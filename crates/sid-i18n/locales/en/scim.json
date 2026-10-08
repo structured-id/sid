@@ -1,0 +1,29 @@
+{
+  "provisioning": {
+    "user_created": "User provisioned via SCIM",
+    "user_updated": "User updated via SCIM",
+    "user_deactivated": "User deactivated via SCIM",
+    "user_reactivated": "User reactivated via SCIM",
+    "group_created": "Group created via SCIM",
+    "group_updated": "Group updated via SCIM",
+    "group_deleted": "Group deleted via SCIM"
+  },
+  "errors": {
+    "invalid_filter": "Invalid SCIM filter expression",
+    "user_not_found": "SCIM user not found",
+    "group_not_found": "SCIM group not found",
+    "conflict": "Resource already exists",
+    "invalid_patch": "Invalid SCIM PATCH operation",
+    "unsupported_attribute": "Unsupported SCIM attribute: {attribute}",
+    "mutability_readonly": "Attribute is read-only: {attribute}",
+    "missing_required": "Required attribute missing: {attribute}",
+    "invalid_value": "Invalid value for attribute: {attribute}"
+  },
+  "outbound": {
+    "dispatch_failed": "Failed to dispatch SCIM event to {target}",
+    "retry_scheduled": "Retry scheduled for {target} (attempt {attempt})",
+    "dlq_entry": "Event moved to dead letter queue after {attempts} failed attempts",
+    "target_unreachable": "SCIM target {target} is unreachable",
+    "auth_failed": "Authentication failed for SCIM target {target}"
+  }
+}

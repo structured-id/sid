@@ -1,0 +1,165 @@
+[package]
+name = "sid-server"
+description = "StructuredID Server - Main CE binary"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "sid_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sid"
+path = "src/main.rs"
+
+[dependencies]
+sid-core = { workspace = true, features = ["grpc"] }
+sid-keys = { workspace = true }
+sid-plugin = { workspace = true }
+arc-swap = { workspace = true }
+sid-admin = { workspace = true }
+sid-authn = { workspace = true, features = ["grpc"] }
+sid-authz = { workspace = true }
+sid-fed = { workspace = true }
+sid-proto = { workspace = true }
+sid-storage = { workspace = true, default-features = false }
+sid-infra = { workspace = true }
+sid-serve = { workspace = true }
+sid-notify = { workspace = true }
+ipnet = { workspace = true }
+tonic = { workspace = true }
+tonic-health = { workspace = true }
+tonic-reflection = { workspace = true }
+tonic-web = { workspace = true }
+prost = { workspace = true }
+prost-types = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+opentelemetry = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+opentelemetry-prometheus = { workspace = true, optional = true }
+opentelemetry-otlp = { workspace = true, optional = true }
+tracing-opentelemetry = { workspace = true, optional = true }
+prometheus = { workspace = true, optional = true }
+anyhow = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+url = { workspace = true }
+base64 = { workspace = true }
+sid-pake-core = { workspace = true }
+sid-ids = { workspace = true, features = ["std", "serde"] }
+sid-ids-proto = { workspace = true }
+reqwest = { workspace = true }
+argon2 = { workspace = true }
+rand = { workspace = true }
+pasta_curves = { workspace = true }
+ff = { workspace = true }
+group = { workspace = true }
+sid-webtransport = { workspace = true, optional = true }
+sid-scim = { path = "../sid-scim", optional = true }
+sid-i18n = { workspace = true }
+dashmap = { workspace = true }
+sha2 = { workspace = true }
+subtle = { workspace = true }
+secrecy = { workspace = true }
+thiserror = { workspace = true }
+zeroize = { workspace = true }
+tokio-stream = "0.1.19"
+# HTTP form of the annotated RPCs through the embedded transcoder (`http`).
+structured-proxy = { version = "8.1", default-features = false, optional = true }
+serde_yaml = { workspace = true, optional = true }
+# The gRPC-Web layer wraps the services the transcoder calls in process, and
+# each call carries the HTTP request it was transcoded from.
+tower = { workspace = true, optional = true, features = ["util"] }
+
+[features]
+default = ["telemetry", "storage-pg", "scim", "http"]
+
+# Serve the annotated RPCs over HTTP (OIDC endpoints, RFC protocol forms)
+# through structured-proxy embedded as a library, at SID_BIND or per
+# SID_HTTP_CONFIG.
+http = ["dep:structured-proxy", "dep:serde_yaml", "dep:tower", "sid-infra/http"]
+
+# PostgreSQL storage backend (default for a full deployment).
+storage-pg = ["sid-storage/storage-pg"]
+
+# OpenTelemetry metrics + Prometheus /metrics endpoint.
+# Disable for embedded/IoT: cargo build --no-default-features --features embedded-dev
+telemetry = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-prometheus",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+    "dep:prometheus",
+]
+
+# Developer embedded mode: SQLite + OAuth2 + MFA + RBAC + audit-local.
+# Single binary with sid-authz inline, no PostgreSQL required; the event bus
+# is the bundled nats-server (in PATH) unless SID_NATS_URL names a cluster.
+# Build: cargo build -p sid-server --no-default-features --features embedded-dev
+embedded-dev = ["sid-storage/storage-sqlite"]
+
+# Core auth (OPAQUE, WebAuthn, OAuth2/OIDC, sessions, RBAC) — always compiled.
+# No feature gate needed: these are the minimal CE binary.
+
+# Federation (sid-fed) — always compiled. Core functionality, not optional.
+
+# SCIM 2.0 inbound provisioning (corporate profile management).
+scim = ["dep:sid-scim"]
+
+# HTTP/3 QUIC transport (experimental).
+webtransport = ["dep:sid-webtransport"]
+
+# Dev/test benchmarking utilities.
+dev-perf-test = []
+
+[dev-dependencies]
+async-trait = { workspace = true }
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+opaque-ke = { workspace = true }
+rand = { workspace = true }
+sid-pake-core = { workspace = true }
+sid-core = { workspace = true }
+sid-plugin = { workspace = true }
+# Passkey ceremonies run against a software authenticator.
+sid-authn = { workspace = true, features = ["soft-authenticator"] }
+sid-proto = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+url = { workspace = true }
+tonic = { workspace = true }
+tonic-types = { workspace = true }
+# The synchronous test harness provisions the installation's issuer over the
+# in-memory store, whose operations complete without awaiting.
+futures = { workspace = true }
+# DPoP proofs are signed by the tests acting as the client.
+jsonwebtoken = { workspace = true }
+# Harnesses set state no operation writes (a grace period end in the past).
+sqlx = { workspace = true }
+# Startup steps are tested against a real in-memory engine.
+sid-storage = { workspace = true, features = ["storage-sqlite"] }
+# Protocol endpoints are checked through the transcoder that serves them, over
+# the service's own descriptors: the HTTP shape comes from the annotations.
+structured-proxy = { version = "8.1", default-features = false }
+prost-reflect = { workspace = true }
+# Every served method is called to check the error contract.
+sid-serve = { workspace = true, features = ["error-contract"] }
+# Forward auth is checked end to end: tokens this server issues, verified by
+# sid-auth against this server's issuer registry over gRPC.
+sid-auth = { path = "../sid-auth" }
+# The account BFF is checked end to end against this server's services.
+sid-auth-proxy = { path = "../sid-auth-proxy" }
+prost = { workspace = true }
+serde_yaml = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true, features = ["util"] }
+# A test reads the permission question that reached sid-authz.
+http-body-util = "0.1"

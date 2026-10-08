@@ -1,0 +1,76 @@
+include:
+  - project: 'structured-id/deploy'
+    file: '/templates/rust.yml'
+  - project: 'structured-id/deploy'
+    file: '/templates/docker.yml'
+
+variables:
+  GIT_SUBMODULE_STRATEGY: recursive
+  RELEASE_CRATE: sid-server
+
+# Unit tests only — integration tests need PostgreSQL (not available in CI yet)
+test:
+  script:
+    - cargo install cargo-nextest --locked
+    - cargo nextest run --workspace --lib --all-features
+
+# Each package builds with the features it declares itself: a workspace build
+# unifies features across packages and hides a missing declaration. Client-
+# facing packages also must not pull server or storage crates on any target.
+dependency-isolation:
+  extends: .rust-base
+  stage: test
+  script:
+    - . "$HOME/.cargo/env"
+    - cargo install cargo-hack --locked
+    - ci/check-dependency-isolation.sh all
+
+# The embedded image compiles inside the build stage rather than copying a
+# binary, so nothing else in this pipeline exercises it. Without this job it
+# rotted unnoticed twice: once when the workspace started patching
+# halo2_proofs to a vendored copy that the build context did not carry, and
+# once when protoc was installed without the well-known types. Both failed
+# before any Rust compiled, which is why this runs on manifest and Dockerfile
+# changes rather than on every push.
+docker-embedded-build:
+  stage: test
+  image: docker:27
+  services:
+    - docker:27-dind
+  variables:
+    DOCKER_BUILDKIT: "1"
+  rules:
+    - changes:
+        - Dockerfile.embedded
+        - Cargo.toml
+        - Cargo.lock
+        - crates/**/*
+        - zkpp
+      when: always
+  script:
+    - docker build -f Dockerfile.embedded -t sid:embedded-ci .
+
+# Build only sid-server binary (override template's --workspace)
+build:
+  script:
+    - cargo build --release -p sid-server
+    - mkdir -p target/release
+    - cp "${CARGO_TARGET_DIR}/release/sid" target/release/
+  artifacts:
+    paths:
+      - target/release/sid
+    expire_in: 1 week
+
+# main → :$VERSION-dev + :$CI_COMMIT_SHA (sliding dev image)
+docker-dev:
+  extends: .docker-build-dev
+  needs:
+    - job: build
+      artifacts: true
+
+# tag → :$VERSION + :latest (immutable release)
+docker-release:
+  extends: .docker-release
+  needs:
+    - job: build
+      artifacts: true

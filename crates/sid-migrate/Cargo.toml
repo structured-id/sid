@@ -1,0 +1,50 @@
+[package]
+name = "sid-migrate"
+description = "StructuredID data migration CLI — export/import/migrate/verify between SQLite and PostgreSQL"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "sid-migrate"
+path = "src/main.rs"
+
+[features]
+default = ["storage-pg", "storage-sqlite"]
+storage-pg = ["sid-storage/storage-pg"]
+storage-sqlite = ["sid-storage/storage-sqlite"]
+
+[dependencies]
+sid-core = { workspace = true }
+sid-plugin = { workspace = true }
+sid-storage = { path = "../sid-storage", default-features = false }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Async
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# UUID
+uuid = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# URL parsing (for sanitizing connection strings in metadata)
+url = { workspace = true }
