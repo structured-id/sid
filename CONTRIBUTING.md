@@ -4,7 +4,9 @@ Thank you for your interest in contributing to StructuredID!
 
 ## Contributor License Agreement
 
-All contributions require signing our [CLA](CLA.md). The CLA bot will prompt you on your first pull request.
+Before a first pull request can be merged, you sign the Structured World Contributor License Agreement once, at <https://sw.foundation/cla>. It covers every repository of the organisation and takes a minute: sign in with GitHub, confirm your e-mail address, sign. The `CLA` status on your pull request then turns green by itself.
+
+You keep the copyright in your contribution. If you contribute as part of your job, your employer may also need to sign the corporate agreement; the page above explains when.
 
 ## Development Setup
 
@@ -41,10 +43,7 @@ cargo fmt --check
 
 ## Architecture
 
-See [ARCH.md](ARCH.md) for the full architecture overview.
-
 Key principles:
-- Architecture docs (`arch/`) are the source of truth. Code must converge to architecture.
 - Profile IS the user (no separate User entity in CE)
 - CE instance IS the organization (implicit)
 - Proto-first development: define `.proto` first, then implement
@@ -59,4 +58,4 @@ Use [GitHub Issues](https://github.com/structured-id/sid/issues). Include:
 
 ## Security Vulnerabilities
 
-**Do not report security vulnerabilities through public issues.** Email security@structured.id with details. See [SECURITY.md](SECURITY.md) if it exists, or the security policy in the repo settings.
+**Do not report security vulnerabilities through public issues.** Report them privately at <https://github.com/structured-id/sid/security/advisories/new>; see [SECURITY.md](SECURITY.md).

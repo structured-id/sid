@@ -4,10 +4,7 @@
 
 **Please do NOT report security vulnerabilities through public GitHub issues.**
 
-If you discover a security vulnerability in StructuredID, please report it responsibly:
-
-1. **GitHub Security Advisories (preferred):** Use [GitHub's private vulnerability reporting](https://github.com/structured-id/sid/security/advisories/new) to create a confidential advisory.
-2. **Email:** Send details to **security@structured.id** (PGP key below).
+If you discover a security vulnerability in StructuredID, report it through [private vulnerability reporting](https://github.com/structured-id/sid/security/advisories/new). The report stays confidential until an advisory is published.
 
 ### What to Include
 
@@ -29,6 +26,7 @@ If you discover a security vulnerability in StructuredID, please report it respo
 
 This policy applies to:
 - `sid` (CE binary)
+- `zkpp` (zero-knowledge password-policy proofs)
 - `proto` (Protobuf definitions)
 - `opaque` (OPAQUE client library)
 - `sid-client-vue` (Vue 3 gRPC-web client)
@@ -41,14 +39,6 @@ We consider security research conducted in good faith to be authorized. We will 
 - Make a good faith effort to avoid privacy violations, data destruction, and service disruption
 - Only interact with accounts you own or with explicit permission
 - Report vulnerabilities promptly and do not exploit them beyond verification
-
-### PGP Key
-
-```
-Fingerprint: [To be published]
-```
-
-Key available at: https://structured.id/.well-known/security.txt
 
 ## Supported Versions
 

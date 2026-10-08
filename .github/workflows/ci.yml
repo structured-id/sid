@@ -6,111 +6,124 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
 jobs:
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Run tests
-        run: cargo test --workspace --all-features
-
   lint:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v5
         with:
-          components: rustfmt, clippy
+          submodules: recursive
+          persist-credentials: false
+      - name: Toolchain (rust-toolchain.toml)
+        run: rustup show
+      - name: protoc with the well-known types
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler libprotobuf-dev
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-      - name: Clippy
-        run: cargo clippy --workspace --all-features -- -D warnings
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: Toolchain (rust-toolchain.toml)
+        run: rustup show
+      - name: protoc with the well-known types
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler libprotobuf-dev
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - uses: Swatinem/rust-cache@v2
+      # PostgreSQL, Redis and NATS as the integration tests expect them locally.
+      - name: Test services
+        run: docker compose -f docker-compose.test.yml up -d --wait
+      # The ZKPP crates generate Halo2 keys in debug builds, minutes per test;
+      # they are tested in their own repository with optimized builds.
+      - name: Tests
+        run: cargo nextest run --locked --workspace --all-features --profile ci --exclude sid-pake-core --exclude sid-crypto
+      - name: Doc tests
+        run: cargo test --locked --doc --workspace --all-features --exclude sid-pake-core --exclude sid-crypto
 
   dependency-isolation:
     name: Dependency isolation
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install cargo-hack
-        run: cargo install cargo-hack --locked
-
+          persist-credentials: false
+      - name: Toolchain (rust-toolchain.toml)
+        run: rustup show
+      - name: protoc with the well-known types
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler libprotobuf-dev
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-hack
+      - uses: Swatinem/rust-cache@v2
       # Each package builds with the features it declares itself: a workspace
       # build unifies features across packages and hides a missing declaration.
       # Client-facing packages also must not pull server or storage crates.
-      - name: Check dependency isolation
-        run: ci/check-dependency-isolation.sh all
+      - run: ci/check-dependency-isolation.sh all
 
-  security:
+  audit:
     name: Security Audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install audit tools
-        run: cargo install cargo-audit cargo-deny cargo-cyclonedx
-
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: Toolchain (rust-toolchain.toml)
+        run: rustup show
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit,cargo-deny,cargo-cyclonedx
       - name: Vulnerability audit
         run: cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2025-0134
-
-      - name: License & ban check
+      - name: License and ban check
         run: cargo deny check
-
-      - name: Generate SBOM (CycloneDX)
+      - name: SBOM (CycloneDX)
         run: cargo cyclonedx --all --format json
-
-      - name: Upload SBOM artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: sbom
           path: "**/*.cdx.json"
           retention-days: 90
 
-  build:
-    name: Build
+  musl:
+    name: Build (x86_64 musl)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Build
-        run: cargo build --workspace --release
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: Toolchain (rust-toolchain.toml) and the musl target
+        run: rustup show && rustup target add x86_64-unknown-linux-musl
+      - name: protoc with the well-known types
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler libprotobuf-dev
+      # zig compiles the C of ring and SQLite for musl without a cross GCC.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo zigbuild --locked --release -p sid-server --target x86_64-unknown-linux-musl

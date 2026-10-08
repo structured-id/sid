@@ -115,10 +115,8 @@ Logins it provisions are federated usernames `userName#<organization domain>`.
 
 ## License
 
-AGPL-3.0-only — see [LICENSE](LICENSE) for details.
+AGPL-3.0-only, see [LICENSE](LICENSE) for details.
 
 > Proto definitions (`proto/`) are licensed separately under Apache 2.0 to allow unrestricted integration by third parties.
 
-## Contributing
-
-We welcome contributions! Please see [CLA.md](CLA.md) for our Contributor License Agreement.
+Contributions are accepted under the [Structured World Contributor License Agreement](https://sw.foundation/cla); see [CONTRIBUTING.md](CONTRIBUTING.md).
