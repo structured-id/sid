@@ -37,8 +37,11 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_REPO: ${{ github.repository }}
         run: |
+          # A plain assignment, so a failed query fails the step under bash -e;
+          # inside the `for` list it would read as no pull requests.
+          prs=$(gh pr list --author app/dependabot --state open --json number --jq '.[].number')
           status=0
-          for pr in $(gh pr list --author app/dependabot --state open --json number --jq '.[].number'); do
+          for pr in $prs; do
             if [ "$(gh pr view "$pr" --json autoMergeRequest --jq '.autoMergeRequest == null')" = "true" ]; then
               gh pr merge --auto --squash "$pr" || status=1
             fi
