@@ -14,9 +14,9 @@ use std::time::{Duration, Instant};
 use ff::PrimeField;
 use group::GroupEncoding;
 use halo2_proofs::{plonk::ProvingKey, poly::commitment::Params};
-use opaque_ke::{ClientRegistration, ClientRegistrationStartResult};
 use pasta_curves::{pallas, vesta};
-use rand::rngs::OsRng;
+use rand::rand_core::UnwrapErr;
+use rand::rngs::SysRng;
 use secrecy::SecretBox;
 use sid_authn::opaque::{OpaqueRouter, PallasOpaque};
 use sid_authn::opaque_zkpp::{ZkppConfig, ZkppOpaqueServer};
@@ -28,6 +28,7 @@ use sid_core::models::{
     HistoryEntry, HistoryEvidence, HistoryKsf, NewHistoryEpoch, PasswordHistory, ProfileId,
 };
 use sid_keys::{KeyManager, KeyVersionParams, RustCryptoPrimitives, SoftwareKeyManager};
+use sid_opaque_ke::{ClientRegistration, ClientRegistrationStartResult};
 use sid_pake_core::{
     binding::operation_context,
     circuit::{CircuitShape, ZKPP_K},
@@ -122,7 +123,7 @@ fn checker() -> HistoryChecker {
 
 /// A client's OPAQUE registration start for `password`.
 fn client_start(password: &[u8]) -> ClientRegistrationStartResult<PallasCipherSuite> {
-    ClientRegistration::<PallasCipherSuite>::start(&mut OsRng, password)
+    ClientRegistration::<PallasCipherSuite>::start(&mut UnwrapErr(SysRng), password)
         .expect("client registration start failed")
 }
 
@@ -143,10 +144,11 @@ fn client_finish(
     start
         .state
         .finish(
-            &mut OsRng,
+            &mut UnwrapErr(SysRng),
             password,
-            opaque_ke::RegistrationResponse::<PallasCipherSuite>::deserialize(response).unwrap(),
-            opaque_ke::ClientRegistrationFinishParameters::default(),
+            sid_opaque_ke::RegistrationResponse::<PallasCipherSuite>::deserialize(response)
+                .unwrap(),
+            sid_opaque_ke::ClientRegistrationFinishParameters::default(),
         )
         .expect("client registration finish failed")
         .message
@@ -161,15 +163,17 @@ fn signs_in(router: &OpaqueRouter, password_file: &[u8], password: &[u8], id: &[
         curve: CurveId::Pallas,
         data: password_file.to_vec(),
     };
-    let login = opaque_ke::ClientLogin::<PallasCipherSuite>::start(&mut OsRng, password).unwrap();
+    let login =
+        sid_opaque_ke::ClientLogin::<PallasCipherSuite>::start(&mut UnwrapErr(SysRng), password)
+            .unwrap();
     let (response, state) = router
         .login_start(&stored, &login.message.serialize(), id)
         .expect("login start");
     let Ok(finished) = login.state.finish(
-        &mut OsRng,
+        &mut UnwrapErr(SysRng),
         password,
-        opaque_ke::CredentialResponse::<PallasCipherSuite>::deserialize(&response).unwrap(),
-        opaque_ke::ClientLoginFinishParameters::default(),
+        sid_opaque_ke::CredentialResponse::<PallasCipherSuite>::deserialize(&response).unwrap(),
+        sid_opaque_ke::ClientLoginFinishParameters::default(),
     ) else {
         return false;
     };
@@ -196,7 +200,7 @@ async fn operation(
 ) -> Operation {
     let id = *uuid::Uuid::now_v7().as_bytes();
     let d = pallas::Base::from_repr(owner_domain(&INSTALLATION, owner)).unwrap();
-    let r = random_blind(OsRng);
+    let r = random_blind(UnwrapErr(SysRng));
     let b = blind_request(history_input(d, password), r).to_bytes();
     let domains: Vec<_> = epochs
         .iter()

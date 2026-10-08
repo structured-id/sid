@@ -7,12 +7,13 @@ mod common;
 
 use common::mock_storage::MockStorage;
 use common::{TestServices, test_profile, zkpp_client as client};
-use opaque_ke::rand::rngs::OsRng;
-use opaque_ke::{ClientLogin, ClientLoginFinishParameters, CredentialResponse};
+use rand::rand_core::UnwrapErr;
+use rand::rngs::SysRng;
 use sha2::{Digest, Sha256};
 use sid_core::models::{
     AuditEntry, Credential, CredentialType, PasswordResetSession, Profile, ProfileId,
 };
+use sid_opaque_ke::{ClientLogin, ClientLoginFinishParameters, CredentialResponse};
 use sid_pake_core::pallas_opaque::PallasCipherSuite;
 use sid_proto::sid::v1::auth_service_server::AuthService;
 use sid_proto::sid::v1::*;
@@ -158,7 +159,7 @@ async fn sign_in_from_device(
     principal: &str,
     password: &[u8],
 ) -> Result<OpaqueLoginFinishResponse, tonic::Status> {
-    let login = ClientLogin::<PallasCipherSuite>::start(&mut OsRng, password).unwrap();
+    let login = ClientLogin::<PallasCipherSuite>::start(&mut UnwrapErr(SysRng), password).unwrap();
     let started = svc
         .auth
         .opaque_login_start(from_device(OpaqueLoginStartRequest {
@@ -170,7 +171,7 @@ async fn sign_in_from_device(
     let finished = login
         .state
         .finish(
-            &mut OsRng,
+            &mut UnwrapErr(SysRng),
             password,
             CredentialResponse::deserialize(&started.credential_response).unwrap(),
             ClientLoginFinishParameters::default(),

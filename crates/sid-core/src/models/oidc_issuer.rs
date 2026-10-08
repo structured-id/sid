@@ -9,7 +9,7 @@
 use std::fmt;
 
 use chrono::{DateTime, Utc};
-use rand::RngCore;
+use rand::TryRng;
 use serde::{Deserialize, Serialize};
 
 pub use sid_ids::IssuerId;
@@ -31,7 +31,9 @@ impl IssuerHandle {
     /// A new random handle.
     pub fn generate() -> Self {
         let mut bytes = [0u8; 16];
-        rand::rngs::OsRng.fill_bytes(&mut bytes);
+        rand::rngs::SysRng
+            .try_fill_bytes(&mut bytes)
+            .expect("the operating system random source is available");
         Self(hex::encode(bytes))
     }
 

@@ -11,7 +11,7 @@ use core::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use reqwest::StatusCode;
 use reqwest::header::CONTENT_TYPE;
 use sha2::Sha256;

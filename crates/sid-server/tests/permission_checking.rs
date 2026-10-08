@@ -226,7 +226,6 @@ struct Asking {
 }
 
 async fn asking() -> Asking {
-    use sha2::{Digest, Sha256};
     use sid_core::models::machine_user::{MachineCredentialType, MachineUserCredential, OwnerType};
     let machine = |client_id: &str| {
         sid_core::models::MachineUser::new(
@@ -247,7 +246,7 @@ async fn asking() -> Asking {
                 checker.id,
                 "kid_checker",
                 MachineCredentialType::ClientSecret,
-                format!("{:x}", Sha256::digest(CHECKER_SECRET.as_bytes())),
+                sid_authn::bearer_secret::verifier_of(CHECKER_SECRET),
             ))
             .with_machine_user(worker.clone())
             .with_profile(profile.clone())

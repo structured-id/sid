@@ -7,10 +7,11 @@
 use super::TestServices;
 use ff::PrimeField;
 use group::GroupEncoding;
-use opaque_ke::rand::rngs::OsRng;
-use opaque_ke::{ClientRegistration, ClientRegistrationFinishParameters, RegistrationResponse};
 use pasta_curves::pallas;
+use rand::rand_core::UnwrapErr;
+use rand::rngs::SysRng;
 use sid_ids::PasswordOperationId;
+use sid_opaque_ke::{ClientRegistration, ClientRegistrationFinishParameters, RegistrationResponse};
 use sid_pake_core::binding::operation_context;
 use sid_pake_core::circuit::{CircuitShape, ZKPP_K};
 use sid_pake_core::history::{
@@ -58,8 +59,9 @@ fn blind_of(state: &ClientRegistration<PallasCipherSuite>) -> pallas::Scalar {
 /// Start registering `password`, with a blind the circuit can hold.
 pub fn start(password: &[u8]) -> Started {
     loop {
-        let started = ClientRegistration::<PallasCipherSuite>::start(&mut OsRng, password)
-            .expect("registration start");
+        let started =
+            ClientRegistration::<PallasCipherSuite>::start(&mut UnwrapErr(SysRng), password)
+                .expect("registration start");
         let blind = blind_of(&started.state);
         if bool::from(pallas::Base::from_repr(blind.to_repr()).is_some()) {
             return Started {
@@ -100,7 +102,7 @@ pub async fn evaluate(
     context: &PasswordHistoryContext,
 ) -> HistoryEvaluation {
     let d = base(&context.owner_domain);
-    let r = random_blind(OsRng);
+    let r = random_blind(UnwrapErr(SysRng));
     let b = blind_request(history_input(d, password), r);
     let op = operation(context);
     let answers = svc
@@ -205,7 +207,7 @@ pub fn finish(started: Started, password: &[u8], response: &[u8]) -> Vec<u8> {
     started
         .state
         .finish(
-            &mut OsRng,
+            &mut UnwrapErr(SysRng),
             password,
             RegistrationResponse::deserialize(response).expect("a registration response"),
             ClientRegistrationFinishParameters::default(),

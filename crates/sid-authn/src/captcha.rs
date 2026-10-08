@@ -6,7 +6,7 @@
 //! - **hCaptcha** — privacy-respecting third-party (free tier)
 //! - **Cloudflare Turnstile** — invisible managed challenge (free)
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 use sid_keys::KeyManager;
 use sid_plugin::cache::CacheBackend;

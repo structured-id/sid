@@ -6,7 +6,7 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use rand::RngCore;
+use rand::TryRng;
 use sha2::{Digest, Sha256};
 use sid_core::models::BrowserSecretHash;
 use zeroize::Zeroizing;
@@ -28,7 +28,9 @@ impl BrowserSecret {
     /// A fresh secret from the operating system's generator.
     pub fn generate() -> Self {
         let mut bytes = Zeroizing::new([0u8; 32]);
-        rand::rngs::OsRng.fill_bytes(bytes.as_mut());
+        rand::rngs::SysRng
+            .try_fill_bytes(bytes.as_mut())
+            .expect("the operating system random source is available");
         Self(bytes)
     }
 

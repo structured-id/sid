@@ -456,7 +456,6 @@ async fn test_introspect_valid_token() {
 /// resource, it sees nothing.
 #[tokio::test]
 async fn test_introspect_by_a_machine_user() {
-    use sha2::{Digest, Sha256};
     use sid_core::models::machine_user::{MachineCredentialType, MachineUserCredential, OwnerType};
     let profile = test_profile();
     let pdp = sid_core::models::MachineUser::new(
@@ -471,7 +470,7 @@ async fn test_introspect_by_a_machine_user() {
         pdp.id,
         "kid-pdp",
         MachineCredentialType::ClientSecret,
-        format!("{:x}", Sha256::digest(secret.as_bytes())),
+        sid_authn::bearer_secret::verifier_of(secret),
     );
     let svc = TestServices::new(
         MockStorage::new()
@@ -924,10 +923,12 @@ async fn opaque_register(
     finish_principal: &str,
     password: &[u8],
 ) -> Result<OpaqueRegistrationFinishResponse, tonic::Status> {
-    use opaque_ke::{ClientRegistration, ClientRegistrationFinishParameters, RegistrationResponse};
+    use sid_opaque_ke::{
+        ClientRegistration, ClientRegistrationFinishParameters, RegistrationResponse,
+    };
     use sid_pake_core::pallas_opaque::PallasCipherSuite;
 
-    let mut rng = opaque_ke::rand::rngs::OsRng;
+    let mut rng = rand::rand_core::UnwrapErr(rand::rngs::SysRng);
     let start = ClientRegistration::<PallasCipherSuite>::start(&mut rng, password).unwrap();
     let resp = svc
         .auth
@@ -1312,7 +1313,7 @@ async fn test_opaque_login_finish_invalid_state() {
 
 #[tokio::test]
 async fn test_e2e_opaque_registration_and_login() {
-    use opaque_ke::{
+    use sid_opaque_ke::{
         ClientLogin, ClientLoginFinishParameters, ClientRegistration,
         ClientRegistrationFinishParameters, CredentialResponse, RegistrationResponse,
     };
@@ -1323,7 +1324,7 @@ async fn test_e2e_opaque_registration_and_login() {
 
     // Step 1-2: OPAQUE registration creates the account for the new email.
     let password = b"carol-strong-password-2024";
-    let mut client_rng = opaque_ke::rand::rngs::OsRng;
+    let mut client_rng = rand::rand_core::UnwrapErr(rand::rngs::SysRng);
 
     // 2a: Registration start
     let client_reg_start =
@@ -1388,7 +1389,7 @@ async fn test_e2e_opaque_registration_and_login() {
     let client_login_finish = client_login_start
         .state
         .finish(
-            &mut opaque_ke::rand::rngs::OsRng,
+            &mut rand::rand_core::UnwrapErr(rand::rngs::SysRng),
             password,
             cred_response,
             ClientLoginFinishParameters::default(),
@@ -2351,9 +2352,9 @@ async fn zkpp_register_without_proof(
     svc: &TestServices,
     principal: &str,
 ) -> sid_core::models::Credential {
-    let mut client_rng = rand::rngs::OsRng;
+    let mut client_rng = rand::rand_core::UnwrapErr(rand::rngs::SysRng);
     let password = b"TestP@ss123";
-    let client_registration = opaque_ke::ClientRegistration::<
+    let client_registration = sid_opaque_ke::ClientRegistration::<
         sid_pake_core::pallas_opaque::PallasCipherSuite,
     >::start(&mut client_rng, password)
     .unwrap();
@@ -2368,7 +2369,7 @@ async fn zkpp_register_without_proof(
         .unwrap()
         .into_inner();
     let context = start.history.expect("the registration's history context");
-    let response = opaque_ke::RegistrationResponse::<
+    let response = sid_opaque_ke::RegistrationResponse::<
         sid_pake_core::pallas_opaque::PallasCipherSuite,
     >::deserialize(&start.registration_response)
     .unwrap();
@@ -2378,7 +2379,7 @@ async fn zkpp_register_without_proof(
             &mut client_rng,
             password,
             response,
-            opaque_ke::ClientRegistrationFinishParameters::default(),
+            sid_opaque_ke::ClientRegistrationFinishParameters::default(),
         )
         .unwrap();
     let done = svc
@@ -4742,7 +4743,7 @@ async fn test_registration_disabled_allows_get_current_profile() {
 
 #[tokio::test]
 async fn test_e2e_opaque_wrong_password() {
-    use opaque_ke::{
+    use sid_opaque_ke::{
         ClientLogin, ClientLoginFinishParameters, ClientRegistration,
         ClientRegistrationFinishParameters, CredentialResponse, RegistrationResponse,
     };
@@ -4753,7 +4754,7 @@ async fn test_e2e_opaque_wrong_password() {
 
     // Register a new account with the correct password
     let correct_pw = b"correct-password-123";
-    let mut rng = opaque_ke::rand::rngs::OsRng;
+    let mut rng = rand::rand_core::UnwrapErr(rand::rngs::SysRng);
 
     let reg_start = ClientRegistration::<PallasCipherSuite>::start(&mut rng, correct_pw).unwrap();
 
@@ -4811,7 +4812,7 @@ async fn test_e2e_opaque_wrong_password() {
 
     // Client-side finish should fail with wrong password
     let finish_result = login_start.state.finish(
-        &mut opaque_ke::rand::rngs::OsRng,
+        &mut rand::rand_core::UnwrapErr(rand::rngs::SysRng),
         wrong_pw,
         cred_response,
         ClientLoginFinishParameters::default(),
@@ -4831,7 +4832,7 @@ async fn test_opaque_login_response_uses_dynamic_expires_in() {
     // This test verifies that the token response expires_in comes from JWT TTL config
     // We already test this via test_token_response_expires_in_matches_ttl
     // and the e2e auth code flow (expects 300). This test validates through OPAQUE login.
-    use opaque_ke::{
+    use sid_opaque_ke::{
         ClientLogin, ClientLoginFinishParameters, ClientRegistration,
         ClientRegistrationFinishParameters, CredentialResponse, RegistrationResponse,
     };
@@ -4841,7 +4842,7 @@ async fn test_opaque_login_response_uses_dynamic_expires_in() {
     let svc = TestServices::new(MockStorage::new());
 
     let password = b"ttl-test-password";
-    let mut rng = opaque_ke::rand::rngs::OsRng;
+    let mut rng = rand::rand_core::UnwrapErr(rand::rngs::SysRng);
 
     // Register
     let reg_start = ClientRegistration::<PallasCipherSuite>::start(&mut rng, password).unwrap();
@@ -4896,7 +4897,7 @@ async fn test_opaque_login_response_uses_dynamic_expires_in() {
     let login_finish = login_start
         .state
         .finish(
-            &mut opaque_ke::rand::rngs::OsRng,
+            &mut rand::rand_core::UnwrapErr(rand::rngs::SysRng),
             password,
             cred_response,
             ClientLoginFinishParameters::default(),
@@ -4925,7 +4926,7 @@ async fn test_opaque_login_response_uses_dynamic_expires_in() {
 /// session's access tokens stop at once instead of living until they expire.
 #[tokio::test]
 async fn test_session_evicted_at_limit_stops_its_tokens() {
-    use opaque_ke::{
+    use sid_opaque_ke::{
         ClientLogin, ClientLoginFinishParameters, ClientRegistration,
         ClientRegistrationFinishParameters, CredentialResponse, RegistrationResponse,
     };
@@ -4939,7 +4940,7 @@ async fn test_session_evicted_at_limit_stops_its_tokens() {
     svc.auth = std::sync::Arc::new(auth.with_security_policy(policy));
 
     let password = b"limit-evict-password";
-    let mut rng = opaque_ke::rand::rngs::OsRng;
+    let mut rng = rand::rand_core::UnwrapErr(rand::rngs::SysRng);
     let reg_start = ClientRegistration::<PallasCipherSuite>::start(&mut rng, password).unwrap();
     let resp = svc
         .auth
@@ -9786,7 +9787,9 @@ async fn test_complete_password_reset_requires_verified_session() {
 /// back-channel logout. The reset session is then used up.
 #[tokio::test]
 async fn test_complete_password_reset_ends_earlier_sessions() {
-    use opaque_ke::{ClientRegistration, ClientRegistrationFinishParameters, RegistrationResponse};
+    use sid_opaque_ke::{
+        ClientRegistration, ClientRegistrationFinishParameters, RegistrationResponse,
+    };
     use sid_pake_core::pallas_opaque::PallasCipherSuite;
     use sid_plugin::{StorageBackend, WorkStore};
 
@@ -9833,7 +9836,7 @@ async fn test_complete_password_reset_ends_earlier_sessions() {
     // The new password's registration upload, as the client builds it under
     // the reset operation's OPRF key.
     let password = b"a new correct horse battery staple";
-    let mut rng = opaque_ke::rand::rngs::OsRng;
+    let mut rng = rand::rand_core::UnwrapErr(rand::rngs::SysRng);
     let start = ClientRegistration::<PallasCipherSuite>::start(&mut rng, password).unwrap();
     let resp = svc
         .auth

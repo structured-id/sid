@@ -1039,7 +1039,6 @@ const EXCHANGE_SECRET: &str = "http-exchange-secret";
 /// `invalid_target` (§2.2.2).
 #[tokio::test]
 async fn token_exchange_over_http() {
-    use sha2::{Digest, Sha256};
     use sid_core::models::machine_user::{
         MachineCredentialType, MachineUser, MachineUserCredential, OwnerType,
     };
@@ -1057,7 +1056,7 @@ async fn token_exchange_over_http() {
         machine.id,
         "kid_http_exchange",
         MachineCredentialType::ClientSecret,
-        format!("{:x}", Sha256::digest(EXCHANGE_SECRET.as_bytes())),
+        sid_authn::bearer_secret::verifier_of(EXCHANGE_SECRET),
     );
     let grant = ImpersonationGrant::new(
         machine.id,

@@ -18,9 +18,10 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 
 # OPAQUE password authentication
-opaque-ke = { workspace = true }
+sid-opaque-ke = { workspace = true }
 argon2 = { workspace = true }
 rand = { workspace = true }
+rand_core = { workspace = true }
 
 # NIST curves (FIPS OPAQUE)
 p256 = { workspace = true }
@@ -29,7 +30,7 @@ p521 = { workspace = true }
 
 # PBKDF2 KSF for FIPS cipher suites
 pbkdf2 = { workspace = true }
-generic-array = { workspace = true }
+hybrid-array = { workspace = true }
 
 # Legacy hash verification (migration from competitor IdPs)
 bcrypt = { workspace = true }
@@ -106,7 +107,7 @@ soft-authenticator = ["p256/ecdsa"]
 [dev-dependencies]
 sid-storage = { path = "../sid-storage", features = ["storage-sqlite"] }
 sid-pake-core = { workspace = true }
-opaque-ke = { workspace = true }
+sid-opaque-ke = { workspace = true }
 p256 = { workspace = true, features = ["ecdsa"] }
 p384 = { workspace = true }
 p521 = { workspace = true }

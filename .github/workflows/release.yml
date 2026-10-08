@@ -1,0 +1,56 @@
+# release-plz keeps a release PR with the next versions and changelogs from
+# conventional commits; merging it tags the released packages, creates the
+# GitHub releases and publishes sid-voprf and sid-opaque-ke to crates.io
+# (see .release-plz.toml).
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release-plz:
+    name: Release
+    if: github.repository_owner == 'structured-id'
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+      pull-requests: write
+      # crates.io trusted publishing (OIDC), configured per crate:
+      # structured-id / sid / release.yml / environment release. A new crate's
+      # first version is published by hand, then gets its trusted publisher.
+      id-token: write
+    steps:
+      - name: Generate release token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.RELEASER_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASER_APP_PRIVATE_KEY }}
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          token: ${{ steps.app-token.outputs.token }}
+      - name: Toolchain (rust-toolchain.toml)
+        run: rustup show
+      - name: Release PR
+        uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+      - name: Release
+        uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}

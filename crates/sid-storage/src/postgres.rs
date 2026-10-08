@@ -44,6 +44,13 @@ fn insert_error(what: &str, e: sqlx::Error) -> SidError {
     }
 }
 
+/// A write refused by a referential constraint. PostgreSQL 18 reports an
+/// `ON DELETE/UPDATE RESTRICT` refusal as SQLSTATE 23001 `restrict_violation`
+/// (PostgreSQL 18 docs, Appendix A), not as 23503 `foreign_key_violation`.
+pub(crate) fn is_reference_violation(db: &dyn sqlx::error::DatabaseError) -> bool {
+    db.is_foreign_key_violation() || db.code().as_deref() == Some("23001")
+}
+
 /// SQLSTATE the email policy fence raises (migration 053).
 const EMAIL_POLICY_FENCE: &str = "SIDEP";
 
@@ -4177,9 +4184,11 @@ impl StorageBackend for PostgresBackend {
             .map_err(|e| match &e {
                 // An administrative envelope restricts recipients to it:
                 // deleting it would widen the envelope.
-                sqlx::Error::Database(db) if db.is_foreign_key_violation() => SidError::Conflict(
-                    "the group restricts the recipients of an administrative assignment".into(),
-                ),
+                sqlx::Error::Database(db) if is_reference_violation(db.as_ref()) => {
+                    SidError::Conflict(
+                        "the group restricts the recipients of an administrative assignment".into(),
+                    )
+                }
                 _ => SidError::Storage(format!("Delete failed: {e}")),
             })?;
         Self::audit_in_tx(&mut tx, &format!("group:{}", id.0), audit).await?;

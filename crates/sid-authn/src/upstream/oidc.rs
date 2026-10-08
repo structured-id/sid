@@ -139,9 +139,11 @@ impl OidcProviderClient {
 
     /// Generate PKCE code_verifier and code_challenge (S256).
     fn generate_pkce() -> (String, String) {
-        use rand::RngCore;
+        use rand::TryRng;
         let mut verifier_bytes = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut verifier_bytes);
+        rand::rngs::SysRng
+            .try_fill_bytes(&mut verifier_bytes)
+            .expect("the operating system random source is available");
         let verifier = URL_SAFE_NO_PAD.encode(verifier_bytes);
 
         let mut hasher = Sha256::new();
@@ -153,9 +155,11 @@ impl OidcProviderClient {
 
     /// Generate random state token for CSRF protection.
     fn generate_state() -> String {
-        use rand::RngCore;
+        use rand::TryRng;
         let mut state_bytes = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut state_bytes);
+        rand::rngs::SysRng
+            .try_fill_bytes(&mut state_bytes)
+            .expect("the operating system random source is available");
         URL_SAFE_NO_PAD.encode(state_bytes)
     }
 

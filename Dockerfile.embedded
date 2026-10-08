@@ -20,7 +20,7 @@
 # `docker buildx prune --filter until=168h`.
 
 # ── Stage 1: Build ──────────────────────────────────────────────
-FROM rust:1.95-bookworm AS builder
+FROM rust:1.99-trixie AS builder
 
 WORKDIR /build
 
@@ -54,10 +54,10 @@ RUN --mount=type=cache,id=sid-cargo-registry,target=/usr/local/cargo/registry,sh
 # ── Bundled event bus ───────────────────────────────────────────
 # Static nats-server, run by the server as a child process (JetStream under
 # SID_DATA_DIR/nats) when SID_NATS_URL is unset.
-FROM nats:2.10-alpine AS nats
+FROM nats:2.15-alpine AS nats
 
 # ── Stage 2: Runtime ────────────────────────────────────────────
-FROM gcr.io/distroless/cc-debian12:nonroot
+FROM gcr.io/distroless/cc-debian13:nonroot
 
 COPY --from=nats /usr/local/bin/nats-server /usr/local/bin/nats-server
 COPY --from=builder /out/sid /usr/local/bin/sid

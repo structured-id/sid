@@ -124,7 +124,7 @@ dev-perf-test = []
 async-trait = { workspace = true }
 tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-opaque-ke = { workspace = true }
+sid-opaque-ke = { workspace = true }
 rand = { workspace = true }
 sid-pake-core = { workspace = true }
 sid-core = { workspace = true }
