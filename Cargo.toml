@@ -172,7 +172,7 @@ digest = "0.10"
 sha2 = "0.10"
 zeroize = "1"
 secrecy = "0.10"
-generic-array = "0.14"
+generic-array = "1.4"
 
 # TOTP (RFC 6238)
 hmac = "0.12"
