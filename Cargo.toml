@@ -169,7 +169,7 @@ fred = { version = "10", default-features = false, features = ["enable-rustls-ri
 # its key pair the way the built-in curves do.
 voprf = { version = "0.5", features = ["danger"] }
 digest = "0.10"
-sha2 = "0.10"
+sha2 = "0.11"
 zeroize = "1"
 secrecy = "0.10"
 generic-array = "0.14"
