@@ -1,0 +1,43 @@
+# StructuredID CE — Embedded Auth Service
+#
+# Drop-in authentication for any application using shared PostgreSQL.
+# SID creates its own schema (default: "sid") — no table conflicts.
+#
+# Usage:
+#   1. Copy this file to your project
+#   2. Merge with your docker-compose.yml (or use `docker compose -f ... -f ...`)
+#   3. Set SID_DATABASE_URL to your shared PostgreSQL
+#   4. SID auto-generates JWT keys on first start
+#
+# Ports:
+#   - 8090: REST API (OIDC, OAuth2, user management)
+#   - 50051: gRPC API (native clients)
+
+services:
+  sid:
+    image: git.private.systems:5005/structured-id/sid:latest
+    environment:
+      # Required: PostgreSQL connection (shared with your app)
+      SID_DATABASE_URL: "postgres://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-dev}@${POSTGRES_HOST:-postgres}:5432/${POSTGRES_DB:-app}"
+      # Schema isolation: SID tables live in their own schema
+      SID_STORAGE_POSTGRESQL_SCHEMA: "${SID_STORAGE_POSTGRESQL_SCHEMA:-sid}"
+      # OIDC issuer URL (must match what clients/frontend use)
+      SID_ISSUER: "${SID_ISSUER:-http://localhost:8090}"
+      SID_BIND: "0.0.0.0:8080"
+      SID_GRPC_BIND: "0.0.0.0:50051"
+      RUST_LOG: "${SID_LOG_LEVEL:-sid=info}"
+    ports:
+      - "${SID_HTTP_PORT:-8090}:8080"
+      - "${SID_GRPC_PORT:-50051}:50051"
+    volumes:
+      - sid_data:/var/lib/sid
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+volumes:
+  sid_data:

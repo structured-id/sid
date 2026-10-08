@@ -1,0 +1,29 @@
+[package]
+name = "sid-org-crypto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Per-org cryptographic state: envelope encryption (Cluster KEK → Org DEK → CA priv), pluggable KekSource, TTL-cached unwrap."
+
+[dependencies]
+async-trait.workspace = true
+secrecy.workspace = true
+zeroize = { workspace = true, features = ["derive"] }
+aes-gcm.workspace = true
+rand = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time"] }
+tracing = "0.1"
+hex = "0.4"
+rcgen = { workspace = true }
+time = "0.3"
+base64 = { workspace = true, optional = true }
+kube = { version = "4.2", default-features = false, features = ["client", "rustls-tls"], optional = true }
+k8s-openapi = { version = "0.28", features = ["v1_32"], optional = true }
+
+[features]
+default = []
+k8s = ["dep:kube", "dep:k8s-openapi", "dep:base64"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

@@ -1,0 +1,78 @@
+# syntax=docker/dockerfile:1.7
+# StructuredID Embedded — Minimal Docker image with SQLite
+#
+# Multi-stage build: Rust builder + distroless runtime (~15 MB).
+# Build: docker build -f Dockerfile.embedded -t sid:embedded .
+# Multi-arch: docker buildx build --platform linux/amd64,linux/arm64 -f Dockerfile.embedded -t sid:embedded .
+#
+# Compilation cache: the registry, the git checkouts and the build directory
+# are BuildKit cache mounts, so a rebuild compiles what changed instead of the
+# whole dependency tree. The host's own cache is deliberately not mounted: a
+# cache key includes the compiler and the target, so a macOS aarch64 cache
+# yields no hits for a linux build and only puts two unrelated caches in one
+# directory. `sharing=locked` is not decoration either: cargo takes an
+# exclusive lock on a build directory, so two builds sharing one must queue
+# rather than corrupt it, and the id keeps this image's directory apart from
+# another image's.
+#
+# The mounts live outside the image, so anything the runtime stage needs is
+# copied out of them inside the same RUN. Reclaimed with
+# `docker buildx prune --filter until=168h`.
+
+# ── Stage 1: Build ──────────────────────────────────────────────
+FROM rust:1.95-bookworm AS builder
+
+WORKDIR /build
+
+# Install protobuf compiler (required for sid-proto)
+# protobuf-compiler brings protoc; libprotobuf-dev brings the well-known types
+# under /usr/include/google/protobuf, which the proto build adds as an include
+# path and which the service definitions import.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    protobuf-compiler libprotobuf-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy workspace manifests first for layer caching
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
+COPY proto/ proto/
+# The ZKPP crate comes from the zkpp submodule by path, so the manifest does
+# not load without it, whatever the feature selection.
+COPY zkpp/ zkpp/
+
+# Build embedded mode: SQLite backend, no telemetry; the event bus is the
+# bundled nats-server copied into the runtime stage.
+RUN --mount=type=cache,id=sid-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=sid-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=sid-target-embedded,target=/build/target,sharing=locked \
+    cargo build --release -p sid-server \
+    --no-default-features \
+    --features embedded-dev \
+    && strip target/release/sid \
+    && install -D target/release/sid /out/sid
+
+# ── Bundled event bus ───────────────────────────────────────────
+# Static nats-server, run by the server as a child process (JetStream under
+# SID_DATA_DIR/nats) when SID_NATS_URL is unset.
+FROM nats:2.10-alpine AS nats
+
+# ── Stage 2: Runtime ────────────────────────────────────────────
+FROM gcr.io/distroless/cc-debian12:nonroot
+
+COPY --from=nats /usr/local/bin/nats-server /usr/local/bin/nats-server
+COPY --from=builder /out/sid /usr/local/bin/sid
+
+# Data directory for SQLite database and auto-generated keys
+VOLUME /var/lib/sid
+
+ENV SID_BIND=0.0.0.0:8080
+ENV SID_GRPC_BIND=0.0.0.0:50051
+ENV SID_DATA_DIR=/var/lib/sid
+ENV SID_STORAGE_BACKEND=sqlite
+ENV SID_STORAGE_SQLITE_PATH=/var/lib/sid/auth.db
+
+EXPOSE 8080 50051
+
+USER nonroot
+
+ENTRYPOINT ["sid"]

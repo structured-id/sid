@@ -1,0 +1,59 @@
+[package]
+name = "sid-attestation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "StructuredID device attestation service"
+
+[lib]
+name = "sid_attestation"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sid-attestation"
+path = "src/main.rs"
+
+[dependencies]
+sid-authn = { workspace = true, features = ["grpc"] }
+sid-infra = { workspace = true }
+sid-serve = { workspace = true }
+sid-core = { workspace = true, features = ["grpc"] }
+sid-plugin = { workspace = true }
+sid-storage = { workspace = true, features = ["storage-pg"] }
+sid-proto = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# UUID
+uuid = { workspace = true }
+
+# gRPC
+tonic = { workspace = true }
+tonic-reflection = { workspace = true }
+prost = { workspace = true }
+prost-types = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
+tonic-types = { workspace = true }
+# Every served method is called to check the error contract.
+sid-serve = { workspace = true, features = ["error-contract"] }

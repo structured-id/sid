@@ -1,0 +1,95 @@
+# GitLab CI/CD for sid-wasm WASM compilation and distribution
+#
+# Add this to .gitlab-ci.yml (or create separate pipeline)
+#
+# Stages:
+#   1. build-wasm — compile Rust → WebAssembly
+#   2. optimize-wasm — run wasm-opt for obfuscation
+#   3. publish-wasm — push to private npm registry
+
+stages:
+  - build-wasm
+  - optimize-wasm
+  - publish-wasm
+
+variables:
+  RUST_VERSION: "1.75"
+  WASM_TARGET: "wasm32-unknown-unknown"
+
+build-wasm:
+  stage: build-wasm
+  image: rust:${RUST_VERSION}
+  before_script:
+    - rustup target add ${WASM_TARGET}
+    - cargo install wasm-bindgen-cli
+  script:
+    - cd crates/sid-wasm
+    - cargo build -p sid-wasm --target ${WASM_TARGET} --release
+    - wasm-bindgen --target web --out-dir ../../target/wasm target/${WASM_TARGET}/release/sid_wasm.wasm
+  artifacts:
+    paths:
+      - target/wasm32-unknown-unknown/release/sid_wasm.wasm
+      - target/wasm/opaque.d.ts
+      - target/wasm/opaque.js
+    expire_in: 1 week
+  only:
+    - main
+    - tags
+
+optimize-wasm:
+  stage: optimize-wasm
+  image: node:20
+  before_script:
+    - npm install -g wasm-opt
+  script:
+    - mkdir -p dist
+    - wasm-opt -Oz target/wasm32-unknown-unknown/release/sid_wasm.wasm -o dist/opaque.wasm
+    - cp target/wasm/opaque.d.ts dist/
+    - cp target/wasm/opaque.js dist/
+    - |
+      echo "WASM binary sizes:"
+      ls -lh target/wasm32-unknown-unknown/release/sid_wasm.wasm
+      ls -lh dist/opaque.wasm
+  artifacts:
+    paths:
+      - dist/opaque.wasm
+      - dist/opaque.d.ts
+      - dist/opaque.js
+    expire_in: 30 days
+  dependencies:
+    - build-wasm
+  only:
+    - main
+    - tags
+
+publish-wasm:
+  stage: publish-wasm
+  image: node:20
+  script:
+    - |
+      if [ -z "$NPM_REGISTRY_TOKEN" ]; then
+        echo "ERROR: NPM_REGISTRY_TOKEN not set in GitLab CI variables"
+        exit 1
+      fi
+    # Option 1: Publish to private npm registry
+    - echo "//registry.example.com/:_authToken=${NPM_REGISTRY_TOKEN}" > ~/.npmrc
+    - npm publish --registry https://registry.example.com
+
+    # Option 2: Upload as GitLab artifact (for manual distribution)
+    - tar czf opaque-wasm-${CI_COMMIT_TAG}.tar.gz dist/
+  artifacts:
+    paths:
+      - opaque-wasm-*.tar.gz
+    expire_in: 90 days
+  dependencies:
+    - optimize-wasm
+  only:
+    - tags  # Only publish on git tags (releases)
+
+# Usage:
+#
+# 1. Set NPM_REGISTRY_TOKEN in GitLab CI/CD variables (Settings → CI/CD)
+# 2. Create a git tag:
+#    git tag v0.1.0
+#    git push origin v0.1.0
+# 3. Pipeline automatically builds, optimizes, and publishes

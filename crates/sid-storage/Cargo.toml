@@ -1,0 +1,57 @@
+[package]
+name = "sid-storage"
+description = "StructuredID Storage Backends - sqlx for all CRUD + audit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = ["storage-pg"]
+
+# PostgreSQL backend (full CE/EE deployment)
+storage-pg = ["dep:sqlx", "sqlx?/postgres", "sid-ids/sqlx-postgres"]
+
+# SQLite backend (embedded-dev mode)
+storage-sqlite = ["dep:sqlx", "sqlx?/sqlite", "sid-ids/sqlx-sqlite"]
+
+[dependencies]
+sid-ids = { workspace = true, features = ["std", "serde"] }
+sid-core = { workspace = true }
+sid-keys = { workspace = true }
+sid-plugin = { workspace = true }
+
+# SQL — backend layer (features selected per storage backend)
+sqlx = { workspace = true, features = ["runtime-tokio", "uuid", "chrono", "json"], optional = true }
+
+# Async
+async-trait = { workspace = true }
+tokio = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# UUID
+uuid = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# Secrets — needed for EmailProviderConfig SecretBox fields
+secrecy = { workspace = true }
+
+[dev-dependencies]
+# Field-encryption integration tests are #[tokio::test]; the library itself
+# needs no macros, so the attribute is enabled here only.
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# Two SQLite backends on one database file (instances sharing a store).
+tempfile = "3"

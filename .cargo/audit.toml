@@ -1,0 +1,27 @@
+# Advisories listed here are reported against this workspace but do not apply to
+# what it builds. Each entry names the check that proves it and the condition
+# that would make it real again. An entry whose reason stops holding is removed,
+# not reworded.
+
+[advisories]
+ignore = [
+    # rsa, Marvin attack: private-key material can be recovered from the timing
+    # of private-key operations. The crate is linked: jsonwebtoken's pure-Rust
+    # backend implements RS*/PS* with it, and CE is pure Rust by rule, so this
+    # is a consequence of that rule, not of one dependency. RustCrypto has no
+    # constant-time private-key path in any released version and the advisory
+    # records `patched = []` as deliberate, so there is nothing to upgrade to.
+    #
+    # Almost every use here is verification with someone else's public key,
+    # which the attack does not reach: RS*/PS* client assertions and DPoP
+    # proofs in sid-authn, and RS*/PS* tokens in sid-auth. One private-key
+    # operation exists — sid-notify signs the Google Workspace service-account
+    # assertion with RS256 — and it is not an oracle: the payload is ours, the
+    # timing is not observable by any party that can also choose the input, and
+    # the attack needs many chosen inputs measured by the attacker.
+    #
+    # This entry stops holding the moment RSA signing moves anywhere a caller
+    # can drive it: a signing endpoint, a decryption path, or any RSA operation
+    # on a key an outside party can make us use repeatedly.
+    "RUSTSEC-2023-0071",
+]

@@ -1,0 +1,63 @@
+# sid-auth-proxy: reference configuration
+#
+# Application proxy (PEP): BFF sign-in for SPAs with server-side sessions,
+# auth translation for legacy upstreams. Access decisions come from sid-auth.
+#
+# Usage:
+#   sid-auth-proxy --config sid-auth-proxy.yaml
+#
+# Only `upstream.default` and `oidc.issuer_url` are required.
+
+# Service identity
+service:
+  name: "sid-auth-proxy"
+
+# HTTP listener
+listen:
+  http: "0.0.0.0:8080"
+
+# gRPC upstream (sid-server): token endpoint and issuer registry.
+upstream:
+  default: "http://127.0.0.1:50051"
+
+oidc:
+  # The installation's public URL, the base of its issuers' URLs. REQUIRED
+  issuer_url: "https://auth.example.com"
+
+# CORS settings (same-origin by default)
+# Empty = no CORS headers, the browser enforces same-origin policy.
+cors:
+  origins: []
+
+# Shield: rate limiting & IP blocklist
+shield:
+  enabled: true
+  # Per-IP rate limits (requests per minute)
+  auth_rate: 20
+  register_rate: 5
+  default_rate: 100
+  magic_link_rate: 3
+  # Per-principal rate limits (requests per minute)
+  principal_rate: 5
+  magic_link_principal_rate: 1
+  # Sliding window size
+  window_secs: 60
+  # Static IP blocklist
+  ip_blocklist: []
+
+# Shared cache for BFF sessions and rate-limit counters across replicas.
+# cache_url: "redis://cache:6379"
+
+# BFF for the account application. SID provisions the account integration
+# and gives its issuer, client, API and callback to the holder of the client
+# key; none of them is configured here.
+# bff:
+#   enabled: false
+#   cookie_name: "__Host-sid-bff"
+#   max_age: 86400       # 24h
+#   idle_timeout: 3600   # 1h
+#   # Ed25519 private key (PKCS#8 PEM) from `sid-auth-proxy keygen`; SID gets
+#   # the public JWK Set it prints (SID_ACCOUNT_CLIENT_JWKS).
+#   client_key: "/etc/sid/bff-key.pem"
+#   # The account API's gRPC-Web endpoint behind `/api/*`.
+#   api_upstream: "http://sid-server:8080"

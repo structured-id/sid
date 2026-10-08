@@ -1,0 +1,289 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/sid-keys",
+    "crates/sid-core",
+    "crates/sid-proto",
+    "crates/sid-plugin",
+    "crates/sid-authn",
+    "crates/sid-authz",
+    "crates/sid-admin",
+    "crates/sid-fed",
+    "crates/sid-storage",
+    "crates/sid-server",
+    "crates/sid-webtransport",
+    "crates/sid-crypto",
+    "crates/sid-notify",
+    "crates/sid-auth",
+    "crates/sid-auth-proxy",
+    "crates/sid-attestation",
+    "crates/sid-infra",
+    "crates/sid-serve",
+    "crates/sid-scim",
+    "crates/sid-migrate",
+    "crates/sid-i18n",
+    "crates/sid-org-crypto",
+    "crates/sid-test-issuer",
+]
+# The public ZKPP crate (submodule) is its own workspace, used here by path;
+# its tests and CI live there.
+exclude = ["zkpp"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+repository = "https://github.com/structured-id/sid"
+authors = ["StructuredID Contributors"]
+
+[workspace.dependencies]
+# Web framework (legacy — being replaced by axum in sid-auth)
+actix-web = "4"
+actix-rt = "2"
+actix-cors = "0.7"
+
+# HTTP framework (sid-auth)
+axum = { version = "0.8", features = ["macros"] }
+tower = "0.5"
+tower-http = { version = "0.7", features = ["cors", "trace"] }
+
+# Atomic swap for hot-reload (ZKPP keygen, config reload)
+arc-swap = "1"
+
+# gRPC
+tonic = "0.14"
+prost = "0.14"
+prost-types = "0.14"
+tonic-health = "0.14"
+tonic-reflection = "0.14"
+tonic-web = "0.14"
+tonic-types = "0.14"
+# HTTP request/response types shared by gRPC metadata and HTTP headers.
+http = "1"
+# Envoy ext_authz (envoy.service.auth.v3) server types.
+envoy-types = "0.7"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_urlencoded = "0.7"
+serde_yaml = "0.9"
+
+# Protobuf reflection (REST↔gRPC transcoding)
+prost-reflect = { version = "0.16", features = ["serde"] }
+
+# Database
+# No default features: the drivers and helpers are named explicitly, so the
+# build carries the Postgres and SQLite paths and nothing else. (The lockfile
+# still records every optional dependency of `sqlx`, the MySQL driver included;
+# that is how Cargo writes lockfiles and is unaffected by feature selection.)
+sqlx = { version = "0.9", default-features = false, features = [
+    "runtime-tokio",
+    "macros",
+    "migrate",
+    "json",
+    "uuid",
+    "chrono",
+] }
+
+# Logging/tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "registry"] }
+tracing-opentelemetry = "0.34"
+
+# OpenTelemetry / Prometheus (behind `telemetry` feature)
+# Moves together with tracing-opentelemetry: each of its releases is built
+# against exactly one opentelemetry minor (0.34 ↔ 0.33).
+opentelemetry = { version = "0.33", default-features = false, features = ["metrics", "trace"] }
+opentelemetry_sdk = { version = "0.33", default-features = false, features = ["metrics", "trace", "rt-tokio"] }
+opentelemetry-prometheus = "0.33"
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["trace", "grpc-tonic"] }
+prometheus = "0.14"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Async traits
+async-trait = "0.1"
+
+# UUID
+# v5: stable logical ids derived from an event and its target (durable work).
+uuid = { version = "1", features = ["v4", "v5", "v7", "serde"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Cryptography (OPAQUE)
+#
+# opaque-ke fixes the RustCrypto generation for everything that meets it in a
+# cipher suite. 4.0.1 requires digest 0.10, hmac/hkdf 0.12, an exact
+# generic-array 0.14.7, elliptic-curve 0.13, argon2 0.5 and rand 0.8, and our
+# suites hand it `sha2` hashes, a `Ksf` and an RNG directly. So sha2, sha1,
+# digest, hmac, hkdf, pbkdf2, generic-array, p256/p384/p521, argon2 and rand
+# stay on this generation until opaque-ke adopts the next one; raising one of
+# them alone produces two incompatible `Digest` traits across our own API.
+opaque-ke = { version = "4", features = ["argon2"] }
+argon2 = { version = "0.5", features = ["std"] }
+rand = "0.8"
+getrandom = "0.4"
+ed25519-dalek = { version = "3", features = ["rand_core", "alloc"] }
+
+# ZK Proof System (OPAQUE-ZKPP)
+# ff and group stay at 0.13 because halo2_gadgets 0.5 and pasta_curves 0.5
+# are built against it; 0.14 has no halo2 release to pair with.
+halo2_proofs = { version = "0.3", features = ["batch"] }
+halo2_gadgets = "0.5"
+pasta_curves = "0.5.1"
+ff = "0.13"
+group = "0.13"
+subtle = "2"
+
+# Unicode normalization & security (anti-homoglyph, IDNA)
+unicode-normalization = "0.1"
+unicode-security = "0.1"
+idna = "1.1"
+
+# Mailbox parsing/validation and the Public Suffix List, shared with the other
+# structured-world products; `psl` is named so a PSL check never degrades to a
+# TLD syntax check.
+structured-email-address = { version = "0.0.20", default-features = false, features = ["std", "psl"] }
+
+# Phone number validation (libphonenumber port)
+phonenumber = "0.3"
+
+# Cedar policy engine (ABAC)
+cedar-policy = "4"
+
+# NATS JetStream (event bus)
+async-nats = "0.50"
+futures = "0.3"
+hex = "0.4"
+fred = { version = "10", default-features = false, features = ["enable-rustls-ring", "subscriber-client", "i-keys", "i-pubsub"] }
+
+# VOPRF / CipherSuite adapter (Pallas).
+# `danger` exposes `derive_key`, which the key-exchange group needs to derive
+# its key pair the way the built-in curves do.
+voprf = { version = "0.5", features = ["danger"] }
+digest = "0.10"
+sha2 = "0.10"
+zeroize = "1"
+secrecy = "0.10"
+generic-array = "0.14"
+
+# TOTP (RFC 6238)
+hmac = "0.12"
+sha1 = "0.10"
+
+# Key derivation for field-level encryption (sid-keys)
+hkdf = "0.12"
+
+# HTTP client (feature flags polling, GeoIP API)
+# 0.13 dropped `rustls-tls` (ring). `rustls` would pull aws-lc-rs, which a CE
+# build does not link, so the provider comes from the process default instead.
+reqwest = { version = "0.13", features = ["json", "form", "rustls-no-provider", "webpki-roots"], default-features = false }
+
+# SMTP email delivery
+lettre = { version = "0.11", features = ["tokio1", "smtp-transport", "tokio1-rustls-tls", "pool", "hostname", "builder"], default-features = false }
+
+# MaxMind GeoIP2 MMDB reader (GeoIP resolution)
+maxminddb = "0.32"
+
+# CIDR range matching (IP intelligence providers)
+ipnet = "2"
+
+# JWT / OAuth2 / WebAuthn
+# The backend is named because neither is default. CE is pure Rust; a
+# validated-module build is a different binary in a different workspace.
+jsonwebtoken = { version = "11", features = ["rust_crypto"] }
+globset = "0.4"
+base64 = "0.23"
+# WebAuthn relying party, pure Rust. `serde` parses client responses as the
+# Level 3 JSON (no relaxed forms), `bin` stores credentials, and
+# `serializable_server_state` keeps ceremonies in the shared challenge store.
+structured-webauthn = { version = "0.1", default-features = false, features = ["bin", "serde", "serializable_server_state"] }
+url = "2"
+# Public Suffix List: whether two hosts are the same site (registrable domain).
+psl = "2"
+dashmap = "6"
+
+# BoringSSL-based crypto (default backend)
+aws-lc-rs = "1"
+
+# NIST curves for FIPS OPAQUE
+p256 = { version = "0.13", features = ["hash2curve", "voprf"] }
+p384 = { version = "0.13", features = ["ecdh", "hash2curve", "voprf"] }
+p521 = { version = "0.13", features = ["ecdh", "hash2curve", "voprf"] }
+
+# PBKDF2 KSF for FIPS cipher suites
+pbkdf2 = "0.12"
+
+# Backup encryption
+aes-gcm = "0.11"
+
+# Legacy hash verification (migration from competitor IdPs)
+bcrypt = "0.19"
+
+# X.509 PKI (federation certificates)
+rcgen = { version = "0.14", features = ["x509-parser"] }
+x509-parser = { version = "0.18", features = ["verify"] }
+rustls-pki-types = "1"
+# Named directly so CE can install ring as the process TLS provider: reqwest
+# 0.13 ships no pure-Rust provider of its own and would otherwise pull aws-lc-rs.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+time = "0.3"
+
+# Identifier packages of the StructuredID SDK.
+sid-ids = { version = "0.1", default-features = false }
+sid-ids-proto = "0.1"
+
+# Workspace crates
+sid-keys = { path = "crates/sid-keys" }
+sid-core = { path = "crates/sid-core", default-features = false }
+sid-proto = { path = "crates/sid-proto" }
+sid-plugin = { path = "crates/sid-plugin" }
+sid-authn = { path = "crates/sid-authn" }
+sid-admin = { path = "crates/sid-admin" }
+sid-authz = { path = "crates/sid-authz" }
+sid-fed = { path = "crates/sid-fed" }
+sid-storage = { path = "crates/sid-storage", default-features = false }
+sid-pake-core = { path = "zkpp/crates/sid-pake-core" }
+sid-webtransport = { path = "crates/sid-webtransport" }
+sid-crypto = { path = "crates/sid-crypto", default-features = false }
+sid-notify = { path = "crates/sid-notify" }
+sid-auth = { path = "crates/sid-auth" }
+sid-auth-proxy = { path = "crates/sid-auth-proxy" }
+sid-infra = { path = "crates/sid-infra" }
+sid-serve = { path = "crates/sid-serve" }
+sid-i18n = { path = "crates/sid-i18n" }
+
+# Line tables keep file:line in panics and backtraces at a fraction of full
+# debuginfo. Build scripts and proc-macros get the same setting, so a crate
+# needed by both is built once and the build cache is shared across projects.
+[profile.dev]
+debug = "line-tables-only"
+[profile.dev.build-override]
+debug = "line-tables-only"
+# Debugger builds: cargo build --profile debugger
+# (tests: cargo nextest run --cargo-profile debugger), output in target/debugger.
+[profile.debugger]
+inherits = "dev"
+debug = "full"
+
+# Optimize ZK crates even in dev/test builds — Halo2 ECC arithmetic is
+# 10-20× slower without optimizations, making tests painfully slow.
+[profile.dev.package.halo2_proofs]
+opt-level = 3
+[profile.dev.package.halo2_gadgets]
+opt-level = 3
+[profile.dev.package.pasta_curves]
+opt-level = 3
+[profile.dev.package.ff]
+opt-level = 3
+[profile.dev.package.group]
+opt-level = 3
+[profile.dev.package.sid-pake-core]
+opt-level = 2

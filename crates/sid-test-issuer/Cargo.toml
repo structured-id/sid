@@ -1,0 +1,34 @@
+[package]
+name = "sid-test-issuer"
+description = "A SID issuer served over gRPC for the tests of services that verify its tokens"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# Test support only: never published, never a runtime dependency.
+publish = false
+
+[dependencies]
+# The SQLite build of the server: the engine this issuer stores in.
+sid-server = { path = "../sid-server", default-features = false, features = ["embedded-dev"] }
+sid-core = { workspace = true, features = ["grpc"] }
+sid-keys = { workspace = true }
+sid-plugin = { workspace = true }
+sid-authn = { workspace = true, features = ["grpc"] }
+sid-authz = { workspace = true }
+sid-proto = { workspace = true }
+sid-storage = { workspace = true, default-features = false, features = ["storage-sqlite"] }
+sid-auth = { path = "../sid-auth", default-features = false }
+arc-swap = { workspace = true }
+chrono = { workspace = true }
+secrecy = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = "0.1.19"
+tonic = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
