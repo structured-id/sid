@@ -1849,7 +1849,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4639,7 +4639,7 @@ dependencies = [
  "once_cell",
  "socket2 0.6.5",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5066,7 +5066,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5124,7 +5124,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5762,7 +5762,7 @@ dependencies = [
  "sha2 0.11.0",
  "sid-core",
  "sid-keys",
- "sid-opaque-ke",
+ "sid-opaque-ke 5.0.0",
  "sid-pake-core",
  "sid-plugin",
  "sid-storage",
@@ -6020,6 +6020,31 @@ dependencies = [
 [[package]]
 name = "sid-opaque-ke"
 version = "4.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2869dd8b6be2d02ae1914a5e6008f497143ff704ef51d43b8e37eb5073a6dbd1"
+dependencies = [
+ "argon2",
+ "curve25519-dalek 5.0.0",
+ "derive-where",
+ "digest 0.11.3",
+ "displaydoc",
+ "ecdsa 0.17.0",
+ "ed25519-dalek 3.0.0",
+ "elliptic-curve 0.14.1",
+ "generic-array 1.4.5",
+ "hkdf 0.13.0",
+ "hmac 0.13.0",
+ "hybrid-array",
+ "rand_core 0.10.1",
+ "serde",
+ "sid-voprf",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "sid-opaque-ke"
+version = "5.0.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -6097,7 +6122,7 @@ dependencies = [
  "rand_core 0.10.1",
  "serde",
  "sha2 0.11.0",
- "sid-opaque-ke",
+ "sid-opaque-ke 4.1.0",
  "sid-voprf",
  "subtle",
  "thiserror 2.0.21",
@@ -6228,7 +6253,7 @@ dependencies = [
  "sid-infra",
  "sid-keys",
  "sid-notify",
- "sid-opaque-ke",
+ "sid-opaque-ke 5.0.0",
  "sid-pake-core",
  "sid-plugin",
  "sid-proto",
@@ -6946,7 +6971,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7836,7 +7861,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

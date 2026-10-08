@@ -8,7 +8,7 @@ keywords = ["cryptography", "crypto", "opaque", "passwords", "authentication"]
 license = "Apache-2.0 OR MIT"
 readme = "README.md"
 repository = "https://github.com/structured-id/sid"
-version = "4.1.0"
+version = "5.0.0"
 edition = "2024"
 rust-version = "1.87"
 

@@ -122,7 +122,7 @@ chrono = { version = "0.4", features = ["serde"] }
 # Cryptography (OPAQUE)
 # The OPAQUE and OPRF implementations, kept in this workspace on the current
 # RustCrypto releases and published from it.
-sid-opaque-ke = { path = "crates/sid-opaque-ke", version = "4.1", features = ["argon2"] }
+sid-opaque-ke = { path = "crates/sid-opaque-ke", version = "5.0", features = ["argon2"] }
 argon2 = "0.6"
 rand = "0.10"
 rand_core = "0.10"

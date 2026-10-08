@@ -1,5 +1,11 @@
 # Changelog
 
+## [5.0.0](https://github.com/structured-id/sid/compare/sid-opaque-ke-v4.1.0...sid-opaque-ke-v5.0.0) - 2026-10-08
+
+### Other
+
+- *(deps)* [**breaking**] move to the current RustCrypto, rand and halo2 lines
+
 ## 4.1.0-pre.2 (March 26, 2026)
 * Upgraded ml-kem from 0.2 to 0.3.0-rc.0
 * Increased MSRV to 1.87
