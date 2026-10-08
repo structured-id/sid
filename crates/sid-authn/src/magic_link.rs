@@ -13,10 +13,10 @@
 
 use argon2::{
     Argon2,
-    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
+    password_hash::{PasswordHasher, PasswordVerifier, phc::PasswordHash},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use rand::RngCore;
+use rand::TryRng;
 use sid_core::models::{MAGIC_LINK_RATE_LIMIT_MAX, MagicLinkSession};
 use sid_plugin::StorageBackend;
 use std::sync::Arc;
@@ -100,12 +100,10 @@ impl MagicLinkService {
         let token = generate_token();
 
         // Hash with Argon2
-        let salt = SaltString::generate(&mut OsRng);
-        let argon2 = Argon2::default();
-        let token_hash = argon2
-            .hash_password(token.as_bytes(), &salt)
-            .map_err(|e| MagicLinkError::Internal(format!("hash failed: {}", e)))?
-            .to_string();
+        let token_hash =
+            PasswordHasher::<PasswordHash>::hash_password(&Argon2::default(), token.as_bytes())
+                .map_err(|e| MagicLinkError::Internal(format!("hash failed: {}", e)))?
+                .to_string();
 
         let session = MagicLinkSession::new(email, token_hash);
         let session_id = session.id;
@@ -207,7 +205,9 @@ impl MagicLinkService {
 /// Generate a 256-bit URL-safe base64 token.
 fn generate_token() -> String {
     let mut bytes = [0u8; MAGIC_LINK_TOKEN_BYTES];
-    OsRng.fill_bytes(&mut bytes);
+    rand::rngs::SysRng
+        .try_fill_bytes(&mut bytes)
+        .expect("the operating system random source is available");
     URL_SAFE_NO_PAD.encode(bytes)
 }
 

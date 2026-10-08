@@ -344,9 +344,9 @@ fn make_issuer(
 
 fn generate_serial() -> SerialNumber {
     use rand::Rng;
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let mut bytes = [0u8; 16];
-    rng.fill(&mut bytes);
+    rng.fill_bytes(&mut bytes);
     // Ensure high bit is 0 (serial must be positive integer per X.509).
     bytes[0] &= 0x7F;
     SerialNumber::from_slice(&bytes)

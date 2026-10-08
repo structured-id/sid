@@ -3,7 +3,7 @@
 //! account access. Recovery codes are NOT considered a security factor for
 //! policy purposes (classified as `PhishingResistance::Fallback`).
 
-use rand::Rng;
+use rand::{Rng, RngExt};
 use sha2::{Digest, Sha256};
 
 /// Number of recovery codes generated per set.
@@ -19,7 +19,7 @@ const CODE_ALPHABET: &[u8] = b"23456789ABCDEFGHJKMNPQRSTUVWXYZ";
 ///
 /// Returns (plaintext_codes, sha256_hashes).
 pub fn generate_recovery_codes() -> (Vec<String>, Vec<String>) {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let mut plaintext = Vec::with_capacity(RECOVERY_CODE_COUNT);
     let mut hashes = Vec::with_capacity(RECOVERY_CODE_COUNT);
 
@@ -36,7 +36,7 @@ pub fn generate_recovery_codes() -> (Vec<String>, Vec<String>) {
 /// Generate a single 8-character recovery code.
 fn generate_single_code(rng: &mut impl Rng) -> String {
     (0..CODE_GROUP_LENGTH * 2)
-        .map(|_| CODE_ALPHABET[rng.gen_range(0..CODE_ALPHABET.len())] as char)
+        .map(|_| CODE_ALPHABET[rng.random_range(0..CODE_ALPHABET.len())] as char)
         .collect()
 }
 

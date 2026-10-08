@@ -75,14 +75,15 @@ fn verify_bcrypt(password: &[u8], hash: &str) -> Result<bool, HashError> {
 }
 
 fn verify_argon2(password: &[u8], hash: &str) -> Result<bool, HashError> {
-    use argon2::{Argon2, PasswordHash, PasswordVerifier};
+    use argon2::Argon2;
+    use argon2::password_hash::{PasswordVerifier, phc::PasswordHash};
 
     let parsed = PasswordHash::new(hash)
         .map_err(|e| HashError::InvalidFormat(format!("invalid argon2 hash: {}", e)))?;
 
     match Argon2::default().verify_password(password, &parsed) {
         Ok(()) => Ok(true),
-        Err(argon2::password_hash::Error::Password) => Ok(false),
+        Err(argon2::password_hash::Error::PasswordInvalid) => Ok(false),
         Err(e) => Err(HashError::CryptoError(format!(
             "argon2 verification error: {}",
             e
@@ -91,7 +92,7 @@ fn verify_argon2(password: &[u8], hash: &str) -> Result<bool, HashError> {
 }
 
 fn verify_pbkdf2(password: &[u8], hash: &str) -> Result<bool, HashError> {
-    use argon2::password_hash::PasswordHash;
+    use argon2::password_hash::phc::PasswordHash;
 
     let parsed = PasswordHash::new(hash)
         .map_err(|e| HashError::InvalidFormat(format!("invalid pbkdf2 hash: {}", e)))?;
@@ -114,7 +115,8 @@ fn verify_pbkdf2(password: &[u8], hash: &str) -> Result<bool, HashError> {
 
     // Compute PBKDF2-HMAC-SHA256 and compare
     let mut output = vec![0u8; expected_hash.len()];
-    let salt_bytes = salt.as_str().as_bytes();
+    let salt_string = salt.to_salt_string();
+    let salt_bytes = salt_string.as_bytes();
     pbkdf2::pbkdf2_hmac::<sha2::Sha256>(password, salt_bytes, iterations, &mut output);
 
     // Constant-time comparison

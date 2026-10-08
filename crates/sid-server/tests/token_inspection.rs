@@ -264,7 +264,6 @@ async fn a_retired_resource_takes_no_inspector() {
 /// outside its allowlist it is refused as at the token endpoint.
 #[tokio::test]
 async fn a_machine_inspector_keeps_its_restrictions() {
-    use sha2::{Digest, Sha256};
     use sid_core::models::machine_user::{MachineCredentialType, MachineUserCredential, OwnerType};
     let mut pdp = sid_core::models::MachineUser::new(
         ProjectId::system(),
@@ -282,7 +281,7 @@ async fn a_machine_inspector_keeps_its_restrictions() {
                 pdp.id,
                 "kid-fenced",
                 MachineCredentialType::ClientSecret,
-                format!("{:x}", Sha256::digest(secret.as_bytes())),
+                sid_authn::bearer_secret::verifier_of(secret),
             )),
     );
     common::grant_inspection(

@@ -1,15 +1,39 @@
 version: 2
 updates:
+  # One pull request per ecosystem and run, not one per package: related
+  # crates (the RustCrypto family, halo2 and its curves) move together.
   - package-ecosystem: cargo
     directory: /
     schedule:
       interval: weekly
-    open-pull-requests-limit: 10
+    groups:
+      cargo:
+        patterns: ["*"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      docker:
+        patterns: ["*"]
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      docker-compose:
+        patterns: ["*"]
   - package-ecosystem: gitsubmodule
     directory: /
     schedule:
       interval: weekly
+    groups:
+      submodules:
+        patterns: ["*"]

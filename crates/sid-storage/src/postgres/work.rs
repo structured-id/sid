@@ -27,12 +27,21 @@ impl PgWorkStore {
         Self { pool }
     }
 
-    /// Create the work table if it does not exist.
+    /// Create the work table if it does not exist. Replicas starting together
+    /// take turns under a transaction-scoped advisory lock: concurrent
+    /// `CREATE ... IF NOT EXISTS` of one name collides in the catalog.
     pub async fn ensure_schema(&self) -> SidResult<()> {
-        sqlx::raw_sql(SCHEMA)
-            .execute(&self.pool)
+        let schema_error = |e: sqlx::Error| SidError::Storage(format!("durable work schema: {e}"));
+        let mut tx = self.pool.begin().await.map_err(schema_error)?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext('sid.durable_work.schema'))")
+            .execute(&mut *tx)
             .await
-            .map_err(|e| SidError::Storage(format!("durable work schema: {e}")))?;
+            .map_err(schema_error)?;
+        sqlx::raw_sql(SCHEMA)
+            .execute(&mut *tx)
+            .await
+            .map_err(schema_error)?;
+        tx.commit().await.map_err(schema_error)?;
         Ok(())
     }
 }

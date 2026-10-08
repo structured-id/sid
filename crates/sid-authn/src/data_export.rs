@@ -68,7 +68,7 @@ impl DataExportService {
         // Compute checksum.
         let mut hasher = Sha256::new();
         hasher.update(&json_bytes);
-        let checksum = format!("{:x}", hasher.finalize());
+        let checksum = hex::encode(hasher.finalize());
 
         // Write to disk.
         let archive_path = format!("{}/{}.json", self.export_dir, job.id);

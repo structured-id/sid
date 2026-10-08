@@ -81,7 +81,7 @@ async fn run_operation(
     password: &[u8],
 ) -> (Vec<OperationDomain>, OperationEvaluation, ZkppPublicInputs) {
     let d = pallas::Base::from_repr(owner_domain(&INSTALLATION, owner)).unwrap();
-    let r = relation::random_blind(rand::rngs::OsRng);
+    let r = relation::random_blind(rand::rng());
     let b = relation::blind_request(relation::history_input(d, password), r).to_bytes();
     let domains = vec![OperationDomain::of(&epoch.epoch)];
     let evaluation = evaluator

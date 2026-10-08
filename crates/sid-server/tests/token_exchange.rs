@@ -20,12 +20,11 @@ fn setup_machine_user_for_exchange(
     storage: MockStorage,
     target_profile: &Profile,
 ) -> (MockStorage, String) {
-    use sha2::{Digest, Sha256};
     use sid_core::models::ProjectId;
     use sid_core::models::machine_user::*;
 
     let raw_secret = "test-machine-secret-12345";
-    let secret_hash = format!("{:x}", Sha256::digest(raw_secret.as_bytes()));
+    let secret_hash = sid_authn::bearer_secret::verifier_of(raw_secret);
 
     let mu = MachineUser::new(
         ProjectId::system(),
@@ -555,13 +554,12 @@ async fn test_token_exchange_wrong_secret() {
 
 #[tokio::test]
 async fn test_token_exchange_no_grant_for_target() {
-    use sha2::{Digest, Sha256};
     use sid_core::models::ProjectId;
     use sid_core::models::machine_user::*;
 
     let target = test_profile();
     let raw_secret = "test-secret-no-grant";
-    let secret_hash = format!("{:x}", Sha256::digest(raw_secret.as_bytes()));
+    let secret_hash = sid_authn::bearer_secret::verifier_of(raw_secret);
 
     let mu = MachineUser::new(
         ProjectId::system(),
