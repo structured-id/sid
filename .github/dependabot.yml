@@ -1,13 +1,18 @@
 version: 2
 updates:
   # One pull request per ecosystem and run, not one per package: related
-  # crates (the RustCrypto family, halo2 and its curves) move together.
+  # crates (the RustCrypto family, halo2 and its curves) move together. A group
+  # applies to version updates only unless `applies-to` says otherwise, so
+  # security updates get their own catch-all group.
   - package-ecosystem: cargo
     directory: /
     schedule:
       interval: weekly
     groups:
       cargo:
+        patterns: ["*"]
+      cargo-security:
+        applies-to: security-updates
         patterns: ["*"]
   - package-ecosystem: github-actions
     directory: /
@@ -16,12 +21,18 @@ updates:
     groups:
       github-actions:
         patterns: ["*"]
+      github-actions-security:
+        applies-to: security-updates
+        patterns: ["*"]
   - package-ecosystem: docker
     directory: /
     schedule:
       interval: weekly
     groups:
       docker:
+        patterns: ["*"]
+      docker-security:
+        applies-to: security-updates
         patterns: ["*"]
   - package-ecosystem: docker-compose
     directory: /
@@ -30,6 +41,9 @@ updates:
     groups:
       docker-compose:
         patterns: ["*"]
+      docker-compose-security:
+        applies-to: security-updates
+        patterns: ["*"]
   - package-ecosystem: gitsubmodule
     directory: /
     schedule:
@@ -37,3 +51,8 @@ updates:
     groups:
       submodules:
         patterns: ["*"]
+  # The exact compiler version in rust-toolchain.toml.
+  - package-ecosystem: rust-toolchain
+    directory: /
+    schedule:
+      interval: weekly
