@@ -1,0 +1,32 @@
+[package]
+name = "sid-scim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+sid-authn = { path = "../sid-authn", features = ["grpc"] }
+sid-core = { path = "../sid-core", features = ["grpc"] }
+sid-plugin = { path = "../sid-plugin" }
+sid-proto = { path = "../sid-proto" }
+tonic = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true, features = ["v7"] }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+prost-types = { workspace = true }
+thiserror = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true, features = ["time", "sync"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+sid-storage = { path = "../sid-storage" }
+sid-authz = { path = "../sid-authz" }
+secrecy = { workspace = true }
+sqlx = { workspace = true }
+tonic-types = { workspace = true }

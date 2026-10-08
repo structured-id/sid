@@ -1,0 +1,14 @@
+# A consumer of sid-proto outside the SID workspace: the dependency graph it
+# resolves is the one a downstream application gets, with no feature
+# unification from neighbouring SID packages.
+[package]
+name = "sid-proto-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+sid-proto = { path = "@SID@/crates/sid-proto" }
+prost = "0.14"
+
+[workspace]

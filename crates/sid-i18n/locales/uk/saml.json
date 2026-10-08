@@ -1,0 +1,21 @@
+{
+  "errors": {
+    "invalid_response": "Недійсна відповідь SAML",
+    "invalid_assertion": "Недійсне твердження SAML",
+    "signature_invalid": "Перевірка підпису відповіді SAML не вдалася",
+    "expired_assertion": "Термін дії твердження SAML закінчився",
+    "audience_mismatch": "Невідповідність обмеження аудиторії SAML",
+    "status_not_success": "Автентифікація SAML не вдалася: {status}",
+    "missing_name_id": "У відповіді SAML відсутній NameID",
+    "no_idp_configured": "Провайдер ідентифікації SAML не налаштований",
+    "metadata_fetch_failed": "Не вдалося отримати метадані SAML IdP з {url}",
+    "certificate_expired": "Сертифікат SAML IdP прострочений",
+    "replay_detected": "Виявлено повторне використання відповіді SAML"
+  },
+  "flow": {
+    "redirecting": "Перенаправлення до провайдера ідентифікації...",
+    "processing": "Обробка відповіді SAML...",
+    "slo_initiated": "Ініційовано єдиний вихід",
+    "slo_complete": "Єдиний вихід завершено"
+  }
+}

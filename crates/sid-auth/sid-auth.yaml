@@ -1,0 +1,75 @@
+# sid-auth: reference configuration
+#
+# Forward-auth decision service. gRPC: ForwardAuthService.Verify, Envoy
+# ext_authz (envoy.service.auth.v3.Authorization/Check) and gRPC health.
+# HTTP: the embedded transcoder serves Verify as /auth/verify/{application}.
+#
+# Usage:
+#   sid-auth --config sid-auth.yaml
+#
+# Required: `upstream` and `issuer_url`.
+
+# gRPC listener.
+grpc_listen: "0.0.0.0:50061"
+
+# The SID server's gRPC address: issuer registry and sid-authz.
+upstream: "http://127.0.0.1:50051"
+
+# The installation's public URL, the base of its issuers' URLs.
+issuer_url: "https://auth.example.com"
+
+# Where a 401 sends a browser to sign in (with the original path as `rd`).
+# login_url: "https://app.example.com/auth/login"
+
+# Protected applications. Each names the registered resource its tokens are
+# issued for; reverse proxies call /auth/verify/<name>, Envoy names the
+# application in the route's ext_authz context extension `application`. A file
+# that does not load stops start-up; without one every request is refused.
+# route_policy_path: "/etc/sid/route-policies.yaml"
+#
+# That file holds, for example:
+# applications:
+#   - name: grafana
+#     origin: https://grafana.example.com
+#     issuer: https://auth.example.com/i/<handle>
+#     resource: https://grafana.example.com/
+#     routes:
+#       - match: { path: "/api/health", methods: ["GET"] }
+#         policy: { auth: none }
+#       # sid-authz decides this operation for the request's subject; needs
+#       # `authz_checker` below.
+#       - match: { path: "/api/dashboards/**", methods: ["DELETE"] }
+#         policy: { auth: required, check_authz: true, action: dashboards.delete }
+#       - match: { path: "/**" }
+#         policy:
+#           auth: required
+#           require: { roles: ["ops"] }
+#           headers: { inject: [user, groups] }
+
+# This service's own client for the authorization API, needed by routes with
+# `check_authz`. A confidential OAuth client or machine user of `issuer`,
+# granted the permission-checker role on each resource whose routes ask. It
+# asks as itself and hands over the request's access token as the evidence
+# of whose permission is decided. `method`: client_secret_basic or
+# client_secret_post with `secret_file`, or private_key_jwt with `key_file`
+# (PKCS#8 PEM), `algorithm` (EdDSA, ES256, RS256) and optional `key_id`.
+# authz_checker:
+#   issuer: https://auth.example.com/i/<handle>
+#   client_id: route-checker
+#   authentication: { method: private_key_jwt, key_file: /etc/sid/checker.pem, algorithm: EdDSA }
+
+# Shared cache (revocations, DPoP proof replay) for more than one replica.
+# cache_url: "redis://cache:6379"
+
+# HTTP form of forward auth: a structured-proxy configuration. It calls this
+# service's decision in process (an `upstream` here is refused), answers
+# native gRPC on its port too, and always forwards the original request's
+# `authorization`, `dpop`, `x-original-*` and `x-forwarded-uri`/`-method`
+# headers.
+http:
+  listen:
+    http: "0.0.0.0:8080"
+  health:
+    enabled: true
+  metrics:
+    enabled: true

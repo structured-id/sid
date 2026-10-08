@@ -1,0 +1,21 @@
+{
+  "errors": {
+    "invalid_response": "Invalid SAML response",
+    "invalid_assertion": "Invalid SAML assertion",
+    "signature_invalid": "SAML response signature verification failed",
+    "expired_assertion": "SAML assertion has expired",
+    "audience_mismatch": "SAML audience restriction mismatch",
+    "status_not_success": "SAML authentication failed: {status}",
+    "missing_name_id": "SAML response missing NameID",
+    "no_idp_configured": "No SAML identity provider configured",
+    "metadata_fetch_failed": "Failed to fetch SAML IdP metadata from {url}",
+    "certificate_expired": "SAML IdP certificate has expired",
+    "replay_detected": "SAML response replay detected"
+  },
+  "flow": {
+    "redirecting": "Redirecting to identity provider...",
+    "processing": "Processing SAML response...",
+    "slo_initiated": "Single logout initiated",
+    "slo_complete": "Single logout complete"
+  }
+}

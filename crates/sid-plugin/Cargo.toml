@@ -1,0 +1,30 @@
+[package]
+name = "sid-plugin"
+description = "StructuredID Plugin API - Traits for extending StructuredID"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+sid-core = { workspace = true }
+sid-keys = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+secrecy = { workspace = true }
+zeroize = { workspace = true }
+
+# Outbound HTTP and the TLS provider it needs (see src/http.rs)
+reqwest = { workspace = true }
+rustls = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }

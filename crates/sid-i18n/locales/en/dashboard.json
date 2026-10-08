@@ -1,0 +1,87 @@
+{
+  "profile": {
+    "title": "My Profile",
+    "display_name": "Display name",
+    "email": "Email",
+    "phone": "Phone",
+    "username": "Username",
+    "change_password": "Change password",
+    "photo": "Profile photo",
+    "upload_photo": "Upload photo",
+    "remove_photo": "Remove photo"
+  },
+  "sessions": {
+    "title": "Active Sessions",
+    "current": "Current session",
+    "device": "Device",
+    "location": "Location",
+    "last_active": "Last active",
+    "started": "Started",
+    "revoke": "End session",
+    "revoke_all": "End all other sessions",
+    "revoke_confirm": "End this session? The device will need to sign in again."
+  },
+  "security": {
+    "title": "Security",
+    "mfa_title": "Two-factor authentication",
+    "mfa_enabled": "Two-factor authentication is enabled",
+    "mfa_disabled": "Two-factor authentication is not enabled",
+    "mfa_enable": "Enable two-factor authentication",
+    "mfa_disable": "Disable two-factor authentication",
+    "totp_setup": "Set up authenticator app",
+    "totp_scan": "Scan this QR code with your authenticator app",
+    "totp_manual": "Or enter this code manually: {secret}",
+    "webauthn_title": "Security keys",
+    "webauthn_add": "Add security key",
+    "webauthn_name_label": "Key name",
+    "webauthn_registered": "Registered {date}",
+    "webauthn_last_used": "Last used {date}",
+    "webauthn_remove": "Remove key",
+    "recovery_codes_title": "Recovery codes",
+    "recovery_codes_remaining": "{count} codes remaining",
+    "recovery_codes_regenerate": "Generate new codes",
+    "recovery_codes_warning": "Store these codes in a safe place. Each code can only be used once.",
+    "recovery_codes_downloaded": "Recovery codes downloaded"
+  },
+  "devices": {
+    "title": "Trusted Devices",
+    "name": "Device name",
+    "type": "Device type",
+    "registered": "Registered",
+    "last_seen": "Last seen",
+    "trust_level": "Trust level",
+    "revoke_trust": "Remove device",
+    "no_devices": "No trusted devices registered"
+  },
+  "connected_apps": {
+    "title": "Connected Applications",
+    "granted": "Authorized {date}",
+    "permissions": "Permissions",
+    "revoke": "Revoke access",
+    "no_apps": "No connected applications"
+  },
+  "pats": {
+    "title": "Personal Access Tokens",
+    "create": "Create token",
+    "name_label": "Token name",
+    "scopes_label": "Scopes",
+    "expires_label": "Expiration",
+    "created_message": "Token created. Copy it now — it won't be shown again.",
+    "revoke": "Revoke token",
+    "no_tokens": "No personal access tokens",
+    "last_used": "Last used {date}",
+    "never_used": "Never used"
+  },
+  "account": {
+    "title": "Account",
+    "export_title": "Export your data",
+    "export_description": "Download a copy of your personal data",
+    "export_request": "Request data export",
+    "export_processing": "Your data export is being prepared. You'll be notified when it's ready.",
+    "closure_title": "Close account",
+    "closure_description": "Permanently delete your account and all associated data",
+    "closure_request": "Close my account",
+    "closure_warning": "This action is irreversible. All your data will be permanently deleted after the grace period.",
+    "closure_grace_period": "Your account will be scheduled for deletion in {days} days. You can cancel during this period."
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "title": "{app} wants to access your account",
+  "subtitle": "Review the permissions this application is requesting",
+  "scopes": {
+    "openid": "Verify your identity",
+    "profile": "View your profile information (name, picture)",
+    "email": "View your email address",
+    "phone": "View your phone number",
+    "address": "View your address",
+    "groups": "View your group memberships",
+    "roles": "View your role assignments",
+    "offline_access": "Stay signed in (request refresh tokens)"
+  },
+  "approve": "Allow",
+  "deny": "Deny",
+  "remember": "Remember this decision",
+  "signed_in_as": "Signed in as {identity}",
+  "switch_account": "Use a different account",
+  "privacy_note": "By allowing, you agree to {app}'s {terms} and {privacy}.",
+  "terms": "terms of service",
+  "privacy": "privacy policy"
+}

@@ -1,0 +1,45 @@
+[package]
+name = "sid-core"
+description = "StructuredID Core - Domain models, errors, and shared types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+sid-ids = { workspace = true, features = ["std", "serde"] }
+sid-keys = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+subtle = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+zeroize = { workspace = true }
+secrecy = { workspace = true }
+rand = { workspace = true }
+url = { workspace = true }
+cloudevents-sdk = "0.9"
+
+# Recovery seed phrase (BIP-39 + key derivation)
+pbkdf2 = { workspace = true, optional = true }
+hkdf = { version = "0.12", optional = true }
+hmac = { version = "0.12", optional = true }
+aes-gcm = { workspace = true, optional = true }
+
+# gRPC error model (optional): canonical google.rpc.Status with typed details
+tonic = { workspace = true, optional = true }
+tonic-types = { workspace = true, optional = true }
+# Encoding of additional status details no canonical type carries
+prost = { workspace = true, optional = true }
+prost-types = { workspace = true, optional = true }
+# The shared refusals log the internal cause they never send
+tracing = { workspace = true, optional = true }
+
+[features]
+default = ["recovery"]
+recovery = ["dep:pbkdf2", "dep:hkdf", "dep:hmac", "dep:aes-gcm"]
+grpc = ["dep:tonic", "dep:tonic-types", "dep:prost", "dep:prost-types", "dep:tracing"]

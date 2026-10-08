@@ -1,0 +1,29 @@
+{
+  "provisioning": {
+    "user_created": "Користувача створено через SCIM",
+    "user_updated": "Користувача оновлено через SCIM",
+    "user_deactivated": "Користувача деактивовано через SCIM",
+    "user_reactivated": "Користувача відновлено через SCIM",
+    "group_created": "Групу створено через SCIM",
+    "group_updated": "Групу оновлено через SCIM",
+    "group_deleted": "Групу видалено через SCIM"
+  },
+  "errors": {
+    "invalid_filter": "Недійсний вираз фільтра SCIM",
+    "user_not_found": "Користувача SCIM не знайдено",
+    "group_not_found": "Групу SCIM не знайдено",
+    "conflict": "Ресурс вже існує",
+    "invalid_patch": "Недійсна операція SCIM PATCH",
+    "unsupported_attribute": "Непідтримуваний атрибут SCIM: {attribute}",
+    "mutability_readonly": "Атрибут лише для читання: {attribute}",
+    "missing_required": "Відсутній обов'язковий атрибут: {attribute}",
+    "invalid_value": "Недійсне значення для атрибута: {attribute}"
+  },
+  "outbound": {
+    "dispatch_failed": "Не вдалося відправити SCIM-подію до {target}",
+    "retry_scheduled": "Повторну спробу заплановано для {target} (спроба {attempt})",
+    "dlq_entry": "Подію переміщено до черги невдалих повідомлень після {attempts} невдалих спроб",
+    "target_unreachable": "Ціль SCIM {target} недоступна",
+    "auth_failed": "Автентифікація для цілі SCIM {target} не вдалася"
+  }
+}

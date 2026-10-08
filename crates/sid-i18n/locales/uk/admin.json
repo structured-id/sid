@@ -1,0 +1,134 @@
+{
+  "nav": {
+    "dashboard": "Панель керування",
+    "profiles": "Користувачі",
+    "groups": "Групи",
+    "roles": "Ролі",
+    "projects": "Проєкти",
+    "applications": "Застосунки",
+    "providers": "Провайдери ідентифікації",
+    "policies": "Політики",
+    "branding": "Брендинг",
+    "settings": "Налаштування",
+    "audit_log": "Журнал аудиту"
+  },
+  "dashboard": {
+    "title": "Панель адміністратора",
+    "total_profiles": "Усього користувачів",
+    "active_sessions": "Активних сеансів",
+    "recent_registrations": "Нещодавні реєстрації",
+    "failed_logins": "Невдалих входів (24 год.)"
+  },
+  "profiles": {
+    "title": "Керування користувачами",
+    "create": "Створити користувача",
+    "search_placeholder": "Пошук за іменем, поштою або ім'ям користувача...",
+    "status_active": "Активний",
+    "status_suspended": "Призупинений",
+    "status_provisioned": "Створений автоматично",
+    "status_closure_requested": "Запит на закриття",
+    "detail_title": "Деталі користувача",
+    "suspend": "Призупинити користувача",
+    "reactivate": "Відновити користувача",
+    "reset_mfa": "Скинути MFA",
+    "impersonate": "Увійти як користувач",
+    "force_logout": "Примусовий вихід"
+  },
+  "groups": {
+    "title": "Керування групами",
+    "create": "Створити групу",
+    "members_count": "Учасників: {count}",
+    "add_member": "Додати учасника",
+    "remove_member": "Видалити учасника",
+    "assign_role": "Призначити роль"
+  },
+  "roles": {
+    "title": "Керування ролями",
+    "create": "Створити роль",
+    "permissions": "Дозволи",
+    "assigned_to": "Призначено",
+    "system_role": "Системна роль",
+    "custom_role": "Користувацька роль"
+  },
+  "projects": {
+    "title": "Керування проєктами",
+    "create": "Створити проєкт",
+    "slug_label": "Slug",
+    "settings": "Налаштування проєкту",
+    "delete_warning": "Видалення проєкту призведе до видалення всіх пов'язаних застосунків, ролей та політик."
+  },
+  "applications": {
+    "title": "Застосунки",
+    "create": "Зареєструвати застосунок",
+    "client_id": "Client ID",
+    "client_secret": "Client Secret",
+    "redirect_uris": "URI перенаправлення",
+    "grant_types": "Типи надання",
+    "secret_warning": "Скопіюйте Client Secret зараз — він більше не буде показаний.",
+    "rotate_secret": "Ротація секрету"
+  },
+  "providers": {
+    "title": "Провайдери ідентифікації",
+    "create": "Додати провайдера",
+    "type_oidc": "OpenID Connect",
+    "type_saml": "SAML 2.0",
+    "type_social": "Вхід через соціальні мережі",
+    "enabled": "Увімкнено",
+    "disabled": "Вимкнено",
+    "test_connection": "Перевірити з'єднання"
+  },
+  "policies": {
+    "title": "Політики авторизації",
+    "cedar_title": "Політики Cedar",
+    "create": "Створити політику",
+    "language": "Мова політики",
+    "validate": "Перевірити",
+    "validation_ok": "Політика дійсна",
+    "validation_error": "Політика містить помилки"
+  },
+  "branding": {
+    "title": "Брендинг та теми",
+    "logo": "Логотип",
+    "favicon": "Іконка сайту",
+    "colors": "Кольори",
+    "typography": "Типографіка",
+    "preview": "Попередній перегляд",
+    "publish": "Опублікувати",
+    "revert": "Повернути до стандартних",
+    "dark_mode": "Темна тема",
+    "draft": "Чернетка",
+    "published": "Опубліковано"
+  },
+  "audit": {
+    "title": "Журнал аудиту",
+    "actor": "Виконавець",
+    "action": "Дія",
+    "resource": "Ресурс",
+    "outcome": "Результат",
+    "timestamp": "Час",
+    "ip_address": "IP-адреса",
+    "details": "Деталі",
+    "success": "Успішно",
+    "failure": "Невдало",
+    "export": "Експорт журналу аудиту"
+  },
+  "machine_users": {
+    "title": "Сервісні облікові записи",
+    "create": "Створити сервісний обліковий запис",
+    "credentials": "Облікові дані",
+    "create_credential": "Створити облікові дані",
+    "impersonation": "Надання імпersonації"
+  },
+  "scim": {
+    "title": "SCIM Provisioning",
+    "inbound": "Вхідний (від IdP)",
+    "outbound": "Вихідний (до застосунків)",
+    "targets": "Цілі SCIM",
+    "create_target": "Додати ціль SCIM",
+    "sync_status": "Статус синхронізації",
+    "last_sync": "Остання синхронізація",
+    "dlq_title": "Черга невдалих повідомлень",
+    "dlq_retry": "Повторити",
+    "dlq_discard": "Відхилити"
+  }
+}

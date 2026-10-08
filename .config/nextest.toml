@@ -1,0 +1,34 @@
+# nextest configuration for SID CE workspace
+# Docs: https://nexte.st/docs/configuration/
+
+[profile.default]
+# Default: 8 parallel test threads
+test-threads = 8
+# Default timeout: 2 minutes (covers backchannel retry tests ~30s)
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.default.overrides]]
+filter = "package(sid-crypto)"
+slow-timeout = { period = "60s", terminate-after = 10 }
+
+# Backchannel logout + IP intelligence tests have 30s real timeouts
+[[profile.default.overrides]]
+filter = "test(backchannel_logout) | test(ip_intelligence)"
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+# The full OPAQUE flow runs the suite's real KSF — 600,000 PBKDF2 iterations,
+# twice, in an unoptimized build. That cost is the function's purpose and the
+# test's point is that the shipped cipher suite works end to end, so it is not
+# something to tune away; what it needs is a budget that a loaded machine
+# cannot turn into a false failure. Tests that only check KDF behaviour use a
+# cheap work factor instead and run in milliseconds.
+[[profile.default.overrides]]
+filter = "test(test_full_registration_login_flow)"
+slow-timeout = { period = "60s", terminate-after = 5 }
+
+# ── CI profile ──
+[profile.ci]
+test-threads = 8
+slow-timeout = { period = "30s", terminate-after = 4 }
+# JUnit output for CI
+junit = { path = "test-results/junit.xml" }

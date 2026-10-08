@@ -1,0 +1,25 @@
+[package]
+name = "sid-serve"
+description = "StructuredID serving loop shared by every service binary: shutdown signal, gRPC health NOT_SERVING on shutdown, bounded drain, server error as exit status"
+version.workspace = true
+edition.workspace = true
+license = "Apache-2.0"
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+tokio-stream = { version = "0.1", features = ["net"] }
+tonic = { workspace = true }
+tonic-health = { workspace = true }
+tracing = { workspace = true }
+bytes = { version = "1", optional = true }
+prost-reflect = { workspace = true, optional = true }
+tonic-types = { workspace = true, optional = true }
+
+[features]
+# The error contract probe, for the tests of the service binaries.
+error-contract = ["dep:bytes", "dep:prost-reflect", "dep:tonic-types"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }

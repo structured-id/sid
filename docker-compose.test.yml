@@ -1,0 +1,51 @@
+services:
+  postgres-test:
+    image: postgres:16-alpine
+    container_name: sid-test-postgres
+    environment:
+      POSTGRES_USER: sid
+      POSTGRES_PASSWORD: sid_dev
+      POSTGRES_DB: sid
+    ports:
+      - "54399:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    volumes:
+      - ./docker/test-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sid"]
+      interval: 2s
+      timeout: 2s
+      retries: 5
+
+  # The shared cache the BFF session store and every replay/rate-limit check
+  # run on. Its atomic commands are the thing under test, so they are tested
+  # on the real server rather than on the in-memory stand-in.
+  redis-test:
+    image: redis:7-alpine
+    container_name: sid-test-redis
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "63799:6379"
+    tmpfs:
+      - /data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 5
+
+  nats-test:
+    image: nats:2.10-alpine
+    container_name: sid-test-nats
+    command: ["-js", "-m", "8222"]
+    ports:
+      - "4399:4222"
+      - "8399:8222"
+    tmpfs:
+      - /tmp/nats
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8222/healthz"]
+      interval: 2s
+      timeout: 2s
+      retries: 5

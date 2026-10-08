@@ -1,0 +1,9 @@
+target/
+!target/release/sid
+.git/
+*.md
+!README.md
+.github/
+.vscode/
+.idea/
+docker-compose*.yml

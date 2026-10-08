@@ -1,0 +1,21 @@
+# Protected applications of the forward-auth integration tests.
+applications:
+  - name: orders
+    origin: https://api.example.com
+    issuer: https://sid.example.com/i/0123456789abcdef0123456789abcdef
+    resource: https://api.example.com/orders
+    routes:
+      - match: { path: "/public/**" }
+        policy: { auth: none }
+      - match: { path: "/checked/**" }
+        policy: { auth: required, check_authz: true, action: orders.read, headers: { inject: [user] } }
+      - match: { path: "/**" }
+        policy: { auth: required, headers: { inject: [user] } }
+  - name: wiki
+    origin: https://wiki.example.com
+    issuer: https://sid.example.com/i/0123456789abcdef0123456789abcdef
+    resource: https://wiki.example.com/
+  - name: ghost
+    origin: https://ghost.example.com
+    issuer: https://sid.example.com/i/0123456789abcdef0123456789abcdef
+    resource: https://ghost.example.com/

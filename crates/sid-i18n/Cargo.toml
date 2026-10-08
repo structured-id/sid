@@ -1,0 +1,59 @@
+[package]
+name = "sid-i18n"
+version.workspace = true
+edition.workspace = true
+description = "StructuredID CE locale package — compile-time i18n with selective locale support"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+pretty_assertions = "1"
+
+[features]
+default = ["i18n-all"]
+
+# Meta-feature: all locales
+i18n-all = [
+    "i18n-en", "i18n-ru", "i18n-de", "i18n-fr", "i18n-es", "i18n-it",
+    "i18n-nl", "i18n-pl", "i18n-pt", "i18n-ja", "i18n-ko", "i18n-zh",
+    "i18n-ar", "i18n-tr", "i18n-uk", "i18n-cs", "i18n-sv", "i18n-da",
+    "i18n-fi", "i18n-nb", "i18n-el", "i18n-he", "i18n-th", "i18n-vi",
+    "i18n-id", "i18n-ms", "i18n-hi", "i18n-bn", "i18n-ro", "i18n-hu",
+]
+
+# Individual locales (English always required as fallback)
+i18n-en = []
+i18n-ru = ["i18n-en"]
+i18n-de = ["i18n-en"]
+i18n-fr = ["i18n-en"]
+i18n-es = ["i18n-en"]
+i18n-it = ["i18n-en"]
+i18n-nl = ["i18n-en"]
+i18n-pl = ["i18n-en"]
+i18n-pt = ["i18n-en"]
+i18n-ja = ["i18n-en"]
+i18n-ko = ["i18n-en"]
+i18n-zh = ["i18n-en"]
+i18n-ar = ["i18n-en"]
+i18n-tr = ["i18n-en"]
+i18n-uk = ["i18n-en"]
+i18n-cs = ["i18n-en"]
+i18n-sv = ["i18n-en"]
+i18n-da = ["i18n-en"]
+i18n-fi = ["i18n-en"]
+i18n-nb = ["i18n-en"]
+i18n-el = ["i18n-en"]
+i18n-he = ["i18n-en"]
+i18n-th = ["i18n-en"]
+i18n-vi = ["i18n-en"]
+i18n-id = ["i18n-en"]
+i18n-ms = ["i18n-en"]
+i18n-hi = ["i18n-en"]
+i18n-bn = ["i18n-en"]
+i18n-ro = ["i18n-en"]
+i18n-hu = ["i18n-en"]

@@ -1,0 +1,16 @@
+# A consumer of sid-core outside the SID workspace. Each sid-core feature is
+# forwarded so the check can build every supported combination on its own.
+[package]
+name = "sid-core-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+sid-core = { path = "@SID@/crates/sid-core", default-features = false }
+
+[features]
+recovery = ["sid-core/recovery"]
+grpc = ["sid-core/grpc"]
+
+[workspace]

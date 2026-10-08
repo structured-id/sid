@@ -1,0 +1,18 @@
+# release-plz configuration for the sid workspace.
+# Only the server binary (sid-server) is released, so one tag is one version
+# of the binary; library crates are neither tagged nor published.
+[workspace]
+publish = false
+release = false
+semver_check = false
+changelog_update = false
+
+[[package]]
+name = "sid-server"
+release = true
+publish = false
+git_release_enable = true
+git_tag_enable = true
+git_tag_name = "v{{ version }}"
+git_release_name = "v{{ version }}"
+changelog_update = false

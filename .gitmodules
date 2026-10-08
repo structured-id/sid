@@ -1,0 +1,6 @@
+[submodule "proto"]
+	path = proto
+	url = https://github.com/structured-id/proto.git
+[submodule "zkpp"]
+	path = zkpp
+	url = https://github.com/structured-id/zkpp.git
