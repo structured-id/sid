@@ -137,7 +137,7 @@ ed25519-dalek = { version = "3", features = ["rand_core", "alloc"] }
 # are built against it; 0.14 has no halo2 release to pair with.
 halo2_proofs = { version = "0.3", features = ["batch"] }
 halo2_gadgets = "0.5"
-pasta_curves = "0.5.1"
+pasta_curves = "0.6.0"
 ff = "0.13"
 group = "0.13"
 subtle = "2"
