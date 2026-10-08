@@ -37,15 +37,27 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_REPO: ${{ github.repository }}
         run: |
+          # A plain assignment, so a failed query fails the step under bash -e;
+          # inside the `for` list it would read as no pull requests.
+          prs=$(gh pr list --author app/dependabot --state open --json number --jq '.[].number')
           status=0
-          for pr in $(gh pr list --author app/dependabot --state open --json number --jq '.[].number'); do
-            if [ "$(gh pr view "$pr" --json autoMergeRequest --jq '.autoMergeRequest == null')" = "true" ]; then
+          for pr in $prs; do
+            # One query per pull request. A failed query marks the run failed
+            # and moves on to the next pull request; read inside an `if` test
+            # it would only read as "no".
+            if ! state=$(gh pr view "$pr" --json autoMergeRequest,mergeStateStatus \
+                --jq '"\(.autoMergeRequest == null) \(.mergeStateStatus)"'); then
+              status=1
+              continue
+            fi
+            read -r unqueued merge_state <<< "$state"
+            if [ "$unqueued" = "true" ]; then
               gh pr merge --auto --squash "$pr" || status=1
             fi
             # Required checks are strict: a pull request behind main must be
             # brought up to date, and Dependabot rebases on its own only on a
             # conflict or at its next scheduled run.
-            if [ "$(gh pr view "$pr" --json mergeStateStatus --jq .mergeStateStatus)" = "BEHIND" ]; then
+            if [ "$merge_state" = "BEHIND" ]; then
               gh pr update-branch "$pr" || status=1
             fi
           done
