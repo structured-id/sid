@@ -14,10 +14,10 @@
 
 use argon2::{
     Argon2,
-    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
+    password_hash::{PasswordHasher, PasswordVerifier, phc::PasswordHash},
 };
 use chrono::{DateTime, Utc};
-use rand::Rng;
+use rand::RngExt;
 use sid_plugin::cache::CacheBackend;
 use std::sync::Arc;
 use std::time::Duration;
@@ -252,17 +252,14 @@ impl OtpService {
 
 /// Generate an 8-digit OTP code using CSPRNG.
 fn generate_otp_code() -> String {
-    let mut rng = rand::thread_rng();
-    let code: u32 = rng.gen_range(0..10u32.pow(OTP_CODE_LENGTH));
+    let mut rng = rand::rng();
+    let code: u32 = rng.random_range(0..10u32.pow(OTP_CODE_LENGTH));
     format!("{:0>width$}", code, width = OTP_CODE_LENGTH as usize)
 }
 
 /// Hash an OTP code with argon2id.
 fn hash_code(code: &str) -> Result<String, String> {
-    let salt = SaltString::generate(&mut OsRng);
-    let argon2 = Argon2::default();
-    argon2
-        .hash_password(code.as_bytes(), &salt)
+    PasswordHasher::<PasswordHash>::hash_password(&Argon2::default(), code.as_bytes())
         .map(|h| h.to_string())
         .map_err(|e| e.to_string())
 }

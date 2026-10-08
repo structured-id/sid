@@ -1,0 +1,380 @@
+// Copyright (c) Meta Platforms, Inc. and affiliates.
+//
+// This source code is dual-licensed under either the MIT license found in the
+// LICENSE-MIT file in the root directory of this source tree or the Apache
+// License, Version 2.0 found in the LICENSE-APACHE file in the root directory
+// of this source tree. You may select, at your option, one of the above-listed
+// licenses.
+
+//! An implementation of the Triple Diffie-Hellman key exchange protocol
+
+use core::marker::PhantomData;
+use core::ops::Add;
+
+use derive_where::derive_where;
+use digest::{Digest, Output, OutputSizeUser};
+use generic_array::{ArrayLength, GenericArray};
+use hybrid_array::Array;
+use hybrid_array::typenum::Sum;
+use rand_core::CryptoRng;
+use subtle::{ConstantTimeEq, CtOption};
+use zeroize::{Zeroize, ZeroizeOnDrop};
+
+use super::{
+    Deserialize, GenerateKe1Result, GenerateKe2Result, GenerateKe3Result, KeyExchange, Serialize,
+    SerializedContext, SerializedCredentialRequest, SerializedCredentialResponse,
+    SerializedIdentifiers,
+};
+use crate::ciphersuite::{CipherSuite, KeGroup};
+use crate::errors::ProtocolError;
+use crate::hash::{Hash, OutputSize};
+use crate::key_exchange::group::Group;
+use crate::key_exchange::shared::{self, NonceLen};
+pub use crate::key_exchange::shared::{DiffieHellman, Ke1Message, Ke1State};
+use crate::keypair::{PrivateKey, PublicKey};
+use crate::opaque::Identifiers;
+use crate::serialization::{SliceExt, concat};
+
+////////////////////////////
+// High-level API Structs //
+// ====================== //
+////////////////////////////
+
+/// The Triple Diffie-Hellman key exchange implementation
+///
+/// # Remote Key
+///
+/// [`ServerLoginBuilder::data()`](crate::ServerLoginBuilder::data()) will
+/// return the client's ephemeral public key.
+///
+/// [`ServerLoginBuilder::build()`](crate::ServerLoginBuilder::build()) expects
+/// a shared secret computed through Diffie-Hellman from the servers private key
+/// and the given public key.
+pub struct TripleDh<G, H>(PhantomData<(G, H)>);
+
+/// The server state produced after the second key exchange message
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Deserialize, serde::Serialize),
+    serde(bound = "")
+)]
+#[derive_where(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, ZeroizeOnDrop)]
+pub struct Ke2State<H: OutputSizeUser> {
+    pub(super) session_key: Output<H>,
+    pub(super) expected_mac: Output<H>,
+}
+
+/// Builder for the second key exchange message
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Deserialize, serde::Serialize),
+    serde(bound(
+        deserialize = "H: serde::Deserialize<'de>,  PublicKey<G>: serde::Deserialize<'de>",
+        serialize = "H: serde::Serialize, PublicKey<G>: serde::Serialize",
+    ))
+)]
+#[derive_where(Clone)]
+#[derive_where(Debug, Eq, Hash, PartialEq; H, PublicKey<G>)]
+pub struct Ke2Builder<G: Group, H: Hash> {
+    server_nonce: Array<u8, NonceLen>,
+    transcript_hasher: H,
+    client_e_pk: PublicKey<G>,
+    server_e_pk: PublicKey<G>,
+    shared_secret_1: Array<u8, G::PkLen>,
+    shared_secret_3: Array<u8, G::PkLen>,
+}
+
+/// The second key exchange message
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Deserialize, serde::Serialize),
+    serde(bound(
+        deserialize = "G::Pk: serde::Deserialize<'de>",
+        serialize = "G::Pk: serde::Serialize"
+    ))
+)]
+#[derive_where(Clone, ZeroizeOnDrop)]
+#[derive_where(Debug, Eq, Hash, Ord, PartialEq, PartialOrd; G::Pk)]
+pub struct Ke2Message<G: Group, H: Hash> {
+    pub(super) server_nonce: Array<u8, NonceLen>,
+    #[derive_where(skip(Zeroize))]
+    pub(super) server_e_pk: PublicKey<G>,
+    pub(super) mac: Output<H>,
+}
+
+/// The third key exchange message
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Deserialize, serde::Serialize),
+    serde(bound = "")
+)]
+#[derive_where(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, ZeroizeOnDrop)]
+pub struct Ke3Message<H: Hash> {
+    pub(super) mac: Output<H>,
+}
+
+////////////////////////////////
+// High-level Implementations //
+// ========================== //
+////////////////////////////////
+
+impl<G: Group + 'static, H: Hash> KeyExchange for TripleDh<G, H>
+where
+    G::Sk: DiffieHellman<G>,
+{
+    type Group = G;
+    type Hash = H;
+
+    type KE1State = Ke1State<G>;
+    type KE2State<CS: CipherSuite> = Ke2State<H>;
+    type KE1Message = Ke1Message<G>;
+    type KE2Builder<'a, CS: CipherSuite<KeyExchange = Self>> = Ke2Builder<G, H>;
+    type KE2BuilderData<'a, CS: 'static + CipherSuite> = &'a PublicKey<G>;
+    type KE2BuilderInput<CS: CipherSuite> = Array<u8, G::PkLen>;
+    type KE2Message = Ke2Message<G, H>;
+    type KE3Message = Ke3Message<H>;
+
+    fn generate_ke1<R: CryptoRng>(rng: &mut R) -> Result<GenerateKe1Result<Self>, ProtocolError> {
+        shared::generate_ke1(rng)
+    }
+
+    fn ke2_builder<'a, CS: CipherSuite<KeyExchange = Self>, R: CryptoRng>(
+        rng: &mut R,
+        credential_request: SerializedCredentialRequest<CS>,
+        ke1_message: Self::KE1Message,
+        credential_response: SerializedCredentialResponse<CS>,
+        client_s_pk: PublicKey<G>,
+        identifiers: SerializedIdentifiers<'_, KeGroup<CS>>,
+        context: SerializedContext<'a>,
+    ) -> Result<Self::KE2Builder<'a, CS>, ProtocolError> {
+        let shared::Ke2BuilderCommon {
+            server_nonce,
+            transcript_hasher,
+            client_e_pk,
+            server_e_pk,
+            shared_secret_1,
+            shared_secret_3,
+        } = shared::ke2_builder_common::<G, H, CS, R>(
+            rng,
+            credential_request,
+            ke1_message,
+            credential_response,
+            client_s_pk,
+            identifiers,
+            context,
+        )?;
+
+        Ok(Ke2Builder {
+            server_nonce,
+            transcript_hasher,
+            client_e_pk,
+            server_e_pk,
+            shared_secret_1,
+            shared_secret_3,
+        })
+    }
+
+    fn ke2_builder_data<'a, CS: 'static + CipherSuite<KeyExchange = Self>>(
+        builder: &'a Self::KE2Builder<'_, CS>,
+    ) -> Self::KE2BuilderData<'a, CS> {
+        &builder.client_e_pk
+    }
+
+    fn generate_ke2_input<CS: CipherSuite<KeyExchange = Self>, R: CryptoRng>(
+        builder: &Self::KE2Builder<'_, CS>,
+        _: &mut R,
+        server_s_sk: &PrivateKey<G>,
+    ) -> Self::KE2BuilderInput<CS> {
+        server_s_sk.ke_diffie_hellman(&builder.client_e_pk)
+    }
+
+    fn build_ke2<CS: CipherSuite<KeyExchange = Self>>(
+        mut builder: Self::KE2Builder<'_, CS>,
+        shared_secret_2: Self::KE2BuilderInput<CS>,
+    ) -> Result<GenerateKe2Result<CS>, ProtocolError> {
+        let transcript_digest = builder.transcript_hasher.clone().finalize();
+        let derived_keys = shared::derive_keys::<H>(
+            [
+                builder.shared_secret_1.as_slice(),
+                &shared_secret_2,
+                &builder.shared_secret_3,
+            ]
+            .into_iter(),
+            &transcript_digest,
+        )?;
+
+        let (mac, expected_mac) = shared::compute_ke2_macs(
+            &mut builder.transcript_hasher,
+            &derived_keys,
+            &transcript_digest,
+        )?;
+
+        Ok(GenerateKe2Result {
+            state: Ke2State {
+                session_key: derived_keys.session_key,
+                expected_mac,
+            },
+            message: Ke2Message {
+                server_nonce: builder.server_nonce,
+                server_e_pk: builder.server_e_pk.clone(),
+                mac,
+            },
+            #[cfg(test)]
+            handshake_secret: derived_keys.handshake_secret,
+            #[cfg(test)]
+            km2: derived_keys.km2,
+        })
+    }
+
+    fn generate_ke3<CS: CipherSuite<KeyExchange = Self>, R: CryptoRng>(
+        _: &mut R,
+        credential_request: SerializedCredentialRequest<CS>,
+        ke1_message: Self::KE1Message,
+        credential_response: SerializedCredentialResponse<CS>,
+        ke1_state: &Self::KE1State,
+        ke2_message: Self::KE2Message,
+        server_s_pk: PublicKey<G>,
+        client_s_sk: PrivateKey<G>,
+        identifiers: SerializedIdentifiers<'_, KeGroup<CS>>,
+        context: SerializedContext<'_>,
+    ) -> Result<GenerateKe3Result<Self>, ProtocolError> {
+        let mut transcript_hasher = shared::transcript(
+            &context,
+            &identifiers,
+            &credential_request,
+            &ke1_message.to_iter(),
+            &credential_response,
+            ke2_message.server_nonce,
+            &ke2_message.server_e_pk.serialize(),
+        );
+
+        let shared_secret_1 = ke1_state
+            .client_e_sk
+            .ke_diffie_hellman(&ke2_message.server_e_pk);
+        let shared_secret_2 = ke1_state.client_e_sk.ke_diffie_hellman(&server_s_pk);
+        let shared_secret_3 = client_s_sk.ke_diffie_hellman(&ke2_message.server_e_pk);
+
+        let (derived_keys, client_mac) = shared::finalize_ke3_transcript(
+            &mut transcript_hasher,
+            [
+                shared_secret_1.as_slice(),
+                shared_secret_2.as_slice(),
+                shared_secret_3.as_slice(),
+            ]
+            .into_iter(),
+            &ke2_message.mac,
+        )?;
+
+        Ok(GenerateKe3Result {
+            session_key: derived_keys.session_key,
+            message: Ke3Message { mac: client_mac },
+            #[cfg(test)]
+            handshake_secret: derived_keys.handshake_secret,
+            #[cfg(test)]
+            km3: derived_keys.km3,
+        })
+    }
+
+    fn finish_ke<CS: CipherSuite>(
+        ke2_state: &Self::KE2State<CS>,
+        ke3_message: Self::KE3Message,
+        _: Identifiers<'_>,
+        _: SerializedContext<'_>,
+    ) -> Result<Output<H>, ProtocolError> {
+        CtOption::new(
+            ke2_state.session_key.clone(),
+            ke2_state.expected_mac.ct_eq(&ke3_message.mac),
+        )
+        .into_option()
+        .ok_or(ProtocolError::InvalidLoginError)
+    }
+}
+
+////////////////////////////////////////////////
+// Trait Implementations //
+// ========================================== //
+////////////////////////////////////////////////
+
+impl<H: Hash> Deserialize for Ke2State<H> {
+    fn deserialize_take(input: &mut &[u8]) -> Result<Self, ProtocolError> {
+        Ok(Self {
+            session_key: input.take_array("session key")?,
+            expected_mac: input.take_array("expected mac")?,
+        })
+    }
+}
+
+impl<H: Hash> Serialize for Ke2State<H>
+where
+    // Ke2State: Hash + Hash
+    OutputSize<H>: Add<OutputSize<H>>,
+    Sum<OutputSize<H>, OutputSize<H>>: ArrayLength,
+{
+    type Len = Sum<OutputSize<H>, OutputSize<H>>;
+
+    fn serialize(&self) -> GenericArray<u8, Self::Len> {
+        concat(&[&self.session_key, &self.expected_mac])
+    }
+}
+
+/// TODO: implement via derive after hash crates get `Zeroize` support in
+/// `digest` v11.
+impl<G: Group, H: Hash> Drop for Ke2Builder<G, H> {
+    fn drop(&mut self) {
+        let Self {
+            server_nonce,
+            transcript_hasher,
+            client_e_pk: _,
+            server_e_pk: _,
+            shared_secret_1,
+            shared_secret_3,
+        } = self;
+
+        server_nonce.zeroize();
+        Digest::reset(transcript_hasher);
+        shared_secret_1.zeroize();
+        shared_secret_3.zeroize();
+    }
+}
+
+impl<G: Group, H: Hash> ZeroizeOnDrop for Ke2Builder<G, H> {}
+
+impl<G: Group, H: Hash> Deserialize for Ke2Message<G, H> {
+    fn deserialize_take(input: &mut &[u8]) -> Result<Self, ProtocolError> {
+        Ok(Self {
+            server_nonce: input.take_array("server nonce")?,
+            server_e_pk: PublicKey::deserialize_take(input)?,
+            mac: input.take_array("mac")?,
+        })
+    }
+}
+
+impl<H: Hash, G: Group> Serialize for Ke2Message<G, H>
+where
+    // Ke2Message: (Nonce + KePk) + Hash
+    NonceLen: Add<G::PkLen>,
+    Sum<NonceLen, G::PkLen>: Add<OutputSize<H>>,
+    Sum<Sum<NonceLen, G::PkLen>, OutputSize<H>>: ArrayLength,
+{
+    type Len = Sum<Sum<NonceLen, G::PkLen>, OutputSize<H>>;
+
+    fn serialize(&self) -> GenericArray<u8, Self::Len> {
+        concat(&[&self.server_nonce, &self.server_e_pk.serialize(), &self.mac])
+    }
+}
+
+impl<H: Hash> Deserialize for Ke3Message<H> {
+    fn deserialize_take(bytes: &mut &[u8]) -> Result<Self, ProtocolError> {
+        Ok(Self {
+            mac: bytes.take_array("mac")?,
+        })
+    }
+}
+
+impl<H: Hash> Serialize for Ke3Message<H> {
+    type Len = OutputSize<H>;
+
+    fn serialize(&self) -> GenericArray<u8, Self::Len> {
+        GenericArray::from(self.mac.clone())
+    }
+}

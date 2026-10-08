@@ -55,9 +55,9 @@ const DEFAULT_ROUTES: &str = r#"
 pub(crate) fn keypair() -> (jsonwebtoken::EncodingKey, [u8; 32]) {
     use ed25519_dalek::SigningKey;
     use ed25519_dalek::pkcs8::EncodePrivateKey;
-    use rand::RngCore;
+    use rand::Rng;
     let mut seed = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut seed);
+    rand::rng().fill_bytes(&mut seed);
     let signing_key = SigningKey::from_bytes(&seed);
     let der = signing_key.to_pkcs8_der().unwrap();
     (

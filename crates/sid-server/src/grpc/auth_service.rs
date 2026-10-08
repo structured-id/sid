@@ -5476,7 +5476,8 @@ impl AuthService for AuthServiceImpl {
         // Generate reset token (256-bit, hex-encoded)
         use sha2::{Digest, Sha256};
         let mut token_bytes = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut token_bytes);
+        rand::TryRng::try_fill_bytes(&mut rand::rngs::SysRng, &mut token_bytes)
+            .map_err(|_| Status::internal("operating system random source unavailable"))?;
         let token = token_bytes
             .iter()
             .map(|b| format!("{:02x}", b))

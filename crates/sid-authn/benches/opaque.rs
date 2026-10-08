@@ -7,13 +7,15 @@
 //! - P-256 (NIST FIPS-approved)
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use opaque_ke::{
-    ClientLogin, ClientLoginFinishParameters, ClientRegistration,
-    ClientRegistrationFinishParameters, rand::rngs::OsRng,
-};
+use rand::rand_core::UnwrapErr;
+use rand::rngs::SysRng;
 use sid_authn::opaque::p256_opaque::P256CipherSuite;
 use sid_authn::opaque::ristretto::DefaultCipherSuite;
 use sid_authn::opaque::{OpaqueRouter, P256Opaque, PallasOpaque, RistrettoOpaque};
+use sid_opaque_ke::{
+    ClientLogin, ClientLoginFinishParameters, ClientRegistration,
+    ClientRegistrationFinishParameters,
+};
 use sid_plugin::crypto::{CurveId, OpaqueOperations};
 use std::collections::HashMap;
 
@@ -50,7 +52,7 @@ fn bench_registration_ristretto(c: &mut Criterion) {
 
     c.bench_function("registration/ristretto255", |b| {
         b.iter(|| {
-            let mut rng = OsRng;
+            let mut rng = UnwrapErr(SysRng);
             let client_start =
                 ClientRegistration::<DefaultCipherSuite>::start(&mut rng, password).unwrap();
             let request_bytes = client_start.message.serialize();
@@ -60,8 +62,10 @@ fn bench_registration_ristretto(c: &mut Criterion) {
                 .unwrap();
 
             let server_msg =
-                opaque_ke::RegistrationResponse::<DefaultCipherSuite>::deserialize(&response_bytes)
-                    .unwrap();
+                sid_opaque_ke::RegistrationResponse::<DefaultCipherSuite>::deserialize(
+                    &response_bytes,
+                )
+                .unwrap();
             let client_finish = client_start
                 .state
                 .finish(
@@ -87,7 +91,7 @@ fn bench_registration_pallas(c: &mut Criterion) {
 
     c.bench_function("registration/pallas", |b| {
         b.iter(|| {
-            let mut rng = OsRng;
+            let mut rng = UnwrapErr(SysRng);
             let client_start =
                 ClientRegistration::<PallasCipherSuite>::start(&mut rng, password).unwrap();
             let request_bytes = client_start.message.serialize();
@@ -96,9 +100,10 @@ fn bench_registration_pallas(c: &mut Criterion) {
                 .registration_start(&request_bytes, credential_id)
                 .unwrap();
 
-            let server_msg =
-                opaque_ke::RegistrationResponse::<PallasCipherSuite>::deserialize(&response_bytes)
-                    .unwrap();
+            let server_msg = sid_opaque_ke::RegistrationResponse::<PallasCipherSuite>::deserialize(
+                &response_bytes,
+            )
+            .unwrap();
             let client_finish = client_start
                 .state
                 .finish(
@@ -122,7 +127,7 @@ fn bench_registration_p256(c: &mut Criterion) {
 
     c.bench_function("registration/p256", |b| {
         b.iter(|| {
-            let mut rng = OsRng;
+            let mut rng = UnwrapErr(SysRng);
             let client_start =
                 ClientRegistration::<P256CipherSuite>::start(&mut rng, password).unwrap();
             let request_bytes = client_start.message.serialize();
@@ -131,9 +136,10 @@ fn bench_registration_p256(c: &mut Criterion) {
                 .registration_start(&request_bytes, credential_id)
                 .unwrap();
 
-            let server_msg =
-                opaque_ke::RegistrationResponse::<P256CipherSuite>::deserialize(&response_bytes)
-                    .unwrap();
+            let server_msg = sid_opaque_ke::RegistrationResponse::<P256CipherSuite>::deserialize(
+                &response_bytes,
+            )
+            .unwrap();
             let client_finish = client_start
                 .state
                 .finish(
@@ -158,13 +164,13 @@ fn bench_login_ristretto(c: &mut Criterion) {
     let password = b"benchmark-password-2024";
 
     // Pre-register
-    let mut rng = OsRng;
+    let mut rng = UnwrapErr(SysRng);
     let client_reg = ClientRegistration::<DefaultCipherSuite>::start(&mut rng, password).unwrap();
     let (resp, _) = router
         .registration_start(&client_reg.message.serialize(), credential_id)
         .unwrap();
     let server_msg =
-        opaque_ke::RegistrationResponse::<DefaultCipherSuite>::deserialize(&resp).unwrap();
+        sid_opaque_ke::RegistrationResponse::<DefaultCipherSuite>::deserialize(&resp).unwrap();
     let client_finish = client_reg
         .state
         .finish(
@@ -180,7 +186,7 @@ fn bench_login_ristretto(c: &mut Criterion) {
 
     c.bench_function("login/ristretto255", |b| {
         b.iter(|| {
-            let mut rng = OsRng;
+            let mut rng = UnwrapErr(SysRng);
             let client_login =
                 ClientLogin::<DefaultCipherSuite>::start(&mut rng, password).unwrap();
             let request_bytes = client_login.message.serialize();
@@ -189,13 +195,14 @@ fn bench_login_ristretto(c: &mut Criterion) {
                 .login_start(&stored, &request_bytes, credential_id)
                 .unwrap();
 
-            let server_msg =
-                opaque_ke::CredentialResponse::<DefaultCipherSuite>::deserialize(&response_bytes)
-                    .unwrap();
+            let server_msg = sid_opaque_ke::CredentialResponse::<DefaultCipherSuite>::deserialize(
+                &response_bytes,
+            )
+            .unwrap();
             let client_finish = client_login
                 .state
                 .finish(
-                    &mut OsRng,
+                    &mut UnwrapErr(SysRng),
                     password,
                     server_msg,
                     ClientLoginFinishParameters::default(),
@@ -218,13 +225,13 @@ fn bench_login_pallas(c: &mut Criterion) {
     let password = b"benchmark-password-2024";
 
     // Pre-register
-    let mut rng = OsRng;
+    let mut rng = UnwrapErr(SysRng);
     let client_reg = ClientRegistration::<PallasCipherSuite>::start(&mut rng, password).unwrap();
     let (resp, _) = router
         .registration_start(&client_reg.message.serialize(), credential_id)
         .unwrap();
     let server_msg =
-        opaque_ke::RegistrationResponse::<PallasCipherSuite>::deserialize(&resp).unwrap();
+        sid_opaque_ke::RegistrationResponse::<PallasCipherSuite>::deserialize(&resp).unwrap();
     let client_finish = client_reg
         .state
         .finish(
@@ -240,7 +247,7 @@ fn bench_login_pallas(c: &mut Criterion) {
 
     c.bench_function("login/pallas", |b| {
         b.iter(|| {
-            let mut rng = OsRng;
+            let mut rng = UnwrapErr(SysRng);
             let client_login = ClientLogin::<PallasCipherSuite>::start(&mut rng, password).unwrap();
             let request_bytes = client_login.message.serialize();
 
@@ -248,13 +255,14 @@ fn bench_login_pallas(c: &mut Criterion) {
                 .login_start(&stored, &request_bytes, credential_id)
                 .unwrap();
 
-            let server_msg =
-                opaque_ke::CredentialResponse::<PallasCipherSuite>::deserialize(&response_bytes)
-                    .unwrap();
+            let server_msg = sid_opaque_ke::CredentialResponse::<PallasCipherSuite>::deserialize(
+                &response_bytes,
+            )
+            .unwrap();
             let client_finish = client_login
                 .state
                 .finish(
-                    &mut OsRng,
+                    &mut UnwrapErr(SysRng),
                     password,
                     server_msg,
                     ClientLoginFinishParameters::default(),
@@ -275,13 +283,13 @@ fn bench_login_p256(c: &mut Criterion) {
     let password = b"benchmark-password-2024";
 
     // Pre-register
-    let mut rng = OsRng;
+    let mut rng = UnwrapErr(SysRng);
     let client_reg = ClientRegistration::<P256CipherSuite>::start(&mut rng, password).unwrap();
     let (resp, _) = router
         .registration_start(&client_reg.message.serialize(), credential_id)
         .unwrap();
     let server_msg =
-        opaque_ke::RegistrationResponse::<P256CipherSuite>::deserialize(&resp).unwrap();
+        sid_opaque_ke::RegistrationResponse::<P256CipherSuite>::deserialize(&resp).unwrap();
     let client_finish = client_reg
         .state
         .finish(
@@ -297,7 +305,7 @@ fn bench_login_p256(c: &mut Criterion) {
 
     c.bench_function("login/p256", |b| {
         b.iter(|| {
-            let mut rng = OsRng;
+            let mut rng = UnwrapErr(SysRng);
             let client_login = ClientLogin::<P256CipherSuite>::start(&mut rng, password).unwrap();
             let request_bytes = client_login.message.serialize();
 
@@ -306,12 +314,12 @@ fn bench_login_p256(c: &mut Criterion) {
                 .unwrap();
 
             let server_msg =
-                opaque_ke::CredentialResponse::<P256CipherSuite>::deserialize(&response_bytes)
+                sid_opaque_ke::CredentialResponse::<P256CipherSuite>::deserialize(&response_bytes)
                     .unwrap();
             let client_finish = client_login
                 .state
                 .finish(
-                    &mut OsRng,
+                    &mut UnwrapErr(SysRng),
                     password,
                     server_msg,
                     ClientLoginFinishParameters::default(),

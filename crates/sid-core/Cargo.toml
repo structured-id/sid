@@ -26,8 +26,8 @@ cloudevents-sdk = "0.9"
 
 # Recovery seed phrase (BIP-39 + key derivation)
 pbkdf2 = { workspace = true, optional = true }
-hkdf = { version = "0.12", optional = true }
-hmac = { version = "0.12", optional = true }
+hkdf = { workspace = true, optional = true }
+hmac = { workspace = true, optional = true }
 aes-gcm = { workspace = true, optional = true }
 
 # gRPC error model (optional): canonical google.rpc.Status with typed details

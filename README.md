@@ -1,6 +1,8 @@
 # StructuredID
 
-A modern, federated identity provider built in Rust.
+StructuredID is person-centric trust infrastructure for portable identities and privacy-preserving relationships.
+
+Identity belongs to the person. Trust is independently verifiable. Relationships are scoped to the relying party.
 
 ## Features
 

@@ -17,7 +17,9 @@ use std::time::Duration;
 use ff::PrimeField;
 use group::{Curve, Group, GroupEncoding};
 use pasta_curves::pallas;
-use rand::RngCore;
+use rand::Rng;
+use rand::rand_core::UnwrapErr;
+use rand::rngs::SysRng;
 use serde::{Deserialize, Serialize};
 use sid_core::models::{
     HistoryEpoch, HistoryEpochId, HistoryEpochUse, HistoryKsf, HistorySuite, NewHistoryEpoch,
@@ -78,7 +80,7 @@ fn key_context(epoch: HistoryEpochId, owner: ProfileId) -> String {
 
 fn point(bytes: &[u8; 32], what: &str) -> SidResult<pallas::Affine> {
     Option::<pallas::Affine>::from(pallas::Affine::from_bytes(bytes))
-        .filter(|p| !bool::from(group::prime::PrimeCurveAffine::is_identity(p)))
+        .filter(|p| !bool::from(group::CurveAffine::is_identity(p)))
         .ok_or_else(|| SidError::Validation(format!("{what}: not a Pallas point")))
 }
 
@@ -136,7 +138,7 @@ impl HistoryEvaluator {
     /// A new active epoch for `owner`: a fresh random key, sealed, and a
     /// fresh KSF salt. Stored before the key is first used.
     pub async fn new_epoch(&self, owner: ProfileId, ksf: HistoryKsf) -> SidResult<NewHistoryEpoch> {
-        let mut rng = rand::rngs::OsRng;
+        let mut rng = UnwrapErr(SysRng);
         let k = <pallas::Scalar as ff::Field>::random(&mut rng);
         let public_key = (pallas::Point::generator() * k).to_affine().to_bytes();
         let mut ksf_salt = [0u8; 32];
@@ -211,7 +213,7 @@ impl HistoryEvaluator {
         let evaluations = scalars
             .iter()
             .map(|k| {
-                let (z, proof) = relation::evaluate_with_proof(*k, b, context, rand::rngs::OsRng)
+                let (z, proof) = relation::evaluate_with_proof(*k, b, context, UnwrapErr(SysRng))
                     .ok_or_else(|| {
                     SidError::Validation("blinded input is degenerate".into())
                 })?;
@@ -239,8 +241,8 @@ impl HistoryEvaluator {
         let b = point(blinded, "blinded input")?;
         let evaluations = (0..domains)
             .map(|_| {
-                let k = <pallas::Scalar as ff::Field>::random(rand::rngs::OsRng);
-                let (z, proof) = relation::evaluate_with_proof(k, b, context, rand::rngs::OsRng)
+                let k = <pallas::Scalar as ff::Field>::random(&mut UnwrapErr(SysRng));
+                let (z, proof) = relation::evaluate_with_proof(k, b, context, UnwrapErr(SysRng))
                     .ok_or_else(|| SidError::Validation("blinded input is degenerate".into()))?;
                 Ok(DomainEvaluation {
                     evaluated: z.to_bytes(),
@@ -259,7 +261,7 @@ impl HistoryEvaluator {
 /// A public key and domain that look like a real epoch's, for a decoy
 /// operation.
 pub fn decoy_domain() -> OperationDomain {
-    let mut rng = rand::rngs::OsRng;
+    let mut rng = UnwrapErr(SysRng);
     let k = <pallas::Scalar as ff::Field>::random(&mut rng);
     let mut id = [0u8; 32];
     rng.fill_bytes(&mut id);

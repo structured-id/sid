@@ -2,7 +2,7 @@
 //! OPAQUE password authentication (RFC 9807)
 //!
 //! Multi-curve OPAQUE implementations behind the [`OpaqueOperations`] trait.
-//! Each provider wraps a typed `opaque_ke::CipherSuite` internally and exposes
+//! Each provider wraps a typed `sid_opaque_ke::CipherSuite` internally and exposes
 //! curve-erased `OpaqueSetupHandle`, `StoredCredential`, `LoginState`, `SessionKey`.
 //!
 //! Providers:
@@ -25,7 +25,7 @@ pub mod ristretto;
 pub mod router;
 pub mod server_setup;
 
-use opaque_ke::rand::{SeedableRng, rngs::StdRng};
+use rand::{SeedableRng, rngs::StdRng};
 
 /// Build a seeded CSPRNG from arbitrary-length seed bytes.
 /// Pads or truncates to 32 bytes for `StdRng::from_seed`.

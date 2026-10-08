@@ -6,7 +6,7 @@
 
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
-use rand::RngCore;
+use rand::Rng;
 use secrecy::{ExposeSecret, SecretBox};
 use zeroize::Zeroize;
 
@@ -21,7 +21,7 @@ const NONCE_LEN: usize = 12;
 pub fn wrap(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, OrgCryptoError> {
     let cipher = Aes256Gcm::new_from_slice(key).map_err(|e| OrgCryptoError::Aes(e.to_string()))?;
     let mut nonce_bytes = [0u8; NONCE_LEN];
-    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    rand::rng().fill_bytes(&mut nonce_bytes);
     let nonce = Nonce::from(nonce_bytes);
     let ciphertext = cipher
         .encrypt(&nonce, plaintext)
@@ -52,7 +52,7 @@ pub fn unwrap(key: &[u8; 32], wrapped: &[u8]) -> Result<SecretBox<Vec<u8>>, OrgC
 /// Generate a fresh 32-byte symmetric key (DEK or KEK material).
 pub fn random_key() -> [u8; 32] {
     let mut k = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut k);
+    rand::rng().fill_bytes(&mut k);
     k
 }
 

@@ -567,8 +567,8 @@ mod tests {
         }
 
         fn random_bytes(&self, buf: &mut [u8]) {
-            use rand::RngCore;
-            rand::rngs::OsRng.fill_bytes(buf);
+            use rand::Rng;
+            rand::rng().fill_bytes(buf);
         }
 
         fn provider_id(&self) -> &'static str {

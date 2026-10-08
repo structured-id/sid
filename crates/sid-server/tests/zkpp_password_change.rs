@@ -8,13 +8,14 @@ mod common;
 
 use common::mock_storage::MockStorage;
 use common::{TestServices, zkpp_client as client};
-use opaque_ke::rand::rngs::OsRng;
-use opaque_ke::{
+use rand::rand_core::UnwrapErr;
+use rand::rngs::SysRng;
+use sid_authn::opaque_zkpp::ZkppConfig;
+use sid_core::models::{Credential, CredentialId, ProfileId};
+use sid_opaque_ke::{
     ClientLogin, ClientLoginFinishParameters, ClientRegistration,
     ClientRegistrationFinishParameters, CredentialResponse, RegistrationResponse,
 };
-use sid_authn::opaque_zkpp::ZkppConfig;
-use sid_core::models::{Credential, CredentialId, ProfileId};
 use sid_pake_core::pallas_opaque::PallasCipherSuite;
 use sid_pake_core::prover::ZkppProver;
 use sid_pake_core::verifier::ZkppVerifier;
@@ -189,7 +190,7 @@ async fn change(
 
 /// Sign in as `PRINCIPAL` with `password` through ordinary OPAQUE login.
 async fn signs_in(svc: &TestServices, password: &[u8]) -> bool {
-    let login = ClientLogin::<PallasCipherSuite>::start(&mut OsRng, password).unwrap();
+    let login = ClientLogin::<PallasCipherSuite>::start(&mut UnwrapErr(SysRng), password).unwrap();
     let Ok(started) = svc
         .auth
         .opaque_login_start(Request::new(OpaqueLoginStartRequest {
@@ -202,7 +203,7 @@ async fn signs_in(svc: &TestServices, password: &[u8]) -> bool {
     };
     let started = started.into_inner();
     let Ok(finished) = login.state.finish(
-        &mut OsRng,
+        &mut UnwrapErr(SysRng),
         password,
         CredentialResponse::deserialize(&started.credential_response).unwrap(),
         ClientLoginFinishParameters::default(),
@@ -276,7 +277,8 @@ async fn test_password_change_refuses_the_retained_password() {
 /// The server's OPAQUE public key, as every registration response carries it
 /// after the evaluated element.
 async fn server_public_key(svc: &TestServices) -> Vec<u8> {
-    let started = ClientRegistration::<PallasCipherSuite>::start(&mut OsRng, b"any").unwrap();
+    let started =
+        ClientRegistration::<PallasCipherSuite>::start(&mut UnwrapErr(SysRng), b"any").unwrap();
     let response = svc
         .auth
         .opaque_registration_start(Request::new(OpaqueRegistrationStartRequest {
@@ -296,7 +298,7 @@ async fn server_public_key(svc: &TestServices) -> Vec<u8> {
 /// public key. The login state starts with the OPRF client (blind and blinded
 /// element), which is the whole registration state.
 async fn weak_record_from_login(svc: &TestServices) -> Vec<u8> {
-    let login = ClientLogin::<PallasCipherSuite>::start(&mut OsRng, WEAK).unwrap();
+    let login = ClientLogin::<PallasCipherSuite>::start(&mut UnwrapErr(SysRng), WEAK).unwrap();
     let started = svc
         .auth
         .opaque_login_start(Request::new(OpaqueLoginStartRequest {
@@ -316,7 +318,7 @@ async fn weak_record_from_login(svc: &TestServices) -> Vec<u8> {
             .unwrap();
     state
         .finish(
-            &mut OsRng,
+            &mut UnwrapErr(SysRng),
             WEAK,
             RegistrationResponse::deserialize(&response).unwrap(),
             ClientRegistrationFinishParameters::default(),

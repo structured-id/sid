@@ -110,7 +110,7 @@ pub fn split(secret: &[u8], threshold: u8, total: u8) -> Result<Vec<Shard>, Sham
         return Err(ShamirError::EmptySecret);
     }
 
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let mut shards: Vec<Shard> = (1..=total)
         .map(|i| Shard {
             index: i,
@@ -123,9 +123,7 @@ pub fn split(secret: &[u8], threshold: u8, total: u8) -> Result<Vec<Shard>, Sham
     let mut coefficients = vec![0u8; threshold as usize];
     for (byte_idx, &secret_byte) in secret.iter().enumerate() {
         coefficients[0] = secret_byte;
-        for coeff in coefficients.iter_mut().skip(1) {
-            *coeff = rng.r#gen::<u8>();
-        }
+        rng.fill_bytes(&mut coefficients[1..]);
 
         for shard in shards.iter_mut() {
             shard.data[byte_idx] = gf256_eval_poly(&coefficients, shard.index);

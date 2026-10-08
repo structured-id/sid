@@ -22,7 +22,7 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
           persist-credentials: false
@@ -38,7 +38,7 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
           persist-credentials: false
@@ -53,6 +53,14 @@ jobs:
       # PostgreSQL, Redis and NATS as the integration tests expect them locally.
       - name: Test services
         run: docker compose -f docker-compose.test.yml up -d --wait
+      # The embedded event bus runs nats-server as a child process; the tests
+      # use the binary the runtime images ship.
+      - name: nats-server from the runtime image
+        run: |
+          id=$(docker create nats:2.15-alpine)
+          sudo docker cp "$id":/usr/local/bin/nats-server /usr/local/bin/nats-server
+          docker rm "$id"
+          nats-server --version
       # The ZKPP circuit crate comes from the zkpp submodule as a dependency, not
       # a workspace member, and is tested in its own repository with optimized
       # builds; sid-crypto holds the server primitives and runs here.
@@ -65,7 +73,7 @@ jobs:
     name: Dependency isolation
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
           persist-credentials: false
@@ -86,7 +94,7 @@ jobs:
     name: Security Audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
           persist-credentials: false
@@ -101,7 +109,7 @@ jobs:
         run: cargo deny check
       - name: SBOM (CycloneDX)
         run: cargo cyclonedx --all --format json
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: sbom
           path: "**/*.cdx.json"
@@ -111,7 +119,7 @@ jobs:
     name: Build (x86_64 musl)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
           persist-credentials: false

@@ -10,7 +10,6 @@
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{Duration, Utc};
-use rand::Rng;
 use secrecy::{ExposeSecret, SecretBox};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -584,10 +583,8 @@ impl OAuth2Server {
     /// Used when creating or rotating OAuth2 client credentials.
     /// The counterpart `authenticate_client` verifies against the stored hash.
     pub fn hash_client_secret(secret: &str) -> SidResult<String> {
-        use argon2::password_hash::{PasswordHasher, SaltString, rand_core::OsRng};
-        let salt = SaltString::generate(&mut OsRng);
-        argon2::Argon2::default()
-            .hash_password(secret.as_bytes(), &salt)
+        use argon2::password_hash::{PasswordHasher, phc::PasswordHash};
+        PasswordHasher::<PasswordHash>::hash_password(&argon2::Argon2::default(), secret.as_bytes())
             .map(|h| h.to_string())
             .map_err(|e| SidError::Internal(format!("Argon2 hash failed: {e}")))
     }
@@ -606,7 +603,7 @@ impl OAuth2Server {
         let password_hash_str = std::str::from_utf8(hash)
             .map_err(|_| SidError::AuthenticationFailed("invalid_client: corrupt hash".into()))?;
 
-        let parsed_hash = argon2::PasswordHash::new(password_hash_str)
+        let parsed_hash = argon2::password_hash::phc::PasswordHash::new(password_hash_str)
             .map_err(|_| SidError::AuthenticationFailed("invalid_client: corrupt hash".into()))?;
 
         argon2::PasswordVerifier::verify_password(
@@ -628,7 +625,7 @@ impl OAuth2Server {
 /// Generate a cryptographically secure random token (URL-safe base64).
 fn generate_random_token(bytes: usize) -> String {
     let mut buf = vec![0u8; bytes];
-    rand::thread_rng().fill(&mut buf[..]);
+    rand::Rng::fill_bytes(&mut rand::rng(), &mut buf);
     URL_SAFE_NO_PAD.encode(&buf)
 }
 

@@ -22,6 +22,8 @@ pub enum Bip39Error {
     UnknownWord(String),
     #[error("checksum mismatch (typo in recovery phrase?)")]
     ChecksumMismatch,
+    #[error("the operating system random source is unavailable")]
+    Entropy,
 }
 
 /// Encode 256-bit entropy as 24-word BIP-39 mnemonic.
@@ -117,9 +119,11 @@ pub fn validate_checksum(words: &[String]) -> bool {
 
 /// Generate a fresh 24-word mnemonic from random entropy.
 pub fn generate() -> Result<(Vec<String>, [u8; 32]), Bip39Error> {
-    use rand::Rng;
+    use rand::TryRng;
     let mut entropy = [0u8; 32];
-    rand::thread_rng().fill(&mut entropy);
+    rand::rngs::SysRng
+        .try_fill_bytes(&mut entropy)
+        .map_err(|_| Bip39Error::Entropy)?;
     let words = encode(&entropy)?;
     Ok((words, entropy))
 }

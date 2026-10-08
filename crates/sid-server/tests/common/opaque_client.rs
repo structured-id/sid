@@ -3,7 +3,9 @@
 #![allow(dead_code)]
 
 use super::TestServices;
-use opaque_ke::{
+use rand::rand_core::UnwrapErr;
+use rand::rngs::SysRng;
+use sid_opaque_ke::{
     ClientLogin, ClientLoginFinishParameters, ClientRegistration,
     ClientRegistrationFinishParameters, CredentialResponse, RegistrationResponse,
 };
@@ -33,7 +35,7 @@ pub async fn try_register(
     password: &[u8],
     claim_token: Option<&str>,
 ) -> Result<OpaqueRegistrationFinishResponse, tonic::Status> {
-    let mut rng = opaque_ke::rand::rngs::OsRng;
+    let mut rng = UnwrapErr(SysRng);
     let client = ClientRegistration::<PallasCipherSuite>::start(&mut rng, password).unwrap();
     let started = start
         .auth
@@ -70,7 +72,7 @@ pub async fn try_register(
 /// The registration record for `password` that a client uploads to replace
 /// its password (the reset path finishes it itself).
 pub async fn registration_record(svc: &TestServices, principal: &str, password: &[u8]) -> Vec<u8> {
-    let mut rng = opaque_ke::rand::rngs::OsRng;
+    let mut rng = UnwrapErr(SysRng);
     let client = ClientRegistration::<PallasCipherSuite>::start(&mut rng, password).unwrap();
     let started = svc
         .auth
@@ -106,7 +108,7 @@ pub async fn try_start_login(
     principal: &str,
     password: &[u8],
 ) -> Result<OpaqueLoginFinishRequest, tonic::Status> {
-    let mut rng = opaque_ke::rand::rngs::OsRng;
+    let mut rng = UnwrapErr(SysRng);
     let client = ClientLogin::<PallasCipherSuite>::start(&mut rng, password).unwrap();
     let started = start
         .auth

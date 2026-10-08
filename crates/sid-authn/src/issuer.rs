@@ -16,7 +16,7 @@ use ed25519_dalek::pkcs8::EncodePrivateKey;
 use jsonwebtoken::{
     Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, decode_header, encode,
 };
-use rand::RngCore;
+use rand::TryRng;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
@@ -260,7 +260,9 @@ async fn new_signing_key(
     generation: u32,
 ) -> SidResult<IssuerSigningKey> {
     let mut seed = Zeroizing::new([0u8; 32]);
-    rand::rngs::OsRng.fill_bytes(seed.as_mut());
+    rand::rngs::SysRng
+        .try_fill_bytes(seed.as_mut())
+        .map_err(|e| SidError::Internal(format!("operating system random source: {e}")))?;
     let public_key = SigningKey::from_bytes(&seed).verifying_key().to_bytes();
     let sealed_private_key = sealed_secret::seal(
         keys,

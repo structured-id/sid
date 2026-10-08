@@ -277,9 +277,9 @@ impl OidcIssuerService for MockIssuers {
 fn issuer_key() -> (jsonwebtoken::EncodingKey, [u8; 32]) {
     use ed25519_dalek::SigningKey;
     use ed25519_dalek::pkcs8::EncodePrivateKey;
-    use rand::RngCore;
+    use rand::Rng;
     let mut seed = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut seed);
+    rand::rng().fill_bytes(&mut seed);
     let sk = SigningKey::from_bytes(&seed);
     let der = sk.to_pkcs8_der().unwrap();
     (

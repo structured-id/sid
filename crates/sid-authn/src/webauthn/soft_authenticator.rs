@@ -8,6 +8,8 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use p256::ecdsa::signature::Signer;
 use p256::ecdsa::{Signature, SigningKey};
+use p256::elliptic_curve::Generate;
+use p256::elliptic_curve::sec1::ToSec1Point;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -162,8 +164,8 @@ impl SoftAuthenticator {
         let user_handle = unb64(&pk["user"]["id"], "user.id");
         let client_data = self.client_data("webauthn.create", &pk["challenge"]);
 
-        let key = SigningKey::random(&mut rand::rngs::OsRng);
-        let point = key.verifying_key().to_encoded_point(false);
+        let key = SigningKey::generate_from_rng(&mut rand::rng());
+        let point = key.verifying_key().as_affine().to_sec1_point(false);
         let (x, y) = (point.x().expect("x"), point.y().expect("y"));
         let id = uuid::Uuid::now_v7().as_bytes().to_vec();
         let counter = self.behavior.counter.unwrap_or(0);

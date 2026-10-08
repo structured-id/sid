@@ -1,6 +1,6 @@
 services:
   postgres-test:
-    image: postgres:16-alpine
+    image: postgres:18-alpine
     container_name: sid-test-postgres
     environment:
       POSTGRES_USER: sid
@@ -8,8 +8,10 @@ services:
       POSTGRES_DB: sid
     ports:
       - "54399:5432"
+    # PostgreSQL 18 images keep the cluster in a versioned directory under
+    # /var/lib/postgresql.
     tmpfs:
-      - /var/lib/postgresql/data
+      - /var/lib/postgresql
     volumes:
       - ./docker/test-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
@@ -22,7 +24,7 @@ services:
   # run on. Its atomic commands are the thing under test, so they are tested
   # on the real server rather than on the in-memory stand-in.
   redis-test:
-    image: redis:7-alpine
+    image: redis:8-alpine
     container_name: sid-test-redis
     command: ["redis-server", "--save", "", "--appendonly", "no"]
     ports:
@@ -36,7 +38,7 @@ services:
       retries: 5
 
   nats-test:
-    image: nats:2.10-alpine
+    image: nats:2.15-alpine
     container_name: sid-test-nats
     command: ["-js", "-m", "8222"]
     ports:

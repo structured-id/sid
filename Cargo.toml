@@ -24,6 +24,8 @@ members = [
     "crates/sid-i18n",
     "crates/sid-org-crypto",
     "crates/sid-test-issuer",
+    "crates/sid-voprf",
+    "crates/sid-opaque-ke",
 ]
 # The public ZKPP crate (submodule) is its own workspace, used here by path;
 # its tests and CI live there.
@@ -118,28 +120,21 @@ uuid = { version = "1", features = ["v4", "v5", "v7", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 # Cryptography (OPAQUE)
-#
-# opaque-ke fixes the RustCrypto generation for everything that meets it in a
-# cipher suite. 4.0.1 requires digest 0.10, hmac/hkdf 0.12, an exact
-# generic-array 0.14.7, elliptic-curve 0.13, argon2 0.5 and rand 0.8, and our
-# suites hand it `sha2` hashes, a `Ksf` and an RNG directly. So sha2, sha1,
-# digest, hmac, hkdf, pbkdf2, generic-array, p256/p384/p521, argon2 and rand
-# stay on this generation until opaque-ke adopts the next one; raising one of
-# them alone produces two incompatible `Digest` traits across our own API.
-opaque-ke = { version = "4", features = ["argon2"] }
-argon2 = { version = "0.5", features = ["std"] }
-rand = "0.8"
+# The OPAQUE and OPRF implementations, kept in this workspace on the current
+# RustCrypto releases and published from it.
+sid-opaque-ke = { path = "crates/sid-opaque-ke", version = "4.1", features = ["argon2"] }
+argon2 = "0.6"
+rand = "0.10"
+rand_core = "0.10"
 getrandom = "0.4"
 ed25519-dalek = { version = "3", features = ["rand_core", "alloc"] }
 
 # ZK Proof System (OPAQUE-ZKPP)
-# ff and group stay at 0.13 because halo2_gadgets 0.5 and pasta_curves 0.5
-# are built against it; 0.14 has no halo2 release to pair with.
-halo2_proofs = { version = "0.3", features = ["batch"] }
-halo2_gadgets = "0.5"
-pasta_curves = "0.5.1"
-ff = "0.13"
-group = "0.13"
+halo2_proofs = { version = "=0.4.0", features = ["batch"] }
+halo2_gadgets = "0.6"
+pasta_curves = "0.6"
+ff = "0.14"
+group = "0.14"
 subtle = "2"
 
 # Unicode normalization & security (anti-homoglyph, IDNA)
@@ -167,24 +162,26 @@ fred = { version = "10", default-features = false, features = ["enable-rustls-ri
 # VOPRF / CipherSuite adapter (Pallas).
 # `danger` exposes `derive_key`, which the key-exchange group needs to derive
 # its key pair the way the built-in curves do.
-voprf = { version = "0.5", features = ["danger"] }
-digest = "0.10"
-sha2 = "0.10"
+sid-voprf = { path = "crates/sid-voprf", version = "0.6", features = ["danger"] }
+digest = "0.11"
+sha2 = "0.11"
 zeroize = "1"
 secrecy = "0.10"
-generic-array = "0.14"
+hybrid-array = "0.4"
 
 # TOTP (RFC 6238)
-hmac = "0.12"
-sha1 = "0.10"
+hmac = "0.13"
+sha1 = "0.11"
 
 # Key derivation for field-level encryption (sid-keys)
-hkdf = "0.12"
+hkdf = "0.13"
 
 # HTTP client (feature flags polling, GeoIP API)
 # 0.13 dropped `rustls-tls` (ring). `rustls` would pull aws-lc-rs, which a CE
 # build does not link, so the provider comes from the process default instead.
-reqwest = { version = "0.13", features = ["json", "form", "rustls-no-provider", "webpki-roots"], default-features = false }
+# Server certificates are verified against the platform trust store, so a
+# runtime image carries its CA bundle.
+reqwest = { version = "0.13", features = ["json", "form", "rustls-no-provider"], default-features = false }
 
 # SMTP email delivery
 lettre = { version = "0.11", features = ["tokio1", "smtp-transport", "tokio1-rustls-tls", "pool", "hostname", "builder"], default-features = false }
@@ -214,12 +211,12 @@ dashmap = "6"
 aws-lc-rs = "1"
 
 # NIST curves for FIPS OPAQUE
-p256 = { version = "0.13", features = ["hash2curve", "voprf"] }
-p384 = { version = "0.13", features = ["ecdh", "hash2curve", "voprf"] }
-p521 = { version = "0.13", features = ["ecdh", "hash2curve", "voprf"] }
+p256 = { version = "0.14", features = ["oprf"] }
+p384 = { version = "0.14", features = ["ecdh", "oprf"] }
+p521 = { version = "0.14", features = ["ecdh", "oprf"] }
 
 # PBKDF2 KSF for FIPS cipher suites
-pbkdf2 = "0.12"
+pbkdf2 = "0.13"
 
 # Backup encryption
 aes-gcm = "0.11"
@@ -259,6 +256,12 @@ sid-auth-proxy = { path = "crates/sid-auth-proxy" }
 sid-infra = { path = "crates/sid-infra" }
 sid-serve = { path = "crates/sid-serve" }
 sid-i18n = { path = "crates/sid-i18n" }
+
+# The ZKPP submodule names the published OPAQUE crates; inside this workspace
+# it builds against their sources here, the same code the server uses.
+[patch.crates-io]
+sid-opaque-ke = { path = "crates/sid-opaque-ke" }
+sid-voprf = { path = "crates/sid-voprf" }
 
 # Line tables keep file:line in panics and backtraces at a fraction of full
 # debuginfo. Build scripts and proc-macros get the same setting, so a crate

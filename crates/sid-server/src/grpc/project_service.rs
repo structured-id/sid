@@ -7,7 +7,7 @@
 use crate::feature_flags::FeatureFlagService;
 use argon2::{
     Argon2,
-    password_hash::{PasswordHasher, SaltString, rand_core::OsRng},
+    password_hash::{PasswordHasher, phc::PasswordHash},
 };
 use prost::Message;
 use secrecy::{ExposeSecret, SecretBox};
@@ -677,7 +677,8 @@ fn proto_to_app_type(proto: i32) -> ApplicationType {
 
 fn generate_client_secret() -> SecretBox<String> {
     let mut bytes = [0u8; 32];
-    rand::RngCore::fill_bytes(&mut OsRng, &mut bytes);
+    rand::TryRng::try_fill_bytes(&mut rand::rngs::SysRng, &mut bytes)
+        .expect("the operating system random source is available");
     let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
     SecretBox::new(Box::new(hex))
 }
@@ -685,7 +686,7 @@ fn generate_client_secret() -> SecretBox<String> {
 #[allow(clippy::result_large_err)]
 /// Whether `secret` is the secret issued to `client`.
 fn secret_matches(client: &OAuth2Client, secret: &str) -> bool {
-    use argon2::password_hash::{PasswordHash, PasswordVerifier};
+    use argon2::password_hash::PasswordVerifier;
     let Some(hash) = client
         .client_secret_hash
         .as_deref()
@@ -701,10 +702,7 @@ fn secret_matches(client: &OAuth2Client, secret: &str) -> bool {
 }
 
 fn hash_secret(secret: &str) -> Result<String, Status> {
-    let salt = SaltString::generate(&mut OsRng);
-    let argon2 = Argon2::default();
-    argon2
-        .hash_password(secret.as_bytes(), &salt)
+    PasswordHasher::<PasswordHash>::hash_password(&Argon2::default(), secret.as_bytes())
         .map(|h| h.to_string())
         .map_err(|e| internal("hash client secret", e))
 }

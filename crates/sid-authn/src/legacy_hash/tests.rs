@@ -17,16 +17,19 @@ fn test_bcrypt_verify_invalid() {
     assert!(!result.unwrap());
 }
 
+/// A PHC argon2 hash of `password` with a fresh salt, as an importer stores it.
+fn argon2_hash(password: &[u8]) -> String {
+    use argon2::Argon2;
+    use argon2::password_hash::{PasswordHasher, phc::PasswordHash};
+
+    PasswordHasher::<PasswordHash>::hash_password(&Argon2::default(), password)
+        .expect("argon2 hash")
+        .to_string()
+}
+
 #[test]
 fn test_argon2_verify_valid() {
-    use argon2::password_hash::SaltString;
-    use argon2::{Argon2, PasswordHasher};
-
-    let salt = SaltString::generate(rand::thread_rng());
-    let hash = Argon2::default()
-        .hash_password(b"secretpass", &salt)
-        .expect("argon2 hash")
-        .to_string();
+    let hash = argon2_hash(b"secretpass");
 
     let result = BuiltinLegacyVerifier::verify(b"secretpass", &hash);
     assert!(result.is_ok());
@@ -35,14 +38,7 @@ fn test_argon2_verify_valid() {
 
 #[test]
 fn test_argon2_verify_invalid() {
-    use argon2::password_hash::SaltString;
-    use argon2::{Argon2, PasswordHasher};
-
-    let salt = SaltString::generate(rand::thread_rng());
-    let hash = Argon2::default()
-        .hash_password(b"secretpass", &salt)
-        .expect("argon2 hash")
-        .to_string();
+    let hash = argon2_hash(b"secretpass");
 
     let result = BuiltinLegacyVerifier::verify(b"wrongpass", &hash);
     assert!(result.is_ok());
@@ -89,14 +85,7 @@ fn test_invalid_bcrypt_hash() {
 #[test]
 fn test_argon2_wrong_password_returns_false() {
     // "$argon2id$" prefix but wrong password → verification produces Ok(false)
-    use argon2::password_hash::SaltString;
-    use argon2::{Argon2, PasswordHasher};
-
-    let salt = SaltString::generate(rand::thread_rng());
-    let hash = Argon2::default()
-        .hash_password(b"correct", &salt)
-        .expect("argon2 hash")
-        .to_string();
+    let hash = argon2_hash(b"correct");
 
     let result = BuiltinLegacyVerifier::verify(b"wrong", &hash);
     assert!(!result.unwrap());

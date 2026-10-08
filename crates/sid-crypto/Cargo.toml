@@ -10,7 +10,7 @@ publish = false
 
 [features]
 default = ["primitives", "aws-lc"]
-primitives = ["dep:sid-keys", "dep:aes-gcm", "dep:curve25519-dalek", "dep:x25519-dalek", "dep:hmac", "dep:hkdf", "dep:pbkdf2", "dep:pasta_curves", "dep:ff", "dep:group", "dep:rand"]
+primitives = ["dep:sid-keys", "dep:aes-gcm", "dep:hmac", "dep:hkdf", "dep:pbkdf2", "dep:pasta_curves", "dep:ff", "dep:group", "dep:rand"]
 aws-lc = ["primitives", "dep:aws-lc-rs"]
 fips = ["aws-lc", "aws-lc-rs/fips"]
 
@@ -29,16 +29,12 @@ pasta_curves = { workspace = true, optional = true }
 ff = { workspace = true, optional = true }
 group = { workspace = true, optional = true }
 
-# Ristretto255 for RFC 9807 standard OPAQUE (server-side)
-curve25519-dalek = { version = "4", features = ["serde", "zeroize"], optional = true }
-x25519-dalek = { version = "2", optional = true }
-
 # Cryptographic primitives
 sha2.workspace = true
 sha1.workspace = true
 hmac = { workspace = true, optional = true }
-digest = "0.10"
-hkdf = { version = "0.12", optional = true }
+digest.workspace = true
+hkdf = { workspace = true, optional = true }
 pbkdf2 = { workspace = true, optional = true }
 zeroize.workspace = true
 

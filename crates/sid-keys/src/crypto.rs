@@ -154,8 +154,8 @@ impl CryptoPrimitives for RustCryptoPrimitives {
     }
 
     fn hmac_sha256(&self, key: &[u8], data: &[u8]) -> [u8; 32] {
-        let mut mac =
-            <Hmac<Sha256> as Mac>::new_from_slice(key).expect("HMAC-SHA256 accepts any key length");
+        let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(key)
+            .expect("HMAC-SHA256 accepts any key length");
         mac.update(data);
         mac.finalize().into_bytes().into()
     }
@@ -192,8 +192,10 @@ impl CryptoPrimitives for RustCryptoPrimitives {
     }
 
     fn random_bytes(&self, buf: &mut [u8]) {
-        use rand::RngCore;
-        rand::rngs::OsRng.fill_bytes(buf);
+        use rand::TryRng;
+        rand::rngs::SysRng
+            .try_fill_bytes(buf)
+            .expect("the operating system random source is available");
     }
 
     fn provider_id(&self) -> &'static str {

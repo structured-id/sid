@@ -13,7 +13,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use sha2::{Digest, Sha256};
 use sid_authn::jwt::JwtService;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_core::models::machine_user::{MachineCredentialType, MachineUserCredential, OwnerType};
@@ -154,7 +153,7 @@ impl TestIssuer {
                         machine.id,
                         format!("kid_{}", checker.client_id),
                         MachineCredentialType::ClientSecret,
-                        format!("{:x}", Sha256::digest(checker.secret.as_bytes())),
+                        sid_authn::bearer_secret::verifier_of(&checker.secret),
                     ),
                     None,
                     audit("machine_user.credential"),
@@ -371,7 +370,7 @@ impl TestIssuer {
                     machine.id,
                     format!("kid_{client_id}"),
                     MachineCredentialType::ClientSecret,
-                    format!("{:x}", Sha256::digest(secret.as_bytes())),
+                    sid_authn::bearer_secret::verifier_of(secret),
                 ),
                 None,
                 audit("machine_user.credential"),

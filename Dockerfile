@@ -3,9 +3,9 @@
 # Local build: cargo build --release -p sid-server && docker build -t sid .
 # The bundled event bus: with SID_NATS_URL unset the server runs this
 # nats-server as a child process (JetStream under SID_DATA_DIR/nats).
-FROM nats:2.10-alpine AS nats
+FROM nats:2.15-alpine AS nats
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates openssl wget \

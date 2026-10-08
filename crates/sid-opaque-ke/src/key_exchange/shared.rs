@@ -1,0 +1,447 @@
+// Copyright (c) Meta Platforms, Inc. and affiliates.
+//
+// This source code is dual-licensed under either the MIT license found in the
+// LICENSE-MIT file in the root directory of this source tree or the Apache
+// License, Version 2.0 found in the LICENSE-APACHE file in the root directory
+// of this source tree. You may select, at your option, one of the above-listed
+// licenses.
+
+use core::ops::Add;
+
+use derive_where::derive_where;
+use digest::{Digest, Mac, Output, OutputSizeUser, Update};
+use generic_array::{ArrayLength, GenericArray};
+use hkdf::{Hkdf, HkdfExtract};
+use hmac::{Hmac, KeyInit};
+use hybrid_array::Array;
+use hybrid_array::typenum::{Sum, U1, U2, U32, Unsigned};
+use rand_core::CryptoRng;
+
+use super::{
+    Deserialize, GenerateKe1Result, KeyExchange, Serialize, SerializedContext,
+    SerializedCredentialRequest, SerializedCredentialResponse, SerializedIdentifiers,
+};
+use crate::ciphersuite::{CipherSuite, KeGroup, KeHash};
+use crate::errors::{InternalError, ProtocolError};
+use crate::hash::{Hash, OutputSize};
+use crate::key_exchange::group::Group;
+use crate::keypair::{KeyPair, PrivateKey, PublicKey};
+use crate::serialization::{SliceExt, UpdateExt, concat, i2osp};
+
+///////////////
+// Constants //
+// ========= //
+///////////////
+
+pub(crate) type NonceLen = U32;
+pub(super) static STR_CONTEXT: &[u8] = b"OPAQUEv1-";
+static STR_CLIENT_MAC: &[u8] = b"ClientMAC";
+static STR_HANDSHAKE_SECRET: &[u8] = b"HandshakeSecret";
+static STR_SERVER_MAC: &[u8] = b"ServerMAC";
+static STR_SESSION_KEY: &[u8] = b"SessionKey";
+static STR_OPAQUE: &[u8] = b"OPAQUE-";
+
+////////////////////////////
+// High-level API Structs //
+// ====================== //
+////////////////////////////
+
+/// Trait required by [`Group::Sk`] to be compatible with
+/// [`TripleDh`](crate::TripleDh) and [`SigmaI`](crate::SigmaI).
+pub trait DiffieHellman<G: Group> {
+    /// Diffie-Hellman key exchange.
+    fn diffie_hellman(&self, pk: &G::Pk) -> Array<u8, G::PkLen>;
+}
+
+/// The client state produced after the first key exchange message
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Deserialize, serde::Serialize),
+    serde(bound(
+        deserialize = "G::Sk: serde::Deserialize<'de>",
+        serialize = "G::Sk: serde::Serialize"
+    ))
+)]
+#[derive_where(Clone, ZeroizeOnDrop)]
+#[derive_where(Debug, Eq, Hash, Ord, PartialEq, PartialOrd; G::Sk)]
+pub struct Ke1State<G: Group> {
+    pub(super) client_e_sk: PrivateKey<G>,
+    pub(super) client_nonce: Array<u8, NonceLen>,
+}
+
+/// The first key exchange message
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Deserialize, serde::Serialize),
+    serde(bound(
+        deserialize = "G::Pk: serde::Deserialize<'de>",
+        serialize = "G::Pk: serde::Serialize"
+    ))
+)]
+#[derive_where(Clone, ZeroizeOnDrop)]
+#[derive_where(Debug, Eq, Hash, Ord, PartialEq, PartialOrd; G::Pk)]
+pub struct Ke1Message<G: Group> {
+    pub(super) client_nonce: Array<u8, NonceLen>,
+    #[derive_where(skip(Zeroize))]
+    pub(super) client_e_pk: PublicKey<G>,
+}
+
+/////////////////////////
+// Convenience Structs //
+//==================== //
+/////////////////////////
+
+// Consists of a session key, followed by two mac keys: (session_key, km2, km3)
+pub(super) struct DerivedKeys<H: OutputSizeUser> {
+    pub(super) session_key: Output<H>,
+    pub(super) km2: Output<H>,
+    pub(super) km3: Output<H>,
+    #[cfg(test)]
+    pub(super) handshake_secret: Output<H>,
+}
+
+/// Helper bundle containing the common `TripleDH` server state that both
+/// `TripleDh` and `TripleDhKem` builders need.
+pub(super) struct Ke2BuilderCommon<G: Group, H: Hash>
+where
+    G::Sk: DiffieHellman<G>,
+{
+    pub(super) server_nonce: Array<u8, NonceLen>,
+    pub(super) transcript_hasher: H,
+    pub(super) client_e_pk: PublicKey<G>,
+    pub(super) server_e_pk: PublicKey<G>,
+    pub(super) shared_secret_1: Array<u8, G::PkLen>,
+    pub(super) shared_secret_3: Array<u8, G::PkLen>,
+}
+
+////////////////////////////////////////////////
+// Helper functions and Trait Implementations //
+// ========================================== //
+////////////////////////////////////////////////
+
+// Helper functions
+
+pub(super) fn generate_ke1<
+    R: CryptoRng,
+    KE: KeyExchange<KE1State = Ke1State<G>, KE1Message = Ke1Message<G>>,
+    G: Group,
+>(
+    rng: &mut R,
+) -> Result<GenerateKe1Result<KE>, ProtocolError> {
+    let client_e_kp = KeyPair::<G>::derive_random(rng);
+    let client_nonce = generate_nonce::<R>(rng);
+
+    let ke1_message = Ke1Message {
+        client_nonce,
+        client_e_pk: client_e_kp.public().clone(),
+    };
+
+    Ok(GenerateKe1Result {
+        state: Ke1State {
+            client_e_sk: client_e_kp.private().clone(),
+            client_nonce,
+        },
+        message: ke1_message,
+    })
+}
+
+// Generate a random nonce up to NonceLen::USIZE bytes.
+pub(super) fn generate_nonce<R: CryptoRng>(rng: &mut R) -> Array<u8, NonceLen> {
+    let mut nonce_bytes = Array::default();
+    rng.fill_bytes(&mut nonce_bytes);
+    nonce_bytes
+}
+
+pub(super) fn transcript<CS: CipherSuite, KE: Group>(
+    context: &SerializedContext<'_>,
+    identifiers: &SerializedIdentifiers<'_, KeGroup<CS>>,
+    credential_request: &SerializedCredentialRequest<CS>,
+    ke1_message: &Ke1MessageIter<KE>,
+    credential_response: &SerializedCredentialResponse<CS>,
+    server_nonce: Array<u8, NonceLen>,
+    server_e_pk: &Array<u8, KE::PkLen>,
+) -> KeHash<CS> {
+    KeHash::<CS>::new()
+        .chain_iter(context.iter())
+        .chain_iter(identifiers.client.iter())
+        .chain_iter(credential_request.iter())
+        .chain_iter(ke1_message.iter())
+        .chain_iter(identifiers.server.iter())
+        .chain_iter(credential_response.iter())
+        .chain(server_nonce)
+        .chain(server_e_pk)
+}
+
+/// Generates the server-side `TripleDH` transcript state shared by multiple
+/// key-exchange variants.
+pub(super) fn ke2_builder_common<'a, G, H, CS, R>(
+    rng: &mut R,
+    credential_request: SerializedCredentialRequest<CS>,
+    ke1_message: Ke1Message<G>,
+    credential_response: SerializedCredentialResponse<CS>,
+    client_s_pk: PublicKey<G>,
+    identifiers: SerializedIdentifiers<'a, KeGroup<CS>>,
+    context: SerializedContext<'a>,
+) -> Result<Ke2BuilderCommon<G, H>, ProtocolError>
+where
+    G: Group,
+    H: Hash,
+    R: CryptoRng,
+    CS: CipherSuite,
+    G::Sk: DiffieHellman<G>,
+    CS::KeyExchange: KeyExchange<Group = G, Hash = H>,
+{
+    let server_ephemeral = KeyPair::<G>::derive_random(rng);
+    let server_nonce = generate_nonce::<R>(rng);
+    let server_e_pk_bytes = server_ephemeral.public().serialize();
+
+    let ke1_iter = ke1_message.to_iter();
+    let client_e_pk = ke1_message.client_e_pk.clone();
+
+    let transcript_hasher = transcript(
+        &context,
+        &identifiers,
+        &credential_request,
+        &ke1_iter,
+        &credential_response,
+        server_nonce,
+        &server_e_pk_bytes,
+    );
+
+    let shared_secret_1 = server_ephemeral
+        .private()
+        .ke_diffie_hellman(&ke1_message.client_e_pk);
+    let shared_secret_3 = server_ephemeral.private().ke_diffie_hellman(&client_s_pk);
+
+    Ok(Ke2BuilderCommon {
+        server_nonce,
+        transcript_hasher,
+        client_e_pk,
+        server_e_pk: server_ephemeral.public().clone(),
+        shared_secret_1,
+        shared_secret_3,
+    })
+}
+
+// Internal function which takes computed shared secrets, along with some
+// auxiliary metadata, to produce the session key and two MAC keys
+pub(super) fn derive_keys<'a, H: Hash>(
+    ikms: impl Iterator<Item = &'a [u8]>,
+    hashed_derivation_transcript: &[u8],
+) -> Result<DerivedKeys<H>, ProtocolError> {
+    let mut hkdf = HkdfExtract::<H>::new(None);
+
+    for ikm in ikms {
+        hkdf.input_ikm(ikm);
+    }
+
+    let (_, extracted_ikm) = hkdf.finalize();
+    let handshake_secret = derive_secrets::<H>(
+        &extracted_ikm,
+        STR_HANDSHAKE_SECRET,
+        hashed_derivation_transcript,
+    )?;
+    let session_key = derive_secrets::<H>(
+        &extracted_ikm,
+        STR_SESSION_KEY,
+        hashed_derivation_transcript,
+    )?;
+
+    let km2 = hkdf_expand_label::<H>(&handshake_secret, STR_SERVER_MAC, b"")?;
+    let km3 = hkdf_expand_label::<H>(&handshake_secret, STR_CLIENT_MAC, b"")?;
+
+    Ok(DerivedKeys {
+        session_key,
+        km2,
+        km3,
+        #[cfg(test)]
+        handshake_secret,
+    })
+}
+
+/// Helper function for shared functionality in KE2 MAC computation
+/// for both `TripleDH` and TripleDH-KEM
+pub(super) fn compute_ke2_macs<H: Hash>(
+    transcript_hasher: &mut H,
+    derived_keys: &DerivedKeys<H>,
+    transcript_digest: &[u8],
+) -> Result<(Output<H>, Output<H>), ProtocolError> {
+    let mut mac_hasher =
+        Hmac::<H>::new_from_slice(&derived_keys.km2).map_err(|_| InternalError::HmacError)?;
+    Mac::update(&mut mac_hasher, transcript_digest);
+    let mac = mac_hasher.finalize().into_bytes();
+
+    Digest::update(transcript_hasher, &mac);
+    let finalized_transcript = transcript_hasher.clone().finalize();
+
+    let mut expected_mac_hasher =
+        Hmac::<H>::new_from_slice(&derived_keys.km3).map_err(|_| InternalError::HmacError)?;
+    Mac::update(&mut expected_mac_hasher, &finalized_transcript);
+    let expected_mac = expected_mac_hasher.finalize().into_bytes();
+
+    Ok((mac, expected_mac))
+}
+
+/// Finalizes the KE3 transcript by deriving session material from the provided
+/// shared secrets and verifying the server's MAC, returning both the derived
+/// keys and the client's MAC response. Callers are expected to supply any
+/// protocol-specific shared secrets (e.g. classic Diffie-Hellman results or
+/// KEM outputs) as byte slices.
+pub(super) fn finalize_ke3_transcript<'a, H: Hash>(
+    transcript_hasher: &mut H,
+    shared_secrets: impl Iterator<Item = &'a [u8]>,
+    server_mac: &Output<H>,
+) -> Result<(DerivedKeys<H>, Output<H>), ProtocolError> {
+    let transcript_digest = transcript_hasher.clone().finalize();
+    let derived_keys = derive_keys::<H>(shared_secrets, &transcript_digest)?;
+    let mut server_mac_hasher =
+        Hmac::<H>::new_from_slice(&derived_keys.km2).map_err(|_| InternalError::HmacError)?;
+    Mac::update(&mut server_mac_hasher, &transcript_digest);
+    server_mac_hasher
+        .verify(server_mac)
+        .map_err(|_| ProtocolError::InvalidLoginError)?;
+
+    Digest::update(transcript_hasher, server_mac.as_slice());
+    let finalized_transcript = transcript_hasher.clone().finalize();
+
+    let mut client_mac_hasher =
+        Hmac::<H>::new_from_slice(&derived_keys.km3).map_err(|_| InternalError::HmacError)?;
+    Mac::update(&mut client_mac_hasher, &finalized_transcript);
+
+    let client_mac = client_mac_hasher.finalize().into_bytes();
+
+    Ok((derived_keys, client_mac))
+}
+
+fn hkdf_expand_label<H: Hash>(
+    secret: &[u8],
+    label: &[u8],
+    context: &[u8],
+) -> Result<Output<H>, ProtocolError> {
+    let h = Hkdf::<H>::from_prk(secret).map_err(|_| InternalError::HkdfError)?;
+    hkdf_expand_label_extracted(&h, label, context)
+}
+
+fn hkdf_expand_label_extracted<H: Hash>(
+    hkdf: &Hkdf<H>,
+    label: &[u8],
+    context: &[u8],
+) -> Result<Output<H>, ProtocolError> {
+    let mut okm = Array::default();
+
+    let length = i2osp::<U2>(OutputSize::<H>::USIZE)?;
+    let label_length = i2osp::<U1>(STR_OPAQUE.len() + label.len())?;
+    let context_len = i2osp::<U1>(context.len())?;
+
+    let hkdf_label = [
+        length.as_slice(),
+        &label_length,
+        STR_OPAQUE,
+        label,
+        &context_len,
+        context,
+    ];
+
+    hkdf.expand_multi_info(&hkdf_label, &mut okm)
+        .map_err(|_| InternalError::HkdfError)?;
+    Ok(okm)
+}
+
+fn derive_secrets<H: Hash>(
+    hkdf: &Hkdf<H>,
+    label: &[u8],
+    hashed_derivation_transcript: &[u8],
+) -> Result<Output<H>, ProtocolError> {
+    hkdf_expand_label_extracted::<H>(hkdf, label, hashed_derivation_transcript)
+}
+
+// Serialization and deserialization implementations
+
+impl<G: Group> Deserialize for Ke1State<G> {
+    fn deserialize_take(bytes: &mut &[u8]) -> Result<Self, ProtocolError> {
+        Ok(Self {
+            client_e_sk: PrivateKey::deserialize_take(bytes)?,
+            client_nonce: bytes.take_array("client nonce")?,
+        })
+    }
+}
+
+impl<G: Group> Serialize for Ke1State<G>
+where
+    // Ke1State: KeSk + Nonce
+    G::SkLen: Add<NonceLen>,
+    Sum<G::SkLen, NonceLen>: ArrayLength,
+{
+    type Len = Sum<G::SkLen, NonceLen>;
+
+    fn serialize(&self) -> GenericArray<u8, Self::Len> {
+        concat(&[&self.client_e_sk.serialize(), &self.client_nonce])
+    }
+}
+
+impl<G: Group> Deserialize for Ke1Message<G> {
+    fn deserialize_take(input: &mut &[u8]) -> Result<Self, ProtocolError> {
+        Ok(Self {
+            client_nonce: input.take_array("client nonce")?,
+            client_e_pk: PublicKey::deserialize_take(input)?,
+        })
+    }
+}
+
+impl<G: Group> Serialize for Ke1Message<G>
+where
+    // Ke1Message: Nonce + KePk
+    NonceLen: Add<G::PkLen>,
+    Sum<NonceLen, G::PkLen>: ArrayLength,
+{
+    type Len = Sum<NonceLen, G::PkLen>;
+
+    fn serialize(&self) -> GenericArray<u8, Self::Len> {
+        concat(&[&self.client_nonce, &self.client_e_pk.serialize()])
+    }
+}
+
+impl<G: Group> Ke1Message<G> {
+    pub(crate) fn to_iter(&self) -> Ke1MessageIter<G> {
+        Ke1MessageIter {
+            client_nonce: self.client_nonce,
+            client_e_pk: self.client_e_pk.serialize(),
+        }
+    }
+}
+
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Deserialize, serde::Serialize),
+    serde(bound = "")
+)]
+#[derive_where(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Zeroize)]
+pub(crate) struct Ke1MessageIter<G: Group> {
+    client_nonce: Array<u8, NonceLen>,
+    client_e_pk: Array<u8, G::PkLen>,
+}
+
+pub(crate) type Ke1MessageIterLen<G: Group> = Sum<NonceLen, G::PkLen>;
+
+impl<G: Group> Ke1MessageIter<G> {
+    pub(crate) fn iter(&self) -> impl Clone + Iterator<Item = &[u8]> {
+        [self.client_nonce.as_slice(), self.client_e_pk.as_slice()].into_iter()
+    }
+
+    pub(crate) fn deserialize_take(input: &mut &[u8]) -> Result<Self, ProtocolError> {
+        Ok(Ke1MessageIter {
+            client_nonce: input.take_array("client nonce")?,
+            client_e_pk: input.take_array("client ephemeral public key")?,
+        })
+    }
+}
+
+impl<G: Group> Ke1MessageIter<G>
+where
+    NonceLen: Add<G::PkLen>,
+    Ke1MessageIterLen<G>: ArrayLength,
+{
+    pub(crate) fn serialize(&self) -> GenericArray<u8, Ke1MessageIterLen<G>> {
+        concat(&[&self.client_nonce, &self.client_e_pk])
+    }
+}

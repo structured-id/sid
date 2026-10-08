@@ -1,8 +1,9 @@
 use super::*;
 use std::collections::HashMap;
 
-use opaque_ke::rand::rngs::OsRng;
-use opaque_ke::{
+use rand::rand_core::UnwrapErr;
+use rand::rngs::SysRng;
+use sid_opaque_ke::{
     ClientLogin, ClientLoginFinishParameters, ClientRegistration,
     ClientRegistrationFinishParameters, CredentialResponse, RegistrationResponse,
 };
@@ -72,14 +73,15 @@ fn an_installed_password_signs_in_through_the_router() {
     let password = b"Str0ngP@ssword1";
     let id = b"login@sid.example.com";
 
-    let client = ClientRegistration::<PallasCipherSuite>::start(&mut OsRng, password).unwrap();
+    let mut rng = UnwrapErr(SysRng);
+    let client = ClientRegistration::<PallasCipherSuite>::start(&mut rng, password).unwrap();
     let response = server
         .opaque_start(&client.message.serialize(), id)
         .unwrap();
     let upload = client
         .state
         .finish(
-            &mut OsRng,
+            &mut rng,
             password,
             RegistrationResponse::deserialize(&response).unwrap(),
             ClientRegistrationFinishParameters::default(),
@@ -90,14 +92,14 @@ fn an_installed_password_signs_in_through_the_router() {
         data: server.opaque_finish(&upload.message.serialize()).unwrap(),
     };
 
-    let login = ClientLogin::<PallasCipherSuite>::start(&mut OsRng, password).unwrap();
+    let login = ClientLogin::<PallasCipherSuite>::start(&mut rng, password).unwrap();
     let (response, state) = router
         .login_start(&stored, &login.message.serialize(), id)
         .unwrap();
     let finished = login
         .state
         .finish(
-            &mut OsRng,
+            &mut rng,
             password,
             CredentialResponse::deserialize(&response).unwrap(),
             ClientLoginFinishParameters::default(),

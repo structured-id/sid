@@ -82,11 +82,13 @@ impl PatServiceImpl {
 /// Hash: SHA-256 hex digest of the full plaintext.
 /// Prefix: first 16 chars (`sid_pat_` + 8 random chars) for UI identification.
 fn generate_pat_token() -> (String, String, String) {
-    use rand::RngCore;
-    use rand::rngs::OsRng;
+    use rand::TryRng;
+    use rand::rngs::SysRng;
 
     let mut bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut bytes);
+    SysRng
+        .try_fill_bytes(&mut bytes)
+        .expect("the operating system random source is available");
 
     const BASE62: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
     let random: String = bytes

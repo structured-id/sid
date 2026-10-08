@@ -10,7 +10,7 @@
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use rand::RngCore as _;
+use rand::TryRng as _;
 use secrecy::SecretBox;
 use sha2::{Digest as _, Sha256};
 use subtle::ConstantTimeEq as _;
@@ -26,7 +26,9 @@ pub struct IssuedSecret {
 /// Issue a fresh secret starting with `prefix`.
 pub fn issue(prefix: &str) -> IssuedSecret {
     let mut bytes = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    rand::rngs::SysRng
+        .try_fill_bytes(&mut bytes)
+        .expect("the operating system random source is available");
     let secret = format!("{prefix}{}", URL_SAFE_NO_PAD.encode(bytes));
     let verifier = verifier_of(&secret);
     IssuedSecret {

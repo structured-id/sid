@@ -118,11 +118,13 @@ impl MachineUserServiceImpl {
 
 /// Generate a client_id for a machine user: `mu_{24 base62 chars}` (27 chars total).
 fn generate_client_id() -> String {
-    use rand::RngCore;
-    use rand::rngs::OsRng;
+    use rand::TryRng;
+    use rand::rngs::SysRng;
 
     let mut bytes = [0u8; 24];
-    OsRng.fill_bytes(&mut bytes);
+    SysRng
+        .try_fill_bytes(&mut bytes)
+        .expect("the operating system random source is available");
 
     const BASE62: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
     let random: String = bytes
@@ -137,11 +139,13 @@ const MACHINE_SECRET_PREFIX: &str = "ms_";
 
 /// Generate a kid for a credential: `kid_{16 base62 chars}`.
 fn generate_kid() -> String {
-    use rand::RngCore;
-    use rand::rngs::OsRng;
+    use rand::TryRng;
+    use rand::rngs::SysRng;
 
     let mut bytes = [0u8; 16];
-    OsRng.fill_bytes(&mut bytes);
+    SysRng
+        .try_fill_bytes(&mut bytes)
+        .expect("the operating system random source is available");
 
     const BASE62: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
     let random: String = bytes

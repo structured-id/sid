@@ -1,0 +1,53 @@
+[package]
+name = "sid-voprf"
+description = "Verifiable oblivious pseudorandom functions (RFC 9497), vendored from facebook/voprf and kept on the current RustCrypto releases"
+authors = ["Kevin Lewi <lewi.kevin.k@gmail.com>", "StructuredID Contributors"]
+categories = ["no-std", "algorithms", "cryptography"]
+keywords = ["oprf"]
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/structured-id/sid"
+version = "0.6.0"
+edition = "2024"
+rust-version = "1.85"
+
+[features]
+alloc = []
+danger = []
+default = ["ristretto255-ciphersuite", "dep:serde"]
+ristretto255 = ["dep:curve25519-dalek"]
+ristretto255-ciphersuite = ["ristretto255", "dep:sha2"]
+serde = ["curve25519-dalek?/serde", "hybrid-array/serde", "dep:serde"]
+std = ["alloc"]
+
+[dependencies]
+curve25519-dalek = { version = "5", default-features = false, features = ["rand_core", "zeroize"], optional = true }
+derive-where = { version = "1.7", features = ["zeroize-on-drop"] }
+digest = "0.11"
+displaydoc = { version = "0.2", default-features = false }
+elliptic-curve = { version = "0.14", features = ["sec1"] }
+# Element and scalar lengths are also `generic_array` lengths, so protocols
+# built on top can serialize messages longer than hybrid-array's sizes.
+generic-array = "1"
+hash2curve = "0.14"
+hybrid-array = "0.4"
+rand_core = { version = "0.10", default-features = false }
+serde = { version = "1", default-features = false, features = ["derive"], optional = true }
+sha2 = { version = "0.11", default-features = false, optional = true }
+subtle = { version = "2.6", default-features = false }
+zeroize = { version = "1.9", default-features = false }
+
+[dev-dependencies]
+hex = "0.4"
+p256 = { version = "0.14", default-features = false, features = ["arithmetic", "oprf"] }
+p384 = { version = "0.14", default-features = false, features = ["arithmetic", "oprf"] }
+p521 = { version = "0.14", default-features = false, features = ["arithmetic", "oprf"] }
+proptest = "1"
+rand = "0.10"
+regex = "1"
+serde_json = "1"
+sha2 = "0.11"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

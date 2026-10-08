@@ -252,7 +252,8 @@ impl AuthServiceImpl {
         return_to: Option<url::Url>,
     ) -> Result<String, Status> {
         let mut bytes = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut bytes);
+        rand::TryRng::try_fill_bytes(&mut rand::rngs::SysRng, &mut bytes)
+            .map_err(|_| Status::internal("operating system random source unavailable"))?;
         let confirmation = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
         self.logout_confirmations
             .insert(

@@ -4,7 +4,7 @@
 //! HMAC-SHA1 with 6-digit codes and 30-second steps. Seeds are stored sealed
 //! and read by the server; this module never holds one beyond a call.
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use rand::Rng;
 use sha1::Sha1;
 use sid_core::models::{CredentialId, MfaEnrollment, MfaMethod, ProfileId};
@@ -24,9 +24,8 @@ const SECRET_LENGTH: usize = 20;
 
 /// Generate a random 20-byte TOTP secret.
 pub fn generate_secret() -> Vec<u8> {
-    let mut rng = rand::thread_rng();
     let mut secret = vec![0u8; SECRET_LENGTH];
-    rng.fill(&mut secret[..]);
+    rand::rng().fill_bytes(&mut secret);
     secret
 }
 

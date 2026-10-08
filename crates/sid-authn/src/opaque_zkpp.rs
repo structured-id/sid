@@ -9,9 +9,9 @@
 //! them is authority and who owns the credential; that lives with the caller.
 
 use group::GroupEncoding;
-use opaque_ke::{RegistrationRequest, RegistrationUpload, ServerRegistration, ServerSetup};
 use pasta_curves::pallas;
 use sid_core::{Error as SidError, Result as SidResult};
+use sid_opaque_ke::{RegistrationRequest, RegistrationUpload, ServerRegistration, ServerSetup};
 use sid_plugin::crypto::CurveId;
 
 use crate::opaque::OpaqueRouter;

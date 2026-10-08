@@ -89,7 +89,7 @@ pub fn encrypt_data_key(
 
     // Random nonce (12 bytes)
     let mut nonce_bytes = [0u8; NONCE_SIZE];
-    rand::Rng::fill(&mut rand::thread_rng(), &mut nonce_bytes);
+    rand::Rng::fill_bytes(&mut rand::rng(), &mut nonce_bytes);
     let nonce = Nonce::from(nonce_bytes);
 
     let ciphertext = cipher
