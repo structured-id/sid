@@ -311,10 +311,11 @@ async fn test_dpop_symmetric_algorithm_rejected() {
 #[tokio::test]
 async fn test_dpop_proof_signed_by_another_key_rejected() {
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
-    use p256::elliptic_curve::sec1::ToEncodedPoint;
+    use p256::elliptic_curve::Generate;
+    use p256::elliptic_curve::sec1::ToSec1Point;
 
-    let other = p256::SecretKey::random(&mut rand::rngs::OsRng);
-    let point = other.public_key().to_encoded_point(false);
+    let other = p256::SecretKey::generate_from_rng(&mut rand::rng());
+    let point = other.public_key().to_sec1_point(false);
     let jwk: jsonwebtoken::jwk::Jwk = serde_json::from_value(serde_json::json!({
         "kty": "EC",
         "crv": "P-256",

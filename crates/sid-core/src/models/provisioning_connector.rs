@@ -133,11 +133,11 @@ pub const CONNECTOR_CLIENT_ID_PREFIX: &str = "pc_";
 /// A fresh connector `client_id`: the prefix and 24 random base62 characters
 /// (about 143 bits).
 fn new_client_id() -> String {
-    use rand::Rng as _;
+    use rand::RngExt as _;
     const BASE62: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
-    let mut rng = rand::rngs::OsRng;
+    let mut rng = rand::rand_core::UnwrapErr(rand::rngs::SysRng);
     let body: String = (0..24)
-        .map(|_| BASE62[rng.gen_range(0..BASE62.len())] as char)
+        .map(|_| BASE62[rng.random_range(0..BASE62.len())] as char)
         .collect();
     format!("{CONNECTOR_CLIENT_ID_PREFIX}{body}")
 }

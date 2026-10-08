@@ -8,8 +8,9 @@ mod common;
 use common::TestServices;
 use common::mock_storage::MockStorage;
 use common::zkpp_client as client;
-use opaque_ke::rand::rngs::OsRng;
-use opaque_ke::{ClientLogin, ClientLoginFinishParameters, CredentialResponse};
+use rand::rand_core::UnwrapErr;
+use rand::rngs::SysRng;
+use sid_opaque_ke::{ClientLogin, ClientLoginFinishParameters, CredentialResponse};
 use sid_pake_core::pallas_opaque::PallasCipherSuite;
 use sid_proto::sid::v1::auth_service_server::AuthService;
 use sid_proto::sid::v1::*;
@@ -45,7 +46,7 @@ async fn a_zkpp_registered_password_signs_in() {
         .await
         .expect("registration finish");
 
-    let login = ClientLogin::<PallasCipherSuite>::start(&mut OsRng, PASSWORD).unwrap();
+    let login = ClientLogin::<PallasCipherSuite>::start(&mut UnwrapErr(SysRng), PASSWORD).unwrap();
     let started = svc
         .auth
         .opaque_login_start(Request::new(OpaqueLoginStartRequest {
@@ -58,7 +59,7 @@ async fn a_zkpp_registered_password_signs_in() {
     let finished = login
         .state
         .finish(
-            &mut OsRng,
+            &mut UnwrapErr(SysRng),
             PASSWORD,
             CredentialResponse::deserialize(&started.credential_response).unwrap(),
             ClientLoginFinishParameters::default(),

@@ -1,0 +1,52 @@
+name: Dependabot auto-merge
+
+# Dependabot pull requests merge themselves once the required checks pass,
+# major updates included. This runs on a schedule and after every push to
+# main rather than on the pull request: a run started by Dependabot gets no
+# Actions secrets, and auto-merge enabled with GITHUB_TOKEN would land on main
+# without starting the workflows of that push. The app token avoids both.
+on:
+  schedule:
+    - cron: "17 */3 * * *"
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependabot-auto-merge
+  cancel-in-progress: false
+
+jobs:
+  auto-merge:
+    name: Auto-merge
+    if: github.repository_owner == 'structured-id'
+    runs-on: ubuntu-latest
+    steps:
+      - name: App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.RELEASER_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASER_APP_PRIVATE_KEY }}
+
+      - name: Queue open Dependabot pull requests
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          status=0
+          for pr in $(gh pr list --author app/dependabot --state open --json number --jq '.[].number'); do
+            if [ "$(gh pr view "$pr" --json autoMergeRequest --jq '.autoMergeRequest == null')" = "true" ]; then
+              gh pr merge --auto --squash "$pr" || status=1
+            fi
+            # Required checks are strict: a pull request behind main must be
+            # brought up to date, and Dependabot rebases on its own only on a
+            # conflict or at its next scheduled run.
+            if [ "$(gh pr view "$pr" --json mergeStateStatus --jq .mergeStateStatus)" = "BEHIND" ]; then
+              gh pr update-branch "$pr" || status=1
+            fi
+          done
+          exit "$status"

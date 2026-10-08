@@ -1721,6 +1721,46 @@ async fn work_store() -> sid_storage::PgWorkStore {
     store
 }
 
+/// Replicas starting together each ensure the work schema of an empty
+/// database: every one of them comes up. `CREATE TABLE IF NOT EXISTS` alone
+/// races on the catalog (`pg_type_typname_nsp_index`) and fails all but one.
+#[tokio::test]
+async fn test_work_store_schema_is_ensured_by_concurrent_replicas() {
+    use sqlx::Connection;
+    use sqlx::postgres::PgConnectOptions;
+
+    let mut conn = sqlx::PgConnection::connect(&database_url())
+        .await
+        .expect("Failed to connect to PostgreSQL. Is the database running?");
+    let schema = format!("work_{}", uuid::Uuid::now_v7().simple());
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA \"{schema}\"")))
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    let options: PgConnectOptions = database_url().parse().unwrap();
+    let options = options.options([("search_path", schema.as_str())]);
+    let mut replicas = Vec::new();
+    for _ in 0..8 {
+        let pool = sqlx::PgPool::connect_with(options.clone()).await.unwrap();
+        replicas.push(sid_storage::PgWorkStore::new(pool));
+    }
+    let mut starts = tokio::task::JoinSet::new();
+    for store in replicas {
+        starts.spawn(async move { store.ensure_schema().await });
+    }
+    while let Some(result) = starts.join_next().await {
+        result
+            .unwrap()
+            .expect("a replica failed to ensure the work schema");
+    }
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP SCHEMA \"{schema}\" CASCADE"
+    )))
+    .execute(&mut conn)
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn test_work_store_enqueue_is_idempotent() {
     common::work::test_work_enqueue_is_idempotent(&work_store().await).await;

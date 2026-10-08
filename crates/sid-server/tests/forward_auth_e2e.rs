@@ -29,7 +29,6 @@ const MACHINE_SECRET: &str = "forward-auth-machine-secret";
 
 /// A machine user of the installation with a client secret.
 fn with_machine(storage: MockStorage) -> MockStorage {
-    use sha2::{Digest, Sha256};
     use sid_core::models::machine_user::*;
     let mu = MachineUser::new(
         ProjectId::system(),
@@ -42,7 +41,7 @@ fn with_machine(storage: MockStorage) -> MockStorage {
         mu.id,
         "kid_forward_auth",
         MachineCredentialType::ClientSecret,
-        format!("{:x}", Sha256::digest(MACHINE_SECRET.as_bytes())),
+        sid_authn::bearer_secret::verifier_of(MACHINE_SECRET),
     );
     storage.with_machine_user(mu).with_machine_credential(cred)
 }

@@ -41,10 +41,12 @@ pub fn load_or_create_master(path: &Path) -> Result<SecretBox<[u8; 32]>, FieldKe
         source,
     };
     if !path.exists() {
-        use rand::RngCore;
+        use rand::TryRng;
         use std::io::Write;
         let mut bytes = zeroize::Zeroizing::new([0u8; MASTER_LEN]);
-        rand::rngs::OsRng.fill_bytes(bytes.as_mut());
+        rand::rngs::SysRng
+            .try_fill_bytes(bytes.as_mut())
+            .expect("the operating system random source is available");
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(io)?;
         }
@@ -86,9 +88,11 @@ pub async fn load_or_create_versions(
     if !versions.is_empty() {
         return Ok(versions);
     }
-    use rand::RngCore;
+    use rand::TryRng;
     let mut salt = vec![0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut salt);
+    rand::rngs::SysRng
+        .try_fill_bytes(&mut salt)
+        .expect("the operating system random source is available");
     storage
         .insert_key_version(
             &KeyVersionParams::new(1, salt, "key-v1"),

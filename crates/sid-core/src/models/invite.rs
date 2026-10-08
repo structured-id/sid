@@ -170,11 +170,11 @@ const INVITE_ALPHABET: &[u8] = b"23456789ABCDEFGHJKMNPQRSTUVWXYZ";
 
 /// Generate a cryptographically random invite code.
 pub fn generate_invite_code() -> String {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
+    use rand::RngExt;
+    let mut rng = rand::rng();
     (0..INVITE_CODE_LENGTH)
         .map(|_| {
-            let idx = rng.gen_range(0..INVITE_ALPHABET.len());
+            let idx = rng.random_range(0..INVITE_ALPHABET.len());
             INVITE_ALPHABET[idx] as char
         })
         .collect()

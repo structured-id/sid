@@ -4,14 +4,14 @@ use super::*;
 
 #[test]
 fn test_generate_single_code_length() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let code = generate_single_code(&mut rng);
     assert_eq!(code.len(), CODE_GROUP_LENGTH * 2);
 }
 
 #[test]
 fn test_generate_single_code_alphabet() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     for _ in 0..100 {
         let code = generate_single_code(&mut rng);
         for ch in code.chars() {
@@ -26,7 +26,7 @@ fn test_generate_single_code_alphabet() {
 
 #[test]
 fn test_generate_single_code_randomness() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let c1 = generate_single_code(&mut rng);
     let c2 = generate_single_code(&mut rng);
     // Extremely unlikely to be equal (30^8 ≈ 6.5×10^11 possibilities).

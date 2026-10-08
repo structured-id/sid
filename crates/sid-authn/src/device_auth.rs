@@ -67,11 +67,11 @@ const USER_CODE_CHARS: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";
 /// Format: 4 chars + hyphen + 4 chars = 8 effective characters.
 /// Entropy: 20^8 ≈ 25.6 billion combinations.
 pub fn generate_user_code() -> String {
-    use rand::Rng;
-    let mut rng = rand::rngs::OsRng;
+    use rand::RngExt;
+    let mut rng = rand::rand_core::UnwrapErr(rand::rngs::SysRng);
     let chars: Vec<u8> = (0..8)
         .map(|_| {
-            let idx = rng.gen_range(0..USER_CODE_CHARS.len());
+            let idx = rng.random_range(0..USER_CODE_CHARS.len());
             USER_CODE_CHARS[idx]
         })
         .collect();
@@ -89,10 +89,12 @@ pub fn generate_user_code() -> String {
 /// hash is stored in database.
 pub fn generate_device_code() -> (String, Vec<u8>) {
     use base64::Engine;
-    use rand::RngCore;
+    use rand::TryRng;
 
     let mut bytes = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    rand::rngs::SysRng
+        .try_fill_bytes(&mut bytes)
+        .expect("the operating system random source is available");
     let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
     let hash = Sha256::digest(raw.as_bytes()).to_vec();
     (raw, hash)
