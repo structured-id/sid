@@ -139,7 +139,7 @@ halo2_proofs = { version = "0.3", features = ["batch"] }
 halo2_gadgets = "0.5"
 pasta_curves = "0.5.1"
 ff = "0.13"
-group = "0.13"
+group = "0.14"
 subtle = "2"
 
 # Unicode normalization & security (anti-homoglyph, IDNA)
