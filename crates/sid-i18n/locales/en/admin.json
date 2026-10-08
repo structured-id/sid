@@ -1,0 +1,134 @@
+{
+  "nav": {
+    "dashboard": "Dashboard",
+    "profiles": "Users",
+    "groups": "Groups",
+    "roles": "Roles",
+    "projects": "Projects",
+    "applications": "Applications",
+    "providers": "Identity Providers",
+    "policies": "Policies",
+    "branding": "Branding",
+    "settings": "Settings",
+    "audit_log": "Audit Log"
+  },
+  "dashboard": {
+    "title": "Admin Dashboard",
+    "total_profiles": "Total users",
+    "active_sessions": "Active sessions",
+    "recent_registrations": "Recent registrations",
+    "failed_logins": "Failed logins (24h)"
+  },
+  "profiles": {
+    "title": "User Management",
+    "create": "Create user",
+    "search_placeholder": "Search by name, email, or username...",
+    "status_active": "Active",
+    "status_suspended": "Suspended",
+    "status_provisioned": "Provisioned",
+    "status_closure_requested": "Closure requested",
+    "detail_title": "User Details",
+    "suspend": "Suspend user",
+    "reactivate": "Reactivate user",
+    "reset_mfa": "Reset MFA",
+    "impersonate": "Impersonate",
+    "force_logout": "Force logout"
+  },
+  "groups": {
+    "title": "Group Management",
+    "create": "Create group",
+    "members_count": "{count} members",
+    "add_member": "Add member",
+    "remove_member": "Remove member",
+    "assign_role": "Assign role"
+  },
+  "roles": {
+    "title": "Role Management",
+    "create": "Create role",
+    "permissions": "Permissions",
+    "assigned_to": "Assigned to",
+    "system_role": "System role",
+    "custom_role": "Custom role"
+  },
+  "projects": {
+    "title": "Project Management",
+    "create": "Create project",
+    "slug_label": "Slug",
+    "settings": "Project Settings",
+    "delete_warning": "Deleting a project will remove all associated applications, roles, and policies."
+  },
+  "applications": {
+    "title": "Applications",
+    "create": "Register application",
+    "client_id": "Client ID",
+    "client_secret": "Client Secret",
+    "redirect_uris": "Redirect URIs",
+    "grant_types": "Grant types",
+    "secret_warning": "Copy the client secret now — it won't be shown again.",
+    "rotate_secret": "Rotate secret"
+  },
+  "providers": {
+    "title": "Identity Providers",
+    "create": "Add provider",
+    "type_oidc": "OpenID Connect",
+    "type_saml": "SAML 2.0",
+    "type_social": "Social login",
+    "enabled": "Enabled",
+    "disabled": "Disabled",
+    "test_connection": "Test connection"
+  },
+  "policies": {
+    "title": "Authorization Policies",
+    "cedar_title": "Cedar Policies",
+    "create": "Create policy",
+    "language": "Policy language",
+    "validate": "Validate",
+    "validation_ok": "Policy is valid",
+    "validation_error": "Policy has errors"
+  },
+  "branding": {
+    "title": "Branding & Theming",
+    "logo": "Logo",
+    "favicon": "Favicon",
+    "colors": "Colors",
+    "typography": "Typography",
+    "preview": "Preview",
+    "publish": "Publish",
+    "revert": "Revert to default",
+    "dark_mode": "Dark mode",
+    "draft": "Draft",
+    "published": "Published"
+  },
+  "audit": {
+    "title": "Audit Log",
+    "actor": "Actor",
+    "action": "Action",
+    "resource": "Resource",
+    "outcome": "Outcome",
+    "timestamp": "Timestamp",
+    "ip_address": "IP Address",
+    "details": "Details",
+    "success": "Success",
+    "failure": "Failure",
+    "export": "Export audit log"
+  },
+  "machine_users": {
+    "title": "Service Accounts",
+    "create": "Create service account",
+    "credentials": "Credentials",
+    "create_credential": "Create credential",
+    "impersonation": "Impersonation grants"
+  },
+  "scim": {
+    "title": "SCIM Provisioning",
+    "inbound": "Inbound (from IdP)",
+    "outbound": "Outbound (to apps)",
+    "targets": "SCIM targets",
+    "create_target": "Add SCIM target",
+    "sync_status": "Sync status",
+    "last_sync": "Last sync",
+    "dlq_title": "Dead letter queue",
+    "dlq_retry": "Retry",
+    "dlq_discard": "Discard"
+  }
+}

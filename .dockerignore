@@ -1,0 +1,11 @@
+target/
+!target/release/sid
+.git/
+*.md
+!README.md
+.github/
+.gitlab/
+.vscode/
+.idea/
+docker-compose*.yml
+Dockerfile.wasm

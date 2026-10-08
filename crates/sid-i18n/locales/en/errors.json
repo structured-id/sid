@@ -1,0 +1,119 @@
+{
+  "auth": {
+    "invalid_credentials": "Invalid email or password",
+    "account_locked": "Account temporarily locked due to too many failed attempts. Try again in {minutes} minutes.",
+    "account_disabled": "This account has been disabled. Contact your administrator.",
+    "account_suspended": "This account has been suspended",
+    "mfa_required": "Multi-factor authentication is required",
+    "mfa_invalid_code": "Invalid verification code. Please try again.",
+    "mfa_recovery_exhausted": "All recovery codes have been used. Contact your administrator.",
+    "session_expired": "Your session has expired. Please sign in again.",
+    "session_revoked": "Your session has been revoked",
+    "token_expired": "Token has expired",
+    "token_invalid": "Invalid or malformed token",
+    "refresh_token_revoked": "Refresh token has been revoked",
+    "consent_required": "User consent is required",
+    "consent_denied": "User denied consent",
+    "password_too_weak": "Password does not meet the requirements",
+    "password_reused": "This password was used recently. Choose a different password.",
+    "magic_link_expired": "This sign-in link has expired. Please request a new one.",
+    "magic_link_used": "This sign-in link has already been used",
+    "magic_links_disabled": "Sign-in links are not enabled on this site",
+    "last_credential": "This is your last way to sign in. Add another passkey or a password before removing it.",
+    "device_code_expired": "Device authorization code has expired",
+    "device_code_invalid": "Invalid device code",
+    "upstream_auth_failed": "Authentication with external provider failed",
+    "upstream_account_not_linked": "No account is linked to this external provider"
+  },
+  "consent": {
+    "not_found": "This site is not connected to your account",
+    "not_active": "This site's access is not active, so its shared data cannot be changed"
+  },
+  "registration": {
+    "email_taken": "An account with this email already exists",
+    "phone_taken": "An account with this phone number already exists",
+    "username_taken": "This username is already taken",
+    "username_invalid": "Username must contain only letters, numbers, hyphens, and underscores",
+    "registration_disabled": "Registration is currently disabled",
+    "invite_required": "An invitation is required to create an account",
+    "invite_expired": "This invitation has expired",
+    "invite_invalid": "Invalid or already used invitation",
+    "claim_required": "This installation has no administrator yet: enter the claim token from the service log to register",
+    "claim_invalid": "The claim token does not match"
+  },
+  "oauth2": {
+    "invalid_client": "Unknown client application",
+    "invalid_redirect_uri": "Invalid redirect URI",
+    "invalid_scope": "Requested scope is not allowed",
+    "invalid_grant": "Invalid authorization grant",
+    "unsupported_grant_type": "Unsupported grant type",
+    "unsupported_response_type": "Unsupported response type",
+    "access_denied": "Access denied by resource owner",
+    "server_error": "An internal error occurred",
+    "temporarily_unavailable": "Service temporarily unavailable. Please try again later.",
+    "application_not_found": "Application not found",
+    "iat_invalid": "Invalid initial access token",
+    "iat_not_found": "Initial access token not found",
+    "iat_limit_reached": "Client registration limit reached",
+    "rat_invalid": "Invalid registration access token",
+    "not_dynamically_registered": "Client was not dynamically registered"
+  },
+  "validation": {
+    "required_field": "{field} is required",
+    "invalid_email": "Invalid email address",
+    "invalid_phone": "Invalid phone number format",
+    "too_short": "{field} must be at least {min} characters",
+    "too_long": "{field} must not exceed {max} characters",
+    "invalid_format": "Invalid format for {field}",
+    "invalid_uuid": "Invalid identifier format"
+  },
+  "rbac": {
+    "permission_denied": "You do not have permission to perform this action",
+    "role_not_found": "Role not found",
+    "role_in_use": "Cannot delete role that is assigned to users or groups",
+    "group_not_found": "Group not found",
+    "already_member": "User is already a member of this group",
+    "not_member": "User is not a member of this group",
+    "sod_conflict": "Assignment conflicts with separation of duties rule: {rule}",
+    "role_exists": "A role with this key already exists in the project"
+  },
+  "project": {
+    "not_found": "Project not found",
+    "slug_taken": "A project with this slug already exists",
+    "cannot_delete_system": "System project cannot be deleted",
+    "cannot_modify_system": "System project cannot be modified"
+  },
+  "branding": {
+    "not_found": "Branding configuration not found",
+    "cannot_delete_published": "Cannot delete the currently published branding configuration",
+    "not_draft": "Only draft configurations can be published"
+  },
+  "flow": {
+    "config_not_found": "Flow configuration not found",
+    "action_not_found": "Flow action not found",
+    "action_config_required": "Action configuration is required",
+    "action_name_required": "Action name is required",
+    "action_name_empty": "Action name cannot be empty"
+  },
+  "device": {
+    "trusted_limit": "The maximum number of trusted devices is reached. Remove trust from another device first."
+  },
+  "export": {
+    "not_ready": "Your data export is not ready for download or its download window has closed."
+  },
+  "general": {
+    "not_found": "Resource not found",
+    "internal_error": "An unexpected error occurred. Please try again later.",
+    "rate_limited": "Too many requests. Please wait before trying again.",
+    "maintenance": "System is under maintenance. Please try again later.",
+    "forbidden": "You are not authorized to access this resource",
+    "admin_required": "Admin role required",
+    "auth_required": "Authorization header required",
+    "bearer_required": "Bearer token expected",
+    "invalid_token": "Invalid or expired token",
+    "invalid_argument": "Invalid argument: {field}",
+    "changed_concurrently": "This was changed meanwhile. Reload and try again.",
+    "already_exists": "This already exists.",
+    "status_not_changeable": "The account's status cannot be changed from its current state"
+  }
+}

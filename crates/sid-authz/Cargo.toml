@@ -1,0 +1,54 @@
+[package]
+name = "sid-authz"
+description = "StructuredID Authorization: RBAC + ABAC (Cedar)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "sid_authz"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sid-authz"
+path = "src/main.rs"
+required-features = ["standalone"]
+
+[dependencies]
+sid-authn = { workspace = true, optional = true }
+sid-core = { workspace = true }
+sid-plugin = { workspace = true }
+sid-proto = { workspace = true, optional = true }
+async-trait = { workspace = true }
+cedar-policy = { workspace = true }
+chrono = { workspace = true }
+prost-types = { workspace = true, optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tonic = { workspace = true, optional = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+# Standalone binary deps
+anyhow = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+
+[features]
+default = ["grpc"]
+grpc = ["dep:sid-authn", "sid-authn/grpc", "sid-core/grpc", "dep:sid-proto", "dep:tonic", "dep:prost-types"]
+standalone = ["grpc", "dep:anyhow", "dep:tokio", "dep:tracing-subscriber"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# The administration benchmark runs against both storage engines.
+sid-storage = { workspace = true, features = ["storage-pg", "storage-sqlite"] }
+
+# P50/P99 of role administration on both engines; percentiles need a
+# harness of its own.
+[[bench]]
+name = "role_administration"
+harness = false

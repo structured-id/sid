@@ -1,0 +1,128 @@
+[package]
+name = "sid-authn"
+description = "StructuredID Authentication - OAuth2, OIDC, WebAuthn, OPAQUE"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+sid-core = { workspace = true }
+sid-keys = { workspace = true }
+sid-plugin = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+
+# OPAQUE password authentication
+opaque-ke = { workspace = true }
+argon2 = { workspace = true }
+rand = { workspace = true }
+
+# NIST curves (FIPS OPAQUE)
+p256 = { workspace = true }
+p384 = { workspace = true }
+p521 = { workspace = true }
+
+# PBKDF2 KSF for FIPS cipher suites
+pbkdf2 = { workspace = true }
+generic-array = { workspace = true }
+
+# Legacy hash verification (migration from competitor IdPs)
+bcrypt = { workspace = true }
+
+# OPAQUE-ZKPP (Pallas CipherSuite + ZK verifier)
+sid-pake-core = { workspace = true }
+ff = { workspace = true }
+group = { workspace = true }
+pasta_curves = { workspace = true }
+
+# TOTP (RFC 6238)
+hmac = { workspace = true }
+sha1 = { workspace = true }
+
+# JWT (EdDSA / Ed25519)
+jsonwebtoken = { workspace = true }
+# Generates each OIDC issuer's Ed25519 signing key and its PKCS#8 encoding.
+ed25519-dalek = { workspace = true, features = ["pkcs8"] }
+base64 = { workspace = true }
+sha2 = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+
+# WebAuthn
+structured-webauthn = { workspace = true }
+url = { workspace = true }
+psl = { workspace = true }
+dashmap = { workspace = true }
+
+# HTTP client (back-channel logout, IP intelligence refresh)
+reqwest = { workspace = true }
+
+# Hex encoding (CAPTCHA PoW challenges)
+hex = { workspace = true }
+
+# Atomic swap for lock-free IP intelligence data updates
+arc-swap = { workspace = true }
+
+# GeoIP (MaxMind MMDB)
+maxminddb = { workspace = true }
+
+# CIDR range matching (IP intelligence: cloud ranges, FireHOL)
+ipnet = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Secret management
+secrecy = { workspace = true }
+zeroize = { workspace = true }
+
+# Constant-time operations
+subtle = { workspace = true }
+
+# Identifier normalization (anti-homoglyph, IDNA)
+unicode-normalization = { workspace = true }
+unicode-security = { workspace = true }
+idna = { workspace = true }
+# Email login handles: mailbox grammar, IDNA and PSL; SID equality on top.
+structured-email-address = { workspace = true }
+
+# Phone number validation (E.164)
+phonenumber = { workspace = true }
+
+# gRPC caller authentication (optional)
+tonic = { workspace = true, optional = true }
+
+[features]
+grpc = ["dep:tonic", "sid-core/grpc"]
+# A software authenticator for tests of WebAuthn ceremonies, here and in the
+# crates that embed them.
+soft-authenticator = ["p256/ecdsa"]
+
+[dev-dependencies]
+sid-storage = { path = "../sid-storage", features = ["storage-sqlite"] }
+sid-pake-core = { workspace = true }
+opaque-ke = { workspace = true }
+p256 = { workspace = true, features = ["ecdsa"] }
+p384 = { workspace = true }
+p521 = { workspace = true }
+ff = { workspace = true }
+pasta_curves = { workspace = true }
+halo2_proofs = { workspace = true }
+rand = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+criterion = { version = "0.8", features = ["html_reports"] }
+
+[[bench]]
+name = "opaque"
+harness = false
+
+[[bench]]
+name = "webauthn"
+harness = false
+required-features = ["soft-authenticator"]
