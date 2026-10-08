@@ -6,7 +6,7 @@
 //! data mutation it records.
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SubsecRound, Utc};
 use sid_core::models::audit::{
     ActorType, AuditEntry, AuditError, AuditOutcome, AuditRecord, compute_record_hash,
 };
@@ -66,6 +66,16 @@ impl PostgresAuditLog {
         chain_id: &str,
         entry: AuditEntry,
     ) -> Result<AuditRecord, AuditError> {
+        Self::append_at(tx, chain_id, entry, Utc::now()).await
+    }
+
+    /// Append a record stamped `at`.
+    pub(crate) async fn append_at(
+        tx: &mut Transaction<'_, Postgres>,
+        chain_id: &str,
+        entry: AuditEntry,
+        at: DateTime<Utc>,
+    ) -> Result<AuditRecord, AuditError> {
         let conn: &mut PgConnection = tx;
         // Creates the head at genesis if absent; the no-op update takes the
         // row lock and returns the head as the lock holder left it.
@@ -82,12 +92,14 @@ impl PostgresAuditLog {
         let sequence = head_sequence as u64 + 1;
 
         let id = Self::generate_id();
-        let now = Utc::now();
 
-        // Build record for hash computation.
+        // Build record for hash computation. The hash covers the timestamp,
+        // so it is taken at the resolution `timestamptz` stores (1 µs,
+        // PostgreSQL 18 docs §8.5): a finer clock would hash digits the
+        // record read back for verification no longer has.
         let mut record = AuditRecord {
             id: id.clone(),
-            timestamp: now,
+            timestamp: at.trunc_subsecs(6),
             chain_id: chain_id.to_string(),
             sequence,
             actor_id: entry.actor_id,
@@ -239,19 +251,4 @@ impl AuditLog for PostgresAuditLog {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_generate_id_is_unique() {
-        let id1 = PostgresAuditLog::generate_id();
-        let id2 = PostgresAuditLog::generate_id();
-        assert_ne!(id1, id2);
-    }
-
-    #[test]
-    fn test_generate_id_is_valid_uuid() {
-        let id = PostgresAuditLog::generate_id();
-        assert!(uuid::Uuid::parse_str(&id).is_ok());
-    }
-}
+mod tests;
