@@ -138,7 +138,7 @@ ed25519-dalek = { version = "3", features = ["rand_core", "alloc"] }
 halo2_proofs = { version = "0.3", features = ["batch"] }
 halo2_gadgets = "0.5"
 pasta_curves = "0.5.1"
-ff = "0.13"
+ff = "0.14"
 group = "0.13"
 subtle = "2"
 
