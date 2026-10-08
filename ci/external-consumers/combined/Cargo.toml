@@ -1,0 +1,14 @@
+# sid-proto and sid-core in one consumer outside the SID workspace: the pair
+# must also resolve without either one depending on features the other lends.
+[package]
+name = "sid-combined-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+sid-proto = { path = "@SID@/crates/sid-proto" }
+sid-core = { path = "@SID@/crates/sid-core" }
+prost = "0.14"
+
+[workspace]

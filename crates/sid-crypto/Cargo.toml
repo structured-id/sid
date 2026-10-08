@@ -1,0 +1,65 @@
+[package]
+name = "sid-crypto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# Part of the server workspace, not published as a crate.
+publish = false
+
+[features]
+default = ["primitives", "aws-lc"]
+primitives = ["dep:sid-keys", "dep:aes-gcm", "dep:curve25519-dalek", "dep:x25519-dalek", "dep:hmac", "dep:hkdf", "dep:pbkdf2", "dep:pasta_curves", "dep:ff", "dep:group", "dep:rand"]
+aws-lc = ["primitives", "dep:aws-lc-rs"]
+fips = ["aws-lc", "aws-lc-rs/fips"]
+
+[dependencies]
+# Primitive trait implemented by the aws-lc-rs backend below
+sid-keys = { workspace = true, optional = true }
+
+# Authenticated encryption (server-side, behind `primitives` feature)
+aes-gcm = { workspace = true, optional = true }
+
+# BoringSSL-based crypto (default backend)
+aws-lc-rs = { workspace = true, optional = true }
+
+# Curve implementations (server-side, behind `primitives` feature)
+pasta_curves = { workspace = true, optional = true }
+ff = { workspace = true, optional = true }
+group = { workspace = true, optional = true }
+
+# Ristretto255 for RFC 9807 standard OPAQUE (server-side)
+curve25519-dalek = { version = "4", features = ["serde", "zeroize"], optional = true }
+x25519-dalek = { version = "2", optional = true }
+
+# Cryptographic primitives
+sha2.workspace = true
+sha1.workspace = true
+hmac = { workspace = true, optional = true }
+digest = "0.10"
+hkdf = { version = "0.12", optional = true }
+pbkdf2 = { workspace = true, optional = true }
+zeroize.workspace = true
+
+# Serialization & types
+serde = { workspace = true }
+serde_json.workspace = true
+
+# Error handling
+thiserror.workspace = true
+anyhow.workspace = true
+
+# Random (server-side)
+rand = { workspace = true, optional = true }
+
+# Testing utilities
+subtle.workspace = true
+
+[dev-dependencies]
+criterion = { version = "0.8", features = ["html_reports"] }
+sid-keys = { workspace = true }
+
+[[bench]]
+name = "primitives"
+harness = false

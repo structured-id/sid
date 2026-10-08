@@ -1,0 +1,108 @@
+[package]
+name = "sid-auth"
+description = "StructuredID forward-auth decision service: forward auth and Envoy ext_authz over one decision"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "sid-auth"
+path = "src/main.rs"
+
+[lib]
+name = "sid_auth"
+path = "src/lib.rs"
+
+[dependencies]
+sid-proto = { workspace = true }
+# Timestamps of the request confirmation sent to sid-authz.
+prost-types = { workspace = true }
+# Resource indicators, issuer handles and the canonical google.rpc error
+# model of the forward-auth RPC.
+sid-core = { workspace = true, features = ["grpc"] }
+# The shared cache holding revocations and DPoP proof `jti`s.
+sid-plugin = { workspace = true }
+sid-infra = { workspace = true }
+# Health on shutdown, bounded drain, the shutdown signal.
+sid-serve = { workspace = true }
+# Issuer verification, revocation view and DPoP proof checks.
+sid-authn = { workspace = true }
+
+# gRPC services and the client to the SID server
+tonic = { workspace = true }
+# The field the authorization API names when it refuses a request's token.
+tonic-types = { workspace = true }
+tokio-stream = "0.1"
+# Envoy asks the forward-auth decision through ext_authz.
+envoy-types = { workspace = true }
+http = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+
+# HTTP form of forward auth: the embedded annotation transcoder
+# (crates.io/crates/structured-proxy). Its own JWT and TLS stacks stay off.
+structured-proxy = { version = "8.1", default-features = false, optional = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Route policy: origins, path globs
+url = { workspace = true }
+globset = { workspace = true }
+
+# Reading a token's `iss` before choosing its verifier; this service's own
+# client assertion and Basic credentials for its authorization-API token
+base64 = { workspace = true }
+jsonwebtoken = { workspace = true }
+secrecy = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+
+# Issuer and resource caches
+dashmap = { workspace = true }
+# The issuer source is a trait object: the gRPC registry in service, a fixed
+# set in tests.
+async-trait = { workspace = true }
+
+[[test]]
+name = "forward_auth_integration"
+# Exercises the HTTP form through the embedded transcoder.
+required-features = ["http"]
+
+[features]
+default = ["http"]
+# Serve ForwardAuthService.Verify over HTTP through the embedded transcoder.
+http = ["dep:structured-proxy", "sid-infra/http"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tonic-health = { workspace = true }
+# Every served method is called to check the error contract.
+sid-serve = { workspace = true, features = ["error-contract"] }
+# The transcoder's router is exercised in process by the HTTP tests.
+axum = { workspace = true }
+tower = { workspace = true, features = ["util"] }
+http-body-util = "0.1"
+# pkcs8: test keys are encoded by the same library that will parse them,
+# rather than by a hand-written DER literal.
+ed25519-dalek = { workspace = true, features = ["pkcs8"] }
+rand = { workspace = true }
+# The permission-query benchmark asks a real issuer served over gRPC.
+sid-test-issuer = { path = "../sid-test-issuer" }
+
+[[bench]]
+name = "permission_query"
+harness = false
