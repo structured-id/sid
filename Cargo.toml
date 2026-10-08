@@ -179,7 +179,7 @@ hmac = "0.12"
 sha1 = "0.10"
 
 # Key derivation for field-level encryption (sid-keys)
-hkdf = "0.12"
+hkdf = "0.13"
 
 # HTTP client (feature flags polling, GeoIP API)
 # 0.13 dropped `rustls-tls` (ring). `rustls` would pull aws-lc-rs, which a CE

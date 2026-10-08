@@ -38,7 +38,7 @@ sha2.workspace = true
 sha1.workspace = true
 hmac = { workspace = true, optional = true }
 digest = "0.10"
-hkdf = { version = "0.12", optional = true }
+hkdf = { version = "0.13", optional = true }
 pbkdf2 = { workspace = true, optional = true }
 zeroize.workspace = true
 
