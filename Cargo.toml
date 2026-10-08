@@ -135,7 +135,7 @@ ed25519-dalek = { version = "3", features = ["rand_core", "alloc"] }
 # ZK Proof System (OPAQUE-ZKPP)
 # ff and group stay at 0.13 because halo2_gadgets 0.5 and pasta_curves 0.5
 # are built against it; 0.14 has no halo2 release to pair with.
-halo2_proofs = { version = "0.3", features = ["batch"] }
+halo2_proofs = { version = "0.4", features = ["batch"] }
 halo2_gadgets = "0.5"
 pasta_curves = "0.5.1"
 ff = "0.13"

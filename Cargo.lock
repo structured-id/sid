@@ -3,6 +3,17 @@
 version = 4
 
 [[package]]
+name = "addchain"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5665045de74fda906c0abfaec40cf2551f88c34dccea869f3fe950dde7209764"
+dependencies = [
+ "num-bigint",
+ "num-integer",
+ "num-traits",
+]
+
+[[package]]
 name = "aead"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1836,8 +1847,25 @@ version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a1f686ab92a9fb0eaf188f6c6c87b89490baa6fdb0db4544ba4dc47f7942489f"
 dependencies = [
+ "bitvec",
+ "ff_derive",
  "rand_core 0.10.1",
  "subtle",
+]
+
+[[package]]
+name = "ff_derive"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "241afe8c15ffa21933eaefe8a563af36fd9fc98a3e8a044e8f7db52eb1fae3d8"
+dependencies = [
+ "addchain",
+ "num-bigint",
+ "num-integer",
+ "num-traits",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -2216,9 +2244,9 @@ dependencies = [
  "ff 0.13.1",
  "group 0.13.0",
  "halo2_poseidon",
- "halo2_proofs",
+ "halo2_proofs 0.3.2",
  "lazy_static",
- "pasta_curves",
+ "pasta_curves 0.5.2",
  "rand 0.8.8",
  "sinsemilla",
  "subtle",
@@ -2234,7 +2262,7 @@ dependencies = [
  "bitvec",
  "ff 0.13.1",
  "group 0.13.0",
- "pasta_curves",
+ "pasta_curves 0.5.2",
 ]
 
 [[package]]
@@ -2248,8 +2276,25 @@ dependencies = [
  "group 0.13.0",
  "indexmap 1.9.3",
  "maybe-rayon",
- "pasta_curves",
+ "pasta_curves 0.5.2",
  "rand_core 0.6.4",
+ "tracing",
+]
+
+[[package]]
+name = "halo2_proofs"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5af2a9457f494f862cd07b81c2e98a19f50b06a2057b7569450d7c26b167d1c"
+dependencies = [
+ "blake2b_simd",
+ "ff 0.14.0",
+ "group 0.14.0",
+ "indexmap 2.14.2",
+ "maybe-rayon",
+ "pasta_curves 0.6.0",
+ "rand 0.10.3",
+ "rand_core 0.10.1",
  "tracing",
 ]
 
@@ -3836,6 +3881,21 @@ dependencies = [
  "group 0.13.0",
  "lazy_static",
  "rand 0.8.8",
+ "static_assertions",
+ "subtle",
+]
+
+[[package]]
+name = "pasta_curves"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ec2f82051d06ea52d7ec6a47546c592fc52392b6040e503e05a764dd10dd1de"
+dependencies = [
+ "blake2b_simd",
+ "ff 0.14.0",
+ "group 0.14.0",
+ "lazy_static",
+ "rand 0.10.3",
  "static_assertions",
  "subtle",
 ]
@@ -5527,7 +5587,7 @@ dependencies = [
  "ff 0.13.1",
  "generic-array",
  "group 0.13.0",
- "halo2_proofs",
+ "halo2_proofs 0.4.0",
  "hex",
  "hmac 0.12.1",
  "idna",
@@ -5538,7 +5598,7 @@ dependencies = [
  "p256 0.13.2",
  "p384 0.13.1",
  "p521",
- "pasta_curves",
+ "pasta_curves 0.5.2",
  "pbkdf2",
  "phonenumber",
  "psl",
@@ -5636,7 +5696,7 @@ dependencies = [
  "group 0.13.0",
  "hkdf 0.12.4",
  "hmac 0.12.1",
- "pasta_curves",
+ "pasta_curves 0.5.2",
  "pbkdf2",
  "rand 0.8.8",
  "serde",
@@ -5837,9 +5897,9 @@ dependencies = [
  "generic-array",
  "group 0.13.0",
  "halo2_gadgets",
- "halo2_proofs",
+ "halo2_proofs 0.3.2",
  "opaque-ke",
- "pasta_curves",
+ "pasta_curves 0.5.2",
  "rand 0.8.8",
  "serde",
  "sha2 0.10.9",
@@ -5949,7 +6009,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry-prometheus",
  "opentelemetry_sdk",
- "pasta_curves",
+ "pasta_curves 0.5.2",
  "prometheus",
  "prost",
  "prost-reflect",
@@ -6141,7 +6201,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d268ae0ea06faafe1662e9967cd4f9022014f5eeb798e0c302c876df8b7af9c"
 dependencies = [
  "group 0.13.0",
- "pasta_curves",
+ "pasta_curves 0.5.2",
  "subtle",
 ]
 
