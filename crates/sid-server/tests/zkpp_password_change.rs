@@ -720,6 +720,18 @@ async fn test_a_change_without_the_current_password_is_refused() {
     );
     assert_eq!(reason(&refused), "STEP_UP_REQUIRED");
     assert_eq!(continuation(&refused), "current_password");
+    // The canonical STEP_UP_REQUIRED detail: the method a generic client
+    // must add, the password (RFC 8176 `pwd`).
+    let violations = refused
+        .get_details_precondition_failure()
+        .map(|failure| failure.violations)
+        .unwrap_or_default();
+    assert!(
+        violations
+            .iter()
+            .any(|v| v.r#type == "amr" && v.subject == "pwd"),
+        "{violations:?}"
+    );
     assert!(signs_in(&svc, OLD).await, "the refusal kept the password");
 }
 

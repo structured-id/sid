@@ -266,7 +266,10 @@ fn refusal_status(refusal: EnrollmentRefusal) -> tonic::Status {
             ErrorReason::StepUpRequired,
             "enter the current password to change it",
         )
-        .with_metadata("continuation", "current_password"),
+        .with_metadata("continuation", "current_password")
+        // The canonical STEP_UP_REQUIRED detail: the method to add, the
+        // password (RFC 8176 §2 `pwd`).
+        .with_precondition("amr", "pwd", "prove the current password"),
     };
     tonic::Status::from(err)
 }

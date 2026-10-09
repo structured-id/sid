@@ -3,6 +3,32 @@ use sid_authn::webauthn::soft_authenticator::SoftAuthenticator;
 use sid_authn::webauthn::{RegistrationResponse, WebAuthnServer};
 use sid_proto::sid::v1::{AuthenticatorAttachment, AuthenticatorTransport, credential};
 
+/// A password credential names its OPAQUE suite, so a client builds KE1 in
+/// it; one stored before the curve was recorded is in the primary suite.
+#[test]
+fn test_credential_info_names_the_opaque_suite() {
+    use sid_core::models::{Credential, CredentialType, ProfileId};
+    use sid_proto::sid::v1::{OpaqueSuite, credential::Info};
+
+    let suite = |curve: Option<u8>| {
+        let mut c = Credential::new(ProfileId::generate(), CredentialType::Opaque, vec![1], None);
+        c.opaque_curve = curve;
+        match credential_info(&c).unwrap() {
+            Some(Info::OpaqueInfo(info)) => info.suite(),
+            _ => panic!("no OPAQUE info"),
+        }
+    };
+    assert_eq!(suite(None), OpaqueSuite::Pallas);
+    assert_eq!(
+        suite(Some(sid_plugin::crypto::CurveId::Ristretto255 as u8)),
+        OpaqueSuite::Ristretto255
+    );
+    assert_eq!(
+        suite(Some(sid_plugin::crypto::CurveId::P521 as u8)),
+        OpaqueSuite::P521
+    );
+}
+
 #[test]
 fn test_profile_to_proto_basic_fields() {
     let mut profile = Profile::new(Some("basic_test"));
@@ -53,7 +79,9 @@ async fn passkey_record(key: &mut SoftAuthenticator) -> Vec<u8> {
 }
 
 fn webauthn_info(data: &[u8]) -> sid_proto::sid::v1::WebAuthnCredentialInfo {
-    let credential::Info::WebauthnInfo(info) = extract_webauthn_info(data).unwrap();
+    let credential::Info::WebauthnInfo(info) = extract_webauthn_info(data).unwrap() else {
+        panic!("not passkey facts");
+    };
     info
 }
 
