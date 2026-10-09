@@ -54,6 +54,7 @@ use sid_proto::sid::v1::authn::{
     PasswordHistoryDomain, PasswordHistoryEvaluation, PasswordHistoryEvaluationProof,
     PasswordRegistrationProof,
 };
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tonic::{Request, Response, Status};
 use tracing::warn;
 
@@ -204,6 +205,9 @@ pub(crate) struct PasswordOperations {
     cache: Arc<dyn CacheBackend>,
     evaluator: HistoryEvaluator,
     checker: HistoryChecker,
+    // Local compute capacity, not authorization/rate-limit authority. A permit
+    // bounds one fixed-shape verifier workspace and remains with its task.
+    proof_permits: Arc<Semaphore>,
     ops: ChallengeStore<PendingOperation>,
     installation: [u8; 16],
     ksf: HistoryKsf,
@@ -222,6 +226,20 @@ fn unavailable(what: &str) -> Status {
 fn internal(e: impl std::fmt::Display) -> Status {
     warn!("password operation: {e}");
     ApiError::internal().into()
+}
+
+/// Hold the reservation in the blocking task itself: cancelling its caller
+/// cannot release capacity while non-cancellable cryptographic work continues.
+async fn run_proof<T: Send + 'static>(
+    permit: OwnedSemaphorePermit,
+    job: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, Status> {
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        job()
+    })
+    .await
+    .map_err(internal)
 }
 
 /// The refusal of a step whose operation is not pending for it: unknown,
@@ -268,6 +286,10 @@ pub(crate) fn decode_proof(proof: PasswordRegistrationProof) -> Result<BoundProo
     use ff::PrimeField;
     use pasta_curves::pallas;
 
+    if proof.instances.len() > sid_pake_core::circuit::instance_count(MAX_HISTORY_DOMAINS) {
+        return Err(invalid_field("proof.instances", "too many instances"));
+    }
+
     let instances = proof
         .instances
         .iter()
@@ -308,6 +330,11 @@ impl PasswordOperations {
             checker: HistoryChecker::new(sid_authn::password_history::KsfAdmission::new(
                 KSF_BUDGET_MIB,
                 KSF_WAIT,
+            )),
+            proof_permits: Arc::new(Semaphore::new(
+                std::thread::available_parallelism()
+                    .expect("password verification requires a known CPU capacity")
+                    .get(),
             )),
             ops: ChallengeStore::new(cache, keys, "password-operation", OPERATION_TTL),
             installation: *installation.as_bytes(),
@@ -584,7 +611,8 @@ impl PasswordOperations {
     /// proved, the proof. Takes the operation for good; a proof, history or
     /// record that fails leaves nothing to retry but a new operation. An
     /// operation already committed answers with its recorded result when the
-    /// record is the one it was committed with.
+    /// record is the one it was committed with. Exhausted proof capacity restores
+    /// the pending operation for an exact retry; it is not a rejected proof.
     pub(crate) async fn finish(
         &self,
         zkpp: Arc<ZkppOpaqueServer>,
@@ -633,6 +661,12 @@ impl PasswordOperations {
                 command,
             })));
         };
+        let (proof_len, instance_count) = zkpp
+            .proof_lengths(op.domains.len())
+            .map_err(|_| invalid_proof())?;
+        if proof.zkpp_proof.len() != proof_len || proof.instances.len() != instance_count {
+            return Err(invalid_proof());
+        }
         let proof = decode_proof(proof)?;
         let (op_id, domains) = (*op.id.as_bytes(), op.domains.len());
 
@@ -652,17 +686,27 @@ impl PasswordOperations {
             return Err(invalid_proof());
         }
 
-        // Proof verification is CPU-bound: off the async runtime, outside
-        // any transaction.
+        // No queue of secret-bearing proofs. Saturation leaves the original
+        // operation pending, so the caller can retry without another evaluation
+        // or another proof. Never turn overload into unverified installation.
+        let permit = match Arc::clone(&self.proof_permits).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                self.store(&op).await?;
+                return Err(unavailable("proof verification capacity"));
+            }
+        };
+        // CPU-bound verification runs outside transactions and the async
+        // runtime; its permit also bounds fixed-shape concurrent workspaces.
         let verifier = Arc::clone(&zkpp);
-        let public =
-            tokio::task::spawn_blocking(move || verifier.verify(&proof, &op_id, &request, domains))
-                .await
-                .map_err(internal)?
-                .map_err(|e| {
-                    warn!("password proof refused: {e}");
-                    invalid_proof()
-                })?;
+        let public = run_proof(permit, move || {
+            verifier.verify(&proof, &op_id, &request, domains)
+        })
+        .await?
+        .map_err(|e| {
+            warn!("password proof refused: {e}");
+            invalid_proof()
+        })?;
 
         if op.decoy {
             // Verified like any proof; the purpose refuses the commit.

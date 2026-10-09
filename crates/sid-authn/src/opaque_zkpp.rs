@@ -92,6 +92,16 @@ impl ZkppOpaqueServer {
             .any(|v| v.shape().history_domains == domains)
     }
 
+    /// Exact wire lengths fixed by the accepted verifier, before allocating
+    /// or decoding client-supplied instances. The client cannot select them.
+    pub fn proof_lengths(&self, domains: usize) -> SidResult<(usize, usize)> {
+        let verifier = self.verifier(domains)?;
+        Ok((
+            verifier.proof_len(),
+            sid_pake_core::circuit::instance_count(verifier.shape().history_domains),
+        ))
+    }
+
     /// OPAQUE registration start for `credential_identifier`: the response
     /// the client finishes its record from.
     pub fn opaque_start(
