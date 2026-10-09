@@ -49,6 +49,15 @@ async fn registered(
     prover: &ZkppProver,
     verifier: ZkppVerifier,
 ) -> (TestServices, Credential, String) {
+    registered_as(prover, verifier, PRINCIPAL).await
+}
+
+/// As [`registered`], for the login identifier `principal`.
+async fn registered_as(
+    prover: &ZkppProver,
+    verifier: ZkppVerifier,
+    principal: &str,
+) -> (TestServices, Credential, String) {
     let svc = TestServices::with_zkpp(
         MockStorage::new().with_system_project(),
         verifier,
@@ -61,7 +70,7 @@ async fn registered(
     let start = svc
         .auth
         .opaque_zkpp_registration_start(Request::new(OpaqueZkppRegistrationStartRequest {
-            principal: PRINCIPAL.to_string(),
+            principal: principal.to_string(),
             registration_request: started.request.clone(),
             claim_token: None,
         }))
@@ -193,11 +202,16 @@ async fn change(
 
 /// Sign in as `PRINCIPAL` with `password` through ordinary OPAQUE login.
 async fn signs_in(svc: &TestServices, password: &[u8]) -> bool {
+    signs_in_as(svc, PRINCIPAL, password).await
+}
+
+/// Sign in as `principal` with `password` through ordinary OPAQUE login.
+async fn signs_in_as(svc: &TestServices, principal: &str, password: &[u8]) -> bool {
     let login = ClientLogin::<PallasCipherSuite>::start(&mut UnwrapErr(SysRng), password).unwrap();
     let Ok(started) = svc
         .auth
         .opaque_login_start(Request::new(OpaqueLoginStartRequest {
-            principal: PRINCIPAL.to_string(),
+            principal: principal.to_string(),
             credential_request: login.message.serialize().to_vec(),
         }))
         .await
@@ -215,12 +229,41 @@ async fn signs_in(svc: &TestServices, password: &[u8]) -> bool {
     };
     svc.auth
         .opaque_login_finish(Request::new(OpaqueLoginFinishRequest {
-            principal: PRINCIPAL.to_string(),
+            principal: principal.to_string(),
             credential_finalization: finished.message.serialize().to_vec(),
             server_login_state: started.server_login_state,
         }))
         .await
         .is_ok()
+}
+
+/// The proved lifecycle is the same whatever identifier the account signs in
+/// with: an account registered with a username or a phone number has its
+/// retained password refused, changes to a new one with verified evidence and
+/// signs in with it, not with the old one.
+#[tokio::test]
+async fn test_a_username_or_phone_account_has_the_same_history() {
+    for principal in ["change_user", "+380671234567"] {
+        let (prover, verifier) = client::keys(1);
+        let (svc, credential, token) = registered_as(&prover, verifier, principal).await;
+        assert!(signs_in_as(&svc, principal, OLD).await, "{principal}");
+        let reused = change(&svc, &prover, &credential, &token, OLD)
+            .await
+            .expect_err("the current password passed the history check");
+        assert_eq!(reason(&reused), "PASSWORD_REUSED", "{principal}");
+        change(&svc, &prover, &credential, &token, NEW)
+            .await
+            .unwrap_or_else(|e| panic!("{principal}: {e:?}"));
+        let stored = svc
+            .storage
+            .get_credential(credential.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.policy_evidence.is_verified(), "{principal}");
+        assert!(signs_in_as(&svc, principal, NEW).await, "{principal}");
+        assert!(!signs_in_as(&svc, principal, OLD).await, "{principal}");
+    }
 }
 
 /// The new password is compared with the retained history: the current
