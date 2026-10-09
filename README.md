@@ -128,7 +128,7 @@ Logins it provisions are federated usernames `userName#<organization domain>`.
 ## Password client conformance
 
 [The installed-client suite](ci/password-clients/README.md) exercises the
-immutable published TypeScript package against real gRPC registration, login,
+immutable published TypeScript package in Node and Chromium against real gRPC registration, login,
 password change and reset. It checks mandatory proofs, evaluator authenticity,
 operation binding, retained-password refusal and durable registration retries.
 The test adapter is separate from the product and uses the client's actual KSF

@@ -66,6 +66,8 @@ jobs:
           node-version: 24
       - name: Immutable published password client
         run: npm ci --ignore-scripts --prefix ci/password-clients
+      - name: Browser for published client conformance
+        run: ci/password-clients/node_modules/.bin/playwright install --with-deps chromium
       # The ZKPP circuit crate comes from the zkpp submodule as a dependency, not
       # a workspace member, and is tested in its own repository with optimized
       # builds; sid-crypto holds the server primitives and runs here.

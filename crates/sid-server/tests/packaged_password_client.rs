@@ -31,12 +31,13 @@ struct Kernel {
 }
 
 impl Kernel {
-    fn start() -> Self {
+    fn start(adapter: &str) -> Self {
         let mut child = tokio::process::Command::new("node")
-            .arg(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../ci/password-clients/kernel.mjs"
-            ))
+            .arg(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../ci/password-clients")
+                    .join(adapter),
+            )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -178,6 +179,17 @@ async fn login(
 /// must fail rather than turn into successful unverified installations.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn published_client_completes_password_lifecycle() {
+    password_lifecycle("kernel.mjs").await;
+}
+
+/// The same lifecycle and refusals must hold in a real browser, not just Node.
+/// Its installed SDK runs the actual browser KSF and prover on the page.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn published_browser_completes_password_lifecycle() {
+    password_lifecycle("browser.mjs").await;
+}
+
+async fn password_lifecycle(adapter: &str) {
     let (_, verifier) = zkpp_client::keys(1);
     let svc = TestServices::with_zkpp(
         MockStorage::new().with_system_project(),
@@ -206,7 +218,7 @@ async fn published_client_completes_password_lifecycle() {
         .unwrap();
     let mut auth = AuthServiceClient::new(channel.clone());
     let mut evaluator = PasswordHistoryEvaluatorServiceClient::new(channel);
-    let mut kernel = Kernel::start();
+    let mut kernel = Kernel::start(adapter);
     let principal = format!(
         "published-{}@sid.example.com",
         uuid::Uuid::now_v7().simple()
@@ -525,7 +537,13 @@ async fn published_client_completes_password_lifecycle() {
     login(&mut kernel, &mut auth, &principal, RESET)
         .await
         .unwrap();
-    kernel.child.kill().await.unwrap();
+    // EOF lets the browser adapter close Chromium and its loopback server.
+    drop(kernel.child.stdin.take());
+    let exit = tokio::time::timeout(Duration::from_secs(10), kernel.child.wait())
+        .await
+        .expect("client cleanup timeout")
+        .unwrap();
+    assert!(exit.success());
     stop.send(()).unwrap();
     server.await.unwrap().unwrap();
 }

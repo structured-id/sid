@@ -2,5 +2,6 @@
   "name": "sid-password-client-conformance",
   "private": true,
   "type": "module",
-  "dependencies": { "@structured-id/opaque": "2.0.1" }
+  "dependencies": { "@structured-id/opaque": "2.0.1" },
+  "devDependencies": { "esbuild": "0.28.1", "playwright": "1.63.0" }
 }
