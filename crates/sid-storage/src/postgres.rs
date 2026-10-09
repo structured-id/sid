@@ -2056,6 +2056,13 @@ impl StorageBackend for PostgresBackend {
         password_history::get(&self.pool, owner).await
     }
 
+    async fn get_history_epochs(
+        &self,
+        owner: ProfileId,
+    ) -> SidResult<sid_core::models::HistoryEpochs> {
+        password_history::epochs(&self.pool, owner).await
+    }
+
     async fn export_password_history(
         &self,
         owner: ProfileId,

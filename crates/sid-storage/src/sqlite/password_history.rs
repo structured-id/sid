@@ -6,8 +6,8 @@
 
 use sid_core::models::{
     HistoryArchive, HistoryCommit, HistoryEntry, HistoryEpoch, HistoryEpochId, HistoryEpochUse,
-    HistoryEvidence, HistoryKsf, HistorySuite, NewHistoryEpoch, PasswordHistory, ProfileId,
-    WrappedHistoryKey,
+    HistoryEpochs, HistoryEvidence, HistoryKsf, HistorySuite, NewHistoryEpoch, PasswordHistory,
+    ProfileId, WrappedHistoryKey,
 };
 use sid_core::{Error as SidError, Result as SidResult};
 
@@ -160,6 +160,37 @@ async fn read_archive(
     };
     archive.validate()?;
     Ok(Some(archive))
+}
+
+/// The owner's revision and epochs not retired; `None` without history.
+async fn read_epochs(
+    conn: &mut sqlx::SqliteConnection,
+    owner: ProfileId,
+) -> SidResult<Option<HistoryEpochs>> {
+    require_current_format(conn, owner).await?;
+    let revision: Option<i64> =
+        sqlx::query_scalar("SELECT revision FROM password_histories WHERE owner_id = ?")
+            .bind(owner)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(storage("revision"))?;
+    let Some(revision) = revision else {
+        return Ok(None);
+    };
+    let rows = sqlx::query(concat!(
+        "SELECT ",
+        epoch_columns!(),
+        " FROM password_history_epochs
+         WHERE owner_id = ? AND status <> 'retired' ORDER BY created_at, id"
+    ))
+    .bind(owner)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(storage("epochs"))?;
+    Ok(Some(HistoryEpochs {
+        revision,
+        epochs: rows.iter().map(row_to_epoch).collect::<SidResult<_>>()?,
+    }))
 }
 
 async fn insert_epoch(tx: &mut WriteTx, new: &NewHistoryEpoch) -> SidResult<()> {
@@ -322,32 +353,25 @@ impl SqliteBackend {
         Ok(true)
     }
 
+    pub(crate) async fn get_history_epochs_impl(
+        &self,
+        owner: ProfileId,
+    ) -> SidResult<HistoryEpochs> {
+        let mut tx = self.pool.begin().await.map_err(storage("read"))?;
+        let epochs = read_epochs(&mut tx, owner).await?.unwrap_or_default();
+        tx.commit().await.map_err(storage("read"))?;
+        Ok(epochs)
+    }
+
     pub(crate) async fn get_password_history_impl(
         &self,
         owner: ProfileId,
     ) -> SidResult<PasswordHistory> {
         // One read transaction: the revision and the rows it covers.
         let mut tx = self.pool.begin().await.map_err(storage("read"))?;
-        require_current_format(&mut tx, owner).await?;
-        let revision: Option<i64> =
-            sqlx::query_scalar("SELECT revision FROM password_histories WHERE owner_id = ?")
-                .bind(owner)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(storage("revision"))?;
-        let Some(revision) = revision else {
+        let Some(HistoryEpochs { revision, epochs }) = read_epochs(&mut tx, owner).await? else {
             return Ok(PasswordHistory::default());
         };
-        let epochs = sqlx::query(concat!(
-            "SELECT ",
-            epoch_columns!(),
-            " FROM password_history_epochs
-             WHERE owner_id = ? AND status <> 'retired' ORDER BY created_at, id"
-        ))
-        .bind(owner)
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(storage("epochs"))?;
         let entries = sqlx::query(
             "SELECT epoch_id, seq, entry, operation_id, policy_version, created_at
              FROM password_history_entries WHERE owner_id = ? ORDER BY seq DESC, epoch_id",
@@ -359,7 +383,7 @@ impl SqliteBackend {
         tx.commit().await.map_err(storage("read"))?;
         Ok(PasswordHistory {
             revision,
-            epochs: epochs.iter().map(row_to_epoch).collect::<SidResult<_>>()?,
+            epochs,
             entries: entries.iter().map(row_to_entry).collect::<SidResult<_>>()?,
         })
     }

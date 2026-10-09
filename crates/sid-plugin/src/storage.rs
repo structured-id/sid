@@ -360,6 +360,12 @@ pub trait StorageBackend: WorkStore + Send + Sync + 'static {
     /// retained entry. An owner with no history reads as revision 0, empty.
     async fn get_password_history(&self, owner: ProfileId) -> Result<PasswordHistory>;
 
+    /// `owner`'s revision and every epoch not retired, for the evaluator:
+    /// no retained entry is read. Revision 0 with no epochs when the owner
+    /// has no history.
+    async fn get_history_epochs(&self, owner: ProfileId)
+    -> Result<sid_core::models::HistoryEpochs>;
+
     /// Consistent complete durable history, including retired epochs and sealed
     /// keys, for offline same-authority transfer; None only if no history exists.
     async fn export_password_history(

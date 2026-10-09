@@ -5,8 +5,8 @@
 use chrono::{DateTime, Utc};
 use sid_core::models::{
     HistoryArchive, HistoryCommit, HistoryEntry, HistoryEpoch, HistoryEpochId, HistoryEpochUse,
-    HistoryEvidence, HistoryKsf, HistorySuite, NewHistoryEpoch, PasswordHistory, ProfileId,
-    WrappedHistoryKey,
+    HistoryEpochs, HistoryEvidence, HistoryKsf, HistorySuite, NewHistoryEpoch, PasswordHistory,
+    ProfileId, WrappedHistoryKey,
 };
 use sid_core::{Error as SidError, Result as SidResult};
 use sqlx::PgPool;
@@ -214,22 +214,30 @@ pub(super) async fn import_archive(
     Ok(true)
 }
 
-pub(super) async fn get(pool: &PgPool, owner: ProfileId) -> SidResult<PasswordHistory> {
+/// A read-only snapshot transaction: a revision and the rows it covers.
+async fn snapshot(pool: &PgPool) -> SidResult<sqlx::Transaction<'static, sqlx::Postgres>> {
     let mut tx = pool.begin().await.map_err(storage("read"))?;
-    // One snapshot: the revision and the rows it covers.
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
         .execute(&mut *tx)
         .await
         .map_err(storage("read"))?;
-    require_current_format(&mut tx, owner).await?;
+    Ok(tx)
+}
+
+/// The owner's revision and epochs not retired; `None` without history.
+async fn read_epochs(
+    conn: &mut sqlx::PgConnection,
+    owner: ProfileId,
+) -> SidResult<Option<HistoryEpochs>> {
+    require_current_format(conn, owner).await?;
     let revision: Option<i64> =
         sqlx::query_scalar("SELECT revision FROM password_histories WHERE owner_id = $1")
             .bind(owner)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut *conn)
             .await
             .map_err(storage("revision"))?;
     let Some(revision) = revision else {
-        return Ok(PasswordHistory::default());
+        return Ok(None);
     };
     let epochs: Vec<EpochRow> = sqlx::query_as(concat!(
         "SELECT ",
@@ -238,9 +246,30 @@ pub(super) async fn get(pool: &PgPool, owner: ProfileId) -> SidResult<PasswordHi
          WHERE owner_id = $1 AND status <> 'retired' ORDER BY created_at, id"
     ))
     .bind(owner)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut *conn)
     .await
     .map_err(storage("epochs"))?;
+    Ok(Some(HistoryEpochs {
+        revision,
+        epochs: epochs
+            .into_iter()
+            .map(epoch_from_row)
+            .collect::<SidResult<_>>()?,
+    }))
+}
+
+pub(super) async fn epochs(pool: &PgPool, owner: ProfileId) -> SidResult<HistoryEpochs> {
+    let mut tx = snapshot(pool).await?;
+    let epochs = read_epochs(&mut tx, owner).await?.unwrap_or_default();
+    tx.commit().await.map_err(storage("read"))?;
+    Ok(epochs)
+}
+
+pub(super) async fn get(pool: &PgPool, owner: ProfileId) -> SidResult<PasswordHistory> {
+    let mut tx = snapshot(pool).await?;
+    let Some(HistoryEpochs { revision, epochs }) = read_epochs(&mut tx, owner).await? else {
+        return Ok(PasswordHistory::default());
+    };
     let entries: Vec<EntryRow> = sqlx::query_as(
         "SELECT epoch_id, seq, entry, operation_id, policy_version, created_at
          FROM password_history_entries WHERE owner_id = $1 ORDER BY seq DESC, epoch_id",
@@ -253,10 +282,7 @@ pub(super) async fn get(pool: &PgPool, owner: ProfileId) -> SidResult<PasswordHi
 
     Ok(PasswordHistory {
         revision,
-        epochs: epochs
-            .into_iter()
-            .map(epoch_from_row)
-            .collect::<SidResult<_>>()?,
+        epochs,
         entries: entries
             .into_iter()
             .map(

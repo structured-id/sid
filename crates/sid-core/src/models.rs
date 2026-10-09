@@ -175,7 +175,8 @@ pub use operation::{OperationCompletion, OperationKey, OperationRecord};
 pub use organization::{OrgId, OrgStatus, OrgType, Organization};
 pub use password_history::{
     HistoryArchive, HistoryCommit, HistoryEntry, HistoryEpoch, HistoryEpochId, HistoryEpochUse,
-    HistoryEvidence, HistoryKsf, HistorySuite, NewHistoryEpoch, PasswordHistory, WrappedHistoryKey,
+    HistoryEpochs, HistoryEvidence, HistoryKsf, HistorySuite, NewHistoryEpoch, PasswordHistory,
+    WrappedHistoryKey,
 };
 pub use password_reset::{
     PasswordResetSession, RESET_SESSION_TTL_SECS, ResetSessionId, ResetSessionStatus,

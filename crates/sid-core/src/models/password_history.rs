@@ -203,6 +203,39 @@ impl PasswordHistory {
     }
 }
 
+/// An owner's epochs as the evaluator reads them: the revision and every
+/// epoch not retired, without any retained entry. Storage retires a
+/// compare-only epoch together with its last entry, so every compare-only
+/// epoch here still retains one; the checker confirms the selection against
+/// the entries before it accepts a password.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HistoryEpochs {
+    pub revision: i64,
+    pub epochs: Vec<HistoryEpoch>,
+}
+
+impl HistoryEpochs {
+    /// The epoch new entries go under, if the owner has one.
+    pub fn active_epoch(&self) -> Option<&HistoryEpoch> {
+        self.epochs
+            .iter()
+            .find(|e| e.status == HistoryEpochUse::Active)
+    }
+
+    /// The epochs a new password must be compared in: the active one first,
+    /// then every compare-only epoch, in the order [`PasswordHistory::required_epochs`]
+    /// lists them.
+    pub fn required_epochs(&self) -> Vec<&HistoryEpoch> {
+        let mut required: Vec<&HistoryEpoch> = self.active_epoch().into_iter().collect();
+        required.extend(
+            self.epochs
+                .iter()
+                .filter(|e| e.status == HistoryEpochUse::CompareOnly),
+        );
+        required
+    }
+}
+
 /// A new epoch with its sealed key, written before its first use.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewHistoryEpoch {

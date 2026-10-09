@@ -89,6 +89,21 @@ fn next(password: &Credential, data: &[u8]) -> Credential {
     new
 }
 
+/// The evaluator's view of `owner` is the history's revision and epochs with
+/// no entry, and selects the same required epochs as the full history.
+async fn assert_epoch_view(backend: &dyn StorageBackend, owner: ProfileId) {
+    let history = backend.get_password_history(owner).await.unwrap();
+    let view = backend.get_history_epochs(owner).await.unwrap();
+    assert_eq!(view.revision, history.revision);
+    assert_eq!(view.epochs, history.epochs);
+    let ids = |epochs: Vec<&HistoryEpoch>| epochs.iter().map(|e| e.id).collect::<Vec<_>>();
+    assert_eq!(
+        ids(view.required_epochs()),
+        ids(history.required_epochs()),
+        "every compare-only epoch the evaluator sees still retains an entry"
+    );
+}
+
 /// The transfer preserves entries, sealed keys and retired provenance; exact
 /// repeats add nothing, conflicting or malformed archives never mutate history.
 pub async fn test_history_archive_preserves_lifecycle(backend: &dyn StorageBackend) {
@@ -158,6 +173,7 @@ pub async fn test_history_archive_preserves_lifecycle(backend: &dyn StorageBacke
     assert_eq!(view.revision, 7);
     assert_eq!(view.entries.len(), 2);
     assert!(!view.epochs.iter().any(|e| e.id == retired.epoch.id));
+    assert_epoch_view(backend, owner).await;
     assert_eq!(
         backend
             .get_history_epoch_key(retired.epoch.id)
@@ -251,6 +267,7 @@ pub async fn test_history_is_empty_until_written(backend: &dyn StorageBackend) {
     let history = backend.get_password_history(owner).await.unwrap();
     assert_eq!(history.revision, 0);
     assert!(history.epochs.is_empty() && history.entries.is_empty());
+    assert_epoch_view(backend, owner).await;
 }
 
 /// Preparing an epoch writes it and its sealed key once. A second or a
@@ -353,6 +370,7 @@ pub async fn test_history_epoch_rotation(backend: &dyn StorageBackend) {
             .map(|e| e.status),
         Some(HistoryEpochUse::CompareOnly)
     );
+    assert_epoch_view(backend, owner).await;
 
     // A rotation naming an epoch no longer active changes nothing.
     let late = backend
@@ -404,6 +422,7 @@ pub async fn test_history_epoch_rotation(backend: &dyn StorageBackend) {
             .unwrap()
     );
     let after = backend.get_password_history(owner).await.unwrap();
+    assert_epoch_view(backend, owner).await;
     assert_eq!(after.epochs, vec![replacement.clone()]);
     assert_eq!(after.entries.len(), 1);
     assert_eq!(after.entries[0].epoch, replacement.id);
@@ -429,6 +448,7 @@ pub async fn test_history_epoch_rotation(backend: &dyn StorageBackend) {
         .unwrap();
     let view = backend.get_password_history(fresh_owner).await.unwrap();
     assert_eq!(view.epochs, vec![next_epoch]);
+    assert_epoch_view(backend, fresh_owner).await;
     assert_eq!(
         backend.get_history_epoch_key(unused.id).await.unwrap(),
         Some(WrappedHistoryKey(Vec::new()))

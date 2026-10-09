@@ -624,6 +624,13 @@ impl StorageBackend for SqliteBackend {
         self.get_password_history_impl(owner).await
     }
 
+    async fn get_history_epochs(
+        &self,
+        owner: sid_core::models::ProfileId,
+    ) -> SidResult<sid_core::models::HistoryEpochs> {
+        self.get_history_epochs_impl(owner).await
+    }
+
     async fn export_password_history(
         &self,
         owner: sid_core::models::ProfileId,

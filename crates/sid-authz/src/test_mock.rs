@@ -253,6 +253,9 @@ impl sid_plugin::StorageBackend for MockStorage {
     ) -> Result<sid_core::models::PasswordHistory> {
         unimplemented!()
     }
+    async fn get_history_epochs(&self, _: ProfileId) -> Result<sid_core::models::HistoryEpochs> {
+        unimplemented!()
+    }
     async fn ensure_history_epoch(
         &self,
         _: &sid_core::models::NewHistoryEpoch,

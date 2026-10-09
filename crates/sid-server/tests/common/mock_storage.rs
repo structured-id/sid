@@ -1315,6 +1315,15 @@ impl StorageBackend for MockStorage {
         Ok(inner.histories.get(&owner).cloned().unwrap_or_default())
     }
 
+    async fn get_history_epochs(&self, owner: ProfileId) -> SidResult<HistoryEpochs> {
+        let inner = self.inner.lock().unwrap();
+        let history = inner.histories.get(&owner).cloned().unwrap_or_default();
+        Ok(HistoryEpochs {
+            revision: history.revision,
+            epochs: history.epochs,
+        })
+    }
+
     async fn ensure_history_epoch(
         &self,
         new: &NewHistoryEpoch,
