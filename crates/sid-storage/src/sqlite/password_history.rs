@@ -75,10 +75,13 @@ fn row_to_entry(row: &sqlx::sqlite::SqliteRow) -> SidResult<HistoryEntry> {
     })
 }
 
-async fn read_archive(
+/// One inventory contract for reads, epoch preparation and atomic commits.
+/// Adopted files may retain either the old table or old credential columns;
+/// neither representation is a supported empty comparison window.
+pub(super) async fn require_current_format(
     conn: &mut sqlx::SqliteConnection,
     owner: ProfileId,
-) -> SidResult<Option<HistoryArchive>> {
+) -> SidResult<()> {
     // SQLite's current baseline has no legacy table. Inspect actual schema,
     // including files adopted from the earlier unversioned implementation.
     let has_table: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'password_history_legacy')")
@@ -102,9 +105,17 @@ async fn read_archive(
     }
     if legacy {
         return Err(SidError::InvalidState(
-            "unconverted password history requires reconciliation before transfer".into(),
+            "unconverted password history requires reconciliation".into(),
         ));
     }
+    Ok(())
+}
+
+async fn read_archive(
+    conn: &mut sqlx::SqliteConnection,
+    owner: ProfileId,
+) -> SidResult<Option<HistoryArchive>> {
+    require_current_format(conn, owner).await?;
     let revision: Option<i64> =
         sqlx::query_scalar("SELECT revision FROM password_histories WHERE owner_id = ?")
             .bind(owner)
@@ -180,6 +191,7 @@ async fn insert_epoch(tx: &mut WriteTx, new: &NewHistoryEpoch) -> SidResult<()> 
 pub(super) async fn apply_in_tx(tx: &mut WriteTx, commit: &HistoryCommit) -> SidResult<bool> {
     commit.validate()?;
     let owner = commit.owner;
+    require_current_format(tx, owner).await?;
     let moved = if commit.expected_revision == 0 {
         sqlx::query(
             "INSERT INTO password_histories (owner_id, revision) VALUES (?, 1)
@@ -308,6 +320,7 @@ impl SqliteBackend {
     ) -> SidResult<PasswordHistory> {
         // One read transaction: the revision and the rows it covers.
         let mut tx = self.pool.begin().await.map_err(storage("read"))?;
+        require_current_format(&mut tx, owner).await?;
         let revision: Option<i64> =
             sqlx::query_scalar("SELECT revision FROM password_histories WHERE owner_id = ?")
                 .bind(owner)
@@ -355,6 +368,7 @@ impl SqliteBackend {
         }
         let owner = new.epoch.owner;
         let mut tx = self.begin_write().await?;
+        require_current_format(&mut tx, owner).await?;
         sqlx::query(
             "INSERT INTO password_histories (owner_id, revision)
              SELECT id, 1 FROM profiles WHERE id = ?

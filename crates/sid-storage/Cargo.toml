@@ -7,6 +7,14 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[[test]]
+name = "postgres_integration"
+required-features = ["storage-pg"]
+
+[[test]]
+name = "field_encryption_pg"
+required-features = ["storage-pg"]
+
 [features]
 default = ["storage-pg"]
 

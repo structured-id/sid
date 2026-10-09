@@ -8527,6 +8527,9 @@ impl StorageBackend for PostgresBackend {
                 "the new password belongs to another profile than the reset".into(),
             ));
         }
+        if history.is_none() {
+            password_history::require_current_format(&mut tx, profile_id).await?;
+        }
         sqlx::query(
             "DELETE FROM credentials WHERE profile_id = $1 AND credential_type IN ($2, $3)",
         )

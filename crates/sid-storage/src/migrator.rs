@@ -359,6 +359,10 @@ const MIGRATIONS: &[Migration] = &[
         name: "20261008_054_webauthn_user_handles",
         sql: include_str!("../../../migrations/20261008_054_webauthn_user_handles.sql"),
     },
+    Migration {
+        name: "20261009_055_password_history_inventory_index",
+        sql: include_str!("../../../migrations/20261009_055_password_history_inventory_index.sql"),
+    },
 ];
 
 /// Run all pending migrations against the database.

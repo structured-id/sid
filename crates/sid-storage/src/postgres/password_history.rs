@@ -72,10 +72,13 @@ fn epoch_from_row(row: EpochRow) -> SidResult<HistoryEpoch> {
     })
 }
 
-async fn read_archive(
+/// Refuse an incomplete comparison set before reading or publishing history.
+/// Migration never writes this inventory concurrently with serving; live
+/// replacement still checks it in its own transaction, not just at Begin.
+pub(super) async fn require_current_format(
     conn: &mut sqlx::PgConnection,
     owner: ProfileId,
-) -> SidResult<Option<HistoryArchive>> {
+) -> SidResult<()> {
     let legacy: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM password_history_legacy WHERE owner_id = $1)",
     )
@@ -85,9 +88,17 @@ async fn read_archive(
     .map_err(storage("legacy inventory"))?;
     if legacy {
         return Err(SidError::InvalidState(
-            "unconverted password history requires reconciliation before transfer".into(),
+            "unconverted password history requires reconciliation".into(),
         ));
     }
+    Ok(())
+}
+
+async fn read_archive(
+    conn: &mut sqlx::PgConnection,
+    owner: ProfileId,
+) -> SidResult<Option<HistoryArchive>> {
+    require_current_format(conn, owner).await?;
     let revision: Option<i64> =
         sqlx::query_scalar("SELECT revision FROM password_histories WHERE owner_id = $1")
             .bind(owner)
@@ -210,6 +221,7 @@ pub(super) async fn get(pool: &PgPool, owner: ProfileId) -> SidResult<PasswordHi
         .execute(&mut *tx)
         .await
         .map_err(storage("read"))?;
+    require_current_format(&mut tx, owner).await?;
     let revision: Option<i64> =
         sqlx::query_scalar("SELECT revision FROM password_histories WHERE owner_id = $1")
             .bind(owner)
@@ -331,6 +343,7 @@ pub(super) async fn ensure_epoch(
             "a prepared history epoch is active".into(),
         ));
     }
+    require_current_format(tx, owner).await?;
     lock_history(tx, owner).await?;
     let existing: Option<EpochRow> = sqlx::query_as(concat!(
         "SELECT ",
@@ -374,6 +387,7 @@ pub(super) async fn apply_in_tx(
 ) -> SidResult<bool> {
     commit.validate()?;
     let owner = commit.owner;
+    require_current_format(tx, owner).await?;
     if commit.expected_revision == 0 {
         // First history of this owner: whoever creates the row owns revision 1.
         let created = sqlx::query(
