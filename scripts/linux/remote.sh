@@ -8,23 +8,37 @@
 #   remote.sh musl [target...]   release build of the server for musl targets
 #                                (default: x86_64 and aarch64), with zig as the
 #                                C cross compiler for the native dependencies
+#   remote.sh history-checker ['<options>'...]
+#                                load measurement of the password-history
+#                                checker, one run per argument (the options of
+#                                the history_checker_load example; none = one
+#                                run with its defaults), one JSON line each
 set -euo pipefail
 
-task="${1:?task: musl [target...]}"
+task="${1:?task: musl [target...] | history-checker ['<options>'...]}"
 shift
-upload=/check
-repo=/home/builder/sid
 export CARGO_TERM_COLOR=never DEBIAN_FRONTEND=noninteractive
 
-apt-get update -qq
-apt-get install -y -qq --no-install-recommends protobuf-compiler libprotobuf-dev cmake xz-utils >/dev/null
-useradd --create-home builder
-
-as_builder() {
-    runuser -u builder -- env CARGO_HOME=/home/builder/.cargo \
-        RUSTUP_HOME=/usr/local/rustup PATH="/home/builder/.cargo/bin:/usr/local/cargo/bin:/opt/zig:$PATH" \
-        CARGO_TERM_COLOR=never "$@"
-}
+if [[ -n "${SID_CHECK_UPLOAD:-}" ]]; then
+    # On the host itself (no container): the host's rustup with the pinned
+    # toolchain, building inside the upload, which check.sh removes.
+    upload="$SID_CHECK_UPLOAD"
+    repo="$upload/sid"
+    as_builder() {
+        RUSTUP_TOOLCHAIN="$SID_CHECK_TOOLCHAIN" CARGO_TARGET_DIR="$upload/target" "$@"
+    }
+else
+    upload=/check
+    repo=/home/builder/sid
+    apt-get update -qq
+    apt-get install -y -qq --no-install-recommends protobuf-compiler libprotobuf-dev cmake xz-utils >/dev/null
+    useradd --create-home builder
+    as_builder() {
+        runuser -u builder -- env CARGO_HOME=/home/builder/.cargo \
+            RUSTUP_HOME=/usr/local/rustup PATH="/home/builder/.cargo/bin:/usr/local/cargo/bin:/opt/zig:$PATH" \
+            CARGO_TERM_COLOR=never "$@"
+    }
+fi
 
 as_builder git init --quiet "$repo"
 as_builder git -C "$repo" fetch --quiet --no-tags "$upload/snapshot.bundle" refs/remote-check/snapshot
@@ -67,6 +81,16 @@ case "$task" in
             fi
         done
         [[ "$status" == 0 ]] || exit "$status"
+        ;;
+    history-checker)
+        echo "cpus $(nproc), memory $(free -m | awk '/^Mem:/ {print $2}') MiB"
+        runs=("$@")
+        [[ ${#runs[@]} -gt 0 ]] || runs=("")
+        for run in "${runs[@]}"; do
+            # shellcheck disable=SC2086 # a run is a list of options
+            as_builder cargo run --locked --release --quiet -p sid-authn \
+                --example history_checker_load -- $run
+        done
         ;;
     *)
         echo "unknown task: $task" >&2

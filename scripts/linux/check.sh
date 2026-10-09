@@ -6,19 +6,26 @@
 #
 #   SID_LINUX=<ssh destination> scripts/linux/check.sh musl
 #   SID_LINUX=<ssh destination> scripts/linux/check.sh musl aarch64-unknown-linux-musl
+#   SID_LINUX=<ssh destination> scripts/linux/check.sh history-checker '--domains 2 --entries 24'
 #
 # `musl` builds the server for the given musl targets (by default x86_64 and
 # aarch64), which exercises every native dependency the server links.
+# `history-checker` measures the password-history checker under concurrent
+# load, one run per argument.
 #
 # SID_REV names a commit or branch to check instead of the working tree.
 #
 # The checks run in the pinned toolchain image as an ordinary account.
 # Everything they build lives in the container and goes with it, and the
 # upload goes too, whatever the outcome: the machine is shared with other work.
+#
+# SID_LINUX_RUNTIME=host runs on a machine without a container runtime: the
+# host's rustup with the pinned toolchain, building inside the upload, which
+# is removed with everything built there.
 set -euo pipefail
 
 destination="${SID_LINUX:?set SID_LINUX to the SSH destination of the Linux machine}"
-task="${1:?task: musl [target...]}"
+task="${1:?task: musl [target...] | history-checker ['<options>'...]}"
 shift
 # The version rust-toolchain.toml pins.
 image="rust:1.99.0"
@@ -72,15 +79,22 @@ ssh "${ssh_options[@]}" "$destination" "chmod 755 '$remote'"
 scp "${ssh_options[@]}" -q -r "$work/snapshot.bundle" "$work/submodules" "$work/remote.sh" \
     "$destination:$remote/"
 
-# shellcheck disable=SC2029
-ssh "${ssh_options[@]}" "$destination" \
-    "docker run -d --name $container -v '$remote':/check:ro $image tail -f /dev/null >/dev/null"
-
-command="bash /check/remote.sh"
+arguments=""
 for argument in "$task" "$@"; do
-    command+=" '${argument//\'/\'\\\'\'}'"
+    arguments+=" '${argument//\'/\'\\\'\'}'"
 done
 status=0
-# shellcheck disable=SC2029
-ssh "${ssh_options[@]}" "$destination" "docker exec $container $command" || status=$?
+if [[ "${SID_LINUX_RUNTIME:-container}" == host ]]; then
+    # shellcheck disable=SC2029
+    ssh "${ssh_options[@]}" "$destination" \
+        "SID_CHECK_UPLOAD='$remote' SID_CHECK_TOOLCHAIN='${image#rust:}' bash '$remote/remote.sh'$arguments" \
+        || status=$?
+else
+    # shellcheck disable=SC2029
+    ssh "${ssh_options[@]}" "$destination" \
+        "docker run -d --name $container -v '$remote':/check:ro $image tail -f /dev/null >/dev/null"
+    # shellcheck disable=SC2029
+    ssh "${ssh_options[@]}" "$destination" "docker exec $container bash /check/remote.sh$arguments" \
+        || status=$?
+fi
 exit "$status"

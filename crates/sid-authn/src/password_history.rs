@@ -335,6 +335,8 @@ impl KsfAdmission {
     }
 
     /// Run the KSF over `t` for every domain in `jobs`, holding their memory.
+    /// The memory of all domains is reserved together, so their KSFs run in
+    /// parallel within it: a check takes one KSF's time, not one per domain.
     async fn run(
         &self,
         jobs: Vec<(Zeroizing<[u8; 32]>, [u8; 32], HistoryKsf)>,
@@ -346,23 +348,29 @@ impl KsfAdmission {
         if mib > self.budget_mib {
             return Err(HistoryCheckError::Ksf);
         }
-        let permit = tokio::time::timeout(
-            self.max_wait,
-            Arc::clone(&self.permits).acquire_many_owned(mib),
-        )
-        .await
-        .map_err(|_| HistoryCheckError::Busy)?
-        .map_err(|_| HistoryCheckError::Busy)?;
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            jobs.iter()
-                .map(|(t, salt, ksf)| {
-                    let t = pallas::Base::from_repr(**t)
+        let permit = Arc::new(
+            tokio::time::timeout(
+                self.max_wait,
+                Arc::clone(&self.permits).acquire_many_owned(mib),
+            )
+            .await
+            .map_err(|_| HistoryCheckError::Busy)?
+            .map_err(|_| HistoryCheckError::Busy)?,
+        );
+        // Each task holds the shared reservation until its own KSF ends, so
+        // cancelling this future cannot release memory a KSF still uses.
+        let tasks: Vec<_> = jobs
+            .into_iter()
+            .map(|(t, salt, ksf)| {
+                let permit = Arc::clone(&permit);
+                tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    let t = pallas::Base::from_repr(*t)
                         .into_option()
                         .ok_or(HistoryCheckError::Mismatch)?;
                     relation::ksf(
                         t,
-                        salt,
+                        &salt,
                         KsfParams {
                             memory_kib: ksf.memory_kib,
                             passes: ksf.passes,
@@ -371,10 +379,14 @@ impl KsfAdmission {
                     )
                     .map_err(|_| HistoryCheckError::Ksf)
                 })
-                .collect()
-        })
-        .await
-        .map_err(|_| HistoryCheckError::Busy)?
+            })
+            .collect();
+        drop(permit);
+        let mut entries = Vec::with_capacity(tasks.len());
+        for task in tasks {
+            entries.push(task.await.map_err(|_| HistoryCheckError::Busy)??);
+        }
+        Ok(entries)
     }
 }
 
