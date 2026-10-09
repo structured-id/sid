@@ -210,6 +210,108 @@ pub struct NewHistoryEpoch {
     pub key: WrappedHistoryKey,
 }
 
+/// Complete durable history for an offline, same-authority transfer. Unlike
+/// the checker's view, this includes retired epochs and sealed evaluator keys.
+/// External wrapping keys are not included and must be restored separately.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryArchive {
+    pub owner: ProfileId,
+    pub revision: i64,
+    pub epochs: Vec<NewHistoryEpoch>,
+    pub entries: Vec<HistoryEntry>,
+}
+
+impl HistoryArchive {
+    /// Check reference and lifecycle integrity before any import mutation.
+    pub fn validate(&self) -> Result<()> {
+        use std::collections::{BTreeMap, BTreeSet};
+        if self.revision <= 0 {
+            return Err(Error::Validation(
+                "history archive revision must be positive".into(),
+            ));
+        }
+        // Both backends export the same order. Refuse reordered archives
+        // before import so exact retries cannot conflict with a sorted read.
+        if self.epochs.windows(2).any(|pair| {
+            (pair[0].epoch.created_at, pair[0].epoch.id)
+                >= (pair[1].epoch.created_at, pair[1].epoch.id)
+        }) || self.entries.windows(2).any(|pair| {
+            (std::cmp::Reverse(pair[0].seq), pair[0].epoch)
+                >= (std::cmp::Reverse(pair[1].seq), pair[1].epoch)
+        }) {
+            return Err(Error::Validation(
+                "history archive is not in canonical order".into(),
+            ));
+        }
+        let mut ids = BTreeMap::new();
+        let mut active = 0;
+        for new in &self.epochs {
+            let e = &new.epoch;
+            if e.status != HistoryEpochUse::Retired || !new.key.0.is_empty() {
+                let context = format!("password-history-key:{}:{}", e.id.0, self.owner);
+                // The stored scalar is 32 bytes plus the 16-byte GCM tag. Bound
+                // the encoded field before decoding any attacker-supplied lengths.
+                if new.key.0.len() != 20 + context.len() + 48 {
+                    return Err(Error::Validation("invalid sealed history key size".into()));
+                }
+                let encoded_length =
+                    u32::from_le_bytes(new.key.0[16..20].try_into().expect("length checked"));
+                if encoded_length as usize != context.len() {
+                    return Err(Error::Validation(
+                        "invalid sealed history key context length".into(),
+                    ));
+                }
+                let sealed = sid_keys::EncryptedField::from_bytes(&new.key.0)
+                    .map_err(|_| Error::Validation("invalid sealed history key".into()))?;
+                if sealed.context != context
+                    || sealed.key_version == 0
+                    || sealed.ciphertext.len() != 48
+                {
+                    return Err(Error::Validation(
+                        "history key is not bound to its owner and epoch".into(),
+                    ));
+                }
+            }
+            if e.owner != self.owner
+                || e.created_at.timestamp_subsec_nanos() % 1000 != 0
+                || ids.insert(e.id, e.status).is_some()
+                || e.ksf.memory_kib > i32::MAX as u32
+                || e.ksf.memory_kib == 0
+                || e.ksf.passes > i32::MAX as u32
+                || e.ksf.passes == 0
+                || e.ksf.lanes > i32::MAX as u32
+                || e.ksf.lanes == 0
+                || u64::from(e.ksf.memory_kib) < 8 * u64::from(e.ksf.lanes)
+            {
+                return Err(Error::Validation("invalid history archive epoch".into()));
+            }
+            if e.status == HistoryEpochUse::Active {
+                active += 1;
+            }
+        }
+        if active > 1 {
+            return Err(Error::Validation(
+                "history archive has multiple active epochs".into(),
+            ));
+        }
+        let mut entries = BTreeSet::new();
+        for entry in &self.entries {
+            if entry.seq <= 0
+                || entry.created_at.timestamp_subsec_nanos() % 1000 != 0
+                || entry.evidence.policy_version > i32::MAX as u32
+                || !entries.insert((entry.epoch, entry.seq))
+                || !matches!(
+                    ids.get(&entry.epoch),
+                    Some(HistoryEpochUse::Active | HistoryEpochUse::CompareOnly)
+                )
+            {
+                return Err(Error::Validation("invalid history archive entry".into()));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// What an accepted password installation writes to its owner's history in
 /// the same transaction as the credential: the new entries (one per active
 /// epoch), and the retention that follows. A commit whose `expected_revision`

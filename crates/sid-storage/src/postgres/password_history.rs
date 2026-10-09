@@ -4,8 +4,9 @@
 
 use chrono::{DateTime, Utc};
 use sid_core::models::{
-    HistoryCommit, HistoryEntry, HistoryEpoch, HistoryEpochId, HistoryEpochUse, HistoryEvidence,
-    HistoryKsf, HistorySuite, NewHistoryEpoch, PasswordHistory, ProfileId, WrappedHistoryKey,
+    HistoryArchive, HistoryCommit, HistoryEntry, HistoryEpoch, HistoryEpochId, HistoryEpochUse,
+    HistoryEvidence, HistoryKsf, HistorySuite, NewHistoryEpoch, PasswordHistory, ProfileId,
+    WrappedHistoryKey,
 };
 use sid_core::{Error as SidError, Result as SidResult};
 use sqlx::PgPool;
@@ -69,6 +70,137 @@ fn epoch_from_row(row: EpochRow) -> SidResult<HistoryEpoch> {
         status: HistoryEpochUse::parse(&status)?,
         created_at,
     })
+}
+
+async fn read_archive(
+    conn: &mut sqlx::PgConnection,
+    owner: ProfileId,
+) -> SidResult<Option<HistoryArchive>> {
+    let legacy: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM password_history_legacy WHERE owner_id = $1)",
+    )
+    .bind(owner)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(storage("legacy inventory"))?;
+    if legacy {
+        return Err(SidError::InvalidState(
+            "unconverted password history requires reconciliation before transfer".into(),
+        ));
+    }
+    let revision: Option<i64> =
+        sqlx::query_scalar("SELECT revision FROM password_histories WHERE owner_id = $1")
+            .bind(owner)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(storage("archive revision"))?;
+    let Some(revision) = revision else {
+        return Ok(None);
+    };
+    let epochs: Vec<EpochRow> = sqlx::query_as(concat!(
+        "SELECT ",
+        epoch_columns!(),
+        " FROM password_history_epochs WHERE owner_id = $1 ORDER BY created_at, id"
+    ))
+    .bind(owner)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(storage("archive epochs"))?;
+    let keys: Vec<(Uuid, Vec<u8>)> =
+        sqlx::query_as("SELECT id, wrapped_key FROM password_history_epochs WHERE owner_id = $1")
+            .bind(owner)
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(storage("archive keys"))?;
+    let mut keys: std::collections::BTreeMap<_, _> = keys.into_iter().collect();
+    let epochs = epochs
+        .into_iter()
+        .map(|row| {
+            let epoch = epoch_from_row(row)?;
+            let key = keys
+                .remove(&epoch.id.0)
+                .ok_or_else(|| SidError::Storage("missing history epoch key".into()))?;
+            Ok(NewHistoryEpoch {
+                epoch,
+                key: WrappedHistoryKey(key),
+            })
+        })
+        .collect::<SidResult<Vec<_>>>()?;
+    let rows: Vec<EntryRow> = sqlx::query_as("SELECT epoch_id, seq, entry, operation_id, policy_version, created_at FROM password_history_entries WHERE owner_id = $1 ORDER BY seq DESC, epoch_id")
+        .bind(owner).fetch_all(&mut *conn).await.map_err(storage("archive entries"))?;
+    let entries = rows
+        .into_iter()
+        .map(|(epoch, seq, entry, operation, version, created_at)| {
+            Ok(HistoryEntry {
+                epoch: HistoryEpochId(epoch),
+                seq,
+                entry: fixed32(entry, "entry")?,
+                evidence: HistoryEvidence {
+                    operation,
+                    policy_version: u32::try_from(version)
+                        .map_err(|_| SidError::Storage("negative policy version".into()))?,
+                },
+                created_at,
+            })
+        })
+        .collect::<SidResult<Vec<_>>>()?;
+    let archive = HistoryArchive {
+        owner,
+        revision,
+        epochs,
+        entries,
+    };
+    archive.validate()?;
+    Ok(Some(archive))
+}
+
+pub(super) async fn export_archive(
+    pool: &PgPool,
+    owner: ProfileId,
+) -> SidResult<Option<HistoryArchive>> {
+    let mut tx = pool.begin().await.map_err(storage("archive read"))?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .map_err(storage("archive read"))?;
+    let archive = read_archive(&mut tx, owner).await?;
+    tx.commit().await.map_err(storage("archive read"))?;
+    Ok(archive)
+}
+
+pub(super) async fn import_archive(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    archive: &HistoryArchive,
+) -> SidResult<bool> {
+    archive.validate()?;
+    // Reconciliation of old-format rows is required even when no current
+    // history row exists; a restore must not turn that state into fresh history.
+    read_archive(tx, archive.owner).await?;
+    let inserted = sqlx::query("INSERT INTO password_histories (owner_id, revision) VALUES ($1, $2) ON CONFLICT (owner_id) DO NOTHING")
+        .bind(archive.owner).bind(archive.revision).execute(&mut **tx).await.map_err(storage("archive insert"))?.rows_affected();
+    if inserted == 0 {
+        sqlx::query("SELECT owner_id FROM password_histories WHERE owner_id = $1 FOR UPDATE")
+            .bind(archive.owner)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(storage("archive lock"))?;
+        if read_archive(tx, archive.owner).await?.as_ref() == Some(archive) {
+            return Ok(false);
+        }
+        return Err(SidError::Conflict(
+            "existing password history differs from archive".into(),
+        ));
+    }
+    for epoch in &archive.epochs {
+        insert_epoch(tx, epoch).await?;
+    }
+    for entry in &archive.entries {
+        sqlx::query("INSERT INTO password_history_entries (epoch_id, owner_id, seq, entry, operation_id, policy_version, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)")
+            .bind(entry.epoch.0).bind(archive.owner).bind(entry.seq).bind(entry.entry.as_slice())
+            .bind(entry.evidence.operation).bind(entry.evidence.policy_version as i32).bind(entry.created_at)
+            .execute(&mut **tx).await.map_err(storage("archive entry"))?;
+    }
+    Ok(true)
 }
 
 pub(super) async fn get(pool: &PgPool, owner: ProfileId) -> SidResult<PasswordHistory> {

@@ -139,16 +139,30 @@ async fn main() -> Result<()> {
             schema,
             include_audit,
         } => {
-            info!(source = %source, output = %output.display(), "starting export");
+            info!(output = %output.display(), "starting export");
             let backend = connect_backend(&source, schema.as_deref()).await?;
             let snapshot =
                 export::export_snapshot(backend.as_ref(), &source, include_audit).await?;
 
             let json =
                 serde_json::to_string_pretty(&snapshot).context("failed to serialize snapshot")?;
-            tokio::fs::write(&output, json)
+            // Snapshots contain sealed credentials and history keys: create a
+            // new owner-readable file rather than following or truncating a path.
+            let mut options = tokio::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            options.mode(0o600);
+            let mut file = options
+                .open(&output)
+                .await
+                .context("failed to create output file")?;
+            use tokio::io::AsyncWriteExt;
+            file.write_all(json.as_bytes())
                 .await
                 .context("failed to write output file")?;
+            file.sync_all()
+                .await
+                .context("failed to synchronize output file")?;
 
             info!(
                 entities = snapshot.metadata.total_entities,
@@ -167,7 +181,7 @@ async fn main() -> Result<()> {
             input,
             schema,
         } => {
-            info!(target = %target, input = %input.display(), "starting import");
+            info!(input = %input.display(), "starting import");
             let json = tokio::fs::read_to_string(&input)
                 .await
                 .context("failed to read input file")?;
@@ -194,7 +208,7 @@ async fn main() -> Result<()> {
             target_schema,
             include_audit,
         } => {
-            info!(source = %source, target = %target, "starting direct migration");
+            info!("starting direct migration");
             let source_backend = connect_backend(&source, source_schema.as_deref()).await?;
             let target_backend = connect_backend(&target, target_schema.as_deref()).await?;
 
@@ -227,7 +241,7 @@ async fn main() -> Result<()> {
             source_schema,
             target_schema,
         } => {
-            info!(source = %source, target = %target, "starting verification");
+            info!("starting verification");
             let source_backend = connect_backend(&source, source_schema.as_deref()).await?;
             let target_backend = connect_backend(&target, target_schema.as_deref()).await?;
 
@@ -272,6 +286,6 @@ async fn connect_backend(url: &str, schema: Option<&str>) -> Result<Box<dyn Stor
             bail!("PostgreSQL support not compiled in. Enable the `storage-pg` feature.");
         }
     } else {
-        bail!("Unsupported database URL scheme. Use 'sqlite://' or 'postgres://'. Got: {url}");
+        bail!("Unsupported database URL scheme. Use 'sqlite://' or 'postgres://'.");
     }
 }

@@ -360,6 +360,30 @@ pub trait StorageBackend: WorkStore + Send + Sync + 'static {
     /// retained entry. An owner with no history reads as revision 0, empty.
     async fn get_password_history(&self, owner: ProfileId) -> Result<PasswordHistory>;
 
+    /// Consistent complete durable history, including retired epochs and sealed
+    /// keys, for offline same-authority transfer; None only if no history exists.
+    async fn export_password_history(
+        &self,
+        _owner: ProfileId,
+    ) -> Result<Option<sid_core::models::HistoryArchive>> {
+        Err(sid_core::Error::Unavailable(
+            "history transfer is unsupported by this backend".into(),
+        ))
+    }
+
+    /// Atomically install a complete history only when absent. Exact existing
+    /// content is an idempotent no-op; any difference is a conflict, never a
+    /// rollback or merge. Callers must quiesce writers for instance migration.
+    async fn import_password_history(
+        &self,
+        _archive: &sid_core::models::HistoryArchive,
+        _ctx: MutationContext,
+    ) -> Result<bool> {
+        Err(sid_core::Error::Unavailable(
+            "history transfer is unsupported by this backend".into(),
+        ))
+    }
+
     /// Store `new` as `owner`'s active epoch with its sealed key, before the
     /// key's first use, and move the history revision on. When the owner
     /// already has an active epoch nothing is written and that epoch is

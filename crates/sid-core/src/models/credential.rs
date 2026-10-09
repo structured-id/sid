@@ -228,7 +228,7 @@ impl std::fmt::Display for CredentialStatus {
 }
 
 /// Credential represents an authentication factor.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Credential {
     pub id: CredentialId,
     pub profile_id: ProfileId,

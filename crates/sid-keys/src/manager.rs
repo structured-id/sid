@@ -67,7 +67,7 @@ pub enum KeyDerivation {
 /// These are stored alongside the encrypted data: losing them makes the version
 /// unrecoverable even with the master secret, which is why a version number
 /// alone is not enough to restore a deployment.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyVersionParams {
     /// Version number, as recorded in every field this key encrypts.
     pub version: u32,

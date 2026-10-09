@@ -19,6 +19,7 @@ storage-sqlite = ["sid-storage/storage-sqlite"]
 [dependencies]
 sid-core = { workspace = true }
 sid-plugin = { workspace = true }
+sid-keys = { workspace = true }
 sid-storage = { path = "../sid-storage", default-features = false }
 
 # CLI
@@ -48,3 +49,8 @@ chrono = { workspace = true }
 
 # URL parsing (for sanitizing connection strings in metadata)
 url = { workspace = true }
+
+[dev-dependencies]
+sqlx = { workspace = true }
+secrecy = { workspace = true }
+tempfile = "3"

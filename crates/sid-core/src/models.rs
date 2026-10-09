@@ -174,8 +174,8 @@ pub use oidc_issuer::{IssuerAuthority, IssuerHandle, IssuerId, IssuerSigningKey,
 pub use operation::{OperationCompletion, OperationKey, OperationRecord};
 pub use organization::{OrgId, OrgStatus, OrgType, Organization};
 pub use password_history::{
-    HistoryCommit, HistoryEntry, HistoryEpoch, HistoryEpochId, HistoryEpochUse, HistoryEvidence,
-    HistoryKsf, HistorySuite, NewHistoryEpoch, PasswordHistory, WrappedHistoryKey,
+    HistoryArchive, HistoryCommit, HistoryEntry, HistoryEpoch, HistoryEpochId, HistoryEpochUse,
+    HistoryEvidence, HistoryKsf, HistorySuite, NewHistoryEpoch, PasswordHistory, WrappedHistoryKey,
 };
 pub use password_reset::{
     PasswordResetSession, RESET_SESSION_TTL_SECS, ResetSessionId, ResetSessionStatus,

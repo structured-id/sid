@@ -16,9 +16,10 @@ use uuid::Uuid;
 use super::{create_test_profile, test_audit, test_session_end};
 
 fn new_epoch(owner: ProfileId, key: u8) -> NewHistoryEpoch {
+    let id = HistoryEpochId::generate();
     NewHistoryEpoch {
         epoch: HistoryEpoch {
-            id: HistoryEpochId::generate(),
+            id,
             owner,
             suite: HistorySuite::PallasPoseidonV1,
             public_key: [key; 32],
@@ -29,7 +30,15 @@ fn new_epoch(owner: ProfileId, key: u8) -> NewHistoryEpoch {
             created_at: chrono::DateTime::from_timestamp_millis(Utc::now().timestamp_millis())
                 .unwrap(),
         },
-        key: WrappedHistoryKey(vec![key; 48]),
+        key: WrappedHistoryKey(
+            sid_keys::EncryptedField {
+                key_version: 1,
+                nonce: [0; 12],
+                context: format!("password-history-key:{}:{owner}", id.0),
+                ciphertext: vec![key; 48],
+            }
+            .to_bytes(),
+        ),
     }
 }
 
@@ -76,6 +85,161 @@ fn next(password: &Credential, data: &[u8]) -> Credential {
     new.zkpp_verified = true;
     new.policy_version = Some(1);
     new
+}
+
+/// The transfer preserves entries, sealed keys and retired provenance; exact
+/// repeats add nothing, conflicting or malformed archives never mutate history.
+pub async fn test_history_archive_preserves_lifecycle(backend: &dyn StorageBackend) {
+    use sid_core::models::{HistoryArchive, HistoryEntry};
+    let (owner, _) = profile_with_password(backend, "hist_archive").await;
+    let mut active = new_epoch(owner, 21);
+    let mut compared = new_epoch(owner, 22);
+    let mut retired = new_epoch(owner, 23);
+    compared.epoch.status = HistoryEpochUse::CompareOnly;
+    retired.epoch.status = HistoryEpochUse::Retired;
+    // Eligible key destruction does not erase retired epoch provenance.
+    retired.key = WrappedHistoryKey(Vec::new());
+    // Preserve PostgreSQL's full microsecond precision across SQLite transfer;
+    // millisecond formatting loses provenance and breaks an exact retry.
+    let now = chrono::DateTime::from_timestamp_micros(1_790_000_000_123_456).unwrap();
+    compared.epoch.created_at = now;
+    retired.epoch.created_at = now;
+    active.epoch.created_at = now;
+    let entries = vec![
+        HistoryEntry {
+            epoch: active.epoch.id,
+            seq: 2,
+            entry: [31; 32],
+            evidence: HistoryEvidence {
+                operation: Uuid::now_v7(),
+                policy_version: 1,
+            },
+            created_at: now,
+        },
+        HistoryEntry {
+            epoch: compared.epoch.id,
+            seq: 1,
+            entry: [30; 32],
+            evidence: HistoryEvidence {
+                operation: Uuid::now_v7(),
+                policy_version: 1,
+            },
+            created_at: now,
+        },
+    ];
+    let mut archive = HistoryArchive {
+        owner,
+        revision: 7,
+        epochs: vec![active.clone(), compared, retired.clone()],
+        entries,
+    };
+    archive
+        .epochs
+        .sort_by_key(|e| (e.epoch.created_at, e.epoch.id));
+    assert!(
+        backend
+            .import_password_history(&archive, test_audit())
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        backend.export_password_history(owner).await.unwrap(),
+        Some(archive.clone())
+    );
+    assert!(
+        !backend
+            .import_password_history(&archive, test_audit())
+            .await
+            .unwrap()
+    );
+    let view = backend.get_password_history(owner).await.unwrap();
+    assert_eq!(view.revision, 7);
+    assert_eq!(view.entries.len(), 2);
+    assert!(!view.epochs.iter().any(|e| e.id == retired.epoch.id));
+    assert_eq!(
+        backend
+            .get_history_epoch_key(retired.epoch.id)
+            .await
+            .unwrap(),
+        Some(retired.key)
+    );
+    let mut stale = archive.clone();
+    stale.revision -= 1;
+    assert!(matches!(
+        backend.import_password_history(&stale, test_audit()).await,
+        Err(sid_core::Error::Conflict(_))
+    ));
+    // Reject noncanonical input before writing: otherwise a successful first
+    // import is sorted on export and the same input falsely conflicts on retry.
+    let mut reordered = archive.clone();
+    reordered.epochs.reverse();
+    assert!(matches!(
+        backend
+            .import_password_history(&reordered, test_audit())
+            .await,
+        Err(sid_core::Error::Validation(_))
+    ));
+    let mut invalid = archive.clone();
+    invalid.entries[0].epoch = HistoryEpochId::generate();
+    assert!(matches!(
+        backend
+            .import_password_history(&invalid, test_audit())
+            .await,
+        Err(sid_core::Error::Validation(_))
+    ));
+    assert_eq!(
+        backend.export_password_history(owner).await.unwrap(),
+        Some(archive)
+    );
+
+    // The same serialized contract is accepted by an independent SQLite
+    // backend: PostgreSQL UUID/timestamp encodings must not change its meaning.
+    #[cfg(feature = "storage-sqlite")]
+    {
+        let sqlite = sid_storage::sqlite::SqliteBackend::new_in_memory()
+            .await
+            .unwrap();
+        let profile = backend.get_profile(owner).await.unwrap().unwrap();
+        sqlite.create_profile(&profile, test_audit()).await.unwrap();
+        let exported = backend
+            .export_password_history(owner)
+            .await
+            .unwrap()
+            .unwrap();
+        let bytes = serde_json::to_vec(&exported).unwrap();
+        let decoded: HistoryArchive = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            sqlite
+                .import_password_history(&decoded, test_audit())
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            sqlite.export_password_history(owner).await.unwrap(),
+            Some(decoded.clone())
+        );
+        // Files written before microsecond-preserving transfer used three
+        // fractional digits. SQL text order differs from timestamp order when
+        // those rows coexist with six-digit timestamps in the same millisecond.
+        let mut expected = decoded.clone();
+        let old = expected.epochs[0]
+            .epoch
+            .created_at
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        sqlx::query("UPDATE password_history_epochs SET created_at = ? WHERE id = ?")
+            .bind(&old)
+            .bind(expected.epochs[0].epoch.id.0.to_string())
+            .execute(sqlite.pool())
+            .await
+            .unwrap();
+        expected.epochs[0].epoch.created_at = chrono::DateTime::parse_from_rfc3339(&old)
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert_eq!(
+            sqlite.export_password_history(owner).await.unwrap(),
+            Some(expected)
+        );
+    }
 }
 
 /// An owner without history reads as revision 0 with nothing in it: the

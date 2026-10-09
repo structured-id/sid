@@ -2050,6 +2050,33 @@ impl StorageBackend for PostgresBackend {
         password_history::get(&self.pool, owner).await
     }
 
+    async fn export_password_history(
+        &self,
+        owner: ProfileId,
+    ) -> SidResult<Option<sid_core::models::HistoryArchive>> {
+        password_history::export_archive(&self.pool, owner).await
+    }
+
+    async fn import_password_history(
+        &self,
+        archive: &sid_core::models::HistoryArchive,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?;
+        let inserted = password_history::import_archive(&mut tx, archive).await?;
+        if inserted {
+            Self::audit_in_tx(&mut tx, &format!("profile:{}", archive.owner), ctx).await?;
+        }
+        tx.commit()
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?;
+        Ok(inserted)
+    }
+
     async fn ensure_history_epoch(
         &self,
         new: &NewHistoryEpoch,

@@ -3,6 +3,284 @@ use crate::export::export_snapshot;
 use sid_core::models::{BindingScope, Profile};
 use sid_storage::sqlite::SqliteBackend;
 
+/// Moving credentials must also move the history that prevents password reuse.
+/// A prepared epoch alone is nonempty durable state, even before its first entry.
+#[tokio::test]
+async fn password_history_survives_migration() {
+    use sid_core::models::{
+        HistoryEpoch, HistoryEpochId, HistoryEpochUse, HistoryKsf, HistorySuite, NewHistoryEpoch,
+        WrappedHistoryKey,
+    };
+    let source = SqliteBackend::new_in_memory().await.unwrap();
+    let profile = Profile::new(Some("history-migration"));
+    let ctx = || AuditEntry::system("test", "history").into();
+    source.create_profile(&profile, ctx()).await.unwrap();
+    let id = HistoryEpochId::generate();
+    let epoch = NewHistoryEpoch {
+        epoch: HistoryEpoch {
+            id,
+            owner: profile.id,
+            suite: HistorySuite::PallasPoseidonV1,
+            public_key: [3; 32],
+            ksf: HistoryKsf::DEFAULT,
+            ksf_salt: [4; 32],
+            status: HistoryEpochUse::Active,
+            created_at: chrono::DateTime::from_timestamp_millis(
+                chrono::Utc::now().timestamp_millis(),
+            )
+            .unwrap(),
+        },
+        key: WrappedHistoryKey(
+            sid_keys::EncryptedField {
+                key_version: 1,
+                nonce: [0; 12],
+                context: format!("password-history-key:{}:{}", id.0, profile.id),
+                ciphertext: vec![5; 48],
+            }
+            .to_bytes(),
+        ),
+    };
+    source
+        .insert_key_version(
+            &sid_keys::KeyVersionParams::new(1, vec![1; 16], "key-v1"),
+            ctx(),
+        )
+        .await
+        .unwrap();
+    source.ensure_history_epoch(&epoch, ctx()).await.unwrap();
+    let password = sid_core::models::Credential::new(
+        profile.id,
+        sid_core::models::CredentialType::Opaque,
+        b"before".to_vec(),
+        None,
+    );
+    source.create_credential(&password, ctx()).await.unwrap();
+    let mut changed = password.clone();
+    changed.data = sid_core::models::CredentialData::new(b"after".to_vec());
+    let commit = sid_core::models::HistoryCommit {
+        owner: profile.id,
+        expected_revision: source
+            .get_password_history(profile.id)
+            .await
+            .unwrap()
+            .revision,
+        new_epoch: None,
+        entries: vec![(epoch.epoch.id, [9; 32])],
+        evidence: sid_core::models::HistoryEvidence {
+            operation: uuid::Uuid::now_v7(),
+            policy_version: 1,
+        },
+        depth: 24,
+    };
+    assert!(
+        source
+            .change_password(password.id, b"before", &changed, Some(&commit), ctx())
+            .await
+            .unwrap()
+    );
+    let before = source.get_password_history(profile.id).await.unwrap();
+    let snapshot = export_snapshot(&source, "sqlite::memory:", false)
+        .await
+        .unwrap();
+    let target = SqliteBackend::new_in_memory().await.unwrap();
+    import_snapshot(&target, &snapshot).await.unwrap();
+    assert_eq!(
+        target.get_password_history(profile.id).await.unwrap(),
+        before
+    );
+    assert_eq!(
+        target.get_history_epoch_key(epoch.epoch.id).await.unwrap(),
+        Some(epoch.key.clone())
+    );
+    import_snapshot(&target, &snapshot).await.unwrap();
+    assert_eq!(
+        target.get_password_history(profile.id).await.unwrap(),
+        before
+    );
+    let mut corrupted = snapshot.clone();
+    corrupted.password_histories[0].1.as_mut().unwrap().entries[0].entry = [10; 32];
+    assert!(import_snapshot(&target, &corrupted).await.is_err());
+    assert_eq!(
+        target.get_password_history(profile.id).await.unwrap(),
+        before
+    );
+    assert_eq!(
+        target
+            .get_credential(password.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .data
+            .expose(),
+        b"after"
+    );
+    let blank = SqliteBackend::new_in_memory().await.unwrap();
+    corrupted.password_histories.clear();
+    assert!(import_snapshot(&blank, &corrupted).await.is_err());
+    assert_eq!(blank.count_profiles().await.unwrap(), 0);
+    assert!(
+        crate::verify::verify_backends(&source, &target)
+            .await
+            .unwrap()
+            .passed
+    );
+    // Equal counts are insufficient: a different target profile must not hide
+    // the complete loss of the source owner's nonempty history.
+    let wrong = SqliteBackend::new_in_memory().await.unwrap();
+    wrong
+        .create_profile(&Profile::new(Some("wrong-history-owner")), ctx())
+        .await
+        .unwrap();
+    for params in &snapshot.key_versions {
+        wrong.insert_key_version(params, ctx()).await.unwrap();
+    }
+    assert!(
+        !crate::verify::verify_backends(&source, &wrong)
+            .await
+            .unwrap()
+            .passed
+    );
+}
+
+/// History input domains include the installation organization: importing
+/// under a different organization would make retained passwords incomparable.
+#[tokio::test]
+async fn history_transfer_refuses_a_different_authority() {
+    let source = SqliteBackend::new_in_memory().await.unwrap();
+    let ctx = || AuditEntry::system("test", "authority").into();
+    let org = sid_core::models::Organization::implicit_community("source.example.com");
+    source
+        .insert_instance_organization(&org, ctx())
+        .await
+        .unwrap();
+    let profile = Profile::new(Some("authority-transfer"));
+    source.create_profile(&profile, ctx()).await.unwrap();
+    let snapshot = export_snapshot(&source, "sqlite::memory:", false)
+        .await
+        .unwrap();
+    let target = SqliteBackend::new_in_memory().await.unwrap();
+    let other = sid_core::models::Organization::implicit_community("other.example.com");
+    target
+        .insert_instance_organization(&other, ctx())
+        .await
+        .unwrap();
+    assert!(import_snapshot(&target, &snapshot).await.is_err());
+    assert_eq!(target.count_profiles().await.unwrap(), 0);
+}
+
+/// The DB archive preserves sealed random key material and public derivation
+/// metadata; restoring the independent master key opens the original secret,
+/// while a different master key cannot silently create substitute history.
+#[tokio::test]
+async fn history_key_restore_requires_the_original_external_key() {
+    use sid_core::models::*;
+    use sid_keys::{KeyManager, KeyVersionParams, RustCryptoPrimitives, SoftwareKeyManager};
+    use std::sync::Arc;
+    let params = KeyVersionParams::new(1, vec![7; 16], "restore-key-v1");
+    let manager = |master| {
+        SoftwareKeyManager::new(
+            secrecy::SecretBox::new(Box::new(master)),
+            vec![params.clone()],
+            Arc::new(RustCryptoPrimitives::new()),
+        )
+        .unwrap()
+    };
+    let keys = manager([9u8; 32]);
+    let source = SqliteBackend::new_in_memory().await.unwrap();
+    let ctx = || AuditEntry::system("test", "restore").into();
+    let profile = Profile::new(Some("history-key-restore"));
+    source.create_profile(&profile, ctx()).await.unwrap();
+    source.insert_key_version(&params, ctx()).await.unwrap();
+    let id = HistoryEpochId::generate();
+    let context = format!("password-history-key:{}:{}", id.0, profile.id);
+    let secret = [0xcc; 32];
+    let sealed = keys.encrypt(&secret, &context).await.unwrap();
+    let epoch = NewHistoryEpoch {
+        epoch: HistoryEpoch {
+            id,
+            owner: profile.id,
+            suite: HistorySuite::PallasPoseidonV1,
+            public_key: [3; 32],
+            ksf: HistoryKsf::DEFAULT,
+            ksf_salt: [4; 32],
+            status: HistoryEpochUse::Active,
+            created_at: chrono::DateTime::from_timestamp_millis(
+                chrono::Utc::now().timestamp_millis(),
+            )
+            .unwrap(),
+        },
+        key: WrappedHistoryKey(sealed.to_bytes()),
+    };
+    source.ensure_history_epoch(&epoch, ctx()).await.unwrap();
+    let snapshot = export_snapshot(&source, "sqlite::memory:", false)
+        .await
+        .unwrap();
+    let encoded = serde_json::to_vec(&snapshot).unwrap();
+    let restored: crate::snapshot::Snapshot = serde_json::from_slice(&encoded).unwrap();
+    let target = SqliteBackend::new_in_memory().await.unwrap();
+    import_snapshot(&target, &restored).await.unwrap();
+    assert_eq!(
+        target.list_key_versions().await.unwrap(),
+        vec![params.clone()]
+    );
+    let wrapped = target.get_history_epoch_key(id).await.unwrap().unwrap();
+    assert_eq!(wrapped, epoch.key);
+    let field = sid_keys::EncryptedField::from_bytes(&wrapped.0).unwrap();
+    let recovered_keys = manager([9u8; 32]);
+    assert_eq!(recovered_keys.decrypt(&field).await.unwrap(), secret);
+    assert!(manager([10u8; 32]).decrypt(&field).await.is_err());
+    let mut missing_version = restored.clone();
+    missing_version.key_versions.clear();
+    let blank = SqliteBackend::new_in_memory().await.unwrap();
+    assert!(import_snapshot(&blank, &missing_version).await.is_err());
+    assert_eq!(blank.count_profiles().await.unwrap(), 0);
+    let mut swapped = restored;
+    let key = &mut swapped.password_histories[0].1.as_mut().unwrap().epochs[0].key;
+    let mut field = sid_keys::EncryptedField::from_bytes(&key.0).unwrap();
+    field.context = format!("password-history-key:{}:{}", id.0, ProfileId::generate());
+    *key = WrappedHistoryKey(field.to_bytes());
+    assert!(import_snapshot(&blank, &swapped).await.is_err());
+    assert_eq!(blank.count_profiles().await.unwrap(), 0);
+}
+
+/// Retained old-format data is a reconciliation requirement, not an empty
+/// history that export may omit and thereby weaken after a move.
+#[tokio::test]
+async fn unconverted_history_refuses_export() {
+    let source = SqliteBackend::new_in_memory().await.unwrap();
+    let profile = Profile::new(Some("old-history-transfer"));
+    source
+        .create_profile(&profile, AuditEntry::system("test", "profile").into())
+        .await
+        .unwrap();
+    // The schema of a file adopted from an older unversioned implementation.
+    sqlx::query("ALTER TABLE credentials ADD COLUMN history_commitment BLOB")
+        .execute(source.pool())
+        .await
+        .unwrap();
+    let credential = sid_core::models::Credential::new(
+        profile.id,
+        sid_core::models::CredentialType::Opaque,
+        b"record".to_vec(),
+        None,
+    );
+    source
+        .create_credential(&credential, AuditEntry::system("test", "credential").into())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE credentials SET history_commitment = ? WHERE id = ?")
+        .bind(vec![1u8; 32])
+        .bind(credential.id.0.to_string())
+        .execute(source.pool())
+        .await
+        .unwrap();
+    assert!(
+        export_snapshot(&source, "sqlite::memory:", false)
+            .await
+            .is_err()
+    );
+}
+
 /// A migrated instance gives every pairwise client the `sub` it already
 /// holds: the bindings move with their ids, and a second import is a no-op.
 #[tokio::test]

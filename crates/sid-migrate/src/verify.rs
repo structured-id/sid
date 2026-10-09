@@ -38,6 +38,20 @@ pub async fn verify_backends(
 ) -> anyhow::Result<VerifyResult> {
     let mut counts = Vec::new();
     let mut integrity_issues = Vec::new();
+    if source.instance_organization().await?.map(|o| o.id)
+        != target.instance_organization().await?.map(|o| o.id)
+    {
+        integrity_issues.push("installation authority differs".into());
+    }
+    let target_versions = target.list_key_versions().await?;
+    for params in source.list_key_versions().await? {
+        if !target_versions.iter().any(|p| p == &params) {
+            integrity_issues.push(format!(
+                "key derivation parameters differ for version {}",
+                params.version
+            ));
+        }
+    }
 
     // Compare profile counts
     info!("verifying profiles...");
@@ -61,6 +75,32 @@ pub async fn verify_backends(
         matches: source_projects == target_projects,
     });
 
+    // Walk the source too: equal profile counts do not prove that the target
+    // contains the owners whose retained history must survive the move.
+    let mut offset = 0u64;
+    loop {
+        let batch = source.list_profiles(offset, 1000).await?;
+        if batch.is_empty() {
+            break;
+        }
+        offset += batch.len() as u64;
+        for profile in batch {
+            if target.get_profile(profile.id).await?.is_none() {
+                integrity_issues.push(format!(
+                    "source profile {} is missing on target",
+                    profile.id
+                ));
+            } else if source.export_password_history(profile.id).await?
+                != target.export_password_history(profile.id).await?
+            {
+                integrity_issues.push(format!(
+                    "password history differs for profile {}",
+                    profile.id
+                ));
+            }
+        }
+    }
+
     // Verify referential integrity on target: every credential has a valid profile
     info!("checking referential integrity...");
     let target_profile_list = {
@@ -78,6 +118,14 @@ pub async fn verify_backends(
     };
 
     for profile in &target_profile_list {
+        if source.export_password_history(profile.id).await?
+            != target.export_password_history(profile.id).await?
+        {
+            integrity_issues.push(format!(
+                "password history differs for profile {}",
+                profile.id
+            ));
+        }
         // Check credentials reference valid profiles
         let creds = target.get_credentials_by_profile(profile.id, None).await?;
         for cred in &creds {

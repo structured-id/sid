@@ -17,6 +17,8 @@ pub async fn export_snapshot(
     include_audit: bool,
 ) -> anyhow::Result<Snapshot> {
     let mut snapshot = Snapshot::new(backend.name(), source_url);
+    snapshot.metadata.installation_org = backend.instance_organization().await?.map(|o| o.id);
+    snapshot.key_versions = backend.list_key_versions().await?;
 
     // 1. Projects
     info!("exporting projects...");
@@ -48,6 +50,9 @@ pub async fn export_snapshot(
     info!("exporting per-profile entities...");
     for profile in &snapshot.profiles {
         let pid = profile.id;
+        snapshot
+            .password_histories
+            .push((pid, backend.export_password_history(pid).await?));
 
         // Principals
         let principals = backend.get_principals_by_profile(pid).await?;

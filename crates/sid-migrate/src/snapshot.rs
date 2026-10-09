@@ -26,6 +26,10 @@ pub struct Snapshot {
     /// Snapshot metadata.
     pub metadata: SnapshotMetadata,
 
+    /// Public derivation parameters for sealed fields. No master key or
+    /// unwrapped epoch secret is included.
+    pub key_versions: Vec<sid_keys::KeyVersionParams>,
+
     /// Projects (including system project).
     pub projects: Vec<Project>,
 
@@ -37,6 +41,13 @@ pub struct Snapshot {
 
     /// Authentication credentials (OPAQUE, WebAuthn, TOTP, recovery).
     pub credentials: Vec<Credential>,
+
+    /// Complete history for every profile, including an explicit None for an
+    /// owner with no history. Missing owners are refused, never treated as empty.
+    pub password_histories: Vec<(
+        sid_core::models::ProfileId,
+        Option<sid_core::models::HistoryArchive>,
+    )>,
 
     /// Active sessions (expired sessions are excluded).
     pub sessions: Vec<Session>,
@@ -158,6 +169,10 @@ pub struct SnapshotMetadata {
     /// Snapshot format version.
     pub version: u32,
 
+    /// Authority whose id forms the password-history domain. The target must
+    /// already have this authority; a data transfer cannot change its identity.
+    pub installation_org: Option<sid_core::models::OrgId>,
+
     /// When the snapshot was created.
     pub created_at: DateTime<Utc>,
 
@@ -176,16 +191,19 @@ impl Snapshot {
     pub fn new(source_backend: &str, source_url: &str) -> Self {
         Self {
             metadata: SnapshotMetadata {
-                version: 1,
+                version: 2,
+                installation_org: None,
                 created_at: Utc::now(),
                 source_backend: source_backend.to_string(),
                 source_url: sanitize_url(source_url),
                 total_entities: 0,
             },
             projects: Vec::new(),
+            key_versions: Vec::new(),
             profiles: Vec::new(),
             principals: Vec::new(),
             credentials: Vec::new(),
+            password_histories: Vec::new(),
             sessions: Vec::new(),
             service_bindings: Vec::new(),
             applications: Vec::new(),
@@ -226,10 +244,16 @@ impl Snapshot {
     /// Count total entities in the snapshot.
     pub fn count_entities(&self) -> u64 {
         let mut count: u64 = 0;
+        count += self.key_versions.len() as u64;
         count += self.projects.len() as u64;
         count += self.profiles.len() as u64;
         count += self.principals.len() as u64;
         count += self.credentials.len() as u64;
+        count += self
+            .password_histories
+            .iter()
+            .filter(|(_, h)| h.is_some())
+            .count() as u64;
         count += self.sessions.len() as u64;
         count += self.service_bindings.len() as u64;
         count += self.applications.len() as u64;

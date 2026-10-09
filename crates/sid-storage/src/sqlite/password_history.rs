@@ -5,12 +5,19 @@
 //! database write lock: two writers of one owner's history are serialized.
 
 use sid_core::models::{
-    HistoryCommit, HistoryEntry, HistoryEpoch, HistoryEpochId, HistoryEpochUse, HistoryEvidence,
-    HistoryKsf, HistorySuite, NewHistoryEpoch, PasswordHistory, ProfileId, WrappedHistoryKey,
+    HistoryArchive, HistoryCommit, HistoryEntry, HistoryEpoch, HistoryEpochId, HistoryEpochUse,
+    HistoryEvidence, HistoryKsf, HistorySuite, NewHistoryEpoch, PasswordHistory, ProfileId,
+    WrappedHistoryKey,
 };
 use sid_core::{Error as SidError, Result as SidResult};
 
-use super::{SqliteBackend, WriteTx, col, dt_col, fmt_dt, uuid_col};
+use super::{SqliteBackend, WriteTx, col, dt_col, uuid_col};
+
+// History archives preserve the full precision supported by PostgreSQL;
+// millisecond truncation changes provenance and breaks identical restore retries.
+fn fmt_dt(dt: &chrono::DateTime<chrono::Utc>) -> String {
+    dt.to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
+}
 
 fn storage(what: &str) -> impl FnOnce(sqlx::Error) -> SidError + '_ {
     move |e| SidError::Storage(format!("password history {what}: {e}"))
@@ -66,6 +73,82 @@ fn row_to_entry(row: &sqlx::sqlite::SqliteRow) -> SidResult<HistoryEntry> {
         },
         created_at: dt_col(row, "created_at")?,
     })
+}
+
+async fn read_archive(
+    conn: &mut sqlx::SqliteConnection,
+    owner: ProfileId,
+) -> SidResult<Option<HistoryArchive>> {
+    // SQLite's current baseline has no legacy table. Inspect actual schema,
+    // including files adopted from the earlier unversioned implementation.
+    let has_table: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'password_history_legacy')")
+        .fetch_one(&mut *conn).await.map_err(storage("legacy schema"))?;
+    let mut legacy = false;
+    if has_table {
+        legacy = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM password_history_legacy WHERE owner_id = ?)",
+        )
+        .bind(owner)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(storage("legacy inventory"))?;
+    }
+    let has_column: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pragma_table_info('credentials') WHERE name = 'history_commitment')")
+        .fetch_one(&mut *conn).await.map_err(storage("legacy schema"))?;
+    if has_column {
+        let old: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM credentials WHERE profile_id = ? AND history_commitment IS NOT NULL)")
+            .bind(owner).fetch_one(&mut *conn).await.map_err(storage("legacy inventory"))?;
+        legacy |= old;
+    }
+    if legacy {
+        return Err(SidError::InvalidState(
+            "unconverted password history requires reconciliation before transfer".into(),
+        ));
+    }
+    let revision: Option<i64> =
+        sqlx::query_scalar("SELECT revision FROM password_histories WHERE owner_id = ?")
+            .bind(owner)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(storage("archive revision"))?;
+    let Some(revision) = revision else {
+        return Ok(None);
+    };
+    let rows = sqlx::query(concat!(
+        "SELECT ",
+        epoch_columns!(),
+        ", wrapped_key FROM password_history_epochs WHERE owner_id = ? ORDER BY created_at, id"
+    ))
+    .bind(owner)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(storage("archive epochs"))?;
+    let mut epochs = rows
+        .iter()
+        .map(|row| {
+            Ok(NewHistoryEpoch {
+                epoch: row_to_epoch(row)?,
+                key: WrappedHistoryKey(col(row, "wrapped_key")?),
+            })
+        })
+        .collect::<SidResult<Vec<_>>>()?;
+    // Old files may mix millisecond and microsecond text encodings. SQL's
+    // lexical order is not temporal order across those representations.
+    epochs.sort_by_key(|e| (e.epoch.created_at, e.epoch.id));
+    let rows = sqlx::query("SELECT epoch_id, seq, entry, operation_id, policy_version, created_at FROM password_history_entries WHERE owner_id = ? ORDER BY seq DESC, epoch_id")
+        .bind(owner).fetch_all(&mut *conn).await.map_err(storage("archive entries"))?;
+    let entries = rows
+        .iter()
+        .map(row_to_entry)
+        .collect::<SidResult<Vec<_>>>()?;
+    let archive = HistoryArchive {
+        owner,
+        revision,
+        epochs,
+        entries,
+    };
+    archive.validate()?;
+    Ok(Some(archive))
 }
 
 async fn insert_epoch(tx: &mut WriteTx, new: &NewHistoryEpoch) -> SidResult<()> {
@@ -178,6 +261,47 @@ pub(super) async fn apply_in_tx(tx: &mut WriteTx, commit: &HistoryCommit) -> Sid
 }
 
 impl SqliteBackend {
+    pub(crate) async fn export_password_history_impl(
+        &self,
+        owner: ProfileId,
+    ) -> SidResult<Option<HistoryArchive>> {
+        let mut tx = self.pool.begin().await.map_err(storage("archive read"))?;
+        let archive = read_archive(&mut tx, owner).await?;
+        tx.commit().await.map_err(storage("archive read"))?;
+        Ok(archive)
+    }
+
+    pub(crate) async fn import_password_history_impl(
+        &self,
+        archive: &HistoryArchive,
+        ctx: sid_core::models::MutationContext,
+    ) -> SidResult<bool> {
+        archive.validate()?;
+        let mut tx = self.begin_write().await?;
+        read_archive(&mut tx, archive.owner).await?;
+        let inserted = sqlx::query("INSERT INTO password_histories (owner_id, revision) VALUES (?, ?) ON CONFLICT (owner_id) DO NOTHING")
+            .bind(archive.owner).bind(archive.revision).execute(&mut *tx).await.map_err(storage("archive insert"))?.rows_affected();
+        if inserted == 0 {
+            if read_archive(&mut tx, archive.owner).await?.as_ref() == Some(archive) {
+                return Ok(false);
+            }
+            return Err(SidError::Conflict(
+                "existing password history differs from archive".into(),
+            ));
+        }
+        for epoch in &archive.epochs {
+            insert_epoch(&mut tx, epoch).await?;
+        }
+        for entry in &archive.entries {
+            sqlx::query("INSERT INTO password_history_entries (epoch_id, owner_id, seq, entry, operation_id, policy_version, created_at) VALUES (?,?,?,?,?,?,?)")
+                .bind(entry.epoch.0.to_string()).bind(archive.owner).bind(entry.seq).bind(entry.entry.as_slice())
+                .bind(entry.evidence.operation.to_string()).bind(i64::from(entry.evidence.policy_version)).bind(fmt_dt(&entry.created_at))
+                .execute(&mut *tx).await.map_err(storage("archive entry"))?;
+        }
+        Self::commit_mutation(tx, &format!("profile:{}", archive.owner), ctx).await?;
+        Ok(true)
+    }
+
     pub(crate) async fn get_password_history_impl(
         &self,
         owner: ProfileId,

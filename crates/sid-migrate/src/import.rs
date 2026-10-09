@@ -17,8 +17,86 @@ pub async fn import_snapshot(
     backend: &dyn StorageBackend,
     snapshot: &Snapshot,
 ) -> anyhow::Result<ImportResult> {
+    anyhow::ensure!(
+        snapshot.metadata.version == 2,
+        "unsupported snapshot format: export a new snapshot with complete password history"
+    );
+    anyhow::ensure!(
+        snapshot.metadata.installation_org == backend.instance_organization().await?.map(|o| o.id),
+        "restore the same installation authority before importing its data"
+    );
+    let profiles: std::collections::BTreeSet<_> = snapshot.profiles.iter().map(|p| p.id).collect();
+    let mut owners = std::collections::BTreeSet::new();
+    for (owner, archive) in &snapshot.password_histories {
+        anyhow::ensure!(
+            profiles.contains(owner) && owners.insert(*owner),
+            "invalid snapshot history owner"
+        );
+        if let Some(archive) = archive {
+            anyhow::ensure!(archive.owner == *owner, "history archive owner mismatch");
+            archive.validate()?;
+            for epoch in &archive.epochs {
+                if epoch.epoch.status == sid_core::models::HistoryEpochUse::Retired
+                    && epoch.key.0.is_empty()
+                {
+                    continue;
+                }
+                let sealed = sid_keys::EncryptedField::from_bytes(&epoch.key.0)?;
+                anyhow::ensure!(
+                    snapshot
+                        .key_versions
+                        .iter()
+                        .any(|v| v.version == sealed.key_version),
+                    "snapshot omits a required history key derivation version"
+                );
+            }
+        }
+        let current = backend.export_password_history(*owner).await?;
+        anyhow::ensure!(
+            current.is_none() || current.as_ref() == archive.as_ref(),
+            "target password history conflicts with snapshot"
+        );
+    }
+    anyhow::ensure!(
+        owners == profiles,
+        "snapshot must include history state for every profile"
+    );
     let mut result = ImportResult::default();
     let actor = "sid-migrate".to_string();
+    let current_versions = backend.list_key_versions().await?;
+    let mut versions = std::collections::BTreeSet::new();
+    for params in &snapshot.key_versions {
+        anyhow::ensure!(
+            versions.insert(params.version),
+            "duplicate key version in snapshot"
+        );
+        if let Some(current) = current_versions
+            .iter()
+            .find(|v| v.version == params.version)
+        {
+            anyhow::ensure!(
+                current == params,
+                "target key derivation parameters conflict with snapshot"
+            );
+        }
+    }
+    for params in &snapshot.key_versions {
+        if backend
+            .insert_key_version(
+                params,
+                make_audit(&actor, "import_key_version", &params.version.to_string()),
+            )
+            .await?
+        {
+            result.key_versions += 1;
+        } else {
+            let current = backend.list_key_versions().await?;
+            anyhow::ensure!(
+                current.iter().any(|v| v == params),
+                "key version changed during import"
+            );
+        }
+    }
 
     // 1. Projects (must exist before anything else)
     info!(count = snapshot.projects.len(), "importing projects...");
@@ -49,6 +127,25 @@ pub async fn import_snapshot(
         }
     }
 
+    // History precedes credentials: failure cannot install a password without
+    // the retained comparison state. Instance migration requires quiesced writers.
+    for (_, archive) in &snapshot.password_histories {
+        if let Some(archive) = archive
+            && backend
+                .import_password_history(
+                    archive,
+                    make_audit(
+                        &actor,
+                        "import_password_history",
+                        &archive.owner.to_string(),
+                    ),
+                )
+                .await?
+        {
+            result.password_histories += 1;
+        }
+    }
+
     // 3. Principals (depend on profiles)
     info!(count = snapshot.principals.len(), "importing principals...");
     for principal in &snapshot.principals {
@@ -64,8 +161,12 @@ pub async fn import_snapshot(
     );
     for credential in &snapshot.credentials {
         let audit = make_audit(&actor, "import_credential", &credential.id.0.to_string());
-        backend.create_credential(credential, audit).await?;
-        result.credentials += 1;
+        match backend.create_credential(credential, audit).await {
+            Ok(()) => result.credentials += 1,
+            Err(sid_core::Error::Conflict(_))
+                if backend.get_credential(credential.id).await?.as_ref() == Some(credential) => {}
+            Err(e) => return Err(e.into()),
+        }
     }
 
     // 5. Sessions (depend on profiles)
@@ -640,6 +741,8 @@ fn make_audit(_actor: &str, action: &str, resource: &str) -> MutationContext {
 /// Result of an import operation with per-entity counts.
 #[derive(Debug, Default)]
 pub struct ImportResult {
+    pub key_versions: u64,
+    pub password_histories: u64,
     pub projects: u64,
     pub profiles: u64,
     pub principals: u64,
@@ -682,6 +785,8 @@ impl ImportResult {
     /// Total imported entities.
     pub fn total(&self) -> u64 {
         self.projects
+            + self.key_versions
+            + self.password_histories
             + self.profiles
             + self.principals
             + self.credentials
@@ -723,6 +828,8 @@ impl ImportResult {
 impl std::fmt::Display for ImportResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Import Summary:")?;
+        writeln!(f, "  Key Versions:         {}", self.key_versions)?;
+        writeln!(f, "  Password Histories:   {}", self.password_histories)?;
         writeln!(f, "  Projects:             {}", self.projects)?;
         writeln!(f, "  Profiles:             {}", self.profiles)?;
         writeln!(f, "  Principals:           {}", self.principals)?;

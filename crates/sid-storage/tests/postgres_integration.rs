@@ -356,6 +356,11 @@ async fn test_history_is_empty_until_written() {
 }
 
 #[tokio::test]
+async fn test_history_archive_preserves_lifecycle() {
+    common::password_history::test_history_archive_preserves_lifecycle(&setup().await).await;
+}
+
+#[tokio::test]
 async fn test_history_epoch_is_prepared_once() {
     common::password_history::test_history_epoch_is_prepared_once(&setup().await).await;
 }
