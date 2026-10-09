@@ -3,6 +3,259 @@ use crate::export::export_snapshot;
 use sid_core::models::{BindingScope, Profile};
 use sid_storage::sqlite::SqliteBackend;
 
+/// A restore must preserve enforced constraints, not just opaque bytes. This
+/// drills the evaluator/checker phase with real blinded inputs, DLEQ and KSF;
+/// proof acceptance and complete account recovery are separate tests. The small
+/// KSF checks behavior, not production performance or approved parameters.
+#[tokio::test]
+async fn restored_history_refuses_passwords_from_active_and_rotated_epochs() {
+    use ff::PrimeField;
+    use group::GroupEncoding;
+    use pasta_curves::pallas;
+    use sid_authn::password_history::*;
+    use sid_core::models::*;
+    use sid_keys::{KeyVersionParams, RustCryptoPrimitives, SoftwareKeyManager};
+    use sid_pake_core::{
+        history as relation,
+        types::{DomainPublicInputs, HistoryTag, ZkppPublicInputs},
+    };
+    use std::{sync::Arc, time::Duration};
+
+    async fn check_password(
+        storage: &dyn StorageBackend,
+        evaluator: &HistoryEvaluator,
+        history: &PasswordHistory,
+        owner: ProfileId,
+        installation: &[u8; 16],
+        password: &[u8],
+    ) -> Result<CheckedPassword, HistoryCheckError> {
+        let d = pallas::Base::from_repr(owner_domain(installation, owner)).unwrap();
+        let r = relation::random_blind(rand::rng());
+        let u = relation::history_input(d, password);
+        let b = relation::blind_request(u, r).to_bytes();
+        let domains: Vec<_> = history
+            .required_epochs()
+            .into_iter()
+            .map(OperationDomain::of)
+            .collect();
+        let mut keys = Vec::new();
+        for domain in &domains {
+            keys.push((
+                domain.epoch,
+                owner,
+                storage
+                    .get_history_epoch_key(domain.epoch)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            ));
+        }
+        let context = uuid::Uuid::now_v7();
+        let evaluation = evaluator
+            .evaluate(&b, &keys, context.as_bytes())
+            .await
+            .unwrap();
+        let public = ZkppPublicInputs {
+            owner_domain: d.to_repr(),
+            blinded: b,
+            domains: domains
+                .iter()
+                .zip(&evaluation.evaluations)
+                .map(|(domain, answer)| {
+                    let c = pallas::Base::from_repr(domain.comparison_domain).unwrap();
+                    let z = pallas::Affine::from_bytes(&answer.evaluated).unwrap();
+                    DomainPublicInputs {
+                        comparison_domain: domain.comparison_domain,
+                        evaluated: answer.evaluated,
+                        tag: HistoryTag::new(relation::finalize_tag(c, u, r, z).to_repr()),
+                    }
+                })
+                .collect(),
+        };
+        HistoryChecker::new(KsfAdmission::new(64, Duration::from_secs(5)))
+            .check(
+                &public,
+                CheckRequest {
+                    owner_domain: d.to_repr(),
+                    domains: &domains,
+                    evaluation: &evaluation,
+                    context: context.as_bytes(),
+                    history,
+                },
+            )
+            .await
+    }
+
+    let source = SqliteBackend::new_in_memory().await.unwrap();
+    let profile = Profile::new(Some("restore-enforcement"));
+    let ctx = || AuditEntry::system("test", "restore-enforcement").into();
+    source.create_profile(&profile, ctx()).await.unwrap();
+    let params = KeyVersionParams::new(1, vec![7; 32], "restore-key");
+    source.insert_key_version(&params, ctx()).await.unwrap();
+    let manager = |master, versions| {
+        Arc::new(
+            SoftwareKeyManager::new(
+                secrecy::SecretBox::new(Box::new(master)),
+                versions,
+                Arc::new(RustCryptoPrimitives::new()),
+            )
+            .unwrap(),
+        )
+    };
+    let evaluator = HistoryEvaluator::new(manager([9; 32], vec![params.clone()]));
+    let ksf = HistoryKsf {
+        memory_kib: 64,
+        passes: 1,
+        lanes: 1,
+    };
+    let mut old = evaluator.new_epoch(profile.id, ksf).await.unwrap();
+    let mut active = evaluator.new_epoch(profile.id, ksf).await.unwrap();
+    let now =
+        chrono::DateTime::from_timestamp_micros(chrono::Utc::now().timestamp_micros()).unwrap();
+    old.epoch.created_at = now;
+    active.epoch.created_at = now;
+    source.ensure_history_epoch(&old, ctx()).await.unwrap();
+    let installation = *OrgId::generate().as_bytes();
+    let first = PasswordHistory {
+        revision: 1,
+        epochs: vec![old.epoch.clone()],
+        entries: vec![],
+    };
+    let accepted = check_password(
+        &source,
+        &evaluator,
+        &first,
+        profile.id,
+        &installation,
+        b"OldStr0ngP@ss1",
+    )
+    .await
+    .unwrap();
+    let first_entry = accepted.new_entries[0].1;
+    old.epoch.status = HistoryEpochUse::CompareOnly;
+    // The second active key lives in an independent staging backend: importing
+    // the complete archive below is the only mutation of the source history.
+    let staging = SqliteBackend::new_in_memory().await.unwrap();
+    staging.create_profile(&profile, ctx()).await.unwrap();
+    staging.ensure_history_epoch(&active, ctx()).await.unwrap();
+    let second = PasswordHistory {
+        revision: 1,
+        epochs: vec![active.epoch.clone()],
+        entries: vec![],
+    };
+    let accepted = check_password(
+        &staging,
+        &evaluator,
+        &second,
+        profile.id,
+        &installation,
+        b"OtherStr0ngP@ss2",
+    )
+    .await
+    .unwrap();
+    let second_entry = accepted.new_entries[0].1;
+    let mut archive = HistoryArchive {
+        owner: profile.id,
+        revision: 3,
+        epochs: vec![old.clone(), active.clone()],
+        entries: vec![
+            HistoryEntry {
+                epoch: active.epoch.id,
+                seq: 2,
+                entry: second_entry,
+                evidence: HistoryEvidence {
+                    operation: uuid::Uuid::now_v7(),
+                    policy_version: 1,
+                },
+                created_at: now,
+            },
+            HistoryEntry {
+                epoch: old.epoch.id,
+                seq: 1,
+                entry: first_entry,
+                evidence: HistoryEvidence {
+                    operation: uuid::Uuid::now_v7(),
+                    policy_version: 1,
+                },
+                created_at: now,
+            },
+        ],
+    };
+    archive
+        .epochs
+        .sort_by_key(|e| (e.epoch.created_at, e.epoch.id));
+    // Use a clean source for the complete nonempty archive; exact import never
+    // overwrites history that was already prepared on the preceding backend.
+    let source = SqliteBackend::new_in_memory().await.unwrap();
+    source.create_profile(&profile, ctx()).await.unwrap();
+    source.insert_key_version(&params, ctx()).await.unwrap();
+    source
+        .import_password_history(&archive, ctx())
+        .await
+        .unwrap();
+    let snapshot = export_snapshot(&source, "sqlite::memory:", false)
+        .await
+        .unwrap();
+    let bytes = serde_json::to_vec(&snapshot).unwrap();
+    let snapshot: crate::snapshot::Snapshot = serde_json::from_slice(&bytes).unwrap();
+    let target = SqliteBackend::new_in_memory().await.unwrap();
+    import_snapshot(&target, &snapshot).await.unwrap();
+    let history = target.get_password_history(profile.id).await.unwrap();
+    assert_eq!(history.entries.len(), 2);
+    let restored =
+        HistoryEvaluator::new(manager([9; 32], target.list_key_versions().await.unwrap()));
+    for retained in [b"OldStr0ngP@ss1".as_slice(), b"OtherStr0ngP@ss2".as_slice()] {
+        assert_eq!(
+            check_password(
+                &target,
+                &restored,
+                &history,
+                profile.id,
+                &installation,
+                retained
+            )
+            .await
+            .unwrap_err(),
+            HistoryCheckError::Reused
+        );
+    }
+    let accepted = check_password(
+        &target,
+        &restored,
+        &history,
+        profile.id,
+        &installation,
+        b"NewStr0ngP@ss3",
+    )
+    .await
+    .unwrap();
+    assert_eq!(accepted.new_entries.len(), 1);
+    assert_eq!(accepted.new_entries[0].0, active.epoch.id);
+    let domain = &history.required_epochs()[0];
+    let wrapped = target
+        .get_history_epoch_key(domain.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let d = pallas::Base::from_repr(owner_domain(&installation, profile.id)).unwrap();
+    let blinded = relation::blind_request(
+        relation::history_input(d, b"NewStr0ngP@ss3"),
+        relation::random_blind(rand::rng()),
+    )
+    .to_bytes();
+    let wrong = HistoryEvaluator::new(manager([10; 32], target.list_key_versions().await.unwrap()));
+    assert!(
+        wrong
+            .evaluate(
+                &blinded,
+                &[(domain.id, profile.id, wrapped)],
+                b"restore-refusal"
+            )
+            .await
+            .is_err()
+    );
+}
+
 /// Moving credentials must also move the history that prevents password reuse.
 /// A prepared epoch alone is nonempty durable state, even before its first entry.
 #[tokio::test]
