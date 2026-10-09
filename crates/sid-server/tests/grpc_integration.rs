@@ -2342,8 +2342,10 @@ async fn test_late_policy_proof_never_verifies_a_stored_credential() {
     assert_eq!(err.code(), tonic::Code::FailedPrecondition);
     assert_eq!(common::error_reason(&err).as_deref(), Some("INVALID_STATE"));
     let stored = svc.storage.get_credential(cred.id).await.unwrap().unwrap();
-    assert!(!stored.zkpp_verified);
-    assert_eq!(stored.policy_version, None);
+    assert_eq!(
+        stored.policy_evidence,
+        sid_core::models::PolicyEvidence::Unverified
+    );
 }
 
 /// Register `principal` through the ZKPP path without a proof; returns the
@@ -2406,11 +2408,11 @@ async fn zkpp_register_without_proof(
 async fn test_zkpp_registration_without_proof_is_unverified() {
     let svc = TestServices::with_zkpp_degraded(MockStorage::new().with_system_project());
     let credential = zkpp_register_without_proof(&svc, "unproven@sid.example.com").await;
-    assert!(
-        !credential.zkpp_verified,
+    assert_eq!(
+        credential.policy_evidence,
+        sid_core::models::PolicyEvidence::Unverified,
         "an unproven registration was stored as verified"
     );
-    assert_eq!(credential.policy_version, None);
 }
 
 // ═══════════════════════════════════════════════════════════════════

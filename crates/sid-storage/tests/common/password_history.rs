@@ -82,8 +82,10 @@ async fn profile_with_password(
 fn next(password: &Credential, data: &[u8]) -> Credential {
     let mut new = password.clone();
     new.data = CredentialData::new(data.to_vec());
-    new.zkpp_verified = true;
-    new.policy_version = Some(1);
+    new.policy_evidence = sid_core::models::PolicyEvidence::Verified {
+        policy_version: 1,
+        artifact: [1; 32],
+    };
     new
 }
 

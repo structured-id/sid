@@ -32,12 +32,12 @@ fn pending(purpose: OperationPurpose) -> PendingOperation {
     }
 }
 
-fn finished(op: PendingOperation, proof_verified: bool) -> FinishedOperation {
+fn finished(op: PendingOperation, evidence: PolicyEvidence) -> FinishedOperation {
     let command = op.finish_command(b"record");
     FinishedOperation {
         operation: op,
         password_file: vec![],
-        proof_verified,
+        evidence,
         history: None,
         command,
     }
@@ -77,18 +77,21 @@ fn a_finish_command_is_keyed_by_the_operation_and_its_record() {
 #[test]
 fn an_installed_credential_carries_its_evidence_and_key() {
     let profile = ProfileId::generate();
-    let credential = finished(pending(change()), true).credential(profile, vec![1, 2, 3]);
+    let evidence = PolicyEvidence::Verified {
+        policy_version: 3,
+        artifact: [4; 32],
+    };
+    let credential = finished(pending(change()), evidence).credential(profile, vec![1, 2, 3]);
     assert_eq!(credential.profile_id, profile);
     assert_eq!(credential.credential_type, CredentialType::Opaque);
     assert_eq!(credential.opaque_curve, Some(CurveId::Pallas as u8));
-    assert!(credential.zkpp_verified);
-    assert_eq!(credential.policy_version, Some(3));
+    assert_eq!(credential.policy_evidence, evidence);
     assert_eq!(credential.opaque_credential_identifier, Some([7; 16]));
     assert_eq!(credential.data.expose(), &[1, 2, 3]);
 
-    let unproven = finished(pending(change()), false).credential(profile, vec![]);
-    assert!(!unproven.zkpp_verified);
-    assert_eq!(unproven.policy_version, None);
+    let unproven =
+        finished(pending(change()), PolicyEvidence::Unverified).credential(profile, vec![]);
+    assert_eq!(unproven.policy_evidence, PolicyEvidence::Unverified);
     assert_eq!(unproven.opaque_credential_identifier, Some([7; 16]));
 }
 
@@ -249,6 +252,7 @@ async fn saturated_finish_preserves_the_operation_for_an_exact_retry() {
     let params = generate_params(ZKPP_K);
     let pk = generate_pk(&params, shape).unwrap();
     let verifier = ZkppVerifier::new(params.clone(), pk.get_vk().clone(), shape);
+    let verifier_artifact = verifier.artifact();
     let prover = ZkppProver::new(params, pk, shape);
     let zkpp =
         Arc::new(ZkppOpaqueServer::new(&router, vec![verifier], ZkppConfig::default()).unwrap());
@@ -387,7 +391,14 @@ async fn saturated_finish_preserves_the_operation_for_an_exact_retry() {
     let Finish::Ready(result) = result else {
         panic!("retry must complete the original operation")
     };
-    assert!(result.proof_verified);
+    // The verdict names the artifact that accepted it and the operation's policy.
+    assert_eq!(
+        result.evidence,
+        PolicyEvidence::Verified {
+            policy_version: 1,
+            artifact: verifier_artifact,
+        }
+    );
     assert_eq!(result.operation.id, id);
     assert_eq!(result.operation.owner, owner);
     assert!(result.history.is_some());

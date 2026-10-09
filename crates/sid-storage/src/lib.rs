@@ -27,6 +27,8 @@ pub use postgres_blob::PostgresBlobStore;
 
 #[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
 mod key_versions;
+#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
+mod policy_evidence;
 
 /// Open work per kind a mutation may still add; beyond it the mutation is
 /// refused rather than accepted without its obligation.

@@ -34,7 +34,51 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 3,
         sql: WEBAUTHN_USER_HANDLES,
     },
+    Migration {
+        version: 4,
+        sql: CREDENTIAL_POLICY_ARTIFACT,
+    },
 ];
+
+/// Policy verdicts name their verifying artifact; the PostgreSQL migration
+/// 056 states the contract. SQLite cannot add a table constraint, so
+/// triggers refuse a row whose evidence columns disagree.
+const CREDENTIAL_POLICY_ARTIFACT: &str = "
+ALTER TABLE credentials ADD COLUMN zkpp_artifact BLOB CHECK (length(zkpp_artifact) = 32);
+
+CREATE TABLE credential_policy_evidence_legacy (
+    credential_id   TEXT PRIMARY KEY,
+    profile_id      TEXT NOT NULL REFERENCES profiles (id) ON DELETE CASCADE,
+    zkpp_verified   INTEGER NOT NULL,
+    policy_version  INTEGER,
+    reason          TEXT NOT NULL CHECK (reason IN ('artifact_not_recorded')),
+    demoted_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+INSERT INTO credential_policy_evidence_legacy (credential_id, profile_id, zkpp_verified, policy_version, reason)
+SELECT id, profile_id, zkpp_verified, policy_version, 'artifact_not_recorded'
+FROM credentials
+WHERE zkpp_artifact IS NULL AND (zkpp_verified <> 0 OR policy_version IS NOT NULL);
+
+UPDATE credentials SET zkpp_verified = 0, policy_version = NULL
+WHERE zkpp_artifact IS NULL AND (zkpp_verified <> 0 OR policy_version IS NOT NULL);
+
+CREATE TRIGGER credentials_policy_evidence_insert
+BEFORE INSERT ON credentials
+WHEN NOT ((NEW.zkpp_verified <> 0 AND NEW.policy_version IS NOT NULL AND NEW.zkpp_artifact IS NOT NULL)
+       OR (NEW.zkpp_verified = 0 AND NEW.policy_version IS NULL AND NEW.zkpp_artifact IS NULL))
+BEGIN
+    SELECT RAISE(ABORT, 'credential policy evidence');
+END;
+
+CREATE TRIGGER credentials_policy_evidence_update
+BEFORE UPDATE OF zkpp_verified, policy_version, zkpp_artifact ON credentials
+WHEN NOT ((NEW.zkpp_verified <> 0 AND NEW.policy_version IS NOT NULL AND NEW.zkpp_artifact IS NOT NULL)
+       OR (NEW.zkpp_verified = 0 AND NEW.policy_version IS NULL AND NEW.zkpp_artifact IS NULL))
+BEGIN
+    SELECT RAISE(ABORT, 'credential policy evidence');
+END;
+";
 
 /// WebAuthn user handles; the PostgreSQL migration 054 states the contract.
 const WEBAUTHN_USER_HANDLES: &str = "

@@ -184,23 +184,35 @@ impl ZkppOpaqueServer {
     /// policy key for `domains` comparison domains, and its link to the
     /// element M of the operation's own OPAQUE request, bound to both the
     /// operation and the request bytes. Returns the history inputs for the
-    /// checker; policy compliance is part of the key, so a password below
-    /// policy has no valid proof.
+    /// checker and the artifact that accepted the proof; policy compliance is
+    /// part of the key, so a password below policy has no valid proof.
     pub fn verify(
         &self,
         proof: &BoundProof,
         operation_id: &[u8; 16],
         registration_request_bytes: &[u8],
         domains: usize,
-    ) -> SidResult<ZkppPublicInputs> {
+    ) -> SidResult<VerifiedProof> {
         let verifier = self.verifier(domains)?;
         let request = parse_registration_request(registration_request_bytes)?;
         let m = request_element(&request)?;
         let context = operation_context(operation_id, registration_request_bytes);
-        verifier.verify(proof, &context, m).map_err(|e| {
+        let inputs = verifier.verify(proof, &context, m).map_err(|e| {
             SidError::AuthenticationFailed(format!("ZKPP proof verification failed: {e}"))
+        })?;
+        Ok(VerifiedProof {
+            inputs,
+            artifact: verifier.artifact(),
         })
     }
+}
+
+/// An accepted proof: its history inputs for the checker and the identity
+/// of the verifying artifact, which the password's evidence records.
+#[derive(Debug)]
+pub struct VerifiedProof {
+    pub inputs: ZkppPublicInputs,
+    pub artifact: [u8; 32],
 }
 
 fn parse_registration_request(bytes: &[u8]) -> SidResult<RegistrationRequest<PallasCipherSuite>> {

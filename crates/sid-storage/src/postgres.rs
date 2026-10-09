@@ -828,13 +828,15 @@ impl PostgresBackend {
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         credential: &Credential,
     ) -> SidResult<()> {
+        let (verified, policy_version, artifact) =
+            crate::policy_evidence::columns(&credential.policy_evidence)?;
         sqlx::query(
             "INSERT INTO credentials (
                 id, profile_id, credential_type, status, data, label,
                 created_at, last_used_at,
                 policy_version, zkpp_verified, opaque_curve, legacy_algorithm,
-                opaque_credential_identifier
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+                opaque_credential_identifier, zkpp_artifact
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
         )
         .bind(credential.id.0)
         .bind(credential.profile_id)
@@ -844,8 +846,8 @@ impl PostgresBackend {
         .bind(&credential.label)
         .bind(credential.created_at)
         .bind(credential.last_used_at)
-        .bind(credential.policy_version.map(|v| v as i32))
-        .bind(credential.zkpp_verified)
+        .bind(policy_version)
+        .bind(verified)
         .bind(credential.opaque_curve.map(|c| c as i16))
         .bind(&credential.legacy_algorithm)
         .bind(
@@ -853,6 +855,7 @@ impl PostgresBackend {
                 .opaque_credential_identifier
                 .map(|id| id.to_vec()),
         )
+        .bind(artifact)
         .execute(&mut **tx)
         .await
         .map_err(|e| insert_error("credential", e))?;
@@ -2011,18 +2014,21 @@ impl StorageBackend for PostgresBackend {
             .begin()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
+        let (verified, policy_version, artifact) =
+            crate::policy_evidence::columns(&new.policy_evidence)?;
         let profile_id: Option<Uuid> = sqlx::query_scalar(
             "UPDATE credentials SET data = $3,
                 policy_version = $4, zkpp_verified = $5,
-                opaque_credential_identifier = $6, last_used_at = NOW()
+                opaque_credential_identifier = $6, zkpp_artifact = $7, last_used_at = NOW()
              WHERE id = $1 AND status = 'active' AND data = $2 RETURNING profile_id",
         )
         .bind(id.0)
         .bind(expected)
         .bind(new.data.expose())
-        .bind(new.policy_version.map(|v| v as i32))
-        .bind(new.zkpp_verified)
+        .bind(policy_version)
+        .bind(verified)
         .bind(new.opaque_credential_identifier.map(|id| id.to_vec()))
+        .bind(artifact)
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("change password: {e}")))?;

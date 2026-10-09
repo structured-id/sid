@@ -70,6 +70,12 @@ count. A pending password operation whose policy is no longer accepted must be
 restarted before it can install a password. Ordinary password login does not
 generate a new policy proof.
 
+A password's policy evidence names the verifying key (artifact) that accepted its
+proof. Upgrading demotes verdicts stored before artifacts were recorded to
+policy-unverified and keeps what they claimed in `credential_policy_evidence_legacy`;
+the next proved password change records a new verdict. Ordinary login and other
+factors are unaffected.
+
 A replaced password-history key takes no new entries, but the passwords already
 retained under it are still compared until retention removes them; the key is
 then destroyed. Replacement does not make previously copied keys or entries

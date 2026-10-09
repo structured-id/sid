@@ -85,7 +85,8 @@ async fn prove_restored_password(
         .unwrap();
     let public = server
         .verify(&proof, operation.as_bytes(), &request, domains.len())
-        .unwrap();
+        .unwrap()
+        .inputs;
     let checked = HistoryChecker::new(KsfAdmission::new(64, std::time::Duration::from_secs(5)))
         .check(
             &public,
@@ -252,8 +253,15 @@ async fn opaque_login_survives_serialized_transfer_and_restart() {
     .unwrap()
     .into();
     proved.opaque_credential_identifier = Some(*evidence.operation.as_bytes());
-    proved.zkpp_verified = true;
-    proved.policy_version = Some(1);
+    proved.policy_evidence = sid_core::models::PolicyEvidence::Verified {
+        policy_version: 1,
+        artifact: sid_pake_core::verifier::ZkppVerifier::new(
+            params.clone(),
+            pk.get_vk().clone(),
+            shape,
+        )
+        .artifact(),
+    };
     let commit = sid_core::models::HistoryCommit {
         owner: profile.id,
         expected_revision: source
@@ -494,8 +502,13 @@ async fn opaque_login_survives_serialized_transfer_and_restart() {
         .await
         .unwrap()
         .unwrap();
-    assert!(changed.zkpp_verified);
-    assert_eq!(changed.policy_version, Some(1));
+    assert!(matches!(
+        changed.policy_evidence,
+        sid_core::models::PolicyEvidence::Verified {
+            policy_version: 1,
+            ..
+        }
+    ));
     assert_eq!(
         restarted.get_password_history(profile.id).await.unwrap(),
         history_after

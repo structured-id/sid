@@ -469,7 +469,7 @@ async fn password_lifecycle(adapter: &str) {
         .into_iter()
         .find(|c| c.credential_type == sid_core::models::CredentialType::Opaque)
         .unwrap();
-    assert!(credential.zkpp_verified);
+    assert!(credential.policy_evidence.is_verified());
     // Rotation concerns the OPRF key identifier, not the credential row UUID.
     assert_ne!(
         credential.opaque_credential_identifier.unwrap(),

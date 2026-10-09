@@ -42,7 +42,7 @@ use sid_core::models::password_history::DEFAULT_HISTORY_DEPTH;
 use sid_core::models::{
     AuditEntry, Credential, CredentialId, CredentialType, HistoryCommit, HistoryEvidence,
     HistoryKsf, MutationContext, NewHistoryEpoch, OperationCompletion, OperationKey,
-    PasswordHistory, ProfileId, ResetSessionId,
+    PasswordHistory, PolicyEvidence, ProfileId, ResetSessionId,
 };
 use sid_ids::PasswordOperationId;
 use sid_pake_core::prover::BoundProof;
@@ -165,8 +165,8 @@ pub(crate) struct Prepared {
 pub(crate) struct FinishedOperation {
     pub operation: PendingOperation,
     pub password_file: Vec<u8>,
-    /// Whether an accepted proof verified this password.
-    pub proof_verified: bool,
+    /// What an accepted proof, if any, established about this password.
+    pub evidence: PolicyEvidence,
     /// The accepted password's history, for a verified proof.
     pub history: Option<HistoryCommit>,
     /// The durable-result command the commit completes.
@@ -179,8 +179,7 @@ impl FinishedOperation {
     pub(crate) fn credential(&self, profile_id: ProfileId, data: Vec<u8>) -> Credential {
         let mut credential = Credential::new(profile_id, CredentialType::Opaque, data, None);
         credential.opaque_curve = Some(CurveId::Pallas as u8);
-        credential.zkpp_verified = self.proof_verified;
-        credential.policy_version = self.proof_verified.then_some(self.operation.policy_version);
+        credential.policy_evidence = self.evidence;
         credential.opaque_credential_identifier = Some(self.operation.credential_identifier);
         credential
     }
@@ -698,7 +697,7 @@ impl PasswordOperations {
             return Ok(Finish::Ready(Box::new(FinishedOperation {
                 operation: op,
                 password_file,
-                proof_verified: false,
+                evidence: PolicyEvidence::Unverified,
                 history: None,
                 command,
             })));
@@ -741,7 +740,7 @@ impl PasswordOperations {
         // CPU-bound verification runs outside transactions and the async
         // runtime; its permit also bounds fixed-shape concurrent workspaces.
         let verifier = Arc::clone(&zkpp);
-        let public = run_proof(permit, move || {
+        let verified = run_proof(permit, move || {
             verifier.verify(&proof, &op_id, &request, domains)
         })
         .await?
@@ -749,13 +748,18 @@ impl PasswordOperations {
             warn!("password proof refused: {e}");
             invalid_proof()
         })?;
+        let public = verified.inputs;
+        let evidence = PolicyEvidence::Verified {
+            policy_version: op.policy_version,
+            artifact: verified.artifact,
+        };
 
         if op.decoy {
             // Verified like any proof; the purpose refuses the commit.
             return Ok(Finish::Ready(Box::new(FinishedOperation {
                 operation: op,
                 password_file,
-                proof_verified: true,
+                evidence,
                 history: None,
                 command,
             })));
@@ -827,7 +831,7 @@ impl PasswordOperations {
         Ok(Finish::Ready(Box::new(FinishedOperation {
             operation: op,
             password_file,
-            proof_verified: true,
+            evidence,
             history: Some(commit),
             command,
         })))

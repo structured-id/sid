@@ -261,8 +261,10 @@ async fn fences_prepared_mutations(db: Database, inventory: Inventory) {
     };
     let mut replacement = password.clone();
     replacement.data = CredentialData::new(b"replacement".to_vec());
-    replacement.zkpp_verified = true;
-    replacement.policy_version = Some(1);
+    replacement.policy_evidence = sid_core::models::PolicyEvidence::Verified {
+        policy_version: 1,
+        artifact: [1; 32],
+    };
     // Inventory appears after Begin. Refusing reads alone cannot fence this
     // already prepared operation: the check must also be inside its commit.
     db.seed(&password, inventory).await;

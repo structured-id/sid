@@ -300,7 +300,9 @@ async fn a_proved_registration_installs_its_first_history_and_signs_in() {
     let request = start.message.serialize().to_vec();
     let proof = prove(&op, password, &start);
 
-    let public = server.verify(&proof, &op.id, &request, 1).unwrap();
+    let verified = server.verify(&proof, &op.id, &request, 1).unwrap();
+    assert_ne!(verified.artifact, [0; 32], "the verdict names its artifact");
+    let public = verified.inputs;
     let first = history(&[&epoch], &[]);
     let accepted = checker()
         .check(&public, check_request(owner, &op, &first))
@@ -334,7 +336,8 @@ async fn a_change_to_a_retained_password_is_refused() {
             &start.message.serialize(),
             1,
         )
-        .unwrap();
+        .unwrap()
+        .inputs;
     let entry = checker()
         .check(&public, check_request(owner, &op, &history(&[&epoch], &[])))
         .await
@@ -352,7 +355,8 @@ async fn a_change_to_a_retained_password_is_refused() {
             &start.message.serialize(),
             1,
         )
-        .unwrap();
+        .unwrap()
+        .inputs;
     assert_eq!(
         checker()
             .check(&public, check_request(owner, &op, &retained))
@@ -371,7 +375,8 @@ async fn a_change_to_a_retained_password_is_refused() {
             &start.message.serialize(),
             1,
         )
-        .unwrap();
+        .unwrap()
+        .inputs;
     assert!(
         checker()
             .check(&public, check_request(owner, &op, &retained))
@@ -395,7 +400,7 @@ async fn a_rotated_epoch_still_refuses_its_passwords() {
 
     let op = operation(&evaluator, owner, &[&rotated], old).await;
     let start = client_start(old);
-    let public = server
+    let one_domain = server
         .verify(
             &prove(&op, old, &start),
             &op.id,
@@ -403,6 +408,7 @@ async fn a_rotated_epoch_still_refuses_its_passwords() {
             1,
         )
         .unwrap();
+    let public = one_domain.inputs;
     let entry = checker()
         .check(
             &public,
@@ -425,7 +431,12 @@ async fn a_rotated_epoch_still_refuses_its_passwords() {
         server.verify(&proof, &op.id, &request, 1).is_err(),
         "a two-domain proof under a one-domain key"
     );
-    let public = server.verify(&proof, &op.id, &request, 2).unwrap();
+    let two_domains = server.verify(&proof, &op.id, &request, 2).unwrap();
+    assert_ne!(
+        two_domains.artifact, one_domain.artifact,
+        "each domain count's key is its own artifact"
+    );
+    let public = two_domains.inputs;
     assert_eq!(
         checker()
             .check(&public, check_request(owner, &op, &after_rotation))
@@ -444,7 +455,8 @@ async fn a_rotated_epoch_still_refuses_its_passwords() {
             &start.message.serialize(),
             2,
         )
-        .unwrap();
+        .unwrap()
+        .inputs;
     let accepted = checker()
         .check(&public, check_request(owner, &op, &after_rotation))
         .await

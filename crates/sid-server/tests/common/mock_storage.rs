@@ -1303,8 +1303,7 @@ impl StorageBackend for MockStorage {
         inner.owe(&ctx)?;
         if let Some(credential) = inner.credentials.get_mut(&id.0) {
             credential.data = new.data.clone();
-            credential.policy_version = new.policy_version;
-            credential.zkpp_verified = new.zkpp_verified;
+            credential.policy_evidence = new.policy_evidence;
             credential.opaque_credential_identifier = new.opaque_credential_identifier;
             credential.last_used_at = Some(chrono::Utc::now());
         }

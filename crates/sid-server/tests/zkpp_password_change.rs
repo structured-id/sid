@@ -86,7 +86,10 @@ async fn registered(
         .await
         .unwrap()
         .unwrap();
-    assert!(credential.zkpp_verified, "the registration proof verified");
+    assert!(
+        credential.policy_evidence.is_verified(),
+        "the registration proof verified"
+    );
     let profile = svc
         .storage
         .get_profile(ProfileId::parse(&done.profile_id).unwrap())
@@ -256,8 +259,13 @@ async fn test_password_change_refuses_the_retained_password() {
         .await
         .unwrap()
         .unwrap();
-    assert!(stored.zkpp_verified);
-    assert_eq!(stored.policy_version, Some(1));
+    assert!(matches!(
+        stored.policy_evidence,
+        sid_core::models::PolicyEvidence::Verified {
+            policy_version: 1,
+            ..
+        }
+    ));
     assert_ne!(
         stored.opaque_credential_identifier, credential.opaque_credential_identifier,
         "the new password has its own OPRF key"

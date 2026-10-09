@@ -363,6 +363,10 @@ const MIGRATIONS: &[Migration] = &[
         name: "20261009_055_password_history_inventory_index",
         sql: include_str!("../../../migrations/20261009_055_password_history_inventory_index.sql"),
     },
+    Migration {
+        name: "20261009_056_credential_policy_artifact",
+        sql: include_str!("../../../migrations/20261009_056_credential_policy_artifact.sql"),
+    },
 ];
 
 /// Run all pending migrations against the database.

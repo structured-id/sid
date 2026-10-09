@@ -118,7 +118,7 @@ pub use consent::{
 };
 pub use credential::{
     ActiveCredential, Credential, CredentialData, CredentialId, CredentialRevocation,
-    CredentialType, WebAuthnUserHandle,
+    CredentialType, PolicyEvidence, WebAuthnUserHandle,
 };
 pub use device::{Device, DeviceAssurance, DeviceId, DeviceTrustChange, DeviceType};
 pub use device_attestation::{
