@@ -184,6 +184,7 @@ impl Installation {
                         revocation.clone(),
                     ),
                 ),
+                security_policy: None,
             },
         );
         let project = Arc::new(ProjectServiceImpl::new(

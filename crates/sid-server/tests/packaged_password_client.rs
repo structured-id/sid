@@ -390,11 +390,20 @@ async fn password_lifecycle(adapter: &str) {
     );
 
     // The same published prover must not omit the retained-password check.
+    // Each change proves the current password (FIRST: the reused attempt
+    // changes nothing) with the published client's own sign-in.
     for (password, reused) in [(FIRST, true), (SECOND, false)] {
+        let sign_in = bytes(
+            kernel
+                .call(json!({"method":"loginStart", "password":FIRST}))
+                .await
+                .unwrap(),
+        );
         let challenge = auth
             .password_change_challenge(authed(
                 PasswordChangeChallengeRequest {
                     credential_id: credential_id.clone(),
+                    credential_request: sign_in,
                 },
                 &token,
             ))
@@ -402,6 +411,13 @@ async fn password_lifecycle(adapter: &str) {
             .unwrap()
             .into_inner();
         let context = challenge.history.unwrap();
+        let credential_finalization = bytes(
+            kernel
+                .call(json!({"method":"loginFinish","password":FIRST,
+                    "response":challenge.credential_response}))
+                .await
+                .unwrap(),
+        );
         let request = bytes(
             kernel
                 .call(json!({"method":"start","password":password}))
@@ -414,6 +430,7 @@ async fn password_lifecycle(adapter: &str) {
                     operation_id: context.operation_id.clone(),
                     credential_id: credential_id.clone(),
                     registration_request: request,
+                    credential_finalization,
                 },
                 &token,
             ))

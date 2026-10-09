@@ -63,6 +63,9 @@ pub const CE_PASSWORD_MIN_SYMBOLS: u32 = 0;
 /// CE: No forced password rotation (0 = disabled).
 pub const CE_PASSWORD_MAX_AGE_DAYS: u32 = 0;
 
+/// CE: Every password change proves the current password (OWASP ASVS V6.2.3).
+pub const CE_PASSWORD_CHANGE_CURRENT_PASSWORD: CurrentPasswordRule = CurrentPasswordRule::Always;
+
 /// CE: No session lifetime limit (0 = unlimited).
 pub const CE_SESSION_MAX_LIFETIME_HOURS: u32 = 0;
 
@@ -487,6 +490,21 @@ pub struct PasswordPolicy {
 
     /// Maximum password age in days. 0 = no forced rotation.
     pub max_age_days: u32,
+
+    /// When a password change must prove the current password.
+    pub change_current_password: CurrentPasswordRule,
+}
+
+/// When a password change must prove the current password. A reset under a
+/// verified reset session never does: that session is its authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CurrentPasswordRule {
+    /// Every change.
+    Always,
+    /// Only once this many minutes have passed since the session last
+    /// authenticated. The credential-binding freshness window still bounds
+    /// it: a longer value behaves as that window.
+    AfterMinutes(u32),
 }
 
 /// Device trust policy.
@@ -640,6 +658,7 @@ impl SecurityPolicy {
                 min_digits: CE_PASSWORD_MIN_DIGITS,
                 min_symbols: CE_PASSWORD_MIN_SYMBOLS,
                 max_age_days: CE_PASSWORD_MAX_AGE_DAYS,
+                change_current_password: CE_PASSWORD_CHANGE_CURRENT_PASSWORD,
             },
             device: DevicePolicy {
                 min_assurance: DeviceAssurance::Unknown,
@@ -996,6 +1015,10 @@ mod tests {
         assert_eq!(CE_PASSWORD_MIN_DIGITS, 1);
         assert_eq!(CE_PASSWORD_MIN_SYMBOLS, 0);
         assert_eq!(CE_PASSWORD_MAX_AGE_DAYS, 0);
+        assert_eq!(
+            CE_PASSWORD_CHANGE_CURRENT_PASSWORD,
+            CurrentPasswordRule::Always
+        );
         assert_eq!(CE_SESSION_MAX_LIFETIME_HOURS, 0);
         assert_eq!(CE_SESSION_IDLE_TIMEOUT_HOURS, 0);
         assert_eq!(CE_SESSION_MAX_CONCURRENT, 0);
@@ -1039,11 +1062,16 @@ mod tests {
             min_digits: 2,
             min_symbols: 1,
             max_age_days: 90,
+            change_current_password: CurrentPasswordRule::AfterMinutes(5),
         };
         let json = serde_json::to_string(&pwd).unwrap();
         let parsed: PasswordPolicy = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.min_length, 12);
         assert_eq!(parsed.max_age_days, 90);
+        assert_eq!(
+            parsed.change_current_password,
+            CurrentPasswordRule::AfterMinutes(5)
+        );
     }
 
     #[test]

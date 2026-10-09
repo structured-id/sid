@@ -65,7 +65,7 @@ use sid_ids::PasswordOperationId;
 use sid_pake_core::prover::BoundProof;
 use sid_pake_core::types::ZkppProof;
 use sid_plugin::cache::CacheBackend;
-use sid_plugin::crypto::CurveId;
+use sid_plugin::crypto::{CurveId, LoginState};
 use sid_plugin::storage::StorageBackend;
 use sid_proto::sid::v1::authn::password_history_evaluator_service_client::PasswordHistoryEvaluatorServiceClient;
 use sid_proto::sid::v1::authn::password_history_evaluator_service_server::PasswordHistoryEvaluatorService;
@@ -162,9 +162,40 @@ pub(crate) struct PendingOperation {
     pub registration_request: Option<Vec<u8>>,
     /// The evaluator's answers, kept for an exact retry and for the checker.
     pub evaluation: Option<OperationEvaluation>,
+    /// A change's sign-in with the current password.
+    #[serde(default)]
+    pub current_password: CurrentPassword,
+}
+
+/// What execute's KE3 established.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CurrentPasswordCheck {
+    /// The change proved the current password.
+    Proven,
+    /// The change began no sign-in and sent no KE3.
+    NotBegun,
+    /// KE3 did not verify: a wrong current password.
+    Failed,
+}
+
+/// Where a change's sign-in with the current password stands.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub(crate) enum CurrentPassword {
+    /// The change did not begin one.
+    #[default]
+    Absent,
+    /// Begun in the challenge: the server's OPAQUE state awaiting KE3.
+    Started(LoginState),
+    /// KE3 verified: the change authenticated with the current password.
+    Proven,
 }
 
 impl PendingOperation {
+    /// Whether the operation authenticated with the current password.
+    pub fn current_password_proven(&self) -> bool {
+        matches!(self.current_password, CurrentPassword::Proven)
+    }
+
     /// The durable-result command of this operation's finish with `record`.
     fn finish_command(&self, record: &[u8]) -> KeyedCommand {
         finish_command(&self.id, self.purpose.method(), record)
@@ -511,6 +542,7 @@ impl PasswordOperations {
             credential_identifier: rand::random(),
             registration_request: None,
             evaluation: None,
+            current_password: CurrentPassword::Absent,
         };
         let registration_response = match registration_request {
             Some(request) => Some(Self::start_opaque(zkpp, &mut op, request)?),
@@ -557,6 +589,73 @@ impl PasswordOperations {
             })?;
         op.registration_request = Some(request);
         Ok(response)
+    }
+
+    /// Begin the change `id`'s sign-in with the current password, when
+    /// `authorized` accepts its purpose: `state` is the server side of the
+    /// KE2 the challenge answers with. Its KE3 comes in execute.
+    pub(crate) async fn begin_current_password(
+        &self,
+        id: &PasswordOperationId,
+        state: LoginState,
+        authorized: impl FnOnce(&PendingOperation) -> Result<(), Status>,
+    ) -> Result<(), Status> {
+        let mut op = self.take(id).await?;
+        let result = authorized(&op);
+        if result.is_ok() {
+            op.current_password = CurrentPassword::Started(state);
+        }
+        self.store(&op).await?;
+        result
+    }
+
+    /// Execute's half of the change `id`'s sign-in with the current
+    /// password: `verify` checks `finalization` (KE3) against the begun
+    /// state, once. A failed check leaves the operation without a proof; a
+    /// retry of a proven operation stays proven.
+    pub(crate) async fn prove_current_password(
+        &self,
+        id: &PasswordOperationId,
+        finalization: &[u8],
+        authorized: impl FnOnce(&PendingOperation) -> Result<(), Status>,
+        verify: impl FnOnce(&LoginState, &[u8]) -> bool,
+    ) -> Result<CurrentPasswordCheck, Status> {
+        let mut op = self.take(id).await?;
+        let checked = authorized(&op).and_then(|()| {
+            match (
+                std::mem::take(&mut op.current_password),
+                finalization.is_empty(),
+            ) {
+                (CurrentPassword::Absent, true) => Ok(CurrentPasswordCheck::NotBegun),
+                (CurrentPassword::Absent, false) => Err(invalid_field(
+                    "credential_finalization",
+                    "the challenge began no current-password sign-in",
+                )),
+                (CurrentPassword::Started(state), true) => {
+                    op.current_password = CurrentPassword::Started(state);
+                    Err(ApiError::new(
+                        ErrorReason::RequiredFieldMissing,
+                        "the current-password sign-in needs its finalization",
+                    )
+                    .with_field_violation("credential_finalization", "required")
+                    .into())
+                }
+                (CurrentPassword::Started(state), false) => {
+                    if verify(&state, finalization) {
+                        op.current_password = CurrentPassword::Proven;
+                        Ok(CurrentPasswordCheck::Proven)
+                    } else {
+                        Ok(CurrentPasswordCheck::Failed)
+                    }
+                }
+                (CurrentPassword::Proven, _) => {
+                    op.current_password = CurrentPassword::Proven;
+                    Ok(CurrentPasswordCheck::Proven)
+                }
+            }
+        });
+        self.store(&op).await?;
+        checked
     }
 
     /// The OPAQUE start of the operation `id`, when `authorized` accepts its

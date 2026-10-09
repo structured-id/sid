@@ -218,10 +218,10 @@ pub use scim_outbound::{
     ScimOutboundRecord, ScimOutboundTarget, ScimOutboundTargetId,
 };
 pub use security_policy::{
-    AuthPolicy, CountryMode, DevicePolicy, EnforcementConfig, EnforcementMode, EnrollmentMode,
-    EnrollmentPolicy, GraceExpiryAction, InviteConfig, MfaEnforcement, NetworkPolicy,
-    NetworkViolationReaction, PasswordPolicy, PrincipalPolicy, SecurityPolicy, SecurityPolicyId,
-    SessionDecayConfig, SessionPolicy,
+    AuthPolicy, CountryMode, CurrentPasswordRule, DevicePolicy, EnforcementConfig, EnforcementMode,
+    EnrollmentMode, EnrollmentPolicy, GraceExpiryAction, InviteConfig, MfaEnforcement,
+    NetworkPolicy, NetworkViolationReaction, PasswordPolicy, PrincipalPolicy, SecurityPolicy,
+    SecurityPolicyId, SessionDecayConfig, SessionPolicy,
 };
 pub use service_binding::{BindingId, BindingScope, EmptyBindingScope, ServiceBinding};
 pub use session::{

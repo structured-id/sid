@@ -11,7 +11,9 @@ use common::{TestServices, zkpp_client as client};
 use rand::rand_core::UnwrapErr;
 use rand::rngs::SysRng;
 use sid_authn::opaque_zkpp::ZkppConfig;
-use sid_core::models::{Credential, CredentialId, ProfileId};
+use sid_core::models::{
+    AuthLevel, Credential, CredentialId, CurrentPasswordRule, ProfileId, SecurityPolicy,
+};
 use sid_opaque_ke::{
     ClientLogin, ClientLoginFinishParameters, ClientRegistration,
     ClientRegistrationFinishParameters, CredentialResponse, RegistrationResponse,
@@ -28,6 +30,7 @@ const PRINCIPAL: &str = "change@sid.example.com";
 const OLD: &[u8] = b"OldStr0ngP@ss1";
 const NEW: &[u8] = b"NewStr0ngP@ss2";
 const WEAK: &[u8] = b"weak";
+const THIRD: &[u8] = b"ThirdStr0ngP@ss3";
 
 fn authed<T>(msg: T, bearer: &str) -> Request<T> {
     let mut req = Request::new(msg);
@@ -58,13 +61,24 @@ async fn registered_as(
     verifier: ZkppVerifier,
     principal: &str,
 ) -> (TestServices, Credential, String) {
-    let svc = TestServices::with_zkpp(
+    registered_with(prover, verifier, principal, SecurityPolicy::ce_default()).await
+}
+
+/// As [`registered_as`], on a server under `policy`.
+async fn registered_with(
+    prover: &ZkppProver,
+    verifier: ZkppVerifier,
+    principal: &str,
+    policy: SecurityPolicy,
+) -> (TestServices, Credential, String) {
+    let svc = TestServices::with_zkpp_policy(
         MockStorage::new().with_system_project(),
         verifier,
         ZkppConfig {
             require_proof: true,
             policy_version: 1,
         },
+        policy,
     );
     let started = client::start(OLD);
     let start = svc
@@ -118,25 +132,48 @@ struct Changing {
 }
 
 /// Challenge, OPAQUE start, execute, evaluation and proof of a change of
-/// `credential` to `password`.
+/// `credential` to `password`, proving `current` as the current password
+/// when given.
 async fn prepare_change(
     svc: &TestServices,
     prover: &ZkppProver,
     credential: &Credential,
     token: &str,
+    current: Option<&[u8]>,
     password: &[u8],
 ) -> Result<Changing, Status> {
+    let login = current
+        .map(|c| ClientLogin::<PallasCipherSuite>::start(&mut UnwrapErr(SysRng), c).unwrap());
     let challenge = svc
         .auth
         .password_change_challenge(authed(
             PasswordChangeChallengeRequest {
                 credential_id: credential.id.0.to_string(),
+                credential_request: login
+                    .as_ref()
+                    .map(|l| l.message.serialize().to_vec())
+                    .unwrap_or_default(),
             },
             token,
         ))
         .await?
         .into_inner();
     let context = challenge.history.expect("the change's history context");
+    // A wrong current password fails on the client: it sends a KE3 that
+    // cannot verify, as a client that skipped its own check would.
+    let credential_finalization = match (login, current) {
+        (Some(login), Some(current)) => login
+            .state
+            .finish(
+                &mut UnwrapErr(SysRng),
+                current,
+                CredentialResponse::deserialize(&challenge.credential_response).unwrap(),
+                ClientLoginFinishParameters::default(),
+            )
+            .map(|f| f.message.serialize().to_vec())
+            .unwrap_or_else(|_| vec![0; 64]),
+        _ => Vec::new(),
+    };
     let started = client::start(password);
     let executed = svc
         .auth
@@ -145,6 +182,7 @@ async fn prepare_change(
                 operation_id: context.operation_id.clone(),
                 credential_id: credential.id.0.to_string(),
                 registration_request: started.request.clone(),
+                credential_finalization,
             },
             token,
         ))
@@ -180,15 +218,17 @@ async fn finish_change(
     Ok(())
 }
 
-/// Change the password of `credential` to `password`, all the way.
+/// Change the password of `credential` from `current` to `password`, all
+/// the way.
 async fn change(
     svc: &TestServices,
     prover: &ZkppProver,
     credential: &Credential,
     token: &str,
+    current: &[u8],
     password: &[u8],
 ) -> Result<(), Status> {
-    let changing = prepare_change(svc, prover, credential, token, password).await?;
+    let changing = prepare_change(svc, prover, credential, token, Some(current), password).await?;
     finish_change(
         svc,
         credential,
@@ -247,11 +287,11 @@ async fn test_a_username_or_phone_account_has_the_same_history() {
         let (prover, verifier) = client::keys(1);
         let (svc, credential, token) = registered_as(&prover, verifier, principal).await;
         assert!(signs_in_as(&svc, principal, OLD).await, "{principal}");
-        let reused = change(&svc, &prover, &credential, &token, OLD)
+        let reused = change(&svc, &prover, &credential, &token, OLD, OLD)
             .await
             .expect_err("the current password passed the history check");
         assert_eq!(reason(&reused), "PASSWORD_REUSED", "{principal}");
-        change(&svc, &prover, &credential, &token, NEW)
+        change(&svc, &prover, &credential, &token, OLD, NEW)
             .await
             .unwrap_or_else(|e| panic!("{principal}: {e:?}"));
         let stored = svc
@@ -278,7 +318,7 @@ async fn test_password_change_refuses_the_retained_password() {
         "the registered password signs in"
     );
 
-    let reused = change(&svc, &prover, &credential, &token, OLD)
+    let reused = change(&svc, &prover, &credential, &token, OLD, OLD)
         .await
         .expect_err("the current password passed the history check");
     assert_eq!(
@@ -293,7 +333,7 @@ async fn test_password_change_refuses_the_retained_password() {
         "a refused change keeps the password"
     );
 
-    change(&svc, &prover, &credential, &token, NEW)
+    change(&svc, &prover, &credential, &token, OLD, NEW)
         .await
         .expect("the change to a new password");
     let stored = svc
@@ -319,7 +359,7 @@ async fn test_password_change_refuses_the_retained_password() {
         "the old password no longer does"
     );
 
-    let again = change(&svc, &prover, &credential, &token, NEW)
+    let again = change(&svc, &prover, &credential, &token, NEW, NEW)
         .await
         .expect_err("the retained new password passed the history check");
     assert_eq!(reason(&again), "PASSWORD_REUSED");
@@ -333,7 +373,7 @@ async fn test_password_change_refuses_the_retained_password() {
 async fn test_a_lost_change_response_resolves_without_a_second_write() {
     let (prover, verifier) = client::keys(1);
     let (svc, credential, token) = registered(&prover, verifier).await;
-    let changing = prepare_change(&svc, &prover, &credential, &token, NEW)
+    let changing = prepare_change(&svc, &prover, &credential, &token, Some(OLD), NEW)
         .await
         .unwrap();
     let other_record = {
@@ -475,7 +515,7 @@ async fn test_a_replaced_history_key_keeps_the_retained_password_refused() {
     let token = common::fresh_token(&svc, &profile).await;
 
     // An operation prepared under the first key, finished after the swap.
-    let early = prepare_change(&svc, &prover, &credential, &token, NEW)
+    let early = prepare_change(&svc, &prover, &credential, &token, Some(OLD), NEW)
         .await
         .unwrap();
 
@@ -504,7 +544,7 @@ async fn test_a_replaced_history_key_keeps_the_retained_password_refused() {
     assert_eq!(reason(&stale), "CONCURRENT_MODIFICATION");
     assert!(signs_in(&svc, OLD).await, "the refusal kept the password");
 
-    let reused = prepare_change(&svc, &prover2, &credential, &token, OLD)
+    let reused = prepare_change(&svc, &prover2, &credential, &token, Some(OLD), OLD)
         .await
         .unwrap();
     assert_eq!(
@@ -524,7 +564,7 @@ async fn test_a_replaced_history_key_keeps_the_retained_password_refused() {
     .expect_err("the retained password passed after the key replacement");
     assert_eq!(reason(&refused), "PASSWORD_REUSED");
 
-    change(&svc, &prover2, &credential, &token, NEW)
+    change(&svc, &prover2, &credential, &token, OLD, NEW)
         .await
         .expect("a new password under the new key");
     assert!(signs_in(&svc, NEW).await);
@@ -536,7 +576,7 @@ async fn test_a_replaced_history_key_keeps_the_retained_password_refused() {
         Some(WrappedHistoryKey(Vec::new())),
         "the retired key is destroyed"
     );
-    let again = change(&svc, &prover, &credential, &token, NEW)
+    let again = change(&svc, &prover, &credential, &token, NEW, NEW)
         .await
         .expect_err("the password retained under the new key passed");
     assert_eq!(reason(&again), "PASSWORD_REUSED");
@@ -606,9 +646,10 @@ async fn weak_record_from_login(svc: &TestServices) -> Vec<u8> {
 async fn test_a_record_for_another_password_opens_under_none() {
     let (prover, verifier) = client::keys(1);
     let (svc, credential, token) = registered(&prover, verifier).await;
-    let Changing { context, proof, .. } = prepare_change(&svc, &prover, &credential, &token, NEW)
-        .await
-        .expect("the change up to its finish");
+    let Changing { context, proof, .. } =
+        prepare_change(&svc, &prover, &credential, &token, Some(OLD), NEW)
+            .await
+            .expect("the change up to its finish");
 
     let second = client::start(WEAK);
     let refused = svc
@@ -618,6 +659,7 @@ async fn test_a_record_for_another_password_opens_under_none() {
                 operation_id: context.operation_id.clone(),
                 credential_id: credential.id.0.to_string(),
                 registration_request: second.request.clone(),
+                credential_finalization: vec![],
             },
             &token,
         ))
@@ -635,4 +677,140 @@ async fn test_a_record_for_another_password_opens_under_none() {
     );
     assert!(!signs_in(&svc, NEW).await);
     assert!(!signs_in(&svc, OLD).await);
+}
+
+/// The `continuation` metadata of a refusal.
+fn continuation(err: &Status) -> String {
+    err.get_details_error_info()
+        .and_then(|info| info.metadata.get("continuation").cloned())
+        .unwrap_or_default()
+}
+
+/// How long the caller of `token` may still change without the current password.
+async fn required_in(svc: &TestServices, token: &str) -> std::time::Duration {
+    let left = svc
+        .auth
+        .get_password_change_requirement(authed(GetPasswordChangeRequirementRequest {}, token))
+        .await
+        .expect("the requirement")
+        .into_inner()
+        .current_password_required_in
+        .expect("a duration");
+    std::time::Duration::try_from(left).expect("never negative")
+}
+
+/// By default a session alone never replaces the password, however fresh: a
+/// change without the current password is refused before anything is
+/// prepared, with the continuation that asks for it, and the requirement
+/// says it is needed now.
+#[tokio::test]
+async fn test_a_change_without_the_current_password_is_refused() {
+    let (prover, verifier) = client::keys(1);
+    let (svc, credential, token) = registered(&prover, verifier).await;
+    assert_eq!(required_in(&svc, &token).await, std::time::Duration::ZERO);
+
+    let Err(refused) = prepare_change(&svc, &prover, &credential, &token, None, NEW).await else {
+        panic!("a change without the current password was prepared");
+    };
+    assert_eq!(
+        refused.code(),
+        Code::FailedPrecondition,
+        "{}",
+        refused.message()
+    );
+    assert_eq!(reason(&refused), "STEP_UP_REQUIRED");
+    assert_eq!(continuation(&refused), "current_password");
+    assert!(signs_in(&svc, OLD).await, "the refusal kept the password");
+}
+
+/// A wrong current password is refused like a wrong sign-in, counts toward
+/// the sign-in lockout, and changes nothing.
+#[tokio::test]
+async fn test_a_wrong_current_password_is_refused() {
+    let (prover, verifier) = client::keys(1);
+    let (svc, credential, token) = registered(&prover, verifier).await;
+
+    let Err(refused) = prepare_change(&svc, &prover, &credential, &token, Some(WEAK), NEW).await
+    else {
+        panic!("a change with a wrong current password was prepared");
+    };
+    assert_eq!(
+        refused.code(),
+        Code::Unauthenticated,
+        "{}",
+        refused.message()
+    );
+    assert_eq!(reason(&refused), "AUTHENTICATION_FAILED");
+    assert!(signs_in(&svc, OLD).await, "the refusal kept the password");
+    assert!(!signs_in(&svc, NEW).await);
+}
+
+/// Under a relaxed rule a recent session changes without the current
+/// password, and the requirement counts down to the moment it is needed; a
+/// proof sent anyway is accepted. Once the session's authentication is older
+/// than the rule, the current password is required again, and proving it
+/// still changes the password.
+#[tokio::test]
+async fn test_a_relaxed_rule_skips_the_current_password_while_recent() {
+    let mut policy = SecurityPolicy::ce_default();
+    policy.password.change_current_password = CurrentPasswordRule::AfterMinutes(5);
+    let (prover, verifier) = client::keys(1);
+    let (svc, credential, token) = registered_with(&prover, verifier, PRINCIPAL, policy).await;
+
+    let left = required_in(&svc, &token).await;
+    assert!(
+        left > std::time::Duration::from_secs(4 * 60)
+            && left <= std::time::Duration::from_secs(5 * 60),
+        "{left:?}"
+    );
+    change_without_current(&svc, &prover, &credential, &token, NEW)
+        .await
+        .expect("a recent session changes without the current password");
+    assert!(signs_in(&svc, NEW).await);
+    change(&svc, &prover, &credential, &token, NEW, THIRD)
+        .await
+        .expect("a proof sent when none is required is accepted");
+    assert!(signs_in(&svc, THIRD).await);
+
+    let profile = svc
+        .storage
+        .get_profile(credential.profile_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let older = common::stored_session_token(
+        &svc,
+        &profile,
+        common::authenticated_session(&profile, AuthLevel::Basic, 6),
+    )
+    .await;
+    assert_eq!(required_in(&svc, &older).await, std::time::Duration::ZERO);
+    let refused = change_without_current(&svc, &prover, &credential, &older, NEW)
+        .await
+        .expect_err("an older session changed without the current password");
+    assert_eq!(reason(&refused), "STEP_UP_REQUIRED");
+    change(&svc, &prover, &credential, &older, THIRD, NEW)
+        .await
+        .expect("proving the current password changes it");
+    assert!(signs_in(&svc, NEW).await);
+}
+
+/// A change to `password` that does not prove the current password.
+async fn change_without_current(
+    svc: &TestServices,
+    prover: &ZkppProver,
+    credential: &Credential,
+    token: &str,
+    password: &[u8],
+) -> Result<(), Status> {
+    let changing = prepare_change(svc, prover, credential, token, None, password).await?;
+    finish_change(
+        svc,
+        credential,
+        token,
+        &changing.context,
+        changing.record,
+        changing.proof,
+    )
+    .await
 }

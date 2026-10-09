@@ -68,6 +68,7 @@ fn pending(purpose: OperationPurpose) -> PendingOperation {
         credential_identifier: [7; 16],
         registration_request: None,
         evaluation: None,
+        current_password: CurrentPassword::Absent,
     }
 }
 

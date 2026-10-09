@@ -728,6 +728,8 @@ struct Options {
     /// ZKPP off.
     zkpp: Option<(Vec<ZkppVerifier>, ZkppConfig)>,
     magic_links: bool,
+    /// The security policy; None keeps the CE default.
+    security_policy: Option<sid_core::models::SecurityPolicy>,
 }
 
 /// What the authentication service is built from besides its storage and
@@ -747,6 +749,8 @@ pub struct AuthOptions {
     /// The installation organization.
     pub org: sid_core::models::OrgId,
     pub cascade: Arc<RevocationCascadeService>,
+    /// The security policy; None keeps the CE default.
+    pub security_policy: Option<sid_core::models::SecurityPolicy>,
 }
 
 /// The authentication service over `storage` and `cache`, as a server start
@@ -768,6 +772,7 @@ pub fn auth_service(
         issuers,
         org,
         cascade,
+        security_policy,
     } = options;
     // Registration, change and reset run their OPAQUE on the ZKPP server
     // whether or not proofs are verified, as a server start builds it:
@@ -788,36 +793,38 @@ pub fn auth_service(
         Arc::new(arc_swap::ArcSwap::from_pointee(Some(zkpp)));
 
     let otp_service = sid_authn::otp::OtpService::new(cache.clone());
-    Arc::new(
-        AuthServiceImpl::new(
-            storage.clone(),
-            oauth2,
-            webauthn,
-            jwt,
-            opaque_router,
-            opaque_zkpp,
-            revocation_cache,
-            feature_flags,
-            magic_link,
-            otp_service,
-            issuers,
-            org,
-            "https://sid.example.com".to_string(),
-            // A 4-bit proof of work, so a test solves a challenge in a few hashes.
-            Arc::new(sid_authn::captcha::SidPowProvider::new([0u8; 32], 4, 300)),
+    let service = AuthServiceImpl::new(
+        storage.clone(),
+        oauth2,
+        webauthn,
+        jwt,
+        opaque_router,
+        opaque_zkpp,
+        revocation_cache,
+        feature_flags,
+        magic_link,
+        otp_service,
+        issuers,
+        org,
+        "https://sid.example.com".to_string(),
+        // A 4-bit proof of work, so a test solves a challenge in a few hashes.
+        Arc::new(sid_authn::captcha::SidPowProvider::new([0u8; 32], 4, 300)),
+        cache.clone(),
+        Arc::new(sid_authn::ip_intelligence::IpIntelligenceAggregator::new(
+            vec![],
             cache.clone(),
-            Arc::new(sid_authn::ip_intelligence::IpIntelligenceAggregator::new(
-                vec![],
-                cache.clone(),
-                std::time::Duration::from_secs(60),
-            )),
-            Arc::new(sid_authn::geoip::GeoIpChain::empty(cache)),
-            test_key_manager(),
-            cascade,
-            Arc::new(sid_authz::CeAuthzEngine::new(storage)),
-        )
-        .with_sign_in_page(&url::Url::parse(SIGN_IN_PAGE).unwrap()),
+            std::time::Duration::from_secs(60),
+        )),
+        Arc::new(sid_authn::geoip::GeoIpChain::empty(cache)),
+        test_key_manager(),
+        cascade,
+        Arc::new(sid_authz::CeAuthzEngine::new(storage)),
     )
+    .with_sign_in_page(&url::Url::parse(SIGN_IN_PAGE).unwrap());
+    Arc::new(match security_policy {
+        Some(policy) => service.with_security_policy(policy),
+        None => service,
+    })
 }
 
 /// The browser sign-in page of every test server, on the issuer's site.
@@ -914,6 +921,26 @@ impl TestServices {
             Options {
                 zkpp: Some((verifiers, config)),
                 magic_links: false,
+                security_policy: None,
+            },
+        )
+    }
+
+    /// As [`Self::with_zkpp`], under `policy` instead of the CE default.
+    #[allow(dead_code)]
+    pub fn with_zkpp_policy(
+        storage: MockStorage,
+        verifier: ZkppVerifier,
+        config: ZkppConfig,
+        policy: sid_core::models::SecurityPolicy,
+    ) -> Self {
+        Self::with_options(
+            storage,
+            FeatureFlagService::disabled(),
+            Options {
+                zkpp: Some((vec![verifier], config)),
+                magic_links: false,
+                security_policy: Some(policy),
             },
         )
     }
@@ -926,6 +953,7 @@ impl TestServices {
             Options {
                 zkpp: None,
                 magic_links: true,
+                security_policy: None,
             },
         )
     }
@@ -937,6 +965,7 @@ impl TestServices {
             Options {
                 zkpp: None,
                 magic_links: false,
+                security_policy: None,
             },
         )
     }
@@ -956,6 +985,7 @@ impl TestServices {
             Options {
                 zkpp: None,
                 magic_links: false,
+                security_policy: None,
             },
         )
     }
@@ -1009,6 +1039,7 @@ impl TestServices {
             Options {
                 zkpp: None,
                 magic_links: false,
+                security_policy: None,
             },
         );
         replica
@@ -1026,7 +1057,11 @@ impl TestServices {
         feature_flags: FeatureFlagService,
         options: Options,
     ) -> Self {
-        let Options { zkpp, magic_links } = options;
+        let Options {
+            zkpp,
+            magic_links,
+            security_policy,
+        } = options;
         let storage: Arc<dyn StorageBackend> = mock_storage.clone();
         // Provisioned as a server start provisions it; a replica over the same
         // store reads the stored one back.
@@ -1108,6 +1143,7 @@ impl TestServices {
                 issuers: issuers.clone(),
                 org: test_org(),
                 cascade: cascade_service.clone(),
+                security_policy,
             },
         );
 
