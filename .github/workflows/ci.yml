@@ -61,6 +61,11 @@ jobs:
           sudo docker cp "$id":/usr/local/bin/nats-server /usr/local/bin/nats-server
           docker rm "$id"
           nats-server --version
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Immutable published password client
+        run: npm ci --ignore-scripts --prefix ci/password-clients
       # The ZKPP circuit crate comes from the zkpp submodule as a dependency, not
       # a workspace member, and is tested in its own repository with optimized
       # builds; sid-crypto holds the server primitives and runs here.

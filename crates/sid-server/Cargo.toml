@@ -120,6 +120,10 @@ webtransport = ["dep:sid-webtransport"]
 # Dev/test benchmarking utilities.
 dev-perf-test = []
 
+# Installed public client conformance; requires ci/password-clients npm ci.
+# No effect on the product's runtime or dependency closure.
+client-conformance = []
+
 [dev-dependencies]
 async-trait = { workspace = true }
 tempfile = "3"
