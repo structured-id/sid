@@ -3,6 +3,549 @@ use crate::export::export_snapshot;
 use sid_core::models::{BindingScope, Profile};
 use sid_storage::sqlite::SqliteBackend;
 
+/// Exercise the genuine combined proof before the checker: the password in
+/// the policy/history witness must also produce this operation's OPAQUE input.
+async fn prove_restored_password(
+    storage: &dyn StorageBackend,
+    owner: sid_core::models::ProfileId,
+    evaluator: &sid_authn::password_history::HistoryEvaluator,
+    server: &sid_authn::opaque_zkpp::ZkppOpaqueServer,
+    prover: &sid_pake_core::prover::ZkppProver,
+    password: &[u8],
+) -> Result<
+    (
+        Vec<u8>,
+        sid_authn::password_history::CheckedPassword,
+        sid_core::models::HistoryEvidence,
+    ),
+    sid_authn::password_history::HistoryCheckError,
+> {
+    use ff::PrimeField;
+    use group::GroupEncoding;
+    use pasta_curves::pallas;
+    use rand::{rand_core::UnwrapErr, rngs::SysRng};
+    use sid_authn::password_history::*;
+    use sid_opaque_ke::{
+        ClientRegistration, ClientRegistrationFinishParameters, RegistrationResponse,
+    };
+    use sid_pake_core::{
+        binding::operation_context, history as relation, pallas_opaque::PallasCipherSuite,
+        prover::HistoryEvaluation,
+    };
+    let history = storage.get_password_history(owner).await.unwrap();
+    let domains: Vec<_> = history
+        .required_epochs()
+        .into_iter()
+        .map(OperationDomain::of)
+        .collect();
+    let d = pallas::Base::from_repr(owner_domain(&[0x5a; 16], owner)).unwrap();
+    let r = relation::random_blind(rand::rng());
+    let blinded = relation::blind_request(relation::history_input(d, password), r).to_bytes();
+    let mut keys = Vec::new();
+    for domain in &domains {
+        keys.push((
+            domain.epoch,
+            owner,
+            storage
+                .get_history_epoch_key(domain.epoch)
+                .await
+                .unwrap()
+                .unwrap(),
+        ));
+    }
+    let operation = uuid::Uuid::now_v7();
+    let evaluation = evaluator
+        .evaluate(&blinded, &keys, operation.as_bytes())
+        .await
+        .unwrap();
+    let mut rng = UnwrapErr(SysRng);
+    let start = ClientRegistration::<PallasCipherSuite>::start(&mut rng, password).unwrap();
+    let request = start.message.serialize().to_vec();
+    let blind =
+        pallas::Scalar::from_repr(start.state.serialize()[..32].try_into().unwrap()).unwrap();
+    let proof = prover
+        .prove(
+            password,
+            blind,
+            &operation_context(operation.as_bytes(), &request),
+            &HistoryEvaluation {
+                d,
+                domains: domains
+                    .iter()
+                    .map(|domain| pallas::Base::from_repr(domain.comparison_domain).unwrap())
+                    .collect(),
+                r,
+                evaluations: evaluation
+                    .evaluations
+                    .iter()
+                    .map(|answer| pallas::Affine::from_bytes(&answer.evaluated).unwrap())
+                    .collect(),
+            },
+        )
+        .unwrap();
+    let public = server
+        .verify(&proof, operation.as_bytes(), &request, domains.len())
+        .unwrap();
+    let checked = HistoryChecker::new(KsfAdmission::new(64, std::time::Duration::from_secs(5)))
+        .check(
+            &public,
+            CheckRequest {
+                owner_domain: d.to_repr(),
+                domains: &domains,
+                evaluation: &evaluation,
+                context: operation.as_bytes(),
+                history: &history,
+            },
+        )
+        .await?;
+    let response = server.opaque_start(&request, operation.as_bytes()).unwrap();
+    let upload = start
+        .state
+        .finish(
+            &mut rng,
+            password,
+            RegistrationResponse::deserialize(&response).unwrap(),
+            ClientRegistrationFinishParameters::default(),
+        )
+        .unwrap();
+    Ok((
+        server.opaque_finish(&upload.message.serialize()).unwrap(),
+        checked,
+        sid_core::models::HistoryEvidence {
+            operation,
+            policy_version: 1,
+        },
+    ))
+}
+
+/// RFC 9807 password files depend on the server setup, not only on the user's
+/// credential identifier. A transfer followed by restart must open the same
+/// password and enforce its proved history; generating a replacement setup
+/// strands the imported account. This is a native/storage drill, not HTTP/RPC
+/// authentication, device-performance qualification or complete recovery.
+#[tokio::test]
+async fn opaque_login_survives_serialized_transfer_and_restart() {
+    use rand::{rand_core::UnwrapErr, rngs::SysRng};
+    use sid_authn::opaque::{OpaqueRouter, PallasOpaque, server_setup};
+    use sid_core::models::{Credential, CredentialType};
+    use sid_keys::{KeyVersionParams, RustCryptoPrimitives, SoftwareKeyManager};
+    use sid_opaque_ke::{
+        ClientLogin, ClientLoginFinishParameters, ClientRegistration,
+        ClientRegistrationFinishParameters, CredentialResponse, RegistrationResponse,
+    };
+    use sid_pake_core::pallas_opaque::PallasCipherSuite;
+    use sid_plugin::crypto::{CurveId, StoredCredential};
+    use std::{collections::HashMap, sync::Arc};
+
+    let source = SqliteBackend::new_in_memory().await.unwrap();
+    let ctx = || AuditEntry::system("test", "opaque-restore").into();
+    let profile = Profile::new(Some("opaque-restore"));
+    source.create_profile(&profile, ctx()).await.unwrap();
+    let params = KeyVersionParams::new(1, vec![7; 32], "restore-key");
+    source.insert_key_version(&params, ctx()).await.unwrap();
+    let manager = |master, versions| {
+        SoftwareKeyManager::new(
+            secrecy::SecretBox::new(Box::new(master)),
+            versions,
+            Arc::new(RustCryptoPrimitives::new()),
+        )
+        .unwrap()
+    };
+    let keys = manager([9; 32], vec![params]);
+    let setup = server_setup::load_or_create(&source, &keys, &PallasOpaque::new())
+        .await
+        .unwrap();
+    let router = |setup| {
+        let mut providers: HashMap<CurveId, Box<dyn sid_plugin::crypto::OpaqueOperations>> =
+            HashMap::new();
+        providers.insert(CurveId::Pallas, Box::new(PallasOpaque::new()));
+        OpaqueRouter::new(Box::new(PallasOpaque::new()), providers, setup)
+    };
+    let before = router(setup);
+    let password = b"Rest0redStr0ngP@ss1";
+    let identifier = *uuid::Uuid::now_v7().as_bytes();
+    let mut rng = UnwrapErr(SysRng);
+    let start = ClientRegistration::<PallasCipherSuite>::start(&mut rng, password).unwrap();
+    let (response, _) = before
+        .registration_start(&start.message.serialize(), &identifier)
+        .unwrap();
+    let upload = start
+        .state
+        .finish(
+            &mut rng,
+            password,
+            RegistrationResponse::deserialize(&response).unwrap(),
+            ClientRegistrationFinishParameters::default(),
+        )
+        .unwrap();
+    let file = before
+        .registration_finish(&upload.message.serialize())
+        .unwrap();
+    let sealed_record = sid_authn::sealed_secret::seal(
+        &keys,
+        &sid_authn::sealed_secret::opaque_context(profile.id),
+        &file.data,
+    )
+    .await
+    .unwrap();
+    let mut credential = Credential::new(profile.id, CredentialType::Opaque, sealed_record, None);
+    credential.opaque_curve = Some(CurveId::Pallas as u8);
+    credential.opaque_credential_identifier = Some(identifier);
+    source.create_credential(&credential, ctx()).await.unwrap();
+
+    // The archive contains both a genuine OPAQUE password and its proved
+    // nonempty history. The small KSF is a functional fixture, not a benchmark.
+    let evaluator = sid_authn::password_history::HistoryEvaluator::new(Arc::new(manager(
+        [9; 32],
+        source.list_key_versions().await.unwrap(),
+    )));
+    let mut epoch = evaluator
+        .new_epoch(
+            profile.id,
+            sid_core::models::HistoryKsf {
+                memory_kib: 64,
+                passes: 1,
+                lanes: 1,
+            },
+        )
+        .await
+        .unwrap();
+    epoch.epoch.created_at =
+        chrono::DateTime::from_timestamp_micros(epoch.epoch.created_at.timestamp_micros()).unwrap();
+    source.ensure_history_epoch(&epoch, ctx()).await.unwrap();
+    let shape = sid_pake_core::circuit::CircuitShape {
+        policy: sid_pake_core::types::CE_DEFAULT_POLICY,
+        history_domains: 1,
+    };
+    let params = sid_pake_core::keygen::generate_params(sid_pake_core::circuit::ZKPP_K);
+    let pk = sid_pake_core::keygen::generate_pk(&params, shape).unwrap();
+    let make_server = |router: &OpaqueRouter| {
+        sid_authn::opaque_zkpp::ZkppOpaqueServer::new(
+            router,
+            vec![sid_pake_core::verifier::ZkppVerifier::new(
+                params.clone(),
+                pk.get_vk().clone(),
+                shape,
+            )],
+            sid_authn::opaque_zkpp::ZkppConfig::default(),
+        )
+        .unwrap()
+    };
+    let prover = sid_pake_core::prover::ZkppProver::new(params.clone(), pk.clone(), shape);
+    let (file, checked, evidence) = prove_restored_password(
+        &source,
+        profile.id,
+        &evaluator,
+        &make_server(&before),
+        &prover,
+        password,
+    )
+    .await
+    .unwrap();
+    let mut proved = credential.clone();
+    proved.data = sid_authn::sealed_secret::seal(
+        &keys,
+        &sid_authn::sealed_secret::opaque_context(profile.id),
+        &file,
+    )
+    .await
+    .unwrap()
+    .into();
+    proved.opaque_credential_identifier = Some(*evidence.operation.as_bytes());
+    proved.zkpp_verified = true;
+    proved.policy_version = Some(1);
+    let commit = sid_core::models::HistoryCommit {
+        owner: profile.id,
+        expected_revision: source
+            .get_password_history(profile.id)
+            .await
+            .unwrap()
+            .revision,
+        new_epoch: None,
+        entries: checked.new_entries,
+        evidence,
+        depth: 1,
+    };
+    assert!(
+        source
+            .change_password(
+                credential.id,
+                credential.data.expose(),
+                &proved,
+                Some(&commit),
+                ctx()
+            )
+            .await
+            .unwrap()
+    );
+    credential = proved;
+
+    let snapshot = export_snapshot(&source, "sqlite::memory:", false)
+        .await
+        .unwrap();
+    let snapshot: crate::snapshot::Snapshot =
+        serde_json::from_slice(&serde_json::to_vec(&snapshot).unwrap()).unwrap();
+    // An archive may not install credentials before resolving missing key
+    // metadata, a substituted sealing context or conflicting destination state.
+    let mut missing = snapshot.clone();
+    missing.opaque_server_setup = None;
+    let blank = SqliteBackend::new_in_memory().await.unwrap();
+    assert!(import_snapshot(&blank, &missing).await.is_err());
+    assert_eq!(blank.count_profiles().await.unwrap(), 0);
+    missing = snapshot.clone();
+    missing.key_versions.clear();
+    assert!(import_snapshot(&blank, &missing).await.is_err());
+    assert_eq!(blank.count_profiles().await.unwrap(), 0);
+    let mut substituted = snapshot.clone();
+    substituted.opaque_server_setup = Some(
+        sid_authn::sealed_secret::seal(
+            &keys,
+            &sid_authn::instance_secret::context(sid_core::models::InstanceSecret::CaptchaKey),
+            b"another-secret",
+        )
+        .await
+        .unwrap(),
+    );
+    assert!(import_snapshot(&blank, &substituted).await.is_err());
+    assert_eq!(blank.count_profiles().await.unwrap(), 0);
+    substituted.opaque_server_setup = Some(vec![0; 4097]);
+    assert!(import_snapshot(&blank, &substituted).await.is_err());
+    assert_eq!(blank.count_profiles().await.unwrap(), 0);
+    substituted.opaque_server_setup = Some(
+        sid_authn::sealed_secret::seal(
+            &keys,
+            &sid_authn::instance_secret::context(
+                sid_core::models::InstanceSecret::OpaqueServerSetup,
+            ),
+            &[],
+        )
+        .await
+        .unwrap(),
+    );
+    assert!(import_snapshot(&blank, &substituted).await.is_err());
+    assert_eq!(blank.count_profiles().await.unwrap(), 0);
+    server_setup::load_or_create(&blank, &keys, &PallasOpaque::new())
+        .await
+        .unwrap();
+    assert!(import_snapshot(&blank, &snapshot).await.is_err());
+    assert_eq!(blank.count_profiles().await.unwrap(), 0);
+    let target = SqliteBackend::new_in_memory().await.unwrap();
+    import_snapshot(&target, &snapshot).await.unwrap();
+    import_snapshot(&target, &snapshot).await.unwrap();
+    assert!(
+        crate::verify::verify_backends(&source, &target)
+            .await
+            .unwrap()
+            .passed
+    );
+    // Matching record counts/history cannot hide a different setup. Model a
+    // mismatched archive; verification must name the setup disagreement.
+    let mut mismatched = snapshot.clone();
+    mismatched.opaque_server_setup = blank
+        .get_instance_secret(sid_core::models::InstanceSecret::OpaqueServerSetup)
+        .await
+        .unwrap();
+    let altered = SqliteBackend::new_in_memory().await.unwrap();
+    import_snapshot(&altered, &mismatched).await.unwrap();
+    let comparison = crate::verify::verify_backends(&source, &altered)
+        .await
+        .unwrap();
+    assert!(comparison.counts.iter().all(|c| c.matches));
+    assert_eq!(
+        comparison.integrity_issues,
+        vec!["OPAQUE server setup differs"]
+    );
+    assert!(!comparison.passed);
+    let restored = manager([9; 32], target.list_key_versions().await.unwrap());
+    let setup = server_setup::load_or_create(&target, &restored, &PallasOpaque::new())
+        .await
+        .unwrap();
+    assert!(
+        setup.0 == before.setup().0,
+        "restore generated a different OPAQUE setup"
+    );
+    let after = router(setup);
+    let stored = target.get_credential(credential.id).await.unwrap().unwrap();
+    let record = sid_authn::sealed_secret::open(
+        &restored,
+        &sid_authn::sealed_secret::opaque_context(profile.id),
+        stored.data.expose(),
+    )
+    .await
+    .unwrap();
+    let login = ClientLogin::<PallasCipherSuite>::start(&mut rng, password).unwrap();
+    let (response, state) = after
+        .login_start(
+            &StoredCredential {
+                curve: CurveId::Pallas,
+                data: record.secret.to_vec(),
+            },
+            &login.message.serialize(),
+            &stored.opaque_credential_identifier(),
+        )
+        .unwrap();
+    let finished = login
+        .state
+        .finish(
+            &mut rng,
+            password,
+            CredentialResponse::deserialize(&response).unwrap(),
+            ClientLoginFinishParameters::default(),
+        )
+        .expect("the restored password opens its envelope");
+    let session = after
+        .login_finish(&state, &finished.message.serialize())
+        .unwrap();
+    assert!(session.expose_secret() == finished.session_key.as_slice());
+    let evaluator = sid_authn::password_history::HistoryEvaluator::new(Arc::new(manager(
+        [9; 32],
+        target.list_key_versions().await.unwrap(),
+    )));
+    let history_before = target.get_password_history(profile.id).await.unwrap();
+    assert_eq!(history_before.entries.len(), 1);
+    let rejected = prove_restored_password(
+        &target,
+        profile.id,
+        &evaluator,
+        &make_server(&after),
+        &prover,
+        password,
+    )
+    .await;
+    assert!(matches!(
+        rejected,
+        Err(sid_authn::password_history::HistoryCheckError::Reused)
+    ));
+    assert_eq!(
+        target.get_password_history(profile.id).await.unwrap(),
+        history_before
+    );
+    assert!(target.get_credential(credential.id).await.unwrap().unwrap() == stored);
+
+    let new_password = b"NewRest0redStr0ngP@ss2";
+    let (file, checked, evidence) = prove_restored_password(
+        &target,
+        profile.id,
+        &evaluator,
+        &make_server(&after),
+        &prover,
+        new_password,
+    )
+    .await
+    .unwrap();
+    let mut changed = stored.clone();
+    changed.data = sid_authn::sealed_secret::seal(
+        &restored,
+        &sid_authn::sealed_secret::opaque_context(profile.id),
+        &file,
+    )
+    .await
+    .unwrap()
+    .into();
+    changed.opaque_credential_identifier = Some(*evidence.operation.as_bytes());
+    let commit = sid_core::models::HistoryCommit {
+        owner: profile.id,
+        expected_revision: history_before.revision,
+        new_epoch: None,
+        entries: checked.new_entries,
+        evidence,
+        depth: 1,
+    };
+    assert!(
+        target
+            .change_password(
+                stored.id,
+                stored.data.expose(),
+                &changed,
+                Some(&commit),
+                ctx()
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        !target
+            .change_password(
+                stored.id,
+                stored.data.expose(),
+                &changed,
+                Some(&commit),
+                ctx()
+            )
+            .await
+            .unwrap()
+    );
+    let history_after = target.get_password_history(profile.id).await.unwrap();
+    assert_eq!(history_after.entries.len(), 1);
+    assert_eq!(history_after.revision, history_before.revision + 1);
+    let snapshot = export_snapshot(&target, "sqlite::memory:", false)
+        .await
+        .unwrap();
+    let snapshot = serde_json::from_slice(&serde_json::to_vec(&snapshot).unwrap()).unwrap();
+    let restarted = SqliteBackend::new_in_memory().await.unwrap();
+    import_snapshot(&restarted, &snapshot).await.unwrap();
+    let restart_keys = manager([9; 32], restarted.list_key_versions().await.unwrap());
+    let setup = server_setup::load_or_create(&restarted, &restart_keys, &PallasOpaque::new())
+        .await
+        .unwrap();
+    let restart_router = router(setup);
+    let changed = restarted
+        .get_credential(credential.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(changed.zkpp_verified);
+    assert_eq!(changed.policy_version, Some(1));
+    assert_eq!(
+        restarted.get_password_history(profile.id).await.unwrap(),
+        history_after
+    );
+    let file = sid_authn::sealed_secret::open(
+        &restart_keys,
+        &sid_authn::sealed_secret::opaque_context(profile.id),
+        changed.data.expose(),
+    )
+    .await
+    .unwrap();
+    for (password, should_open) in [
+        (new_password.as_slice(), true),
+        (password.as_slice(), false),
+    ] {
+        let login = ClientLogin::<PallasCipherSuite>::start(&mut rng, password).unwrap();
+        let (response, state) = restart_router
+            .login_start(
+                &StoredCredential {
+                    curve: CurveId::Pallas,
+                    data: file.secret.to_vec(),
+                },
+                &login.message.serialize(),
+                &changed.opaque_credential_identifier(),
+            )
+            .unwrap();
+        let finished = login.state.finish(
+            &mut rng,
+            password,
+            CredentialResponse::deserialize(&response).unwrap(),
+            ClientLoginFinishParameters::default(),
+        );
+        if should_open {
+            let finished = finished.expect("the new password opens after a second restore");
+            let session = restart_router
+                .login_finish(&state, &finished.message.serialize())
+                .unwrap();
+            assert!(session.expose_secret() == finished.session_key.as_slice());
+        } else {
+            assert!(finished.is_err(), "the replaced password still signs in");
+        }
+    }
+    let wrong = manager([10; 32], target.list_key_versions().await.unwrap());
+    assert!(
+        server_setup::load_or_create(&target, &wrong, &PallasOpaque::new())
+            .await
+            .is_err()
+    );
+}
+
 /// A restore must preserve enforced constraints, not just opaque bytes. This
 /// drills the evaluator/checker phase with real blinded inputs, DLEQ and KSF;
 /// proof acceptance and complete account recovery are separate tests. The small
@@ -301,6 +844,21 @@ async fn password_history_survives_migration() {
         .await
         .unwrap();
     source.ensure_history_epoch(&epoch, ctx()).await.unwrap();
+    // Even this storage-only credential fixture needs the instance setup:
+    // a complete archive must not adopt an orphaned OPAQUE password file.
+    let keys = sid_keys::SoftwareKeyManager::new(
+        secrecy::SecretBox::new(Box::new([9; 32])),
+        source.list_key_versions().await.unwrap(),
+        std::sync::Arc::new(sid_keys::RustCryptoPrimitives::new()),
+    )
+    .unwrap();
+    sid_authn::opaque::server_setup::load_or_create(
+        &source,
+        &keys,
+        &sid_authn::opaque::PallasOpaque::new(),
+    )
+    .await
+    .unwrap();
     let password = sid_core::models::Credential::new(
         profile.id,
         sid_core::models::CredentialType::Opaque,

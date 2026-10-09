@@ -26,7 +26,7 @@ fn test_snapshot_empty_count() {
 #[test]
 fn test_snapshot_metadata_version() {
     let snapshot = Snapshot::new("postgresql", "postgres://localhost/sid");
-    // Version 2 requires explicit per-owner history; v1 could silently omit it.
-    assert_eq!(snapshot.metadata.version, 2);
+    // Version 3 also preserves the sealed setup required by OPAQUE files.
+    assert_eq!(snapshot.metadata.version, 3);
     assert_eq!(snapshot.metadata.source_backend, "postgresql");
 }

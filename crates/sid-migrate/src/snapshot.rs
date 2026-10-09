@@ -30,6 +30,11 @@ pub struct Snapshot {
     /// unwrapped epoch secret is included.
     pub key_versions: Vec<sid_keys::KeyVersionParams>,
 
+    /// Sealed OPAQUE server setup on which imported password files depend.
+    /// The independent master key is never included. None means the source
+    /// has not initialized OPAQUE; such a snapshot cannot contain OPAQUE files.
+    pub opaque_server_setup: Option<Vec<u8>>,
+
     /// Projects (including system project).
     pub projects: Vec<Project>,
 
@@ -191,7 +196,7 @@ impl Snapshot {
     pub fn new(source_backend: &str, source_url: &str) -> Self {
         Self {
             metadata: SnapshotMetadata {
-                version: 2,
+                version: 3,
                 installation_org: None,
                 created_at: Utc::now(),
                 source_backend: source_backend.to_string(),
@@ -200,6 +205,7 @@ impl Snapshot {
             },
             projects: Vec::new(),
             key_versions: Vec::new(),
+            opaque_server_setup: None,
             profiles: Vec::new(),
             principals: Vec::new(),
             credentials: Vec::new(),
@@ -245,6 +251,7 @@ impl Snapshot {
     pub fn count_entities(&self) -> u64 {
         let mut count: u64 = 0;
         count += self.key_versions.len() as u64;
+        count += u64::from(self.opaque_server_setup.is_some());
         count += self.projects.len() as u64;
         count += self.profiles.len() as u64;
         count += self.principals.len() as u64;

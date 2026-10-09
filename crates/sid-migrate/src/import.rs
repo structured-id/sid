@@ -7,6 +7,38 @@ use tracing::info;
 
 use crate::snapshot::Snapshot;
 
+/// Validate public setup metadata without reading the independently held key.
+/// Supported OPAQUE setups contain a seed and keypairs, well below this bound;
+/// a snapshot cannot cause unbounded copies through sealed-field inspection.
+pub(crate) fn validate_opaque_setup(snapshot: &Snapshot) -> anyhow::Result<()> {
+    let Some(setup) = &snapshot.opaque_server_setup else {
+        anyhow::ensure!(
+            !snapshot
+                .credentials
+                .iter()
+                .any(|c| c.credential_type == sid_core::models::CredentialType::Opaque),
+            "snapshot contains OPAQUE credentials without their server setup"
+        );
+        return Ok(());
+    };
+    anyhow::ensure!(setup.len() <= 4096, "sealed OPAQUE setup is oversized");
+    let context =
+        sid_authn::instance_secret::context(sid_core::models::InstanceSecret::OpaqueServerSetup);
+    let field = sid_authn::sealed_secret::inspect(&context, setup)?;
+    anyhow::ensure!(
+        field.ciphertext.len() > 16,
+        "sealed OPAQUE setup has no encrypted payload"
+    );
+    anyhow::ensure!(
+        snapshot
+            .key_versions
+            .iter()
+            .any(|v| v.version == field.key_version),
+        "snapshot omits the OPAQUE setup's key derivation version"
+    );
+    Ok(())
+}
+
 /// Import a snapshot into a target storage backend.
 ///
 /// Entities are imported in dependency order: projects first, then profiles,
@@ -18,12 +50,19 @@ pub async fn import_snapshot(
     snapshot: &Snapshot,
 ) -> anyhow::Result<ImportResult> {
     anyhow::ensure!(
-        snapshot.metadata.version == 2,
-        "unsupported snapshot format: export a new snapshot with complete password history"
+        snapshot.metadata.version == 3,
+        "unsupported snapshot format: export a new snapshot with password history and OPAQUE setup"
     );
     anyhow::ensure!(
         snapshot.metadata.installation_org == backend.instance_organization().await?.map(|o| o.id),
         "restore the same installation authority before importing its data"
+    );
+    validate_opaque_setup(snapshot)?;
+    let setup_kind = sid_core::models::InstanceSecret::OpaqueServerSetup;
+    let current_setup = backend.get_instance_secret(setup_kind).await?;
+    anyhow::ensure!(
+        current_setup.is_none() || current_setup == snapshot.opaque_server_setup,
+        "target OPAQUE setup conflicts with snapshot"
     );
     let profiles: std::collections::BTreeSet<_> = snapshot.profiles.iter().map(|p| p.id).collect();
     let mut owners = std::collections::BTreeSet::new();
@@ -96,6 +135,22 @@ pub async fn import_snapshot(
                 "key version changed during import"
             );
         }
+    }
+
+    // The setup precedes credentials and is insert-only. Recheck the stored
+    // value after insertion: a concurrent initializer must never replace it.
+    if let Some(setup) = &snapshot.opaque_server_setup {
+        backend
+            .insert_instance_secret(
+                setup_kind,
+                setup,
+                make_audit(&actor, "import_opaque_setup", "opaque_server_setup"),
+            )
+            .await?;
+        anyhow::ensure!(
+            backend.get_instance_secret(setup_kind).await?.as_ref() == Some(setup),
+            "target OPAQUE setup changed during import"
+        );
     }
 
     // 1. Projects (must exist before anything else)

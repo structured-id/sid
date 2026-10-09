@@ -38,6 +38,10 @@ pub async fn verify_backends(
 ) -> anyhow::Result<VerifyResult> {
     let mut counts = Vec::new();
     let mut integrity_issues = Vec::new();
+    let setup = sid_core::models::InstanceSecret::OpaqueServerSetup;
+    if source.get_instance_secret(setup).await? != target.get_instance_secret(setup).await? {
+        integrity_issues.push("OPAQUE server setup differs".into());
+    }
     if source.instance_organization().await?.map(|o| o.id)
         != target.instance_organization().await?.map(|o| o.id)
     {

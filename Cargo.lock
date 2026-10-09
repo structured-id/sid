@@ -5974,6 +5974,7 @@ dependencies = [
  "sid-authn",
  "sid-core",
  "sid-keys",
+ "sid-opaque-ke",
  "sid-pake-core",
  "sid-plugin",
  "sid-storage",

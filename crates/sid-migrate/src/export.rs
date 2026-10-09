@@ -19,6 +19,9 @@ pub async fn export_snapshot(
     let mut snapshot = Snapshot::new(backend.name(), source_url);
     snapshot.metadata.installation_org = backend.instance_organization().await?.map(|o| o.id);
     snapshot.key_versions = backend.list_key_versions().await?;
+    snapshot.opaque_server_setup = backend
+        .get_instance_secret(sid_core::models::InstanceSecret::OpaqueServerSetup)
+        .await?;
 
     // 1. Projects
     info!("exporting projects...");
@@ -283,6 +286,7 @@ pub async fn export_snapshot(
     }
 
     // Update metadata
+    crate::import::validate_opaque_setup(&snapshot)?;
     snapshot.metadata.total_entities = snapshot.count_entities();
     snapshot.metadata.created_at = Utc::now();
 
