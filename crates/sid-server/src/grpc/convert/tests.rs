@@ -18,14 +18,14 @@ fn test_credential_info_names_the_opaque_suite() {
             _ => panic!("no OPAQUE info"),
         }
     };
-    assert_eq!(suite(None), OpaqueSuite::Pallas);
+    assert_eq!(suite(None), OpaqueSuite::PallasV1);
     assert_eq!(
         suite(Some(sid_plugin::crypto::CurveId::Ristretto255 as u8)),
-        OpaqueSuite::Ristretto255
+        OpaqueSuite::Ristretto255V1
     );
     assert_eq!(
         suite(Some(sid_plugin::crypto::CurveId::P521 as u8)),
-        OpaqueSuite::P521
+        OpaqueSuite::P521V1
     );
 }
 

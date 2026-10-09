@@ -214,6 +214,20 @@ async fn the_history_evaluator_runs_here_unless_a_remote_one_is_complete() {
         .is_err(),
         "the cutoff belongs to the remote evaluator"
     );
+    // The evaluator's resource is an RFC 8707 indicator here as on the
+    // evaluator: an invalid one stops the start instead of failing every
+    // token request later.
+    for invalid in ["", "history", "https://history.sid.example.com/#part"] {
+        assert!(
+            authority(
+                "SID_PASSWORD_HISTORY_EVALUATOR_RESOURCE",
+                Some(("SID_PASSWORD_HISTORY_EVALUATOR_RESOURCE", invalid))
+            )
+            .await
+            .is_err(),
+            "resource {invalid:?} was accepted"
+        );
+    }
 
     // An evaluator address that is set but unreadable is not "unset": the
     // start fails rather than handing this server the history keys.

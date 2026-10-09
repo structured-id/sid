@@ -244,11 +244,11 @@ pub(crate) fn credential_info(
                 })?,
             };
             let suite = match curve {
-                CurveId::Pallas => OpaqueSuite::Pallas,
-                CurveId::Ristretto255 => OpaqueSuite::Ristretto255,
-                CurveId::P256 => OpaqueSuite::P256,
-                CurveId::P384 => OpaqueSuite::P384,
-                CurveId::P521 => OpaqueSuite::P521,
+                CurveId::Pallas => OpaqueSuite::PallasV1,
+                CurveId::Ristretto255 => OpaqueSuite::Ristretto255V1,
+                CurveId::P256 => OpaqueSuite::P256V1,
+                CurveId::P384 => OpaqueSuite::P384V1,
+                CurveId::P521 => OpaqueSuite::P521V1,
             };
             Ok(Some(Info::OpaqueInfo(OpaqueCredentialInfo {
                 suite: suite as i32,

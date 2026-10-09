@@ -1392,16 +1392,21 @@ async fn password_history_authority(
         Err(std::env::VarError::NotUnicode(_)) => Err(anyhow::anyhow!("{name} must be Unicode")),
     };
     let required = |name: &str| var(name).map_err(|_| anyhow::anyhow!("{name} is required"));
+    // Both sides of a split deployment name the evaluator by one RFC 8707
+    // indicator; an invalid one stops the start.
+    let evaluator_resource = || {
+        sid_core::models::ResourceIndicator::parse(&required(
+            "SID_PASSWORD_HISTORY_EVALUATOR_RESOURCE",
+        )?)
+        .map_err(|e| anyhow::anyhow!("SID_PASSWORD_HISTORY_EVALUATOR_RESOURCE: {e}"))
+    };
     let cutoff = history_epoch_cutoff(var("SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE"))?;
     let prepare_caller = optional("SID_PASSWORD_HISTORY_PREPARE_CALLER")?;
     let Some(evaluator) = optional("SID_PASSWORD_HISTORY_EVALUATOR")? else {
         let serve = match prepare_caller {
             None => None,
             Some(caller) => {
-                let resource = sid_core::models::ResourceIndicator::parse(&required(
-                    "SID_PASSWORD_HISTORY_EVALUATOR_RESOURCE",
-                )?)
-                .map_err(|e| anyhow::anyhow!("SID_PASSWORD_HISTORY_EVALUATOR_RESOURCE: {e}"))?;
+                let resource = evaluator_resource()?;
                 let operation_key_file = required("SID_PASSWORD_OPERATION_KEY_FILE")?;
                 let operation_keys = crate::field_keys::field_key_manager(
                     storage,
@@ -1430,7 +1435,7 @@ async fn password_history_authority(
         cutoff.is_none(),
         "SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE belongs to the remote evaluator"
     );
-    let resource = required("SID_PASSWORD_HISTORY_EVALUATOR_RESOURCE")?;
+    let resource = evaluator_resource()?;
     let token_upstream = required("SID_PASSWORD_HISTORY_TOKEN_UPSTREAM")?;
     let operation_key_file = required("SID_PASSWORD_OPERATION_KEY_FILE")?;
     let caller = sid_authn::client_credential::ClientCredentialConfig::from_vars(
@@ -1448,7 +1453,7 @@ async fn password_history_authority(
             &caller,
             base,
             lazy(&token_upstream)?,
-            &resource,
+            resource.as_str(),
         )?,
     );
     let operation_keys =

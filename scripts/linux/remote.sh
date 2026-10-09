@@ -22,20 +22,28 @@ export CARGO_TERM_COLOR=never DEBIAN_FRONTEND=noninteractive
 if [[ -n "${SID_CHECK_UPLOAD:-}" ]]; then
     # On the host itself (no container): the host's rustup with the pinned
     # toolchain, building inside the upload, which check.sh removes.
+    # The build tools go into the upload too: the check runs as the SSH
+    # account, which cannot write /opt or the system rustup.
     upload="$SID_CHECK_UPLOAD"
     repo="$upload/sid"
+    tools="$upload/tools"
+    mkdir -p "$tools"
     as_builder() {
-        RUSTUP_TOOLCHAIN="$SID_CHECK_TOOLCHAIN" CARGO_TARGET_DIR="$upload/target" "$@"
+        RUSTUP_TOOLCHAIN="$SID_CHECK_TOOLCHAIN" CARGO_TARGET_DIR="$upload/target" \
+            PATH="$tools/bin:$tools/zig:$PATH" "$@"
     }
 else
     upload=/check
     repo=/home/builder/sid
+    tools=/opt
     apt-get update -qq
     apt-get install -y -qq --no-install-recommends protobuf-compiler libprotobuf-dev cmake xz-utils >/dev/null
     useradd --create-home builder
+    # The image's rustup is root's; the builder adds targets to it.
+    chmod -R a+w /usr/local/rustup
     as_builder() {
         runuser -u builder -- env CARGO_HOME=/home/builder/.cargo \
-            RUSTUP_HOME=/usr/local/rustup PATH="/home/builder/.cargo/bin:/usr/local/cargo/bin:/opt/zig:$PATH" \
+            RUSTUP_HOME=/usr/local/rustup PATH="/home/builder/.cargo/bin:/usr/local/cargo/bin:$tools/bin:$tools/zig:$PATH" \
             CARGO_TERM_COLOR=never "$@"
     }
 fi
@@ -62,12 +70,11 @@ case "$task" in
         # server links, for any target, without a per-target GCC.
         zig_version=0.14.1
         curl -fsSL "https://ziglang.org/download/$zig_version/zig-x86_64-linux-$zig_version.tar.xz" \
-            | tar -xJ -C /opt
-        mv "/opt/zig-x86_64-linux-$zig_version" /opt/zig
-        chmod -R a+rX /opt/zig
-        chmod -R a+w /usr/local/rustup
+            | tar -xJ -C "$tools"
+        mv "$tools/zig-x86_64-linux-$zig_version" "$tools/zig"
+        chmod -R a+rX "$tools/zig"
         as_builder rustup target add "${targets[@]}"
-        as_builder cargo install --locked --quiet cargo-zigbuild
+        as_builder cargo install --locked --quiet --root "$tools" cargo-zigbuild
         status=0
         for target in "${targets[@]}"; do
             echo "===== $target ====="
