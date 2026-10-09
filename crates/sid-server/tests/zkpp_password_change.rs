@@ -274,6 +274,128 @@ async fn test_password_change_refuses_the_retained_password() {
     assert_eq!(reason(&again), "PASSWORD_REUSED");
 }
 
+/// After its history key is replaced (a KSF change or a suspected key
+/// compromise), an owner's operation is compared in two domains: the new key
+/// and the replaced one that still holds the retained password. The retained
+/// password stays refused, an operation prepared before the replacement
+/// cannot finish against the moved history, and a new password is accepted
+/// under the new key, after which the replaced key is destroyed.
+#[tokio::test]
+async fn test_a_replaced_history_key_keeps_the_retained_password_refused() {
+    use sid_authn::password_history::HistoryEvaluator;
+    use sid_core::models::{AuditEntry, HistoryKsf, WrappedHistoryKey};
+
+    let (prover, verifier) = client::keys(1);
+    let (prover2, verifier2) = client::keys(2);
+    let svc = TestServices::with_zkpp_verifiers(
+        MockStorage::new().with_system_project(),
+        vec![verifier, verifier2],
+        ZkppConfig {
+            require_proof: true,
+            policy_version: 1,
+        },
+    );
+    let started = client::start(OLD);
+    let start = svc
+        .auth
+        .opaque_zkpp_registration_start(Request::new(OpaqueZkppRegistrationStartRequest {
+            principal: PRINCIPAL.to_string(),
+            registration_request: started.request.clone(),
+            claim_token: None,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    let context = start.history.unwrap();
+    let proof = client::evaluate_and_prove(&svc, &prover, OLD, &context, &started).await;
+    let done = svc
+        .auth
+        .opaque_zkpp_registration_finish(Request::new(OpaqueZkppRegistrationFinishRequest {
+            operation_id: context.operation_id.clone(),
+            registration_record: client::finish(started, OLD, &start.registration_response),
+            proof: Some(proof),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    let credential = svc
+        .storage
+        .get_credential(CredentialId(done.credential_id.parse().unwrap()))
+        .await
+        .unwrap()
+        .unwrap();
+    let owner = credential.profile_id;
+    let profile = svc.storage.get_profile(owner).await.unwrap().unwrap();
+    let token = common::fresh_token(&svc, &profile).await;
+
+    // An operation prepared under the first key, finished after the swap.
+    let early = prepare_change(&svc, &prover, &credential, &token, NEW)
+        .await
+        .unwrap();
+
+    // The replacement the server makes on a cutoff, sealed by its key manager.
+    let original = svc.storage.get_password_history(owner).await.unwrap();
+    let replaced = original.active_epoch().unwrap().id;
+    let new = HistoryEvaluator::new(common::test_key_manager())
+        .new_epoch(owner, HistoryKsf::DEFAULT)
+        .await
+        .unwrap();
+    svc.storage
+        .rotate_history_epoch(&new, replaced, AuditEntry::system("test", "rotate").into())
+        .await
+        .unwrap();
+
+    let stale = finish_change(
+        &svc,
+        &credential,
+        &token,
+        &early.context,
+        early.record,
+        early.proof,
+    )
+    .await
+    .expect_err("an operation prepared before the replacement finished");
+    assert_eq!(reason(&stale), "CONCURRENT_MODIFICATION");
+    assert!(signs_in(&svc, OLD).await, "the refusal kept the password");
+
+    let reused = prepare_change(&svc, &prover2, &credential, &token, OLD)
+        .await
+        .unwrap();
+    assert_eq!(
+        reused.context.domains.len(),
+        2,
+        "the new key and the replaced key holding the retained password"
+    );
+    let refused = finish_change(
+        &svc,
+        &credential,
+        &token,
+        &reused.context,
+        reused.record,
+        reused.proof,
+    )
+    .await
+    .expect_err("the retained password passed after the key replacement");
+    assert_eq!(reason(&refused), "PASSWORD_REUSED");
+
+    change(&svc, &prover2, &credential, &token, NEW)
+        .await
+        .expect("a new password under the new key");
+    assert!(signs_in(&svc, NEW).await);
+    let after = svc.storage.get_password_history(owner).await.unwrap();
+    assert_eq!(after.epochs.len(), 1, "the emptied replaced key is retired");
+    assert_eq!(after.epochs[0].id, new.epoch.id);
+    assert_eq!(
+        svc.storage.get_history_epoch_key(replaced).await.unwrap(),
+        Some(WrappedHistoryKey(Vec::new())),
+        "the retired key is destroyed"
+    );
+    let again = change(&svc, &prover, &credential, &token, NEW)
+        .await
+        .expect_err("the password retained under the new key passed");
+    assert_eq!(reason(&again), "PASSWORD_REUSED");
+}
+
 /// The server's OPAQUE public key, as every registration response carries it
 /// after the evaluated element.
 async fn server_public_key(svc: &TestServices) -> Vec<u8> {

@@ -723,10 +723,10 @@ pub fn test_org() -> sid_core::models::OrgId {
 
 /// Optional server capabilities a test enables.
 struct Options {
-    /// The ZKPP verifier and configuration; the server is built on the
+    /// The ZKPP verifiers and configuration; the server is built on the
     /// services' own OPAQUE router, as a server start builds it. None leaves
     /// ZKPP off.
-    zkpp: Option<(Option<ZkppVerifier>, ZkppConfig)>,
+    zkpp: Option<(Vec<ZkppVerifier>, ZkppConfig)>,
     magic_links: bool,
 }
 
@@ -740,8 +740,9 @@ pub struct AuthOptions {
     pub revocation_cache: Arc<RevocationCache>,
     pub feature_flags: FeatureFlagService,
     pub magic_link: Option<Arc<MagicLinkService>>,
-    /// The ZKPP verifier and configuration; None verifies no proof.
-    pub zkpp: Option<(Option<ZkppVerifier>, ZkppConfig)>,
+    /// The ZKPP verifiers (one per history-domain count) and configuration;
+    /// None or no verifier verifies no proof.
+    pub zkpp: Option<(Vec<ZkppVerifier>, ZkppConfig)>,
     pub issuers: Arc<sid_authn::issuer::IssuerRegistry>,
     /// The installation organization.
     pub org: sid_core::models::OrgId,
@@ -772,7 +773,7 @@ pub fn auth_service(
     // whether or not proofs are verified, as a server start builds it:
     // without a verifier every password installs policy-unverified.
     let (verifiers, config) = match zkpp {
-        Some((verifier, config)) => (verifier.into_iter().collect(), config),
+        Some((verifiers, config)) => (verifiers, config),
         None => (
             vec![],
             ZkppConfig {
@@ -876,7 +877,7 @@ impl TestServices {
     pub fn with_zkpp_degraded(storage: MockStorage) -> Self {
         Self::with_zkpp_options(
             storage,
-            None,
+            vec![],
             ZkppConfig {
                 require_proof: false,
                 policy_version: 1,
@@ -888,19 +889,30 @@ impl TestServices {
     /// `verifier` under `config`.
     #[allow(dead_code)]
     pub fn with_zkpp(storage: MockStorage, verifier: ZkppVerifier, config: ZkppConfig) -> Self {
-        Self::with_zkpp_options(storage, Some(verifier), config)
+        Self::with_zkpp_options(storage, vec![verifier], config)
+    }
+
+    /// TestServices verifying operations with one or more history domains,
+    /// one verifier per domain count, as a server start builds them.
+    #[allow(dead_code)]
+    pub fn with_zkpp_verifiers(
+        storage: MockStorage,
+        verifiers: Vec<ZkppVerifier>,
+        config: ZkppConfig,
+    ) -> Self {
+        Self::with_zkpp_options(storage, verifiers, config)
     }
 
     fn with_zkpp_options(
         storage: MockStorage,
-        verifier: Option<ZkppVerifier>,
+        verifiers: Vec<ZkppVerifier>,
         config: ZkppConfig,
     ) -> Self {
         Self::with_options(
             storage,
             FeatureFlagService::disabled(),
             Options {
-                zkpp: Some((verifier, config)),
+                zkpp: Some((verifiers, config)),
                 magic_links: false,
             },
         )
