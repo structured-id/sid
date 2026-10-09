@@ -260,6 +260,14 @@ impl sid_plugin::StorageBackend for MockStorage {
     ) -> Result<sid_core::models::HistoryEpoch> {
         unimplemented!()
     }
+    async fn rotate_history_epoch(
+        &self,
+        _: &sid_core::models::NewHistoryEpoch,
+        _: sid_core::models::HistoryEpochId,
+        _: MutationContext,
+    ) -> Result<sid_core::models::HistoryEpoch> {
+        unimplemented!()
+    }
     async fn get_history_epoch_key(
         &self,
         _: sid_core::models::HistoryEpochId,

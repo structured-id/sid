@@ -2097,6 +2097,27 @@ impl StorageBackend for PostgresBackend {
         Ok(epoch)
     }
 
+    async fn rotate_history_epoch(
+        &self,
+        new: &NewHistoryEpoch,
+        replaces: HistoryEpochId,
+        audit: MutationContext,
+    ) -> SidResult<HistoryEpoch> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?;
+        let epoch = password_history::rotate_epoch(&mut tx, new, replaces).await?;
+        if epoch.id == new.epoch.id {
+            Self::audit_in_tx(&mut tx, &format!("profile:{}", epoch.owner), audit).await?;
+        }
+        tx.commit()
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?;
+        Ok(epoch)
+    }
+
     async fn get_history_epoch_key(
         &self,
         epoch: HistoryEpochId,

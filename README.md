@@ -60,6 +60,7 @@ Environment variables:
 | `SID_ZKPP_ENABLED` | `true` | Build policy-proof verifiers; accepts only `true`, `false`, `1` or `0` |
 | `SID_ZKPP_REQUIRE_PROOF` | `true` | Require a password-policy proof for password setup; `false` explicitly permits policy-unverified setup. Cannot be `true` while verifiers are disabled |
 | `SID_ZKPP_POLICY_VERSION` | `1` | Accepted compiled password policy; an unknown or malformed version stops startup |
+| `SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE` | - | RFC 3339 instant: password-history keys created before it (a suspected key compromise) are replaced at their owner's next password operation; a malformed or future value stops startup |
 | `RUST_LOG` | `sid=info` | Log level |
 
 Malformed explicit ZKPP settings stop startup. Optional proof setup still verifies
@@ -68,6 +69,11 @@ Verifier keys must enforce the configured policy, with one key per history-domai
 count. A pending password operation whose policy is no longer accepted must be
 restarted before it can install a password. Ordinary password login does not
 generate a new policy proof.
+
+A replaced password-history key takes no new entries, but the passwords already
+retained under it are still compared until retention removes them; the key is
+then destroyed. Replacement does not make previously copied keys or entries
+secret again.
 
 ### Trusted request verifiers
 

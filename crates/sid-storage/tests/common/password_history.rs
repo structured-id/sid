@@ -301,6 +301,148 @@ pub async fn test_history_epoch_is_prepared_once(backend: &dyn StorageBackend) {
     assert!(matches!(err, sid_core::Error::NotFound(_)), "{err:?}");
 }
 
+/// Rotation replaces the active epoch: the replaced one stops taking entries
+/// but stays comparable while it retains one, and is retired with its sealed
+/// key destroyed once retention removes its last entry. Concurrent rotations
+/// from one epoch agree on one replacement; a stale rotation writes nothing.
+pub async fn test_history_epoch_rotation(backend: &dyn StorageBackend) {
+    let (owner, password) = profile_with_password(backend, "hist_rotate").await;
+    let old = backend
+        .ensure_history_epoch(&new_epoch(owner, 11), test_audit())
+        .await
+        .unwrap();
+    let read = backend.get_password_history(owner).await.unwrap();
+    assert!(
+        backend
+            .change_password(
+                password.id,
+                b"p0",
+                &next(&password, b"p1"),
+                Some(&commit(owner, read.revision, old.id, 0x11, 1)),
+                test_audit()
+            )
+            .await
+            .unwrap()
+    );
+    let before = backend.get_password_history(owner).await.unwrap();
+
+    let (a, b) = (new_epoch(owner, 12), new_epoch(owner, 13));
+    let (ra, rb) = tokio::join!(
+        backend.rotate_history_epoch(&a, old.id, test_audit()),
+        backend.rotate_history_epoch(&b, old.id, test_audit()),
+    );
+    let (ra, rb) = (ra.unwrap(), rb.unwrap());
+    assert_eq!(ra.id, rb.id, "concurrent rotations agree on one epoch");
+    let replacement = ra;
+    let rotated = backend.get_password_history(owner).await.unwrap();
+    assert_eq!(rotated.revision, before.revision + 1, "one rotation wrote");
+    assert_eq!(rotated.active_epoch().map(|e| e.id), Some(replacement.id));
+    let required: Vec<HistoryEpochId> = rotated.required_epochs().iter().map(|e| e.id).collect();
+    assert_eq!(
+        required,
+        vec![replacement.id, old.id],
+        "the replaced epoch still holds an entry and stays required"
+    );
+    assert_eq!(
+        rotated
+            .epochs
+            .iter()
+            .find(|e| e.id == old.id)
+            .map(|e| e.status),
+        Some(HistoryEpochUse::CompareOnly)
+    );
+
+    // A rotation naming an epoch no longer active changes nothing.
+    let late = backend
+        .rotate_history_epoch(&new_epoch(owner, 14), old.id, test_audit())
+        .await
+        .unwrap();
+    assert_eq!(late.id, replacement.id);
+    assert_eq!(
+        backend.get_password_history(owner).await.unwrap().revision,
+        rotated.revision
+    );
+
+    // The replaced epoch takes no new entry: the whole change is refused.
+    assert!(
+        !backend
+            .change_password(
+                password.id,
+                b"p1",
+                &next(&password, b"p2"),
+                Some(&commit(owner, rotated.revision, old.id, 0x12, 1)),
+                test_audit()
+            )
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        backend
+            .get_credential(password.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .data
+            .expose(),
+        b"p1"
+    );
+
+    // An entry under the replacement retires the emptied epoch and destroys
+    // its key; the row stays only as provenance.
+    assert!(
+        backend
+            .change_password(
+                password.id,
+                b"p1",
+                &next(&password, b"p2"),
+                Some(&commit(owner, rotated.revision, replacement.id, 0x13, 1)),
+                test_audit()
+            )
+            .await
+            .unwrap()
+    );
+    let after = backend.get_password_history(owner).await.unwrap();
+    assert_eq!(after.epochs, vec![replacement.clone()]);
+    assert_eq!(after.entries.len(), 1);
+    assert_eq!(after.entries[0].epoch, replacement.id);
+    assert_eq!(
+        backend.get_history_epoch_key(old.id).await.unwrap(),
+        Some(WrappedHistoryKey(Vec::new())),
+        "a retired epoch's key is destroyed"
+    );
+    assert_ne!(
+        backend.get_history_epoch_key(replacement.id).await.unwrap(),
+        Some(WrappedHistoryKey(Vec::new()))
+    );
+
+    // An epoch that never held an entry is retired at once when replaced.
+    let (fresh_owner, _) = profile_with_password(backend, "hist_rotate_empty").await;
+    let unused = backend
+        .ensure_history_epoch(&new_epoch(fresh_owner, 15), test_audit())
+        .await
+        .unwrap();
+    let next_epoch = backend
+        .rotate_history_epoch(&new_epoch(fresh_owner, 16), unused.id, test_audit())
+        .await
+        .unwrap();
+    let view = backend.get_password_history(fresh_owner).await.unwrap();
+    assert_eq!(view.epochs, vec![next_epoch]);
+    assert_eq!(
+        backend.get_history_epoch_key(unused.id).await.unwrap(),
+        Some(WrappedHistoryKey(Vec::new()))
+    );
+
+    let err = backend
+        .rotate_history_epoch(
+            &new_epoch(ProfileId::generate(), 17),
+            HistoryEpochId::generate(),
+            test_audit(),
+        )
+        .await
+        .expect_err("no profile, no history");
+    assert!(matches!(err, sid_core::Error::NotFound(_)), "{err:?}");
+}
+
 /// A registration with an accepted proof writes the profile, its first
 /// epoch and its first entry in one commit.
 pub async fn test_registration_writes_first_history(backend: &dyn StorageBackend) {

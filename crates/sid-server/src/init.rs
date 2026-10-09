@@ -822,7 +822,11 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         cascade_service.clone(),
         authz_engine.clone(),
     )
-    .with_trusted_proxies(trusted_proxies);
+    .with_trusted_proxies(trusted_proxies)
+    .with_history_epoch_cutoff(
+        history_epoch_cutoff(std::env::var("SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE"))
+            .unwrap_or_else(|e| panic!("password history configuration: {e}")),
+    );
     let auth_svc = Arc::new(match &login_url {
         Some(page) => auth_svc.with_sign_in_page(page),
         None => auth_svc,
@@ -1325,6 +1329,29 @@ pub fn spawn_work_runner(
     let runner = WorkRunner::new(c.storage.clone(), worker, handlers, RunnerConfig::default())
         .map_err(|e| anyhow::anyhow!("work runner: {e}"))?;
     Ok(tokio::spawn(runner.run(shutdown)))
+}
+
+/// The cutoff before which password-history epochs are replaced, an RFC 3339
+/// instant. Unset means none; a malformed or future value stops startup.
+fn history_epoch_cutoff(
+    input: Result<String, std::env::VarError>,
+) -> anyhow::Result<Option<chrono::DateTime<chrono::Utc>>> {
+    const NAME: &str = "SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE";
+    let value = match input {
+        Ok(v) => v,
+        Err(std::env::VarError::NotPresent) => return Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!("{NAME} must be Unicode"),
+    };
+    let cutoff = chrono::DateTime::parse_from_rfc3339(&value)
+        .map_err(|_| anyhow::anyhow!("{NAME} must be an RFC 3339 instant"))?
+        .with_timezone(&chrono::Utc);
+    // A future cutoff would replace every epoch created until then, again
+    // at each operation: it names no compromise that has happened.
+    anyhow::ensure!(
+        cutoff <= chrono::Utc::now(),
+        "{NAME} must not be in the future"
+    );
+    Ok(Some(cutoff))
 }
 
 /// Parse explicit proof settings without treating invalid input as absence.

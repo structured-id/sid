@@ -71,6 +71,32 @@ fn zkpp_settings_preserve_documented_defaults() {
     }
 }
 
+/// The history-epoch cutoff is absent unless set; a set value is a past RFC
+/// 3339 instant. Malformed, non-Unicode or future values stop startup rather
+/// than silently disabling or perpetually repeating epoch replacement.
+#[test]
+fn history_epoch_cutoff_accepts_only_a_past_instant() {
+    use std::env::VarError::{NotPresent, NotUnicode};
+    assert_eq!(history_epoch_cutoff(Err(NotPresent)).unwrap(), None);
+    let past = history_epoch_cutoff(Ok("2026-10-01T12:00:00Z".into()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(past.to_rfc3339(), "2026-10-01T12:00:00+00:00");
+    let offset = history_epoch_cutoff(Ok("2026-10-01T15:00:00+03:00".into()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(offset, past, "an offset names the same instant");
+    for refused in ["", "yesterday", "2026-10-01", "2026-10-01 12:00:00"] {
+        assert!(
+            history_epoch_cutoff(Ok(refused.into())).is_err(),
+            "{refused:?}"
+        );
+    }
+    let future = (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339();
+    assert!(history_epoch_cutoff(Ok(future)).is_err());
+    assert!(history_epoch_cutoff(Err(NotUnicode("bad".into()))).is_err());
+}
+
 /// A machine-credential alert keeps its id across scans (relayed once) and
 /// a different alert (another credential or another day) gets another id.
 #[test]

@@ -32,8 +32,9 @@ use sid_authn::challenge_store::ChallengeStore;
 use sid_authn::opaque_zkpp::ZkppOpaqueServer;
 use sid_authn::operation::KeyedCommand;
 use sid_authn::password_history::{
-    CheckRequest, HistoryCheckError, HistoryChecker, HistoryEvaluator, MAX_HISTORY_DOMAINS,
-    OperationDomain, OperationEvaluation, decoy_domain, inputs_match, owner_domain,
+    CheckRequest, EpochPolicy, HistoryCheckError, HistoryChecker, HistoryEvaluator,
+    MAX_HISTORY_DOMAINS, OperationDomain, OperationEvaluation, decoy_domain, inputs_match,
+    owner_domain,
 };
 use sid_core::grpc_error::refuse::invalid_field;
 use sid_core::grpc_error::{ApiError, ErrorReason};
@@ -211,7 +212,8 @@ pub(crate) struct PasswordOperations {
     proof_permits: Arc<Semaphore>,
     ops: ChallengeStore<PendingOperation>,
     installation: [u8; 16],
-    ksf: HistoryKsf,
+    /// What new epochs are made with and when an active one is replaced.
+    epochs: EpochPolicy,
     depth: u32,
 }
 
@@ -339,9 +341,17 @@ impl PasswordOperations {
             )),
             ops: ChallengeStore::new(cache, keys, "password-operation", OPERATION_TTL),
             installation: *installation.as_bytes(),
-            ksf: HistoryKsf::DEFAULT,
+            epochs: EpochPolicy {
+                ksf: HistoryKsf::DEFAULT,
+                not_before: None,
+            },
             depth: DEFAULT_HISTORY_DEPTH,
         }
+    }
+
+    /// Replace epochs created before `cutoff` at their owner's next operation.
+    pub(crate) fn set_epoch_cutoff(&mut self, cutoff: Option<chrono::DateTime<chrono::Utc>>) {
+        self.epochs.not_before = cutoff;
     }
 
     fn key(id: &PasswordOperationId) -> String {
@@ -375,7 +385,7 @@ impl PasswordOperations {
             OperationOwner::New(profile_id) => {
                 let epoch = self
                     .evaluator
-                    .new_epoch(profile_id, self.ksf)
+                    .new_epoch(profile_id, self.epochs.ksf)
                     .await
                     .map_err(internal)?;
                 let domains = vec![OperationDomain::of(&epoch.epoch)];
@@ -435,32 +445,51 @@ impl PasswordOperations {
         })
     }
 
-    /// The owner's history with an active epoch, creating one (key sealed
-    /// and stored before first use) when the owner has none.
+    /// The owner's history with a current active epoch: one is created (key
+    /// sealed and stored before first use) when the owner has none, and an
+    /// active epoch the [`EpochPolicy`] no longer accepts is replaced, staying
+    /// comparable while it retains entries.
     async fn current_history(&self, owner: ProfileId) -> Result<PasswordHistory, Status> {
         let history = self
             .storage
             .get_password_history(owner)
             .await
             .map_err(internal)?;
-        if history.active_epoch().is_some() {
-            return Ok(history);
-        }
+        let replaces = match history.active_epoch() {
+            Some(active) if self.epochs.is_current(active) => return Ok(history),
+            Some(active) => Some(active.id),
+            None => None,
+        };
         let epoch = self
             .evaluator
-            .new_epoch(owner, self.ksf)
+            .new_epoch(owner, self.epochs.ksf)
             .await
             .map_err(internal)?;
-        self.storage
-            .ensure_history_epoch(
-                &epoch,
-                MutationContext::from(AuditEntry::system(
-                    "password_history.epoch_created",
-                    owner.to_string(),
-                )),
-            )
-            .await
-            .map_err(internal)?;
+        match replaces {
+            Some(replaces) => self
+                .storage
+                .rotate_history_epoch(
+                    &epoch,
+                    replaces,
+                    MutationContext::from(AuditEntry::system(
+                        "password_history.epoch_rotated",
+                        owner.to_string(),
+                    )),
+                )
+                .await
+                .map_err(internal)?,
+            None => self
+                .storage
+                .ensure_history_epoch(
+                    &epoch,
+                    MutationContext::from(AuditEntry::system(
+                        "password_history.epoch_created",
+                        owner.to_string(),
+                    )),
+                )
+                .await
+                .map_err(internal)?,
+        };
         self.storage
             .get_password_history(owner)
             .await

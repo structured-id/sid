@@ -351,6 +351,11 @@ async fn test_history_epoch_is_prepared_once() {
 }
 
 #[tokio::test]
+async fn test_history_epoch_rotation() {
+    common::password_history::test_history_epoch_rotation(&setup().await).await;
+}
+
+#[tokio::test]
 async fn test_registration_writes_first_history() {
     common::password_history::test_registration_writes_first_history(&setup().await).await;
 }

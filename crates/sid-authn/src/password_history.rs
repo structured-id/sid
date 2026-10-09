@@ -74,6 +74,27 @@ pub fn comparison_domain(epoch: &HistoryEpoch) -> [u8; 32] {
     .to_repr()
 }
 
+/// When an owner's active epoch must be replaced before it takes another
+/// entry: new epochs follow the current suite and KSF, and an operator may
+/// set a cutoff (a suspected key compromise) before which every epoch is
+/// replaced. A replaced epoch stays comparable while it retains entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EpochPolicy {
+    pub ksf: HistoryKsf,
+    pub not_before: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl EpochPolicy {
+    /// Whether `epoch` may keep taking new entries.
+    pub fn is_current(&self, epoch: &HistoryEpoch) -> bool {
+        epoch.suite == HistorySuite::PallasPoseidonV1
+            && epoch.ksf == self.ksf
+            && self
+                .not_before
+                .is_none_or(|cutoff| epoch.created_at >= cutoff)
+    }
+}
+
 fn key_context(epoch: HistoryEpochId, owner: ProfileId) -> String {
     format!("{KEY_CONTEXT_PREFIX}:{}:{owner}", epoch.0)
 }

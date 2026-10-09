@@ -471,6 +471,110 @@ async fn a_finish_for_another_policy_is_refused_before_record_decoding() {
     assert_eq!(details.violations[0].r#type, "PASSWORD_POLICY_VERSION");
 }
 
+/// An active epoch made under KSF parameters the server no longer uses, or
+/// before an operator's cutoff, is replaced when its owner's next operation
+/// is prepared. The replaced epoch stays required while it retains the
+/// accepted password, so that password is still compared; a replaced epoch
+/// without entries is retired with its key destroyed. A current epoch is
+/// never replaced.
+#[tokio::test]
+async fn a_stale_active_epoch_is_replaced_at_preparation() {
+    use sid_core::models::{CredentialData, HistoryEpochUse, Profile, WrappedHistoryKey};
+
+    let storage = Arc::new(
+        sid_storage::sqlite::SqliteBackend::new_in_memory()
+            .await
+            .unwrap(),
+    );
+    let keys = Arc::new(
+        sid_keys::SoftwareKeyManager::new(
+            secrecy::SecretBox::new(Box::new([3; 32])),
+            vec![sid_keys::KeyVersionParams::new(1, vec![1; 32], "test")],
+            Arc::new(sid_keys::RustCryptoPrimitives::new()),
+        )
+        .unwrap(),
+    );
+    let mut ops = PasswordOperations::new(
+        storage.clone(),
+        Arc::new(sid_plugin::cache::InMemoryCacheBackend::new()),
+        keys,
+        sid_core::models::OrgId::generate(),
+    );
+    let audit = || MutationContext::from(AuditEntry::system("test", "rotation"));
+    let profile = Profile::new(Some("rotating"));
+    storage.create_profile(&profile, audit()).await.unwrap();
+    let password = Credential::new(profile.id, CredentialType::Opaque, b"p0".to_vec(), None);
+    storage.create_credential(&password, audit()).await.unwrap();
+
+    let old_ksf = HistoryKsf {
+        memory_kib: 1024,
+        passes: 1,
+        lanes: 1,
+    };
+    let old = ops.evaluator.new_epoch(profile.id, old_ksf).await.unwrap();
+    storage.ensure_history_epoch(&old, audit()).await.unwrap();
+    let revision = storage
+        .get_password_history(profile.id)
+        .await
+        .unwrap()
+        .revision;
+    let mut changed = password.clone();
+    changed.data = CredentialData::new(b"p1".to_vec());
+    let accepted = HistoryCommit {
+        owner: profile.id,
+        expected_revision: revision,
+        new_epoch: None,
+        entries: vec![(old.epoch.id, [9; 32])],
+        evidence: HistoryEvidence {
+            operation: uuid::Uuid::now_v7(),
+            policy_version: 1,
+        },
+        depth: 1,
+    };
+    assert!(
+        storage
+            .change_password(password.id, b"p0", &changed, Some(&accepted), audit())
+            .await
+            .unwrap()
+    );
+
+    let rotated = ops.current_history(profile.id).await.unwrap();
+    let current = rotated.active_epoch().unwrap().clone();
+    assert_ne!(current.id, old.epoch.id);
+    assert_eq!(current.ksf, HistoryKsf::DEFAULT);
+    let required: Vec<_> = rotated.required_epochs().iter().map(|e| e.id).collect();
+    assert_eq!(
+        required,
+        vec![current.id, old.epoch.id],
+        "the accepted password is still compared under its epoch"
+    );
+
+    let again = ops.current_history(profile.id).await.unwrap();
+    assert_eq!(again.revision, rotated.revision, "a current epoch stays");
+    assert_eq!(again.active_epoch().map(|e| e.id), Some(current.id));
+
+    // A compromise cutoff after the current epoch replaces it too; it held
+    // no entry, so it is retired at once and its key destroyed.
+    ops.set_epoch_cutoff(Some(current.created_at + chrono::Duration::milliseconds(1)));
+    let cut = ops.current_history(profile.id).await.unwrap();
+    let replacement = cut.active_epoch().unwrap().clone();
+    assert_ne!(replacement.id, current.id);
+    let required: Vec<_> = cut.required_epochs().iter().map(|e| e.id).collect();
+    assert_eq!(required, vec![replacement.id, old.epoch.id]);
+    assert!(!cut.epochs.iter().any(|e| e.id == current.id));
+    assert_eq!(
+        storage.get_history_epoch_key(current.id).await.unwrap(),
+        Some(WrappedHistoryKey(Vec::new()))
+    );
+    assert_eq!(
+        cut.epochs
+            .iter()
+            .find(|e| e.id == old.epoch.id)
+            .map(|e| e.status),
+        Some(HistoryEpochUse::CompareOnly)
+    );
+}
+
 /// A step without an operation id is an invalid argument naming the field; a
 /// well-formed id round-trips through the wire.
 #[test]

@@ -820,6 +820,18 @@ impl AuthServiceImpl {
         self
     }
 
+    /// Replace every password-history epoch created before `cutoff` at its
+    /// owner's next password operation (a suspected history-key compromise).
+    pub fn with_history_epoch_cutoff(
+        mut self,
+        cutoff: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Self {
+        Arc::get_mut(&mut self.password_ops)
+            .expect("password operations are not shared during construction")
+            .set_epoch_cutoff(cutoff);
+        self
+    }
+
     /// The client address of `request`: the transport peer, or what a
     /// trusted proxy in front of it reports.
     fn client_ip<T>(&self, request: &Request<T>) -> Option<std::net::IpAddr> {

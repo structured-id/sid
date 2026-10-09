@@ -259,8 +259,16 @@ pub(super) async fn apply_in_tx(tx: &mut WriteTx, commit: &HistoryCommit) -> Sid
         .execute(&mut **tx)
         .await
         .map_err(storage("retention"))?;
+    retire_unused(tx, owner).await?;
+    Ok(true)
+}
+
+/// Retire every compare-only epoch of `owner` that retains no entry and
+/// destroy its sealed key: nothing will be compared or written under it again,
+/// and the epoch row stays only as provenance.
+async fn retire_unused(tx: &mut WriteTx, owner: ProfileId) -> SidResult<()> {
     sqlx::query(
-        "UPDATE password_history_epochs SET status = 'retired'
+        "UPDATE password_history_epochs SET status = 'retired', wrapped_key = X''
          WHERE owner_id = ? AND status = 'compare_only'
            AND NOT EXISTS (SELECT 1 FROM password_history_entries x
                            WHERE x.epoch_id = password_history_epochs.id)",
@@ -269,7 +277,7 @@ pub(super) async fn apply_in_tx(tx: &mut WriteTx, commit: &HistoryCommit) -> Sid
     .execute(&mut **tx)
     .await
     .map_err(storage("epoch retirement"))?;
-    Ok(true)
+    Ok(())
 }
 
 impl SqliteBackend {
@@ -399,6 +407,73 @@ impl SqliteBackend {
         if let Some(row) = active {
             return row_to_epoch(&row);
         }
+        insert_epoch(&mut tx, new).await?;
+        sqlx::query("UPDATE password_histories SET revision = revision + 1 WHERE owner_id = ?")
+            .bind(owner)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage("revision"))?;
+        Self::commit_mutation(tx, &format!("profile:{owner}"), audit).await?;
+        Ok(new.epoch.clone())
+    }
+
+    pub(crate) async fn rotate_history_epoch_impl(
+        &self,
+        new: &NewHistoryEpoch,
+        replaces: HistoryEpochId,
+        audit: sid_core::models::MutationContext,
+    ) -> SidResult<HistoryEpoch> {
+        if new.epoch.status != HistoryEpochUse::Active {
+            return Err(SidError::Validation(
+                "a prepared history epoch is active".into(),
+            ));
+        }
+        let owner = new.epoch.owner;
+        let mut tx = self.begin_write().await?;
+        require_current_format(&mut tx, owner).await?;
+        sqlx::query(
+            "INSERT INTO password_histories (owner_id, revision)
+             SELECT id, 1 FROM profiles WHERE id = ?
+             ON CONFLICT (owner_id) DO NOTHING",
+        )
+        .bind(owner)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage("history row"))?;
+        let exists: Option<i64> =
+            sqlx::query_scalar("SELECT revision FROM password_histories WHERE owner_id = ?")
+                .bind(owner)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(storage("history row"))?;
+        if exists.is_none() {
+            return Err(SidError::NotFound(format!("profile {owner}")));
+        }
+        let active = sqlx::query(concat!(
+            "SELECT ",
+            epoch_columns!(),
+            " FROM password_history_epochs WHERE owner_id = ? AND status = 'active'"
+        ))
+        .bind(owner)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage("active epoch"))?;
+        if let Some(row) = active {
+            let current = row_to_epoch(&row)?;
+            if current.id != replaces {
+                return Ok(current);
+            }
+        }
+        sqlx::query(
+            "UPDATE password_history_epochs SET status = 'compare_only'
+             WHERE id = ? AND owner_id = ? AND status = 'active'",
+        )
+        .bind(replaces.0.to_string())
+        .bind(owner)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage("epoch rotation"))?;
+        retire_unused(&mut tx, owner).await?;
         insert_epoch(&mut tx, new).await?;
         sqlx::query("UPDATE password_histories SET revision = revision + 1 WHERE owner_id = ?")
             .bind(owner)

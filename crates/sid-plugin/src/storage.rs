@@ -395,6 +395,20 @@ pub trait StorageBackend: WorkStore + Send + Sync + 'static {
         ctx: MutationContext,
     ) -> Result<HistoryEpoch>;
 
+    /// Replace `owner`'s active epoch `replaces` with `new`, before the new
+    /// key's first use, and move the history revision on. The replaced epoch
+    /// stops taking entries: it stays comparable while it retains entries
+    /// and is retired, its sealed key destroyed, when it retains none. When
+    /// `replaces` is no longer the active epoch nothing is written and the
+    /// current active epoch is returned, so concurrent rotations agree on one
+    /// key. The owner must exist (`Error::NotFound` otherwise).
+    async fn rotate_history_epoch(
+        &self,
+        new: &NewHistoryEpoch,
+        replaces: HistoryEpochId,
+        ctx: MutationContext,
+    ) -> Result<HistoryEpoch>;
+
     /// The sealed VOPRF key of an epoch, for the evaluator; `None` when no
     /// such epoch is stored.
     async fn get_history_epoch_key(
