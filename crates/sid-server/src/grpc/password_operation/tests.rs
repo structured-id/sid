@@ -482,6 +482,99 @@ async fn a_finish_for_another_policy_is_refused_before_record_decoding() {
     assert_eq!(details.violations[0].r#type, "PASSWORD_POLICY_VERSION");
 }
 
+/// A history key the server cannot open (its external wrapping key is lost
+/// or not restored) makes the evaluation unavailable and retryable: no
+/// substitute key is generated, the stored history is left as it was and the
+/// pending operation keeps no evaluation.
+#[tokio::test]
+async fn an_unopenable_history_key_is_unavailable_and_never_replaced() {
+    use group::{Curve, Group, GroupEncoding};
+    use sid_authn::opaque::{OpaqueRouter, PallasOpaque};
+    use sid_authn::opaque_zkpp::ZkppConfig;
+    use sid_core::models::Profile;
+    use sid_plugin::crypto::OpaqueOperations;
+
+    let storage = Arc::new(
+        sid_storage::sqlite::SqliteBackend::new_in_memory()
+            .await
+            .unwrap(),
+    );
+    let manager = |master: u8| -> Arc<dyn sid_keys::KeyManager> {
+        Arc::new(
+            sid_keys::SoftwareKeyManager::new(
+                secrecy::SecretBox::new(Box::new([master; 32])),
+                vec![sid_keys::KeyVersionParams::new(1, vec![1; 32], "test")],
+                Arc::new(sid_keys::RustCryptoPrimitives::new()),
+            )
+            .unwrap(),
+        )
+    };
+    let installation = sid_core::models::OrgId::generate();
+    let original = PasswordOperations::new(
+        storage.clone(),
+        Arc::new(sid_plugin::cache::InMemoryCacheBackend::new()),
+        manager(3),
+        installation,
+    );
+    let audit = || MutationContext::from(AuditEntry::system("test", "key loss"));
+    let profile = Profile::new(Some("keyless"));
+    storage.create_profile(&profile, audit()).await.unwrap();
+    let sealed = original.current_history(profile.id).await.unwrap();
+    let epoch = sealed.active_epoch().unwrap().id;
+
+    // The same database served with another master key.
+    let restored = PasswordOperations::new(
+        storage.clone(),
+        Arc::new(sid_plugin::cache::InMemoryCacheBackend::new()),
+        manager(4),
+        installation,
+    );
+    let primary = Box::new(PallasOpaque::new());
+    let setup = primary.create_setup(None).unwrap();
+    let providers = [(
+        CurveId::Pallas,
+        Box::new(PallasOpaque::new()) as Box<dyn OpaqueOperations>,
+    )]
+    .into();
+    let router = OpaqueRouter::new(primary, providers, setup);
+    let zkpp = ZkppOpaqueServer::new(
+        &router,
+        vec![],
+        ZkppConfig {
+            require_proof: false,
+            policy_version: 1,
+        },
+    )
+    .unwrap();
+    let prepared = restored
+        .prepare(
+            &zkpp,
+            change(),
+            OperationOwner::Existing(profile.id),
+            profile.id.to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+    let id = operation_id(prepared.context.operation_id.as_ref()).unwrap();
+    let blinded = (pallas::Point::generator() * pallas::Scalar::from(5u64))
+        .to_affine()
+        .to_bytes();
+    let status = restored.evaluate(&id, &blinded).await.unwrap_err();
+    assert_eq!(status.code(), Code::Unavailable, "{}", status.message());
+    assert_eq!(
+        status.get_details_error_info().unwrap().reason,
+        "PASSWORD_HISTORY_UNAVAILABLE"
+    );
+    assert!(status.get_details_retry_info().is_some());
+
+    let after = storage.get_password_history(profile.id).await.unwrap();
+    assert_eq!(after, sealed, "no substitute key or history change");
+    assert_eq!(after.active_epoch().map(|e| e.id), Some(epoch));
+    let pending = restored.take(&id).await.unwrap();
+    assert!(pending.evaluation.is_none(), "nothing was evaluated");
+}
+
 /// An active epoch made under KSF parameters the server no longer uses, or
 /// before an operator's cutoff, is replaced when its owner's next operation
 /// is prepared. The replaced epoch stays required while it retains the

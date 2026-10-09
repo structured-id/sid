@@ -282,6 +282,101 @@ async fn test_password_change_refuses_the_retained_password() {
     assert_eq!(reason(&again), "PASSWORD_REUSED");
 }
 
+/// A change whose response was lost resolves on retry: the exact finish
+/// returns the recorded success without a second password installation or a
+/// second history entry, and a finish of the same operation with another
+/// record is refused, leaving the installed password in place.
+#[tokio::test]
+async fn test_a_lost_change_response_resolves_without_a_second_write() {
+    let (prover, verifier) = client::keys(1);
+    let (svc, credential, token) = registered(&prover, verifier).await;
+    let changing = prepare_change(&svc, &prover, &credential, &token, NEW)
+        .await
+        .unwrap();
+    let other_record = {
+        let started = client::start(WEAK);
+        client::finish(started, WEAK, &server_registration_response(&svc).await)
+    };
+    finish_change(
+        &svc,
+        &credential,
+        &token,
+        &changing.context,
+        changing.record.clone(),
+        changing.proof.clone(),
+    )
+    .await
+    .expect("the change");
+    let installed = svc
+        .storage
+        .get_credential(credential.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let history = svc
+        .storage
+        .get_password_history(credential.profile_id)
+        .await
+        .unwrap();
+
+    finish_change(
+        &svc,
+        &credential,
+        &token,
+        &changing.context,
+        changing.record,
+        changing.proof.clone(),
+    )
+    .await
+    .expect("the exact retry returns the recorded result");
+    let substituted = finish_change(
+        &svc,
+        &credential,
+        &token,
+        &changing.context,
+        other_record,
+        changing.proof,
+    )
+    .await
+    .expect_err("a retry with another record was accepted");
+    // The operation's key is already bound to the first record.
+    assert_eq!(reason(&substituted), "OPERATION_KEY_CONFLICT");
+
+    let after = svc
+        .storage
+        .get_credential(credential.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.data.expose(), installed.data.expose());
+    assert_eq!(
+        svc.storage
+            .get_password_history(credential.profile_id)
+            .await
+            .unwrap(),
+        history,
+        "no second entry"
+    );
+    assert!(signs_in(&svc, NEW).await);
+    assert!(!signs_in(&svc, WEAK).await);
+}
+
+/// Any registration response of the server, for building a record that is
+/// well-formed but belongs to no operation.
+async fn server_registration_response(svc: &TestServices) -> Vec<u8> {
+    let started = client::start(b"any");
+    svc.auth
+        .opaque_registration_start(Request::new(OpaqueRegistrationStartRequest {
+            principal: "someone-else@sid.example.com".to_string(),
+            registration_request: started.request,
+            claim_token: None,
+        }))
+        .await
+        .expect("a registration start")
+        .into_inner()
+        .registration_response
+}
+
 /// After its history key is replaced (a KSF change or a suspected key
 /// compromise), an owner's operation is compared in two domains: the new key
 /// and the replaced one that still holds the retained password. The retained
