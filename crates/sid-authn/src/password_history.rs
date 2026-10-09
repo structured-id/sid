@@ -251,18 +251,22 @@ impl HistoryEvaluator {
         })
     }
 
-    /// An evaluation under a key that exists nowhere, for a registration
-    /// start that must look like any other while committing nothing.
+    /// An evaluation under the throwaway keys of a decoy's domains (see
+    /// [`decoy_domain`]), for a registration start that must look like any
+    /// other while committing nothing: each proof verifies under the public
+    /// key the client was given, as a real one does.
     pub fn evaluate_decoy(
         &self,
         blinded: &[u8; 32],
-        domains: usize,
+        keys: &[[u8; 32]],
         context: &[u8],
     ) -> SidResult<OperationEvaluation> {
         let b = point(blinded, "blinded input")?;
-        let evaluations = (0..domains)
-            .map(|_| {
-                let k = <pallas::Scalar as ff::Field>::random(&mut UnwrapErr(SysRng));
+        let evaluations = keys
+            .iter()
+            .map(|key| {
+                let k = scalar(key, "decoy key")
+                    .map_err(|_| SidError::Internal("decoy key value".into()))?;
                 let (z, proof) = relation::evaluate_with_proof(k, b, context, UnwrapErr(SysRng))
                     .ok_or_else(|| SidError::Validation("blinded input is degenerate".into()))?;
                 Ok(DomainEvaluation {
@@ -280,17 +284,20 @@ impl HistoryEvaluator {
 }
 
 /// A public key and domain that look like a real epoch's, for a decoy
+/// operation, with the throwaway key the decoy is evaluated under. The key
+/// belongs to no owner and protects nothing; it lives only as long as the
 /// operation.
-pub fn decoy_domain() -> OperationDomain {
+pub fn decoy_domain() -> (OperationDomain, [u8; 32]) {
     let mut rng = UnwrapErr(SysRng);
     let k = <pallas::Scalar as ff::Field>::random(&mut rng);
     let mut id = [0u8; 32];
     rng.fill_bytes(&mut id);
-    OperationDomain {
+    let domain = OperationDomain {
         epoch: HistoryEpochId::generate(),
         public_key: (pallas::Point::generator() * k).to_affine().to_bytes(),
         comparison_domain: relation::domain_element(COMPARISON_DOMAIN_PURPOSE, &[&id]).to_repr(),
-    }
+    };
+    (domain, k.to_repr())
 }
 
 /// Why the checker did not accept a proved password.

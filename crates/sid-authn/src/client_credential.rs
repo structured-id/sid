@@ -8,14 +8,107 @@
 use std::time::{Duration, Instant};
 
 use secrecy::{ExposeSecret, SecretString};
+use serde::Deserialize;
 use tokio::sync::{Mutex, RwLock};
 use tonic::metadata::{AsciiMetadataValue, MetadataValue};
-
-use crate::config::{ClientAuthentication, ClientCredentialConfig};
 
 /// How long a client assertion is valid (RFC 7523 §3 item 4): long enough to
 /// reach the token endpoint, far below the server's accepted lifetime.
 const ASSERTION_LIFETIME_SECS: i64 = 60;
+
+/// A registered client (a confidential OAuth client or a machine user) this
+/// service authenticates as at its issuer: to ask sid-authz, holding the
+/// permission-checker role on the resources it asks about, or to call
+/// another service, holding that service's actions.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClientCredentialConfig {
+    /// The exact issuer the client is registered under; its tokens are for
+    /// that issuer's resources only.
+    pub issuer: String,
+    /// The client identifier (RFC 6749 §2.2).
+    pub client_id: String,
+    /// How the client authenticates at the token endpoint (RFC 6749 §2.3).
+    pub authentication: ClientAuthentication,
+}
+
+/// A client authentication method with the file holding its credential.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "method", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ClientAuthentication {
+    /// The client secret in HTTP Basic (RFC 6749 §2.3.1).
+    ClientSecretBasic {
+        /// File holding the client secret.
+        secret_file: String,
+    },
+    /// The client secret in the request body (RFC 6749 §2.3.1).
+    ClientSecretPost {
+        /// File holding the client secret.
+        secret_file: String,
+    },
+    /// A JWT signed with the client's registered key (RFC 7523 §2.2).
+    PrivateKeyJwt {
+        /// File holding the PKCS#8 PEM private key.
+        key_file: String,
+        /// The JWS algorithm of the key: `EdDSA`, `ES256` or `RS256`.
+        algorithm: String,
+        /// The registered key's identifier, sent as the JWS `kid`; absent
+        /// when the client registered a single key.
+        #[serde(default)]
+        key_id: Option<String>,
+    },
+}
+
+impl ClientCredentialConfig {
+    /// From `{prefix}_CLIENT_ID`, `_ISSUER`, `_METHOD` and the method's
+    /// `_SECRET_FILE` or `_KEY_FILE`/`_ALGORITHM`/`_KEY_ID` in the process
+    /// environment; `None` when no client is named.
+    pub fn from_env(prefix: &str) -> Result<Option<Self>, CredentialError> {
+        Self::from_vars(prefix, |name| {
+            std::env::var(name).ok().filter(|v| !v.is_empty())
+        })
+    }
+
+    /// As [`Self::from_env`], reading variables through `var`.
+    pub fn from_vars(
+        prefix: &str,
+        var: impl Fn(&str) -> Option<String>,
+    ) -> Result<Option<Self>, CredentialError> {
+        let name = |suffix: &str| format!("{prefix}_{suffix}");
+        let Some(client_id) = var(&name("CLIENT_ID")) else {
+            return Ok(None);
+        };
+        let required = |suffix: &str| {
+            let key = name(suffix);
+            var(&key).ok_or_else(|| {
+                CredentialError::Config(format!("{key} is required with {prefix}_CLIENT_ID"))
+            })
+        };
+        let authentication = match required("METHOD")?.as_str() {
+            "client_secret_basic" => ClientAuthentication::ClientSecretBasic {
+                secret_file: required("SECRET_FILE")?,
+            },
+            "client_secret_post" => ClientAuthentication::ClientSecretPost {
+                secret_file: required("SECRET_FILE")?,
+            },
+            "private_key_jwt" => ClientAuthentication::PrivateKeyJwt {
+                key_file: required("KEY_FILE")?,
+                algorithm: required("ALGORITHM")?,
+                key_id: var(&name("KEY_ID")),
+            },
+            other => {
+                return Err(CredentialError::Config(format!(
+                    "{prefix}_METHOD {other} is not a supported method"
+                )));
+            }
+        };
+        Ok(Some(Self {
+            issuer: required("ISSUER")?,
+            client_id,
+            authentication,
+        }))
+    }
+}
 
 /// Why no token is available.
 #[derive(Debug, thiserror::Error)]
@@ -85,7 +178,7 @@ impl ClientCredential {
         base: &str,
         channel: tonic::transport::Channel,
     ) -> Result<Self, CredentialError> {
-        let api = sid_authn::issuer::authorization_api_endpoint(&config.issuer);
+        let api = crate::issuer::authorization_api_endpoint(&config.issuer);
         Self::load(
             config,
             base,
@@ -237,7 +330,7 @@ impl ClientCredential {
     /// resource, with the required scope when there is one.
     async fn request(&self) -> Result<Held, CredentialError> {
         use sid_proto::sid::v1::OAuth2TokenRequest;
-        let token_endpoint = sid_authn::issuer::token_endpoint(&self.issuer);
+        let token_endpoint = crate::issuer::token_endpoint(&self.issuer);
         let mut body = OAuth2TokenRequest {
             grant_type: "client_credentials".into(),
             scope: self.scope.map(str::to_owned),
@@ -263,7 +356,7 @@ impl ClientCredential {
                 body.client_assertion =
                     Some(self.assertion(&token_endpoint, key, *algorithm, key_id.as_deref())?);
                 body.client_assertion_type =
-                    Some(sid_authn::client_assertion::JWT_BEARER_ASSERTION_TYPE.into());
+                    Some(crate::client_assertion::JWT_BEARER_ASSERTION_TYPE.into());
             }
         }
         let mut request = tonic::Request::new(body);

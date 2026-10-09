@@ -21,7 +21,7 @@ sid-keys = { workspace = true }
 sid-plugin = { workspace = true }
 arc-swap = { workspace = true }
 sid-admin = { workspace = true }
-sid-authn = { workspace = true, features = ["grpc"] }
+sid-authn = { workspace = true, features = ["grpc", "client-credential"] }
 sid-authz = { workspace = true }
 sid-fed = { workspace = true }
 sid-proto = { workspace = true }

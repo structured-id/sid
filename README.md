@@ -60,7 +60,12 @@ Environment variables:
 | `SID_ZKPP_ENABLED` | `true` | Build policy-proof verifiers; accepts only `true`, `false`, `1` or `0` |
 | `SID_ZKPP_REQUIRE_PROOF` | `true` | Require a password-policy proof for password setup; `false` explicitly permits policy-unverified setup. Cannot be `true` while verifiers are disabled |
 | `SID_ZKPP_POLICY_VERSION` | `1` | Accepted compiled password policy; an unknown or malformed version stops startup |
-| `SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE` | - | RFC 3339 instant: password-history keys created before it (a suspected key compromise) are replaced at their owner's next password operation; a malformed or future value stops startup |
+| `SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE` | - | RFC 3339 instant: password-history keys created before it (a suspected key compromise) are replaced at their owner's next password operation; a malformed or future value stops startup. With a remote evaluator it is the evaluator's setting and stops this server's startup |
+| `SID_PASSWORD_HISTORY_EVALUATOR` | - | gRPC address of a separately deployed password-history evaluator; unset runs the evaluator in this server (see below) |
+| `SID_PASSWORD_HISTORY_EVALUATOR_RESOURCE` | - | Resource indicator of the remote evaluator; required with `SID_PASSWORD_HISTORY_EVALUATOR` |
+| `SID_PASSWORD_HISTORY_TOKEN_UPSTREAM` | - | gRPC address of the issuer this server obtains its token for the evaluator from; required with `SID_PASSWORD_HISTORY_EVALUATOR` |
+| `SID_PASSWORD_HISTORY_CALLER_*` | - | This server's client credential at the evaluator: `_CLIENT_ID`, `_ISSUER`, `_METHOD` and the method's `_SECRET_FILE` or `_KEY_FILE`/`_ALGORITHM`/`_KEY_ID`; required with `SID_PASSWORD_HISTORY_EVALUATOR` |
+| `SID_PASSWORD_OPERATION_KEY_FILE` | - | Master key file sealing pending password operations, shared with the remote evaluator and opening nothing else; required with `SID_PASSWORD_HISTORY_EVALUATOR` |
 | `RUST_LOG` | `sid=info` | Log level |
 
 Malformed explicit ZKPP settings stop startup. Optional proof setup still verifies
@@ -80,6 +85,17 @@ A replaced password-history key takes no new entries, but the passwords already
 retained under it are still compared until retention removes them; the key is
 then destroyed. Replacement does not make previously copied keys or entries
 secret again.
+
+Password history has two authorities: the evaluator holds the per-owner history
+keys and answers blinded requests; the checker, in this server, receives each
+proved password's tag, runs the history KSF and compares it with the retained
+entries. By default both run in this server and seal history keys with its field
+keys, so whoever controls this server holds both: a tag together with its key
+lets that password be guessed without the KSF. A deployment that keeps them apart
+runs the evaluator as its own service with its own key file and points
+`SID_PASSWORD_HISTORY_EVALUATOR` at it; this server then holds no history key,
+and the evaluator never receives a tag or a retained entry. The two share only
+the key that seals pending operations.
 
 ### Trusted request verifiers
 

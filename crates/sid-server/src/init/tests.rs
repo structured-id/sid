@@ -97,6 +97,125 @@ fn history_epoch_cutoff_accepts_only_a_past_instant() {
     assert!(history_epoch_cutoff(Err(NotUnicode("bad".into()))).is_err());
 }
 
+/// Without an evaluator address the evaluator runs in this server with the
+/// epoch cutoff. A remote evaluator needs its resource, the token issuer,
+/// this server's own client and the shared operation key; the cutoff is then
+/// the evaluator's setting and is refused here. A partial configuration
+/// stops the start rather than running history without its evaluator.
+#[tokio::test]
+async fn the_history_evaluator_runs_here_unless_a_remote_one_is_complete() {
+    use crate::grpc::password_operation::PasswordHistoryAuthority;
+    use std::env::VarError;
+
+    let storage = store().await;
+    let field_keys: Arc<dyn sid_keys::KeyManager> = Arc::new(keys());
+    let dir = tempfile::tempdir().unwrap();
+    let secret = dir.path().join("caller.secret");
+    std::fs::write(&secret, "caller-secret").unwrap();
+    let operation_key = dir.path().join("operation.key");
+    let complete = [
+        (
+            "SID_PASSWORD_HISTORY_EVALUATOR",
+            "http://history.sid.example.com:50051".to_owned(),
+        ),
+        (
+            "SID_PASSWORD_HISTORY_EVALUATOR_RESOURCE",
+            "https://history.sid.example.com/".to_owned(),
+        ),
+        (
+            "SID_PASSWORD_HISTORY_TOKEN_UPSTREAM",
+            "http://sid.example.com:50051".to_owned(),
+        ),
+        (
+            "SID_PASSWORD_OPERATION_KEY_FILE",
+            operation_key.display().to_string(),
+        ),
+        (
+            "SID_PASSWORD_HISTORY_CALLER_CLIENT_ID",
+            "credential-service".to_owned(),
+        ),
+        (
+            "SID_PASSWORD_HISTORY_CALLER_ISSUER",
+            "https://sid.example.com/i/0123456789abcdef0123456789abcdef".to_owned(),
+        ),
+        (
+            "SID_PASSWORD_HISTORY_CALLER_METHOD",
+            "client_secret_basic".to_owned(),
+        ),
+        (
+            "SID_PASSWORD_HISTORY_CALLER_SECRET_FILE",
+            secret.display().to_string(),
+        ),
+    ];
+    let authority = |missing: &str, extra: Option<(&str, &str)>| {
+        let vars: Vec<(String, String)> = complete
+            .iter()
+            .filter(|(name, _)| *name != missing)
+            .map(|(name, value)| ((*name).to_owned(), value.clone()))
+            .chain(extra.map(|(n, v)| (n.to_owned(), v.to_owned())))
+            .collect();
+        let storage = &storage;
+        let field_keys = field_keys.clone();
+        async move {
+            password_history_authority(
+                |name| {
+                    vars.iter()
+                        .find(|(key, _)| key == name)
+                        .map(|(_, value)| value.clone())
+                        .ok_or(VarError::NotPresent)
+                },
+                storage,
+                field_keys,
+                "https://sid.example.com",
+            )
+            .await
+        }
+    };
+
+    let local = password_history_authority(
+        |name| match name {
+            "SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE" => Ok("2026-10-01T12:00:00Z".into()),
+            _ => Err(VarError::NotPresent),
+        },
+        &storage,
+        field_keys.clone(),
+        "https://sid.example.com",
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        local,
+        PasswordHistoryAuthority::InProcess {
+            epoch_cutoff: Some(_),
+            ..
+        }
+    ));
+
+    assert!(matches!(
+        authority("", None).await.unwrap(),
+        PasswordHistoryAuthority::Remote { .. }
+    ));
+    assert!(
+        operation_key.exists(),
+        "the shared operation key is a file of its own"
+    );
+    for (name, _) in &complete[1..] {
+        assert!(authority(name, None).await.is_err(), "{name} is required");
+    }
+    assert!(
+        authority(
+            "",
+            Some((
+                "SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE",
+                "2026-10-01T12:00:00Z"
+            ))
+        )
+        .await
+        .is_err(),
+        "the cutoff belongs to the remote evaluator"
+    );
+}
+
 /// A machine-credential alert keeps its id across scans (relayed once) and
 /// a different alert (another credential or another day) gets another id.
 #[test]

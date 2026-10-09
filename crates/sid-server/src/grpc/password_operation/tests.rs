@@ -12,6 +12,44 @@ fn change() -> OperationPurpose {
     }
 }
 
+/// A key manager over its own master secret.
+fn manager(master: u8) -> Arc<dyn sid_keys::KeyManager> {
+    Arc::new(
+        sid_keys::SoftwareKeyManager::new(
+            secrecy::SecretBox::new(Box::new([master; 32])),
+            vec![sid_keys::KeyVersionParams::new(1, vec![1; 32], "test")],
+            Arc::new(sid_keys::RustCryptoPrimitives::new()),
+        )
+        .unwrap(),
+    )
+}
+
+/// The two authorities of a split deployment over one database and cache:
+/// the evaluator seals history keys with `history_keys`, both seal pending
+/// operations with `operation_keys`, and the credential side holds no
+/// history key.
+fn split(
+    storage: Arc<dyn StorageBackend>,
+    history_keys: Arc<dyn sid_keys::KeyManager>,
+    operation_keys: Arc<dyn sid_keys::KeyManager>,
+) -> (PasswordOperations, Arc<HistoryEvaluation>) {
+    let cache: Arc<dyn CacheBackend> = Arc::new(sid_plugin::cache::InMemoryCacheBackend::new());
+    let evaluation = Arc::new(HistoryEvaluation::new(
+        storage.clone(),
+        cache.clone(),
+        history_keys,
+        operation_keys.clone(),
+    ));
+    let ops = PasswordOperations::new(
+        storage,
+        cache,
+        operation_keys,
+        sid_core::models::OrgId::generate(),
+        evaluation.clone(),
+    );
+    (ops, evaluation)
+}
+
 /// A prepared operation between its steps, as [`PasswordOperations::prepare`]
 /// stores it.
 fn pending(purpose: OperationPurpose) -> PendingOperation {
@@ -19,11 +57,12 @@ fn pending(purpose: OperationPurpose) -> PendingOperation {
         id: PasswordOperationId::generate(),
         purpose,
         owner: ProfileId::generate(),
-        decoy: false,
+        kind: OwnerKind::Existing,
         owner_domain: [1; 32],
         domains: vec![],
         history_revision: 0,
         new_epoch: None,
+        decoy_keys: vec![],
         policy_version: 3,
         charge_key: "profile:test".to_string(),
         credential_identifier: [7; 16],
@@ -222,20 +261,9 @@ async fn saturated_finish_preserves_the_operation_for_an_exact_retry() {
         .await
         .unwrap(),
     );
-    let keys = Arc::new(
-        sid_keys::SoftwareKeyManager::new(
-            secrecy::SecretBox::new(Box::new([3; 32])),
-            vec![sid_keys::KeyVersionParams::new(1, vec![1; 32], "test")],
-            Arc::new(sid_keys::RustCryptoPrimitives::new()),
-        )
-        .unwrap(),
-    );
-    let mut ops = PasswordOperations::new(
-        storage,
-        Arc::new(sid_plugin::cache::InMemoryCacheBackend::new()),
-        keys,
-        sid_core::models::OrgId::generate(),
-    );
+    // Split keys: the whole lifecycle works with history keys the credential
+    // side cannot open.
+    let (mut ops, evaluation) = split(storage, manager(3), manager(5));
     ops.proof_permits = Arc::new(Semaphore::new(1));
     let primary = Box::new(PallasOpaque::new());
     let setup = primary.create_setup(None).unwrap();
@@ -278,9 +306,9 @@ async fn saturated_finish_preserves_the_operation_for_an_exact_retry() {
         pallas::Base::from_repr(prepared.context.owner_domain.clone().try_into().unwrap()).unwrap();
     let r = random_blind(UnwrapErr(SysRng));
     let b = blind_request(history_input(d, password), r).to_bytes();
-    let mut pending = ops.take(&id).await.unwrap();
-    let evaluated = ops.evaluate_taken(&mut pending, &b).await.unwrap();
-    ops.store(&pending).await.unwrap();
+    let mut pending = evaluation.take(&id).await.unwrap();
+    let evaluated = evaluation.evaluate_taken(&mut pending, &b).await.unwrap();
+    evaluation.store(&pending).await.unwrap();
     let history = HistoryEvaluation {
         d,
         domains: prepared
@@ -435,20 +463,7 @@ async fn a_finish_for_another_policy_is_refused_before_record_decoding() {
             .await
             .unwrap(),
     );
-    let keys = Arc::new(
-        sid_keys::SoftwareKeyManager::new(
-            secrecy::SecretBox::new(Box::new([3; 32])),
-            vec![sid_keys::KeyVersionParams::new(1, vec![1; 32], "test")],
-            Arc::new(sid_keys::RustCryptoPrimitives::new()),
-        )
-        .unwrap(),
-    );
-    let ops = PasswordOperations::new(
-        storage,
-        Arc::new(sid_plugin::cache::InMemoryCacheBackend::new()),
-        keys,
-        sid_core::models::OrgId::generate(),
-    );
+    let (ops, _) = split(storage, manager(3), manager(3));
     let primary = Box::new(PallasOpaque::new());
     let setup = primary.create_setup(None).unwrap();
     let providers = [(
@@ -499,36 +514,15 @@ async fn an_unopenable_history_key_is_unavailable_and_never_replaced() {
             .await
             .unwrap(),
     );
-    let manager = |master: u8| -> Arc<dyn sid_keys::KeyManager> {
-        Arc::new(
-            sid_keys::SoftwareKeyManager::new(
-                secrecy::SecretBox::new(Box::new([master; 32])),
-                vec![sid_keys::KeyVersionParams::new(1, vec![1; 32], "test")],
-                Arc::new(sid_keys::RustCryptoPrimitives::new()),
-            )
-            .unwrap(),
-        )
-    };
-    let installation = sid_core::models::OrgId::generate();
-    let original = PasswordOperations::new(
-        storage.clone(),
-        Arc::new(sid_plugin::cache::InMemoryCacheBackend::new()),
-        manager(3),
-        installation,
-    );
+    let (_, original) = split(storage.clone(), manager(3), manager(3));
     let audit = || MutationContext::from(AuditEntry::system("test", "key loss"));
     let profile = Profile::new(Some("keyless"));
     storage.create_profile(&profile, audit()).await.unwrap();
-    let sealed = original.current_history(profile.id).await.unwrap();
+    let sealed = original.current_epochs(profile.id).await.unwrap();
     let epoch = sealed.active_epoch().unwrap().id;
 
-    // The same database served with another master key.
-    let restored = PasswordOperations::new(
-        storage.clone(),
-        Arc::new(sid_plugin::cache::InMemoryCacheBackend::new()),
-        manager(4),
-        installation,
-    );
+    // The same database served with another history master key.
+    let (restored, restored_evaluation) = split(storage.clone(), manager(4), manager(3));
     let primary = Box::new(PallasOpaque::new());
     let setup = primary.create_setup(None).unwrap();
     let providers = [(
@@ -560,7 +554,10 @@ async fn an_unopenable_history_key_is_unavailable_and_never_replaced() {
     let blinded = (pallas::Point::generator() * pallas::Scalar::from(5u64))
         .to_affine()
         .to_bytes();
-    let status = restored.evaluate(&id, &blinded).await.unwrap_err();
+    let status = restored_evaluation
+        .evaluate(&id, &blinded)
+        .await
+        .unwrap_err();
     assert_eq!(status.code(), Code::Unavailable, "{}", status.message());
     assert_eq!(
         status.get_details_error_info().unwrap().reason,
@@ -568,7 +565,7 @@ async fn an_unopenable_history_key_is_unavailable_and_never_replaced() {
     );
     assert!(status.get_details_retry_info().is_some());
 
-    let after = storage.get_password_history(profile.id).await.unwrap();
+    let after = storage.get_history_epochs(profile.id).await.unwrap();
     assert_eq!(after, sealed, "no substitute key or history change");
     assert_eq!(after.active_epoch().map(|e| e.id), Some(epoch));
     let pending = restored.take(&id).await.unwrap();
@@ -590,20 +587,7 @@ async fn a_stale_active_epoch_is_replaced_at_preparation() {
             .await
             .unwrap(),
     );
-    let keys = Arc::new(
-        sid_keys::SoftwareKeyManager::new(
-            secrecy::SecretBox::new(Box::new([3; 32])),
-            vec![sid_keys::KeyVersionParams::new(1, vec![1; 32], "test")],
-            Arc::new(sid_keys::RustCryptoPrimitives::new()),
-        )
-        .unwrap(),
-    );
-    let mut ops = PasswordOperations::new(
-        storage.clone(),
-        Arc::new(sid_plugin::cache::InMemoryCacheBackend::new()),
-        keys,
-        sid_core::models::OrgId::generate(),
-    );
+    let (_, ops) = split(storage.clone(), manager(3), manager(3));
     let audit = || MutationContext::from(AuditEntry::system("test", "rotation"));
     let profile = Profile::new(Some("rotating"));
     storage.create_profile(&profile, audit()).await.unwrap();
@@ -642,7 +626,7 @@ async fn a_stale_active_epoch_is_replaced_at_preparation() {
             .unwrap()
     );
 
-    let rotated = ops.current_history(profile.id).await.unwrap();
+    let rotated = ops.current_epochs(profile.id).await.unwrap();
     let current = rotated.active_epoch().unwrap().clone();
     assert_ne!(current.id, old.epoch.id);
     assert_eq!(current.ksf, HistoryKsf::DEFAULT);
@@ -653,14 +637,20 @@ async fn a_stale_active_epoch_is_replaced_at_preparation() {
         "the accepted password is still compared under its epoch"
     );
 
-    let again = ops.current_history(profile.id).await.unwrap();
+    let again = ops.current_epochs(profile.id).await.unwrap();
     assert_eq!(again.revision, rotated.revision, "a current epoch stays");
     assert_eq!(again.active_epoch().map(|e| e.id), Some(current.id));
 
     // A compromise cutoff after the current epoch replaces it too; it held
     // no entry, so it is retired at once and its key destroyed.
-    ops.set_epoch_cutoff(Some(current.created_at + chrono::Duration::milliseconds(1)));
-    let cut = ops.current_history(profile.id).await.unwrap();
+    let ops = HistoryEvaluation::new(
+        storage.clone(),
+        Arc::new(sid_plugin::cache::InMemoryCacheBackend::new()),
+        manager(3),
+        manager(3),
+    )
+    .with_epoch_cutoff(Some(current.created_at + chrono::Duration::milliseconds(1)));
+    let cut = ops.current_epochs(profile.id).await.unwrap();
     let replacement = cut.active_epoch().unwrap().clone();
     assert_ne!(replacement.id, current.id);
     let required: Vec<_> = cut.required_epochs().iter().map(|e| e.id).collect();
@@ -676,6 +666,262 @@ async fn a_stale_active_epoch_is_replaced_at_preparation() {
             .find(|e| e.id == old.epoch.id)
             .map(|e| e.status),
         Some(HistoryEpochUse::CompareOnly)
+    );
+}
+
+/// In a split deployment the credential side receives a new owner's first
+/// epoch with its key, to commit it with the account, but neither of its key
+/// managers opens that key: only the evaluator's does.
+#[tokio::test]
+async fn the_credential_side_cannot_open_a_history_key() {
+    use sid_authn::opaque::{OpaqueRouter, PallasOpaque};
+    use sid_authn::opaque_zkpp::ZkppConfig;
+    use sid_plugin::crypto::OpaqueOperations;
+
+    let storage = Arc::new(
+        sid_storage::sqlite::SqliteBackend::new_in_memory()
+            .await
+            .unwrap(),
+    );
+    let (history_keys, operation_keys, field_keys) = (manager(3), manager(5), manager(7));
+    let (ops, _) = split(storage, history_keys.clone(), operation_keys.clone());
+    let primary = Box::new(PallasOpaque::new());
+    let setup = primary.create_setup(None).unwrap();
+    let providers = [(
+        CurveId::Pallas,
+        Box::new(PallasOpaque::new()) as Box<dyn OpaqueOperations>,
+    )]
+    .into();
+    let router = OpaqueRouter::new(primary, providers, setup);
+    let zkpp = ZkppOpaqueServer::new(
+        &router,
+        vec![],
+        ZkppConfig {
+            require_proof: false,
+            policy_version: 1,
+        },
+    )
+    .unwrap();
+    let owner = ProfileId::generate();
+    let prepared = ops
+        .prepare(
+            &zkpp,
+            change(),
+            OperationOwner::New(owner),
+            owner.to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+    let id = operation_id(prepared.context.operation_id.as_ref()).unwrap();
+    let op = ops.take(&id).await.unwrap();
+    let new = op.new_epoch.expect("a new owner's first epoch");
+    assert_eq!(
+        prepared.context.domains,
+        vec![domain_message(&OperationDomain::of(&new.epoch))],
+        "the client gets the evaluator's selection"
+    );
+    let sealed = sid_keys::EncryptedField::from_bytes(&new.key.0).unwrap();
+    for keys in [operation_keys, field_keys] {
+        assert!(
+            keys.decrypt(&sealed).await.is_err(),
+            "the credential side opens no history key"
+        );
+    }
+    assert!(history_keys.decrypt(&sealed).await.is_ok());
+}
+
+/// The checker accepts only the domains its own read of the history
+/// requires: an evaluator that omits a compare-only epoch holding an entry,
+/// adds one, reorders them, or hands a new owner an epoch of someone else
+/// does not decide what a password is compared against.
+#[test]
+fn a_selection_the_history_does_not_require_is_refused() {
+    use sid_core::models::{HistoryEntry, HistoryEpoch, HistoryEpochId, HistorySuite};
+    let owner = ProfileId::generate();
+    let epoch = |status, key: u8| HistoryEpoch {
+        id: HistoryEpochId::generate(),
+        owner,
+        suite: HistorySuite::PallasPoseidonV1,
+        public_key: [key; 32],
+        ksf: HistoryKsf::DEFAULT,
+        ksf_salt: [key; 32],
+        status,
+        created_at: chrono::Utc::now(),
+    };
+    let (active, old) = (
+        epoch(HistoryEpochUse::Active, 1),
+        epoch(HistoryEpochUse::CompareOnly, 2),
+    );
+    let history = PasswordHistory {
+        revision: 4,
+        epochs: vec![old.clone(), active.clone()],
+        entries: vec![HistoryEntry {
+            epoch: old.id,
+            seq: 1,
+            entry: [9; 32],
+            evidence: HistoryEvidence {
+                operation: uuid::Uuid::now_v7(),
+                policy_version: 1,
+            },
+            created_at: chrono::Utc::now(),
+        }],
+    };
+    let with = |kind, domains: Vec<&HistoryEpoch>, new_epoch: Option<NewHistoryEpoch>| {
+        let mut op = pending(change());
+        op.owner = owner;
+        op.kind = kind;
+        op.domains = domains.into_iter().map(OperationDomain::of).collect();
+        op.new_epoch = new_epoch;
+        op
+    };
+    assert!(selection_is_complete(
+        &with(OwnerKind::Existing, vec![&active, &old], None),
+        &history
+    ));
+    for refused in [
+        with(OwnerKind::Existing, vec![&active], None),
+        with(OwnerKind::Existing, vec![&old, &active], None),
+        with(OwnerKind::Existing, vec![&active, &old, &old], None),
+        with(OwnerKind::Decoy, vec![&active, &old], None),
+    ] {
+        assert!(!selection_is_complete(&refused, &history));
+    }
+
+    let first = epoch(HistoryEpochUse::Active, 3);
+    let new = |epoch: HistoryEpoch| NewHistoryEpoch {
+        epoch,
+        key: sid_core::models::WrappedHistoryKey(vec![1]),
+    };
+    let empty = PasswordHistory::default();
+    assert!(selection_is_complete(
+        &with(OwnerKind::New, vec![&first], Some(new(first.clone()))),
+        &empty
+    ));
+    let mut foreign = first.clone();
+    foreign.owner = ProfileId::generate();
+    assert!(!selection_is_complete(
+        &with(OwnerKind::New, vec![&foreign], Some(new(foreign.clone()))),
+        &empty
+    ));
+    assert!(!selection_is_complete(
+        &with(OwnerKind::New, vec![&active], Some(new(first))),
+        &empty
+    ));
+}
+
+/// An evaluator co-located with the credential service prepares in process
+/// only: its network interface refuses preparation from anyone, since a
+/// caller could otherwise create keys for operations it names.
+#[tokio::test]
+async fn an_in_process_evaluator_refuses_preparation_over_the_network() {
+    let storage = Arc::new(
+        sid_storage::sqlite::SqliteBackend::new_in_memory()
+            .await
+            .unwrap(),
+    );
+    let (_, evaluation) = split(storage, manager(3), manager(3));
+    let service = PasswordHistoryEvaluatorImpl::new(evaluation, PrepareAdmission::InProcess);
+    let status = service
+        .prepare_password_history(Request::new(PreparePasswordHistoryRequest {
+            operation_id: Some(PasswordOperationId::generate().into()),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), Code::PermissionDenied);
+}
+
+/// A registration start for a held identifier must look like any other to
+/// the client, which checks every evaluation proof against the domain key it
+/// was given. The decoy's answer verifies under the decoy domain's key for
+/// this operation, as a real one does; otherwise the failed check tells the
+/// client that the identifier is taken.
+#[tokio::test]
+async fn a_decoy_evaluation_verifies_under_its_domain_key() {
+    use group::{Curve, Group, GroupEncoding};
+    use sid_authn::opaque::{OpaqueRouter, PallasOpaque};
+    use sid_authn::opaque_zkpp::ZkppConfig;
+    use sid_plugin::crypto::OpaqueOperations;
+
+    let storage = Arc::new(
+        sid_storage::sqlite::SqliteBackend::new_in_memory()
+            .await
+            .unwrap(),
+    );
+    let (ops, evaluation) = split(storage, manager(3), manager(5));
+    let primary = Box::new(PallasOpaque::new());
+    let setup = primary.create_setup(None).unwrap();
+    let providers = [(
+        CurveId::Pallas,
+        Box::new(PallasOpaque::new()) as Box<dyn OpaqueOperations>,
+    )]
+    .into();
+    let router = OpaqueRouter::new(primary, providers, setup);
+    let zkpp = ZkppOpaqueServer::new(
+        &router,
+        vec![],
+        ZkppConfig {
+            require_proof: false,
+            policy_version: 1,
+        },
+    )
+    .unwrap();
+    let prepared = ops
+        .prepare(&zkpp, change(), OperationOwner::Decoy, "decoy".into(), None)
+        .await
+        .unwrap();
+    let id = operation_id(prepared.context.operation_id.as_ref()).unwrap();
+    let blinded = (pallas::Point::generator() * pallas::Scalar::from(5u64)).to_affine();
+    let answers = evaluation.evaluate(&id, &blinded.to_bytes()).await.unwrap();
+    assert_eq!(answers.len(), prepared.context.domains.len());
+    for (domain, answer) in prepared.context.domains.iter().zip(&answers) {
+        let point = |bytes: &[u8]| pallas::Affine::from_bytes(&bytes.try_into().unwrap()).unwrap();
+        let scalar = |bytes: &[u8]| pallas::Scalar::from_repr(bytes.try_into().unwrap()).unwrap();
+        let proof = answer.proof.as_ref().unwrap();
+        assert!(
+            sid_pake_core::history::verify_evaluation(
+                point(&domain.evaluator_public_key),
+                blinded,
+                point(&answer.evaluated_element),
+                id.as_bytes(),
+                &sid_pake_core::history::EvaluationProof {
+                    c: scalar(&proof.challenge),
+                    s: scalar(&proof.response),
+                },
+            ),
+            "a decoy's evaluation verifies like a real one"
+        );
+    }
+}
+
+/// An operation the evaluator never prepared has no keys to evaluate under:
+/// its evaluation reads as expired, and nothing is charged.
+#[tokio::test]
+async fn an_unprepared_operation_is_not_evaluated() {
+    let storage = Arc::new(
+        sid_storage::sqlite::SqliteBackend::new_in_memory()
+            .await
+            .unwrap(),
+    );
+    let (ops, evaluation) = split(storage, manager(3), manager(3));
+    let op = pending(change());
+    ops.store(&op).await.unwrap();
+    let status = evaluation.evaluate(&op.id, &[2; 32]).await.unwrap_err();
+    assert_eq!(
+        status.get_details_error_info().unwrap().reason,
+        "OPERATION_EXPIRED"
+    );
+    assert_eq!(
+        evaluation
+            .cache
+            .incr(
+                &format!("password-history-evaluations:{}", op.charge_key),
+                EVALUATION_WINDOW,
+            )
+            .await
+            .unwrap(),
+        1,
+        "the refused evaluation was not charged"
     );
 }
 

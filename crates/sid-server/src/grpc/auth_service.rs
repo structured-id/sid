@@ -517,6 +517,10 @@ pub struct AuthServiceImpl {
     /// Password registrations, changes and resets between their steps, and
     /// the history evaluator and checker they use.
     pub(crate) password_ops: Arc<super::password_operation::PasswordOperations>,
+    /// The history evaluator, when it runs in this process.
+    history_evaluation: Option<Arc<super::password_operation::HistoryEvaluation>>,
+    /// The shared cache, for components rebuilt after construction.
+    cache: Arc<dyn CacheBackend>,
     /// Profile a WebAuthn ceremony was started for, keyed by its challenge:
     /// only that profile may finish it.
     webauthn_state: ChallengeStore<ProfileId>,
@@ -651,12 +655,19 @@ impl AuthServiceImpl {
         let ttl = std::time::Duration::from_secs(300); // 5 minutes
         let captcha_gate =
             sid_authn::captcha::CaptchaGate::new(cache_backend.clone(), key_manager.clone());
-        let password_ops = Arc::new(super::password_operation::PasswordOperations::new(
-            storage.clone(),
-            cache_backend.clone(),
-            key_manager.clone(),
-            installation_org,
-        ));
+        // A standalone installation co-locates the history evaluator.
+        let (password_ops, history_evaluation) =
+            super::password_operation::PasswordOperations::with_authority(
+                storage.clone(),
+                cache_backend.clone(),
+                key_manager.clone(),
+                installation_org,
+                super::password_operation::PasswordHistoryAuthority::InProcess {
+                    history_keys: key_manager.clone(),
+                    epoch_cutoff: None,
+                },
+            );
+        let password_ops = Arc::new(password_ops);
         Self {
             storage,
             oauth2,
@@ -679,6 +690,8 @@ impl AuthServiceImpl {
                 ttl,
             ),
             password_ops,
+            history_evaluation,
+            cache: cache_backend.clone(),
             webauthn_state: ChallengeStore::new(
                 cache_backend.clone(),
                 key_manager.clone(),
@@ -820,15 +833,20 @@ impl AuthServiceImpl {
         self
     }
 
-    /// Replace every password-history epoch created before `cutoff` at its
-    /// owner's next password operation (a suspected history-key compromise).
-    pub fn with_history_epoch_cutoff(
+    /// Where this service's password history evaluator runs.
+    pub fn with_password_history(
         mut self,
-        cutoff: Option<chrono::DateTime<chrono::Utc>>,
+        authority: super::password_operation::PasswordHistoryAuthority,
     ) -> Self {
-        Arc::get_mut(&mut self.password_ops)
-            .expect("password operations are not shared during construction")
-            .set_epoch_cutoff(cutoff);
+        let (ops, evaluation) = super::password_operation::PasswordOperations::with_authority(
+            self.storage.clone(),
+            self.cache.clone(),
+            self.key_manager.clone(),
+            self.installation_org,
+            authority,
+        );
+        self.password_ops = Arc::new(ops);
+        self.history_evaluation = evaluation;
         self
     }
 
@@ -2528,10 +2546,18 @@ impl AuthServiceImpl {
         Ok(credential)
     }
 
-    /// The password history evaluator interface over this service's
-    /// operations, served as its own gRPC service.
-    pub fn history_evaluator(&self) -> super::password_operation::PasswordHistoryEvaluatorImpl {
-        super::password_operation::PasswordHistoryEvaluatorImpl::new(self.password_ops.clone())
+    /// The password history evaluator interface, served as its own gRPC
+    /// service, when the evaluator runs in this process; `None` when it is
+    /// its own service.
+    pub fn history_evaluator(
+        &self,
+    ) -> Option<super::password_operation::PasswordHistoryEvaluatorImpl> {
+        self.history_evaluation.clone().map(|evaluation| {
+            super::password_operation::PasswordHistoryEvaluatorImpl::new(
+                evaluation,
+                super::password_operation::PrepareAdmission::InProcess,
+            )
+        })
     }
 
     /// The result bytes a finish records for its retries: the response, encoded.

@@ -1157,7 +1157,9 @@ impl TestServices {
             issuers.clone(),
             storage.clone(),
         );
-        let evaluator = auth.history_evaluator();
+        let evaluator = auth
+            .history_evaluator()
+            .expect("the test server co-locates the history evaluator");
         let machine_user = sid_server::grpc::machine_user_service::MachineUserServiceImpl::new(
             storage.clone(),
             jwt.clone(),

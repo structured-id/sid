@@ -823,9 +823,15 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         authz_engine.clone(),
     )
     .with_trusted_proxies(trusted_proxies)
-    .with_history_epoch_cutoff(
-        history_epoch_cutoff(std::env::var("SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE"))
-            .unwrap_or_else(|e| panic!("password history configuration: {e}")),
+    .with_password_history(
+        password_history_authority(
+            |name| std::env::var(name),
+            storage.as_ref(),
+            key_manager.clone(),
+            &issuer,
+        )
+        .await
+        .context("password history configuration")?,
     );
     let auth_svc = Arc::new(match &login_url {
         Some(page) => auth_svc.with_sign_in_page(page),
@@ -1329,6 +1335,66 @@ pub fn spawn_work_runner(
     let runner = WorkRunner::new(c.storage.clone(), worker, handlers, RunnerConfig::default())
         .map_err(|e| anyhow::anyhow!("work runner: {e}"))?;
     Ok(tokio::spawn(runner.run(shutdown)))
+}
+
+/// Where this server's password history evaluator runs. Without
+/// `SID_PASSWORD_HISTORY_EVALUATOR` it runs here, sealing history keys with
+/// the field keys. With it, this server calls that gRPC address with its own
+/// client credential (`SID_PASSWORD_HISTORY_CALLER_*`) for the evaluator's
+/// resource (`SID_PASSWORD_HISTORY_EVALUATOR_RESOURCE`), requested from the
+/// issuer at `SID_PASSWORD_HISTORY_TOKEN_UPSTREAM`, and seals pending
+/// operations with the master in `SID_PASSWORD_OPERATION_KEY_FILE`, the key
+/// it shares with the evaluator; it then holds no history key, and epoch
+/// replacement (`SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE`) is the evaluator's
+/// setting.
+async fn password_history_authority(
+    var: impl Fn(&str) -> Result<String, std::env::VarError>,
+    storage: &dyn sid_plugin::StorageBackend,
+    field_keys: Arc<dyn sid_keys::KeyManager>,
+    base: &str,
+) -> anyhow::Result<crate::grpc::password_operation::PasswordHistoryAuthority> {
+    use crate::grpc::password_operation::{PasswordHistoryAuthority, RemoteHistoryEvaluator};
+    let cutoff = history_epoch_cutoff(var("SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE"))?;
+    let Ok(evaluator) = var("SID_PASSWORD_HISTORY_EVALUATOR") else {
+        return Ok(PasswordHistoryAuthority::InProcess {
+            history_keys: field_keys,
+            epoch_cutoff: cutoff,
+        });
+    };
+    anyhow::ensure!(
+        cutoff.is_none(),
+        "SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE belongs to the remote evaluator"
+    );
+    let required = |name: &str| var(name).map_err(|_| anyhow::anyhow!("{name} is required"));
+    let resource = required("SID_PASSWORD_HISTORY_EVALUATOR_RESOURCE")?;
+    let token_upstream = required("SID_PASSWORD_HISTORY_TOKEN_UPSTREAM")?;
+    let operation_key_file = required("SID_PASSWORD_OPERATION_KEY_FILE")?;
+    let caller = sid_authn::client_credential::ClientCredentialConfig::from_vars(
+        "SID_PASSWORD_HISTORY_CALLER",
+        |name| var(name).ok().filter(|v| !v.is_empty()),
+    )?
+    .ok_or_else(|| anyhow::anyhow!("SID_PASSWORD_HISTORY_CALLER_CLIENT_ID is required"))?;
+    let lazy = |address: &str| -> anyhow::Result<tonic::transport::Channel> {
+        Ok(tonic::transport::Endpoint::from_shared(address.to_owned())
+            .with_context(|| format!("gRPC address {address}"))?
+            .connect_lazy())
+    };
+    let credential = Arc::new(
+        sid_authn::client_credential::ClientCredential::for_resource(
+            &caller,
+            base,
+            lazy(&token_upstream)?,
+            &resource,
+        )?,
+    );
+    let operation_keys =
+        crate::field_keys::field_key_manager(storage, std::path::Path::new(&operation_key_file))
+            .await
+            .context("SID_PASSWORD_OPERATION_KEY_FILE")?;
+    Ok(PasswordHistoryAuthority::Remote {
+        evaluator: RemoteHistoryEvaluator::new(lazy(&evaluator)?, credential),
+        operation_keys,
+    })
 }
 
 /// The cutoff before which password-history epochs are replaced, an RFC 3339
