@@ -19,9 +19,10 @@
 //!
 //! Every credential has its own OPRF key (`credential_identifier`, drawn at
 //! prepare and stored with the credential). Before the commit that key has
-//! evaluated exactly one element, the request the proof is bound to, so the
-//! final record can only be the enrollment of the proved password: an OPRF
-//! output for another password under this key does not exist anywhere.
+//! evaluated exactly one element, the request the proof is bound to. This
+//! prevents borrowing another operation's OPRF evaluation. Supported clients
+//! derive their final record with the prescribed KSF; this input binding is
+//! not a proof of the final record's client-side derivation.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -634,6 +635,18 @@ impl PasswordOperations {
         authorized(&op)?;
         if op.purpose.method() != method {
             return Err(expired());
+        }
+        if op.policy_version != zkpp.config().policy_version {
+            return Err(ApiError::new(
+                ErrorReason::InvalidState,
+                "the password operation's policy is no longer accepted",
+            )
+            .with_precondition(
+                "PASSWORD_POLICY_VERSION",
+                "password_operation",
+                "start a new operation under the current policy",
+            )
+            .into());
         }
         let command = op.finish_command(record);
         let request = op

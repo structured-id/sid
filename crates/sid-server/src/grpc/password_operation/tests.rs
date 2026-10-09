@@ -410,6 +410,67 @@ fn a_skipped_step_is_invalid_state() {
     assert_eq!(violation.r#type, "PASSWORD_OPERATION_STEP");
 }
 
+/// Replacing the active policy must invalidate a pending operation before
+/// decoding its record or accepting a permitted no-proof replacement. The
+/// operation's former version cannot become the new credential's evidence.
+#[tokio::test]
+async fn a_finish_for_another_policy_is_refused_before_record_decoding() {
+    use sid_authn::opaque::{OpaqueRouter, PallasOpaque};
+    use sid_authn::opaque_zkpp::ZkppConfig;
+    use sid_plugin::crypto::OpaqueOperations;
+
+    let storage = Arc::new(
+        sid_storage::sqlite::SqliteBackend::new_in_memory()
+            .await
+            .unwrap(),
+    );
+    let keys = Arc::new(
+        sid_keys::SoftwareKeyManager::new(
+            secrecy::SecretBox::new(Box::new([3; 32])),
+            vec![sid_keys::KeyVersionParams::new(1, vec![1; 32], "test")],
+            Arc::new(sid_keys::RustCryptoPrimitives::new()),
+        )
+        .unwrap(),
+    );
+    let ops = PasswordOperations::new(
+        storage,
+        Arc::new(sid_plugin::cache::InMemoryCacheBackend::new()),
+        keys,
+        sid_core::models::OrgId::generate(),
+    );
+    let primary = Box::new(PallasOpaque::new());
+    let setup = primary.create_setup(None).unwrap();
+    let providers = [(
+        CurveId::Pallas,
+        Box::new(PallasOpaque::new()) as Box<dyn OpaqueOperations>,
+    )]
+    .into();
+    let router = OpaqueRouter::new(primary, providers, setup);
+    let zkpp = Arc::new(
+        ZkppOpaqueServer::new(
+            &router,
+            vec![],
+            ZkppConfig {
+                require_proof: false,
+                policy_version: 1,
+            },
+        )
+        .unwrap(),
+    );
+    let op = pending(change());
+    ops.store(&op).await.unwrap();
+    let result = ops
+        .finish(zkpp, &op.id, "change", b"", None, |_| Ok(()))
+        .await;
+    let status = match result {
+        Err(status) => status,
+        Ok(_) => panic!("another policy must not finish the old operation"),
+    };
+    assert_eq!(status.code(), Code::FailedPrecondition);
+    let details = status.get_details_precondition_failure().unwrap();
+    assert_eq!(details.violations[0].r#type, "PASSWORD_POLICY_VERSION");
+}
+
 /// A step without an operation id is an invalid argument naming the field; a
 /// well-formed id round-trips through the wire.
 #[test]

@@ -1327,23 +1327,69 @@ pub fn spawn_work_runner(
     Ok(tokio::spawn(runner.run(shutdown)))
 }
 
-/// Initialize ZKPP with async keygen, on `router`'s server setup so a ZKPP
-/// registration signs in through `router`.
-///
-/// Returns an `ArcSwap` that starts as `None` (ZKPP not ready) and is
-/// hot-swapped to `Some(server)` when keygen completes. Non-ZKPP traffic
-/// is unaffected. ZKPP-dependent RPCs return UNAVAILABLE during keygen.
-/// The verifier is always built: `SID_ZKPP_REQUIRE_PROOF=false` only lets a
-/// client that cannot prove register policy-unverified, a proof it does send
-/// is still verified.
+/// Parse explicit proof settings without treating invalid input as absence.
+fn zkpp_settings(
+    enabled: Result<String, std::env::VarError>,
+    required: Result<String, std::env::VarError>,
+    version: Result<String, std::env::VarError>,
+) -> anyhow::Result<(bool, sid_authn::opaque_zkpp::ZkppConfig)> {
+    fn value(
+        name: &str,
+        input: Result<String, std::env::VarError>,
+    ) -> anyhow::Result<Option<String>> {
+        match input {
+            Ok(v) => Ok(Some(v)),
+            Err(std::env::VarError::NotPresent) => Ok(None),
+            Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!("{name} must be Unicode"),
+        }
+    }
+    fn boolean(name: &str, input: Result<String, std::env::VarError>) -> anyhow::Result<bool> {
+        match value(name, input)?.as_deref() {
+            None | Some("true" | "1") => Ok(true),
+            Some("false" | "0") => Ok(false),
+            Some(_) => anyhow::bail!("{name} must be true, false, 1 or 0"),
+        }
+    }
+    let enabled = boolean("SID_ZKPP_ENABLED", enabled)?;
+    let require_proof = boolean("SID_ZKPP_REQUIRE_PROOF", required)?;
+    anyhow::ensure!(
+        enabled || !require_proof,
+        "mandatory password proofs require enabled verifiers"
+    );
+    let policy_version = match value("SID_ZKPP_POLICY_VERSION", version)? {
+        None => 1,
+        Some(v) => v.parse::<u32>().map_err(|_| {
+            anyhow::anyhow!("SID_ZKPP_POLICY_VERSION must be an unsigned policy version")
+        })?,
+    };
+    anyhow::ensure!(
+        sid_pake_core::policy::get_policy(sid_pake_core::types::PolicyVersion(policy_version))
+            .is_some(),
+        "SID_ZKPP_POLICY_VERSION selects an unknown policy"
+    );
+    Ok((
+        enabled,
+        sid_authn::opaque_zkpp::ZkppConfig {
+            require_proof,
+            policy_version,
+        },
+    ))
+}
+
+/// Initialize ZKPP with async keygen on the router's server setup.
+/// Password operations return UNAVAILABLE until the verifier is ready.
+/// Proofs are mandatory by default; optional setup still verifies every proof.
 fn init_zkpp(router: &Arc<OpaqueRouter>) -> Arc<arc_swap::ArcSwap<Option<Arc<ZkppOpaqueServer>>>> {
     let slot: Arc<arc_swap::ArcSwap<Option<Arc<ZkppOpaqueServer>>>> =
         Arc::new(arc_swap::ArcSwap::from_pointee(None));
 
-    if !std::env::var("SID_ZKPP_ENABLED")
-        .map(|v| v == "true" || v == "1")
-        .unwrap_or(false)
-    {
+    let (enabled, config) = zkpp_settings(
+        std::env::var("SID_ZKPP_ENABLED"),
+        std::env::var("SID_ZKPP_REQUIRE_PROOF"),
+        std::env::var("SID_ZKPP_POLICY_VERSION"),
+    )
+    .unwrap_or_else(|e| panic!("ZKPP configuration: {e}"));
+    if !enabled {
         // Registration, change and reset run their OPAQUE on this server
         // whether or not proofs are verified; without verifiers every
         // password installs policy-unverified (D018) and a proof sent
@@ -1354,7 +1400,7 @@ fn init_zkpp(router: &Arc<OpaqueRouter>) -> Arc<arc_swap::ArcSwap<Option<Arc<Zkp
             vec![],
             sid_authn::opaque_zkpp::ZkppConfig {
                 require_proof: false,
-                policy_version: 1,
+                policy_version: config.policy_version,
             },
         ) {
             Ok(server) => slot.store(Arc::new(Some(Arc::new(server)))),
@@ -1363,23 +1409,13 @@ fn init_zkpp(router: &Arc<OpaqueRouter>) -> Arc<arc_swap::ArcSwap<Option<Arc<Zkp
         return slot;
     }
 
-    let require_proof = std::env::var("SID_ZKPP_REQUIRE_PROOF")
-        .map(|v| v == "true" || v == "1")
-        .unwrap_or(true);
-    let policy_version: u32 = std::env::var("SID_ZKPP_POLICY_VERSION")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(1);
+    let policy_version = config.policy_version;
+    let require_proof = config.require_proof;
     // The verifying key is built for this policy: its minimums are fixed
     // columns of the key, so this is the policy every accepted proof meets.
     let policy =
         sid_pake_core::policy::get_policy(sid_pake_core::types::PolicyVersion(policy_version))
             .unwrap_or_else(|| panic!("SID_ZKPP_POLICY_VERSION={policy_version}: no such policy"));
-
-    let config = sid_authn::opaque_zkpp::ZkppConfig {
-        require_proof,
-        policy_version,
-    };
 
     // A ZKPP server on the router's setup; a router it cannot serve is a
     // deployment error, found here at start, not after keygen.
@@ -1449,10 +1485,16 @@ fn init_zkpp(router: &Arc<OpaqueRouter>) -> Arc<arc_swap::ArcSwap<Option<Arc<Zkp
                 );
             }
             Ok(Err(e)) => {
-                tracing::warn!("ZKPP keygen failed: {:?} — ZKPP remains disabled", e);
+                tracing::warn!(
+                    "ZKPP keygen failed: {:?} — password operations remain unavailable",
+                    e
+                );
             }
             Err(e) => {
-                tracing::error!("ZKPP keygen task panicked: {} — ZKPP remains disabled", e);
+                tracing::error!(
+                    "ZKPP keygen task panicked: {} — password operations remain unavailable",
+                    e
+                );
             }
         }
     });

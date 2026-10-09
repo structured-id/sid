@@ -57,7 +57,17 @@ Environment variables:
 | `SID_BIND` | - | HTTP listen address of the embedded transcoder (OIDC endpoints, SCIM); unset serves no HTTP |
 | `SID_SCIM_BASE_URL` | `SID_ISSUER` | Public URL the SCIM endpoint is reached under (`/scim/v2` follows) |
 | `SID_AUTHZ_REQUEST_VERIFIERS_FILE` | - | JSON file naming the services trusted to confirm sender proofs of original requests (see below); unset trusts none |
+| `SID_ZKPP_ENABLED` | `true` | Build policy-proof verifiers; accepts only `true`, `false`, `1` or `0` |
+| `SID_ZKPP_REQUIRE_PROOF` | `true` | Require a password-policy proof for password setup; `false` explicitly permits policy-unverified setup. Cannot be `true` while verifiers are disabled |
+| `SID_ZKPP_POLICY_VERSION` | `1` | Accepted compiled password policy; an unknown or malformed version stops startup |
 | `RUST_LOG` | `sid=info` | Log level |
+
+Malformed explicit ZKPP settings stop startup. Optional proof setup still verifies
+every submitted proof; it never accepts an invalid proof as policy-unverified.
+Verifier keys must enforce the configured policy, with one key per history-domain
+count. A pending password operation whose policy is no longer accepted must be
+restarted before it can install a password. Ordinary password login does not
+generate a new policy proof.
 
 ### Trusted request verifiers
 

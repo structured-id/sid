@@ -22,7 +22,7 @@ pub struct AppState {
     pub opaque_router: Arc<OpaqueRouter>,
     /// OPAQUE-ZKPP server (Pallas + Halo2 ZK proof verification).
     /// Starts as None during async keygen, hot-swapped to Some when ready.
-    /// Enabled via `SID_ZKPP_ENABLED=true` env var.
+    /// Verification and mandatory proofs are enabled by default.
     pub opaque_zkpp: Arc<arc_swap::ArcSwap<Option<Arc<ZkppOpaqueServer>>>>,
     /// In-memory revocation cache for instant access token invalidation.
     pub revocation_cache: Arc<RevocationCache>,

@@ -53,7 +53,9 @@ impl ZkppOpaqueServer {
     /// signs in through `router`, on any replica and after any restart.
     /// The router's primary curve must be Pallas, the curve the proofs bind.
     /// `verifiers` are the keys for the policy version, one per domain count;
-    /// without one, only unproven installations are possible, so
+    /// their compiled policy must match that version and domain counts must
+    /// be unique, also when policy-unverified setup is permitted.
+    /// Without one, only unproven installations are possible, so
     /// `config.require_proof` then refuses to start.
     pub fn new(
         router: &OpaqueRouter,
@@ -70,6 +72,28 @@ impl ZkppOpaqueServer {
             return Err(SidError::Internal(
                 "ZKPP requires proofs but has no verifier".to_string(),
             ));
+        }
+        if !verifiers.is_empty() {
+            let policy = sid_pake_core::policy::get_policy(sid_pake_core::types::PolicyVersion(
+                config.policy_version,
+            ))
+            .ok_or_else(|| SidError::Internal("unknown ZKPP policy version".into()))?;
+            for (index, verifier) in verifiers.iter().enumerate() {
+                let shape = verifier.shape();
+                if shape.policy != policy {
+                    return Err(SidError::Internal(
+                        "ZKPP verifier does not enforce the configured policy".into(),
+                    ));
+                }
+                if verifiers[..index]
+                    .iter()
+                    .any(|prior| prior.shape().history_domains == shape.history_domains)
+                {
+                    return Err(SidError::Internal(
+                        "duplicate ZKPP verifier for a history domain count".into(),
+                    ));
+                }
+            }
         }
         let server_setup = ServerSetup::<PallasCipherSuite>::deserialize(&router.setup().0)
             .map_err(|e| SidError::Internal(format!("Pallas server setup: {e}")))?;

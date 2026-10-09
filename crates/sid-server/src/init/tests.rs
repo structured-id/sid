@@ -2,6 +2,75 @@
 
 use super::*;
 
+/// Explicit malformed security settings must stop startup, never disable
+/// proof verification or silently select a different policy.
+#[test]
+fn zkpp_settings_refuse_malformed_security_configuration() {
+    use std::env::VarError::NotPresent;
+    for value in ["TRUE", "", "tru", "yes"] {
+        assert!(zkpp_settings(Ok(value.into()), Err(NotPresent), Err(NotPresent)).is_err());
+        assert!(zkpp_settings(Ok("true".into()), Ok(value.into()), Err(NotPresent)).is_err());
+    }
+    for value in ["", "garbage", "0", "4294967296", "2"] {
+        assert!(zkpp_settings(Ok("true".into()), Err(NotPresent), Ok(value.into())).is_err());
+    }
+    assert!(zkpp_settings(Ok("false".into()), Ok("true".into()), Err(NotPresent)).is_err());
+    assert!(zkpp_settings(Ok("false".into()), Err(NotPresent), Err(NotPresent)).is_err());
+    assert!(
+        zkpp_settings(
+            Ok("true".into()),
+            Err(std::env::VarError::NotUnicode("bad".into())),
+            Err(NotPresent)
+        )
+        .is_err()
+    );
+    assert!(
+        zkpp_settings(
+            Ok("true".into()),
+            Err(NotPresent),
+            Err(std::env::VarError::NotUnicode("bad".into()))
+        )
+        .is_err()
+    );
+    assert!(
+        zkpp_settings(
+            Err(std::env::VarError::NotUnicode("bad".into())),
+            Err(NotPresent),
+            Err(NotPresent)
+        )
+        .is_err()
+    );
+}
+
+/// Fresh installations require proofs; only an explicit false/0 permits
+/// policy-unverified setup. Missing configuration cannot weaken this default.
+#[test]
+fn zkpp_settings_preserve_documented_defaults() {
+    use std::env::VarError::NotPresent;
+    let (enabled, config) =
+        zkpp_settings(Err(NotPresent), Err(NotPresent), Err(NotPresent)).unwrap();
+    assert!(enabled);
+    assert!(config.require_proof);
+    assert_eq!(config.policy_version, 1);
+    let (enabled, config) =
+        zkpp_settings(Err(NotPresent), Ok("false".into()), Err(NotPresent)).unwrap();
+    assert!(enabled);
+    assert!(!config.require_proof);
+    let (enabled, config) =
+        zkpp_settings(Ok("false".into()), Ok("false".into()), Err(NotPresent)).unwrap();
+    assert!(!enabled && !config.require_proof);
+    for value in ["true", "1"] {
+        let (enabled, config) =
+            zkpp_settings(Ok(value.into()), Err(NotPresent), Err(NotPresent)).unwrap();
+        assert!(enabled && config.require_proof);
+        for optional in ["false", "0"] {
+            let (_, config) =
+                zkpp_settings(Ok(value.into()), Ok(optional.into()), Ok("1".into())).unwrap();
+            assert!(!config.require_proof);
+        }
+    }
+}
+
 /// A machine-credential alert keeps its id across scans (relayed once) and
 /// a different alert (another credential or another day) gets another id.
 #[test]
