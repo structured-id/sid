@@ -745,6 +745,49 @@ async fn test_a_wrong_current_password_is_refused() {
     assert!(!signs_in(&svc, NEW).await);
 }
 
+/// A wrong current password fails on the client at KE2, so a guesser can
+/// abandon each try before execute. Every sign-in a change begins therefore
+/// counts when its KE2 is issued: after the limit the challenge refuses, so
+/// a stolen session cannot guess the password through changes. The budget
+/// is the change's own; the account's sign-in stays open.
+#[tokio::test]
+async fn test_abandoned_current_password_guesses_are_limited() {
+    let (prover, verifier) = client::keys(1);
+    let (svc, credential, token) = registered(&prover, verifier).await;
+
+    let begin = |guess: &'static [u8]| {
+        let svc = &svc;
+        let credential = &credential;
+        let token = &token;
+        async move {
+            let login =
+                ClientLogin::<PallasCipherSuite>::start(&mut UnwrapErr(SysRng), guess).unwrap();
+            svc.auth
+                .password_change_challenge(authed(
+                    PasswordChangeChallengeRequest {
+                        credential_id: credential.id.0.to_string(),
+                        credential_request: login.message.serialize().to_vec(),
+                    },
+                    token,
+                ))
+                .await
+        }
+    };
+    for _ in 0..5 {
+        begin(WEAK)
+            .await
+            .expect("a guess gets its KE2 until the limit");
+    }
+    let limited = begin(OLD).await.expect_err("the guesses were not counted");
+    assert_eq!(
+        reason(&limited),
+        "RATE_LIMIT_EXCEEDED",
+        "{}",
+        limited.message()
+    );
+    assert!(signs_in(&svc, OLD).await, "sign-in has its own budget");
+}
+
 /// Under a relaxed rule a recent session changes without the current
 /// password, and the requirement counts down to the moment it is needed; a
 /// proof sent anyway is accepted. Once the session's authentication is older

@@ -473,6 +473,12 @@ fn new_self_registration(
 /// Whether `op` is a change of `credential_id` started by `caller`; any other
 /// operation reads as not pending, so a caller learns nothing about others'.
 #[allow(clippy::result_large_err)]
+/// The attempt counter of the current-password sign-ins `profile`'s password
+/// changes begin, apart from its sign-in counter.
+fn current_password_guesses(profile: ProfileId) -> String {
+    format!("current-password:{profile}")
+}
+
 fn own_change(
     op: &PendingOperation,
     caller: ProfileId,
@@ -3055,6 +3061,16 @@ impl AuthService for AuthServiceImpl {
         if proves {
             // As at sign-in: during a lockout the current password is not tried.
             self.refuse_if_locked(&caller.to_string()).await?;
+            // A wrong guess fails on the client at KE2 and need never reach
+            // execute, so each KE2 issued is counted now, against the
+            // change's own budget: a stolen session cannot guess the password
+            // through changes, and the account's sign-in budget is untouched.
+            let guesses = current_password_guesses(caller);
+            self.refuse_if_locked(&guesses).await?;
+            self.anomaly_detector
+                .record_failed_attempt(&guesses)
+                .await
+                .map_err(anomaly_unavailable)?;
         }
         let prepared = self
             .password_ops
