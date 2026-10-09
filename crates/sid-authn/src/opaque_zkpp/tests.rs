@@ -167,7 +167,7 @@ fn an_installed_password_signs_in_through_the_router() {
 
     let login = ClientLogin::<PallasCipherSuite>::start(&mut rng, password).unwrap();
     let (response, state) = router
-        .login_start(&stored, &login.message.serialize(), id)
+        .login_start(&stored, &login.message.serialize(), id, &[])
         .unwrap();
     let finished = login
         .state
@@ -179,7 +179,7 @@ fn an_installed_password_signs_in_through_the_router() {
         )
         .expect("the client recovers its envelope");
     let session = router
-        .login_finish(&state, &finished.message.serialize())
+        .login_finish(&state, &finished.message.serialize(), &[])
         .unwrap();
     assert_eq!(session.expose_secret(), finished.session_key.as_slice());
 }

@@ -205,6 +205,22 @@ impl PendingOperation {
     }
 }
 
+/// Purpose label of a change's current-password sign-in context.
+const CHANGE_CONTEXT_LABEL: &[u8] = b"SID-PASSWORD-CHANGE-v1";
+
+/// The OPAQUE context (RFC 9807 §6) of the change `id`'s current-password
+/// sign-in: the purpose, the operation and SHA-256 of the new password's
+/// registration request, so its KE3 confirms this change of this request
+/// and no ordinary sign-in or other change.
+pub(crate) fn change_context(id: &PasswordOperationId, registration_request: &[u8]) -> Vec<u8> {
+    use sha2::Digest;
+    let mut context = Vec::with_capacity(CHANGE_CONTEXT_LABEL.len() + 16 + 32);
+    context.extend_from_slice(CHANGE_CONTEXT_LABEL);
+    context.extend_from_slice(id.as_bytes());
+    context.extend_from_slice(&sha2::Sha256::digest(registration_request));
+    context
+}
+
 fn finish_command(id: &PasswordOperationId, method: &'static str, record: &[u8]) -> KeyedCommand {
     let key = OperationKey::parse(&id.to_string()).expect("an operation id is a valid key");
     KeyedCommand::new(RESULT_NAMESPACE, key, method, record.to_vec())
@@ -636,16 +652,21 @@ impl PasswordOperations {
 
     /// Execute's half of the change `id`'s sign-in with the current
     /// password: `verify` checks `finalization` (KE3) against the begun
-    /// state, once. A failed check leaves the operation without a proof; a
-    /// retry of a proven operation stays proven.
+    /// state, once, under the change's context over the request the
+    /// challenge fixed. A failed check leaves the operation without a proof;
+    /// a retry of a proven operation stays proven.
     pub(crate) async fn prove_current_password(
         &self,
         id: &PasswordOperationId,
         finalization: &[u8],
         authorized: impl FnOnce(&PendingOperation) -> Result<(), Status>,
-        verify: impl FnOnce(&LoginState, &[u8]) -> bool,
+        verify: impl FnOnce(&LoginState, &[u8], &[u8]) -> bool,
     ) -> Result<CurrentPasswordCheck, Status> {
         let mut op = self.take(id).await?;
+        let context = op
+            .registration_request
+            .as_deref()
+            .map(|request| change_context(&op.id, request));
         let checked = authorized(&op).and_then(|()| {
             match (
                 std::mem::take(&mut op.current_password),
@@ -666,7 +687,11 @@ impl PasswordOperations {
                     .into())
                 }
                 (CurrentPassword::Started(state), false) => {
-                    if verify(&state, finalization) {
+                    let Some(context) = context.as_deref() else {
+                        op.current_password = CurrentPassword::Started(state);
+                        return Err(step_missing("the change fixed no new registration request"));
+                    };
+                    if verify(&state, finalization, context) {
                         op.current_password = CurrentPassword::Proven;
                         Ok(CurrentPasswordCheck::Proven)
                     } else {
@@ -681,6 +706,28 @@ impl PasswordOperations {
         });
         self.store(&op).await?;
         checked
+    }
+
+    /// The OPAQUE start of the operation `id` over the registration request
+    /// it already fixed, when `authorized` accepts its purpose: a change
+    /// answers execute with the response to the request its challenge fixed,
+    /// never a new one.
+    pub(crate) async fn fixed_opaque_start(
+        &self,
+        zkpp: &ZkppOpaqueServer,
+        id: &PasswordOperationId,
+        authorized: impl FnOnce(&PendingOperation) -> Result<(), Status>,
+    ) -> Result<Vec<u8>, Status> {
+        let mut op = self.take(id).await?;
+        let result = authorized(&op).and_then(|()| {
+            let request = op
+                .registration_request
+                .clone()
+                .ok_or_else(|| step_missing("the change fixed no new registration request"))?;
+            Self::start_opaque(zkpp, &mut op, request)
+        });
+        self.store(&op).await?;
+        result
     }
 
     /// The OPAQUE start of the operation `id`, when `authorized` accepts its

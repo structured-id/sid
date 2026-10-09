@@ -167,7 +167,7 @@ fn signs_in(router: &OpaqueRouter, password_file: &[u8], password: &[u8], id: &[
         sid_opaque_ke::ClientLogin::<PallasCipherSuite>::start(&mut UnwrapErr(SysRng), password)
             .unwrap();
     let (response, state) = router
-        .login_start(&stored, &login.message.serialize(), id)
+        .login_start(&stored, &login.message.serialize(), id, &[])
         .expect("login start");
     let Ok(finished) = login.state.finish(
         &mut UnwrapErr(SysRng),
@@ -178,7 +178,7 @@ fn signs_in(router: &OpaqueRouter, password_file: &[u8], password: &[u8], id: &[
         return false;
     };
     router
-        .login_finish(&state, &finished.message.serialize())
+        .login_finish(&state, &finished.message.serialize(), &[])
         .is_ok_and(|key| key.expose_secret() == finished.session_key.as_slice())
 }
 

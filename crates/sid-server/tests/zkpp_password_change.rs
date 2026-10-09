@@ -131,6 +131,29 @@ struct Changing {
     proof: PasswordRegistrationProof,
 }
 
+/// The OPAQUE context a change's current-password sign-in runs under:
+/// ASCII "SID-PASSWORD-CHANGE-v1", the operation id, SHA-256 of the new
+/// password's registration request.
+fn change_context(operation: &sid_ids_proto::PasswordOperationId, request: &[u8]) -> Vec<u8> {
+    use sha2::Digest;
+    let id = sid_ids_proto::required(Some(operation)).unwrap();
+    let mut context = b"SID-PASSWORD-CHANGE-v1".to_vec();
+    context.extend_from_slice(id.as_bytes());
+    context.extend_from_slice(&sha2::Sha256::digest(request));
+    context
+}
+
+/// Which context the client finishes its current-password sign-in under.
+#[derive(Clone, Copy)]
+enum Confirmation {
+    /// This change's context: an honest client.
+    ThisChange,
+    /// The empty context of an ordinary sign-in: a relayed login.
+    OrdinarySignIn,
+    /// The context of this operation over another registration request.
+    AnotherRequest,
+}
+
 /// Challenge, OPAQUE start, execute, evaluation and proof of a change of
 /// `credential` to `password`, proving `current` as the current password
 /// when given.
@@ -142,6 +165,31 @@ async fn prepare_change(
     current: Option<&[u8]>,
     password: &[u8],
 ) -> Result<Changing, Status> {
+    prepare_change_confirming(
+        svc,
+        prover,
+        credential,
+        token,
+        current,
+        password,
+        Confirmation::ThisChange,
+    )
+    .await
+}
+
+/// As [`prepare_change`], finishing the current-password sign-in under the
+/// context `confirmation` names.
+async fn prepare_change_confirming(
+    svc: &TestServices,
+    prover: &ZkppProver,
+    credential: &Credential,
+    token: &str,
+    current: Option<&[u8]>,
+    password: &[u8],
+    confirmation: Confirmation,
+) -> Result<Changing, Status> {
+    // The new password's request comes first: the challenge fixes it.
+    let started = client::start(password);
     let login = current
         .map(|c| ClientLogin::<PallasCipherSuite>::start(&mut UnwrapErr(SysRng), c).unwrap());
     let challenge = svc
@@ -153,12 +201,19 @@ async fn prepare_change(
                     .as_ref()
                     .map(|l| l.message.serialize().to_vec())
                     .unwrap_or_default(),
+                registration_request: started.request.clone(),
             },
             token,
         ))
         .await?
         .into_inner();
     let context = challenge.history.expect("the change's history context");
+    let operation = context.operation_id.as_ref().expect("an operation id");
+    let sign_in_context = match confirmation {
+        Confirmation::ThisChange => change_context(operation, &started.request),
+        Confirmation::OrdinarySignIn => Vec::new(),
+        Confirmation::AnotherRequest => change_context(operation, &client::start(password).request),
+    };
     // A wrong current password fails on the client: it sends a KE3 that
     // cannot verify, as a client that skipped its own check would.
     let credential_finalization = match (login, current) {
@@ -168,20 +223,21 @@ async fn prepare_change(
                 &mut UnwrapErr(SysRng),
                 current,
                 CredentialResponse::deserialize(&challenge.credential_response).unwrap(),
-                ClientLoginFinishParameters::default(),
+                ClientLoginFinishParameters {
+                    context: Some(&sign_in_context),
+                    ..ClientLoginFinishParameters::default()
+                },
             )
             .map(|f| f.message.serialize().to_vec())
             .unwrap_or_else(|_| vec![0; 64]),
         _ => Vec::new(),
     };
-    let started = client::start(password);
     let executed = svc
         .auth
         .password_change_execute(authed(
             PasswordChangeExecuteRequest {
                 operation_id: context.operation_id.clone(),
                 credential_id: credential.id.0.to_string(),
-                registration_request: started.request.clone(),
                 credential_finalization,
             },
             token,
@@ -639,9 +695,10 @@ async fn weak_record_from_login(svc: &TestServices) -> Vec<u8> {
 
 /// A record for another password cannot become the proved one. The proof is
 /// checked, but the record is opaque to the server, so the guarantee is the
-/// operation's own OPRF key: it answers no request but the one the proof is
-/// bound to, and a record built from another key's answers (the login oracle
-/// of the current password) opens under no password once stored.
+/// operation's own OPRF key: it answers no request but the one the challenge
+/// fixed (execute names none), and a record built from another key's answers
+/// (the login oracle of the current password) opens under no password once
+/// stored.
 #[tokio::test]
 async fn test_a_record_for_another_password_opens_under_none() {
     let (prover, verifier) = client::keys(1);
@@ -650,22 +707,6 @@ async fn test_a_record_for_another_password_opens_under_none() {
         prepare_change(&svc, &prover, &credential, &token, Some(OLD), NEW)
             .await
             .expect("the change up to its finish");
-
-    let second = client::start(WEAK);
-    let refused = svc
-        .auth
-        .password_change_execute(authed(
-            PasswordChangeExecuteRequest {
-                operation_id: context.operation_id.clone(),
-                credential_id: credential.id.0.to_string(),
-                registration_request: second.request.clone(),
-                credential_finalization: vec![],
-            },
-            &token,
-        ))
-        .await
-        .expect_err("a second request was evaluated under the operation's key");
-    assert_eq!(refused.code(), Code::AlreadyExists, "{}", refused.message());
 
     let record = weak_record_from_login(&svc).await;
     finish_change(&svc, &credential, &token, &context, record, proof)
@@ -757,6 +798,66 @@ async fn test_a_wrong_current_password_is_refused() {
     assert!(!signs_in(&svc, NEW).await);
 }
 
+/// The current password is proved for this change only: a sign-in finished
+/// under an ordinary login's empty context (a relayed login) or under this
+/// operation's context over another registration request is refused like a
+/// wrong password and changes nothing, although the password is right.
+#[tokio::test]
+async fn test_a_confirmation_for_another_purpose_or_request_is_refused() {
+    let (prover, verifier) = client::keys(1);
+    let (svc, credential, token) = registered(&prover, verifier).await;
+
+    for confirmation in [Confirmation::OrdinarySignIn, Confirmation::AnotherRequest] {
+        let Err(refused) = prepare_change_confirming(
+            &svc,
+            &prover,
+            &credential,
+            &token,
+            Some(OLD),
+            NEW,
+            confirmation,
+        )
+        .await
+        else {
+            panic!("a confirmation made for something else was accepted");
+        };
+        assert_eq!(reason(&refused), "AUTHENTICATION_FAILED");
+    }
+    assert!(signs_in(&svc, OLD).await, "the refusals kept the password");
+    assert!(!signs_in(&svc, NEW).await);
+    // The honest confirmation of the same change still goes through.
+    change(&svc, &prover, &credential, &token, OLD, NEW)
+        .await
+        .expect("the change's own confirmation");
+}
+
+/// The challenge fixes the new password's request: without one there is
+/// nothing for the current password to confirm.
+#[tokio::test]
+async fn test_a_challenge_without_the_new_request_is_refused() {
+    let (prover, verifier) = client::keys(1);
+    let (svc, credential, token) = registered(&prover, verifier).await;
+    let login = ClientLogin::<PallasCipherSuite>::start(&mut UnwrapErr(SysRng), OLD).unwrap();
+    let refused = svc
+        .auth
+        .password_change_challenge(authed(
+            PasswordChangeChallengeRequest {
+                credential_id: credential.id.0.to_string(),
+                credential_request: login.message.serialize().to_vec(),
+                registration_request: Vec::new(),
+            },
+            &token,
+        ))
+        .await
+        .expect_err("a challenge without the new request was answered");
+    assert_eq!(
+        refused.code(),
+        Code::InvalidArgument,
+        "{}",
+        refused.message()
+    );
+}
+
 /// A change up to its finish without a policy proof, proving `current`: the
 /// operation and the record of `password`.
 async fn unproved_change(
@@ -766,6 +867,7 @@ async fn unproved_change(
     current: &[u8],
     password: &[u8],
 ) -> (PasswordHistoryContext, Vec<u8>) {
+    let started = client::start(password);
     let login = ClientLogin::<PallasCipherSuite>::start(&mut UnwrapErr(SysRng), current).unwrap();
     let challenge = svc
         .auth
@@ -773,6 +875,7 @@ async fn unproved_change(
             PasswordChangeChallengeRequest {
                 credential_id: credential.id.0.to_string(),
                 credential_request: login.message.serialize().to_vec(),
+                registration_request: started.request.clone(),
             },
             token,
         ))
@@ -780,26 +883,31 @@ async fn unproved_change(
         .expect("challenge")
         .into_inner();
     let context = challenge.history.expect("the change's history context");
+    let sign_in_context = change_context(
+        context.operation_id.as_ref().expect("an operation id"),
+        &started.request,
+    );
     let finalization = login
         .state
         .finish(
             &mut UnwrapErr(SysRng),
             current,
             CredentialResponse::deserialize(&challenge.credential_response).unwrap(),
-            ClientLoginFinishParameters::default(),
+            ClientLoginFinishParameters {
+                context: Some(&sign_in_context),
+                ..ClientLoginFinishParameters::default()
+            },
         )
         .expect("the current password opens the envelope")
         .message
         .serialize()
         .to_vec();
-    let started = client::start(password);
     let executed = svc
         .auth
         .password_change_execute(authed(
             PasswordChangeExecuteRequest {
                 operation_id: context.operation_id.clone(),
                 credential_id: credential.id.0.to_string(),
-                registration_request: started.request.clone(),
                 credential_finalization: finalization,
             },
             token,
@@ -903,6 +1011,7 @@ async fn test_abandoned_current_password_guesses_are_limited() {
                     PasswordChangeChallengeRequest {
                         credential_id: credential.id.0.to_string(),
                         credential_request: login.message.serialize().to_vec(),
+                        registration_request: client::start(NEW).request,
                     },
                     token,
                 ))

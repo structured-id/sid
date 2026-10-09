@@ -835,6 +835,7 @@ async fn test_password_change_challenge_no_bearer() {
     let req = Request::new(PasswordChangeChallengeRequest {
         credential_id: Uuid::now_v7().to_string(),
         credential_request: vec![],
+        registration_request: vec![],
     });
 
     let err = svc.auth.password_change_challenge(req).await.unwrap_err();
@@ -848,7 +849,6 @@ async fn test_password_change_execute_no_bearer() {
     let req = Request::new(PasswordChangeExecuteRequest {
         operation_id: None,
         credential_id: Uuid::now_v7().to_string(),
-        registration_request: vec![],
         credential_finalization: vec![],
     });
 
@@ -1179,6 +1179,7 @@ async fn test_password_change_rejects_foreign_credential() {
             PasswordChangeChallengeRequest {
                 credential_id: victim_cred.id.0.to_string(),
                 credential_request: vec![],
+                registration_request: vec![],
             },
             &token,
         ))

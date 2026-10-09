@@ -56,7 +56,8 @@ use tonic::{Code, Request, Response, Status};
 use tracing::{info, instrument, warn};
 
 use super::password_operation::{
-    CurrentPasswordCheck, Finish, OperationOwner, OperationPurpose, PendingOperation, operation_id,
+    CurrentPasswordCheck, Finish, OperationOwner, OperationPurpose, PendingOperation,
+    change_context, operation_id,
 };
 use sid_core::grpc_error::refuse::{
     changed_concurrently, dependency_unavailable, internal, invalid_field, maintenance,
@@ -2819,7 +2820,8 @@ impl AuthService for AuthServiceImpl {
         let stored_cred = self.stored_password(opaque_cred).await?;
         let (credential_response, login_state) = self
             .opaque_router
-            .login_start(&stored_cred, &req.credential_request, &credential_id)
+            // An ordinary sign-in has the empty context.
+            .login_start(&stored_cred, &req.credential_request, &credential_id, &[])
             .map_err(|e| {
                 warn!("OPAQUE login start failed for {}: {}", req.principal, e);
                 authentication_failed()
@@ -2881,18 +2883,19 @@ impl AuthService for AuthServiceImpl {
         self.refuse_if_locked(&profile_id.to_string()).await?;
 
         // Verify OPAQUE login
-        let _session_key = match self
-            .opaque_router
-            .login_finish(&login_state, &req.credential_finalization)
-        {
-            Ok(key) => key,
-            Err(e) => {
-                warn!("OPAQUE login finish failed: {}", e);
-                self.record_failed_login(&profile_id.to_string(), client_ip)
-                    .await?;
-                return Err(authentication_failed());
-            }
-        };
+        let _session_key =
+            match self
+                .opaque_router
+                .login_finish(&login_state, &req.credential_finalization, &[])
+            {
+                Ok(key) => key,
+                Err(e) => {
+                    warn!("OPAQUE login finish failed: {}", e);
+                    self.record_failed_login(&profile_id.to_string(), client_ip)
+                        .await?;
+                    return Err(authentication_failed());
+                }
+            };
 
         // A profile deleted while the sign-in was in flight signs nobody in.
         let profile = self
@@ -3079,6 +3082,11 @@ impl AuthService for AuthServiceImpl {
 
         let req = request.into_inner();
         let credential = self.own_password(&req.credential_id, caller).await?;
+        // The challenge fixes the new password's request: the current
+        // password is confirmed for it, and execute starts no other.
+        if req.registration_request.is_empty() {
+            return Err(missing_field("registration_request"));
+        }
         let proves = !req.credential_request.is_empty();
         if required && !proves {
             return Err(sid_authn::credential_enrollment::current_password_required());
@@ -3108,11 +3116,13 @@ impl AuthService for AuthServiceImpl {
                 },
                 OperationOwner::Existing(caller),
                 format!("profile:{caller}"),
-                None,
+                // Fixed now; its response is withheld until execute confirms.
+                Some(req.registration_request.clone()),
             )
             .await?;
 
         let credential_response = if proves {
+            let id = operation_id(prepared.context.operation_id.as_ref())?;
             let stored = self.stored_password(&credential).await?;
             let (response, state) = self
                 .opaque_router
@@ -3120,12 +3130,12 @@ impl AuthService for AuthServiceImpl {
                     &stored,
                     &req.credential_request,
                     &credential.opaque_credential_identifier(),
+                    &change_context(&id, &req.registration_request),
                 )
                 .map_err(|e| {
                     warn!("current-password sign-in start failed: {e}");
                     invalid_field("credential_request", "not an OPAQUE credential request")
                 })?;
-            let id = operation_id(prepared.context.operation_id.as_ref())?;
             self.password_ops
                 .begin_current_password(&id, state, |op| own_change(op, caller, &credential))
                 .await?;
@@ -3172,9 +3182,9 @@ impl AuthService for AuthServiceImpl {
                 &id,
                 &req.credential_finalization,
                 |op| own_change(op, caller, &credential),
-                |state, finalization| {
+                |state, finalization, context| {
                     self.opaque_router
-                        .login_finish(state, finalization)
+                        .login_finish(state, finalization, context)
                         .inspect_err(|e| warn!("current-password sign-in failed: {e}"))
                         .is_ok()
                 },
@@ -3193,9 +3203,7 @@ impl AuthService for AuthServiceImpl {
         }
         let registration_response = self
             .password_ops
-            .opaque_start(&zkpp, &id, req.registration_request, |op| {
-                own_change(op, caller, &credential)
-            })
+            .fixed_opaque_start(&zkpp, &id, |op| own_change(op, caller, &credential))
             .await?;
 
         Ok(Response::new(PasswordChangeExecuteResponse {

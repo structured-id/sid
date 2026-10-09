@@ -390,6 +390,7 @@ async fn opaque_login_survives_serialized_transfer_and_restart() {
             },
             &login.message.serialize(),
             &stored.opaque_credential_identifier(),
+            &[],
         )
         .unwrap();
     let finished = login
@@ -402,7 +403,7 @@ async fn opaque_login_survives_serialized_transfer_and_restart() {
         )
         .expect("the restored password opens its envelope");
     let session = after
-        .login_finish(&state, &finished.message.serialize())
+        .login_finish(&state, &finished.message.serialize(), &[])
         .unwrap();
     assert!(session.expose_secret() == finished.session_key.as_slice());
     let evaluator = sid_authn::password_history::HistoryEvaluator::new(Arc::new(manager(
@@ -533,6 +534,7 @@ async fn opaque_login_survives_serialized_transfer_and_restart() {
                 },
                 &login.message.serialize(),
                 &changed.opaque_credential_identifier(),
+                &[],
             )
             .unwrap();
         let finished = login.state.finish(
@@ -544,7 +546,7 @@ async fn opaque_login_survives_serialized_transfer_and_restart() {
         if should_open {
             let finished = finished.expect("the new password opens after a second restore");
             let session = restart_router
-                .login_finish(&state, &finished.message.serialize())
+                .login_finish(&state, &finished.message.serialize(), &[])
                 .unwrap();
             assert!(session.expose_secret() == finished.session_key.as_slice());
         } else {

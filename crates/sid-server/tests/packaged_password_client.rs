@@ -75,6 +75,17 @@ fn bytes(v: Value) -> Vec<u8> {
     serde_json::from_value(v).expect("binary test result")
 }
 
+/// The OPAQUE context of a change's current-password sign-in: ASCII
+/// "SID-PASSWORD-CHANGE-v1", the operation id, SHA-256 of the new password's
+/// registration request.
+fn change_context(operation: &sid_ids_proto::PasswordOperationId, request: &[u8]) -> Vec<u8> {
+    let id = sid_ids_proto::required(Some(operation)).unwrap();
+    let mut context = b"SID-PASSWORD-CHANGE-v1".to_vec();
+    context.extend_from_slice(id.as_bytes());
+    context.extend_from_slice(&Sha256::digest(request));
+    context
+}
+
 fn authed<T>(value: T, token: &str) -> Request<T> {
     let mut request = Request::new(value);
     request
@@ -393,6 +404,14 @@ async fn password_lifecycle(adapter: &str) {
     // Each change proves the current password (FIRST: the reused attempt
     // changes nothing) with the published client's own sign-in.
     for (password, reused) in [(FIRST, true), (SECOND, false)] {
+        // The new password's request comes first: the challenge fixes it and
+        // the current-password sign-in is bound to it.
+        let request = bytes(
+            kernel
+                .call(json!({"method":"start","password":password}))
+                .await
+                .unwrap(),
+        );
         let sign_in = bytes(
             kernel
                 .call(json!({"method":"loginStart", "password":FIRST}))
@@ -404,6 +423,7 @@ async fn password_lifecycle(adapter: &str) {
                 PasswordChangeChallengeRequest {
                     credential_id: credential_id.clone(),
                     credential_request: sign_in,
+                    registration_request: request.clone(),
                 },
                 &token,
             ))
@@ -411,16 +431,12 @@ async fn password_lifecycle(adapter: &str) {
             .unwrap()
             .into_inner();
         let context = challenge.history.unwrap();
+        let sign_in_context = change_context(context.operation_id.as_ref().unwrap(), &request);
         let credential_finalization = bytes(
             kernel
                 .call(json!({"method":"loginFinish","password":FIRST,
-                    "response":challenge.credential_response}))
-                .await
-                .unwrap(),
-        );
-        let request = bytes(
-            kernel
-                .call(json!({"method":"start","password":password}))
+                    "response":challenge.credential_response,
+                    "context":sign_in_context}))
                 .await
                 .unwrap(),
         );
@@ -429,7 +445,6 @@ async fn password_lifecycle(adapter: &str) {
                 PasswordChangeExecuteRequest {
                     operation_id: context.operation_id.clone(),
                     credential_id: credential_id.clone(),
-                    registration_request: request,
                     credential_finalization,
                 },
                 &token,

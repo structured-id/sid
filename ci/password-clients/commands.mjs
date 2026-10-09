@@ -42,7 +42,13 @@ export function commands(client) {
         login = await client.loginStart(v.password);
         return login.request;
       case "loginFinish":
-        return client.loginFinish(v.password, login.state, bytes(v.response));
+        // An ordinary sign-in has the empty context; a change sends its own.
+        return client.loginFinish(
+          v.password,
+          login.state,
+          bytes(v.response),
+          bytes(v.context ?? []),
+        );
       default:
         throw new Error("unknown test command");
     }
