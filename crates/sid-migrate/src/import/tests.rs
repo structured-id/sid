@@ -1109,44 +1109,6 @@ async fn history_key_restore_requires_the_original_external_key() {
     assert_eq!(blank.count_profiles().await.unwrap(), 0);
 }
 
-/// Retained old-format data is a reconciliation requirement, not an empty
-/// history that export may omit and thereby weaken after a move.
-#[tokio::test]
-async fn unconverted_history_refuses_export() {
-    let source = SqliteBackend::new_in_memory().await.unwrap();
-    let profile = Profile::new(Some("old-history-transfer"));
-    source
-        .create_profile(&profile, AuditEntry::system("test", "profile").into())
-        .await
-        .unwrap();
-    // The schema of a file adopted from an older unversioned implementation.
-    sqlx::query("ALTER TABLE credentials ADD COLUMN history_commitment BLOB")
-        .execute(source.pool())
-        .await
-        .unwrap();
-    let credential = sid_core::models::Credential::new(
-        profile.id,
-        sid_core::models::CredentialType::Opaque,
-        b"record".to_vec(),
-        None,
-    );
-    source
-        .create_credential(&credential, AuditEntry::system("test", "credential").into())
-        .await
-        .unwrap();
-    sqlx::query("UPDATE credentials SET history_commitment = ? WHERE id = ?")
-        .bind(vec![1u8; 32])
-        .bind(credential.id.0.to_string())
-        .execute(source.pool())
-        .await
-        .unwrap();
-    assert!(
-        export_snapshot(&source, "sqlite::memory:", false)
-            .await
-            .is_err()
-    );
-}
-
 /// A migrated instance gives every pairwise client the `sub` it already
 /// holds: the bindings move with their ids, and a second import is a no-op.
 #[tokio::test]

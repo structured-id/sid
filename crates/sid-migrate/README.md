@@ -44,15 +44,9 @@ credential phases support exact retries; this does not establish retry safety
 for every other entity. Repeated credentials are accepted only when their
 complete stored record is identical.
 
-Old snapshots without complete history must be re-exported. Existing unconverted
-Poseidon history causes export, live history reads, epoch preparation and proved
-password replacements to refuse. Reset also refuses before removing the old
-credential, including when no policy proof is supplied. Refusal rolls back the
-reset, credential, history and session changes together. Ordinary credential
-reads remain available; retaining unsupported rows does not mean the current
-private-history checker enforces them. Reconcile them before transfer
-rather than discarding them. A stale snapshot cannot recreate later records;
-conflicting target history is never treated as permission to reset retention.
+Snapshots without complete history must be re-exported. A stale snapshot
+cannot recreate later records; conflicting target history is never treated as
+permission to reset retention.
 
 `verify` compares history contents, sealed OPAQUE setup, sealed history keys and derivation parameters, not
 just record counts. It does not decrypt keys or establish completeness after a

@@ -72,33 +72,10 @@ fn epoch_from_row(row: EpochRow) -> SidResult<HistoryEpoch> {
     })
 }
 
-/// Refuse an incomplete comparison set before reading or publishing history.
-/// Migration never writes this inventory concurrently with serving; live
-/// replacement still checks it in its own transaction, not just at Begin.
-pub(super) async fn require_current_format(
-    conn: &mut sqlx::PgConnection,
-    owner: ProfileId,
-) -> SidResult<()> {
-    let legacy: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM password_history_legacy WHERE owner_id = $1)",
-    )
-    .bind(owner)
-    .fetch_one(&mut *conn)
-    .await
-    .map_err(storage("legacy inventory"))?;
-    if legacy {
-        return Err(SidError::InvalidState(
-            "unconverted password history requires reconciliation".into(),
-        ));
-    }
-    Ok(())
-}
-
 async fn read_archive(
     conn: &mut sqlx::PgConnection,
     owner: ProfileId,
 ) -> SidResult<Option<HistoryArchive>> {
-    require_current_format(conn, owner).await?;
     let revision: Option<i64> =
         sqlx::query_scalar("SELECT revision FROM password_histories WHERE owner_id = $1")
             .bind(owner)
@@ -184,9 +161,6 @@ pub(super) async fn import_archive(
     archive: &HistoryArchive,
 ) -> SidResult<bool> {
     archive.validate()?;
-    // Reconciliation of old-format rows is required even when no current
-    // history row exists; a restore must not turn that state into fresh history.
-    read_archive(tx, archive.owner).await?;
     let inserted = sqlx::query("INSERT INTO password_histories (owner_id, revision) VALUES ($1, $2) ON CONFLICT (owner_id) DO NOTHING")
         .bind(archive.owner).bind(archive.revision).execute(&mut **tx).await.map_err(storage("archive insert"))?.rows_affected();
     if inserted == 0 {
@@ -229,7 +203,6 @@ async fn read_epochs(
     conn: &mut sqlx::PgConnection,
     owner: ProfileId,
 ) -> SidResult<Option<HistoryEpochs>> {
-    require_current_format(conn, owner).await?;
     let revision: Option<i64> =
         sqlx::query_scalar("SELECT revision FROM password_histories WHERE owner_id = $1")
             .bind(owner)
@@ -369,7 +342,6 @@ pub(super) async fn ensure_epoch(
             "a prepared history epoch is active".into(),
         ));
     }
-    require_current_format(tx, owner).await?;
     lock_history(tx, owner).await?;
     let existing: Option<EpochRow> = sqlx::query_as(concat!(
         "SELECT ",
@@ -413,7 +385,6 @@ pub(super) async fn apply_in_tx(
 ) -> SidResult<bool> {
     commit.validate()?;
     let owner = commit.owner;
-    require_current_format(tx, owner).await?;
     if commit.expected_revision == 0 {
         // First history of this owner: whoever creates the row owns revision 1.
         let created = sqlx::query(
@@ -521,7 +492,6 @@ pub(super) async fn rotate_epoch(
             "a prepared history epoch is active".into(),
         ));
     }
-    require_current_format(tx, owner).await?;
     lock_history(tx, owner).await?;
     let active: Option<EpochRow> = sqlx::query_as(concat!(
         "SELECT ",

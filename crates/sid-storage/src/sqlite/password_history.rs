@@ -69,47 +69,10 @@ fn row_to_entry(row: &sqlx::sqlite::SqliteRow) -> SidResult<HistoryEntry> {
     })
 }
 
-/// One inventory contract for reads, epoch preparation and atomic commits.
-/// Adopted files may retain either the old table or old credential columns;
-/// neither representation is a supported empty comparison window.
-pub(super) async fn require_current_format(
-    conn: &mut sqlx::SqliteConnection,
-    owner: ProfileId,
-) -> SidResult<()> {
-    // SQLite's current baseline has no legacy table. Inspect actual schema,
-    // including files adopted from the earlier unversioned implementation.
-    let has_table: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'password_history_legacy')")
-        .fetch_one(&mut *conn).await.map_err(storage("legacy schema"))?;
-    let mut legacy = false;
-    if has_table {
-        legacy = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM password_history_legacy WHERE owner_id = ?)",
-        )
-        .bind(owner)
-        .fetch_one(&mut *conn)
-        .await
-        .map_err(storage("legacy inventory"))?;
-    }
-    let has_column: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pragma_table_info('credentials') WHERE name = 'history_commitment')")
-        .fetch_one(&mut *conn).await.map_err(storage("legacy schema"))?;
-    if has_column {
-        let old: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM credentials WHERE profile_id = ? AND history_commitment IS NOT NULL)")
-            .bind(owner).fetch_one(&mut *conn).await.map_err(storage("legacy inventory"))?;
-        legacy |= old;
-    }
-    if legacy {
-        return Err(SidError::InvalidState(
-            "unconverted password history requires reconciliation".into(),
-        ));
-    }
-    Ok(())
-}
-
 async fn read_archive(
     conn: &mut sqlx::SqliteConnection,
     owner: ProfileId,
 ) -> SidResult<Option<HistoryArchive>> {
-    require_current_format(conn, owner).await?;
     let revision: Option<i64> =
         sqlx::query_scalar("SELECT revision FROM password_histories WHERE owner_id = ?")
             .bind(owner)
@@ -161,7 +124,6 @@ async fn read_epochs(
     conn: &mut sqlx::SqliteConnection,
     owner: ProfileId,
 ) -> SidResult<Option<HistoryEpochs>> {
-    require_current_format(conn, owner).await?;
     let revision: Option<i64> =
         sqlx::query_scalar("SELECT revision FROM password_histories WHERE owner_id = ?")
             .bind(owner)
@@ -216,7 +178,6 @@ async fn insert_epoch(tx: &mut WriteTx, new: &NewHistoryEpoch) -> SidResult<()> 
 pub(super) async fn apply_in_tx(tx: &mut WriteTx, commit: &HistoryCommit) -> SidResult<bool> {
     commit.validate()?;
     let owner = commit.owner;
-    require_current_format(tx, owner).await?;
     let moved = if commit.expected_revision == 0 {
         sqlx::query(
             "INSERT INTO password_histories (owner_id, revision) VALUES (?, 1)
@@ -323,7 +284,6 @@ impl SqliteBackend {
     ) -> SidResult<bool> {
         archive.validate()?;
         let mut tx = self.begin_write().await?;
-        read_archive(&mut tx, archive.owner).await?;
         let inserted = sqlx::query("INSERT INTO password_histories (owner_id, revision) VALUES (?, ?) ON CONFLICT (owner_id) DO NOTHING")
             .bind(archive.owner).bind(archive.revision).execute(&mut *tx).await.map_err(storage("archive insert"))?.rows_affected();
         if inserted == 0 {
@@ -394,7 +354,6 @@ impl SqliteBackend {
         }
         let owner = new.epoch.owner;
         let mut tx = self.begin_write().await?;
-        require_current_format(&mut tx, owner).await?;
         sqlx::query(
             "INSERT INTO password_histories (owner_id, revision)
              SELECT id, 1 FROM profiles WHERE id = ?
@@ -448,7 +407,6 @@ impl SqliteBackend {
         }
         let owner = new.epoch.owner;
         let mut tx = self.begin_write().await?;
-        require_current_format(&mut tx, owner).await?;
         sqlx::query(
             "INSERT INTO password_histories (owner_id, revision)
              SELECT id, 1 FROM profiles WHERE id = ?

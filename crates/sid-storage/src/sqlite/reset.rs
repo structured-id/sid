@@ -141,12 +141,6 @@ impl SqliteBackend {
                 "the new password belongs to another profile than the reset".into(),
             ));
         }
-        // Check retained history before deleting the old credential: an
-        // adopted file can hold its constraint only on that row. All effects
-        // still share this transaction and roll back on any later failure.
-        if history.is_none() {
-            super::password_history::require_current_format(&mut tx, profile_id).await?;
-        }
         if let Some(history) = history
             && !super::password_history::apply_in_tx(&mut tx, history).await?
         {
