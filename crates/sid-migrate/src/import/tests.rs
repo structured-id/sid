@@ -749,6 +749,39 @@ async fn restored_history_refuses_passwords_from_active_and_rotated_epochs() {
         emptied.validate().is_err(),
         "a compare-only epoch without entries was accepted"
     );
+    // Every live epoch is a domain each proved operation must evaluate; past
+    // the verifier's limit no operation could succeed and age entries out, so
+    // such an archive is refused. At the limit it is accepted.
+    let with_live = async |extra: usize| {
+        let mut wide = archive.clone();
+        for seq in (3..).take(extra) {
+            let mut epoch = evaluator.new_epoch(profile.id, ksf).await.unwrap();
+            epoch.epoch.created_at = now;
+            epoch.epoch.status = HistoryEpochUse::CompareOnly;
+            wide.entries.push(HistoryEntry {
+                epoch: epoch.epoch.id,
+                seq,
+                entry: first_entry,
+                evidence: HistoryEvidence {
+                    operation: uuid::Uuid::now_v7(),
+                    policy_version: 1,
+                },
+                created_at: now,
+            });
+            wide.epochs.push(epoch);
+        }
+        wide.epochs
+            .sort_by_key(|e| (e.epoch.created_at, e.epoch.id));
+        wide.entries
+            .sort_by_key(|e| (std::cmp::Reverse(e.seq), e.epoch));
+        wide
+    };
+    let limit = sid_core::models::password_history::MAX_HISTORY_DOMAINS;
+    assert!(with_live(limit - 2).await.validate().is_ok());
+    assert!(
+        with_live(limit - 1).await.validate().is_err(),
+        "an archive needing more history domains than a proof holds was accepted"
+    );
     // Use a clean source for the complete nonempty archive; exact import never
     // overwrites history that was already prepared on the preceding backend.
     let source = SqliteBackend::new_in_memory().await.unwrap();
@@ -1152,6 +1185,44 @@ async fn service_bindings_survive_migration() {
         .expect("the binding moved");
     assert_eq!(after.binding_id, before.binding_id);
     assert_eq!(after.binding_index, before.binding_index);
+}
+
+/// A snapshot from a backend that keeps microseconds (PostgreSQL) imports
+/// into SQLite and resumes: the stored credential keeps its exact
+/// timestamps, so the retried credential phase recognizes it.
+#[tokio::test]
+async fn credentials_with_microsecond_timestamps_resume_their_import() {
+    use sid_core::models::{Credential, CredentialType};
+
+    let source = SqliteBackend::new_in_memory().await.unwrap();
+    let profile = Profile::new(Some("microseconds"));
+    source
+        .create_profile(&profile, AuditEntry::system("test", "profile").into())
+        .await
+        .unwrap();
+    let mut snapshot = export_snapshot(&source, "sqlite::memory:", false)
+        .await
+        .unwrap();
+    let mut credential = Credential::new(profile.id, CredentialType::Totp, vec![1, 2, 3], None);
+    let at = chrono::DateTime::from_timestamp_micros(1_760_000_000_123_456).unwrap();
+    credential.created_at = at;
+    credential.last_used_at = Some(at);
+    snapshot.credentials.push(credential.clone());
+
+    let target = SqliteBackend::new_in_memory().await.unwrap();
+    assert_eq!(
+        import_snapshot(&target, &snapshot)
+            .await
+            .unwrap()
+            .credentials,
+        1
+    );
+    let second = import_snapshot(&target, &snapshot)
+        .await
+        .expect("a resumed import recognizes the stored credential");
+    assert_eq!(second.credentials, 0);
+    let stored = target.get_credential(credential.id).await.unwrap().unwrap();
+    assert_eq!(stored.created_at, at);
 }
 
 /// Store the same installation organization and issuer in `backend`, as a

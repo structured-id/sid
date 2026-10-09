@@ -163,9 +163,9 @@ fn percentile(sorted: &[Duration], p: f64) -> Duration {
 async fn main() {
     let args = args();
     assert!(
-        (1..=sid_authn::password_history::MAX_HISTORY_DOMAINS).contains(&args.domains),
+        (1..=sid_core::models::password_history::MAX_HISTORY_DOMAINS).contains(&args.domains),
         "--domains must be 1..={}",
-        sid_authn::password_history::MAX_HISTORY_DOMAINS
+        sid_core::models::password_history::MAX_HISTORY_DOMAINS
     );
     let evaluator = HistoryEvaluator::new(key_manager());
     let owner = ProfileId::generate();

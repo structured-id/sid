@@ -40,11 +40,6 @@ const COMPARISON_DOMAIN_PURPOSE: &[u8] = b"SID-HISTORY-TAG-v1";
 /// Prefix of the key manager context an epoch key is sealed under.
 const KEY_CONTEXT_PREFIX: &str = "password-history-key";
 
-/// The most comparison domains one operation may require: the active epoch
-/// and the rotated ones that still hold entries. Each is a proof slot and a
-/// KSF run, so the bound caps both.
-pub const MAX_HISTORY_DOMAINS: usize = 3;
-
 /// The owner's history input domain `d`: the installation and the owner, so
 /// the same password gives unrelated inputs for different owners or
 /// installations. Little-endian canonical field element.

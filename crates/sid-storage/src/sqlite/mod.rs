@@ -259,12 +259,14 @@ pub(crate) fn insert_error(what: &str, e: sqlx::Error) -> SidError {
     }
 }
 
+/// Microseconds, the precision PostgreSQL keeps: a record moved between the
+/// backends compares equal to itself.
 pub(crate) fn fmt_dt(dt: &chrono::DateTime<chrono::Utc>) -> String {
-    dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    dt.to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
 }
 
 pub(crate) fn fmt_dt_opt(dt: Option<chrono::DateTime<chrono::Utc>>) -> Option<String> {
-    dt.map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+    dt.as_ref().map(fmt_dt)
 }
 
 /// Decode one column, naming it in the error so a malformed stored value

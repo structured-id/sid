@@ -19,6 +19,10 @@ use crate::{Error, Result};
 pub const DEFAULT_HISTORY_DEPTH: u32 = 1;
 /// The deepest retained history any policy may set.
 pub const MAX_HISTORY_DEPTH: u32 = 24;
+/// The most comparison domains one operation may require: the active epoch
+/// and the rotated ones that still hold entries. Each is a proof slot and a
+/// KSF run, so the bound caps both.
+pub const MAX_HISTORY_DOMAINS: usize = 3;
 
 /// One history epoch of one owner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -350,6 +354,17 @@ impl HistoryArchive {
         if empty_compare_only {
             return Err(Error::Validation(
                 "history archive has a compare-only epoch without entries".into(),
+            ));
+        }
+        // Every live epoch is a domain each proved operation evaluates; past
+        // the limit no operation succeeds, so nothing could age entries out.
+        let live = ids
+            .values()
+            .filter(|s| matches!(s, HistoryEpochUse::Active | HistoryEpochUse::CompareOnly))
+            .count();
+        if live > MAX_HISTORY_DOMAINS {
+            return Err(Error::Validation(
+                "history archive needs more history domains than a proof holds".into(),
             ));
         }
         Ok(())

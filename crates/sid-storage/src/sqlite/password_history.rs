@@ -11,13 +11,7 @@ use sid_core::models::{
 };
 use sid_core::{Error as SidError, Result as SidResult};
 
-use super::{SqliteBackend, WriteTx, col, dt_col, uuid_col};
-
-// History archives preserve the full precision supported by PostgreSQL;
-// millisecond truncation changes provenance and breaks identical restore retries.
-fn fmt_dt(dt: &chrono::DateTime<chrono::Utc>) -> String {
-    dt.to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
-}
+use super::{SqliteBackend, WriteTx, col, dt_col, fmt_dt, uuid_col};
 
 fn storage(what: &str) -> impl FnOnce(sqlx::Error) -> SidError + '_ {
     move |e| SidError::Storage(format!("password history {what}: {e}"))

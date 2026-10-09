@@ -1619,7 +1619,7 @@ fn init_zkpp(router: &Arc<OpaqueRouter>) -> Arc<arc_swap::ArcSwap<Option<Arc<Zkp
                     params
                 }
             };
-            (1..=sid_authn::password_history::MAX_HISTORY_DOMAINS)
+            (1..=sid_core::models::password_history::MAX_HISTORY_DOMAINS)
                 .map(|history_domains| {
                     let shape = sid_pake_core::circuit::CircuitShape {
                         policy,

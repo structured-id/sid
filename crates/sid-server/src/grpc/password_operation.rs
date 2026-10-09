@@ -50,12 +50,12 @@ use sid_authn::opaque_zkpp::ZkppOpaqueServer;
 use sid_authn::operation::KeyedCommand;
 use sid_authn::password_history::{
     CheckRequest, EpochPolicy, HistoryCheckError, HistoryChecker, HistoryEvaluator,
-    MAX_HISTORY_DOMAINS, OperationDomain, OperationEvaluation, decoy_domain, inputs_match,
-    owner_domain,
+    OperationDomain, OperationEvaluation, decoy_domain, inputs_match, owner_domain,
 };
 use sid_core::grpc_error::refuse::invalid_field;
 use sid_core::grpc_error::{ApiError, ErrorReason};
 use sid_core::models::password_history::DEFAULT_HISTORY_DEPTH;
+use sid_core::models::password_history::MAX_HISTORY_DOMAINS;
 use sid_core::models::{
     AuditEntry, Credential, CredentialId, CredentialType, HistoryCommit, HistoryEpochUse,
     HistoryEpochs, HistoryEvidence, HistoryKsf, MutationContext, NewHistoryEpoch,
