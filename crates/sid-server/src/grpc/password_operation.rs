@@ -103,6 +103,9 @@ pub(crate) enum OperationPurpose {
     Change {
         profile_id: ProfileId,
         credential_id: CredentialId,
+        /// The OPRF credential identifier of the password the change began
+        /// on: each password has its own, so it names that version.
+        password: [u8; 16],
     },
     /// A reset under a verified reset session.
     Reset { session: ResetSessionId },
@@ -417,6 +420,9 @@ pub enum PasswordHistoryAuthority {
         history_keys: Arc<dyn sid_keys::KeyManager>,
         /// Epochs created before it are replaced at their next operation.
         epoch_cutoff: Option<chrono::DateTime<chrono::Utc>>,
+        /// Also the evaluator of a remote credential service: pending
+        /// operations are then sealed with the key shared with it.
+        serve: Option<EvaluatorService>,
     },
     /// Its own service. Pending operations are sealed with
     /// `operation_keys`, which the evaluator shares and which open nothing
@@ -425,6 +431,17 @@ pub enum PasswordHistoryAuthority {
         evaluator: RemoteHistoryEvaluator,
         operation_keys: Arc<dyn sid_keys::KeyManager>,
     },
+}
+
+/// What this server needs to serve the evaluator to a remote credential
+/// service.
+pub struct EvaluatorService {
+    /// Seals pending operations; the credential service holds the same key.
+    pub operation_keys: Arc<dyn sid_keys::KeyManager>,
+    /// The authorization subject of the one service admitted to prepare.
+    pub caller: String,
+    /// The evaluator's resource indicator its access tokens name.
+    pub resource: sid_core::models::ResourceIndicator,
 }
 
 impl PasswordOperations {
@@ -442,17 +459,25 @@ impl PasswordOperations {
             PasswordHistoryAuthority::InProcess {
                 history_keys,
                 epoch_cutoff,
+                serve,
             } => {
+                let operation_keys = serve.map_or(field_keys, |s| s.operation_keys);
                 let evaluation = Arc::new(
                     HistoryEvaluation::new(
                         storage.clone(),
                         cache.clone(),
                         history_keys,
-                        field_keys.clone(),
+                        operation_keys.clone(),
                     )
                     .with_epoch_cutoff(epoch_cutoff),
                 );
-                let ops = Self::new(storage, cache, field_keys, installation, evaluation.clone());
+                let ops = Self::new(
+                    storage,
+                    cache,
+                    operation_keys,
+                    installation,
+                    evaluation.clone(),
+                );
                 (ops, Some(evaluation))
             }
             PasswordHistoryAuthority::Remote {
@@ -1237,6 +1262,7 @@ impl HistoryPreparation for RemoteHistoryEvaluator {
 }
 
 /// Who may ask the evaluator to prepare an operation.
+#[derive(Clone)]
 pub enum PrepareAdmission {
     /// Nobody over the network: the credential service in this process
     /// prepares in process.

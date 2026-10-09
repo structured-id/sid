@@ -740,6 +740,15 @@ async fn restored_history_refuses_passwords_from_active_and_rotated_epochs() {
     archive
         .epochs
         .sort_by_key(|e| (e.epoch.created_at, e.epoch.id));
+    // A compare-only epoch exists only for the entries it still holds; one
+    // without entries would be required by the evaluator and never by the
+    // checker, so every later proved operation would fail its selection.
+    let mut emptied = archive.clone();
+    emptied.entries.retain(|e| e.epoch != old.epoch.id);
+    assert!(
+        emptied.validate().is_err(),
+        "a compare-only epoch without entries was accepted"
+    );
     // Use a clean source for the complete nonempty archive; exact import never
     // overwrites history that was already prepared on the preceding backend.
     let source = SqliteBackend::new_in_memory().await.unwrap();

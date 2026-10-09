@@ -479,16 +479,27 @@ fn current_password_guesses(profile: ProfileId) -> String {
     format!("current-password:{profile}")
 }
 
+/// Accept `op` as the caller's change of `credential` as it stands now. An
+/// operation begun on a password another change has since replaced is
+/// refused: its authority (a sign-in with that password, or a fresh session
+/// then) is over the replaced one and must not overwrite the newer.
 fn own_change(
     op: &PendingOperation,
     caller: ProfileId,
-    credential_id: CredentialId,
+    credential: &Credential,
 ) -> Result<(), Status> {
     match op.purpose {
         OperationPurpose::Change {
             profile_id,
-            credential_id: changed,
-        } if profile_id == caller && changed == credential_id => Ok(()),
+            credential_id,
+            password,
+        } if profile_id == caller && credential_id == credential.id => {
+            if password == credential.opaque_credential_identifier() {
+                Ok(())
+            } else {
+                Err(changed_concurrently())
+            }
+        }
         _ => Err(super::password_operation::operation_not_pending()),
     }
 }
@@ -525,6 +536,9 @@ pub struct AuthServiceImpl {
     pub(crate) password_ops: Arc<super::password_operation::PasswordOperations>,
     /// The history evaluator, when it runs in this process.
     history_evaluation: Option<Arc<super::password_operation::HistoryEvaluation>>,
+    /// Who may prepare at that evaluator over the network: nobody, unless
+    /// it serves a remote credential service.
+    evaluator_admission: super::password_operation::PrepareAdmission,
     /// The shared cache, for components rebuilt after construction.
     cache: Arc<dyn CacheBackend>,
     /// Profile a WebAuthn ceremony was started for, keyed by its challenge:
@@ -671,6 +685,7 @@ impl AuthServiceImpl {
                 super::password_operation::PasswordHistoryAuthority::InProcess {
                     history_keys: key_manager.clone(),
                     epoch_cutoff: None,
+                    serve: None,
                 },
             );
         let password_ops = Arc::new(password_ops);
@@ -697,6 +712,7 @@ impl AuthServiceImpl {
             ),
             password_ops,
             history_evaluation,
+            evaluator_admission: super::password_operation::PrepareAdmission::InProcess,
             cache: cache_backend.clone(),
             webauthn_state: ChallengeStore::new(
                 cache_backend.clone(),
@@ -853,6 +869,15 @@ impl AuthServiceImpl {
         );
         self.password_ops = Arc::new(ops);
         self.history_evaluation = evaluation;
+        self
+    }
+
+    /// Who may prepare at this server's history evaluator over the network.
+    pub fn with_evaluator_admission(
+        mut self,
+        admission: super::password_operation::PrepareAdmission,
+    ) -> Self {
+        self.evaluator_admission = admission;
         self
     }
 
@@ -2594,7 +2619,7 @@ impl AuthServiceImpl {
         self.history_evaluation.clone().map(|evaluation| {
             super::password_operation::PasswordHistoryEvaluatorImpl::new(
                 evaluation,
-                super::password_operation::PrepareAdmission::InProcess,
+                self.evaluator_admission.clone(),
             )
         })
     }
@@ -3079,6 +3104,7 @@ impl AuthService for AuthServiceImpl {
                 OperationPurpose::Change {
                     profile_id: caller,
                     credential_id: credential.id,
+                    password: credential.opaque_credential_identifier(),
                 },
                 OperationOwner::Existing(caller),
                 format!("profile:{caller}"),
@@ -3101,7 +3127,7 @@ impl AuthService for AuthServiceImpl {
                 })?;
             let id = operation_id(prepared.context.operation_id.as_ref())?;
             self.password_ops
-                .begin_current_password(&id, state, |op| own_change(op, caller, credential.id))
+                .begin_current_password(&id, state, |op| own_change(op, caller, &credential))
                 .await?;
             response
         } else {
@@ -3145,7 +3171,7 @@ impl AuthService for AuthServiceImpl {
             .prove_current_password(
                 &id,
                 &req.credential_finalization,
-                |op| own_change(op, caller, credential.id),
+                |op| own_change(op, caller, &credential),
                 |state, finalization| {
                     self.opaque_router
                         .login_finish(state, finalization)
@@ -3168,7 +3194,7 @@ impl AuthService for AuthServiceImpl {
         let registration_response = self
             .password_ops
             .opaque_start(&zkpp, &id, req.registration_request, |op| {
-                own_change(op, caller, credential.id)
+                own_change(op, caller, &credential)
             })
             .await?;
 
@@ -3208,7 +3234,7 @@ impl AuthService for AuthServiceImpl {
                 &req.registration_record,
                 req.proof,
                 |op| {
-                    own_change(op, caller, credential.id)?;
+                    own_change(op, caller, &credential)?;
                     if required && !op.current_password_proven() {
                         return Err(sid_authn::credential_enrollment::current_password_required());
                     }

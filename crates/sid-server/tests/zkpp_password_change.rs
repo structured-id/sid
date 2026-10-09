@@ -745,6 +745,130 @@ async fn test_a_wrong_current_password_is_refused() {
     assert!(!signs_in(&svc, NEW).await);
 }
 
+/// A change up to its finish without a policy proof, proving `current`: the
+/// operation and the record of `password`.
+async fn unproved_change(
+    svc: &TestServices,
+    credential: &Credential,
+    token: &str,
+    current: &[u8],
+    password: &[u8],
+) -> (PasswordHistoryContext, Vec<u8>) {
+    let login = ClientLogin::<PallasCipherSuite>::start(&mut UnwrapErr(SysRng), current).unwrap();
+    let challenge = svc
+        .auth
+        .password_change_challenge(authed(
+            PasswordChangeChallengeRequest {
+                credential_id: credential.id.0.to_string(),
+                credential_request: login.message.serialize().to_vec(),
+            },
+            token,
+        ))
+        .await
+        .expect("challenge")
+        .into_inner();
+    let context = challenge.history.expect("the change's history context");
+    let finalization = login
+        .state
+        .finish(
+            &mut UnwrapErr(SysRng),
+            current,
+            CredentialResponse::deserialize(&challenge.credential_response).unwrap(),
+            ClientLoginFinishParameters::default(),
+        )
+        .expect("the current password opens the envelope")
+        .message
+        .serialize()
+        .to_vec();
+    let started = client::start(password);
+    let executed = svc
+        .auth
+        .password_change_execute(authed(
+            PasswordChangeExecuteRequest {
+                operation_id: context.operation_id.clone(),
+                credential_id: credential.id.0.to_string(),
+                registration_request: started.request.clone(),
+                credential_finalization: finalization,
+            },
+            token,
+        ))
+        .await
+        .expect("execute")
+        .into_inner();
+    let record = client::finish(started, password, &executed.registration_response);
+    (context, record)
+}
+
+/// Where policy proofs are optional, nothing but the current-password proof
+/// authorizes an unproved change. That proof is of the password it signed in
+/// against: a change begun before another change committed must not replace
+/// the newer password with its own.
+#[tokio::test]
+async fn a_change_proved_against_a_replaced_password_does_not_commit() {
+    let svc = TestServices::with_zkpp_degraded(MockStorage::new().with_system_project());
+    let started = client::start(OLD);
+    let start = svc
+        .auth
+        .opaque_zkpp_registration_start(Request::new(OpaqueZkppRegistrationStartRequest {
+            principal: PRINCIPAL.to_string(),
+            registration_request: started.request.clone(),
+            claim_token: None,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    let done = svc
+        .auth
+        .opaque_zkpp_registration_finish(Request::new(OpaqueZkppRegistrationFinishRequest {
+            operation_id: start.history.unwrap().operation_id,
+            registration_record: client::finish(started, OLD, &start.registration_response),
+            proof: None,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    let credential = svc
+        .storage
+        .get_credential(CredentialId(done.credential_id.parse().unwrap()))
+        .await
+        .unwrap()
+        .unwrap();
+    let profile = svc
+        .storage
+        .get_profile(credential.profile_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let token = common::fresh_token(&svc, &profile).await;
+    let finish = |context: PasswordHistoryContext, record: Vec<u8>| {
+        let svc = &svc;
+        let credential = &credential;
+        let token = &token;
+        async move {
+            svc.auth
+                .password_change_finish(authed(
+                    PasswordChangeFinishRequest {
+                        operation_id: context.operation_id,
+                        credential_id: credential.id.0.to_string(),
+                        registration_record: record,
+                        proof: None,
+                    },
+                    token,
+                ))
+                .await
+        }
+    };
+
+    let (early, early_record) = unproved_change(&svc, &credential, &token, OLD, NEW).await;
+    let (late, late_record) = unproved_change(&svc, &credential, &token, OLD, THIRD).await;
+    finish(late, late_record).await.expect("the later change");
+    finish(early, early_record)
+        .await
+        .expect_err("a change proved against the replaced password committed");
+    assert!(signs_in(&svc, THIRD).await, "the later password stays");
+    assert!(!signs_in(&svc, NEW).await);
+}
+
 /// A wrong current password fails on the client at KE2, so a guesser can
 /// abandon each try before execute. Every sign-in a change begins therefore
 /// counts when its KE2 is issued: after the limit the challenge refuses, so

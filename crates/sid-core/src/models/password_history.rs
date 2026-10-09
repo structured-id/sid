@@ -341,6 +341,17 @@ impl HistoryArchive {
                 return Err(Error::Validation("invalid history archive entry".into()));
             }
         }
+        // A compare-only epoch exists for the entries it still holds: one
+        // without entries is required by the epoch view and by no history
+        // check, so every later proved operation would fail its selection.
+        let empty_compare_only = ids.iter().any(|(id, status)| {
+            *status == HistoryEpochUse::CompareOnly && !entries.iter().any(|(e, _)| e == id)
+        });
+        if empty_compare_only {
+            return Err(Error::Validation(
+                "history archive has a compare-only epoch without entries".into(),
+            ));
+        }
         Ok(())
     }
 }

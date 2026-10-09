@@ -214,6 +214,100 @@ async fn the_history_evaluator_runs_here_unless_a_remote_one_is_complete() {
         .is_err(),
         "the cutoff belongs to the remote evaluator"
     );
+
+    // An evaluator address that is set but unreadable is not "unset": the
+    // start fails rather than handing this server the history keys.
+    let unreadable = password_history_authority(
+        |name| match name {
+            "SID_PASSWORD_HISTORY_EVALUATOR" => Err(VarError::NotUnicode("\u{fffd}".into())),
+            _ => Err(VarError::NotPresent),
+        },
+        &storage,
+        field_keys.clone(),
+        "https://sid.example.com",
+    )
+    .await;
+    assert!(unreadable.is_err());
+}
+
+/// The server that holds the history keys serves the evaluator to a remote
+/// credential service when it names that service's caller: it then admits
+/// network preparation from that caller alone, for the evaluator's resource,
+/// and seals operations with the key it shares with that service. Each of
+/// the three settings needs the others; the address of a remote evaluator
+/// excludes them.
+#[tokio::test]
+async fn the_history_evaluator_is_served_to_a_named_credential_service() {
+    use crate::grpc::password_operation::PasswordHistoryAuthority;
+    use std::env::VarError;
+
+    let storage = store().await;
+    let field_keys: Arc<dyn sid_keys::KeyManager> = Arc::new(keys());
+    let dir = tempfile::tempdir().unwrap();
+    let operation_key = dir.path().join("operation.key");
+    let complete = [
+        (
+            "SID_PASSWORD_HISTORY_PREPARE_CALLER",
+            "machine:credential-service".to_owned(),
+        ),
+        (
+            "SID_PASSWORD_HISTORY_EVALUATOR_RESOURCE",
+            "https://history.sid.example.com/".to_owned(),
+        ),
+        (
+            "SID_PASSWORD_OPERATION_KEY_FILE",
+            operation_key.display().to_string(),
+        ),
+    ];
+    let authority = |missing: &str, extra: Option<(&str, &str)>| {
+        let vars: Vec<(String, String)> = complete
+            .iter()
+            .filter(|(name, _)| *name != missing)
+            .map(|(name, value)| ((*name).to_owned(), value.clone()))
+            .chain(extra.map(|(n, v)| (n.to_owned(), v.to_owned())))
+            .collect();
+        let storage = &storage;
+        let field_keys = field_keys.clone();
+        async move {
+            password_history_authority(
+                |name| {
+                    vars.iter()
+                        .find(|(key, _)| key == name)
+                        .map(|(_, value)| value.clone())
+                        .ok_or(VarError::NotPresent)
+                },
+                storage,
+                field_keys,
+                "https://sid.example.com",
+            )
+            .await
+        }
+    };
+
+    match authority("", None).await.unwrap() {
+        PasswordHistoryAuthority::InProcess {
+            serve: Some(serve), ..
+        } => {
+            assert_eq!(serve.caller, "machine:credential-service");
+            assert_eq!(serve.resource.as_str(), "https://history.sid.example.com/");
+        }
+        _ => panic!("not served to the credential service"),
+    }
+    for (name, _) in &complete[1..] {
+        assert!(authority(name, None).await.is_err(), "{name} is required");
+    }
+    assert!(
+        authority(
+            "",
+            Some((
+                "SID_PASSWORD_HISTORY_EVALUATOR",
+                "http://history.sid.example.com:50051"
+            ))
+        )
+        .await
+        .is_err(),
+        "a server is either the evaluator or its client"
+    );
 }
 
 /// A machine-credential alert keeps its id across scans (relayed once) and

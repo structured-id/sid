@@ -9,6 +9,7 @@ fn change() -> OperationPurpose {
     OperationPurpose::Change {
         profile_id: ProfileId::generate(),
         credential_id: CredentialId(uuid::Uuid::now_v7()),
+        password: [5; 16],
     }
 }
 
