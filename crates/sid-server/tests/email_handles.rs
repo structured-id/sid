@@ -68,6 +68,7 @@ fn harness(storage: Arc<dyn StorageBackend>) -> Harness {
             storage.clone(),
             "/tmp/sid-test-exports".to_string(),
         )),
+        sid_plugin::crypto::CurveId::Pallas,
     );
     Harness {
         identity,

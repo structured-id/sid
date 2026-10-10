@@ -3,14 +3,61 @@ use sid_authn::webauthn::soft_authenticator::SoftAuthenticator;
 use sid_authn::webauthn::{RegistrationResponse, WebAuthnServer};
 use sid_proto::sid::v1::{AuthenticatorAttachment, AuthenticatorTransport, credential};
 
-/// A password credential carries no type-specific info: the API's OPAQUE
-/// configuration is fixed by the contract, not per credential.
+/// A password credential names the OPAQUE configuration it signs in with:
+/// its recorded curve's suite, or for one stored before the curve was
+/// recorded the deployment's primary curve, the one sign-in uses for it,
+/// never an assumed Pallas.
 #[test]
-fn test_credential_info_is_absent_for_a_password() {
+fn test_credential_info_names_the_configuration_sign_in_uses() {
+    use sid_core::models::{Credential, CredentialType, ProfileId};
+    use sid_plugin::crypto::CurveId;
+    use sid_proto::sid::v1::{OpaqueSuite, credential::Info};
+
+    let suite = |curve: Option<u8>, primary: CurveId| {
+        let mut c = Credential::new(ProfileId::generate(), CredentialType::Opaque, vec![1], None);
+        c.opaque_curve = curve;
+        match credential_info(&c, primary).unwrap() {
+            Some(Info::OpaqueInfo(info)) => info.suite(),
+            _ => panic!("no OPAQUE info"),
+        }
+    };
+    assert_eq!(suite(None, CurveId::P256), OpaqueSuite::P256V1);
+    assert_eq!(suite(None, CurveId::Pallas), OpaqueSuite::PallasV1);
+    assert_eq!(
+        suite(Some(CurveId::Ristretto255 as u8), CurveId::Pallas),
+        OpaqueSuite::Ristretto255V1
+    );
+    assert_eq!(
+        suite(Some(CurveId::P384 as u8), CurveId::Pallas),
+        OpaqueSuite::P384V1
+    );
+    assert_eq!(
+        suite(Some(CurveId::P521 as u8), CurveId::Pallas),
+        OpaqueSuite::P521V1
+    );
+}
+
+/// A recorded curve the server does not know is an error, never a guess.
+#[test]
+fn test_credential_info_refuses_an_unknown_curve() {
     use sid_core::models::{Credential, CredentialType, ProfileId};
 
-    let c = Credential::new(ProfileId::generate(), CredentialType::Opaque, vec![1], None);
-    assert!(credential_info(&c).unwrap().is_none());
+    let mut c = Credential::new(ProfileId::generate(), CredentialType::Opaque, vec![1], None);
+    c.opaque_curve = Some(200);
+    assert!(credential_info(&c, sid_plugin::crypto::CurveId::Pallas).is_err());
+}
+
+/// A type without type-specific info carries none.
+#[test]
+fn test_credential_info_is_absent_for_totp() {
+    use sid_core::models::{Credential, CredentialType, ProfileId};
+
+    let c = Credential::new(ProfileId::generate(), CredentialType::Totp, vec![1], None);
+    assert!(
+        credential_info(&c, sid_plugin::crypto::CurveId::Pallas)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -63,7 +110,9 @@ async fn passkey_record(key: &mut SoftAuthenticator) -> Vec<u8> {
 }
 
 fn webauthn_info(data: &[u8]) -> sid_proto::sid::v1::WebAuthnCredentialInfo {
-    let credential::Info::WebauthnInfo(info) = extract_webauthn_info(data).unwrap();
+    let credential::Info::WebauthnInfo(info) = extract_webauthn_info(data).unwrap() else {
+        panic!("not passkey facts");
+    };
     info
 }
 

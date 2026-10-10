@@ -218,18 +218,53 @@ pub(crate) fn extract_webauthn_info(
     ))
 }
 
+/// The curve an OPAQUE credential signs in with: its recorded one, or for a
+/// credential stored before the curve was recorded, the deployment's
+/// `primary` curve. Sign-in and the reported configuration both use this.
+#[allow(clippy::result_large_err)]
+pub(crate) fn opaque_curve(
+    c: &sid_core::models::Credential,
+    primary: sid_plugin::crypto::CurveId,
+) -> Result<sid_plugin::crypto::CurveId, tonic::Status> {
+    match c.opaque_curve {
+        None => Ok(primary),
+        Some(raw) => sid_plugin::crypto::CurveId::try_from(raw).map_err(|_| {
+            sid_core::grpc_error::refuse::internal(
+                "read OPAQUE curve",
+                format!("credential {} has curve {raw}", c.id.0),
+            )
+        }),
+    }
+}
+
 /// The `info` of a credential's proto: its passkey facts for a WebAuthn
-/// credential, nothing for another type. A password carries no suite: the
-/// API's single OPAQUE configuration is fixed by the contract.
+/// credential, its OPAQUE configuration for a password, nothing for another
+/// type. Each curve has exactly one cipher suite implementation (its OPRF,
+/// hash and KSF), so the curve sign-in uses names the full configuration.
 #[allow(clippy::result_large_err)]
 pub(crate) fn credential_info(
     c: &sid_core::models::Credential,
+    primary: sid_plugin::crypto::CurveId,
 ) -> Result<Option<sid_proto::sid::v1::credential::Info>, tonic::Status> {
     use sid_core::models::CredentialType;
+    use sid_plugin::crypto::CurveId;
+    use sid_proto::sid::v1::{OpaqueCredentialInfo, OpaqueSuite, credential::Info};
     match c.credential_type {
         CredentialType::WebAuthn => extract_webauthn_info(c.data.expose())
             .map(Some)
             .map_err(|e| sid_core::grpc_error::refuse::internal("read stored passkey", e)),
+        CredentialType::Opaque => {
+            let suite = match opaque_curve(c, primary)? {
+                CurveId::Pallas => OpaqueSuite::PallasV1,
+                CurveId::Ristretto255 => OpaqueSuite::Ristretto255V1,
+                CurveId::P256 => OpaqueSuite::P256V1,
+                CurveId::P384 => OpaqueSuite::P384V1,
+                CurveId::P521 => OpaqueSuite::P521V1,
+            };
+            Ok(Some(Info::OpaqueInfo(OpaqueCredentialInfo {
+                suite: suite as i32,
+            })))
+        }
         _ => Ok(None),
     }
 }

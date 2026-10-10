@@ -47,7 +47,7 @@ use sid_core::models::{
     RevocationReason,
 };
 use sid_plugin::cache::CacheBackend;
-use sid_plugin::crypto::{CurveId, LoginState, StoredCredential};
+use sid_plugin::crypto::{LoginState, StoredCredential};
 use sid_plugin::storage::StorageBackend;
 use sid_proto::sid::v1::auth_service_server::AuthService;
 use sid_proto::sid::v1::*;
@@ -2169,15 +2169,7 @@ impl AuthServiceImpl {
 
     /// The OPAQUE password file of `credential`, opened, with its curve.
     async fn stored_password(&self, credential: &Credential) -> Result<StoredCredential, Status> {
-        let curve = match credential.opaque_curve {
-            Some(c) => CurveId::try_from(c).map_err(|_| {
-                internal(
-                    "read OPAQUE curve",
-                    format!("credential {} has curve {c}", credential.id.0),
-                )
-            })?,
-            None => self.opaque_router.primary_curve(),
-        };
+        let curve = super::convert::opaque_curve(credential, self.opaque_router.primary_curve())?;
         Ok(StoredCredential {
             curve,
             data: self.open_envelope(credential).await?.to_vec(),
