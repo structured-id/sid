@@ -118,8 +118,8 @@ async fn the_history_evaluator_runs_here_unless_a_remote_one_is_complete() {
             Arc::new(storage.history_keys());
         async move { Ok(store) }
     };
-    let field_keys: Arc<dyn sid_keys::KeyManager> = Arc::new(keys());
     let dir = tempfile::tempdir().unwrap();
+    let master = dir.path().join("master.key");
     let secret = dir.path().join("caller.secret");
     std::fs::write(&secret, "caller-secret").unwrap();
     let complete = [
@@ -159,7 +159,7 @@ async fn the_history_evaluator_runs_here_unless_a_remote_one_is_complete() {
             .map(|(name, value)| ((*name).to_owned(), value.clone()))
             .chain(extra.map(|(n, v)| (n.to_owned(), v.to_owned())))
             .collect();
-        let field_keys = field_keys.clone();
+        let master = &master;
         let storage = &storage;
         async move {
             password_history_authority(
@@ -171,7 +171,7 @@ async fn the_history_evaluator_runs_here_unless_a_remote_one_is_complete() {
                 },
                 storage,
                 local,
-                field_keys,
+                master,
                 "https://sid.example.com",
             )
             .await
@@ -201,7 +201,7 @@ async fn the_history_evaluator_runs_here_unless_a_remote_one_is_complete() {
         },
         &storage,
         local,
-        field_keys.clone(),
+        &master,
         "https://sid.example.com",
     )
     .await
@@ -210,6 +210,9 @@ async fn the_history_evaluator_runs_here_unless_a_remote_one_is_complete() {
         panic!("the evaluator runs here");
     };
     assert_eq!(opened.load(Ordering::SeqCst), 1);
+    // Its keys are sealed under versions its own store records, not the
+    // credential service's field-key versions.
+    assert_eq!(store.list_key_versions().await.unwrap().len(), 1);
     assert_eq!(credential_cutoff().await, at("2026-10-01T12:00:00Z"));
     assert_eq!(
         store.write_cutoff().await.unwrap(),
@@ -283,7 +286,7 @@ async fn the_history_evaluator_runs_here_unless_a_remote_one_is_complete() {
         },
         &storage,
         local,
-        field_keys.clone(),
+        &master,
         "https://sid.example.com",
     )
     .await;
@@ -353,6 +356,7 @@ async fn a_restored_database_gets_the_configured_cutoff_back() {
             .unwrap()
     );
 
+    let master_dir = tempfile::tempdir().unwrap();
     let authority = password_history_authority(
         |name| match name {
             "SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE" => Ok("2026-10-01T00:00:00Z".into()),
@@ -364,7 +368,7 @@ async fn a_restored_database_gets_the_configured_cutoff_back() {
                 Arc::new(storage.history_keys());
             async move { Ok(store) }
         },
-        Arc::new(keys()),
+        &master_dir.path().join("master.key"),
         "https://sid.example.com",
     )
     .await

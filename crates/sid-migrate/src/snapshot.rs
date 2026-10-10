@@ -59,6 +59,12 @@ pub struct Snapshot {
     /// has its key here.
     pub history_keys: Vec<sid_core::models::KeyArchive>,
 
+    /// Public derivation parameters of the evaluator's own key custody,
+    /// which seals `history_keys`; apart from `key_versions`, which seal the
+    /// credential service's fields. The evaluator's master key is never
+    /// included.
+    pub history_key_versions: Vec<sid_keys::KeyVersionParams>,
+
     /// Active sessions (expired sessions are excluded).
     pub sessions: Vec<Session>,
 
@@ -216,6 +222,7 @@ impl Snapshot {
             credentials: Vec::new(),
             password_histories: Vec::new(),
             history_keys: Vec::new(),
+            history_key_versions: Vec::new(),
             sessions: Vec::new(),
             service_bindings: Vec::new(),
             applications: Vec::new(),
@@ -268,6 +275,7 @@ impl Snapshot {
             .filter(|(_, h)| h.is_some())
             .count() as u64;
         count += self.history_keys.len() as u64;
+        count += self.history_key_versions.len() as u64;
         count += self.sessions.len() as u64;
         count += self.service_bindings.len() as u64;
         count += self.applications.len() as u64;

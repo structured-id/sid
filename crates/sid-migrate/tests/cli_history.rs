@@ -18,6 +18,11 @@ fn ctx() -> MutationContext {
     AuditEntry::system("test", "cli").into()
 }
 
+/// The evaluator's key version the source's history key is sealed under.
+fn history_key_version() -> sid_keys::KeyVersionParams {
+    sid_keys::KeyVersionParams::new(1, vec![7; 16], "history-v1")
+}
+
 /// A file-backed installation of `org` whose one profile has a nonempty
 /// history under an evaluator key, written by an accepted password's commit.
 struct Source {
@@ -37,10 +42,8 @@ async fn source_with_history(dir: &std::path::Path, org: &Organization) -> Sourc
     let profile = Profile::new(Some("cli-history-transfer"));
     source.create_profile(&profile, ctx()).await.unwrap();
     source
-        .insert_key_version(
-            &sid_keys::KeyVersionParams::new(1, vec![7; 16], "key-v1"),
-            ctx(),
-        )
+        .history_keys()
+        .insert_key_version(&history_key_version(), AuditEntry::system("test", "cli"))
         .await
         .unwrap();
     let id = HistoryEpochId::generate();
@@ -267,6 +270,12 @@ async fn cli_restores_history_keys_into_the_evaluators_own_database() {
         keys.get_epoch_key(source.epoch.epoch.id).await.unwrap(),
         Some(source.epoch.key)
     );
+    // The evaluator's key custody moved with its keys, to its database.
+    assert_eq!(
+        keys.list_key_versions().await.unwrap(),
+        vec![history_key_version()]
+    );
+    assert!(target.list_key_versions().await.unwrap().is_empty());
     let (in_credentials,): (bool,) = sqlx::query_as(
         "SELECT EXISTS (SELECT 1 FROM information_schema.tables \
          WHERE table_schema = $1 AND table_name LIKE 'history_key%')",

@@ -1057,6 +1057,48 @@ impl HistoryKeyStore for SqliteHistoryKeyStore {
         Ok(cutoff)
     }
 
+    async fn list_key_versions(&self) -> SidResult<Vec<sid_keys::KeyVersionParams>> {
+        let rows: Vec<(i64, Vec<u8>, String, String)> = sqlx::query_as(
+            "SELECT version, salt, algorithm, context FROM history_key_versions ORDER BY version",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage("key versions"))?;
+        rows.into_iter()
+            .map(|(version, salt, algorithm, context)| {
+                let version = u32::try_from(version)
+                    .map_err(|_| SidError::Storage("negative key version".into()))?;
+                crate::key_versions::key_version_params(version, salt, &algorithm, context)
+            })
+            .collect()
+    }
+
+    async fn insert_key_version(
+        &self,
+        params: &sid_keys::KeyVersionParams,
+        audit: AuditEntry,
+    ) -> SidResult<bool> {
+        let mut tx = self.begin_write().await?;
+        let inserted = sqlx::query(
+            "INSERT INTO history_key_versions (version, salt, algorithm, context)
+             VALUES (?, ?, ?, ?) ON CONFLICT (version) DO NOTHING",
+        )
+        .bind(i64::from(params.version))
+        .bind(&params.salt)
+        .bind(crate::key_versions::key_derivation_name(params.algorithm))
+        .bind(&params.context)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage("key version"))?
+        .rows_affected()
+            == 1;
+        if inserted {
+            key_audit(&mut tx, audit).await?;
+            tx.commit().await.map_err(storage("commit"))?;
+        }
+        Ok(inserted)
+    }
+
     async fn export_keys(&self, owner_domain: &[u8; 32]) -> SidResult<Option<KeyArchive>> {
         let mut tx = self.pool.begin().await.map_err(storage("archive read"))?;
         let archive = read_key_archive(&mut tx, owner_domain).await?;

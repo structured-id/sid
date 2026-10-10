@@ -59,6 +59,15 @@ pub async fn verify_backends(
             ));
         }
     }
+    let target_history_versions = target_keys.list_key_versions().await?;
+    for params in source_keys.list_key_versions().await? {
+        if !target_history_versions.contains(&params) {
+            integrity_issues.push(format!(
+                "history key derivation parameters differ for version {}",
+                params.version
+            ));
+        }
+    }
 
     // Compare profile counts
     info!("verifying profiles...");

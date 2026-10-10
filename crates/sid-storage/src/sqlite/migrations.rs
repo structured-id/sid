@@ -46,7 +46,23 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 6,
         sql: ENROLLMENT_CLEANUP,
     },
+    Migration {
+        version: 7,
+        sql: HISTORY_KEY_VERSIONS,
+    },
 ];
+
+/// The evaluator's own key custody versions; its PostgreSQL migration 003
+/// states the contract.
+const HISTORY_KEY_VERSIONS: &str = "
+CREATE TABLE history_key_versions (
+    version    INTEGER PRIMARY KEY CHECK (version > 0),
+    salt       BLOB NOT NULL,
+    algorithm  TEXT NOT NULL,
+    context    TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+";
 
 /// Reclaiming the keys of first enrollments that never committed; the
 /// evaluator's PostgreSQL migration 002 states the contract.

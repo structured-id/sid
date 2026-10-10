@@ -510,6 +510,19 @@ pub async fn test_cleanup_races_preparation(store: &dyn HistoryKeyStore) {
     }
 }
 
+/// The evaluator's key versions are its own record: inserted once, never
+/// replaced, listed in version order.
+pub async fn test_history_key_versions_are_insert_only(store: &dyn HistoryKeyStore) {
+    let v1 = sid_keys::KeyVersionParams::new(1, vec![1; 16], "history-v1");
+    let v2 = sid_keys::KeyVersionParams::new(2, vec![2; 16], "history-v2");
+    assert!(store.list_key_versions().await.unwrap().is_empty());
+    assert!(store.insert_key_version(&v2, audit()).await.unwrap());
+    assert!(store.insert_key_version(&v1, audit()).await.unwrap());
+    let other = sid_keys::KeyVersionParams::new(1, vec![9; 16], "replaced");
+    assert!(!store.insert_key_version(&other, audit()).await.unwrap());
+    assert_eq!(store.list_key_versions().await.unwrap(), vec![v1, v2]);
+}
+
 /// A fence is dropped only once older than asked; until then it still
 /// refuses its operation's preparation.
 pub async fn test_abandoned_fences_are_compacted(store: &dyn HistoryKeyStore) {

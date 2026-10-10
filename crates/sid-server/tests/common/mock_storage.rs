@@ -112,6 +112,8 @@ pub struct MockStorageInner {
     key_uses: Vec<(Uuid, HistoryEpochId, chrono::DateTime<chrono::Utc>)>,
     /// The evaluator's audit entries, in order.
     key_audits: Vec<AuditEntry>,
+    /// The evaluator's own key custody versions.
+    history_key_versions: Vec<sid_keys::KeyVersionParams>,
     /// The first enrollment that created each epoch it created.
     key_created_by: HashMap<HistoryEpochId, Uuid>,
     /// Aborted first enrollments: their owner domain and when they were.
@@ -858,6 +860,30 @@ impl sid_plugin::history_keys::HistoryKeyStore for MockStorage {
                 Ok(not_before)
             }
         }
+    }
+
+    async fn list_key_versions(&self) -> SidResult<Vec<sid_keys::KeyVersionParams>> {
+        let mut versions = self.inner.lock().unwrap().history_key_versions.clone();
+        versions.sort_by_key(|v| v.version);
+        Ok(versions)
+    }
+
+    async fn insert_key_version(
+        &self,
+        params: &sid_keys::KeyVersionParams,
+        audit: AuditEntry,
+    ) -> SidResult<bool> {
+        let mut inner = self.inner.lock().unwrap();
+        if inner
+            .history_key_versions
+            .iter()
+            .any(|v| v.version == params.version)
+        {
+            return Ok(false);
+        }
+        inner.history_key_versions.push(params.clone());
+        inner.key_audits.push(audit);
+        Ok(true)
     }
 
     async fn export_keys(&self, _: &[u8; 32]) -> SidResult<Option<KeyArchive>> {

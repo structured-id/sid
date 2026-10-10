@@ -813,7 +813,7 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         |name| std::env::var(name),
         storage.as_ref(),
         || local_history_keys.open(),
-        key_manager.clone(),
+        std::path::Path::new(&master_key_path),
         &issuer,
     )
     .await
@@ -1403,7 +1403,9 @@ impl LocalHistoryKeys {
 
 /// Where this server's password history evaluator runs. Without
 /// `SID_PASSWORD_HISTORY_EVALUATOR` it runs here, over the store `local`
-/// opens and sealing history keys with the field keys. With it, this server
+/// opens, sealing history keys under the installation's master secret
+/// (`master_key_path`) and the key versions that store records: the
+/// evaluator's custody stays its own, so its store moves with its keys. With it, this server
 /// calls that gRPC address with its own client credential
 /// (`SID_PASSWORD_HISTORY_CALLER_*`) for the evaluator's resource
 /// (`SID_PASSWORD_HISTORY_EVALUATOR_RESOURCE`), requested from the issuer at
@@ -1421,7 +1423,7 @@ async fn password_history_authority<Local>(
     var: impl Fn(&str) -> Result<String, std::env::VarError>,
     storage: &dyn sid_plugin::StorageBackend,
     local: impl FnOnce() -> Local,
-    field_keys: Arc<dyn sid_keys::KeyManager>,
+    master_key_path: &std::path::Path,
     base: &str,
 ) -> anyhow::Result<crate::grpc::password_operation::PasswordHistoryAuthority>
 where
@@ -1455,9 +1457,12 @@ where
                 .await
                 .context("SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE: evaluator cutoff")?;
         }
+        let history_keys = crate::field_keys::field_key_manager(store.as_ref(), master_key_path)
+            .await
+            .context("password history evaluator keys")?;
         return Ok(PasswordHistoryAuthority::InProcess {
             store,
-            history_keys: field_keys,
+            history_keys,
         });
     };
     // An invalid RFC 8707 indicator of the evaluator stops the start.

@@ -385,6 +385,10 @@ const HISTORY_KEY_MIGRATIONS: &[Migration] = &[
         name: "20261010_002_enrollment_cleanup",
         sql: include_str!("../../../migrations/history_keys/20261010_002_enrollment_cleanup.sql"),
     },
+    Migration {
+        name: "20261010_003_key_versions",
+        sql: include_str!("../../../migrations/history_keys/20261010_003_key_versions.sql"),
+    },
 ];
 
 /// Run the pending migrations of the history evaluator's store on `pool`:

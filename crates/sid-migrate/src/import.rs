@@ -43,7 +43,8 @@ pub(crate) fn validate_opaque_setup(snapshot: &Snapshot) -> anyhow::Result<()> {
 /// Validate the password history state of a snapshot as a whole: one history
 /// entry per profile; each archive and each key archive well formed; every
 /// key archive belongs to the history domain of a snapshot profile, once,
-/// with its key derivation versions included; and every epoch a history
+/// with the evaluator's key derivation versions it is sealed under included
+/// (its own custody, not the credential service's); and every epoch a history
 /// names has its key with the same descriptor, so no history arrives that
 /// its owner's operations could not evaluate.
 pub(crate) fn validate_history(snapshot: &Snapshot) -> anyhow::Result<()> {
@@ -93,7 +94,7 @@ pub(crate) fn validate_history(snapshot: &Snapshot) -> anyhow::Result<()> {
             let sealed = sid_keys::EncryptedField::from_bytes(&epoch.key.0)?;
             anyhow::ensure!(
                 snapshot
-                    .key_versions
+                    .history_key_versions
                     .iter()
                     .any(|v| v.version == sealed.key_version),
                 "snapshot omits a required history key derivation version"
@@ -164,6 +165,26 @@ pub async fn import_snapshot(
             current.is_none() || current.as_ref() == Some(archive),
             "target password history keys conflict with snapshot"
         );
+    }
+    // The evaluator's custody versions, checked like the field-key versions
+    // before anything is written: a conflicting version would open its keys
+    // under another derivation.
+    let current_history_versions = history_keys.list_key_versions().await?;
+    let mut history_versions = std::collections::BTreeSet::new();
+    for params in &snapshot.history_key_versions {
+        anyhow::ensure!(
+            history_versions.insert(params.version),
+            "duplicate history key version in snapshot"
+        );
+        if let Some(current) = current_history_versions
+            .iter()
+            .find(|v| v.version == params.version)
+        {
+            anyhow::ensure!(
+                current == params,
+                "target history key derivation parameters conflict with snapshot"
+            );
+        }
     }
     let mut result = ImportResult::default();
     let actor = "sid-migrate".to_string();
@@ -250,7 +271,24 @@ pub async fn import_snapshot(
     // Keys precede history and history precedes credentials: a failure never
     // installs a password without its retained comparison state, nor a
     // history whose keys are missing. Instance migration requires quiesced
-    // writers.
+    // writers. The evaluator's custody versions precede the keys they open.
+    for params in &snapshot.history_key_versions {
+        if history_keys
+            .insert_key_version(
+                params,
+                AuditEntry::system("import_history_key_version", params.version.to_string())
+                    .with_metadata(serde_json::json!({"tool": "sid-migrate"})),
+            )
+            .await?
+        {
+            result.key_versions += 1;
+        } else {
+            anyhow::ensure!(
+                history_keys.list_key_versions().await?.contains(params),
+                "history key version changed during import"
+            );
+        }
+    }
     for archive in &snapshot.history_keys {
         if history_keys
             .import_keys(

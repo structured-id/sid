@@ -118,6 +118,20 @@ pub trait HistoryKeyStore: Send + Sync {
         audit: AuditEntry,
     ) -> Result<DateTime<Utc>>;
 
+    /// The non-secret derivation parameters of the key versions sealing this
+    /// store's history keys: the evaluator's own key custody, apart from any
+    /// other service's field keys. With the evaluator's master secret, held
+    /// outside the database, they reconstruct every version.
+    async fn list_key_versions(&self) -> Result<Vec<sid_keys::KeyVersionParams>>;
+
+    /// Record a key version's parameters. Returns `false`, writing nothing,
+    /// when the version is already recorded; versions are never replaced.
+    async fn insert_key_version(
+        &self,
+        params: &sid_keys::KeyVersionParams,
+        audit: AuditEntry,
+    ) -> Result<bool>;
+
     /// Every epoch with its key and every replacement of one owner, for an
     /// offline same-authority transfer; `None` when the owner has no epoch.
     async fn export_keys(&self, owner_domain: &[u8; 32]) -> Result<Option<KeyArchive>>;

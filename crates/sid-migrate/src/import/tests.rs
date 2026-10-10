@@ -274,9 +274,18 @@ async fn opaque_login_survives_serialized_transfer_and_restart() {
 
     // The archive contains both a genuine OPAQUE password and its proved
     // nonempty history. The small KSF is a functional fixture, not a benchmark.
+    // The evaluator seals under its own custody's versions.
+    source
+        .history_keys()
+        .insert_key_version(
+            &KeyVersionParams::new(1, vec![8; 32], "history-restore-key"),
+            AuditEntry::system("test", "opaque-restore"),
+        )
+        .await
+        .unwrap();
     let evaluator = sid_authn::password_history::HistoryEvaluator::new(Arc::new(manager(
         [9; 32],
-        source.list_key_versions().await.unwrap(),
+        source.history_keys().list_key_versions().await.unwrap(),
     )));
     let epoch = evaluator
         .new_epoch(
@@ -485,7 +494,7 @@ async fn opaque_login_survives_serialized_transfer_and_restart() {
     assert!(session.expose_secret() == finished.session_key.as_slice());
     let evaluator = sid_authn::password_history::HistoryEvaluator::new(Arc::new(manager(
         [9; 32],
-        target.list_key_versions().await.unwrap(),
+        target.history_keys().list_key_versions().await.unwrap(),
     )));
     let history_before = target.get_password_history(profile.id).await.unwrap();
     assert_eq!(history_before.entries.len(), 1);
@@ -739,7 +748,11 @@ async fn restored_history_refuses_passwords_from_active_and_rotated_epochs() {
     source.create_profile(&profile, ctx()).await.unwrap();
     let domain = owner_domain(&installation_id, profile.id);
     let params = KeyVersionParams::new(1, vec![7; 32], "restore-key");
-    source.insert_key_version(&params, ctx()).await.unwrap();
+    source
+        .history_keys()
+        .insert_key_version(&params, audit())
+        .await
+        .unwrap();
     let manager = |master, versions| {
         Arc::new(
             SoftwareKeyManager::new(
@@ -911,7 +924,11 @@ async fn restored_history_refuses_passwords_from_active_and_rotated_epochs() {
     // overwrites history that was already prepared on the preceding backend.
     let source = installation(&org).await;
     source.create_profile(&profile, ctx()).await.unwrap();
-    source.insert_key_version(&params, ctx()).await.unwrap();
+    source
+        .history_keys()
+        .insert_key_version(&params, audit())
+        .await
+        .unwrap();
     source
         .history_keys()
         .import_keys(&keys, audit())
@@ -932,8 +949,10 @@ async fn restored_history_refuses_passwords_from_active_and_rotated_epochs() {
         target.history_keys().export_keys(&domain).await.unwrap(),
         Some(keys)
     );
-    let restored =
-        HistoryEvaluator::new(manager([9; 32], target.list_key_versions().await.unwrap()));
+    let restored = HistoryEvaluator::new(manager(
+        [9; 32],
+        target.history_keys().list_key_versions().await.unwrap(),
+    ));
     for retained in [b"OldStr0ngP@ss1".as_slice(), b"OtherStr0ngP@ss2".as_slice()] {
         assert_eq!(
             check_password(
@@ -974,7 +993,10 @@ async fn restored_history_refuses_passwords_from_active_and_rotated_epochs() {
         relation::random_blind(rand::rng()),
     )
     .to_bytes();
-    let wrong = HistoryEvaluator::new(manager([10; 32], target.list_key_versions().await.unwrap()));
+    let wrong = HistoryEvaluator::new(manager(
+        [10; 32],
+        target.history_keys().list_key_versions().await.unwrap(),
+    ));
     assert!(
         wrong
             .evaluate(&blinded, &domain, &[(epoch, wrapped)], b"restore-refusal")
@@ -1034,6 +1056,14 @@ async fn password_history_survives_migration() {
         .insert_key_version(
             &sid_keys::KeyVersionParams::new(1, vec![1; 16], "key-v1"),
             ctx(),
+        )
+        .await
+        .unwrap();
+    source
+        .history_keys()
+        .insert_key_version(
+            &sid_keys::KeyVersionParams::new(1, vec![6; 16], "history-v1"),
+            AuditEntry::system("test", "history"),
         )
         .await
         .unwrap();
@@ -1210,7 +1240,11 @@ async fn history_key_restore_requires_the_original_external_key() {
     let ctx = || AuditEntry::system("test", "restore").into();
     let profile = Profile::new(Some("history-key-restore"));
     source.create_profile(&profile, ctx()).await.unwrap();
-    source.insert_key_version(&params, ctx()).await.unwrap();
+    source
+        .history_keys()
+        .insert_key_version(&params, AuditEntry::system("test", "restore"))
+        .await
+        .unwrap();
     // An owner with a key and no history yet (prepared, never committed).
     let mut epoch = sealed_epoch(org.id.as_bytes(), profile.id);
     let id = epoch.epoch.id;
@@ -1235,7 +1269,7 @@ async fn history_key_restore_requires_the_original_external_key() {
     let target = installation(&org).await;
     import(&target, &restored).await.unwrap();
     assert_eq!(
-        target.list_key_versions().await.unwrap(),
+        target.history_keys().list_key_versions().await.unwrap(),
         vec![params.clone()]
     );
     let wrapped = target
@@ -1250,7 +1284,7 @@ async fn history_key_restore_requires_the_original_external_key() {
     assert_eq!(recovered_keys.decrypt(&field).await.unwrap(), secret);
     assert!(manager([10u8; 32]).decrypt(&field).await.is_err());
     let mut missing_version = restored.clone();
-    missing_version.key_versions.clear();
+    missing_version.history_key_versions.clear();
     let blank = installation(&org).await;
     assert!(import(&blank, &missing_version).await.is_err());
     assert_eq!(blank.count_profiles().await.unwrap(), 0);
@@ -1265,6 +1299,98 @@ async fn history_key_restore_requires_the_original_external_key() {
     *key = WrappedHistoryKey(field.to_bytes());
     assert!(import(&blank, &swapped).await.is_err());
     assert_eq!(blank.count_profiles().await.unwrap(), 0);
+}
+
+/// The evaluator holds its own key custody: its keys move with the key
+/// versions its store records, however those differ from the credential
+/// service's field-key versions (here rotated independently, with other
+/// salts and a version the credential service never had). The restored
+/// evaluator opens its key; a snapshot without the evaluator's versions is
+/// refused before anything is written.
+#[tokio::test]
+async fn history_keys_move_with_the_evaluators_own_key_versions() {
+    use sid_core::models::*;
+    use sid_keys::{KeyManager, KeyVersionParams, RustCryptoPrimitives, SoftwareKeyManager};
+    use sid_plugin::history_keys::HistoryKeyStore;
+    use std::sync::Arc;
+    let field_version = KeyVersionParams::new(1, vec![1; 16], "field-v1");
+    let evaluator_versions = vec![
+        KeyVersionParams::new(1, vec![2; 16], "history-v1"),
+        KeyVersionParams::new(2, vec![3; 16], "history-v2"),
+    ];
+    let evaluator_keys = |versions| {
+        SoftwareKeyManager::new(
+            secrecy::SecretBox::new(Box::new([9u8; 32])),
+            versions,
+            Arc::new(RustCryptoPrimitives::new()),
+        )
+        .unwrap()
+    };
+    let org = Organization::implicit_community("sid.example.com");
+    let source = installation(&org).await;
+    let ctx = || AuditEntry::system("test", "custody").into();
+    let profile = Profile::new(Some("evaluator-custody"));
+    source.create_profile(&profile, ctx()).await.unwrap();
+    source
+        .insert_key_version(&field_version, ctx())
+        .await
+        .unwrap();
+    for params in &evaluator_versions {
+        source
+            .history_keys()
+            .insert_key_version(params, AuditEntry::system("test", "custody"))
+            .await
+            .unwrap();
+    }
+    let mut epoch = sealed_epoch(org.id.as_bytes(), profile.id);
+    let id = epoch.epoch.id;
+    let secret = [0xcd; 32];
+    let sealed = evaluator_keys(evaluator_versions.clone())
+        .encrypt(&secret, &history_key_context(id, &epoch.epoch.owner_domain))
+        .await
+        .unwrap();
+    assert_eq!(sealed.key_version, 2, "sealed under the evaluator's newest");
+    epoch.key = WrappedHistoryKey(sealed.to_bytes());
+    source
+        .history_keys()
+        .create_first_epoch(
+            &epoch,
+            uuid::Uuid::now_v7(),
+            AuditEntry::system("test", "custody"),
+        )
+        .await
+        .unwrap();
+
+    let snapshot = export(&source).await.unwrap();
+    assert_eq!(snapshot.key_versions, vec![field_version.clone()]);
+    assert_eq!(snapshot.history_key_versions, evaluator_versions);
+
+    let mut without = snapshot.clone();
+    without.history_key_versions.clear();
+    let blank = installation(&org).await;
+    assert!(import(&blank, &without).await.is_err());
+    assert_eq!(blank.count_profiles().await.unwrap(), 0);
+
+    let target = installation(&org).await;
+    import(&target, &snapshot).await.unwrap();
+    assert_eq!(
+        target.list_key_versions().await.unwrap(),
+        vec![field_version]
+    );
+    let restored = target.history_keys().list_key_versions().await.unwrap();
+    assert_eq!(restored, evaluator_versions);
+    let wrapped = target
+        .history_keys()
+        .get_epoch_key(id)
+        .await
+        .unwrap()
+        .unwrap();
+    let field = sid_keys::EncryptedField::from_bytes(&wrapped.0).unwrap();
+    assert_eq!(
+        evaluator_keys(restored).decrypt(&field).await.unwrap(),
+        secret
+    );
+    assert!(verify(&source, &target).await.unwrap().passed);
 }
 
 /// A migrated instance gives every pairwise client the `sub` it already

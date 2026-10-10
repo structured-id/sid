@@ -22,6 +22,9 @@ pub async fn export_snapshot(
     let mut snapshot = Snapshot::new(backend.name(), source_url);
     snapshot.metadata.installation_org = backend.instance_organization().await?.map(|o| o.id);
     snapshot.key_versions = backend.list_key_versions().await?;
+    // The evaluator's keys are sealed under its own custody, which may run
+    // apart from this service and rotate on its own.
+    snapshot.history_key_versions = keys.list_key_versions().await?;
     snapshot.opaque_server_setup = backend
         .get_instance_secret(sid_core::models::InstanceSecret::OpaqueServerSetup)
         .await?;

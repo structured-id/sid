@@ -487,6 +487,11 @@ async fn test_abandoned_fences_are_compacted() {
 }
 
 #[tokio::test]
+async fn test_history_key_versions_are_insert_only() {
+    common::history_keys::test_history_key_versions_are_insert_only(&key_store().await).await;
+}
+
+#[tokio::test]
 async fn test_ended_work_is_purged() {
     common::work::test_ended_work_is_purged(&setup().await).await;
 }
