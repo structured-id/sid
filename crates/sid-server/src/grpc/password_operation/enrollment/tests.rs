@@ -371,4 +371,21 @@ async fn first_enrollments_are_refused_at_capacity() {
             .is_empty(),
         "no key past capacity"
     );
+
+    // A registration for a held identifier is answered as a new one would
+    // be: at capacity it is refused alike, so the refusal tells nobody
+    // which identifiers are registered.
+    let decoy = ops
+        .prepare(
+            &zkpp_without_proofs(),
+            change(),
+            OperationOwner::Decoy,
+            "anonymous".into(),
+            None,
+        )
+        .await
+        .map(|_| ())
+        .unwrap_err();
+    assert_eq!(decoy.code(), refused.code(), "{}", decoy.message());
+    assert_eq!(decoy.message(), refused.message());
 }

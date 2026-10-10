@@ -753,10 +753,14 @@ impl PasswordOperations {
             .get_password_history(owner)
             .await
             .map_err(internal)?;
-        if kind == OwnerKind::New {
+        if matches!(kind, OwnerKind::New | OwnerKind::Decoy) {
             // Durable before the evaluator makes the new owner's key, so a
             // registration that never commits (abandoned, or lost to a crash
             // before its reply or this record) still has its key reclaimed.
+            // A decoy (a held identifier) is admitted the same way and under
+            // the same capacity: at capacity both are refused alike, so the
+            // refusal does not tell which identifiers are registered. Its
+            // cleanup finds no key and only fences the operation.
             let admission = EnrollmentAdmission {
                 operation: op.id.into_uuid(),
                 owner_domain: op.owner_domain,
