@@ -1316,6 +1316,67 @@ async fn a_decoy_evaluation_verifies_under_its_domain_key() {
     }
 }
 
+/// A registration start for a held identifier costs what one for a new owner
+/// does, so its timing does not tell the identifier is taken: the decoy's
+/// preparation seals and stores a first key under its own throwaway domain,
+/// its evaluation reads that stored key, and the decoy's abort (it never
+/// commits) reclaims the key like any abandoned first enrollment's.
+#[tokio::test]
+async fn a_decoy_does_the_work_of_a_first_enrollment() {
+    use group::{Curve, Group, GroupEncoding};
+
+    let storage = sqlite().await;
+    let (ops, evaluation) = split(
+        storage.clone(),
+        sid_core::models::OrgId::generate(),
+        manager(3),
+        manager(5),
+    );
+    let prepared = ops
+        .prepare(
+            &zkpp_without_proofs(),
+            change(),
+            OperationOwner::Decoy,
+            "decoy".into(),
+            None,
+        )
+        .await
+        .unwrap();
+    let domain: [u8; 32] = prepared.context.owner_domain.clone().try_into().unwrap();
+    let stored = storage
+        .history_keys()
+        .get_key_epochs(&domain)
+        .await
+        .unwrap();
+    assert_eq!(stored.epochs.len(), 1, "one sealed first key, stored");
+    assert_eq!(
+        prepared.context.domains[0].evaluator_public_key,
+        stored.epochs[0].public_key.to_vec(),
+        "the decoy is evaluated under the stored key"
+    );
+    let id = operation_id(prepared.context.operation_id.as_ref()).unwrap();
+    let blinded = (pallas::Point::generator() * pallas::Scalar::from(5u64)).to_affine();
+    evaluation.evaluate(&id, &blinded.to_bytes()).await.unwrap();
+
+    assert_eq!(
+        evaluation
+            .abandon_enrollment(&domain, id.into_uuid())
+            .await
+            .unwrap(),
+        EnrollmentCleanup::Reclaimed
+    );
+    assert!(
+        storage
+            .history_keys()
+            .get_key_epochs(&domain)
+            .await
+            .unwrap()
+            .epochs
+            .is_empty(),
+        "the abort reclaimed the decoy's key"
+    );
+}
+
 /// The evaluator evaluates only operations it admitted, and only while they
 /// can commit: the credential service's record of an operation does not make
 /// it evaluable, an expired admission is not evaluated, and neither is
@@ -1347,7 +1408,6 @@ async fn only_an_admitted_live_operation_is_evaluated() {
                 expires_at: chrono::Utc::now() - chrono::Duration::seconds(1),
                 charge_key: charge_key("profile:test"),
                 epochs: vec![],
-                decoy_keys: vec![],
                 evaluation: None,
             },
         )

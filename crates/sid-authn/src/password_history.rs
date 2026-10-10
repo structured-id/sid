@@ -258,58 +258,6 @@ impl HistoryEvaluator {
             evaluations,
         })
     }
-
-    /// An evaluation under the throwaway keys of a decoy's domains (see
-    /// [`decoy_epoch`]), for a registration start that must look like any
-    /// other while committing nothing: each proof verifies under the public
-    /// key the client was given, as a real one does.
-    pub fn evaluate_decoy(
-        &self,
-        blinded: &[u8; 32],
-        keys: &[[u8; 32]],
-        context: &[u8],
-    ) -> SidResult<OperationEvaluation> {
-        let b = point(blinded, "blinded input")?;
-        let evaluations = keys
-            .iter()
-            .map(|key| {
-                let k = scalar(key, "decoy key")
-                    .map_err(|_| SidError::Internal("decoy key value".into()))?;
-                let (z, proof) = relation::evaluate_with_proof(k, b, context, UnwrapErr(SysRng))
-                    .ok_or_else(|| SidError::Validation("blinded input is degenerate".into()))?;
-                Ok(DomainEvaluation {
-                    evaluated: z.to_bytes(),
-                    challenge: proof.c.to_repr(),
-                    response: proof.s.to_repr(),
-                })
-            })
-            .collect::<SidResult<_>>()?;
-        Ok(OperationEvaluation {
-            blinded: *blinded,
-            evaluations,
-        })
-    }
-}
-
-/// An epoch description that looks like a real epoch's under `ksf`, for a
-/// decoy operation, with the throwaway key the decoy is evaluated under. The
-/// key belongs to no owner and protects nothing; it lives only as long as
-/// the operation.
-pub fn decoy_epoch(ksf: HistoryKsf) -> (HistoryEpochDescriptor, [u8; 32]) {
-    let mut rng = UnwrapErr(SysRng);
-    let k = <pallas::Scalar as ff::Field>::random(&mut rng);
-    let mut ksf_salt = [0u8; 32];
-    rng.fill_bytes(&mut ksf_salt);
-    let epoch = HistoryEpochDescriptor {
-        id: HistoryEpochId::generate(),
-        suite: HistorySuite::PallasPoseidonV1,
-        public_key: (pallas::Point::generator() * k).to_affine().to_bytes(),
-        ksf,
-        ksf_salt,
-        created_at: chrono::DateTime::from_timestamp_millis(chrono::Utc::now().timestamp_millis())
-            .expect("current time in range"),
-    };
-    (epoch, k.to_repr())
 }
 
 /// Why the checker did not accept a proved password.

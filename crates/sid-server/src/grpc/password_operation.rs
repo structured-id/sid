@@ -56,7 +56,7 @@ use sid_authn::opaque_zkpp::ZkppOpaqueServer;
 use sid_authn::operation::KeyedCommand;
 use sid_authn::password_history::{
     CheckRequest, EpochPolicy, HistoryCheckError, HistoryChecker, HistoryEvaluator,
-    OperationDomain, OperationEvaluation, RelayedProof, decoy_epoch, owner_domain, verify_inputs,
+    OperationDomain, OperationEvaluation, RelayedProof, owner_domain, verify_inputs,
 };
 use sid_core::grpc_error::refuse::invalid_field;
 use sid_core::grpc_error::{ApiError, ErrorReason};
@@ -1225,9 +1225,6 @@ struct EvaluatorOperation {
     charge_key: String,
     /// The selected epochs, active first.
     epochs: Vec<HistoryEpochDescriptor>,
-    /// A decoy's throwaway evaluation keys, one per epoch: its answers verify
-    /// under the keys the client got, as a real one's do. Empty otherwise.
-    decoy_keys: Vec<[u8; 32]>,
     /// The charged evaluation, kept for an exact retry.
     evaluation: Option<OperationEvaluation>,
 }
@@ -1338,7 +1335,7 @@ impl HistoryEvaluation {
             self.store(&admission.id, &record).await?;
             return if repeated {
                 // A repeat never hands out a key a cutoff has since withdrawn.
-                if record.kind != OwnerKind::Decoy && !policy.permits_writes(&epochs[0]) {
+                if !policy.permits_writes(&epochs[0]) {
                     return Err(history_key_withdrawn());
                 }
                 Ok(epochs)
@@ -1356,7 +1353,6 @@ impl HistoryEvaluation {
             expires_at: admission.expires_at,
             charge_key: admission.charge_key.clone(),
             epochs: Vec::new(),
-            decoy_keys: Vec::new(),
             evaluation: None,
         };
         self.select(&mut record, admission, &policy, now).await?;
@@ -1373,7 +1369,12 @@ impl HistoryEvaluation {
     ) -> Result<(), Status> {
         let owner_domain = admission.owner_domain;
         match admission.kind {
-            OwnerKind::New => {
+            // A decoy (a held identifier's registration start) is made a
+            // first enrollment under its own throwaway domain: the same key
+            // sealed and stored, the same transaction, so its timing does not
+            // tell the identifier is taken. It never commits, so its abort
+            // reclaims the key like any abandoned first enrollment's.
+            OwnerKind::New | OwnerKind::Decoy => {
                 let new = self
                     .evaluator
                     .new_epoch(owner_domain, self.ksf)
@@ -1437,11 +1438,6 @@ impl HistoryEvaluation {
                     // before the cutoff it has not applied yet.
                     return Err(history_key_withdrawn());
                 }
-            }
-            OwnerKind::Decoy => {
-                let (epoch, key) = decoy_epoch(self.ksf);
-                record.epochs = vec![epoch];
-                record.decoy_keys = vec![key];
             }
         }
         Ok(())
@@ -1558,28 +1554,26 @@ impl HistoryEvaluation {
         // new or repeated, is handed out under a withdrawn key. The record
         // stays, so every repeat of this operation is refused alike rather
         // than admitted afresh.
-        if record.kind != OwnerKind::Decoy {
-            let refusal = match self.epoch_policy().await {
-                Ok(policy) if policy.permits_writes(&record.epochs[0]) => None,
-                Ok(_) => Some(history_key_withdrawn()),
-                Err(unavailable) => Some(unavailable),
-            };
-            // An aborted first enrollment is evaluated no more, whether or
-            // not its key could be reclaimed.
-            let refusal = match refusal {
-                None if record.kind == OwnerKind::New => {
-                    match self.keys.enrollment_abandoned(id.into_uuid()).await {
-                        Ok(false) => None,
-                        Ok(true) => Some(expired()),
-                        Err(e) => Some(internal(e)),
-                    }
+        let refusal = match self.epoch_policy().await {
+            Ok(policy) if policy.permits_writes(&record.epochs[0]) => None,
+            Ok(_) => Some(history_key_withdrawn()),
+            Err(unavailable) => Some(unavailable),
+        };
+        // An aborted first enrollment (a decoy's included) is evaluated no
+        // more, whether or not its key could be reclaimed.
+        let refusal = match refusal {
+            None if record.kind != OwnerKind::Existing => {
+                match self.keys.enrollment_abandoned(id.into_uuid()).await {
+                    Ok(false) => None,
+                    Ok(true) => Some(expired()),
+                    Err(e) => Some(internal(e)),
                 }
-                refusal => refusal,
-            };
-            if let Some(refusal) = refusal {
-                self.store(id, &record).await?;
-                return Err(refusal);
             }
+            refusal => refusal,
+        };
+        if let Some(refusal) = refusal {
+            self.store(id, &record).await?;
+            return Err(refusal);
         }
         let result = self.evaluate_taken(id, &mut record, &blinded).await;
         self.store(id, &record).await?;
@@ -1634,32 +1628,28 @@ impl HistoryEvaluation {
             .into());
         }
         let context = id.as_bytes();
-        let evaluation = if record.kind == OwnerKind::Decoy {
-            self.evaluator
-                .evaluate_decoy(blinded, &record.decoy_keys, context)
-        } else {
-            let mut keys = Vec::with_capacity(record.epochs.len());
-            for epoch in &record.epochs {
-                let key = self.keys.get_epoch_key(epoch.id).await.map_err(internal)?;
-                let key = key.ok_or_else(|| {
-                    warn!("history epoch {} has no stored key", epoch.id.0);
-                    unavailable("history key missing")
-                })?;
-                keys.push((epoch.id, key));
-            }
-            self.evaluator
-                .evaluate(blinded, &record.owner_domain, &keys, context)
-                .await
+        let mut keys = Vec::with_capacity(record.epochs.len());
+        for epoch in &record.epochs {
+            let key = self.keys.get_epoch_key(epoch.id).await.map_err(internal)?;
+            let key = key.ok_or_else(|| {
+                warn!("history epoch {} has no stored key", epoch.id.0);
+                unavailable("history key missing")
+            })?;
+            keys.push((epoch.id, key));
         }
-        .map_err(|e| match e {
-            sid_core::Error::Validation(_) => {
-                invalid_field("blinded_input", "not a valid group element")
-            }
-            other => {
-                warn!("history evaluation failed: {other}");
-                unavailable("evaluator")
-            }
-        })?;
+        let evaluation = self
+            .evaluator
+            .evaluate(blinded, &record.owner_domain, &keys, context)
+            .await
+            .map_err(|e| match e {
+                sid_core::Error::Validation(_) => {
+                    invalid_field("blinded_input", "not a valid group element")
+                }
+                other => {
+                    warn!("history evaluation failed: {other}");
+                    unavailable("evaluator")
+                }
+            })?;
         record.evaluation = Some(evaluation.clone());
         Ok(evaluation)
     }
