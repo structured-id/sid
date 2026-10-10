@@ -33,6 +33,16 @@ const DURABLE_ACK_WAIT: std::time::Duration = std::time::Duration::from_secs(60)
 /// When a delivery dropped unsettled is delivered again.
 const DURABLE_REDELIVERY: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// How often the server confirms a durable consumer's open pull; two missed
+/// in a row reopen it.
+const DURABLE_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long one pull request stays open on the server.
+const DURABLE_PULL_EXPIRES: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The pause before a failed durable consumer is opened again.
+const DURABLE_REOPEN: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// NATS JetStream event bus for production deployments.
 ///
 /// Publishes events to JetStream stream `SID_EVENTS`.
@@ -217,13 +227,13 @@ impl EventBus for NatsEventBus {
             event_types: consumer.event_types.clone(),
             ..Default::default()
         });
-        // One durable consumer per name: its position and every unsettled
-        // event outlive this process, and replicas consuming under the name
-        // share it (the deliver group), each event going to one of them.
-        let config = jetstream::consumer::push::Config {
+        // One durable pull consumer per name: its position and every
+        // unsettled event outlive this process, and replicas pulling under the
+        // name share it, each event going to one of them. Pulling (rather than
+        // a push queue group, which cannot carry heartbeats) lets a lost or
+        // deleted consumer surface as an error, after which it is reopened.
+        let config = jetstream::consumer::pull::Config {
             durable_name: Some(consumer.name.clone()),
-            deliver_subject: format!("_DELIVER.{}", consumer.name),
-            deliver_group: Some(consumer.name.clone()),
             // Every event since the consumer was created, never only those
             // published while a replica happens to be connected.
             deliver_policy: jetstream::consumer::DeliverPolicy::All,
@@ -239,29 +249,42 @@ impl EventBus for NatsEventBus {
             filter_subjects: subjects,
             ..Default::default()
         };
-        let stream = self
-            .jetstream
-            .get_stream(STREAM_NAME)
-            .await
-            .map_err(|e| EventBusError::SubscribeFailed(format!("get stream: {e}")))?;
-        let durable = stream
-            .get_or_create_consumer(&consumer.name, config)
-            .await
-            .map_err(|e| {
-                EventBusError::SubscribeFailed(format!("durable consumer {}: {e}", consumer.name))
-            })?;
-        let messages = durable
-            .messages()
-            .await
-            .map_err(|e| EventBusError::SubscribeFailed(format!("messages stream: {e}")))?;
+        let jetstream = self.jetstream.clone();
+        let name = consumer.name;
+        // Opened once here, so a consumer that cannot be set up is refused to
+        // the caller rather than retried unseen.
+        let messages = open_durable(&jetstream, &name, &config).await?;
 
         let (tx, rx) = mpsc::channel(1);
-        let name = consumer.name;
         tokio::spawn(async move {
             use async_nats::jetstream::AckKind;
             use futures::StreamExt;
             let mut messages = messages;
-            while let Some(Ok(msg)) = messages.next().await {
+            loop {
+                let msg = match messages.next().await {
+                    Some(Ok(msg)) => msg,
+                    // A missed heartbeat, a deleted consumer or an ended
+                    // stream: reopen (recreating the consumer if it is gone)
+                    // until it works or the consumer is dropped. A recreated
+                    // consumer starts from the stream's oldest event again;
+                    // every consumer's effect is idempotent under its own
+                    // records.
+                    failed => {
+                        match failed {
+                            Some(Err(e)) => {
+                                tracing::warn!(consumer = %name, "durable consumer: {e}");
+                            }
+                            _ => tracing::warn!(consumer = %name, "durable consumer ended"),
+                        }
+                        match reopen_durable(&jetstream, &name, &config, &tx).await {
+                            Some(reopened) => {
+                                messages = reopened;
+                                continue;
+                            }
+                            None => break,
+                        }
+                    }
+                };
                 let event = match serde_json::from_slice::<Event>(&msg.payload) {
                     Ok(event) => event.validate().map(|()| event).map_err(|e| e.to_string()),
                     Err(e) => Err(e.to_string()),
@@ -399,6 +422,52 @@ impl EventBus for NatsEventBus {
             Ok(())
         } else {
             Err(EventBusError::NotConnected)
+        }
+    }
+}
+
+/// The messages of the durable consumer `name`, created with `config` when
+/// it does not exist. One message is pulled at a time: a pulled message's
+/// acknowledgement deadline runs while it waits, so none waits behind another.
+async fn open_durable(
+    jetstream: &jetstream::Context,
+    name: &str,
+    config: &jetstream::consumer::pull::Config,
+) -> EventBusResult<jetstream::consumer::pull::Stream> {
+    let stream = jetstream
+        .get_stream(STREAM_NAME)
+        .await
+        .map_err(|e| EventBusError::SubscribeFailed(format!("get stream: {e}")))?;
+    let durable = stream
+        .get_or_create_consumer(name, config.clone())
+        .await
+        .map_err(|e| EventBusError::SubscribeFailed(format!("durable consumer {name}: {e}")))?;
+    durable
+        .stream()
+        .max_messages_per_batch(1)
+        .heartbeat(DURABLE_HEARTBEAT)
+        .expires(DURABLE_PULL_EXPIRES)
+        .messages()
+        .await
+        .map_err(|e| EventBusError::SubscribeFailed(format!("messages stream: {e}")))
+}
+
+/// Open the durable consumer `name` again, pausing between failed tries,
+/// until it opens or `tx`'s receiver is dropped (`None`).
+async fn reopen_durable(
+    jetstream: &jetstream::Context,
+    name: &str,
+    config: &jetstream::consumer::pull::Config,
+    tx: &mpsc::Sender<Delivery>,
+) -> Option<jetstream::consumer::pull::Stream> {
+    loop {
+        tokio::select! {
+            () = tx.closed() => return None,
+            () = tokio::time::sleep(DURABLE_REOPEN) => {}
+        }
+        match open_durable(jetstream, name, config).await {
+            Ok(messages) => return Some(messages),
+            Err(e) => tracing::warn!(consumer = %name, "reopen: {e}"),
         }
     }
 }

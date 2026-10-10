@@ -15,6 +15,8 @@ struct Feed {
     deliveries: std::sync::Mutex<Option<mpsc::Receiver<Delivery>>>,
     published: Arc<std::sync::Mutex<Vec<Event>>>,
     publishes: bool,
+    /// The durable consumer the consumer under test must open.
+    consumer: String,
 }
 
 #[tonic::async_trait]
@@ -29,7 +31,8 @@ impl EventBus for Feed {
     async fn subscribe(&self, _: EventFilter) -> EventBusResult<mpsc::Receiver<Event>> {
         Err(EventBusError::NotConnected)
     }
-    async fn consume(&self, _: DurableConsumer) -> EventBusResult<mpsc::Receiver<Delivery>> {
+    async fn consume(&self, consumer: DurableConsumer) -> EventBusResult<mpsc::Receiver<Delivery>> {
+        assert_eq!(consumer.name, self.consumer);
         Ok(self
             .deliveries
             .lock()
@@ -42,9 +45,15 @@ impl EventBus for Feed {
     }
 }
 
-/// Deliver `events` one at a time to a consumer run on a [`Feed`], as the bus
-/// does; how each was settled, and what the consumer published.
-async fn feed<F, Fut>(events: Vec<Event>, publishes: bool, run: F) -> (Vec<Settlement>, Vec<Event>)
+/// Deliver `events` one at a time to a consumer run on a [`Feed`] under the
+/// durable consumer `name`, as the bus does; how each was settled, and what
+/// the consumer published.
+async fn feed<F, Fut>(
+    name: String,
+    events: Vec<Event>,
+    publishes: bool,
+    run: F,
+) -> (Vec<Settlement>, Vec<Event>)
 where
     F: FnOnce(Feed) -> Fut,
     Fut: std::future::Future<Output = EventBusResult<()>> + Send + 'static,
@@ -55,6 +64,7 @@ where
         deliveries: std::sync::Mutex::new(Some(rx)),
         published: published.clone(),
         publishes,
+        consumer: name,
     }));
     let mut settled = Vec::new();
     for event in events {
@@ -80,9 +90,12 @@ async fn relay_reporting(
     events: Vec<Event>,
     publishes: bool,
 ) -> (Vec<Settlement>, Vec<Event>) {
-    feed(events, publishes, |bus| async move {
-        consume_relayed_cleanup(&bus, evaluation, AUTHORITY).await
-    })
+    feed(
+        cleanup_consumer(AUTHORITY),
+        events,
+        publishes,
+        |bus| async move { consume_relayed_cleanup(&bus, evaluation, AUTHORITY).await },
+    )
     .await
 }
 
@@ -225,6 +238,7 @@ async fn the_authority_records_its_own_settlements() {
     };
     let backend: Arc<dyn StorageBackend> = storage.clone();
     let (settled, _) = feed(
+        settlement_consumer(AUTHORITY),
         vec![
             report("sid-credentials.other.example.com"),
             report(AUTHORITY),
@@ -237,6 +251,26 @@ async fn the_authority_records_its_own_settlements() {
     assert!(matches!(settled[0], Settlement::Reject(_)), "{settled:?}");
     assert_eq!(settled[1..], [Settlement::Done, Settlement::Done]);
     assert!(settled_in(storage.as_ref(), &cleanup).await);
+}
+
+/// Each authority's consumers are its own: authorities sharing a bus get a
+/// copy of every event each, instead of splitting one consumer's events and
+/// rejecting the other's. The names stay within a consumer name's characters.
+#[test]
+fn durable_consumers_are_scoped_by_authority() {
+    let other = "sid-credentials.other.example.com";
+    for name in [cleanup_consumer, settlement_consumer] {
+        assert_eq!(name(AUTHORITY), name(AUTHORITY));
+        assert_ne!(name(AUTHORITY), name(other));
+        assert!(
+            name(AUTHORITY)
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-'),
+            "{}",
+            name(AUTHORITY)
+        );
+    }
+    assert_ne!(cleanup_consumer(AUTHORITY), settlement_consumer(AUTHORITY));
 }
 
 async fn settled_in(storage: &dyn StorageBackend, cleanup: &RelayedCleanup) -> bool {

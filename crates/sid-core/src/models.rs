@@ -179,7 +179,7 @@ pub use password_history::{
     HistoryEpochDescriptor, HistoryEpochId, HistoryEpochUse, HistoryEvidence, HistoryKsf,
     HistoryLiveSet, HistoryPreparation, HistorySuite, KeyArchive, KeyEpoch, KeyEpochs, NewKeyEpoch,
     OWNER_PURGE_KIND, OwnerPurge, PasswordHistory, RelayedCleanup, WrappedHistoryKey,
-    history_key_context,
+    cleanup_successor, history_key_context,
 };
 pub use password_reset::{
     PasswordResetSession, RESET_SESSION_TTL_SECS, ResetSessionId, ResetSessionStatus,

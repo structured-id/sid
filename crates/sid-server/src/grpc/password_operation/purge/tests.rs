@@ -146,19 +146,39 @@ async fn a_separate_evaluator_is_told_of_the_purge_until_it_settles() {
     let mut work = claimed(storage.as_ref(), purge.id).await;
     assert!(matches!(handler.handle(&work).await, WorkOutcome::Retry(_)));
     let domain = sid_authn::password_history::owner_domain(org.id.as_bytes(), profile);
-    let event = WorkId(uuid::Uuid::new_v5(&PURGE_EVENT_NAMESPACE, &domain));
+    let event = WorkId(purge_event_id(&domain, work.id, 1));
     let relay = storage.get_work(event).await.unwrap().expect("relay owed");
     assert_eq!(relay.kind.as_str(), sid_core::models::EVENT_RELAY_KIND);
 
     work.attempt = 2;
     assert!(matches!(handler.handle(&work).await, WorkOutcome::Retry(_)));
-    let again = WorkId(uuid::Uuid::new_v5(
-        &PURGE_EVENT_NAMESPACE,
-        &[domain.as_slice(), &2u32.to_be_bytes()].concat(),
-    ));
+    let again = WorkId(purge_event_id(&domain, work.id, 2));
     assert!(
         storage.get_work(again).await.unwrap().is_some(),
         "relayed again"
+    );
+
+    // Its attempts run out unsettled (an evaluator outage): the purge goes on
+    // in a successor, which relays anew and ends on the settlement.
+    assert!(
+        handler.on_dead(&work, "awaiting").is_none(),
+        "attempts remain"
+    );
+    work.attempt = work.max_attempts;
+    let successor = handler
+        .on_dead(&work, "awaiting")
+        .expect("the purge goes on");
+    assert_ne!(successor.id, work.id);
+    storage.enqueue_work(&successor, 10).await.unwrap();
+    let mut work = claimed(storage.as_ref(), successor.id).await;
+    assert!(matches!(handler.handle(&work).await, WorkOutcome::Retry(_)));
+    assert!(
+        storage
+            .get_work(WorkId(purge_event_id(&domain, work.id, 1)))
+            .await
+            .unwrap()
+            .is_some(),
+        "the successor relays anew"
     );
 
     super::super::relayed::record_settlement(

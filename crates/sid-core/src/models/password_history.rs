@@ -684,9 +684,33 @@ pub fn commit_deadline(expires_at: DateTime<Utc>) -> DateTime<Utc> {
     expires_at + ENROLLMENT_FINISH_GRACE
 }
 
-/// Attempts at an enrollment's terminal step before it is recorded failed:
-/// with an hourly retry this outlasts an evaluator outage of more than a day.
+/// Attempts at an enrollment's terminal step or an owner's purge before it
+/// is recorded failed: with an hourly retry, more than a day of an evaluator
+/// outage. The failed work is the record of the outage; the obligation goes
+/// on in its [`cleanup_successor`].
 pub const ENROLLMENT_ADMISSION_ATTEMPTS: u32 = 40;
+
+/// Namespace of the ids of cleanup work continuing an exhausted one.
+const CLEANUP_SUCCESSOR_NAMESPACE: Uuid =
+    Uuid::from_u128(0x5e81_c3a6_0d47_4b2f_93e8_a1f4_6c27_d095);
+
+/// The work taking over the cleanup `work` (an aborted enrollment's or a
+/// deleted owner's) whose attempts ran out unsettled: a cleanup is an
+/// obligation that no outage may end, so it goes on from a fresh attempt
+/// count, due at once. `None` while attempts remain: a failure ending the
+/// work earlier is permanent and would fail the same way again.
+pub fn cleanup_successor(work: &crate::models::ClaimedWork) -> Option<crate::models::NewWork> {
+    if work.attempt < work.max_attempts {
+        return None;
+    }
+    let mut successor = crate::models::NewWork::new(work.kind.clone(), work.payload.clone());
+    successor.id = crate::models::WorkId(Uuid::new_v5(
+        &CLEANUP_SUCCESSOR_NAMESPACE,
+        work.id.0.as_bytes(),
+    ));
+    successor.max_attempts = work.max_attempts;
+    Some(successor)
+}
 
 /// A first enrollment as the credential authority admits it, before the
 /// evaluator creates the new owner's key: the operation, the owner's

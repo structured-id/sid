@@ -113,3 +113,46 @@ async fn test_durable_consumer_keeps_events_until_settled_done() {
         "an event settled done was delivered again"
     );
 }
+
+/// A durable consumer lost on the server while it is being consumed (deleted,
+/// or gone with a server failure) is reopened: an event published afterwards
+/// still reaches the consumer, which never sees its channel close.
+#[tokio::test]
+async fn test_durable_consumer_recovers_from_a_lost_consumer() {
+    let bus = NatsEventBus::connect(&nats_url())
+        .await
+        .expect("test NATS unreachable; start docker-compose.test.yml");
+    let tag = uuid::Uuid::now_v7().simple().to_string();
+    let subject = format!("sid.test.recover_{tag}.v1");
+    let consumer = DurableConsumer {
+        name: format!("test-recover-{tag}"),
+        event_types: vec![subject.clone()],
+    };
+    let mut deliveries = bus.consume(consumer.clone()).await.unwrap();
+    let before = Event::new("sid-test", &subject);
+    bus.publish(before.clone()).await.unwrap();
+    let delivered = next(&mut deliveries).await;
+    assert_eq!(delivered.event.id, before.id);
+    delivered.settle(Settlement::Done);
+
+    let client = async_nats::connect(nats_url()).await.unwrap();
+    jetstream::new(client)
+        .get_stream("SID_EVENTS")
+        .await
+        .unwrap()
+        .delete_consumer(&consumer.name)
+        .await
+        .unwrap();
+
+    let after = Event::new("sid-test", &subject);
+    bus.publish(after.clone()).await.unwrap();
+    // The recreated consumer starts from the oldest event again, so the one
+    // settled before the loss may come first.
+    let mut delivered = next(&mut deliveries).await;
+    if delivered.event.id == before.id {
+        delivered.settle(Settlement::Done);
+        delivered = next(&mut deliveries).await;
+    }
+    assert_eq!(delivered.event.id, after.id, "delivered after the loss");
+    delivered.settle(Settlement::Done);
+}

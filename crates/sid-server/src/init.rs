@@ -1386,18 +1386,28 @@ pub fn spawn_cleanup_settlements(
     let authority = c.auth_svc.cleanup_settlement_authority()?;
     let (bus, storage) = (c.event_bus.clone(), c.storage.clone());
     Some(tokio::spawn(async move {
-        tokio::select! {
-            consumed = crate::grpc::password_operation::consume_cleanup_settlements(
-                bus.as_ref(),
-                storage,
-                &authority,
-            ) => {
-                if let Err(e) = consumed {
-                    // The relayed cleanup stays owed and is relayed again
-                    // until its work is recorded failed.
-                    tracing::error!("cleanup settlements are not consumed: {e}");
+        let consume = async {
+            // The bus reopens a consumer it already has; one it cannot open
+            // (the bus unreachable at start) is tried again here. Meanwhile
+            // the relayed cleanup stays owed and is relayed again.
+            loop {
+                match crate::grpc::password_operation::consume_cleanup_settlements(
+                    bus.as_ref(),
+                    storage.clone(),
+                    &authority,
+                )
+                .await
+                {
+                    Ok(()) => break,
+                    Err(e) => {
+                        tracing::error!("cleanup settlements are not consumed: {e}");
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    }
                 }
             }
+        };
+        tokio::select! {
+            () = consume => {}
             () = shutdown => {}
         }
     }))

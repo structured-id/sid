@@ -13,7 +13,7 @@ use sid_authn::work_runner::{RetrySchedule, WorkHandler, WorkOutcome};
 use sid_core::models::event::event_types;
 use sid_core::models::{
     AuditEntry, ClaimedWork, Event, MutationContext, NewWork, OWNER_PURGE_KIND, OwnerPurge,
-    ProfileId, RelayedCleanup, WorkKind,
+    ProfileId, RelayedCleanup, WorkId, WorkKind, cleanup_successor,
 };
 use sid_plugin::storage::StorageBackend;
 use tracing::info;
@@ -56,21 +56,32 @@ impl OwnerPurgeHandler {
     }
 }
 
+/// The id of the event that attempt `attempt` of the purge work `work`
+/// relays for `owner_domain`: one per attempt, so each relays anew, and the
+/// same for a repeated deletion, which owes the same work.
+pub(crate) fn purge_event_id(owner_domain: &[u8; 32], work: WorkId, attempt: u32) -> uuid::Uuid {
+    uuid::Uuid::new_v5(
+        &PURGE_EVENT_NAMESPACE,
+        &[
+            owner_domain.as_slice(),
+            work.0.as_bytes(),
+            &attempt.to_be_bytes(),
+        ]
+        .concat(),
+    )
+}
+
 /// The relayed event telling a separate evaluator that `purge`'s owner was
-/// deleted: one per owner domain at the first attempt (a repeated deletion
-/// owes the same one), then one per later `attempt` that relays it again.
-fn purge_event(source: &str, purge: &OwnerPurge, attempt: u32) -> Result<NewWork, String> {
+/// deleted, for attempt `attempt` of the work `work`.
+fn purge_event(
+    source: &str,
+    purge: &OwnerPurge,
+    work: WorkId,
+    attempt: u32,
+) -> Result<NewWork, String> {
     let mut event = Event::new(source, event_types::PASSWORD_HISTORY_OWNER_PURGED)
         .with_data(serde_json::to_value(purge).map_err(|e| format!("event data: {e}"))?);
-    event.id = if attempt <= 1 {
-        uuid::Uuid::new_v5(&PURGE_EVENT_NAMESPACE, &purge.owner_domain)
-    } else {
-        uuid::Uuid::new_v5(
-            &PURGE_EVENT_NAMESPACE,
-            &[purge.owner_domain.as_slice(), &attempt.to_be_bytes()].concat(),
-        )
-    }
-    .to_string();
+    event.id = purge_event_id(&purge.owner_domain, work, attempt).to_string();
     Ok(event.relay())
 }
 
@@ -84,10 +95,11 @@ impl WorkHandler for OwnerPurgeHandler {
         RELAY_RETRY
     }
 
-    /// The failed work is itself the actionable record: a deleted owner
-    /// whose keys are still held.
-    fn on_dead(&self, _work: &ClaimedWork, _error: &str) -> Option<NewWork> {
-        None
+    /// The failed work is the actionable record of a deleted owner whose
+    /// keys are still held; the purge goes on in its successor, so the keys
+    /// go once the evaluator is back.
+    fn on_dead(&self, work: &ClaimedWork, _error: &str) -> Option<NewWork> {
+        cleanup_successor(work)
     }
 
     async fn handle(&self, work: &ClaimedWork) -> WorkOutcome {
@@ -118,7 +130,7 @@ impl WorkHandler for OwnerPurgeHandler {
                     Ok(false) => {}
                     Err(e) => return WorkOutcome::Retry(format!("settlement: {e}")),
                 }
-                let event = match purge_event(source, &purge, work.attempt) {
+                let event = match purge_event(source, &purge, work.id, work.attempt) {
                     Ok(event) => event,
                     Err(e) => return WorkOutcome::Permanent(e),
                 };

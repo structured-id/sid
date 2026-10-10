@@ -26,12 +26,31 @@ use tracing::{error, info, warn};
 
 use super::HistoryEvaluation;
 
-/// The durable consumer every replica of a separate evaluator shares.
-pub const CLEANUP_CONSUMER: &str = "password-history-evaluator-cleanup";
+/// Namespace of the authority tag in durable consumer names.
+const CONSUMER_AUTHORITY_NAMESPACE: uuid::Uuid =
+    uuid::Uuid::from_u128(0x71c4_2e9a_5b03_4f68_a2d7_c815_3e6f_09b4);
 
-/// The durable consumer every replica of a credential authority with a
-/// separate evaluator shares.
-pub const SETTLEMENT_CONSUMER: &str = "password-history-cleanup-settlements";
+/// A durable consumer's name for credential authority `authority`: every
+/// replica serving that authority shares it, and deployments of different
+/// authorities on one bus each get their own copy of every event rather than
+/// sharing, and rejecting, each other's. The tag keeps the name within the
+/// characters a consumer name allows.
+fn consumer_name(prefix: &str, authority: &str) -> String {
+    let tag = uuid::Uuid::new_v5(&CONSUMER_AUTHORITY_NAMESPACE, authority.as_bytes());
+    format!("{prefix}-{}", tag.simple())
+}
+
+/// The durable consumer every replica of a separate evaluator serving
+/// `authority` shares.
+pub fn cleanup_consumer(authority: &str) -> String {
+    consumer_name("password-history-evaluator-cleanup", authority)
+}
+
+/// The durable consumer every replica of credential authority `authority`
+/// shares, with a separate evaluator.
+pub fn settlement_consumer(authority: &str) -> String {
+    consumer_name("password-history-cleanup-settlements", authority)
+}
 
 /// The method a recorded settlement carries.
 pub(crate) const SETTLED_METHOD: &str = "settled";
@@ -88,7 +107,7 @@ pub async fn consume_cleanup_settlements(
 ) -> EventBusResult<()> {
     let mut deliveries = bus
         .consume(DurableConsumer {
-            name: SETTLEMENT_CONSUMER.into(),
+            name: settlement_consumer(authority),
             event_types: vec![event_types::PASSWORD_HISTORY_CLEANUP_SETTLED.into()],
         })
         .await?;
@@ -133,7 +152,7 @@ pub async fn consume_relayed_cleanup(
 ) -> EventBusResult<()> {
     let mut deliveries = bus
         .consume(DurableConsumer {
-            name: CLEANUP_CONSUMER.into(),
+            name: cleanup_consumer(source),
             event_types: vec![
                 event_types::PASSWORD_HISTORY_ENROLLMENT_ABORTED.into(),
                 event_types::PASSWORD_HISTORY_OWNER_PURGED.into(),

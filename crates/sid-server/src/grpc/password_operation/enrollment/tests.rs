@@ -244,22 +244,49 @@ async fn a_separate_evaluator_is_told_with_the_abort_until_it_settles() {
         matches!(handler.handle(&work).await, WorkOutcome::Retry(_)),
         "relayed, not settled"
     );
-    let first = WorkId(uuid::Uuid::new_v5(
-        &ABORT_EVENT_NAMESPACE,
-        id.into_uuid().as_bytes(),
-    ));
+    let first = WorkId(abort_event_id(id.into_uuid(), None));
     let relay = storage.get_work(first).await.unwrap().expect("relay owed");
     assert_eq!(relay.kind.as_str(), sid_core::models::EVENT_RELAY_KIND);
 
     work.attempt = 2;
     assert!(matches!(handler.handle(&work).await, WorkOutcome::Retry(_)));
-    let again = WorkId(uuid::Uuid::new_v5(
-        &ABORT_EVENT_NAMESPACE,
-        format!("{}:2", id.into_uuid()).as_bytes(),
-    ));
+    let again = WorkId(abort_event_id(id.into_uuid(), Some((work.id, 2))));
     assert!(
         storage.get_work(again).await.unwrap().is_some(),
         "relayed again"
+    );
+
+    // Its attempts run out unsettled (an evaluator outage): the cleanup goes
+    // on in a successor, which relays at once and ends on the settlement.
+    assert!(
+        handler.on_dead(&work, "awaiting").is_none(),
+        "attempts remain"
+    );
+    work.attempt = work.max_attempts;
+    let successor = handler
+        .on_dead(&work, "awaiting")
+        .expect("the cleanup goes on");
+    assert_ne!(successor.id, work.id);
+    assert_eq!(successor.payload, work.payload);
+    assert!(successor.not_before.is_none(), "due at once");
+    storage.enqueue_work(&successor, 10).await.unwrap();
+    let mut next = ClaimedWork {
+        id: successor.id,
+        kind: successor.kind,
+        payload: successor.payload,
+        attempt: 1,
+        max_attempts: successor.max_attempts,
+        generation: 1,
+        expires_at: None,
+    };
+    assert!(matches!(handler.handle(&next).await, WorkOutcome::Retry(_)));
+    assert!(
+        storage
+            .get_work(WorkId(abort_event_id(id.into_uuid(), Some((next.id, 1)))))
+            .await
+            .unwrap()
+            .is_some(),
+        "the successor relays at its first attempt"
     );
 
     super::super::relayed::record_settlement(
@@ -270,9 +297,9 @@ async fn a_separate_evaluator_is_told_with_the_abort_until_it_settles() {
     )
     .await
     .unwrap();
-    work.attempt = 3;
+    next.attempt = 2;
     assert_eq!(
-        handler.handle(&work).await,
+        handler.handle(&next).await,
         WorkOutcome::Done(Some("settled by the evaluator".into()))
     );
 }
