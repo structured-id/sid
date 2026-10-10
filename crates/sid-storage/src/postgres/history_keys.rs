@@ -571,6 +571,21 @@ impl HistoryKeyStore for PgHistoryKeyStore {
         abandoned(&mut conn, operation).await
     }
 
+    async fn compact_abandoned(&self, before: DateTime<Utc>, audit: AuditEntry) -> SidResult<u64> {
+        let mut tx = self.begin().await?;
+        let dropped = sqlx::query("DELETE FROM history_key_abandoned WHERE abandoned_at < $1")
+            .bind(before)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage("fence compaction"))?
+            .rows_affected();
+        if dropped > 0 {
+            audit_in_tx(&mut tx, audit).await?;
+        }
+        tx.commit().await.map_err(storage("commit"))?;
+        Ok(dropped)
+    }
+
     async fn get_epoch_key(&self, epoch: HistoryEpochId) -> SidResult<Option<WrappedHistoryKey>> {
         let key: Option<Vec<u8>> =
             sqlx::query_scalar("SELECT wrapped_key FROM history_key_epochs WHERE id = $1")

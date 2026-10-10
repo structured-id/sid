@@ -57,6 +57,13 @@ impl sid_plugin::WorkStore for MockStorage {
     async fn import_work(&self, _: &WorkSnapshot) -> Result<bool> {
         unimplemented!()
     }
+    async fn purge_ended_work(
+        &self,
+        _: &WorkKind,
+        _: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64> {
+        unimplemented!()
+    }
 }
 
 #[async_trait::async_trait]
@@ -1893,6 +1900,14 @@ impl sid_plugin::StorageBackend for MockStorage {
         unimplemented!()
     }
     async fn record_outcome(&self, _: MutationContext) -> Result<()> {
+        unimplemented!()
+    }
+    async fn purge_operation_results(
+        &self,
+        _: &str,
+        _: &str,
+        _: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64> {
         unimplemented!()
     }
     async fn get_operation_result(

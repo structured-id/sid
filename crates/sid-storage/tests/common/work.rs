@@ -112,6 +112,39 @@ pub async fn test_work_capacity_holds_under_concurrency(store: &dyn WorkStore) {
     }
 }
 
+/// Ended work of a kind is dropped once older than asked; open work, newer
+/// ended work and other kinds stay.
+pub async fn test_ended_work_is_purged(store: &dyn WorkStore) {
+    let kind = unique_kind("purge");
+    let (done, open) = (work(&kind), work(&kind));
+    store.enqueue_work(&done, 10).await.unwrap();
+    let claimed = store
+        .claim_work(from_ref(&kind), "w", 1, LEASE)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .complete_work(claimed[0].id, claimed[0].generation, None)
+            .await
+            .unwrap()
+    );
+    store.enqueue_work(&open, 10).await.unwrap();
+    let other = unique_kind("purge_other");
+    let theirs = work(&other);
+    store.enqueue_work(&theirs, 10).await.unwrap();
+
+    let earlier = Utc::now() - Duration::hours(1);
+    assert_eq!(store.purge_ended_work(&kind, earlier).await.unwrap(), 0);
+    let later = Utc::now() + Duration::seconds(5);
+    assert_eq!(store.purge_ended_work(&kind, later).await.unwrap(), 1);
+    assert!(store.get_work(claimed[0].id).await.unwrap().is_none());
+    assert!(
+        store.get_work(open.id).await.unwrap().is_some(),
+        "open work"
+    );
+    assert!(store.get_work(theirs.id).await.unwrap().is_some());
+}
+
 /// Work under a live lease is not handed to another worker, however many
 /// times it asks.
 pub async fn test_work_live_lease_is_exclusive(store: &dyn WorkStore) {

@@ -510,6 +510,38 @@ pub async fn test_cleanup_races_preparation(store: &dyn HistoryKeyStore) {
     }
 }
 
+/// A fence is dropped only once older than asked; until then it still
+/// refuses its operation's preparation.
+pub async fn test_abandoned_fences_are_compacted(store: &dyn HistoryKeyStore) {
+    let (domain, operation) = (owner(), Uuid::now_v7());
+    store
+        .abandon_enrollment(&domain, operation, audit())
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .compact_abandoned(Utc::now() - chrono::Duration::hours(1), audit())
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(store.enrollment_abandoned(operation).await.unwrap());
+    let fenced = store
+        .create_first_epoch(&new_epoch(domain, 90), operation, audit())
+        .await
+        .expect_err("still fenced");
+    assert!(matches!(fenced, sid_core::Error::Fenced(_)), "{fenced:?}");
+
+    assert!(
+        store
+            .compact_abandoned(Utc::now() + chrono::Duration::seconds(5), audit())
+            .await
+            .unwrap()
+            >= 1
+    );
+    assert!(!store.enrollment_abandoned(operation).await.unwrap());
+}
+
 /// A key transfer preserves every epoch, sealed key and replacement; exact
 /// repeats add nothing; a conflicting or malformed archive mutates nothing.
 pub async fn test_key_archive_round_trip(store: &dyn HistoryKeyStore) {

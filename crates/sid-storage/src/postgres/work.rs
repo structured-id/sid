@@ -382,6 +382,23 @@ macro_rules! work_store_over_pool {
             async fn import_work(&self, work: &WorkSnapshot) -> SidResult<bool> {
                 import(&self.pool, work).await
             }
+
+            async fn purge_ended_work(
+                &self,
+                kind: &WorkKind,
+                before: chrono::DateTime<chrono::Utc>,
+            ) -> SidResult<u64> {
+                sqlx::query(
+                    "DELETE FROM durable_work
+                     WHERE kind = $1 AND state NOT IN ('pending', 'claimed') AND updated_at < $2",
+                )
+                .bind(kind.as_str())
+                .bind(before)
+                .execute(&self.pool)
+                .await
+                .map(|done| done.rows_affected())
+                .map_err(|e| SidError::Storage(format!("purge work: {e}")))
+            }
         }
     };
 }

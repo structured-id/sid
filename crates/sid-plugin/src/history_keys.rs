@@ -51,6 +51,14 @@ pub trait HistoryKeyStore: Send + Sync {
     /// Whether `operation` was cleaned up as an aborted first enrollment.
     async fn enrollment_abandoned(&self, operation: Uuid) -> Result<bool>;
 
+    /// Drop the fences of first enrollments abandoned before `before`. A
+    /// fence matters only while a delayed preparation of its operation could
+    /// still be within that operation's expiry; past it the preparation is
+    /// refused as expired, so `before` must lie at least the operation
+    /// lifetime and the tolerated clock skew in the past. Returns how many
+    /// were dropped.
+    async fn compact_abandoned(&self, before: DateTime<Utc>, audit: AuditEntry) -> Result<u64>;
+
     /// Store `new` as the owner's active epoch when it has none. When it
     /// already has an active epoch nothing is written and that epoch is
     /// returned, so concurrent preparations agree on one key.

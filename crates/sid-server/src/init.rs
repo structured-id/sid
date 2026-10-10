@@ -57,6 +57,7 @@ const LOCK_PROFILE_PURGE: i64 = 47;
 const LOCK_MIGRATION_DEADLINE: i64 = 48;
 const LOCK_AUDIT_PARTITION: i64 = 49;
 const LOCK_PRINCIPAL_EXPIRY: i64 = 50;
+const LOCK_ENROLLMENT_COMPACTION: i64 = 51;
 
 /// Namespace of machine-credential alert event ids.
 const CREDENTIAL_ALERT_NAMESPACE: uuid::Uuid =
@@ -1021,6 +1022,33 @@ async fn release_job_lock(lock: sid_plugin::storage::JobLock, name: &str) {
 
 /// Spawn all CE background tasks, each run by one instance at a time.
 pub fn spawn_ce_background_tasks(c: &CeComponents) {
+    // Ended first enrollments' records (hourly): their work, aborts and
+    // fences are dropped once no step of them can still arrive.
+    {
+        let storage = c.storage.clone();
+        let auth = c.auth_svc.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+            loop {
+                interval.tick().await;
+                if let Some(lock) = take_job_lock(
+                    &*storage,
+                    LOCK_ENROLLMENT_COMPACTION,
+                    "enrollment_compaction",
+                )
+                .await
+                {
+                    match auth.compact_enrollments().await {
+                        Ok(0) => {}
+                        Ok(n) => info!("Compacted {} ended enrollment records", n),
+                        Err(e) => tracing::warn!("enrollment compaction failed: {}", e),
+                    }
+                    release_job_lock(lock, "enrollment_compaction").await;
+                }
+            }
+        });
+    }
+
     // PAT auto-revoke (hourly)
     {
         let storage = c.storage.clone();

@@ -255,6 +255,90 @@ async fn a_separate_evaluator_is_told_with_the_abort() {
     );
 }
 
+/// Once no step of them can still arrive, an ended enrollment's records go:
+/// its ended work, its abort's completion and the evaluator's fence. A
+/// committed registration keeps its completion and its key, and nothing is
+/// dropped while the records are young.
+#[tokio::test]
+async fn ended_enrollment_records_are_compacted() {
+    let storage = sqlite().await;
+    let installation = sid_core::models::OrgId::generate();
+    let (ops, evaluation) = split(storage.clone(), installation, manager(3), manager(3));
+    let handler = EnrollmentHandler::new(
+        storage.clone(),
+        EnrollmentDelivery::InProcess(evaluation.clone()),
+    );
+    let (aborted, aborted_domain) = enrolled(&ops, installation).await;
+    let (committed, committed_domain) = enrolled(&ops, installation).await;
+    let key = |id: PasswordOperationId| OperationKey::parse(&id.to_string()).unwrap();
+    storage
+        .record_outcome(MutationContext::from(audit("test.commit")).with_operation(
+            OperationCompletion::new(
+                RESULT_NAMESPACE,
+                key(committed),
+                "registration",
+                b"record",
+                b"profile".to_vec(),
+            ),
+        ))
+        .await
+        .unwrap();
+    // Ended work goes as the storage contract says; here the abort's and
+    // the fence's records are what matters.
+    for (id, domain) in [(aborted, aborted_domain), (committed, committed_domain)] {
+        handler
+            .handle(&claimed(storage.as_ref(), id, domain).await)
+            .await;
+    }
+
+    assert_eq!(
+        compact_enrollments(storage.as_ref(), Some(&evaluation), chrono::Utc::now())
+            .await
+            .unwrap(),
+        0,
+        "young records stay"
+    );
+    let later = chrono::Utc::now() + chrono::Duration::days(2);
+    compact_enrollments(storage.as_ref(), Some(&evaluation), later)
+        .await
+        .unwrap();
+    assert!(
+        storage
+            .get_operation_result(RESULT_NAMESPACE, &key(aborted))
+            .await
+            .unwrap()
+            .is_none(),
+        "the abort's completion"
+    );
+    assert!(
+        !storage
+            .history_keys()
+            .enrollment_abandoned(aborted.into_uuid())
+            .await
+            .unwrap(),
+        "the fence"
+    );
+    assert!(
+        storage
+            .get_operation_result(RESULT_NAMESPACE, &key(committed))
+            .await
+            .unwrap()
+            .is_some(),
+        "a commit's completion stays"
+    );
+    assert_eq!(
+        storage
+            .history_keys()
+            .get_key_epochs(&committed_domain)
+            .await
+            .unwrap()
+            .epochs
+            .len(),
+        1,
+        "the committed owner's key stays"
+    );
+}
+
 /// First enrollments are bounded across replicas: at capacity a new one is
 /// refused before the evaluator makes its key.
 #[tokio::test]

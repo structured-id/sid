@@ -223,6 +223,58 @@ pub async fn test_terminal_abort_races_the_commit(backend: &dyn StorageBackend) 
     }
 }
 
+/// Completions of one method in one namespace are dropped once older than
+/// asked; another method's and another namespace's stay.
+pub async fn test_operation_results_are_purged_by_method(backend: &dyn StorageBackend) {
+    let ns = namespace();
+    let record = |ns: &str, method: &str| {
+        test_audit().with_operation(OperationCompletion::new(
+            ns,
+            key(),
+            method,
+            b"inputs",
+            Vec::new(),
+        ))
+    };
+    let aborted = record(&ns, "abort");
+    let aborted_key = aborted.operation.clone().unwrap().key;
+    backend.record_outcome(aborted).await.unwrap();
+    let committed = record(&ns, "commit");
+    let committed_key = committed.operation.clone().unwrap().key;
+    backend.record_outcome(committed).await.unwrap();
+    let elsewhere = namespace();
+    let theirs = record(&elsewhere, "abort");
+    let their_key = theirs.operation.clone().unwrap().key;
+    backend.record_outcome(theirs).await.unwrap();
+
+    let earlier = chrono::Utc::now() - chrono::Duration::hours(1);
+    assert_eq!(
+        backend
+            .purge_operation_results(&ns, "abort", earlier)
+            .await
+            .unwrap(),
+        0
+    );
+    let later = chrono::Utc::now() + chrono::Duration::seconds(5);
+    assert_eq!(
+        backend
+            .purge_operation_results(&ns, "abort", later)
+            .await
+            .unwrap(),
+        1
+    );
+    let found = async |ns: &str, key: &OperationKey| {
+        backend
+            .get_operation_result(ns, key)
+            .await
+            .unwrap()
+            .is_some()
+    };
+    assert!(!found(&ns, &aborted_key).await);
+    assert!(found(&ns, &committed_key).await, "another method's");
+    assert!(found(&elsewhere, &their_key).await, "another namespace's");
+}
+
 /// A mutation that fails records no completion: the key stays free.
 pub async fn test_failed_mutation_records_no_completion(backend: &dyn StorageBackend) {
     backend.ensure_system_project(test_audit()).await.unwrap();

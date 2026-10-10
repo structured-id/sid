@@ -2938,6 +2938,41 @@ impl StorageBackend for SqliteBackend {
         let tx = self.begin_write().await?;
         Self::commit_mutation(tx, &chain, ctx).await
     }
+    async fn purge_operation_results(
+        &self,
+        namespace: &str,
+        method: &str,
+        before: chrono::DateTime<chrono::Utc>,
+    ) -> SidResult<u64> {
+        let mut tx = self.begin_write().await?;
+        // Compared as instants: stored timestamps do not all sort as text.
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT op_key, completed_at FROM operation_results WHERE namespace = ? AND method = ?",
+        )
+        .bind(namespace)
+        .bind(method)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("purge operation results: {e}")))?;
+        let mut dropped = 0;
+        for (key, completed_at) in rows {
+            let completed_at = chrono::DateTime::parse_from_rfc3339(&completed_at)
+                .map_err(|e| SidError::Storage(format!("completed_at: {e}")))?;
+            if completed_at < before {
+                sqlx::query("DELETE FROM operation_results WHERE namespace = ? AND op_key = ?")
+                    .bind(namespace)
+                    .bind(&key)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| SidError::Storage(format!("purge operation results: {e}")))?;
+                dropped += 1;
+            }
+        }
+        tx.commit()
+            .await
+            .map_err(|e| SidError::Storage(format!("commit: {e}")))?;
+        Ok(dropped)
+    }
     async fn get_operation_result(
         &self,
         namespace: &str,

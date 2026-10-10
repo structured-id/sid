@@ -398,7 +398,9 @@ pub async fn run_history_key_migrations(pool: &PgPool) -> SidResult<()> {
         .acquire()
         .await
         .map_err(|e| SidError::Storage(format!("Failed to acquire a connection: {}", e)))?;
-    sqlx::query("SELECT pg_advisory_lock(43)")
+    // A key of its own: the small numbers are the engine's migration lock and
+    // its background jobs' locks, which share the one advisory key space.
+    sqlx::query("SELECT pg_advisory_lock(hashtextextended('sid.history_key.migrations', 0))")
         .execute(&mut *conn)
         .await
         .map_err(|e| SidError::Storage(format!("Failed to acquire migration lock: {}", e)))?;
@@ -440,9 +442,10 @@ pub async fn run_history_key_migrations(pool: &PgPool) -> SidResult<()> {
         Ok(())
     }
     .await;
-    let unlocked = sqlx::query("SELECT pg_advisory_unlock(43)")
-        .execute(&mut *conn)
-        .await;
+    let unlocked =
+        sqlx::query("SELECT pg_advisory_unlock(hashtextextended('sid.history_key.migrations', 0))")
+            .execute(&mut *conn)
+            .await;
     applied?;
     unlocked.map_err(|e| SidError::Storage(format!("Failed to release migration lock: {}", e)))?;
     Ok(())

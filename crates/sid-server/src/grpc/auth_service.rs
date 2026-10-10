@@ -2617,6 +2617,18 @@ impl AuthServiceImpl {
         Arc::new(EnrollmentHandler::new(self.storage.clone(), delivery))
     }
 
+    /// Drop the records of first enrollments that ended long enough ago that
+    /// none of their steps can still arrive (see
+    /// [`compact_enrollments`](super::password_operation::compact_enrollments)).
+    pub async fn compact_enrollments(&self) -> sid_core::Result<u64> {
+        super::password_operation::compact_enrollments(
+            self.storage.as_ref(),
+            self.history_evaluation.as_deref(),
+            chrono::Utc::now(),
+        )
+        .await
+    }
+
     /// The result bytes a finish records for its retries: the response, encoded.
     fn finish_result<T: prost::Message>(response: &T) -> Vec<u8> {
         response.encode_to_vec()

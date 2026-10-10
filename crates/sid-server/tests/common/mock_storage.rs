@@ -114,8 +114,8 @@ pub struct MockStorageInner {
     key_audits: Vec<AuditEntry>,
     /// The first enrollment that created each epoch it created.
     key_created_by: HashMap<HistoryEpochId, Uuid>,
-    /// Aborted first enrollments and their owner domain.
-    key_abandoned: HashMap<Uuid, [u8; 32]>,
+    /// Aborted first enrollments: their owner domain and when they were.
+    key_abandoned: HashMap<Uuid, ([u8; 32], chrono::DateTime<chrono::Utc>)>,
     /// The credential side's history write cutoff.
     history_write_cutoff: Option<chrono::DateTime<chrono::Utc>>,
     /// The evaluator's history write cutoff.
@@ -647,10 +647,11 @@ impl sid_plugin::history_keys::HistoryKeyStore for MockStorage {
     ) -> SidResult<sid_core::models::EnrollmentCleanup> {
         use sid_core::models::EnrollmentCleanup;
         let mut inner = self.inner.lock().unwrap();
-        if *inner
+        if inner
             .key_abandoned
             .entry(operation)
-            .or_insert(*owner_domain)
+            .or_insert((*owner_domain, chrono::Utc::now()))
+            .0
             != *owner_domain
         {
             return Err(sid_core::Error::Validation(
@@ -703,6 +704,21 @@ impl sid_plugin::history_keys::HistoryKeyStore for MockStorage {
             .unwrap()
             .key_abandoned
             .contains_key(&operation))
+    }
+
+    async fn compact_abandoned(
+        &self,
+        before: chrono::DateTime<chrono::Utc>,
+        audit: AuditEntry,
+    ) -> SidResult<u64> {
+        let mut inner = self.inner.lock().unwrap();
+        let held = inner.key_abandoned.len();
+        inner.key_abandoned.retain(|_, (_, at)| *at >= before);
+        let dropped = (held - inner.key_abandoned.len()) as u64;
+        if dropped > 0 {
+            inner.key_audits.push(audit);
+        }
+        Ok(dropped)
     }
 
     async fn ensure_epoch(&self, new: &NewKeyEpoch, audit: AuditEntry) -> SidResult<KeyEpoch> {
@@ -4926,6 +4942,19 @@ impl StorageBackend for MockStorage {
     async fn record_outcome(&self, ctx: MutationContext) -> SidResult<()> {
         self.inner.lock().unwrap().owe(&ctx)
     }
+    async fn purge_operation_results(
+        &self,
+        namespace: &str,
+        method: &str,
+        before: chrono::DateTime<chrono::Utc>,
+    ) -> SidResult<u64> {
+        let mut inner = self.inner.lock().unwrap();
+        let held = inner.operations.len();
+        inner.operations.retain(|(ns, _), r| {
+            ns != namespace || r.completion.method != method || r.completed_at >= before
+        });
+        Ok((held - inner.operations.len()) as u64)
+    }
     async fn get_operation_result(
         &self,
         namespace: &str,
@@ -5593,5 +5622,20 @@ impl sid_plugin::WorkStore for MockStorage {
             .work
             .insert(work.record.id, (work.at_rest(), work.payload.clone(), None));
         Ok(true)
+    }
+
+    async fn purge_ended_work(
+        &self,
+        kind: &WorkKind,
+        before: chrono::DateTime<chrono::Utc>,
+    ) -> SidResult<u64> {
+        let mut inner = self.inner.lock().unwrap();
+        let held = inner.work.len();
+        inner.work.retain(|_, (r, _, _)| {
+            r.kind != *kind
+                || matches!(r.state, WorkState::Pending | WorkState::Claimed)
+                || r.updated_at >= before
+        });
+        Ok((held - inner.work.len()) as u64)
     }
 }

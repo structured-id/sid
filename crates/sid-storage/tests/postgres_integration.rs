@@ -482,6 +482,21 @@ async fn test_cleanup_races_preparation() {
 }
 
 #[tokio::test]
+async fn test_abandoned_fences_are_compacted() {
+    common::history_keys::test_abandoned_fences_are_compacted(&key_store().await).await;
+}
+
+#[tokio::test]
+async fn test_ended_work_is_purged() {
+    common::work::test_ended_work_is_purged(&setup().await).await;
+}
+
+#[tokio::test]
+async fn test_operation_results_are_purged_by_method() {
+    common::operation::test_operation_results_are_purged_by_method(&setup().await).await;
+}
+
+#[tokio::test]
 async fn test_reseal_credential_data_keeps_status() {
     common::test_reseal_credential_data_keeps_status(&setup().await).await;
 }

@@ -2341,6 +2341,16 @@ pub trait StorageBackend: WorkStore + Send + Sync + 'static {
     /// `Error::OperationCompleted` is returned.
     async fn record_outcome(&self, ctx: MutationContext) -> Result<()>;
 
+    /// Drop the completions of `method` in `namespace` recorded before
+    /// `before`, once their commands can no longer be retried or raced; the
+    /// command's owner decides when. Returns how many were dropped.
+    async fn purge_operation_results(
+        &self,
+        namespace: &str,
+        method: &str,
+        before: DateTime<Utc>,
+    ) -> Result<u64>;
+
     /// The committed completion of the keyed command `key` in `namespace`
     /// (recorded through [`MutationContext::operation`]), if any.
     async fn get_operation_result(

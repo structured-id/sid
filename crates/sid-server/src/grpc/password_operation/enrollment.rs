@@ -34,6 +34,33 @@ const ABORT_METHOD: &str = "password_history.enrollment_abort";
 const ABORT_EVENT_NAMESPACE: uuid::Uuid =
     uuid::Uuid::from_u128(0x6a1e_93c4_2f0b_4c7d_8e55_b3a9_10d2_7f64);
 
+/// How long the records of an ended first enrollment are kept: its ended
+/// work, its abort's completion and the evaluator's fence. Past an
+/// operation's lifetime and the tolerated clock skew no preparation, finish
+/// or commit of it can still arrive, so each is then no longer needed.
+const ENROLLMENT_RECORD_RETENTION: chrono::Duration = chrono::Duration::days(1);
+
+/// Drop the records of first enrollments that ended more than a day ago:
+/// their ended work, their aborts' completions and, with the evaluator in
+/// this process, its fences. Open work, a commit's completion and every key
+/// are untouched. Returns how many records were dropped.
+pub(crate) async fn compact_enrollments(
+    storage: &dyn StorageBackend,
+    evaluation: Option<&HistoryEvaluation>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> sid_core::Result<u64> {
+    let before = now - ENROLLMENT_RECORD_RETENTION;
+    let kind = WorkKind::new(ENROLLMENT_ADMISSION_KIND).expect("the enrollment kind is valid");
+    let mut dropped = storage.purge_ended_work(&kind, before).await?;
+    dropped += storage
+        .purge_operation_results(RESULT_NAMESPACE, ABORT_METHOD, before)
+        .await?;
+    if let Some(evaluation) = evaluation {
+        dropped += evaluation.compact_abandoned(before).await?;
+    }
+    Ok(dropped)
+}
+
 /// Where an aborted enrollment's cleanup goes.
 pub(crate) enum EnrollmentDelivery {
     /// The evaluator in this process.

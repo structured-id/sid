@@ -55,6 +55,16 @@ pub trait WorkStore: Send + Sync {
     /// The stored record of a piece of work.
     async fn get_work(&self, id: WorkId) -> Result<Option<WorkRecord>>;
 
+    /// Drop work of `kind` that ended (completed, failed, expired or
+    /// cancelled) before `before`; open work is never touched. Its kind's
+    /// owner decides when an ended item is no longer needed. Returns how
+    /// many were dropped.
+    async fn purge_ended_work(
+        &self,
+        kind: &WorkKind,
+        before: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64>;
+
     /// Every stored piece of work with its payload, to carry to another store.
     async fn export_work(&self) -> Result<Vec<WorkSnapshot>>;
 

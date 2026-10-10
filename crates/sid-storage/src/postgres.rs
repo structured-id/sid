@@ -8171,6 +8171,25 @@ impl StorageBackend for PostgresBackend {
         Ok(())
     }
 
+    async fn purge_operation_results(
+        &self,
+        namespace: &str,
+        method: &str,
+        before: chrono::DateTime<chrono::Utc>,
+    ) -> SidResult<u64> {
+        sqlx::query(
+            "DELETE FROM operation_results
+             WHERE namespace = $1 AND method = $2 AND completed_at < $3",
+        )
+        .bind(namespace)
+        .bind(method)
+        .bind(before)
+        .execute(&self.pool)
+        .await
+        .map(|done| done.rows_affected())
+        .map_err(|e| SidError::Storage(format!("purge operation results: {e}")))
+    }
+
     async fn get_operation_result(
         &self,
         namespace: &str,

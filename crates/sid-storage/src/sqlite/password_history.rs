@@ -996,6 +996,38 @@ impl HistoryKeyStore for SqliteHistoryKeyStore {
         abandoned(&mut conn, operation).await
     }
 
+    async fn compact_abandoned(
+        &self,
+        before: chrono::DateTime<chrono::Utc>,
+        audit: AuditEntry,
+    ) -> SidResult<u64> {
+        let mut tx = self.begin_write().await?;
+        // Compared as instants: stored timestamps do not all sort as text.
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT operation_id, abandoned_at FROM history_key_abandoned")
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(storage("fence compaction"))?;
+        let mut dropped = 0;
+        for (operation, at) in rows {
+            let at = chrono::DateTime::parse_from_rfc3339(&at)
+                .map_err(|e| SidError::Storage(format!("abandoned_at: {e}")))?;
+            if at < before {
+                sqlx::query("DELETE FROM history_key_abandoned WHERE operation_id = ?")
+                    .bind(&operation)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(storage("fence compaction"))?;
+                dropped += 1;
+            }
+        }
+        if dropped > 0 {
+            key_audit(&mut tx, audit).await?;
+        }
+        tx.commit().await.map_err(storage("commit"))?;
+        Ok(dropped)
+    }
+
     async fn get_epoch_key(&self, epoch: HistoryEpochId) -> SidResult<Option<WrappedHistoryKey>> {
         let key: Option<Vec<u8>> =
             sqlx::query_scalar("SELECT wrapped_key FROM history_key_epochs WHERE id = ?")

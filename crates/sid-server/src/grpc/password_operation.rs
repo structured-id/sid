@@ -113,7 +113,7 @@ const MAX_CHARGE_KEY: usize = 128;
 const ENROLLMENT_CAPACITY: u64 = 100_000;
 
 mod enrollment;
-pub(crate) use enrollment::{EnrollmentDelivery, EnrollmentHandler};
+pub(crate) use enrollment::{EnrollmentDelivery, EnrollmentHandler, compact_enrollments};
 
 /// What the operation installs a password for, and the authority it rests on.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1489,6 +1489,17 @@ impl HistoryEvaluation {
                 operation,
                 audit("password_history.enrollment_abandoned"),
             )
+            .await
+    }
+
+    /// Drop the fences of first enrollments abandoned before `before`, when
+    /// no delayed preparation of them can still be within its expiry.
+    pub async fn compact_abandoned(
+        &self,
+        before: chrono::DateTime<chrono::Utc>,
+    ) -> sid_core::Result<u64> {
+        self.keys
+            .compact_abandoned(before, audit("password_history.fences_compacted"))
             .await
     }
 
