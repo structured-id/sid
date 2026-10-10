@@ -4,12 +4,20 @@ fn owner() -> ProfileId {
     ProfileId::generate()
 }
 
+/// A valid evaluator public key: the Pallas generator, compressed.
+fn public_key() -> [u8; 32] {
+    use group::{Curve, Group, GroupEncoding};
+    pasta_curves::pallas::Point::generator()
+        .to_affine()
+        .to_bytes()
+}
+
 fn epoch(owner: ProfileId, status: HistoryEpochUse) -> HistoryEpoch {
     HistoryEpoch {
         id: HistoryEpochId::generate(),
         owner,
         suite: HistorySuite::PallasPoseidonV1,
-        public_key: [7; 32],
+        public_key: public_key(),
         ksf: HistoryKsf::DEFAULT,
         ksf_salt: [9; 32],
         status,
@@ -103,6 +111,60 @@ fn an_archive_with_unbounded_ksf_work_is_refused() {
     assert!(archive(&active).validate().is_ok());
     active.ksf.passes = MAX_HISTORY_KSF_PASSES + 1;
     assert!(archive(&active).validate().is_err());
+}
+
+/// An epoch's public key must be a usable Pallas point: one that does not
+/// decode, or the identity, would be imported and then refuse every later
+/// password operation of its owner. The import refuses it instead, in the
+/// credential service's archive and in the evaluator's.
+#[test]
+fn an_archive_with_an_unusable_public_key_is_refused() {
+    let o = owner();
+    let mut active = epoch(o, HistoryEpochUse::Active);
+    let history = |active: &HistoryEpoch| HistoryArchive {
+        owner: o,
+        revision: 1,
+        epochs: vec![active.clone()],
+        entries: vec![entry(active.id, 1)],
+    };
+    let domain = [4; 32];
+    let keys = |active: &HistoryEpoch| KeyArchive {
+        owner_domain: domain,
+        epochs: vec![NewKeyEpoch {
+            epoch: KeyEpoch {
+                id: active.id,
+                owner_domain: domain,
+                suite: active.suite,
+                public_key: active.public_key,
+                ksf: active.ksf,
+                ksf_salt: active.ksf_salt,
+                status: active.status,
+                created_at: active.created_at,
+            },
+            key: sealed_key(active.id, &domain),
+        }],
+        replaced: Vec::new(),
+    };
+    assert!(history(&active).validate().is_ok());
+    assert!(keys(&active).validate().is_ok());
+    // The identity's compressed form, and bytes that are no point at all.
+    for unusable in [[0; 32], [0xff; 32]] {
+        active.public_key = unusable;
+        assert!(history(&active).validate().is_err(), "{unusable:?}");
+        assert!(keys(&active).validate().is_err(), "{unusable:?}");
+    }
+}
+
+/// A history key sealed for `epoch` of `owner_domain`, as the evaluator
+/// seals it: the binding is checked, the ciphertext is opaque here.
+fn sealed_key(epoch: HistoryEpochId, owner_domain: &[u8; 32]) -> WrappedHistoryKey {
+    let field = sid_keys::EncryptedField {
+        key_version: 1,
+        nonce: [5; 12],
+        context: history_key_context(epoch, owner_domain),
+        ciphertext: vec![6; 48],
+    };
+    WrappedHistoryKey(field.to_bytes())
 }
 
 /// The active epoch comes first, compare-only epochs that still retain an

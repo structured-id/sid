@@ -1005,6 +1005,14 @@ async fn restored_history_refuses_passwords_from_active_and_rotated_epochs() {
     );
 }
 
+/// A valid evaluator public key: the Pallas generator, compressed.
+fn history_public_key() -> [u8; 32] {
+    use group::{Curve, Group, GroupEncoding};
+    pasta_curves::pallas::Point::generator()
+        .to_affine()
+        .to_bytes()
+}
+
 /// The evaluator's epoch of `owner` in `installation_id`, with a sealed key
 /// bound to it (never unsealed by the transfer).
 fn sealed_epoch(
@@ -1019,7 +1027,7 @@ fn sealed_epoch(
             id,
             owner_domain,
             suite: HistorySuite::PallasPoseidonV1,
-            public_key: [3; 32],
+            public_key: history_public_key(),
             ksf: HistoryKsf::DEFAULT,
             ksf_salt: [4; 32],
             status: HistoryEpochUse::Active,

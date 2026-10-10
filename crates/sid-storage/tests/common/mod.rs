@@ -48,6 +48,16 @@ pub mod work;
 
 // ─── Builders ───
 
+/// A history epoch's public key: `(n + 1)·G` on Pallas, so each `n` gives a
+/// distinct valid point and none is the identity.
+pub fn history_public_key(n: u8) -> [u8; 32] {
+    use ::group::{Curve, Group, GroupEncoding};
+    use pasta_curves::pallas;
+    (pallas::Point::generator() * pallas::Scalar::from(u64::from(n) + 1))
+        .to_affine()
+        .to_bytes()
+}
+
 pub fn test_audit() -> MutationContext {
     AuditEntry::system("test", "test-resource").into()
 }

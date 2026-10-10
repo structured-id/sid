@@ -21,7 +21,7 @@ fn descriptor(key: u8) -> HistoryEpochDescriptor {
     HistoryEpochDescriptor {
         id: HistoryEpochId::generate(),
         suite: HistorySuite::PallasPoseidonV1,
-        public_key: [key; 32],
+        public_key: super::history_public_key(key),
         ksf: HistoryKsf::DEFAULT,
         ksf_salt: [key.wrapping_add(1); 32],
         // Stored to the microsecond by every backend.

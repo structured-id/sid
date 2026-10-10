@@ -28,6 +28,15 @@ pub const MAX_HISTORY_DOMAINS: usize = 3;
 /// or three passes; new epochs use three.
 pub const MAX_HISTORY_KSF_PASSES: u32 = 10;
 
+/// A compressed Pallas point, decoded; `None` for bytes that are no point
+/// and for the identity, which no evaluator key, blinded input or evaluation
+/// may be.
+pub fn pallas_point(bytes: &[u8; 32]) -> Option<pasta_curves::pallas::Affine> {
+    use group::GroupEncoding;
+    Option::<pasta_curves::pallas::Affine>::from(pasta_curves::pallas::Affine::from_bytes(bytes))
+        .filter(|p| !bool::from(group::CurveAffine::is_identity(p)))
+}
+
 /// One history epoch of one owner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct HistoryEpochId(pub Uuid);
@@ -415,10 +424,13 @@ impl HistoryArchive {
         let mut ids = BTreeMap::new();
         let mut active = 0;
         for e in &self.epochs {
+            // An unusable key would be stored and then refuse every later
+            // password operation of the owner.
             if e.owner != self.owner
                 || e.created_at.timestamp_subsec_nanos() % 1000 != 0
                 || ids.insert(e.id, e.status).is_some()
                 || !valid_ksf(&e.ksf)
+                || pallas_point(&e.public_key).is_none()
             {
                 return Err(Error::Validation("invalid history archive epoch".into()));
             }
@@ -527,6 +539,7 @@ impl KeyArchive {
                 || e.created_at.timestamp_subsec_nanos() % 1000 != 0
                 || ids.insert(e.id, e.status).is_some()
                 || !valid_ksf(&e.ksf)
+                || pallas_point(&e.public_key).is_none()
             {
                 return Err(Error::Validation("invalid key archive epoch".into()));
             }

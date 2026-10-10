@@ -98,8 +98,7 @@ impl EpochPolicy {
 }
 
 fn point(bytes: &[u8; 32], what: &str) -> SidResult<pallas::Affine> {
-    Option::<pallas::Affine>::from(pallas::Affine::from_bytes(bytes))
-        .filter(|p| !bool::from(group::CurveAffine::is_identity(p)))
+    sid_core::models::password_history::pallas_point(bytes)
         .ok_or_else(|| SidError::Validation(format!("{what}: not a Pallas point")))
 }
 

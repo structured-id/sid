@@ -53,7 +53,13 @@ async fn source_with_history(dir: &std::path::Path, org: &Organization) -> Sourc
             id,
             owner_domain,
             suite: HistorySuite::PallasPoseidonV1,
-            public_key: [3; 32],
+            // A valid evaluator public key: the Pallas generator.
+            public_key: {
+                use group::{Curve, Group, GroupEncoding};
+                pasta_curves::pallas::Point::generator()
+                    .to_affine()
+                    .to_bytes()
+            },
             ksf: HistoryKsf::DEFAULT,
             ksf_salt: [4; 32],
             status: HistoryEpochUse::Active,
