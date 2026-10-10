@@ -723,6 +723,48 @@ impl EnrollmentAdmission {
     }
 }
 
+/// Namespace of the recorded settlements of relayed cleanup: a cleanup the
+/// credential authority relayed stays owed until its settlement is recorded
+/// here.
+pub const CLEANUP_SETTLED_NAMESPACE: &str = "password_history.cleanup_settled";
+
+/// A cleanup a separate evaluator is told of by a relayed event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RelayedCleanup {
+    /// An aborted first enrollment, whose key is reclaimed.
+    Enrollment { operation: Uuid },
+    /// A deleted owner, whose keys are destroyed.
+    OwnerPurge { owner_domain: [u8; 32] },
+}
+
+impl RelayedCleanup {
+    /// The key its settlement is recorded under, one per cleanup.
+    pub fn settlement_key(&self) -> crate::models::OperationKey {
+        let key = match self {
+            Self::Enrollment { operation } => format!("enrollment:{operation}"),
+            Self::OwnerPurge { owner_domain } => {
+                let mut key = String::with_capacity(6 + 64);
+                key.push_str("purge:");
+                for b in owner_domain {
+                    use std::fmt::Write;
+                    write!(key, "{b:02x}").expect("writing to a String cannot fail");
+                }
+                key
+            }
+        };
+        crate::models::OperationKey::parse(&key).expect("a settlement key is a valid key")
+    }
+}
+
+/// What a separate evaluator reports once it has acted on a relayed cleanup
+/// of the credential authority `authority`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CleanupSettled {
+    pub authority: String,
+    pub cleanup: RelayedCleanup,
+}
+
 /// Work kind of a deleted owner's purge from the evaluator: owed in the
 /// transaction that deletes the profile, until the evaluator has destroyed
 /// the owner's history keys and lifecycle.

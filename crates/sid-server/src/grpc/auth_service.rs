@@ -2594,6 +2594,15 @@ impl AuthServiceImpl {
         }
     }
 
+    /// The credential authority whose cleanup settlements this service
+    /// consumes: its own, when its evaluator runs separately; `None` when the
+    /// evaluator runs in process and settles directly.
+    pub fn cleanup_settlement_authority(&self) -> Option<String> {
+        self.history_evaluation
+            .is_none()
+            .then(|| self.issuer.clone())
+    }
+
     /// The handler that ends this service's first enrollments at their
     /// expiry: the evaluator reclaims an aborted one's key.
     pub fn enrollment_handler(&self) -> Arc<dyn sid_authn::work_runner::WorkHandler> {

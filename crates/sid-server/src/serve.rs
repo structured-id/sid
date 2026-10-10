@@ -320,6 +320,7 @@ pub async fn serve(
     )?;
 
     let work_runner = spawn_work_runner(&c, stopped.clone().wait())?;
+    let settlements = crate::init::spawn_cleanup_settlements(&c, stopped.clone().wait());
 
     let (routes, health) = services.services.into_parts();
 
@@ -376,6 +377,11 @@ pub async fn serve(
     };
     // Attempts in flight record their outcome before the process ends.
     let drained = work_runner.await;
+    // A settlement being recorded finishes; an unacknowledged one is
+    // delivered again.
+    if let Some(settlements) = settlements {
+        settlements.await?;
+    }
     served?;
     http_drained?;
     transport?;

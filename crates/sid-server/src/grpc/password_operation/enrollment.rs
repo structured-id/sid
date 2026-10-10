@@ -19,7 +19,7 @@ use sid_authn::work_runner::{RetrySchedule, WorkHandler, WorkOutcome};
 use sid_core::models::event::event_types;
 use sid_core::models::{
     AuditEntry, ClaimedWork, ENROLLMENT_ADMISSION_KIND, EnrollmentAdmission, EnrollmentCleanup,
-    Event, MutationContext, NewWork, OperationCompletion, OperationKey, WorkKind,
+    Event, MutationContext, NewWork, OperationCompletion, OperationKey, RelayedCleanup, WorkKind,
 };
 use sid_plugin::storage::StorageBackend;
 use tracing::{error, info};
@@ -62,6 +62,15 @@ pub(crate) async fn compact_enrollments(
     }
     dropped += storage
         .purge_operation_results(RESULT_NAMESPACE, ABORT_METHOD, before)
+        .await?;
+    // A settlement dropped before its work saw it costs one more relay,
+    // which the evaluator settles again harmlessly.
+    dropped += storage
+        .purge_operation_results(
+            sid_core::models::CLEANUP_SETTLED_NAMESPACE,
+            super::relayed::SETTLED_METHOD,
+            before,
+        )
         .await?;
     if let Some(evaluation) = evaluation {
         dropped += evaluation.compact_abandoned(before).await?;
@@ -112,7 +121,7 @@ impl EnrollmentHandler {
         if let EvaluatorDelivery::Relay { source } = &self.delivery {
             // Owed in the abort's own transaction: the separate evaluator
             // learns of every abort that is recorded, and of no other.
-            ctx = ctx.with_work(abort_event(source, admission)?);
+            ctx = ctx.with_work(abort_event(source, admission, None)?);
         }
         match self.storage.record_outcome(ctx).await {
             Ok(()) => Ok(true),
@@ -130,15 +139,45 @@ impl EnrollmentHandler {
             Err(e) => Err(format!("record the abort: {e}")),
         }
     }
+
+    /// Relay `admission`'s abort once more, as a new event of `attempt`: the
+    /// earlier one may have aged out unconsumed.
+    async fn relay_again(
+        &self,
+        source: &str,
+        admission: &EnrollmentAdmission,
+        attempt: u32,
+    ) -> Result<(), String> {
+        let ctx = MutationContext::from(AuditEntry::system(
+            "password_history.enrollment_abort_relayed",
+            "password_history",
+        ))
+        .with_work(abort_event(source, admission, Some(attempt))?);
+        self.storage
+            .record_outcome(ctx)
+            .await
+            .map_err(|e| format!("relay the abort again: {e}"))
+    }
 }
 
-/// The relayed event telling a separate evaluator that `admission` aborted.
-fn abort_event(source: &str, admission: &EnrollmentAdmission) -> Result<NewWork, String> {
+/// The relayed event telling a separate evaluator that `admission` aborted:
+/// one with the abort itself (a retried abort owes the same one), then one
+/// per later `attempt` that relays it again.
+fn abort_event(
+    source: &str,
+    admission: &EnrollmentAdmission,
+    attempt: Option<u32>,
+) -> Result<NewWork, String> {
     let mut event = Event::new(source, event_types::PASSWORD_HISTORY_ENROLLMENT_ABORTED)
         .with_data(serde_json::to_value(admission).map_err(|e| format!("event data: {e}"))?);
-    // One event per operation: a retried abort owes the same one.
-    event.id =
-        uuid::Uuid::new_v5(&ABORT_EVENT_NAMESPACE, admission.operation.as_bytes()).to_string();
+    event.id = match attempt {
+        None => uuid::Uuid::new_v5(&ABORT_EVENT_NAMESPACE, admission.operation.as_bytes()),
+        Some(attempt) => uuid::Uuid::new_v5(
+            &ABORT_EVENT_NAMESPACE,
+            format!("{}:{attempt}", admission.operation).as_bytes(),
+        ),
+    }
+    .to_string();
     Ok(event.relay())
 }
 
@@ -169,10 +208,30 @@ impl WorkHandler for EnrollmentHandler {
             Err(e) => return WorkOutcome::Retry(e),
         }
         match &self.delivery {
-            // The relayed event is owed in the abort's transaction; the
+            // The first relayed event is owed in the abort's transaction; the
             // separate evaluator reclaims the key as it consumes it
-            // ([`super::consume_relayed_cleanup`]), acknowledging only then.
-            EvaluatorDelivery::Relay { .. } => WorkOutcome::Done(Some("abort relayed".into())),
+            // ([`super::consume_relayed_cleanup`]) and reports the
+            // settlement. Until that is recorded the abort stays owed and a
+            // later attempt relays it again, so an event that aged out of the
+            // stream or met an evaluator outage is not lost.
+            EvaluatorDelivery::Relay { source } => {
+                let cleanup = RelayedCleanup::Enrollment {
+                    operation: admission.operation,
+                };
+                match super::relayed::settled(self.storage.as_ref(), &cleanup).await {
+                    Ok(true) => WorkOutcome::Done(Some("settled by the evaluator".into())),
+                    Ok(false) if work.attempt <= 1 => {
+                        WorkOutcome::Retry("abort relayed; awaiting the evaluator".into())
+                    }
+                    Ok(false) => match self.relay_again(source, &admission, work.attempt).await {
+                        Ok(()) => {
+                            WorkOutcome::Retry("abort relayed again; awaiting the evaluator".into())
+                        }
+                        Err(e) => WorkOutcome::Retry(e),
+                    },
+                    Err(e) => WorkOutcome::Retry(format!("settlement: {e}")),
+                }
+            }
             EvaluatorDelivery::InProcess(evaluation) => match evaluation
                 .abandon_enrollment(&admission.owner_domain, admission.operation)
                 .await

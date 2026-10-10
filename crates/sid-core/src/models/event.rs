@@ -358,6 +358,11 @@ pub mod event_types {
     /// history keys and lifecycle. Internal to the credential authority and
     /// its evaluator; carries the owner's history input domain only.
     pub const PASSWORD_HISTORY_OWNER_PURGED: &str = "sid.password_history.owner_purged.v1";
+    /// A separate evaluator acted on a relayed cleanup (an aborted enrollment
+    /// or a purged owner) and recorded it: the credential authority stops
+    /// owing it. Carries the authority, the operation or the owner's history
+    /// input domain only.
+    pub const PASSWORD_HISTORY_CLEANUP_SETTLED: &str = "sid.password_history.cleanup_settled.v1";
 
     // Consent
     pub const CONSENT_GRANTED: &str = "sid.consent.granted.v1";

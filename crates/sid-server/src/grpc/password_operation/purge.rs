@@ -13,7 +13,7 @@ use sid_authn::work_runner::{RetrySchedule, WorkHandler, WorkOutcome};
 use sid_core::models::event::event_types;
 use sid_core::models::{
     AuditEntry, ClaimedWork, Event, MutationContext, NewWork, OWNER_PURGE_KIND, OwnerPurge,
-    ProfileId, WorkKind,
+    ProfileId, RelayedCleanup, WorkKind,
 };
 use sid_plugin::storage::StorageBackend;
 use tracing::info;
@@ -57,11 +57,20 @@ impl OwnerPurgeHandler {
 }
 
 /// The relayed event telling a separate evaluator that `purge`'s owner was
-/// deleted; one per owner domain, so a retry owes the same one.
-fn purge_event(source: &str, purge: &OwnerPurge) -> Result<NewWork, String> {
+/// deleted: one per owner domain at the first attempt (a repeated deletion
+/// owes the same one), then one per later `attempt` that relays it again.
+fn purge_event(source: &str, purge: &OwnerPurge, attempt: u32) -> Result<NewWork, String> {
     let mut event = Event::new(source, event_types::PASSWORD_HISTORY_OWNER_PURGED)
         .with_data(serde_json::to_value(purge).map_err(|e| format!("event data: {e}"))?);
-    event.id = uuid::Uuid::new_v5(&PURGE_EVENT_NAMESPACE, &purge.owner_domain).to_string();
+    event.id = if attempt <= 1 {
+        uuid::Uuid::new_v5(&PURGE_EVENT_NAMESPACE, &purge.owner_domain)
+    } else {
+        uuid::Uuid::new_v5(
+            &PURGE_EVENT_NAMESPACE,
+            &[purge.owner_domain.as_slice(), &attempt.to_be_bytes()].concat(),
+        )
+    }
+    .to_string();
     Ok(event.relay())
 }
 
@@ -96,8 +105,20 @@ impl WorkHandler for OwnerPurgeHandler {
                     Err(e) => WorkOutcome::Retry(format!("purge: {e}")),
                 }
             }
+            // The purge stays owed until the separate evaluator's settlement
+            // is recorded: each attempt before then relays it again, so an
+            // event that aged out of the stream or met an evaluator outage
+            // is not lost ([`super::consume_cleanup_settlements`]).
             EvaluatorDelivery::Relay { source } => {
-                let event = match purge_event(source, &purge) {
+                let cleanup = RelayedCleanup::OwnerPurge {
+                    owner_domain: purge.owner_domain,
+                };
+                match super::relayed::settled(self.storage.as_ref(), &cleanup).await {
+                    Ok(true) => return WorkOutcome::Done(Some("settled by the evaluator".into())),
+                    Ok(false) => {}
+                    Err(e) => return WorkOutcome::Retry(format!("settlement: {e}")),
+                }
+                let event = match purge_event(source, &purge, work.attempt) {
                     Ok(event) => event,
                     Err(e) => return WorkOutcome::Permanent(e),
                 };
@@ -107,7 +128,7 @@ impl WorkHandler for OwnerPurgeHandler {
                 ))
                 .with_work(event);
                 match self.storage.record_outcome(ctx).await {
-                    Ok(()) => WorkOutcome::Done(Some("purge relayed".into())),
+                    Ok(()) => WorkOutcome::Retry("purge relayed; awaiting the evaluator".into()),
                     Err(e) => WorkOutcome::Retry(format!("relay the purge: {e}")),
                 }
             }

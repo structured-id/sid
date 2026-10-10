@@ -224,9 +224,11 @@ async fn an_abort_before_its_preparation_fences_it() {
 }
 
 /// With a separate evaluator, the abort is recorded together with the event
-/// that tells it; this side holds no key to touch.
+/// that tells it, and stays owed until the evaluator's settlement is
+/// recorded: a later attempt relays it again (the first event may have aged
+/// out of the stream), and only the settlement ends the work.
 #[tokio::test]
-async fn a_separate_evaluator_is_told_with_the_abort() {
+async fn a_separate_evaluator_is_told_with_the_abort_until_it_settles() {
     let storage = sqlite().await;
     let installation = sid_core::models::OrgId::generate();
     let (ops, _) = split(storage.clone(), installation, manager(3), manager(3));
@@ -237,21 +239,41 @@ async fn a_separate_evaluator_is_told_with_the_abort() {
             source: "https://sid.example.com".into(),
         },
     );
-    let work = claimed(storage.as_ref(), id, domain).await;
-    assert_eq!(
-        handler.handle(&work).await,
-        WorkOutcome::Done(Some("abort relayed".into()))
+    let mut work = claimed(storage.as_ref(), id, domain).await;
+    assert!(
+        matches!(handler.handle(&work).await, WorkOutcome::Retry(_)),
+        "relayed, not settled"
     );
-    let event = WorkId(uuid::Uuid::new_v5(
+    let first = WorkId(uuid::Uuid::new_v5(
         &ABORT_EVENT_NAMESPACE,
         id.into_uuid().as_bytes(),
     ));
-    let relay = storage.get_work(event).await.unwrap().expect("relay owed");
+    let relay = storage.get_work(first).await.unwrap().expect("relay owed");
     assert_eq!(relay.kind.as_str(), sid_core::models::EVENT_RELAY_KIND);
+
+    work.attempt = 2;
+    assert!(matches!(handler.handle(&work).await, WorkOutcome::Retry(_)));
+    let again = WorkId(uuid::Uuid::new_v5(
+        &ABORT_EVENT_NAMESPACE,
+        format!("{}:2", id.into_uuid()).as_bytes(),
+    ));
+    assert!(
+        storage.get_work(again).await.unwrap().is_some(),
+        "relayed again"
+    );
+
+    super::super::relayed::record_settlement(
+        storage.as_ref(),
+        &sid_core::models::RelayedCleanup::Enrollment {
+            operation: id.into_uuid(),
+        },
+    )
+    .await
+    .unwrap();
+    work.attempt = 3;
     assert_eq!(
         handler.handle(&work).await,
-        WorkOutcome::Done(Some("abort relayed".into())),
-        "a retry owes no second event"
+        WorkOutcome::Done(Some("settled by the evaluator".into()))
     );
 }
 

@@ -1375,6 +1375,34 @@ pub fn spawn_work_runner(
     Ok(tokio::spawn(runner.run(shutdown)))
 }
 
+/// With a separate history evaluator, consume the cleanup settlements it
+/// reports, so the cleanup this server relays stops being owed once settled;
+/// runs until `shutdown` resolves. Nothing to consume with the evaluator in
+/// process.
+pub fn spawn_cleanup_settlements(
+    c: &CeComponents,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let authority = c.auth_svc.cleanup_settlement_authority()?;
+    let (bus, storage) = (c.event_bus.clone(), c.storage.clone());
+    Some(tokio::spawn(async move {
+        tokio::select! {
+            consumed = crate::grpc::password_operation::consume_cleanup_settlements(
+                bus.as_ref(),
+                storage,
+                &authority,
+            ) => {
+                if let Err(e) = consumed {
+                    // The relayed cleanup stays owed and is relayed again
+                    // until its work is recorded failed.
+                    tracing::error!("cleanup settlements are not consumed: {e}");
+                }
+            }
+            () = shutdown => {}
+        }
+    }))
+}
+
 /// The history evaluator's store in this installation's own database, used
 /// only when the evaluator runs in this process: its tables are created then.
 pub(crate) enum LocalHistoryKeys {

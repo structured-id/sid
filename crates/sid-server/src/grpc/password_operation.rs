@@ -118,7 +118,9 @@ mod purge;
 mod relayed;
 pub(crate) use enrollment::{EnrollmentHandler, EvaluatorDelivery, compact_enrollments};
 pub(crate) use purge::{OwnerPurgeHandler, owner_purge};
-pub use relayed::{CLEANUP_CONSUMER, consume_relayed_cleanup};
+pub use relayed::{
+    CLEANUP_CONSUMER, SETTLEMENT_CONSUMER, consume_cleanup_settlements, consume_relayed_cleanup,
+};
 
 /// What the operation installs a password for, and the authority it rests on.
 #[derive(Debug, Clone, Serialize, Deserialize)]

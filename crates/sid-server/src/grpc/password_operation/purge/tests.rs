@@ -126,10 +126,11 @@ async fn a_deleted_owners_keys_are_destroyed() {
     );
 }
 
-/// With a separate evaluator, the purge owes the event that tells it, once
-/// per owner however often it runs.
+/// With a separate evaluator, the purge owes the event that tells it until
+/// the evaluator's settlement is recorded: a later attempt relays it again,
+/// and only the settlement ends the work.
 #[tokio::test]
-async fn a_separate_evaluator_is_told_of_the_purge() {
+async fn a_separate_evaluator_is_told_of_the_purge_until_it_settles() {
     let (storage, org, profile, _, _) = owner_with_a_key().await;
     let purge = owner_purge(storage.as_ref(), profile)
         .await
@@ -142,17 +143,37 @@ async fn a_separate_evaluator_is_told_of_the_purge() {
             source: "https://sid.example.com".into(),
         },
     );
-    let work = claimed(storage.as_ref(), purge.id).await;
-    for _ in 0..2 {
-        assert_eq!(
-            handler.handle(&work).await,
-            WorkOutcome::Done(Some("purge relayed".into()))
-        );
-    }
+    let mut work = claimed(storage.as_ref(), purge.id).await;
+    assert!(matches!(handler.handle(&work).await, WorkOutcome::Retry(_)));
     let domain = sid_authn::password_history::owner_domain(org.id.as_bytes(), profile);
     let event = WorkId(uuid::Uuid::new_v5(&PURGE_EVENT_NAMESPACE, &domain));
     let relay = storage.get_work(event).await.unwrap().expect("relay owed");
     assert_eq!(relay.kind.as_str(), sid_core::models::EVENT_RELAY_KIND);
+
+    work.attempt = 2;
+    assert!(matches!(handler.handle(&work).await, WorkOutcome::Retry(_)));
+    let again = WorkId(uuid::Uuid::new_v5(
+        &PURGE_EVENT_NAMESPACE,
+        &[domain.as_slice(), &2u32.to_be_bytes()].concat(),
+    ));
+    assert!(
+        storage.get_work(again).await.unwrap().is_some(),
+        "relayed again"
+    );
+
+    super::super::relayed::record_settlement(
+        storage.as_ref(),
+        &sid_core::models::RelayedCleanup::OwnerPurge {
+            owner_domain: domain,
+        },
+    )
+    .await
+    .unwrap();
+    work.attempt = 3;
+    assert_eq!(
+        handler.handle(&work).await,
+        WorkOutcome::Done(Some("settled by the evaluator".into()))
+    );
 }
 
 /// Before the installation has an authority there is no history domain, so

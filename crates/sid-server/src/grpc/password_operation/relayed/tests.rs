@@ -9,33 +9,53 @@ use tokio::sync::mpsc;
 /// The credential authority whose cleanup the evaluator serves.
 const AUTHORITY: &str = "sid-credentials.sid.example.com";
 
-/// A bus handing the consumer the deliveries a test feeds it.
-struct Feed(std::sync::Mutex<Option<mpsc::Receiver<Delivery>>>);
+/// A bus handing the consumer the deliveries a test feeds it and keeping
+/// what is published, or refusing every publish.
+struct Feed {
+    deliveries: std::sync::Mutex<Option<mpsc::Receiver<Delivery>>>,
+    published: Arc<std::sync::Mutex<Vec<Event>>>,
+    publishes: bool,
+}
 
 #[tonic::async_trait]
 impl EventBus for Feed {
-    async fn publish(&self, _: Event) -> EventBusResult<()> {
+    async fn publish(&self, event: Event) -> EventBusResult<()> {
+        if !self.publishes {
+            return Err(EventBusError::NotConnected);
+        }
+        self.published.lock().unwrap().push(event);
         Ok(())
     }
     async fn subscribe(&self, _: EventFilter) -> EventBusResult<mpsc::Receiver<Event>> {
         Err(EventBusError::NotConnected)
     }
-    async fn consume(&self, consumer: DurableConsumer) -> EventBusResult<mpsc::Receiver<Delivery>> {
-        assert_eq!(consumer.name, CLEANUP_CONSUMER);
-        Ok(self.0.lock().unwrap().take().expect("consumed once"))
+    async fn consume(&self, _: DurableConsumer) -> EventBusResult<mpsc::Receiver<Delivery>> {
+        Ok(self
+            .deliveries
+            .lock()
+            .unwrap()
+            .take()
+            .expect("consumed once"))
     }
     async fn health_check(&self) -> EventBusResult<()> {
         Ok(())
     }
 }
 
-/// Deliver `events` one at a time to the evaluator's cleanup consumer, as the
-/// bus does, and return how each was settled.
-async fn relay(evaluation: Arc<HistoryEvaluation>, events: Vec<Event>) -> Vec<Settlement> {
+/// Deliver `events` one at a time to a consumer run on a [`Feed`], as the bus
+/// does; how each was settled, and what the consumer published.
+async fn feed<F, Fut>(events: Vec<Event>, publishes: bool, run: F) -> (Vec<Settlement>, Vec<Event>)
+where
+    F: FnOnce(Feed) -> Fut,
+    Fut: std::future::Future<Output = EventBusResult<()>> + Send + 'static,
+{
     let (tx, rx) = mpsc::channel(1);
-    let bus = Feed(std::sync::Mutex::new(Some(rx)));
-    let consumer =
-        tokio::spawn(async move { consume_relayed_cleanup(&bus, evaluation, AUTHORITY).await });
+    let published = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let consumer = tokio::spawn(run(Feed {
+        deliveries: std::sync::Mutex::new(Some(rx)),
+        published: published.clone(),
+        publishes,
+    }));
     let mut settled = Vec::new();
     for event in events {
         let (delivery, outcome) = Delivery::new(event);
@@ -44,7 +64,26 @@ async fn relay(evaluation: Arc<HistoryEvaluation>, events: Vec<Event>) -> Vec<Se
     }
     drop(tx);
     consumer.await.unwrap().unwrap();
-    settled
+    let published = published.lock().unwrap().clone();
+    (settled, published)
+}
+
+/// Deliver `events` to the evaluator's cleanup consumer.
+async fn relay(evaluation: Arc<HistoryEvaluation>, events: Vec<Event>) -> Vec<Settlement> {
+    relay_reporting(evaluation, events, true).await.0
+}
+
+/// [`relay`], with a bus that takes the settlement reports or refuses them,
+/// and what was reported.
+async fn relay_reporting(
+    evaluation: Arc<HistoryEvaluation>,
+    events: Vec<Event>,
+    publishes: bool,
+) -> (Vec<Settlement>, Vec<Event>) {
+    feed(events, publishes, |bus| async move {
+        consume_relayed_cleanup(&bus, evaluation, AUTHORITY).await
+    })
+    .await
 }
 
 /// A first enrollment prepared for a new owner: its admission.
@@ -113,13 +152,95 @@ async fn a_separate_evaluator_acts_on_relayed_cleanup() {
         })
         .unwrap(),
     );
-    let settled = relay(evaluation, vec![abort.clone(), purge, abort]).await;
+    let (settled, reported) =
+        relay_reporting(evaluation, vec![abort.clone(), purge, abort], true).await;
     assert_eq!(
         settled,
         vec![Settlement::Done, Settlement::Done, Settlement::Done]
     );
     assert_eq!(keys(&storage, &aborted.owner_domain).await, 0, "reclaimed");
     assert_eq!(keys(&storage, &deleted.owner_domain).await, 0, "destroyed");
+    // Each settlement is reported to the authority, once per cleanup.
+    let cleanups: Vec<RelayedCleanup> = reported
+        .iter()
+        .map(|e| {
+            assert_eq!(e.event_type, event_types::PASSWORD_HISTORY_CLEANUP_SETTLED);
+            let settled: CleanupSettled = serde_json::from_value(e.data.clone()).unwrap();
+            assert_eq!(settled.authority, AUTHORITY);
+            settled.cleanup
+        })
+        .collect();
+    assert_eq!(
+        cleanups,
+        vec![
+            RelayedCleanup::Enrollment {
+                operation: aborted.operation
+            },
+            RelayedCleanup::OwnerPurge {
+                owner_domain: deleted.owner_domain
+            },
+            RelayedCleanup::Enrollment {
+                operation: aborted.operation
+            },
+        ]
+    );
+    assert_eq!(reported[0].id, reported[2].id, "the same report again");
+}
+
+/// A settlement that cannot be reported leaves its event unacknowledged: it
+/// is delivered again, acted on again (harmlessly) and reported then.
+#[tokio::test]
+async fn an_unreported_settlement_is_retried() {
+    let storage = sqlite().await;
+    let installation = sid_core::models::OrgId::generate();
+    let (ops, evaluation) = split(storage.clone(), installation, manager(3), manager(3));
+    let aborted = enrolled(&ops, installation).await;
+    let abort = event(
+        AUTHORITY,
+        event_types::PASSWORD_HISTORY_ENROLLMENT_ABORTED,
+        serde_json::to_value(aborted).unwrap(),
+    );
+    let (settled, _) = relay_reporting(evaluation, vec![abort], false).await;
+    assert!(matches!(settled[0], Settlement::Retry(_)), "{settled:?}");
+}
+
+/// The credential authority records the settlements reported for it, once
+/// however often they arrive, and rejects one for another authority.
+#[tokio::test]
+async fn the_authority_records_its_own_settlements() {
+    let storage = sqlite().await;
+    let cleanup = RelayedCleanup::Enrollment {
+        operation: uuid::Uuid::now_v7(),
+    };
+    let report = |authority: &str| {
+        event(
+            "sid-password-history-evaluator",
+            event_types::PASSWORD_HISTORY_CLEANUP_SETTLED,
+            serde_json::to_value(CleanupSettled {
+                authority: authority.into(),
+                cleanup,
+            })
+            .unwrap(),
+        )
+    };
+    let backend: Arc<dyn StorageBackend> = storage.clone();
+    let (settled, _) = feed(
+        vec![
+            report("sid-credentials.other.example.com"),
+            report(AUTHORITY),
+            report(AUTHORITY),
+        ],
+        true,
+        |bus| async move { consume_cleanup_settlements(&bus, backend, AUTHORITY).await },
+    )
+    .await;
+    assert!(matches!(settled[0], Settlement::Reject(_)), "{settled:?}");
+    assert_eq!(settled[1..], [Settlement::Done, Settlement::Done]);
+    assert!(settled_in(storage.as_ref(), &cleanup).await);
+}
+
+async fn settled_in(storage: &dyn StorageBackend, cleanup: &RelayedCleanup) -> bool {
+    super::settled(storage, cleanup).await.unwrap()
 }
 
 /// Only the served authority's cleanup events are acted on: one from another
