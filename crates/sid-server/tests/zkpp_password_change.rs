@@ -1148,12 +1148,16 @@ async fn test_only_issued_current_password_responses_are_counted() {
             .serialize()
             .to_vec()
     };
+    let uses = svc.mock_storage.history_key_uses();
     for _ in 0..6 {
         let refused = challenge(vec![7; 12])
             .await
             .expect_err("a malformed sign-in request gets no KE2");
         assert_eq!(refused.code(), tonic::Code::InvalidArgument);
     }
+    // Refused before any history is prepared: a stolen session repeating
+    // malformed requests makes the evaluator record nothing.
+    assert_eq!(svc.mock_storage.history_key_uses(), uses);
     let attempts = futures::future::join_all((0..10).map(|_| challenge(guess()))).await;
     let issued = attempts.iter().filter(|a| a.is_ok()).count();
     assert_eq!(issued, 5, "exactly the limit of KE2s is issued");

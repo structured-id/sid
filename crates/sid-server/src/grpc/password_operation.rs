@@ -720,6 +720,29 @@ impl PasswordOperations {
         actor: String,
         registration_request: Option<Vec<u8>>,
     ) -> Result<Prepared, Status> {
+        self.prepare_as(
+            PasswordOperationId::generate(),
+            zkpp,
+            purpose,
+            owner,
+            actor,
+            registration_request,
+        )
+        .await
+    }
+
+    /// [`prepare`](Self::prepare) under `id`, drawn by a caller that binds
+    /// something to the operation (a current-password sign-in) before it is
+    /// prepared.
+    pub(crate) async fn prepare_as(
+        &self,
+        id: PasswordOperationId,
+        zkpp: &ZkppOpaqueServer,
+        purpose: OperationPurpose,
+        owner: OperationOwner,
+        actor: String,
+        registration_request: Option<Vec<u8>>,
+    ) -> Result<Prepared, Status> {
         let (owner, kind) = match owner {
             OperationOwner::New(profile_id) => (profile_id, OwnerKind::New),
             OperationOwner::Existing(profile_id) => (profile_id, OwnerKind::Existing),
@@ -731,7 +754,7 @@ impl PasswordOperations {
             + chrono::Duration::from_std(OPERATION_TTL)
                 .expect("the operation lifetime fits a duration");
         let mut op = PendingOperation {
-            id: PasswordOperationId::generate(),
+            id,
             purpose,
             owner,
             kind,

@@ -3035,9 +3035,32 @@ impl AuthService for AuthServiceImpl {
             self.refuse_if_locked(&caller.to_string()).await?;
             self.refuse_if_locked(&guesses).await?;
         }
+        // The current password's sign-in starts first, under the operation it
+        // confirms: a malformed one is refused before any history is
+        // prepared for it, and charges nothing.
+        let id = sid_ids::PasswordOperationId::generate();
+        let started = if proves {
+            let stored = self.stored_password(&credential).await?;
+            Some(
+                self.opaque_router
+                    .login_start(
+                        &stored,
+                        &req.credential_request,
+                        &credential.opaque_credential_identifier(),
+                        &change_context(&id, &req.registration_request),
+                    )
+                    .map_err(|e| {
+                        warn!("current-password sign-in start failed: {e}");
+                        invalid_field("credential_request", "not an OPAQUE credential request")
+                    })?,
+            )
+        } else {
+            None
+        };
         let prepared = self
             .password_ops
-            .prepare(
+            .prepare_as(
+                id,
                 &zkpp,
                 OperationPurpose::Change {
                     profile_id: caller,
@@ -3051,21 +3074,7 @@ impl AuthService for AuthServiceImpl {
             )
             .await?;
 
-        let credential_response = if proves {
-            let id = operation_id(prepared.context.operation_id.as_ref())?;
-            let stored = self.stored_password(&credential).await?;
-            let (response, state) = self
-                .opaque_router
-                .login_start(
-                    &stored,
-                    &req.credential_request,
-                    &credential.opaque_credential_identifier(),
-                    &change_context(&id, &req.registration_request),
-                )
-                .map_err(|e| {
-                    warn!("current-password sign-in start failed: {e}");
-                    invalid_field("credential_request", "not an OPAQUE credential request")
-                })?;
+        let credential_response = if let Some((response, state)) = started {
             // A wrong guess fails on the client at KE2 and need never reach
             // execute, so each KE2 is counted just before it is issued,
             // against the change's own budget: a stolen session cannot guess

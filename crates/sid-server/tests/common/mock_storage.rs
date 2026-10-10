@@ -508,6 +508,13 @@ impl MockStorage {
             .insert(credential.id.0, credential.clone());
     }
 
+    /// How many (operation, epoch) uses the evaluator has recorded: one per
+    /// epoch each history preparation selected.
+    #[allow(dead_code)]
+    pub fn history_key_uses(&self) -> usize {
+        self.inner.lock().unwrap().key_uses.len()
+    }
+
     /// Put the email key `value` into the state the email policy cutover
     /// leaves a key written before revisions in: revision 0, quarantined.
     #[allow(dead_code)]

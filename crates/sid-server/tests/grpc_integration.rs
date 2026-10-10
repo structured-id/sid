@@ -900,6 +900,7 @@ async fn test_webauthn_authenticate_start_unknown_user() {
 /// A browser on WebTransport asks when a password change needs the current
 /// password, as one on gRPC-Web does: the method is routed to the service,
 /// which answers an anonymous caller UNAUTHENTICATED, not as an unknown method.
+#[cfg(feature = "webtransport")]
 #[tokio::test]
 async fn test_webtransport_routes_the_password_change_requirement() {
     let svc = TestServices::new(MockStorage::new());
