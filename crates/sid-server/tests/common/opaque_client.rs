@@ -3,12 +3,10 @@
 #![allow(dead_code)]
 
 use super::TestServices;
+use super::zkpp_client;
 use rand::rand_core::UnwrapErr;
 use rand::rngs::SysRng;
-use sid_opaque_ke::{
-    ClientLogin, ClientLoginFinishParameters, ClientRegistration,
-    ClientRegistrationFinishParameters, CredentialResponse, RegistrationResponse,
-};
+use sid_opaque_ke::{ClientLogin, ClientLoginFinishParameters, CredentialResponse};
 use sid_pake_core::pallas_opaque::PallasCipherSuite;
 use sid_proto::sid::v1::auth_service_server::AuthService;
 use sid_proto::sid::v1::*;
@@ -26,79 +24,42 @@ pub async fn register(
         .expect("registration");
 }
 
-/// A whole registration presenting `claim_token`; returns the refusal of
-/// either step.
+/// A whole registration operation presenting `claim_token`, finished
+/// without a password proof (the services do not require one); returns the
+/// refusal of either step.
 pub async fn try_register(
     start: &TestServices,
     finish: &TestServices,
     principal: &str,
     password: &[u8],
     claim_token: Option<&str>,
-) -> Result<OpaqueRegistrationFinishResponse, tonic::Status> {
-    let mut rng = UnwrapErr(SysRng);
-    let client = ClientRegistration::<PallasCipherSuite>::start(&mut rng, password).unwrap();
-    let started = start
+) -> Result<OpaqueZkppRegistrationFinishResponse, tonic::Status> {
+    let started = zkpp_client::start(password);
+    let prepared = start
         .auth
-        .opaque_registration_start(Request::new(OpaqueRegistrationStartRequest {
+        .opaque_zkpp_registration_start(Request::new(OpaqueZkppRegistrationStartRequest {
             principal: principal.to_string(),
-            registration_request: client.message.serialize().to_vec(),
+            registration_request: started.request.clone(),
             claim_token: claim_token.map(str::to_string),
         }))
         .await?
         .into_inner();
-    let response =
-        RegistrationResponse::<PallasCipherSuite>::deserialize(&started.registration_response)
-            .unwrap();
-    let record = client
-        .state
-        .finish(
-            &mut rng,
-            password,
-            response,
-            ClientRegistrationFinishParameters::default(),
-        )
-        .unwrap();
+    let context = prepared
+        .history
+        .expect("the registration's history context");
     finish
         .auth
-        .opaque_registration_finish(Request::new(OpaqueRegistrationFinishRequest {
-            principal: principal.to_string(),
-            registration_record: record.message.serialize().to_vec(),
-            server_setup: started.server_setup,
+        .opaque_zkpp_registration_finish(Request::new(OpaqueZkppRegistrationFinishRequest {
+            operation_id: context.operation_id,
+            registration_record: zkpp_client::finish(
+                started,
+                password,
+                &prepared.registration_response,
+            ),
+            proof: None,
         }))
         .await
         .map(|r| r.into_inner())
-}
-
-/// The registration record for `password` that a client uploads to replace
-/// its password (the reset path finishes it itself).
-pub async fn registration_record(svc: &TestServices, principal: &str, password: &[u8]) -> Vec<u8> {
-    let mut rng = UnwrapErr(SysRng);
-    let client = ClientRegistration::<PallasCipherSuite>::start(&mut rng, password).unwrap();
-    let started = svc
-        .auth
-        .opaque_registration_start(Request::new(OpaqueRegistrationStartRequest {
-            principal: principal.to_string(),
-            registration_request: client.message.serialize().to_vec(),
-            claim_token: None,
-        }))
-        .await
-        .unwrap()
-        .into_inner();
-    let response =
-        RegistrationResponse::<PallasCipherSuite>::deserialize(&started.registration_response)
-            .unwrap();
-    client
-        .state
-        .finish(
-            &mut rng,
-            password,
-            response,
-            ClientRegistrationFinishParameters::default(),
-        )
-        .unwrap()
-        .message
-        .serialize()
-        .to_vec()
 }
 
 /// Start a login for `principal` with `password` on `start`; returns the

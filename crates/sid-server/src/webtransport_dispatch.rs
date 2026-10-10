@@ -25,24 +25,6 @@ pub fn register_all(
     register_rpc!(
         d,
         auth_svc,
-        "sid.v1.AuthService/OpaqueRegistrationStart",
-        opaque_registration_start,
-        OpaqueRegistrationStartRequest,
-        OpaqueRegistrationStartResponse
-    );
-
-    register_rpc!(
-        d,
-        auth_svc,
-        "sid.v1.AuthService/OpaqueRegistrationFinish",
-        opaque_registration_finish,
-        OpaqueRegistrationFinishRequest,
-        OpaqueRegistrationFinishResponse
-    );
-
-    register_rpc!(
-        d,
-        auth_svc,
         "sid.v1.AuthService/OpaqueLoginStart",
         opaque_login_start,
         OpaqueLoginStartRequest,

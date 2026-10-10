@@ -306,8 +306,7 @@ enum PendingLogin {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) enum PendingRegistration {
     /// A new account for an identifier nobody holds. `profile_id` is reserved
-    /// at start; `credential_identifier` is the OPRF credential identifier of
-    /// its first password, drawn at start and stored with the credential.
+    /// at start.
     NewAccount {
         profile_id: ProfileId,
         principal_type: PrincipalType,
@@ -319,28 +318,12 @@ pub(crate) enum PendingRegistration {
         /// The sealed instance claim the start verified: the account becomes
         /// the first administrator and consumes it when it is committed.
         instance_claim: Option<Vec<u8>>,
-        credential_identifier: [u8; 16],
     },
     /// The identifier already belongs to an account. Start still evaluates the
     /// OPRF under a key that exists nowhere, so the answer looks like any other;
     /// finishing commits nothing, so a registration never attaches to an
     /// existing account.
     ExistingAccount { principal_type: PrincipalType },
-}
-
-impl PendingRegistration {
-    /// The OPRF credential identifier the registration's start evaluates
-    /// under: the new password's own for a new account, a throwaway one for a
-    /// held identifier.
-    fn credential_identifier(&self) -> [u8; 16] {
-        match self {
-            Self::NewAccount {
-                credential_identifier,
-                ..
-            } => *credential_identifier,
-            Self::ExistingAccount { .. } => rand::random(),
-        }
-    }
 }
 
 /// `ALREADY_EXISTS` with the error-model reason for the identifier kind.
@@ -354,6 +337,16 @@ fn already_registered(principal_type: PrincipalType) -> tonic::Status {
     ApiError::new(reason, "identifier is already registered")
         .with_resource("Principal", principal_type.as_str())
         .into()
+}
+
+/// UNIMPLEMENTED: the plain OPAQUE registration, which installs no password
+/// (see the registration RPCs).
+fn plain_registration_refused() -> tonic::Status {
+    ApiError::new(
+        ErrorReason::FeatureNotAvailable,
+        "register through OpaqueZkppRegistrationStart and OpaqueZkppRegistrationFinish",
+    )
+    .into()
 }
 
 /// INVALID_STATE: `method` cannot step up a session at `decay` (an older
@@ -530,8 +523,6 @@ pub struct AuthServiceImpl {
     pub(crate) feature_flags: FeatureFlagService,
     /// OPAQUE login state between start and finish.
     login_state: ChallengeStore<PendingLogin>,
-    /// Ephemeral OPAQUE registration state: key → what the registration may commit.
-    registration_state: ChallengeStore<PendingRegistration>,
     /// Password registrations, changes and resets between their steps, and
     /// the history evaluator and checker they use.
     pub(crate) password_ops: Arc<super::password_operation::PasswordOperations>,
@@ -694,12 +685,6 @@ impl AuthServiceImpl {
                 cache_backend.clone(),
                 key_manager.clone(),
                 "opaque-login",
-                ttl,
-            ),
-            registration_state: ChallengeStore::new(
-                cache_backend.clone(),
-                key_manager.clone(),
-                "opaque-registration",
                 ttl,
             ),
             password_ops,
@@ -1933,7 +1918,6 @@ impl AuthServiceImpl {
                     value,
                     email,
                     instance_claim,
-                    credential_identifier: rand::random(),
                 })
             }
             Err(status) => Err(status),
@@ -1943,14 +1927,12 @@ impl AuthServiceImpl {
     /// Commit a pending registration with its first credential, atomically. A taken
     /// identifier answers `ALREADY_EXISTS` and nothing is written: the holder is not
     /// contacted, and the registrant must use another identifier and claim this one
-    /// from their own account. `finish_principal`, when the finish names one, must
-    /// be the identifier the start reserved. `history` is the first password's
-    /// accepted history; `completion` the durable result of the operation that
-    /// installs it.
+    /// from their own account. `history` is the first password's accepted
+    /// history; `completion` the durable result of the operation that installs
+    /// it.
     async fn commit_registration(
         &self,
         pending: PendingRegistration,
-        finish_principal: Option<&str>,
         build_credential: impl FnOnce(ProfileId) -> Credential,
         history: Option<HistoryCommit>,
         completion: Option<OperationCompletion>,
@@ -1968,15 +1950,6 @@ impl AuthServiceImpl {
                 return Err(already_registered(principal_type));
             }
         };
-        if let Some(finish_principal) = finish_principal {
-            let (finish_type, finish_value) = parse_principal(finish_principal)?;
-            if finish_type != principal_type || finish_value != value {
-                return Err(invalid_field(
-                    "principal",
-                    "not the identifier the registration started for",
-                ));
-            }
-        }
 
         let mut credential = build_credential(profile_id);
         if credential.credential_type == CredentialType::Opaque {
@@ -2692,86 +2665,27 @@ impl AuthServiceImpl {
 impl AuthService for AuthServiceImpl {
     // ── OPAQUE Registration ──
 
+    // A password is installed only by a password operation (registration,
+    // change or reset), which verifies the password proof when one is
+    // required and records the first history entry with the credential. A
+    // plain OPAQUE registration would do neither, so it registers nothing.
+
     #[tracing::instrument(skip_all, fields(rpc = "opaque_registration_start"))]
     #[instrument(skip_all, fields(method = "opaque_registration_start"))]
     async fn opaque_registration_start(
         &self,
-        request: Request<OpaqueRegistrationStartRequest>,
+        _request: Request<OpaqueRegistrationStartRequest>,
     ) -> Result<Response<OpaqueRegistrationStartResponse>, Status> {
-        self.check_maintenance().await?;
-        let req = request.into_inner();
-        let pending = self
-            .begin_registration(&req.principal, req.claim_token.as_deref())
-            .await?;
-
-        let (response_bytes, _state) = self
-            .opaque_router
-            .registration_start(&req.registration_request, &pending.credential_identifier())
-            .map_err(|e| {
-                warn!("OPAQUE registration start failed: {}", e);
-                invalid_field(
-                    "registration_request",
-                    "not a valid OPAQUE registration request",
-                )
-            })?;
-
-        let state_key = uuid::Uuid::now_v7().to_string();
-        self.registration_state.insert(&state_key, &pending).await?;
-
-        Ok(Response::new(OpaqueRegistrationStartResponse {
-            registration_response: response_bytes,
-            server_setup: state_key,
-        }))
+        Err(plain_registration_refused())
     }
 
     #[tracing::instrument(skip_all, fields(rpc = "opaque_registration_finish"))]
     #[instrument(skip_all, fields(method = "opaque_registration_finish"))]
     async fn opaque_registration_finish(
         &self,
-        request: Request<OpaqueRegistrationFinishRequest>,
+        _request: Request<OpaqueRegistrationFinishRequest>,
     ) -> Result<Response<OpaqueRegistrationFinishResponse>, Status> {
-        self.check_maintenance().await?;
-        let req = request.into_inner();
-
-        let pending = self
-            .registration_state
-            .take(&req.server_setup)
-            .await?
-            .ok_or_else(|| ceremony_expired("registration"))?;
-
-        let stored = self
-            .opaque_router
-            .registration_finish(&req.registration_record)
-            .map_err(|e| {
-                warn!("OPAQUE registration finish failed: {}", e);
-                invalid_field(
-                    "registration_record",
-                    "not a valid OPAQUE registration record",
-                )
-            })?;
-
-        let curve = stored.curve as u8;
-        let identifier = pending.credential_identifier();
-        let (profile_id, credential_id) = self
-            .commit_registration(
-                pending,
-                Some(&req.principal),
-                |profile_id| {
-                    let mut credential =
-                        Credential::new(profile_id, CredentialType::Opaque, stored.data, None);
-                    credential.opaque_curve = Some(curve);
-                    credential.opaque_credential_identifier = Some(identifier);
-                    credential
-                },
-                None,
-                None,
-            )
-            .await?;
-
-        Ok(Response::new(OpaqueRegistrationFinishResponse {
-            profile_id: profile_id.to_string(),
-            credential_id: credential_id.0.to_string(),
-        }))
+        Err(plain_registration_refused())
     }
 
     // ── OPAQUE Login ──
@@ -3076,7 +2990,6 @@ impl AuthService for AuthServiceImpl {
         let completion = done.completion(Self::finish_result(&response));
         self.commit_registration(
             pending,
-            None,
             |_| credential,
             self.with_history_age(done.history),
             Some(completion),

@@ -505,7 +505,7 @@ async fn test_a_lost_change_response_resolves_without_a_second_write() {
 async fn server_registration_response(svc: &TestServices) -> Vec<u8> {
     let started = client::start(b"any");
     svc.auth
-        .opaque_registration_start(Request::new(OpaqueRegistrationStartRequest {
+        .opaque_zkpp_registration_start(Request::new(OpaqueZkppRegistrationStartRequest {
             principal: "someone-else@sid.example.com".to_string(),
             registration_request: started.request,
             claim_token: None,
@@ -687,13 +687,12 @@ async fn test_a_replaced_history_key_keeps_the_retained_password_refused() {
 /// The server's OPAQUE public key, as every registration response carries it
 /// after the evaluated element.
 async fn server_public_key(svc: &TestServices) -> Vec<u8> {
-    let started =
-        ClientRegistration::<PallasCipherSuite>::start(&mut UnwrapErr(SysRng), b"any").unwrap();
+    let started = client::start(b"any");
     let response = svc
         .auth
-        .opaque_registration_start(Request::new(OpaqueRegistrationStartRequest {
+        .opaque_zkpp_registration_start(Request::new(OpaqueZkppRegistrationStartRequest {
             principal: "someone-else@sid.example.com".to_string(),
-            registration_request: started.message.serialize().to_vec(),
+            registration_request: started.request,
             claim_token: None,
         }))
         .await

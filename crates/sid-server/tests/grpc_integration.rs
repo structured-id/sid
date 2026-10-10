@@ -897,70 +897,55 @@ async fn test_webauthn_authenticate_start_unknown_user() {
 // OPAQUE (AuthService)
 // ═══════════════════════════════════════════════════════════════════
 
-/// A start for a free identifier is a new registration; the only failure here is
-/// the malformed OPAQUE message, which must be rejected before any state is kept.
+/// A password is installed only by a password operation: the plain OPAQUE
+/// registration RPCs refuse a well-formed request and register nothing, so
+/// they cannot skip the password proof or the first history entry.
 #[tokio::test]
-async fn test_opaque_register_start_new_identifier_rejects_malformed_request() {
+async fn test_plain_opaque_registration_is_refused() {
+    let email = "plain-registration@sid.example.com";
     let svc = TestServices::new(MockStorage::new());
-    let req = Request::new(OpaqueRegistrationStartRequest {
-        principal: "nonexistent@sid.example.com".to_string(),
-        registration_request: vec![0, 1, 2, 3],
-        claim_token: None,
-    });
-
-    let err = svc.auth.opaque_registration_start(req).await.unwrap_err();
+    let started = common::zkpp_client::start(b"Str0ngP@ssword1");
+    let err = svc
+        .auth
+        .opaque_registration_start(Request::new(OpaqueRegistrationStartRequest {
+            principal: email.to_string(),
+            registration_request: started.request,
+            claim_token: None,
+        }))
+        .await
+        .expect_err("the plain registration start is refused");
+    assert_eq!(err.code(), tonic::Code::Unimplemented, "{}", err.message());
     assert_eq!(
-        err.code(),
-        tonic::Code::InvalidArgument,
-        "{}",
-        err.message()
+        common::error_reason(&err).as_deref(),
+        Some("FEATURE_NOT_AVAILABLE")
+    );
+    let err = svc
+        .auth
+        .opaque_registration_finish(Request::new(OpaqueRegistrationFinishRequest {
+            principal: email.to_string(),
+            registration_record: vec![0; 32],
+            server_setup: uuid::Uuid::now_v7().to_string(),
+        }))
+        .await
+        .expect_err("the plain registration finish is refused");
+    assert_eq!(err.code(), tonic::Code::Unimplemented, "{}", err.message());
+    assert!(
+        svc.storage
+            .get_profile_by_principal(sid_core::models::PrincipalType::Email, email)
+            .await
+            .unwrap()
+            .is_none(),
+        "nothing is registered"
     );
 }
 
-/// Run a full OPAQUE registration (start + finish) for `principal` with `password`,
-/// finishing under `finish_principal`.
+/// Run a whole registration operation for `principal` with `password`.
 async fn opaque_register(
     svc: &TestServices,
     principal: &str,
-    finish_principal: &str,
     password: &[u8],
-) -> Result<OpaqueRegistrationFinishResponse, tonic::Status> {
-    use sid_opaque_ke::{
-        ClientRegistration, ClientRegistrationFinishParameters, RegistrationResponse,
-    };
-    use sid_pake_core::pallas_opaque::PallasCipherSuite;
-
-    let mut rng = rand::rand_core::UnwrapErr(rand::rngs::SysRng);
-    let start = ClientRegistration::<PallasCipherSuite>::start(&mut rng, password).unwrap();
-    let resp = svc
-        .auth
-        .opaque_registration_start(Request::new(OpaqueRegistrationStartRequest {
-            principal: principal.to_string(),
-            registration_request: start.message.serialize().to_vec(),
-            claim_token: None,
-        }))
-        .await?
-        .into_inner();
-    let response =
-        RegistrationResponse::<PallasCipherSuite>::deserialize(&resp.registration_response)
-            .unwrap();
-    let finish = start
-        .state
-        .finish(
-            &mut rng,
-            password,
-            response,
-            ClientRegistrationFinishParameters::default(),
-        )
-        .unwrap();
-    svc.auth
-        .opaque_registration_finish(Request::new(OpaqueRegistrationFinishRequest {
-            principal: finish_principal.to_string(),
-            registration_record: finish.message.serialize().to_vec(),
-            server_setup: resp.server_setup,
-        }))
-        .await
-        .map(|r| r.into_inner())
+) -> Result<OpaqueZkppRegistrationFinishResponse, tonic::Status> {
+    common::opaque_client::try_register(svc, svc, principal, password, None).await
 }
 
 /// Number of OPAQUE credentials the profile holding `email` has.
@@ -985,11 +970,11 @@ async fn opaque_credential_count(svc: &TestServices, email: &str) -> usize {
 async fn test_registration_cannot_attach_password_to_existing_account() {
     let email = "victim@sid.example.com";
     let svc = TestServices::new(MockStorage::new());
-    opaque_register(&svc, email, email, b"victim-password-1")
+    opaque_register(&svc, email, b"victim-password-1")
         .await
         .expect("victim registers");
 
-    let err = opaque_register(&svc, email, email, b"attacker-password-2")
+    let err = opaque_register(&svc, email, b"attacker-password-2")
         .await
         .expect_err("second registration of the same email must fail");
     assert_eq!(err.code(), tonic::Code::AlreadyExists, "{}", err.message());
@@ -1007,14 +992,9 @@ async fn test_registration_cannot_attach_password_to_existing_account() {
 #[tokio::test]
 async fn test_registration_keeps_the_email_spelling() {
     let svc = TestServices::new(MockStorage::new());
-    opaque_register(
-        &svc,
-        "Ann.Smith+work@SID.example.com",
-        "Ann.Smith+work@SID.example.com",
-        b"a-good-password-1",
-    )
-    .await
-    .expect("registered");
+    opaque_register(&svc, "Ann.Smith+work@SID.example.com", b"a-good-password-1")
+        .await
+        .expect("registered");
     let profile = svc
         .storage
         .get_profile_by_principal(
@@ -1028,14 +1008,9 @@ async fn test_registration_keeps_the_email_spelling() {
     assert_eq!(emails.len(), 1);
     assert_eq!(emails[0].email, "Ann.Smith+work@sid.example.com");
 
-    let err = opaque_register(
-        &svc,
-        "annsmith@sid.example.com",
-        "annsmith@sid.example.com",
-        b"a-good-password-2",
-    )
-    .await
-    .expect_err("an equivalent spelling is the same handle");
+    let err = opaque_register(&svc, "annsmith@sid.example.com", b"a-good-password-2")
+        .await
+        .expect_err("an equivalent spelling is the same handle");
     assert_eq!(err.code(), tonic::Code::AlreadyExists, "{}", err.message());
 }
 
@@ -1066,40 +1041,11 @@ async fn test_registration_cannot_claim_provisioned_account() {
         .await
         .expect("provisioned profile");
 
-    let err = opaque_register(&svc, email, email, b"attacker-password")
+    let err = opaque_register(&svc, email, b"attacker-password")
         .await
         .expect_err("self-registration must not claim a provisioned account");
     assert_eq!(err.code(), tonic::Code::AlreadyExists, "{}", err.message());
     assert_eq!(opaque_credential_count(&svc, email).await, 0);
-}
-
-/// A finish must name the identifier its start reserved; a swapped principal
-/// commits nothing under either identifier.
-#[tokio::test]
-async fn test_registration_finish_rejects_other_principal() {
-    let svc = TestServices::new(MockStorage::new());
-    let err = opaque_register(
-        &svc,
-        "first@sid.example.com",
-        "second@sid.example.com",
-        b"some-password",
-    )
-    .await
-    .expect_err("principal swap must fail");
-    assert_eq!(
-        err.code(),
-        tonic::Code::InvalidArgument,
-        "{}",
-        err.message()
-    );
-    for email in ["first@sid.example.com", "second@sid.example.com"] {
-        let held = svc
-            .storage
-            .get_profile_by_principal(sid_core::models::PrincipalType::Email, email)
-            .await
-            .unwrap();
-        assert!(held.is_none(), "{email} must not be registered");
-    }
 }
 
 /// A new registration creates the profile, its unverified email principal and
@@ -1108,7 +1054,7 @@ async fn test_registration_finish_rejects_other_principal() {
 async fn test_registration_creates_account_with_single_principal() {
     let email = "newcomer@sid.example.com";
     let svc = TestServices::new(MockStorage::new());
-    let resp = opaque_register(&svc, email, email, b"newcomer-password")
+    let resp = opaque_register(&svc, email, b"newcomer-password")
         .await
         .expect("registration");
 
@@ -1144,10 +1090,10 @@ async fn test_password_change_rejects_foreign_credential() {
     let victim_email = "victim-pc@sid.example.com";
     let attacker_email = "attacker-pc@sid.example.com";
     let svc = TestServices::with_zkpp_degraded(MockStorage::new());
-    opaque_register(&svc, victim_email, victim_email, b"victim-password")
+    opaque_register(&svc, victim_email, b"victim-password")
         .await
         .expect("victim registers");
-    opaque_register(&svc, attacker_email, attacker_email, b"attacker-password")
+    opaque_register(&svc, attacker_email, b"attacker-password")
         .await
         .expect("attacker registers");
 
@@ -1223,7 +1169,7 @@ async fn test_opaque_login_ignores_revoked_credential() {
     let email = "revoked-pw@sid.example.com";
     let password = b"revoked-password";
     let svc = TestServices::new(MockStorage::new());
-    opaque_register(&svc, email, email, password)
+    opaque_register(&svc, email, password)
         .await
         .expect("registration");
     let profile = svc
@@ -1270,13 +1216,17 @@ async fn test_opaque_register_start_invalid_message() {
         .await
         .unwrap();
 
-    let req = Request::new(OpaqueRegistrationStartRequest {
+    let req = Request::new(OpaqueZkppRegistrationStartRequest {
         principal: "alice@sid.example.com".to_string(),
         registration_request: vec![0xFF, 0xFF], // invalid OPAQUE message
         claim_token: None,
     });
 
-    let err = svc.auth.opaque_registration_start(req).await.unwrap_err();
+    let err = svc
+        .auth
+        .opaque_zkpp_registration_start(req)
+        .await
+        .unwrap_err();
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
 }
 
@@ -1317,59 +1267,19 @@ async fn test_opaque_login_finish_invalid_state() {
 
 #[tokio::test]
 async fn test_e2e_opaque_registration_and_login() {
-    use sid_opaque_ke::{
-        ClientLogin, ClientLoginFinishParameters, ClientRegistration,
-        ClientRegistrationFinishParameters, CredentialResponse, RegistrationResponse,
-    };
+    use sid_opaque_ke::{ClientLogin, ClientLoginFinishParameters, CredentialResponse};
     use sid_pake_core::pallas_opaque::PallasCipherSuite;
 
     let email = "carol@sid.example.com";
     let svc = TestServices::new(MockStorage::new());
 
-    // Step 1-2: OPAQUE registration creates the account for the new email.
+    // Step 1-2: the registration operation creates the account for the new email.
     let password = b"carol-strong-password-2024";
     let mut client_rng = rand::rand_core::UnwrapErr(rand::rngs::SysRng);
-
-    // 2a: Registration start
-    let client_reg_start =
-        ClientRegistration::<PallasCipherSuite>::start(&mut client_rng, password).unwrap();
-
-    let resp = svc
-        .auth
-        .opaque_registration_start(Request::new(OpaqueRegistrationStartRequest {
-            principal: email.to_string(),
-            registration_request: client_reg_start.message.serialize().to_vec(),
-            claim_token: None,
-        }))
+    let registered = opaque_register(&svc, email, password)
         .await
-        .unwrap();
-    let reg_resp = resp.into_inner();
-
-    let reg_response =
-        RegistrationResponse::<PallasCipherSuite>::deserialize(&reg_resp.registration_response)
-            .unwrap();
-
-    // 2b: Registration finish
-    let client_reg_finish = client_reg_start
-        .state
-        .finish(
-            &mut client_rng,
-            password,
-            reg_response,
-            ClientRegistrationFinishParameters::default(),
-        )
-        .unwrap();
-
-    let resp = svc
-        .auth
-        .opaque_registration_finish(Request::new(OpaqueRegistrationFinishRequest {
-            principal: email.to_string(),
-            registration_record: client_reg_finish.message.serialize().to_vec(),
-            server_setup: reg_resp.server_setup.clone(),
-        }))
-        .await
-        .unwrap();
-    assert!(!resp.into_inner().credential_id.is_empty());
+        .expect("registration");
+    assert!(!registered.credential_id.is_empty());
 
     // Step 3: OPAQUE Login
     let client_login_start =
@@ -4757,10 +4667,7 @@ async fn test_registration_disabled_allows_get_current_profile() {
 
 #[tokio::test]
 async fn test_e2e_opaque_wrong_password() {
-    use sid_opaque_ke::{
-        ClientLogin, ClientLoginFinishParameters, ClientRegistration,
-        ClientRegistrationFinishParameters, CredentialResponse, RegistrationResponse,
-    };
+    use sid_opaque_ke::{ClientLogin, ClientLoginFinishParameters, CredentialResponse};
     use sid_pake_core::pallas_opaque::PallasCipherSuite;
 
     let email = "wrong_pw@sid.example.com";
@@ -4769,42 +4676,9 @@ async fn test_e2e_opaque_wrong_password() {
     // Register a new account with the correct password
     let correct_pw = b"correct-password-123";
     let mut rng = rand::rand_core::UnwrapErr(rand::rngs::SysRng);
-
-    let reg_start = ClientRegistration::<PallasCipherSuite>::start(&mut rng, correct_pw).unwrap();
-
-    let resp = svc
-        .auth
-        .opaque_registration_start(Request::new(OpaqueRegistrationStartRequest {
-            principal: email.to_string(),
-            registration_request: reg_start.message.serialize().to_vec(),
-            claim_token: None,
-        }))
+    opaque_register(&svc, email, correct_pw)
         .await
-        .unwrap();
-    let reg_resp = resp.into_inner();
-
-    let reg_response =
-        RegistrationResponse::<PallasCipherSuite>::deserialize(&reg_resp.registration_response)
-            .unwrap();
-
-    let reg_finish = reg_start
-        .state
-        .finish(
-            &mut rng,
-            correct_pw,
-            reg_response,
-            ClientRegistrationFinishParameters::default(),
-        )
-        .unwrap();
-
-    svc.auth
-        .opaque_registration_finish(Request::new(OpaqueRegistrationFinishRequest {
-            principal: email.to_string(),
-            registration_record: reg_finish.message.serialize().to_vec(),
-            server_setup: reg_resp.server_setup.clone(),
-        }))
-        .await
-        .unwrap();
+        .expect("registration");
 
     // Now try login with WRONG password
     let wrong_pw = b"wrong-password-456";
@@ -4846,10 +4720,7 @@ async fn test_opaque_login_response_uses_dynamic_expires_in() {
     // This test verifies that the token response expires_in comes from JWT TTL config
     // We already test this via test_token_response_expires_in_matches_ttl
     // and the e2e auth code flow (expects 300). This test validates through OPAQUE login.
-    use sid_opaque_ke::{
-        ClientLogin, ClientLoginFinishParameters, ClientRegistration,
-        ClientRegistrationFinishParameters, CredentialResponse, RegistrationResponse,
-    };
+    use sid_opaque_ke::{ClientLogin, ClientLoginFinishParameters, CredentialResponse};
     use sid_pake_core::pallas_opaque::PallasCipherSuite;
 
     let email = "ttl_test@sid.example.com";
@@ -4857,41 +4728,9 @@ async fn test_opaque_login_response_uses_dynamic_expires_in() {
 
     let password = b"ttl-test-password";
     let mut rng = rand::rand_core::UnwrapErr(rand::rngs::SysRng);
-
-    // Register
-    let reg_start = ClientRegistration::<PallasCipherSuite>::start(&mut rng, password).unwrap();
-    let resp = svc
-        .auth
-        .opaque_registration_start(Request::new(OpaqueRegistrationStartRequest {
-            principal: email.to_string(),
-            registration_request: reg_start.message.serialize().to_vec(),
-            claim_token: None,
-        }))
+    opaque_register(&svc, email, password)
         .await
-        .unwrap()
-        .into_inner();
-
-    let reg_response =
-        RegistrationResponse::<PallasCipherSuite>::deserialize(&resp.registration_response)
-            .unwrap();
-    let reg_finish = reg_start
-        .state
-        .finish(
-            &mut rng,
-            password,
-            reg_response,
-            ClientRegistrationFinishParameters::default(),
-        )
-        .unwrap();
-
-    svc.auth
-        .opaque_registration_finish(Request::new(OpaqueRegistrationFinishRequest {
-            principal: email.to_string(),
-            registration_record: reg_finish.message.serialize().to_vec(),
-            server_setup: resp.server_setup.clone(),
-        }))
-        .await
-        .unwrap();
+        .expect("registration");
 
     // Login
     let login_start = ClientLogin::<PallasCipherSuite>::start(&mut rng, password).unwrap();
@@ -4940,10 +4779,7 @@ async fn test_opaque_login_response_uses_dynamic_expires_in() {
 /// session's access tokens stop at once instead of living until they expire.
 #[tokio::test]
 async fn test_session_evicted_at_limit_stops_its_tokens() {
-    use sid_opaque_ke::{
-        ClientLogin, ClientLoginFinishParameters, ClientRegistration,
-        ClientRegistrationFinishParameters, CredentialResponse, RegistrationResponse,
-    };
+    use sid_opaque_ke::{ClientLogin, ClientLoginFinishParameters, CredentialResponse};
     use sid_pake_core::pallas_opaque::PallasCipherSuite;
 
     let email = "limit_evict@sid.example.com";
@@ -4955,35 +4791,9 @@ async fn test_session_evicted_at_limit_stops_its_tokens() {
 
     let password = b"limit-evict-password";
     let mut rng = rand::rand_core::UnwrapErr(rand::rngs::SysRng);
-    let reg_start = ClientRegistration::<PallasCipherSuite>::start(&mut rng, password).unwrap();
-    let resp = svc
-        .auth
-        .opaque_registration_start(Request::new(OpaqueRegistrationStartRequest {
-            principal: email.to_string(),
-            registration_request: reg_start.message.serialize().to_vec(),
-            claim_token: None,
-        }))
+    opaque_register(&svc, email, password)
         .await
-        .unwrap()
-        .into_inner();
-    let reg_finish = reg_start
-        .state
-        .finish(
-            &mut rng,
-            password,
-            RegistrationResponse::<PallasCipherSuite>::deserialize(&resp.registration_response)
-                .unwrap(),
-            ClientRegistrationFinishParameters::default(),
-        )
-        .unwrap();
-    svc.auth
-        .opaque_registration_finish(Request::new(OpaqueRegistrationFinishRequest {
-            principal: email.to_string(),
-            registration_record: reg_finish.message.serialize().to_vec(),
-            server_setup: resp.server_setup.clone(),
-        }))
-        .await
-        .unwrap();
+        .expect("registration");
 
     let mut sessions = Vec::new();
     for _ in 0..2 {
@@ -5458,7 +5268,7 @@ async fn account_with_email(
     email: &str,
     profile_type: sid_core::models::ProfileType,
 ) -> Profile {
-    opaque_register(svc, email, email, b"account-password")
+    opaque_register(svc, email, b"account-password")
         .await
         .expect("registration");
     let mut profile = svc
