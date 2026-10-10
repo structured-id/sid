@@ -356,6 +356,16 @@ async fn test_history_epoch_rotation() {
 }
 
 #[tokio::test]
+async fn test_history_lifecycle_follows_the_live_set() {
+    common::password_history::test_history_lifecycle_follows_the_live_set(&setup().await).await;
+}
+
+#[tokio::test]
+async fn test_history_stale_live_set_cannot_retire() {
+    common::password_history::test_history_stale_live_set_cannot_retire(&setup().await).await;
+}
+
+#[tokio::test]
 async fn test_registration_writes_first_history() {
     common::password_history::test_registration_writes_first_history(&setup().await).await;
 }

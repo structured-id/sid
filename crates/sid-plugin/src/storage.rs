@@ -403,17 +403,40 @@ pub trait StorageBackend: WorkStore + Send + Sync + 'static {
 
     /// Replace `owner`'s active epoch `replaces` with `new`, before the new
     /// key's first use, and move the history revision on. The replaced epoch
-    /// stops taking entries: it stays comparable while it retains entries
-    /// and is retired, its sealed key destroyed, when it retains none. When
-    /// `replaces` is no longer the active epoch nothing is written and the
-    /// current active epoch is returned, so concurrent rotations agree on one
-    /// key. The owner must exist (`Error::NotFound` otherwise).
+    /// stops taking entries and becomes compare-only, recorded as replaced at
+    /// the new revision; only [`Self::prepare_history_epochs`] retires it.
+    /// When `replaces` is no longer the active epoch nothing is written and
+    /// the current active epoch is returned, so concurrent rotations agree on
+    /// one key. The owner must exist (`Error::NotFound` otherwise).
     async fn rotate_history_epoch(
         &self,
         new: &NewHistoryEpoch,
         replaces: HistoryEpochId,
         ctx: MutationContext,
     ) -> Result<HistoryEpoch>;
+
+    /// The evaluator's side of preparing operation `prep.operation`, in one
+    /// transaction per owner, durable and shared by every replica:
+    ///
+    /// - record `prep.live` as the owner's lifecycle when its revision is newer
+    ///   than the one recorded; the same revision with another live set is a
+    ///   `Conflict`; an older one changes nothing and retires nothing;
+    /// - release the uses of the operations `prep.live.settled` names and of
+    ///   every operation past its expiry;
+    /// - retire each compare-only epoch absent from the recorded live set,
+    ///   replaced at or before its revision and used by no operation: it is no
+    ///   longer selected, and its sealed key is kept;
+    /// - select the active epoch, then each compare-only epoch of `prep.live`
+    ///   not retired, and record that `prep.operation` uses them until it
+    ///   settles or `prep.expires_at`.
+    ///
+    /// Each epoch of `prep.live.live` must be the owner's (`Validation`
+    /// otherwise). Returns the selection, active epoch first.
+    async fn prepare_history_epochs(
+        &self,
+        prep: &sid_core::models::HistoryPreparation,
+        ctx: MutationContext,
+    ) -> Result<Vec<HistoryEpoch>>;
 
     /// The sealed VOPRF key of an epoch, for the evaluator; `None` when no
     /// such epoch is stored.

@@ -665,6 +665,14 @@ impl StorageBackend for SqliteBackend {
         self.rotate_history_epoch_impl(new, replaces, audit).await
     }
 
+    async fn prepare_history_epochs(
+        &self,
+        prep: &sid_core::models::HistoryPreparation,
+        audit: MutationContext,
+    ) -> SidResult<Vec<sid_core::models::HistoryEpoch>> {
+        self.prepare_history_epochs_impl(prep, audit).await
+    }
+
     async fn get_history_epoch_key(
         &self,
         epoch: sid_core::models::HistoryEpochId,

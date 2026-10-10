@@ -5,8 +5,8 @@
 use chrono::{DateTime, Utc};
 use sid_core::models::{
     HistoryArchive, HistoryCommit, HistoryEntry, HistoryEpoch, HistoryEpochId, HistoryEpochUse,
-    HistoryEpochs, HistoryEvidence, HistoryKsf, HistorySuite, NewHistoryEpoch, PasswordHistory,
-    ProfileId, WrappedHistoryKey,
+    HistoryEpochs, HistoryEvidence, HistoryKsf, HistoryPreparation, HistorySuite, NewHistoryEpoch,
+    PasswordHistory, ProfileId, WrappedHistoryKey,
 };
 use sid_core::{Error as SidError, Result as SidResult};
 use sqlx::PgPool;
@@ -178,6 +178,20 @@ pub(super) async fn import_archive(
     }
     for epoch in &archive.epochs {
         insert_epoch(tx, epoch).await?;
+        // Replaced no later than the archive's revision: a live set at least
+        // that new may retire it.
+        if epoch.epoch.status == HistoryEpochUse::CompareOnly {
+            sqlx::query(
+                "INSERT INTO password_history_replaced (epoch_id, owner_id, replaced_at_revision)
+                 VALUES ($1, $2, $3)",
+            )
+            .bind(epoch.epoch.id.0)
+            .bind(archive.owner)
+            .bind(archive.revision)
+            .execute(&mut **tx)
+            .await
+            .map_err(storage("archive replacement"))?;
+        }
     }
     for entry in &archive.entries {
         sqlx::query("INSERT INTO password_history_entries (epoch_id, owner_id, seq, entry, operation_id, policy_version, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)")
@@ -451,34 +465,139 @@ pub(super) async fn apply_in_tx(
         }
     }
     // Retain the newest `depth` accepted passwords; every commit takes the
-    // next seq, so those are the last `depth` seqs.
+    // next seq, so those are the last `depth` seqs. An epoch emptied here is
+    // retired by the evaluator, from the live set, never by this commit.
     sqlx::query("DELETE FROM password_history_entries WHERE owner_id = $1 AND seq <= $2")
         .bind(owner)
         .bind(seq - i64::from(commit.depth))
         .execute(&mut **tx)
         .await
         .map_err(storage("retention"))?;
-    retire_unused(tx, owner).await?;
     Ok(true)
 }
 
-/// Retire every compare-only epoch of `owner` that retains no entry and
-/// destroy its sealed key: nothing will be compared or written under it again,
-/// and the epoch row stays only as provenance.
-async fn retire_unused(
+/// The evaluator's side of preparing an operation; see
+/// `StorageBackend::prepare_history_epochs`.
+pub(super) async fn prepare_epochs(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    owner: ProfileId,
-) -> SidResult<()> {
-    sqlx::query(
-        "UPDATE password_history_epochs e SET status = 'retired', wrapped_key = ''::bytea
-         WHERE e.owner_id = $1 AND e.status = 'compare_only'
-           AND NOT EXISTS (SELECT 1 FROM password_history_entries x WHERE x.epoch_id = e.id)",
+    prep: &HistoryPreparation,
+) -> SidResult<Vec<HistoryEpoch>> {
+    let owner = prep.owner;
+    let live: Vec<Uuid> = prep.live.live.iter().map(|e| e.0).collect();
+    let foreign: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM unnest($2::uuid[]) AS l(id)
+         WHERE NOT EXISTS (SELECT 1 FROM password_history_epochs e
+                           WHERE e.id = l.id AND e.owner_id = $1)",
     )
     .bind(owner)
+    .bind(&live)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(storage("live set"))?;
+    if foreign > 0 {
+        return Err(SidError::Validation(
+            "the live set names an epoch that is not the owner's".into(),
+        ));
+    }
+    sqlx::query(
+        "INSERT INTO password_history_lifecycle (owner_id, revision, live_epochs)
+         SELECT id, $2, $3 FROM profiles WHERE id = $1
+         ON CONFLICT (owner_id) DO NOTHING",
+    )
+    .bind(owner)
+    .bind(prep.live.revision)
+    .bind(&live)
+    .execute(&mut **tx)
+    .await
+    .map_err(storage("lifecycle row"))?;
+    let (recorded, mut recorded_live): (i64, Vec<Uuid>) = sqlx::query_as(
+        "SELECT revision, live_epochs FROM password_history_lifecycle
+         WHERE owner_id = $1 FOR UPDATE",
+    )
+    .bind(owner)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(storage("lifecycle lock"))?
+    .ok_or_else(|| SidError::NotFound(format!("profile {owner}")))?;
+    let revision = match recorded.cmp(&prep.live.revision) {
+        std::cmp::Ordering::Less => {
+            sqlx::query(
+                "UPDATE password_history_lifecycle SET revision = $2, live_epochs = $3
+                 WHERE owner_id = $1",
+            )
+            .bind(owner)
+            .bind(prep.live.revision)
+            .bind(&live)
+            .execute(&mut **tx)
+            .await
+            .map_err(storage("lifecycle update"))?;
+            recorded_live = live.clone();
+            prep.live.revision
+        }
+        std::cmp::Ordering::Equal if recorded_live != live => {
+            return Err(SidError::Conflict(format!(
+                "history revision {recorded} already has another live set"
+            )));
+        }
+        _ => recorded,
+    };
+    let settled: Vec<Uuid> = prep.live.settled.clone();
+    sqlx::query(
+        "DELETE FROM password_history_uses
+         WHERE owner_id = $1 AND (operation_id = ANY($2) OR expires_at <= $3)",
+    )
+    .bind(owner)
+    .bind(&settled)
+    .bind(prep.now)
+    .execute(&mut **tx)
+    .await
+    .map_err(storage("use release"))?;
+    sqlx::query(
+        "UPDATE password_history_epochs e SET status = 'retired'
+         FROM password_history_replaced r
+         WHERE r.epoch_id = e.id AND e.owner_id = $1 AND e.status = 'compare_only'
+           AND r.replaced_at_revision <= $2
+           AND NOT (e.id = ANY($3))
+           AND NOT EXISTS (SELECT 1 FROM password_history_uses u WHERE u.epoch_id = e.id)",
+    )
+    .bind(owner)
+    .bind(revision)
+    .bind(&recorded_live)
     .execute(&mut **tx)
     .await
     .map_err(storage("epoch retirement"))?;
-    Ok(())
+    let rows: Vec<EpochRow> = sqlx::query_as(concat!(
+        "SELECT ",
+        epoch_columns!(),
+        " FROM password_history_epochs
+         WHERE owner_id = $1
+           AND (status = 'active' OR (status = 'compare_only' AND id = ANY($2)))
+         ORDER BY status <> 'active', created_at, id"
+    ))
+    .bind(owner)
+    .bind(&live)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(storage("selection"))?;
+    let selected = rows
+        .into_iter()
+        .map(epoch_from_row)
+        .collect::<SidResult<Vec<_>>>()?;
+    for epoch in &selected {
+        sqlx::query(
+            "INSERT INTO password_history_uses (operation_id, epoch_id, owner_id, expires_at)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (operation_id, epoch_id) DO UPDATE SET expires_at = EXCLUDED.expires_at",
+        )
+        .bind(prep.operation)
+        .bind(epoch.id.0)
+        .bind(owner)
+        .bind(prep.expires_at)
+        .execute(&mut **tx)
+        .await
+        .map_err(storage("use record"))?;
+    }
+    Ok(selected)
 }
 
 pub(super) async fn rotate_epoch(
@@ -517,12 +636,26 @@ pub(super) async fn rotate_epoch(
     .execute(&mut **tx)
     .await
     .map_err(storage("epoch rotation"))?;
-    retire_unused(tx, owner).await?;
     insert_epoch(tx, new).await?;
-    sqlx::query("UPDATE password_histories SET revision = revision + 1 WHERE owner_id = $1")
-        .bind(owner)
-        .execute(&mut **tx)
-        .await
-        .map_err(storage("revision"))?;
+    let revision: i64 = sqlx::query_scalar(
+        "UPDATE password_histories SET revision = revision + 1 WHERE owner_id = $1
+         RETURNING revision",
+    )
+    .bind(owner)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(storage("revision"))?;
+    // A live set read before this revision was read while the replaced epoch
+    // could still take entries: it cannot retire it.
+    sqlx::query(
+        "INSERT INTO password_history_replaced (epoch_id, owner_id, replaced_at_revision)
+         VALUES ($1, $2, $3) ON CONFLICT (epoch_id) DO NOTHING",
+    )
+    .bind(replaces.0)
+    .bind(owner)
+    .bind(revision)
+    .execute(&mut **tx)
+    .await
+    .map_err(storage("epoch replacement"))?;
     Ok(new.epoch.clone())
 }

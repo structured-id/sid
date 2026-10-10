@@ -324,6 +324,7 @@ async fn a_split_history_evaluator_serves_only_the_credential_service() {
     // Preparation is the credential service's alone.
     let prepare = || PreparePasswordHistoryRequest {
         operation_id: Some(sid_ids::PasswordOperationId::generate().into()),
+        ..Default::default()
     };
     let anonymous = client
         .prepare_password_history(prepare())

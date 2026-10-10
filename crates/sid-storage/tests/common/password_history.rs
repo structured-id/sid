@@ -7,8 +7,8 @@
 use chrono::Utc;
 use sid_core::models::{
     Credential, CredentialData, CredentialType, HistoryCommit, HistoryEpoch, HistoryEpochId,
-    HistoryEpochUse, HistoryEvidence, HistoryKsf, HistorySuite, NewHistoryEpoch, NewRegistration,
-    PasswordResetSession, ProfileId, WrappedHistoryKey,
+    HistoryEpochUse, HistoryEvidence, HistoryKsf, HistoryLiveSet, HistoryPreparation, HistorySuite,
+    NewHistoryEpoch, NewRegistration, PasswordResetSession, ProfileId, WrappedHistoryKey,
 };
 use sid_plugin::storage::StorageBackend;
 use uuid::Uuid;
@@ -89,19 +89,42 @@ fn next(password: &Credential, data: &[u8]) -> Credential {
     new
 }
 
-/// The evaluator's view of `owner` is the history's revision and epochs with
-/// no entry, and selects the same required epochs as the full history.
+/// The evaluator's view of `owner` is the history's revision and epochs, with
+/// no entry.
 async fn assert_epoch_view(backend: &dyn StorageBackend, owner: ProfileId) {
     let history = backend.get_password_history(owner).await.unwrap();
     let view = backend.get_history_epochs(owner).await.unwrap();
     assert_eq!(view.revision, history.revision);
     assert_eq!(view.epochs, history.epochs);
-    let ids = |epochs: Vec<&HistoryEpoch>| epochs.iter().map(|e| e.id).collect::<Vec<_>>();
-    assert_eq!(
-        ids(view.required_epochs()),
-        ids(history.required_epochs()),
-        "every compare-only epoch the evaluator sees still retains an entry"
-    );
+}
+
+/// The evaluator's preparation of `operation` for `owner` under `live`,
+/// usable by the operation until `expires_at`.
+async fn prepare(
+    backend: &dyn StorageBackend,
+    owner: ProfileId,
+    live: HistoryLiveSet,
+    operation: Uuid,
+    expires_at: chrono::DateTime<Utc>,
+) -> sid_core::Result<Vec<HistoryEpochId>> {
+    backend
+        .prepare_history_epochs(
+            &HistoryPreparation {
+                owner,
+                live,
+                operation,
+                expires_at,
+                now: Utc::now(),
+            },
+            test_audit(),
+        )
+        .await
+        .map(|selected| selected.iter().map(|e| e.id).collect())
+}
+
+/// The live set the credential service reads for `owner` now.
+async fn live_now(backend: &dyn StorageBackend, owner: ProfileId) -> HistoryLiveSet {
+    HistoryLiveSet::of(&backend.get_password_history(owner).await.unwrap())
 }
 
 /// The transfer preserves entries, sealed keys and retired provenance; exact
@@ -321,9 +344,10 @@ pub async fn test_history_epoch_is_prepared_once(backend: &dyn StorageBackend) {
 }
 
 /// Rotation replaces the active epoch: the replaced one stops taking entries
-/// but stays comparable while it retains one, and is retired with its sealed
-/// key destroyed once retention removes its last entry. Concurrent rotations
-/// from one epoch agree on one replacement; a stale rotation writes nothing.
+/// but stays comparable while it retains one, and is retired, its sealed key
+/// kept, by the first preparation after retention removed its last entry.
+/// Concurrent rotations from one epoch agree on one replacement; a stale
+/// rotation writes nothing.
 pub async fn test_history_epoch_rotation(backend: &dyn StorageBackend) {
     let (owner, password) = profile_with_password(backend, "hist_rotate").await;
     let old = backend
@@ -407,8 +431,10 @@ pub async fn test_history_epoch_rotation(backend: &dyn StorageBackend) {
         b"p1"
     );
 
-    // An entry under the replacement retires the emptied epoch and destroys
-    // its key; the row stays only as provenance.
+    // An entry under the replacement empties the replaced epoch. The commit
+    // does not retire it: the evaluator does, at the next preparation whose
+    // live set no longer names it; its sealed key is kept.
+    let old_key = backend.get_history_epoch_key(old.id).await.unwrap();
     assert!(
         backend
             .change_password(
@@ -421,22 +447,40 @@ pub async fn test_history_epoch_rotation(backend: &dyn StorageBackend) {
             .await
             .unwrap()
     );
+    let emptied = backend.get_password_history(owner).await.unwrap();
+    assert_epoch_view(backend, owner).await;
+    assert_eq!(emptied.entries.len(), 1);
+    assert_eq!(emptied.entries[0].epoch, replacement.id);
+    assert_eq!(
+        emptied
+            .required_epochs()
+            .iter()
+            .map(|e| e.id)
+            .collect::<Vec<_>>(),
+        vec![replacement.id],
+        "an emptied epoch is no longer required"
+    );
+    let selected = prepare(
+        backend,
+        owner,
+        live_now(backend, owner).await,
+        Uuid::now_v7(),
+        Utc::now(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(selected, vec![replacement.id]);
     let after = backend.get_password_history(owner).await.unwrap();
     assert_epoch_view(backend, owner).await;
-    assert_eq!(after.epochs, vec![replacement.clone()]);
-    assert_eq!(after.entries.len(), 1);
-    assert_eq!(after.entries[0].epoch, replacement.id);
+    assert_eq!(after.epochs, vec![replacement.clone()], "retired");
     assert_eq!(
         backend.get_history_epoch_key(old.id).await.unwrap(),
-        Some(WrappedHistoryKey(Vec::new())),
-        "a retired epoch's key is destroyed"
-    );
-    assert_ne!(
-        backend.get_history_epoch_key(replacement.id).await.unwrap(),
-        Some(WrappedHistoryKey(Vec::new()))
+        old_key,
+        "retirement keeps the sealed key"
     );
 
-    // An epoch that never held an entry is retired at once when replaced.
+    // An epoch that never held an entry is retired by the next preparation
+    // once it is replaced.
     let (fresh_owner, _) = profile_with_password(backend, "hist_rotate_empty").await;
     let unused = backend
         .ensure_history_epoch(&new_epoch(fresh_owner, 15), test_audit())
@@ -446,10 +490,20 @@ pub async fn test_history_epoch_rotation(backend: &dyn StorageBackend) {
         .rotate_history_epoch(&new_epoch(fresh_owner, 16), unused.id, test_audit())
         .await
         .unwrap();
+    let selected = prepare(
+        backend,
+        fresh_owner,
+        live_now(backend, fresh_owner).await,
+        Uuid::now_v7(),
+        Utc::now(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(selected, vec![next_epoch.id]);
     let view = backend.get_password_history(fresh_owner).await.unwrap();
     assert_eq!(view.epochs, vec![next_epoch]);
     assert_epoch_view(backend, fresh_owner).await;
-    assert_eq!(
+    assert_ne!(
         backend.get_history_epoch_key(unused.id).await.unwrap(),
         Some(WrappedHistoryKey(Vec::new()))
     );
@@ -672,6 +726,185 @@ pub async fn test_reset_history_is_compare_and_swap(backend: &dyn StorageBackend
     let history = backend.get_password_history(owner).await.unwrap();
     assert_eq!(history.entries.len(), 1);
     assert_eq!(history.entries[0].entry, [9u8; 32]);
+}
+
+/// The evaluator's lifecycle record, as the credential service's live sets
+/// drive it:
+/// - one revision has one live set: another set for it is a conflict, the same
+///   one again (or concurrently) is accepted;
+/// - an older live set changes nothing and retires nothing;
+/// - a live set read before an epoch was replaced cannot retire it, even if
+///   it does not name it;
+/// - an epoch a prepared operation uses is retired only once that operation
+///   is named settled or has expired;
+/// - a live set naming another owner's epoch is refused.
+pub async fn test_history_lifecycle_follows_the_live_set(backend: &dyn StorageBackend) {
+    let (owner, password) = profile_with_password(backend, "hist_lifecycle").await;
+    let first = backend
+        .ensure_history_epoch(&new_epoch(owner, 41), test_audit())
+        .await
+        .unwrap();
+    let read = backend.get_password_history(owner).await.unwrap();
+    assert!(
+        backend
+            .change_password(
+                password.id,
+                b"p0",
+                &next(&password, b"p1"),
+                Some(&commit(owner, read.revision, first.id, 0x41, 1)),
+                test_audit()
+            )
+            .await
+            .unwrap()
+    );
+    let later = Utc::now() + chrono::Duration::minutes(15);
+
+    // The live set read while `first` was active and held the entry.
+    let before_rotation = live_now(backend, owner).await;
+    assert_eq!(before_rotation.live, vec![first.id]);
+    let second = backend
+        .rotate_history_epoch(&new_epoch(owner, 42), first.id, test_audit())
+        .await
+        .unwrap();
+
+    // Concurrent preparations with the same live set agree; operation `a`
+    // now uses both epochs.
+    let (a, b) = (Uuid::now_v7(), Uuid::now_v7());
+    let (ra, rb) = tokio::join!(
+        prepare(backend, owner, before_rotation.clone(), a, later),
+        prepare(backend, owner, before_rotation.clone(), b, Utc::now()),
+    );
+    assert_eq!(ra.unwrap(), vec![second.id, first.id]);
+    assert_eq!(rb.unwrap(), vec![second.id, first.id]);
+
+    // The same revision with another set is a conflict and changes nothing.
+    let mut other = before_rotation.clone();
+    other.live.clear();
+    let err = prepare(backend, owner, other, Uuid::now_v7(), later)
+        .await
+        .expect_err("one revision, one live set");
+    assert!(matches!(err, sid_core::Error::Conflict(_)), "{err:?}");
+
+    // A change under the new epoch empties `first`.
+    let current = backend.get_password_history(owner).await.unwrap();
+    assert!(
+        backend
+            .change_password(
+                password.id,
+                b"p1",
+                &next(&password, b"p2"),
+                Some(&commit(owner, current.revision, second.id, 0x42, 1)),
+                test_audit()
+            )
+            .await
+            .unwrap()
+    );
+    let emptied = live_now(backend, owner).await;
+    assert_eq!(emptied.live, vec![second.id]);
+
+    // `a` still uses `first`: the newer live set does not retire it.
+    let selected = prepare(backend, owner, emptied.clone(), Uuid::now_v7(), later)
+        .await
+        .unwrap();
+    assert_eq!(selected, vec![second.id]);
+    let view = backend.get_history_epochs(owner).await.unwrap();
+    assert!(
+        view.epochs.iter().any(|e| e.id == first.id),
+        "an epoch an operation uses is not retired"
+    );
+
+    // An older live set changes nothing: it neither retires nor rolls back.
+    // (Its own operation expires at once, so it holds nothing.)
+    prepare(
+        backend,
+        owner,
+        before_rotation.clone(),
+        Uuid::now_v7(),
+        Utc::now(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        backend
+            .get_history_epochs(owner)
+            .await
+            .unwrap()
+            .epochs
+            .iter()
+            .any(|e| e.id == first.id)
+    );
+
+    // Naming `a` settled releases it; `b` expired already. `first` is
+    // retired, its key kept.
+    let key = backend.get_history_epoch_key(first.id).await.unwrap();
+    let mut settled = emptied.clone();
+    settled.settled = vec![a];
+    let selected = prepare(backend, owner, settled, Uuid::now_v7(), later)
+        .await
+        .unwrap();
+    assert_eq!(selected, vec![second.id]);
+    let view = backend.get_history_epochs(owner).await.unwrap();
+    assert!(!view.epochs.iter().any(|e| e.id == first.id), "retired");
+    assert_eq!(backend.get_history_epoch_key(first.id).await.unwrap(), key);
+
+    // Another owner's epoch in the live set is refused.
+    let (stranger, _) = profile_with_password(backend, "hist_lifecycle_other").await;
+    let theirs = backend
+        .ensure_history_epoch(&new_epoch(stranger, 43), test_audit())
+        .await
+        .unwrap();
+    let mut foreign = emptied.clone();
+    foreign.revision += 1;
+    foreign.live = vec![theirs.id];
+    let err = prepare(backend, owner, foreign, Uuid::now_v7(), later)
+        .await
+        .expect_err("another owner's epoch");
+    assert!(matches!(err, sid_core::Error::Validation(_)), "{err:?}");
+}
+
+/// A live set read before an epoch was replaced, arriving after it, cannot
+/// retire it: when it was read the epoch could still take entries.
+pub async fn test_history_stale_live_set_cannot_retire(backend: &dyn StorageBackend) {
+    let (owner, password) = profile_with_password(backend, "hist_stale_live").await;
+    let first = backend
+        .ensure_history_epoch(&new_epoch(owner, 51), test_audit())
+        .await
+        .unwrap();
+    // Read with no entry anywhere.
+    let stale = live_now(backend, owner).await;
+    assert!(stale.live.is_empty());
+    // `first` then takes an entry and is replaced.
+    let read = backend.get_password_history(owner).await.unwrap();
+    assert!(
+        backend
+            .change_password(
+                password.id,
+                b"p0",
+                &next(&password, b"p1"),
+                Some(&commit(owner, read.revision, first.id, 0x51, 1)),
+                test_audit()
+            )
+            .await
+            .unwrap()
+    );
+    let second = backend
+        .rotate_history_epoch(&new_epoch(owner, 52), first.id, test_audit())
+        .await
+        .unwrap();
+    // The stale, empty set is the first the evaluator records: it is older
+    // than the replacement, so `first` and its entry stay.
+    let selected = prepare(backend, owner, stale, Uuid::now_v7(), Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(selected, vec![second.id]);
+    let view = backend.get_history_epochs(owner).await.unwrap();
+    assert!(view.epochs.iter().any(|e| e.id == first.id), "not retired");
+    let current = live_now(backend, owner).await;
+    assert_eq!(current.live, vec![first.id]);
+    let selected = prepare(backend, owner, current, Uuid::now_v7(), Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(selected, vec![second.id, first.id]);
 }
 
 /// History is written only for the credential's own profile.

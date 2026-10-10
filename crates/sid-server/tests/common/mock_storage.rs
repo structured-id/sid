@@ -102,6 +102,17 @@ pub struct MockStorageInner {
     histories: HashMap<ProfileId, PasswordHistory>,
     /// The sealed VOPRF key of every stored history epoch.
     history_keys: HashMap<HistoryEpochId, WrappedHistoryKey>,
+    /// The evaluator's newest accepted (revision, live set) per owner.
+    history_lifecycle: HashMap<ProfileId, (i64, Vec<HistoryEpochId>)>,
+    /// The revision at which each replaced epoch stopped being active.
+    history_replaced: HashMap<HistoryEpochId, i64>,
+    /// (operation, epoch, owner, expiry) of each epoch a prepared operation uses.
+    history_uses: Vec<(
+        Uuid,
+        HistoryEpochId,
+        ProfileId,
+        chrono::DateTime<chrono::Utc>,
+    )>,
     /// WebAuthn user handles by (profile, relying party).
     webauthn_user_handles: HashMap<(ProfileId, String), WebAuthnUserHandle>,
 }
@@ -1374,28 +1385,92 @@ impl StorageBackend for MockStorage {
         {
             return Ok(active.clone());
         }
-        let retained: HashSet<HistoryEpochId> = history.entries.iter().map(|e| e.epoch).collect();
-        let mut destroyed = Vec::new();
         for epoch in &mut history.epochs {
             if epoch.id == replaces && epoch.status == HistoryEpochUse::Active {
                 epoch.status = HistoryEpochUse::CompareOnly;
             }
-            if epoch.status == HistoryEpochUse::CompareOnly && !retained.contains(&epoch.id) {
-                epoch.status = HistoryEpochUse::Retired;
-                destroyed.push(epoch.id);
-            }
         }
-        history
-            .epochs
-            .retain(|e| e.status != HistoryEpochUse::Retired);
         history.epochs.push(new.epoch.clone());
         history.revision += 1;
-        for id in destroyed {
-            inner.history_keys.insert(id, WrappedHistoryKey(Vec::new()));
-        }
+        let revision = history.revision;
+        inner.history_replaced.entry(replaces).or_insert(revision);
         inner.history_keys.insert(new.epoch.id, new.key.clone());
         inner.owe(&ctx)?;
         Ok(new.epoch.clone())
+    }
+
+    async fn prepare_history_epochs(
+        &self,
+        prep: &sid_core::models::HistoryPreparation,
+        ctx: MutationContext,
+    ) -> SidResult<Vec<HistoryEpoch>> {
+        let mut inner = self.inner.lock().unwrap();
+        let owner = prep.owner;
+        if !inner.profiles.contains_key(&owner) {
+            return Err(sid_core::Error::NotFound(format!("profile {owner}")));
+        }
+        let owned: HashSet<HistoryEpochId> = inner
+            .histories
+            .get(&owner)
+            .map(|h| h.epochs.iter().map(|e| e.id).collect())
+            .unwrap_or_default();
+        if prep.live.live.iter().any(|e| !owned.contains(e)) {
+            return Err(sid_core::Error::Validation(
+                "the live set names an epoch that is not the owner's".into(),
+            ));
+        }
+        let incoming = (prep.live.revision, prep.live.live.clone());
+        let (revision, recorded) = match inner.history_lifecycle.get(&owner).cloned() {
+            Some((stored, live)) if stored == prep.live.revision && live != prep.live.live => {
+                return Err(sid_core::Error::Conflict(format!(
+                    "history revision {stored} already has another live set"
+                )));
+            }
+            Some(kept) if kept.0 >= prep.live.revision => kept,
+            _ => incoming,
+        };
+        inner
+            .history_lifecycle
+            .insert(owner, (revision, recorded.clone()));
+        inner.history_uses.retain(|(op, _, o, expires)| {
+            *o != owner || (!prep.live.settled.contains(op) && *expires > prep.now)
+        });
+        let used: HashSet<HistoryEpochId> = inner.history_uses.iter().map(|u| u.1).collect();
+        let replaced = inner.history_replaced.clone();
+        let history = inner.histories.entry(owner).or_default();
+        for epoch in &mut history.epochs {
+            if epoch.status == HistoryEpochUse::CompareOnly
+                && replaced.get(&epoch.id).is_some_and(|r| *r <= revision)
+                && !recorded.contains(&epoch.id)
+                && !used.contains(&epoch.id)
+            {
+                epoch.status = HistoryEpochUse::Retired;
+            }
+        }
+        // The checker's view holds no retired epoch.
+        history
+            .epochs
+            .retain(|e| e.status != HistoryEpochUse::Retired);
+        let mut selected: Vec<HistoryEpoch> = history
+            .epochs
+            .iter()
+            .filter(|e| {
+                e.status == HistoryEpochUse::Active
+                    || (e.status == HistoryEpochUse::CompareOnly && prep.live.live.contains(&e.id))
+            })
+            .cloned()
+            .collect();
+        selected.sort_by_key(|e| (e.status != HistoryEpochUse::Active, e.created_at, e.id));
+        for epoch in &selected {
+            inner
+                .history_uses
+                .retain(|u| !(u.0 == prep.operation && u.1 == epoch.id));
+            inner
+                .history_uses
+                .push((prep.operation, epoch.id, owner, prep.expires_at));
+        }
+        inner.owe(&ctx)?;
+        Ok(selected)
     }
 
     async fn get_history_epoch_key(
@@ -5128,24 +5203,11 @@ impl MockStorageInner {
                 created_at: chrono::Utc::now(),
             });
         }
-        // Retain the newest `depth` accepted passwords.
+        // Retain the newest `depth` accepted passwords; an emptied epoch is
+        // retired by the evaluator's preparation, not here.
         history
             .entries
             .retain(|e| e.seq > seq - i64::from(commit.depth));
-        let retained: HashSet<HistoryEpochId> = history.entries.iter().map(|e| e.epoch).collect();
-        let mut destroyed = Vec::new();
-        for epoch in &mut history.epochs {
-            if epoch.status == HistoryEpochUse::CompareOnly && !retained.contains(&epoch.id) {
-                epoch.status = HistoryEpochUse::Retired;
-                destroyed.push(epoch.id);
-            }
-        }
-        history
-            .epochs
-            .retain(|e| e.status != HistoryEpochUse::Retired);
-        for id in destroyed {
-            self.history_keys.insert(id, WrappedHistoryKey(Vec::new()));
-        }
         Ok(true)
     }
 

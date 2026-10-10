@@ -576,10 +576,10 @@ async fn an_unopenable_history_key_is_unavailable_and_never_replaced() {
 
 /// An active epoch made under KSF parameters the server no longer uses, or
 /// before an operator's cutoff, is replaced when its owner's next operation
-/// is prepared. The replaced epoch stays required while it retains the
-/// accepted password, so that password is still compared; a replaced epoch
-/// without entries is retired with its key destroyed. A current epoch is
-/// never replaced.
+/// is prepared. The replaced epoch stays selected while the live set names
+/// it, so the accepted password is still compared; a replaced epoch without
+/// entries is retired by a later preparation, its key kept. A current epoch
+/// is never replaced.
 #[tokio::test]
 async fn a_stale_active_epoch_is_replaced_at_preparation() {
     use sid_core::models::{CredentialData, HistoryEpochUse, Profile, WrappedHistoryKey};
@@ -628,13 +628,35 @@ async fn a_stale_active_epoch_is_replaced_at_preparation() {
             .unwrap()
     );
 
+    // The live set the credential service sends with the next preparation,
+    // read after `rotate` so it is at least as new as the rotation.
+    let prepare = |storage: Arc<sid_storage::sqlite::SqliteBackend>| async move {
+        let history = storage.get_password_history(profile.id).await.unwrap();
+        let now = chrono::Utc::now();
+        storage
+            .prepare_history_epochs(
+                &sid_core::models::HistoryPreparation {
+                    owner: profile.id,
+                    live: sid_core::models::HistoryLiveSet::of(&history),
+                    operation: uuid::Uuid::now_v7(),
+                    expires_at: now,
+                    now,
+                },
+                audit(),
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|e| e.id)
+            .collect::<Vec<_>>()
+    };
+
     let rotated = ops.current_epochs(profile.id).await.unwrap();
     let current = rotated.active_epoch().unwrap().clone();
     assert_ne!(current.id, old.epoch.id);
     assert_eq!(current.ksf, HistoryKsf::DEFAULT);
-    let required: Vec<_> = rotated.required_epochs().iter().map(|e| e.id).collect();
     assert_eq!(
-        required,
+        prepare(storage.clone()).await,
         vec![current.id, old.epoch.id],
         "the accepted password is still compared under its epoch"
     );
@@ -643,8 +665,9 @@ async fn a_stale_active_epoch_is_replaced_at_preparation() {
     assert_eq!(again.revision, rotated.revision, "a current epoch stays");
     assert_eq!(again.active_epoch().map(|e| e.id), Some(current.id));
 
-    // A compromise cutoff after the current epoch replaces it too; it held
-    // no entry, so it is retired at once and its key destroyed.
+    // A compromise cutoff after the current epoch replaces it too. It held no
+    // entry, so the next preparation, whose live set postdates the
+    // replacement, retires it; its sealed key is kept.
     let ops = HistoryEvaluation::new(
         storage.clone(),
         Arc::new(sid_plugin::cache::InMemoryCacheBackend::new()),
@@ -655,15 +678,22 @@ async fn a_stale_active_epoch_is_replaced_at_preparation() {
     let cut = ops.current_epochs(profile.id).await.unwrap();
     let replacement = cut.active_epoch().unwrap().clone();
     assert_ne!(replacement.id, current.id);
-    let required: Vec<_> = cut.required_epochs().iter().map(|e| e.id).collect();
-    assert_eq!(required, vec![replacement.id, old.epoch.id]);
-    assert!(!cut.epochs.iter().any(|e| e.id == current.id));
+    let key = storage.get_history_epoch_key(current.id).await.unwrap();
+    assert_eq!(
+        prepare(storage.clone()).await,
+        vec![replacement.id, old.epoch.id]
+    );
+    let after = storage.get_history_epochs(profile.id).await.unwrap();
+    assert!(!after.epochs.iter().any(|e| e.id == current.id), "retired");
     assert_eq!(
         storage.get_history_epoch_key(current.id).await.unwrap(),
-        Some(WrappedHistoryKey(Vec::new()))
+        key,
+        "retirement keeps the sealed key"
     );
+    assert_ne!(key, Some(WrappedHistoryKey(Vec::new())));
     assert_eq!(
-        cut.epochs
+        after
+            .epochs
             .iter()
             .find(|e| e.id == old.epoch.id)
             .map(|e| e.status),
@@ -781,6 +811,20 @@ fn a_selection_the_history_does_not_require_is_refused() {
         &with(OwnerKind::Existing, vec![&active, &old], None),
         &history
     ));
+    // A domain selected while its epoch held an entry stays acceptable once
+    // retention emptied it or the evaluator retired it: there is nothing in
+    // it to compare, and the comparison skips nothing with an entry.
+    let emptied = epoch(HistoryEpochUse::CompareOnly, 4);
+    let mut with_emptied = history.clone();
+    with_emptied.epochs.push(emptied.clone());
+    assert!(selection_is_complete(
+        &with(OwnerKind::Existing, vec![&active, &old, &emptied], None),
+        &with_emptied
+    ));
+    assert!(selection_is_complete(
+        &with(OwnerKind::Existing, vec![&active, &old, &emptied], None),
+        &history
+    ));
     for refused in [
         with(OwnerKind::Existing, vec![&active], None),
         with(OwnerKind::Existing, vec![&old, &active], None),
@@ -827,6 +871,7 @@ async fn an_in_process_evaluator_refuses_preparation_over_the_network() {
     let status = service
         .prepare_password_history(Request::new(PreparePasswordHistoryRequest {
             operation_id: Some(PasswordOperationId::generate().into()),
+            ..Default::default()
         }))
         .await
         .unwrap_err();
@@ -942,6 +987,114 @@ fn an_operation_id_is_required_and_round_trips() {
     let id = PasswordOperationId::generate();
     let wire: sid_ids_proto::PasswordOperationId = id.into();
     assert_eq!(operation_id(Some(&wire)).unwrap(), id);
+}
+
+/// The live set the credential service sends names the owner's epochs by
+/// their comparison domains: the evaluator maps each to its own epoch and
+/// refuses a domain it did not issue for the owner, a domain named twice, a
+/// negative revision or more domains than an operation holds, retaining
+/// every key instead of guessing.
+#[tokio::test]
+async fn the_evaluator_maps_the_live_set_to_its_own_epochs() {
+    use sid_core::models::{HistoryEpoch, HistoryEpochId, HistorySuite};
+    let storage = Arc::new(
+        sid_storage::sqlite::SqliteBackend::new_in_memory()
+            .await
+            .unwrap(),
+    );
+    let (_, evaluation) = split(storage, manager(3), manager(3));
+    let owner = ProfileId::generate();
+    let epoch = |status, key: u8| HistoryEpoch {
+        id: HistoryEpochId::generate(),
+        owner,
+        suite: HistorySuite::PallasPoseidonV1,
+        public_key: [key; 32],
+        ksf: HistoryKsf::DEFAULT,
+        ksf_salt: [key; 32],
+        status,
+        created_at: chrono::Utc::now(),
+    };
+    let (active, old) = (
+        epoch(HistoryEpochUse::Active, 1),
+        epoch(HistoryEpochUse::CompareOnly, 2),
+    );
+    let epochs = HistoryEpochs {
+        revision: 7,
+        epochs: vec![old.clone(), active.clone()],
+    };
+    let domain = |e: &HistoryEpoch| OperationDomain::of(e).comparison_domain;
+    let settled = uuid::Uuid::now_v7();
+    let live = LiveDomains {
+        revision: 7,
+        domains: vec![domain(&old), domain(&active)],
+        settled: vec![settled, settled],
+    };
+    let mapped = evaluation.live_epochs(owner, &epochs, &live).unwrap();
+    let mut expected = vec![active.id, old.id];
+    expected.sort_unstable();
+    assert_eq!(mapped.live, expected);
+    assert_eq!(mapped.settled, vec![settled]);
+    assert_eq!(mapped.revision, 7);
+
+    let refused = |live: LiveDomains| {
+        let status = evaluation.live_epochs(owner, &epochs, &live).unwrap_err();
+        assert_eq!(status.code(), Code::Unavailable, "{}", status.message());
+    };
+    refused(LiveDomains {
+        domains: vec![[9; 32]],
+        ..live.clone()
+    });
+    refused(LiveDomains {
+        domains: vec![domain(&old), domain(&old)],
+        ..live.clone()
+    });
+    refused(LiveDomains {
+        revision: -1,
+        ..live.clone()
+    });
+    refused(LiveDomains {
+        domains: vec![domain(&old); MAX_HISTORY_DOMAINS + 1],
+        ..live.clone()
+    });
+}
+
+/// A preparation request's live set is decoded before the evaluator reads it:
+/// a domain that is not 32 bytes, a malformed settled operation or more
+/// entries than the bounds allow is an invalid argument.
+#[test]
+fn a_malformed_live_set_is_an_invalid_argument() {
+    let good = PreparePasswordHistoryRequest {
+        operation_id: Some(PasswordOperationId::generate().into()),
+        live_comparison_domains: vec![vec![2; 32], vec![1; 32]],
+        history_revision: 4,
+        settled_operations: vec![PasswordOperationId::generate().into()],
+    };
+    let live = live_domains(&good).unwrap();
+    assert_eq!(live.domains, vec![[1; 32], [2; 32]], "sorted");
+    assert_eq!(live.revision, 4);
+    assert_eq!(live.settled.len(), 1);
+
+    for bad in [
+        PreparePasswordHistoryRequest {
+            live_comparison_domains: vec![vec![1; 31]],
+            ..good.clone()
+        },
+        PreparePasswordHistoryRequest {
+            live_comparison_domains: vec![vec![1; 32]; MAX_HISTORY_DOMAINS + 1],
+            ..good.clone()
+        },
+        PreparePasswordHistoryRequest {
+            settled_operations: vec![sid_ids_proto::PasswordOperationId { value: vec![1; 3] }],
+            ..good.clone()
+        },
+        PreparePasswordHistoryRequest {
+            history_revision: u64::MAX,
+            ..good.clone()
+        },
+    ] {
+        let status = live_domains(&bad).unwrap_err();
+        assert_eq!(status.code(), Code::InvalidArgument, "{}", status.message());
+    }
 }
 
 /// A step whose operation is not pending for it reads as expired, whatever

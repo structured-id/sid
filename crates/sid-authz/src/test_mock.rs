@@ -271,6 +271,13 @@ impl sid_plugin::StorageBackend for MockStorage {
     ) -> Result<sid_core::models::HistoryEpoch> {
         unimplemented!()
     }
+    async fn prepare_history_epochs(
+        &self,
+        _: &sid_core::models::HistoryPreparation,
+        _: MutationContext,
+    ) -> Result<Vec<sid_core::models::HistoryEpoch>> {
+        unimplemented!()
+    }
     async fn get_history_epoch_key(
         &self,
         _: sid_core::models::HistoryEpochId,

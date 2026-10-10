@@ -208,10 +208,10 @@ impl PasswordHistory {
 }
 
 /// An owner's epochs as the evaluator reads them: the revision and every
-/// epoch not retired, without any retained entry. Storage retires a
-/// compare-only epoch together with its last entry, so every compare-only
-/// epoch here still retains one; the checker confirms the selection against
-/// the entries before it accepts a password.
+/// epoch not retired, without any retained entry. Which compare-only epochs
+/// still retain an entry is not here: the credential service says so in its
+/// [`HistoryLiveSet`], and the checker confirms the selection against the
+/// entries before it accepts a password.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct HistoryEpochs {
     pub revision: i64,
@@ -225,19 +225,52 @@ impl HistoryEpochs {
             .iter()
             .find(|e| e.status == HistoryEpochUse::Active)
     }
+}
 
-    /// The epochs a new password must be compared in: the active one first,
-    /// then every compare-only epoch, in the order [`PasswordHistory::required_epochs`]
-    /// lists them.
-    pub fn required_epochs(&self) -> Vec<&HistoryEpoch> {
-        let mut required: Vec<&HistoryEpoch> = self.active_epoch().into_iter().collect();
-        required.extend(
-            self.epochs
-                .iter()
-                .filter(|e| e.status == HistoryEpochUse::CompareOnly),
-        );
-        required
+/// What the credential service, which holds the entries, tells the evaluator
+/// about an owner's history when an operation is prepared: the revision, the
+/// epochs that hold at least one retained entry at that revision, and the
+/// owner's operations whose commit that revision records. The evaluator never
+/// reads an entry to learn this.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HistoryLiveSet {
+    pub revision: i64,
+    /// Sorted, without duplicates.
+    pub live: Vec<HistoryEpochId>,
+    /// Committed operations (16 UUIDv7 bytes each), sorted, without duplicates.
+    pub settled: Vec<Uuid>,
+}
+
+impl HistoryLiveSet {
+    /// The live set of `history`, as read in one snapshot.
+    pub fn of(history: &PasswordHistory) -> Self {
+        let live: std::collections::BTreeSet<HistoryEpochId> =
+            history.entries.iter().map(|e| e.epoch).collect();
+        let settled: std::collections::BTreeSet<Uuid> = history
+            .entries
+            .iter()
+            .map(|e| e.evidence.operation)
+            .collect();
+        Self {
+            revision: history.revision,
+            live: live.into_iter().collect(),
+            settled: settled.into_iter().collect(),
+        }
     }
+}
+
+/// One operation's preparation as the evaluator records it: the owner's live
+/// set the credential service sent, and the operation that will use the
+/// selected epochs until it settles or `expires_at`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryPreparation {
+    pub owner: ProfileId,
+    pub live: HistoryLiveSet,
+    pub operation: Uuid,
+    /// When the operation can no longer use its epochs: past it nothing of the
+    /// operation is evaluated again.
+    pub expires_at: DateTime<Utc>,
+    pub now: DateTime<Utc>,
 }
 
 /// A new epoch with its sealed key, written before its first use.
@@ -345,18 +378,9 @@ impl HistoryArchive {
                 return Err(Error::Validation("invalid history archive entry".into()));
             }
         }
-        // A compare-only epoch exists for the entries it still holds: one
-        // without entries is required by the epoch view and by no history
-        // check, so every later proved operation would fail its selection.
-        let empty_compare_only = ids.iter().any(|(id, status)| {
-            *status == HistoryEpochUse::CompareOnly && !entries.iter().any(|(e, _)| e == id)
-        });
-        if empty_compare_only {
-            return Err(Error::Validation(
-                "history archive has a compare-only epoch without entries".into(),
-            ));
-        }
-        // Every live epoch is a domain each proved operation evaluates; past
+        // A compare-only epoch without entries is valid: the evaluator retires
+        // it at the owner's next preparation, from the credential service's
+        // live set. Every live epoch is a domain each proved operation evaluates; past
         // the limit no operation succeeds, so nothing could age entries out.
         let live = ids
             .values()

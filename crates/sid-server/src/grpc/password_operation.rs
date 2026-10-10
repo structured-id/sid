@@ -58,7 +58,7 @@ use sid_core::models::password_history::DEFAULT_HISTORY_DEPTH;
 use sid_core::models::password_history::MAX_HISTORY_DOMAINS;
 use sid_core::models::{
     AuditEntry, Credential, CredentialId, CredentialType, HistoryCommit, HistoryEpochUse,
-    HistoryEpochs, HistoryEvidence, HistoryKsf, MutationContext, NewHistoryEpoch,
+    HistoryEpochs, HistoryEvidence, HistoryKsf, HistoryLiveSet, MutationContext, NewHistoryEpoch,
     OperationCompletion, OperationKey, PasswordHistory, PolicyEvidence, ProfileId, ResetSessionId,
 };
 use sid_ids::PasswordOperationId;
@@ -306,15 +306,49 @@ fn operation_store(
     ChallengeStore::new(cache, operation_keys, "password-operation", OPERATION_TTL)
 }
 
+/// What the credential service, which holds the entries, tells the evaluator
+/// about the owner's history with each preparation
+/// (`PreparePasswordHistoryRequest`): the revision, the comparison domains of
+/// the epochs holding an entry at it, and the operations it records committed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct LiveDomains {
+    pub revision: i64,
+    /// Sorted, without duplicates.
+    pub domains: Vec<[u8; 32]>,
+    pub settled: Vec<uuid::Uuid>,
+}
+
+impl LiveDomains {
+    /// The live domains of `history`, as read in one snapshot.
+    pub(crate) fn of(history: &PasswordHistory) -> Self {
+        let set = HistoryLiveSet::of(history);
+        let mut domains: Vec<[u8; 32]> = history
+            .epochs
+            .iter()
+            .filter(|e| set.live.contains(&e.id))
+            .map(|e| OperationDomain::of(e).comparison_domain)
+            .collect();
+        domains.sort_unstable();
+        Self {
+            revision: set.revision,
+            domains,
+            settled: set.settled,
+        }
+    }
+}
+
 /// Selects the comparison domains of a stored pending operation: the
 /// history evaluator, in this process or as its own service.
 #[tonic::async_trait]
 pub(crate) trait HistoryPreparation: Send + Sync {
-    /// The domains of the operation `id`, as the client receives them. The
-    /// evaluator records them in the operation; repeating the call returns
-    /// the same domains.
-    async fn prepare(&self, id: &PasswordOperationId)
-    -> Result<Vec<PasswordHistoryDomain>, Status>;
+    /// The domains of the operation `id`, as the client receives them, given
+    /// the owner's `live` domains. The evaluator records them in the
+    /// operation; repeating the call returns the same domains.
+    async fn prepare(
+        &self,
+        id: &PasswordOperationId,
+        live: &LiveDomains,
+    ) -> Result<Vec<PasswordHistoryDomain>, Status>;
 }
 
 fn domain_message(d: &OperationDomain) -> PasswordHistoryDomain {
@@ -590,7 +624,17 @@ impl PasswordOperations {
             None => None,
         };
         self.store(&op).await?;
-        let domains = self.evaluator.prepare(&op.id).await?;
+        // Read for every kind, a decoy's random owner included, so a start
+        // for a held identifier costs what any other does.
+        let history = self
+            .storage
+            .get_password_history(owner)
+            .await
+            .map_err(internal)?;
+        let domains = self
+            .evaluator
+            .prepare(&op.id, &LiveDomains::of(&history))
+            .await?;
         let context = PasswordHistoryContext {
             operation_id: Some(op.id.into()),
             owner_domain: op.owner_domain.to_vec(),
@@ -961,25 +1005,38 @@ impl PasswordOperations {
     }
 }
 
-/// Whether `op`'s domains are exactly what `history` requires, in order: a
-/// new owner's first epoch alone, or the active epoch and every compare-only
-/// epoch that retains an entry.
+/// Whether `op`'s domains cover what `history` requires: a new owner's first
+/// epoch alone; for an existing owner the active epoch first, then every
+/// compare-only epoch that retains an entry, each once, plus at most domains
+/// that hold no entry (an epoch emptied or retired since the operation was
+/// prepared), never one the comparison would skip with an entry in it.
 fn selection_is_complete(op: &PendingOperation, history: &PasswordHistory) -> bool {
-    let required: Vec<OperationDomain> = match (op.kind, &op.new_epoch) {
+    match (op.kind, &op.new_epoch) {
         (OwnerKind::New, Some(new)) => {
-            if new.epoch.owner != op.owner || new.epoch.status != HistoryEpochUse::Active {
-                return false;
-            }
-            vec![OperationDomain::of(&new.epoch)]
+            new.epoch.owner == op.owner
+                && new.epoch.status == HistoryEpochUse::Active
+                && op.domains == [OperationDomain::of(&new.epoch)]
         }
-        (OwnerKind::Existing, None) => history
-            .required_epochs()
-            .into_iter()
-            .map(OperationDomain::of)
-            .collect(),
-        _ => return false,
-    };
-    op.domains == required
+        (OwnerKind::Existing, None) => {
+            let required: Vec<OperationDomain> = history
+                .required_epochs()
+                .into_iter()
+                .map(OperationDomain::of)
+                .collect();
+            let once = op
+                .domains
+                .iter()
+                .enumerate()
+                .all(|(i, d)| !op.domains[..i].iter().any(|e| e.epoch == d.epoch));
+            once && op.domains.first() == required.first()
+                && required.iter().all(|r| op.domains.contains(r))
+                && op
+                    .domains
+                    .iter()
+                    .all(|d| required.contains(d) || history.entries_of(d.epoch).next().is_none())
+        }
+        _ => false,
+    }
 }
 
 /// The history evaluator: it alone holds the history keys. It selects each
@@ -1033,21 +1090,23 @@ impl HistoryEvaluation {
         self.ops.take(&id.to_string()).await?.ok_or_else(expired)
     }
 
-    /// Select the domains of the stored operation `id` and record them, with
-    /// the revision they were read at and a new owner's first epoch. An
-    /// operation already prepared returns its domains unchanged.
+    /// Select the domains of the stored operation `id` from the owner's
+    /// `live` domains and record them, with the revision they were read at
+    /// and a new owner's first epoch. An operation already prepared returns
+    /// its domains unchanged: a retry keeps its original selection.
     pub(crate) async fn prepare(
         &self,
         id: &PasswordOperationId,
+        live: &LiveDomains,
     ) -> Result<Vec<OperationDomain>, Status> {
         let mut op = self.take(id).await?;
-        let result = self.select(&mut op).await;
+        let result = self.select(&mut op, live).await;
         self.store(&op).await?;
         result?;
         Ok(op.domains.clone())
     }
 
-    async fn select(&self, op: &mut PendingOperation) -> Result<(), Status> {
+    async fn select(&self, op: &mut PendingOperation, live: &LiveDomains) -> Result<(), Status> {
         if !op.domains.is_empty() {
             return Ok(());
         }
@@ -1064,16 +1123,43 @@ impl HistoryEvaluation {
             }
             OwnerKind::Existing => {
                 let epochs = self.current_epochs(op.owner).await?;
-                let required = epochs.required_epochs();
-                if required.len() > MAX_HISTORY_DOMAINS {
+                let live = self.live_epochs(op.owner, &epochs, live)?;
+                let now = chrono::Utc::now();
+                let expires_at = now
+                    + chrono::Duration::from_std(OPERATION_TTL)
+                        .expect("the operation lifetime fits a duration");
+                let selected = self
+                    .storage
+                    .prepare_history_epochs(
+                        &sid_core::models::HistoryPreparation {
+                            owner: op.owner,
+                            live,
+                            operation: op.id.into_uuid(),
+                            expires_at,
+                            now,
+                        },
+                        MutationContext::from(AuditEntry::system(
+                            "password_history.prepared",
+                            op.owner.to_string(),
+                        )),
+                    )
+                    .await
+                    .map_err(|e| match e {
+                        sid_core::Error::Conflict(reason) => {
+                            warn!("history lifecycle of {} refused: {reason}", op.owner);
+                            unavailable("history lifecycle conflict")
+                        }
+                        other => internal(other),
+                    })?;
+                if selected.len() > MAX_HISTORY_DOMAINS {
                     warn!(
                         "profile {} requires {} history domains",
                         op.owner,
-                        required.len()
+                        selected.len()
                     );
                     return Err(unavailable("too many history epochs"));
                 }
-                op.domains = required.into_iter().map(OperationDomain::of).collect();
+                op.domains = selected.iter().map(OperationDomain::of).collect();
                 op.history_revision = epochs.revision;
             }
             OwnerKind::Decoy => {
@@ -1083,6 +1169,52 @@ impl HistoryEvaluation {
             }
         }
         Ok(())
+    }
+
+    /// The owner's epochs named by `live`: each domain must be one the
+    /// evaluator issued for this owner, once, within the domain bound.
+    /// Anything else retains every key: the preparation is refused.
+    #[allow(clippy::result_large_err)]
+    fn live_epochs(
+        &self,
+        owner: ProfileId,
+        epochs: &HistoryEpochs,
+        live: &LiveDomains,
+    ) -> Result<HistoryLiveSet, Status> {
+        let refused = |why: &str| {
+            warn!("live history set of {owner} refused: {why}");
+            unavailable("history lifecycle")
+        };
+        if live.revision < 0 {
+            return Err(refused("a negative revision"));
+        }
+        if live.domains.len() > MAX_HISTORY_DOMAINS {
+            return Err(refused("more domains than an operation holds"));
+        }
+        if live.settled.len() > sid_core::models::password_history::MAX_HISTORY_DEPTH as usize {
+            return Err(refused("more settled operations than history retains"));
+        }
+        let mut ids = Vec::with_capacity(live.domains.len());
+        for domain in &live.domains {
+            let epoch = epochs
+                .epochs
+                .iter()
+                .find(|e| OperationDomain::of(e).comparison_domain == *domain)
+                .ok_or_else(|| refused("a domain not issued for the owner"))?;
+            ids.push(epoch.id);
+        }
+        ids.sort_unstable();
+        if ids.windows(2).any(|w| w[0] == w[1]) {
+            return Err(refused("a domain named twice"));
+        }
+        let mut settled = live.settled.clone();
+        settled.sort_unstable();
+        settled.dedup();
+        Ok(HistoryLiveSet {
+            revision: live.revision,
+            live: ids,
+            settled,
+        })
     }
 
     /// The owner's epochs with a current active one: one is created (key
@@ -1243,8 +1375,9 @@ impl HistoryPreparation for HistoryEvaluation {
     async fn prepare(
         &self,
         id: &PasswordOperationId,
+        live: &LiveDomains,
     ) -> Result<Vec<PasswordHistoryDomain>, Status> {
-        Ok(HistoryEvaluation::prepare(self, id)
+        Ok(HistoryEvaluation::prepare(self, id, live)
             .await?
             .iter()
             .map(domain_message)
@@ -1280,12 +1413,22 @@ impl HistoryPreparation for RemoteHistoryEvaluator {
     async fn prepare(
         &self,
         id: &PasswordOperationId,
+        live: &LiveDomains,
     ) -> Result<Vec<PasswordHistoryDomain>, Status> {
         let domains = self
             .client
             .clone()
             .prepare_password_history(PreparePasswordHistoryRequest {
                 operation_id: Some((*id).into()),
+                live_comparison_domains: live.domains.iter().map(|d| d.to_vec()).collect(),
+                history_revision: u64::try_from(live.revision).map_err(internal)?,
+                settled_operations: live
+                    .settled
+                    .iter()
+                    .map(|op| sid_ids_proto::PasswordOperationId {
+                        value: op.as_bytes().to_vec(),
+                    })
+                    .collect(),
             })
             .await
             .map_err(|status| {
@@ -1306,6 +1449,42 @@ impl HistoryPreparation for RemoteHistoryEvaluator {
         }
         Ok(domains)
     }
+}
+
+/// The live set a preparation request carries, decoded; the evaluator checks
+/// each domain against the owner's epochs.
+#[allow(clippy::result_large_err)]
+fn live_domains(req: &PreparePasswordHistoryRequest) -> Result<LiveDomains, Status> {
+    if req.live_comparison_domains.len() > MAX_HISTORY_DOMAINS {
+        return Err(invalid_field(
+            "live_comparison_domains",
+            "more domains than an operation holds",
+        ));
+    }
+    if req.settled_operations.len() > sid_core::models::password_history::MAX_HISTORY_DEPTH as usize
+    {
+        return Err(invalid_field(
+            "settled_operations",
+            "more operations than history retains",
+        ));
+    }
+    let mut domains = req
+        .live_comparison_domains
+        .iter()
+        .map(|d| array32(d, "live_comparison_domains"))
+        .collect::<Result<Vec<_>, Status>>()?;
+    domains.sort_unstable();
+    let settled = req
+        .settled_operations
+        .iter()
+        .map(|op| operation_id(Some(op)).map(|id| id.into_uuid()))
+        .collect::<Result<Vec<_>, Status>>()?;
+    Ok(LiveDomains {
+        revision: i64::try_from(req.history_revision)
+            .map_err(|_| invalid_field("history_revision", "out of range"))?,
+        domains,
+        settled,
+    })
 }
 
 /// Who may ask the evaluator to prepare an operation.
@@ -1400,8 +1579,10 @@ impl PasswordHistoryEvaluatorService for PasswordHistoryEvaluatorImpl {
         request: Request<PreparePasswordHistoryRequest>,
     ) -> Result<Response<PreparePasswordHistoryResponse>, Status> {
         self.admit(&request).await?;
-        let id = operation_id(request.get_ref().operation_id.as_ref())?;
-        let domains = self.evaluation.prepare(&id).await?;
+        let req = request.into_inner();
+        let id = operation_id(req.operation_id.as_ref())?;
+        let live = live_domains(&req)?;
+        let domains = self.evaluation.prepare(&id, &live).await?;
         Ok(Response::new(PreparePasswordHistoryResponse {
             domains: domains.iter().map(domain_message).collect(),
         }))

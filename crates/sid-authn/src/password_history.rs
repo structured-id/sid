@@ -468,6 +468,10 @@ impl HistoryChecker {
         }
         let b = point(&evaluation.blinded, "blinded").map_err(|_| HistoryCheckError::Mismatch)?;
         let mut jobs = Vec::with_capacity(domains.len());
+        // The KSF job of each domain; none for a domain whose epoch the
+        // evaluator retired after selecting it: it holds no entry, so there
+        // is nothing to compare and no entry to write under it.
+        let mut job_of = Vec::with_capacity(domains.len());
         for ((proved, domain), answer) in public
             .domains
             .iter()
@@ -485,19 +489,25 @@ impl HistoryChecker {
             if !relation::verify_evaluation(pk, b, z, context, &proof) {
                 return Err(HistoryCheckError::EvaluationProof);
             }
-            let epoch = history.epochs.iter().find(|e| e.id == domain.epoch);
             // A new owner's first epoch is not stored yet: its KSF comes from
             // the operation's own epoch, which the caller passes as history.
-            let epoch = epoch.ok_or(HistoryCheckError::Mismatch)?;
-            jobs.push((
-                Zeroizing::new(*proved.tag.expose()),
-                epoch.ksf_salt,
-                epoch.ksf,
-            ));
+            match history.epochs.iter().find(|e| e.id == domain.epoch) {
+                Some(epoch) => {
+                    job_of.push(Some(jobs.len()));
+                    jobs.push((
+                        Zeroizing::new(*proved.tag.expose()),
+                        epoch.ksf_salt,
+                        epoch.ksf,
+                    ));
+                }
+                None => job_of.push(None),
+            }
         }
         let candidates = Zeroizing::new(self.admission.run(jobs).await?);
+        let candidate = |i: usize| job_of[i].map(|j| &candidates[j]);
         let mut reused = subtle::Choice::from(0u8);
-        for (domain, s) in domains.iter().zip(candidates.iter()) {
+        for (i, domain) in domains.iter().enumerate() {
+            let Some(s) = candidate(i) else { continue };
             for entry in history.entries_of(domain.epoch) {
                 reused |= entry.entry.ct_eq(s);
             }
@@ -509,9 +519,9 @@ impl HistoryChecker {
         Ok(CheckedPassword {
             new_entries: domains
                 .iter()
-                .zip(candidates.iter())
-                .filter(|(d, _)| Some(d.epoch) == active)
-                .map(|(d, s)| (d.epoch, *s))
+                .enumerate()
+                .filter(|(_, d)| Some(d.epoch) == active)
+                .filter_map(|(i, d)| candidate(i).map(|s| (d.epoch, *s)))
                 .collect(),
         })
     }

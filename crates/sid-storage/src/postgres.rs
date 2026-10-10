@@ -2131,6 +2131,24 @@ impl StorageBackend for PostgresBackend {
         Ok(epoch)
     }
 
+    async fn prepare_history_epochs(
+        &self,
+        prep: &sid_core::models::HistoryPreparation,
+        audit: MutationContext,
+    ) -> SidResult<Vec<HistoryEpoch>> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?;
+        let selected = password_history::prepare_epochs(&mut tx, prep).await?;
+        Self::audit_in_tx(&mut tx, &format!("profile:{}", prep.owner), audit).await?;
+        tx.commit()
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?;
+        Ok(selected)
+    }
+
     async fn get_history_epoch_key(
         &self,
         epoch: HistoryEpochId,

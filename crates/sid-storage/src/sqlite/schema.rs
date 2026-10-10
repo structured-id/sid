@@ -188,6 +188,33 @@ CREATE TABLE IF NOT EXISTS password_history_entries (
 CREATE INDEX IF NOT EXISTS password_history_entries_owner
     ON password_history_entries (owner_id, seq);
 
+-- The evaluator's record of each owner's history lifecycle: the newest live
+-- set the credential service sent (a sorted JSON array of epoch ids), when
+-- each epoch stopped being active, and which prepared operations still use
+-- which epochs.
+CREATE TABLE IF NOT EXISTS password_history_lifecycle (
+    owner_id    TEXT PRIMARY KEY REFERENCES profiles(id) ON DELETE CASCADE,
+    revision    INTEGER NOT NULL CHECK (revision >= 0),
+    live_epochs TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS password_history_replaced (
+    epoch_id             TEXT PRIMARY KEY REFERENCES password_history_epochs(id) ON DELETE CASCADE,
+    owner_id             TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    replaced_at_revision INTEGER NOT NULL CHECK (replaced_at_revision > 0)
+);
+
+CREATE TABLE IF NOT EXISTS password_history_uses (
+    operation_id TEXT NOT NULL,
+    epoch_id     TEXT NOT NULL REFERENCES password_history_epochs(id) ON DELETE CASCADE,
+    owner_id     TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    expires_at   TEXT NOT NULL,
+    PRIMARY KEY (operation_id, epoch_id)
+);
+
+CREATE INDEX IF NOT EXISTS password_history_uses_owner
+    ON password_history_uses (owner_id, epoch_id);
+
 --------------------------------------------------------------------------------
 -- sessions
 --------------------------------------------------------------------------------

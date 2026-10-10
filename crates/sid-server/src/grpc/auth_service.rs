@@ -3219,7 +3219,7 @@ impl AuthService for AuthServiceImpl {
     async fn password_change_finish(
         &self,
         request: Request<PasswordChangeFinishRequest>,
-    ) -> Result<Response<PasswordChangeFinishResponse>, Status> {
+    ) -> Result<Response<()>, Status> {
         self.check_maintenance().await?;
 
         // Auth first, feature check second
@@ -3251,7 +3251,7 @@ impl AuthService for AuthServiceImpl {
             )
             .await?
         {
-            Finish::Completed(_) => return Ok(Response::new(PasswordChangeFinishResponse {})),
+            Finish::Completed(_) => return Ok(Response::new(())),
             Finish::Ready(done) => *done,
         };
 
@@ -3268,7 +3268,7 @@ impl AuthService for AuthServiceImpl {
             "credential.password_change",
             credential.id.0.to_string(),
         ))
-        .with_operation(done.completion(Self::finish_result(&PasswordChangeFinishResponse {})));
+        .with_operation(done.completion(Self::finish_result(&())));
 
         // Applies only over the password just read, and only while it is
         // active: a revocation or another change in between is not undone.
@@ -3283,7 +3283,7 @@ impl AuthService for AuthServiceImpl {
 
         info!("Password changed for credential {}", credential.id.0);
 
-        Ok(Response::new(PasswordChangeFinishResponse {}))
+        Ok(Response::new(()))
     }
 
     /// How long, by this server's clock, the caller's session may still
@@ -3291,8 +3291,8 @@ impl AuthService for AuthServiceImpl {
     #[instrument(skip_all, fields(method = "get_password_change_requirement"))]
     async fn get_password_change_requirement(
         &self,
-        request: Request<GetPasswordChangeRequirementRequest>,
-    ) -> Result<Response<PasswordChangeRequirement>, Status> {
+        request: Request<()>,
+    ) -> Result<Response<prost_types::Duration>, Status> {
         self.check_maintenance().await?;
         let verified = self.caller_claims(&request).await?;
         let left = sid_authn::credential_enrollment::password_change_requirement(
@@ -3307,9 +3307,7 @@ impl AuthService for AuthServiceImpl {
             .map_err(|e| internal("password change requirement", e))?;
         let left = prost_types::Duration::try_from(left)
             .map_err(|e| internal("password change requirement", e))?;
-        Ok(Response::new(PasswordChangeRequirement {
-            current_password_required_in: Some(left),
-        }))
+        Ok(Response::new(left))
     }
 
     // ── Deferred ZK Proof ──

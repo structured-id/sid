@@ -624,17 +624,42 @@ async fn test_a_replaced_history_key_keeps_the_retained_password_refused() {
         .await
         .expect("a new password under the new key");
     assert!(signs_in(&svc, NEW).await);
+    // Depth 1: the replaced key holds no entry any more. It is no longer
+    // required, its sealed key is kept, and the next operation is not asked
+    // to evaluate under it.
     let after = svc.storage.get_password_history(owner).await.unwrap();
-    assert_eq!(after.epochs.len(), 1, "the emptied replaced key is retired");
-    assert_eq!(after.epochs[0].id, new.epoch.id);
     assert_eq!(
+        after
+            .required_epochs()
+            .iter()
+            .map(|e| e.id)
+            .collect::<Vec<_>>(),
+        vec![new.epoch.id],
+        "the emptied replaced key is no longer required"
+    );
+    assert_ne!(
         svc.storage.get_history_epoch_key(replaced).await.unwrap(),
         Some(WrappedHistoryKey(Vec::new())),
-        "the retired key is destroyed"
+        "retiring a key keeps it"
     );
-    let again = change(&svc, &prover, &credential, &token, NEW, NEW)
+    let next = prepare_change(&svc, &prover, &credential, &token, Some(NEW), NEW)
         .await
-        .expect_err("the password retained under the new key passed");
+        .unwrap();
+    assert_eq!(
+        next.context.domains.len(),
+        1,
+        "the emptied replaced key is not selected"
+    );
+    let again = finish_change(
+        &svc,
+        &credential,
+        &token,
+        &next.context,
+        next.record,
+        next.proof,
+    )
+    .await
+    .expect_err("the password retained under the new key passed");
     assert_eq!(reason(&again), "PASSWORD_REUSED");
 }
 
@@ -731,12 +756,10 @@ fn continuation(err: &Status) -> String {
 async fn required_in(svc: &TestServices, token: &str) -> std::time::Duration {
     let left = svc
         .auth
-        .get_password_change_requirement(authed(GetPasswordChangeRequirementRequest {}, token))
+        .get_password_change_requirement(authed((), token))
         .await
         .expect("the requirement")
-        .into_inner()
-        .current_password_required_in
-        .expect("a duration");
+        .into_inner();
     std::time::Duration::try_from(left).expect("never negative")
 }
 

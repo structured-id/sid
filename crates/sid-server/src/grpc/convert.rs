@@ -219,41 +219,17 @@ pub(crate) fn extract_webauthn_info(
 }
 
 /// The `info` of a credential's proto: its passkey facts for a WebAuthn
-/// credential, its OPAQUE suite for a password, nothing for another type.
+/// credential, nothing for another type. A password carries no suite: the
+/// API's single OPAQUE configuration is fixed by the contract.
 #[allow(clippy::result_large_err)]
 pub(crate) fn credential_info(
     c: &sid_core::models::Credential,
 ) -> Result<Option<sid_proto::sid::v1::credential::Info>, tonic::Status> {
     use sid_core::models::CredentialType;
-    use sid_plugin::crypto::CurveId;
-    use sid_proto::sid::v1::{OpaqueCredentialInfo, OpaqueSuite, credential::Info};
     match c.credential_type {
         CredentialType::WebAuthn => extract_webauthn_info(c.data.expose())
             .map(Some)
             .map_err(|e| sid_core::grpc_error::refuse::internal("read stored passkey", e)),
-        CredentialType::Opaque => {
-            // A credential stored before its curve was recorded is in the
-            // primary suite, Pallas.
-            let curve = match c.opaque_curve {
-                None => CurveId::Pallas,
-                Some(raw) => CurveId::try_from(raw).map_err(|_| {
-                    sid_core::grpc_error::refuse::internal(
-                        "read OPAQUE curve",
-                        format!("credential {} has curve {raw}", c.id.0),
-                    )
-                })?,
-            };
-            let suite = match curve {
-                CurveId::Pallas => OpaqueSuite::PallasV1,
-                CurveId::Ristretto255 => OpaqueSuite::Ristretto255V1,
-                CurveId::P256 => OpaqueSuite::P256V1,
-                CurveId::P384 => OpaqueSuite::P384V1,
-                CurveId::P521 => OpaqueSuite::P521V1,
-            };
-            Ok(Some(Info::OpaqueInfo(OpaqueCredentialInfo {
-                suite: suite as i32,
-            })))
-        }
         _ => Ok(None),
     }
 }
