@@ -1096,6 +1096,26 @@ async fn test_abandoned_current_password_guesses_are_limited() {
     assert!(signs_in(&svc, OLD).await, "sign-in has its own budget");
 }
 
+/// The change's budget limits guesses, not the owner: a proven current
+/// password clears it, so changes made one after another with the right
+/// password never lock the next one out.
+#[tokio::test]
+async fn test_proven_changes_do_not_spend_the_budget() {
+    let (prover, verifier) = client::keys(1);
+    let (svc, credential, token) = registered(&prover, verifier).await;
+    let passwords: Vec<Vec<u8>> = (0..7)
+        .map(|i| format!("Str0ngP@ssword-{i}").into_bytes())
+        .collect();
+    let mut current = OLD.to_vec();
+    for next in &passwords {
+        change(&svc, &prover, &credential, &token, &current, next)
+            .await
+            .expect("a change proving the current password");
+        current = next.clone();
+    }
+    assert!(signs_in(&svc, &current).await);
+}
+
 /// Only an issued KE2 tells the caller anything about a guess, so only it is
 /// counted: challenges refused before one (here a malformed sign-in request)
 /// leave the budget whole. Guesses sent at once are each counted before

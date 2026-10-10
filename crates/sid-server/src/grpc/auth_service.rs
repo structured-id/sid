@@ -3230,7 +3230,16 @@ impl AuthService for AuthServiceImpl {
             CurrentPasswordCheck::NotBegun if required => {
                 return Err(sid_authn::credential_enrollment::current_password_required());
             }
-            CurrentPasswordCheck::NotBegun | CurrentPasswordCheck::Proven => {}
+            CurrentPasswordCheck::NotBegun => {}
+            CurrentPasswordCheck::Proven => {
+                // The budget limits guesses, not the owner: the right
+                // password clears it, while abandoned and wrong guesses stay
+                // charged until one is proven.
+                self.anomaly_detector
+                    .clear_lockout(&current_password_guesses(caller))
+                    .await
+                    .map_err(anomaly_unavailable)?;
+            }
         }
         let registration_response = self
             .password_ops
