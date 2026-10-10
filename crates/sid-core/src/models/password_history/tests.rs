@@ -72,15 +72,13 @@ fn an_owner_without_an_active_epoch_has_none_required() {
 
 fn commit(depth: u32) -> HistoryCommit {
     let o = owner();
-    let e = epoch(o, HistoryEpochUse::Active);
+    let active = epoch(o, HistoryEpochUse::Active).descriptor();
+    let replaced = epoch(o, HistoryEpochUse::CompareOnly).descriptor();
     HistoryCommit {
         owner: o,
         expected_revision: 0,
-        new_epoch: Some(NewHistoryEpoch {
-            epoch: e.clone(),
-            key: WrappedHistoryKey(vec![1, 2, 3]),
-        }),
-        entries: vec![(e.id, [5; 32])],
+        epochs: vec![active, replaced],
+        entries: vec![(active.id, [5; 32])],
         evidence: HistoryEvidence {
             operation: Uuid::now_v7(),
             policy_version: 1,
@@ -89,8 +87,10 @@ fn commit(depth: u32) -> HistoryCommit {
     }
 }
 
-/// Depth outside 1..=24, a commit without an entry, and a new epoch of
-/// another owner are refused before anything is written.
+/// Depth outside 1..=24, a commit without an entry, without its epochs or
+/// with more than a proof holds, an epoch named twice or with an invalid KSF,
+/// and an entry outside the selected active epoch are refused before
+/// anything is written.
 #[test]
 fn a_commit_that_cannot_be_stored_as_stated_is_refused() {
     assert!(commit(1).validate().is_ok());
@@ -102,9 +102,28 @@ fn a_commit_that_cannot_be_stored_as_stated_is_refused() {
     empty.entries.clear();
     assert!(empty.validate().is_err());
 
-    let mut foreign = commit(1);
-    foreign.new_epoch.as_mut().unwrap().epoch.owner = owner();
-    assert!(foreign.validate().is_err());
+    let mut unnamed = commit(1);
+    unnamed.epochs.clear();
+    assert!(unnamed.validate().is_err());
+
+    let mut crowded = commit(1);
+    while crowded.epochs.len() <= MAX_HISTORY_DOMAINS {
+        let more = epoch(crowded.owner, HistoryEpochUse::CompareOnly).descriptor();
+        crowded.epochs.push(more);
+    }
+    assert!(crowded.validate().is_err());
+
+    let mut twice = commit(1);
+    twice.epochs[1] = twice.epochs[0];
+    assert!(twice.validate().is_err());
+
+    let mut weak = commit(1);
+    weak.epochs[1].ksf.memory_kib = 0;
+    assert!(weak.validate().is_err());
+
+    let mut misplaced = commit(1);
+    misplaced.entries[0].0 = misplaced.epochs[1].id;
+    assert!(misplaced.validate().is_err());
 }
 
 #[test]

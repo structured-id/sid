@@ -537,11 +537,6 @@ pub struct AuthServiceImpl {
     pub(crate) password_ops: Arc<super::password_operation::PasswordOperations>,
     /// The history evaluator, when it runs in this process.
     history_evaluation: Option<Arc<super::password_operation::HistoryEvaluation>>,
-    /// Who may prepare at that evaluator over the network: nobody, unless
-    /// it serves a remote credential service.
-    evaluator_admission: super::password_operation::PrepareAdmission,
-    /// The shared cache, for components rebuilt after construction.
-    cache: Arc<dyn CacheBackend>,
     /// Profile a WebAuthn ceremony was started for, keyed by its challenge:
     /// only that profile may finish it.
     webauthn_state: ChallengeStore<ProfileId>,
@@ -672,22 +667,18 @@ impl AuthServiceImpl {
         key_manager: Arc<dyn sid_keys::KeyManager>,
         cascade: Arc<RevocationCascadeService>,
         authz: Arc<dyn sid_plugin::AuthzEngine>,
+        password_history: super::password_operation::PasswordHistoryAuthority,
     ) -> Self {
         let ttl = std::time::Duration::from_secs(300); // 5 minutes
         let captcha_gate =
             sid_authn::captcha::CaptchaGate::new(cache_backend.clone(), key_manager.clone());
-        // A standalone installation co-locates the history evaluator.
         let (password_ops, history_evaluation) =
             super::password_operation::PasswordOperations::with_authority(
                 storage.clone(),
                 cache_backend.clone(),
                 key_manager.clone(),
                 installation_org,
-                super::password_operation::PasswordHistoryAuthority::InProcess {
-                    history_keys: key_manager.clone(),
-                    epoch_cutoff: None,
-                    serve: None,
-                },
+                password_history,
             );
         let password_ops = Arc::new(password_ops);
         Self {
@@ -713,8 +704,6 @@ impl AuthServiceImpl {
             ),
             password_ops,
             history_evaluation,
-            evaluator_admission: super::password_operation::PrepareAdmission::InProcess,
-            cache: cache_backend.clone(),
             webauthn_state: ChallengeStore::new(
                 cache_backend.clone(),
                 key_manager.clone(),
@@ -853,32 +842,6 @@ impl AuthServiceImpl {
         proxies: sid_authn::client_address::TrustedProxies,
     ) -> Self {
         self.trusted_proxies = proxies;
-        self
-    }
-
-    /// Where this service's password history evaluator runs.
-    pub fn with_password_history(
-        mut self,
-        authority: super::password_operation::PasswordHistoryAuthority,
-    ) -> Self {
-        let (ops, evaluation) = super::password_operation::PasswordOperations::with_authority(
-            self.storage.clone(),
-            self.cache.clone(),
-            self.key_manager.clone(),
-            self.installation_org,
-            authority,
-        );
-        self.password_ops = Arc::new(ops);
-        self.history_evaluation = evaluation;
-        self
-    }
-
-    /// Who may prepare at this server's history evaluator over the network.
-    pub fn with_evaluator_admission(
-        mut self,
-        admission: super::password_operation::PrepareAdmission,
-    ) -> Self {
-        self.evaluator_admission = admission;
         self
     }
 
@@ -2056,7 +2019,12 @@ impl AuthServiceImpl {
             Err(sid_core::Error::InvalidState(_)) => {
                 return Err(registration_restricted("instance_claim"));
             }
-            Err(e) => return Err(storage_failure(e)),
+            Err(e) => {
+                return Err(super::password_operation::commit_refusal(
+                    e,
+                    storage_failure,
+                ));
+            }
         }
 
         info!("Self-registration committed for profile {}", profile_id);
@@ -2605,14 +2573,15 @@ impl AuthServiceImpl {
 
     /// The password history evaluator interface, served as its own gRPC
     /// service, when the evaluator runs in this process; `None` when it is
-    /// its own service.
+    /// its own service. Nobody prepares at it over the network: this
+    /// process's credential service prepares in process.
     pub fn history_evaluator(
         &self,
     ) -> Option<super::password_operation::PasswordHistoryEvaluatorImpl> {
         self.history_evaluation.clone().map(|evaluation| {
             super::password_operation::PasswordHistoryEvaluatorImpl::new(
                 evaluation,
-                self.evaluator_admission.clone(),
+                Arc::new(super::password_operation::InProcessOnly),
             )
         })
     }
@@ -3268,7 +3237,7 @@ impl AuthService for AuthServiceImpl {
             .storage
             .change_password(credential.id, &current, &new, done.history.as_ref(), ctx)
             .await
-            .map_err(storage_failure)?;
+            .map_err(|e| super::password_operation::commit_refusal(e, storage_failure))?;
         if !changed {
             return Err(changed_concurrently());
         }
@@ -5908,7 +5877,7 @@ impl AuthService for AuthServiceImpl {
             .storage
             .complete_password_reset(session.id, &new_cred, done.history.as_ref(), &end, ctx)
             .await
-            .map_err(storage_failure)?
+            .map_err(|e| super::password_operation::commit_refusal(e, storage_failure))?
             // Completed, or expired, meanwhile: the reset starts again.
             .ok_or_else(|| ceremony_expired("password reset"))?;
 

@@ -28,6 +28,7 @@ pub mod email_policy;
 pub mod export_job;
 pub mod flow_action;
 pub mod group;
+pub mod history_keys;
 pub mod job_lock;
 pub mod machine;
 pub mod oidc_issuer;

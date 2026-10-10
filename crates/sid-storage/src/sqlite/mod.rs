@@ -35,6 +35,7 @@ mod machine;
 mod oidc_issuer;
 mod operation;
 mod password_history;
+pub use password_history::SqliteHistoryKeyStore;
 mod profile;
 mod project;
 mod provisioning_connector;
@@ -626,11 +627,13 @@ impl StorageBackend for SqliteBackend {
         self.get_password_history_impl(owner).await
     }
 
-    async fn get_history_epochs(
+    async fn raise_history_write_cutoff(
         &self,
-        owner: sid_core::models::ProfileId,
-    ) -> SidResult<sid_core::models::HistoryEpochs> {
-        self.get_history_epochs_impl(owner).await
+        not_before: chrono::DateTime<chrono::Utc>,
+        audit: MutationContext,
+    ) -> SidResult<chrono::DateTime<chrono::Utc>> {
+        self.raise_history_write_cutoff_impl(not_before, audit)
+            .await
     }
 
     async fn export_password_history(
@@ -646,38 +649,6 @@ impl StorageBackend for SqliteBackend {
         ctx: MutationContext,
     ) -> SidResult<bool> {
         self.import_password_history_impl(archive, ctx).await
-    }
-
-    async fn ensure_history_epoch(
-        &self,
-        new: &sid_core::models::NewHistoryEpoch,
-        audit: MutationContext,
-    ) -> SidResult<sid_core::models::HistoryEpoch> {
-        self.ensure_history_epoch_impl(new, audit).await
-    }
-
-    async fn rotate_history_epoch(
-        &self,
-        new: &sid_core::models::NewHistoryEpoch,
-        replaces: sid_core::models::HistoryEpochId,
-        audit: MutationContext,
-    ) -> SidResult<sid_core::models::HistoryEpoch> {
-        self.rotate_history_epoch_impl(new, replaces, audit).await
-    }
-
-    async fn prepare_history_epochs(
-        &self,
-        prep: &sid_core::models::HistoryPreparation,
-        audit: MutationContext,
-    ) -> SidResult<Vec<sid_core::models::HistoryEpoch>> {
-        self.prepare_history_epochs_impl(prep, audit).await
-    }
-
-    async fn get_history_epoch_key(
-        &self,
-        epoch: sid_core::models::HistoryEpochId,
-    ) -> SidResult<Option<sid_core::models::WrappedHistoryKey>> {
-        self.get_history_epoch_key_impl(epoch).await
     }
 
     async fn reseal_credential_data(

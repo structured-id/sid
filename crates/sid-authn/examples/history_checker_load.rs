@@ -22,11 +22,11 @@ use group::GroupEncoding;
 use pasta_curves::pallas;
 use sid_authn::password_history::{
     CheckRequest, HistoryCheckError, HistoryChecker, HistoryEvaluator, KsfAdmission,
-    OperationDomain, OperationEvaluation, owner_domain,
+    OperationDomain, RelayedProof, owner_domain,
 };
 use sid_core::models::{
-    HistoryEntry, HistoryEpochUse, HistoryEvidence, HistoryKsf, NewHistoryEpoch, PasswordHistory,
-    ProfileId,
+    HistoryEntry, HistoryEpoch, HistoryEpochDescriptor, HistoryEpochUse, HistoryEvidence,
+    HistoryKsf, NewKeyEpoch, PasswordHistory, ProfileId,
 };
 use sid_pake_core::history as relation;
 use sid_pake_core::types::{DomainPublicInputs, HistoryTag, ZkppPublicInputs};
@@ -88,37 +88,34 @@ fn key_manager() -> Arc<dyn sid_keys::KeyManager> {
     )
 }
 
-/// One prepared check: the operation's domains and evaluation and the
-/// client's proved inputs for a fresh password.
+/// One prepared check: the operation's domains and descriptors, the
+/// evaluator's proofs as the client relays them, and the client's proved
+/// inputs for a fresh password.
 struct Prepared {
     domains: Vec<OperationDomain>,
-    evaluation: OperationEvaluation,
+    epochs: Vec<HistoryEpochDescriptor>,
+    proofs: Vec<RelayedProof>,
     public: ZkppPublicInputs,
     context: Vec<u8>,
 }
 
 async fn prepare(
     evaluator: &HistoryEvaluator,
-    owner: ProfileId,
-    epochs: &[NewHistoryEpoch],
+    owner_domain: [u8; 32],
+    epochs: &[NewKeyEpoch],
     index: usize,
 ) -> Prepared {
-    let d = pallas::Base::from_repr(owner_domain(&INSTALLATION, owner)).unwrap();
+    let d = pallas::Base::from_repr(owner_domain).unwrap();
     let password = format!("Candidate-{index}-Str0ng!");
     let u = relation::history_input(d, password.as_bytes());
     let r = relation::random_blind(rand::rng());
     let blinded = relation::blind_request(u, r).to_bytes();
     let context = format!("operation-{index}").into_bytes();
-    let domains: Vec<_> = epochs
-        .iter()
-        .map(|e| OperationDomain::of(&e.epoch))
-        .collect();
-    let keys: Vec<_> = epochs
-        .iter()
-        .map(|e| (e.epoch.id, owner, e.key.clone()))
-        .collect();
+    let descriptors: Vec<_> = epochs.iter().map(|e| e.epoch.descriptor()).collect();
+    let domains: Vec<_> = descriptors.iter().map(OperationDomain::of).collect();
+    let keys: Vec<_> = epochs.iter().map(|e| (e.epoch.id, e.key.clone())).collect();
     let evaluation = evaluator
-        .evaluate(&blinded, &keys, &context)
+        .evaluate(&blinded, &owner_domain, &keys, &context)
         .await
         .expect("evaluation");
     let public = ZkppPublicInputs {
@@ -140,7 +137,15 @@ async fn prepare(
     };
     Prepared {
         domains,
-        evaluation,
+        epochs: descriptors,
+        proofs: evaluation
+            .evaluations
+            .iter()
+            .map(|a| RelayedProof {
+                challenge: a.challenge,
+                response: a.response,
+            })
+            .collect(),
         public,
         context,
     }
@@ -169,9 +174,10 @@ async fn main() {
     );
     let evaluator = HistoryEvaluator::new(key_manager());
     let owner = ProfileId::generate();
+    let domain = owner_domain(&INSTALLATION, owner);
     let mut epochs = Vec::with_capacity(args.domains);
     for index in 0..args.domains {
-        let mut epoch = evaluator.new_epoch(owner, args.ksf).await.unwrap();
+        let mut epoch = evaluator.new_epoch(domain, args.ksf).await.unwrap();
         if index > 0 {
             epoch.epoch.status = HistoryEpochUse::CompareOnly;
         }
@@ -180,7 +186,22 @@ async fn main() {
     // Retained entries spread over the domains; their values never match.
     let history = PasswordHistory {
         revision: 1,
-        epochs: epochs.iter().map(|e| e.epoch.clone()).collect(),
+        epochs: epochs
+            .iter()
+            .map(|e| {
+                let d = e.epoch.descriptor();
+                HistoryEpoch {
+                    id: d.id,
+                    owner,
+                    suite: d.suite,
+                    public_key: d.public_key,
+                    ksf: d.ksf,
+                    ksf_salt: d.ksf_salt,
+                    status: e.epoch.status,
+                    created_at: e.epoch.created_at,
+                }
+            })
+            .collect(),
         entries: (0..args.entries)
             .map(|i| HistoryEntry {
                 epoch: epochs[i % epochs.len()].epoch.id,
@@ -196,7 +217,7 @@ async fn main() {
     };
     let mut jobs = Vec::with_capacity(args.checks);
     for index in 0..args.checks {
-        jobs.push(prepare(&evaluator, owner, &epochs, index).await);
+        jobs.push(prepare(&evaluator, domain, &epochs, index).await);
     }
 
     let checker = Arc::new(HistoryChecker::new(KsfAdmission::new(
@@ -223,7 +244,8 @@ async fn main() {
                             CheckRequest {
                                 owner_domain: job.public.owner_domain,
                                 domains: &job.domains,
-                                evaluation: &job.evaluation,
+                                epochs: &job.epochs,
+                                proofs: &job.proofs,
                                 context: &job.context,
                                 history: &history,
                             },

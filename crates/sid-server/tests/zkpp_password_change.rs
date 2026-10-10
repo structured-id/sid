@@ -516,16 +516,17 @@ async fn server_registration_response(svc: &TestServices) -> Vec<u8> {
         .registration_response
 }
 
-/// After its history key is replaced (a KSF change or a suspected key
-/// compromise), an owner's operation is compared in two domains: the new key
-/// and the replaced one that still holds the retained password. The retained
-/// password stays refused, an operation prepared before the replacement
-/// cannot finish against the moved history, and a new password is accepted
-/// under the new key, after which the replaced key is destroyed.
+/// After a history-key write cutoff (a suspected key compromise), an
+/// operation prepared and proved under the withdrawn key cannot write an
+/// entry under it: its finish is refused and the password stays. The next
+/// operation gets a new key and is compared in two domains, the new key and
+/// the withdrawn one that still holds the retained password: the retained
+/// password stays refused, a new password is accepted under the new key, and
+/// the emptied withdrawn key is kept but no longer selected.
 #[tokio::test]
 async fn test_a_replaced_history_key_keeps_the_retained_password_refused() {
-    use sid_authn::password_history::HistoryEvaluator;
-    use sid_core::models::{AuditEntry, HistoryKsf, WrappedHistoryKey};
+    use sid_core::models::{AuditEntry, WrappedHistoryKey};
+    use sid_plugin::history_keys::HistoryKeyStore;
 
     let (prover, verifier) = client::keys(1);
     let (prover2, verifier2) = client::keys(2);
@@ -575,15 +576,19 @@ async fn test_a_replaced_history_key_keeps_the_retained_password_refused() {
         .await
         .unwrap();
 
-    // The replacement the server makes on a cutoff, sealed by its key manager.
+    // The cutoff, raised as a server start raises the configured one: into
+    // the credential side's fence and the evaluator's store.
     let original = svc.storage.get_password_history(owner).await.unwrap();
     let replaced = original.active_epoch().unwrap().id;
-    let new = HistoryEvaluator::new(common::test_key_manager())
-        .new_epoch(owner, HistoryKsf::DEFAULT)
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let cutoff =
+        chrono::DateTime::from_timestamp_millis(chrono::Utc::now().timestamp_millis()).unwrap();
+    svc.storage
+        .raise_history_write_cutoff(cutoff, AuditEntry::system("test", "cutoff").into())
         .await
         .unwrap();
-    svc.storage
-        .rotate_history_epoch(&new, replaced, AuditEntry::system("test", "rotate").into())
+    svc.mock_storage
+        .raise_write_cutoff(cutoff, AuditEntry::system("test", "cutoff"))
         .await
         .unwrap();
 
@@ -596,9 +601,22 @@ async fn test_a_replaced_history_key_keeps_the_retained_password_refused() {
         early.proof,
     )
     .await
-    .expect_err("an operation prepared before the replacement finished");
-    assert_eq!(reason(&stale), "CONCURRENT_MODIFICATION");
+    .expect_err("an operation proved under the withdrawn key finished");
+    assert_eq!(reason(&stale), "INVALID_STATE");
+    assert_eq!(
+        stale
+            .get_details_precondition_failure()
+            .expect("precondition")
+            .violations[0]
+            .r#type,
+        "PASSWORD_HISTORY_WRITE_CUTOFF"
+    );
     assert!(signs_in(&svc, OLD).await, "the refusal kept the password");
+    assert_eq!(
+        svc.storage.get_password_history(owner).await.unwrap(),
+        original,
+        "and the history"
+    );
 
     let reused = prepare_change(&svc, &prover2, &credential, &token, Some(OLD), OLD)
         .await
@@ -628,17 +646,20 @@ async fn test_a_replaced_history_key_keeps_the_retained_password_refused() {
     // required, its sealed key is kept, and the next operation is not asked
     // to evaluate under it.
     let after = svc.storage.get_password_history(owner).await.unwrap();
+    let new = after.active_epoch().expect("the new key").clone();
+    assert_ne!(new.id, replaced);
+    assert!(new.created_at >= cutoff, "a key created after the cutoff");
     assert_eq!(
         after
             .required_epochs()
             .iter()
             .map(|e| e.id)
             .collect::<Vec<_>>(),
-        vec![new.epoch.id],
+        vec![new.id],
         "the emptied replaced key is no longer required"
     );
     assert_ne!(
-        svc.storage.get_history_epoch_key(replaced).await.unwrap(),
+        svc.mock_storage.get_epoch_key(replaced).await.unwrap(),
         Some(WrappedHistoryKey(Vec::new())),
         "retiring a key keeps it"
     );

@@ -4,6 +4,7 @@
 //! Compares record counts and checks referential integrity
 //! (e.g., all credentials reference existing profiles).
 
+use sid_plugin::history_keys::HistoryKeyStore;
 use sid_plugin::storage::StorageBackend;
 use tracing::info;
 
@@ -32,9 +33,12 @@ pub struct CountCheck {
 /// Performs:
 /// 1. Record count comparison for each entity type
 /// 2. Referential integrity checks (credentials→profiles, sessions→profiles, etc.)
+/// 3. Each source profile's password history and history evaluator keys
 pub async fn verify_backends(
     source: &dyn StorageBackend,
+    source_keys: &dyn HistoryKeyStore,
     target: &dyn StorageBackend,
+    target_keys: &dyn HistoryKeyStore,
 ) -> anyhow::Result<VerifyResult> {
     let mut counts = Vec::new();
     let mut integrity_issues = Vec::new();
@@ -42,9 +46,8 @@ pub async fn verify_backends(
     if source.get_instance_secret(setup).await? != target.get_instance_secret(setup).await? {
         integrity_issues.push("OPAQUE server setup differs".into());
     }
-    if source.instance_organization().await?.map(|o| o.id)
-        != target.instance_organization().await?.map(|o| o.id)
-    {
+    let installation = source.instance_organization().await?.map(|o| o.id);
+    if installation != target.instance_organization().await?.map(|o| o.id) {
         integrity_issues.push("installation authority differs".into());
     }
     let target_versions = target.list_key_versions().await?;
@@ -101,6 +104,18 @@ pub async fn verify_backends(
                     "password history differs for profile {}",
                     profile.id
                 ));
+            }
+            if let Some(installation) = &installation {
+                let domain =
+                    sid_authn::password_history::owner_domain(installation.as_bytes(), profile.id);
+                if source_keys.export_keys(&domain).await?
+                    != target_keys.export_keys(&domain).await?
+                {
+                    integrity_issues.push(format!(
+                        "password history keys differ for profile {}",
+                        profile.id
+                    ));
+                }
             }
         }
     }

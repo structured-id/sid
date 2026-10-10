@@ -57,6 +57,8 @@ pub struct Issued {
 /// The running issuer.
 pub struct TestIssuer {
     pub storage: Arc<dyn StorageBackend>,
+    /// The password-history evaluator's store, in the same database.
+    pub history_keys: Arc<dyn sid_plugin::history_keys::HistoryKeyStore>,
     /// The installation's issuer.
     pub issuer: OidcIssuer,
     issuers: Arc<sid_authn::issuer::IssuerRegistry>,
@@ -93,6 +95,8 @@ impl TestIssuer {
         let audit_log: Arc<dyn sid_plugin::audit::AuditLog> = Arc::new(
             sid_storage::sqlite::SqliteAuditLog::new(backend.pool().clone()),
         );
+        let history_keys: Arc<dyn sid_plugin::history_keys::HistoryKeyStore> =
+            Arc::new(backend.history_keys());
         let storage: Arc<dyn StorageBackend> = Arc::new(backend);
         storage
             .ensure_system_project(audit("project.ensure_system"))
@@ -235,7 +239,11 @@ impl TestIssuer {
             revocation,
             issuers.clone(),
             organization.id,
-            keys,
+            keys.clone(),
+            sid_server::grpc::password_operation::PasswordHistoryAuthority::InProcess {
+                store: history_keys.clone(),
+                history_keys: keys,
+            },
         );
         let oidc = sid_server::grpc::oidc_issuer_service::OidcIssuerServiceImpl::new(
             issuers.clone(),
@@ -268,6 +276,7 @@ impl TestIssuer {
         });
         Self {
             storage,
+            history_keys,
             issuer,
             issuers,
             jwt,
@@ -587,6 +596,7 @@ async fn register(
 
 /// The authentication service, as a server start builds it; only its token
 /// endpoint is used here.
+#[allow(clippy::too_many_arguments)]
 fn auth_service(
     storage: Arc<dyn StorageBackend>,
     cache: Arc<dyn CacheBackend>,
@@ -595,6 +605,7 @@ fn auth_service(
     issuers: Arc<sid_authn::issuer::IssuerRegistry>,
     org: sid_core::models::OrgId,
     keys: Arc<dyn sid_keys::KeyManager>,
+    password_history: sid_server::grpc::password_operation::PasswordHistoryAuthority,
 ) -> Arc<sid_server::grpc::auth_service::AuthServiceImpl> {
     use sid_authn::opaque::{OpaqueRouter, P256Opaque, PallasOpaque, RistrettoOpaque};
     use sid_plugin::crypto::{CurveId, OpaqueOperations};
@@ -657,6 +668,7 @@ fn auth_service(
         keys,
         cascade,
         Arc::new(sid_authz::CeAuthzEngine::new(storage)),
+        password_history,
     ))
 }
 

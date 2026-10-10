@@ -97,22 +97,31 @@ fn history_epoch_cutoff_accepts_only_a_past_instant() {
     assert!(history_epoch_cutoff(Err(NotUnicode("bad".into()))).is_err());
 }
 
-/// Without an evaluator address the evaluator runs in this server with the
-/// epoch cutoff. A remote evaluator needs its resource, the token issuer,
-/// this server's own client and the shared operation key; the cutoff is then
-/// the evaluator's setting and is refused here. A partial configuration
-/// stops the start rather than running history without its evaluator.
+/// Without an evaluator address the evaluator runs in this server over its
+/// local store. A remote evaluator needs its resource, the token issuer and
+/// this server's own client; this server then opens no evaluator store. The
+/// history write cutoff setting is raised into this server's own durable
+/// cutoff in both cases, and into the in-process evaluator's; an earlier
+/// setting lowers neither. A partial configuration stops the start rather
+/// than running history without its evaluator.
 #[tokio::test]
 async fn the_history_evaluator_runs_here_unless_a_remote_one_is_complete() {
     use crate::grpc::password_operation::PasswordHistoryAuthority;
     use std::env::VarError;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     let storage = store().await;
+    let opened = AtomicUsize::new(0);
+    let local = || {
+        opened.fetch_add(1, Ordering::SeqCst);
+        let store: Arc<dyn sid_plugin::history_keys::HistoryKeyStore> =
+            Arc::new(storage.history_keys());
+        async move { Ok(store) }
+    };
     let field_keys: Arc<dyn sid_keys::KeyManager> = Arc::new(keys());
     let dir = tempfile::tempdir().unwrap();
     let secret = dir.path().join("caller.secret");
     std::fs::write(&secret, "caller-secret").unwrap();
-    let operation_key = dir.path().join("operation.key");
     let complete = [
         (
             "SID_PASSWORD_HISTORY_EVALUATOR",
@@ -125,10 +134,6 @@ async fn the_history_evaluator_runs_here_unless_a_remote_one_is_complete() {
         (
             "SID_PASSWORD_HISTORY_TOKEN_UPSTREAM",
             "http://sid.example.com:50051".to_owned(),
-        ),
-        (
-            "SID_PASSWORD_OPERATION_KEY_FILE",
-            operation_key.display().to_string(),
         ),
         (
             "SID_PASSWORD_HISTORY_CALLER_CLIENT_ID",
@@ -154,8 +159,8 @@ async fn the_history_evaluator_runs_here_unless_a_remote_one_is_complete() {
             .map(|(name, value)| ((*name).to_owned(), value.clone()))
             .chain(extra.map(|(n, v)| (n.to_owned(), v.to_owned())))
             .collect();
-        let storage = &storage;
         let field_keys = field_keys.clone();
+        let storage = &storage;
         async move {
             password_history_authority(
                 |name| {
@@ -165,55 +170,95 @@ async fn the_history_evaluator_runs_here_unless_a_remote_one_is_complete() {
                         .ok_or(VarError::NotPresent)
                 },
                 storage,
+                local,
                 field_keys,
                 "https://sid.example.com",
             )
             .await
         }
     };
+    let at = |instant: &str| {
+        chrono::DateTime::parse_from_rfc3339(instant)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    };
+    // The credential cutoff in force: an earlier raise changes nothing and
+    // reports it.
+    let credential_cutoff = async || {
+        storage
+            .raise_history_write_cutoff(
+                at("2000-01-01T00:00:00Z"),
+                AuditEntry::system("test", "cutoff").into(),
+            )
+            .await
+            .unwrap()
+    };
 
-    let local = password_history_authority(
+    let here = password_history_authority(
         |name| match name {
             "SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE" => Ok("2026-10-01T12:00:00Z".into()),
             _ => Err(VarError::NotPresent),
         },
         &storage,
+        local,
         field_keys.clone(),
         "https://sid.example.com",
     )
     .await
     .unwrap();
-    assert!(matches!(
-        local,
-        PasswordHistoryAuthority::InProcess {
-            epoch_cutoff: Some(_),
-            ..
-        }
-    ));
+    let PasswordHistoryAuthority::InProcess { store, .. } = here else {
+        panic!("the evaluator runs here");
+    };
+    assert_eq!(opened.load(Ordering::SeqCst), 1);
+    assert_eq!(credential_cutoff().await, at("2026-10-01T12:00:00Z"));
+    assert_eq!(
+        store.write_cutoff().await.unwrap(),
+        Some(at("2026-10-01T12:00:00Z"))
+    );
 
     assert!(matches!(
         authority("", None).await.unwrap(),
-        PasswordHistoryAuthority::Remote { .. }
+        PasswordHistoryAuthority::Remote(_)
     ));
-    assert!(
-        operation_key.exists(),
-        "the shared operation key is a file of its own"
+    assert_eq!(
+        opened.load(Ordering::SeqCst),
+        1,
+        "a client of a remote evaluator opens no evaluator store"
     );
     for (name, _) in &complete[1..] {
         assert!(authority(name, None).await.is_err(), "{name} is required");
     }
+    // A client of a remote evaluator fences its own commits: a later
+    // cutoff is raised here too, and an earlier setting lowers nothing.
     assert!(
         authority(
             "",
             Some((
                 "SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE",
-                "2026-10-01T12:00:00Z"
+                "2026-10-02T12:00:00Z"
             ))
         )
         .await
-        .is_err(),
-        "the cutoff belongs to the remote evaluator"
+        .is_ok()
     );
+    assert_eq!(credential_cutoff().await, at("2026-10-02T12:00:00Z"));
+    assert!(
+        authority(
+            "",
+            Some((
+                "SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE",
+                "2026-09-01T12:00:00Z"
+            ))
+        )
+        .await
+        .is_ok()
+    );
+    assert_eq!(
+        credential_cutoff().await,
+        at("2026-10-02T12:00:00Z"),
+        "an earlier setting lowers nothing"
+    );
+    assert_eq!(opened.load(Ordering::SeqCst), 1);
     // The evaluator's resource is an RFC 8707 indicator here as on the
     // evaluator: an invalid one stops the start instead of failing every
     // token request later.
@@ -237,6 +282,7 @@ async fn the_history_evaluator_runs_here_unless_a_remote_one_is_complete() {
             _ => Err(VarError::NotPresent),
         },
         &storage,
+        local,
         field_keys.clone(),
         "https://sid.example.com",
     )
@@ -244,83 +290,117 @@ async fn the_history_evaluator_runs_here_unless_a_remote_one_is_complete() {
     assert!(unreadable.is_err());
 }
 
-/// The server that holds the history keys serves the evaluator to a remote
-/// credential service when it names that service's caller: it then admits
-/// network preparation from that caller alone, for the evaluator's resource,
-/// and seals operations with the key it shares with that service. Each of
-/// the three settings needs the others; the address of a remote evaluator
-/// excludes them.
+/// A database restored from a snapshot taken before a cutoff carries no
+/// cutoff of its own; the deployment's setting, kept outside the snapshot,
+/// restores it at start before anything is served: a history commit under a
+/// key created before it is refused again, in the credential store and the
+/// evaluator's, while a replacement prepared under a later key applies.
 #[tokio::test]
-async fn the_history_evaluator_is_served_to_a_named_credential_service() {
-    use crate::grpc::password_operation::PasswordHistoryAuthority;
-    use std::env::VarError;
-
-    let storage = store().await;
-    let field_keys: Arc<dyn sid_keys::KeyManager> = Arc::new(keys());
-    let dir = tempfile::tempdir().unwrap();
-    let operation_key = dir.path().join("operation.key");
-    let complete = [
-        (
-            "SID_PASSWORD_HISTORY_PREPARE_CALLER",
-            "machine:credential-service".to_owned(),
-        ),
-        (
-            "SID_PASSWORD_HISTORY_EVALUATOR_RESOURCE",
-            "https://history.sid.example.com/".to_owned(),
-        ),
-        (
-            "SID_PASSWORD_OPERATION_KEY_FILE",
-            operation_key.display().to_string(),
-        ),
-    ];
-    let authority = |missing: &str, extra: Option<(&str, &str)>| {
-        let vars: Vec<(String, String)> = complete
-            .iter()
-            .filter(|(name, _)| *name != missing)
-            .map(|(name, value)| ((*name).to_owned(), value.clone()))
-            .chain(extra.map(|(n, v)| (n.to_owned(), v.to_owned())))
-            .collect();
-        let storage = &storage;
-        let field_keys = field_keys.clone();
-        async move {
-            password_history_authority(
-                |name| {
-                    vars.iter()
-                        .find(|(key, _)| key == name)
-                        .map(|(_, value)| value.clone())
-                        .ok_or(VarError::NotPresent)
-                },
-                storage,
-                field_keys,
-                "https://sid.example.com",
-            )
-            .await
-        }
+async fn a_restored_database_gets_the_configured_cutoff_back() {
+    use sid_core::models::{
+        Credential, CredentialData, CredentialType, HistoryCommit, HistoryEpochDescriptor,
+        HistoryEpochId, HistoryEvidence, HistoryKsf, HistorySuite, Profile,
     };
 
-    match authority("", None).await.unwrap() {
-        PasswordHistoryAuthority::InProcess {
-            serve: Some(serve), ..
-        } => {
-            assert_eq!(serve.caller, "machine:credential-service");
-            assert_eq!(serve.resource.as_str(), "https://history.sid.example.com/");
-        }
-        _ => panic!("not served to the credential service"),
-    }
-    for (name, _) in &complete[1..] {
-        assert!(authority(name, None).await.is_err(), "{name} is required");
-    }
+    let storage = store().await;
+    let ctx = || AuditEntry::system("test", "restore").into();
+    let profile = Profile::new(Some("restored"));
+    storage.create_profile(&profile, ctx()).await.unwrap();
+    let password = Credential::new(profile.id, CredentialType::Opaque, b"p0".to_vec(), None);
+    storage.create_credential(&password, ctx()).await.unwrap();
+    let at = |instant: &str| {
+        chrono::DateTime::parse_from_rfc3339(instant)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    };
+    let epoch = |created_at| HistoryEpochDescriptor {
+        id: HistoryEpochId::generate(),
+        suite: HistorySuite::PallasPoseidonV1,
+        public_key: [1; 32],
+        ksf: HistoryKsf::DEFAULT,
+        ksf_salt: [2; 32],
+        created_at,
+    };
+    let withdrawn = epoch(at("2026-09-01T00:00:00Z"));
+    let commit = |revision, epochs: Vec<HistoryEpochDescriptor>| HistoryCommit {
+        owner: profile.id,
+        expected_revision: revision,
+        entries: vec![(epochs[0].id, [revision as u8; 32])],
+        epochs,
+        evidence: HistoryEvidence {
+            operation: uuid::Uuid::now_v7(),
+            policy_version: 1,
+        },
+        depth: 3,
+    };
+    let next = |data: &[u8]| {
+        let mut new = password.clone();
+        new.data = CredentialData::new(data.to_vec());
+        new
+    };
+    // The snapshot: history written before the cutoff, no cutoff recorded.
     assert!(
-        authority(
-            "",
-            Some((
-                "SID_PASSWORD_HISTORY_EVALUATOR",
-                "http://history.sid.example.com:50051"
-            ))
+        storage
+            .change_password(
+                password.id,
+                b"p0",
+                &next(b"p1"),
+                Some(&commit(0, vec![withdrawn])),
+                ctx()
+            )
+            .await
+            .unwrap()
+    );
+
+    let authority = password_history_authority(
+        |name| match name {
+            "SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE" => Ok("2026-10-01T00:00:00Z".into()),
+            _ => Err(std::env::VarError::NotPresent),
+        },
+        &storage,
+        || {
+            let store: Arc<dyn sid_plugin::history_keys::HistoryKeyStore> =
+                Arc::new(storage.history_keys());
+            async move { Ok(store) }
+        },
+        Arc::new(keys()),
+        "https://sid.example.com",
+    )
+    .await
+    .unwrap();
+    let crate::grpc::password_operation::PasswordHistoryAuthority::InProcess { store, .. } =
+        authority
+    else {
+        panic!("the evaluator runs here");
+    };
+    assert_eq!(
+        store.write_cutoff().await.unwrap(),
+        Some(at("2026-10-01T00:00:00Z"))
+    );
+
+    let err = storage
+        .change_password(
+            password.id,
+            b"p1",
+            &next(b"p2"),
+            Some(&commit(1, vec![withdrawn])),
+            ctx(),
         )
         .await
-        .is_err(),
-        "a server is either the evaluator or its client"
+        .expect_err("a commit under the withdrawn key after the restore");
+    assert!(matches!(err, sid_core::Error::Fenced(_)), "{err:?}");
+    let current = epoch(at("2026-10-02T00:00:00Z"));
+    assert!(
+        storage
+            .change_password(
+                password.id,
+                b"p1",
+                &next(b"p2"),
+                Some(&commit(1, vec![current, withdrawn])),
+                ctx()
+            )
+            .await
+            .unwrap()
     );
 }
 

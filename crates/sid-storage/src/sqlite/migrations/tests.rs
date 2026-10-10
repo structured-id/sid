@@ -190,6 +190,47 @@ async fn an_interrupted_upgrade_leaves_the_file_and_resumes() {
     assert!(has_profile(&pool, "p1").await);
 }
 
+/// The history evaluator split converts only an empty history layout: a file
+/// holding history refuses the upgrade, its version and tables unchanged;
+/// emptied, it converts and its credential tables carry no key.
+#[tokio::test]
+async fn history_split_refuses_populated_history() {
+    let (_dir, path) = scratch();
+    let pool = open(&path).await;
+    upgrade(&pool, BASELINE, &MIGRATIONS[..3]).await.unwrap();
+    add_profile(&pool, "p-history").await;
+    sqlx::query("INSERT INTO password_histories (owner_id, revision) VALUES ('p-history', 1)")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    upgrade(&pool, BASELINE, MIGRATIONS)
+        .await
+        .expect_err("a populated history refuses the split");
+    assert_eq!(version(&pool).await, 4, "the version is unchanged");
+    assert!(has_table(&pool, "password_history_lifecycle").await);
+    assert!(!has_table(&pool, "history_key_epochs").await);
+
+    sqlx::query("DELETE FROM password_histories")
+        .execute(&pool)
+        .await
+        .unwrap();
+    upgrade(&pool, BASELINE, MIGRATIONS).await.unwrap();
+    assert_eq!(version(&pool).await, 5);
+    assert!(has_table(&pool, "history_key_epochs").await);
+    assert!(!has_table(&pool, "password_history_lifecycle").await);
+    let key_column: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pragma_table_info('password_history_epochs') WHERE name = 'wrapped_key'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        key_column, 0,
+        "the credential service's epochs carry no key"
+    );
+}
+
 /// Verdicts stored before artifacts were named are demoted with their
 /// provenance kept: the password reads as policy-unverified, the legacy
 /// table holds what was claimed. Afterwards a row whose evidence columns

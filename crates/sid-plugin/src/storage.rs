@@ -18,17 +18,16 @@ use sid_core::models::{
     CedarPolicyId, ClosureRequest, Credential, CredentialId, CredentialType, Device,
     DeviceAuthCodeId, DeviceAuthorizationCode, DeviceId, DeviceTrustChange, DirectoryGroupWrite,
     DirectoryUserWrite, EmailSettings, ExportJob, Group, GroupId, GroupMember, HistoryCommit,
-    HistoryEpoch, HistoryEpochId, ImpersonationGrant, InitialAccessToken, InitialAccessTokenId,
-    Invite, InviteFilter, InviteId, MachineUser, MachineUserCredential, MachineUserId,
-    MagicLinkSession, MutationContext, NewHistoryEpoch, NewRegistration, OAuth2Client,
-    OutboundDlqEntry, OutboundEntityType, PasswordHistory, PatId, PersonalAccessToken,
-    PhoneSettings, Principal, PrincipalBinding, PrincipalEntity, PrincipalId, PrincipalType,
-    Profile, ProfileEmail, ProfileEmailId, ProfileGrant, ProfileGrantId, ProfileId,
+    ImpersonationGrant, InitialAccessToken, InitialAccessTokenId, Invite, InviteFilter, InviteId,
+    MachineUser, MachineUserCredential, MachineUserId, MagicLinkSession, MutationContext,
+    NewRegistration, OAuth2Client, OutboundDlqEntry, OutboundEntityType, PasswordHistory, PatId,
+    PersonalAccessToken, PhoneSettings, Principal, PrincipalBinding, PrincipalEntity, PrincipalId,
+    PrincipalType, Profile, ProfileEmail, ProfileEmailId, ProfileGrant, ProfileGrantId, ProfileId,
     ProfileMetadata, ProfilePhone, ProfilePhoneId, Project, ProjectChange, ProjectId, RefreshToken,
     RegistrationSource, RegistrationSourceType, Role, RoleAssignment, RoleAssignmentId, RoleId,
     ScimOutboundRecord, ScimOutboundTarget, ScimOutboundTargetId, Session, SessionAuthentication,
     SessionEnd, SessionId, SodConflictRule, UpstreamIdentity, UpstreamIdentityId, UpstreamLogin,
-    UpstreamProvider, UpstreamProviderId, WrappedHistoryKey,
+    UpstreamProvider, UpstreamProviderId,
 };
 use uuid::Uuid;
 
@@ -353,21 +352,28 @@ pub trait StorageBackend: WorkStore + Send + Sync + 'static {
 
     // === PASSWORD HISTORY ===
     //
-    // The history checker reads epochs and entries,
-    // never key material; the evaluator reads an epoch's sealed key.
+    // The credential service's side: epoch descriptors and retained entries,
+    // never key material. The evaluator's keys and lifecycle live in its own
+    // store ([`crate::history_keys::HistoryKeyStore`]).
 
-    /// `owner`'s history: its revision, every epoch not retired and every
-    /// retained entry. An owner with no history reads as revision 0, empty.
+    /// `owner`'s history: its revision, every recorded epoch descriptor and
+    /// every retained entry. An owner with no history reads as revision 0,
+    /// empty.
     async fn get_password_history(&self, owner: ProfileId) -> Result<PasswordHistory>;
 
-    /// `owner`'s revision and every epoch not retired, for the evaluator:
-    /// no retained entry is read. Revision 0 with no epochs when the owner
-    /// has no history.
-    async fn get_history_epochs(&self, owner: ProfileId)
-    -> Result<sid_core::models::HistoryEpochs>;
+    /// Raise the history write cutoff to `not_before`: from its commit no
+    /// history commit writes an entry under an epoch created before it
+    /// (`Error::Fenced`), serialized with those commits. Monotonic: an equal
+    /// or earlier value changes nothing. Returns the cutoff in force.
+    async fn raise_history_write_cutoff(
+        &self,
+        not_before: chrono::DateTime<chrono::Utc>,
+        ctx: MutationContext,
+    ) -> Result<chrono::DateTime<chrono::Utc>>;
 
-    /// Consistent complete durable history, including retired epochs and sealed
-    /// keys, for offline same-authority transfer; None only if no history exists.
+    /// Consistent complete durable history (every epoch descriptor and
+    /// retained entry, no key) for offline same-authority transfer; None only
+    /// if no history exists.
     async fn export_password_history(
         &self,
         _owner: ProfileId,
@@ -389,61 +395,6 @@ pub trait StorageBackend: WorkStore + Send + Sync + 'static {
             "history transfer is unsupported by this backend".into(),
         ))
     }
-
-    /// Store `new` as `owner`'s active epoch with its sealed key, before the
-    /// key's first use, and move the history revision on. When the owner
-    /// already has an active epoch nothing is written and that epoch is
-    /// returned, so concurrent preparations agree on one key. The owner
-    /// must exist (`Error::NotFound` otherwise).
-    async fn ensure_history_epoch(
-        &self,
-        new: &NewHistoryEpoch,
-        ctx: MutationContext,
-    ) -> Result<HistoryEpoch>;
-
-    /// Replace `owner`'s active epoch `replaces` with `new`, before the new
-    /// key's first use, and move the history revision on. The replaced epoch
-    /// stops taking entries and becomes compare-only, recorded as replaced at
-    /// the new revision; only [`Self::prepare_history_epochs`] retires it.
-    /// When `replaces` is no longer the active epoch nothing is written and
-    /// the current active epoch is returned, so concurrent rotations agree on
-    /// one key. The owner must exist (`Error::NotFound` otherwise).
-    async fn rotate_history_epoch(
-        &self,
-        new: &NewHistoryEpoch,
-        replaces: HistoryEpochId,
-        ctx: MutationContext,
-    ) -> Result<HistoryEpoch>;
-
-    /// The evaluator's side of preparing operation `prep.operation`, in one
-    /// transaction per owner, durable and shared by every replica:
-    ///
-    /// - record `prep.live` as the owner's lifecycle when its revision is newer
-    ///   than the one recorded; the same revision with another live set is a
-    ///   `Conflict`; an older one changes nothing and retires nothing;
-    /// - release the uses of the operations `prep.live.settled` names and of
-    ///   every operation past its expiry;
-    /// - retire each compare-only epoch absent from the recorded live set,
-    ///   replaced at or before its revision and used by no operation: it is no
-    ///   longer selected, and its sealed key is kept;
-    /// - select the active epoch, then each compare-only epoch of `prep.live`
-    ///   not retired, and record that `prep.operation` uses them until it
-    ///   settles or `prep.expires_at`.
-    ///
-    /// Each epoch of `prep.live.live` must be the owner's (`Validation`
-    /// otherwise). Returns the selection, active epoch first.
-    async fn prepare_history_epochs(
-        &self,
-        prep: &sid_core::models::HistoryPreparation,
-        ctx: MutationContext,
-    ) -> Result<Vec<HistoryEpoch>>;
-
-    /// The sealed VOPRF key of an epoch, for the evaluator; `None` when no
-    /// such epoch is stored.
-    async fn get_history_epoch_key(
-        &self,
-        epoch: HistoryEpochId,
-    ) -> Result<Option<WrappedHistoryKey>>;
 
     /// Replace a credential's data with the same secret sealed differently,
     /// only if its data is still `expected`. Its status and last use are left

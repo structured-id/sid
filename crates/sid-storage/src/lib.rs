@@ -21,7 +21,7 @@ pub mod postgres;
 pub mod postgres_blob;
 
 #[cfg(feature = "storage-pg")]
-pub use postgres::{PgWorkStore, PostgresBackend};
+pub use postgres::{PgHistoryKeyStore, PgWorkStore, PostgresBackend};
 #[cfg(feature = "storage-pg")]
 pub use postgres_blob::PostgresBlobStore;
 

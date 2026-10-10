@@ -63,6 +63,8 @@ enum Engine {
 /// start provisions them.
 struct Installation {
     storage: Arc<dyn StorageBackend>,
+    /// The history evaluator's store, in the same database.
+    history_keys: Arc<dyn sid_plugin::history_keys::HistoryKeyStore>,
     cache: Arc<dyn CacheBackend>,
     organization: sid_core::models::Organization,
     org: OrgId,
@@ -79,7 +81,10 @@ fn database_url() -> String {
 
 async fn installation(engine: Engine) -> Installation {
     let dir = tempfile::tempdir().expect("data directory");
-    let storage: Arc<dyn StorageBackend> = match engine {
+    let (storage, history_keys): (
+        Arc<dyn StorageBackend>,
+        Arc<dyn sid_plugin::history_keys::HistoryKeyStore>,
+    ) = match engine {
         Engine::Postgres => {
             let schema = format!("scim_http_{}", Uuid::now_v7().simple());
             let backend = sid_storage::PostgresBackend::new(&database_url(), Some(schema.clone()))
@@ -88,15 +93,19 @@ async fn installation(engine: Engine) -> Installation {
             sid_storage::migrator::run_migrations(backend.pool(), Some(&schema))
                 .await
                 .expect("migrations");
-            Arc::new(backend)
+            let keys = sid_storage::PgHistoryKeyStore::new(backend.pool().clone());
+            keys.migrate().await.expect("history key migrations");
+            (Arc::new(backend), Arc::new(keys))
         }
-        Engine::Sqlite => Arc::new(
-            sid_storage::sqlite::SqliteBackend::new(
+        Engine::Sqlite => {
+            let backend = sid_storage::sqlite::SqliteBackend::new(
                 dir.path().join("sid.db").to_str().expect("UTF-8 path"),
             )
             .await
-            .expect("SQLite store"),
-        ),
+            .expect("SQLite store");
+            let keys = backend.history_keys();
+            (Arc::new(backend), Arc::new(keys))
+        }
     };
     storage
         .ensure_system_project(AuditEntry::system("project.ensure_system", "system").into())
@@ -122,6 +131,7 @@ async fn installation(engine: Engine) -> Installation {
         .unwrap();
     Installation {
         storage,
+        history_keys,
         cache: Arc::new(sid_plugin::cache::InMemoryCacheBackend::new()),
         organization,
         org,
@@ -185,6 +195,7 @@ impl Installation {
                     ),
                 ),
                 security_policy: None,
+                history_keys: self.history_keys.clone(),
             },
         );
         let project = Arc::new(ProjectServiceImpl::new(

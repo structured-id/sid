@@ -751,6 +751,8 @@ pub struct AuthOptions {
     pub cascade: Arc<RevocationCascadeService>,
     /// The security policy; None keeps the CE default.
     pub security_policy: Option<sid_core::models::SecurityPolicy>,
+    /// The history evaluator's store, co-located as CE runs it.
+    pub history_keys: Arc<dyn sid_plugin::history_keys::HistoryKeyStore>,
 }
 
 /// The authentication service over `storage` and `cache`, as a server start
@@ -773,6 +775,7 @@ pub fn auth_service(
         org,
         cascade,
         security_policy,
+        history_keys,
     } = options;
     // Registration, change and reset run their OPAQUE on the ZKPP server
     // whether or not proofs are verified, as a server start builds it:
@@ -819,6 +822,10 @@ pub fn auth_service(
         test_key_manager(),
         cascade,
         Arc::new(sid_authz::CeAuthzEngine::new(storage)),
+        sid_server::grpc::password_operation::PasswordHistoryAuthority::InProcess {
+            store: history_keys,
+            history_keys: test_key_manager(),
+        },
     )
     .with_sign_in_page(&url::Url::parse(SIGN_IN_PAGE).unwrap());
     Arc::new(match security_policy {
@@ -1144,6 +1151,7 @@ impl TestServices {
                 org: test_org(),
                 cascade: cascade_service.clone(),
                 security_policy,
+                history_keys: mock_storage.clone(),
             },
         );
 

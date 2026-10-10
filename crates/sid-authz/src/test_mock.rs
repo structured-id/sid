@@ -253,35 +253,11 @@ impl sid_plugin::StorageBackend for MockStorage {
     ) -> Result<sid_core::models::PasswordHistory> {
         unimplemented!()
     }
-    async fn get_history_epochs(&self, _: ProfileId) -> Result<sid_core::models::HistoryEpochs> {
-        unimplemented!()
-    }
-    async fn ensure_history_epoch(
+    async fn raise_history_write_cutoff(
         &self,
-        _: &sid_core::models::NewHistoryEpoch,
+        _: chrono::DateTime<chrono::Utc>,
         _: MutationContext,
-    ) -> Result<sid_core::models::HistoryEpoch> {
-        unimplemented!()
-    }
-    async fn rotate_history_epoch(
-        &self,
-        _: &sid_core::models::NewHistoryEpoch,
-        _: sid_core::models::HistoryEpochId,
-        _: MutationContext,
-    ) -> Result<sid_core::models::HistoryEpoch> {
-        unimplemented!()
-    }
-    async fn prepare_history_epochs(
-        &self,
-        _: &sid_core::models::HistoryPreparation,
-        _: MutationContext,
-    ) -> Result<Vec<sid_core::models::HistoryEpoch>> {
-        unimplemented!()
-    }
-    async fn get_history_epoch_key(
-        &self,
-        _: sid_core::models::HistoryEpochId,
-    ) -> Result<Option<sid_core::models::WrappedHistoryKey>> {
+    ) -> Result<chrono::DateTime<chrono::Utc>> {
         unimplemented!()
     }
     async fn reseal_credential_data(

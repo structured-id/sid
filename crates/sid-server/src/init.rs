@@ -244,10 +244,14 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
 
     // ── Storage backend ──
 
+    // The history evaluator's own store over the same database, for a
+    // standalone installation that runs the evaluator in process; its tables
+    // are created only when it does (`local_history_keys`).
     #[cfg(feature = "storage-pg")]
-    let (storage, audit_log): (
+    let (storage, audit_log, local_history_keys): (
         Arc<dyn StorageBackend>,
         Arc<dyn sid_plugin::audit::AuditLog>,
+        LocalHistoryKeys,
     ) = {
         let database_url = std::env::var("SID_DATABASE_URL").expect("SID_DATABASE_URL must be set");
         let schema = std::env::var("SID_STORAGE_POSTGRESQL_SCHEMA").ok();
@@ -271,13 +275,16 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
             .await
             .expect("Migration failed");
 
-        (Arc::new(backend), audit_log)
+        let local_history_keys =
+            LocalHistoryKeys::Postgres(sid_storage::PgHistoryKeyStore::new(backend.pool().clone()));
+        (Arc::new(backend), audit_log, local_history_keys)
     };
 
     #[cfg(all(feature = "embedded-dev", not(feature = "storage-pg")))]
-    let (storage, audit_log): (
+    let (storage, audit_log, local_history_keys): (
         Arc<dyn StorageBackend>,
         Arc<dyn sid_plugin::audit::AuditLog>,
+        LocalHistoryKeys,
     ) = {
         let db_path =
             std::env::var("SID_SQLITE_PATH").unwrap_or_else(|_| "/var/lib/sid/auth.db".to_string());
@@ -287,7 +294,8 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         let audit_log: Arc<dyn sid_plugin::audit::AuditLog> = Arc::new(
             sid_storage::sqlite::SqliteAuditLog::new(backend.pool().clone()),
         );
-        (Arc::new(backend), audit_log)
+        let local_history_keys = LocalHistoryKeys::Sqlite(backend.history_keys());
+        (Arc::new(backend), audit_log, local_history_keys)
     };
 
     // Ensure system project exists
@@ -800,6 +808,15 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
 
     let login_url = login_url(std::env::var("SID_LOGIN_URL").ok().as_deref(), &issuer)?;
 
+    let history_authority = password_history_authority(
+        |name| std::env::var(name),
+        storage.as_ref(),
+        || local_history_keys.open(),
+        key_manager.clone(),
+        &issuer,
+    )
+    .await
+    .context("password history configuration")?;
     let auth_svc = AuthServiceImpl::new(
         storage.clone(),
         oauth2.clone(),
@@ -821,41 +838,9 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         key_manager.clone(),
         cascade_service.clone(),
         authz_engine.clone(),
+        history_authority,
     )
     .with_trusted_proxies(trusted_proxies);
-    let history_authority = password_history_authority(
-        |name| std::env::var(name),
-        storage.as_ref(),
-        key_manager.clone(),
-        &issuer,
-    )
-    .await
-    .context("password history configuration")?;
-    // Serving the evaluator to a remote credential service: that service
-    // prepares with its own token for the evaluator's resource.
-    let evaluator_admission = match &history_authority {
-        crate::grpc::password_operation::PasswordHistoryAuthority::InProcess {
-            serve: Some(serve),
-            ..
-        } => crate::grpc::password_operation::PrepareAdmission::Service {
-            storage: storage.clone(),
-            tokens: Arc::new(
-                sid_authn::resource_token::ResourceTokenVerifier::new(
-                    issuers.clone(),
-                    local_issuer.clone(),
-                    serve.resource.clone(),
-                )
-                .await
-                .context("password history evaluator token verifier")?,
-            ),
-            revocation: revocation_cache.clone(),
-            caller: serve.caller.clone(),
-        },
-        _ => crate::grpc::password_operation::PrepareAdmission::InProcess,
-    };
-    let auth_svc = auth_svc
-        .with_password_history(history_authority)
-        .with_evaluator_admission(evaluator_admission);
     let auth_svc = Arc::new(match &login_url {
         Some(page) => auth_svc.with_sign_in_page(page),
         None => auth_svc,
@@ -1360,30 +1345,62 @@ pub fn spawn_work_runner(
     Ok(tokio::spawn(runner.run(shutdown)))
 }
 
+/// The history evaluator's store in this installation's own database, used
+/// only when the evaluator runs in this process: its tables are created then.
+pub(crate) enum LocalHistoryKeys {
+    #[cfg(feature = "storage-pg")]
+    Postgres(sid_storage::PgHistoryKeyStore),
+    #[cfg(all(feature = "embedded-dev", not(feature = "storage-pg")))]
+    Sqlite(sid_storage::sqlite::SqliteHistoryKeyStore),
+}
+
+impl LocalHistoryKeys {
+    /// The store, its tables created first.
+    async fn open(self) -> anyhow::Result<Arc<dyn sid_plugin::history_keys::HistoryKeyStore>> {
+        Ok(match self {
+            #[cfg(feature = "storage-pg")]
+            Self::Postgres(store) => {
+                store
+                    .migrate()
+                    .await
+                    .context("history evaluator migrations")?;
+                Arc::new(store)
+            }
+            #[cfg(all(feature = "embedded-dev", not(feature = "storage-pg")))]
+            Self::Sqlite(store) => Arc::new(store),
+        })
+    }
+}
+
 /// Where this server's password history evaluator runs. Without
-/// `SID_PASSWORD_HISTORY_EVALUATOR` it runs here, sealing history keys with
-/// the field keys. With it, this server calls that gRPC address with its own
-/// client credential (`SID_PASSWORD_HISTORY_CALLER_*`) for the evaluator's
-/// resource (`SID_PASSWORD_HISTORY_EVALUATOR_RESOURCE`), requested from the
-/// issuer at `SID_PASSWORD_HISTORY_TOKEN_UPSTREAM`, and seals pending
-/// operations with the master in `SID_PASSWORD_OPERATION_KEY_FILE`, the key
-/// it shares with the evaluator; it then holds no history key, and epoch
-/// replacement (`SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE`) is the evaluator's
-/// setting. Conversely, the server that holds the history keys serves the
-/// evaluator to such a remote credential service when
-/// `SID_PASSWORD_HISTORY_PREPARE_CALLER` names that service's authorization
-/// subject: it then admits network preparation from it alone, for
-/// `SID_PASSWORD_HISTORY_EVALUATOR_RESOURCE`, and seals operations with the
-/// shared `SID_PASSWORD_OPERATION_KEY_FILE`.
-async fn password_history_authority(
+/// `SID_PASSWORD_HISTORY_EVALUATOR` it runs here, over the store `local`
+/// opens and sealing history keys with the field keys. With it, this server
+/// calls that gRPC address with its own client credential
+/// (`SID_PASSWORD_HISTORY_CALLER_*`) for the evaluator's resource
+/// (`SID_PASSWORD_HISTORY_EVALUATOR_RESOURCE`), requested from the issuer at
+/// `SID_PASSWORD_HISTORY_TOKEN_UPSTREAM`; it then opens no evaluator store
+/// and holds no history key.
+///
+/// The history write cutoff `SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE` is an
+/// input to the durable cutoff of each store, raised before anything is
+/// served: first this server's own (`storage`), which fences its history
+/// commits whether or not the evaluator is reachable, then the in-process
+/// evaluator's. An older or unset setting lowers neither; a raise that
+/// cannot be committed stops the start. A remote evaluator applies the
+/// setting from its own deployment.
+async fn password_history_authority<Local>(
     var: impl Fn(&str) -> Result<String, std::env::VarError>,
     storage: &dyn sid_plugin::StorageBackend,
+    local: impl FnOnce() -> Local,
     field_keys: Arc<dyn sid_keys::KeyManager>,
     base: &str,
-) -> anyhow::Result<crate::grpc::password_operation::PasswordHistoryAuthority> {
-    use crate::grpc::password_operation::{
-        EvaluatorService, PasswordHistoryAuthority, RemoteHistoryEvaluator,
-    };
+) -> anyhow::Result<crate::grpc::password_operation::PasswordHistoryAuthority>
+where
+    Local: std::future::Future<
+            Output = anyhow::Result<Arc<dyn sid_plugin::history_keys::HistoryKeyStore>>,
+        >,
+{
+    use crate::grpc::password_operation::{PasswordHistoryAuthority, RemoteHistoryEvaluator};
     // A setting that is present but unreadable is refused, never read as
     // unset: that would quietly give this server the history keys.
     let optional = |name: &str| match var(name) {
@@ -1392,52 +1409,34 @@ async fn password_history_authority(
         Err(std::env::VarError::NotUnicode(_)) => Err(anyhow::anyhow!("{name} must be Unicode")),
     };
     let required = |name: &str| var(name).map_err(|_| anyhow::anyhow!("{name} is required"));
-    // Both sides of a split deployment name the evaluator by one RFC 8707
-    // indicator; an invalid one stops the start.
-    let evaluator_resource = || {
-        sid_core::models::ResourceIndicator::parse(&required(
-            "SID_PASSWORD_HISTORY_EVALUATOR_RESOURCE",
-        )?)
-        .map_err(|e| anyhow::anyhow!("SID_PASSWORD_HISTORY_EVALUATOR_RESOURCE: {e}"))
-    };
     let cutoff = history_epoch_cutoff(var("SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE"))?;
-    let prepare_caller = optional("SID_PASSWORD_HISTORY_PREPARE_CALLER")?;
+    let audit = || AuditEntry::system("password_history.write_cutoff", "password_history");
+    if let Some(cutoff) = cutoff {
+        let in_force = storage
+            .raise_history_write_cutoff(cutoff, audit().into())
+            .await
+            .context("SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE: credential history cutoff")?;
+        info!(%in_force, "password history write cutoff in force for history commits");
+    }
     let Some(evaluator) = optional("SID_PASSWORD_HISTORY_EVALUATOR")? else {
-        let serve = match prepare_caller {
-            None => None,
-            Some(caller) => {
-                let resource = evaluator_resource()?;
-                let operation_key_file = required("SID_PASSWORD_OPERATION_KEY_FILE")?;
-                let operation_keys = crate::field_keys::field_key_manager(
-                    storage,
-                    std::path::Path::new(&operation_key_file),
-                )
+        let store = local().await?;
+        if let Some(cutoff) = cutoff {
+            store
+                .raise_write_cutoff(cutoff, audit())
                 .await
-                .context("SID_PASSWORD_OPERATION_KEY_FILE")?;
-                Some(EvaluatorService {
-                    operation_keys,
-                    caller,
-                    resource,
-                })
-            }
-        };
+                .context("SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE: evaluator cutoff")?;
+        }
         return Ok(PasswordHistoryAuthority::InProcess {
+            store,
             history_keys: field_keys,
-            epoch_cutoff: cutoff,
-            serve,
         });
     };
-    anyhow::ensure!(
-        prepare_caller.is_none(),
-        "SID_PASSWORD_HISTORY_PREPARE_CALLER is the evaluator's setting, not its client's"
-    );
-    anyhow::ensure!(
-        cutoff.is_none(),
-        "SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE belongs to the remote evaluator"
-    );
-    let resource = evaluator_resource()?;
+    // An invalid RFC 8707 indicator of the evaluator stops the start.
+    let resource = sid_core::models::ResourceIndicator::parse(&required(
+        "SID_PASSWORD_HISTORY_EVALUATOR_RESOURCE",
+    )?)
+    .map_err(|e| anyhow::anyhow!("SID_PASSWORD_HISTORY_EVALUATOR_RESOURCE: {e}"))?;
     let token_upstream = required("SID_PASSWORD_HISTORY_TOKEN_UPSTREAM")?;
-    let operation_key_file = required("SID_PASSWORD_OPERATION_KEY_FILE")?;
     let caller = sid_authn::client_credential::ClientCredentialConfig::from_vars(
         "SID_PASSWORD_HISTORY_CALLER",
         |name| var(name).ok().filter(|v| !v.is_empty()),
@@ -1456,14 +1455,9 @@ async fn password_history_authority(
             resource.as_str(),
         )?,
     );
-    let operation_keys =
-        crate::field_keys::field_key_manager(storage, std::path::Path::new(&operation_key_file))
-            .await
-            .context("SID_PASSWORD_OPERATION_KEY_FILE")?;
-    Ok(PasswordHistoryAuthority::Remote {
-        evaluator: RemoteHistoryEvaluator::new(lazy(&evaluator)?, credential),
-        operation_keys,
-    })
+    Ok(PasswordHistoryAuthority::Remote(
+        RemoteHistoryEvaluator::new(lazy(&evaluator)?, credential),
+    ))
 }
 
 /// The cutoff before which password-history epochs are replaced, an RFC 3339

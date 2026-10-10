@@ -367,7 +367,80 @@ const MIGRATIONS: &[Migration] = &[
         name: "20261010_057_password_history_lifecycle",
         sql: include_str!("../../../migrations/20261010_057_password_history_lifecycle.sql"),
     },
+    Migration {
+        name: "20261010_058_history_evaluator_split",
+        sql: include_str!("../../../migrations/20261010_058_history_evaluator_split.sql"),
+    },
 ];
+
+/// The history evaluator's own store, in execution order: applied by the
+/// evaluator under its own credentials, tracked apart from [`MIGRATIONS`] so
+/// the store can live in a database of its own.
+const HISTORY_KEY_MIGRATIONS: &[Migration] = &[Migration {
+    name: "20261010_001_history_keys",
+    sql: include_str!("../../../migrations/history_keys/20261010_001_history_keys.sql"),
+}];
+
+/// Run the pending migrations of the history evaluator's store on `pool`:
+/// each in its own transaction with its tracking row in
+/// `_history_key_migrations`, serialized across replicas by an advisory lock
+/// of its own.
+pub async fn run_history_key_migrations(pool: &PgPool) -> SidResult<()> {
+    use sqlx::Connection;
+
+    let mut conn = pool
+        .acquire()
+        .await
+        .map_err(|e| SidError::Storage(format!("Failed to acquire a connection: {}", e)))?;
+    sqlx::query("SELECT pg_advisory_lock(43)")
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| SidError::Storage(format!("Failed to acquire migration lock: {}", e)))?;
+    let applied: SidResult<()> = async {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS _history_key_migrations (
+                name TEXT PRIMARY KEY,
+                applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )",
+        )
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| SidError::Storage(format!("history key migrations table: {e}")))?;
+        let done: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM _history_key_migrations ORDER BY name")
+                .fetch_all(&mut *conn)
+                .await
+                .map_err(|e| SidError::Storage(format!("history key migrations: {e}")))?;
+        for migration in HISTORY_KEY_MIGRATIONS {
+            if done.iter().any(|name| name == migration.name) {
+                continue;
+            }
+            info!("Running history key migration: {}", migration.name);
+            let fail = |e: sqlx::Error| {
+                SidError::Storage(format!("Migration '{}' failed: {}", migration.name, e))
+            };
+            let mut tx = conn.begin().await.map_err(fail)?;
+            sqlx::raw_sql(migration.sql)
+                .execute(&mut *tx)
+                .await
+                .map_err(fail)?;
+            sqlx::query("INSERT INTO _history_key_migrations (name) VALUES ($1)")
+                .bind(migration.name)
+                .execute(&mut *tx)
+                .await
+                .map_err(fail)?;
+            tx.commit().await.map_err(fail)?;
+        }
+        Ok(())
+    }
+    .await;
+    let unlocked = sqlx::query("SELECT pg_advisory_unlock(43)")
+        .execute(&mut *conn)
+        .await;
+    applied?;
+    unlocked.map_err(|e| SidError::Storage(format!("Failed to release migration lock: {}", e)))?;
+    Ok(())
+}
 
 /// Run all pending migrations against the database.
 ///

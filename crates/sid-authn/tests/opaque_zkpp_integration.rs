@@ -22,10 +22,11 @@ use sid_authn::opaque::{OpaqueRouter, PallasOpaque};
 use sid_authn::opaque_zkpp::{ZkppConfig, ZkppOpaqueServer};
 use sid_authn::password_history::{
     CheckRequest, HistoryCheckError, HistoryChecker, HistoryEvaluator, KsfAdmission,
-    OperationDomain, OperationEvaluation, owner_domain,
+    OperationDomain, RelayedProof, owner_domain,
 };
 use sid_core::models::{
-    HistoryEntry, HistoryEvidence, HistoryKsf, NewHistoryEpoch, PasswordHistory, ProfileId,
+    HistoryEntry, HistoryEpoch, HistoryEpochDescriptor, HistoryEvidence, HistoryKsf, NewKeyEpoch,
+    PasswordHistory, ProfileId,
 };
 use sid_keys::{KeyManager, KeyVersionParams, RustCryptoPrimitives, SoftwareKeyManager};
 use sid_opaque_ke::{ClientRegistration, ClientRegistrationStartResult};
@@ -182,35 +183,43 @@ fn signs_in(router: &OpaqueRouter, password_file: &[u8], password: &[u8], id: &[
         .is_ok_and(|key| key.expose_secret() == finished.session_key.as_slice())
 }
 
+/// A new active epoch of `owner` in this installation.
+async fn new_epoch(evaluator: &HistoryEvaluator, owner: ProfileId) -> NewKeyEpoch {
+    evaluator
+        .new_epoch(owner_domain(&INSTALLATION, owner), KSF)
+        .await
+        .unwrap()
+}
+
 /// One password operation of `owner` against `epochs`: the server's domain
-/// list and operation id, the client's blinded request and the evaluator's
-/// answers, and what the prover needs.
+/// list, the evaluator's descriptors and operation id, the evaluator's proofs
+/// as the client relays them, and what the prover needs.
 struct Operation {
     id: [u8; 16],
     domains: Vec<OperationDomain>,
-    evaluation: OperationEvaluation,
+    epochs: Vec<HistoryEpochDescriptor>,
+    proofs: Vec<RelayedProof>,
     prover_input: HistoryEvaluation,
 }
 
 async fn operation(
     evaluator: &HistoryEvaluator,
     owner: ProfileId,
-    epochs: &[&NewHistoryEpoch],
+    epochs: &[&NewKeyEpoch],
     password: &[u8],
 ) -> Operation {
     let id = *uuid::Uuid::now_v7().as_bytes();
-    let d = pallas::Base::from_repr(owner_domain(&INSTALLATION, owner)).unwrap();
+    let owner_domain = owner_domain(&INSTALLATION, owner);
+    let d = pallas::Base::from_repr(owner_domain).unwrap();
     let r = random_blind(UnwrapErr(SysRng));
     let b = blind_request(history_input(d, password), r).to_bytes();
-    let domains: Vec<_> = epochs
-        .iter()
-        .map(|e| OperationDomain::of(&e.epoch))
-        .collect();
-    let keys: Vec<_> = epochs
-        .iter()
-        .map(|e| (e.epoch.id, owner, e.key.clone()))
-        .collect();
-    let evaluation = evaluator.evaluate(&b, &keys, &id).await.unwrap();
+    let descriptors: Vec<_> = epochs.iter().map(|e| e.epoch.descriptor()).collect();
+    let domains: Vec<_> = descriptors.iter().map(OperationDomain::of).collect();
+    let keys: Vec<_> = epochs.iter().map(|e| (e.epoch.id, e.key.clone())).collect();
+    let evaluation = evaluator
+        .evaluate(&b, &owner_domain, &keys, &id)
+        .await
+        .unwrap();
     let prover_input = HistoryEvaluation {
         d,
         domains: domains
@@ -227,7 +236,15 @@ async fn operation(
     Operation {
         id,
         domains,
-        evaluation,
+        epochs: descriptors,
+        proofs: evaluation
+            .evaluations
+            .iter()
+            .map(|a| RelayedProof {
+                challenge: a.challenge,
+                response: a.response,
+            })
+            .collect(),
         prover_input,
     }
 }
@@ -247,10 +264,31 @@ fn prove(
         .expect("proof generation failed")
 }
 
-fn history(epochs: &[&NewHistoryEpoch], entries: &[(usize, [u8; 32])]) -> PasswordHistory {
+/// `owner`'s history as the credential service records it: the evaluator's
+/// descriptors with their status, and `entries` as `(epoch index, entry)`.
+fn history(
+    owner: ProfileId,
+    epochs: &[&NewKeyEpoch],
+    entries: &[(usize, [u8; 32])],
+) -> PasswordHistory {
     PasswordHistory {
         revision: 1,
-        epochs: epochs.iter().map(|e| e.epoch.clone()).collect(),
+        epochs: epochs
+            .iter()
+            .map(|e| {
+                let d = e.epoch.descriptor();
+                HistoryEpoch {
+                    id: d.id,
+                    owner,
+                    suite: d.suite,
+                    public_key: d.public_key,
+                    ksf: d.ksf,
+                    ksf_salt: d.ksf_salt,
+                    status: e.epoch.status,
+                    created_at: e.epoch.created_at,
+                }
+            })
+            .collect(),
         entries: entries
             .iter()
             .enumerate()
@@ -276,7 +314,8 @@ fn check_request<'a>(
     CheckRequest {
         owner_domain: owner_domain(&INSTALLATION, owner),
         domains: &op.domains,
-        evaluation: &op.evaluation,
+        epochs: &op.epochs,
+        proofs: &op.proofs,
         context: &op.id,
         history,
     }
@@ -291,7 +330,7 @@ async fn a_proved_registration_installs_its_first_history_and_signs_in() {
     let server = server(&router, &[1], true);
     let evaluator = HistoryEvaluator::new(key_manager());
     let owner = ProfileId::generate();
-    let epoch = evaluator.new_epoch(owner, KSF).await.unwrap();
+    let epoch = new_epoch(&evaluator, owner).await;
     let password = b"Str0ngP@ssword1";
     let id = b"alice@sid.example.com";
 
@@ -303,7 +342,7 @@ async fn a_proved_registration_installs_its_first_history_and_signs_in() {
     let verified = server.verify(&proof, &op.id, &request, 1).unwrap();
     assert_ne!(verified.artifact, [0; 32], "the verdict names its artifact");
     let public = verified.inputs;
-    let first = history(&[&epoch], &[]);
+    let first = history(owner, &[&epoch], &[]);
     let accepted = checker()
         .check(&public, check_request(owner, &op, &first))
         .await
@@ -324,7 +363,7 @@ async fn a_change_to_a_retained_password_is_refused() {
     let server = server(&router, &[1], true);
     let evaluator = HistoryEvaluator::new(key_manager());
     let owner = ProfileId::generate();
-    let epoch = evaluator.new_epoch(owner, KSF).await.unwrap();
+    let epoch = new_epoch(&evaluator, owner).await;
     let old = b"OldStr0ngP@ss1";
 
     let op = operation(&evaluator, owner, &[&epoch], old).await;
@@ -339,12 +378,15 @@ async fn a_change_to_a_retained_password_is_refused() {
         .unwrap()
         .inputs;
     let entry = checker()
-        .check(&public, check_request(owner, &op, &history(&[&epoch], &[])))
+        .check(
+            &public,
+            check_request(owner, &op, &history(owner, &[&epoch], &[])),
+        )
         .await
         .unwrap()
         .new_entries[0]
         .1;
-    let retained = history(&[&epoch], &[(0, entry)]);
+    let retained = history(owner, &[&epoch], &[(0, entry)]);
 
     let op = operation(&evaluator, owner, &[&epoch], old).await;
     let start = client_start(old);
@@ -395,7 +437,7 @@ async fn a_rotated_epoch_still_refuses_its_passwords() {
     let server = server(&router, &[1, 2], true);
     let evaluator = HistoryEvaluator::new(key_manager());
     let owner = ProfileId::generate();
-    let mut rotated = evaluator.new_epoch(owner, KSF).await.unwrap();
+    let mut rotated = new_epoch(&evaluator, owner).await;
     let old = b"OldStr0ngP@ss1";
 
     let op = operation(&evaluator, owner, &[&rotated], old).await;
@@ -412,7 +454,7 @@ async fn a_rotated_epoch_still_refuses_its_passwords() {
     let entry = checker()
         .check(
             &public,
-            check_request(owner, &op, &history(&[&rotated], &[])),
+            check_request(owner, &op, &history(owner, &[&rotated], &[])),
         )
         .await
         .unwrap()
@@ -420,8 +462,8 @@ async fn a_rotated_epoch_still_refuses_its_passwords() {
         .1;
 
     rotated.epoch.status = sid_core::models::HistoryEpochUse::CompareOnly;
-    let active = evaluator.new_epoch(owner, KSF).await.unwrap();
-    let after_rotation = history(&[&active, &rotated], &[(1, entry)]);
+    let active = new_epoch(&evaluator, owner).await;
+    let after_rotation = history(owner, &[&active, &rotated], &[(1, entry)]);
 
     let op = operation(&evaluator, owner, &[&active, &rotated], old).await;
     let start = client_start(old);
@@ -478,7 +520,7 @@ async fn a_rotated_epoch_still_refuses_its_passwords() {
 async fn a_weak_password_has_no_proof() {
     let evaluator = HistoryEvaluator::new(key_manager());
     let owner = ProfileId::generate();
-    let epoch = evaluator.new_epoch(owner, KSF).await.unwrap();
+    let epoch = new_epoch(&evaluator, owner).await;
     let password = b"abc";
     let op = operation(&evaluator, owner, &[&epoch], password).await;
     let start = client_start(password);
@@ -502,7 +544,7 @@ async fn a_proof_for_another_password_than_the_request_is_refused() {
     let server = server(&router, &[1], true);
     let evaluator = HistoryEvaluator::new(key_manager());
     let owner = ProfileId::generate();
-    let epoch = evaluator.new_epoch(owner, KSF).await.unwrap();
+    let epoch = new_epoch(&evaluator, owner).await;
 
     let strong = b"Str0ngPr0ven1";
     let op = operation(&evaluator, owner, &[&epoch], strong).await;
@@ -528,7 +570,7 @@ async fn a_proof_is_bound_to_its_operation_and_request() {
     let server = server(&router, &[1], true);
     let evaluator = HistoryEvaluator::new(key_manager());
     let owner = ProfileId::generate();
-    let epoch = evaluator.new_epoch(owner, KSF).await.unwrap();
+    let epoch = new_epoch(&evaluator, owner).await;
     let password = b"Str0ngP@ssword1";
     let op = operation(&evaluator, owner, &[&epoch], password).await;
     let start = client_start(password);
@@ -564,7 +606,7 @@ async fn proof_size_and_verification_time() {
     let server = server(&router, &[1], true);
     let evaluator = HistoryEvaluator::new(key_manager());
     let owner = ProfileId::generate();
-    let epoch = evaluator.new_epoch(owner, KSF).await.unwrap();
+    let epoch = new_epoch(&evaluator, owner).await;
     let password = b"BenchmarkP@ss1";
     let op = operation(&evaluator, owner, &[&epoch], password).await;
     let start = client_start(password);

@@ -119,6 +119,38 @@ fn manager(master: u8) -> Arc<dyn sid_keys::KeyManager> {
     )
 }
 
+/// The admission a split deployment's composition gives its evaluator: the
+/// one credential service named by `caller`, by its own access token for the
+/// evaluator's resource.
+struct ServiceCaller {
+    storage: Arc<dyn sid_plugin::StorageBackend>,
+    tokens: Arc<sid_authn::resource_token::ResourceTokenVerifier>,
+    revocation: Arc<RevocationCache>,
+    caller: String,
+}
+
+#[tonic::async_trait]
+impl sid_server::grpc::password_operation::PrepareAdmission for ServiceCaller {
+    async fn admit(
+        &self,
+        request: &tonic::Request<sid_proto::sid::v1::authn::PreparePasswordHistoryRequest>,
+    ) -> Result<(), tonic::Status> {
+        let service = sid_authn::service_auth::authenticate_service(
+            request,
+            self.storage.as_ref(),
+            &self.tokens,
+            &self.revocation,
+        )
+        .await?;
+        if service.subject() != self.caller {
+            return Err(tonic::Status::permission_denied(
+                "preparing password history is reserved to the credential service",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// A split deployment: the history evaluator is its own gRPC service with its
 /// own history keys, and the credential service prepares through it with its
 /// own client credential. Registration gets the evaluator's domains and the
@@ -174,17 +206,16 @@ async fn a_split_history_evaluator_serves_only_the_credential_service() {
         )
     };
 
-    // One database and one shared cache; the evaluator alone holds the
-    // history keys, both seal pending operations with the operation key.
+    // The evaluator alone holds the history keys, in its own store, and
+    // seals its own records; it admits preparation from the one credential
+    // service the composition names.
     let cache: Arc<dyn CacheBackend> = Arc::new(sid_plugin::cache::InMemoryCacheBackend::new());
-    let operation_keys = manager(0x22);
     let evaluation = Arc::new(HistoryEvaluation::new(
-        issuer.storage.clone(),
-        cache.clone(),
+        issuer.history_keys.clone(),
+        Arc::new(sid_plugin::cache::InMemoryCacheBackend::new()),
         manager(0x11),
-        operation_keys.clone(),
     ));
-    let admission = PrepareAdmission::Service {
+    let admission: Arc<dyn PrepareAdmission> = Arc::new(ServiceCaller {
         storage: issuer.storage.clone(),
         tokens: Arc::new(
             sid_authn::resource_token::ResourceTokenVerifier::new(
@@ -200,7 +231,7 @@ async fn a_split_history_evaluator_serves_only_the_credential_service() {
             cache.clone(),
         )),
         caller: format!("machine:{}", service.id),
-    };
+    });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let evaluator_url = format!("http://{}", listener.local_addr().unwrap());
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
@@ -220,7 +251,7 @@ async fn a_split_history_evaluator_serves_only_the_credential_service() {
     let organization = sid_authn::instance_org::ensure(issuer.storage.as_ref(), "sid.example.com")
         .await
         .unwrap();
-    let auth = Arc::try_unwrap(auth_service(
+    let auth = auth_service(
         issuer.storage.clone(),
         cache.clone(),
         issuer.jwt.clone(),
@@ -231,16 +262,11 @@ async fn a_split_history_evaluator_serves_only_the_credential_service() {
         issuer.issuers.clone(),
         organization.id,
         manager(0x33),
-    ))
-    .ok()
-    .expect("the service is not shared yet")
-    .with_password_history(PasswordHistoryAuthority::Remote {
-        evaluator: RemoteHistoryEvaluator::new(
+        PasswordHistoryAuthority::Remote(RemoteHistoryEvaluator::new(
             lazy(&evaluator_url),
             credential("credential-service", &service_secret),
-        ),
-        operation_keys,
-    });
+        )),
+    );
     assert!(
         auth.history_evaluator().is_none(),
         "the credential service serves no evaluator"

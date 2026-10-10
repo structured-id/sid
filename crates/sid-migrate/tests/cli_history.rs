@@ -2,6 +2,7 @@
 //! Exercise the installed CLI path, including private output permissions.
 
 use sid_core::models::*;
+use sid_plugin::history_keys::HistoryKeyStore;
 use sid_plugin::storage::StorageBackend;
 use sid_storage::sqlite::SqliteBackend;
 use std::process::Command;
@@ -13,8 +14,9 @@ fn run(args: &[&str]) -> std::process::Output {
         .unwrap()
 }
 
-/// A real file-backed source moves its nonempty history through JSON and the
-/// CLI; an existing output file is neither overwritten nor made world-readable.
+/// A real file-backed source moves its nonempty history and the evaluator's
+/// keys through JSON and the CLI; an existing output file is neither
+/// overwritten nor made world-readable.
 #[tokio::test]
 async fn cli_moves_history_and_protects_the_export() {
     let dir = tempfile::tempdir().unwrap();
@@ -27,6 +29,17 @@ async fn cli_moves_history_and_protects_the_export() {
         .await
         .unwrap();
     let ctx = || AuditEntry::system("test", "cli").into();
+    // The target is an installation of the same authority, as a restore has it.
+    let org = Organization::implicit_community("sid.example.com");
+    let target = SqliteBackend::new(target_path.to_str().unwrap())
+        .await
+        .unwrap();
+    for backend in [&source, &target] {
+        backend
+            .insert_instance_organization(&org, ctx())
+            .await
+            .unwrap();
+    }
     let profile = Profile::new(Some("cli-history-transfer"));
     source.create_profile(&profile, ctx()).await.unwrap();
     source
@@ -37,10 +50,11 @@ async fn cli_moves_history_and_protects_the_export() {
         .await
         .unwrap();
     let id = HistoryEpochId::generate();
-    let epoch = NewHistoryEpoch {
-        epoch: HistoryEpoch {
+    let owner_domain = sid_authn::password_history::owner_domain(org.id.as_bytes(), profile.id);
+    let epoch = NewKeyEpoch {
+        epoch: KeyEpoch {
             id,
-            owner: profile.id,
+            owner_domain,
             suite: HistorySuite::PallasPoseidonV1,
             public_key: [3; 32],
             ksf: HistoryKsf::DEFAULT,
@@ -55,14 +69,42 @@ async fn cli_moves_history_and_protects_the_export() {
             sid_keys::EncryptedField {
                 key_version: 1,
                 nonce: [0; 12],
-                context: format!("password-history-key:{}:{}", id.0, profile.id),
+                context: history_key_context(id, &owner_domain),
                 ciphertext: vec![5; 48],
             }
             .to_bytes(),
         ),
     };
-    source.ensure_history_epoch(&epoch, ctx()).await.unwrap();
+    source
+        .history_keys()
+        .create_first_epoch(&epoch, AuditEntry::system("test", "cli"))
+        .await
+        .unwrap();
+    // The history itself is written by an accepted password's commit.
+    let password = Credential::new(profile.id, CredentialType::Totp, b"before".to_vec(), None);
+    source.create_credential(&password, ctx()).await.unwrap();
+    let mut changed = password.clone();
+    changed.data = CredentialData::new(b"after".to_vec());
+    let commit = HistoryCommit {
+        owner: profile.id,
+        expected_revision: 0,
+        epochs: vec![epoch.epoch.descriptor()],
+        entries: vec![(id, [9; 32])],
+        evidence: HistoryEvidence {
+            operation: uuid::Uuid::now_v7(),
+            policy_version: 1,
+        },
+        depth: 3,
+    };
+    assert!(
+        source
+            .change_password(password.id, b"before", &changed, Some(&commit), ctx())
+            .await
+            .unwrap()
+    );
     let before = source.export_password_history(profile.id).await.unwrap();
+    assert!(before.is_some());
+    drop((source, target));
     let output = output_path.to_str().unwrap();
     let exported = run(&["export", "--source", &source_url, "--output", output]);
     assert!(
@@ -101,6 +143,10 @@ async fn cli_moves_history_and_protects_the_export() {
     assert_eq!(
         target.export_password_history(profile.id).await.unwrap(),
         before
+    );
+    assert_eq!(
+        target.history_keys().get_epoch_key(id).await.unwrap(),
+        Some(epoch.key)
     );
     let verified = run(&["verify", "--source", &source_url, "--target", &target_url]);
     assert!(

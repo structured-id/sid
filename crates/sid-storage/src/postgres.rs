@@ -12,19 +12,19 @@ use sid_core::{
         CedarPolicy, CedarPolicyId, ClientKeySet, ClosureRequest, Credential, CredentialId,
         CredentialType, Device as CoreDevice, DeviceAuthCodeId,
         DeviceAuthorizationCode as CoreDeviceAuth, DeviceId as CoreDeviceId, EmailSettings,
-        ExportJob, Group, GroupId, GroupMember, HistoryCommit, HistoryEpoch, HistoryEpochId,
-        ImpersonationGrant, InitialAccessToken, InitialAccessTokenId, Invite, InviteFilter,
-        InviteId, MachineUser, MachineUserCredential, MachineUserId, MagicLinkSession,
-        MutationContext, NewHistoryEpoch, NewRegistration, OAuth2Client, OutboundDlqEntry,
-        OutboundEntityType, PasswordHistory, PatId, PersonalAccessToken, PhoneSettings, Principal,
-        PrincipalBinding, PrincipalEntity, PrincipalId, PrincipalType, Profile, ProfileEmail,
-        ProfileEmailId, ProfileGrant, ProfileGrantId, ProfileId, ProfileMetadata, ProfilePhone,
-        ProfilePhoneId, Project, ProjectChange, ProjectId, RefreshToken, RegistrationSource,
-        RegistrationSourceType, RevocationReason, Role, RoleAssignment, RoleAssignmentId,
-        RoleAssignmentPrincipal, RoleId, ScimOutboundRecord, ScimOutboundTarget,
-        ScimOutboundTargetId, Session, SessionAuthentication, SessionEnd, SessionId,
-        SodConflictRule, UpstreamIdentity, UpstreamIdentityId, UpstreamLogin, UpstreamProvider,
-        UpstreamProviderId, WebAuthnUserHandle, WrappedHistoryKey,
+        ExportJob, Group, GroupId, GroupMember, HistoryCommit, ImpersonationGrant,
+        InitialAccessToken, InitialAccessTokenId, Invite, InviteFilter, InviteId, MachineUser,
+        MachineUserCredential, MachineUserId, MagicLinkSession, MutationContext, NewRegistration,
+        OAuth2Client, OutboundDlqEntry, OutboundEntityType, PasswordHistory, PatId,
+        PersonalAccessToken, PhoneSettings, Principal, PrincipalBinding, PrincipalEntity,
+        PrincipalId, PrincipalType, Profile, ProfileEmail, ProfileEmailId, ProfileGrant,
+        ProfileGrantId, ProfileId, ProfileMetadata, ProfilePhone, ProfilePhoneId, Project,
+        ProjectChange, ProjectId, RefreshToken, RegistrationSource, RegistrationSourceType,
+        RevocationReason, Role, RoleAssignment, RoleAssignmentId, RoleAssignmentPrincipal, RoleId,
+        ScimOutboundRecord, ScimOutboundTarget, ScimOutboundTargetId, Session,
+        SessionAuthentication, SessionEnd, SessionId, SodConflictRule, UpstreamIdentity,
+        UpstreamIdentityId, UpstreamLogin, UpstreamProvider, UpstreamProviderId,
+        WebAuthnUserHandle,
     },
 };
 use sid_plugin::audit::AuditLog;
@@ -2056,11 +2056,39 @@ impl StorageBackend for PostgresBackend {
         password_history::get(&self.pool, owner).await
     }
 
-    async fn get_history_epochs(
+    async fn raise_history_write_cutoff(
         &self,
-        owner: ProfileId,
-    ) -> SidResult<sid_core::models::HistoryEpochs> {
-        password_history::epochs(&self.pool, owner).await
+        not_before: chrono::DateTime<chrono::Utc>,
+        audit: MutationContext,
+    ) -> SidResult<chrono::DateTime<chrono::Utc>> {
+        let not_before = sid_core::models::password_history::write_cutoff_instant(not_before);
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?;
+        // The row lock serializes the raise with every history commit, which
+        // reads this row shared in its own transaction.
+        let current: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT not_before FROM password_history_write_cutoff FOR UPDATE")
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| SidError::Storage(format!("write cutoff: {e}")))?;
+        if let Some(current) = current
+            && current >= not_before
+        {
+            return Ok(current);
+        }
+        sqlx::query("UPDATE password_history_write_cutoff SET not_before = $1")
+            .bind(not_before)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| SidError::Storage(format!("write cutoff raise: {e}")))?;
+        Self::audit_in_tx(&mut tx, "password_history_write_cutoff", audit).await?;
+        tx.commit()
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?;
+        Ok(not_before)
     }
 
     async fn export_password_history(
@@ -2088,72 +2116,6 @@ impl StorageBackend for PostgresBackend {
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
         Ok(inserted)
-    }
-
-    async fn ensure_history_epoch(
-        &self,
-        new: &NewHistoryEpoch,
-        audit: MutationContext,
-    ) -> SidResult<HistoryEpoch> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| SidError::Storage(e.to_string()))?;
-        let epoch = password_history::ensure_epoch(&mut tx, new).await?;
-        if epoch.id == new.epoch.id {
-            Self::audit_in_tx(&mut tx, &format!("profile:{}", epoch.owner), audit).await?;
-        }
-        tx.commit()
-            .await
-            .map_err(|e| SidError::Storage(e.to_string()))?;
-        Ok(epoch)
-    }
-
-    async fn rotate_history_epoch(
-        &self,
-        new: &NewHistoryEpoch,
-        replaces: HistoryEpochId,
-        audit: MutationContext,
-    ) -> SidResult<HistoryEpoch> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| SidError::Storage(e.to_string()))?;
-        let epoch = password_history::rotate_epoch(&mut tx, new, replaces).await?;
-        if epoch.id == new.epoch.id {
-            Self::audit_in_tx(&mut tx, &format!("profile:{}", epoch.owner), audit).await?;
-        }
-        tx.commit()
-            .await
-            .map_err(|e| SidError::Storage(e.to_string()))?;
-        Ok(epoch)
-    }
-
-    async fn prepare_history_epochs(
-        &self,
-        prep: &sid_core::models::HistoryPreparation,
-        audit: MutationContext,
-    ) -> SidResult<Vec<HistoryEpoch>> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| SidError::Storage(e.to_string()))?;
-        let selected = password_history::prepare_epochs(&mut tx, prep).await?;
-        Self::audit_in_tx(&mut tx, &format!("profile:{}", prep.owner), audit).await?;
-        tx.commit()
-            .await
-            .map_err(|e| SidError::Storage(e.to_string()))?;
-        Ok(selected)
-    }
-
-    async fn get_history_epoch_key(
-        &self,
-        epoch: HistoryEpochId,
-    ) -> SidResult<Option<WrappedHistoryKey>> {
-        password_history::epoch_key(&self.pool, epoch).await
     }
 
     async fn reseal_credential_data(
@@ -8789,6 +8751,8 @@ mod closure;
 mod contact;
 mod device_auth;
 mod directory;
+mod history_keys;
+pub use history_keys::PgHistoryKeyStore;
 mod job_lock;
 mod machine_credential;
 mod operation;

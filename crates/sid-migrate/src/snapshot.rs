@@ -54,6 +54,11 @@ pub struct Snapshot {
         Option<sid_core::models::HistoryArchive>,
     )>,
 
+    /// The history evaluator's sealed keys, one archive per owner domain that
+    /// holds any; no unsealed key is included. Every epoch a history names
+    /// has its key here.
+    pub history_keys: Vec<sid_core::models::KeyArchive>,
+
     /// Active sessions (expired sessions are excluded).
     pub sessions: Vec<Session>,
 
@@ -196,7 +201,7 @@ impl Snapshot {
     pub fn new(source_backend: &str, source_url: &str) -> Self {
         Self {
             metadata: SnapshotMetadata {
-                version: 3,
+                version: 4,
                 installation_org: None,
                 created_at: Utc::now(),
                 source_backend: source_backend.to_string(),
@@ -210,6 +215,7 @@ impl Snapshot {
             principals: Vec::new(),
             credentials: Vec::new(),
             password_histories: Vec::new(),
+            history_keys: Vec::new(),
             sessions: Vec::new(),
             service_bindings: Vec::new(),
             applications: Vec::new(),
@@ -261,6 +267,7 @@ impl Snapshot {
             .iter()
             .filter(|(_, h)| h.is_some())
             .count() as u64;
+        count += self.history_keys.len() as u64;
         count += self.sessions.len() as u64;
         count += self.service_bindings.len() as u64;
         count += self.applications.len() as u64;

@@ -16,6 +16,7 @@ pub mod cache;
 pub mod crypto;
 pub mod event_bus;
 pub mod geoip;
+pub mod history_keys;
 pub mod http;
 pub mod legacy_hash;
 pub mod mfa;

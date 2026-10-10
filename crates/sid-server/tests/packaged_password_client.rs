@@ -141,9 +141,16 @@ async fn prove(
         "{error}"
     );
     let result = kernel.call(input).await.unwrap();
+    // The evaluator's proofs travel with the finish, unchanged, for the
+    // history checker.
     PasswordRegistrationProof {
         zkpp_proof: bytes(result["proof"].clone()),
         instances: serde_json::from_value(result["instances"].clone()).unwrap(),
+        evaluation_proofs: answers
+            .evaluations
+            .into_iter()
+            .map(|e| e.proof.expect("an evaluation proof"))
+            .collect(),
     }
 }
 

@@ -100,19 +100,22 @@ pub struct MockStorageInner {
     export_jobs: HashMap<Uuid, ExportJob>,
     /// Password histories by owner, as the checker reads them.
     histories: HashMap<ProfileId, PasswordHistory>,
-    /// The sealed VOPRF key of every stored history epoch.
-    history_keys: HashMap<HistoryEpochId, WrappedHistoryKey>,
-    /// The evaluator's newest accepted (revision, live set) per owner.
-    history_lifecycle: HashMap<ProfileId, (i64, Vec<HistoryEpochId>)>,
-    /// The revision at which each replaced epoch stopped being active.
-    history_replaced: HashMap<HistoryEpochId, i64>,
-    /// (operation, epoch, owner, expiry) of each epoch a prepared operation uses.
-    history_uses: Vec<(
-        Uuid,
-        HistoryEpochId,
-        ProfileId,
-        chrono::DateTime<chrono::Utc>,
-    )>,
+    /// The history evaluator's own store, in the same mock as a standalone
+    /// installation keeps it in the same database: its epochs by owner
+    /// domain, retired ones included, with their sealed keys.
+    key_epochs: HashMap<[u8; 32], Vec<NewKeyEpoch>>,
+    /// The evaluator's newest accepted (revision, live set) per owner domain.
+    key_lifecycle: HashMap<[u8; 32], (i64, Vec<HistoryEpochId>)>,
+    /// The revision from which each replaced epoch stopped being active.
+    key_replaced: HashMap<HistoryEpochId, i64>,
+    /// (operation, epoch, expiry) of each epoch a prepared operation uses.
+    key_uses: Vec<(Uuid, HistoryEpochId, chrono::DateTime<chrono::Utc>)>,
+    /// The evaluator's audit entries, in order.
+    key_audits: Vec<AuditEntry>,
+    /// The credential side's history write cutoff.
+    history_write_cutoff: Option<chrono::DateTime<chrono::Utc>>,
+    /// The evaluator's history write cutoff.
+    key_write_cutoff: Option<chrono::DateTime<chrono::Utc>>,
     /// WebAuthn user handles by (profile, relying party).
     webauthn_user_handles: HashMap<(ProfileId, String), WebAuthnUserHandle>,
 }
@@ -573,6 +576,203 @@ impl MockStorage {
         inner.initial_access_tokens.insert(iat.id.0, iat);
         drop(inner);
         self
+    }
+
+    /// The history evaluator's audit entries, in order.
+    #[allow(dead_code)]
+    pub fn history_key_audits(&self) -> Vec<AuditEntry> {
+        self.inner.lock().unwrap().key_audits.clone()
+    }
+}
+
+/// The owner's epochs not retired, in creation order.
+fn live_key_epochs(epochs: &[NewKeyEpoch]) -> Vec<KeyEpoch> {
+    let mut live: Vec<KeyEpoch> = epochs
+        .iter()
+        .map(|e| e.epoch.clone())
+        .filter(|e| e.status != HistoryEpochUse::Retired)
+        .collect();
+    live.sort_by_key(|e| (e.created_at, e.id));
+    live
+}
+
+/// The history evaluator's store, as the real backends keep it: keyed by
+/// owner domain, one lock as one transaction.
+#[async_trait]
+impl sid_plugin::history_keys::HistoryKeyStore for MockStorage {
+    async fn get_key_epochs(&self, owner_domain: &[u8; 32]) -> SidResult<KeyEpochs> {
+        let inner = self.inner.lock().unwrap();
+        Ok(KeyEpochs {
+            epochs: live_key_epochs(inner.key_epochs.get(owner_domain).map_or(&[], |e| e)),
+        })
+    }
+
+    async fn create_first_epoch(
+        &self,
+        new: &NewKeyEpoch,
+        audit: AuditEntry,
+    ) -> SidResult<KeyEpoch> {
+        let mut inner = self.inner.lock().unwrap();
+        let existing = inner.key_epochs.entry(new.epoch.owner_domain).or_default();
+        match existing.as_slice() {
+            [] => {}
+            [only] if only.epoch == new.epoch => return Ok(only.epoch.clone()),
+            _ => {
+                return Err(sid_core::Error::Conflict(
+                    "the owner already has a history epoch".into(),
+                ));
+            }
+        }
+        existing.push(new.clone());
+        inner.key_audits.push(audit);
+        Ok(new.epoch.clone())
+    }
+
+    async fn ensure_epoch(&self, new: &NewKeyEpoch, audit: AuditEntry) -> SidResult<KeyEpoch> {
+        let mut inner = self.inner.lock().unwrap();
+        let existing = inner.key_epochs.entry(new.epoch.owner_domain).or_default();
+        if let Some(active) = existing
+            .iter()
+            .find(|e| e.epoch.status == HistoryEpochUse::Active)
+        {
+            return Ok(active.epoch.clone());
+        }
+        existing.push(new.clone());
+        inner.key_audits.push(audit);
+        Ok(new.epoch.clone())
+    }
+
+    async fn rotate_epoch(
+        &self,
+        new: &NewKeyEpoch,
+        replaces: HistoryEpochId,
+        replaced_at_revision: i64,
+        audit: AuditEntry,
+    ) -> SidResult<KeyEpoch> {
+        let mut inner = self.inner.lock().unwrap();
+        let existing = inner.key_epochs.entry(new.epoch.owner_domain).or_default();
+        if let Some(active) = existing
+            .iter()
+            .find(|e| e.epoch.status == HistoryEpochUse::Active)
+            && active.epoch.id != replaces
+        {
+            return Ok(active.epoch.clone());
+        }
+        for e in existing.iter_mut() {
+            if e.epoch.id == replaces && e.epoch.status == HistoryEpochUse::Active {
+                e.epoch.status = HistoryEpochUse::CompareOnly;
+            }
+        }
+        existing.push(new.clone());
+        inner
+            .key_replaced
+            .entry(replaces)
+            .or_insert(replaced_at_revision);
+        inner.key_audits.push(audit);
+        Ok(new.epoch.clone())
+    }
+
+    async fn prepare_epochs(
+        &self,
+        prep: &sid_core::models::HistoryPreparation,
+        audit: AuditEntry,
+    ) -> SidResult<Vec<KeyEpoch>> {
+        let mut inner = self.inner.lock().unwrap();
+        let domain = prep.owner_domain;
+        let owned: HashSet<HistoryEpochId> = inner
+            .key_epochs
+            .get(&domain)
+            .map(|e| e.iter().map(|e| e.epoch.id).collect())
+            .unwrap_or_default();
+        if prep.live.live.iter().any(|e| !owned.contains(e)) {
+            return Err(sid_core::Error::Validation(
+                "the live set names an epoch that is not the owner's".into(),
+            ));
+        }
+        let (revision, recorded) = match inner.key_lifecycle.get(&domain).cloned() {
+            Some((stored, live)) if stored == prep.live.revision && live != prep.live.live => {
+                return Err(sid_core::Error::Conflict(format!(
+                    "history revision {stored} already has another live set"
+                )));
+            }
+            Some(kept) if kept.0 >= prep.live.revision => kept,
+            _ => (prep.live.revision, prep.live.live.clone()),
+        };
+        inner
+            .key_lifecycle
+            .insert(domain, (revision, recorded.clone()));
+        inner.key_uses.retain(|(op, epoch, expires)| {
+            !owned.contains(epoch) || (!prep.live.settled.contains(op) && *expires > prep.now)
+        });
+        let used: HashSet<HistoryEpochId> = inner.key_uses.iter().map(|u| u.1).collect();
+        let replaced = inner.key_replaced.clone();
+        let epochs = inner.key_epochs.entry(domain).or_default();
+        for e in epochs.iter_mut() {
+            if e.epoch.status == HistoryEpochUse::CompareOnly
+                && replaced.get(&e.epoch.id).is_some_and(|r| *r <= revision)
+                && !recorded.contains(&e.epoch.id)
+                && !used.contains(&e.epoch.id)
+            {
+                e.epoch.status = HistoryEpochUse::Retired;
+            }
+        }
+        let mut selected: Vec<KeyEpoch> = live_key_epochs(epochs)
+            .into_iter()
+            .filter(|e| {
+                e.status == HistoryEpochUse::Active
+                    || (e.status == HistoryEpochUse::CompareOnly && prep.live.live.contains(&e.id))
+            })
+            .collect();
+        selected.sort_by_key(|e| (e.status != HistoryEpochUse::Active, e.created_at, e.id));
+        for epoch in &selected {
+            inner
+                .key_uses
+                .retain(|u| !(u.0 == prep.operation && u.1 == epoch.id));
+            inner
+                .key_uses
+                .push((prep.operation, epoch.id, prep.expires_at));
+        }
+        inner.key_audits.push(audit);
+        Ok(selected)
+    }
+
+    async fn get_epoch_key(&self, epoch: HistoryEpochId) -> SidResult<Option<WrappedHistoryKey>> {
+        let inner = self.inner.lock().unwrap();
+        Ok(inner
+            .key_epochs
+            .values()
+            .flatten()
+            .find(|e| e.epoch.id == epoch)
+            .map(|e| e.key.clone()))
+    }
+
+    async fn write_cutoff(&self) -> SidResult<Option<chrono::DateTime<chrono::Utc>>> {
+        Ok(self.inner.lock().unwrap().key_write_cutoff)
+    }
+
+    async fn raise_write_cutoff(
+        &self,
+        not_before: chrono::DateTime<chrono::Utc>,
+        audit: AuditEntry,
+    ) -> SidResult<chrono::DateTime<chrono::Utc>> {
+        let not_before = sid_core::models::password_history::write_cutoff_instant(not_before);
+        let mut inner = self.inner.lock().unwrap();
+        match inner.key_write_cutoff {
+            Some(current) if current >= not_before => Ok(current),
+            _ => {
+                inner.key_write_cutoff = Some(not_before);
+                inner.key_audits.push(audit);
+                Ok(not_before)
+            }
+        }
+    }
+
+    async fn export_keys(&self, _: &[u8; 32]) -> SidResult<Option<KeyArchive>> {
+        unimplemented!("instance transfer is tested against the real backends")
+    }
+
+    async fn import_keys(&self, _: &KeyArchive, _: AuditEntry) -> SidResult<bool> {
+        unimplemented!("instance transfer is tested against the real backends")
     }
 }
 
@@ -1326,158 +1526,21 @@ impl StorageBackend for MockStorage {
         Ok(inner.histories.get(&owner).cloned().unwrap_or_default())
     }
 
-    async fn get_history_epochs(&self, owner: ProfileId) -> SidResult<HistoryEpochs> {
-        let inner = self.inner.lock().unwrap();
-        let history = inner.histories.get(&owner).cloned().unwrap_or_default();
-        Ok(HistoryEpochs {
-            revision: history.revision,
-            epochs: history.epochs,
-        })
-    }
-
-    async fn ensure_history_epoch(
+    async fn raise_history_write_cutoff(
         &self,
-        new: &NewHistoryEpoch,
+        not_before: chrono::DateTime<chrono::Utc>,
         ctx: MutationContext,
-    ) -> SidResult<HistoryEpoch> {
+    ) -> SidResult<chrono::DateTime<chrono::Utc>> {
+        let not_before = sid_core::models::password_history::write_cutoff_instant(not_before);
         let mut inner = self.inner.lock().unwrap();
-        let owner = new.epoch.owner;
-        if !inner.profiles.contains_key(&owner) {
-            return Err(sid_core::Error::NotFound(format!("profile {owner}")));
-        }
-        let history = inner
-            .histories
-            .entry(owner)
-            .or_insert_with(|| PasswordHistory {
-                revision: 1,
-                ..Default::default()
-            });
-        if let Some(active) = history.active_epoch() {
-            return Ok(active.clone());
-        }
-        history.epochs.push(new.epoch.clone());
-        history.revision += 1;
-        inner.history_keys.insert(new.epoch.id, new.key.clone());
-        inner.owe(&ctx)?;
-        Ok(new.epoch.clone())
-    }
-
-    async fn rotate_history_epoch(
-        &self,
-        new: &NewHistoryEpoch,
-        replaces: HistoryEpochId,
-        ctx: MutationContext,
-    ) -> SidResult<HistoryEpoch> {
-        let mut inner = self.inner.lock().unwrap();
-        let owner = new.epoch.owner;
-        if !inner.profiles.contains_key(&owner) {
-            return Err(sid_core::Error::NotFound(format!("profile {owner}")));
-        }
-        let history = inner
-            .histories
-            .entry(owner)
-            .or_insert_with(|| PasswordHistory {
-                revision: 1,
-                ..Default::default()
-            });
-        if let Some(active) = history.active_epoch()
-            && active.id != replaces
-        {
-            return Ok(active.clone());
-        }
-        for epoch in &mut history.epochs {
-            if epoch.id == replaces && epoch.status == HistoryEpochUse::Active {
-                epoch.status = HistoryEpochUse::CompareOnly;
+        match inner.history_write_cutoff {
+            Some(current) if current >= not_before => Ok(current),
+            _ => {
+                inner.owe(&ctx)?;
+                inner.history_write_cutoff = Some(not_before);
+                Ok(not_before)
             }
         }
-        history.epochs.push(new.epoch.clone());
-        history.revision += 1;
-        let revision = history.revision;
-        inner.history_replaced.entry(replaces).or_insert(revision);
-        inner.history_keys.insert(new.epoch.id, new.key.clone());
-        inner.owe(&ctx)?;
-        Ok(new.epoch.clone())
-    }
-
-    async fn prepare_history_epochs(
-        &self,
-        prep: &sid_core::models::HistoryPreparation,
-        ctx: MutationContext,
-    ) -> SidResult<Vec<HistoryEpoch>> {
-        let mut inner = self.inner.lock().unwrap();
-        let owner = prep.owner;
-        if !inner.profiles.contains_key(&owner) {
-            return Err(sid_core::Error::NotFound(format!("profile {owner}")));
-        }
-        let owned: HashSet<HistoryEpochId> = inner
-            .histories
-            .get(&owner)
-            .map(|h| h.epochs.iter().map(|e| e.id).collect())
-            .unwrap_or_default();
-        if prep.live.live.iter().any(|e| !owned.contains(e)) {
-            return Err(sid_core::Error::Validation(
-                "the live set names an epoch that is not the owner's".into(),
-            ));
-        }
-        let incoming = (prep.live.revision, prep.live.live.clone());
-        let (revision, recorded) = match inner.history_lifecycle.get(&owner).cloned() {
-            Some((stored, live)) if stored == prep.live.revision && live != prep.live.live => {
-                return Err(sid_core::Error::Conflict(format!(
-                    "history revision {stored} already has another live set"
-                )));
-            }
-            Some(kept) if kept.0 >= prep.live.revision => kept,
-            _ => incoming,
-        };
-        inner
-            .history_lifecycle
-            .insert(owner, (revision, recorded.clone()));
-        inner.history_uses.retain(|(op, _, o, expires)| {
-            *o != owner || (!prep.live.settled.contains(op) && *expires > prep.now)
-        });
-        let used: HashSet<HistoryEpochId> = inner.history_uses.iter().map(|u| u.1).collect();
-        let replaced = inner.history_replaced.clone();
-        let history = inner.histories.entry(owner).or_default();
-        for epoch in &mut history.epochs {
-            if epoch.status == HistoryEpochUse::CompareOnly
-                && replaced.get(&epoch.id).is_some_and(|r| *r <= revision)
-                && !recorded.contains(&epoch.id)
-                && !used.contains(&epoch.id)
-            {
-                epoch.status = HistoryEpochUse::Retired;
-            }
-        }
-        // The checker's view holds no retired epoch.
-        history
-            .epochs
-            .retain(|e| e.status != HistoryEpochUse::Retired);
-        let mut selected: Vec<HistoryEpoch> = history
-            .epochs
-            .iter()
-            .filter(|e| {
-                e.status == HistoryEpochUse::Active
-                    || (e.status == HistoryEpochUse::CompareOnly && prep.live.live.contains(&e.id))
-            })
-            .cloned()
-            .collect();
-        selected.sort_by_key(|e| (e.status != HistoryEpochUse::Active, e.created_at, e.id));
-        for epoch in &selected {
-            inner
-                .history_uses
-                .retain(|u| !(u.0 == prep.operation && u.1 == epoch.id));
-            inner
-                .history_uses
-                .push((prep.operation, epoch.id, owner, prep.expires_at));
-        }
-        inner.owe(&ctx)?;
-        Ok(selected)
-    }
-
-    async fn get_history_epoch_key(
-        &self,
-        epoch: HistoryEpochId,
-    ) -> SidResult<Option<WrappedHistoryKey>> {
-        Ok(self.inner.lock().unwrap().history_keys.get(&epoch).cloned())
     }
 
     async fn reseal_credential_data(
@@ -5173,28 +5236,56 @@ impl MockStorageInner {
     }
 
     /// Apply `commit` to its owner's history as the real backends do:
-    /// `Ok(false)` when the history is no longer at the commit's revision.
+    /// `Ok(false)` when the history is no longer at the commit's revision;
+    /// a description that differs from the recorded one, or names another
+    /// owner's epoch, is a conflict and changes nothing. The first epoch
+    /// becomes the owner's one active epoch, every other one it names or
+    /// that was active compare-only.
     fn apply_history(&mut self, commit: &HistoryCommit) -> SidResult<bool> {
         commit.validate()?;
+        commit.check_write_cutoff(self.history_write_cutoff)?;
+        for d in &commit.epochs {
+            let recorded = self
+                .histories
+                .iter()
+                .find_map(|(owner, h)| h.epochs.iter().find(|e| e.id == d.id).map(|e| (*owner, e)));
+            if let Some((owner, e)) = recorded
+                && (owner != commit.owner || e.descriptor() != *d)
+            {
+                return Err(sid_core::Error::Conflict(
+                    "the history epoch is recorded with another description".into(),
+                ));
+            }
+        }
         let history = self.histories.entry(commit.owner).or_default();
         if history.revision != commit.expected_revision {
             return Ok(false);
         }
         history.revision += 1;
-        if let Some(new) = &commit.new_epoch {
-            history.epochs.push(new.epoch.clone());
-            self.history_keys.insert(new.epoch.id, new.key.clone());
+        for d in &commit.epochs {
+            if !history.epochs.iter().any(|e| e.id == d.id) {
+                history.epochs.push(HistoryEpoch {
+                    id: d.id,
+                    owner: commit.owner,
+                    suite: d.suite,
+                    public_key: d.public_key,
+                    ksf: d.ksf,
+                    ksf_salt: d.ksf_salt,
+                    status: HistoryEpochUse::CompareOnly,
+                    created_at: d.created_at,
+                });
+            }
+        }
+        let active = commit.epochs[0].id;
+        for epoch in &mut history.epochs {
+            if epoch.id == active {
+                epoch.status = HistoryEpochUse::Active;
+            } else if epoch.status == HistoryEpochUse::Active {
+                epoch.status = HistoryEpochUse::CompareOnly;
+            }
         }
         let seq = history.entries.iter().map(|e| e.seq).max().unwrap_or(0) + 1;
         for (epoch, entry) in &commit.entries {
-            // Only the owner's active epoch takes new entries.
-            let active = history
-                .epochs
-                .iter()
-                .any(|e| e.id == *epoch && e.status == HistoryEpochUse::Active);
-            if !active {
-                return Ok(false);
-            }
             history.entries.push(HistoryEntry {
                 epoch: *epoch,
                 seq,
