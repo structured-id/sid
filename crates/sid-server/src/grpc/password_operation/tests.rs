@@ -977,6 +977,32 @@ async fn an_admission_outside_its_bounds_is_refused() {
     );
 }
 
+/// The credential service sets an admission's expiry on its own clock: one
+/// running ahead of the evaluator's by an ordinary skew is still admitted,
+/// while an expiry past the lifetime and that skew is not.
+#[tokio::test]
+async fn an_admission_from_a_clock_slightly_ahead_is_admitted() {
+    let storage = sqlite().await;
+    let (_, evaluation) = split(
+        storage.clone(),
+        sid_core::models::OrgId::generate(),
+        manager(3),
+        manager(3),
+    );
+    let ttl = chrono::Duration::from_std(OPERATION_TTL).unwrap();
+    let mut ahead = admission(OwnerKind::New, [8; 32]);
+    ahead.expires_at = chrono::Utc::now() + ttl + chrono::Duration::seconds(30);
+    evaluation
+        .prepare(&ahead)
+        .await
+        .expect("an expiry within the clock-skew tolerance");
+
+    let mut beyond = admission(OwnerKind::New, [9; 32]);
+    beyond.expires_at = chrono::Utc::now() + ttl + chrono::Duration::seconds(90);
+    let status = evaluation.prepare(&beyond).await.unwrap_err();
+    assert_eq!(status.code(), Code::InvalidArgument, "{}", status.message());
+}
+
 /// Concurrent admissions for one owner without a key agree on one: both
 /// operations select the same active epoch, and the owner has one.
 #[tokio::test]

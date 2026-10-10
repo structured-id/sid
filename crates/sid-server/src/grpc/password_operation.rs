@@ -91,6 +91,9 @@ use super::auth_service::PendingRegistration;
 /// How long a prepared operation waits for its next step. Covers proving on
 /// a weak device (tens of seconds) with room for the user.
 const OPERATION_TTL: Duration = Duration::from_secs(15 * 60);
+/// How far the credential service's clock may run ahead of the evaluator's
+/// when it sets an admission's expiry.
+const ADMISSION_CLOCK_SKEW: Duration = Duration::from_secs(60);
 /// History evaluations one subject may be charged per window.
 const EVALUATIONS_PER_WINDOW: u64 = 30;
 const EVALUATION_WINDOW: Duration = Duration::from_secs(60 * 60);
@@ -1238,8 +1241,11 @@ impl HistoryEvaluation {
         admission: &HistoryAdmission,
     ) -> Result<Vec<HistoryEpochDescriptor>, Status> {
         let now = chrono::Utc::now();
+        // The expiry comes from the credential service's clock; an ordinary
+        // skew between the two hosts is tolerated, as at JWT expiry
+        // (RFC 7519 §4.1.4).
         let latest = now
-            + chrono::Duration::from_std(OPERATION_TTL)
+            + chrono::Duration::from_std(OPERATION_TTL + ADMISSION_CLOCK_SKEW)
                 .expect("the operation lifetime fits a duration");
         if admission.expires_at <= now || admission.expires_at > latest {
             return Err(invalid_field(

@@ -2574,7 +2574,11 @@ impl AuthServiceImpl {
     /// The password history evaluator interface, served as its own gRPC
     /// service, when the evaluator runs in this process; `None` when it is
     /// its own service. Nobody prepares at it over the network: this
-    /// process's credential service prepares in process.
+    /// process's credential service prepares in process. An evaluator that
+    /// admits a remote credential service is a separate composition of
+    /// [`PasswordHistoryEvaluatorImpl`](super::password_operation::PasswordHistoryEvaluatorImpl)
+    /// with its own `PrepareAdmission`, with its own database and keys; this
+    /// server never serves one.
     pub fn history_evaluator(
         &self,
     ) -> Option<super::password_operation::PasswordHistoryEvaluatorImpl> {
