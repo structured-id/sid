@@ -92,6 +92,26 @@ pub async fn test_work_capacity_is_enforced_per_kind(store: &dyn WorkStore) {
     assert!(store.enqueue_work(&work(&kind), 2).await.unwrap());
 }
 
+/// Work enqueued on its own at once (replicas admitting it together) never
+/// exceeds its kind's capacity: exactly the capacity is accepted.
+pub async fn test_work_capacity_holds_under_concurrency(store: &dyn WorkStore) {
+    for _ in 0..10 {
+        let kind = unique_kind("capacity_race");
+        let items: Vec<NewWork> = (0..64).map(|_| work(&kind)).collect();
+        let results =
+            futures::future::join_all(items.iter().map(|item| store.enqueue_work(item, 5))).await;
+        let accepted = results.iter().filter(|r| matches!(r, Ok(true))).count();
+        assert_eq!(accepted, 5, "{results:?}");
+        assert!(
+            results
+                .iter()
+                .filter(|r| !matches!(r, Ok(true)))
+                .all(|r| matches!(r, Err(Error::ResourceExhausted(_)))),
+            "{results:?}"
+        );
+    }
+}
+
 /// Work under a live lease is not handed to another worker, however many
 /// times it asks.
 pub async fn test_work_live_lease_is_exclusive(store: &dyn WorkStore) {

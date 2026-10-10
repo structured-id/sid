@@ -19,8 +19,9 @@ pub trait WorkStore: Send + Sync {
     /// already exists (the same obligation again), whatever the load. When
     /// `capacity` pending or claimed items of its kind are stored the work is
     /// refused with `Error::ResourceExhausted`, never dropped after acceptance;
-    /// the bound is per kind so one backlog cannot starve others, and enqueues
-    /// committing concurrently may exceed it by their number.
+    /// the bound is per kind so one backlog cannot starve others, and it holds
+    /// exactly however many replicas enqueue at once. (Work a mutation owes in
+    /// its own transaction is bounded only as a safety net.)
     async fn enqueue_work(&self, work: &NewWork, capacity: u64) -> Result<bool>;
 
     /// Claim up to `limit` due work of `kinds` for `worker`, leased for

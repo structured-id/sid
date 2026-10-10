@@ -990,6 +990,11 @@ async fn test_work_capacity_is_enforced_per_kind() {
 }
 
 #[tokio::test]
+async fn test_work_capacity_holds_under_concurrency() {
+    common::work::test_work_capacity_holds_under_concurrency(&setup().await).await;
+}
+
+#[tokio::test]
 async fn test_work_lease_fences_stale_worker() {
     common::work::test_work_lease_fences_stale_worker(&setup().await).await;
 }

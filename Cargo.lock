@@ -6277,6 +6277,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "futures",
  "secrecy",
  "serde",
  "serde_json",

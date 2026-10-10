@@ -63,3 +63,5 @@ secrecy = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 # Two SQLite backends on one database file (instances sharing a store).
 tempfile = "3"
+# Many concurrent calls on one borrowed store (replicas racing).
+futures = { workspace = true }
