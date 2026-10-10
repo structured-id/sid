@@ -984,6 +984,40 @@ async fn test_audit_partition_is_created_in_its_schema() {
     finish_isolated(&own, &own_schema, outcome).await;
 }
 
+/// A month's partition is created in the installation's own schema even when
+/// `public`, which follows it on the search path, already has that month.
+/// The existence check resolved the bare partition name through the search
+/// path, found `public`'s and created nothing here.
+#[tokio::test]
+async fn test_audit_partition_ignores_public_on_the_search_path() {
+    let shared = setup().await;
+    let (own, own_schema) = isolated("partition_public").await;
+    let outcome = tokio::spawn({
+        let (own, own_schema, shared) = (own.clone(), own_schema.clone(), shared.clone());
+        async move {
+            // A month no other scenario uses, so the shared schema's partition
+            // is this test's own.
+            let month = chrono::NaiveDate::from_ymd_opt(1999, 7, 1).unwrap();
+            shared.ensure_audit_partition(month).await.unwrap();
+            let created = own.ensure_audit_partition(month).await.unwrap();
+            let in_own: Option<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "SELECT to_regclass('\"{own_schema}\".audit_records_1999_07')::text"
+            )))
+            .fetch_one(own.pool())
+            .await
+            .unwrap();
+            sqlx::query("DROP TABLE IF EXISTS public.audit_records_1999_07")
+                .execute(shared.pool())
+                .await
+                .unwrap();
+            assert!(created, "reported as already existing");
+            assert!(in_own.is_some(), "no partition in this schema");
+        }
+    })
+    .await;
+    finish_isolated(&own, &own_schema, outcome).await;
+}
+
 // ─── Account closure (shared) ───
 
 #[tokio::test]
