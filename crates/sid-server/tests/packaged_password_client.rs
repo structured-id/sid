@@ -57,7 +57,10 @@ impl Kernel {
         input.write_all(b"\n").await.unwrap();
         input.flush().await.unwrap();
         let mut line = String::new();
-        let n = tokio::time::timeout(Duration::from_secs(90), self.output.read_line(&mut line))
+        // A hang detector, not a performance bound: one command may be a
+        // genuine proof by the single-thread prover on a loaded machine, so it
+        // gets the whole test's budget (.config/nextest.toml).
+        let n = tokio::time::timeout(Duration::from_secs(300), self.output.read_line(&mut line))
             .await
             .expect("client command timeout")
             .expect("client output");

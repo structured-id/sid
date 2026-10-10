@@ -32,6 +32,12 @@ slow-timeout = { period = "60s", terminate-after = 5 }
 [[profile.default.overrides]]
 filter = "test(published_client_completes_password_lifecycle) | test(published_browser_completes_password_lifecycle)"
 slow-timeout = { period = "60s", terminate-after = 5 }
+# One at a time: each prover is single-threaded, and two of them sharing a
+# small runner's cores doubled a proof's time past its budget.
+test-group = "packaged-provers"
+
+[test-groups]
+packaged-provers = { max-threads = 1 }
 
 # ── CI profile ──
 [profile.ci]
