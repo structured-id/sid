@@ -820,8 +820,27 @@ async fn test_a_change_without_the_current_password_is_refused() {
     assert!(signs_in(&svc, OLD).await, "the refusal kept the password");
 }
 
-/// A wrong current password is refused like a wrong sign-in, counts toward
-/// the sign-in lockout, and changes nothing.
+/// Wrong current passwords sent all the way to execute spend only the
+/// change's own budget, already charged when each KE2 was issued: as many as
+/// that budget allows leave the account's sign-in open.
+#[tokio::test]
+async fn test_wrong_current_passwords_leave_sign_in_open() {
+    let (prover, verifier) = client::keys(1);
+    let (svc, credential, token) = registered(&prover, verifier).await;
+
+    for _ in 0..5 {
+        let Err(refused) =
+            prepare_change(&svc, &prover, &credential, &token, Some(WEAK), NEW).await
+        else {
+            panic!("a change with a wrong current password was prepared");
+        };
+        assert_eq!(reason(&refused), "AUTHENTICATION_FAILED");
+    }
+    assert!(signs_in(&svc, OLD).await, "the sign-in budget was spent");
+}
+
+/// A wrong current password is refused like a wrong sign-in and changes
+/// nothing.
 #[tokio::test]
 async fn test_a_wrong_current_password_is_refused() {
     let (prover, verifier) = client::keys(1);

@@ -1396,6 +1396,12 @@ impl AuthServiceImpl {
             .record_failed_attempt(identity)
             .await
             .map_err(anomaly_unavailable)?;
+        self.record_failed_from(client_ip).await
+    }
+
+    /// Count a failed attempt against its source address only: the stuffing
+    /// limit and the address's reputation, not any account's sign-in budget.
+    async fn record_failed_from(&self, client_ip: Option<std::net::IpAddr>) -> Result<(), Status> {
         self.record_ip_attempt(client_ip).await?;
         if let Some(ip) = client_ip
             && let Err(e) = self
@@ -3201,8 +3207,9 @@ impl AuthService for AuthServiceImpl {
             .await?;
         match check {
             CurrentPasswordCheck::Failed => {
-                self.record_failed_login(&caller.to_string(), client_ip)
-                    .await?;
+                // The guess was charged to the change's own budget when its
+                // KE2 was issued; the account's sign-in budget stays apart.
+                self.record_failed_from(client_ip).await?;
                 return Err(authentication_failed());
             }
             CurrentPasswordCheck::NotBegun if required => {
