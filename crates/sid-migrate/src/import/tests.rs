@@ -1393,6 +1393,66 @@ async fn history_keys_move_with_the_evaluators_own_key_versions() {
     assert!(verify(&source, &target).await.unwrap().passed);
 }
 
+/// A raised history write cutoff moves with the snapshot: both the credential
+/// service's and the evaluator's, so the restored installation keeps refusing
+/// writes under a withdrawn key. A target whose cutoff is already later keeps
+/// its own: a cutoff is never lowered.
+#[tokio::test]
+async fn history_write_cutoffs_move_with_the_snapshot() {
+    use sid_core::models::*;
+    use sid_plugin::history_keys::HistoryKeyStore;
+    let at = |micros| chrono::DateTime::from_timestamp_micros(micros).unwrap();
+    let org = Organization::implicit_community("sid.example.com");
+    let source = installation(&org).await;
+    let credential_cutoff = at(1_790_000_000_000_000);
+    let evaluator_cutoff = at(1_790_000_001_000_000);
+    source
+        .raise_history_write_cutoff(
+            credential_cutoff,
+            AuditEntry::system("test", "cutoff").into(),
+        )
+        .await
+        .unwrap();
+    source
+        .history_keys()
+        .raise_write_cutoff(evaluator_cutoff, AuditEntry::system("test", "cutoff"))
+        .await
+        .unwrap();
+
+    let snapshot = export(&source).await.unwrap();
+    let target = installation(&org).await;
+    import(&target, &snapshot).await.unwrap();
+    assert_eq!(
+        target.history_write_cutoff().await.unwrap(),
+        Some(credential_cutoff)
+    );
+    assert_eq!(
+        target.history_keys().write_cutoff().await.unwrap(),
+        Some(evaluator_cutoff)
+    );
+    assert!(verify(&source, &target).await.unwrap().passed);
+    let behind = verify(&source, &installation(&org).await).await.unwrap();
+    assert!(!behind.passed, "a target without the cutoffs is reported");
+
+    let later = at(1_790_000_002_000_000);
+    let ahead = installation(&org).await;
+    ahead
+        .raise_history_write_cutoff(later, AuditEntry::system("test", "cutoff").into())
+        .await
+        .unwrap();
+    ahead
+        .history_keys()
+        .raise_write_cutoff(later, AuditEntry::system("test", "cutoff"))
+        .await
+        .unwrap();
+    import(&ahead, &snapshot).await.unwrap();
+    assert_eq!(ahead.history_write_cutoff().await.unwrap(), Some(later));
+    assert_eq!(
+        ahead.history_keys().write_cutoff().await.unwrap(),
+        Some(later)
+    );
+}
+
 /// A migrated instance gives every pairwise client the `sub` it already
 /// holds: the bindings move with their ids, and a second import is a no-op.
 #[tokio::test]

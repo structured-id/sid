@@ -492,6 +492,13 @@ impl SqliteBackend {
         })
     }
 
+    pub(crate) async fn history_write_cutoff_impl(
+        &self,
+    ) -> SidResult<Option<chrono::DateTime<chrono::Utc>>> {
+        let mut conn = self.pool.acquire().await.map_err(storage("read"))?;
+        read_cutoff(&mut conn, Cutoff::Credential).await
+    }
+
     pub(crate) async fn raise_history_write_cutoff_impl(
         &self,
         not_before: chrono::DateTime<chrono::Utc>,

@@ -1668,6 +1668,10 @@ impl StorageBackend for MockStorage {
         Ok(inner.histories.get(&owner).cloned().unwrap_or_default())
     }
 
+    async fn history_write_cutoff(&self) -> SidResult<Option<chrono::DateTime<chrono::Utc>>> {
+        Ok(self.inner.lock().unwrap().history_write_cutoff)
+    }
+
     async fn raise_history_write_cutoff(
         &self,
         not_before: chrono::DateTime<chrono::Utc>,

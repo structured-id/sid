@@ -25,6 +25,9 @@ pub async fn export_snapshot(
     // The evaluator's keys are sealed under its own custody, which may run
     // apart from this service and rotate on its own.
     snapshot.history_key_versions = keys.list_key_versions().await?;
+    // A raised cutoff withdraws keys; the target must keep refusing them.
+    snapshot.history_write_cutoff = backend.history_write_cutoff().await?;
+    snapshot.history_key_write_cutoff = keys.write_cutoff().await?;
     snapshot.opaque_server_setup = backend
         .get_instance_secret(sid_core::models::InstanceSecret::OpaqueServerSetup)
         .await?;

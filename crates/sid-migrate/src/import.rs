@@ -137,8 +137,8 @@ pub async fn import_snapshot(
     snapshot: &Snapshot,
 ) -> anyhow::Result<ImportResult> {
     anyhow::ensure!(
-        snapshot.metadata.version == 4,
-        "unsupported snapshot format: export a new snapshot with password history keys and OPAQUE setup"
+        snapshot.metadata.version == 5,
+        "unsupported snapshot format: export a new snapshot with password history keys, write cutoffs and OPAQUE setup"
     );
     anyhow::ensure!(
         snapshot.metadata.installation_org == backend.instance_organization().await?.map(|o| o.id),
@@ -266,6 +266,27 @@ pub async fn import_snapshot(
                 if backend.get_profile(profile.id).await?.is_some() => {}
             Err(e) => return Err(e.into()),
         }
+    }
+
+    // The write cutoffs precede the epochs they fence: from the first
+    // imported key, no write goes under an epoch the source had withdrawn.
+    // Raising is monotonic, so a target already past a cutoff keeps its own.
+    if let Some(cutoff) = snapshot.history_write_cutoff {
+        backend
+            .raise_history_write_cutoff(
+                cutoff,
+                make_audit(&actor, "import_history_write_cutoff", "password_history"),
+            )
+            .await?;
+    }
+    if let Some(cutoff) = snapshot.history_key_write_cutoff {
+        history_keys
+            .raise_write_cutoff(
+                cutoff,
+                AuditEntry::system("import_history_key_write_cutoff", "password_history_keys")
+                    .with_metadata(serde_json::json!({"tool": "sid-migrate"})),
+            )
+            .await?;
     }
 
     // Keys precede history and history precedes credentials: a failure never

@@ -260,6 +260,9 @@ impl sid_plugin::StorageBackend for MockStorage {
     ) -> Result<sid_core::models::PasswordHistory> {
         unimplemented!()
     }
+    async fn history_write_cutoff(&self) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
+        unimplemented!()
+    }
     async fn raise_history_write_cutoff(
         &self,
         _: chrono::DateTime<chrono::Utc>,

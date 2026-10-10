@@ -65,6 +65,14 @@ pub struct Snapshot {
     /// included.
     pub history_key_versions: Vec<sid_keys::KeyVersionParams>,
 
+    /// The credential service's history write cutoff, when one was raised:
+    /// no history entry is written under an epoch created before it.
+    pub history_write_cutoff: Option<DateTime<Utc>>,
+
+    /// The evaluator's history key write cutoff, when one was raised: no
+    /// epoch created before it is selected or evaluated.
+    pub history_key_write_cutoff: Option<DateTime<Utc>>,
+
     /// Active sessions (expired sessions are excluded).
     pub sessions: Vec<Session>,
 
@@ -207,7 +215,7 @@ impl Snapshot {
     pub fn new(source_backend: &str, source_url: &str) -> Self {
         Self {
             metadata: SnapshotMetadata {
-                version: 4,
+                version: 5,
                 installation_org: None,
                 created_at: Utc::now(),
                 source_backend: source_backend.to_string(),
@@ -223,6 +231,8 @@ impl Snapshot {
             password_histories: Vec::new(),
             history_keys: Vec::new(),
             history_key_versions: Vec::new(),
+            history_write_cutoff: None,
+            history_key_write_cutoff: None,
             sessions: Vec::new(),
             service_bindings: Vec::new(),
             applications: Vec::new(),

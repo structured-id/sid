@@ -68,6 +68,14 @@ pub async fn verify_backends(
             ));
         }
     }
+    // A target may be past a source's cutoff, never behind it: behind, it
+    // would accept writes under a key the source had withdrawn.
+    if source.history_write_cutoff().await? > target.history_write_cutoff().await? {
+        integrity_issues.push("history write cutoff is lower in the target".into());
+    }
+    if source_keys.write_cutoff().await? > target_keys.write_cutoff().await? {
+        integrity_issues.push("history key write cutoff is lower in the target".into());
+    }
 
     // Compare profile counts
     info!("verifying profiles...");

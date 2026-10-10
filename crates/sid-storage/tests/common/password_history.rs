@@ -766,6 +766,8 @@ pub async fn test_history_write_cutoff_fences_commits(backend: &dyn StorageBacke
             .unwrap(),
         cutoff
     );
+    // The recorded cutoff reads back as the one in force.
+    assert_eq!(backend.history_write_cutoff().await.unwrap(), Some(cutoff));
     let before = backend.get_password_history(owner).await.unwrap();
 
     let err = change(backend, owner, &password, (b"p1", b"p2"), &[old], 0x62, 3)

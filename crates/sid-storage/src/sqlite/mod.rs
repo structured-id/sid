@@ -627,6 +627,10 @@ impl StorageBackend for SqliteBackend {
         self.get_password_history_impl(owner).await
     }
 
+    async fn history_write_cutoff(&self) -> SidResult<Option<chrono::DateTime<chrono::Utc>>> {
+        self.history_write_cutoff_impl().await
+    }
+
     async fn raise_history_write_cutoff(
         &self,
         not_before: chrono::DateTime<chrono::Utc>,

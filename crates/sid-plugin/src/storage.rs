@@ -361,6 +361,9 @@ pub trait StorageBackend: WorkStore + Send + Sync + 'static {
     /// empty.
     async fn get_password_history(&self, owner: ProfileId) -> Result<PasswordHistory>;
 
+    /// The history write cutoff this store records; `None` when none was set.
+    async fn history_write_cutoff(&self) -> Result<Option<chrono::DateTime<chrono::Utc>>>;
+
     /// Raise the history write cutoff to `not_before`: from its commit no
     /// history commit writes an entry under an epoch created before it
     /// (`Error::Fenced`), serialized with those commits. Monotonic: an equal
