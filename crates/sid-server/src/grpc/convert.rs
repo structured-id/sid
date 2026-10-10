@@ -222,7 +222,10 @@ pub(crate) fn extract_webauthn_info(
 /// reported configuration both use. Never the deployment's current primary
 /// for new passwords: a record without its configuration, or with one this
 /// server does not know, is an error, so a setting change cannot alter how
-/// an existing password signs in.
+/// an existing password signs in. Every build that writes OPAQUE records
+/// records the curve; a record without one predates that, is a
+/// development-only format with no reader by design, and is recreated rather
+/// than signed in under a guessed curve.
 #[allow(clippy::result_large_err)]
 pub(crate) fn opaque_curve(
     c: &sid_core::models::Credential,
