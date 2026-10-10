@@ -26,6 +26,15 @@ pub struct Snapshot {
     /// Snapshot metadata.
     pub metadata: SnapshotMetadata,
 
+    /// Public derivation parameters for sealed fields. No master key or
+    /// unwrapped epoch secret is included.
+    pub key_versions: Vec<sid_keys::KeyVersionParams>,
+
+    /// Sealed OPAQUE server setup on which imported password files depend.
+    /// The independent master key is never included. None means the source
+    /// has not initialized OPAQUE; such a snapshot cannot contain OPAQUE files.
+    pub opaque_server_setup: Option<Vec<u8>>,
+
     /// Projects (including system project).
     pub projects: Vec<Project>,
 
@@ -37,6 +46,24 @@ pub struct Snapshot {
 
     /// Authentication credentials (OPAQUE, WebAuthn, TOTP, recovery).
     pub credentials: Vec<Credential>,
+
+    /// Complete history for every profile, including an explicit None for an
+    /// owner with no history. Missing owners are refused, never treated as empty.
+    pub password_histories: Vec<(
+        sid_core::models::ProfileId,
+        Option<sid_core::models::HistoryArchive>,
+    )>,
+
+    /// The history evaluator's sealed keys, one archive per owner domain that
+    /// holds any; no unsealed key is included. Every epoch a history names
+    /// has its key here.
+    pub history_keys: Vec<sid_core::models::KeyArchive>,
+
+    /// Public derivation parameters of the evaluator's own key custody,
+    /// which seals `history_keys`; apart from `key_versions`, which seal the
+    /// credential service's fields. The evaluator's master key is never
+    /// included.
+    pub history_key_versions: Vec<sid_keys::KeyVersionParams>,
 
     /// Active sessions (expired sessions are excluded).
     pub sessions: Vec<Session>,
@@ -158,6 +185,10 @@ pub struct SnapshotMetadata {
     /// Snapshot format version.
     pub version: u32,
 
+    /// Authority whose id forms the password-history domain. The target must
+    /// already have this authority; a data transfer cannot change its identity.
+    pub installation_org: Option<sid_core::models::OrgId>,
+
     /// When the snapshot was created.
     pub created_at: DateTime<Utc>,
 
@@ -176,16 +207,22 @@ impl Snapshot {
     pub fn new(source_backend: &str, source_url: &str) -> Self {
         Self {
             metadata: SnapshotMetadata {
-                version: 1,
+                version: 4,
+                installation_org: None,
                 created_at: Utc::now(),
                 source_backend: source_backend.to_string(),
                 source_url: sanitize_url(source_url),
                 total_entities: 0,
             },
             projects: Vec::new(),
+            key_versions: Vec::new(),
+            opaque_server_setup: None,
             profiles: Vec::new(),
             principals: Vec::new(),
             credentials: Vec::new(),
+            password_histories: Vec::new(),
+            history_keys: Vec::new(),
+            history_key_versions: Vec::new(),
             sessions: Vec::new(),
             service_bindings: Vec::new(),
             applications: Vec::new(),
@@ -226,10 +263,19 @@ impl Snapshot {
     /// Count total entities in the snapshot.
     pub fn count_entities(&self) -> u64 {
         let mut count: u64 = 0;
+        count += self.key_versions.len() as u64;
+        count += u64::from(self.opaque_server_setup.is_some());
         count += self.projects.len() as u64;
         count += self.profiles.len() as u64;
         count += self.principals.len() as u64;
         count += self.credentials.len() as u64;
+        count += self
+            .password_histories
+            .iter()
+            .filter(|(_, h)| h.is_some())
+            .count() as u64;
+        count += self.history_keys.len() as u64;
+        count += self.history_key_versions.len() as u64;
         count += self.sessions.len() as u64;
         count += self.service_bindings.len() as u64;
         count += self.applications.len() as u64;

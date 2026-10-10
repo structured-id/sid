@@ -6,6 +6,14 @@ const BASE: &str = "https://sid.example.com";
 const ISSUER: &str = "https://sid.example.com/i/0123456789abcdef0123456789abcdef";
 const ED_PRIVATE_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIGnMIVUgwI0tTO1AANoNzICml1zLy8M4WqrJlomrTGlU\n-----END PRIVATE KEY-----";
 
+/// A channel that is never connected: loading a credential does not call
+/// its issuer.
+fn test_channel() -> tonic::transport::Channel {
+    tonic::transport::Channel::from_static("http://127.0.0.1:1")
+        .connect_timeout(std::time::Duration::from_millis(100))
+        .connect_lazy()
+}
+
 /// A file holding `content`, removed when dropped.
 struct File(std::path::PathBuf);
 
@@ -42,7 +50,7 @@ fn basic(file: &File) -> ClientAuthentication {
 }
 
 fn load(config: &ClientCredentialConfig) -> Result<ClientCredential, CredentialError> {
-    ClientCredential::checker(config, BASE, crate::test_channel())
+    ClientCredential::checker(config, BASE, test_channel())
 }
 
 /// A checker's tokens are for its issuer's authorization API with the
@@ -54,13 +62,13 @@ async fn a_credential_names_the_resource_its_tokens_are_for() {
     let checker = load(&config(ISSUER, basic(&secret))).unwrap();
     assert_eq!(
         checker.resource,
-        sid_authn::issuer::authorization_api_endpoint(ISSUER)
+        crate::issuer::authorization_api_endpoint(ISSUER)
     );
     assert_eq!(checker.scope, Some(sid_core::models::AUTHZ_CHECK));
     let caller = ClientCredential::for_resource(
         &config(ISSUER, basic(&secret)),
         BASE,
-        crate::test_channel(),
+        test_channel(),
         "https://tenants.sid.example.com/",
     )
     .unwrap();
@@ -140,6 +148,45 @@ async fn a_credential_that_cannot_authenticate_does_not_load() {
     assert!(matches!(load(&nameless), Err(CredentialError::Config(_))));
 }
 
+/// A credential named in the environment needs its issuer, method and the
+/// method's own file; no client named reads as none.
+#[test]
+fn a_credential_from_the_environment_names_its_method() {
+    let complete = [
+        ("SVC_CLIENT_ID", "evaluator-caller"),
+        ("SVC_ISSUER", ISSUER),
+        ("SVC_METHOD", "client_secret_basic"),
+        ("SVC_SECRET_FILE", "/run/secrets/svc"),
+    ];
+    let without = |missing: &str| {
+        ClientCredentialConfig::from_vars("SVC", |name| {
+            complete
+                .iter()
+                .find(|(key, _)| *key == name && *key != missing)
+                .map(|(_, value)| (*value).to_owned())
+        })
+    };
+    let config = without("").unwrap().unwrap();
+    assert_eq!(config.client_id, "evaluator-caller");
+    assert!(matches!(
+        config.authentication,
+        ClientAuthentication::ClientSecretBasic { .. }
+    ));
+    assert!(without("SVC_CLIENT_ID").unwrap().is_none());
+    for name in ["SVC_ISSUER", "SVC_METHOD", "SVC_SECRET_FILE"] {
+        assert!(
+            matches!(without(name), Err(CredentialError::Config(_))),
+            "{name} is required"
+        );
+    }
+    let unknown = ClientCredentialConfig::from_vars("SVC", |name| match name {
+        "SVC_CLIENT_ID" => Some("c".into()),
+        "SVC_METHOD" => Some("tls_client_auth".into()),
+        _ => None,
+    });
+    assert!(matches!(unknown, Err(CredentialError::Config(_))));
+}
+
 /// Basic credentials are form-urlencoded before they are joined (RFC 6749
 /// §2.3.1), so the token endpoint reads back exactly the client and secret,
 /// including a colon, spaces, `+` and `%`.
@@ -149,7 +196,7 @@ fn basic_credentials_read_back_exactly() {
     let secret = SecretString::from("p@ss: word+%41/é".to_owned());
     let header = basic_authorization("svc:checker 1", &secret).unwrap();
     assert!(header.is_sensitive());
-    let read = sid_authn::client_auth::ClientAuthentication::from_request(
+    let read = crate::client_auth::ClientAuthentication::from_request(
         Some(header.to_str().unwrap()),
         None,
         None,
@@ -183,7 +230,7 @@ async fn the_client_assertion_names_the_client_and_the_token_endpoint() {
     else {
         panic!("a private_key_jwt credential");
     };
-    let audience = sid_authn::issuer::token_endpoint(ISSUER);
+    let audience = crate::issuer::token_endpoint(ISSUER);
     let first = credential
         .assertion(&audience, key, *algorithm, key_id.as_deref())
         .unwrap();

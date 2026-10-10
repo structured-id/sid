@@ -1849,7 +1849,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3939,9 +3939,9 @@ dependencies = [
 
 [[package]]
 name = "pasta_curves"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ec2f82051d06ea52d7ec6a47546c592fc52392b6040e503e05a764dd10dd1de"
+checksum = "a0ed53ba43531a06e1f82020907cf192fc3c25d7c0baf5c49c547b74e7103b62"
 dependencies = [
  "blake2b_simd",
  "ff 0.14.0",
@@ -4599,7 +4599,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -4637,9 +4637,9 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5066,7 +5066,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5124,7 +5124,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5740,6 +5740,7 @@ dependencies = [
  "halo2_proofs",
  "hex",
  "hmac 0.13.0",
+ "http",
  "hybrid-array",
  "idna",
  "ipnet",
@@ -5765,6 +5766,7 @@ dependencies = [
  "sid-opaque-ke",
  "sid-pake-core",
  "sid-plugin",
+ "sid-proto",
  "sid-storage",
  "structured-email-address",
  "structured-webauthn",
@@ -5964,11 +5966,22 @@ dependencies = [
  "async-trait",
  "chrono",
  "clap",
+ "ff 0.14.0",
+ "group 0.14.0",
+ "pasta_curves",
+ "rand 0.10.3",
+ "secrecy",
  "serde",
  "serde_json",
+ "sid-authn",
  "sid-core",
+ "sid-keys",
+ "sid-opaque-ke",
+ "sid-pake-core",
  "sid-plugin",
  "sid-storage",
+ "sqlx",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -6264,6 +6277,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "futures",
  "secrecy",
  "serde",
  "serde_json",
@@ -6285,13 +6299,20 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "chrono",
+ "ff 0.14.0",
+ "group 0.14.0",
+ "pasta_curves",
+ "rand 0.10.3",
  "secrecy",
  "sha2 0.11.0",
  "sid-auth",
  "sid-authn",
  "sid-authz",
  "sid-core",
+ "sid-ids",
  "sid-keys",
+ "sid-opaque-ke",
+ "sid-pake-core",
  "sid-plugin",
  "sid-proto",
  "sid-server",
@@ -6943,10 +6964,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7115,9 +7136,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-util"
-version = "0.7.19"
+version = "0.7.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "494815d09bf52b5548659851081238f0ca39ff638363907596da739561c62c52"
+checksum = "e464cf451ba96ebfc6f9b6542f17ee8b8956e33f1e40d9690624e59d7a7f8a4b"
 dependencies = [
  "bytes",
  "futures-core",
@@ -7836,7 +7857,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

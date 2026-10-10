@@ -57,6 +57,13 @@ impl sid_plugin::WorkStore for MockStorage {
     async fn import_work(&self, _: &WorkSnapshot) -> Result<bool> {
         unimplemented!()
     }
+    async fn purge_ended_work(
+        &self,
+        _: &WorkKind,
+        _: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64> {
+        unimplemented!()
+    }
 }
 
 #[async_trait::async_trait]
@@ -253,17 +260,11 @@ impl sid_plugin::StorageBackend for MockStorage {
     ) -> Result<sid_core::models::PasswordHistory> {
         unimplemented!()
     }
-    async fn ensure_history_epoch(
+    async fn raise_history_write_cutoff(
         &self,
-        _: &sid_core::models::NewHistoryEpoch,
+        _: chrono::DateTime<chrono::Utc>,
         _: MutationContext,
-    ) -> Result<sid_core::models::HistoryEpoch> {
-        unimplemented!()
-    }
-    async fn get_history_epoch_key(
-        &self,
-        _: sid_core::models::HistoryEpochId,
-    ) -> Result<Option<sid_core::models::WrappedHistoryKey>> {
+    ) -> Result<chrono::DateTime<chrono::Utc>> {
         unimplemented!()
     }
     async fn reseal_credential_data(
@@ -1895,6 +1896,17 @@ impl sid_plugin::StorageBackend for MockStorage {
         &self,
         _: chrono::DateTime<chrono::Utc>,
         _: MutationContext,
+    ) -> Result<u64> {
+        unimplemented!()
+    }
+    async fn record_outcome(&self, _: MutationContext) -> Result<()> {
+        unimplemented!()
+    }
+    async fn purge_operation_results(
+        &self,
+        _: &str,
+        _: &str,
+        _: chrono::DateTime<chrono::Utc>,
     ) -> Result<u64> {
         unimplemented!()
     }

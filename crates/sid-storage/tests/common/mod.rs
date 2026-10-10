@@ -7,8 +7,8 @@
 use chrono::{Duration, Utc};
 use sid_core::models::{
     AuditEntry, AuthCodeRedemption, AuthorizationCode, LoginStrategy, MutationContext,
-    OAuth2Client, Principal, PrincipalId, PrincipalType, Profile, ProfileId, ProjectId,
-    RefreshToken, Session,
+    OAuth2Client, PolicyEvidence, Principal, PrincipalId, PrincipalType, Profile, ProfileId,
+    ProjectId, RefreshToken, Session,
 };
 use sid_plugin::storage::StorageBackend;
 use uuid::Uuid;
@@ -28,6 +28,7 @@ pub mod email_policy;
 pub mod export_job;
 pub mod flow_action;
 pub mod group;
+pub mod history_keys;
 pub mod job_lock;
 pub mod machine;
 pub mod oidc_issuer;
@@ -5701,8 +5702,10 @@ pub async fn test_change_password_is_compare_and_swap(backend: &dyn StorageBacke
     let changed_to = |data: &[u8], version: u32| {
         let mut new = password.clone();
         new.data = CredentialData::new(data.to_vec());
-        new.policy_version = Some(version);
-        new.zkpp_verified = true;
+        new.policy_evidence = PolicyEvidence::Verified {
+            policy_version: version,
+            artifact: [version as u8; 32],
+        };
         new
     };
 
@@ -5733,8 +5736,14 @@ pub async fn test_change_password_is_compare_and_swap(backend: &dyn StorageBacke
     );
     let stored = backend.get_credential(password.id).await.unwrap().unwrap();
     assert_eq!(stored.data.expose(), b"p1");
-    assert_eq!(stored.policy_version, Some(2));
-    assert!(stored.zkpp_verified);
+    assert_eq!(
+        stored.policy_evidence,
+        PolicyEvidence::Verified {
+            policy_version: 2,
+            artifact: [2; 32],
+        },
+        "the verdict keeps its policy and artifact"
+    );
     assert!(stored.last_used_at.is_some());
 
     let (to_a, to_b) = (changed_to(b"a", 3), changed_to(b"b", 3));
@@ -5858,9 +5867,9 @@ pub async fn test_replace_password_swaps_only_password(backend: &dyn StorageBack
     assert!(matches!(err, sid_core::Error::Validation(_)), "{err:?}");
 }
 
-/// A password's policy evidence (whether its proof was verified, the policy
-/// version) reads back as stored, for a verified and for a policy-unverified
-/// credential.
+/// A password's policy evidence (the policy version and the artifact that
+/// accepted its proof) reads back as stored, for a verified and for a
+/// policy-unverified credential.
 pub async fn test_credential_policy_evidence_roundtrip(backend: &dyn StorageBackend) {
     use sid_core::models::{Credential, CredentialType};
 
@@ -5869,17 +5878,19 @@ pub async fn test_credential_policy_evidence_roundtrip(backend: &dyn StorageBack
         .create_profile(&profile, test_audit())
         .await
         .unwrap();
+    let evidence = PolicyEvidence::Verified {
+        policy_version: 3,
+        artifact: [0xa5; 32],
+    };
     let mut verified = Credential::new(profile.id, CredentialType::Opaque, vec![1u8; 32], None);
-    verified.zkpp_verified = true;
-    verified.policy_version = Some(3);
+    verified.policy_evidence = evidence;
     backend
         .create_credential(&verified, test_audit())
         .await
         .unwrap();
 
     let stored = backend.get_credential(verified.id).await.unwrap().unwrap();
-    assert!(stored.zkpp_verified);
-    assert_eq!(stored.policy_version, Some(3));
+    assert_eq!(stored.policy_evidence, evidence);
 
     let unverified = Credential::new(profile.id, CredentialType::Opaque, vec![2u8; 32], None);
     backend
@@ -5891,8 +5902,21 @@ pub async fn test_credential_policy_evidence_roundtrip(backend: &dyn StorageBack
         .await
         .unwrap()
         .unwrap();
-    assert!(!stored.zkpp_verified);
-    assert_eq!(stored.policy_version, None);
+    assert_eq!(stored.policy_evidence, PolicyEvidence::Unverified);
+
+    // A policy version beyond the stored integer is refused, never truncated
+    // into another policy's evidence.
+    let mut out_of_range = Credential::new(profile.id, CredentialType::Opaque, vec![3u8; 32], None);
+    out_of_range.policy_evidence = PolicyEvidence::Verified {
+        policy_version: u32::MAX,
+        artifact: [1; 32],
+    };
+    assert!(
+        backend
+            .replace_credential(&out_of_range, test_audit())
+            .await
+            .is_err()
+    );
 }
 
 /// A new recovery-code set replaces the old one and nothing else, so the old

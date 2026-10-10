@@ -830,12 +830,19 @@ impl IdentityService for IdentityServiceImpl {
         .with_data(serde_json::json!({
             "profile_id": pid.to_string(),
         }));
-        let ctx = MutationContext::from(AuditEntry::admin(
+        let mut ctx = MutationContext::from(AuditEntry::admin(
             caller.profile_id.to_string(),
             "profile.delete",
             pid.to_string(),
         ))
         .with_work(deleted.relay());
+        // The owner's history keys go with it, owed in the same transaction.
+        if let Some(purge) = super::password_operation::owner_purge(self.storage.as_ref(), pid)
+            .await
+            .map_err(storage_failure)?
+        {
+            ctx = ctx.with_work(purge);
+        }
         self.storage
             .delete_profile(pid, ctx)
             .await

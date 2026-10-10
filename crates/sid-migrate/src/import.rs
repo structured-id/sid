@@ -2,12 +2,130 @@
 //! Import a Snapshot into a StorageBackend.
 
 use sid_core::models::{AuditEntry, MutationContext};
+use sid_plugin::history_keys::HistoryKeyStore;
 use sid_plugin::storage::StorageBackend;
 use tracing::info;
 
 use crate::snapshot::Snapshot;
 
-/// Import a snapshot into a target storage backend.
+/// Validate public setup metadata without reading the independently held key.
+/// Supported OPAQUE setups contain a seed and keypairs, well below this bound;
+/// a snapshot cannot cause unbounded copies through sealed-field inspection.
+pub(crate) fn validate_opaque_setup(snapshot: &Snapshot) -> anyhow::Result<()> {
+    let Some(setup) = &snapshot.opaque_server_setup else {
+        anyhow::ensure!(
+            !snapshot
+                .credentials
+                .iter()
+                .any(|c| c.credential_type == sid_core::models::CredentialType::Opaque),
+            "snapshot contains OPAQUE credentials without their server setup"
+        );
+        return Ok(());
+    };
+    anyhow::ensure!(setup.len() <= 4096, "sealed OPAQUE setup is oversized");
+    let context =
+        sid_authn::instance_secret::context(sid_core::models::InstanceSecret::OpaqueServerSetup);
+    let field = sid_authn::sealed_secret::inspect(&context, setup)?;
+    anyhow::ensure!(
+        field.ciphertext.len() > 16,
+        "sealed OPAQUE setup has no encrypted payload"
+    );
+    anyhow::ensure!(
+        snapshot
+            .key_versions
+            .iter()
+            .any(|v| v.version == field.key_version),
+        "snapshot omits the OPAQUE setup's key derivation version"
+    );
+    Ok(())
+}
+
+/// Validate the password history state of a snapshot as a whole: one history
+/// entry per profile; each archive and each key archive well formed; every
+/// key archive belongs to the history domain of a snapshot profile, once,
+/// with the evaluator's key derivation versions it is sealed under included
+/// (its own custody, not the credential service's); and every epoch a history
+/// names has its key with the same descriptor, so no history arrives that
+/// its owner's operations could not evaluate.
+pub(crate) fn validate_history(snapshot: &Snapshot) -> anyhow::Result<()> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let profiles: BTreeSet<_> = snapshot.profiles.iter().map(|p| p.id).collect();
+    let mut owners = BTreeSet::new();
+    for (owner, archive) in &snapshot.password_histories {
+        anyhow::ensure!(
+            profiles.contains(owner) && owners.insert(*owner),
+            "invalid snapshot history owner"
+        );
+        if let Some(archive) = archive {
+            anyhow::ensure!(archive.owner == *owner, "history archive owner mismatch");
+            archive.validate()?;
+        }
+    }
+    anyhow::ensure!(
+        owners == profiles,
+        "snapshot must include history state for every profile"
+    );
+
+    // The evaluator's owner domain of each profile.
+    let domains: BTreeMap<[u8; 32], sid_core::models::ProfileId> =
+        match snapshot.metadata.installation_org {
+            Some(installation) => profiles
+                .iter()
+                .map(|p| {
+                    (
+                        sid_authn::password_history::owner_domain(installation.as_bytes(), *p),
+                        *p,
+                    )
+                })
+                .collect(),
+            None => BTreeMap::new(),
+        };
+    let mut keys = BTreeMap::new();
+    for archive in &snapshot.history_keys {
+        archive.validate()?;
+        let owner = domains
+            .get(&archive.owner_domain)
+            .ok_or_else(|| anyhow::anyhow!("history keys of no snapshot profile"))?;
+        anyhow::ensure!(
+            keys.insert(*owner, archive).is_none(),
+            "duplicate history keys of one owner"
+        );
+        for epoch in &archive.epochs {
+            let sealed = sid_keys::EncryptedField::from_bytes(&epoch.key.0)?;
+            anyhow::ensure!(
+                snapshot
+                    .history_key_versions
+                    .iter()
+                    .any(|v| v.version == sealed.key_version),
+                "snapshot omits a required history key derivation version"
+            );
+        }
+    }
+    for (owner, archive) in &snapshot.password_histories {
+        let Some(archive) = archive else { continue };
+        for epoch in &archive.epochs {
+            let key = keys.get(owner).and_then(|k| {
+                k.epochs
+                    .iter()
+                    .find(|e| e.epoch.descriptor() == epoch.descriptor())
+            });
+            let Some(key) = key else {
+                anyhow::bail!("snapshot history names an epoch without its key");
+            };
+            // An entry retained under an epoch is compared at every later
+            // replacement, which a retired key no longer evaluates.
+            anyhow::ensure!(
+                key.epoch.status != sid_core::models::HistoryEpochUse::Retired
+                    || !archive.entries.iter().any(|e| e.epoch == epoch.id),
+                "snapshot history retains an entry under a retired key"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Import a snapshot into a target storage backend and the history
+/// evaluator's key store.
 ///
 /// Entities are imported in dependency order: projects first, then profiles,
 /// then entities that reference profiles/projects.
@@ -15,10 +133,111 @@ use crate::snapshot::Snapshot;
 /// All writes include an audit entry referencing "sid-migrate" as the actor.
 pub async fn import_snapshot(
     backend: &dyn StorageBackend,
+    history_keys: &dyn HistoryKeyStore,
     snapshot: &Snapshot,
 ) -> anyhow::Result<ImportResult> {
+    anyhow::ensure!(
+        snapshot.metadata.version == 4,
+        "unsupported snapshot format: export a new snapshot with password history keys and OPAQUE setup"
+    );
+    anyhow::ensure!(
+        snapshot.metadata.installation_org == backend.instance_organization().await?.map(|o| o.id),
+        "restore the same installation authority before importing its data"
+    );
+    validate_opaque_setup(snapshot)?;
+    let setup_kind = sid_core::models::InstanceSecret::OpaqueServerSetup;
+    let current_setup = backend.get_instance_secret(setup_kind).await?;
+    anyhow::ensure!(
+        current_setup.is_none() || current_setup == snapshot.opaque_server_setup,
+        "target OPAQUE setup conflicts with snapshot"
+    );
+    validate_history(snapshot)?;
+    for (owner, archive) in &snapshot.password_histories {
+        let current = backend.export_password_history(*owner).await?;
+        anyhow::ensure!(
+            current.is_none() || current.as_ref() == archive.as_ref(),
+            "target password history conflicts with snapshot"
+        );
+    }
+    for archive in &snapshot.history_keys {
+        let current = history_keys.export_keys(&archive.owner_domain).await?;
+        anyhow::ensure!(
+            current.is_none() || current.as_ref() == Some(archive),
+            "target password history keys conflict with snapshot"
+        );
+    }
+    // The evaluator's custody versions, checked like the field-key versions
+    // before anything is written: a conflicting version would open its keys
+    // under another derivation.
+    let current_history_versions = history_keys.list_key_versions().await?;
+    let mut history_versions = std::collections::BTreeSet::new();
+    for params in &snapshot.history_key_versions {
+        anyhow::ensure!(
+            history_versions.insert(params.version),
+            "duplicate history key version in snapshot"
+        );
+        if let Some(current) = current_history_versions
+            .iter()
+            .find(|v| v.version == params.version)
+        {
+            anyhow::ensure!(
+                current == params,
+                "target history key derivation parameters conflict with snapshot"
+            );
+        }
+    }
     let mut result = ImportResult::default();
     let actor = "sid-migrate".to_string();
+    let current_versions = backend.list_key_versions().await?;
+    let mut versions = std::collections::BTreeSet::new();
+    for params in &snapshot.key_versions {
+        anyhow::ensure!(
+            versions.insert(params.version),
+            "duplicate key version in snapshot"
+        );
+        if let Some(current) = current_versions
+            .iter()
+            .find(|v| v.version == params.version)
+        {
+            anyhow::ensure!(
+                current == params,
+                "target key derivation parameters conflict with snapshot"
+            );
+        }
+    }
+    for params in &snapshot.key_versions {
+        if backend
+            .insert_key_version(
+                params,
+                make_audit(&actor, "import_key_version", &params.version.to_string()),
+            )
+            .await?
+        {
+            result.key_versions += 1;
+        } else {
+            let current = backend.list_key_versions().await?;
+            anyhow::ensure!(
+                current.iter().any(|v| v == params),
+                "key version changed during import"
+            );
+        }
+    }
+
+    // The setup precedes credentials and is insert-only. Recheck the stored
+    // value after insertion: a concurrent initializer must never replace it.
+    if let Some(setup) = &snapshot.opaque_server_setup {
+        backend
+            .insert_instance_secret(
+                setup_kind,
+                setup,
+                make_audit(&actor, "import_opaque_setup", "opaque_server_setup"),
+            )
+            .await?;
+        anyhow::ensure!(
+            backend.get_instance_secret(setup_kind).await?.as_ref() == Some(setup),
+            "target OPAQUE setup changed during import"
+        );
+    }
 
     // 1. Projects (must exist before anything else)
     info!(count = snapshot.projects.len(), "importing projects...");
@@ -49,6 +268,56 @@ pub async fn import_snapshot(
         }
     }
 
+    // Keys precede history and history precedes credentials: a failure never
+    // installs a password without its retained comparison state, nor a
+    // history whose keys are missing. Instance migration requires quiesced
+    // writers. The evaluator's custody versions precede the keys they open.
+    for params in &snapshot.history_key_versions {
+        if history_keys
+            .insert_key_version(
+                params,
+                AuditEntry::system("import_history_key_version", params.version.to_string())
+                    .with_metadata(serde_json::json!({"tool": "sid-migrate"})),
+            )
+            .await?
+        {
+            result.key_versions += 1;
+        } else {
+            anyhow::ensure!(
+                history_keys.list_key_versions().await?.contains(params),
+                "history key version changed during import"
+            );
+        }
+    }
+    for archive in &snapshot.history_keys {
+        if history_keys
+            .import_keys(
+                archive,
+                AuditEntry::system("import_history_keys", "password_history_keys")
+                    .with_metadata(serde_json::json!({"tool": "sid-migrate"})),
+            )
+            .await?
+        {
+            result.history_keys += 1;
+        }
+    }
+    for (_, archive) in &snapshot.password_histories {
+        if let Some(archive) = archive
+            && backend
+                .import_password_history(
+                    archive,
+                    make_audit(
+                        &actor,
+                        "import_password_history",
+                        &archive.owner.to_string(),
+                    ),
+                )
+                .await?
+        {
+            result.password_histories += 1;
+        }
+    }
+
     // 3. Principals (depend on profiles)
     info!(count = snapshot.principals.len(), "importing principals...");
     for principal in &snapshot.principals {
@@ -64,8 +333,12 @@ pub async fn import_snapshot(
     );
     for credential in &snapshot.credentials {
         let audit = make_audit(&actor, "import_credential", &credential.id.0.to_string());
-        backend.create_credential(credential, audit).await?;
-        result.credentials += 1;
+        match backend.create_credential(credential, audit).await {
+            Ok(()) => result.credentials += 1,
+            Err(sid_core::Error::Conflict(_))
+                if backend.get_credential(credential.id).await?.as_ref() == Some(credential) => {}
+            Err(e) => return Err(e.into()),
+        }
     }
 
     // 5. Sessions (depend on profiles)
@@ -640,6 +913,9 @@ fn make_audit(_actor: &str, action: &str, resource: &str) -> MutationContext {
 /// Result of an import operation with per-entity counts.
 #[derive(Debug, Default)]
 pub struct ImportResult {
+    pub key_versions: u64,
+    pub history_keys: u64,
+    pub password_histories: u64,
     pub projects: u64,
     pub profiles: u64,
     pub principals: u64,
@@ -682,6 +958,9 @@ impl ImportResult {
     /// Total imported entities.
     pub fn total(&self) -> u64 {
         self.projects
+            + self.key_versions
+            + self.history_keys
+            + self.password_histories
             + self.profiles
             + self.principals
             + self.credentials
@@ -723,6 +1002,9 @@ impl ImportResult {
 impl std::fmt::Display for ImportResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Import Summary:")?;
+        writeln!(f, "  Key Versions:         {}", self.key_versions)?;
+        writeln!(f, "  History Keys:         {}", self.history_keys)?;
+        writeln!(f, "  Password Histories:   {}", self.password_histories)?;
         writeln!(f, "  Projects:             {}", self.projects)?;
         writeln!(f, "  Profiles:             {}", self.profiles)?;
         writeln!(f, "  Principals:           {}", self.principals)?;

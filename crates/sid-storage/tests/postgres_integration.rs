@@ -356,8 +356,19 @@ async fn test_history_is_empty_until_written() {
 }
 
 #[tokio::test]
-async fn test_history_epoch_is_prepared_once() {
-    common::password_history::test_history_epoch_is_prepared_once(&setup().await).await;
+async fn test_history_archive_preserves_lifecycle() {
+    common::password_history::test_history_archive_preserves_lifecycle(&setup().await).await;
+}
+
+#[tokio::test]
+async fn test_history_rotation_is_published_by_its_commit() {
+    common::password_history::test_history_rotation_is_published_by_its_commit(&setup().await)
+        .await;
+}
+
+#[tokio::test]
+async fn test_history_descriptor_conflict_writes_nothing() {
+    common::password_history::test_history_descriptor_conflict_writes_nothing(&setup().await).await;
 }
 
 #[tokio::test]
@@ -376,6 +387,11 @@ async fn test_history_retains_depth() {
 }
 
 #[tokio::test]
+async fn test_history_age_retention() {
+    common::password_history::test_history_age_retention(&setup().await).await;
+}
+
+#[tokio::test]
 async fn test_reset_history_is_compare_and_swap() {
     common::password_history::test_reset_history_is_compare_and_swap(&setup().await).await;
 }
@@ -383,6 +399,145 @@ async fn test_reset_history_is_compare_and_swap() {
 #[tokio::test]
 async fn test_history_of_another_owner_is_refused() {
     common::password_history::test_history_of_another_owner_is_refused(&setup().await).await;
+}
+
+// The history write cutoff is database-wide: these scenarios run in a schema
+// of their own so the cutoff they raise reaches no scenario beside them.
+
+#[tokio::test]
+async fn test_history_write_cutoff_fences_commits() {
+    let (backend, _) = isolated("cutoff").await;
+    common::password_history::test_history_write_cutoff_fences_commits(&backend).await;
+}
+
+#[tokio::test]
+async fn test_history_write_cutoff_races_a_commit() {
+    let (backend, _) = isolated("cutoff_race").await;
+    common::password_history::test_history_write_cutoff_races_a_commit(&backend).await;
+}
+
+#[tokio::test]
+async fn test_write_cutoff_only_rises() {
+    let (backend, _) = isolated("key_cutoff").await;
+    let keys = sid_storage::PgHistoryKeyStore::new(backend.pool().clone());
+    keys.migrate().await.expect("history key migrations");
+    common::history_keys::test_write_cutoff_only_rises(&keys).await;
+}
+
+// ─── History evaluator's key store ───
+
+/// The evaluator's store over the same test database, with its own
+/// migrations applied.
+/// The evaluator's store in a schema of its own, for a scenario that cannot
+/// keep to its own rows: compaction removes every fence older than a time,
+/// whoever wrote it. Dropped by [`drop_schema`] when the scenario ends.
+async fn isolated_key_store() -> (sid_storage::PgHistoryKeyStore, String) {
+    let schema = format!("hk_{}", uuid::Uuid::now_v7().simple());
+    let backend = setup().await;
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA \"{schema}\"")))
+        .execute(backend.pool())
+        .await
+        .unwrap();
+    let url = database_url();
+    let separator = if url.contains('?') { '&' } else { '?' };
+    let store = sid_storage::PgHistoryKeyStore::connect(&format!(
+        "{url}{separator}options=-c%20search_path%3D{schema}"
+    ))
+    .await
+    .unwrap();
+    store.migrate().await.unwrap();
+    (store, schema)
+}
+
+async fn drop_schema(schema: &str) {
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP SCHEMA \"{schema}\" CASCADE"
+    )))
+    .execute(setup().await.pool())
+    .await
+    .unwrap();
+}
+
+async fn key_store() -> sid_storage::PgHistoryKeyStore {
+    let backend = setup().await;
+    sid_storage::migrator::run_history_key_migrations(backend.pool())
+        .await
+        .expect("Failed to run history key migrations");
+    sid_storage::PgHistoryKeyStore::new(backend.pool().clone())
+}
+
+#[tokio::test]
+async fn test_first_epoch_never_resets_a_history() {
+    common::history_keys::test_first_epoch_never_resets_a_history(&key_store().await).await;
+}
+
+#[tokio::test]
+async fn test_epoch_is_ensured_once() {
+    common::history_keys::test_epoch_is_ensured_once(&key_store().await).await;
+}
+
+#[tokio::test]
+async fn test_owner_domains_are_separate() {
+    common::history_keys::test_owner_domains_are_separate(&key_store().await).await;
+}
+
+#[tokio::test]
+async fn test_epoch_rotation() {
+    common::history_keys::test_epoch_rotation(&key_store().await).await;
+}
+
+#[tokio::test]
+async fn test_lifecycle_follows_the_live_set() {
+    common::history_keys::test_lifecycle_follows_the_live_set(&key_store().await).await;
+}
+
+#[tokio::test]
+async fn test_stale_live_set_cannot_retire() {
+    common::history_keys::test_stale_live_set_cannot_retire(&key_store().await).await;
+}
+
+#[tokio::test]
+async fn test_key_archive_round_trip() {
+    common::history_keys::test_key_archive_round_trip(&key_store().await).await;
+}
+
+#[tokio::test]
+async fn test_abandoned_enrollment_is_reclaimed() {
+    common::history_keys::test_abandoned_enrollment_is_reclaimed(&key_store().await).await;
+}
+
+#[tokio::test]
+async fn test_cleanup_races_preparation() {
+    common::history_keys::test_cleanup_races_preparation(&key_store().await).await;
+}
+
+#[tokio::test]
+async fn test_abandoned_fences_are_compacted() {
+    let (store, schema) = isolated_key_store().await;
+    common::history_keys::test_abandoned_fences_are_compacted(&store).await;
+    drop_schema(&schema).await;
+}
+
+#[tokio::test]
+async fn test_purged_owner_keeps_nothing() {
+    let (store, schema) = isolated_key_store().await;
+    common::history_keys::test_purged_owner_keeps_nothing(&store).await;
+    drop_schema(&schema).await;
+}
+
+#[tokio::test]
+async fn test_history_key_versions_are_insert_only() {
+    common::history_keys::test_history_key_versions_are_insert_only(&key_store().await).await;
+}
+
+#[tokio::test]
+async fn test_ended_work_is_purged() {
+    common::work::test_ended_work_is_purged(&setup().await).await;
+}
+
+#[tokio::test]
+async fn test_operation_results_are_purged_by_method() {
+    common::operation::test_operation_results_are_purged_by_method(&setup().await).await;
 }
 
 #[tokio::test]
@@ -1071,6 +1226,11 @@ async fn test_work_capacity_is_enforced_per_kind() {
 }
 
 #[tokio::test]
+async fn test_work_capacity_holds_under_concurrency() {
+    common::work::test_work_capacity_holds_under_concurrency(&setup().await).await;
+}
+
+#[tokio::test]
 async fn test_work_lease_fences_stale_worker() {
     common::work::test_work_lease_fences_stale_worker(&setup().await).await;
 }
@@ -1465,6 +1625,11 @@ async fn test_completed_operation_commits_nothing() {
 #[tokio::test]
 async fn test_concurrent_duplicate_operation_commits_once() {
     common::operation::test_concurrent_duplicate_operation_commits_once(&setup().await).await;
+}
+
+#[tokio::test]
+async fn test_terminal_abort_races_the_commit() {
+    common::operation::test_terminal_abort_races_the_commit(&setup().await).await;
 }
 
 #[tokio::test]
@@ -2726,6 +2891,81 @@ async fn test_pg_profile_with_username_roundtrip() {
         .expect("profile should exist");
 
     assert_eq!(loaded.username.as_deref(), Some(username.as_str()));
+}
+
+// ─── History evaluator split (migration 058) ───
+
+/// The split converts only an empty history layout. A database holding
+/// history refuses the migration unchanged and unrecorded, so the next start
+/// fails the same way instead of running half-converted; an empty one is
+/// converted and no longer stores keys with the credential service's data.
+#[tokio::test]
+async fn test_history_split_refuses_populated_history() {
+    let schema = format!("history_split_{}", uuid::Uuid::now_v7().simple());
+    let backend = PostgresBackend::new(&database_url(), Some(schema.clone()))
+        .await
+        .expect("Failed to connect to PostgreSQL. Is the database running?");
+    sid_storage::migrator::run_migrations_through(
+        backend.pool(),
+        Some(&schema),
+        "20261010_057_password_history_lifecycle",
+    )
+    .await
+    .expect("migrations through 057");
+    let profile = common::create_test_profile("split");
+    backend
+        .create_profile(&profile, common::test_audit())
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO password_histories (owner_id, revision) VALUES ($1, 1)")
+        .bind(profile.id)
+        .execute(backend.pool())
+        .await
+        .unwrap();
+
+    let err = sid_storage::migrator::run_migrations(backend.pool(), Some(&schema))
+        .await
+        .expect_err("a populated history refuses the split");
+    assert!(
+        err.to_string().contains("password history data exists"),
+        "{err}"
+    );
+    let recorded: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM _migrations WHERE name = '20261010_058_history_evaluator_split')",
+    )
+    .fetch_one(backend.pool())
+    .await
+    .unwrap();
+    assert!(!recorded, "the refused migration is not recorded");
+    let kept: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns
+         WHERE table_schema = $1 AND table_name = 'password_history_epochs'
+           AND column_name = 'wrapped_key')",
+    )
+    .bind(&schema)
+    .fetch_one(backend.pool())
+    .await
+    .unwrap();
+    assert!(kept, "nothing of the layout changed");
+
+    // Emptied, it converts.
+    sqlx::query("DELETE FROM password_histories")
+        .execute(backend.pool())
+        .await
+        .unwrap();
+    sid_storage::migrator::run_migrations(backend.pool(), Some(&schema))
+        .await
+        .expect("an empty history converts");
+    let keys_left: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns
+         WHERE table_schema = $1 AND table_name = 'password_history_epochs'
+           AND column_name = 'wrapped_key')",
+    )
+    .bind(&schema)
+    .fetch_one(backend.pool())
+    .await
+    .unwrap();
+    assert!(!keys_left, "the credential service's epochs carry no key");
 }
 
 // ─── Email policy revisions ───

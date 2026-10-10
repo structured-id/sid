@@ -97,9 +97,14 @@ phonenumber = { workspace = true }
 
 # gRPC caller authentication (optional)
 tonic = { workspace = true, optional = true }
+# A service's own client credential at its issuer (optional)
+sid-proto = { workspace = true, optional = true }
+http = { workspace = true, optional = true }
 
 [features]
 grpc = ["dep:tonic", "sid-core/grpc"]
+# A service authenticating to the services it calls with its own token.
+client-credential = ["grpc", "dep:sid-proto", "dep:http"]
 # A software authenticator for tests of WebAuthn ceremonies, here and in the
 # crates that embed them.
 soft-authenticator = ["p256/ecdsa"]

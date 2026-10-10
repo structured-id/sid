@@ -116,6 +116,13 @@ impl WorkStore for RecordingStore {
     async fn import_work(&self, _: &sid_core::models::WorkSnapshot) -> sid_core::Result<bool> {
         unimplemented!()
     }
+    async fn purge_ended_work(
+        &self,
+        _: &WorkKind,
+        _: chrono::DateTime<chrono::Utc>,
+    ) -> sid_core::Result<u64> {
+        unimplemented!()
+    }
 }
 
 /// An observed event is stored as its own relay work, under the observation

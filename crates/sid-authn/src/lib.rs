@@ -28,6 +28,8 @@ pub mod claim_mapping;
 pub mod client_address;
 pub mod client_assertion;
 pub mod client_auth;
+#[cfg(feature = "client-credential")]
+pub mod client_credential;
 #[cfg(feature = "grpc")]
 pub mod connector_auth;
 pub mod credential_enrollment;

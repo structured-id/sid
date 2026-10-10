@@ -7,6 +7,14 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[[test]]
+name = "postgres_integration"
+required-features = ["storage-pg"]
+
+[[test]]
+name = "field_encryption_pg"
+required-features = ["storage-pg"]
+
 [features]
 default = ["storage-pg"]
 
@@ -55,3 +63,5 @@ secrecy = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 # Two SQLite backends on one database file (instances sharing a store).
 tempfile = "3"
+# Many concurrent calls on one borrowed store (replicas racing).
+futures = { workspace = true }

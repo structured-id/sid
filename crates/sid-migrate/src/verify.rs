@@ -4,6 +4,7 @@
 //! Compares record counts and checks referential integrity
 //! (e.g., all credentials reference existing profiles).
 
+use sid_plugin::history_keys::HistoryKeyStore;
 use sid_plugin::storage::StorageBackend;
 use tracing::info;
 
@@ -32,12 +33,41 @@ pub struct CountCheck {
 /// Performs:
 /// 1. Record count comparison for each entity type
 /// 2. Referential integrity checks (credentials→profiles, sessions→profiles, etc.)
+/// 3. Each source profile's password history and history evaluator keys
 pub async fn verify_backends(
     source: &dyn StorageBackend,
+    source_keys: &dyn HistoryKeyStore,
     target: &dyn StorageBackend,
+    target_keys: &dyn HistoryKeyStore,
 ) -> anyhow::Result<VerifyResult> {
     let mut counts = Vec::new();
     let mut integrity_issues = Vec::new();
+    let setup = sid_core::models::InstanceSecret::OpaqueServerSetup;
+    if source.get_instance_secret(setup).await? != target.get_instance_secret(setup).await? {
+        integrity_issues.push("OPAQUE server setup differs".into());
+    }
+    let installation = source.instance_organization().await?.map(|o| o.id);
+    if installation != target.instance_organization().await?.map(|o| o.id) {
+        integrity_issues.push("installation authority differs".into());
+    }
+    let target_versions = target.list_key_versions().await?;
+    for params in source.list_key_versions().await? {
+        if !target_versions.iter().any(|p| p == &params) {
+            integrity_issues.push(format!(
+                "key derivation parameters differ for version {}",
+                params.version
+            ));
+        }
+    }
+    let target_history_versions = target_keys.list_key_versions().await?;
+    for params in source_keys.list_key_versions().await? {
+        if !target_history_versions.contains(&params) {
+            integrity_issues.push(format!(
+                "history key derivation parameters differ for version {}",
+                params.version
+            ));
+        }
+    }
 
     // Compare profile counts
     info!("verifying profiles...");
@@ -61,6 +91,44 @@ pub async fn verify_backends(
         matches: source_projects == target_projects,
     });
 
+    // Walk the source too: equal profile counts do not prove that the target
+    // contains the owners whose retained history must survive the move.
+    let mut offset = 0u64;
+    loop {
+        let batch = source.list_profiles(offset, 1000).await?;
+        if batch.is_empty() {
+            break;
+        }
+        offset += batch.len() as u64;
+        for profile in batch {
+            if target.get_profile(profile.id).await?.is_none() {
+                integrity_issues.push(format!(
+                    "source profile {} is missing on target",
+                    profile.id
+                ));
+            } else if source.export_password_history(profile.id).await?
+                != target.export_password_history(profile.id).await?
+            {
+                integrity_issues.push(format!(
+                    "password history differs for profile {}",
+                    profile.id
+                ));
+            }
+            if let Some(installation) = &installation {
+                let domain =
+                    sid_authn::password_history::owner_domain(installation.as_bytes(), profile.id);
+                if source_keys.export_keys(&domain).await?
+                    != target_keys.export_keys(&domain).await?
+                {
+                    integrity_issues.push(format!(
+                        "password history keys differ for profile {}",
+                        profile.id
+                    ));
+                }
+            }
+        }
+    }
+
     // Verify referential integrity on target: every credential has a valid profile
     info!("checking referential integrity...");
     let target_profile_list = {
@@ -78,6 +146,14 @@ pub async fn verify_backends(
     };
 
     for profile in &target_profile_list {
+        if source.export_password_history(profile.id).await?
+            != target.export_password_history(profile.id).await?
+        {
+            integrity_issues.push(format!(
+                "password history differs for profile {}",
+                profile.id
+            ));
+        }
         // Check credentials reference valid profiles
         let creds = target.get_credentials_by_profile(profile.id, None).await?;
         for cred in &creds {

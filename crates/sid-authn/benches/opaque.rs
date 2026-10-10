@@ -192,7 +192,7 @@ fn bench_login_ristretto(c: &mut Criterion) {
             let request_bytes = client_login.message.serialize();
 
             let (response_bytes, login_state) = router
-                .login_start(&stored, &request_bytes, credential_id)
+                .login_start(&stored, &request_bytes, credential_id, &[])
                 .unwrap();
 
             let server_msg = sid_opaque_ke::CredentialResponse::<DefaultCipherSuite>::deserialize(
@@ -211,7 +211,7 @@ fn bench_login_ristretto(c: &mut Criterion) {
             let finalization_bytes = client_finish.message.serialize();
 
             router
-                .login_finish(&login_state, &finalization_bytes)
+                .login_finish(&login_state, &finalization_bytes, &[])
                 .unwrap()
         })
     });
@@ -252,7 +252,7 @@ fn bench_login_pallas(c: &mut Criterion) {
             let request_bytes = client_login.message.serialize();
 
             let (response_bytes, login_state) = router
-                .login_start(&stored, &request_bytes, credential_id)
+                .login_start(&stored, &request_bytes, credential_id, &[])
                 .unwrap();
 
             let server_msg = sid_opaque_ke::CredentialResponse::<PallasCipherSuite>::deserialize(
@@ -271,7 +271,7 @@ fn bench_login_pallas(c: &mut Criterion) {
             let finalization_bytes = client_finish.message.serialize();
 
             router
-                .login_finish(&login_state, &finalization_bytes)
+                .login_finish(&login_state, &finalization_bytes, &[])
                 .unwrap()
         })
     });
@@ -310,7 +310,7 @@ fn bench_login_p256(c: &mut Criterion) {
             let request_bytes = client_login.message.serialize();
 
             let (response_bytes, login_state) = router
-                .login_start(&stored, &request_bytes, credential_id)
+                .login_start(&stored, &request_bytes, credential_id, &[])
                 .unwrap();
 
             let server_msg =
@@ -328,7 +328,7 @@ fn bench_login_p256(c: &mut Criterion) {
             let finalization_bytes = client_finish.message.serialize();
 
             router
-                .login_finish(&login_state, &finalization_bytes)
+                .login_finish(&login_state, &finalization_bytes, &[])
                 .unwrap()
         })
     });

@@ -317,6 +317,41 @@ impl WorkStore for SqliteBackend {
             == 1;
         Ok(inserted)
     }
+
+    async fn purge_ended_work(
+        &self,
+        kind: &WorkKind,
+        before: chrono::DateTime<chrono::Utc>,
+    ) -> SidResult<u64> {
+        let mut conn = self.pool.acquire().await.map_err(storage)?;
+        let mut tx = sqlx::Connection::begin_with(&mut *conn, "BEGIN IMMEDIATE")
+            .await
+            .map_err(storage)?;
+        // Compared as instants: stored timestamps do not all sort as text.
+        let ended: Vec<(String, String)> = sqlx::query_as(
+            "SELECT id, updated_at FROM durable_work
+             WHERE kind = ? AND state NOT IN ('pending', 'claimed')",
+        )
+        .bind(kind.as_str())
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(storage)?;
+        let mut dropped = 0;
+        for (id, updated_at) in ended {
+            let updated_at = chrono::DateTime::parse_from_rfc3339(&updated_at)
+                .map_err(|e| SidError::Storage(format!("work updated_at: {e}")))?;
+            if updated_at < before {
+                sqlx::query("DELETE FROM durable_work WHERE id = ?")
+                    .bind(&id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(storage)?;
+                dropped += 1;
+            }
+        }
+        tx.commit().await.map_err(storage)?;
+        Ok(dropped)
+    }
 }
 
 /// The work record in `row`.

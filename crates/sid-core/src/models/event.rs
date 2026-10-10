@@ -347,6 +347,18 @@ pub mod event_types {
     pub const PROFILE_SUSPENDED: &str = "sid.profile.suspended.v1";
     pub const PROFILE_CLOSED: &str = "sid.profile.closed.v1";
 
+    // Password history
+    /// A first enrollment was aborted before it committed: the evaluator may
+    /// reclaim the key it created for that operation. Internal to the
+    /// credential authority and its evaluator; carries the operation and the
+    /// owner's history input domain only.
+    pub const PASSWORD_HISTORY_ENROLLMENT_ABORTED: &str =
+        "sid.password_history.enrollment_aborted.v1";
+    /// An owner's profile was deleted: the evaluator destroys the owner's
+    /// history keys and lifecycle. Internal to the credential authority and
+    /// its evaluator; carries the owner's history input domain only.
+    pub const PASSWORD_HISTORY_OWNER_PURGED: &str = "sid.password_history.owner_purged.v1";
+
     // Consent
     pub const CONSENT_GRANTED: &str = "sid.consent.granted.v1";
     pub const CONSENT_REVOKED: &str = "sid.consent.revoked.v1";

@@ -57,7 +57,44 @@ Environment variables:
 | `SID_BIND` | - | HTTP listen address of the embedded transcoder (OIDC endpoints, SCIM); unset serves no HTTP |
 | `SID_SCIM_BASE_URL` | `SID_ISSUER` | Public URL the SCIM endpoint is reached under (`/scim/v2` follows) |
 | `SID_AUTHZ_REQUEST_VERIFIERS_FILE` | - | JSON file naming the services trusted to confirm sender proofs of original requests (see below); unset trusts none |
+| `SID_ZKPP_ENABLED` | `true` | Build policy-proof verifiers; accepts only `true`, `false`, `1` or `0` |
+| `SID_ZKPP_REQUIRE_PROOF` | `true` | Require a password-policy proof for password setup; `false` explicitly permits policy-unverified setup. Cannot be `true` while verifiers are disabled |
+| `SID_ZKPP_POLICY_VERSION` | `1` | Accepted compiled password policy; an unknown or malformed version stops startup |
+| `SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE` | - | RFC 3339 instant: no history entry is written under a key created before it (a suspected key compromise), and such keys are replaced at their owner's next password operation. Raised at start into this server's history store and the in-process evaluator's; an older or unset value lowers nothing. A malformed or future value stops startup |
+| `SID_PASSWORD_HISTORY_EVALUATOR` | - | gRPC address of a separately deployed password-history evaluator; unset runs the evaluator in this server (see below) |
+| `SID_PASSWORD_HISTORY_EVALUATOR_RESOURCE` | - | Resource indicator of the evaluator; required with `SID_PASSWORD_HISTORY_EVALUATOR` |
+| `SID_PASSWORD_HISTORY_TOKEN_UPSTREAM` | - | gRPC address of the issuer this server obtains its token for the evaluator from; required with `SID_PASSWORD_HISTORY_EVALUATOR` |
+| `SID_PASSWORD_HISTORY_CALLER_*` | - | This server's client credential at the evaluator: `_CLIENT_ID`, `_ISSUER`, `_METHOD` and the method's `_SECRET_FILE` or `_KEY_FILE`/`_ALGORITHM`/`_KEY_ID`; required with `SID_PASSWORD_HISTORY_EVALUATOR` |
 | `RUST_LOG` | `sid=info` | Log level |
+
+Malformed explicit ZKPP settings stop startup. Optional proof setup still verifies
+every submitted proof; it never accepts an invalid proof as policy-unverified.
+Verifier keys must enforce the configured policy, with one key per history-domain
+count. A pending password operation whose policy is no longer accepted must be
+restarted before it can install a password. Ordinary password login does not
+generate a new policy proof.
+
+A password's policy evidence names the verifying key (artifact) that accepted its
+proof. Upgrading demotes verdicts stored before artifacts were recorded to
+policy-unverified and keeps what they claimed in `credential_policy_evidence_legacy`;
+the next proved password change records a new verdict. Ordinary login and other
+factors are unaffected.
+
+A replaced password-history key takes no new entries, but the passwords already
+retained under it are still compared until retention removes them; the key is
+then destroyed. Replacement does not make previously copied keys or entries
+secret again.
+
+Password history has two authorities: the evaluator holds the per-owner history
+keys and answers blinded requests; the checker, in this server, receives each
+proved password's tag, runs the history KSF and compares it with the retained
+entries. This server runs both and seals history keys with its field keys, so
+whoever controls it holds both: a tag together with its key lets that password
+be guessed without the KSF. A deployment that keeps them apart runs the
+evaluator as its own service, with its own database and keys, and points this
+server's `SID_PASSWORD_HISTORY_EVALUATOR` at it; this server then holds no
+history key, and the evaluator never receives a tag or a retained entry. The
+client relays the evaluator's proofs, which this server verifies itself.
 
 ### Trusted request verifiers
 
@@ -114,6 +151,15 @@ and granted a role on the SCIM directory resource; it authenticates with its
 SCIM bearer or with an OAuth client-credentials token from the installation's
 issuer (`GetScimInboundConfig` returns the token endpoint and `client_id`).
 Logins it provisions are federated usernames `userName#<organization domain>`.
+
+## Password client conformance
+
+[The installed-client suite](ci/password-clients/README.md) exercises the
+immutable published TypeScript package in Node and Chromium against real gRPC registration, login,
+password change and reset. It checks mandatory proofs, evaluator authenticity,
+operation binding, retained-password refusal and durable registration retries.
+The test adapter is separate from the product and uses the client's actual KSF
+and prover; it does not replace them with reduced-cost fixtures.
 
 ## License
 

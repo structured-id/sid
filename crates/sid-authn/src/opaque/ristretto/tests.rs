@@ -97,7 +97,7 @@ fn test_full_registration_login_flow() {
     let client_login_request = client_login_start.message.serialize().to_vec();
 
     let (server_login_response, login_state) = p
-        .login_start(&setup, &stored, &client_login_request, credential_id)
+        .login_start(&setup, &stored, &client_login_request, credential_id, &[])
         .unwrap();
 
     // Verify CurveId prefix
@@ -118,7 +118,9 @@ fn test_full_registration_login_flow() {
         .unwrap();
     let finalization_bytes = client_login_finish.message.serialize().to_vec();
 
-    let session_key = p.login_finish(&login_state, &finalization_bytes).unwrap();
+    let session_key = p
+        .login_finish(&login_state, &finalization_bytes, &[])
+        .unwrap();
     assert!(!session_key.expose_secret().is_empty());
     // Client and server must derive the same session key
     assert_eq!(
@@ -135,7 +137,7 @@ fn test_curve_mismatch_rejected() {
         curve: CurveId::Pallas,
         data: vec![0; 64],
     };
-    let result = p.login_start(&setup, &wrong_curve, b"request", b"id");
+    let result = p.login_start(&setup, &wrong_curve, b"request", b"id", &[]);
     assert!(matches!(result, Err(OpaqueError::CurveMismatch { .. })));
 }
 

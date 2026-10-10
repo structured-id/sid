@@ -28,7 +28,7 @@ sid-infra = { workspace = true }
 # Health on shutdown, bounded drain, the shutdown signal.
 sid-serve = { workspace = true }
 # Issuer verification, revocation view and DPoP proof checks.
-sid-authn = { workspace = true }
+sid-authn = { workspace = true, features = ["client-credential"] }
 
 # gRPC services and the client to the SID server
 tonic = { workspace = true }

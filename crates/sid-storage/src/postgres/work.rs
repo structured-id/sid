@@ -102,6 +102,15 @@ pub(crate) async fn insert_work_in_tx(
 async fn enqueue(pool: &PgPool, work: &NewWork, capacity: u64) -> SidResult<bool> {
     let storage = |e: sqlx::Error| SidError::Storage(format!("enqueue work: {e}"));
     let mut tx = pool.begin().await.map_err(storage)?;
+    // Count and insert as one step per kind: replicas enqueuing together
+    // would otherwise each see room and pass the capacity between them.
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(hashtextextended('sid.durable_work.capacity:' || $1, 0))",
+    )
+    .bind(work.kind.as_str())
+    .execute(&mut *tx)
+    .await
+    .map_err(storage)?;
     let inserted = insert_work_in_tx(&mut tx, work, capacity).await?;
     tx.commit().await.map_err(storage)?;
     Ok(inserted)
@@ -372,6 +381,23 @@ macro_rules! work_store_over_pool {
 
             async fn import_work(&self, work: &WorkSnapshot) -> SidResult<bool> {
                 import(&self.pool, work).await
+            }
+
+            async fn purge_ended_work(
+                &self,
+                kind: &WorkKind,
+                before: chrono::DateTime<chrono::Utc>,
+            ) -> SidResult<u64> {
+                sqlx::query(
+                    "DELETE FROM durable_work
+                     WHERE kind = $1 AND state NOT IN ('pending', 'claimed') AND updated_at < $2",
+                )
+                .bind(kind.as_str())
+                .bind(before)
+                .execute(&self.pool)
+                .await
+                .map(|done| done.rows_affected())
+                .map_err(|e| SidError::Storage(format!("purge work: {e}")))
             }
         }
     };

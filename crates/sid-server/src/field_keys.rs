@@ -79,12 +79,41 @@ pub fn load_or_create_master(path: &Path) -> Result<SecretBox<[u8; 32]>, FieldKe
     Ok(SecretBox::new(Box::new(master)))
 }
 
-/// Key versions from storage, creating version 1 on first start. Concurrent
+/// A store recording the key versions of one key custody.
+#[tonic::async_trait]
+pub trait KeyVersionStore: Sync {
+    async fn versions(&self) -> sid_core::Result<Vec<KeyVersionParams>>;
+    async fn insert(&self, params: &KeyVersionParams, audit: AuditEntry) -> sid_core::Result<bool>;
+}
+
+/// The credential service's field keys.
+#[tonic::async_trait]
+impl KeyVersionStore for dyn StorageBackend {
+    async fn versions(&self) -> sid_core::Result<Vec<KeyVersionParams>> {
+        self.list_key_versions().await
+    }
+    async fn insert(&self, params: &KeyVersionParams, audit: AuditEntry) -> sid_core::Result<bool> {
+        self.insert_key_version(params, audit.into()).await
+    }
+}
+
+/// The history evaluator's own key custody.
+#[tonic::async_trait]
+impl KeyVersionStore for dyn sid_plugin::history_keys::HistoryKeyStore {
+    async fn versions(&self) -> sid_core::Result<Vec<KeyVersionParams>> {
+        self.list_key_versions().await
+    }
+    async fn insert(&self, params: &KeyVersionParams, audit: AuditEntry) -> sid_core::Result<bool> {
+        self.insert_key_version(params, audit).await
+    }
+}
+
+/// Key versions from `store`, creating version 1 on first start. Concurrent
 /// starters agree: only one insert of a version succeeds and all re-read it.
 pub async fn load_or_create_versions(
-    storage: &dyn StorageBackend,
+    store: &(impl KeyVersionStore + ?Sized),
 ) -> Result<Vec<KeyVersionParams>, FieldKeyError> {
-    let versions = storage.list_key_versions().await?;
+    let versions = store.versions().await?;
     if !versions.is_empty() {
         return Ok(versions);
     }
@@ -93,22 +122,23 @@ pub async fn load_or_create_versions(
     rand::rngs::SysRng
         .try_fill_bytes(&mut salt)
         .expect("the operating system random source is available");
-    storage
-        .insert_key_version(
+    store
+        .insert(
             &KeyVersionParams::new(1, salt, "key-v1"),
-            AuditEntry::system("crypto.key_version_created", "key_version:1").into(),
+            AuditEntry::system("crypto.key_version_created", "key_version:1"),
         )
         .await?;
-    Ok(storage.list_key_versions().await?)
+    Ok(store.versions().await?)
 }
 
-/// Build the key manager from the master file and the stored versions.
+/// Build the key manager of the custody `store` records, from the master
+/// file and the stored versions.
 pub async fn field_key_manager(
-    storage: &dyn StorageBackend,
+    store: &(impl KeyVersionStore + ?Sized),
     master_path: &Path,
 ) -> Result<Arc<dyn KeyManager>, FieldKeyError> {
     let master = load_or_create_master(master_path)?;
-    let versions = load_or_create_versions(storage).await?;
+    let versions = load_or_create_versions(store).await?;
     let manager = SoftwareKeyManager::new(master, versions, Arc::new(RustCryptoPrimitives::new()))?;
     Ok(Arc::new(manager))
 }
