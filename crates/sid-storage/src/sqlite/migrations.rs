@@ -98,21 +98,20 @@ CREATE TABLE history_key_abandoned (
 /// both in one database. Only an empty history layout is converted: the guard
 /// row's check fails, aborting the whole upgrade unchanged, when any history
 /// data exists. The upgrade transaction holds the write lock, so nothing is
-/// written between the check and the change.
+/// written between the check and the change. A released file has no
+/// lifecycle tables at all; one created by a development build may have them,
+/// and with no epoch they can hold nothing that needs keeping.
 const HISTORY_EVALUATOR_SPLIT: &str = "
 CREATE TEMP TABLE history_split_guard (rows INTEGER NOT NULL CHECK (rows = 0));
 INSERT INTO history_split_guard (rows) SELECT
     (SELECT count(*) FROM password_histories)
   + (SELECT count(*) FROM password_history_epochs)
-  + (SELECT count(*) FROM password_history_entries)
-  + (SELECT count(*) FROM password_history_lifecycle)
-  + (SELECT count(*) FROM password_history_replaced)
-  + (SELECT count(*) FROM password_history_uses);
+  + (SELECT count(*) FROM password_history_entries);
 DROP TABLE history_split_guard;
 
-DROP TABLE password_history_uses;
-DROP TABLE password_history_replaced;
-DROP TABLE password_history_lifecycle;
+DROP TABLE IF EXISTS password_history_uses;
+DROP TABLE IF EXISTS password_history_replaced;
+DROP TABLE IF EXISTS password_history_lifecycle;
 ALTER TABLE password_history_epochs DROP COLUMN wrapped_key;
 
 CREATE TABLE password_history_write_cutoff (

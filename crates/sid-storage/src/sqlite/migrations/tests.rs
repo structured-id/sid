@@ -190,6 +190,24 @@ async fn an_interrupted_upgrade_leaves_the_file_and_resumes() {
     assert!(has_profile(&pool, "p1").await);
 }
 
+/// The baseline is the released schema: an older build's file, created from
+/// it and upgraded only by the migrations it knew, upgrades to the latest
+/// version, its data kept.
+#[tokio::test]
+async fn a_released_file_upgrades_to_the_latest_version() {
+    let (_dir, path) = scratch();
+    let pool = open(&path).await;
+    upgrade(&pool, BASELINE, &MIGRATIONS[..2]).await.unwrap();
+    add_profile(&pool, "p-released").await;
+    pool.close().await;
+
+    let pool = open(&path).await;
+    upgrade(&pool, BASELINE, MIGRATIONS).await.unwrap();
+    assert_eq!(version(&pool).await, MIGRATIONS.last().unwrap().version);
+    assert!(has_profile(&pool, "p-released").await);
+    assert!(has_table(&pool, "history_key_epochs").await);
+}
+
 /// The history evaluator split converts only an empty history layout: a file
 /// holding history refuses the upgrade, its version and tables unchanged;
 /// emptied, it converts and its credential tables carry no key.
@@ -208,7 +226,7 @@ async fn history_split_refuses_populated_history() {
         .await
         .expect_err("a populated history refuses the split");
     assert_eq!(version(&pool).await, 4, "the version is unchanged");
-    assert!(has_table(&pool, "password_history_lifecycle").await);
+    assert!(has_table(&pool, "password_histories").await);
     assert!(!has_table(&pool, "history_key_epochs").await);
 
     sqlx::query("DELETE FROM password_histories")

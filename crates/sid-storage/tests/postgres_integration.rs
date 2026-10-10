@@ -428,6 +428,36 @@ async fn test_write_cutoff_only_rises() {
 
 /// The evaluator's store over the same test database, with its own
 /// migrations applied.
+/// The evaluator's store in a schema of its own, for a scenario that cannot
+/// keep to its own rows: compaction removes every fence older than a time,
+/// whoever wrote it. Dropped by [`drop_schema`] when the scenario ends.
+async fn isolated_key_store() -> (sid_storage::PgHistoryKeyStore, String) {
+    let schema = format!("hk_{}", uuid::Uuid::now_v7().simple());
+    let backend = setup().await;
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA \"{schema}\"")))
+        .execute(backend.pool())
+        .await
+        .unwrap();
+    let url = database_url();
+    let separator = if url.contains('?') { '&' } else { '?' };
+    let store = sid_storage::PgHistoryKeyStore::connect(&format!(
+        "{url}{separator}options=-c%20search_path%3D{schema}"
+    ))
+    .await
+    .unwrap();
+    store.migrate().await.unwrap();
+    (store, schema)
+}
+
+async fn drop_schema(schema: &str) {
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP SCHEMA \"{schema}\" CASCADE"
+    )))
+    .execute(setup().await.pool())
+    .await
+    .unwrap();
+}
+
 async fn key_store() -> sid_storage::PgHistoryKeyStore {
     let backend = setup().await;
     sid_storage::migrator::run_history_key_migrations(backend.pool())
@@ -483,12 +513,16 @@ async fn test_cleanup_races_preparation() {
 
 #[tokio::test]
 async fn test_abandoned_fences_are_compacted() {
-    common::history_keys::test_abandoned_fences_are_compacted(&key_store().await).await;
+    let (store, schema) = isolated_key_store().await;
+    common::history_keys::test_abandoned_fences_are_compacted(&store).await;
+    drop_schema(&schema).await;
 }
 
 #[tokio::test]
 async fn test_purged_owner_keeps_nothing() {
-    common::history_keys::test_purged_owner_keeps_nothing(&key_store().await).await;
+    let (store, schema) = isolated_key_store().await;
+    common::history_keys::test_purged_owner_keeps_nothing(&store).await;
+    drop_schema(&schema).await;
 }
 
 #[tokio::test]
