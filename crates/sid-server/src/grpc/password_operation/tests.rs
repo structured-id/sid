@@ -568,10 +568,12 @@ async fn a_stored_operation_ends_at_its_deadline() {
     assert!(ops.take(&op.id).await.is_err(), "stored past its deadline");
 }
 
-/// A first enrollment's operation ends exactly when its cleanup becomes
-/// due, the deadline fixed before the evaluator was asked.
+/// A first enrollment's cleanup becomes due only after the operation can no
+/// longer commit: its commit deadline (the expiry fixed before the evaluator
+/// was asked, plus the finish grace) and the replicas' clock skew, so a
+/// finish still verifying past the expiry is never overtaken.
 #[tokio::test]
-async fn a_registration_ends_when_its_cleanup_is_due() {
+async fn a_registration_cleanup_is_due_after_its_commit_deadline() {
     let storage = sqlite().await;
     let (ops, _) = split(
         storage.clone(),
@@ -598,7 +600,8 @@ async fn a_registration_ends_when_its_cleanup_is_due() {
             .unwrap()
             .expect("the admission is owed");
     assert_eq!(
-        op.expires_at.timestamp_micros(),
+        (commit_deadline(op.expires_at) + sid_core::models::password_history::REPLICA_CLOCK_SKEW)
+            .timestamp_micros(),
         cleanup.not_before.timestamp_micros()
     );
 }

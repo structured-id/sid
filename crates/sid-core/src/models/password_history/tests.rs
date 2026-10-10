@@ -31,6 +31,27 @@ fn entry(epoch: HistoryEpochId, seq: i64) -> HistoryEntry {
     }
 }
 
+/// A first enrollment commits until its deadline, its expiry plus the finish
+/// grace, and its cleanup is due only after that deadline and the replicas'
+/// clock skew: a finish that took the operation before its expiry and is
+/// still verifying its proof is never overtaken by the abort.
+#[test]
+fn an_enrollment_cleanup_waits_for_its_commit_deadline() {
+    let expires_at = DateTime::from_timestamp_micros(1_790_000_000_000_000).unwrap();
+    let deadline = commit_deadline(expires_at);
+    assert_eq!(deadline, expires_at + ENROLLMENT_FINISH_GRACE);
+    let work = EnrollmentAdmission {
+        operation: Uuid::now_v7(),
+        owner_domain: [1; 32],
+        expires_at,
+    }
+    .work();
+    assert!(
+        work.not_before.expect("due at a set time") > deadline,
+        "the cleanup is due after every commit it could overtake"
+    );
+}
+
 /// A transferred history must accept its next write: a revision that cannot
 /// move once more would refuse every later password of its owner.
 #[test]

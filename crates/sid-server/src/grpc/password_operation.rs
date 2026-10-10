@@ -62,6 +62,7 @@ use sid_core::grpc_error::refuse::invalid_field;
 use sid_core::grpc_error::{ApiError, ErrorReason};
 use sid_core::models::password_history::DEFAULT_HISTORY_DEPTH;
 use sid_core::models::password_history::MAX_HISTORY_DOMAINS;
+use sid_core::models::password_history::commit_deadline;
 use sid_core::models::{
     AuditEntry, Credential, CredentialId, CredentialType, EnrollmentAdmission, EnrollmentCleanup,
     HistoryCommit, HistoryEpochDescriptor, HistoryEpochId, HistoryEvidence, HistoryKsf,
@@ -988,8 +989,30 @@ impl PasswordOperations {
     /// nothing to retry but a new operation. An operation already committed
     /// answers with its recorded result when the record is the one it was
     /// committed with. Exhausted proof capacity restores the pending
-    /// operation for an exact retry; it is not a rejected proof.
+    /// operation for an exact retry; it is not a rejected proof. A finish
+    /// whose verification ran past the operation's commit deadline commits
+    /// nothing: a first enrollment's cleanup may be recorded from then on.
     pub(crate) async fn finish(
+        &self,
+        zkpp: Arc<ZkppOpaqueServer>,
+        id: &PasswordOperationId,
+        method: &'static str,
+        record: &[u8],
+        proof: Option<PasswordRegistrationProof>,
+        authorized: impl FnOnce(&PendingOperation) -> Result<(), Status>,
+    ) -> Result<Finish, Status> {
+        let finished = self
+            .verify_finish(zkpp, id, method, record, proof, authorized)
+            .await?;
+        if let Finish::Ready(done) = &finished
+            && chrono::Utc::now() >= commit_deadline(done.operation.expires_at)
+        {
+            return Err(expired());
+        }
+        Ok(finished)
+    }
+
+    async fn verify_finish(
         &self,
         zkpp: Arc<ZkppOpaqueServer>,
         id: &PasswordOperationId,

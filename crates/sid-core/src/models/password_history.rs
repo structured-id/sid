@@ -670,14 +670,29 @@ impl HistoryCommit {
 /// either committed or been aborted and its key reclaimed.
 pub const ENROLLMENT_ADMISSION_KIND: &str = "password_history.enrollment";
 
+/// How long after a password operation's expiry a finish that took the
+/// operation before it may still commit: its proof verification and history
+/// KSF run in between. Past the [`commit_deadline`] the finish refuses.
+pub const ENROLLMENT_FINISH_GRACE: chrono::Duration = chrono::Duration::minutes(5);
+
+/// How far apart the replicas' clocks may be: a cleanup due by one replica's
+/// clock waits this long beyond the deadline another replica enforces.
+pub const REPLICA_CLOCK_SKEW: chrono::Duration = chrono::Duration::minutes(1);
+
+/// The last instant an operation expiring at `expires_at` may commit.
+pub fn commit_deadline(expires_at: DateTime<Utc>) -> DateTime<Utc> {
+    expires_at + ENROLLMENT_FINISH_GRACE
+}
+
 /// Attempts at an enrollment's terminal step before it is recorded failed:
 /// with an hourly retry this outlasts an evaluator outage of more than a day.
 pub const ENROLLMENT_ADMISSION_ATTEMPTS: u32 = 40;
 
 /// A first enrollment as the credential authority admits it, before the
 /// evaluator creates the new owner's key: the operation, the owner's
-/// history input domain and the expiry after which it can no longer
-/// commit. It carries no password, proof or secret.
+/// history input domain and its expiry (no step starts after it; a finish
+/// already running commits until the [`commit_deadline`]). It carries no
+/// password, proof or secret.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnrollmentAdmission {
     /// The password operation (16 UUIDv7 bytes).
@@ -687,15 +702,16 @@ pub struct EnrollmentAdmission {
 }
 
 impl EnrollmentAdmission {
-    /// The durable work recording this admission: one per operation, due at
-    /// its expiry, when the registration is either committed or aborted.
+    /// The durable work recording this admission: one per operation, due
+    /// once the registration can no longer commit (its [`commit_deadline`],
+    /// on any replica's clock), when it is either committed or aborted.
     pub fn work(&self) -> crate::models::NewWork {
         let kind = crate::models::WorkKind::new(ENROLLMENT_ADMISSION_KIND)
             .expect("the enrollment kind is valid");
         let payload = serde_json::to_vec(self).expect("an admission serializes");
         let mut work = crate::models::NewWork::new(kind, payload);
         work.id = crate::models::WorkId(self.operation);
-        work.not_before = Some(self.expires_at);
+        work.not_before = Some(commit_deadline(self.expires_at) + REPLICA_CLOCK_SKEW);
         work.max_attempts = ENROLLMENT_ADMISSION_ATTEMPTS;
         work
     }
