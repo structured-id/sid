@@ -686,5 +686,25 @@ pub async fn test_key_archive_round_trip(store: &dyn HistoryKeyStore) {
         store.export_keys(&misbound.owner_domain).await.unwrap(),
         None
     );
+    // An inactive epoch without its replacement revision could never be
+    // retired; such an archive is refused before any write.
+    let other = owner();
+    let mut inactive = new_epoch(other, 64);
+    inactive.epoch.status = HistoryEpochUse::CompareOnly;
+    let mut epochs = vec![new_epoch(other, 63), inactive];
+    epochs.sort_by_key(|e| (e.epoch.created_at, e.epoch.id));
+    let unreplaced = KeyArchive {
+        owner_domain: other,
+        epochs,
+        replaced: vec![],
+    };
+    assert!(matches!(
+        store.import_keys(&unreplaced, audit()).await,
+        Err(sid_core::Error::Validation(_))
+    ));
+    assert_eq!(
+        store.export_keys(&unreplaced.owner_domain).await.unwrap(),
+        None
+    );
     assert_eq!(store.export_keys(&domain).await.unwrap(), Some(archive));
 }

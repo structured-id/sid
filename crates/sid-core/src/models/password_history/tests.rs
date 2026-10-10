@@ -49,6 +49,23 @@ fn an_archive_whose_revision_cannot_advance_is_refused() {
     assert!(archive(0).validate().is_err());
 }
 
+/// The next accepted password takes the sequence after the newest entry: an
+/// entry at the top of the range would refuse every later password of its
+/// owner.
+#[test]
+fn an_archive_entry_whose_sequence_cannot_advance_is_refused() {
+    let o = owner();
+    let active = epoch(o, HistoryEpochUse::Active);
+    let archive = |seq| HistoryArchive {
+        owner: o,
+        revision: 1,
+        epochs: vec![active.clone()],
+        entries: vec![entry(active.id, seq)],
+    };
+    assert!(archive(i64::MAX - 1).validate().is_ok());
+    assert!(archive(i64::MAX).validate().is_err());
+}
+
 /// An epoch's KSF work is bounded like its memory: an archive whose epoch
 /// would hold a checker for unbounded time is refused before import.
 #[test]

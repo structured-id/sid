@@ -433,7 +433,9 @@ impl HistoryArchive {
         }
         let mut entries = BTreeSet::new();
         for entry in &self.entries {
+            // The next accepted password takes the newest sequence plus one.
             if entry.seq <= 0
+                || entry.seq == i64::MAX
                 || entry.created_at.timestamp_subsec_nanos() % 1000 != 0
                 || entry.evidence.policy_version > i32::MAX as u32
                 || !entries.insert((entry.epoch, entry.seq))
@@ -546,6 +548,18 @@ impl KeyArchive {
             {
                 return Err(Error::Validation("invalid key archive replacement".into()));
             }
+        }
+        // Each inactive epoch has exactly one replacement record (duplicates
+        // are refused by the strict order above): retirement keys on it, so
+        // an epoch without one would keep its key forever.
+        let inactive = ids
+            .values()
+            .filter(|status| **status != HistoryEpochUse::Active)
+            .count();
+        if self.replaced.len() != inactive {
+            return Err(Error::Validation(
+                "key archive lacks a replacement for an inactive epoch".into(),
+            ));
         }
         Ok(())
     }
