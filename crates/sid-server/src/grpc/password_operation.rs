@@ -201,6 +201,9 @@ pub(crate) struct PendingOperation {
     /// A change's sign-in with the current password.
     #[serde(default)]
     pub current_password: CurrentPassword,
+    /// When the operation ends, fixed when it is prepared: every step stores
+    /// it until then, and a first enrollment's cleanup is due then.
+    pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// What execute's KE3 established.
@@ -680,9 +683,17 @@ impl PasswordOperations {
         self
     }
 
+    /// Store `op` until its deadline; once that has passed it is expired.
     async fn store(&self, op: &PendingOperation) -> Result<(), Status> {
-        self.ops.insert(&op.id.to_string(), op).await?;
-        Ok(())
+        if self
+            .ops
+            .insert_until(&op.id.to_string(), op, op.expires_at)
+            .await?
+        {
+            Ok(())
+        } else {
+            Err(expired())
+        }
     }
 
     /// Take the pending operation `id` exclusively; a concurrent step of the
@@ -710,6 +721,11 @@ impl PasswordOperations {
             OperationOwner::Existing(profile_id) => (profile_id, OwnerKind::Existing),
             OperationOwner::Decoy => (ProfileId::generate(), OwnerKind::Decoy),
         };
+        // One deadline for every record of the operation: its pending state,
+        // the evaluator's record and a first enrollment's cleanup.
+        let expires_at = chrono::Utc::now()
+            + chrono::Duration::from_std(OPERATION_TTL)
+                .expect("the operation lifetime fits a duration");
         let mut op = PendingOperation {
             id: PasswordOperationId::generate(),
             purpose,
@@ -722,6 +738,7 @@ impl PasswordOperations {
             credential_identifier: rand::random(),
             registration_request: None,
             current_password: CurrentPassword::Absent,
+            expires_at,
         };
         let registration_response = match registration_request {
             Some(request) => Some(Self::start_opaque(zkpp, &mut op, request)?),
@@ -734,9 +751,6 @@ impl PasswordOperations {
             .get_password_history(owner)
             .await
             .map_err(internal)?;
-        let expires_at = chrono::Utc::now()
-            + chrono::Duration::from_std(OPERATION_TTL)
-                .expect("the operation lifetime fits a duration");
         if kind == OwnerKind::New {
             // Durable before the evaluator makes the new owner's key, so a
             // registration that never commits (abandoned, or lost to a crash
@@ -1274,8 +1288,17 @@ impl HistoryEvaluation {
         id: &PasswordOperationId,
         record: &EvaluatorOperation,
     ) -> Result<(), Status> {
-        self.ops.insert(&id.to_string(), record).await?;
-        Ok(())
+        // Until the credential service's deadline, not a fresh lifetime per
+        // step: past it a first enrollment's key may already be reclaimed.
+        if self
+            .ops
+            .insert_until(&id.to_string(), record, record.expires_at)
+            .await?
+        {
+            Ok(())
+        } else {
+            Err(expired())
+        }
     }
 
     /// Admit the operation of `admission` and select its epochs, recorded

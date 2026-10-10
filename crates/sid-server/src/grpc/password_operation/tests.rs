@@ -90,6 +90,7 @@ fn pending(purpose: OperationPurpose) -> PendingOperation {
         credential_identifier: [7; 16],
         registration_request: None,
         current_password: CurrentPassword::Absent,
+        expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
     }
 }
 
@@ -539,6 +540,67 @@ fn a_skipped_step_is_invalid_state() {
         .expect("precondition")
         .violations[0];
     assert_eq!(violation.r#type, "PASSWORD_OPERATION_STEP");
+}
+
+/// An operation is kept until the deadline it was prepared with, however
+/// many steps store it again: the terminal abort of a registration is due at
+/// that deadline, so a step must not find the operation after it. Past the
+/// deadline a step's store refuses it as expired.
+#[tokio::test]
+async fn a_stored_operation_ends_at_its_deadline() {
+    let (ops, _) = split(
+        sqlite().await,
+        sid_core::models::OrgId::generate(),
+        manager(3),
+        manager(3),
+    );
+    let mut op = pending(change());
+    op.expires_at = chrono::Utc::now() + chrono::Duration::milliseconds(60);
+    ops.store(&op).await.unwrap();
+    let op = ops.take(&op.id).await.unwrap();
+    ops.store(&op).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+    let gone = ops.take(&op.id).await.unwrap_err();
+    assert_eq!(gone.code(), Code::FailedPrecondition, "{}", gone.message());
+
+    let late = ops.store(&op).await.unwrap_err();
+    assert_eq!(late.code(), Code::FailedPrecondition, "{}", late.message());
+    assert!(ops.take(&op.id).await.is_err(), "stored past its deadline");
+}
+
+/// A first enrollment's operation ends exactly when its cleanup becomes
+/// due, the deadline fixed before the evaluator was asked.
+#[tokio::test]
+async fn a_registration_ends_when_its_cleanup_is_due() {
+    let storage = sqlite().await;
+    let (ops, _) = split(
+        storage.clone(),
+        sid_core::models::OrgId::generate(),
+        manager(3),
+        manager(3),
+    );
+    let owner = ProfileId::generate();
+    let prepared = ops
+        .prepare(
+            &zkpp_without_proofs(),
+            change(),
+            OperationOwner::New(owner),
+            owner.to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+    let id = operation_id(prepared.context.operation_id.as_ref()).unwrap();
+    let op = ops.take(&id).await.unwrap();
+    let cleanup =
+        sid_plugin::WorkStore::get_work(storage.as_ref(), sid_core::models::WorkId(id.into_uuid()))
+            .await
+            .unwrap()
+            .expect("the admission is owed");
+    assert_eq!(
+        op.expires_at.timestamp_micros(),
+        cleanup.not_before.timestamp_micros()
+    );
 }
 
 /// Replacing the active policy must invalidate a pending operation before
@@ -1274,8 +1336,9 @@ async fn only_an_admitted_live_operation_is_evaluated() {
         "OPERATION_EXPIRED"
     );
 
+    // A record past its deadline is not even stored.
     let expired_id = PasswordOperationId::generate();
-    evaluation
+    let late = evaluation
         .store(
             &expired_id,
             &EvaluatorOperation {
@@ -1289,7 +1352,11 @@ async fn only_an_admitted_live_operation_is_evaluated() {
             },
         )
         .await
-        .unwrap();
+        .unwrap_err();
+    assert_eq!(
+        late.get_details_error_info().unwrap().reason,
+        "OPERATION_EXPIRED"
+    );
     let status = evaluation
         .evaluate(&expired_id, &[2; 32])
         .await
