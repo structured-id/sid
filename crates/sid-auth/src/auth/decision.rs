@@ -42,7 +42,7 @@ pub struct Pdp {
     pub authz: tonic::transport::Channel,
     /// This service's own credential for the authorization API; routes that
     /// ask sid-authz have no verdict without it.
-    pub checker: Option<Arc<crate::credential::ClientCredential>>,
+    pub checker: Option<Arc<sid_authn::client_credential::ClientCredential>>,
     /// Where a 401 sends a browser to sign in; empty for none.
     pub login_url: String,
 }

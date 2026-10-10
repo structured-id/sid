@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::*;
+use sid_authn::client_credential::ClientAuthentication;
 
 #[test]
 fn minimal_config_takes_defaults() {

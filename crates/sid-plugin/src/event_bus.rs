@@ -37,11 +37,64 @@ pub enum EventBusError {
     #[error("invalid replay window: {0}")]
     InvalidReplayWindow(String),
 
+    /// This bus keeps no event until a consumer settles it.
+    #[error("durable consumption is not supported by this event bus")]
+    DurableUnsupported,
+
     #[error("event bus error: {0}")]
     Other(String),
 }
 
 pub type EventBusResult<T> = Result<T, EventBusError>;
+
+/// A named durable consumer: its position survives restarts and is shared
+/// by every replica that consumes under the same name, each event going to
+/// one of them.
+#[derive(Debug, Clone)]
+pub struct DurableConsumer {
+    /// Stable across restarts and replicas; one per consuming feature.
+    pub name: String,
+    /// The event types it consumes (exact types or bus wildcards).
+    pub event_types: Vec<String>,
+}
+
+/// What a durable consumer did with a delivered event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Settlement {
+    /// The effect is recorded: the event is acknowledged and not delivered
+    /// again.
+    Done,
+    /// Not done yet: the event stays the consumer's and is delivered again
+    /// after `delay`.
+    Retry(std::time::Duration),
+    /// The event can never be processed (malformed, not this consumer's to
+    /// act on): it is not delivered again.
+    Reject(String),
+}
+
+/// One event handed to a durable consumer. The bus acknowledges it only on
+/// [`Settlement::Done`]: until the consumer settles it, the event remains
+/// the consumer's. A delivery dropped unsettled is delivered again.
+#[derive(Debug)]
+pub struct Delivery {
+    pub event: Event,
+    settled: tokio::sync::oneshot::Sender<Settlement>,
+}
+
+impl Delivery {
+    /// A delivery of `event` and the receiver its settlement arrives on.
+    pub fn new(event: Event) -> (Self, tokio::sync::oneshot::Receiver<Settlement>) {
+        let (settled, outcome) = tokio::sync::oneshot::channel();
+        (Self { event, settled }, outcome)
+    }
+
+    /// Settle the delivery. A bus that stopped waiting delivers it again.
+    pub fn settle(self, settlement: Settlement) {
+        if self.settled.send(settlement).is_err() {
+            tracing::debug!("event settled after its bus stopped waiting; it is delivered again");
+        }
+    }
+}
 
 /// Internal event bus for publishing and subscribing to domain events.
 ///
@@ -70,6 +123,19 @@ pub trait EventBus: Send + Sync {
     ) -> EventBusResult<mpsc::Receiver<Event>> {
         let _ = (from, to, filter);
         Err(EventBusError::ReplayUnsupported)
+    }
+
+    /// Consume as `consumer`, at least once: every matching event published
+    /// since the consumer was first created is delivered, and each stays the
+    /// consumer's (delivered again after a crash, a drop or a retry) until it
+    /// is settled [`Settlement::Done`] or [`Settlement::Reject`]. Deliveries
+    /// arrive one at a time; the next follows the settlement of the last.
+    ///
+    /// A bus that keeps no event until it is settled refuses with
+    /// [`EventBusError::DurableUnsupported`] rather than consume lossily.
+    async fn consume(&self, consumer: DurableConsumer) -> EventBusResult<mpsc::Receiver<Delivery>> {
+        let _ = consumer;
+        Err(EventBusError::DurableUnsupported)
     }
 
     /// Check if the event bus is connected and healthy.

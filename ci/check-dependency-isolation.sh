@@ -61,6 +61,7 @@ COMBOS=(
   "sid-storage|--features storage-sqlite"
   "sid-authn|"
   "sid-authn|--features grpc"
+  "sid-authn|--features client-credential"
   "sid-authz|"
   "sid-authz|--no-default-features"
   "sid-authz|--features standalone"

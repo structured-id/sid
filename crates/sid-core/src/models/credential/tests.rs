@@ -15,8 +15,32 @@ fn test_credential_new_defaults() {
     assert_eq!(cred.data.expose(), &[1, 2, 3]);
     assert_eq!(cred.label.as_deref(), Some("My password"));
     assert!(cred.last_used_at.is_none());
-    assert!(cred.policy_version.is_none());
-    assert!(!cred.zkpp_verified);
+    assert_eq!(cred.policy_evidence, PolicyEvidence::Unverified);
+    assert!(!cred.policy_evidence.is_verified());
+}
+
+/// Evidence keeps its policy version and artifact through serialization (the
+/// transfer archive), and an unverified password carries neither.
+#[test]
+fn test_policy_evidence_round_trips() {
+    for evidence in [
+        PolicyEvidence::Unverified,
+        PolicyEvidence::Verified {
+            policy_version: 2,
+            artifact: [7; 32],
+        },
+    ] {
+        let json = serde_json::to_string(&evidence).unwrap();
+        assert_eq!(
+            serde_json::from_str::<PolicyEvidence>(&json).unwrap(),
+            evidence
+        );
+    }
+    assert!(
+        serde_json::from_str::<PolicyEvidence>(r#"{"kind":"verified","policy_version":1}"#)
+            .is_err(),
+        "a verdict without its artifact is refused"
+    );
 }
 
 /// Stored type and status names read back; any other name is refused, never

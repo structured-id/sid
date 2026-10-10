@@ -86,6 +86,9 @@ const INTERNAL_RPCS: &[&str] = &[
     // use OidcProviderService.
     "sid.v1.authn.OidcIssuerService/GetOidcIssuer",
     "sid.v1.authn.OidcIssuerService/GetProtectedResource",
+    // Called only by the credential service, under its own service
+    // identity, to have the history evaluator select an operation's domains.
+    "sid.v1.authn.PasswordHistoryEvaluatorService/PreparePasswordHistory",
     // The account BFF reaches it over the deployment's gRPC channel; a
     // browser or relying party has no business with it.
     "sid.v1.authn.SystemIntegrationService/GetAccountConnection",

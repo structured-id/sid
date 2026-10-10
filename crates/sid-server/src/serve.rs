@@ -75,12 +75,6 @@ impl CeServices {
             .await
             .add(AuthServiceServer::from_arc(c.auth_svc.clone()))
             .await
-            // The VOPRF evaluator of password history; CE co-locates it with
-            // the credential service.
-            .add(PasswordHistoryEvaluatorServiceServer::new(
-                c.auth_svc.history_evaluator(),
-            ))
-            .await
             .add(ProjectServiceServer::from_arc(c.project_svc.clone()))
             .await
             .add(OidcIssuerServiceServer::new(
@@ -151,6 +145,14 @@ impl CeServices {
                 ),
             ))
             .await;
+
+        // The VOPRF evaluator of password history, when it runs in this
+        // process; a split deployment serves it from its own.
+        if let Some(evaluator) = c.auth_svc.history_evaluator() {
+            services
+                .add(PasswordHistoryEvaluatorServiceServer::new(evaluator))
+                .await;
+        }
 
         #[cfg(feature = "scim")]
         {
@@ -318,6 +320,7 @@ pub async fn serve(
     )?;
 
     let work_runner = spawn_work_runner(&c, stopped.clone().wait())?;
+    let settlements = crate::init::spawn_cleanup_settlements(&c, stopped.clone().wait());
 
     let (routes, health) = services.services.into_parts();
 
@@ -374,6 +377,11 @@ pub async fn serve(
     };
     // Attempts in flight record their outcome before the process ends.
     let drained = work_runner.await;
+    // A settlement being recorded finishes; an unacknowledged one is
+    // delivered again.
+    if let Some(settlements) = settlements {
+        settlements.await?;
+    }
     served?;
     http_drained?;
     transport?;

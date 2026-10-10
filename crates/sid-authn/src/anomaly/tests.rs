@@ -226,6 +226,26 @@ async fn test_brute_force_lockout() {
     assert_eq!(result.rule, "brute_force");
 }
 
+/// Each counted attempt learns whether it is within the limit: the attempt
+/// that reaches it is still permitted and starts the lockout, every later one
+/// is not.
+#[tokio::test]
+async fn test_count_attempt_permits_up_to_the_limit() {
+    let config = AnomalyConfig {
+        brute_force_max_attempts: 3,
+        brute_force_window_secs: 300,
+        brute_force_lockout_secs: 60,
+        ..Default::default()
+    };
+    let detector = AnomalyDetector::new(config, NetworkPolicy::default(), test_cache());
+    let identity = "change:alice";
+    for attempt in 1..=3 {
+        assert!(detector.count_attempt(identity).await.unwrap(), "{attempt}");
+    }
+    assert!(detector.lockout_active(identity).await.unwrap());
+    assert!(!detector.count_attempt(identity).await.unwrap());
+}
+
 /// The retry delay a locked-out client is told is the configured lockout.
 #[test]
 fn test_lockout_duration_is_the_configured_lockout() {
