@@ -2981,6 +2981,13 @@ async fn test_history_split_refuses_populated_history() {
     .await
     .unwrap();
     assert!(kept, "nothing of the layout changed");
+    let history_kept: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM password_histories WHERE owner_id = $1)")
+            .bind(profile.id)
+            .fetch_one(backend.pool())
+            .await
+            .unwrap();
+    assert!(history_kept, "the history data is kept");
 
     // Emptied, it converts.
     sqlx::query("DELETE FROM password_histories")
@@ -3000,6 +3007,68 @@ async fn test_history_split_refuses_populated_history() {
     .await
     .unwrap();
     assert!(!keys_left, "the credential service's epochs carry no key");
+}
+
+/// Lifecycle state alone (no history, no epoch) is history data too: the
+/// split refuses it on every start, keeps it byte for byte and stays
+/// unrecorded, as the SQLite upgrade does.
+#[tokio::test]
+async fn test_history_split_refuses_lifecycle_only_state() {
+    let schema = format!("history_split_{}", uuid::Uuid::now_v7().simple());
+    let backend = PostgresBackend::new(&database_url(), Some(schema.clone()))
+        .await
+        .expect("Failed to connect to PostgreSQL. Is the database running?");
+    sid_storage::migrator::run_migrations_through(
+        backend.pool(),
+        Some(&schema),
+        "20261010_057_password_history_lifecycle",
+    )
+    .await
+    .expect("migrations through 057");
+    let profile = common::create_test_profile("split-lifecycle");
+    backend
+        .create_profile(&profile, common::test_audit())
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO password_history_lifecycle (owner_id, revision, live_epochs)
+         VALUES ($1, 2, '{}')",
+    )
+    .bind(profile.id)
+    .execute(backend.pool())
+    .await
+    .unwrap();
+    let lifecycle = || async {
+        sqlx::query_scalar::<_, String>(
+            "SELECT owner_id::text || ',' || revision || ',' || live_epochs::text
+             FROM password_history_lifecycle",
+        )
+        .fetch_all(backend.pool())
+        .await
+        .unwrap()
+    };
+    let before = lifecycle().await;
+
+    for start in 1..=2 {
+        let err = sid_storage::migrator::run_migrations(backend.pool(), Some(&schema))
+            .await
+            .expect_err("lifecycle state refuses the split");
+        assert!(
+            format!("{err:#}").contains("password history data exists"),
+            "start {start}: {err:#}"
+        );
+        assert_eq!(lifecycle().await, before, "start {start}: lifecycle kept");
+        let recorded: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM _migrations WHERE name = '20261010_058_history_evaluator_split')",
+        )
+        .fetch_one(backend.pool())
+        .await
+        .unwrap();
+        assert!(
+            !recorded,
+            "start {start}: the refused migration is not recorded"
+        );
+    }
 }
 
 // ─── Email policy revisions ───

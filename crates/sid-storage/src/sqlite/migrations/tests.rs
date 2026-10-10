@@ -222,12 +222,23 @@ async fn history_split_refuses_populated_history() {
         .await
         .unwrap();
 
-    upgrade(&pool, BASELINE, MIGRATIONS)
+    let err = upgrade(&pool, BASELINE, MIGRATIONS)
         .await
         .expect_err("a populated history refuses the split");
+    assert!(
+        err.to_string()
+            .contains("password_history_data_exists_in_the_pre_release_layout_and_is_kept"),
+        "the refusal states its reason: {err}"
+    );
     assert_eq!(version(&pool).await, 4, "the version is unchanged");
     assert!(has_table(&pool, "password_histories").await);
     assert!(!has_table(&pool, "history_key_epochs").await);
+    let history_kept: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM password_histories WHERE owner_id = 'p-history'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(history_kept, 1, "the history data is kept");
 
     sqlx::query("DELETE FROM password_histories")
         .execute(&pool)
@@ -251,6 +262,160 @@ async fn history_split_refuses_populated_history() {
         key_column, 0,
         "the credential service's epochs carry no key"
     );
+}
+
+/// The lifecycle tables a development build may have created before the
+/// split; a released file has none of them.
+const DEV_LIFECYCLE_TABLES: &str = "
+CREATE TABLE password_history_lifecycle (
+    owner_id    TEXT PRIMARY KEY REFERENCES profiles(id) ON DELETE CASCADE,
+    revision    INTEGER NOT NULL CHECK (revision >= 0),
+    live_epochs TEXT NOT NULL
+);
+CREATE TABLE password_history_replaced (
+    epoch_id             TEXT PRIMARY KEY REFERENCES password_history_epochs(id) ON DELETE CASCADE,
+    owner_id             TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    replaced_at_revision INTEGER NOT NULL CHECK (replaced_at_revision > 0)
+);
+CREATE TABLE password_history_uses (
+    operation_id TEXT NOT NULL,
+    epoch_id     TEXT NOT NULL REFERENCES password_history_epochs(id) ON DELETE CASCADE,
+    owner_id     TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    expires_at   TEXT NOT NULL,
+    PRIMARY KEY (operation_id, epoch_id)
+);
+";
+
+/// Every row of `table`, as text, in a stable order: what a refused upgrade
+/// must leave byte for byte.
+async fn rows(pool: &SqlitePool, table: &str) -> Vec<String> {
+    let columns: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info(?) ORDER BY cid")
+            .bind(table)
+            .fetch_all(pool)
+            .await
+            .unwrap();
+    // `quote` renders a blob as its exact hex, so equal text is equal bytes.
+    let row = columns
+        .iter()
+        .map(|c| format!("quote({c})"))
+        .collect::<Vec<_>>()
+        .join(" || ',' || ");
+    // Table and column names come from this test's fixed list and the
+    // table's own schema, never from input.
+    sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT {row} FROM {table} ORDER BY 1"
+    )))
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+/// Lifecycle state alone (no history, no epoch) is history data too: a
+/// development file holding it refuses the split as PostgreSQL does, keeps
+/// it and its version, and refuses again on the next start. Existing but
+/// empty lifecycle tables convert.
+#[tokio::test]
+async fn history_split_refuses_lifecycle_only_state() {
+    let (_dir, path) = scratch();
+    let pool = open(&path).await;
+    upgrade(&pool, BASELINE, &MIGRATIONS[..3]).await.unwrap();
+    sqlx::raw_sql(DEV_LIFECYCLE_TABLES)
+        .execute(&pool)
+        .await
+        .unwrap();
+    add_profile(&pool, "p-lifecycle").await;
+    sqlx::query(
+        "INSERT INTO password_history_lifecycle (owner_id, revision, live_epochs)
+         VALUES ('p-lifecycle', 2, '[]')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let before = rows(&pool, "password_history_lifecycle").await;
+
+    for start in 1..=2 {
+        let err = upgrade(&pool, BASELINE, MIGRATIONS)
+            .await
+            .expect_err("lifecycle state refuses the split");
+        assert!(
+            err.to_string()
+                .contains("password_history_data_exists_in_the_pre_release_layout_and_is_kept"),
+            "start {start}: {err}"
+        );
+        assert_eq!(version(&pool).await, 4, "start {start}: version unchanged");
+        assert_eq!(
+            rows(&pool, "password_history_lifecycle").await,
+            before,
+            "start {start}: lifecycle kept byte for byte"
+        );
+        assert!(!has_table(&pool, "history_key_epochs").await);
+    }
+
+    sqlx::query("DELETE FROM password_history_lifecycle")
+        .execute(&pool)
+        .await
+        .unwrap();
+    upgrade(&pool, BASELINE, MIGRATIONS)
+        .await
+        .expect("empty lifecycle tables convert");
+    assert!(!has_table(&pool, "password_history_lifecycle").await);
+    assert!(has_table(&pool, "history_key_epochs").await);
+}
+
+/// A refused split keeps a populated history byte for byte: the sealed key
+/// of its epoch and its entry, as well as its lifecycle.
+#[tokio::test]
+async fn history_split_keeps_populated_history_byte_for_byte() {
+    let (_dir, path) = scratch();
+    let pool = open(&path).await;
+    upgrade(&pool, BASELINE, &MIGRATIONS[..3]).await.unwrap();
+    sqlx::raw_sql(DEV_LIFECYCLE_TABLES)
+        .execute(&pool)
+        .await
+        .unwrap();
+    add_profile(&pool, "p-full").await;
+    sqlx::raw_sql(
+        "INSERT INTO password_histories (owner_id, revision) VALUES ('p-full', 2);
+         INSERT INTO password_history_epochs
+             (id, owner_id, suite, public_key, wrapped_key, ksf_memory_kib, ksf_passes,
+              ksf_lanes, ksf_salt, status, created_at)
+         VALUES ('e-1', 'p-full', 'pallas-poseidon-v1', zeroblob(32), X'00112233445566778899',
+                 19456, 3, 1, zeroblob(32), 'active', '2026-10-01T00:00:00.000000Z');
+         INSERT INTO password_history_entries
+             (epoch_id, owner_id, seq, entry, operation_id, policy_version, created_at)
+         VALUES ('e-1', 'p-full', 1, randomblob(32), 'op-1', 1, '2026-10-01T00:00:00.000000Z');
+         INSERT INTO password_history_lifecycle (owner_id, revision, live_epochs)
+         VALUES ('p-full', 2, '[\"e-1\"]');
+         INSERT INTO password_history_uses (operation_id, epoch_id, owner_id, expires_at)
+         VALUES ('op-2', 'e-1', 'p-full', '2026-10-02T00:00:00.000000Z');",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let tables = [
+        "password_histories",
+        "password_history_epochs",
+        "password_history_entries",
+        "password_history_lifecycle",
+        "password_history_uses",
+    ];
+    let mut before = Vec::new();
+    for table in tables {
+        before.push(rows(&pool, table).await);
+    }
+
+    upgrade(&pool, BASELINE, MIGRATIONS)
+        .await
+        .expect_err("a populated history refuses the split");
+    assert_eq!(version(&pool).await, 4);
+    for (table, before) in tables.iter().zip(before) {
+        assert_eq!(
+            rows(&pool, table).await,
+            before,
+            "{table} kept byte for byte"
+        );
+    }
 }
 
 /// Verdicts stored before artifacts were named are demoted with their

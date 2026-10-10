@@ -272,9 +272,10 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
 
         let backend = storage_backend.with_audit_log(audit_log.clone());
 
+        // A refused migration changed nothing; its reason is the error's cause.
         sid_storage::migrator::run_migrations(backend.pool(), schema.as_deref())
             .await
-            .expect("Migration failed");
+            .context("database migrations")?;
 
         let local_history_keys =
             LocalHistoryKeys::Postgres(sid_storage::PgHistoryKeyStore::new(backend.pool().clone()));
@@ -291,7 +292,7 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
             std::env::var("SID_SQLITE_PATH").unwrap_or_else(|_| "/var/lib/sid/auth.db".to_string());
         let backend = sid_storage::sqlite::SqliteBackend::new(&db_path)
             .await
-            .expect("Failed to initialize SQLite backend");
+            .context("SQLite storage and its migrations")?;
         let audit_log: Arc<dyn sid_plugin::audit::AuditLog> = Arc::new(
             sid_storage::sqlite::SqliteAuditLog::new(backend.pool().clone()),
         );

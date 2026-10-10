@@ -95,23 +95,35 @@ CREATE TABLE history_key_abandoned (
 /// The history evaluator's keys and lifecycle move to its own tables, keyed by
 /// the owner's history input domain; the PostgreSQL migration 058 and the
 /// evaluator's own migration set state the contract. An embedded file keeps
-/// both in one database. Only an empty history layout is converted: the guard
-/// row's check fails, aborting the whole upgrade unchanged, when any history
-/// data exists. The upgrade transaction holds the write lock, so nothing is
-/// written between the check and the change. A released file has no
-/// lifecycle tables at all; one created by a development build may have them,
-/// and with no epoch they can hold nothing that needs keeping.
+/// both in one database. The converted layout existed only in development
+/// builds, and only an empty one is converted: the guard row's check fails,
+/// aborting the whole upgrade unchanged with the data kept, when any history
+/// data exists, lifecycle state included; history is never deleted to
+/// proceed. The check is named so the refusal states its reason. The upgrade
+/// transaction holds the write lock, so nothing is written between the check
+/// and the change. A released file has no lifecycle tables; one created by a
+/// development build may have them, so they are created empty where absent,
+/// only for the check, and dropped with the rest.
 const HISTORY_EVALUATOR_SPLIT: &str = "
-CREATE TEMP TABLE history_split_guard (rows INTEGER NOT NULL CHECK (rows = 0));
+CREATE TABLE IF NOT EXISTS password_history_lifecycle (owner_id TEXT);
+CREATE TABLE IF NOT EXISTS password_history_replaced (epoch_id TEXT);
+CREATE TABLE IF NOT EXISTS password_history_uses (operation_id TEXT);
+CREATE TEMP TABLE history_split_guard (
+    rows INTEGER NOT NULL
+    CONSTRAINT password_history_data_exists_in_the_pre_release_layout_and_is_kept CHECK (rows = 0)
+);
 INSERT INTO history_split_guard (rows) SELECT
-    (SELECT count(*) FROM password_histories)
-  + (SELECT count(*) FROM password_history_epochs)
-  + (SELECT count(*) FROM password_history_entries);
+    EXISTS (SELECT 1 FROM password_histories)
+    OR EXISTS (SELECT 1 FROM password_history_epochs)
+    OR EXISTS (SELECT 1 FROM password_history_entries)
+    OR EXISTS (SELECT 1 FROM password_history_lifecycle)
+    OR EXISTS (SELECT 1 FROM password_history_replaced)
+    OR EXISTS (SELECT 1 FROM password_history_uses);
 DROP TABLE history_split_guard;
 
-DROP TABLE IF EXISTS password_history_uses;
-DROP TABLE IF EXISTS password_history_replaced;
-DROP TABLE IF EXISTS password_history_lifecycle;
+DROP TABLE password_history_uses;
+DROP TABLE password_history_replaced;
+DROP TABLE password_history_lifecycle;
 ALTER TABLE password_history_epochs DROP COLUMN wrapped_key;
 
 CREATE TABLE password_history_write_cutoff (

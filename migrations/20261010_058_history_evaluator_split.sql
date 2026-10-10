@@ -3,11 +3,14 @@
 -- credential service's tables keep only each epoch's public descriptor and the
 -- retained entries.
 --
--- Only an empty history layout is converted: keys sealed for the former owner
--- binding cannot be moved without the evaluator's key manager, and there is no
--- conversion path. When any history data exists this migration refuses before
--- changing anything, so it is not recorded as applied. The tables are locked
--- first, so no concurrent write can land between the check and the change.
+-- The layout this converts was never part of a release: it existed only in
+-- development builds. Only an empty history layout is converted: keys sealed
+-- for the former owner binding cannot be moved without the evaluator's key
+-- manager, and no conversion is provided for an unreleased format. When any
+-- history data exists this migration refuses before changing anything, so the
+-- data is kept and the migration is not recorded as applied; it never deletes
+-- history to proceed. The tables are locked first, so no concurrent write can
+-- land between the check and the change.
 
 LOCK TABLE password_histories, password_history_epochs, password_history_entries,
     password_history_lifecycle, password_history_replaced, password_history_uses
@@ -22,7 +25,7 @@ BEGIN
         OR EXISTS (SELECT 1 FROM password_history_replaced)
         OR EXISTS (SELECT 1 FROM password_history_uses)
     THEN
-        RAISE EXCEPTION 'password history data exists; this layout change converts only an empty history';
+        RAISE EXCEPTION 'password history data exists in the pre-release history layout; this release converts only an empty history and changed nothing (the data is kept)';
     END IF;
 END
 $$;
