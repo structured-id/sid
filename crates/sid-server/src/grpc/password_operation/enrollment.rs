@@ -169,6 +169,9 @@ impl WorkHandler for EnrollmentHandler {
             Err(e) => return WorkOutcome::Retry(e),
         }
         match &self.delivery {
+            // The relayed event is owed in the abort's transaction; the
+            // separate evaluator reclaims the key as it consumes it
+            // ([`super::consume_relayed_cleanup`]), acknowledging only then.
             EvaluatorDelivery::Relay { .. } => WorkOutcome::Done(Some("abort relayed".into())),
             EvaluatorDelivery::InProcess(evaluation) => match evaluation
                 .abandon_enrollment(&admission.owner_domain, admission.operation)
