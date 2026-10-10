@@ -1542,6 +1542,9 @@ fn zkpp_settings(
         }
     }
     let enabled = boolean("SID_ZKPP_ENABLED", enabled)?;
+    // Governs every installed password: registration, change and reset all
+    // run as password operations; the plain OPAQUE registration registers
+    // nothing.
     let require_proof = boolean("SID_ZKPP_REQUIRE_PROOF", required)?;
     anyhow::ensure!(
         enabled || !require_proof,
