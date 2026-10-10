@@ -897,6 +897,29 @@ async fn test_webauthn_authenticate_start_unknown_user() {
 // OPAQUE (AuthService)
 // ═══════════════════════════════════════════════════════════════════
 
+/// A browser on WebTransport asks when a password change needs the current
+/// password, as one on gRPC-Web does: the method is routed to the service,
+/// which answers an anonymous caller UNAUTHENTICATED, not as an unknown method.
+#[tokio::test]
+async fn test_webtransport_routes_the_password_change_requirement() {
+    let svc = TestServices::new(MockStorage::new());
+    let dispatcher = sid_server::webtransport_dispatch::register_all(&svc.identity, &svc.auth);
+    let err = dispatcher
+        .dispatch(
+            "sid.v1.AuthService/GetPasswordChangeRequirement",
+            Vec::new(),
+            tonic::metadata::MetadataMap::new(),
+        )
+        .await
+        .expect_err("an anonymous caller has no session to ask about");
+    assert_eq!(
+        err.code(),
+        tonic::Code::Unauthenticated,
+        "{}",
+        err.message()
+    );
+}
+
 /// A password is installed only by a password operation: the plain OPAQUE
 /// registration RPCs refuse a well-formed request and register nothing, so
 /// they cannot skip the password proof or the first history entry.

@@ -88,6 +88,15 @@ pub fn register_all(
     register_rpc!(
         d,
         auth_svc,
+        "sid.v1.AuthService/GetPasswordChangeRequirement",
+        get_password_change_requirement,
+        (),
+        prost_types::Duration
+    );
+
+    register_rpc!(
+        d,
+        auth_svc,
         "sid.v1.AuthService/ExecutePasswordReset",
         execute_password_reset,
         ExecutePasswordResetRequest,
