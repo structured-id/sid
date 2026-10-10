@@ -151,6 +151,78 @@ pub async fn test_operation_results_travel_between_stores(backend: &dyn StorageB
     assert!(matches!(err, Error::OperationCompleted(_)), "{err:?}");
 }
 
+/// A registration's commit and the terminal abort of the same operation
+/// complete one key: of the two racing, exactly one is written, and the
+/// account exists exactly when the commit won. An abort recorded alone
+/// carries its owed work with it.
+pub async fn test_terminal_abort_races_the_commit(backend: &dyn StorageBackend) {
+    use sid_core::models::{
+        Credential, CredentialType, NewRegistration, Profile, SignupIdentifier,
+    };
+    for round in 0..4 {
+        let (ns, key) = (namespace(), key());
+        let name = format!("enrolled{}", &Uuid::now_v7().simple().to_string()[16..]);
+        let profile = Profile::new(Some(&name));
+        let credential = Credential::new(profile.id, CredentialType::Opaque, vec![round], None);
+        let registration = NewRegistration::new(
+            profile.clone(),
+            SignupIdentifier::Username(&name),
+            Some(credential),
+        )
+        .unwrap();
+        let commit = test_audit().with_operation(OperationCompletion::new(
+            &ns,
+            key.clone(),
+            "registration",
+            b"record",
+            b"committed".to_vec(),
+        ));
+        let owed = sid_core::models::NewWork::new(
+            sid_core::models::WorkKind::new("test.enrollment_abort").unwrap(),
+            vec![round],
+        );
+        let abort = test_audit()
+            .with_operation(OperationCompletion::new(
+                &ns,
+                key.clone(),
+                "abort",
+                &[],
+                Vec::new(),
+            ))
+            .with_work(owed.clone());
+        let (committed, aborted) = tokio::join!(
+            backend.register_profile(&registration, commit),
+            backend.record_outcome(abort),
+        );
+        assert_eq!(
+            usize::from(committed.is_ok()) + usize::from(aborted.is_ok()),
+            1,
+            "{committed:?} {aborted:?}"
+        );
+        let loser = if committed.is_ok() {
+            aborted
+        } else {
+            committed
+        }
+        .unwrap_err();
+        assert!(matches!(loser, Error::OperationCompleted(_)), "{loser:?}");
+        let record = backend
+            .get_operation_result(&ns, &key)
+            .await
+            .unwrap()
+            .expect("one completion");
+        let account = backend.get_profile(profile.id).await.unwrap();
+        let abort_work = backend.get_work(owed.id).await.unwrap();
+        if record.completion.method == "registration" {
+            assert!(account.is_some(), "the commit won but wrote no account");
+            assert!(abort_work.is_none(), "a lost abort owed its work");
+        } else {
+            assert!(account.is_none(), "the abort won but an account exists");
+            assert!(abort_work.is_some(), "the abort's work was not owed");
+        }
+    }
+}
+
 /// A mutation that fails records no completion: the key stays free.
 pub async fn test_failed_mutation_records_no_completion(backend: &dyn StorageBackend) {
     backend.ensure_system_project(test_audit()).await.unwrap();

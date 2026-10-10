@@ -416,5 +416,19 @@ pub(super) async fn apply_in_tx(
         .execute(&mut **tx)
         .await
         .map_err(storage("retention"))?;
+    // Age retention, under the same revision fence: older accepted passwords
+    // go, the newest (this commit's) always stays.
+    if let Some(before) = commit.expires_before(now) {
+        sqlx::query(
+            "DELETE FROM password_history_entries
+             WHERE owner_id = $1 AND seq < $2 AND created_at < $3",
+        )
+        .bind(owner)
+        .bind(seq)
+        .bind(before)
+        .execute(&mut **tx)
+        .await
+        .map_err(storage("age retention"))?;
+    }
     Ok(true)
 }

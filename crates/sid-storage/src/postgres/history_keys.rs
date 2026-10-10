@@ -6,8 +6,8 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sid_core::models::{
-    AuditEntry, HistoryEpochId, HistoryEpochUse, HistoryKsf, HistoryPreparation, HistorySuite,
-    KeyArchive, KeyEpoch, KeyEpochs, NewKeyEpoch, WrappedHistoryKey,
+    AuditEntry, EnrollmentCleanup, HistoryEpochId, HistoryEpochUse, HistoryKsf, HistoryPreparation,
+    HistorySuite, KeyArchive, KeyEpoch, KeyEpochs, NewKeyEpoch, WrappedHistoryKey,
 };
 use sid_core::{Error as SidError, Result as SidResult};
 use sid_plugin::history_keys::HistoryKeyStore;
@@ -109,15 +109,17 @@ async fn audit_in_tx(
     Ok(())
 }
 
+/// Insert `new`; `created_by` is the first enrollment that made it, if any.
 async fn insert_key_epoch(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     new: &NewKeyEpoch,
+    created_by: Option<Uuid>,
 ) -> SidResult<()> {
     let e = &new.epoch;
     sqlx::query(
         "INSERT INTO history_key_epochs (id, owner_domain, suite, public_key, wrapped_key,
-             ksf_memory_kib, ksf_passes, ksf_lanes, ksf_salt, status, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+             ksf_memory_kib, ksf_passes, ksf_lanes, ksf_salt, status, created_at, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
     )
     .bind(e.id.0)
     .bind(e.owner_domain.as_slice())
@@ -130,10 +132,22 @@ async fn insert_key_epoch(
     .bind(e.ksf_salt.as_slice())
     .bind(e.status.as_str())
     .bind(e.created_at)
+    .bind(created_by)
     .execute(&mut **tx)
     .await
     .map_err(storage("key epoch insert"))?;
     Ok(())
+}
+
+/// Whether `operation` was cleaned up as an aborted first enrollment.
+async fn abandoned(conn: &mut sqlx::PgConnection, operation: Uuid) -> SidResult<bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM history_key_abandoned WHERE operation_id = $1)",
+    )
+    .bind(operation)
+    .fetch_one(conn)
+    .await
+    .map_err(storage("abandoned enrollment"))
 }
 
 /// Serialize every write of one owner: a transaction-scoped advisory lock on
@@ -255,12 +269,20 @@ impl HistoryKeyStore for PgHistoryKeyStore {
     async fn create_first_epoch(
         &self,
         new: &NewKeyEpoch,
+        operation: Uuid,
         audit: AuditEntry,
     ) -> SidResult<KeyEpoch> {
         require_active(new)?;
         let owner_domain = &new.epoch.owner_domain;
         let mut tx = self.begin().await?;
         lock_owner(&mut tx, owner_domain).await?;
+        // Serialized with the cleanup by the owner lock: a preparation that
+        // arrives after its operation was abandoned creates nothing.
+        if abandoned(&mut tx, operation).await? {
+            return Err(SidError::Fenced(format!(
+                "first enrollment {operation} was aborted"
+            )));
+        }
         let existing: Vec<KeyEpochRow> = sqlx::query_as(concat!(
             "SELECT ",
             key_epoch_columns!(),
@@ -281,7 +303,7 @@ impl HistoryKeyStore for PgHistoryKeyStore {
                 "the owner already has a history epoch".into(),
             ));
         }
-        insert_key_epoch(&mut tx, new).await?;
+        insert_key_epoch(&mut tx, new, Some(operation)).await?;
         audit_in_tx(&mut tx, audit).await?;
         tx.commit().await.map_err(storage("commit"))?;
         Ok(new.epoch.clone())
@@ -294,7 +316,7 @@ impl HistoryKeyStore for PgHistoryKeyStore {
         if let Some(active) = active_epoch(&mut tx, &new.epoch.owner_domain).await? {
             return Ok(active);
         }
-        insert_key_epoch(&mut tx, new).await?;
+        insert_key_epoch(&mut tx, new, None).await?;
         audit_in_tx(&mut tx, audit).await?;
         tx.commit().await.map_err(storage("commit"))?;
         Ok(new.epoch.clone())
@@ -330,7 +352,7 @@ impl HistoryKeyStore for PgHistoryKeyStore {
         .execute(&mut *tx)
         .await
         .map_err(storage("epoch rotation"))?;
-        insert_key_epoch(&mut tx, new).await?;
+        insert_key_epoch(&mut tx, new, None).await?;
         sqlx::query(
             "INSERT INTO history_key_replaced (epoch_id, owner_domain, replaced_at_revision)
              VALUES ($1, $2, $3) ON CONFLICT (epoch_id) DO NOTHING",
@@ -469,6 +491,86 @@ impl HistoryKeyStore for PgHistoryKeyStore {
         Ok(selected)
     }
 
+    async fn abandon_enrollment(
+        &self,
+        owner_domain: &[u8; 32],
+        operation: Uuid,
+        audit: AuditEntry,
+    ) -> SidResult<EnrollmentCleanup> {
+        let mut tx = self.begin().await?;
+        lock_owner(&mut tx, owner_domain).await?;
+        let fenced: Vec<u8> = sqlx::query_scalar(
+            "INSERT INTO history_key_abandoned (operation_id, owner_domain) VALUES ($1, $2)
+             ON CONFLICT (operation_id) DO UPDATE SET operation_id = EXCLUDED.operation_id
+             RETURNING owner_domain",
+        )
+        .bind(operation)
+        .bind(owner_domain.as_slice())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(storage("enrollment fence"))?;
+        if fenced != owner_domain.as_slice() {
+            return Err(SidError::Validation(
+                "the aborted enrollment was recorded for another owner".into(),
+            ));
+        }
+        let created: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM history_key_epochs WHERE created_by = $1 AND owner_domain = $2",
+        )
+        .bind(operation)
+        .bind(owner_domain.as_slice())
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(storage("enrollment epochs"))?;
+        let outcome = if created.is_empty() {
+            EnrollmentCleanup::NothingCreated
+        } else {
+            // A committed owner is what a lifecycle, another epoch or another
+            // operation's use shows; any of them keeps the key.
+            let (lifecycle, others, uses): (bool, i64, i64) = sqlx::query_as(
+                "SELECT
+                     EXISTS (SELECT 1 FROM history_key_lifecycle WHERE owner_domain = $1),
+                     (SELECT count(*) FROM history_key_epochs
+                      WHERE owner_domain = $1 AND created_by IS DISTINCT FROM $2),
+                     (SELECT count(*) FROM history_key_uses
+                      WHERE owner_domain = $1 AND operation_id <> $2)",
+            )
+            .bind(owner_domain.as_slice())
+            .bind(operation)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(storage("enrollment eligibility"))?;
+            if lifecycle || others > 0 || uses > 0 {
+                EnrollmentCleanup::Retained(format!(
+                    "lifecycle recorded: {lifecycle}, other epochs: {others}, other uses: {uses}"
+                ))
+            } else {
+                sqlx::query("DELETE FROM history_key_uses WHERE operation_id = $1")
+                    .bind(operation)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(storage("enrollment uses"))?;
+                sqlx::query(
+                    "DELETE FROM history_key_epochs WHERE created_by = $1 AND owner_domain = $2",
+                )
+                .bind(operation)
+                .bind(owner_domain.as_slice())
+                .execute(&mut *tx)
+                .await
+                .map_err(storage("enrollment key"))?;
+                EnrollmentCleanup::Reclaimed
+            }
+        };
+        audit_in_tx(&mut tx, audit).await?;
+        tx.commit().await.map_err(storage("commit"))?;
+        Ok(outcome)
+    }
+
+    async fn enrollment_abandoned(&self, operation: Uuid) -> SidResult<bool> {
+        let mut conn = self.pool.acquire().await.map_err(storage("acquire"))?;
+        abandoned(&mut conn, operation).await
+    }
+
     async fn get_epoch_key(&self, epoch: HistoryEpochId) -> SidResult<Option<WrappedHistoryKey>> {
         let key: Option<Vec<u8>> =
             sqlx::query_scalar("SELECT wrapped_key FROM history_key_epochs WHERE id = $1")
@@ -537,7 +639,7 @@ impl HistoryKeyStore for PgHistoryKeyStore {
             ));
         }
         for epoch in &archive.epochs {
-            insert_key_epoch(&mut tx, epoch).await?;
+            insert_key_epoch(&mut tx, epoch, None).await?;
         }
         for (epoch, revision) in &archive.replaced {
             sqlx::query(

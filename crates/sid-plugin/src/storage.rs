@@ -2334,6 +2334,13 @@ pub trait StorageBackend: WorkStore + Send + Sync + 'static {
 
     // === DISTRIBUTED LOCKING ===
 
+    /// Commit `ctx` alone: its keyed command's completion, its audit entry
+    /// and the work it owes, with no other state. A command that ends
+    /// without changing anything else (a terminal abort) is recorded this
+    /// way; when its key is already completed nothing is written and
+    /// `Error::OperationCompleted` is returned.
+    async fn record_outcome(&self, ctx: MutationContext) -> Result<()>;
+
     /// The committed completion of the keyed command `key` in `namespace`
     /// (recorded through [`MutationContext::operation`]), if any.
     async fn get_operation_result(

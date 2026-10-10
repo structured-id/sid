@@ -63,9 +63,10 @@ use sid_core::grpc_error::{ApiError, ErrorReason};
 use sid_core::models::password_history::DEFAULT_HISTORY_DEPTH;
 use sid_core::models::password_history::MAX_HISTORY_DOMAINS;
 use sid_core::models::{
-    AuditEntry, Credential, CredentialId, CredentialType, HistoryCommit, HistoryEpochDescriptor,
-    HistoryEpochId, HistoryEvidence, HistoryKsf, HistoryLiveSet, HistorySuite, KeyEpochs,
-    OperationCompletion, OperationKey, PasswordHistory, PolicyEvidence, ProfileId, ResetSessionId,
+    AuditEntry, Credential, CredentialId, CredentialType, EnrollmentAdmission, EnrollmentCleanup,
+    HistoryCommit, HistoryEpochDescriptor, HistoryEpochId, HistoryEvidence, HistoryKsf,
+    HistoryLiveSet, HistorySuite, KeyEpochs, OperationCompletion, OperationKey, PasswordHistory,
+    PolicyEvidence, ProfileId, ResetSessionId,
 };
 use sid_ids::PasswordOperationId;
 use sid_pake_core::prover::BoundProof;
@@ -105,6 +106,14 @@ const KSF_BUDGET_MIB: u32 = 512;
 const RESULT_NAMESPACE: &str = "password-operation";
 /// Longest charge key the evaluator admits (`PreparePasswordHistoryRequest.charge_key`).
 const MAX_CHARGE_KEY: usize = 128;
+/// First enrollments admitted and not yet ended (committed, or aborted and
+/// their key reclaimed), across replicas. Past it a new registration is
+/// refused before the evaluator makes a key, so an outage of the cleanup
+/// becomes backpressure rather than unbounded key storage.
+const ENROLLMENT_CAPACITY: u64 = 100_000;
+
+mod enrollment;
+pub(crate) use enrollment::{EnrollmentDelivery, EnrollmentHandler};
 
 /// What the operation installs a password for, and the authority it rests on.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -324,6 +333,8 @@ pub(crate) struct PasswordOperations {
     ops: ChallengeStore<PendingOperation>,
     installation: [u8; 16],
     depth: u32,
+    /// First enrollments admitted and not yet ended, across replicas.
+    enrollment_capacity: u64,
 }
 
 /// What the credential service, which holds the entries, tells the evaluator
@@ -503,6 +514,9 @@ pub(crate) fn commit_refusal(
             warn!("password commit refused by the history write cutoff: {reason}");
             history_key_withdrawn()
         }
+        // The operation is taken exclusively before its commit, so another
+        // completion of its key is its terminal abort, which won.
+        sid_core::Error::OperationCompleted(_) => expired(),
         e => other(e),
     }
 }
@@ -655,7 +669,15 @@ impl PasswordOperations {
             ops: ChallengeStore::new(cache, operation_keys, "password-operation", OPERATION_TTL),
             installation: *installation.as_bytes(),
             depth: DEFAULT_HISTORY_DEPTH,
+            enrollment_capacity: ENROLLMENT_CAPACITY,
         }
+    }
+
+    /// The same, admitting at most `capacity` open first enrollments.
+    #[cfg(test)]
+    fn with_enrollment_capacity(mut self, capacity: u64) -> Self {
+        self.enrollment_capacity = capacity;
+        self
     }
 
     async fn store(&self, op: &PendingOperation) -> Result<(), Status> {
@@ -715,6 +737,28 @@ impl PasswordOperations {
         let expires_at = chrono::Utc::now()
             + chrono::Duration::from_std(OPERATION_TTL)
                 .expect("the operation lifetime fits a duration");
+        if kind == OwnerKind::New {
+            // Durable before the evaluator makes the new owner's key, so a
+            // registration that never commits (abandoned, or lost to a crash
+            // before its reply or this record) still has its key reclaimed.
+            let admission = EnrollmentAdmission {
+                operation: op.id.into_uuid(),
+                owner_domain: op.owner_domain,
+                expires_at,
+            };
+            match self
+                .storage
+                .enqueue_work(&admission.work(), self.enrollment_capacity)
+                .await
+            {
+                Ok(_) => {}
+                Err(sid_core::Error::ResourceExhausted(reason)) => {
+                    warn!("first enrollments at capacity: {reason}");
+                    return Err(unavailable("enrollment capacity"));
+                }
+                Err(e) => return Err(internal(e)),
+            }
+        }
         let epochs = self
             .evaluator
             .prepare(&HistoryAdmission {
@@ -1091,6 +1135,8 @@ impl PasswordOperations {
                 policy_version: op.policy_version,
             },
             depth: self.depth,
+            // The purpose sets the installation's age retention as it commits.
+            max_age_days: 0,
         };
         Ok(Finish::Ready(Box::new(FinishedOperation {
             operation: op,
@@ -1308,13 +1354,20 @@ impl HistoryEvaluation {
                 // existing history, so a new-owner admission resets nothing.
                 let epoch = self
                     .keys
-                    .create_first_epoch(&new, audit("password_history.epoch_created"))
+                    .create_first_epoch(
+                        &new,
+                        admission.id.into_uuid(),
+                        audit("password_history.epoch_created"),
+                    )
                     .await
                     .map_err(|e| match e {
                         sid_core::Error::Conflict(reason) => {
                             warn!("a new owner's history domain already has keys: {reason}");
                             unavailable("history keys")
                         }
+                        // Its registration was aborted before this
+                        // preparation arrived.
+                        sid_core::Error::Fenced(_) => expired(),
                         other => internal(other),
                     })?;
                 record.epochs = vec![epoch.descriptor()];
@@ -1420,6 +1473,25 @@ impl HistoryEvaluation {
             .map_err(internal)
     }
 
+    /// The terminal step of the aborted first enrollment `operation` of the
+    /// owner of `owner_domain`: from now on it creates no key and is evaluated
+    /// no more, and the key it created is destroyed when nothing else can
+    /// need it. The credential authority alone decides that a registration
+    /// aborted; this is called only with that decision.
+    pub async fn abandon_enrollment(
+        &self,
+        owner_domain: &[u8; 32],
+        operation: uuid::Uuid,
+    ) -> sid_core::Result<EnrollmentCleanup> {
+        self.keys
+            .abandon_enrollment(
+                owner_domain,
+                operation,
+                audit("password_history.enrollment_abandoned"),
+            )
+            .await
+    }
+
     /// Evaluate the operation's blinded input under each selected epoch.
     /// Charged once per operation before any key is used; an exact retry
     /// returns the recorded answers, another input is refused, and nothing
@@ -1443,6 +1515,18 @@ impl HistoryEvaluation {
                 Ok(policy) if policy.permits_writes(&record.epochs[0]) => None,
                 Ok(_) => Some(history_key_withdrawn()),
                 Err(unavailable) => Some(unavailable),
+            };
+            // An aborted first enrollment is evaluated no more, whether or
+            // not its key could be reclaimed.
+            let refusal = match refusal {
+                None if record.kind == OwnerKind::New => {
+                    match self.keys.enrollment_abandoned(id.into_uuid()).await {
+                        Ok(false) => None,
+                        Ok(true) => Some(expired()),
+                        Err(e) => Some(internal(e)),
+                    }
+                }
+                refusal => refusal,
             };
             if let Some(refusal) = refusal {
                 self.store(id, &record).await?;

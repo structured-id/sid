@@ -1892,6 +1892,9 @@ impl sid_plugin::StorageBackend for MockStorage {
     ) -> Result<u64> {
         unimplemented!()
     }
+    async fn record_outcome(&self, _: MutationContext) -> Result<()> {
+        unimplemented!()
+    }
     async fn get_operation_result(
         &self,
         _: &str,

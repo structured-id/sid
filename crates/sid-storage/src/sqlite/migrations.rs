@@ -42,7 +42,26 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 5,
         sql: HISTORY_EVALUATOR_SPLIT,
     },
+    Migration {
+        version: 6,
+        sql: ENROLLMENT_CLEANUP,
+    },
 ];
+
+/// Reclaiming the keys of first enrollments that never committed; the
+/// evaluator's PostgreSQL migration 002 states the contract.
+const ENROLLMENT_CLEANUP: &str = "
+ALTER TABLE history_key_epochs ADD COLUMN created_by TEXT;
+
+CREATE INDEX history_key_epochs_created_by
+    ON history_key_epochs (created_by) WHERE created_by IS NOT NULL;
+
+CREATE TABLE history_key_abandoned (
+    operation_id TEXT PRIMARY KEY,
+    owner_domain BLOB NOT NULL CHECK (length(owner_domain) = 32),
+    abandoned_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+";
 
 /// The history evaluator's keys and lifecycle move to its own tables, keyed by
 /// the owner's history input domain; the PostgreSQL migration 058 and the

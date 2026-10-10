@@ -2929,6 +2929,15 @@ impl StorageBackend for SqliteBackend {
     ) -> SidResult<u64> {
         self.drop_expired_audit_records_impl(cut_before, ctx).await
     }
+    async fn record_outcome(&self, ctx: MutationContext) -> SidResult<()> {
+        let chain = ctx
+            .operation
+            .as_ref()
+            .map(|o| format!("operation:{}", o.namespace))
+            .unwrap_or_else(|| "operation".to_string());
+        let tx = self.begin_write().await?;
+        Self::commit_mutation(tx, &chain, ctx).await
+    }
     async fn get_operation_result(
         &self,
         namespace: &str,

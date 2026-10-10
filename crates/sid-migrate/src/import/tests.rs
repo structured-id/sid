@@ -291,7 +291,11 @@ async fn opaque_login_survives_serialized_transfer_and_restart() {
         .unwrap();
     source
         .history_keys()
-        .create_first_epoch(&epoch, AuditEntry::system("test", "opaque-restore"))
+        .create_first_epoch(
+            &epoch,
+            uuid::Uuid::now_v7(),
+            AuditEntry::system("test", "opaque-restore"),
+        )
         .await
         .unwrap();
     let shape = sid_pake_core::circuit::CircuitShape {
@@ -354,6 +358,7 @@ async fn opaque_login_survives_serialized_transfer_and_restart() {
         entries: checked.new_entries,
         evidence,
         depth: 1,
+        max_age_days: 0,
     };
     assert!(
         source
@@ -533,6 +538,7 @@ async fn opaque_login_survives_serialized_transfer_and_restart() {
         entries: checked.new_entries,
         evidence,
         depth: 1,
+        max_age_days: 0,
     };
     assert!(
         target
@@ -758,7 +764,7 @@ async fn restored_history_refuses_passwords_from_active_and_rotated_epochs() {
     active.epoch.created_at = now;
     source
         .history_keys()
-        .create_first_epoch(&old, audit())
+        .create_first_epoch(&old, uuid::Uuid::now_v7(), audit())
         .await
         .unwrap();
     let first = PasswordHistory {
@@ -783,7 +789,7 @@ async fn restored_history_refuses_passwords_from_active_and_rotated_epochs() {
     let staging = SqliteBackend::new_in_memory().await.unwrap();
     staging
         .history_keys()
-        .create_first_epoch(&active, audit())
+        .create_first_epoch(&active, uuid::Uuid::now_v7(), audit())
         .await
         .unwrap();
     let second = PasswordHistory {
@@ -1033,7 +1039,11 @@ async fn password_history_survives_migration() {
         .unwrap();
     source
         .history_keys()
-        .create_first_epoch(&epoch, AuditEntry::system("test", "history"))
+        .create_first_epoch(
+            &epoch,
+            uuid::Uuid::now_v7(),
+            AuditEntry::system("test", "history"),
+        )
         .await
         .unwrap();
     // Even this storage-only credential fixture needs the instance setup:
@@ -1074,6 +1084,7 @@ async fn password_history_survives_migration() {
             policy_version: 1,
         },
         depth: 24,
+        max_age_days: 0,
     };
     assert!(
         source
@@ -1211,7 +1222,11 @@ async fn history_key_restore_requires_the_original_external_key() {
     epoch.key = WrappedHistoryKey(sealed.to_bytes());
     source
         .history_keys()
-        .create_first_epoch(&epoch, AuditEntry::system("test", "restore"))
+        .create_first_epoch(
+            &epoch,
+            uuid::Uuid::now_v7(),
+            AuditEntry::system("test", "restore"),
+        )
         .await
         .unwrap();
     let snapshot = export(&source).await.unwrap();

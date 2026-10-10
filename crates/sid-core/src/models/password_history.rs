@@ -580,6 +580,11 @@ pub struct HistoryCommit {
     pub evidence: HistoryEvidence,
     /// How many accepted passwords to retain, newest first, 1..=24.
     pub depth: u32,
+    /// Accepted passwords older than this many days, counted from their
+    /// acceptance, are dropped too; the one this commit accepts, the newest,
+    /// always stays. 0 keeps every entry `depth` keeps.
+    #[serde(default)]
+    pub max_age_days: u32,
 }
 
 impl HistoryCommit {
@@ -623,6 +628,12 @@ impl HistoryCommit {
         Ok(())
     }
 
+    /// The acceptance time before which an older entry is dropped by this
+    /// commit made at `now`; `None` when age drops nothing.
+    pub fn expires_before(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        (self.max_age_days > 0).then(|| now - chrono::Duration::days(i64::from(self.max_age_days)))
+    }
+
     /// Refuse a commit that writes under an epoch created before the history
     /// write cutoff `not_before` (none when no cutoff was ever set). Only the
     /// epoch taking the new entry counts: older epochs named for comparison
@@ -638,6 +649,61 @@ impl HistoryCommit {
             _ => Ok(()),
         }
     }
+}
+
+/// Work kind of a first enrollment's admission: owed from before the
+/// evaluator is asked for the new owner's key until the registration has
+/// either committed or been aborted and its key reclaimed.
+pub const ENROLLMENT_ADMISSION_KIND: &str = "password_history.enrollment";
+
+/// Attempts at an enrollment's terminal step before it is recorded failed:
+/// with an hourly retry this outlasts an evaluator outage of more than a day.
+pub const ENROLLMENT_ADMISSION_ATTEMPTS: u32 = 40;
+
+/// A first enrollment as the credential authority admits it, before the
+/// evaluator creates the new owner's key: the operation, the owner's
+/// history input domain and the expiry after which it can no longer
+/// commit. It carries no password, proof or secret.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnrollmentAdmission {
+    /// The password operation (16 UUIDv7 bytes).
+    pub operation: Uuid,
+    pub owner_domain: [u8; 32],
+    pub expires_at: DateTime<Utc>,
+}
+
+impl EnrollmentAdmission {
+    /// The durable work recording this admission: one per operation, due at
+    /// its expiry, when the registration is either committed or aborted.
+    pub fn work(&self) -> crate::models::NewWork {
+        let kind = crate::models::WorkKind::new(ENROLLMENT_ADMISSION_KIND)
+            .expect("the enrollment kind is valid");
+        let payload = serde_json::to_vec(self).expect("an admission serializes");
+        let mut work = crate::models::NewWork::new(kind, payload);
+        work.id = crate::models::WorkId(self.operation);
+        work.not_before = Some(self.expires_at);
+        work.max_attempts = ENROLLMENT_ADMISSION_ATTEMPTS;
+        work
+    }
+
+    /// The admission a work payload records.
+    pub fn from_work(payload: &[u8]) -> Result<Self> {
+        serde_json::from_slice(payload)
+            .map_err(|e| Error::Validation(format!("enrollment admission: {e}")))
+    }
+}
+
+/// What the evaluator did with an aborted first enrollment's key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnrollmentCleanup {
+    /// The key the operation created was destroyed.
+    Reclaimed,
+    /// The operation created no key (its preparation never ran, or ran
+    /// after this cleanup and was refused); it can no longer create one.
+    NothingCreated,
+    /// The key is kept: the owner's lifecycle or another operation still
+    /// needs it, which an aborted first enrollment should not allow.
+    Retained(String),
 }
 
 #[cfg(test)]

@@ -372,6 +372,11 @@ async fn test_history_retains_depth() {
 }
 
 #[tokio::test]
+async fn test_history_age_retention() {
+    common::password_history::test_history_age_retention(&setup().await).await;
+}
+
+#[tokio::test]
 async fn test_reset_history_is_compare_and_swap() {
     common::password_history::test_reset_history_is_compare_and_swap(&setup().await).await;
 }
@@ -432,6 +437,17 @@ async fn test_stale_live_set_cannot_retire() {
 #[tokio::test]
 async fn test_key_archive_round_trip() {
     common::history_keys::test_key_archive_round_trip(&setup().await.history_keys()).await;
+}
+
+#[tokio::test]
+async fn test_abandoned_enrollment_is_reclaimed() {
+    common::history_keys::test_abandoned_enrollment_is_reclaimed(&setup().await.history_keys())
+        .await;
+}
+
+#[tokio::test]
+async fn test_cleanup_races_preparation() {
+    common::history_keys::test_cleanup_races_preparation(&setup().await.history_keys()).await;
 }
 
 #[tokio::test]
@@ -1363,6 +1379,11 @@ async fn test_completed_operation_commits_nothing() {
 #[tokio::test]
 async fn test_concurrent_duplicate_operation_commits_once() {
     common::operation::test_concurrent_duplicate_operation_commits_once(&setup().await).await;
+}
+
+#[tokio::test]
+async fn test_terminal_abort_races_the_commit() {
+    common::operation::test_terminal_abort_races_the_commit(&setup().await).await;
 }
 
 #[tokio::test]

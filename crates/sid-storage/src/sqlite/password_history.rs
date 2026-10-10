@@ -8,9 +8,10 @@
 
 use async_trait::async_trait;
 use sid_core::models::{
-    AuditEntry, HistoryArchive, HistoryCommit, HistoryEntry, HistoryEpoch, HistoryEpochDescriptor,
-    HistoryEpochId, HistoryEpochUse, HistoryEvidence, HistoryKsf, HistoryPreparation, HistorySuite,
-    KeyArchive, KeyEpoch, KeyEpochs, NewKeyEpoch, PasswordHistory, ProfileId, WrappedHistoryKey,
+    AuditEntry, EnrollmentCleanup, HistoryArchive, HistoryCommit, HistoryEntry, HistoryEpoch,
+    HistoryEpochDescriptor, HistoryEpochId, HistoryEpochUse, HistoryEvidence, HistoryKsf,
+    HistoryPreparation, HistorySuite, KeyArchive, KeyEpoch, KeyEpochs, NewKeyEpoch,
+    PasswordHistory, ProfileId, WrappedHistoryKey,
 };
 use sid_core::{Error as SidError, Result as SidResult};
 use sid_plugin::history_keys::HistoryKeyStore;
@@ -313,7 +314,8 @@ pub(super) async fn apply_in_tx(tx: &mut WriteTx, commit: &HistoryCommit) -> Sid
     for d in &commit.epochs {
         record_descriptor(tx, owner, d).await?;
     }
-    let now = fmt_dt(&chrono::Utc::now());
+    let accepted_at = chrono::Utc::now();
+    let now = fmt_dt(&accepted_at);
     let active = commit.epochs[0].id.0.to_string();
     sqlx::query(
         "UPDATE password_history_epochs SET status = 'compare_only'
@@ -362,6 +364,31 @@ pub(super) async fn apply_in_tx(tx: &mut WriteTx, commit: &HistoryCommit) -> Sid
         .execute(&mut **tx)
         .await
         .map_err(storage("retention"))?;
+    // Age retention, under the same revision fence: older accepted passwords
+    // go, the newest (this commit's) always stays. Compared as instants,
+    // since stored timestamps do not all sort as text.
+    if let Some(before) = commit.expires_before(accepted_at) {
+        let rows: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT seq, created_at FROM password_history_entries WHERE owner_id = ? AND seq < ?",
+        )
+        .bind(owner)
+        .bind(seq)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(storage("age retention"))?;
+        for (old, created_at) in rows {
+            let created_at = chrono::DateTime::parse_from_rfc3339(&created_at)
+                .map_err(|e| SidError::Storage(format!("entry created_at: {e}")))?;
+            if created_at < before {
+                sqlx::query("DELETE FROM password_history_entries WHERE owner_id = ? AND seq = ?")
+                    .bind(owner)
+                    .bind(old)
+                    .execute(&mut **tx)
+                    .await
+                    .map_err(storage("age retention"))?;
+            }
+        }
+    }
     Ok(true)
 }
 
@@ -520,12 +547,17 @@ async fn key_audit(tx: &mut WriteTx, audit: AuditEntry) -> SidResult<()> {
     Ok(())
 }
 
-async fn insert_key_epoch(tx: &mut WriteTx, new: &NewKeyEpoch) -> SidResult<()> {
+/// Insert `new`; `created_by` is the first enrollment that made it, if any.
+async fn insert_key_epoch(
+    tx: &mut WriteTx,
+    new: &NewKeyEpoch,
+    created_by: Option<uuid::Uuid>,
+) -> SidResult<()> {
     let e = &new.epoch;
     sqlx::query(
         "INSERT INTO history_key_epochs (id, owner_domain, suite, public_key, wrapped_key,
-             ksf_memory_kib, ksf_passes, ksf_lanes, ksf_salt, status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             ksf_memory_kib, ksf_passes, ksf_lanes, ksf_salt, status, created_at, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(e.id.0.to_string())
     .bind(e.owner_domain.as_slice())
@@ -538,10 +570,22 @@ async fn insert_key_epoch(tx: &mut WriteTx, new: &NewKeyEpoch) -> SidResult<()> 
     .bind(e.ksf_salt.as_slice())
     .bind(e.status.as_str())
     .bind(fmt_dt(&e.created_at))
+    .bind(created_by.map(|o| o.to_string()))
     .execute(&mut **tx)
     .await
     .map_err(storage("key epoch insert"))?;
     Ok(())
+}
+
+/// Whether `operation` was cleaned up as an aborted first enrollment.
+async fn abandoned(conn: &mut sqlx::SqliteConnection, operation: uuid::Uuid) -> SidResult<bool> {
+    let found: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM history_key_abandoned WHERE operation_id = ?")
+            .bind(operation.to_string())
+            .fetch_optional(conn)
+            .await
+            .map_err(storage("abandoned enrollment"))?;
+    Ok(found.is_some())
 }
 
 async fn owner_key_epochs(
@@ -641,10 +685,18 @@ impl HistoryKeyStore for SqliteHistoryKeyStore {
     async fn create_first_epoch(
         &self,
         new: &NewKeyEpoch,
+        operation: uuid::Uuid,
         audit: AuditEntry,
     ) -> SidResult<KeyEpoch> {
         require_active(new)?;
         let mut tx = self.begin_write().await?;
+        // The write lock serializes this with the cleanup: a preparation
+        // that arrives after its operation was abandoned creates nothing.
+        if abandoned(&mut tx, operation).await? {
+            return Err(SidError::Fenced(format!(
+                "first enrollment {operation} was aborted"
+            )));
+        }
         let existing = owner_key_epochs(&mut tx, &new.epoch.owner_domain, true).await?;
         if let [only] = existing.as_slice()
             && *only == new.epoch
@@ -656,7 +708,7 @@ impl HistoryKeyStore for SqliteHistoryKeyStore {
                 "the owner already has a history epoch".into(),
             ));
         }
-        insert_key_epoch(&mut tx, new).await?;
+        insert_key_epoch(&mut tx, new, Some(operation)).await?;
         key_audit(&mut tx, audit).await?;
         tx.commit().await.map_err(storage("commit"))?;
         Ok(new.epoch.clone())
@@ -672,7 +724,7 @@ impl HistoryKeyStore for SqliteHistoryKeyStore {
         {
             return Ok(active);
         }
-        insert_key_epoch(&mut tx, new).await?;
+        insert_key_epoch(&mut tx, new, None).await?;
         key_audit(&mut tx, audit).await?;
         tx.commit().await.map_err(storage("commit"))?;
         Ok(new.epoch.clone())
@@ -710,7 +762,7 @@ impl HistoryKeyStore for SqliteHistoryKeyStore {
         .execute(&mut *tx)
         .await
         .map_err(storage("epoch rotation"))?;
-        insert_key_epoch(&mut tx, new).await?;
+        insert_key_epoch(&mut tx, new, None).await?;
         sqlx::query(
             "INSERT INTO history_key_replaced (epoch_id, owner_domain, replaced_at_revision)
              VALUES (?, ?, ?) ON CONFLICT (epoch_id) DO NOTHING",
@@ -857,6 +909,93 @@ impl HistoryKeyStore for SqliteHistoryKeyStore {
         Ok(selected)
     }
 
+    async fn abandon_enrollment(
+        &self,
+        owner_domain: &[u8; 32],
+        operation: uuid::Uuid,
+        audit: AuditEntry,
+    ) -> SidResult<EnrollmentCleanup> {
+        let op = operation.to_string();
+        let mut tx = self.begin_write().await?;
+        sqlx::query(
+            "INSERT INTO history_key_abandoned (operation_id, owner_domain) VALUES (?, ?)
+             ON CONFLICT (operation_id) DO NOTHING",
+        )
+        .bind(&op)
+        .bind(owner_domain.as_slice())
+        .execute(&mut *tx)
+        .await
+        .map_err(storage("enrollment fence"))?;
+        let fenced: Vec<u8> = sqlx::query_scalar(
+            "SELECT owner_domain FROM history_key_abandoned WHERE operation_id = ?",
+        )
+        .bind(&op)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(storage("enrollment fence"))?;
+        if fenced != owner_domain.as_slice() {
+            return Err(SidError::Validation(
+                "the aborted enrollment was recorded for another owner".into(),
+            ));
+        }
+        let created: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM history_key_epochs WHERE created_by = ? AND owner_domain = ?",
+        )
+        .bind(&op)
+        .bind(owner_domain.as_slice())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(storage("enrollment epochs"))?;
+        let outcome = if created == 0 {
+            EnrollmentCleanup::NothingCreated
+        } else {
+            // A committed owner is what a lifecycle, another epoch or another
+            // operation's use shows; any of them keeps the key.
+            let (lifecycle, others, uses): (i64, i64, i64) = sqlx::query_as(
+                "SELECT
+                     (SELECT count(*) FROM history_key_lifecycle WHERE owner_domain = ?1),
+                     (SELECT count(*) FROM history_key_epochs
+                      WHERE owner_domain = ?1 AND created_by IS NOT ?2),
+                     (SELECT count(*) FROM history_key_uses
+                      WHERE owner_domain = ?1 AND operation_id <> ?2)",
+            )
+            .bind(owner_domain.as_slice())
+            .bind(&op)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(storage("enrollment eligibility"))?;
+            if lifecycle > 0 || others > 0 || uses > 0 {
+                EnrollmentCleanup::Retained(format!(
+                    "lifecycle recorded: {}, other epochs: {others}, other uses: {uses}",
+                    lifecycle > 0
+                ))
+            } else {
+                sqlx::query("DELETE FROM history_key_uses WHERE operation_id = ?")
+                    .bind(&op)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(storage("enrollment uses"))?;
+                sqlx::query(
+                    "DELETE FROM history_key_epochs WHERE created_by = ? AND owner_domain = ?",
+                )
+                .bind(&op)
+                .bind(owner_domain.as_slice())
+                .execute(&mut *tx)
+                .await
+                .map_err(storage("enrollment key"))?;
+                EnrollmentCleanup::Reclaimed
+            }
+        };
+        key_audit(&mut tx, audit).await?;
+        tx.commit().await.map_err(storage("commit"))?;
+        Ok(outcome)
+    }
+
+    async fn enrollment_abandoned(&self, operation: uuid::Uuid) -> SidResult<bool> {
+        let mut conn = self.pool.acquire().await.map_err(storage("read"))?;
+        abandoned(&mut conn, operation).await
+    }
+
     async fn get_epoch_key(&self, epoch: HistoryEpochId) -> SidResult<Option<WrappedHistoryKey>> {
         let key: Option<Vec<u8>> =
             sqlx::query_scalar("SELECT wrapped_key FROM history_key_epochs WHERE id = ?")
@@ -905,7 +1044,7 @@ impl HistoryKeyStore for SqliteHistoryKeyStore {
             ));
         }
         for epoch in &archive.epochs {
-            insert_key_epoch(&mut tx, epoch).await?;
+            insert_key_epoch(&mut tx, epoch, None).await?;
         }
         for (epoch, revision) in &archive.replaced {
             sqlx::query(

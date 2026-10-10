@@ -112,6 +112,10 @@ pub struct MockStorageInner {
     key_uses: Vec<(Uuid, HistoryEpochId, chrono::DateTime<chrono::Utc>)>,
     /// The evaluator's audit entries, in order.
     key_audits: Vec<AuditEntry>,
+    /// The first enrollment that created each epoch it created.
+    key_created_by: HashMap<HistoryEpochId, Uuid>,
+    /// Aborted first enrollments and their owner domain.
+    key_abandoned: HashMap<Uuid, [u8; 32]>,
     /// The credential side's history write cutoff.
     history_write_cutoff: Option<chrono::DateTime<chrono::Utc>>,
     /// The evaluator's history write cutoff.
@@ -610,9 +614,15 @@ impl sid_plugin::history_keys::HistoryKeyStore for MockStorage {
     async fn create_first_epoch(
         &self,
         new: &NewKeyEpoch,
+        operation: Uuid,
         audit: AuditEntry,
     ) -> SidResult<KeyEpoch> {
         let mut inner = self.inner.lock().unwrap();
+        if inner.key_abandoned.contains_key(&operation) {
+            return Err(sid_core::Error::Fenced(format!(
+                "first enrollment {operation} was aborted"
+            )));
+        }
         let existing = inner.key_epochs.entry(new.epoch.owner_domain).or_default();
         match existing.as_slice() {
             [] => {}
@@ -624,8 +634,75 @@ impl sid_plugin::history_keys::HistoryKeyStore for MockStorage {
             }
         }
         existing.push(new.clone());
+        inner.key_created_by.insert(new.epoch.id, operation);
         inner.key_audits.push(audit);
         Ok(new.epoch.clone())
+    }
+
+    async fn abandon_enrollment(
+        &self,
+        owner_domain: &[u8; 32],
+        operation: Uuid,
+        audit: AuditEntry,
+    ) -> SidResult<sid_core::models::EnrollmentCleanup> {
+        use sid_core::models::EnrollmentCleanup;
+        let mut inner = self.inner.lock().unwrap();
+        if *inner
+            .key_abandoned
+            .entry(operation)
+            .or_insert(*owner_domain)
+            != *owner_domain
+        {
+            return Err(sid_core::Error::Validation(
+                "the aborted enrollment was recorded for another owner".into(),
+            ));
+        }
+        let epochs = inner
+            .key_epochs
+            .get(owner_domain)
+            .cloned()
+            .unwrap_or_default();
+        let created: Vec<HistoryEpochId> = epochs
+            .iter()
+            .map(|e| e.epoch.id)
+            .filter(|id| inner.key_created_by.get(id) == Some(&operation))
+            .collect();
+        let outcome = if created.is_empty() {
+            EnrollmentCleanup::NothingCreated
+        } else {
+            let lifecycle = inner.key_lifecycle.contains_key(owner_domain);
+            let others = epochs.len() - created.len();
+            let uses = inner
+                .key_uses
+                .iter()
+                .filter(|(op, epoch, _)| {
+                    *op != operation && epochs.iter().any(|e| e.epoch.id == *epoch)
+                })
+                .count();
+            if lifecycle || others > 0 || uses > 0 {
+                EnrollmentCleanup::Retained(format!(
+                    "lifecycle recorded: {lifecycle}, other epochs: {others}, other uses: {uses}"
+                ))
+            } else {
+                inner.key_uses.retain(|(op, _, _)| *op != operation);
+                inner.key_epochs.remove(owner_domain);
+                for id in &created {
+                    inner.key_created_by.remove(id);
+                }
+                EnrollmentCleanup::Reclaimed
+            }
+        };
+        inner.key_audits.push(audit);
+        Ok(outcome)
+    }
+
+    async fn enrollment_abandoned(&self, operation: Uuid) -> SidResult<bool> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .key_abandoned
+            .contains_key(&operation))
     }
 
     async fn ensure_epoch(&self, new: &NewKeyEpoch, audit: AuditEntry) -> SidResult<KeyEpoch> {
@@ -4846,6 +4923,9 @@ impl StorageBackend for MockStorage {
     ) -> SidResult<u64> {
         unimplemented!("audit retention is exercised by the storage conformance suite")
     }
+    async fn record_outcome(&self, ctx: MutationContext) -> SidResult<()> {
+        self.inner.lock().unwrap().owe(&ctx)
+    }
     async fn get_operation_result(
         &self,
         namespace: &str,
@@ -5299,6 +5379,12 @@ impl MockStorageInner {
         history
             .entries
             .retain(|e| e.seq > seq - i64::from(commit.depth));
+        // Age retention: the newest (this commit's) always stays.
+        if let Some(before) = commit.expires_before(chrono::Utc::now()) {
+            history
+                .entries
+                .retain(|e| e.seq == seq || e.created_at >= before);
+        }
         Ok(true)
     }
 

@@ -216,7 +216,11 @@ async fn history_split_refuses_populated_history() {
         .await
         .unwrap();
     upgrade(&pool, BASELINE, MIGRATIONS).await.unwrap();
-    assert_eq!(version(&pool).await, 5);
+    assert_eq!(
+        version(&pool).await,
+        MIGRATIONS.last().unwrap().version,
+        "converted, then upgraded to the latest version"
+    );
     assert!(has_table(&pool, "history_key_epochs").await);
     assert!(!has_table(&pool, "password_history_lifecycle").await);
     let key_column: i64 = sqlx::query_scalar(

@@ -7,7 +7,7 @@ use sid_storage::sqlite::SqliteBackend;
 use tonic::Code;
 use tonic_types::StatusExt;
 
-fn change() -> OperationPurpose {
+pub(super) fn change() -> OperationPurpose {
     OperationPurpose::Change {
         profile_id: ProfileId::generate(),
         credential_id: CredentialId(uuid::Uuid::now_v7()),
@@ -16,7 +16,7 @@ fn change() -> OperationPurpose {
 }
 
 /// A key manager over its own master secret.
-fn manager(master: u8) -> Arc<dyn sid_keys::KeyManager> {
+pub(super) fn manager(master: u8) -> Arc<dyn sid_keys::KeyManager> {
     Arc::new(
         sid_keys::SoftwareKeyManager::new(
             secrecy::SecretBox::new(Box::new([master; 32])),
@@ -27,7 +27,7 @@ fn manager(master: u8) -> Arc<dyn sid_keys::KeyManager> {
     )
 }
 
-async fn sqlite() -> Arc<SqliteBackend> {
+pub(super) async fn sqlite() -> Arc<SqliteBackend> {
     Arc::new(SqliteBackend::new_in_memory().await.unwrap())
 }
 
@@ -35,7 +35,7 @@ async fn sqlite() -> Arc<SqliteBackend> {
 /// installation runs them: the evaluator over its own store, sealing history
 /// keys and its records with `history_keys`; the credential side sealing its
 /// records with `field_keys`, holding no history key.
-fn split(
+pub(super) fn split(
     storage: Arc<SqliteBackend>,
     installation: sid_core::models::OrgId,
     history_keys: Arc<dyn sid_keys::KeyManager>,
@@ -52,7 +52,7 @@ fn split(
 }
 
 /// A ZKPP server that verifies no proof and accepts unproven passwords.
-fn zkpp_without_proofs() -> ZkppOpaqueServer {
+pub(super) fn zkpp_without_proofs() -> ZkppOpaqueServer {
     use sid_authn::opaque::{OpaqueRouter, PallasOpaque};
     use sid_authn::opaque_zkpp::ZkppConfig;
     use sid_plugin::crypto::OpaqueOperations;
@@ -671,7 +671,9 @@ async fn a_stale_active_epoch_is_replaced_at_preparation() {
         .new_epoch(domain, old_ksf)
         .await
         .unwrap();
-    keys.create_first_epoch(&old, audit("test")).await.unwrap();
+    keys.create_first_epoch(&old, uuid::Uuid::now_v7(), audit("test"))
+        .await
+        .unwrap();
     let change_to =
         async |from: &[u8], to: &[u8], revision, epochs: Vec<HistoryEpochDescriptor>| {
             let mut changed = password.clone();
@@ -686,6 +688,7 @@ async fn a_stale_active_epoch_is_replaced_at_preparation() {
                     policy_version: 1,
                 },
                 depth: 2,
+                max_age_days: 0,
             };
             assert!(
                 storage

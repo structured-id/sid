@@ -121,7 +121,22 @@ fn commit(depth: u32) -> HistoryCommit {
             policy_version: 1,
         },
         depth,
+        max_age_days: 0,
     }
+}
+
+/// Age drops nothing unless set, and then everything accepted before the
+/// given number of days ago.
+#[test]
+fn age_retention_is_off_by_default() {
+    let now = Utc::now();
+    let mut c = commit(1);
+    assert_eq!(c.expires_before(now), None);
+    c.max_age_days = 183;
+    assert_eq!(
+        c.expires_before(now),
+        Some(now - chrono::Duration::days(183))
+    );
 }
 
 /// Depth outside 1..=24, a commit without an entry, without its epochs or

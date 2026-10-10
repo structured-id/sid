@@ -174,10 +174,11 @@ pub use oidc_issuer::{IssuerAuthority, IssuerHandle, IssuerId, IssuerSigningKey,
 pub use operation::{OperationCompletion, OperationKey, OperationRecord};
 pub use organization::{OrgId, OrgStatus, OrgType, Organization};
 pub use password_history::{
-    HistoryArchive, HistoryCommit, HistoryEntry, HistoryEpoch, HistoryEpochDescriptor,
-    HistoryEpochId, HistoryEpochUse, HistoryEvidence, HistoryKsf, HistoryLiveSet,
-    HistoryPreparation, HistorySuite, KeyArchive, KeyEpoch, KeyEpochs, NewKeyEpoch,
-    PasswordHistory, WrappedHistoryKey, history_key_context,
+    ENROLLMENT_ADMISSION_KIND, EnrollmentAdmission, EnrollmentCleanup, HistoryArchive,
+    HistoryCommit, HistoryEntry, HistoryEpoch, HistoryEpochDescriptor, HistoryEpochId,
+    HistoryEpochUse, HistoryEvidence, HistoryKsf, HistoryLiveSet, HistoryPreparation, HistorySuite,
+    KeyArchive, KeyEpoch, KeyEpochs, NewKeyEpoch, PasswordHistory, WrappedHistoryKey,
+    history_key_context,
 };
 pub use password_reset::{
     PasswordResetSession, RESET_SESSION_TTL_SECS, ResetSessionId, ResetSessionStatus,

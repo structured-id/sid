@@ -63,6 +63,9 @@ pub const CE_PASSWORD_MIN_SYMBOLS: u32 = 0;
 /// CE: No forced password rotation (0 = disabled).
 pub const CE_PASSWORD_MAX_AGE_DAYS: u32 = 0;
 
+/// CE: Retained password history does not expire by age (0 = no limit).
+pub const CE_PASSWORD_HISTORY_MAX_AGE_DAYS: u32 = 0;
+
 /// CE: Every password change proves the current password (OWASP ASVS V6.2.3).
 pub const CE_PASSWORD_CHANGE_CURRENT_PASSWORD: CurrentPasswordRule = CurrentPasswordRule::Always;
 
@@ -493,6 +496,12 @@ pub struct PasswordPolicy {
 
     /// When a password change must prove the current password.
     pub change_current_password: CurrentPasswordRule,
+
+    /// Days an accepted password is kept in its owner's history, counted
+    /// from its acceptance; the owner's newest accepted password always
+    /// stays. Applied when the owner next installs a password. 0 = no limit.
+    #[serde(default)]
+    pub history_max_age_days: u32,
 }
 
 /// When a password change must prove the current password. A reset under a
@@ -659,6 +668,7 @@ impl SecurityPolicy {
                 min_symbols: CE_PASSWORD_MIN_SYMBOLS,
                 max_age_days: CE_PASSWORD_MAX_AGE_DAYS,
                 change_current_password: CE_PASSWORD_CHANGE_CURRENT_PASSWORD,
+                history_max_age_days: CE_PASSWORD_HISTORY_MAX_AGE_DAYS,
             },
             device: DevicePolicy {
                 min_assurance: DeviceAssurance::Unknown,
@@ -1063,11 +1073,13 @@ mod tests {
             min_symbols: 1,
             max_age_days: 90,
             change_current_password: CurrentPasswordRule::AfterMinutes(5),
+            history_max_age_days: 183,
         };
         let json = serde_json::to_string(&pwd).unwrap();
         let parsed: PasswordPolicy = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.min_length, 12);
         assert_eq!(parsed.max_age_days, 90);
+        assert_eq!(parsed.history_max_age_days, 183);
         assert_eq!(
             parsed.change_current_password,
             CurrentPasswordRule::AfterMinutes(5)

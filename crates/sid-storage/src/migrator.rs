@@ -376,10 +376,16 @@ const MIGRATIONS: &[Migration] = &[
 /// The history evaluator's own store, in execution order: applied by the
 /// evaluator under its own credentials, tracked apart from [`MIGRATIONS`] so
 /// the store can live in a database of its own.
-const HISTORY_KEY_MIGRATIONS: &[Migration] = &[Migration {
-    name: "20261010_001_history_keys",
-    sql: include_str!("../../../migrations/history_keys/20261010_001_history_keys.sql"),
-}];
+const HISTORY_KEY_MIGRATIONS: &[Migration] = &[
+    Migration {
+        name: "20261010_001_history_keys",
+        sql: include_str!("../../../migrations/history_keys/20261010_001_history_keys.sql"),
+    },
+    Migration {
+        name: "20261010_002_enrollment_cleanup",
+        sql: include_str!("../../../migrations/history_keys/20261010_002_enrollment_cleanup.sql"),
+    },
+];
 
 /// Run the pending migrations of the history evaluator's store on `pool`:
 /// each in its own transaction with its tracking row in

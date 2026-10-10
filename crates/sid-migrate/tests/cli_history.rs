@@ -71,7 +71,11 @@ async fn source_with_history(dir: &std::path::Path, org: &Organization) -> Sourc
     };
     source
         .history_keys()
-        .create_first_epoch(&epoch, AuditEntry::system("test", "cli"))
+        .create_first_epoch(
+            &epoch,
+            uuid::Uuid::now_v7(),
+            AuditEntry::system("test", "cli"),
+        )
         .await
         .unwrap();
     let password = Credential::new(profile.id, CredentialType::Totp, b"before".to_vec(), None);
@@ -88,6 +92,7 @@ async fn source_with_history(dir: &std::path::Path, org: &Organization) -> Sourc
             policy_version: 1,
         },
         depth: 3,
+        max_age_days: 0,
     };
     assert!(
         source

@@ -48,6 +48,7 @@ fn commit(
             policy_version: 1,
         },
         depth,
+        max_age_days: 0,
     }
 }
 
@@ -517,6 +518,144 @@ pub async fn test_history_retains_depth(backend: &dyn StorageBackend) {
         .map(|e| e.entry)
         .collect();
     assert_eq!(entries, vec![[5u8; 32], [4u8; 32], [3u8; 32]]);
+}
+
+/// Age retention, measured from each entry's acceptance and decided per
+/// owner: a commit drops that owner's entries accepted more than
+/// `max_age_days` ago, keeps younger ones (several sharing one epoch
+/// included) and always keeps its own, the newest. Another owner's history
+/// is untouched, a commit without age drops nothing, and a commit that loses
+/// its revision race drops nothing either.
+pub async fn test_history_age_retention(backend: &dyn StorageBackend) {
+    use sid_core::models::{HistoryArchive, HistoryEntry, HistoryEpoch};
+    let now = chrono::DateTime::from_timestamp_micros(Utc::now().timestamp_micros()).unwrap();
+    let days = |n: i64| now - chrono::Duration::days(n);
+    let seeded = |name: &'static str, key: u8, ages: Vec<i64>| async move {
+        let (owner, password) = profile_with_password(backend, name).await;
+        let d = HistoryEpochDescriptor {
+            created_at: days(400),
+            ..descriptor(key)
+        };
+        let epoch = HistoryEpoch {
+            id: d.id,
+            owner,
+            suite: d.suite,
+            public_key: d.public_key,
+            ksf: d.ksf,
+            ksf_salt: d.ksf_salt,
+            status: HistoryEpochUse::Active,
+            created_at: d.created_at,
+        };
+        let count = ages.len() as i64;
+        let entries = ages
+            .into_iter()
+            .enumerate()
+            .map(|(i, age)| HistoryEntry {
+                epoch: d.id,
+                seq: count - i as i64,
+                entry: [key.wrapping_add(i as u8); 32],
+                evidence: HistoryEvidence {
+                    operation: Uuid::now_v7(),
+                    policy_version: 1,
+                },
+                created_at: days(age),
+            })
+            .collect();
+        let archive = HistoryArchive {
+            owner,
+            revision: count,
+            epochs: vec![epoch],
+            entries,
+        };
+        assert!(
+            backend
+                .import_password_history(&archive, test_audit())
+                .await
+                .unwrap()
+        );
+        (owner, password, d)
+    };
+    let seqs = async |owner| -> Vec<i64> {
+        let mut seqs: Vec<i64> = backend
+            .get_password_history(owner)
+            .await
+            .unwrap()
+            .entries
+            .iter()
+            .map(|e| e.seq)
+            .collect();
+        seqs.sort_unstable();
+        seqs
+    };
+    let aged = |owner, revision, epoch, max_age_days| HistoryCommit {
+        max_age_days,
+        ..commit(owner, revision, &[epoch], 90, 24)
+    };
+
+    // Entries 100 and 300 days old under one epoch: a six-month commit drops
+    // only the older; the new one is seq 3.
+    let (mine, password, epoch) = seeded("hist_age_mine", 40, vec![100, 300]).await;
+    let (theirs, _, _) = seeded("hist_age_theirs", 50, vec![300]).await;
+    assert!(
+        backend
+            .change_password(
+                password.id,
+                b"p0",
+                &next(&password, b"p1"),
+                Some(&aged(mine, 2, epoch, 183)),
+                test_audit(),
+            )
+            .await
+            .unwrap()
+    );
+    assert_eq!(seqs(mine).await, vec![2, 3]);
+    assert_eq!(seqs(theirs).await, vec![1], "another owner is untouched");
+
+    // A commit whose revision moved drops nothing.
+    let stale = backend
+        .change_password(
+            password.id,
+            b"p1",
+            &next(&password, b"p2"),
+            Some(&aged(mine, 2, epoch, 1)),
+            test_audit(),
+        )
+        .await
+        .unwrap();
+    assert!(!stale);
+    assert_eq!(seqs(mine).await, vec![2, 3]);
+
+    // Without age every entry depth keeps stays, however old.
+    let (kept, kept_password, kept_epoch) = seeded("hist_age_kept", 60, vec![300]).await;
+    assert!(
+        backend
+            .change_password(
+                kept_password.id,
+                b"p0",
+                &next(&kept_password, b"p1"),
+                Some(&aged(kept, 1, kept_epoch, 0)),
+                test_audit(),
+            )
+            .await
+            .unwrap()
+    );
+    assert_eq!(seqs(kept).await, vec![1, 2]);
+
+    // Every entry older than the limit: only the new one remains.
+    let (alone, alone_password, alone_epoch) = seeded("hist_age_alone", 70, vec![200, 250]).await;
+    assert!(
+        backend
+            .change_password(
+                alone_password.id,
+                b"p0",
+                &next(&alone_password, b"p1"),
+                Some(&aged(alone, 2, alone_epoch, 183)),
+                test_audit(),
+            )
+            .await
+            .unwrap()
+    );
+    assert_eq!(seqs(alone).await, vec![3], "the newest always stays");
 }
 
 /// A reset whose history read is stale completes nothing: the reset stays

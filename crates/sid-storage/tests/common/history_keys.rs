@@ -105,8 +105,12 @@ async fn epoch_ids(store: &dyn HistoryKeyStore, owner_domain: [u8; 32]) -> Vec<H
 pub async fn test_first_epoch_never_resets_a_history(store: &dyn HistoryKeyStore) {
     let domain = owner();
     let first = new_epoch(domain, 1);
+    let operation = Uuid::now_v7();
     assert_eq!(
-        store.create_first_epoch(&first, audit()).await.unwrap(),
+        store
+            .create_first_epoch(&first, operation, audit())
+            .await
+            .unwrap(),
         first.epoch
     );
     assert_eq!(
@@ -114,12 +118,15 @@ pub async fn test_first_epoch_never_resets_a_history(store: &dyn HistoryKeyStore
         Some(first.key.clone())
     );
     assert_eq!(
-        store.create_first_epoch(&first, audit()).await.unwrap(),
+        store
+            .create_first_epoch(&first, operation, audit())
+            .await
+            .unwrap(),
         first.epoch,
         "an exact retry"
     );
     let err = store
-        .create_first_epoch(&new_epoch(domain, 2), audit())
+        .create_first_epoch(&new_epoch(domain, 2), Uuid::now_v7(), audit())
         .await
         .expect_err("a second first epoch");
     assert!(matches!(err, sid_core::Error::Conflict(_)), "{err:?}");
@@ -129,8 +136,8 @@ pub async fn test_first_epoch_never_resets_a_history(store: &dyn HistoryKeyStore
     let racing = owner();
     let (a, b) = (new_epoch(racing, 3), new_epoch(racing, 4));
     let (ra, rb) = tokio::join!(
-        store.create_first_epoch(&a, audit()),
-        store.create_first_epoch(&b, audit()),
+        store.create_first_epoch(&a, Uuid::now_v7(), audit()),
+        store.create_first_epoch(&b, Uuid::now_v7(), audit()),
     );
     assert!(ra.is_ok() ^ rb.is_ok(), "{ra:?} {rb:?}");
     assert_eq!(epoch_ids(store, racing).await.len(), 1);
@@ -369,6 +376,138 @@ pub async fn test_write_cutoff_only_rises(store: &dyn HistoryKeyStore) {
     let fine = later + chrono::Duration::nanoseconds(1500);
     let kept = store.raise_write_cutoff(fine, audit()).await.unwrap();
     assert!(kept >= fine);
+}
+
+/// An aborted first enrollment loses the key it created, and only that key:
+/// the cleanup fences the operation, so a preparation that arrives after it
+/// creates nothing; repeating the cleanup is harmless; a key the operation
+/// did not create, or one its owner's lifecycle or another operation still
+/// needs, is kept.
+pub async fn test_abandoned_enrollment_is_reclaimed(store: &dyn HistoryKeyStore) {
+    // Created, then aborted: the key goes, and a late retry creates nothing.
+    let domain = owner();
+    let operation = Uuid::now_v7();
+    let first = new_epoch(domain, 71);
+    store
+        .create_first_epoch(&first, operation, audit())
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .abandon_enrollment(&domain, operation, audit())
+            .await
+            .unwrap(),
+        sid_core::models::EnrollmentCleanup::Reclaimed
+    );
+    assert_eq!(store.get_epoch_key(first.epoch.id).await.unwrap(), None);
+    assert!(epoch_ids(store, domain).await.is_empty());
+    assert!(store.enrollment_abandoned(operation).await.unwrap());
+    let late = store
+        .create_first_epoch(&first, operation, audit())
+        .await
+        .expect_err("a preparation after the cleanup");
+    assert!(matches!(late, sid_core::Error::Fenced(_)), "{late:?}");
+    assert_eq!(
+        store
+            .abandon_enrollment(&domain, operation, audit())
+            .await
+            .unwrap(),
+        sid_core::models::EnrollmentCleanup::NothingCreated,
+        "a repeated cleanup"
+    );
+
+    // Aborted before its preparation ran: nothing to reclaim, and the
+    // delayed preparation is refused.
+    let (early_domain, early) = (owner(), Uuid::now_v7());
+    assert_eq!(
+        store
+            .abandon_enrollment(&early_domain, early, audit())
+            .await
+            .unwrap(),
+        sid_core::models::EnrollmentCleanup::NothingCreated
+    );
+    let delayed = store
+        .create_first_epoch(&new_epoch(early_domain, 72), early, audit())
+        .await
+        .expect_err("a preparation delayed past its cleanup");
+    assert!(matches!(delayed, sid_core::Error::Fenced(_)), "{delayed:?}");
+    assert!(epoch_ids(store, early_domain).await.is_empty());
+
+    // Another operation's key is never touched.
+    let (kept_domain, creator) = (owner(), Uuid::now_v7());
+    let kept = new_epoch(kept_domain, 73);
+    store
+        .create_first_epoch(&kept, creator, audit())
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .abandon_enrollment(&kept_domain, Uuid::now_v7(), audit())
+            .await
+            .unwrap(),
+        sid_core::models::EnrollmentCleanup::NothingCreated
+    );
+    assert_eq!(
+        store.get_epoch_key(kept.epoch.id).await.unwrap(),
+        Some(kept.key.clone())
+    );
+
+    // An owner with a recorded lifecycle (it committed and prepared again)
+    // keeps its key even if told its first enrollment was aborted.
+    prepare(
+        store,
+        kept_domain,
+        live(1, &[kept.epoch.id], &[]),
+        Uuid::now_v7(),
+        Utc::now(),
+    )
+    .await
+    .unwrap();
+    let retained = store
+        .abandon_enrollment(&kept_domain, creator, audit())
+        .await
+        .unwrap();
+    assert!(
+        matches!(retained, sid_core::models::EnrollmentCleanup::Retained(_)),
+        "{retained:?}"
+    );
+    assert_eq!(
+        store.get_epoch_key(kept.epoch.id).await.unwrap(),
+        Some(kept.key)
+    );
+}
+
+/// A cleanup racing its operation's preparation: either the key was created
+/// first and is reclaimed, or the preparation is fenced; never a key left
+/// behind for an aborted operation.
+pub async fn test_cleanup_races_preparation(store: &dyn HistoryKeyStore) {
+    for key in 80..84 {
+        let (domain, operation) = (owner(), Uuid::now_v7());
+        let new = new_epoch(domain, key);
+        let (created, cleaned) = tokio::join!(
+            store.create_first_epoch(&new, operation, audit()),
+            store.abandon_enrollment(&domain, operation, audit()),
+        );
+        let cleaned = cleaned.unwrap();
+        match created {
+            Ok(_) => assert!(
+                matches!(
+                    cleaned,
+                    sid_core::models::EnrollmentCleanup::Reclaimed
+                        | sid_core::models::EnrollmentCleanup::NothingCreated
+                ),
+                "{cleaned:?}"
+            ),
+            Err(e) => assert!(matches!(e, sid_core::Error::Fenced(_)), "{e:?}"),
+        }
+        // Whichever came first, a repeated cleanup leaves no key.
+        store
+            .abandon_enrollment(&domain, operation, audit())
+            .await
+            .unwrap();
+        assert!(epoch_ids(store, domain).await.is_empty(), "key {key} left");
+        assert_eq!(store.get_epoch_key(new.epoch.id).await.unwrap(), None);
+    }
 }
 
 /// A key transfer preserves every epoch, sealed key and replacement; exact

@@ -2590,6 +2590,33 @@ impl AuthServiceImpl {
         })
     }
 
+    /// `history` with this installation's age retention: an accepted
+    /// password's commit also drops the owner's entries older than the policy
+    /// keeps, under the same revision fence.
+    fn with_history_age(
+        &self,
+        history: Option<sid_core::models::HistoryCommit>,
+    ) -> Option<sid_core::models::HistoryCommit> {
+        history.map(|mut commit| {
+            commit.max_age_days = self.security_policy.password.history_max_age_days;
+            commit
+        })
+    }
+
+    /// The handler that ends this service's first enrollments at their
+    /// expiry: the in-process evaluator reclaims an aborted one's key
+    /// directly, a separate evaluator learns of the abort as a relayed event.
+    pub fn enrollment_handler(&self) -> Arc<dyn sid_authn::work_runner::WorkHandler> {
+        use super::password_operation::{EnrollmentDelivery, EnrollmentHandler};
+        let delivery = match self.history_evaluation.clone() {
+            Some(evaluation) => EnrollmentDelivery::InProcess(evaluation),
+            None => EnrollmentDelivery::Relay {
+                source: self.issuer.clone(),
+            },
+        };
+        Arc::new(EnrollmentHandler::new(self.storage.clone(), delivery))
+    }
+
     /// The result bytes a finish records for its retries: the response, encoded.
     fn finish_result<T: prost::Message>(response: &T) -> Vec<u8> {
         response.encode_to_vec()
@@ -3018,7 +3045,7 @@ impl AuthService for AuthServiceImpl {
             pending,
             None,
             |_| credential,
-            done.history,
+            self.with_history_age(done.history),
             Some(completion),
         )
         .await?;
@@ -3242,9 +3269,10 @@ impl AuthService for AuthServiceImpl {
 
         // Applies only over the password just read, and only while it is
         // active: a revocation or another change in between is not undone.
+        let history = self.with_history_age(done.history);
         let changed = self
             .storage
-            .change_password(credential.id, &current, &new, done.history.as_ref(), ctx)
+            .change_password(credential.id, &current, &new, history.as_ref(), ctx)
             .await
             .map_err(|e| super::password_operation::commit_refusal(e, storage_failure))?;
         if !changed {
@@ -5882,9 +5910,10 @@ impl AuthService for AuthServiceImpl {
             RevocationReason::UserRequested,
             profile_id.to_string(),
         );
+        let history = self.with_history_age(done.history);
         let ended = self
             .storage
-            .complete_password_reset(session.id, &new_cred, done.history.as_ref(), &end, ctx)
+            .complete_password_reset(session.id, &new_cred, history.as_ref(), &end, ctx)
             .await
             .map_err(|e| super::password_operation::commit_refusal(e, storage_failure))?
             // Completed, or expired, meanwhile: the reset starts again.

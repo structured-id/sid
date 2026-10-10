@@ -332,6 +332,7 @@ async fn a_restored_database_gets_the_configured_cutoff_back() {
             policy_version: 1,
         },
         depth: 3,
+        max_age_days: 0,
     };
     let next = |data: &[u8]| {
         let mut new = password.clone();

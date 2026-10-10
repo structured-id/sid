@@ -8153,6 +8153,24 @@ impl StorageBackend for PostgresBackend {
         job_lock::try_job_lock(&self.pool, job).await
     }
 
+    async fn record_outcome(&self, ctx: MutationContext) -> SidResult<()> {
+        let chain = ctx
+            .operation
+            .as_ref()
+            .map(|o| format!("operation:{}", o.namespace))
+            .unwrap_or_else(|| "operation".to_string());
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| SidError::Storage(format!("begin: {e}")))?;
+        Self::audit_in_tx(&mut tx, &chain, ctx).await?;
+        tx.commit()
+            .await
+            .map_err(|e| SidError::Storage(format!("commit: {e}")))?;
+        Ok(())
+    }
+
     async fn get_operation_result(
         &self,
         namespace: &str,
