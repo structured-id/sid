@@ -341,8 +341,19 @@ async fn test_history_is_empty_until_written() {
 }
 
 #[tokio::test]
-async fn test_history_epoch_is_prepared_once() {
-    common::password_history::test_history_epoch_is_prepared_once(&setup().await).await;
+async fn test_history_archive_preserves_lifecycle() {
+    common::password_history::test_history_archive_preserves_lifecycle(&setup().await).await;
+}
+
+#[tokio::test]
+async fn test_history_rotation_is_published_by_its_commit() {
+    common::password_history::test_history_rotation_is_published_by_its_commit(&setup().await)
+        .await;
+}
+
+#[tokio::test]
+async fn test_history_descriptor_conflict_writes_nothing() {
+    common::password_history::test_history_descriptor_conflict_writes_nothing(&setup().await).await;
 }
 
 #[tokio::test]
@@ -361,6 +372,11 @@ async fn test_history_retains_depth() {
 }
 
 #[tokio::test]
+async fn test_history_age_retention() {
+    common::password_history::test_history_age_retention(&setup().await).await;
+}
+
+#[tokio::test]
 async fn test_reset_history_is_compare_and_swap() {
     common::password_history::test_reset_history_is_compare_and_swap(&setup().await).await;
 }
@@ -368,6 +384,96 @@ async fn test_reset_history_is_compare_and_swap() {
 #[tokio::test]
 async fn test_history_of_another_owner_is_refused() {
     common::password_history::test_history_of_another_owner_is_refused(&setup().await).await;
+}
+
+#[tokio::test]
+async fn test_history_write_cutoff_fences_commits() {
+    common::password_history::test_history_write_cutoff_fences_commits(&setup().await).await;
+}
+
+#[tokio::test]
+async fn test_history_write_cutoff_races_a_commit() {
+    common::password_history::test_history_write_cutoff_races_a_commit(&setup().await).await;
+}
+
+#[tokio::test]
+async fn test_write_cutoff_only_rises() {
+    common::history_keys::test_write_cutoff_only_rises(&setup().await.history_keys()).await;
+}
+
+// ─── History evaluator's key store ───
+
+#[tokio::test]
+async fn test_first_epoch_never_resets_a_history() {
+    common::history_keys::test_first_epoch_never_resets_a_history(&setup().await.history_keys())
+        .await;
+}
+
+#[tokio::test]
+async fn test_epoch_is_ensured_once() {
+    common::history_keys::test_epoch_is_ensured_once(&setup().await.history_keys()).await;
+}
+
+#[tokio::test]
+async fn test_owner_domains_are_separate() {
+    common::history_keys::test_owner_domains_are_separate(&setup().await.history_keys()).await;
+}
+
+#[tokio::test]
+async fn test_epoch_rotation() {
+    common::history_keys::test_epoch_rotation(&setup().await.history_keys()).await;
+}
+
+#[tokio::test]
+async fn test_lifecycle_follows_the_live_set() {
+    common::history_keys::test_lifecycle_follows_the_live_set(&setup().await.history_keys()).await;
+}
+
+#[tokio::test]
+async fn test_stale_live_set_cannot_retire() {
+    common::history_keys::test_stale_live_set_cannot_retire(&setup().await.history_keys()).await;
+}
+
+#[tokio::test]
+async fn test_key_archive_round_trip() {
+    common::history_keys::test_key_archive_round_trip(&setup().await.history_keys()).await;
+}
+
+#[tokio::test]
+async fn test_abandoned_enrollment_is_reclaimed() {
+    common::history_keys::test_abandoned_enrollment_is_reclaimed(&setup().await.history_keys())
+        .await;
+}
+
+#[tokio::test]
+async fn test_cleanup_races_preparation() {
+    common::history_keys::test_cleanup_races_preparation(&setup().await.history_keys()).await;
+}
+
+#[tokio::test]
+async fn test_abandoned_fences_are_compacted() {
+    common::history_keys::test_abandoned_fences_are_compacted(&setup().await.history_keys()).await;
+}
+
+#[tokio::test]
+async fn test_purged_owner_keeps_nothing() {
+    common::history_keys::test_purged_owner_keeps_nothing(&setup().await.history_keys()).await;
+}
+
+#[tokio::test]
+async fn test_history_key_versions_are_insert_only() {
+    common::history_keys::test_history_key_versions_are_insert_only(&setup().await.history_keys())
+        .await;
+}
+
+#[tokio::test]
+async fn test_ended_work_is_purged() {
+    common::work::test_ended_work_is_purged(&setup().await).await;
+}
+
+#[tokio::test]
+async fn test_operation_results_are_purged_by_method() {
+    common::operation::test_operation_results_are_purged_by_method(&setup().await).await;
 }
 
 #[tokio::test]
@@ -910,6 +1016,11 @@ async fn test_work_capacity_is_enforced_per_kind() {
 }
 
 #[tokio::test]
+async fn test_work_capacity_holds_under_concurrency() {
+    common::work::test_work_capacity_holds_under_concurrency(&setup().await).await;
+}
+
+#[tokio::test]
 async fn test_work_lease_fences_stale_worker() {
     common::work::test_work_lease_fences_stale_worker(&setup().await).await;
 }
@@ -1299,6 +1410,11 @@ async fn test_completed_operation_commits_nothing() {
 #[tokio::test]
 async fn test_concurrent_duplicate_operation_commits_once() {
     common::operation::test_concurrent_duplicate_operation_commits_once(&setup().await).await;
+}
+
+#[tokio::test]
+async fn test_terminal_abort_races_the_commit() {
+    common::operation::test_terminal_abort_races_the_commit(&setup().await).await;
 }
 
 #[tokio::test]

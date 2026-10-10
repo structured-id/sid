@@ -25,6 +25,7 @@ mod verify;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use sid_plugin::history_keys::HistoryKeyStore;
 use sid_plugin::storage::StorageBackend;
 use std::path::PathBuf;
 use tracing::info;
@@ -63,6 +64,11 @@ enum Commands {
         /// Include audit log in export (can be very large)
         #[arg(long, default_value = "false")]
         include_audit: bool,
+
+        /// The password-history evaluator's database, when it is not the
+        /// source database (PostgreSQL URL)
+        #[arg(long)]
+        history_keys: Option<String>,
     },
 
     /// Import data from a JSON file into a SID instance.
@@ -78,6 +84,11 @@ enum Commands {
         /// PostgreSQL schema name (for shared-database deployments)
         #[arg(long)]
         schema: Option<String>,
+
+        /// The password-history evaluator's database, when it is not the
+        /// target database (PostgreSQL URL)
+        #[arg(long)]
+        history_keys: Option<String>,
     },
 
     /// Migrate data directly from one backend to another (no intermediate file).
@@ -101,6 +112,14 @@ enum Commands {
         /// Include audit log in migration
         #[arg(long, default_value = "false")]
         include_audit: bool,
+
+        /// The source's password-history evaluator database, when separate
+        #[arg(long)]
+        source_history_keys: Option<String>,
+
+        /// The target's password-history evaluator database, when separate
+        #[arg(long)]
+        target_history_keys: Option<String>,
     },
 
     /// Verify data consistency between two backends.
@@ -120,6 +139,14 @@ enum Commands {
         /// Target PostgreSQL schema name
         #[arg(long)]
         target_schema: Option<String>,
+
+        /// The source's password-history evaluator database, when separate
+        #[arg(long)]
+        source_history_keys: Option<String>,
+
+        /// The target's password-history evaluator database, when separate
+        #[arg(long)]
+        target_history_keys: Option<String>,
     },
 }
 
@@ -138,17 +165,38 @@ async fn main() -> Result<()> {
             output,
             schema,
             include_audit,
+            history_keys,
         } => {
-            info!(source = %source, output = %output.display(), "starting export");
-            let backend = connect_backend(&source, schema.as_deref()).await?;
-            let snapshot =
-                export::export_snapshot(backend.as_ref(), &source, include_audit).await?;
+            info!(output = %output.display(), "starting export");
+            let store =
+                connect_backend(&source, schema.as_deref(), history_keys.as_deref()).await?;
+            let snapshot = export::export_snapshot(
+                store.storage.as_ref(),
+                store.keys.as_ref(),
+                &source,
+                include_audit,
+            )
+            .await?;
 
             let json =
                 serde_json::to_string_pretty(&snapshot).context("failed to serialize snapshot")?;
-            tokio::fs::write(&output, json)
+            // Snapshots contain sealed credentials and history keys: create a
+            // new owner-readable file rather than following or truncating a path.
+            let mut options = tokio::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            options.mode(0o600);
+            let mut file = options
+                .open(&output)
+                .await
+                .context("failed to create output file")?;
+            use tokio::io::AsyncWriteExt;
+            file.write_all(json.as_bytes())
                 .await
                 .context("failed to write output file")?;
+            file.sync_all()
+                .await
+                .context("failed to synchronize output file")?;
 
             info!(
                 entities = snapshot.metadata.total_entities,
@@ -166,8 +214,9 @@ async fn main() -> Result<()> {
             target,
             input,
             schema,
+            history_keys,
         } => {
-            info!(target = %target, input = %input.display(), "starting import");
+            info!(input = %input.display(), "starting import");
             let json = tokio::fs::read_to_string(&input)
                 .await
                 .context("failed to read input file")?;
@@ -181,8 +230,11 @@ async fn main() -> Result<()> {
                 "snapshot loaded"
             );
 
-            let backend = connect_backend(&target, schema.as_deref()).await?;
-            let result = import::import_snapshot(backend.as_ref(), &snapshot).await?;
+            let store =
+                connect_backend(&target, schema.as_deref(), history_keys.as_deref()).await?;
+            let result =
+                import::import_snapshot(store.storage.as_ref(), store.keys.as_ref(), &snapshot)
+                    .await?;
 
             println!("{result}");
         }
@@ -193,27 +245,54 @@ async fn main() -> Result<()> {
             source_schema,
             target_schema,
             include_audit,
+            source_history_keys,
+            target_history_keys,
         } => {
-            info!(source = %source, target = %target, "starting direct migration");
-            let source_backend = connect_backend(&source, source_schema.as_deref()).await?;
-            let target_backend = connect_backend(&target, target_schema.as_deref()).await?;
+            info!("starting direct migration");
+            let source_store = connect_backend(
+                &source,
+                source_schema.as_deref(),
+                source_history_keys.as_deref(),
+            )
+            .await?;
+            let target_store = connect_backend(
+                &target,
+                target_schema.as_deref(),
+                target_history_keys.as_deref(),
+            )
+            .await?;
 
             // Export from source
-            let snapshot =
-                export::export_snapshot(source_backend.as_ref(), &source, include_audit).await?;
+            let snapshot = export::export_snapshot(
+                source_store.storage.as_ref(),
+                source_store.keys.as_ref(),
+                &source,
+                include_audit,
+            )
+            .await?;
             info!(
                 entities = snapshot.metadata.total_entities,
                 "source data exported, importing to target..."
             );
 
             // Import to target
-            let result = import::import_snapshot(target_backend.as_ref(), &snapshot).await?;
+            let result = import::import_snapshot(
+                target_store.storage.as_ref(),
+                target_store.keys.as_ref(),
+                &snapshot,
+            )
+            .await?;
             println!("{result}");
 
             // Auto-verify
             info!("running post-migration verification...");
-            let verify_result =
-                verify::verify_backends(source_backend.as_ref(), target_backend.as_ref()).await?;
+            let verify_result = verify::verify_backends(
+                source_store.storage.as_ref(),
+                source_store.keys.as_ref(),
+                target_store.storage.as_ref(),
+                target_store.keys.as_ref(),
+            )
+            .await?;
             println!("{verify_result}");
 
             if !verify_result.passed {
@@ -226,13 +305,30 @@ async fn main() -> Result<()> {
             target,
             source_schema,
             target_schema,
+            source_history_keys,
+            target_history_keys,
         } => {
-            info!(source = %source, target = %target, "starting verification");
-            let source_backend = connect_backend(&source, source_schema.as_deref()).await?;
-            let target_backend = connect_backend(&target, target_schema.as_deref()).await?;
+            info!("starting verification");
+            let source_store = connect_backend(
+                &source,
+                source_schema.as_deref(),
+                source_history_keys.as_deref(),
+            )
+            .await?;
+            let target_store = connect_backend(
+                &target,
+                target_schema.as_deref(),
+                target_history_keys.as_deref(),
+            )
+            .await?;
 
-            let result =
-                verify::verify_backends(source_backend.as_ref(), target_backend.as_ref()).await?;
+            let result = verify::verify_backends(
+                source_store.storage.as_ref(),
+                source_store.keys.as_ref(),
+                target_store.storage.as_ref(),
+                target_store.keys.as_ref(),
+            )
+            .await?;
             println!("{result}");
 
             if !result.passed {
@@ -244,16 +340,36 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Connect to a storage backend based on URL scheme.
-async fn connect_backend(url: &str, schema: Option<&str>) -> Result<Box<dyn StorageBackend>> {
+/// One installation's data: its storage backend and the password-history
+/// evaluator's key store, which a standalone installation keeps in the same
+/// database under its own tables and a split one in the evaluator's own.
+struct Store {
+    storage: Box<dyn StorageBackend>,
+    keys: Box<dyn HistoryKeyStore>,
+}
+
+/// Connect to a storage backend and its history key store based on URL
+/// scheme: the evaluator's own PostgreSQL database `history_keys`, or the
+/// storage database itself. The key store's tables are created if missing.
+async fn connect_backend(
+    url: &str,
+    schema: Option<&str>,
+    history_keys: Option<&str>,
+) -> Result<Store> {
     if url.starts_with("sqlite:") {
         #[cfg(feature = "storage-sqlite")]
         {
+            if history_keys.is_some() {
+                bail!("a SQLite installation keeps its history keys in its own file");
+            }
             let path = url.strip_prefix("sqlite://").unwrap_or(url);
             let backend = sid_storage::sqlite::SqliteBackend::new(path)
                 .await
                 .context("failed to connect to SQLite")?;
-            Ok(Box::new(backend))
+            Ok(Store {
+                keys: Box::new(backend.history_keys()),
+                storage: Box::new(backend),
+            })
         }
         #[cfg(not(feature = "storage-sqlite"))]
         {
@@ -265,13 +381,25 @@ async fn connect_backend(url: &str, schema: Option<&str>) -> Result<Box<dyn Stor
             let backend = sid_storage::PostgresBackend::new(url, schema.map(String::from))
                 .await
                 .context("failed to connect to PostgreSQL")?;
-            Ok(Box::new(backend))
+            let keys = match history_keys {
+                Some(keys_url) => sid_storage::PgHistoryKeyStore::connect(keys_url)
+                    .await
+                    .context("failed to connect to the history key store")?,
+                None => sid_storage::PgHistoryKeyStore::new(backend.pool().clone()),
+            };
+            keys.migrate()
+                .await
+                .context("history key store migrations")?;
+            Ok(Store {
+                keys: Box::new(keys),
+                storage: Box::new(backend),
+            })
         }
         #[cfg(not(feature = "storage-pg"))]
         {
             bail!("PostgreSQL support not compiled in. Enable the `storage-pg` feature.");
         }
     } else {
-        bail!("Unsupported database URL scheme. Use 'sqlite://' or 'postgres://'. Got: {url}");
+        bail!("Unsupported database URL scheme. Use 'sqlite://' or 'postgres://'.");
     }
 }

@@ -1,6 +1,32 @@
 use super::*;
 use sid_core::models::event::event_types;
 
+/// The in-process bus keeps no event until it is settled, so it refuses a
+/// durable consumer instead of consuming lossily.
+#[tokio::test]
+async fn test_in_process_bus_refuses_durable_consumption() {
+    let refused = InProcessEventBus::new()
+        .consume(DurableConsumer {
+            name: "test".into(),
+            event_types: vec![event_types::USER_CREATED.into()],
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(refused, EventBusError::DurableUnsupported));
+}
+
+/// A delivery dropped unsettled reads as not settled; a settled one as its
+/// settlement.
+#[tokio::test]
+async fn test_delivery_reports_its_settlement() {
+    let (delivery, outcome) = Delivery::new(Event::new("test", event_types::USER_CREATED));
+    delivery.settle(Settlement::Done);
+    assert_eq!(outcome.await.unwrap(), Settlement::Done);
+    let (delivery, outcome) = Delivery::new(Event::new("test", event_types::USER_CREATED));
+    drop(delivery);
+    assert!(outcome.await.is_err());
+}
+
 #[tokio::test]
 async fn test_publish_to_subscriber() {
     let bus = InProcessEventBus::new();

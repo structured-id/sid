@@ -23,6 +23,9 @@ secrecy = { workspace = true }
 rand = { workspace = true }
 url = { workspace = true }
 cloudevents-sdk = "0.9"
+# A history epoch's public key is a compressed Pallas point
+pasta_curves = { workspace = true }
+group = { workspace = true }
 
 # Recovery seed phrase (BIP-39 + key derivation)
 pbkdf2 = { workspace = true, optional = true }

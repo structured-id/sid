@@ -54,6 +54,29 @@ async fn expired_state_is_not_taken() {
     assert_eq!(b.take("k1").await.unwrap(), None);
 }
 
+/// State stored again at a later step keeps its ceremony's deadline instead
+/// of a fresh store TTL; past the deadline nothing is stored.
+#[tokio::test]
+async fn state_stored_until_a_deadline_ends_with_it() {
+    let (a, b) = replicas(Duration::from_secs(60));
+    let deadline = chrono::Utc::now() + chrono::Duration::milliseconds(40);
+    assert!(
+        a.insert_until("k1", &"state".to_string(), deadline)
+            .await
+            .unwrap()
+    );
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    assert_eq!(b.take("k1").await.unwrap(), None);
+
+    let passed = chrono::Utc::now() - chrono::Duration::milliseconds(1);
+    assert!(
+        !a.insert_until("k2", &"state".to_string(), passed)
+            .await
+            .unwrap()
+    );
+    assert_eq!(b.take("k2").await.unwrap(), None);
+}
+
 /// The cache holds only sealed state, bound to its ceremony kind and key: the
 /// plaintext is not in it, and a value moved to another key is refused.
 #[tokio::test]

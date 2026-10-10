@@ -273,10 +273,20 @@ async fn cancel_limit_survives_new_requests() {
     assert_eq!(status(&storage, pid).await, ProfileStatus::Active);
 }
 
-/// A closed profile is purged only once its principal quarantine is over.
+/// A closed profile is purged only once its principal quarantine is over,
+/// and its purge owes the destruction of its password-history keys.
 #[tokio::test]
 async fn closed_profile_is_purged_at_quarantine_end() {
     let (storage, closures, pool) = setup().await;
+    // The installation's authority, as the shared database may already hold.
+    storage
+        .insert_instance_organization(
+            &sid_core::models::Organization::implicit_community("sid.example.com"),
+            AuditEntry::system("test", "org").into(),
+        )
+        .await
+        .unwrap();
+    let org = storage.instance_organization().await.unwrap().unwrap();
     let (recent, _, _) = closing_profile(&storage, &closures).await;
     let (old, _, _) = closing_profile(&storage, &closures).await;
     set_grace_end(&pool, recent, Utc::now() - Duration::minutes(1)).await;
@@ -288,4 +298,16 @@ async fn closed_profile_is_purged_at_quarantine_end() {
 
     assert_eq!(status(&storage, recent).await, ProfileStatus::Closed);
     assert_eq!(status(&storage, old).await, ProfileStatus::Purged);
+    let purge_of = |profile| {
+        sid_core::models::OwnerPurge {
+            owner_domain: sid_authn::password_history::owner_domain(org.id.as_bytes(), profile),
+        }
+        .work()
+        .id
+    };
+    assert!(
+        storage.get_work(purge_of(old)).await.unwrap().is_some(),
+        "the purged owner's history keys are owed their destruction"
+    );
+    assert!(storage.get_work(purge_of(recent)).await.unwrap().is_none());
 }

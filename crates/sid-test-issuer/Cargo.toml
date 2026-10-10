@@ -15,7 +15,7 @@ sid-server = { path = "../sid-server", default-features = false, features = ["em
 sid-core = { workspace = true, features = ["grpc"] }
 sid-keys = { workspace = true }
 sid-plugin = { workspace = true }
-sid-authn = { workspace = true, features = ["grpc"] }
+sid-authn = { workspace = true, features = ["grpc", "client-credential"] }
 sid-authz = { workspace = true }
 sid-proto = { workspace = true }
 sid-storage = { workspace = true, default-features = false, features = ["storage-sqlite"] }
@@ -32,3 +32,12 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# A split password history evaluator is exercised with a real registration
+# request and checks the evaluator's proof.
+sid-opaque-ke = { workspace = true }
+sid-pake-core = { workspace = true }
+sid-ids = { workspace = true }
+pasta_curves = { workspace = true }
+group = { workspace = true }
+ff = { workspace = true }
+rand = { workspace = true }

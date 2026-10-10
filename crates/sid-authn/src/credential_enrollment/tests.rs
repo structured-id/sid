@@ -129,6 +129,104 @@ fn provisional_session_refuses() {
     }
 }
 
+fn change(
+    session: &Session,
+    rule: CurrentPasswordRule,
+    proven: bool,
+) -> Result<(), EnrollmentRefusal> {
+    check_password_change(
+        session,
+        &credentials(&[CredentialType::Opaque]),
+        true,
+        rule,
+        proven,
+        Utc::now(),
+    )
+}
+
+/// By default every change proves the current password: a fresh session
+/// alone does not replace it (OWASP ASVS V6.2.3).
+#[test]
+fn always_rule_requires_the_current_password() {
+    let fresh = session(AuthLevel::Basic, 0);
+    let now = Utc::now();
+    assert_eq!(
+        current_password_required_in(&fresh, CurrentPasswordRule::Always, now),
+        chrono::Duration::zero()
+    );
+    assert_eq!(
+        change(&fresh, CurrentPasswordRule::Always, false),
+        Err(EnrollmentRefusal::CurrentPasswordRequired)
+    );
+    assert_eq!(change(&fresh, CurrentPasswordRule::Always, true), Ok(()));
+}
+
+/// A relaxed rule skips the current password while the session's last
+/// authentication is recent, and says exactly how long that lasts.
+#[test]
+fn relaxed_rule_counts_down_from_the_last_authentication() {
+    let rule = CurrentPasswordRule::AfterMinutes(5);
+    let recent = session(AuthLevel::Basic, 2);
+    let now = Utc::now();
+    let left = current_password_required_in(&recent, rule, now);
+    assert_eq!(
+        left,
+        recent.authenticated_at + chrono::Duration::minutes(5) - now
+    );
+    assert!(left > chrono::Duration::minutes(2));
+    assert_eq!(change(&recent, rule, false), Ok(()));
+
+    let older = session(AuthLevel::Basic, 6);
+    assert_eq!(
+        current_password_required_in(&older, rule, Utc::now()),
+        chrono::Duration::zero()
+    );
+    assert_eq!(
+        change(&older, rule, false),
+        Err(EnrollmentRefusal::CurrentPasswordRequired)
+    );
+    assert_eq!(change(&older, rule, true), Ok(()));
+}
+
+/// A relaxed rule never outlasts the credential-binding freshness window.
+#[test]
+fn relaxed_rule_is_bounded_by_the_freshness_window() {
+    let rule = CurrentPasswordRule::AfterMinutes(180);
+    let stale = session(AuthLevel::Basic, 70);
+    assert_eq!(
+        current_password_required_in(&stale, rule, Utc::now()),
+        chrono::Duration::zero()
+    );
+    assert_eq!(
+        change(&stale, rule, false),
+        Err(EnrollmentRefusal::CurrentPasswordRequired)
+    );
+    // The proof is itself a fresh authentication.
+    assert_eq!(change(&stale, rule, true), Ok(()));
+}
+
+/// A proof sent while none was required is accepted: client and server
+/// clocks may disagree slightly, and the stronger request is never refused.
+#[test]
+fn proof_is_accepted_when_not_required() {
+    let recent = session(AuthLevel::Basic, 1);
+    assert_eq!(
+        change(&recent, CurrentPasswordRule::AfterMinutes(5), true),
+        Ok(())
+    );
+}
+
+/// The current password lifts no other condition: mailbox possession still
+/// changes nothing.
+#[test]
+fn proof_does_not_lift_a_provisional_session() {
+    let provisional = Session::new_provisional(ProfileId::generate(), "127.0.0.1".into());
+    assert_eq!(
+        change(&provisional, CurrentPasswordRule::Always, true),
+        Err(EnrollmentRefusal::Provisional)
+    );
+}
+
 /// A passkey counts as a second factor only where policy says so.
 #[test]
 fn passkey_assurance_follows_policy() {

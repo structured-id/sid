@@ -295,15 +295,24 @@ impl AnomalyDetector {
     /// Count a failed attempt for `identity`; the attempt that reaches the
     /// limit starts the lockout. An error means the attempt was not counted.
     pub async fn record_failed_attempt(&self, identity: &str) -> CacheResult<()> {
+        self.count_attempt(identity).await.map(|_| ())
+    }
+
+    /// Count an attempt for `identity` and say whether it is within the
+    /// limit. The count is one atomic step, so of attempts made at once only
+    /// the limit get `true`; the one reaching the limit starts the lockout.
+    /// An error means the attempt was not counted.
+    pub async fn count_attempt(&self, identity: &str) -> CacheResult<bool> {
         let window = Duration::from_secs(self.config.brute_force_window_secs);
         let count = self.cache.incr(&attempts_key(identity), window).await?;
-        if count >= u64::from(self.config.brute_force_max_attempts) {
+        let limit = u64::from(self.config.brute_force_max_attempts);
+        if count >= limit {
             let lockout_ttl = Duration::from_secs(self.config.brute_force_lockout_secs);
             self.cache
                 .set(&lockout_key(identity), b"1", lockout_ttl)
                 .await?;
         }
-        Ok(())
+        Ok(count <= limit)
     }
 
     /// Count a login attempt from `ip` (credential stuffing).

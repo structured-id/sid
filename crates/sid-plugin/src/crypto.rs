@@ -254,7 +254,9 @@ pub trait OpaqueOperations: Send + Sync {
     /// OPAQUE registration: finalize with client's `RegistrationUpload`.
     fn registration_finish(&self, upload_bytes: &[u8]) -> Result<StoredCredential, OpaqueError>;
 
-    /// OPAQUE login: process client's `CredentialRequest`.
+    /// OPAQUE login: process client's `CredentialRequest` under `context`
+    /// (RFC 9807 §6: empty for an ordinary sign-in, the purpose's binding for
+    /// a sign-in inside another operation; the client must use the same).
     ///
     /// Returns `(response_bytes, login_state)`.
     fn login_start(
@@ -263,6 +265,7 @@ pub trait OpaqueOperations: Send + Sync {
         credential: &StoredCredential,
         request_bytes: &[u8],
         credential_id: &[u8],
+        context: &[u8],
     ) -> Result<(Vec<u8>, LoginState), OpaqueError>;
 
     /// Fake OPAQUE login start for nonexistent users (anti-enumeration).
@@ -277,11 +280,13 @@ pub trait OpaqueOperations: Send + Sync {
         credential_id: &[u8],
     ) -> Result<Vec<u8>, OpaqueError>;
 
-    /// OPAQUE login: finalize with client's `CredentialFinalization`.
+    /// OPAQUE login: finalize with client's `CredentialFinalization` under the
+    /// `context` the login started with.
     fn login_finish(
         &self,
         state: &LoginState,
         finalization_bytes: &[u8],
+        context: &[u8],
     ) -> Result<SessionKey, OpaqueError>;
 }
 

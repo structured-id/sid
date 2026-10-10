@@ -53,7 +53,9 @@ impl ZkppOpaqueServer {
     /// signs in through `router`, on any replica and after any restart.
     /// The router's primary curve must be Pallas, the curve the proofs bind.
     /// `verifiers` are the keys for the policy version, one per domain count;
-    /// without one, only unproven installations are possible, so
+    /// their compiled policy must match that version and domain counts must
+    /// be unique, also when policy-unverified setup is permitted.
+    /// Without one, only unproven installations are possible, so
     /// `config.require_proof` then refuses to start.
     pub fn new(
         router: &OpaqueRouter,
@@ -70,6 +72,28 @@ impl ZkppOpaqueServer {
             return Err(SidError::Internal(
                 "ZKPP requires proofs but has no verifier".to_string(),
             ));
+        }
+        if !verifiers.is_empty() {
+            let policy = sid_pake_core::policy::get_policy(sid_pake_core::types::PolicyVersion(
+                config.policy_version,
+            ))
+            .ok_or_else(|| SidError::Internal("unknown ZKPP policy version".into()))?;
+            for (index, verifier) in verifiers.iter().enumerate() {
+                let shape = verifier.shape();
+                if shape.policy != policy {
+                    return Err(SidError::Internal(
+                        "ZKPP verifier does not enforce the configured policy".into(),
+                    ));
+                }
+                if verifiers[..index]
+                    .iter()
+                    .any(|prior| prior.shape().history_domains == shape.history_domains)
+                {
+                    return Err(SidError::Internal(
+                        "duplicate ZKPP verifier for a history domain count".into(),
+                    ));
+                }
+            }
         }
         let server_setup = ServerSetup::<PallasCipherSuite>::deserialize(&router.setup().0)
             .map_err(|e| SidError::Internal(format!("Pallas server setup: {e}")))?;
@@ -90,6 +114,16 @@ impl ZkppOpaqueServer {
         self.verifiers
             .iter()
             .any(|v| v.shape().history_domains == domains)
+    }
+
+    /// Exact wire lengths fixed by the accepted verifier, before allocating
+    /// or decoding client-supplied instances. The client cannot select them.
+    pub fn proof_lengths(&self, domains: usize) -> SidResult<(usize, usize)> {
+        let verifier = self.verifier(domains)?;
+        Ok((
+            verifier.proof_len(),
+            sid_pake_core::circuit::instance_count(verifier.shape().history_domains),
+        ))
     }
 
     /// OPAQUE registration start for `credential_identifier`: the response
@@ -150,23 +184,35 @@ impl ZkppOpaqueServer {
     /// policy key for `domains` comparison domains, and its link to the
     /// element M of the operation's own OPAQUE request, bound to both the
     /// operation and the request bytes. Returns the history inputs for the
-    /// checker; policy compliance is part of the key, so a password below
-    /// policy has no valid proof.
+    /// checker and the artifact that accepted the proof; policy compliance is
+    /// part of the key, so a password below policy has no valid proof.
     pub fn verify(
         &self,
         proof: &BoundProof,
         operation_id: &[u8; 16],
         registration_request_bytes: &[u8],
         domains: usize,
-    ) -> SidResult<ZkppPublicInputs> {
+    ) -> SidResult<VerifiedProof> {
         let verifier = self.verifier(domains)?;
         let request = parse_registration_request(registration_request_bytes)?;
         let m = request_element(&request)?;
         let context = operation_context(operation_id, registration_request_bytes);
-        verifier.verify(proof, &context, m).map_err(|e| {
+        let inputs = verifier.verify(proof, &context, m).map_err(|e| {
             SidError::AuthenticationFailed(format!("ZKPP proof verification failed: {e}"))
+        })?;
+        Ok(VerifiedProof {
+            inputs,
+            artifact: verifier.artifact(),
         })
     }
+}
+
+/// An accepted proof: its history inputs for the checker and the identity
+/// of the verifying artifact, which the password's evidence records.
+#[derive(Debug)]
+pub struct VerifiedProof {
+    pub inputs: ZkppPublicInputs,
+    pub artifact: [u8; 32],
 }
 
 fn parse_registration_request(bytes: &[u8]) -> SidResult<RegistrationRequest<PallasCipherSuite>> {
