@@ -1521,7 +1521,7 @@ fn history_epoch_cutoff(
 /// Parse explicit proof settings without treating invalid input as absence.
 fn zkpp_settings(
     enabled: Result<String, std::env::VarError>,
-    required: Result<String, std::env::VarError>,
+    skip: Result<String, std::env::VarError>,
     version: Result<String, std::env::VarError>,
 ) -> anyhow::Result<(bool, sid_authn::opaque_zkpp::ZkppConfig)> {
     fn value(
@@ -1534,21 +1534,29 @@ fn zkpp_settings(
             Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!("{name} must be Unicode"),
         }
     }
-    fn boolean(name: &str, input: Result<String, std::env::VarError>) -> anyhow::Result<bool> {
+    /// `default` when unset; an empty or unknown value is an error, never
+    /// either answer.
+    fn boolean(
+        name: &str,
+        input: Result<String, std::env::VarError>,
+        default: bool,
+    ) -> anyhow::Result<bool> {
         match value(name, input)?.as_deref() {
-            None | Some("true" | "1") => Ok(true),
+            None => Ok(default),
+            Some("true" | "1") => Ok(true),
             Some("false" | "0") => Ok(false),
             Some(_) => anyhow::bail!("{name} must be true, false, 1 or 0"),
         }
     }
-    let enabled = boolean("SID_ZKPP_ENABLED", enabled)?;
-    // Governs every installed password: registration, change and reset all
-    // run as password operations; the plain OPAQUE registration registers
-    // nothing.
-    let require_proof = boolean("SID_ZKPP_REQUIRE_PROOF", required)?;
+    let enabled = boolean("SID_ZKPP_ENABLED", enabled, true)?;
+    // Proofs are required unless explicitly skipped: an unset flag cannot
+    // weaken them. Governs every installed password: registration, change
+    // and reset all run as password operations; the plain OPAQUE
+    // registration registers nothing.
+    let require_proof = !boolean("SID_ZKPP_SKIP_PROOF", skip, false)?;
     anyhow::ensure!(
         enabled || !require_proof,
-        "mandatory password proofs require enabled verifiers"
+        "with SID_ZKPP_ENABLED=false no proof can be verified: set SID_ZKPP_SKIP_PROOF=true to accept that"
     );
     let policy_version = match value("SID_ZKPP_POLICY_VERSION", version)? {
         None => 1,
@@ -1579,7 +1587,7 @@ fn init_zkpp(router: &Arc<OpaqueRouter>) -> Arc<arc_swap::ArcSwap<Option<Arc<Zkp
 
     let (enabled, config) = zkpp_settings(
         std::env::var("SID_ZKPP_ENABLED"),
-        std::env::var("SID_ZKPP_REQUIRE_PROOF"),
+        std::env::var("SID_ZKPP_SKIP_PROOF"),
         std::env::var("SID_ZKPP_POLICY_VERSION"),
     )
     .unwrap_or_else(|e| panic!("ZKPP configuration: {e}"));

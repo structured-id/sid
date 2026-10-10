@@ -58,7 +58,7 @@ Environment variables:
 | `SID_SCIM_BASE_URL` | `SID_ISSUER` | Public URL the SCIM endpoint is reached under (`/scim/v2` follows) |
 | `SID_AUTHZ_REQUEST_VERIFIERS_FILE` | - | JSON file naming the services trusted to confirm sender proofs of original requests (see below); unset trusts none |
 | `SID_ZKPP_ENABLED` | `true` | Build policy-proof verifiers; accepts only `true`, `false`, `1` or `0` |
-| `SID_ZKPP_REQUIRE_PROOF` | `true` | Require a password-policy proof for password setup; `false` explicitly permits policy-unverified setup. Cannot be `true` while verifiers are disabled |
+| `SID_ZKPP_SKIP_PROOF` | `false` | Every password setup requires a password-policy proof unless this is `true` or `1`, which explicitly permits policy-unverified setup. An empty or other value stops startup. Required to be `true` when `SID_ZKPP_ENABLED` is `false` |
 | `SID_ZKPP_POLICY_VERSION` | `1` | Accepted compiled password policy; an unknown or malformed version stops startup |
 | `SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE` | - | RFC 3339 instant: no history entry is written under a key created before it (a suspected key compromise), and such keys are replaced at their owner's next password operation. Raised at start into this server's history store and the in-process evaluator's; an older or unset value lowers nothing. A malformed or future value stops startup |
 | `SID_PASSWORD_HISTORY_EVALUATOR` | - | gRPC address of a separately deployed password-history evaluator; unset runs the evaluator in this server (see below) |

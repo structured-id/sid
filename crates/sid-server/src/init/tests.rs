@@ -14,7 +14,7 @@ fn zkpp_settings_refuse_malformed_security_configuration() {
     for value in ["", "garbage", "0", "4294967296", "2"] {
         assert!(zkpp_settings(Ok("true".into()), Err(NotPresent), Ok(value.into())).is_err());
     }
-    assert!(zkpp_settings(Ok("false".into()), Ok("true".into()), Err(NotPresent)).is_err());
+    assert!(zkpp_settings(Ok("false".into()), Ok("false".into()), Err(NotPresent)).is_err());
     assert!(zkpp_settings(Ok("false".into()), Err(NotPresent), Err(NotPresent)).is_err());
     assert!(
         zkpp_settings(
@@ -42,33 +42,45 @@ fn zkpp_settings_refuse_malformed_security_configuration() {
     );
 }
 
-/// Fresh installations require proofs; only an explicit false/0 permits
-/// policy-unverified setup. Missing configuration cannot weaken this default.
+/// Proofs are required unless `SID_ZKPP_SKIP_PROOF` explicitly says true/1:
+/// an unset flag, false/0 keep them required, and an empty or unknown value
+/// stops startup, so no mistyped or blank setting weakens the default.
 #[test]
-fn zkpp_settings_preserve_documented_defaults() {
+fn zkpp_settings_require_proofs_unless_explicitly_skipped() {
     use std::env::VarError::NotPresent;
     let (enabled, config) =
         zkpp_settings(Err(NotPresent), Err(NotPresent), Err(NotPresent)).unwrap();
     assert!(enabled);
     assert!(config.require_proof);
     assert_eq!(config.policy_version, 1);
-    let (enabled, config) =
-        zkpp_settings(Err(NotPresent), Ok("false".into()), Err(NotPresent)).unwrap();
-    assert!(enabled);
-    assert!(!config.require_proof);
-    let (enabled, config) =
-        zkpp_settings(Ok("false".into()), Ok("false".into()), Err(NotPresent)).unwrap();
-    assert!(!enabled && !config.require_proof);
-    for value in ["true", "1"] {
+    for skip in ["true", "1"] {
         let (enabled, config) =
-            zkpp_settings(Ok(value.into()), Err(NotPresent), Err(NotPresent)).unwrap();
-        assert!(enabled && config.require_proof);
-        for optional in ["false", "0"] {
-            let (_, config) =
-                zkpp_settings(Ok(value.into()), Ok(optional.into()), Ok("1".into())).unwrap();
-            assert!(!config.require_proof);
-        }
+            zkpp_settings(Err(NotPresent), Ok(skip.into()), Err(NotPresent)).unwrap();
+        assert!(enabled);
+        assert!(!config.require_proof);
     }
+    for keep in ["false", "0"] {
+        let (_, config) = zkpp_settings(Err(NotPresent), Ok(keep.into()), Err(NotPresent)).unwrap();
+        assert!(config.require_proof);
+    }
+    for unclear in ["", " ", "yes", "TRUE", "off"] {
+        assert!(
+            zkpp_settings(Err(NotPresent), Ok(unclear.into()), Err(NotPresent)).is_err(),
+            "{unclear:?} must stop startup"
+        );
+    }
+}
+
+/// Without verifiers no proof can be checked: that is accepted only with an
+/// explicit skip, never by turning the verifiers off alone.
+#[test]
+fn disabled_verifiers_need_an_explicit_skip() {
+    use std::env::VarError::NotPresent;
+    assert!(zkpp_settings(Ok("false".into()), Err(NotPresent), Err(NotPresent)).is_err());
+    assert!(zkpp_settings(Ok("false".into()), Ok("false".into()), Err(NotPresent)).is_err());
+    let (enabled, config) =
+        zkpp_settings(Ok("false".into()), Ok("true".into()), Err(NotPresent)).unwrap();
+    assert!(!enabled && !config.require_proof);
 }
 
 /// The history-epoch cutoff is absent unless set; a set value is a past RFC
