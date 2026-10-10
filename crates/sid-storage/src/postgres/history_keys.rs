@@ -151,8 +151,28 @@ async fn abandoned(conn: &mut sqlx::PgConnection, operation: Uuid) -> SidResult<
 }
 
 /// Serialize every write of one owner: a transaction-scoped advisory lock on
-/// the owner domain, since an owner may have no row to lock yet.
+/// the owner domain, since an owner may have no row to lock yet. A purged
+/// owner is refused here, so nothing is created, imported or selected for it
+/// after its purge.
 async fn lock_owner(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    owner_domain: &[u8; 32],
+) -> SidResult<()> {
+    lock_domain(tx, owner_domain).await?;
+    let purged: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM history_key_purged WHERE owner_domain = $1)",
+    )
+    .bind(owner_domain.as_slice())
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(storage("owner purge fence"))?;
+    if purged {
+        return Err(SidError::Fenced("the history owner was deleted".into()));
+    }
+    Ok(())
+}
+
+async fn lock_domain(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     owner_domain: &[u8; 32],
 ) -> SidResult<()> {
@@ -498,7 +518,9 @@ impl HistoryKeyStore for PgHistoryKeyStore {
         audit: AuditEntry,
     ) -> SidResult<EnrollmentCleanup> {
         let mut tx = self.begin().await?;
-        lock_owner(&mut tx, owner_domain).await?;
+        // A purged owner has no key left to reclaim; the cleanup still fences
+        // its operation.
+        lock_domain(&mut tx, owner_domain).await?;
         let fenced: Vec<u8> = sqlx::query_scalar(
             "INSERT INTO history_key_abandoned (operation_id, owner_domain) VALUES ($1, $2)
              ON CONFLICT (operation_id) DO UPDATE SET operation_id = EXCLUDED.operation_id
@@ -571,9 +593,51 @@ impl HistoryKeyStore for PgHistoryKeyStore {
         abandoned(&mut conn, operation).await
     }
 
+    async fn purge_owner(&self, owner_domain: &[u8; 32], audit: AuditEntry) -> SidResult<u64> {
+        let domain = owner_domain.as_slice();
+        let mut tx = self.begin().await?;
+        lock_domain(&mut tx, owner_domain).await?;
+        sqlx::query(
+            "INSERT INTO history_key_purged (owner_domain) VALUES ($1)
+             ON CONFLICT (owner_domain) DO NOTHING",
+        )
+        .bind(domain)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage("owner purge fence"))?;
+        for table in [
+            "history_key_uses",
+            "history_key_replaced",
+            "history_key_lifecycle",
+        ] {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DELETE FROM {table} WHERE owner_domain = $1"
+            )))
+            .bind(domain)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage("owner purge"))?;
+        }
+        let destroyed = sqlx::query("DELETE FROM history_key_epochs WHERE owner_domain = $1")
+            .bind(domain)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage("owner purge"))?
+            .rows_affected();
+        audit_in_tx(&mut tx, audit).await?;
+        tx.commit().await.map_err(storage("commit"))?;
+        Ok(destroyed)
+    }
+
     async fn compact_abandoned(&self, before: DateTime<Utc>, audit: AuditEntry) -> SidResult<u64> {
         let mut tx = self.begin().await?;
-        let dropped = sqlx::query("DELETE FROM history_key_abandoned WHERE abandoned_at < $1")
+        let mut dropped = sqlx::query("DELETE FROM history_key_abandoned WHERE abandoned_at < $1")
+            .bind(before)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage("fence compaction"))?
+            .rows_affected();
+        dropped += sqlx::query("DELETE FROM history_key_purged WHERE purged_at < $1")
             .bind(before)
             .execute(&mut *tx)
             .await

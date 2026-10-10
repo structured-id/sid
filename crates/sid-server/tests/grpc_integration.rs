@@ -10049,6 +10049,46 @@ async fn test_event_user_deleted_on_delete_profile() {
     );
 }
 
+/// Deleting a profile owes the purge of its password-history keys with the
+/// deletion: the evaluator destroys them, keyed by the owner's history
+/// domain only.
+#[tokio::test]
+async fn test_delete_profile_owes_its_history_key_purge() {
+    use sid_plugin::StorageBackend;
+
+    let profile = test_profile();
+    let pid = profile.id;
+    let storage = MockStorage::new().with_profile(profile);
+    let org = sid_core::models::Organization::implicit_community("sid.example.com");
+    storage
+        .insert_instance_organization(&org, AuditEntry::system("test", "org").into())
+        .await
+        .unwrap();
+    let svc = TestServices::new(storage);
+
+    svc.identity
+        .delete_profile(admin_request(
+            &svc,
+            DeleteProfileRequest {
+                id: pid.to_string(),
+            },
+        ))
+        .await
+        .unwrap();
+
+    let purge = sid_core::models::OwnerPurge {
+        owner_domain: sid_authn::password_history::owner_domain(org.id.as_bytes(), pid),
+    }
+    .work();
+    let owed = svc
+        .storage
+        .get_work(purge.id)
+        .await
+        .unwrap()
+        .expect("the history key purge is owed");
+    assert_eq!(owed.kind.as_str(), sid_core::models::OWNER_PURGE_KIND);
+}
+
 #[tokio::test]
 async fn test_event_user_deactivated_on_admin_suspend() {
     use sid_core::models::event::{EventFilter, event_types};

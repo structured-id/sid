@@ -40,18 +40,26 @@ const ABORT_EVENT_NAMESPACE: uuid::Uuid =
 /// or commit of it can still arrive, so each is then no longer needed.
 const ENROLLMENT_RECORD_RETENTION: chrono::Duration = chrono::Duration::days(1);
 
-/// Drop the records of first enrollments that ended more than a day ago:
-/// their ended work, their aborts' completions and, with the evaluator in
-/// this process, its fences. Open work, a commit's completion and every key
-/// are untouched. Returns how many records were dropped.
+/// Drop the records of first enrollments and owner purges that ended more
+/// than a day ago: their ended work, the aborts' completions and, with the
+/// evaluator in this process, its fences. Open work, a commit's completion
+/// and every key are untouched. Returns how many records were dropped.
 pub(crate) async fn compact_enrollments(
     storage: &dyn StorageBackend,
     evaluation: Option<&HistoryEvaluation>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> sid_core::Result<u64> {
     let before = now - ENROLLMENT_RECORD_RETENTION;
-    let kind = WorkKind::new(ENROLLMENT_ADMISSION_KIND).expect("the enrollment kind is valid");
-    let mut dropped = storage.purge_ended_work(&kind, before).await?;
+    let mut dropped = 0;
+    // Ended purges of deleted owners go with them: their fences are
+    // compacted below on the same terms.
+    for kind in [
+        ENROLLMENT_ADMISSION_KIND,
+        sid_core::models::OWNER_PURGE_KIND,
+    ] {
+        let kind = WorkKind::new(kind).expect("the history work kinds are valid");
+        dropped += storage.purge_ended_work(&kind, before).await?;
+    }
     dropped += storage
         .purge_operation_results(RESULT_NAMESPACE, ABORT_METHOD, before)
         .await?;
@@ -61,12 +69,14 @@ pub(crate) async fn compact_enrollments(
     Ok(dropped)
 }
 
-/// Where an aborted enrollment's cleanup goes.
-pub(crate) enum EnrollmentDelivery {
+/// Where the evaluator is told of what the credential authority settled: an
+/// aborted enrollment, a deleted owner.
+#[derive(Clone)]
+pub(crate) enum EvaluatorDelivery {
     /// The evaluator in this process.
     InProcess(Arc<HistoryEvaluation>),
-    /// A separate evaluator, through an event relayed with the abort;
-    /// `source` names this credential authority in the event.
+    /// A separate evaluator, through an event relayed in the same
+    /// transaction; `source` names this credential authority in the event.
     Relay { source: String },
 }
 
@@ -74,11 +84,11 @@ pub(crate) enum EnrollmentDelivery {
 pub(crate) struct EnrollmentHandler {
     kind: WorkKind,
     storage: Arc<dyn StorageBackend>,
-    delivery: EnrollmentDelivery,
+    delivery: EvaluatorDelivery,
 }
 
 impl EnrollmentHandler {
-    pub(crate) fn new(storage: Arc<dyn StorageBackend>, delivery: EnrollmentDelivery) -> Self {
+    pub(crate) fn new(storage: Arc<dyn StorageBackend>, delivery: EvaluatorDelivery) -> Self {
         Self {
             kind: WorkKind::new(ENROLLMENT_ADMISSION_KIND).expect("the enrollment kind is valid"),
             storage,
@@ -99,7 +109,7 @@ impl EnrollmentHandler {
             "password_history",
         ))
         .with_operation(completion);
-        if let EnrollmentDelivery::Relay { source } = &self.delivery {
+        if let EvaluatorDelivery::Relay { source } = &self.delivery {
             // Owed in the abort's own transaction: the separate evaluator
             // learns of every abort that is recorded, and of no other.
             ctx = ctx.with_work(abort_event(source, admission)?);
@@ -159,8 +169,8 @@ impl WorkHandler for EnrollmentHandler {
             Err(e) => return WorkOutcome::Retry(e),
         }
         match &self.delivery {
-            EnrollmentDelivery::Relay { .. } => WorkOutcome::Done(Some("abort relayed".into())),
-            EnrollmentDelivery::InProcess(evaluation) => match evaluation
+            EvaluatorDelivery::Relay { .. } => WorkOutcome::Done(Some("abort relayed".into())),
+            EvaluatorDelivery::InProcess(evaluation) => match evaluation
                 .abandon_enrollment(&admission.owner_domain, admission.operation)
                 .await
             {

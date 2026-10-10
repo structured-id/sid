@@ -2609,18 +2609,33 @@ impl AuthServiceImpl {
         })
     }
 
-    /// The handler that ends this service's first enrollments at their
-    /// expiry: the in-process evaluator reclaims an aborted one's key
-    /// directly, a separate evaluator learns of the abort as a relayed event.
-    pub fn enrollment_handler(&self) -> Arc<dyn sid_authn::work_runner::WorkHandler> {
-        use super::password_operation::{EnrollmentDelivery, EnrollmentHandler};
-        let delivery = match self.history_evaluation.clone() {
-            Some(evaluation) => EnrollmentDelivery::InProcess(evaluation),
-            None => EnrollmentDelivery::Relay {
+    /// Where this service's evaluator is told what was settled here: the
+    /// in-process evaluator directly, a separate one by relayed events.
+    fn evaluator_delivery(&self) -> super::password_operation::EvaluatorDelivery {
+        use super::password_operation::EvaluatorDelivery;
+        match self.history_evaluation.clone() {
+            Some(evaluation) => EvaluatorDelivery::InProcess(evaluation),
+            None => EvaluatorDelivery::Relay {
                 source: self.issuer.clone(),
             },
-        };
-        Arc::new(EnrollmentHandler::new(self.storage.clone(), delivery))
+        }
+    }
+
+    /// The handler that ends this service's first enrollments at their
+    /// expiry: the evaluator reclaims an aborted one's key.
+    pub fn enrollment_handler(&self) -> Arc<dyn sid_authn::work_runner::WorkHandler> {
+        Arc::new(super::password_operation::EnrollmentHandler::new(
+            self.storage.clone(),
+            self.evaluator_delivery(),
+        ))
+    }
+
+    /// The handler that has the evaluator destroy a deleted owner's keys.
+    pub fn owner_purge_handler(&self) -> Arc<dyn sid_authn::work_runner::WorkHandler> {
+        Arc::new(super::password_operation::OwnerPurgeHandler::new(
+            self.storage.clone(),
+            self.evaluator_delivery(),
+        ))
     }
 
     /// Drop the records of first enrollments that ended long enough ago that

@@ -92,7 +92,7 @@ async fn an_abandoned_registration_loses_its_key() {
 
     let handler = EnrollmentHandler::new(
         storage.clone(),
-        EnrollmentDelivery::InProcess(evaluation.clone()),
+        EvaluatorDelivery::InProcess(evaluation.clone()),
     );
     let work = claimed(storage.as_ref(), id, domain).await;
     assert_eq!(
@@ -143,7 +143,7 @@ async fn a_committed_registration_keeps_its_key() {
 
     let handler = EnrollmentHandler::new(
         storage.clone(),
-        EnrollmentDelivery::InProcess(evaluation.clone()),
+        EvaluatorDelivery::InProcess(evaluation.clone()),
     );
     let work = claimed(storage.as_ref(), id, domain).await;
     assert_eq!(
@@ -187,7 +187,7 @@ async fn an_abort_before_its_preparation_fences_it() {
     storage.enqueue_work(&admission.work(), 10).await.unwrap();
     let handler = EnrollmentHandler::new(
         storage.clone(),
-        EnrollmentDelivery::InProcess(evaluation.clone()),
+        EvaluatorDelivery::InProcess(evaluation.clone()),
     );
     assert_eq!(
         handler
@@ -233,7 +233,7 @@ async fn a_separate_evaluator_is_told_with_the_abort() {
     let (id, domain) = enrolled(&ops, installation).await;
     let handler = EnrollmentHandler::new(
         storage.clone(),
-        EnrollmentDelivery::Relay {
+        EvaluatorDelivery::Relay {
             source: "https://sid.example.com".into(),
         },
     );
@@ -266,7 +266,7 @@ async fn ended_enrollment_records_are_compacted() {
     let (ops, evaluation) = split(storage.clone(), installation, manager(3), manager(3));
     let handler = EnrollmentHandler::new(
         storage.clone(),
-        EnrollmentDelivery::InProcess(evaluation.clone()),
+        EvaluatorDelivery::InProcess(evaluation.clone()),
     );
     let (aborted, aborted_domain) = enrolled(&ops, installation).await;
     let (committed, committed_domain) = enrolled(&ops, installation).await;

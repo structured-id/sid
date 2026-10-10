@@ -389,6 +389,10 @@ const HISTORY_KEY_MIGRATIONS: &[Migration] = &[
         name: "20261010_003_key_versions",
         sql: include_str!("../../../migrations/history_keys/20261010_003_key_versions.sql"),
     },
+    Migration {
+        name: "20261010_004_owner_purge",
+        sql: include_str!("../../../migrations/history_keys/20261010_004_owner_purge.sql"),
+    },
 ];
 
 /// Run the pending migrations of the history evaluator's store on `pool`:

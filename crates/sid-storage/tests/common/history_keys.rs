@@ -510,17 +510,105 @@ pub async fn test_cleanup_races_preparation(store: &dyn HistoryKeyStore) {
     }
 }
 
+/// A deleted owner's purge destroys its keys, replacements, uses and
+/// lifecycle, and only its own; a preparation still in flight for it creates,
+/// imports or selects nothing afterwards. Repeating the purge is harmless,
+/// and its fence is compacted like an abandoned enrollment's.
+pub async fn test_purged_owner_keeps_nothing(store: &dyn HistoryKeyStore) {
+    let (purged, kept) = (owner(), owner());
+    let first = new_epoch(purged, 1);
+    store
+        .create_first_epoch(&first, Uuid::now_v7(), audit())
+        .await
+        .unwrap();
+    let operation = Uuid::now_v7();
+    let expires = Utc::now() + chrono::Duration::minutes(5);
+    prepare(
+        store,
+        purged,
+        live(1, &[first.epoch.id], &[]),
+        operation,
+        expires,
+    )
+    .await
+    .unwrap();
+    store
+        .rotate_epoch(&new_epoch(purged, 2), first.epoch.id, 2, audit())
+        .await
+        .unwrap();
+    let archive = store.export_keys(&purged).await.unwrap().unwrap();
+    store
+        .create_first_epoch(&new_epoch(kept, 3), Uuid::now_v7(), audit())
+        .await
+        .unwrap();
+
+    assert_eq!(store.purge_owner(&purged, audit()).await.unwrap(), 2);
+    assert!(epoch_ids(store, purged).await.is_empty());
+    assert!(store.export_keys(&purged).await.unwrap().is_none());
+    assert!(store.get_epoch_key(first.epoch.id).await.unwrap().is_none());
+    assert_eq!(epoch_ids(store, kept).await.len(), 1, "another owner's key");
+
+    fn fenced<T>(r: sid_core::Result<T>) -> bool {
+        matches!(r, Err(sid_core::Error::Fenced(_)))
+    }
+    assert!(fenced(
+        store
+            .create_first_epoch(&new_epoch(purged, 4), Uuid::now_v7(), audit())
+            .await
+    ));
+    assert!(fenced(
+        store.ensure_epoch(&new_epoch(purged, 5), audit()).await
+    ));
+    assert!(fenced(
+        prepare(store, purged, live(3, &[], &[]), operation, expires)
+            .await
+            .map(|_| ())
+    ));
+    assert!(fenced(store.import_keys(&archive, audit()).await));
+    assert!(epoch_ids(store, purged).await.is_empty());
+    assert_eq!(store.purge_owner(&purged, audit()).await.unwrap(), 0);
+
+    assert_eq!(
+        store
+            .compact_abandoned(Utc::now() - chrono::Duration::hours(1), audit())
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(
+        store
+            .compact_abandoned(Utc::now() + chrono::Duration::seconds(5), audit())
+            .await
+            .unwrap()
+            >= 1
+    );
+    store
+        .ensure_epoch(&new_epoch(purged, 6), audit())
+        .await
+        .expect("a compacted fence no longer refuses");
+}
+
 /// The evaluator's key versions are its own record: inserted once, never
 /// replaced, listed in version order.
 pub async fn test_history_key_versions_are_insert_only(store: &dyn HistoryKeyStore) {
-    let v1 = sid_keys::KeyVersionParams::new(1, vec![1; 16], "history-v1");
-    let v2 = sid_keys::KeyVersionParams::new(2, vec![2; 16], "history-v2");
-    assert!(store.list_key_versions().await.unwrap().is_empty());
+    // The store may be shared with other scenarios: above its newest version.
+    let base = store
+        .list_key_versions()
+        .await
+        .unwrap()
+        .iter()
+        .map(|v| v.version)
+        .max()
+        .unwrap_or(0);
+    let v1 = sid_keys::KeyVersionParams::new(base + 1, vec![1; 16], "history-v1");
+    let v2 = sid_keys::KeyVersionParams::new(base + 2, vec![2; 16], "history-v2");
     assert!(store.insert_key_version(&v2, audit()).await.unwrap());
     assert!(store.insert_key_version(&v1, audit()).await.unwrap());
-    let other = sid_keys::KeyVersionParams::new(1, vec![9; 16], "replaced");
+    let other = sid_keys::KeyVersionParams::new(base + 1, vec![9; 16], "replaced");
     assert!(!store.insert_key_version(&other, audit()).await.unwrap());
-    assert_eq!(store.list_key_versions().await.unwrap(), vec![v1, v2]);
+    let listed = store.list_key_versions().await.unwrap();
+    assert!(listed.windows(2).all(|w| w[0].version < w[1].version));
+    assert_eq!(&listed[listed.len() - 2..], &[v1, v2]);
 }
 
 /// A fence is dropped only once older than asked; until then it still

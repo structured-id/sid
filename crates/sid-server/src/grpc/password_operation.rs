@@ -113,7 +113,9 @@ const MAX_CHARGE_KEY: usize = 128;
 const ENROLLMENT_CAPACITY: u64 = 100_000;
 
 mod enrollment;
-pub(crate) use enrollment::{EnrollmentDelivery, EnrollmentHandler, compact_enrollments};
+mod purge;
+pub(crate) use enrollment::{EnrollmentHandler, EvaluatorDelivery, compact_enrollments};
+pub(crate) use purge::{OwnerPurgeHandler, owner_purge};
 
 /// What the operation installs a password for, and the authority it rests on.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1512,6 +1514,14 @@ impl HistoryEvaluation {
                 operation,
                 audit("password_history.enrollment_abandoned"),
             )
+            .await
+    }
+
+    /// Destroy the deleted owner's keys and fence its domain; returns how
+    /// many keys were destroyed.
+    pub async fn purge_owner(&self, owner_domain: &[u8; 32]) -> sid_core::Result<u64> {
+        self.keys
+            .purge_owner(owner_domain, audit("password_history.owner_purged"))
             .await
     }
 

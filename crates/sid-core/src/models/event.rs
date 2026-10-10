@@ -354,6 +354,10 @@ pub mod event_types {
     /// owner's history input domain only.
     pub const PASSWORD_HISTORY_ENROLLMENT_ABORTED: &str =
         "sid.password_history.enrollment_aborted.v1";
+    /// An owner's profile was deleted: the evaluator destroys the owner's
+    /// history keys and lifecycle. Internal to the credential authority and
+    /// its evaluator; carries the owner's history input domain only.
+    pub const PASSWORD_HISTORY_OWNER_PURGED: &str = "sid.password_history.owner_purged.v1";
 
     // Consent
     pub const CONSENT_GRANTED: &str = "sid.consent.granted.v1";

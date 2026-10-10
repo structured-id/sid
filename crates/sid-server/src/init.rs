@@ -1367,6 +1367,7 @@ pub fn spawn_work_runner(
             c.storage.clone(),
         )),
         c.auth_svc.enrollment_handler(),
+        c.auth_svc.owner_purge_handler(),
     ];
     let worker = format!("sid-server-{}-{}", std::process::id(), uuid::Uuid::now_v7());
     let runner = WorkRunner::new(c.storage.clone(), worker, handlers, RunnerConfig::default())

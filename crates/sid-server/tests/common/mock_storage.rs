@@ -114,6 +114,8 @@ pub struct MockStorageInner {
     key_audits: Vec<AuditEntry>,
     /// The evaluator's own key custody versions.
     history_key_versions: Vec<sid_keys::KeyVersionParams>,
+    /// Purged owner domains and when they were purged.
+    key_purged: HashMap<[u8; 32], chrono::DateTime<chrono::Utc>>,
     /// The first enrollment that created each epoch it created.
     key_created_by: HashMap<HistoryEpochId, Uuid>,
     /// Aborted first enrollments: their owner domain and when they were.
@@ -620,6 +622,7 @@ impl sid_plugin::history_keys::HistoryKeyStore for MockStorage {
         audit: AuditEntry,
     ) -> SidResult<KeyEpoch> {
         let mut inner = self.inner.lock().unwrap();
+        inner.refuse_purged(&new.epoch.owner_domain)?;
         if inner.key_abandoned.contains_key(&operation) {
             return Err(sid_core::Error::Fenced(format!(
                 "first enrollment {operation} was aborted"
@@ -714,17 +717,35 @@ impl sid_plugin::history_keys::HistoryKeyStore for MockStorage {
         audit: AuditEntry,
     ) -> SidResult<u64> {
         let mut inner = self.inner.lock().unwrap();
-        let held = inner.key_abandoned.len();
+        let held = inner.key_abandoned.len() + inner.key_purged.len();
         inner.key_abandoned.retain(|_, (_, at)| *at >= before);
-        let dropped = (held - inner.key_abandoned.len()) as u64;
+        inner.key_purged.retain(|_, at| *at >= before);
+        let dropped = (held - inner.key_abandoned.len() - inner.key_purged.len()) as u64;
         if dropped > 0 {
             inner.key_audits.push(audit);
         }
         Ok(dropped)
     }
 
+    async fn purge_owner(&self, owner_domain: &[u8; 32], audit: AuditEntry) -> SidResult<u64> {
+        let mut inner = self.inner.lock().unwrap();
+        inner
+            .key_purged
+            .entry(*owner_domain)
+            .or_insert_with(chrono::Utc::now);
+        let destroyed = inner.key_epochs.remove(owner_domain).unwrap_or_default();
+        let ids: HashSet<HistoryEpochId> = destroyed.iter().map(|e| e.epoch.id).collect();
+        inner.key_lifecycle.remove(owner_domain);
+        inner.key_replaced.retain(|id, _| !ids.contains(id));
+        inner.key_uses.retain(|(_, id, _)| !ids.contains(id));
+        inner.key_created_by.retain(|id, _| !ids.contains(id));
+        inner.key_audits.push(audit);
+        Ok(destroyed.len() as u64)
+    }
+
     async fn ensure_epoch(&self, new: &NewKeyEpoch, audit: AuditEntry) -> SidResult<KeyEpoch> {
         let mut inner = self.inner.lock().unwrap();
+        inner.refuse_purged(&new.epoch.owner_domain)?;
         let existing = inner.key_epochs.entry(new.epoch.owner_domain).or_default();
         if let Some(active) = existing
             .iter()
@@ -745,6 +766,7 @@ impl sid_plugin::history_keys::HistoryKeyStore for MockStorage {
         audit: AuditEntry,
     ) -> SidResult<KeyEpoch> {
         let mut inner = self.inner.lock().unwrap();
+        inner.refuse_purged(&new.epoch.owner_domain)?;
         let existing = inner.key_epochs.entry(new.epoch.owner_domain).or_default();
         if let Some(active) = existing
             .iter()
@@ -774,6 +796,7 @@ impl sid_plugin::history_keys::HistoryKeyStore for MockStorage {
     ) -> SidResult<Vec<KeyEpoch>> {
         let mut inner = self.inner.lock().unwrap();
         let domain = prep.owner_domain;
+        inner.refuse_purged(&domain)?;
         let owned: HashSet<HistoryEpochId> = inner
             .key_epochs
             .get(&domain)
@@ -5441,6 +5464,16 @@ impl MockStorageInner {
                 .retain(|e| e.seq == seq || e.created_at >= before);
         }
         Ok(true)
+    }
+
+    /// Refuse a purged history owner, as the evaluator's store does.
+    fn refuse_purged(&self, owner_domain: &[u8; 32]) -> SidResult<()> {
+        if self.key_purged.contains_key(owner_domain) {
+            return Err(sid_core::Error::Fenced(
+                "the history owner was deleted".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Commit the work a mutation owes, as a backend does in its transaction.

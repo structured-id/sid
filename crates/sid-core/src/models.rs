@@ -177,8 +177,8 @@ pub use password_history::{
     ENROLLMENT_ADMISSION_KIND, EnrollmentAdmission, EnrollmentCleanup, HistoryArchive,
     HistoryCommit, HistoryEntry, HistoryEpoch, HistoryEpochDescriptor, HistoryEpochId,
     HistoryEpochUse, HistoryEvidence, HistoryKsf, HistoryLiveSet, HistoryPreparation, HistorySuite,
-    KeyArchive, KeyEpoch, KeyEpochs, NewKeyEpoch, PasswordHistory, WrappedHistoryKey,
-    history_key_context,
+    KeyArchive, KeyEpoch, KeyEpochs, NewKeyEpoch, OWNER_PURGE_KIND, OwnerPurge, PasswordHistory,
+    WrappedHistoryKey, history_key_context,
 };
 pub use password_reset::{
     PasswordResetSession, RESET_SESSION_TTL_SECS, ResetSessionId, ResetSessionStatus,

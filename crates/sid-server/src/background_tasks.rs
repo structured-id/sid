@@ -231,13 +231,19 @@ pub async fn purge_closed_profiles(storage: &dyn StorageBackend) -> u64 {
             Ok(Some(req)) if quarantine_ended(&req, now) => {
                 let mut p = profile.clone();
                 if p.transition_status(ProfileStatus::Purged).is_ok() {
-                    match storage
-                        .update_profile(
-                            &p,
-                            AuditEntry::system("profile.purged", profile.id.to_string()).into(),
-                        )
-                        .await
-                    {
+                    let mut ctx: sid_core::models::MutationContext =
+                        AuditEntry::system("profile.purged", profile.id.to_string()).into();
+                    // The owner's history keys go with it, owed in the same
+                    // transaction.
+                    match crate::grpc::password_operation::owner_purge(storage, profile.id).await {
+                        Ok(Some(purge)) => ctx = ctx.with_work(purge),
+                        Ok(None) => {}
+                        Err(e) => {
+                            warn!(profile_id = %profile.id, error = %e, "Purge deferred");
+                            continue;
+                        }
+                    }
+                    match storage.update_profile(&p, ctx).await {
                         Ok(false) => {}
                         Ok(true) => {
                             info!(

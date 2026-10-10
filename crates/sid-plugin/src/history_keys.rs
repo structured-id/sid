@@ -51,12 +51,19 @@ pub trait HistoryKeyStore: Send + Sync {
     /// Whether `operation` was cleaned up as an aborted first enrollment.
     async fn enrollment_abandoned(&self, operation: Uuid) -> Result<bool>;
 
-    /// Drop the fences of first enrollments abandoned before `before`. A
-    /// fence matters only while a delayed preparation of its operation could
-    /// still be within that operation's expiry; past it the preparation is
-    /// refused as expired, so `before` must lie at least the operation
-    /// lifetime and the tolerated clock skew in the past. Returns how many
-    /// were dropped.
+    /// Destroy every key, replacement, use and lifecycle of the deleted owner
+    /// of `owner_domain`, in one transaction serialized with the owner's
+    /// other writes, and fence the domain: from now on no epoch is created,
+    /// imported or selected for it (`Fenced`). Repeating it is harmless.
+    /// Returns how many keys it destroyed.
+    async fn purge_owner(&self, owner_domain: &[u8; 32], audit: AuditEntry) -> Result<u64>;
+
+    /// Drop the fences of first enrollments abandoned, and of owners purged,
+    /// before `before`. A fence matters only while a delayed preparation of
+    /// an operation it refuses could still be within that operation's
+    /// expiry; past it the preparation is refused as expired, so `before`
+    /// must lie at least the operation lifetime and the tolerated clock skew
+    /// in the past. Returns how many were dropped.
     async fn compact_abandoned(&self, before: DateTime<Utc>, audit: AuditEntry) -> Result<u64>;
 
     /// Store `new` as the owner's active epoch when it has none. When it

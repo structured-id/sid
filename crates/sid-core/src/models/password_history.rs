@@ -693,6 +693,40 @@ impl EnrollmentAdmission {
     }
 }
 
+/// Work kind of a deleted owner's purge from the evaluator: owed in the
+/// transaction that deletes the profile, until the evaluator has destroyed
+/// the owner's history keys and lifecycle.
+pub const OWNER_PURGE_KIND: &str = "password_history.owner_purge";
+
+/// Namespace of the purge work ids, one per owner domain.
+const OWNER_PURGE_NAMESPACE: Uuid = Uuid::from_u128(0x2c5d_8f17_a3e4_4b90_9d61_7e0f_c4a8_5b23);
+
+/// A deleted owner whose history keys the evaluator destroys: only the
+/// owner's history input domain, nothing that names the profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnerPurge {
+    pub owner_domain: [u8; 32],
+}
+
+impl OwnerPurge {
+    /// The durable work recording this purge: one per owner domain, so a
+    /// repeated deletion owes the same purge.
+    pub fn work(&self) -> crate::models::NewWork {
+        let kind =
+            crate::models::WorkKind::new(OWNER_PURGE_KIND).expect("the owner purge kind is valid");
+        let payload = serde_json::to_vec(self).expect("a purge serializes");
+        let mut work = crate::models::NewWork::new(kind, payload);
+        work.id = crate::models::WorkId(Uuid::new_v5(&OWNER_PURGE_NAMESPACE, &self.owner_domain));
+        work.max_attempts = ENROLLMENT_ADMISSION_ATTEMPTS;
+        work
+    }
+
+    /// The purge a work payload records.
+    pub fn from_work(payload: &[u8]) -> Result<Self> {
+        serde_json::from_slice(payload).map_err(|e| Error::Validation(format!("owner purge: {e}")))
+    }
+}
+
 /// What the evaluator did with an aborted first enrollment's key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnrollmentCleanup {

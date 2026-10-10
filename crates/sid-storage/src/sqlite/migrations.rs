@@ -50,7 +50,20 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 7,
         sql: HISTORY_KEY_VERSIONS,
     },
+    Migration {
+        version: 8,
+        sql: HISTORY_OWNER_PURGE,
+    },
 ];
+
+/// Fences of purged owners; the evaluator's PostgreSQL migration 004 states
+/// the contract.
+const HISTORY_OWNER_PURGE: &str = "
+CREATE TABLE history_key_purged (
+    owner_domain BLOB PRIMARY KEY CHECK (length(owner_domain) = 32),
+    purged_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+";
 
 /// The evaluator's own key custody versions; its PostgreSQL migration 003
 /// states the contract.

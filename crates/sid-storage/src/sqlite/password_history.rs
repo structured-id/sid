@@ -588,6 +588,21 @@ async fn abandoned(conn: &mut sqlx::SqliteConnection, operation: uuid::Uuid) -> 
     Ok(found.is_some())
 }
 
+/// Refuse a purged owner: under the write lock, nothing is created, imported
+/// or selected for it after its purge.
+async fn refuse_purged(conn: &mut sqlx::SqliteConnection, owner_domain: &[u8]) -> SidResult<()> {
+    let found: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM history_key_purged WHERE owner_domain = ?")
+            .bind(owner_domain)
+            .fetch_optional(conn)
+            .await
+            .map_err(storage("owner purge fence"))?;
+    if found.is_some() {
+        return Err(SidError::Fenced("the history owner was deleted".into()));
+    }
+    Ok(())
+}
+
 async fn owner_key_epochs(
     conn: &mut sqlx::SqliteConnection,
     owner_domain: &[u8; 32],
@@ -690,6 +705,7 @@ impl HistoryKeyStore for SqliteHistoryKeyStore {
     ) -> SidResult<KeyEpoch> {
         require_active(new)?;
         let mut tx = self.begin_write().await?;
+        refuse_purged(&mut tx, &new.epoch.owner_domain).await?;
         // The write lock serializes this with the cleanup: a preparation
         // that arrives after its operation was abandoned creates nothing.
         if abandoned(&mut tx, operation).await? {
@@ -717,6 +733,7 @@ impl HistoryKeyStore for SqliteHistoryKeyStore {
     async fn ensure_epoch(&self, new: &NewKeyEpoch, audit: AuditEntry) -> SidResult<KeyEpoch> {
         require_active(new)?;
         let mut tx = self.begin_write().await?;
+        refuse_purged(&mut tx, &new.epoch.owner_domain).await?;
         let existing = owner_key_epochs(&mut tx, &new.epoch.owner_domain, false).await?;
         if let Some(active) = existing
             .into_iter()
@@ -745,6 +762,7 @@ impl HistoryKeyStore for SqliteHistoryKeyStore {
         }
         let owner_domain = &new.epoch.owner_domain;
         let mut tx = self.begin_write().await?;
+        refuse_purged(&mut tx, owner_domain).await?;
         let existing = owner_key_epochs(&mut tx, owner_domain, false).await?;
         if let Some(current) = existing
             .into_iter()
@@ -785,6 +803,7 @@ impl HistoryKeyStore for SqliteHistoryKeyStore {
     ) -> SidResult<Vec<KeyEpoch>> {
         let owner_domain = prep.owner_domain.as_slice();
         let mut tx = self.begin_write().await?;
+        refuse_purged(&mut tx, owner_domain).await?;
         for epoch in &prep.live.live {
             let owned: Option<i64> = sqlx::query_scalar(
                 "SELECT 1 FROM history_key_epochs WHERE id = ? AND owner_domain = ?",
@@ -996,29 +1015,72 @@ impl HistoryKeyStore for SqliteHistoryKeyStore {
         abandoned(&mut conn, operation).await
     }
 
+    async fn purge_owner(&self, owner_domain: &[u8; 32], audit: AuditEntry) -> SidResult<u64> {
+        let domain = owner_domain.as_slice();
+        let mut tx = self.begin_write().await?;
+        sqlx::query(
+            "INSERT INTO history_key_purged (owner_domain) VALUES (?)
+             ON CONFLICT (owner_domain) DO NOTHING",
+        )
+        .bind(domain)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage("owner purge fence"))?;
+        for table in [
+            "history_key_uses",
+            "history_key_replaced",
+            "history_key_lifecycle",
+        ] {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DELETE FROM {table} WHERE owner_domain = ?"
+            )))
+            .bind(domain)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage("owner purge"))?;
+        }
+        let destroyed = sqlx::query("DELETE FROM history_key_epochs WHERE owner_domain = ?")
+            .bind(domain)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage("owner purge"))?
+            .rows_affected();
+        key_audit(&mut tx, audit).await?;
+        tx.commit().await.map_err(storage("commit"))?;
+        Ok(destroyed)
+    }
+
     async fn compact_abandoned(
         &self,
         before: chrono::DateTime<chrono::Utc>,
         audit: AuditEntry,
     ) -> SidResult<u64> {
         let mut tx = self.begin_write().await?;
-        // Compared as instants: stored timestamps do not all sort as text.
-        let rows: Vec<(String, String)> =
-            sqlx::query_as("SELECT operation_id, abandoned_at FROM history_key_abandoned")
-                .fetch_all(&mut *tx)
-                .await
-                .map_err(storage("fence compaction"))?;
         let mut dropped = 0;
-        for (operation, at) in rows {
-            let at = chrono::DateTime::parse_from_rfc3339(&at)
-                .map_err(|e| SidError::Storage(format!("abandoned_at: {e}")))?;
-            if at < before {
-                sqlx::query("DELETE FROM history_key_abandoned WHERE operation_id = ?")
-                    .bind(&operation)
+        // Compared as instants: stored timestamps do not all sort as text.
+        for (table, key, at) in [
+            ("history_key_abandoned", "operation_id", "abandoned_at"),
+            ("history_key_purged", "owner_domain", "purged_at"),
+        ] {
+            let rows: Vec<(Vec<u8>, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+                "SELECT CAST({key} AS BLOB), {at} FROM {table}"
+            )))
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(storage("fence compaction"))?;
+            for (id, fenced_at) in rows {
+                let fenced_at = chrono::DateTime::parse_from_rfc3339(&fenced_at)
+                    .map_err(|e| SidError::Storage(format!("{at}: {e}")))?;
+                if fenced_at < before {
+                    sqlx::query(sqlx::AssertSqlSafe(format!(
+                        "DELETE FROM {table} WHERE CAST({key} AS BLOB) = ?"
+                    )))
+                    .bind(&id)
                     .execute(&mut *tx)
                     .await
                     .map_err(storage("fence compaction"))?;
-                dropped += 1;
+                    dropped += 1;
+                }
             }
         }
         if dropped > 0 {
@@ -1109,6 +1171,7 @@ impl HistoryKeyStore for SqliteHistoryKeyStore {
     async fn import_keys(&self, archive: &KeyArchive, audit: AuditEntry) -> SidResult<bool> {
         archive.validate()?;
         let mut tx = self.begin_write().await?;
+        refuse_purged(&mut tx, &archive.owner_domain).await?;
         if let Some(existing) = read_key_archive(&mut tx, &archive.owner_domain).await? {
             if existing == *archive {
                 return Ok(false);
