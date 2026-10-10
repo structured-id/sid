@@ -229,7 +229,11 @@ impl EventBus for NatsEventBus {
             deliver_policy: jetstream::consumer::DeliverPolicy::All,
             ack_policy: jetstream::consumer::AckPolicy::Explicit,
             // A delivery not settled in time (a hung or killed consumer) is
-            // delivered again; no limit, so an event is never dropped.
+            // delivered again; no limit, so redelivery never drops an event.
+            // The stream's own age and size limits still apply to an event
+            // nobody consumed: a producer whose effect must not be lost keeps
+            // it owed on its side until the consumer reports the effect, and
+            // publishes it again meanwhile, rather than relying on the stream.
             ack_wait: DURABLE_ACK_WAIT,
             max_deliver: -1,
             filter_subjects: subjects,
