@@ -783,6 +783,19 @@ async fn restored_history_refuses_passwords_from_active_and_rotated_epochs() {
         with_live(limit - 1).await.validate().is_err(),
         "an archive needing more history domains than a proof holds was accepted"
     );
+    // Only epochs a proof must evaluate count: an emptied compare-only epoch
+    // beside a full set is never selected, and the next preparation retires it.
+    let mut at_limit_with_empty = with_live(limit - 2).await;
+    let mut empty = evaluator.new_epoch(profile.id, ksf).await.unwrap();
+    empty.epoch.created_at = now;
+    empty.epoch.status = HistoryEpochUse::CompareOnly;
+    at_limit_with_empty.epochs.push(empty);
+    at_limit_with_empty
+        .epochs
+        .sort_by_key(|e| (e.epoch.created_at, e.epoch.id));
+    at_limit_with_empty
+        .validate()
+        .expect("an emptied compare-only epoch does not count toward the domain limit");
     // Use a clean source for the complete nonempty archive; exact import never
     // overwrites history that was already prepared on the preceding backend.
     let source = SqliteBackend::new_in_memory().await.unwrap();

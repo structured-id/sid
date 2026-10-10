@@ -378,13 +378,19 @@ impl HistoryArchive {
                 return Err(Error::Validation("invalid history archive entry".into()));
             }
         }
-        // A compare-only epoch without entries is valid: the evaluator retires
-        // it at the owner's next preparation, from the credential service's
-        // live set. Every live epoch is a domain each proved operation evaluates; past
-        // the limit no operation succeeds, so nothing could age entries out.
+        // A compare-only epoch without entries is valid: it is never selected,
+        // and the evaluator retires it at the owner's next preparation, from
+        // the credential service's live set. Every required epoch (the active
+        // one and each compare-only one holding an entry) is a domain each
+        // proved operation evaluates; past the limit no operation succeeds,
+        // so nothing could age entries out.
         let live = ids
-            .values()
-            .filter(|s| matches!(s, HistoryEpochUse::Active | HistoryEpochUse::CompareOnly))
+            .iter()
+            .filter(|(id, status)| match status {
+                HistoryEpochUse::Active => true,
+                HistoryEpochUse::CompareOnly => entries.iter().any(|(e, _)| e == *id),
+                HistoryEpochUse::Retired => false,
+            })
             .count();
         if live > MAX_HISTORY_DOMAINS {
             return Err(Error::Validation(
