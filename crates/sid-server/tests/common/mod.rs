@@ -1127,7 +1127,6 @@ impl TestServices {
             storage.clone(),
             "/tmp/sid-test-exports".to_string(),
         ));
-        let opaque_primary_curve = opaque_router.primary_curve();
 
         let auth = auth_service(
             storage.clone(),
@@ -1156,7 +1155,6 @@ impl TestServices {
             cascade_service.clone(),
             closure_service,
             data_export,
-            opaque_primary_curve,
         ));
 
         let project = Arc::new(ProjectServiceImpl::new(

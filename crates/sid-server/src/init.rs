@@ -685,7 +685,6 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         cascade_service.clone(),
         closure_service.clone(),
         data_export,
-        opaque_router.primary_curve(),
     ));
 
     let otp_service = OtpService::new(cache_backend.clone());

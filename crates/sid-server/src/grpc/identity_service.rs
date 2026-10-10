@@ -177,13 +177,9 @@ pub struct IdentityServiceImpl {
     pub(crate) cascade_service: Arc<RevocationCascadeService>,
     pub(crate) closure_service: Arc<AccountClosureService>,
     pub(crate) data_export: Arc<DataExportService>,
-    /// The curve sign-in uses for a password stored before its curve was
-    /// recorded; its configuration is reported for such a credential.
-    pub(crate) opaque_primary_curve: sid_plugin::crypto::CurveId,
 }
 
 impl IdentityServiceImpl {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         storage: Arc<dyn StorageBackend>,
         jwt: Arc<JwtService>,
@@ -192,7 +188,6 @@ impl IdentityServiceImpl {
         cascade_service: Arc<RevocationCascadeService>,
         closure_service: Arc<AccountClosureService>,
         data_export: Arc<DataExportService>,
-        opaque_primary_curve: sid_plugin::crypto::CurveId,
     ) -> Self {
         Self {
             storage,
@@ -202,7 +197,6 @@ impl IdentityServiceImpl {
             cascade_service,
             closure_service,
             data_export,
-            opaque_primary_curve,
         }
     }
 
@@ -924,7 +918,7 @@ impl IdentityService for IdentityServiceImpl {
 
         let infos = creds
             .iter()
-            .map(|c| convert::credential_info(c, self.opaque_primary_curve))
+            .map(convert::credential_info)
             .collect::<Result<Vec<_>, Status>>()?;
 
         Ok(Response::new(ListCredentialsResponse {
@@ -994,7 +988,7 @@ impl IdentityService for IdentityServiceImpl {
             }
             cred.label = Some(label);
         }
-        let info = convert::credential_info(&cred, self.opaque_primary_curve)?;
+        let info = convert::credential_info(&cred)?;
 
         Ok(Response::new(UpdateCredentialResponse {
             credential: Some(Credential {

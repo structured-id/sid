@@ -218,33 +218,36 @@ pub(crate) fn extract_webauthn_info(
     ))
 }
 
-/// The curve an OPAQUE credential signs in with: its recorded one, or for a
-/// credential stored before the curve was recorded, the deployment's
-/// `primary` curve. Sign-in and the reported configuration both use this.
+/// The curve recorded with an OPAQUE credential, which sign-in and the
+/// reported configuration both use. Never the deployment's current primary
+/// for new passwords: a record without its configuration, or with one this
+/// server does not know, is an error, so a setting change cannot alter how
+/// an existing password signs in.
 #[allow(clippy::result_large_err)]
 pub(crate) fn opaque_curve(
     c: &sid_core::models::Credential,
-    primary: sid_plugin::crypto::CurveId,
 ) -> Result<sid_plugin::crypto::CurveId, tonic::Status> {
-    match c.opaque_curve {
-        None => Ok(primary),
-        Some(raw) => sid_plugin::crypto::CurveId::try_from(raw).map_err(|_| {
-            sid_core::grpc_error::refuse::internal(
-                "read OPAQUE curve",
-                format!("credential {} has curve {raw}", c.id.0),
-            )
-        }),
-    }
+    let Some(raw) = c.opaque_curve else {
+        return Err(sid_core::grpc_error::refuse::internal(
+            "read OPAQUE curve",
+            format!("credential {} has no recorded configuration", c.id.0),
+        ));
+    };
+    sid_plugin::crypto::CurveId::try_from(raw).map_err(|_| {
+        sid_core::grpc_error::refuse::internal(
+            "read OPAQUE curve",
+            format!("credential {} has curve {raw}", c.id.0),
+        )
+    })
 }
 
 /// The `info` of a credential's proto: its passkey facts for a WebAuthn
 /// credential, its OPAQUE configuration for a password, nothing for another
-/// type. Each curve has exactly one cipher suite implementation (its OPRF,
-/// hash and KSF), so the curve sign-in uses names the full configuration.
+/// type. The suite is the one this server's implementation for the recorded
+/// curve runs (its OPRF, hash and KSF).
 #[allow(clippy::result_large_err)]
 pub(crate) fn credential_info(
     c: &sid_core::models::Credential,
-    primary: sid_plugin::crypto::CurveId,
 ) -> Result<Option<sid_proto::sid::v1::credential::Info>, tonic::Status> {
     use sid_core::models::CredentialType;
     use sid_plugin::crypto::CurveId;
@@ -254,7 +257,7 @@ pub(crate) fn credential_info(
             .map(Some)
             .map_err(|e| sid_core::grpc_error::refuse::internal("read stored passkey", e)),
         CredentialType::Opaque => {
-            let suite = match opaque_curve(c, primary)? {
+            let suite = match opaque_curve(c)? {
                 CurveId::Pallas => OpaqueSuite::PallasV1,
                 CurveId::Ristretto255 => OpaqueSuite::Ristretto255V1,
                 CurveId::P256 => OpaqueSuite::P256V1,

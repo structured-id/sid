@@ -4362,13 +4362,14 @@ async fn test_admin_list_credentials() {
     let storage = MockStorage::new().with_profile(profile.clone());
     let svc = TestServices::new(storage);
 
-    // Create a credential
-    let cred = Credential::new(
+    // A password stored with its configuration, as every producer stores it.
+    let mut cred = Credential::new(
         profile.id,
         CredentialType::Opaque,
         vec![1, 2, 3],
         Some("Password".to_string()),
     );
+    cred.opaque_curve = Some(sid_plugin::crypto::CurveId::P256 as u8);
     svc.storage
         .create_credential(&cred, AuditEntry::system("test", "test").into())
         .await
@@ -4386,6 +4387,13 @@ async fn test_admin_list_credentials() {
     assert_eq!(body.credentials.len(), 1);
     // Credential data should be cleared (not exposed)
     assert!(body.credentials[0].data.is_empty());
+    // The recorded configuration, not the deployment's primary.
+    match &body.credentials[0].info {
+        Some(sid_proto::sid::v1::credential::Info::OpaqueInfo(info)) => {
+            assert_eq!(info.suite(), sid_proto::sid::v1::OpaqueSuite::P256V1)
+        }
+        other => panic!("no OPAQUE configuration: {other:?}"),
+    }
 }
 
 #[tokio::test]

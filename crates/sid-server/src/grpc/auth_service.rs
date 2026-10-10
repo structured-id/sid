@@ -2169,7 +2169,7 @@ impl AuthServiceImpl {
 
     /// The OPAQUE password file of `credential`, opened, with its curve.
     async fn stored_password(&self, credential: &Credential) -> Result<StoredCredential, Status> {
-        let curve = super::convert::opaque_curve(credential, self.opaque_router.primary_curve())?;
+        let curve = super::convert::opaque_curve(credential)?;
         Ok(StoredCredential {
             curve,
             data: self.open_envelope(credential).await?.to_vec(),
