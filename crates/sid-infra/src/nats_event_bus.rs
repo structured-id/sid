@@ -9,7 +9,10 @@
 use async_nats::jetstream::{self, Context as JsContext, stream};
 use async_trait::async_trait;
 use sid_core::models::event::{Event, EventFilter};
-use sid_plugin::event_bus::{EventBus, EventBusError, EventBusResult, SUBSCRIPTION_CAPACITY};
+use sid_plugin::event_bus::{
+    Delivery, DurableConsumer, EventBus, EventBusError, EventBusResult, SUBSCRIPTION_CAPACITY,
+    Settlement,
+};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::mpsc;
 
@@ -22,6 +25,13 @@ const SUBJECT_PREFIX: &str = "sid.>";
 
 /// Default max age for events in the stream (7 days).
 const DEFAULT_MAX_AGE_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// How long a durable consumer may hold a delivery unsettled before it is
+/// delivered again.
+const DURABLE_ACK_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// When a delivery dropped unsettled is delivered again.
+const DURABLE_REDELIVERY: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// NATS JetStream event bus for production deployments.
 ///
@@ -199,6 +209,91 @@ impl EventBus for NatsEventBus {
             }
         });
 
+        Ok(rx)
+    }
+
+    async fn consume(&self, consumer: DurableConsumer) -> EventBusResult<mpsc::Receiver<Delivery>> {
+        let subjects = Self::filter_to_subjects(&EventFilter {
+            event_types: consumer.event_types.clone(),
+            ..Default::default()
+        });
+        // One durable consumer per name: its position and every unsettled
+        // event outlive this process, and replicas consuming under the name
+        // share it (the deliver group), each event going to one of them.
+        let config = jetstream::consumer::push::Config {
+            durable_name: Some(consumer.name.clone()),
+            deliver_subject: format!("_DELIVER.{}", consumer.name),
+            deliver_group: Some(consumer.name.clone()),
+            // Every event since the consumer was created, never only those
+            // published while a replica happens to be connected.
+            deliver_policy: jetstream::consumer::DeliverPolicy::All,
+            ack_policy: jetstream::consumer::AckPolicy::Explicit,
+            // A delivery not settled in time (a hung or killed consumer) is
+            // delivered again; no limit, so an event is never dropped.
+            ack_wait: DURABLE_ACK_WAIT,
+            max_deliver: -1,
+            filter_subjects: subjects,
+            ..Default::default()
+        };
+        let stream = self
+            .jetstream
+            .get_stream(STREAM_NAME)
+            .await
+            .map_err(|e| EventBusError::SubscribeFailed(format!("get stream: {e}")))?;
+        let durable = stream
+            .get_or_create_consumer(&consumer.name, config)
+            .await
+            .map_err(|e| {
+                EventBusError::SubscribeFailed(format!("durable consumer {}: {e}", consumer.name))
+            })?;
+        let messages = durable
+            .messages()
+            .await
+            .map_err(|e| EventBusError::SubscribeFailed(format!("messages stream: {e}")))?;
+
+        let (tx, rx) = mpsc::channel(1);
+        let name = consumer.name;
+        tokio::spawn(async move {
+            use async_nats::jetstream::AckKind;
+            use futures::StreamExt;
+            let mut messages = messages;
+            while let Some(Ok(msg)) = messages.next().await {
+                let event = match serde_json::from_slice::<Event>(&msg.payload) {
+                    Ok(event) => event.validate().map(|()| event).map_err(|e| e.to_string()),
+                    Err(e) => Err(e.to_string()),
+                };
+                let settlement = match event {
+                    Err(e) => Settlement::Reject(format!("not an event: {e}")),
+                    Ok(event) => {
+                        let (delivery, outcome) = Delivery::new(event);
+                        if tx.send(delivery).await.is_err() {
+                            // The consumer stopped: the event stays its own.
+                            if let Err(e) = msg.ack_with(AckKind::Nak(None)).await {
+                                tracing::warn!(consumer = %name, "release an event: {e}");
+                            }
+                            break;
+                        }
+                        // Dropped unsettled: delivered again.
+                        outcome
+                            .await
+                            .unwrap_or(Settlement::Retry(DURABLE_REDELIVERY))
+                    }
+                };
+                let acked = match &settlement {
+                    Settlement::Done => msg.ack().await,
+                    Settlement::Retry(delay) => msg.ack_with(AckKind::Nak(Some(*delay))).await,
+                    Settlement::Reject(reason) => {
+                        tracing::error!(consumer = %name, "event rejected: {reason}");
+                        msg.ack_with(AckKind::Term).await
+                    }
+                };
+                // An unconfirmed acknowledgement is delivered again; the
+                // consumer's effect is idempotent under its own records.
+                if let Err(e) = acked {
+                    tracing::warn!(consumer = %name, "settle an event: {e}");
+                }
+            }
+        });
         Ok(rx)
     }
 

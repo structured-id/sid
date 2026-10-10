@@ -114,8 +114,10 @@ const ENROLLMENT_CAPACITY: u64 = 100_000;
 
 mod enrollment;
 mod purge;
+mod relayed;
 pub(crate) use enrollment::{EnrollmentHandler, EvaluatorDelivery, compact_enrollments};
 pub(crate) use purge::{OwnerPurgeHandler, owner_purge};
+pub use relayed::{CLEANUP_CONSUMER, consume_relayed_cleanup};
 
 /// What the operation installs a password for, and the authority it rests on.
 #[derive(Debug, Clone, Serialize, Deserialize)]
