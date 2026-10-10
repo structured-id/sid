@@ -13,7 +13,6 @@
 
 pub mod auth;
 pub mod config;
-pub mod credential;
 pub mod issuers;
 pub mod receiver;
 pub mod server;

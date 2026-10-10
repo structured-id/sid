@@ -116,7 +116,7 @@ fn main() {
             .connect()
             .await
             .expect("channel");
-        let checker = sid_auth::credential::ClientCredential::checker(
+        let checker = sid_authn::client_credential::ClientCredential::checker(
             &issuer.client_config(CHECKER, &secret),
             INSTALLATION,
             channel.clone(),

@@ -104,7 +104,7 @@ fn test_full_flow_via_router() {
     let client_login_request = client_login_start.message.serialize().to_vec();
 
     let (server_login_response, login_state) = router
-        .login_start(&stored, &client_login_request, credential_id)
+        .login_start(&stored, &client_login_request, credential_id, &[])
         .unwrap();
 
     let server_login_msg = sid_opaque_ke::CredentialResponse::<DefaultCipherSuite>::deserialize(
@@ -123,7 +123,7 @@ fn test_full_flow_via_router() {
     let finalization_bytes = client_login_finish.message.serialize().to_vec();
 
     let session_key = router
-        .login_finish(&login_state, &finalization_bytes)
+        .login_finish(&login_state, &finalization_bytes, &[])
         .unwrap();
     assert_eq!(
         session_key.expose_secret(),
@@ -144,21 +144,21 @@ fn test_unsupported_curve_rejected() {
         curve: CurveId::P384,
         data: vec![0; 64],
     };
-    let result = router.login_start(&cred, b"request", b"id");
+    let result = router.login_start(&cred, b"request", b"id", &[]);
     assert!(matches!(result, Err(OpaqueError::UnsupportedCurve(_))));
 }
 
 #[test]
 fn test_empty_login_state_rejected() {
     let router = build_ristretto_router();
-    let result = router.login_finish(&LoginState(vec![]), b"finalization");
+    let result = router.login_finish(&LoginState(vec![]), b"finalization", &[]);
     assert!(matches!(result, Err(OpaqueError::Deserialization(_))));
 }
 
 #[test]
 fn test_invalid_curve_byte_rejected() {
     let router = build_ristretto_router();
-    let result = router.login_finish(&LoginState(vec![255, 0, 1, 2]), b"finalization");
+    let result = router.login_finish(&LoginState(vec![255, 0, 1, 2]), b"finalization", &[]);
     assert!(matches!(result, Err(OpaqueError::Deserialization(_))));
 }
 

@@ -227,8 +227,31 @@ impl std::fmt::Display for CredentialStatus {
     }
 }
 
+/// What a password's registration proved about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PolicyEvidence {
+    /// No accepted policy proof: the password is policy-unverified.
+    #[default]
+    Unverified,
+    /// A proof that the password meets `policy_version`, accepted by the
+    /// verifying artifact `artifact` (its identity), so the verdicts of an
+    /// artifact retired as unsound can be found and stop counting.
+    Verified {
+        policy_version: u32,
+        artifact: [u8; 32],
+    },
+}
+
+impl PolicyEvidence {
+    /// Whether an accepted proof backs the password.
+    pub fn is_verified(&self) -> bool {
+        matches!(self, Self::Verified { .. })
+    }
+}
+
 /// Credential represents an authentication factor.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Credential {
     pub id: CredentialId,
     pub profile_id: ProfileId,
@@ -250,13 +273,10 @@ pub struct Credential {
     pub last_used_at: Option<DateTime<Utc>>,
 
     // ─── OPAQUE-ZKPP fields (only for credential_type = Opaque) ───
-    /// Policy version the ZKPP proof was verified against.
-    pub policy_version: Option<u32>,
-
-    /// Whether the server verified a policy proof bound to this registration.
-    /// false = policy-unverified, for as long as this credential exists: a
-    /// later proof never changes it, only a new registration with its proof.
-    pub zkpp_verified: bool,
+    /// What the registration that installed this password proved about it.
+    /// Unverified for as long as this credential exists: a later proof never
+    /// changes it, only a new registration with its proof.
+    pub policy_evidence: PolicyEvidence,
 
     /// OPAQUE curve discriminant (only for credential_type = Opaque).
     /// Maps to `CurveId`: 0=Pallas, 1=Ristretto255, 2=P256, 3=P384, 4=P521.
@@ -294,8 +314,7 @@ impl Credential {
             label,
             created_at: now,
             last_used_at: None,
-            policy_version: None,
-            zkpp_verified: false,
+            policy_evidence: PolicyEvidence::Unverified,
             opaque_curve: None,
             opaque_credential_identifier: None,
             legacy_algorithm: None,

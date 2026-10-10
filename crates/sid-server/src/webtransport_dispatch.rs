@@ -25,24 +25,6 @@ pub fn register_all(
     register_rpc!(
         d,
         auth_svc,
-        "sid.v1.AuthService/OpaqueRegistrationStart",
-        opaque_registration_start,
-        OpaqueRegistrationStartRequest,
-        OpaqueRegistrationStartResponse
-    );
-
-    register_rpc!(
-        d,
-        auth_svc,
-        "sid.v1.AuthService/OpaqueRegistrationFinish",
-        opaque_registration_finish,
-        OpaqueRegistrationFinishRequest,
-        OpaqueRegistrationFinishResponse
-    );
-
-    register_rpc!(
-        d,
-        auth_svc,
         "sid.v1.AuthService/OpaqueLoginStart",
         opaque_login_start,
         OpaqueLoginStartRequest,
@@ -101,6 +83,15 @@ pub fn register_all(
         password_change_finish,
         PasswordChangeFinishRequest,
         PasswordChangeFinishResponse
+    );
+
+    register_rpc!(
+        d,
+        auth_svc,
+        "sid.v1.AuthService/GetPasswordChangeRequirement",
+        get_password_change_requirement,
+        (),
+        prost_types::Duration
     );
 
     register_rpc!(

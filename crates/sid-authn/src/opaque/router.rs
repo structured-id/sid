@@ -102,7 +102,8 @@ impl OpaqueRouter {
 
     // ── Login (dispatches by credential curve) ──
 
-    /// Start OPAQUE login, dispatching to the correct curve provider.
+    /// Start OPAQUE login under `context` (empty for an ordinary sign-in),
+    /// dispatching to the correct curve provider.
     ///
     /// Returns `(response_bytes, login_state)`. The `LoginState` is prefixed
     /// with the `CurveId` byte for dispatch in [`login_finish`](Self::login_finish).
@@ -111,12 +112,19 @@ impl OpaqueRouter {
         credential: &StoredCredential,
         request_bytes: &[u8],
         credential_id: &[u8],
+        context: &[u8],
     ) -> Result<(Vec<u8>, LoginState), OpaqueError> {
         let provider = self
             .verifiers
             .get(&credential.curve)
             .ok_or(OpaqueError::UnsupportedCurve(credential.curve))?;
-        provider.login_start(&self.setup, credential, request_bytes, credential_id)
+        provider.login_start(
+            &self.setup,
+            credential,
+            request_bytes,
+            credential_id,
+            context,
+        )
     }
 
     /// Fake OPAQUE login start for anti-enumeration.
@@ -133,13 +141,15 @@ impl OpaqueRouter {
             .fake_login_start(&self.setup, request_bytes, credential_id)
     }
 
-    /// Finish OPAQUE login, dispatching by the `CurveId` encoded in `LoginState`.
+    /// Finish OPAQUE login under the `context` it started with, dispatching
+    /// by the `CurveId` encoded in `LoginState`.
     ///
     /// Returns [`SessionKey`] on success.
     pub fn login_finish(
         &self,
         state: &LoginState,
         finalization_bytes: &[u8],
+        context: &[u8],
     ) -> Result<SessionKey, OpaqueError> {
         if state.0.is_empty() {
             return Err(OpaqueError::Deserialization(
@@ -156,7 +166,7 @@ impl OpaqueRouter {
             .verifiers
             .get(&curve)
             .ok_or(OpaqueError::UnsupportedCurve(curve))?;
-        provider.login_finish(state, finalization_bytes)
+        provider.login_finish(state, finalization_bytes, context)
     }
 }
 

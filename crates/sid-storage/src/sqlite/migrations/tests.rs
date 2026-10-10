@@ -190,6 +190,146 @@ async fn an_interrupted_upgrade_leaves_the_file_and_resumes() {
     assert!(has_profile(&pool, "p1").await);
 }
 
+/// The baseline is the released schema: an older build's file, created from
+/// it and upgraded only by the migrations it knew, upgrades to the latest
+/// version, its data kept.
+#[tokio::test]
+async fn a_released_file_upgrades_to_the_latest_version() {
+    let (_dir, path) = scratch();
+    let pool = open(&path).await;
+    upgrade(&pool, BASELINE, &MIGRATIONS[..2]).await.unwrap();
+    add_profile(&pool, "p-released").await;
+    pool.close().await;
+
+    let pool = open(&path).await;
+    upgrade(&pool, BASELINE, MIGRATIONS).await.unwrap();
+    assert_eq!(version(&pool).await, MIGRATIONS.last().unwrap().version);
+    assert!(has_profile(&pool, "p-released").await);
+    assert!(has_table(&pool, "history_key_epochs").await);
+}
+
+/// The history evaluator split converts only an empty history layout: a file
+/// holding history refuses the upgrade, its version and tables unchanged;
+/// emptied, it converts and its credential tables carry no key.
+#[tokio::test]
+async fn history_split_refuses_populated_history() {
+    let (_dir, path) = scratch();
+    let pool = open(&path).await;
+    upgrade(&pool, BASELINE, &MIGRATIONS[..3]).await.unwrap();
+    add_profile(&pool, "p-history").await;
+    sqlx::query("INSERT INTO password_histories (owner_id, revision) VALUES ('p-history', 1)")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    upgrade(&pool, BASELINE, MIGRATIONS)
+        .await
+        .expect_err("a populated history refuses the split");
+    assert_eq!(version(&pool).await, 4, "the version is unchanged");
+    assert!(has_table(&pool, "password_histories").await);
+    assert!(!has_table(&pool, "history_key_epochs").await);
+
+    sqlx::query("DELETE FROM password_histories")
+        .execute(&pool)
+        .await
+        .unwrap();
+    upgrade(&pool, BASELINE, MIGRATIONS).await.unwrap();
+    assert_eq!(
+        version(&pool).await,
+        MIGRATIONS.last().unwrap().version,
+        "converted, then upgraded to the latest version"
+    );
+    assert!(has_table(&pool, "history_key_epochs").await);
+    assert!(!has_table(&pool, "password_history_lifecycle").await);
+    let key_column: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pragma_table_info('password_history_epochs') WHERE name = 'wrapped_key'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        key_column, 0,
+        "the credential service's epochs carry no key"
+    );
+}
+
+/// Verdicts stored before artifacts were named are demoted with their
+/// provenance kept: the password reads as policy-unverified, the legacy
+/// table holds what was claimed. Afterwards a row whose evidence columns
+/// disagree is refused on insert and on update.
+#[tokio::test]
+async fn unattributed_policy_verdicts_are_demoted_with_provenance() {
+    let (_dir, path) = scratch();
+    let pool = open(&path).await;
+    upgrade(&pool, BASELINE, &MIGRATIONS[..2]).await.unwrap();
+    // One password per profile.
+    for (id, verified, version) in [("c1", 1, Some(1)), ("c2", 0, None), ("c3", 0, Some(1))] {
+        add_profile(&pool, &format!("p-{id}")).await;
+        sqlx::query(
+            "INSERT INTO credentials (id, profile_id, credential_type, data, zkpp_verified, policy_version)
+             VALUES (?, ?, 'opaque', X'00', ?, ?)",
+        )
+        .bind(id)
+        .bind(format!("p-{id}"))
+        .bind(verified)
+        .bind(version)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    add_profile(&pool, "p-c4").await;
+
+    upgrade(&pool, BASELINE, MIGRATIONS).await.unwrap();
+    let rows: Vec<(String, i64, Option<i64>)> =
+        sqlx::query_as("SELECT id, zkpp_verified, policy_version FROM credentials ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            ("c1".into(), 0, None),
+            ("c2".into(), 0, None),
+            ("c3".into(), 0, None)
+        ]
+    );
+    let kept: Vec<(String, i64, Option<i64>)> = sqlx::query_as(
+        "SELECT credential_id, zkpp_verified, policy_version
+         FROM credential_policy_evidence_legacy ORDER BY credential_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        kept,
+        vec![("c1".into(), 1, Some(1)), ("c3".into(), 0, Some(1))],
+        "every claimed verdict keeps its provenance"
+    );
+
+    let disagreeing = sqlx::query(
+        "INSERT INTO credentials (id, profile_id, credential_type, data, zkpp_verified, policy_version)
+         VALUES ('c4', 'p-c4', 'opaque', X'00', 1, 1)",
+    )
+    .execute(&pool)
+    .await;
+    assert!(disagreeing.is_err(), "a verdict without its artifact");
+    let disagreeing = sqlx::query("UPDATE credentials SET zkpp_verified = 1 WHERE id = 'c2'")
+        .execute(&pool)
+        .await;
+    assert!(
+        disagreeing.is_err(),
+        "a verdict set without policy or artifact"
+    );
+    sqlx::query(
+        "UPDATE credentials SET zkpp_verified = 1, policy_version = 1, zkpp_artifact = ?
+         WHERE id = 'c2'",
+    )
+    .bind(vec![7u8; 32])
+    .execute(&pool)
+    .await
+    .expect("a complete verdict is stored");
+}
+
 /// Processes opening one empty file at once: one creates and upgrades it,
 /// the others wait and find it current.
 #[tokio::test]

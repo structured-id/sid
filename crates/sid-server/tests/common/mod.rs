@@ -723,11 +723,13 @@ pub fn test_org() -> sid_core::models::OrgId {
 
 /// Optional server capabilities a test enables.
 struct Options {
-    /// The ZKPP verifier and configuration; the server is built on the
+    /// The ZKPP verifiers and configuration; the server is built on the
     /// services' own OPAQUE router, as a server start builds it. None leaves
     /// ZKPP off.
-    zkpp: Option<(Option<ZkppVerifier>, ZkppConfig)>,
+    zkpp: Option<(Vec<ZkppVerifier>, ZkppConfig)>,
     magic_links: bool,
+    /// The security policy; None keeps the CE default.
+    security_policy: Option<sid_core::models::SecurityPolicy>,
 }
 
 /// What the authentication service is built from besides its storage and
@@ -740,12 +742,17 @@ pub struct AuthOptions {
     pub revocation_cache: Arc<RevocationCache>,
     pub feature_flags: FeatureFlagService,
     pub magic_link: Option<Arc<MagicLinkService>>,
-    /// The ZKPP verifier and configuration; None verifies no proof.
-    pub zkpp: Option<(Option<ZkppVerifier>, ZkppConfig)>,
+    /// The ZKPP verifiers (one per history-domain count) and configuration;
+    /// None or no verifier verifies no proof.
+    pub zkpp: Option<(Vec<ZkppVerifier>, ZkppConfig)>,
     pub issuers: Arc<sid_authn::issuer::IssuerRegistry>,
     /// The installation organization.
     pub org: sid_core::models::OrgId,
     pub cascade: Arc<RevocationCascadeService>,
+    /// The security policy; None keeps the CE default.
+    pub security_policy: Option<sid_core::models::SecurityPolicy>,
+    /// The history evaluator's store, co-located as CE runs it.
+    pub history_keys: Arc<dyn sid_plugin::history_keys::HistoryKeyStore>,
 }
 
 /// The authentication service over `storage` and `cache`, as a server start
@@ -767,12 +774,14 @@ pub fn auth_service(
         issuers,
         org,
         cascade,
+        security_policy,
+        history_keys,
     } = options;
     // Registration, change and reset run their OPAQUE on the ZKPP server
     // whether or not proofs are verified, as a server start builds it:
     // without a verifier every password installs policy-unverified.
     let (verifiers, config) = match zkpp {
-        Some((verifier, config)) => (verifier.into_iter().collect(), config),
+        Some((verifiers, config)) => (verifiers, config),
         None => (
             vec![],
             ZkppConfig {
@@ -787,36 +796,42 @@ pub fn auth_service(
         Arc::new(arc_swap::ArcSwap::from_pointee(Some(zkpp)));
 
     let otp_service = sid_authn::otp::OtpService::new(cache.clone());
-    Arc::new(
-        AuthServiceImpl::new(
-            storage.clone(),
-            oauth2,
-            webauthn,
-            jwt,
-            opaque_router,
-            opaque_zkpp,
-            revocation_cache,
-            feature_flags,
-            magic_link,
-            otp_service,
-            issuers,
-            org,
-            "https://sid.example.com".to_string(),
-            // A 4-bit proof of work, so a test solves a challenge in a few hashes.
-            Arc::new(sid_authn::captcha::SidPowProvider::new([0u8; 32], 4, 300)),
+    let service = AuthServiceImpl::new(
+        storage.clone(),
+        oauth2,
+        webauthn,
+        jwt,
+        opaque_router,
+        opaque_zkpp,
+        revocation_cache,
+        feature_flags,
+        magic_link,
+        otp_service,
+        issuers,
+        org,
+        "https://sid.example.com".to_string(),
+        // A 4-bit proof of work, so a test solves a challenge in a few hashes.
+        Arc::new(sid_authn::captcha::SidPowProvider::new([0u8; 32], 4, 300)),
+        cache.clone(),
+        Arc::new(sid_authn::ip_intelligence::IpIntelligenceAggregator::new(
+            vec![],
             cache.clone(),
-            Arc::new(sid_authn::ip_intelligence::IpIntelligenceAggregator::new(
-                vec![],
-                cache.clone(),
-                std::time::Duration::from_secs(60),
-            )),
-            Arc::new(sid_authn::geoip::GeoIpChain::empty(cache)),
-            test_key_manager(),
-            cascade,
-            Arc::new(sid_authz::CeAuthzEngine::new(storage)),
-        )
-        .with_sign_in_page(&url::Url::parse(SIGN_IN_PAGE).unwrap()),
+            std::time::Duration::from_secs(60),
+        )),
+        Arc::new(sid_authn::geoip::GeoIpChain::empty(cache)),
+        test_key_manager(),
+        cascade,
+        Arc::new(sid_authz::CeAuthzEngine::new(storage)),
+        sid_server::grpc::password_operation::PasswordHistoryAuthority::InProcess {
+            store: history_keys,
+            history_keys: test_key_manager(),
+        },
     )
+    .with_sign_in_page(&url::Url::parse(SIGN_IN_PAGE).unwrap());
+    Arc::new(match security_policy {
+        Some(policy) => service.with_security_policy(policy),
+        None => service,
+    })
 }
 
 /// The browser sign-in page of every test server, on the issuer's site.
@@ -876,7 +891,7 @@ impl TestServices {
     pub fn with_zkpp_degraded(storage: MockStorage) -> Self {
         Self::with_zkpp_options(
             storage,
-            None,
+            vec![],
             ZkppConfig {
                 require_proof: false,
                 policy_version: 1,
@@ -888,20 +903,51 @@ impl TestServices {
     /// `verifier` under `config`.
     #[allow(dead_code)]
     pub fn with_zkpp(storage: MockStorage, verifier: ZkppVerifier, config: ZkppConfig) -> Self {
-        Self::with_zkpp_options(storage, Some(verifier), config)
+        Self::with_zkpp_options(storage, vec![verifier], config)
+    }
+
+    /// TestServices verifying operations with one or more history domains,
+    /// one verifier per domain count, as a server start builds them.
+    #[allow(dead_code)]
+    pub fn with_zkpp_verifiers(
+        storage: MockStorage,
+        verifiers: Vec<ZkppVerifier>,
+        config: ZkppConfig,
+    ) -> Self {
+        Self::with_zkpp_options(storage, verifiers, config)
     }
 
     fn with_zkpp_options(
         storage: MockStorage,
-        verifier: Option<ZkppVerifier>,
+        verifiers: Vec<ZkppVerifier>,
         config: ZkppConfig,
     ) -> Self {
         Self::with_options(
             storage,
             FeatureFlagService::disabled(),
             Options {
-                zkpp: Some((verifier, config)),
+                zkpp: Some((verifiers, config)),
                 magic_links: false,
+                security_policy: None,
+            },
+        )
+    }
+
+    /// As [`Self::with_zkpp`], under `policy` instead of the CE default.
+    #[allow(dead_code)]
+    pub fn with_zkpp_policy(
+        storage: MockStorage,
+        verifier: ZkppVerifier,
+        config: ZkppConfig,
+        policy: sid_core::models::SecurityPolicy,
+    ) -> Self {
+        Self::with_options(
+            storage,
+            FeatureFlagService::disabled(),
+            Options {
+                zkpp: Some((vec![verifier], config)),
+                magic_links: false,
+                security_policy: Some(policy),
             },
         )
     }
@@ -914,6 +960,7 @@ impl TestServices {
             Options {
                 zkpp: None,
                 magic_links: true,
+                security_policy: None,
             },
         )
     }
@@ -925,6 +972,7 @@ impl TestServices {
             Options {
                 zkpp: None,
                 magic_links: false,
+                security_policy: None,
             },
         )
     }
@@ -944,6 +992,7 @@ impl TestServices {
             Options {
                 zkpp: None,
                 magic_links: false,
+                security_policy: None,
             },
         )
     }
@@ -997,6 +1046,7 @@ impl TestServices {
             Options {
                 zkpp: None,
                 magic_links: false,
+                security_policy: None,
             },
         );
         replica
@@ -1014,7 +1064,11 @@ impl TestServices {
         feature_flags: FeatureFlagService,
         options: Options,
     ) -> Self {
-        let Options { zkpp, magic_links } = options;
+        let Options {
+            zkpp,
+            magic_links,
+            security_policy,
+        } = options;
         let storage: Arc<dyn StorageBackend> = mock_storage.clone();
         // Provisioned as a server start provisions it; a replica over the same
         // store reads the stored one back.
@@ -1096,6 +1150,8 @@ impl TestServices {
                 issuers: issuers.clone(),
                 org: test_org(),
                 cascade: cascade_service.clone(),
+                security_policy,
+                history_keys: mock_storage.clone(),
             },
         );
 
@@ -1145,7 +1201,9 @@ impl TestServices {
             issuers.clone(),
             storage.clone(),
         );
-        let evaluator = auth.history_evaluator();
+        let evaluator = auth
+            .history_evaluator()
+            .expect("the test server co-locates the history evaluator");
         let machine_user = sid_server::grpc::machine_user_service::MachineUserServiceImpl::new(
             storage.clone(),
             jwt.clone(),

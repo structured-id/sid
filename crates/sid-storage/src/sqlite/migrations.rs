@@ -34,7 +34,190 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 3,
         sql: WEBAUTHN_USER_HANDLES,
     },
+    Migration {
+        version: 4,
+        sql: CREDENTIAL_POLICY_ARTIFACT,
+    },
+    Migration {
+        version: 5,
+        sql: HISTORY_EVALUATOR_SPLIT,
+    },
+    Migration {
+        version: 6,
+        sql: ENROLLMENT_CLEANUP,
+    },
+    Migration {
+        version: 7,
+        sql: HISTORY_KEY_VERSIONS,
+    },
+    Migration {
+        version: 8,
+        sql: HISTORY_OWNER_PURGE,
+    },
 ];
+
+/// Fences of purged owners; the evaluator's PostgreSQL migration 004 states
+/// the contract.
+const HISTORY_OWNER_PURGE: &str = "
+CREATE TABLE history_key_purged (
+    owner_domain BLOB PRIMARY KEY CHECK (length(owner_domain) = 32),
+    purged_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+";
+
+/// The evaluator's own key custody versions; its PostgreSQL migration 003
+/// states the contract.
+const HISTORY_KEY_VERSIONS: &str = "
+CREATE TABLE history_key_versions (
+    version    INTEGER PRIMARY KEY CHECK (version > 0),
+    salt       BLOB NOT NULL,
+    algorithm  TEXT NOT NULL,
+    context    TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+";
+
+/// Reclaiming the keys of first enrollments that never committed; the
+/// evaluator's PostgreSQL migration 002 states the contract.
+const ENROLLMENT_CLEANUP: &str = "
+ALTER TABLE history_key_epochs ADD COLUMN created_by TEXT;
+
+CREATE INDEX history_key_epochs_created_by
+    ON history_key_epochs (created_by) WHERE created_by IS NOT NULL;
+
+CREATE TABLE history_key_abandoned (
+    operation_id TEXT PRIMARY KEY,
+    owner_domain BLOB NOT NULL CHECK (length(owner_domain) = 32),
+    abandoned_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+";
+
+/// The history evaluator's keys and lifecycle move to its own tables, keyed by
+/// the owner's history input domain; the PostgreSQL migration 058 and the
+/// evaluator's own migration set state the contract. An embedded file keeps
+/// both in one database. Only an empty history layout is converted: the guard
+/// row's check fails, aborting the whole upgrade unchanged, when any history
+/// data exists. The upgrade transaction holds the write lock, so nothing is
+/// written between the check and the change. A released file has no
+/// lifecycle tables at all; one created by a development build may have them,
+/// and with no epoch they can hold nothing that needs keeping.
+const HISTORY_EVALUATOR_SPLIT: &str = "
+CREATE TEMP TABLE history_split_guard (rows INTEGER NOT NULL CHECK (rows = 0));
+INSERT INTO history_split_guard (rows) SELECT
+    (SELECT count(*) FROM password_histories)
+  + (SELECT count(*) FROM password_history_epochs)
+  + (SELECT count(*) FROM password_history_entries);
+DROP TABLE history_split_guard;
+
+DROP TABLE IF EXISTS password_history_uses;
+DROP TABLE IF EXISTS password_history_replaced;
+DROP TABLE IF EXISTS password_history_lifecycle;
+ALTER TABLE password_history_epochs DROP COLUMN wrapped_key;
+
+CREATE TABLE password_history_write_cutoff (
+    singleton  INTEGER PRIMARY KEY CHECK (singleton = 1),
+    not_before TEXT
+);
+INSERT INTO password_history_write_cutoff (singleton) VALUES (1);
+
+CREATE TABLE history_key_write_cutoff (
+    singleton  INTEGER PRIMARY KEY CHECK (singleton = 1),
+    not_before TEXT
+);
+INSERT INTO history_key_write_cutoff (singleton) VALUES (1);
+
+CREATE TABLE history_key_epochs (
+    id              TEXT PRIMARY KEY,
+    owner_domain    BLOB NOT NULL CHECK (length(owner_domain) = 32),
+    suite           TEXT NOT NULL CHECK (suite IN ('pallas-poseidon-v1')),
+    public_key      BLOB NOT NULL CHECK (length(public_key) = 32),
+    wrapped_key     BLOB NOT NULL,
+    ksf_memory_kib  INTEGER NOT NULL CHECK (ksf_memory_kib > 0),
+    ksf_passes      INTEGER NOT NULL CHECK (ksf_passes > 0),
+    ksf_lanes       INTEGER NOT NULL CHECK (ksf_lanes > 0),
+    ksf_salt        BLOB NOT NULL CHECK (length(ksf_salt) = 32),
+    status          TEXT NOT NULL CHECK (status IN ('active', 'compare_only', 'retired')),
+    created_at      TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX history_key_one_active_epoch
+    ON history_key_epochs (owner_domain) WHERE status = 'active';
+
+CREATE INDEX history_key_epochs_owner ON history_key_epochs (owner_domain);
+
+CREATE TABLE history_key_lifecycle (
+    owner_domain BLOB PRIMARY KEY CHECK (length(owner_domain) = 32),
+    revision     INTEGER NOT NULL CHECK (revision >= 0),
+    live_epochs  TEXT NOT NULL
+);
+
+CREATE TABLE history_key_replaced (
+    epoch_id             TEXT PRIMARY KEY REFERENCES history_key_epochs(id) ON DELETE CASCADE,
+    owner_domain         BLOB NOT NULL CHECK (length(owner_domain) = 32),
+    replaced_at_revision INTEGER NOT NULL CHECK (replaced_at_revision > 0)
+);
+
+CREATE TABLE history_key_uses (
+    operation_id TEXT NOT NULL,
+    epoch_id     TEXT NOT NULL REFERENCES history_key_epochs(id) ON DELETE CASCADE,
+    owner_domain BLOB NOT NULL CHECK (length(owner_domain) = 32),
+    expires_at   TEXT NOT NULL,
+    PRIMARY KEY (operation_id, epoch_id)
+);
+
+CREATE INDEX history_key_uses_owner ON history_key_uses (owner_domain, epoch_id);
+
+CREATE TABLE history_key_audit (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    occurred_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    actor_id    TEXT NOT NULL,
+    actor_type  TEXT NOT NULL,
+    action      TEXT NOT NULL,
+    resource    TEXT NOT NULL,
+    outcome     TEXT NOT NULL,
+    metadata    TEXT NOT NULL
+);
+";
+
+/// Policy verdicts name their verifying artifact; the PostgreSQL migration
+/// 056 states the contract. SQLite cannot add a table constraint, so
+/// triggers refuse a row whose evidence columns disagree.
+const CREDENTIAL_POLICY_ARTIFACT: &str = "
+ALTER TABLE credentials ADD COLUMN zkpp_artifact BLOB CHECK (length(zkpp_artifact) = 32);
+
+CREATE TABLE credential_policy_evidence_legacy (
+    credential_id   TEXT PRIMARY KEY,
+    profile_id      TEXT NOT NULL REFERENCES profiles (id) ON DELETE CASCADE,
+    zkpp_verified   INTEGER NOT NULL,
+    policy_version  INTEGER,
+    reason          TEXT NOT NULL CHECK (reason IN ('artifact_not_recorded')),
+    demoted_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+INSERT INTO credential_policy_evidence_legacy (credential_id, profile_id, zkpp_verified, policy_version, reason)
+SELECT id, profile_id, zkpp_verified, policy_version, 'artifact_not_recorded'
+FROM credentials
+WHERE zkpp_artifact IS NULL AND (zkpp_verified <> 0 OR policy_version IS NOT NULL);
+
+UPDATE credentials SET zkpp_verified = 0, policy_version = NULL
+WHERE zkpp_artifact IS NULL AND (zkpp_verified <> 0 OR policy_version IS NOT NULL);
+
+CREATE TRIGGER credentials_policy_evidence_insert
+BEFORE INSERT ON credentials
+WHEN NOT ((NEW.zkpp_verified <> 0 AND NEW.policy_version IS NOT NULL AND NEW.zkpp_artifact IS NOT NULL)
+       OR (NEW.zkpp_verified = 0 AND NEW.policy_version IS NULL AND NEW.zkpp_artifact IS NULL))
+BEGIN
+    SELECT RAISE(ABORT, 'credential policy evidence');
+END;
+
+CREATE TRIGGER credentials_policy_evidence_update
+BEFORE UPDATE OF zkpp_verified, policy_version, zkpp_artifact ON credentials
+WHEN NOT ((NEW.zkpp_verified <> 0 AND NEW.policy_version IS NOT NULL AND NEW.zkpp_artifact IS NOT NULL)
+       OR (NEW.zkpp_verified = 0 AND NEW.policy_version IS NULL AND NEW.zkpp_artifact IS NULL))
+BEGIN
+    SELECT RAISE(ABORT, 'credential policy evidence');
+END;
+";
 
 /// WebAuthn user handles; the PostgreSQL migration 054 states the contract.
 const WEBAUTHN_USER_HANDLES: &str = "

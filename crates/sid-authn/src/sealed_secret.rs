@@ -85,6 +85,20 @@ pub async fn open(
     context: &str,
     stored: &[u8],
 ) -> Result<Opened, SealedSecretError> {
+    let field = inspect(context, stored)?;
+    let secret = Zeroizing::new(key_manager.decrypt(&field).await?);
+    let resealed = if key_manager.needs_rotation(&field) {
+        Some(seal(key_manager, context, &secret).await?)
+    } else {
+        None
+    };
+    Ok(Opened { secret, resealed })
+}
+
+/// Read only the public sealing metadata and ciphertext. This verifies the
+/// storage format and record context, not the authentication tag or key custody;
+/// callers must still open the value before using its secret.
+pub fn inspect(context: &str, stored: &[u8]) -> Result<EncryptedField, SealedSecretError> {
     let body = stored
         .strip_prefix(SEALED_PREFIX.as_slice())
         .ok_or(SealedSecretError::NotSealed)?;
@@ -93,13 +107,7 @@ pub async fn open(
     if field.context != context {
         return Err(SealedSecretError::ContextMismatch);
     }
-    let secret = Zeroizing::new(key_manager.decrypt(&field).await?);
-    let resealed = if key_manager.needs_rotation(&field) {
-        Some(seal(key_manager, context, &secret).await?)
-    } else {
-        None
-    };
-    Ok(Opened { secret, resealed })
+    Ok(field)
 }
 
 /// Seal every credential of `credential_type` still stored in plain form,

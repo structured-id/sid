@@ -24,7 +24,8 @@ use sid_pake_core::types::CE_DEFAULT_POLICY;
 use sid_pake_core::verifier::ZkppVerifier;
 use sid_proto::sid::v1::authn::password_history_evaluator_service_server::PasswordHistoryEvaluatorService;
 use sid_proto::sid::v1::authn::{
-    EvaluatePasswordHistoryRequest, PasswordHistoryContext, PasswordRegistrationProof,
+    EvaluatePasswordHistoryRequest, PasswordHistoryContext, PasswordHistoryEvaluationProof,
+    PasswordRegistrationProof,
 };
 use tonic::Request;
 
@@ -93,6 +94,13 @@ pub fn operation(context: &PasswordHistoryContext) -> PasswordOperationId {
     sid_ids_proto::required(context.operation_id.as_ref()).expect("an operation id")
 }
 
+/// What the evaluator answered: the prover's history input and the
+/// evaluator's proofs, relayed unchanged with the finish.
+pub struct Evaluated {
+    pub history: HistoryEvaluation,
+    pub proofs: Vec<PasswordHistoryEvaluationProof>,
+}
+
 /// Have the services' evaluator evaluate the history input of `password` for
 /// the operation `context`, checking each answer's proof under its domain's
 /// key as the client does before proving.
@@ -100,7 +108,7 @@ pub async fn evaluate(
     svc: &TestServices,
     password: &[u8],
     context: &PasswordHistoryContext,
-) -> HistoryEvaluation {
+) -> Evaluated {
     let d = base(&context.owner_domain);
     let r = random_blind(UnwrapErr(SysRng));
     let b = blind_request(history_input(d, password), r);
@@ -143,26 +151,32 @@ pub async fn evaluate(
             z
         })
         .collect();
-    HistoryEvaluation {
-        d,
-        domains: context
-            .domains
-            .iter()
-            .map(|x| base(&x.comparison_domain))
+    Evaluated {
+        history: HistoryEvaluation {
+            d,
+            domains: context
+                .domains
+                .iter()
+                .map(|x| base(&x.comparison_domain))
+                .collect(),
+            r,
+            evaluations,
+        },
+        proofs: answers
+            .into_iter()
+            .map(|a| a.proof.expect("an evaluation proof"))
             .collect(),
-        r,
-        evaluations,
     }
 }
 
 /// The proof of `password` for the operation `context` over the request of
-/// `started`, with the evaluated `history`, in its wire form.
+/// `started`, with the `evaluated` history, in its wire form.
 pub fn prove(
     prover: &ZkppProver,
     password: &[u8],
     context: &PasswordHistoryContext,
     started: &Started,
-    history: &HistoryEvaluation,
+    evaluated: &Evaluated,
 ) -> PasswordRegistrationProof {
     let op = operation(context);
     wire(
@@ -171,9 +185,10 @@ pub fn prove(
                 password,
                 blind_of(&started.state),
                 &operation_context(op.as_bytes(), &started.request),
-                history,
+                &evaluated.history,
             )
             .expect("prove"),
+        evaluated.proofs.clone(),
     )
 }
 
@@ -186,12 +201,16 @@ pub async fn evaluate_and_prove(
     context: &PasswordHistoryContext,
     started: &Started,
 ) -> PasswordRegistrationProof {
-    let history = evaluate(svc, password, context).await;
-    prove(prover, password, context, started, &history)
+    let evaluated = evaluate(svc, password, context).await;
+    prove(prover, password, context, started, &evaluated)
 }
 
-/// The wire form of a bound proof: SNARK bytes and canonical instances.
-pub fn wire(proof: BoundProof) -> PasswordRegistrationProof {
+/// The wire form of a bound proof: SNARK bytes and canonical instances, with
+/// the evaluator's `proofs` relayed.
+pub fn wire(
+    proof: BoundProof,
+    proofs: Vec<PasswordHistoryEvaluationProof>,
+) -> PasswordRegistrationProof {
     PasswordRegistrationProof {
         zkpp_proof: proof.snark_proof.0,
         instances: proof
@@ -199,6 +218,7 @@ pub fn wire(proof: BoundProof) -> PasswordRegistrationProof {
             .iter()
             .map(|i| i.to_repr().to_vec())
             .collect(),
+        evaluation_proofs: proofs,
     }
 }
 
