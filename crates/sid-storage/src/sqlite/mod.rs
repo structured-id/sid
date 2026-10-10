@@ -35,6 +35,7 @@ mod machine;
 mod oidc_issuer;
 mod operation;
 mod password_history;
+pub use password_history::SqliteHistoryKeyStore;
 mod profile;
 mod project;
 mod provisioning_connector;
@@ -259,12 +260,14 @@ pub(crate) fn insert_error(what: &str, e: sqlx::Error) -> SidError {
     }
 }
 
+/// Microseconds, the precision PostgreSQL keeps: a record moved between the
+/// backends compares equal to itself.
 pub(crate) fn fmt_dt(dt: &chrono::DateTime<chrono::Utc>) -> String {
-    dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    dt.to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
 }
 
 pub(crate) fn fmt_dt_opt(dt: Option<chrono::DateTime<chrono::Utc>>) -> Option<String> {
-    dt.map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+    dt.as_ref().map(fmt_dt)
 }
 
 /// Decode one column, naming it in the error so a malformed stored value
@@ -624,19 +627,28 @@ impl StorageBackend for SqliteBackend {
         self.get_password_history_impl(owner).await
     }
 
-    async fn ensure_history_epoch(
+    async fn raise_history_write_cutoff(
         &self,
-        new: &sid_core::models::NewHistoryEpoch,
+        not_before: chrono::DateTime<chrono::Utc>,
         audit: MutationContext,
-    ) -> SidResult<sid_core::models::HistoryEpoch> {
-        self.ensure_history_epoch_impl(new, audit).await
+    ) -> SidResult<chrono::DateTime<chrono::Utc>> {
+        self.raise_history_write_cutoff_impl(not_before, audit)
+            .await
     }
 
-    async fn get_history_epoch_key(
+    async fn export_password_history(
         &self,
-        epoch: sid_core::models::HistoryEpochId,
-    ) -> SidResult<Option<sid_core::models::WrappedHistoryKey>> {
-        self.get_history_epoch_key_impl(epoch).await
+        owner: sid_core::models::ProfileId,
+    ) -> SidResult<Option<sid_core::models::HistoryArchive>> {
+        self.export_password_history_impl(owner).await
+    }
+
+    async fn import_password_history(
+        &self,
+        archive: &sid_core::models::HistoryArchive,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        self.import_password_history_impl(archive, ctx).await
     }
 
     async fn reseal_credential_data(

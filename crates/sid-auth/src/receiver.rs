@@ -33,8 +33,8 @@ use tonic::server::NamedService;
 
 use crate::auth::jwt::{ForwardAuthClaims, TargetAccess, TokenRefusal, presented_token};
 use crate::auth::policy::Target;
-use crate::credential::ClientCredential;
 use crate::issuers::IssuerDirectory;
+use sid_authn::client_credential::ClientCredential;
 
 /// What a receiver admits calls against.
 pub struct Receiver {

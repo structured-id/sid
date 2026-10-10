@@ -47,7 +47,7 @@ use sid_core::models::{
     RevocationReason,
 };
 use sid_plugin::cache::CacheBackend;
-use sid_plugin::crypto::{CurveId, LoginState, StoredCredential};
+use sid_plugin::crypto::{LoginState, StoredCredential};
 use sid_plugin::storage::StorageBackend;
 use sid_proto::sid::v1::auth_service_server::AuthService;
 use sid_proto::sid::v1::*;
@@ -56,7 +56,8 @@ use tonic::{Code, Request, Response, Status};
 use tracing::{info, instrument, warn};
 
 use super::password_operation::{
-    Finish, OperationOwner, OperationPurpose, PendingOperation, operation_id,
+    CurrentPasswordCheck, Finish, OperationOwner, OperationPurpose, PendingOperation,
+    change_context, operation_id,
 };
 use sid_core::grpc_error::refuse::{
     changed_concurrently, dependency_unavailable, internal, invalid_field, maintenance,
@@ -473,16 +474,33 @@ fn new_self_registration(
 /// Whether `op` is a change of `credential_id` started by `caller`; any other
 /// operation reads as not pending, so a caller learns nothing about others'.
 #[allow(clippy::result_large_err)]
+/// The attempt counter of the current-password sign-ins `profile`'s password
+/// changes begin, apart from its sign-in counter.
+fn current_password_guesses(profile: ProfileId) -> String {
+    format!("current-password:{profile}")
+}
+
+/// Accept `op` as the caller's change of `credential` as it stands now. An
+/// operation begun on a password another change has since replaced is
+/// refused: its authority (a sign-in with that password, or a fresh session
+/// then) is over the replaced one and must not overwrite the newer.
 fn own_change(
     op: &PendingOperation,
     caller: ProfileId,
-    credential_id: CredentialId,
+    credential: &Credential,
 ) -> Result<(), Status> {
     match op.purpose {
         OperationPurpose::Change {
             profile_id,
-            credential_id: changed,
-        } if profile_id == caller && changed == credential_id => Ok(()),
+            credential_id,
+            password,
+        } if profile_id == caller && credential_id == credential.id => {
+            if password == credential.opaque_credential_identifier() {
+                Ok(())
+            } else {
+                Err(changed_concurrently())
+            }
+        }
         _ => Err(super::password_operation::operation_not_pending()),
     }
 }
@@ -517,6 +535,8 @@ pub struct AuthServiceImpl {
     /// Password registrations, changes and resets between their steps, and
     /// the history evaluator and checker they use.
     pub(crate) password_ops: Arc<super::password_operation::PasswordOperations>,
+    /// The history evaluator, when it runs in this process.
+    history_evaluation: Option<Arc<super::password_operation::HistoryEvaluation>>,
     /// Profile a WebAuthn ceremony was started for, keyed by its challenge:
     /// only that profile may finish it.
     webauthn_state: ChallengeStore<ProfileId>,
@@ -647,16 +667,20 @@ impl AuthServiceImpl {
         key_manager: Arc<dyn sid_keys::KeyManager>,
         cascade: Arc<RevocationCascadeService>,
         authz: Arc<dyn sid_plugin::AuthzEngine>,
+        password_history: super::password_operation::PasswordHistoryAuthority,
     ) -> Self {
         let ttl = std::time::Duration::from_secs(300); // 5 minutes
         let captcha_gate =
             sid_authn::captcha::CaptchaGate::new(cache_backend.clone(), key_manager.clone());
-        let password_ops = Arc::new(super::password_operation::PasswordOperations::new(
-            storage.clone(),
-            cache_backend.clone(),
-            key_manager.clone(),
-            installation_org,
-        ));
+        let (password_ops, history_evaluation) =
+            super::password_operation::PasswordOperations::with_authority(
+                storage.clone(),
+                cache_backend.clone(),
+                key_manager.clone(),
+                installation_org,
+                password_history,
+            );
+        let password_ops = Arc::new(password_ops);
         Self {
             storage,
             oauth2,
@@ -679,6 +703,7 @@ impl AuthServiceImpl {
                 ttl,
             ),
             password_ops,
+            history_evaluation,
             webauthn_state: ChallengeStore::new(
                 cache_backend.clone(),
                 key_manager.clone(),
@@ -1994,7 +2019,12 @@ impl AuthServiceImpl {
             Err(sid_core::Error::InvalidState(_)) => {
                 return Err(registration_restricted("instance_claim"));
             }
-            Err(e) => return Err(storage_failure(e)),
+            Err(e) => {
+                return Err(super::password_operation::commit_refusal(
+                    e,
+                    storage_failure,
+                ));
+            }
         }
 
         info!("Self-registration committed for profile {}", profile_id);
@@ -2087,6 +2117,31 @@ impl AuthServiceImpl {
             self.security_policy.auth.passkey_satisfies_mfa,
         )
         .await
+    }
+
+    /// Refuse unless the caller may change its own password now; answer
+    /// whether the change must prove the current password (see
+    /// [`sid_authn::credential_enrollment::password_change_authority`]).
+    async fn password_change_authority(
+        &self,
+        caller: &sid_authn::caller::Caller,
+    ) -> Result<bool, Status> {
+        sid_authn::credential_enrollment::password_change_authority(
+            self.storage.as_ref(),
+            caller,
+            self.security_policy.auth.passkey_satisfies_mfa,
+            self.security_policy.password.change_current_password,
+        )
+        .await
+    }
+
+    /// The OPAQUE password file of `credential`, opened, with its curve.
+    async fn stored_password(&self, credential: &Credential) -> Result<StoredCredential, Status> {
+        let curve = super::convert::opaque_curve(credential)?;
+        Ok(StoredCredential {
+            curve,
+            data: self.open_envelope(credential).await?.to_vec(),
+        })
     }
 
     /// The profile's passkeys that may still sign in (revoked ones never do).
@@ -2516,10 +2571,19 @@ impl AuthServiceImpl {
         Ok(credential)
     }
 
-    /// The password history evaluator interface over this service's
-    /// operations, served as its own gRPC service.
-    pub fn history_evaluator(&self) -> super::password_operation::PasswordHistoryEvaluatorImpl {
-        super::password_operation::PasswordHistoryEvaluatorImpl::new(self.password_ops.clone())
+    /// The password history evaluator interface, served as its own gRPC
+    /// service, when the evaluator runs in this process; `None` when it is
+    /// its own service. Nobody prepares at it over the network: this
+    /// process's credential service prepares in process.
+    pub fn history_evaluator(
+        &self,
+    ) -> Option<super::password_operation::PasswordHistoryEvaluatorImpl> {
+        self.history_evaluation.clone().map(|evaluation| {
+            super::password_operation::PasswordHistoryEvaluatorImpl::new(
+                evaluation,
+                Arc::new(super::password_operation::InProcessOnly),
+            )
+        })
     }
 
     /// The result bytes a finish records for its retries: the response, encoded.
@@ -2714,22 +2778,11 @@ impl AuthService for AuthServiceImpl {
         };
 
         let credential_id = opaque_cred.opaque_credential_identifier();
-        let curve = match opaque_cred.opaque_curve {
-            Some(c) => CurveId::try_from(c).map_err(|_| {
-                internal(
-                    "read OPAQUE curve",
-                    format!("credential {} has curve {c}", opaque_cred.id.0),
-                )
-            })?,
-            None => self.opaque_router.primary_curve(),
-        };
-        let stored_cred = StoredCredential {
-            curve,
-            data: self.open_envelope(opaque_cred).await?.to_vec(),
-        };
+        let stored_cred = self.stored_password(opaque_cred).await?;
         let (credential_response, login_state) = self
             .opaque_router
-            .login_start(&stored_cred, &req.credential_request, &credential_id)
+            // An ordinary sign-in has the empty context.
+            .login_start(&stored_cred, &req.credential_request, &credential_id, &[])
             .map_err(|e| {
                 warn!("OPAQUE login start failed for {}: {}", req.principal, e);
                 authentication_failed()
@@ -2791,18 +2844,19 @@ impl AuthService for AuthServiceImpl {
         self.refuse_if_locked(&profile_id.to_string()).await?;
 
         // Verify OPAQUE login
-        let _session_key = match self
-            .opaque_router
-            .login_finish(&login_state, &req.credential_finalization)
-        {
-            Ok(key) => key,
-            Err(e) => {
-                warn!("OPAQUE login finish failed: {}", e);
-                self.record_failed_login(&profile_id.to_string(), client_ip)
-                    .await?;
-                return Err(authentication_failed());
-            }
-        };
+        let _session_key =
+            match self
+                .opaque_router
+                .login_finish(&login_state, &req.credential_finalization, &[])
+            {
+                Ok(key) => key,
+                Err(e) => {
+                    warn!("OPAQUE login finish failed: {}", e);
+                    self.record_failed_login(&profile_id.to_string(), client_ip)
+                        .await?;
+                    return Err(authentication_failed());
+                }
+            };
 
         // A profile deleted while the sign-in was in flight signs nobody in.
         let profile = self
@@ -2981,12 +3035,29 @@ impl AuthService for AuthServiceImpl {
         self.check_maintenance().await?;
 
         // Auth first, feature check second
-        let caller = self.caller_claims(&request).await?.caller.profile_id;
+        let verified = self.caller_claims(&request).await?;
+        let caller = verified.caller.profile_id;
 
         let zkpp = self.require_zkpp()?;
+        let required = self.password_change_authority(&verified.caller).await?;
 
         let req = request.into_inner();
         let credential = self.own_password(&req.credential_id, caller).await?;
+        // The challenge fixes the new password's request: the current
+        // password is confirmed for it, and execute starts no other.
+        if req.registration_request.is_empty() {
+            return Err(missing_field("registration_request"));
+        }
+        let proves = !req.credential_request.is_empty();
+        if required && !proves {
+            return Err(sid_authn::credential_enrollment::current_password_required());
+        }
+        let guesses = current_password_guesses(caller);
+        if proves {
+            // As at sign-in: during a lockout the current password is not tried.
+            self.refuse_if_locked(&caller.to_string()).await?;
+            self.refuse_if_locked(&guesses).await?;
+        }
         let prepared = self
             .password_ops
             .prepare(
@@ -2994,15 +3065,54 @@ impl AuthService for AuthServiceImpl {
                 OperationPurpose::Change {
                     profile_id: caller,
                     credential_id: credential.id,
+                    password: credential.opaque_credential_identifier(),
                 },
                 OperationOwner::Existing(caller),
                 format!("profile:{caller}"),
-                None,
+                // Fixed now; its response is withheld until execute confirms.
+                Some(req.registration_request.clone()),
             )
             .await?;
 
+        let credential_response = if proves {
+            let id = operation_id(prepared.context.operation_id.as_ref())?;
+            let stored = self.stored_password(&credential).await?;
+            let (response, state) = self
+                .opaque_router
+                .login_start(
+                    &stored,
+                    &req.credential_request,
+                    &credential.opaque_credential_identifier(),
+                    &change_context(&id, &req.registration_request),
+                )
+                .map_err(|e| {
+                    warn!("current-password sign-in start failed: {e}");
+                    invalid_field("credential_request", "not an OPAQUE credential request")
+                })?;
+            // A wrong guess fails on the client at KE2 and need never reach
+            // execute, so each KE2 is counted just before it is issued,
+            // against the change's own budget: a stolen session cannot guess
+            // the password through changes, and the account's sign-in budget
+            // is untouched. A challenge refused earlier taught nothing.
+            if !self
+                .anomaly_detector
+                .count_attempt(&guesses)
+                .await
+                .map_err(anomaly_unavailable)?
+            {
+                return Err(too_many_attempts(self.anomaly_detector.lockout_duration()));
+            }
+            self.password_ops
+                .begin_current_password(&id, state, |op| own_change(op, caller, &credential))
+                .await?;
+            response
+        } else {
+            Vec::new()
+        };
+
         Ok(Response::new(PasswordChangeChallengeResponse {
             history: Some(prepared.context),
+            credential_response,
         }))
     }
 
@@ -3018,20 +3128,48 @@ impl AuthService for AuthServiceImpl {
 
         // Auth first, feature check second
         let verified = self.caller_claims(&request).await?;
+        let client_ip = self.client_ip(&request);
 
         let zkpp = self.require_zkpp()?;
         let caller = verified.caller.profile_id;
-        self.require_enrollment_authority(&verified.caller, caller, CredentialType::Opaque)
-            .await?;
+        let required = self.password_change_authority(&verified.caller).await?;
 
         let req = request.into_inner();
         let credential = self.own_password(&req.credential_id, caller).await?;
         let id = operation_id(req.operation_id.as_ref())?;
+        if !req.credential_finalization.is_empty() {
+            // As at sign-in: during a lockout a right and a wrong password
+            // get the same answer.
+            self.refuse_if_locked(&caller.to_string()).await?;
+        }
+        let check = self
+            .password_ops
+            .prove_current_password(
+                &id,
+                &req.credential_finalization,
+                |op| own_change(op, caller, &credential),
+                |state, finalization, context| {
+                    self.opaque_router
+                        .login_finish(state, finalization, context)
+                        .inspect_err(|e| warn!("current-password sign-in failed: {e}"))
+                        .is_ok()
+                },
+            )
+            .await?;
+        match check {
+            CurrentPasswordCheck::Failed => {
+                self.record_failed_login(&caller.to_string(), client_ip)
+                    .await?;
+                return Err(authentication_failed());
+            }
+            CurrentPasswordCheck::NotBegun if required => {
+                return Err(sid_authn::credential_enrollment::current_password_required());
+            }
+            CurrentPasswordCheck::NotBegun | CurrentPasswordCheck::Proven => {}
+        }
         let registration_response = self
             .password_ops
-            .opaque_start(&zkpp, &id, req.registration_request, |op| {
-                own_change(op, caller, credential.id)
-            })
+            .fixed_opaque_start(&zkpp, &id, |op| own_change(op, caller, &credential))
             .await?;
 
         Ok(Response::new(PasswordChangeExecuteResponse {
@@ -3047,7 +3185,7 @@ impl AuthService for AuthServiceImpl {
     async fn password_change_finish(
         &self,
         request: Request<PasswordChangeFinishRequest>,
-    ) -> Result<Response<PasswordChangeFinishResponse>, Status> {
+    ) -> Result<Response<()>, Status> {
         self.check_maintenance().await?;
 
         // Auth first, feature check second
@@ -3055,8 +3193,8 @@ impl AuthService for AuthServiceImpl {
         let caller = verified.caller.profile_id;
 
         let zkpp = self.require_zkpp()?;
-        self.require_enrollment_authority(&verified.caller, caller, CredentialType::Opaque)
-            .await?;
+        // Rechecked at the commit: time may have run out since the challenge.
+        let required = self.password_change_authority(&verified.caller).await?;
 
         let req = request.into_inner();
         let credential = self.own_password(&req.credential_id, caller).await?;
@@ -3069,11 +3207,17 @@ impl AuthService for AuthServiceImpl {
                 "change",
                 &req.registration_record,
                 req.proof,
-                |op| own_change(op, caller, credential.id),
+                |op| {
+                    own_change(op, caller, &credential)?;
+                    if required && !op.current_password_proven() {
+                        return Err(sid_authn::credential_enrollment::current_password_required());
+                    }
+                    Ok(())
+                },
             )
             .await?
         {
-            Finish::Completed(_) => return Ok(Response::new(PasswordChangeFinishResponse {})),
+            Finish::Completed(_) => return Ok(Response::new(())),
             Finish::Ready(done) => *done,
         };
 
@@ -3090,7 +3234,7 @@ impl AuthService for AuthServiceImpl {
             "credential.password_change",
             credential.id.0.to_string(),
         ))
-        .with_operation(done.completion(Self::finish_result(&PasswordChangeFinishResponse {})));
+        .with_operation(done.completion(Self::finish_result(&())));
 
         // Applies only over the password just read, and only while it is
         // active: a revocation or another change in between is not undone.
@@ -3098,14 +3242,38 @@ impl AuthService for AuthServiceImpl {
             .storage
             .change_password(credential.id, &current, &new, done.history.as_ref(), ctx)
             .await
-            .map_err(storage_failure)?;
+            .map_err(|e| super::password_operation::commit_refusal(e, storage_failure))?;
         if !changed {
             return Err(changed_concurrently());
         }
 
         info!("Password changed for credential {}", credential.id.0);
 
-        Ok(Response::new(PasswordChangeFinishResponse {}))
+        Ok(Response::new(()))
+    }
+
+    /// How long, by this server's clock, the caller's session may still
+    /// change its password without the current password.
+    #[instrument(skip_all, fields(method = "get_password_change_requirement"))]
+    async fn get_password_change_requirement(
+        &self,
+        request: Request<()>,
+    ) -> Result<Response<prost_types::Duration>, Status> {
+        self.check_maintenance().await?;
+        let verified = self.caller_claims(&request).await?;
+        let left = sid_authn::credential_enrollment::password_change_requirement(
+            self.storage.as_ref(),
+            &verified.caller,
+            self.security_policy.password.change_current_password,
+        )
+        .await?;
+        // Never negative: the requirement clamps at zero.
+        let left = left
+            .to_std()
+            .map_err(|e| internal("password change requirement", e))?;
+        let left = prost_types::Duration::try_from(left)
+            .map_err(|e| internal("password change requirement", e))?;
+        Ok(Response::new(left))
     }
 
     // ── Deferred ZK Proof ──
@@ -5714,7 +5882,7 @@ impl AuthService for AuthServiceImpl {
             .storage
             .complete_password_reset(session.id, &new_cred, done.history.as_ref(), &end, ctx)
             .await
-            .map_err(storage_failure)?
+            .map_err(|e| super::password_operation::commit_refusal(e, storage_failure))?
             // Completed, or expired, meanwhile: the reset starts again.
             .ok_or_else(|| ceremony_expired("password reset"))?;
 

@@ -22,8 +22,8 @@ use rand::rand_core::UnwrapErr;
 use rand::rngs::SysRng;
 use serde::{Deserialize, Serialize};
 use sid_core::models::{
-    HistoryEpoch, HistoryEpochId, HistoryEpochUse, HistoryKsf, HistorySuite, NewHistoryEpoch,
-    PasswordHistory, ProfileId, WrappedHistoryKey,
+    HistoryEpochDescriptor, HistoryEpochId, HistoryEpochUse, HistoryKsf, HistorySuite, KeyEpoch,
+    NewKeyEpoch, PasswordHistory, ProfileId, WrappedHistoryKey, history_key_context,
 };
 use sid_core::{Error as SidError, Result as SidResult};
 use sid_keys::{EncryptedField, KeyManager};
@@ -37,13 +37,6 @@ use zeroize::Zeroizing;
 const OWNER_DOMAIN_PURPOSE: &[u8] = b"SID-HISTORY-INPUT-v1";
 /// Purpose of a comparison-domain element.
 const COMPARISON_DOMAIN_PURPOSE: &[u8] = b"SID-HISTORY-TAG-v1";
-/// Prefix of the key manager context an epoch key is sealed under.
-const KEY_CONTEXT_PREFIX: &str = "password-history-key";
-
-/// The most comparison domains one operation may require: the active epoch
-/// and the rotated ones that still hold entries. Each is a proof slot and a
-/// KSF run, so the bound caps both.
-pub const MAX_HISTORY_DOMAINS: usize = 3;
 
 /// The owner's history input domain `d`: the installation and the owner, so
 /// the same password gives unrelated inputs for different owners or
@@ -55,7 +48,7 @@ pub fn owner_domain(installation: &[u8; 16], owner: ProfileId) -> [u8; 32] {
 /// The comparison-domain element `c` of an epoch: its suite, id and complete
 /// KSF configuration, so tags of different epochs or KSF settings never
 /// compare equal.
-pub fn comparison_domain(epoch: &HistoryEpoch) -> [u8; 32] {
+pub fn comparison_domain(epoch: &HistoryEpochDescriptor) -> [u8; 32] {
     let ksf = [
         epoch.ksf.memory_kib.to_le_bytes(),
         epoch.ksf.passes.to_le_bytes(),
@@ -74,8 +67,34 @@ pub fn comparison_domain(epoch: &HistoryEpoch) -> [u8; 32] {
     .to_repr()
 }
 
-fn key_context(epoch: HistoryEpochId, owner: ProfileId) -> String {
-    format!("{KEY_CONTEXT_PREFIX}:{}:{owner}", epoch.0)
+/// When an owner's active epoch must be replaced before it takes another
+/// entry: new epochs follow the current suite and KSF, and an operator may
+/// set a cutoff (a suspected key compromise) before which every epoch is
+/// replaced. A replaced epoch stays comparable while it retains entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EpochPolicy {
+    pub ksf: HistoryKsf,
+    pub not_before: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl EpochPolicy {
+    /// Whether the write cutoff still permits new entries under `epoch`. A
+    /// replaced epoch that passes may still be written by an operation that
+    /// selected it; one created before the cutoff may not, whatever the
+    /// operation's age.
+    pub fn permits_writes(&self, epoch: &HistoryEpochDescriptor) -> bool {
+        self.not_before
+            .is_none_or(|cutoff| epoch.created_at >= cutoff)
+    }
+
+    /// Whether `epoch` may keep taking new entries.
+    pub fn is_current(&self, epoch: &KeyEpoch) -> bool {
+        epoch.suite == HistorySuite::PallasPoseidonV1
+            && epoch.ksf == self.ksf
+            && self
+                .not_before
+                .is_none_or(|cutoff| epoch.created_at >= cutoff)
+    }
 }
 
 fn point(bytes: &[u8; 32], what: &str) -> SidResult<pallas::Affine> {
@@ -99,7 +118,7 @@ pub struct OperationDomain {
 }
 
 impl OperationDomain {
-    pub fn of(epoch: &HistoryEpoch) -> Self {
+    pub fn of(epoch: &HistoryEpochDescriptor) -> Self {
         Self {
             epoch: epoch.id,
             public_key: epoch.public_key,
@@ -135,9 +154,20 @@ impl HistoryEvaluator {
         Self { keys }
     }
 
-    /// A new active epoch for `owner`: a fresh random key, sealed, and a
-    /// fresh KSF salt. Stored before the key is first used.
-    pub async fn new_epoch(&self, owner: ProfileId, ksf: HistoryKsf) -> SidResult<NewHistoryEpoch> {
+    /// A new active epoch for the owner of `owner_domain`: a fresh random
+    /// key, sealed for that epoch and owner, and a fresh KSF salt. Stored
+    /// before the key is first used.
+    pub async fn new_epoch(
+        &self,
+        owner_domain: [u8; 32],
+        ksf: HistoryKsf,
+    ) -> SidResult<NewKeyEpoch> {
+        // The key's creation instant, fixed before the (asynchronous) seal so
+        // a slow seal cannot move it past a write cutoff. Milliseconds,
+        // truncated: earlier, never later, than the key's creation.
+        let created_at =
+            chrono::DateTime::from_timestamp_millis(chrono::Utc::now().timestamp_millis())
+                .expect("current time in range");
         let mut rng = UnwrapErr(SysRng);
         let k = <pallas::Scalar as ff::Field>::random(&mut rng);
         let public_key = (pallas::Point::generator() * k).to_affine().to_bytes();
@@ -147,38 +177,35 @@ impl HistoryEvaluator {
         let secret = Zeroizing::new(k.to_repr());
         let sealed = self
             .keys
-            .encrypt(secret.as_ref(), &key_context(id, owner))
+            .encrypt(secret.as_ref(), &history_key_context(id, &owner_domain))
             .await
             .map_err(|e| SidError::Internal(format!("seal history key: {e}")))?;
-        Ok(NewHistoryEpoch {
-            epoch: HistoryEpoch {
+        Ok(NewKeyEpoch {
+            epoch: KeyEpoch {
                 id,
-                owner,
+                owner_domain,
                 suite: HistorySuite::PallasPoseidonV1,
                 public_key,
                 ksf,
                 ksf_salt,
                 status: HistoryEpochUse::Active,
-                created_at: chrono::DateTime::from_timestamp_millis(
-                    chrono::Utc::now().timestamp_millis(),
-                )
-                .expect("current time in range"),
+                created_at,
             },
             key: WrappedHistoryKey(sealed.to_bytes()),
         })
     }
 
-    /// Unseal `key` as the key of `epoch` of `owner`. A key sealed for any
-    /// other epoch or owner is refused before use.
+    /// Unseal `key` as the key of `epoch` of the owner of `owner_domain`. A
+    /// key sealed for any other epoch or owner is refused before use.
     async fn unseal(
         &self,
         epoch: HistoryEpochId,
-        owner: ProfileId,
+        owner_domain: &[u8; 32],
         key: &WrappedHistoryKey,
     ) -> SidResult<pallas::Scalar> {
         let field = EncryptedField::from_bytes(&key.0)
             .map_err(|e| SidError::Internal(format!("history key format: {e}")))?;
-        if field.context != key_context(epoch, owner) {
+        if field.context != history_key_context(epoch, owner_domain) {
             return Err(SidError::Internal(
                 "history key sealed for another epoch or owner".into(),
             ));
@@ -196,19 +223,21 @@ impl HistoryEvaluator {
         scalar(&repr, "history key").map_err(|_| SidError::Internal("history key value".into()))
     }
 
-    /// Evaluate `blinded` under each `(epoch, owner, key)`, in order, with
-    /// proofs bound to `context` (the operation). Every key is unsealed and
-    /// checked before any evaluation; one bad key fails the whole request.
+    /// Evaluate `blinded` under each `(epoch, key)` of the owner of
+    /// `owner_domain`, in order, with proofs bound to `context` (the
+    /// operation). Every key is unsealed and checked before any evaluation;
+    /// one bad key fails the whole request.
     pub async fn evaluate(
         &self,
         blinded: &[u8; 32],
-        keys: &[(HistoryEpochId, ProfileId, WrappedHistoryKey)],
+        owner_domain: &[u8; 32],
+        keys: &[(HistoryEpochId, WrappedHistoryKey)],
         context: &[u8],
     ) -> SidResult<OperationEvaluation> {
         let b = point(blinded, "blinded input")?;
         let mut scalars = Vec::with_capacity(keys.len());
-        for (epoch, owner, key) in keys {
-            scalars.push(self.unseal(*epoch, *owner, key).await?);
+        for (epoch, key) in keys {
+            scalars.push(self.unseal(*epoch, owner_domain, key).await?);
         }
         let evaluations = scalars
             .iter()
@@ -230,18 +259,22 @@ impl HistoryEvaluator {
         })
     }
 
-    /// An evaluation under a key that exists nowhere, for a registration
-    /// start that must look like any other while committing nothing.
+    /// An evaluation under the throwaway keys of a decoy's domains (see
+    /// [`decoy_epoch`]), for a registration start that must look like any
+    /// other while committing nothing: each proof verifies under the public
+    /// key the client was given, as a real one does.
     pub fn evaluate_decoy(
         &self,
         blinded: &[u8; 32],
-        domains: usize,
+        keys: &[[u8; 32]],
         context: &[u8],
     ) -> SidResult<OperationEvaluation> {
         let b = point(blinded, "blinded input")?;
-        let evaluations = (0..domains)
-            .map(|_| {
-                let k = <pallas::Scalar as ff::Field>::random(&mut UnwrapErr(SysRng));
+        let evaluations = keys
+            .iter()
+            .map(|key| {
+                let k = scalar(key, "decoy key")
+                    .map_err(|_| SidError::Internal("decoy key value".into()))?;
                 let (z, proof) = relation::evaluate_with_proof(k, b, context, UnwrapErr(SysRng))
                     .ok_or_else(|| SidError::Validation("blinded input is degenerate".into()))?;
                 Ok(DomainEvaluation {
@@ -258,18 +291,25 @@ impl HistoryEvaluator {
     }
 }
 
-/// A public key and domain that look like a real epoch's, for a decoy
-/// operation.
-pub fn decoy_domain() -> OperationDomain {
+/// An epoch description that looks like a real epoch's under `ksf`, for a
+/// decoy operation, with the throwaway key the decoy is evaluated under. The
+/// key belongs to no owner and protects nothing; it lives only as long as
+/// the operation.
+pub fn decoy_epoch(ksf: HistoryKsf) -> (HistoryEpochDescriptor, [u8; 32]) {
     let mut rng = UnwrapErr(SysRng);
     let k = <pallas::Scalar as ff::Field>::random(&mut rng);
-    let mut id = [0u8; 32];
-    rng.fill_bytes(&mut id);
-    OperationDomain {
-        epoch: HistoryEpochId::generate(),
+    let mut ksf_salt = [0u8; 32];
+    rng.fill_bytes(&mut ksf_salt);
+    let epoch = HistoryEpochDescriptor {
+        id: HistoryEpochId::generate(),
+        suite: HistorySuite::PallasPoseidonV1,
         public_key: (pallas::Point::generator() * k).to_affine().to_bytes(),
-        comparison_domain: relation::domain_element(COMPARISON_DOMAIN_PURPOSE, &[&id]).to_repr(),
-    }
+        ksf,
+        ksf_salt,
+        created_at: chrono::DateTime::from_timestamp_millis(chrono::Utc::now().timestamp_millis())
+            .expect("current time in range"),
+    };
+    (epoch, k.to_repr())
 }
 
 /// Why the checker did not accept a proved password.
@@ -314,10 +354,19 @@ impl KsfAdmission {
     }
 
     /// Run the KSF over `t` for every domain in `jobs`, holding their memory.
+    /// The memory of all domains is reserved together, so their KSFs run in
+    /// parallel within it: a check takes one KSF's time, not one per domain.
     async fn run(
         &self,
         jobs: Vec<(Zeroizing<[u8; 32]>, [u8; 32], HistoryKsf)>,
     ) -> Result<Vec<[u8; 32]>, HistoryCheckError> {
+        // The time a KSF holds its worker is bounded before it starts, like
+        // its memory: an epoch's parameters may come from another service.
+        if jobs.iter().any(|(_, _, ksf)| {
+            ksf.passes > sid_core::models::password_history::MAX_HISTORY_KSF_PASSES
+        }) {
+            return Err(HistoryCheckError::Ksf);
+        }
         let mib: u32 = jobs
             .iter()
             .map(|(_, _, ksf)| ksf.memory_kib.div_ceil(1024))
@@ -325,23 +374,29 @@ impl KsfAdmission {
         if mib > self.budget_mib {
             return Err(HistoryCheckError::Ksf);
         }
-        let permit = tokio::time::timeout(
-            self.max_wait,
-            Arc::clone(&self.permits).acquire_many_owned(mib),
-        )
-        .await
-        .map_err(|_| HistoryCheckError::Busy)?
-        .map_err(|_| HistoryCheckError::Busy)?;
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            jobs.iter()
-                .map(|(t, salt, ksf)| {
-                    let t = pallas::Base::from_repr(**t)
+        let permit = Arc::new(
+            tokio::time::timeout(
+                self.max_wait,
+                Arc::clone(&self.permits).acquire_many_owned(mib),
+            )
+            .await
+            .map_err(|_| HistoryCheckError::Busy)?
+            .map_err(|_| HistoryCheckError::Busy)?,
+        );
+        // Each task holds the shared reservation until its own KSF ends, so
+        // cancelling this future cannot release memory a KSF still uses.
+        let tasks: Vec<_> = jobs
+            .into_iter()
+            .map(|(t, salt, ksf)| {
+                let permit = Arc::clone(&permit);
+                tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    let t = pallas::Base::from_repr(*t)
                         .into_option()
                         .ok_or(HistoryCheckError::Mismatch)?;
                     relation::ksf(
                         t,
-                        salt,
+                        &salt,
                         KsfParams {
                             memory_kib: ksf.memory_kib,
                             passes: ksf.passes,
@@ -350,20 +405,36 @@ impl KsfAdmission {
                     )
                     .map_err(|_| HistoryCheckError::Ksf)
                 })
-                .collect()
-        })
-        .await
-        .map_err(|_| HistoryCheckError::Busy)?
+            })
+            .collect();
+        drop(permit);
+        let mut entries = Vec::with_capacity(tasks.len());
+        for task in tasks {
+            entries.push(task.await.map_err(|_| HistoryCheckError::Busy)??);
+        }
+        Ok(entries)
     }
 }
 
+/// One evaluator proof (Chaum-Pedersen DLEQ) as the client relays it with
+/// the finish: the challenge and response scalars, little-endian.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RelayedProof {
+    pub challenge: [u8; 32],
+    pub response: [u8; 32],
+}
+
 /// What the checker compares a proof against: the operation as the server
-/// prepared it, the evaluator's recorded answers, and the history snapshot
-/// the operation was prepared from.
+/// prepared it, the evaluator's proofs the client relayed, and the history
+/// snapshot the operation was prepared from.
 pub struct CheckRequest<'a> {
     pub owner_domain: [u8; 32],
     pub domains: &'a [OperationDomain],
-    pub evaluation: &'a OperationEvaluation,
+    /// The evaluator's descriptor of each domain's epoch, in the same order;
+    /// the first is the epoch the accepted password's entry goes under.
+    pub epochs: &'a [HistoryEpochDescriptor],
+    /// One per domain, in the operation's domain order.
+    pub proofs: &'a [RelayedProof],
     /// The operation id the evaluator's proofs are bound to.
     pub context: &'a [u8],
     pub history: &'a PasswordHistory,
@@ -376,31 +447,46 @@ pub struct CheckedPassword {
     pub new_entries: Vec<(HistoryEpochId, [u8; 32])>,
 }
 
-/// Whether a proof's history inputs are this operation's: its owner domain,
-/// the blinded input the evaluator answered, and each comparison domain with
-/// the evaluator's answer, in order. Compared in constant time. The server
-/// holds all of these before the proof arrives, so it compares the claimed
-/// inputs before the SNARK as well as the verified ones after it.
-pub fn inputs_match(
+/// Verify a proof's history inputs against the operation: its owner domain
+/// and comparison domains (constant time, in the operation's order), and the
+/// evaluator's relayed proof for each domain over the proof's own blinded
+/// input B and evaluated element Z, under the domain key the server prepared
+/// and bound to `context`. The client transport is untrusted: a missing,
+/// extra, reordered or substituted proof, or one made for another operation,
+/// fails. Cheap enough to run on the claimed inputs before the SNARK, and on
+/// the verified ones after it.
+pub fn verify_inputs(
     public: &ZkppPublicInputs,
     owner_domain: &[u8; 32],
     domains: &[OperationDomain],
-    evaluation: &OperationEvaluation,
-) -> bool {
+    proofs: &[RelayedProof],
+    context: &[u8],
+) -> Result<(), HistoryCheckError> {
     let eq = |a: &[u8; 32], b: &[u8; 32]| bool::from(a.ct_eq(b));
-    eq(&public.owner_domain, owner_domain)
-        && eq(&public.blinded, &evaluation.blinded)
-        && public.domains.len() == domains.len()
-        && evaluation.evaluations.len() == domains.len()
-        && public
+    if !eq(&public.owner_domain, owner_domain)
+        || public.domains.len() != domains.len()
+        || proofs.len() != domains.len()
+        || !public
             .domains
             .iter()
             .zip(domains)
-            .zip(&evaluation.evaluations)
-            .all(|((proved, domain), answer)| {
-                eq(&proved.comparison_domain, &domain.comparison_domain)
-                    && eq(&proved.evaluated, &answer.evaluated)
-            })
+            .all(|(proved, domain)| eq(&proved.comparison_domain, &domain.comparison_domain))
+    {
+        return Err(HistoryCheckError::Mismatch);
+    }
+    let b = point(&public.blinded, "blinded").map_err(|_| HistoryCheckError::Mismatch)?;
+    for ((proved, domain), relayed) in public.domains.iter().zip(domains).zip(proofs) {
+        let pk = point(&domain.public_key, "key").map_err(|_| HistoryCheckError::Mismatch)?;
+        let z = point(&proved.evaluated, "evaluation").map_err(|_| HistoryCheckError::Mismatch)?;
+        let proof = EvaluationProof {
+            c: scalar(&relayed.challenge, "c").map_err(|_| HistoryCheckError::EvaluationProof)?,
+            s: scalar(&relayed.response, "s").map_err(|_| HistoryCheckError::EvaluationProof)?,
+        };
+        if !relation::verify_evaluation(pk, b, z, context, &proof) {
+            return Err(HistoryCheckError::EvaluationProof);
+        }
+    }
+    Ok(())
 }
 
 /// The history authority that sees tags and entries but no key.
@@ -424,45 +510,45 @@ impl HistoryChecker {
         let CheckRequest {
             owner_domain,
             domains,
-            evaluation,
+            epochs,
+            proofs,
             context,
             history,
         } = request;
-        if !inputs_match(public, &owner_domain, domains, evaluation) {
+        verify_inputs(public, &owner_domain, domains, proofs, context)?;
+        // The descriptors are the operation's own: each must be the epoch of
+        // its domain, so a mismatched set is refused, not compared.
+        if epochs.len() != domains.len()
+            || epochs
+                .iter()
+                .zip(domains)
+                .any(|(epoch, domain)| OperationDomain::of(epoch) != *domain)
+        {
             return Err(HistoryCheckError::Mismatch);
         }
-        let b = point(&evaluation.blinded, "blinded").map_err(|_| HistoryCheckError::Mismatch)?;
         let mut jobs = Vec::with_capacity(domains.len());
-        for ((proved, domain), answer) in public
-            .domains
-            .iter()
-            .zip(domains)
-            .zip(&evaluation.evaluations)
-        {
-            let pk = point(&domain.public_key, "key").map_err(|_| HistoryCheckError::Mismatch)?;
-            let z =
-                point(&answer.evaluated, "evaluation").map_err(|_| HistoryCheckError::Mismatch)?;
-            let proof = EvaluationProof {
-                c: scalar(&answer.challenge, "c")
-                    .map_err(|_| HistoryCheckError::EvaluationProof)?,
-                s: scalar(&answer.response, "s").map_err(|_| HistoryCheckError::EvaluationProof)?,
-            };
-            if !relation::verify_evaluation(pk, b, z, context, &proof) {
-                return Err(HistoryCheckError::EvaluationProof);
+        // The KSF job of each domain: the first (where the accepted entry
+        // goes), and each other one that retains an entry. A domain whose
+        // epoch holds nothing (retired after it was selected) has nothing to
+        // compare and takes no entry, so it costs no KSF.
+        let mut job_of = Vec::with_capacity(domains.len());
+        for (i, (proved, epoch)) in public.domains.iter().zip(epochs).enumerate() {
+            if i == 0 || history.entries_of(epoch.id).next().is_some() {
+                job_of.push(Some(jobs.len()));
+                jobs.push((
+                    Zeroizing::new(*proved.tag.expose()),
+                    epoch.ksf_salt,
+                    epoch.ksf,
+                ));
+            } else {
+                job_of.push(None);
             }
-            let epoch = history.epochs.iter().find(|e| e.id == domain.epoch);
-            // A new owner's first epoch is not stored yet: its KSF comes from
-            // the operation's own epoch, which the caller passes as history.
-            let epoch = epoch.ok_or(HistoryCheckError::Mismatch)?;
-            jobs.push((
-                Zeroizing::new(*proved.tag.expose()),
-                epoch.ksf_salt,
-                epoch.ksf,
-            ));
         }
         let candidates = Zeroizing::new(self.admission.run(jobs).await?);
+        let candidate = |i: usize| job_of[i].map(|j| &candidates[j]);
         let mut reused = subtle::Choice::from(0u8);
-        for (domain, s) in domains.iter().zip(candidates.iter()) {
+        for (i, domain) in domains.iter().enumerate() {
+            let Some(s) = candidate(i) else { continue };
             for entry in history.entries_of(domain.epoch) {
                 reused |= entry.entry.ct_eq(s);
             }
@@ -470,13 +556,12 @@ impl HistoryChecker {
         if bool::from(reused) {
             return Err(HistoryCheckError::Reused);
         }
-        let active = history.active_epoch().map(|e| e.id);
+        // The operation's first domain is its active epoch: the accepted
+        // password's one entry goes there.
         Ok(CheckedPassword {
-            new_entries: domains
-                .iter()
-                .zip(candidates.iter())
-                .filter(|(d, _)| Some(d.epoch) == active)
-                .map(|(d, s)| (d.epoch, *s))
+            new_entries: candidate(0)
+                .map(|s| (domains[0].epoch, *s))
+                .into_iter()
                 .collect(),
         })
     }

@@ -118,7 +118,7 @@ pub use consent::{
 };
 pub use credential::{
     ActiveCredential, Credential, CredentialData, CredentialId, CredentialRevocation,
-    CredentialType, WebAuthnUserHandle,
+    CredentialType, PolicyEvidence, WebAuthnUserHandle,
 };
 pub use device::{Device, DeviceAssurance, DeviceId, DeviceTrustChange, DeviceType};
 pub use device_attestation::{
@@ -174,8 +174,10 @@ pub use oidc_issuer::{IssuerAuthority, IssuerHandle, IssuerId, IssuerSigningKey,
 pub use operation::{OperationCompletion, OperationKey, OperationRecord};
 pub use organization::{OrgId, OrgStatus, OrgType, Organization};
 pub use password_history::{
-    HistoryCommit, HistoryEntry, HistoryEpoch, HistoryEpochId, HistoryEpochUse, HistoryEvidence,
-    HistoryKsf, HistorySuite, NewHistoryEpoch, PasswordHistory, WrappedHistoryKey,
+    HistoryArchive, HistoryCommit, HistoryEntry, HistoryEpoch, HistoryEpochDescriptor,
+    HistoryEpochId, HistoryEpochUse, HistoryEvidence, HistoryKsf, HistoryLiveSet,
+    HistoryPreparation, HistorySuite, KeyArchive, KeyEpoch, KeyEpochs, NewKeyEpoch,
+    PasswordHistory, WrappedHistoryKey, history_key_context,
 };
 pub use password_reset::{
     PasswordResetSession, RESET_SESSION_TTL_SECS, ResetSessionId, ResetSessionStatus,
@@ -217,10 +219,10 @@ pub use scim_outbound::{
     ScimOutboundRecord, ScimOutboundTarget, ScimOutboundTargetId,
 };
 pub use security_policy::{
-    AuthPolicy, CountryMode, DevicePolicy, EnforcementConfig, EnforcementMode, EnrollmentMode,
-    EnrollmentPolicy, GraceExpiryAction, InviteConfig, MfaEnforcement, NetworkPolicy,
-    NetworkViolationReaction, PasswordPolicy, PrincipalPolicy, SecurityPolicy, SecurityPolicyId,
-    SessionDecayConfig, SessionPolicy,
+    AuthPolicy, CountryMode, CurrentPasswordRule, DevicePolicy, EnforcementConfig, EnforcementMode,
+    EnrollmentMode, EnrollmentPolicy, GraceExpiryAction, InviteConfig, MfaEnforcement,
+    NetworkPolicy, NetworkViolationReaction, PasswordPolicy, PrincipalPolicy, SecurityPolicy,
+    SecurityPolicyId, SessionDecayConfig, SessionPolicy,
 };
 pub use service_binding::{BindingId, BindingScope, EmptyBindingScope, ServiceBinding};
 pub use session::{

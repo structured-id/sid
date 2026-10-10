@@ -141,6 +141,11 @@ impl SqliteBackend {
                 "the new password belongs to another profile than the reset".into(),
             ));
         }
+        if let Some(history) = history
+            && !super::password_history::apply_in_tx(&mut tx, history).await?
+        {
+            return Ok(None);
+        }
         sqlx::query("DELETE FROM credentials WHERE profile_id = ? AND credential_type IN (?, ?)")
             .bind(profile_id)
             .bind(CredentialType::Opaque.as_str())
@@ -149,11 +154,6 @@ impl SqliteBackend {
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
         insert_credential(&mut *tx, credential).await?;
-        if let Some(history) = history
-            && !super::password_history::apply_in_tx(&mut tx, history).await?
-        {
-            return Ok(None);
-        }
         let sessions = sqlx::query("DELETE FROM sessions WHERE profile_id = ? RETURNING *")
             .bind(profile_id)
             .fetch_all(&mut *tx)

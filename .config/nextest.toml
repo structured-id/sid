@@ -26,6 +26,13 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 filter = "test(test_full_registration_login_flow)"
 slow-timeout = { period = "60s", terminate-after = 5 }
 
+# The installed single-thread TS prover generates four genuine proofs, plus
+# production client Argon2 registrations/logins. Bound the whole lifecycle;
+# do not replace the prover or lower its KSF to fit a unit-test timeout.
+[[profile.default.overrides]]
+filter = "test(published_client_completes_password_lifecycle) | test(published_browser_completes_password_lifecycle)"
+slow-timeout = { period = "60s", terminate-after = 5 }
+
 # ── CI profile ──
 [profile.ci]
 test-threads = 8

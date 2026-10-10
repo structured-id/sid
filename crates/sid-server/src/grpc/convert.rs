@@ -218,18 +218,58 @@ pub(crate) fn extract_webauthn_info(
     ))
 }
 
+/// The curve recorded with an OPAQUE credential, which sign-in and the
+/// reported configuration both use. Never the deployment's current primary
+/// for new passwords: a record without its configuration, or with one this
+/// server does not know, is an error, so a setting change cannot alter how
+/// an existing password signs in.
+#[allow(clippy::result_large_err)]
+pub(crate) fn opaque_curve(
+    c: &sid_core::models::Credential,
+) -> Result<sid_plugin::crypto::CurveId, tonic::Status> {
+    let Some(raw) = c.opaque_curve else {
+        return Err(sid_core::grpc_error::refuse::internal(
+            "read OPAQUE curve",
+            format!("credential {} has no recorded configuration", c.id.0),
+        ));
+    };
+    sid_plugin::crypto::CurveId::try_from(raw).map_err(|_| {
+        sid_core::grpc_error::refuse::internal(
+            "read OPAQUE curve",
+            format!("credential {} has curve {raw}", c.id.0),
+        )
+    })
+}
+
 /// The `info` of a credential's proto: its passkey facts for a WebAuthn
-/// credential, nothing for another type.
+/// credential, its OPAQUE configuration for a password, nothing for another
+/// type. The suite is the one this server's implementation for the recorded
+/// curve runs (its OPRF, hash and KSF).
 #[allow(clippy::result_large_err)]
 pub(crate) fn credential_info(
     c: &sid_core::models::Credential,
 ) -> Result<Option<sid_proto::sid::v1::credential::Info>, tonic::Status> {
-    if c.credential_type != sid_core::models::CredentialType::WebAuthn {
-        return Ok(None);
+    use sid_core::models::CredentialType;
+    use sid_plugin::crypto::CurveId;
+    use sid_proto::sid::v1::{OpaqueCredentialInfo, OpaqueSuite, credential::Info};
+    match c.credential_type {
+        CredentialType::WebAuthn => extract_webauthn_info(c.data.expose())
+            .map(Some)
+            .map_err(|e| sid_core::grpc_error::refuse::internal("read stored passkey", e)),
+        CredentialType::Opaque => {
+            let suite = match opaque_curve(c)? {
+                CurveId::Pallas => OpaqueSuite::PallasV1,
+                CurveId::Ristretto255 => OpaqueSuite::Ristretto255V1,
+                CurveId::P256 => OpaqueSuite::P256V1,
+                CurveId::P384 => OpaqueSuite::P384V1,
+                CurveId::P521 => OpaqueSuite::P521V1,
+            };
+            Ok(Some(Info::OpaqueInfo(OpaqueCredentialInfo {
+                suite: suite as i32,
+            })))
+        }
+        _ => Ok(None),
     }
-    extract_webauthn_info(c.data.expose())
-        .map(Some)
-        .map_err(|e| sid_core::grpc_error::refuse::internal("read stored passkey", e))
 }
 
 /// Convert core `Device` to proto `Device`.

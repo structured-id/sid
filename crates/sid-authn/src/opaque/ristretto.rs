@@ -117,6 +117,7 @@ impl OpaqueOperations for RistrettoOpaque {
         credential: &StoredCredential,
         request_bytes: &[u8],
         credential_id: &[u8],
+        context: &[u8],
     ) -> Result<(Vec<u8>, LoginState), OpaqueError> {
         if credential.curve != CurveId::Ristretto255 {
             return Err(OpaqueError::CurveMismatch {
@@ -140,7 +141,10 @@ impl OpaqueOperations for RistrettoOpaque {
             Some(password_file),
             request,
             credential_id,
-            ServerLoginParameters::default(),
+            ServerLoginParameters {
+                context: Some(context),
+                ..ServerLoginParameters::default()
+            },
         )
         .map_err(|e| OpaqueError::Protocol(e.to_string()))?;
 
@@ -179,6 +183,7 @@ impl OpaqueOperations for RistrettoOpaque {
         &self,
         state: &LoginState,
         finalization_bytes: &[u8],
+        context: &[u8],
     ) -> Result<SessionKey, OpaqueError> {
         if state.0.is_empty() {
             return Err(OpaqueError::Deserialization(
@@ -197,7 +202,13 @@ impl OpaqueOperations for RistrettoOpaque {
                 .map_err(|e| OpaqueError::Deserialization(e.to_string()))?;
 
         let result = server_login
-            .finish(finalization, ServerLoginParameters::default())
+            .finish(
+                finalization,
+                ServerLoginParameters {
+                    context: Some(context),
+                    ..ServerLoginParameters::default()
+                },
+            )
             .map_err(|e| OpaqueError::Protocol(e.to_string()))?;
 
         Ok(SessionKey::new(result.session_key.to_vec()))

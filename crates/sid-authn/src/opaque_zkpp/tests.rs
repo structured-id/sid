@@ -64,6 +64,79 @@ fn a_non_pallas_primary_curve_is_refused() {
     assert!(ZkppOpaqueServer::new(&router, vec![], unproven()).is_err());
 }
 
+fn verifier_for(policy: sid_pake_core::types::PolicyParams) -> ZkppVerifier {
+    use sid_pake_core::{circuit::CircuitShape, keygen};
+    let params = keygen::generate_params(sid_pake_core::circuit::ZKPP_K);
+    let shape = CircuitShape::single_domain(policy);
+    let vk = keygen::generate_vk(&params, shape).unwrap();
+    ZkppVerifier::new(params, vk, shape)
+}
+
+/// A verifier compiled without the selected policy's minimums must not be
+/// labelled as satisfying that policy, even when no-proof setup is allowed.
+#[test]
+fn a_weaker_compiled_policy_is_refused() {
+    let weak = sid_pake_core::types::PolicyParams {
+        min_length: 0,
+        min_upper: 0,
+        min_lower: 0,
+        min_digit: 0,
+        min_symbol: 0,
+    };
+    assert!(ZkppOpaqueServer::new(&router(), vec![verifier_for(weak)], unproven()).is_err());
+}
+
+/// A version unknown to the selected policy authority cannot turn a known
+/// key into evidence for that version merely by relabelling it.
+#[test]
+fn an_unknown_compiled_policy_version_is_refused() {
+    let config = ZkppConfig {
+        require_proof: true,
+        policy_version: u32::MAX,
+    };
+    assert!(
+        ZkppOpaqueServer::new(
+            &router(),
+            vec![verifier_for(sid_pake_core::types::CE_DEFAULT_POLICY)],
+            config,
+        )
+        .is_err()
+    );
+}
+
+/// Domain-count selection must have exactly one accepted verifier, rather
+/// than silently choosing whichever duplicate appears first in the list.
+#[test]
+fn duplicate_domain_verifiers_are_refused() {
+    let policy = sid_pake_core::types::CE_DEFAULT_POLICY;
+    assert!(
+        ZkppOpaqueServer::new(
+            &router(),
+            vec![verifier_for(policy), verifier_for(policy)],
+            ZkppConfig::default()
+        )
+        .is_err()
+    );
+}
+
+/// A key with the exact configured minimums remains usable in both strict
+/// and policy-unverified setup modes; absence of a proof is a separate choice.
+#[test]
+fn matching_compiled_policy_is_accepted() {
+    for require_proof in [false, true] {
+        let server = ZkppOpaqueServer::new(
+            &router(),
+            vec![verifier_for(sid_pake_core::types::CE_DEFAULT_POLICY)],
+            ZkppConfig {
+                require_proof,
+                policy_version: 1,
+            },
+        )
+        .unwrap();
+        assert!(server.supports_domains(1));
+    }
+}
+
 /// A password installed through the ZKPP server signs in through the
 /// router: both run on the installation's one server setup.
 #[test]
@@ -94,7 +167,7 @@ fn an_installed_password_signs_in_through_the_router() {
 
     let login = ClientLogin::<PallasCipherSuite>::start(&mut rng, password).unwrap();
     let (response, state) = router
-        .login_start(&stored, &login.message.serialize(), id)
+        .login_start(&stored, &login.message.serialize(), id, &[])
         .unwrap();
     let finished = login
         .state
@@ -106,7 +179,7 @@ fn an_installed_password_signs_in_through_the_router() {
         )
         .expect("the client recovers its envelope");
     let session = router
-        .login_finish(&state, &finished.message.serialize())
+        .login_finish(&state, &finished.message.serialize(), &[])
         .unwrap();
     assert_eq!(session.expose_secret(), finished.session_key.as_slice());
 }

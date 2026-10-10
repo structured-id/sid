@@ -834,6 +834,8 @@ async fn test_password_change_challenge_no_bearer() {
     let svc = TestServices::new(MockStorage::new());
     let req = Request::new(PasswordChangeChallengeRequest {
         credential_id: Uuid::now_v7().to_string(),
+        credential_request: vec![],
+        registration_request: vec![],
     });
 
     let err = svc.auth.password_change_challenge(req).await.unwrap_err();
@@ -847,7 +849,7 @@ async fn test_password_change_execute_no_bearer() {
     let req = Request::new(PasswordChangeExecuteRequest {
         operation_id: None,
         credential_id: Uuid::now_v7().to_string(),
-        registration_request: vec![],
+        credential_finalization: vec![],
     });
 
     let err = svc.auth.password_change_execute(req).await.unwrap_err();
@@ -1176,6 +1178,8 @@ async fn test_password_change_rejects_foreign_credential() {
         .password_change_challenge(authed_request(
             PasswordChangeChallengeRequest {
                 credential_id: victim_cred.id.0.to_string(),
+                credential_request: vec![],
+                registration_request: vec![],
             },
             &token,
         ))
@@ -2342,8 +2346,10 @@ async fn test_late_policy_proof_never_verifies_a_stored_credential() {
     assert_eq!(err.code(), tonic::Code::FailedPrecondition);
     assert_eq!(common::error_reason(&err).as_deref(), Some("INVALID_STATE"));
     let stored = svc.storage.get_credential(cred.id).await.unwrap().unwrap();
-    assert!(!stored.zkpp_verified);
-    assert_eq!(stored.policy_version, None);
+    assert_eq!(
+        stored.policy_evidence,
+        sid_core::models::PolicyEvidence::Unverified
+    );
 }
 
 /// Register `principal` through the ZKPP path without a proof; returns the
@@ -2406,11 +2412,11 @@ async fn zkpp_register_without_proof(
 async fn test_zkpp_registration_without_proof_is_unverified() {
     let svc = TestServices::with_zkpp_degraded(MockStorage::new().with_system_project());
     let credential = zkpp_register_without_proof(&svc, "unproven@sid.example.com").await;
-    assert!(
-        !credential.zkpp_verified,
+    assert_eq!(
+        credential.policy_evidence,
+        sid_core::models::PolicyEvidence::Unverified,
         "an unproven registration was stored as verified"
     );
-    assert_eq!(credential.policy_version, None);
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -4356,13 +4362,14 @@ async fn test_admin_list_credentials() {
     let storage = MockStorage::new().with_profile(profile.clone());
     let svc = TestServices::new(storage);
 
-    // Create a credential
-    let cred = Credential::new(
+    // A password stored with its configuration, as every producer stores it.
+    let mut cred = Credential::new(
         profile.id,
         CredentialType::Opaque,
         vec![1, 2, 3],
         Some("Password".to_string()),
     );
+    cred.opaque_curve = Some(sid_plugin::crypto::CurveId::P256 as u8);
     svc.storage
         .create_credential(&cred, AuditEntry::system("test", "test").into())
         .await
@@ -4380,6 +4387,13 @@ async fn test_admin_list_credentials() {
     assert_eq!(body.credentials.len(), 1);
     // Credential data should be cleared (not exposed)
     assert!(body.credentials[0].data.is_empty());
+    // The recorded configuration, not the deployment's primary.
+    match &body.credentials[0].info {
+        Some(sid_proto::sid::v1::credential::Info::OpaqueInfo(info)) => {
+            assert_eq!(info.suite(), sid_proto::sid::v1::OpaqueSuite::P256V1)
+        }
+        other => panic!("no OPAQUE configuration: {other:?}"),
+    }
 }
 
 #[tokio::test]

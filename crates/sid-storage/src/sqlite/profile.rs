@@ -24,9 +24,11 @@ pub(super) async fn insert_credential<'e, E>(exec: E, credential: &Credential) -
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
+    let (verified, policy_version, artifact) =
+        crate::policy_evidence::columns(&credential.policy_evidence)?;
     sqlx::query(
-        "INSERT INTO credentials (id, profile_id, credential_type, status, data, label, policy_version, zkpp_verified, opaque_curve, legacy_algorithm, opaque_credential_identifier, created_at, last_used_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO credentials (id, profile_id, credential_type, status, data, label, policy_version, zkpp_verified, opaque_curve, legacy_algorithm, opaque_credential_identifier, zkpp_artifact, created_at, last_used_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(credential.id.0.to_string())
     .bind(credential.profile_id)
@@ -34,11 +36,12 @@ where
     .bind(credential.status.as_str())
     .bind(credential.data.expose())
     .bind(&credential.label)
-    .bind(credential.policy_version.map(|v| v as i32))
-    .bind(credential.zkpp_verified)
+    .bind(policy_version)
+    .bind(verified)
     .bind(credential.opaque_curve.map(|c| c as i32))
     .bind(&credential.legacy_algorithm)
     .bind(credential.opaque_credential_identifier.map(|id| id.to_vec()))
+    .bind(artifact)
     .bind(fmt_dt(&credential.created_at))
     .bind(fmt_dt_opt(credential.last_used_at))
     .execute(exec)
@@ -191,10 +194,11 @@ fn row_to_credential(row: &sqlx::sqlite::SqliteRow) -> SidResult<Credential> {
         label: row.get("label"),
         created_at: parse_dt(&row.get::<String, _>("created_at")),
         last_used_at: parse_dt_opt(row.get("last_used_at")),
-        policy_version: row
-            .get::<Option<i32>, _>("policy_version")
-            .map(|v| v as u32),
-        zkpp_verified: row.get::<bool, _>("zkpp_verified"),
+        policy_evidence: crate::policy_evidence::from_columns(
+            row.get::<bool, _>("zkpp_verified"),
+            row.get::<Option<i32>, _>("policy_version"),
+            row.get::<Option<Vec<u8>>, _>("zkpp_artifact"),
+        )?,
         opaque_curve: row.get::<Option<i32>, _>("opaque_curve").map(|v| v as u8),
         opaque_credential_identifier: row
             .get::<Option<Vec<u8>>, _>("opaque_credential_identifier")
@@ -1129,17 +1133,20 @@ impl SqliteBackend {
         history: Option<&HistoryCommit>,
         audit: MutationContext,
     ) -> SidResult<bool> {
+        let (verified, policy_version, artifact) =
+            crate::policy_evidence::columns(&new.policy_evidence)?;
         let mut tx = self.begin_write().await?;
         let profile_id: Option<String> = sqlx::query_scalar(
             "UPDATE credentials SET data = ?,
                 policy_version = ?, zkpp_verified = ?,
-                opaque_credential_identifier = ?, last_used_at = ?
+                opaque_credential_identifier = ?, zkpp_artifact = ?, last_used_at = ?
              WHERE id = ? AND status = 'active' AND data = ? RETURNING profile_id",
         )
         .bind(new.data.expose())
-        .bind(new.policy_version.map(|v| v as i32))
-        .bind(new.zkpp_verified)
+        .bind(policy_version)
+        .bind(verified)
         .bind(new.opaque_credential_identifier.map(|id| id.to_vec()))
+        .bind(artifact)
         .bind(fmt_dt(&chrono::Utc::now()))
         .bind(id.0.to_string())
         .bind(expected)

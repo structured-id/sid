@@ -1944,10 +1944,10 @@ async fn protected_at(a: &Asking, issuer: Issuer, cache_url: Option<String>) -> 
         resource: a.orders.indicator.as_str().to_owned(),
         origin: SERVICE_ORIGIN.into(),
         cache_url,
-        checker: sid_auth::config::ClientCredentialConfig {
+        checker: sid_authn::client_credential::ClientCredentialConfig {
             issuer: canonical,
             client_id: CHECKER.into(),
-            authentication: sid_auth::config::ClientAuthentication::ClientSecretBasic {
+            authentication: sid_authn::client_credential::ClientAuthentication::ClientSecretBasic {
                 secret_file: secret.path().display().to_string(),
             },
         },

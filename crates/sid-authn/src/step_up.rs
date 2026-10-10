@@ -29,6 +29,14 @@ pub enum StepUpDecision {
     },
     /// Full re-authentication required (session too decayed).
     ReauthRequired,
+    /// No enrolled method reaches the required strength. The operation needs
+    /// enrollment of a sufficient factor or recovery, never a weaker proof.
+    NoSufficientMethod {
+        /// Current session assurance level.
+        current_acr: AuthLevel,
+        /// Required assurance level.
+        target_acr: AuthLevel,
+    },
 }
 
 /// Configuration for step-up evaluation.
@@ -78,16 +86,14 @@ pub fn evaluate_step_up(
     let require_phishing_resistant =
         config.require_phishing_resistant_for_elevated && target_acr >= AuthLevel::Elevated;
 
-    // Filter and sort available methods.
     let available_methods = select_methods(enrolled_methods, require_phishing_resistant);
-
-    // If no methods available and phishing-resistant was required,
-    // fall back to any enrolled methods.
-    let available_methods = if available_methods.is_empty() && require_phishing_resistant {
-        select_methods(enrolled_methods, false)
-    } else {
-        available_methods
-    };
+    // A required strength is never lowered to what happens to be enrolled.
+    if available_methods.is_empty() && require_phishing_resistant {
+        return StepUpDecision::NoSufficientMethod {
+            current_acr,
+            target_acr,
+        };
+    }
 
     StepUpDecision::StepUpRequired {
         current_acr,
@@ -290,10 +296,11 @@ mod tests {
         }
     }
 
+    // A required phishing-resistant step-up is never satisfied by TOTP just
+    // because no stronger method is enrolled: the operation needs enrollment
+    // or recovery instead of a silently weaker proof.
     #[test]
-    fn test_fallback_to_any_when_no_phishing_resistant() {
-        // User only has TOTP, target requires elevated (phishing-resistant).
-        // Should fall back to TOTP since no phishing-resistant available.
+    fn test_no_weaker_fallback_when_phishing_resistant_required() {
         let result = evaluate_step_up(
             AuthLevel::Basic,
             AuthLevel::Elevated,
@@ -301,14 +308,13 @@ mod tests {
             &[MfaMethod::Totp],
             &default_config(),
         );
-        match result {
-            StepUpDecision::StepUpRequired {
-                available_methods, ..
-            } => {
-                assert!(available_methods.contains(&MfaMethod::Totp));
+        assert_eq!(
+            result,
+            StepUpDecision::NoSufficientMethod {
+                current_acr: AuthLevel::Basic,
+                target_acr: AuthLevel::Elevated,
             }
-            other => panic!("expected StepUpRequired, got {:?}", other),
-        }
+        );
     }
 
     #[test]

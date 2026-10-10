@@ -22,6 +22,27 @@ fn pid() -> ProfileId {
     ProfileId::parse("0192b1e0-7c3a-7f4e-8a5d-3c2b1a0f9e8d").unwrap()
 }
 
+/// Inspection is metadata-only: it exposes ciphertext and its key reference,
+/// refuses another record and plaintext, and does not pretend to authenticate
+/// corrupted ciphertext without the independent key manager.
+#[tokio::test]
+async fn inspection_preserves_the_sealed_context_boundary() {
+    let context = totp_context(pid());
+    let stored = seal(&manager(7, &[1]), &context, b"seed").await.unwrap();
+    let field = inspect(&context, &stored).unwrap();
+    assert_eq!(field.key_version, 1);
+    assert_eq!(field.context, context);
+    assert_eq!(field.ciphertext.len(), 4 + 16);
+    assert!(matches!(
+        inspect("another-record", &stored),
+        Err(SealedSecretError::ContextMismatch)
+    ));
+    assert!(matches!(
+        inspect(&context, b"plaintext"),
+        Err(SealedSecretError::NotSealed)
+    ));
+}
+
 /// A sealed secret reads back only for its own record.
 #[tokio::test]
 async fn sealed_secret_opens_for_its_own_context() {

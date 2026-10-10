@@ -244,10 +244,14 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
 
     // ── Storage backend ──
 
+    // The history evaluator's own store over the same database, for a
+    // standalone installation that runs the evaluator in process; its tables
+    // are created only when it does (`local_history_keys`).
     #[cfg(feature = "storage-pg")]
-    let (storage, audit_log): (
+    let (storage, audit_log, local_history_keys): (
         Arc<dyn StorageBackend>,
         Arc<dyn sid_plugin::audit::AuditLog>,
+        LocalHistoryKeys,
     ) = {
         let database_url = std::env::var("SID_DATABASE_URL").expect("SID_DATABASE_URL must be set");
         let schema = std::env::var("SID_STORAGE_POSTGRESQL_SCHEMA").ok();
@@ -271,13 +275,16 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
             .await
             .expect("Migration failed");
 
-        (Arc::new(backend), audit_log)
+        let local_history_keys =
+            LocalHistoryKeys::Postgres(sid_storage::PgHistoryKeyStore::new(backend.pool().clone()));
+        (Arc::new(backend), audit_log, local_history_keys)
     };
 
     #[cfg(all(feature = "embedded-dev", not(feature = "storage-pg")))]
-    let (storage, audit_log): (
+    let (storage, audit_log, local_history_keys): (
         Arc<dyn StorageBackend>,
         Arc<dyn sid_plugin::audit::AuditLog>,
+        LocalHistoryKeys,
     ) = {
         let db_path =
             std::env::var("SID_SQLITE_PATH").unwrap_or_else(|_| "/var/lib/sid/auth.db".to_string());
@@ -287,7 +294,8 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         let audit_log: Arc<dyn sid_plugin::audit::AuditLog> = Arc::new(
             sid_storage::sqlite::SqliteAuditLog::new(backend.pool().clone()),
         );
-        (Arc::new(backend), audit_log)
+        let local_history_keys = LocalHistoryKeys::Sqlite(backend.history_keys());
+        (Arc::new(backend), audit_log, local_history_keys)
     };
 
     // Ensure system project exists
@@ -800,6 +808,15 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
 
     let login_url = login_url(std::env::var("SID_LOGIN_URL").ok().as_deref(), &issuer)?;
 
+    let history_authority = password_history_authority(
+        |name| std::env::var(name),
+        storage.as_ref(),
+        || local_history_keys.open(),
+        key_manager.clone(),
+        &issuer,
+    )
+    .await
+    .context("password history configuration")?;
     let auth_svc = AuthServiceImpl::new(
         storage.clone(),
         oauth2.clone(),
@@ -821,6 +838,7 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         key_manager.clone(),
         cascade_service.clone(),
         authz_engine.clone(),
+        history_authority,
     )
     .with_trusted_proxies(trusted_proxies);
     let auth_svc = Arc::new(match &login_url {
@@ -1327,23 +1345,207 @@ pub fn spawn_work_runner(
     Ok(tokio::spawn(runner.run(shutdown)))
 }
 
-/// Initialize ZKPP with async keygen, on `router`'s server setup so a ZKPP
-/// registration signs in through `router`.
+/// The history evaluator's store in this installation's own database, used
+/// only when the evaluator runs in this process: its tables are created then.
+pub(crate) enum LocalHistoryKeys {
+    #[cfg(feature = "storage-pg")]
+    Postgres(sid_storage::PgHistoryKeyStore),
+    #[cfg(all(feature = "embedded-dev", not(feature = "storage-pg")))]
+    Sqlite(sid_storage::sqlite::SqliteHistoryKeyStore),
+}
+
+impl LocalHistoryKeys {
+    /// The store, its tables created first.
+    async fn open(self) -> anyhow::Result<Arc<dyn sid_plugin::history_keys::HistoryKeyStore>> {
+        Ok(match self {
+            #[cfg(feature = "storage-pg")]
+            Self::Postgres(store) => {
+                store
+                    .migrate()
+                    .await
+                    .context("history evaluator migrations")?;
+                Arc::new(store)
+            }
+            #[cfg(all(feature = "embedded-dev", not(feature = "storage-pg")))]
+            Self::Sqlite(store) => Arc::new(store),
+        })
+    }
+}
+
+/// Where this server's password history evaluator runs. Without
+/// `SID_PASSWORD_HISTORY_EVALUATOR` it runs here, over the store `local`
+/// opens and sealing history keys with the field keys. With it, this server
+/// calls that gRPC address with its own client credential
+/// (`SID_PASSWORD_HISTORY_CALLER_*`) for the evaluator's resource
+/// (`SID_PASSWORD_HISTORY_EVALUATOR_RESOURCE`), requested from the issuer at
+/// `SID_PASSWORD_HISTORY_TOKEN_UPSTREAM`; it then opens no evaluator store
+/// and holds no history key.
 ///
-/// Returns an `ArcSwap` that starts as `None` (ZKPP not ready) and is
-/// hot-swapped to `Some(server)` when keygen completes. Non-ZKPP traffic
-/// is unaffected. ZKPP-dependent RPCs return UNAVAILABLE during keygen.
-/// The verifier is always built: `SID_ZKPP_REQUIRE_PROOF=false` only lets a
-/// client that cannot prove register policy-unverified, a proof it does send
-/// is still verified.
+/// The history write cutoff `SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE` is an
+/// input to the durable cutoff of each store, raised before anything is
+/// served: first this server's own (`storage`), which fences its history
+/// commits whether or not the evaluator is reachable, then the in-process
+/// evaluator's. An older or unset setting lowers neither; a raise that
+/// cannot be committed stops the start. A remote evaluator applies the
+/// setting from its own deployment.
+async fn password_history_authority<Local>(
+    var: impl Fn(&str) -> Result<String, std::env::VarError>,
+    storage: &dyn sid_plugin::StorageBackend,
+    local: impl FnOnce() -> Local,
+    field_keys: Arc<dyn sid_keys::KeyManager>,
+    base: &str,
+) -> anyhow::Result<crate::grpc::password_operation::PasswordHistoryAuthority>
+where
+    Local: std::future::Future<
+            Output = anyhow::Result<Arc<dyn sid_plugin::history_keys::HistoryKeyStore>>,
+        >,
+{
+    use crate::grpc::password_operation::{PasswordHistoryAuthority, RemoteHistoryEvaluator};
+    // A setting that is present but unreadable is refused, never read as
+    // unset: that would quietly give this server the history keys.
+    let optional = |name: &str| match var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(anyhow::anyhow!("{name} must be Unicode")),
+    };
+    let required = |name: &str| var(name).map_err(|_| anyhow::anyhow!("{name} is required"));
+    let cutoff = history_epoch_cutoff(var("SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE"))?;
+    let audit = || AuditEntry::system("password_history.write_cutoff", "password_history");
+    if let Some(cutoff) = cutoff {
+        let in_force = storage
+            .raise_history_write_cutoff(cutoff, audit().into())
+            .await
+            .context("SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE: credential history cutoff")?;
+        info!(%in_force, "password history write cutoff in force for history commits");
+    }
+    let Some(evaluator) = optional("SID_PASSWORD_HISTORY_EVALUATOR")? else {
+        let store = local().await?;
+        if let Some(cutoff) = cutoff {
+            store
+                .raise_write_cutoff(cutoff, audit())
+                .await
+                .context("SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE: evaluator cutoff")?;
+        }
+        return Ok(PasswordHistoryAuthority::InProcess {
+            store,
+            history_keys: field_keys,
+        });
+    };
+    // An invalid RFC 8707 indicator of the evaluator stops the start.
+    let resource = sid_core::models::ResourceIndicator::parse(&required(
+        "SID_PASSWORD_HISTORY_EVALUATOR_RESOURCE",
+    )?)
+    .map_err(|e| anyhow::anyhow!("SID_PASSWORD_HISTORY_EVALUATOR_RESOURCE: {e}"))?;
+    let token_upstream = required("SID_PASSWORD_HISTORY_TOKEN_UPSTREAM")?;
+    let caller = sid_authn::client_credential::ClientCredentialConfig::from_vars(
+        "SID_PASSWORD_HISTORY_CALLER",
+        |name| var(name).ok().filter(|v| !v.is_empty()),
+    )?
+    .ok_or_else(|| anyhow::anyhow!("SID_PASSWORD_HISTORY_CALLER_CLIENT_ID is required"))?;
+    let lazy = |address: &str| -> anyhow::Result<tonic::transport::Channel> {
+        Ok(tonic::transport::Endpoint::from_shared(address.to_owned())
+            .with_context(|| format!("gRPC address {address}"))?
+            .connect_lazy())
+    };
+    let credential = Arc::new(
+        sid_authn::client_credential::ClientCredential::for_resource(
+            &caller,
+            base,
+            lazy(&token_upstream)?,
+            resource.as_str(),
+        )?,
+    );
+    Ok(PasswordHistoryAuthority::Remote(
+        RemoteHistoryEvaluator::new(lazy(&evaluator)?, credential),
+    ))
+}
+
+/// The cutoff before which password-history epochs are replaced, an RFC 3339
+/// instant. Unset means none; a malformed or future value stops startup.
+fn history_epoch_cutoff(
+    input: Result<String, std::env::VarError>,
+) -> anyhow::Result<Option<chrono::DateTime<chrono::Utc>>> {
+    const NAME: &str = "SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE";
+    let value = match input {
+        Ok(v) => v,
+        Err(std::env::VarError::NotPresent) => return Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!("{NAME} must be Unicode"),
+    };
+    let cutoff = chrono::DateTime::parse_from_rfc3339(&value)
+        .map_err(|_| anyhow::anyhow!("{NAME} must be an RFC 3339 instant"))?
+        .with_timezone(&chrono::Utc);
+    // A future cutoff would replace every epoch created until then, again
+    // at each operation: it names no compromise that has happened.
+    anyhow::ensure!(
+        cutoff <= chrono::Utc::now(),
+        "{NAME} must not be in the future"
+    );
+    Ok(Some(cutoff))
+}
+
+/// Parse explicit proof settings without treating invalid input as absence.
+fn zkpp_settings(
+    enabled: Result<String, std::env::VarError>,
+    required: Result<String, std::env::VarError>,
+    version: Result<String, std::env::VarError>,
+) -> anyhow::Result<(bool, sid_authn::opaque_zkpp::ZkppConfig)> {
+    fn value(
+        name: &str,
+        input: Result<String, std::env::VarError>,
+    ) -> anyhow::Result<Option<String>> {
+        match input {
+            Ok(v) => Ok(Some(v)),
+            Err(std::env::VarError::NotPresent) => Ok(None),
+            Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!("{name} must be Unicode"),
+        }
+    }
+    fn boolean(name: &str, input: Result<String, std::env::VarError>) -> anyhow::Result<bool> {
+        match value(name, input)?.as_deref() {
+            None | Some("true" | "1") => Ok(true),
+            Some("false" | "0") => Ok(false),
+            Some(_) => anyhow::bail!("{name} must be true, false, 1 or 0"),
+        }
+    }
+    let enabled = boolean("SID_ZKPP_ENABLED", enabled)?;
+    let require_proof = boolean("SID_ZKPP_REQUIRE_PROOF", required)?;
+    anyhow::ensure!(
+        enabled || !require_proof,
+        "mandatory password proofs require enabled verifiers"
+    );
+    let policy_version = match value("SID_ZKPP_POLICY_VERSION", version)? {
+        None => 1,
+        Some(v) => v.parse::<u32>().map_err(|_| {
+            anyhow::anyhow!("SID_ZKPP_POLICY_VERSION must be an unsigned policy version")
+        })?,
+    };
+    anyhow::ensure!(
+        sid_pake_core::policy::get_policy(sid_pake_core::types::PolicyVersion(policy_version))
+            .is_some(),
+        "SID_ZKPP_POLICY_VERSION selects an unknown policy"
+    );
+    Ok((
+        enabled,
+        sid_authn::opaque_zkpp::ZkppConfig {
+            require_proof,
+            policy_version,
+        },
+    ))
+}
+
+/// Initialize ZKPP with async keygen on the router's server setup.
+/// Password operations return UNAVAILABLE until the verifier is ready.
+/// Proofs are mandatory by default; optional setup still verifies every proof.
 fn init_zkpp(router: &Arc<OpaqueRouter>) -> Arc<arc_swap::ArcSwap<Option<Arc<ZkppOpaqueServer>>>> {
     let slot: Arc<arc_swap::ArcSwap<Option<Arc<ZkppOpaqueServer>>>> =
         Arc::new(arc_swap::ArcSwap::from_pointee(None));
 
-    if !std::env::var("SID_ZKPP_ENABLED")
-        .map(|v| v == "true" || v == "1")
-        .unwrap_or(false)
-    {
+    let (enabled, config) = zkpp_settings(
+        std::env::var("SID_ZKPP_ENABLED"),
+        std::env::var("SID_ZKPP_REQUIRE_PROOF"),
+        std::env::var("SID_ZKPP_POLICY_VERSION"),
+    )
+    .unwrap_or_else(|e| panic!("ZKPP configuration: {e}"));
+    if !enabled {
         // Registration, change and reset run their OPAQUE on this server
         // whether or not proofs are verified; without verifiers every
         // password installs policy-unverified (D018) and a proof sent
@@ -1354,7 +1556,7 @@ fn init_zkpp(router: &Arc<OpaqueRouter>) -> Arc<arc_swap::ArcSwap<Option<Arc<Zkp
             vec![],
             sid_authn::opaque_zkpp::ZkppConfig {
                 require_proof: false,
-                policy_version: 1,
+                policy_version: config.policy_version,
             },
         ) {
             Ok(server) => slot.store(Arc::new(Some(Arc::new(server)))),
@@ -1363,23 +1565,13 @@ fn init_zkpp(router: &Arc<OpaqueRouter>) -> Arc<arc_swap::ArcSwap<Option<Arc<Zkp
         return slot;
     }
 
-    let require_proof = std::env::var("SID_ZKPP_REQUIRE_PROOF")
-        .map(|v| v == "true" || v == "1")
-        .unwrap_or(true);
-    let policy_version: u32 = std::env::var("SID_ZKPP_POLICY_VERSION")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(1);
+    let policy_version = config.policy_version;
+    let require_proof = config.require_proof;
     // The verifying key is built for this policy: its minimums are fixed
     // columns of the key, so this is the policy every accepted proof meets.
     let policy =
         sid_pake_core::policy::get_policy(sid_pake_core::types::PolicyVersion(policy_version))
             .unwrap_or_else(|| panic!("SID_ZKPP_POLICY_VERSION={policy_version}: no such policy"));
-
-    let config = sid_authn::opaque_zkpp::ZkppConfig {
-        require_proof,
-        policy_version,
-    };
 
     // A ZKPP server on the router's setup; a router it cannot serve is a
     // deployment error, found here at start, not after keygen.
@@ -1421,7 +1613,7 @@ fn init_zkpp(router: &Arc<OpaqueRouter>) -> Arc<arc_swap::ArcSwap<Option<Arc<Zkp
                     params
                 }
             };
-            (1..=sid_authn::password_history::MAX_HISTORY_DOMAINS)
+            (1..=sid_core::models::password_history::MAX_HISTORY_DOMAINS)
                 .map(|history_domains| {
                     let shape = sid_pake_core::circuit::CircuitShape {
                         policy,
@@ -1449,10 +1641,16 @@ fn init_zkpp(router: &Arc<OpaqueRouter>) -> Arc<arc_swap::ArcSwap<Option<Arc<Zkp
                 );
             }
             Ok(Err(e)) => {
-                tracing::warn!("ZKPP keygen failed: {:?} — ZKPP remains disabled", e);
+                tracing::warn!(
+                    "ZKPP keygen failed: {:?} — password operations remain unavailable",
+                    e
+                );
             }
             Err(e) => {
-                tracing::error!("ZKPP keygen task panicked: {} — ZKPP remains disabled", e);
+                tracing::error!(
+                    "ZKPP keygen task panicked: {} — password operations remain unavailable",
+                    e
+                );
             }
         }
     });

@@ -2,21 +2,29 @@
 //! Export data from a StorageBackend into a Snapshot.
 
 use chrono::Utc;
+use sid_plugin::history_keys::HistoryKeyStore;
 use sid_plugin::storage::StorageBackend;
 use tracing::info;
 
 use crate::snapshot::Snapshot;
 
-/// Export all data from a storage backend into a snapshot.
+/// Export all data from a storage backend and the history evaluator's key
+/// store into a snapshot.
 ///
 /// Reads all persistent entities. Expired sessions are excluded.
 /// Audit log is included only when `include_audit` is true (it can be very large).
 pub async fn export_snapshot(
     backend: &dyn StorageBackend,
+    keys: &dyn HistoryKeyStore,
     source_url: &str,
     include_audit: bool,
 ) -> anyhow::Result<Snapshot> {
     let mut snapshot = Snapshot::new(backend.name(), source_url);
+    snapshot.metadata.installation_org = backend.instance_organization().await?.map(|o| o.id);
+    snapshot.key_versions = backend.list_key_versions().await?;
+    snapshot.opaque_server_setup = backend
+        .get_instance_secret(sid_core::models::InstanceSecret::OpaqueServerSetup)
+        .await?;
 
     // 1. Projects
     info!("exporting projects...");
@@ -46,8 +54,24 @@ pub async fn export_snapshot(
 
     // 3. Per-profile entities
     info!("exporting per-profile entities...");
+    let installation = snapshot.metadata.installation_org.map(|o| *o.as_bytes());
     for profile in &snapshot.profiles {
         let pid = profile.id;
+        snapshot
+            .password_histories
+            .push((pid, backend.export_password_history(pid).await?));
+        // The evaluator keys its store by the owner's history domain, which
+        // the installation authority and the profile define.
+        if let Some(installation) = &installation
+            && let Some(archive) = keys
+                .export_keys(&sid_authn::password_history::owner_domain(
+                    installation,
+                    pid,
+                ))
+                .await?
+        {
+            snapshot.history_keys.push(archive);
+        }
 
         // Principals
         let principals = backend.get_principals_by_profile(pid).await?;
@@ -278,6 +302,8 @@ pub async fn export_snapshot(
     }
 
     // Update metadata
+    crate::import::validate_opaque_setup(&snapshot)?;
+    crate::import::validate_history(&snapshot)?;
     snapshot.metadata.total_entities = snapshot.count_entities();
     snapshot.metadata.created_at = Utc::now();
 
