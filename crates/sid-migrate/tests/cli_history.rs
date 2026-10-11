@@ -152,52 +152,85 @@ async fn cli_refuses_a_schema_for_sqlite() {
 }
 
 /// Every URL and option pair is checked before any input is read or any
-/// database is reached: a wrong SQLite target neither waits on its input nor
-/// connects to (and migrates) the source first. The input here does not
-/// exist and the source refuses connections, so a late check reports those.
+/// database is reached: a wrong target (a schema for SQLite, a malformed
+/// PostgreSQL schema) neither waits on its input nor connects to (and
+/// migrates) the source first. The input here does not exist and the
+/// databases refuse connections, so a late check reports those instead.
 #[tokio::test]
 async fn cli_refuses_a_bad_target_before_any_io() {
     let dir = tempfile::tempdir().unwrap();
     let target = format!("sqlite://{}", dir.path().join("target.sqlite").display());
     let missing = dir.path().join("missing.json");
     let unreachable = "postgres://sid:sid_dev@127.0.0.1:1/sid";
+    let sqlite_schema = "no PostgreSQL schema";
+    let malformed_schema = "Schema name";
     let runs = [
-        vec![
-            "import",
-            "--target",
-            &target,
-            "--schema",
-            "tenant_a",
-            "--input",
-            missing.to_str().unwrap(),
-        ],
-        vec![
-            "migrate",
-            "--source",
-            unreachable,
-            "--target",
-            &target,
-            "--target-schema",
-            "tenant_a",
-        ],
-        vec![
-            "verify",
-            "--source",
-            unreachable,
-            "--target",
-            &target,
-            "--target-schema",
-            "tenant_a",
-        ],
+        (
+            vec![
+                "import",
+                "--target",
+                &target,
+                "--schema",
+                "tenant_a",
+                "--input",
+                missing.to_str().unwrap(),
+            ],
+            sqlite_schema,
+        ),
+        (
+            vec![
+                "migrate",
+                "--source",
+                unreachable,
+                "--target",
+                &target,
+                "--target-schema",
+                "tenant_a",
+            ],
+            sqlite_schema,
+        ),
+        (
+            vec![
+                "verify",
+                "--source",
+                unreachable,
+                "--target",
+                &target,
+                "--target-schema",
+                "tenant_a",
+            ],
+            sqlite_schema,
+        ),
+        (
+            vec![
+                "import",
+                "--target",
+                unreachable,
+                "--schema",
+                "tenant a",
+                "--input",
+                missing.to_str().unwrap(),
+            ],
+            malformed_schema,
+        ),
+        (
+            vec![
+                "migrate",
+                "--source",
+                unreachable,
+                "--target",
+                unreachable,
+                "--target-schema",
+                "tenant a",
+            ],
+            malformed_schema,
+        ),
     ];
-    for args in runs {
+    for (args, refusal) in runs {
         let refused = run(&args);
         let stderr = String::from_utf8_lossy(&refused.stderr);
         assert!(!refused.status.success(), "{args:?} was accepted");
-        assert!(
-            stderr.contains("no PostgreSQL schema"),
-            "{args:?}: {stderr}"
-        );
+        assert!(stderr.contains(refusal), "{args:?}: {stderr}");
         assert!(
             !stderr.contains("failed to"),
             "{args:?} did I/O first: {stderr}"
