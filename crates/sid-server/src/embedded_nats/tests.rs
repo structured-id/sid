@@ -161,6 +161,7 @@ async fn embedded_work_survives_restart() {
         .consume(DurableConsumer {
             recipient: notify,
             event_types: Vec::new(),
+            ordered: false,
         })
         .await
         .unwrap();

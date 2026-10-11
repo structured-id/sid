@@ -1,23 +1,21 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! SCIM outbound worker.
 //!
-//! Consumes corporate profile/group change events durably and owes each to
-//! every enabled target as a dispatch job of its own; the event is settled
-//! once those jobs are stored. A job is done once its target took the event
-//! or its failure is recorded in the dead-letter store, and only that job is
-//! tried again otherwise, so a target that already took the event never
-//! gets it twice because another one failed.
+//! Consumes corporate profile/group change events durably, one at a time in
+//! the order they were committed, and dispatches each to every enabled
+//! target. A target's outcome (taken, or its failure recorded in the
+//! dead-letter store) is recorded per (event, target) in the same commit as
+//! anything it stores, so a redelivered event goes only to the targets that
+//! have no outcome yet: a target that took it, or whose failure was
+//! recorded, never gets it or its dead letter twice.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
-use sid_authn::work_runner::{RetrySchedule, WorkHandler, WorkOutcome};
 use sid_core::models::{
-    AuditEntry, ClaimedWork, MutationContext, NewWork, OutboundEntityType, ProfileId,
-    ScimOutboundRecord, ScimOutboundTarget, ScimOutboundTargetId, WorkId, WorkKind,
+    AuditEntry, MutationContext, OperationCompletion, OperationKey, OutboundEntityType, ProfileId,
+    ScimOutboundRecord, ScimOutboundTarget, ScimOutboundTargetId,
     event::{Event, RequiredReceiver, WorkRecipient, event_types},
 };
 use sid_plugin::StorageBackend;
@@ -32,58 +30,35 @@ use super::mapper::{self, ScimPatchPayload};
 /// The receiver SCIM outbound work is addressed to.
 pub const SCIM_OUTBOUND_RECEIVER: &str = "sid-scim-outbound";
 
-/// Work kind dispatching one event to one target.
-pub const SCIM_DISPATCH_KIND: &str = "scim.outbound.dispatch";
-
 /// The event types outbound provisioning acts on.
 const SCIM_EVENTS: &str = "sid.scim.*";
 
-/// When an event whose dispatch jobs could not be stored is delivered again.
-const UNSTORED_RETRY: Duration = Duration::from_secs(30);
+/// Where a target's outcome for an event is recorded.
+pub const DISPATCH_OUTCOME_NAMESPACE: &str = "scim.outbound.dispatched";
 
-/// Namespace of dispatch job ids, one per (event, target).
-const DISPATCH_NAMESPACE: Uuid = Uuid::from_u128(0x2c6f_91d4_7a30_4e85_b1c9_5d02_e64a_8f17);
+/// When an event some target's outcome could not be recorded for is
+/// delivered again.
+const UNRECORDED_RETRY: Duration = Duration::from_secs(30);
 
-/// Delays between dispatch attempts whose failure could not be recorded.
-const DISPATCH_RETRY: RetrySchedule = RetrySchedule::new(&[
-    Duration::from_secs(5),
-    Duration::from_secs(30),
-    Duration::from_secs(300),
-    Duration::from_secs(3600),
-]);
+/// Namespace of the ids a target's failure records carry for an event.
+const FAILURE_NAMESPACE: Uuid = Uuid::from_u128(0x2c6f_91d4_7a30_4e85_b1c9_5d02_e64a_8f17);
 
-/// One event for one target.
-#[derive(Debug, Deserialize)]
-struct DispatchJob {
-    target: ScimOutboundTargetId,
-    event: Event,
+/// The key a target's outcome for `event` is recorded under.
+pub(crate) fn outcome_key(event: &Event, target: ScimOutboundTargetId) -> OperationKey {
+    OperationKey::parse(&format!("{}:{}", event.relay_id(), target.0))
+        .expect("two UUIDs make a valid key")
 }
 
-/// The dispatch job of `event` to `target`, identified by both, so an event
-/// accepted again stores no second job.
-fn dispatch_job(event: &Event, target: ScimOutboundTargetId) -> NewWork {
-    /// [`DispatchJob`] as written, borrowing the event.
-    #[derive(Serialize)]
-    struct Written<'a> {
-        target: ScimOutboundTargetId,
-        event: &'a Event,
-    }
-    let payload =
-        serde_json::to_vec(&Written { target, event }).expect("a dispatch job serializes");
-    let mut work = NewWork::new(
-        WorkKind::new(SCIM_DISPATCH_KIND).expect("the dispatch kind is valid"),
-        payload,
-    );
-    work.id = WorkId(Uuid::new_v5(
-        &DISPATCH_NAMESPACE,
-        &[
-            event.relay_id().0.as_bytes().as_slice(),
-            target.0.as_bytes(),
-        ]
-        .concat(),
-    ));
-    work.max_attempts = 20;
-    work
+/// The record of a target's outcome for `event`, committed with whatever
+/// that outcome stores.
+fn outcome(event: &Event, target: ScimOutboundTargetId, method: &str) -> OperationCompletion {
+    OperationCompletion::new(
+        DISPATCH_OUTCOME_NAMESPACE,
+        outcome_key(event, target),
+        method,
+        &[],
+        Vec::new(),
+    )
 }
 
 /// Outbound provisioning as a receiver the deployment requires while
@@ -101,26 +76,18 @@ pub struct ScimOutboundWorker {
     event_bus: Arc<dyn EventBus>,
     /// Loaded outbound targets (cached at startup, reloaded on config change).
     targets: Vec<ScimOutboundTarget>,
-    kind: WorkKind,
-    /// Open dispatch jobs before an event is left with the bus.
-    capacity: u64,
 }
 
 impl ScimOutboundWorker {
-    /// A worker over `targets`, storing dispatch jobs in `storage` up to
-    /// `capacity` open ones.
     pub fn new(
         storage: Arc<dyn StorageBackend>,
         event_bus: Arc<dyn EventBus>,
         targets: Vec<ScimOutboundTarget>,
-        capacity: u64,
     ) -> Self {
         Self {
             storage,
             event_bus,
             targets,
-            kind: WorkKind::new(SCIM_DISPATCH_KIND).expect("the dispatch kind is valid"),
-            capacity,
         }
     }
 
@@ -135,6 +102,9 @@ impl ScimOutboundWorker {
             .consume(DurableConsumer {
                 recipient: receiver.recipient,
                 event_types: receiver.event_types,
+                // An entity's changes reach a target in commit order: an
+                // update never overtakes the create whose mapping it needs.
+                ordered: true,
             })
             .await?;
         info!(targets = self.targets.len(), "SCIM outbound worker started");
@@ -143,32 +113,73 @@ impl ScimOutboundWorker {
 
     async fn process_events(self: Arc<Self>, mut rx: mpsc::Receiver<Delivery>) {
         while let Some(delivery) = rx.recv().await {
-            let settlement = self.accept(&delivery.event).await;
+            let settlement = self.process(&delivery.event).await;
             delivery.settle(settlement);
         }
 
         info!("SCIM outbound worker stopped (event channel closed)");
     }
 
-    /// Owe `event` to every enabled target as a dispatch job of its own. It
-    /// is settled once all are stored, and left with the bus otherwise.
-    async fn accept(&self, event: &Event) -> Settlement {
+    /// Dispatch `event` to every enabled target that has no recorded outcome
+    /// for it. It is settled once every target has one, and left with the bus
+    /// (delivered again, to those targets only) otherwise.
+    pub(crate) async fn process(&self, event: &Event) -> Settlement {
         debug!(
             event_type = %event.event_type,
             subject = ?event.subject,
-            "accepting SCIM outbound event"
+            "processing SCIM outbound event"
         );
+        let mut unrecorded = false;
         for target in self.targets.iter().filter(|t| t.enabled) {
-            if let Err(e) = self
+            match self
                 .storage
-                .enqueue_work(&dispatch_job(event, target.id), self.capacity)
+                .get_operation_result(DISPATCH_OUTCOME_NAMESPACE, &outcome_key(event, target.id))
                 .await
             {
-                warn!(target = %target.display_name, error = %e, "SCIM dispatch not stored");
-                return Settlement::Retry(UNSTORED_RETRY);
+                Ok(Some(_)) => continue,
+                Ok(None) => {}
+                Err(e) => {
+                    warn!(target = %target.display_name, error = %e, "SCIM outcome not read");
+                    unrecorded = true;
+                    continue;
+                }
+            }
+            let recorded = match self.dispatch_to_target(target, event).await {
+                Ok(()) => self.record_taken(target, event).await,
+                Err(e) => {
+                    error!(
+                        target = %target.display_name,
+                        event_type = %event.event_type,
+                        error = %e,
+                        "SCIM outbound dispatch failed"
+                    );
+                    self.handle_dispatch_failure(target, event, &e).await
+                }
+            };
+            unrecorded |= !recorded;
+        }
+        if unrecorded {
+            Settlement::Retry(UNRECORDED_RETRY)
+        } else {
+            Settlement::Done
+        }
+    }
+
+    /// Record that `target` took `event`. Whether it is recorded: a target
+    /// whose record is lost gets the event again on its redelivery.
+    async fn record_taken(&self, target: &ScimOutboundTarget, event: &Event) -> bool {
+        let ctx = MutationContext::from(AuditEntry::system(
+            "scim.outbound.dispatched",
+            &event.event_type,
+        ))
+        .with_operation(outcome(event, target.id, "taken"));
+        match self.storage.record_outcome(ctx).await {
+            Ok(()) | Err(sid_core::Error::OperationCompleted(_)) => true,
+            Err(e) => {
+                warn!(target = %target.display_name, error = %e, "SCIM outcome not recorded");
+                false
             }
         }
-        Settlement::Done
     }
 
     /// Dispatch a single event to a single outbound target.
@@ -518,9 +529,9 @@ impl ScimOutboundWorker {
 
     // ── Failure handling (DLQ, error recording, sid-notify) ──
 
-    /// Handle a failed dispatch: update error tracking, save to DLQ, owe the
-    /// failure event. Whether the dead letter, and with it the failure, is
-    /// recorded.
+    /// Handle a failed dispatch: save the dead letter, owe the failure event
+    /// and record the target's outcome in one commit, then count the error.
+    /// Whether the failure is recorded (now or by an earlier attempt).
     async fn handle_dispatch_failure(
         &self,
         target: &ScimOutboundTarget,
@@ -528,41 +539,21 @@ impl ScimOutboundWorker {
         error: &ScimClientError,
     ) -> bool {
         let now = Utc::now();
-
-        // G3: Update error tracking on outbound record (if entity exists downstream).
         let sid_entity_id = extract_profile_id(&event.data)
             .map(ProfileId::into_uuid)
             .or_else(|_| extract_uuid_field(&event.data, "group_id"))
             .ok();
+        // The failure's records carry ids of this (event, target), and commit
+        // with its outcome: a repeat of this dispatch finds the outcome and
+        // stores no second dead letter or alert.
+        let failure_id = Uuid::new_v5(
+            &FAILURE_NAMESPACE,
+            outcome_key(event, target.id).as_str().as_bytes(),
+        );
 
-        if let Some(entity_id) = sid_entity_id {
-            let entity_type = if event.event_type.contains("group") {
-                OutboundEntityType::Group
-            } else {
-                OutboundEntityType::User
-            };
-
-            // Counted in place on the stored mapping: a stale copy would undo a
-            // concurrent success (its downstream id and cleared error) and lose counts.
-            if let Err(e) = self
-                .storage
-                .record_scim_outbound_failure(
-                    target.id,
-                    entity_id,
-                    entity_type,
-                    &error.to_string(),
-                    now,
-                    AuditEntry::system("scim.outbound.error_recorded", error.to_string()).into(),
-                )
-                .await
-            {
-                warn!(error = %e, "failed to update outbound record with error");
-            }
-        }
-
-        // G2: Save failed event to DLQ for later retry/review.
+        // Save the failed event to the dead-letter store for review.
         let dlq_entry = sid_core::models::OutboundDlqEntry {
-            id: Uuid::now_v7(),
+            id: failure_id,
             target_id: target.id,
             event_type: event.event_type.clone(),
             payload: event.data.clone(),
@@ -580,7 +571,7 @@ impl ScimOutboundWorker {
 
         // The failure alert (sid-notify tells the admins) is owed by the
         // commit that stores the dead letter.
-        let failure_event = Event::new("sid-scim", event_types::SCIM_OUTBOUND_FAILED)
+        let mut failure_event = Event::new("sid-scim", event_types::SCIM_OUTBOUND_FAILED)
             .with_subject(format!("target/{}", target.id))
             .with_data(serde_json::json!({
                 "target_name": target.display_name,
@@ -588,22 +579,53 @@ impl ScimOutboundWorker {
                 "error": error.to_string(),
                 "error_class": error_class(error),
             }));
+        failure_event.id = failure_id.to_string();
         let ctx = MutationContext::from(AuditEntry::system(
             "scim.outbound.dlq_saved",
             &event.event_type,
         ))
-        .with_work(failure_event.relay());
+        .with_work(failure_event.relay())
+        .with_operation(outcome(event, target.id, "failed"));
         match self
             .storage
             .create_outbound_dlq_entry(&dlq_entry, ctx)
             .await
         {
-            Ok(()) => true,
+            Ok(()) => {}
+            // An earlier attempt recorded this failure already.
+            Err(sid_core::Error::OperationCompleted(_)) => return true,
             Err(e) => {
                 warn!(error = %e, "failed to save DLQ entry and its alert");
-                false
+                return false;
             }
         }
+
+        // Counted once the failure is recorded, so a repeated dispatch does
+        // not count it twice. Counted in place on the stored mapping: a stale
+        // copy would undo a concurrent success (its downstream id and cleared
+        // error) and lose counts.
+        if let Some(entity_id) = sid_entity_id {
+            let entity_type = if event.event_type.contains("group") {
+                OutboundEntityType::Group
+            } else {
+                OutboundEntityType::User
+            };
+            if let Err(e) = self
+                .storage
+                .record_scim_outbound_failure(
+                    target.id,
+                    entity_id,
+                    entity_type,
+                    &error.to_string(),
+                    now,
+                    AuditEntry::system("scim.outbound.error_recorded", error.to_string()).into(),
+                )
+                .await
+            {
+                warn!(error = %e, "failed to update outbound record with error");
+            }
+        }
+        true
     }
 
     // ── Storage helpers ──
@@ -722,56 +744,6 @@ fn extract_uuid_field(data: &serde_json::Value, field: &str) -> Result<Uuid, Sci
 
     Uuid::parse_str(id_str)
         .map_err(|e| ScimClientError::Serialization(format!("invalid {field}: {e}")))
-}
-
-/// Dispatches one event to one target.
-#[async_trait]
-impl WorkHandler for ScimOutboundWorker {
-    fn kind(&self) -> &WorkKind {
-        &self.kind
-    }
-
-    fn retry_schedule(&self) -> RetrySchedule {
-        DISPATCH_RETRY
-    }
-
-    /// The failed job is the durable record of a dispatch whose failure could
-    /// not be stored in the dead-letter store either.
-    fn on_dead(&self, _work: &ClaimedWork, _error: &str) -> Option<NewWork> {
-        None
-    }
-
-    async fn handle(&self, work: &ClaimedWork) -> WorkOutcome {
-        let job: DispatchJob = match serde_json::from_slice(&work.payload) {
-            Ok(job) => job,
-            Err(e) => return WorkOutcome::Permanent(format!("malformed dispatch job: {e}")),
-        };
-        let Some(target) = self
-            .targets
-            .iter()
-            .find(|t| t.id == job.target && t.enabled)
-        else {
-            return WorkOutcome::Done(Some("target no longer configured".into()));
-        };
-        match self.dispatch_to_target(target, &job.event).await {
-            Ok(()) => WorkOutcome::Done(None),
-            Err(e) => {
-                error!(
-                    target = %target.display_name,
-                    event_type = %job.event.event_type,
-                    error = %e,
-                    "SCIM outbound dispatch failed"
-                );
-                // Only this target's dispatch is tried again when its failure
-                // could not be recorded; the others are separate jobs.
-                if self.handle_dispatch_failure(target, &job.event, &e).await {
-                    WorkOutcome::Done(Some("failure recorded".into()))
-                } else {
-                    WorkOutcome::Retry(format!("failure not recorded: {e}"))
-                }
-            }
-        }
-    }
 }
 
 /// Classify error for sid-notify alert routing.

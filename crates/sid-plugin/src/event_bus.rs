@@ -64,6 +64,11 @@ pub struct DurableConsumer {
     /// The event types it consumes (exact types or bus wildcards); empty is
     /// everything addressed to it.
     pub event_types: Vec<String>,
+    /// Hand events over in the order they were delivered, one at a time
+    /// across all replicas: none goes to any replica before the last is
+    /// settled done or rejected, and one being retried holds the rest back.
+    /// For a receiver whose effects on an entity depend on the earlier ones.
+    pub ordered: bool,
 }
 
 /// What a durable consumer did with a delivered event.

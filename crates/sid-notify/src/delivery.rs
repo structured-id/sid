@@ -100,6 +100,7 @@ pub async fn open_work(
     bus.consume(DurableConsumer {
         recipient,
         event_types: Vec::new(),
+        ordered: false,
     })
     .await
 }

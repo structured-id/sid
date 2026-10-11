@@ -1389,13 +1389,11 @@ pub(crate) fn required_receivers(
 /// back-channel logouts, relayed events and their deliveries, contestation
 /// checks). Every replica runs one; leases keep an attempt on a single
 /// replica. Facts are owed to the deployment's required receivers and to
-/// `also_required` (receivers this server runs, whose work is `also_run`).
-/// Runs until `shutdown` resolves, then lets attempts in flight record their
-/// outcome.
+/// `also_required` (receivers this server runs). Runs until `shutdown`
+/// resolves, then lets attempts in flight record their outcome.
 pub fn spawn_work_runner(
     c: &CeComponents,
     also_required: &[sid_core::models::RequiredReceiver],
-    also_run: Vec<Arc<dyn WorkHandler>>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
     let receivers = c
@@ -1404,7 +1402,7 @@ pub fn spawn_work_runner(
         .chain(also_required)
         .cloned()
         .collect();
-    let mut handlers: Vec<Arc<dyn WorkHandler>> = vec![
+    let handlers: Vec<Arc<dyn WorkHandler>> = vec![
         Arc::new(BackChannelLogoutHandler::new(
             c.issuers.clone(),
             c.storage.clone(),
@@ -1428,7 +1426,6 @@ pub fn spawn_work_runner(
         c.auth_svc.enrollment_handler(),
         c.auth_svc.owner_purge_handler(),
     ];
-    handlers.extend(also_run);
     let worker = format!("sid-server-{}-{}", std::process::id(), uuid::Uuid::now_v7());
     let runner = WorkRunner::new(c.storage.clone(), worker, handlers, RunnerConfig::default())
         .map_err(|e| anyhow::anyhow!("work runner: {e}"))?;

@@ -85,6 +85,7 @@ fn consumer_of(name: &str) -> DurableConsumer {
     DurableConsumer {
         recipient: recipient(name),
         event_types: Vec::new(),
+        ordered: false,
     }
 }
 
@@ -291,6 +292,71 @@ async fn test_receivers_are_independent_and_replicas_share() {
     seen.sort();
     seen.dedup();
     assert_eq!(seen.len(), events.len(), "an event went to both replicas");
+    drop_topology(&t).await;
+}
+
+/// An ordered receiver's replicas get its events in delivery order, one at a
+/// time: none gets the second while the first is held or waits for its
+/// retry, and the second comes once the first is settled done.
+#[tokio::test]
+async fn test_ordered_consumer_holds_later_events_across_replicas() {
+    let t = topology();
+    let bus = owner(&t).await;
+    let receiver = recipient("ordered");
+    let (first, second) = (
+        Event::new("sid-test", event_types::USER_CREATED),
+        Event::new("sid-test", event_types::USER_CREATED),
+    );
+    for event in [&first, &second] {
+        bus.deliver(&receiver, event.delivery_id(&receiver), event)
+            .await
+            .unwrap();
+    }
+    let ordered = DurableConsumer {
+        ordered: true,
+        ..consumer_of("ordered")
+    };
+    let replica = owner(&t).await;
+    let mut at_a = bus.consume(ordered.clone()).await.unwrap();
+    let mut at_b = replica.consume(ordered).await.unwrap();
+
+    let held = tokio::select! {
+        d = next(&mut at_a) => d,
+        d = next(&mut at_b) => d,
+    };
+    assert_eq!(held.event.id, first.id, "out of delivery order");
+    // Nothing reaches either replica within a short wait.
+    async fn both_quiet(
+        a: &mut mpsc::Receiver<Delivery>,
+        b: &mut mpsc::Receiver<Delivery>,
+    ) -> bool {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::select! {
+                _ = a.recv() => {}
+                _ = b.recv() => {}
+            }
+        })
+        .await
+        .is_err()
+    }
+    assert!(
+        both_quiet(&mut at_a, &mut at_b).await,
+        "a later event went out while the first was held"
+    );
+    held.settle(Settlement::Retry(Duration::from_secs(6)));
+    assert!(
+        both_quiet(&mut at_a, &mut at_b).await,
+        "a later event overtook the one waiting for its retry"
+    );
+
+    for wanted in [&first, &second] {
+        let delivered = tokio::select! {
+            d = next(&mut at_a) => d,
+            d = next(&mut at_b) => d,
+        };
+        assert_eq!(delivered.event.id, wanted.id, "out of delivery order");
+        delivered.settle(Settlement::Done);
+    }
     drop_topology(&t).await;
 }
 

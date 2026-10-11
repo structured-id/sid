@@ -3,7 +3,7 @@ use sid_core::models::{
     AttributeMapping, GroupPushConfig, OutboundAuthConfig, OutboundSyncConfig, ProjectId,
 };
 use sid_plugin::WorkStore;
-use sid_plugin::event_bus::InProcessEventBus;
+use sid_plugin::event_bus::{InProcessEventBus, Settlement};
 use sid_storage::sqlite::SqliteBackend;
 
 #[test]
@@ -121,12 +121,8 @@ async fn worker(targets: Vec<ScimOutboundTarget>) -> (Arc<SqliteBackend>, ScimOu
             .await
             .unwrap();
     }
-    let worker = ScimOutboundWorker::new(
-        storage.clone(),
-        Arc::new(InProcessEventBus::new()),
-        targets,
-        100,
-    );
+    let worker =
+        ScimOutboundWorker::new(storage.clone(), Arc::new(InProcessEventBus::new()), targets);
     (storage, worker)
 }
 
@@ -137,77 +133,85 @@ fn undeliverable() -> Event {
         .with_data(serde_json::json!({"profile_id": Uuid::now_v7().to_string()}))
 }
 
-/// An accepted event is owed to each enabled target as its own job, none to
-/// a disabled one, and accepting it again (a redelivery) stores nothing new.
+async fn dead_letters(storage: &SqliteBackend, target: &ScimOutboundTarget) -> usize {
+    storage
+        .list_outbound_dlq_entries(target.id)
+        .await
+        .unwrap()
+        .len()
+}
+
+/// Every enabled target gets the event and its failure is recorded once,
+/// with one alert; a disabled target gets nothing. The event redelivered
+/// (its settlement lost) records no second dead letter or alert: the
+/// failure and the target's outcome commit together.
 #[tokio::test]
-async fn test_accepting_owes_one_job_per_enabled_target() {
+async fn test_a_redelivered_event_records_each_failure_once() {
     let (a, b, off) = (target("a", true), target("b", true), target("off", false));
     let (storage, worker) = worker(vec![a.clone(), b.clone(), off.clone()]).await;
     let event = undeliverable();
 
-    assert_eq!(worker.accept(&event).await, Settlement::Done);
-    assert_eq!(worker.accept(&event).await, Settlement::Done);
-    for owed in [&a, &b] {
-        let job = storage
-            .get_work(dispatch_job(&event, owed.id).id)
-            .await
-            .unwrap()
-            .unwrap_or_else(|| panic!("no job for {}", owed.display_name));
-        assert_eq!(job.state, sid_core::models::WorkState::Pending);
+    for _ in 0..2 {
+        assert_eq!(worker.process(&event).await, Settlement::Done);
     }
-    assert!(
-        storage
-            .get_work(dispatch_job(&event, off.id).id)
-            .await
-            .unwrap()
-            .is_none(),
-        "a disabled target was owed the event"
+    assert_eq!(
+        dead_letters(&storage, &a).await,
+        1,
+        "a failure recorded twice"
     );
-    let jobs = storage.export_work().await.unwrap();
-    assert_eq!(jobs.len(), 2, "a redelivered event stored a second job");
+    assert_eq!(
+        dead_letters(&storage, &b).await,
+        1,
+        "a failure recorded twice"
+    );
+    assert_eq!(
+        dead_letters(&storage, &off).await,
+        0,
+        "a disabled target got it"
+    );
+    let alerts = storage.export_work().await.unwrap();
+    assert_eq!(alerts.len(), 2, "one alert per failure, not per attempt");
 }
 
-fn claimed(work: NewWork) -> ClaimedWork {
-    ClaimedWork {
-        id: work.id,
-        kind: work.kind,
-        payload: work.payload,
-        attempt: 1,
-        max_attempts: work.max_attempts,
-        generation: 1,
-        expires_at: None,
-    }
-}
-
-/// A target's job dispatches to that target only: its failure is recorded
-/// in the dead-letter store and ends the job, and the other target's job is
-/// untouched by it. A job for a target no longer configured is done.
+/// A target whose outcome is recorded (it took the event before a crash) is
+/// not dispatched to again when the event is redelivered; the others are.
 #[tokio::test]
-async fn test_a_job_dispatches_to_its_own_target_only() {
+async fn test_a_target_with_an_outcome_is_not_dispatched_again() {
     let (a, b) = (target("a", true), target("b", true));
     let (storage, worker) = worker(vec![a.clone(), b.clone()]).await;
     let event = undeliverable();
-    worker.accept(&event).await;
+    assert!(worker.record_taken(&a, &event).await);
 
-    let outcome = worker.handle(&claimed(dispatch_job(&event, a.id))).await;
-    assert_eq!(outcome, WorkOutcome::Done(Some("failure recorded".into())));
-    let dead = storage.list_outbound_dlq_entries(a.id).await.unwrap();
-    assert_eq!(dead.len(), 1, "the failure was not recorded");
-    assert!(
-        storage
-            .list_outbound_dlq_entries(b.id)
-            .await
-            .unwrap()
-            .is_empty(),
-        "the other target was dispatched to"
+    assert_eq!(worker.process(&event).await, Settlement::Done);
+    assert_eq!(dead_letters(&storage, &a).await, 0, "a took it twice");
+    assert_eq!(dead_letters(&storage, &b).await, 1);
+}
+
+/// A target whose failure cannot be recorded leaves the event with the bus,
+/// to come again; on its redelivery the target whose failure was recorded
+/// is not dispatched to again.
+#[tokio::test]
+async fn test_an_unrecorded_failure_retries_only_its_target() {
+    let a = target("a", true);
+    // Not stored: its dead letter cannot be written.
+    let ghost = target("ghost", true);
+    let (storage, _) = worker(vec![a.clone()]).await;
+    let worker = ScimOutboundWorker::new(
+        storage.clone(),
+        Arc::new(InProcessEventBus::new()),
+        vec![a.clone(), ghost],
     );
+    let event = undeliverable();
 
-    let removed = target("gone", true);
-    let outcome = worker
-        .handle(&claimed(dispatch_job(&event, removed.id)))
-        .await;
+    for _ in 0..2 {
+        assert_eq!(
+            worker.process(&event).await,
+            Settlement::Retry(UNRECORDED_RETRY)
+        );
+    }
     assert_eq!(
-        outcome,
-        WorkOutcome::Done(Some("target no longer configured".into()))
+        dead_letters(&storage, &a).await,
+        1,
+        "a failure recorded twice"
     );
 }

@@ -12,6 +12,7 @@ async fn test_in_process_bus_refuses_durable_consumption() {
         .consume(DurableConsumer {
             recipient: recipient.clone(),
             event_types: vec![event_types::USER_CREATED.into()],
+            ordered: false,
         })
         .await
         .unwrap_err();

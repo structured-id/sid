@@ -203,7 +203,7 @@ impl EventBus for NatsEventBus {
         // Pulling (rather than a push queue group, which cannot carry
         // heartbeats) lets a lost or deleted consumer surface as an error,
         // after which it is reopened.
-        let config = jetstream::consumer::pull::Config {
+        let mut config = jetstream::consumer::pull::Config {
             durable_name: Some(name.clone()),
             deliver_policy: jetstream::consumer::DeliverPolicy::All,
             ack_policy: jetstream::consumer::AckPolicy::Explicit,
@@ -214,6 +214,12 @@ impl EventBus for NatsEventBus {
             filter_subjects: subjects,
             ..Default::default()
         };
+        if consumer.ordered {
+            // One unacknowledged event for the whole consumer: a message
+            // negatively acknowledged with a delay stays pending until it is
+            // redelivered, so no replica gets a later one meanwhile.
+            config.max_ack_pending = 1;
+        }
         let jetstream = self.jetstream.clone();
         let stream = self.topology.work_stream();
         // Opened once here, so a consumer that cannot be set up is refused to

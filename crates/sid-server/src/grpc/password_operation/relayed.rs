@@ -108,6 +108,7 @@ pub async fn consume_cleanup_settlements(
         .consume(DurableConsumer {
             recipient: settlement_consumer(authority),
             event_types: vec![event_types::PASSWORD_HISTORY_CLEANUP_SETTLED.into()],
+            ordered: false,
         })
         .await?;
     while let Some(delivery) = deliveries.recv().await {
@@ -157,6 +158,7 @@ pub async fn consume_relayed_cleanup(
                 event_types::PASSWORD_HISTORY_ENROLLMENT_ABORTED.into(),
                 event_types::PASSWORD_HISTORY_OWNER_PURGED.into(),
             ],
+            ordered: false,
         })
         .await?;
     while let Some(delivery) = deliveries.recv().await {

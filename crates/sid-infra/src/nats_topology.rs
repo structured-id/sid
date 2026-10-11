@@ -368,6 +368,14 @@ async fn prepare_stream(
                 .ok_or_else(|| TopologyError::Nats(format!("create {}: {e}", wanted.name)))?,
         },
     };
+    // A stream of another name holding these subjects (an earlier broad
+    // `SID_EVENTS` on `sid.>`) is refused and left as it is: deleting it
+    // would lose its history and the work its consumers have not settled,
+    // and moving its contents into this topology is a controlled transition
+    // of its own (stopping its writers, keeping unsettled work from expiring,
+    // carrying consumer positions, resuming after an interruption), not
+    // something a starting server may do. Until that transition runs, the
+    // server does not start on such a deployment.
     if held_by != wanted.name {
         return Err(TopologyError::Conflict {
             subjects: probe,
