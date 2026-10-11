@@ -187,8 +187,8 @@ pub(crate) fn abort_event_id(operation: uuid::Uuid, relay: Option<(WorkId, u32)>
     }
 }
 
-/// The relayed event telling a separate evaluator that `admission` aborted
-/// (see [`abort_event_id`]).
+/// The event telling the separate evaluator of `source` that `admission`
+/// aborted, addressed to it (see [`abort_event_id`]).
 fn abort_event(
     source: &str,
     admission: &EnrollmentAdmission,
@@ -197,7 +197,7 @@ fn abort_event(
     let mut event = Event::new(source, event_types::PASSWORD_HISTORY_ENROLLMENT_ABORTED)
         .with_data(serde_json::to_value(admission).map_err(|e| format!("event data: {e}"))?);
     event.id = abort_event_id(admission.operation, relay).to_string();
-    Ok(event.relay())
+    Ok(event.deliver(&super::relayed::cleanup_consumer(source)))
 }
 
 #[tonic::async_trait]
@@ -232,8 +232,9 @@ impl WorkHandler for EnrollmentHandler {
             // separate evaluator reclaims the key as it consumes it
             // ([`super::consume_relayed_cleanup`]) and reports the
             // settlement. Until that is recorded the abort stays owed and a
-            // later attempt relays it again, so an event that aged out of the
-            // stream or met an evaluator outage is not lost.
+            // later attempt relays it again, so an abort whose handoff ended
+            // without effect (a rejected event, a failed delivery) is still
+            // carried out.
             EvaluatorDelivery::Relay { source } => {
                 let cleanup = RelayedCleanup::Enrollment {
                     operation: admission.operation,

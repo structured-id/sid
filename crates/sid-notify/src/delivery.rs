@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Durable ownership of notification delivery.
 //!
-//! An inbound event is accepted by storing a routing job before the broker
-//! message is acknowledged. The routing job resolves the recipient and stores
+//! Every committed fact is owed to this service as addressed work; an
+//! inbound event is accepted by storing a routing job before it is settled. The routing job resolves the recipient and stores
 //! one delivery job per (template, channel), each with a stable id so a
 //! repeated fan-out creates nothing twice. Delivery jobs record receipts,
 //! ambiguous attempts and failures; work that ends failed commits its
@@ -15,8 +15,9 @@ use crate::routing::RoutingTable;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use sid_authn::work_runner::{RetrySchedule, WorkHandler, WorkOutcome};
-use sid_core::models::event::{Event, event_types};
+use sid_core::models::event::{Event, WorkRecipient, event_types};
 use sid_core::models::{ClaimedWork, NewWork, WorkId, WorkKind};
+use sid_plugin::event_bus::{DurableConsumer, EventBusResult, Settlement};
 use sid_plugin::notification::{DeliveryError, NotificationPriority, Recipient};
 use sid_plugin::{EventBus, WorkStore};
 use std::sync::Arc;
@@ -54,26 +55,25 @@ fn stable_id(name: &str) -> WorkId {
     WorkId(Uuid::new_v5(&ID_NAMESPACE, name.as_bytes()))
 }
 
-/// The routing job an accepted `event` is stored under.
+/// The routing job an accepted `event` is stored under: one per event
+/// `(source, id)`.
 pub fn route_job_id(event: &Event) -> WorkId {
-    stable_id(&format!("route:{}", event.id))
+    stable_id(&format!("route:{}", event.relay_id()))
 }
 
 /// Accept an inbound event: store its routing job. Once this returns `Ok`
-/// the broker message may be acknowledged; on `Err` it must not be.
+/// the event may be settled; on `Err` it must not be.
 pub async fn accept_event(
     store: &dyn WorkStore,
-    payload: &[u8],
+    event: &Event,
     capacity: u64,
 ) -> sid_core::Result<()> {
-    // The event id names the job, so a redelivered event is stored once. A
-    // payload without one is still owned (its routing job fails it visibly).
-    let id = match serde_json::from_slice::<Event>(payload) {
-        Ok(event) if !event.id.is_empty() => route_job_id(&event),
-        _ => WorkId(Uuid::new_v5(&ID_NAMESPACE, payload)),
-    };
-    let mut work = NewWork::new(kind(ROUTE), payload.to_vec());
-    work.id = id;
+    // The event's identity names the job, so a redelivered event is stored
+    // once, also when it was stored just before a crash cut its settlement.
+    let payload = serde_json::to_vec(event)
+        .map_err(|e| sid_core::Error::Internal(format!("event payload: {e}")))?;
+    let mut work = NewWork::new(kind(ROUTE), payload);
+    work.id = route_job_id(event);
     work.max_attempts = MAX_ATTEMPTS;
     store.enqueue_work(&work, capacity).await.map(|_| ())
 }
@@ -82,25 +82,44 @@ pub async fn accept_event(
 /// accepted (the job store is down or full).
 pub const REDELIVER_AFTER: Duration = Duration::from_secs(5);
 
-/// Take ownership of one broker message: ACK once its routing job is stored,
-/// otherwise NAK so the broker redelivers it later.
-pub async fn accept_message(
+/// Consume the work addressed to `recipient` on `bus` until the bus ends the
+/// consumer or `stop` resolves. Each event is settled only once its routing
+/// job is stored, and left with the bus (delivered again later) otherwise;
+/// `accepted` runs after each stored one. Replicas consuming as the same
+/// receiver share its work.
+pub async fn consume_work(
+    bus: &dyn EventBus,
+    recipient: WorkRecipient,
     store: &dyn WorkStore,
     capacity: u64,
-    msg: &async_nats::jetstream::Message,
-) {
-    let reply = match accept_event(store, &msg.payload, capacity).await {
-        Ok(()) => msg.ack().await,
-        Err(e) => {
-            tracing::warn!(error = %e, "event not accepted; left with the broker");
-            msg.ack_with(async_nats::jetstream::AckKind::Nak(Some(REDELIVER_AFTER)))
-                .await
+    accepted: impl Fn(),
+    stop: impl std::future::Future<Output = ()>,
+) -> EventBusResult<()> {
+    let mut deliveries = bus
+        .consume(DurableConsumer {
+            recipient,
+            event_types: Vec::new(),
+        })
+        .await?;
+    tokio::pin!(stop);
+    loop {
+        let delivery = tokio::select! {
+            delivery = deliveries.recv() => match delivery {
+                Some(delivery) => delivery,
+                None => return Ok(()),
+            },
+            () = &mut stop => return Ok(()),
+        };
+        match accept_event(store, &delivery.event, capacity).await {
+            Ok(()) => {
+                delivery.settle(Settlement::Done);
+                accepted();
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "event not accepted; left with the bus");
+                delivery.settle(Settlement::Retry(REDELIVER_AFTER));
+            }
         }
-    };
-    if let Err(e) = reply {
-        // Without the reply the broker redelivers after its ack wait; the
-        // job id is stable, so a stored event is not stored twice.
-        tracing::warn!(error = %e, "acknowledging a NATS message failed");
     }
 }
 

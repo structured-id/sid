@@ -5934,6 +5934,7 @@ dependencies = [
  "sid-plugin",
  "sid-proto",
  "structured-proxy",
+ "thiserror 2.0.21",
  "time",
  "tokio",
  "tonic",

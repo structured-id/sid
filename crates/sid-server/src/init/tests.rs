@@ -2,6 +2,33 @@
 
 use super::*;
 
+/// Unset owes every fact to the notification service; a list names each
+/// receiver, `none` names none, and a name that is not an address token
+/// stops startup instead of being dropped.
+#[test]
+fn required_receivers_from_setting() {
+    let names = |setting| {
+        required_receivers(setting)
+            .unwrap()
+            .into_iter()
+            .map(|r| {
+                assert!(r.event_types.is_empty(), "a receiver is owed every fact");
+                r.recipient.to_string()
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(names(None), ["sid-notify"]);
+    assert_eq!(names(Some(" ")), ["sid-notify"]);
+    assert_eq!(names(Some("none")), Vec::<String>::new());
+    assert_eq!(
+        names(Some("sid-notify, audit-sink")),
+        ["sid-notify", "audit-sink"]
+    );
+    for invalid in ["sid.notify", "a,,b", "sid-notify,*"] {
+        assert!(required_receivers(Some(invalid)).is_err(), "{invalid}");
+    }
+}
+
 /// Explicit malformed security settings must stop startup, never disable
 /// proof verification or silently select a different policy.
 #[test]

@@ -112,18 +112,20 @@ fn route_handler(store: &Arc<dyn WorkStore>, resolver: RecipientResolver) -> Rou
     )
 }
 
-/// An accepted event is owned by one routing job, however often the broker
-/// redelivers it; a payload that is not an event is still owned.
+/// An accepted event is owned by one routing job, however often the bus
+/// redelivers it (also after a crash between storing and settling); another
+/// producer's event with the same id is a different fact with its own job.
 #[tokio::test]
 async fn test_accept_event_is_idempotent_per_event() {
     let store = store().await;
     let event = security_event();
-    let payload = serde_json::to_vec(&event).unwrap();
-    accept_event(store.as_ref(), &payload, 10).await.unwrap();
-    accept_event(store.as_ref(), &payload, 10).await.unwrap();
+    accept_event(store.as_ref(), &event, 10).await.unwrap();
+    accept_event(store.as_ref(), &event, 10).await.unwrap();
 
-    let route = record(store.as_ref(), &format!("route:{}", event.id))
+    let route = store
+        .get_work(route_job_id(&event))
         .await
+        .unwrap()
         .expect("accepted event has no routing job");
     assert_eq!(route.state, WorkState::Pending);
     assert_eq!(route.max_attempts, MAX_ATTEMPTS);
@@ -133,23 +135,16 @@ async fn test_accept_event_is_idempotent_per_event() {
         .unwrap();
     assert_eq!(claimed.len(), 1, "a redelivered event was stored twice");
 
-    accept_event(store.as_ref(), b"not json", 10).await.unwrap();
-    let garbage = store
-        .get_work(WorkId(Uuid::new_v5(&ID_NAMESPACE, b"not json")))
-        .await
-        .unwrap();
-    assert!(
-        garbage.is_some(),
-        "an unreadable event was dropped instead of owned"
-    );
+    let mut other_source = event.clone();
+    other_source.source = "sid-other".into();
+    assert_ne!(route_job_id(&other_source), route_job_id(&event));
 }
 
-/// A full job store refuses the event, so the broker keeps it.
+/// A full job store refuses the event, so the bus keeps it.
 #[tokio::test]
 async fn test_accept_event_refused_when_full() {
     let store = store().await;
-    let first = serde_json::to_vec(&security_event()).unwrap();
-    let second = serde_json::to_vec(&security_event()).unwrap();
+    let (first, second) = (security_event(), security_event());
     accept_event(store.as_ref(), &first, 1).await.unwrap();
     let refused = accept_event(store.as_ref(), &second, 1).await;
     assert!(matches!(
@@ -317,9 +312,7 @@ async fn test_runner_delivers_and_alerts_dead_letters() {
     let handle = tokio::spawn(runner.run(async move { stopped.await.unwrap_or(()) }));
 
     let event = security_event();
-    accept_event(store.as_ref(), &serde_json::to_vec(&event).unwrap(), 100)
-        .await
-        .unwrap();
+    accept_event(store.as_ref(), &event, 100).await.unwrap();
 
     let alert = tokio::time::timeout(Duration::from_secs(10), alerts.recv())
         .await

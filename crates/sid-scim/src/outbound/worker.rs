@@ -1,25 +1,46 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! SCIM outbound worker.
 //!
-//! Subscribes to corporate profile/group change events and dispatches
-//! SCIM requests to configured downstream apps.
+//! Consumes corporate profile/group change events durably and dispatches
+//! SCIM requests to configured downstream apps. An event stays owed until
+//! every target has taken it or its failure is recorded in the dead-letter
+//! store.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::Utc;
 use sid_core::models::{
     AuditEntry, MutationContext, OutboundEntityType, ProfileId, ScimOutboundRecord,
     ScimOutboundTarget, ScimOutboundTargetId,
-    event::{Event, EventFilter, event_types},
+    event::{Event, RequiredReceiver, WorkRecipient, event_types},
 };
 use sid_plugin::StorageBackend;
-use sid_plugin::event_bus::EventBus;
+use sid_plugin::event_bus::{Delivery, DurableConsumer, EventBus, Settlement};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use super::client::{ScimClientError, ScimHttpClient};
 use super::mapper::{self, ScimPatchPayload};
+
+/// The receiver SCIM outbound work is addressed to.
+pub const SCIM_OUTBOUND_RECEIVER: &str = "sid-scim-outbound";
+
+/// The event types outbound provisioning acts on.
+const SCIM_EVENTS: &str = "sid.scim.*";
+
+/// When an event whose failure could not be recorded is delivered again.
+const UNRECORDED_RETRY: Duration = Duration::from_secs(30);
+
+/// Outbound provisioning as a receiver the deployment requires while
+/// targets are configured: every SCIM fact committed meanwhile is owed to it.
+pub fn required_receiver() -> RequiredReceiver {
+    RequiredReceiver {
+        recipient: WorkRecipient::new(SCIM_OUTBOUND_RECEIVER).expect("the receiver is a token"),
+        event_types: vec![SCIM_EVENTS.into()],
+    }
+}
 
 /// Outbound worker that processes events and dispatches SCIM requests.
 pub struct ScimOutboundWorker {
@@ -42,50 +63,58 @@ impl ScimOutboundWorker {
         }
     }
 
-    /// Subscribe to SCIM events and process them on a background task. A
-    /// subscription that cannot be made is returned, not logged away.
+    /// Consume the outbound work and process it on a background task. A
+    /// consumer that cannot be opened is returned, not logged away.
     pub async fn start(
         self: Arc<Self>,
     ) -> Result<tokio::task::JoinHandle<()>, sid_plugin::event_bus::EventBusError> {
-        let filter = EventFilter {
-            event_types: vec!["sid.scim.*".into()],
-            queue_group: Some("sid-scim-worker".into()),
-            ..Default::default()
-        };
-        let rx = self.event_bus.subscribe(filter).await?;
+        let receiver = required_receiver();
+        let rx = self
+            .event_bus
+            .consume(DurableConsumer {
+                recipient: receiver.recipient,
+                event_types: receiver.event_types,
+            })
+            .await?;
         info!(targets = self.targets.len(), "SCIM outbound worker started");
         Ok(tokio::spawn(self.process_events(rx)))
     }
 
-    async fn process_events(self: Arc<Self>, mut rx: mpsc::Receiver<Event>) {
-        while let Some(event) = rx.recv().await {
-            let active_targets: Vec<&ScimOutboundTarget> =
-                self.targets.iter().filter(|t| t.enabled).collect();
-
-            if active_targets.is_empty() {
-                continue;
-            }
-
-            debug!(
-                event_type = %event.event_type,
-                subject = ?event.subject,
-                "processing SCIM outbound event"
-            );
-
-            for target in &active_targets {
-                if let Err(e) = self.dispatch_to_target(target, &event).await {
-                    error!(
-                        target = %target.display_name,
-                        event_type = %event.event_type,
-                        error = %e,
-                        "SCIM outbound dispatch failed"
-                    );
-                    self.handle_dispatch_failure(target, &event, &e).await;
-                }
-            }
+    async fn process_events(self: Arc<Self>, mut rx: mpsc::Receiver<Delivery>) {
+        while let Some(delivery) = rx.recv().await {
+            let settlement = self.process(&delivery.event).await;
+            delivery.settle(settlement);
         }
 
         info!("SCIM outbound worker stopped (event channel closed)");
+    }
+
+    /// Dispatch `event` to every active target. It is settled once each
+    /// target took it or has its failure recorded; a failure that could not
+    /// be recorded leaves it owed.
+    async fn process(&self, event: &Event) -> Settlement {
+        debug!(
+            event_type = %event.event_type,
+            subject = ?event.subject,
+            "processing SCIM outbound event"
+        );
+        let mut unrecorded = false;
+        for target in self.targets.iter().filter(|t| t.enabled) {
+            if let Err(e) = self.dispatch_to_target(target, event).await {
+                error!(
+                    target = %target.display_name,
+                    event_type = %event.event_type,
+                    error = %e,
+                    "SCIM outbound dispatch failed"
+                );
+                unrecorded |= !self.handle_dispatch_failure(target, event, &e).await;
+            }
+        }
+        if unrecorded {
+            Settlement::Retry(UNRECORDED_RETRY)
+        } else {
+            Settlement::Done
+        }
     }
 
     /// Dispatch a single event to a single outbound target.
@@ -435,13 +464,15 @@ impl ScimOutboundWorker {
 
     // ── Failure handling (DLQ, error recording, sid-notify) ──
 
-    /// Handle a failed dispatch: update error tracking, save to DLQ, publish failure event.
+    /// Handle a failed dispatch: update error tracking, save to DLQ, owe the
+    /// failure event. Whether the dead letter, and with it the failure, is
+    /// recorded.
     async fn handle_dispatch_failure(
         &self,
         target: &ScimOutboundTarget,
         event: &Event,
         error: &ScimClientError,
-    ) {
+    ) -> bool {
         let now = Utc::now();
 
         // G3: Update error tracking on outbound record (if entity exists downstream).
@@ -495,7 +526,7 @@ impl ScimOutboundWorker {
 
         // The failure alert (sid-notify tells the admins) is owed by the
         // commit that stores the dead letter.
-        let failure_event = Event::new("sid-scim", "sid.scim.outbound_failed.v1")
+        let failure_event = Event::new("sid-scim", event_types::SCIM_OUTBOUND_FAILED)
             .with_subject(format!("target/{}", target.id))
             .with_data(serde_json::json!({
                 "target_name": target.display_name,
@@ -508,12 +539,16 @@ impl ScimOutboundWorker {
             &event.event_type,
         ))
         .with_work(failure_event.relay());
-        if let Err(e) = self
+        match self
             .storage
             .create_outbound_dlq_entry(&dlq_entry, ctx)
             .await
         {
-            warn!(error = %e, "failed to save DLQ entry and its alert");
+            Ok(()) => true,
+            Err(e) => {
+                warn!(error = %e, "failed to save DLQ entry and its alert");
+                false
+            }
         }
     }
 

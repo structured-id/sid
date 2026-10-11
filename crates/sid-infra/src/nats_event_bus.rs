@@ -1,30 +1,25 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! NATS JetStream event bus implementation.
 //!
-//! Production EventBus for multi-binary deployments.
-//! Uses NATS JetStream for durable, at-least-once event delivery.
+//! Production EventBus for multi-binary deployments, on the identity
+//! [`Topology`]: facts go to the retained history, addressed work to the
+//! work stream, where it stays until its receiver settles it.
 //!
 //! Connects to an embedded or external NATS server.
 
-use async_nats::jetstream::{self, Context as JsContext, stream};
+use async_nats::jetstream::{self, Context as JsContext};
 use async_trait::async_trait;
-use sid_core::models::event::{Event, EventFilter};
+use sid_core::models::WorkId;
+use sid_core::models::event::{
+    Event, EventFamily, EventFilter, EventRoute, WorkRecipient, event_route,
+};
 use sid_plugin::event_bus::{
     Delivery, DurableConsumer, EventBus, EventBusError, EventBusResult, SUBSCRIPTION_CAPACITY,
     Settlement,
 };
-use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::mpsc;
 
-/// NATS JetStream stream name for all SID events.
-const STREAM_NAME: &str = "SID_EVENTS";
-
-/// NATS subject prefix for SID events.
-/// Events are published as `sid.{category}.{action}.v1`.
-const SUBJECT_PREFIX: &str = "sid.>";
-
-/// Default max age for events in the stream (7 days).
-const DEFAULT_MAX_AGE_SECS: u64 = 7 * 24 * 60 * 60;
+use crate::nats_topology::{Topology, TopologyRole};
 
 /// How long a durable consumer may hold a delivery unsettled before it is
 /// delivered again.
@@ -44,154 +39,150 @@ const DURABLE_PULL_EXPIRES: std::time::Duration = std::time::Duration::from_secs
 const DURABLE_REOPEN: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// NATS JetStream event bus for production deployments.
-///
-/// Publishes events to JetStream stream `SID_EVENTS`.
-/// Subscribers create ephemeral consumers with filter subjects.
 pub struct NatsEventBus {
     /// NATS client connection.
     client: async_nats::Client,
     /// JetStream context for stream operations.
     jetstream: JsContext,
-    /// Consumer name counter for unique consumer names.
-    consumer_counter: AtomicU64,
+    topology: Topology,
 }
 
 impl NatsEventBus {
-    /// Connect to NATS server and ensure the events stream exists.
-    ///
-    /// Creates the `SID_EVENTS` stream if it doesn't exist,
-    /// or updates its configuration if needed.
-    pub async fn connect(nats_url: &str) -> EventBusResult<Self> {
+    /// Connect to the NATS server at `nats_url` and prepare `topology` in
+    /// `role`: the deployment's topology owner creates or updates the
+    /// streams, every other process requires them as defined.
+    pub async fn connect(
+        nats_url: &str,
+        topology: Topology,
+        role: TopologyRole,
+    ) -> EventBusResult<Self> {
         let client = async_nats::connect(nats_url)
             .await
             .map_err(|e| EventBusError::Other(format!("NATS connect failed: {e}")))?;
-
         let jetstream = jetstream::new(client.clone());
-
-        // Create or update the events stream.
-        let stream_config = stream::Config {
-            name: STREAM_NAME.to_string(),
-            subjects: vec![SUBJECT_PREFIX.to_string()],
-            max_age: std::time::Duration::from_secs(DEFAULT_MAX_AGE_SECS),
-            storage: stream::StorageType::File,
-            retention: stream::RetentionPolicy::Limits,
-            ..Default::default()
-        };
-
-        jetstream
-            .get_or_create_stream(stream_config)
+        topology
+            .prepare(&jetstream, role)
             .await
-            .map_err(|e| EventBusError::Other(format!("stream setup failed: {e}")))?;
-
+            .map_err(|e| EventBusError::Other(format!("event topology: {e}")))?;
         Ok(Self {
             client,
             jetstream,
-            consumer_counter: AtomicU64::new(0),
+            topology,
         })
     }
 
-    /// Generate a unique ephemeral consumer name.
-    fn next_consumer_name(&self) -> String {
-        let id = self.consumer_counter.fetch_add(1, Ordering::Relaxed);
-        let pid = std::process::id();
-        format!("sid-consumer-{pid}-{id}")
-    }
-
-    /// Convert EventFilter patterns to NATS subject filters.
-    ///
-    /// - `sid.user.*` → `sid.user.*` (NATS wildcard: single token)
-    /// - `sid.security.>` → `sid.security.>` (NATS wildcard: multi-token)
-    /// - exact match → exact subject
-    /// - empty filter → `sid.>` (all events)
-    fn filter_to_subjects(filter: &EventFilter) -> Vec<String> {
-        if filter.event_types.is_empty() {
-            return vec![SUBJECT_PREFIX.to_string()];
-        }
-
-        filter.event_types.to_vec()
-    }
-}
-
-#[async_trait]
-impl EventBus for NatsEventBus {
-    async fn publish(&self, event: Event) -> EventBusResult<()> {
-        let subject = event.event_type.clone();
-        let payload = serde_json::to_vec(&event)
-            .map_err(|e| EventBusError::PublishFailed(format!("serialize: {e}")))?;
-
-        // The event id travels as the message id, so JetStream drops a
-        // republished event (a retry after a lost PubAck) within its
-        // duplicate window instead of storing it twice.
+    /// Publish `payload` on `subject` with message id `id`, accepted only by
+    /// `stream`, and wait for the stream's acknowledgement.
+    async fn send(
+        &self,
+        stream: &str,
+        subject: String,
+        id: WorkId,
+        payload: Vec<u8>,
+    ) -> EventBusResult<()> {
+        // The id travels as the message id, so a republication (a retry
+        // after a lost acknowledgement) within the duplicate window is
+        // stored once; the expected stream keeps it from landing anywhere
+        // else should the subjects ever be captured by another stream.
         let message = jetstream::message::PublishMessage::build()
             .payload(payload.into())
-            .message_id(event.id.as_str());
+            .message_id(id.to_string())
+            .expected_stream(stream);
         self.jetstream
             .send_publish(subject, message)
             .await
             .map_err(|e| EventBusError::PublishFailed(format!("publish: {e}")))?
             .await
             .map_err(|e| EventBusError::PublishFailed(format!("ack: {e}")))?;
-
         Ok(())
+    }
+}
+
+/// Refuses `event` unless its route is one `accepts`.
+fn routed(event: &Event, accepts: fn(EventRoute) -> bool) -> EventBusResult<()> {
+    match event_route(&event.event_type) {
+        Some(route) if accepts(route) => Ok(()),
+        _ => Err(EventBusError::Unroutable(event.event_type.clone())),
+    }
+}
+
+/// An identity fact: the only thing kept in this bus's history.
+fn identity_fact(route: EventRoute) -> bool {
+    route == EventRoute::Fact(EventFamily::Identity)
+}
+
+/// Anything of the identity family: a fact owed to a required receiver, or
+/// work addressed to a named one.
+fn identity_work(route: EventRoute) -> bool {
+    route.family() == EventFamily::Identity
+}
+
+#[async_trait]
+impl EventBus for NatsEventBus {
+    async fn publish(&self, event: Event) -> EventBusResult<()> {
+        routed(&event, identity_fact)?;
+        let subject = self
+            .topology
+            .history_subject(&event.event_type)
+            .ok_or_else(|| EventBusError::Unroutable(event.event_type.clone()))?;
+        let payload = serde_json::to_vec(&event)
+            .map_err(|e| EventBusError::PublishFailed(format!("serialize: {e}")))?;
+        self.send(
+            &self.topology.history_stream(),
+            subject,
+            event.relay_id(),
+            payload,
+        )
+        .await
+    }
+
+    async fn deliver(
+        &self,
+        recipient: &WorkRecipient,
+        delivery: WorkId,
+        event: &Event,
+    ) -> EventBusResult<()> {
+        routed(event, identity_work)?;
+        let subject = self
+            .topology
+            .work_subject(recipient, &event.event_type)
+            .ok_or_else(|| EventBusError::Unroutable(event.event_type.clone()))?;
+        let payload = serde_json::to_vec(event)
+            .map_err(|e| EventBusError::PublishFailed(format!("serialize: {e}")))?;
+        self.send(&self.topology.work_stream(), subject, delivery, payload)
+            .await
     }
 
     async fn subscribe(&self, filter: EventFilter) -> EventBusResult<mpsc::Receiver<Event>> {
-        let subjects = Self::filter_to_subjects(&filter);
-        let consumer_name = self.next_consumer_name();
-
-        // Build filter subject config.
-        // When queue_group is set, use durable_name + deliver_group for load-balanced
-        // consumption (each event → exactly one instance in the group).
-        // When queue_group is None, use ephemeral consumer (fan-out / broadcast).
-        let (durable_name, deliver_group) = match &filter.queue_group {
-            Some(group) => {
-                // Durable name: queue group + filter hash for uniqueness per subscription type.
-                let durable = format!("{group}-{}", subjects.join("_").replace('.', "-"));
-                (Some(durable), Some(group.clone()))
-            }
-            None => (None, None),
+        let subjects = self
+            .topology
+            .history_filters(&filter.event_types)
+            .map_err(EventBusError::SubscribeFailed)?;
+        // An observer: an ephemeral consumer that sees what is published
+        // while it exists and keeps nothing for it.
+        let deliver_subject = self.client.new_inbox();
+        let config = jetstream::consumer::push::Config {
+            filter_subjects: subjects,
+            deliver_policy: jetstream::consumer::DeliverPolicy::New,
+            ack_policy: jetstream::consumer::AckPolicy::None,
+            deliver_subject,
+            ..Default::default()
         };
-
-        // Push consumers require a deliver_subject (inbox for message delivery).
-        let deliver_subject = format!("_INBOX.{}", self.next_consumer_name());
-
-        let consumer_config = if subjects.len() == 1 {
-            jetstream::consumer::push::Config {
-                filter_subject: subjects.into_iter().next().unwrap(),
-                deliver_policy: jetstream::consumer::DeliverPolicy::New,
-                deliver_subject: deliver_subject.clone(),
-                durable_name,
-                deliver_group,
-                ..Default::default()
-            }
-        } else {
-            jetstream::consumer::push::Config {
-                filter_subjects: subjects,
-                deliver_policy: jetstream::consumer::DeliverPolicy::New,
-                deliver_subject,
-                durable_name,
-                deliver_group,
-                ..Default::default()
-            }
-        };
-
         let stream = self
             .jetstream
-            .get_stream(STREAM_NAME)
+            .get_stream(self.topology.history_stream())
             .await
             .map_err(|e| EventBusError::SubscribeFailed(format!("get stream: {e}")))?;
-
-        let consumer = stream.create_consumer(consumer_config).await.map_err(|e| {
-            EventBusError::SubscribeFailed(format!("create consumer {consumer_name}: {e}"))
-        })?;
-
+        let consumer = stream
+            .create_consumer(config)
+            .await
+            .map_err(|e| EventBusError::SubscribeFailed(format!("create consumer: {e}")))?;
         let messages = consumer
             .messages()
             .await
             .map_err(|e| EventBusError::SubscribeFailed(format!("messages stream: {e}")))?;
 
         let (tx, rx) = mpsc::channel(SUBSCRIPTION_CAPACITY);
-
         // Forward NATS messages into the bounded channel: a full channel makes
         // this task wait, so a slow subscriber slows its own consumer only.
         tokio::spawn(async move {
@@ -200,60 +191,48 @@ impl EventBus for NatsEventBus {
             while let Some(Ok(msg)) = messages.next().await {
                 match serde_json::from_slice::<Event>(&msg.payload) {
                     Ok(event) => {
-                        // Validate CloudEvents required fields.
                         if let Err(e) = event.validate() {
                             tracing::warn!("invalid CloudEvents envelope, skipping: {e}");
                         } else if tx.send(event).await.is_err() {
-                            // Receiver dropped, stop consuming
                             break;
                         }
                     }
-                    Err(e) => {
-                        tracing::warn!("failed to deserialize NATS event: {e}");
-                    }
-                }
-                // Acknowledge the message.
-                if let Err(e) = msg.ack().await {
-                    tracing::warn!("failed to ack NATS message: {e}");
+                    Err(e) => tracing::warn!("failed to deserialize NATS event: {e}"),
                 }
             }
         });
-
         Ok(rx)
     }
 
     async fn consume(&self, consumer: DurableConsumer) -> EventBusResult<mpsc::Receiver<Delivery>> {
-        let subjects = Self::filter_to_subjects(&EventFilter {
-            event_types: consumer.event_types.clone(),
-            ..Default::default()
-        });
-        // One durable pull consumer per name: its position and every
-        // unsettled event outlive this process, and replicas pulling under the
-        // name share it, each event going to one of them. Pulling (rather than
-        // a push queue group, which cannot carry heartbeats) lets a lost or
-        // deleted consumer surface as an error, after which it is reopened.
+        let subjects = self
+            .topology
+            .work_filters(&consumer.recipient, &consumer.event_types)
+            .map_err(EventBusError::SubscribeFailed)?;
+        let name = consumer.recipient.to_string();
+        // One durable pull consumer per receiver: replicas pulling under the
+        // name share it, each event going to one of them. The work stream
+        // keeps an event until it is acknowledged, so a consumer created
+        // after the event, or recreated after a loss, still gets it.
+        // Pulling (rather than a push queue group, which cannot carry
+        // heartbeats) lets a lost or deleted consumer surface as an error,
+        // after which it is reopened.
         let config = jetstream::consumer::pull::Config {
-            durable_name: Some(consumer.name.clone()),
-            // Every event since the consumer was created, never only those
-            // published while a replica happens to be connected.
+            durable_name: Some(name.clone()),
             deliver_policy: jetstream::consumer::DeliverPolicy::All,
             ack_policy: jetstream::consumer::AckPolicy::Explicit,
             // A delivery not settled in time (a hung or killed consumer) is
             // delivered again; no limit, so redelivery never drops an event.
-            // The stream's own age and size limits still apply to an event
-            // nobody consumed: a producer whose effect must not be lost keeps
-            // it owed on its side until the consumer reports the effect, and
-            // publishes it again meanwhile, rather than relying on the stream.
             ack_wait: DURABLE_ACK_WAIT,
             max_deliver: -1,
             filter_subjects: subjects,
             ..Default::default()
         };
         let jetstream = self.jetstream.clone();
-        let name = consumer.name;
+        let stream = self.topology.work_stream();
         // Opened once here, so a consumer that cannot be set up is refused to
         // the caller rather than retried unseen.
-        let messages = open_durable(&jetstream, &name, &config).await?;
+        let messages = open_durable(&jetstream, &stream, &name, &config).await?;
 
         let (tx, rx) = mpsc::channel(1);
         tokio::spawn(async move {
@@ -265,10 +244,7 @@ impl EventBus for NatsEventBus {
                     Some(Ok(msg)) => msg,
                     // A missed heartbeat, a deleted consumer or an ended
                     // stream: reopen (recreating the consumer if it is gone)
-                    // until it works or the consumer is dropped. A recreated
-                    // consumer starts from the stream's oldest event again;
-                    // every consumer's effect is idempotent under its own
-                    // records.
+                    // until it works or the consumer is dropped.
                     failed => {
                         match failed {
                             Some(Err(e)) => {
@@ -276,7 +252,7 @@ impl EventBus for NatsEventBus {
                             }
                             _ => tracing::warn!(consumer = %name, "durable consumer ended"),
                         }
-                        match reopen_durable(&jetstream, &name, &config, &tx).await {
+                        match reopen_durable(&jetstream, &stream, &name, &config, &tx).await {
                             Some(reopened) => {
                                 messages = reopened;
                                 continue;
@@ -307,7 +283,7 @@ impl EventBus for NatsEventBus {
                     }
                 };
                 let acked = match &settlement {
-                    Settlement::Done => msg.ack().await,
+                    Settlement::Done => msg.double_ack().await,
                     Settlement::Retry(delay) => msg.ack_with(AckKind::Nak(Some(*delay))).await,
                     Settlement::Reject(reason) => {
                         tracing::error!(consumer = %name, "event rejected: {reason}");
@@ -330,55 +306,43 @@ impl EventBus for NatsEventBus {
         to: Option<chrono::DateTime<chrono::Utc>>,
         filter: EventFilter,
     ) -> EventBusResult<mpsc::Receiver<Event>> {
-        let subjects = Self::filter_to_subjects(&filter);
-        let deliver_subject = format!("_INBOX.replay-{}", self.next_consumer_name());
+        let subjects = self
+            .topology
+            .history_filters(&filter.event_types)
+            .map_err(EventBusError::SubscribeFailed)?;
 
-        // Ephemeral consumer with DeliverPolicy::ByStartTime for historical replay.
+        // Ephemeral consumer on the history only: replay reads facts and
+        // never hands anyone work.
         let nanos = from
             .timestamp_nanos_opt()
             .ok_or_else(|| EventBusError::InvalidReplayWindow(format!("start {from}")))?;
         let opt_start_time = time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(nanos))
             .map_err(|e| EventBusError::InvalidReplayWindow(format!("start {from}: {e}")))?;
-
-        let consumer_config = if subjects.len() == 1 {
-            jetstream::consumer::push::Config {
-                filter_subject: subjects.into_iter().next().unwrap(),
-                deliver_policy: jetstream::consumer::DeliverPolicy::ByStartTime {
-                    start_time: opt_start_time,
-                },
-                deliver_subject,
-                ..Default::default()
-            }
-        } else {
-            jetstream::consumer::push::Config {
-                filter_subjects: subjects,
-                deliver_policy: jetstream::consumer::DeliverPolicy::ByStartTime {
-                    start_time: opt_start_time,
-                },
-                deliver_subject,
-                ..Default::default()
-            }
+        let config = jetstream::consumer::push::Config {
+            filter_subjects: subjects,
+            deliver_policy: jetstream::consumer::DeliverPolicy::ByStartTime {
+                start_time: opt_start_time,
+            },
+            ack_policy: jetstream::consumer::AckPolicy::None,
+            deliver_subject: self.client.new_inbox(),
+            ..Default::default()
         };
 
         let stream = self
             .jetstream
-            .get_stream(STREAM_NAME)
+            .get_stream(self.topology.history_stream())
             .await
             .map_err(|e| EventBusError::SubscribeFailed(format!("get stream: {e}")))?;
-
         let consumer = stream
-            .create_consumer(consumer_config)
+            .create_consumer(config)
             .await
             .map_err(|e| EventBusError::SubscribeFailed(format!("create replay consumer: {e}")))?;
-
         let messages = consumer
             .messages()
             .await
             .map_err(|e| EventBusError::SubscribeFailed(format!("replay messages: {e}")))?;
 
         let (tx, rx) = mpsc::channel(SUBSCRIPTION_CAPACITY);
-        let to_cutoff = to;
-
         // Forward replayed events until `to` cutoff or stream end.
         tokio::spawn(async move {
             use futures::StreamExt;
@@ -386,32 +350,19 @@ impl EventBus for NatsEventBus {
             while let Some(Ok(msg)) = messages.next().await {
                 match serde_json::from_slice::<Event>(&msg.payload) {
                     Ok(event) => {
-                        // Stop if past the `to` cutoff.
-                        if let Some(cutoff) = to_cutoff
-                            && event.time >= cutoff
-                        {
-                            if let Err(e) = msg.ack().await {
-                                tracing::warn!("replay: failed to ack event: {e}");
-                            }
+                        if to.is_some_and(|cutoff| event.time >= cutoff) {
                             break;
                         }
-
                         if let Err(e) = event.validate() {
                             tracing::warn!("replay: invalid CloudEvents envelope, skipping: {e}");
                         } else if tx.send(event).await.is_err() {
                             break;
                         }
                     }
-                    Err(e) => {
-                        tracing::warn!("replay: failed to deserialize event: {e}");
-                    }
-                }
-                if let Err(e) = msg.ack().await {
-                    tracing::warn!("replay: failed to ack event: {e}");
+                    Err(e) => tracing::warn!("replay: failed to deserialize event: {e}"),
                 }
             }
         });
-
         Ok(rx)
     }
 
@@ -426,16 +377,18 @@ impl EventBus for NatsEventBus {
     }
 }
 
-/// The messages of the durable consumer `name`, created with `config` when
-/// it does not exist. One message is pulled at a time: a pulled message's
-/// acknowledgement deadline runs while it waits, so none waits behind another.
+/// The messages of the durable consumer `name` on `stream`, created with
+/// `config` when it does not exist. One message is pulled at a time: a
+/// pulled message's acknowledgement deadline runs while it waits, so none
+/// waits behind another.
 async fn open_durable(
     jetstream: &jetstream::Context,
+    stream: &str,
     name: &str,
     config: &jetstream::consumer::pull::Config,
 ) -> EventBusResult<jetstream::consumer::pull::Stream> {
     let stream = jetstream
-        .get_stream(STREAM_NAME)
+        .get_stream(stream)
         .await
         .map_err(|e| EventBusError::SubscribeFailed(format!("get stream: {e}")))?;
     let durable = stream
@@ -456,6 +409,7 @@ async fn open_durable(
 /// until it opens or `tx`'s receiver is dropped (`None`).
 async fn reopen_durable(
     jetstream: &jetstream::Context,
+    stream: &str,
     name: &str,
     config: &jetstream::consumer::pull::Config,
     tx: &mpsc::Sender<Delivery>,
@@ -465,81 +419,9 @@ async fn reopen_durable(
             () = tx.closed() => return None,
             () = tokio::time::sleep(DURABLE_REOPEN) => {}
         }
-        match open_durable(jetstream, name, config).await {
+        match open_durable(jetstream, stream, name, config).await {
             Ok(messages) => return Some(messages),
             Err(e) => tracing::warn!(consumer = %name, "reopen: {e}"),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_filter_to_subjects_empty() {
-        let filter = EventFilter::default();
-        let subjects = NatsEventBus::filter_to_subjects(&filter);
-        assert_eq!(subjects, vec!["sid.>"]);
-    }
-
-    #[test]
-    fn test_filter_to_subjects_exact() {
-        let filter = EventFilter {
-            event_types: vec!["sid.user.created.v1".to_string()],
-            ..Default::default()
-        };
-        let subjects = NatsEventBus::filter_to_subjects(&filter);
-        assert_eq!(subjects, vec!["sid.user.created.v1"]);
-    }
-
-    #[test]
-    fn test_filter_to_subjects_wildcard() {
-        let filter = EventFilter {
-            event_types: vec!["sid.user.*".to_string()],
-            ..Default::default()
-        };
-        let subjects = NatsEventBus::filter_to_subjects(&filter);
-        assert_eq!(subjects, vec!["sid.user.*"]);
-    }
-
-    #[test]
-    fn test_filter_to_subjects_nats_wildcard() {
-        let filter = EventFilter {
-            event_types: vec!["sid.security.>".to_string()],
-            ..Default::default()
-        };
-        let subjects = NatsEventBus::filter_to_subjects(&filter);
-        assert_eq!(subjects, vec!["sid.security.>"]);
-    }
-
-    #[test]
-    fn test_filter_to_subjects_multiple() {
-        let filter = EventFilter {
-            event_types: vec![
-                "sid.user.created.v1".to_string(),
-                "sid.security.*".to_string(),
-            ],
-            ..Default::default()
-        };
-        let subjects = NatsEventBus::filter_to_subjects(&filter);
-        assert_eq!(subjects.len(), 2);
-        assert!(subjects.contains(&"sid.user.created.v1".to_string()));
-        assert!(subjects.contains(&"sid.security.*".to_string()));
-    }
-
-    #[test]
-    fn test_consumer_name_format() {
-        let pid = std::process::id();
-        let counter = AtomicU64::new(0);
-        let id = counter.fetch_add(1, Ordering::Relaxed);
-        let name = format!("sid-consumer-{pid}-{id}");
-        assert!(name.starts_with("sid-consumer-"));
-        assert!(name.ends_with("-0"));
-
-        let id2 = counter.fetch_add(1, Ordering::Relaxed);
-        let name2 = format!("sid-consumer-{pid}-{id2}");
-        assert!(name2.ends_with("-1"));
-        assert_ne!(name, name2);
     }
 }

@@ -4,7 +4,8 @@
 //! Reads from environment variables:
 //! - `SID_NATS_URL` — NATS server URL (required, e.g., `nats://127.0.0.1:4222`)
 //! - `SID_NOTIFY_BIND` — gRPC bind address (default: `0.0.0.0:9040`)
-//! - `SID_NOTIFY_QUEUE_GROUP` — NATS queue group name (default: `sid-notify`)
+//! - `SID_NOTIFY_RECEIVER` — the receiver facts are owed to; replicas share it (default: `sid-notify`)
+//! - `SID_NATS_TOPOLOGY` and the `SID_NATS_*` bounds — the event topology, as for every SID service
 //! - `SID_NOTIFY_DATABASE_URL` — PostgreSQL URL for delivery jobs and templates (required)
 //! - `SID_NOTIFY_JOB_CAPACITY` — open jobs per kind before events stay with the broker (default: 100000)
 //! - `SID_IDENTITY_GRPC_ADDRESS` — sid-identity gRPC address for recipient resolution (optional, e.g., `http://127.0.0.1:9000`)
@@ -24,6 +25,8 @@
 
 use std::net::SocketAddr;
 
+use sid_core::models::WorkRecipient;
+
 use crate::channels::smtp::{EmailAuthMethod, SmtpConfig, SmtpTlsMode};
 use crate::channels::web_push::VapidConfig;
 
@@ -36,8 +39,9 @@ pub struct NotifyConfig {
     /// gRPC server bind address.
     pub grpc_bind: SocketAddr,
 
-    /// NATS queue group name for load-balanced consumption.
-    pub queue_group: String,
+    /// The receiver every fact is owed to as addressed work: producers name
+    /// the same one in `SID_EVENT_RECEIVERS`, and replicas share its work.
+    pub receiver: WorkRecipient,
 
     /// SMTP channel configuration.
     pub smtp: SmtpConfig,
@@ -84,8 +88,10 @@ impl NotifyConfig {
             .parse()
             .map_err(|e| ConfigError::Invalid("SID_NOTIFY_BIND", format!("{e}")))?;
 
-        let queue_group =
-            std::env::var("SID_NOTIFY_QUEUE_GROUP").unwrap_or_else(|_| "sid-notify".into());
+        let receiver = WorkRecipient::new(
+            std::env::var("SID_NOTIFY_RECEIVER").unwrap_or_else(|_| DEFAULT_RECEIVER.into()),
+        )
+        .map_err(|e| ConfigError::Invalid("SID_NOTIFY_RECEIVER", e.to_string()))?;
 
         let smtp_host = std::env::var("SID_SMTP_HOST").unwrap_or_else(|_| "localhost".into());
         let smtp_port: u16 = std::env::var("SID_SMTP_PORT")
@@ -197,7 +203,7 @@ impl NotifyConfig {
         Ok(Self {
             nats_url,
             grpc_bind,
-            queue_group,
+            receiver,
             smtp,
             smtp_enabled,
             webhook_enabled,
@@ -213,6 +219,10 @@ impl NotifyConfig {
 
 /// Open jobs per kind when `SID_NOTIFY_JOB_CAPACITY` is unset.
 pub const DEFAULT_JOB_CAPACITY: u64 = 100_000;
+
+/// The receiver when `SID_NOTIFY_RECEIVER` is unset; the producers' default
+/// receiver too.
+pub const DEFAULT_RECEIVER: &str = "sid-notify";
 
 /// Configuration error.
 #[derive(Debug, thiserror::Error)]
@@ -236,7 +246,7 @@ mod tests {
         let config = NotifyConfig {
             nats_url: "nats://127.0.0.1:4222".into(),
             grpc_bind: "0.0.0.0:9040".parse().unwrap(),
-            queue_group: "sid-notify".into(),
+            receiver: WorkRecipient::new(DEFAULT_RECEIVER).unwrap(),
             smtp: SmtpConfig::default(),
             smtp_enabled: true,
             webhook_enabled: true,
@@ -250,7 +260,7 @@ mod tests {
 
         assert_eq!(config.nats_url, "nats://127.0.0.1:4222");
         assert_eq!(config.grpc_bind.port(), 9040);
-        assert_eq!(config.queue_group, "sid-notify");
+        assert_eq!(config.receiver.as_str(), "sid-notify");
         assert_eq!(config.smtp.host, "localhost");
         assert_eq!(config.smtp.port, 587);
         assert!(config.smtp_enabled);
@@ -263,7 +273,7 @@ mod tests {
         let config = NotifyConfig {
             nats_url: "nats://127.0.0.1:4222".into(),
             grpc_bind: "0.0.0.0:9040".parse().unwrap(),
-            queue_group: "sid-notify".into(),
+            receiver: WorkRecipient::new(DEFAULT_RECEIVER).unwrap(),
             smtp: SmtpConfig::default(),
             smtp_enabled: true,
             webhook_enabled: true,
@@ -299,7 +309,7 @@ mod tests {
         let config = NotifyConfig {
             nats_url: "nats://127.0.0.1:4222".into(),
             grpc_bind: "0.0.0.0:9040".parse().unwrap(),
-            queue_group: "sid-notify".into(),
+            receiver: WorkRecipient::new(DEFAULT_RECEIVER).unwrap(),
             smtp: SmtpConfig::default(),
             smtp_enabled: false,
             webhook_enabled: false,

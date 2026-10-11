@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! sid-notify server: NATS consumer + gRPC API.
+//! sid-notify server: durable work consumer + gRPC API.
 //!
-//! Subscribes to NATS JetStream events via durable consumer with queue group,
-//! routes events through NotificationDispatcher, and exposes gRPC API for
+//! Consumes the facts owed to this service from its addressed work, routes
+//! them through NotificationDispatcher, and exposes gRPC API for
 //! template/webhook/DLQ management.
 
 use crate::channels::smtp::SmtpChannel;
@@ -16,8 +16,6 @@ use crate::routing::RoutingTable;
 use crate::template::TemplateEngine;
 use crate::template_store::TemplateStore;
 
-use async_nats::jetstream::{self, consumer, stream};
-use futures::StreamExt;
 use sid_authn::caller::{Caller, authenticate};
 use sid_authn::jwt::TokenVerifier;
 use sid_authn::revocation_cache::RevocationCache;
@@ -35,12 +33,6 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tonic::transport::Server as TonicServer;
 use tracing::{error, info, warn};
-
-/// NATS JetStream stream name for SID events.
-const STREAM_NAME: &str = "SID_EVENTS";
-
-/// NATS subject filter — all SID events.
-const SUBJECT_FILTER: &str = "sid.>";
 
 /// Notification server combining NATS consumer and gRPC API.
 pub struct NotifyServer {
@@ -160,58 +152,20 @@ impl NotifyServer {
         let drain = sid_serve::shutdown::drain_interval_from_env()?;
         let (stopper, stopped) = sid_serve::stop_signal();
 
-        // Connect to NATS.
-        let nats_client = async_nats::connect(&self.config.nats_url).await?;
-        let jetstream = jetstream::new(nats_client);
-        info!(url = %self.config.nats_url, "Connected to NATS");
-
-        // Ensure the SID_EVENTS stream exists.
-        jetstream
-            .get_or_create_stream(stream::Config {
-                name: STREAM_NAME.to_string(),
-                subjects: vec![SUBJECT_FILTER.to_string()],
-                max_age: std::time::Duration::from_secs(7 * 24 * 60 * 60),
-                storage: stream::StorageType::File,
-                retention: stream::RetentionPolicy::Limits,
-                ..Default::default()
-            })
-            .await?;
-
-        // Create durable consumer with queue group for load-balanced processing.
-        let stream = jetstream.get_stream(STREAM_NAME).await?;
-        let durable_name = format!(
-            "{}-{}",
-            self.config.queue_group,
-            SUBJECT_FILTER.replace('.', "-")
+        // The deployment prepares the event topology; this service requires
+        // it as defined unless it is named the owner.
+        let bus: Arc<dyn sid_plugin::EventBus> = Arc::new(
+            sid_infra::NatsEventBus::connect(
+                &self.config.nats_url,
+                sid_infra::Topology::from_env()?,
+                sid_infra::TopologyRole::from_env(sid_infra::TopologyRole::Verify)?,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("NATS event bus: {e}"))?,
         );
-        let deliver_subject = format!("_INBOX.sid-notify.{}", std::process::id());
-
-        // A new durable consumer starts from the stream's first event: events
-        // published before this service first ran are owed to it too.
-        let nats_consumer = stream
-            .create_consumer(consumer::push::Config {
-                filter_subject: SUBJECT_FILTER.to_string(),
-                deliver_policy: consumer::DeliverPolicy::All,
-                ack_policy: consumer::AckPolicy::Explicit,
-                deliver_subject,
-                durable_name: Some(durable_name.clone()),
-                deliver_group: Some(self.config.queue_group.clone()),
-                ..Default::default()
-            })
-            .await?;
-
-        info!(
-            durable = %durable_name,
-            group = %self.config.queue_group,
-            "NATS JetStream consumer created"
-        );
+        info!(url = %self.config.nats_url, receiver = %self.config.receiver, "Connected to NATS");
 
         // Delivery jobs run in this process under leases shared with every replica.
-        let bus: Arc<dyn sid_plugin::EventBus> = Arc::new(
-            sid_infra::NatsEventBus::connect(&self.config.nats_url)
-                .await
-                .map_err(|e| anyhow::anyhow!("NATS event bus: {e}"))?,
-        );
         let handlers: Vec<Arc<dyn WorkHandler>> = vec![
             Arc::new(delivery::RouteHandler::new(
                 self.routing.clone(),
@@ -220,7 +174,7 @@ impl NotifyServer {
                 self.config.job_capacity,
             )),
             Arc::new(delivery::DeliverHandler::new(self.dispatcher.clone())),
-            Arc::new(delivery::DlqAlertHandler::new(bus)),
+            Arc::new(delivery::DlqAlertHandler::new(Arc::clone(&bus))),
         ];
         let worker = format!("sid-notify-{}-{}", std::process::id(), uuid::Uuid::now_v7());
         let runner = WorkRunner::new(
@@ -233,44 +187,27 @@ impl NotifyServer {
         let waker = runner.waker();
         let runner_handle = tokio::spawn(runner.run(stopped.clone().wait()));
 
-        // An event is acknowledged only once its routing job is stored; until
-        // then the broker keeps it and redelivers.
+        // Every fact is owed to this service as addressed work, kept by the
+        // bus until settled; an event is settled only once its routing job is
+        // stored, and stays with the bus otherwise.
         let jobs = Arc::clone(&self.jobs);
         let capacity = self.config.job_capacity;
+        let receiver = self.config.receiver.clone();
+        let consumer_bus = bus;
         let consumer_stopped = stopped.clone().wait();
         let consumer_handle = tokio::spawn(async move {
-            tokio::pin!(consumer_stopped);
-            let messages = match nats_consumer.messages().await {
-                Ok(m) => m,
-                Err(e) => {
-                    error!("Failed to start NATS message stream: {e}");
-                    return;
-                }
-            };
-
-            let mut messages = messages;
-            loop {
-                tokio::select! {
-                    msg = messages.next() => {
-                        match msg {
-                            Some(Ok(msg)) => {
-                                delivery::accept_message(jobs.as_ref(), capacity, &msg).await;
-                                waker.wake();
-                            }
-                            Some(Err(e)) => {
-                                warn!("NATS message error: {e}");
-                            }
-                            None => {
-                                info!("NATS message stream ended");
-                                break;
-                            }
-                        }
-                    }
-                    () = &mut consumer_stopped => {
-                        info!("NATS consumer shutting down");
-                        break;
-                    }
-                }
+            let consumed = delivery::consume_work(
+                consumer_bus.as_ref(),
+                receiver,
+                jobs.as_ref(),
+                capacity,
+                || waker.wake(),
+                consumer_stopped,
+            )
+            .await;
+            match consumed {
+                Ok(()) => info!("notification work consumer stopped"),
+                Err(e) => error!("notification work cannot be consumed: {e}"),
             }
         });
 

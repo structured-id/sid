@@ -1,21 +1,21 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! The relayed cleanup between a credential authority and a separate
 //! evaluator. The credential authority owes an aborted first enrollment's
-//! and a deleted owner's cleanup as an event relayed with the decision that
-//! made it. The evaluator consumes those events durably and acts on each (it
-//! reclaims the enrollment's key, or destroys the owner's keys), reports the
-//! settlement, and only then acknowledges the event; both effects are
+//! and a deleted owner's cleanup as an event addressed to its evaluator,
+//! committed with the decision that made it. The evaluator consumes those
+//! events durably and acts on each (it reclaims the enrollment's key, or
+//! destroys the owner's keys), addresses the settlement back to the
+//! authority, and only then acknowledges the event; both effects are
 //! idempotent in its store. The credential authority records the
 //! settlements it consumes and keeps each cleanup owed, relaying it again,
-//! until its settlement is recorded: an event lost to the stream's limits
-//! or an evaluator outage is never lost to the obligation. A standalone
-//! installation does neither: its evaluator runs in process and is told
-//! directly.
+//! until its settlement is recorded: the settlement, not the handoff,
+//! establishes that the keys are gone. A standalone installation does
+//! neither: its evaluator runs in process and is told directly.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use sid_core::models::event::{Event, event_types};
+use sid_core::models::event::{Event, WorkRecipient, event_types};
 use sid_core::models::{
     AuditEntry, CLEANUP_SETTLED_NAMESPACE, CleanupSettled, EnrollmentAdmission, EnrollmentCleanup,
     MutationContext, OperationCompletion, OwnerPurge, RelayedCleanup,
@@ -30,26 +30,25 @@ use super::HistoryEvaluation;
 const CONSUMER_AUTHORITY_NAMESPACE: uuid::Uuid =
     uuid::Uuid::from_u128(0x71c4_2e9a_5b03_4f68_a2d7_c815_3e6f_09b4);
 
-/// A durable consumer's name for credential authority `authority`: every
-/// replica serving that authority shares it, and deployments of different
-/// authorities on one bus each get their own copy of every event rather than
-/// sharing, and rejecting, each other's. The tag keeps the name within the
-/// characters a consumer name allows.
-fn consumer_name(prefix: &str, authority: &str) -> String {
+/// A receiver for credential authority `authority`: every replica serving
+/// that authority shares it, and deployments of different authorities on
+/// one bus each have their own rather than sharing, and rejecting, each
+/// other's work. The tag keeps the name within an address token.
+fn receiver(prefix: &str, authority: &str) -> WorkRecipient {
     let tag = uuid::Uuid::new_v5(&CONSUMER_AUTHORITY_NAMESPACE, authority.as_bytes());
-    format!("{prefix}-{}", tag.simple())
+    WorkRecipient::new(format!("{prefix}-{}", tag.simple())).expect("a tagged prefix is a token")
 }
 
-/// The durable consumer every replica of a separate evaluator serving
-/// `authority` shares.
-pub fn cleanup_consumer(authority: &str) -> String {
-    consumer_name("password-history-evaluator-cleanup", authority)
+/// The separate evaluator serving `authority`: the cleanup is addressed
+/// to it.
+pub fn cleanup_consumer(authority: &str) -> WorkRecipient {
+    receiver("password-history-evaluator-cleanup", authority)
 }
 
-/// The durable consumer every replica of credential authority `authority`
-/// shares, with a separate evaluator.
-pub fn settlement_consumer(authority: &str) -> String {
-    consumer_name("password-history-cleanup-settlements", authority)
+/// Credential authority `authority`, with a separate evaluator: the
+/// settlements are addressed to it.
+pub fn settlement_consumer(authority: &str) -> WorkRecipient {
+    receiver("password-history-cleanup-settlements", authority)
 }
 
 /// The method a recorded settlement carries.
@@ -107,7 +106,7 @@ pub async fn consume_cleanup_settlements(
 ) -> EventBusResult<()> {
     let mut deliveries = bus
         .consume(DurableConsumer {
-            name: settlement_consumer(authority),
+            recipient: settlement_consumer(authority),
             event_types: vec![event_types::PASSWORD_HISTORY_CLEANUP_SETTLED.into()],
         })
         .await?;
@@ -153,7 +152,7 @@ pub async fn consume_relayed_cleanup(
 ) -> EventBusResult<()> {
     let mut deliveries = bus
         .consume(DurableConsumer {
-            name: cleanup_consumer(source),
+            recipient: cleanup_consumer(source),
             event_types: vec![
                 event_types::PASSWORD_HISTORY_ENROLLMENT_ABORTED.into(),
                 event_types::PASSWORD_HISTORY_OWNER_PURGED.into(),
@@ -193,13 +192,17 @@ async fn report(
         event_types::PASSWORD_HISTORY_CLEANUP_SETTLED,
     )
     .with_data(serde_json::to_value(&settled).expect("a settlement serializes"));
-    // One per cleanup: a repeated report is the same event.
+    // One per cleanup: a repeated report is the same event and the same
+    // handoff. Its owner until the bus accepts it is the cleanup event this
+    // evaluator has not yet acknowledged.
     event.id = uuid::Uuid::new_v5(
         &SETTLED_EVENT_NAMESPACE,
         cleanup.settlement_key().as_str().as_bytes(),
     )
     .to_string();
-    bus.publish(event).await
+    let authority = settlement_consumer(authority);
+    bus.deliver(&authority, event.delivery_id(&authority), &event)
+        .await
 }
 
 /// What acting on `event` came to, and the cleanup it settled.

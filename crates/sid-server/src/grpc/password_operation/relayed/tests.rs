@@ -10,29 +10,42 @@ use tokio::sync::mpsc;
 const AUTHORITY: &str = "sid-credentials.sid.example.com";
 
 /// A bus handing the consumer the deliveries a test feeds it and keeping
-/// what is published, or refusing every publish.
+/// what is addressed to the credential authority, or refusing every handoff.
 struct Feed {
     deliveries: std::sync::Mutex<Option<mpsc::Receiver<Delivery>>>,
     published: Arc<std::sync::Mutex<Vec<Event>>>,
     publishes: bool,
     /// The durable consumer the consumer under test must open.
-    consumer: String,
+    consumer: WorkRecipient,
 }
 
 #[tonic::async_trait]
 impl EventBus for Feed {
     async fn publish(&self, event: Event) -> EventBusResult<()> {
+        panic!(
+            "{} went to history instead of its receiver",
+            event.event_type
+        )
+    }
+    async fn deliver(
+        &self,
+        recipient: &WorkRecipient,
+        delivery: sid_core::models::WorkId,
+        event: &Event,
+    ) -> EventBusResult<()> {
         if !self.publishes {
             return Err(EventBusError::NotConnected);
         }
-        self.published.lock().unwrap().push(event);
+        assert_eq!(*recipient, settlement_consumer(AUTHORITY));
+        assert_eq!(delivery, event.delivery_id(recipient));
+        self.published.lock().unwrap().push(event.clone());
         Ok(())
     }
     async fn subscribe(&self, _: EventFilter) -> EventBusResult<mpsc::Receiver<Event>> {
         Err(EventBusError::NotConnected)
     }
     async fn consume(&self, consumer: DurableConsumer) -> EventBusResult<mpsc::Receiver<Delivery>> {
-        assert_eq!(consumer.name, self.consumer);
+        assert_eq!(consumer.recipient, self.consumer);
         Ok(self
             .deliveries
             .lock()
@@ -49,7 +62,7 @@ impl EventBus for Feed {
 /// durable consumer `name`, as the bus does; how each was settled, and what
 /// the consumer published.
 async fn feed<F, Fut>(
-    name: String,
+    name: WorkRecipient,
     events: Vec<Event>,
     publishes: bool,
     run: F,
@@ -253,22 +266,15 @@ async fn the_authority_records_its_own_settlements() {
     assert!(settled_in(storage.as_ref(), &cleanup).await);
 }
 
-/// Each authority's consumers are its own: authorities sharing a bus get a
-/// copy of every event each, instead of splitting one consumer's events and
-/// rejecting the other's. The names stay within a consumer name's characters.
+/// Each authority's receivers are its own: authorities sharing a bus each
+/// get their own work, instead of splitting one receiver's events and
+/// rejecting the other's.
 #[test]
 fn durable_consumers_are_scoped_by_authority() {
     let other = "sid-credentials.other.example.com";
     for name in [cleanup_consumer, settlement_consumer] {
         assert_eq!(name(AUTHORITY), name(AUTHORITY));
         assert_ne!(name(AUTHORITY), name(other));
-        assert!(
-            name(AUTHORITY)
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-'),
-            "{}",
-            name(AUTHORITY)
-        );
     }
     assert_ne!(cleanup_consumer(AUTHORITY), settlement_consumer(AUTHORITY));
 }
