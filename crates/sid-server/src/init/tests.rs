@@ -2,13 +2,18 @@
 
 use super::*;
 
-/// Unset owes every fact to the notification service; a list names each
-/// receiver, `none` names none, and a name that is not an address token
-/// stops startup instead of being dropped.
+/// The bundled bus serves the single-binary installation, which runs no
+/// separate receiver: unset owes facts to nobody there, rather than to an
+/// absent service whose work would pile up. On an external bus the receivers
+/// are part of the deployment: unset stops startup instead of guessing. A
+/// list names each receiver, `none` names none, and a name that is not an
+/// address token stops startup instead of being dropped.
 #[test]
 fn required_receivers_from_setting() {
-    let names = |setting| {
-        required_receivers(setting)
+    use crate::embedded_nats::EventBusMode;
+    let external = EventBusMode::External("nats://nats.sid.example.com:4222".into());
+    let names = |mode: &EventBusMode, setting| {
+        required_receivers(mode, setting)
             .unwrap()
             .into_iter()
             .map(|r| {
@@ -17,15 +22,33 @@ fn required_receivers_from_setting() {
             })
             .collect::<Vec<_>>()
     };
-    assert_eq!(names(None), ["sid-notify"]);
-    assert_eq!(names(Some(" ")), ["sid-notify"]);
-    assert_eq!(names(Some("none")), Vec::<String>::new());
+    assert_eq!(names(&EventBusMode::Embedded, None), Vec::<String>::new());
     assert_eq!(
-        names(Some("sid-notify, audit-sink")),
+        names(&EventBusMode::Embedded, Some(" ")),
+        Vec::<String>::new()
+    );
+    assert!(
+        required_receivers(&external, None).is_err(),
+        "external unset"
+    );
+    assert!(
+        required_receivers(&external, Some("")).is_err(),
+        "external empty"
+    );
+    assert_eq!(names(&external, Some("none")), Vec::<String>::new());
+    assert_eq!(
+        names(&external, Some("sid-notify, audit-sink")),
         ["sid-notify", "audit-sink"]
     );
+    assert_eq!(
+        names(&EventBusMode::Embedded, Some("sid-notify")),
+        ["sid-notify"]
+    );
     for invalid in ["sid.notify", "a,,b", "sid-notify,*"] {
-        assert!(required_receivers(Some(invalid)).is_err(), "{invalid}");
+        assert!(
+            required_receivers(&external, Some(invalid)).is_err(),
+            "{invalid}"
+        );
     }
 }
 

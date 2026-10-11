@@ -10,8 +10,9 @@
 //!   A message stays until its receiver's consumer settles it, whether or
 //!   not that consumer exists yet; nobody purges or deletes it.
 //!
-//! One owner per deployment creates and updates these streams; every other
-//! producer and consumer verifies them and is not ready while they differ.
+//! One owner per deployment creates these streams; every process, the owner
+//! included, verifies existing ones and is not ready while they differ.
+//! Nothing here changes a stream that exists.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -33,8 +34,8 @@ const TYPE_PREFIX: &str = "sid.";
 /// Who may create and change the streams.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TopologyRole {
-    /// The deployment's topology owner: creates missing streams and brings
-    /// those of an older version up to this one.
+    /// The deployment's topology owner: creates missing streams. An
+    /// existing stream must already be as defined; it is never changed.
     Own,
     /// Any other producer or consumer: the streams must already be as
     /// defined here.
@@ -238,6 +239,12 @@ impl Topology {
             storage: stream::StorageType::File,
             // Age never removes work; only its receiver's settlement does.
             max_age: Duration::ZERO,
+            // The duplicate window stays the server's: it only spares a quick
+            // republication. A handoff repeated after it (a crash between the
+            // broker's acknowledgement and the producer recording it) arrives
+            // again with the same delivery id, and every receiver keys what it
+            // stores by that id (a routing job, a dispatch job, a settlement),
+            // so it takes effect once however late it comes.
             max_messages: self.work_max_messages,
             max_bytes: self.work_max_bytes,
             discard: stream::DiscardPolicy::New,
@@ -299,7 +306,7 @@ fn filters(prefix: &str, patterns: &[String]) -> Result<Vec<String>, String> {
 /// The definition's fields that decide retention and placement, as the
 /// server reports them, compared with what the topology requires.
 fn differs(found: &stream::Config, wanted: &stream::Config) -> Option<String> {
-    let checks: [(&str, bool); 10] = [
+    let checks: [(&str, bool); 12] = [
         ("subjects", found.subjects != wanted.subjects),
         ("retention", found.retention != wanted.retention),
         ("storage", found.storage != wanted.storage),
@@ -309,6 +316,12 @@ fn differs(found: &stream::Config, wanted: &stream::Config) -> Option<String> {
         ("discard", found.discard != wanted.discard),
         ("deny_delete", found.deny_delete != wanted.deny_delete),
         ("deny_purge", found.deny_purge != wanted.deny_purge),
+        // Either would remove a message nobody settled.
+        (
+            "allow_message_ttl",
+            found.allow_message_ttl != wanted.allow_message_ttl,
+        ),
+        ("allow_rollup", found.allow_rollup != wanted.allow_rollup),
         ("replicas", found.num_replicas != wanted.num_replicas),
     ];
     let differing: Vec<&str> = checks
@@ -381,15 +394,14 @@ async fn prepare_stream(
             found: version,
         });
     }
+    // An existing stream is never changed here, by the owner either: a
+    // stream definition cannot be compared and swapped atomically, so a
+    // stale owner reading before a newer one wrote could roll it back.
+    // Moving to another definition is a transition of its own.
     let current = version == TOPOLOGY_VERSION.to_string();
-    match (differs(&found, &wanted), role) {
-        (None, _) if current => Ok(()),
-        (_, TopologyRole::Own) => js
-            .update_stream(wanted.clone())
-            .await
-            .map(drop)
-            .map_err(|e| TopologyError::Nats(format!("update {}: {e}", wanted.name))),
-        (reason, TopologyRole::Verify) => Err(TopologyError::NotReady {
+    match differs(&found, &wanted) {
+        None if current => Ok(()),
+        reason => Err(TopologyError::NotReady {
             stream: wanted.name,
             reason: reason.unwrap_or_else(|| format!("topology version {version:?}")),
         }),

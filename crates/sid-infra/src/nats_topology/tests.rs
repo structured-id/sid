@@ -79,6 +79,19 @@ fn test_stream_definitions() {
     assert_eq!(differs(&aged, &work).as_deref(), Some("max_age"));
 }
 
+/// Every control that can remove a message unsettled is part of the
+/// definition: a stream that allows per-message TTL or rollup differs.
+#[test]
+fn test_removal_controls_are_compared() {
+    let work = Topology::default().work_config();
+    let mut ttl = work.clone();
+    ttl.allow_message_ttl = true;
+    assert_eq!(differs(&ttl, &work).as_deref(), Some("allow_message_ttl"));
+    let mut rollup = work.clone();
+    rollup.allow_rollup = true;
+    assert_eq!(differs(&rollup, &work).as_deref(), Some("allow_rollup"));
+}
+
 /// A subject root is one token; stream names follow it.
 #[test]
 fn test_root_is_one_token() {

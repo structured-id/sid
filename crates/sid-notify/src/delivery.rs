@@ -2,12 +2,13 @@
 //! Durable ownership of notification delivery.
 //!
 //! Every committed fact is owed to this service as addressed work; an
-//! inbound event is accepted by storing a routing job before it is settled. The routing job resolves the recipient and stores
-//! one delivery job per (template, channel), each with a stable id so a
-//! repeated fan-out creates nothing twice. Delivery jobs record receipts,
-//! ambiguous attempts and failures; work that ends failed commits its
-//! dead-letter alert in the same transaction, and the alert job publishes
-//! `sid.notify.dlq.v1`.
+//! inbound event is accepted by storing a routing job before it is settled.
+//! The routing job resolves the recipient and stores one delivery job per
+//! (template, channel), each with a stable id so a repeated fan-out creates
+//! nothing twice. Delivery jobs record receipts, ambiguous attempts and
+//! failures; work that ends failed commits, in the same transaction, the
+//! relay of its `sid.notify.dlq.v1` fact, which is owed and published as
+//! every fact is.
 
 use crate::dispatcher::NotificationDispatcher;
 use crate::recipient_resolver::{RecipientResolver, ResolveError};
@@ -17,11 +18,12 @@ use serde::{Deserialize, Serialize};
 use sid_authn::work_runner::{RetrySchedule, WorkHandler, WorkOutcome};
 use sid_core::models::event::{Event, WorkRecipient, event_types};
 use sid_core::models::{ClaimedWork, NewWork, WorkId, WorkKind};
-use sid_plugin::event_bus::{DurableConsumer, EventBusResult, Settlement};
+use sid_plugin::event_bus::{Delivery, DurableConsumer, EventBusResult, Settlement};
 use sid_plugin::notification::{DeliveryError, NotificationPriority, Recipient};
 use sid_plugin::{EventBus, WorkStore};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 /// Namespace of the stable ids this service derives for its jobs.
@@ -31,8 +33,6 @@ const ID_NAMESPACE: Uuid = Uuid::from_u128(0x5f0d_2c8e_6a41_4b7c_9e13_7d2a_0c64_
 pub const ROUTE: &str = "notify.route";
 /// One delivery: an event rendered through one template to one channel.
 pub const DELIVER: &str = "notify.deliver";
-/// Publishing the alert for a job that ended failed.
-pub const DLQ_ALERT: &str = "notify.dlq_alert";
 
 /// Attempts per job, the first immediate and then the delays below.
 pub const MAX_ATTEMPTS: u32 = 7;
@@ -82,33 +82,38 @@ pub async fn accept_event(
 /// accepted (the job store is down or full).
 pub const REDELIVER_AFTER: Duration = Duration::from_secs(5);
 
-/// Consume the work addressed to `recipient` on `bus` until the bus ends the
-/// consumer or `stop` resolves. Each event is settled only once its routing
-/// job is stored, and left with the bus (delivered again later) otherwise;
-/// `accepted` runs after each stored one. Replicas consuming as the same
-/// receiver share its work.
-pub async fn consume_work(
+/// Open the durable consumer of the work addressed to `recipient` on `bus`.
+/// Replicas consuming as the same receiver share its work.
+pub async fn open_work(
     bus: &dyn EventBus,
     recipient: WorkRecipient,
+) -> EventBusResult<mpsc::Receiver<Delivery>> {
+    bus.consume(DurableConsumer {
+        recipient,
+        event_types: Vec::new(),
+    })
+    .await
+}
+
+/// Accept `deliveries` until the bus ends the consumer or `stop` resolves.
+/// Each event is settled only once its routing job is stored, and left with
+/// the bus (delivered again later) otherwise; `accepted` runs after each
+/// stored one.
+pub async fn accept_work(
+    mut deliveries: mpsc::Receiver<Delivery>,
     store: &dyn WorkStore,
     capacity: u64,
     accepted: impl Fn(),
     stop: impl std::future::Future<Output = ()>,
-) -> EventBusResult<()> {
-    let mut deliveries = bus
-        .consume(DurableConsumer {
-            recipient,
-            event_types: Vec::new(),
-        })
-        .await?;
+) {
     tokio::pin!(stop);
     loop {
         let delivery = tokio::select! {
             delivery = deliveries.recv() => match delivery {
                 Some(delivery) => delivery,
-                None => return Ok(()),
+                None => return,
             },
-            () = &mut stop => return Ok(()),
+            () = &mut stop => return,
         };
         match accept_event(store, &delivery.event, capacity).await {
             Ok(()) => {
@@ -133,18 +138,18 @@ struct DeliveryJob {
     recipient: Recipient,
 }
 
-/// The dead-letter alert for `work`, one per failed job.
+/// The relay of the dead-letter fact for `work`, one per failed job: its
+/// event id follows from the job, so a repeated failure owes nothing new.
 fn dead_letter(work: &ClaimedWork, error: &str) -> Option<NewWork> {
-    let alert = serde_json::json!({
-        "work_id": work.id.to_string(),
-        "kind": work.kind.as_str(),
-        "attempts": work.attempt,
-        "error": error,
-    });
-    let mut job = NewWork::new(kind(DLQ_ALERT), alert.to_string().into_bytes());
-    job.id = stable_id(&format!("dlq:{}", work.id));
-    job.max_attempts = MAX_ATTEMPTS;
-    Some(job)
+    let mut event =
+        Event::new("sid-notify", event_types::NOTIFY_DLQ).with_data(serde_json::json!({
+            "work_id": work.id.to_string(),
+            "kind": work.kind.as_str(),
+            "attempts": work.attempt,
+            "error": error,
+        }));
+    event.id = stable_id(&format!("dlq:{}", work.id)).to_string();
+    Some(event.relay())
 }
 
 /// Routes an accepted event into delivery jobs.
@@ -317,53 +322,6 @@ fn outcome_of(error: &DeliveryError) -> WorkOutcome {
         | DeliveryError::InvalidRecipient(_)
         | DeliveryError::Rejected(_)
         | DeliveryError::NotConfigured => WorkOutcome::Permanent(text),
-    }
-}
-
-/// Publishes the alert for a job that ended failed.
-pub struct DlqAlertHandler {
-    kind: WorkKind,
-    bus: Arc<dyn EventBus>,
-}
-
-impl DlqAlertHandler {
-    pub fn new(bus: Arc<dyn EventBus>) -> Self {
-        Self {
-            kind: kind(DLQ_ALERT),
-            bus,
-        }
-    }
-}
-
-#[async_trait]
-impl WorkHandler for DlqAlertHandler {
-    fn kind(&self) -> &WorkKind {
-        &self.kind
-    }
-
-    fn retry_schedule(&self) -> RetrySchedule {
-        RETRY
-    }
-
-    /// The failed job itself stays recorded; an alert about an alert would
-    /// only repeat the same broker outage.
-    fn on_dead(&self, _work: &ClaimedWork, _error: &str) -> Option<NewWork> {
-        None
-    }
-
-    async fn handle(&self, work: &ClaimedWork) -> WorkOutcome {
-        let data = match serde_json::from_slice::<serde_json::Value>(&work.payload) {
-            Ok(data) => data,
-            Err(e) => return WorkOutcome::Permanent(format!("malformed alert: {e}")),
-        };
-        let mut event = Event::new("sid-notify", event_types::NOTIFY_DLQ).with_data(data);
-        // The alert job's id is the event id, so a republished alert is
-        // dropped by the broker's duplicate window.
-        event.id = work.id.to_string();
-        match self.bus.publish(event).await {
-            Ok(()) => WorkOutcome::Done(None),
-            Err(e) => WorkOutcome::Retry(e.to_string()),
-        }
     }
 }
 

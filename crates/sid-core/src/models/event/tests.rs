@@ -115,6 +115,25 @@ fn test_delivery_work_is_per_event_and_receiver() {
     assert_eq!(back.event.id, event.id);
 }
 
+/// A plan is one per fact whatever receivers it names, so the store keeps
+/// the first written; it carries the event and the receivers it was given.
+#[test]
+fn test_fanout_plan_is_one_per_fact() {
+    let event = Event::new("src", event_types::USER_CREATED);
+    let first = event.fanout(&[recipient("sid-notify")]);
+    let other = event.fanout(&[recipient("audit-sink")]);
+    assert_eq!(first.kind.as_str(), EVENT_FANOUT_KIND);
+    assert_eq!(first.id, other.id, "the plan id follows the receivers");
+    assert_ne!(first.id, event.relay().id);
+    assert_ne!(
+        first.id,
+        Event::new("src", event_types::USER_CREATED).fanout(&[]).id
+    );
+    let plan: EventFanout = serde_json::from_slice(&first.payload).unwrap();
+    assert_eq!(plan.event.id, event.id);
+    assert_eq!(plan.receivers, [recipient("sid-notify")]);
+}
+
 /// A receiver name is a transport address token; anything that could widen
 /// or split an address is refused, including when read back.
 #[test]

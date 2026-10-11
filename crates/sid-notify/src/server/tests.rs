@@ -6,6 +6,7 @@ fn test_config() -> NotifyConfig {
         nats_url: "nats://127.0.0.1:4222".into(),
         grpc_bind: "127.0.0.1:0".parse().unwrap(),
         receiver: sid_core::models::WorkRecipient::new(crate::config::DEFAULT_RECEIVER).unwrap(),
+        event_receivers: Vec::new(),
         smtp: SmtpConfig::default(),
         smtp_enabled: true,
         webhook_enabled: true,

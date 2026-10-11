@@ -23,6 +23,14 @@ pub const EVENT_RELAY_KIND: &str = "event.relay";
 /// Work kind handing an event to one addressed receiver.
 pub const EVENT_DELIVERY_KIND: &str = "event.deliver";
 
+/// Work kind carrying a relayed fact's fixed plan: the receivers it is owed
+/// to, then its history publication.
+pub const EVENT_FANOUT_KIND: &str = "event.fanout";
+
+/// Namespace of fan-out plan ids, one per relayed fact.
+const EVENT_FANOUT_NAMESPACE: uuid::Uuid =
+    uuid::Uuid::from_u128(0x5e81_c3a0_2d74_4b9f_86e1_0af2_93c7_4d58);
+
 /// Relay attempts before the event is recorded failed: with the relay's
 /// schedule this outlasts a broker outage of more than a day.
 pub const EVENT_RELAY_ATTEMPTS: u32 = 40;
@@ -160,6 +168,24 @@ pub struct RequiredReceiver {
 }
 
 impl RequiredReceiver {
+    /// The receivers a deployment lists (comma-separated names, or `none`),
+    /// each owed every fact: its own routing decides what it acts on. A name
+    /// that is not an address token, or an empty one, is refused.
+    pub fn parse_list(list: &str) -> crate::Result<Vec<Self>> {
+        match list.trim() {
+            "none" => Ok(Vec::new()),
+            list => list
+                .split(',')
+                .map(|name| {
+                    WorkRecipient::new(name.trim()).map(|recipient| Self {
+                        recipient,
+                        event_types: Vec::new(),
+                    })
+                })
+                .collect(),
+        }
+    }
+
     pub fn requires(&self, event_type: &str) -> bool {
         self.event_types.is_empty()
             || self
@@ -167,6 +193,14 @@ impl RequiredReceiver {
                 .iter()
                 .any(|pattern| type_matches(pattern, event_type))
     }
+}
+
+/// The input of [`EVENT_FANOUT_KIND`] work: a fact and the receivers it is
+/// owed to, fixed when the plan is first stored.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventFanout {
+    pub event: Event,
+    pub receivers: Vec<WorkRecipient>,
 }
 
 /// The input of [`EVENT_DELIVERY_KIND`] work: one event for one receiver.
@@ -308,6 +342,31 @@ impl Event {
             &EVENT_RELAY_NAMESPACE,
             &identity_key(&[self.source.as_bytes(), self.id.as_bytes()]),
         ))
+    }
+
+    /// The fan-out plan owing this fact to `receivers`. Its id follows from
+    /// the event alone, not from the receivers, so the store keeps the plan
+    /// first written: a retry under another configuration changes nothing.
+    pub fn fanout(&self, receivers: &[WorkRecipient]) -> NewWork {
+        /// [`EventFanout`] as written, borrowing what it carries.
+        #[derive(Serialize)]
+        struct Written<'a> {
+            event: &'a Event,
+            receivers: &'a [WorkRecipient],
+        }
+        let kind = WorkKind::new(EVENT_FANOUT_KIND).expect("the fan-out kind is valid");
+        let payload = serde_json::to_vec(&Written {
+            event: self,
+            receivers,
+        })
+        .expect("a plan serializes");
+        let mut work = NewWork::new(kind, payload);
+        work.id = WorkId(uuid::Uuid::new_v5(
+            &EVENT_FANOUT_NAMESPACE,
+            self.relay_id().0.as_bytes(),
+        ));
+        work.max_attempts = EVENT_RELAY_ATTEMPTS;
+        work
     }
 
     /// The stable identity of this event's handoff to `recipient`: the same

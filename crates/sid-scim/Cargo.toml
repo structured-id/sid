@@ -25,7 +25,7 @@ tokio = { workspace = true, features = ["time", "sync"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-sid-storage = { path = "../sid-storage" }
+sid-storage = { path = "../sid-storage", features = ["storage-sqlite"] }
 sid-authz = { path = "../sid-authz" }
 secrecy = { workspace = true }
 sqlx = { workspace = true }

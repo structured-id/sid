@@ -1,18 +1,23 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! SCIM outbound worker.
 //!
-//! Consumes corporate profile/group change events durably and dispatches
-//! SCIM requests to configured downstream apps. An event stays owed until
-//! every target has taken it or its failure is recorded in the dead-letter
-//! store.
+//! Consumes corporate profile/group change events durably and owes each to
+//! every enabled target as a dispatch job of its own; the event is settled
+//! once those jobs are stored. A job is done once its target took the event
+//! or its failure is recorded in the dead-letter store, and only that job is
+//! tried again otherwise, so a target that already took the event never
+//! gets it twice because another one failed.
 
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use sid_authn::work_runner::{RetrySchedule, WorkHandler, WorkOutcome};
 use sid_core::models::{
-    AuditEntry, MutationContext, OutboundEntityType, ProfileId, ScimOutboundRecord,
-    ScimOutboundTarget, ScimOutboundTargetId,
+    AuditEntry, ClaimedWork, MutationContext, NewWork, OutboundEntityType, ProfileId,
+    ScimOutboundRecord, ScimOutboundTarget, ScimOutboundTargetId, WorkId, WorkKind,
     event::{Event, RequiredReceiver, WorkRecipient, event_types},
 };
 use sid_plugin::StorageBackend;
@@ -27,11 +32,59 @@ use super::mapper::{self, ScimPatchPayload};
 /// The receiver SCIM outbound work is addressed to.
 pub const SCIM_OUTBOUND_RECEIVER: &str = "sid-scim-outbound";
 
+/// Work kind dispatching one event to one target.
+pub const SCIM_DISPATCH_KIND: &str = "scim.outbound.dispatch";
+
 /// The event types outbound provisioning acts on.
 const SCIM_EVENTS: &str = "sid.scim.*";
 
-/// When an event whose failure could not be recorded is delivered again.
-const UNRECORDED_RETRY: Duration = Duration::from_secs(30);
+/// When an event whose dispatch jobs could not be stored is delivered again.
+const UNSTORED_RETRY: Duration = Duration::from_secs(30);
+
+/// Namespace of dispatch job ids, one per (event, target).
+const DISPATCH_NAMESPACE: Uuid = Uuid::from_u128(0x2c6f_91d4_7a30_4e85_b1c9_5d02_e64a_8f17);
+
+/// Delays between dispatch attempts whose failure could not be recorded.
+const DISPATCH_RETRY: RetrySchedule = RetrySchedule::new(&[
+    Duration::from_secs(5),
+    Duration::from_secs(30),
+    Duration::from_secs(300),
+    Duration::from_secs(3600),
+]);
+
+/// One event for one target.
+#[derive(Debug, Deserialize)]
+struct DispatchJob {
+    target: ScimOutboundTargetId,
+    event: Event,
+}
+
+/// The dispatch job of `event` to `target`, identified by both, so an event
+/// accepted again stores no second job.
+fn dispatch_job(event: &Event, target: ScimOutboundTargetId) -> NewWork {
+    /// [`DispatchJob`] as written, borrowing the event.
+    #[derive(Serialize)]
+    struct Written<'a> {
+        target: ScimOutboundTargetId,
+        event: &'a Event,
+    }
+    let payload =
+        serde_json::to_vec(&Written { target, event }).expect("a dispatch job serializes");
+    let mut work = NewWork::new(
+        WorkKind::new(SCIM_DISPATCH_KIND).expect("the dispatch kind is valid"),
+        payload,
+    );
+    work.id = WorkId(Uuid::new_v5(
+        &DISPATCH_NAMESPACE,
+        &[
+            event.relay_id().0.as_bytes().as_slice(),
+            target.0.as_bytes(),
+        ]
+        .concat(),
+    ));
+    work.max_attempts = 20;
+    work
+}
 
 /// Outbound provisioning as a receiver the deployment requires while
 /// targets are configured: every SCIM fact committed meanwhile is owed to it.
@@ -48,18 +101,26 @@ pub struct ScimOutboundWorker {
     event_bus: Arc<dyn EventBus>,
     /// Loaded outbound targets (cached at startup, reloaded on config change).
     targets: Vec<ScimOutboundTarget>,
+    kind: WorkKind,
+    /// Open dispatch jobs before an event is left with the bus.
+    capacity: u64,
 }
 
 impl ScimOutboundWorker {
+    /// A worker over `targets`, storing dispatch jobs in `storage` up to
+    /// `capacity` open ones.
     pub fn new(
         storage: Arc<dyn StorageBackend>,
         event_bus: Arc<dyn EventBus>,
         targets: Vec<ScimOutboundTarget>,
+        capacity: u64,
     ) -> Self {
         Self {
             storage,
             event_bus,
             targets,
+            kind: WorkKind::new(SCIM_DISPATCH_KIND).expect("the dispatch kind is valid"),
+            capacity,
         }
     }
 
@@ -82,39 +143,32 @@ impl ScimOutboundWorker {
 
     async fn process_events(self: Arc<Self>, mut rx: mpsc::Receiver<Delivery>) {
         while let Some(delivery) = rx.recv().await {
-            let settlement = self.process(&delivery.event).await;
+            let settlement = self.accept(&delivery.event).await;
             delivery.settle(settlement);
         }
 
         info!("SCIM outbound worker stopped (event channel closed)");
     }
 
-    /// Dispatch `event` to every active target. It is settled once each
-    /// target took it or has its failure recorded; a failure that could not
-    /// be recorded leaves it owed.
-    async fn process(&self, event: &Event) -> Settlement {
+    /// Owe `event` to every enabled target as a dispatch job of its own. It
+    /// is settled once all are stored, and left with the bus otherwise.
+    async fn accept(&self, event: &Event) -> Settlement {
         debug!(
             event_type = %event.event_type,
             subject = ?event.subject,
-            "processing SCIM outbound event"
+            "accepting SCIM outbound event"
         );
-        let mut unrecorded = false;
         for target in self.targets.iter().filter(|t| t.enabled) {
-            if let Err(e) = self.dispatch_to_target(target, event).await {
-                error!(
-                    target = %target.display_name,
-                    event_type = %event.event_type,
-                    error = %e,
-                    "SCIM outbound dispatch failed"
-                );
-                unrecorded |= !self.handle_dispatch_failure(target, event, &e).await;
+            if let Err(e) = self
+                .storage
+                .enqueue_work(&dispatch_job(event, target.id), self.capacity)
+                .await
+            {
+                warn!(target = %target.display_name, error = %e, "SCIM dispatch not stored");
+                return Settlement::Retry(UNSTORED_RETRY);
             }
         }
-        if unrecorded {
-            Settlement::Retry(UNRECORDED_RETRY)
-        } else {
-            Settlement::Done
-        }
+        Settlement::Done
     }
 
     /// Dispatch a single event to a single outbound target.
@@ -670,6 +724,56 @@ fn extract_uuid_field(data: &serde_json::Value, field: &str) -> Result<Uuid, Sci
         .map_err(|e| ScimClientError::Serialization(format!("invalid {field}: {e}")))
 }
 
+/// Dispatches one event to one target.
+#[async_trait]
+impl WorkHandler for ScimOutboundWorker {
+    fn kind(&self) -> &WorkKind {
+        &self.kind
+    }
+
+    fn retry_schedule(&self) -> RetrySchedule {
+        DISPATCH_RETRY
+    }
+
+    /// The failed job is the durable record of a dispatch whose failure could
+    /// not be stored in the dead-letter store either.
+    fn on_dead(&self, _work: &ClaimedWork, _error: &str) -> Option<NewWork> {
+        None
+    }
+
+    async fn handle(&self, work: &ClaimedWork) -> WorkOutcome {
+        let job: DispatchJob = match serde_json::from_slice(&work.payload) {
+            Ok(job) => job,
+            Err(e) => return WorkOutcome::Permanent(format!("malformed dispatch job: {e}")),
+        };
+        let Some(target) = self
+            .targets
+            .iter()
+            .find(|t| t.id == job.target && t.enabled)
+        else {
+            return WorkOutcome::Done(Some("target no longer configured".into()));
+        };
+        match self.dispatch_to_target(target, &job.event).await {
+            Ok(()) => WorkOutcome::Done(None),
+            Err(e) => {
+                error!(
+                    target = %target.display_name,
+                    event_type = %job.event.event_type,
+                    error = %e,
+                    "SCIM outbound dispatch failed"
+                );
+                // Only this target's dispatch is tried again when its failure
+                // could not be recorded; the others are separate jobs.
+                if self.handle_dispatch_failure(target, &job.event, &e).await {
+                    WorkOutcome::Done(Some("failure recorded".into()))
+                } else {
+                    WorkOutcome::Retry(format!("failure not recorded: {e}"))
+                }
+            }
+        }
+    }
+}
+
 /// Classify error for sid-notify alert routing.
 fn error_class(error: &ScimClientError) -> &'static str {
     match error {
@@ -683,89 +787,4 @@ fn error_class(error: &ScimClientError) -> &'static str {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_extract_profile_id_valid() {
-        let uuid = Uuid::now_v7();
-        let data = serde_json::json!({"profile_id": uuid.to_string()});
-        let result = extract_profile_id(&data);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().into_uuid(), uuid);
-    }
-
-    #[test]
-    fn test_extract_profile_id_missing() {
-        let data = serde_json::json!({"other": "value"});
-        let result = extract_profile_id(&data);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_extract_profile_id_invalid() {
-        let data = serde_json::json!({"profile_id": "not-a-uuid"});
-        let result = extract_profile_id(&data);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_extract_uuid_field() {
-        let uuid = Uuid::now_v7();
-        let data = serde_json::json!({"group_id": uuid.to_string()});
-        let result = extract_uuid_field(&data, "group_id");
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), uuid);
-    }
-
-    #[test]
-    fn test_extract_uuid_field_missing() {
-        let data = serde_json::json!({});
-        let result = extract_uuid_field(&data, "group_id");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_error_class_classification() {
-        assert_eq!(
-            error_class(&ScimClientError::Unreachable("timeout".into())),
-            "unreachable"
-        );
-        assert_eq!(
-            error_class(&ScimClientError::Rejected {
-                status: 400,
-                body: "bad request".into()
-            }),
-            "rejected"
-        );
-        assert_eq!(
-            error_class(&ScimClientError::RateLimited {
-                retry_after_secs: 30
-            }),
-            "rate_limited"
-        );
-        assert_eq!(
-            error_class(&ScimClientError::Conflict {
-                body: "conflict".into()
-            }),
-            "conflict"
-        );
-        assert_eq!(
-            error_class(&ScimClientError::AuthFailed { status: 401 }),
-            "auth_failed"
-        );
-        assert_eq!(
-            error_class(&ScimClientError::Serialization("bad json".into())),
-            "serialization"
-        );
-    }
-
-    #[test]
-    fn test_reactivate_patch_payload() {
-        let patch = mapper::ScimPatchPayload::reactivate();
-        assert_eq!(patch.operations.len(), 1);
-        assert_eq!(patch.operations[0].op, "replace");
-        assert_eq!(patch.operations[0].path.as_deref(), Some("active"));
-        assert_eq!(patch.operations[0].value, Some(serde_json::json!(true)));
-    }
-}
+mod tests;

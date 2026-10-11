@@ -85,6 +85,8 @@ fn start(binary: &str, data_dir: &std::path::Path, port: u16, env: &[(&str, &str
     .env("SID_STORAGE_POSTGRESQL_SCHEMA", schema)
     .env("SID_DATA_DIR", data_dir)
     .env("SID_NATS_URL", "nats://localhost:4399")
+    // No notification service runs beside this server.
+    .env("SID_EVENT_RECEIVERS", "none")
     .env("SID_REDIS_URL", "redis://localhost:63799")
     .env("SID_IPINTEL_PROVIDERS", "none")
     .env("SID_ISSUER", "https://sid.example.com")

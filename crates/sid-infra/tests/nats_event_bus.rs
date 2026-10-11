@@ -409,8 +409,36 @@ async fn test_only_the_owner_creates_the_topology() {
         matches!(differs, Err(TopologyError::NotReady { .. })),
         "{differs:?}"
     );
-    shorter.prepare(&js, TopologyRole::Own).await.unwrap();
-    assert!(t.prepare(&js, TopologyRole::Verify).await.is_err());
+    drop_topology(&t).await;
+}
+
+/// An owner never changes a stream that exists: one holding another
+/// definition (written by a newer or differently configured owner) is not
+/// ready for it and stays exactly as it is, so a stale owner cannot roll a
+/// definition back between reading and writing it.
+#[tokio::test]
+async fn test_an_owner_never_rewrites_an_existing_stream() {
+    let t = topology();
+    let mut other = t.clone();
+    other.history_max_age = Duration::from_secs(60);
+    let js = jetstream().await;
+    other.prepare(&js, TopologyRole::Own).await.unwrap();
+
+    let refused = t.prepare(&js, TopologyRole::Own).await;
+    assert!(
+        matches!(refused, Err(TopologyError::NotReady { .. })),
+        "{refused:?}"
+    );
+    let kept = js
+        .get_stream(t.history_stream())
+        .await
+        .unwrap()
+        .info()
+        .await
+        .unwrap()
+        .config
+        .max_age;
+    assert_eq!(kept, Duration::from_secs(60), "an owner rewrote the stream");
     drop_topology(&t).await;
 }
 

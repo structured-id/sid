@@ -92,18 +92,11 @@ fn run_notify(
 ) {
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let handle = tokio::spawn(async move {
-        delivery::consume_work(
-            bus.as_ref(),
-            receiver(),
-            store.as_ref(),
-            capacity,
-            || {},
-            async move {
-                let _ = stopped.await;
-            },
-        )
-        .await
-        .unwrap();
+        let deliveries = delivery::open_work(bus.as_ref(), receiver()).await.unwrap();
+        delivery::accept_work(deliveries, store.as_ref(), capacity, || {}, async move {
+            let _ = stopped.await;
+        })
+        .await;
     });
     (stop, handle)
 }
@@ -316,6 +309,7 @@ async fn test_notify_server_init() {
         nats_url: nats_url(),
         grpc_bind: "127.0.0.1:0".parse().unwrap(),
         receiver: receiver(),
+        event_receivers: Vec::new(),
         smtp: SmtpConfig::default(),
         smtp_enabled: true,
         webhook_enabled: false,

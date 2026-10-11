@@ -78,10 +78,14 @@ fn down() -> EventBusError {
 
 /// Records what is enqueued and under which capacity, refusing everything
 /// once `full`.
+/// As a store keeps work: the first item under an id stays, a repeated
+/// enqueue keeps it unchanged, and an id in `refuse` is refused once (a
+/// failure part way through owing several items).
 #[derive(Default)]
 struct RecordingStore {
     enqueued: Mutex<Vec<(NewWork, u64)>>,
     full: bool,
+    refuse: Mutex<std::collections::HashSet<WorkId>>,
 }
 
 impl RecordingStore {
@@ -93,15 +97,28 @@ impl RecordingStore {
             .map(|(w, _)| w.id)
             .collect()
     }
+
+    fn get(&self, id: WorkId) -> Option<NewWork> {
+        self.enqueued
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(w, _)| w.id == id)
+            .map(|(w, _)| w.clone())
+    }
 }
 
 #[async_trait]
 impl WorkStore for RecordingStore {
     async fn enqueue_work(&self, work: &NewWork, capacity: u64) -> sid_core::Result<bool> {
-        if self.full {
+        if self.full || self.refuse.lock().unwrap().remove(&work.id) {
             return Err(sid_core::Error::ResourceExhausted("full".into()));
         }
-        self.enqueued.lock().unwrap().push((work.clone(), capacity));
+        let mut enqueued = self.enqueued.lock().unwrap();
+        if enqueued.iter().any(|(w, _)| w.id == work.id) {
+            return Ok(false);
+        }
+        enqueued.push((work.clone(), capacity));
         Ok(true)
     }
     async fn claim_work(
@@ -157,33 +174,60 @@ fn receivers() -> Vec<RequiredReceiver> {
     ]
 }
 
-fn relay(bus: Arc<RecordingBus>, store: Arc<RecordingStore>) -> EventRelayHandler {
-    EventRelayHandler::new(bus, store, receivers(), CAPACITY)
+fn relay(store: Arc<RecordingStore>) -> EventRelayHandler {
+    EventRelayHandler::new(store, receivers(), CAPACITY)
 }
 
-/// A relayed fact is owed to every receiver that requires its type, each
-/// under its own stable delivery id and the given capacity, and is then
-/// published to history unchanged.
+fn fanout(bus: Arc<RecordingBus>, store: Arc<RecordingStore>) -> EventFanoutHandler {
+    EventFanoutHandler::new(bus, store, CAPACITY)
+}
+
+/// The plan stored for `event`, as the runner would claim it.
+fn plan_of(store: &RecordingStore, event: &Event) -> ClaimedWork {
+    claimed(
+        store
+            .get(event.fanout(&[]).id)
+            .expect("the plan was not stored"),
+    )
+}
+
+/// A relayed fact gets one plan naming every receiver that requires its
+/// type; carrying it out owes the fact to each, under its own stable
+/// delivery id and the given capacity, then publishes it unchanged.
 #[tokio::test]
 async fn test_relay_owes_required_receivers_then_publishes() {
     let bus = Arc::new(RecordingBus::default());
     let store = Arc::new(RecordingStore::default());
     let event = Event::new("src", event_types::SCIM_USER_PROVISIONED).with_subject("profile/p");
 
-    let outcome = relay(bus.clone(), store.clone())
-        .handle(&claimed(event.relay()))
-        .await;
+    let outcome = relay(store.clone()).handle(&claimed(event.relay())).await;
+    assert!(matches!(outcome, WorkOutcome::Done(_)), "{outcome:?}");
+    let plan = plan_of(&store, &event);
+    assert_eq!(plan.kind.as_str(), EVENT_FANOUT_KIND);
+    let planned: EventFanout = serde_json::from_slice(&plan.payload).unwrap();
+    assert_eq!(
+        planned.receivers,
+        [recipient("sid-notify"), recipient("scim")]
+    );
+    assert!(
+        bus.published.lock().unwrap().is_empty(),
+        "published before owed"
+    );
+
+    let outcome = fanout(bus.clone(), store.clone()).handle(&plan).await;
     assert!(matches!(outcome, WorkOutcome::Done(_)), "{outcome:?}");
     assert_eq!(
-        store.ids(),
+        store.ids()[1..],
         [
             event.delivery_id(&recipient("sid-notify")),
             event.delivery_id(&recipient("scim"))
         ]
     );
     for (work, capacity) in store.enqueued.lock().unwrap().iter() {
-        assert_eq!(work.kind.as_str(), EVENT_DELIVERY_KIND);
         assert_eq!(*capacity, CAPACITY);
+        if work.id != plan.id {
+            assert_eq!(work.kind.as_str(), EVENT_DELIVERY_KIND);
+        }
     }
     let published = bus.published.lock().unwrap().clone();
     assert_eq!(published.len(), 1);
@@ -192,24 +236,77 @@ async fn test_relay_owes_required_receivers_then_publishes() {
 }
 
 /// A receiver whose patterns do not take the type is owed nothing; a retried
-/// relay owes the same deliveries again under the same ids, so the store
+/// relay and a repeated plan owe the same under the same ids, so the store
 /// keeps one each.
 #[tokio::test]
 async fn test_relay_owes_only_matching_receivers_with_stable_ids() {
     let bus = Arc::new(RecordingBus::default());
     let store = Arc::new(RecordingStore::default());
     let event = Event::new("src", event_types::SESSION_REVOKED);
-    let handler = relay(bus, store.clone());
+    let handler = relay(store.clone());
     handler.handle(&claimed(event.relay())).await;
     handler.handle(&claimed(event.relay())).await;
+    let plan = plan_of(&store, &event);
+    fanout(bus.clone(), store.clone()).handle(&plan).await;
+    fanout(bus, store.clone()).handle(&plan).await;
     let notify = event.delivery_id(&recipient("sid-notify"));
-    assert_eq!(store.ids(), [notify, notify]);
+    assert_eq!(store.ids(), [plan.id, notify]);
 }
 
-/// A delivery owed before the deployment's receivers change stays owed:
-/// the relay retried under the new set (`SID_EVENT_RECEIVERS` changed, SCIM
-/// targets removed) adds the new receivers and erases none of the earlier
-/// obligations, which the store keeps as their own pending work.
+/// The receivers a fact is owed to are fixed once: when owing them failed
+/// part way (one delivery stored, the next refused) and the deployment's
+/// receivers changed before the retry, the retry still owes the original
+/// ones, the refused one included, and owes the old fact to no receiver the
+/// new configuration added.
+#[tokio::test]
+async fn test_a_retry_keeps_the_receivers_first_fixed() {
+    let bus = Arc::new(RecordingBus::default());
+    let store = Arc::new(RecordingStore::default());
+    let event = Event::new("src", event_types::SCIM_USER_PROVISIONED);
+    let scim = event.delivery_id(&recipient("scim"));
+    store.refuse.lock().unwrap().insert(scim);
+
+    relay(store.clone()).handle(&claimed(event.relay())).await;
+    let plan = plan_of(&store, &event);
+    let first = fanout(bus.clone(), store.clone()).handle(&plan).await;
+    assert!(matches!(first, WorkOutcome::Retry(_)), "{first:?}");
+
+    // The configuration changes; the relay is run again (a lost outcome).
+    let changed = EventRelayHandler::new(
+        store.clone(),
+        vec![RequiredReceiver {
+            recipient: recipient("audit-sink"),
+            event_types: Vec::new(),
+        }],
+        CAPACITY,
+    );
+    let retried = changed.handle(&claimed(event.relay())).await;
+    assert!(matches!(retried, WorkOutcome::Done(_)), "{retried:?}");
+    let plan = plan_of(&store, &event);
+    let done = fanout(bus.clone(), store.clone()).handle(&plan).await;
+    assert!(matches!(done, WorkOutcome::Done(_)), "{done:?}");
+
+    assert!(
+        store.get(scim).is_some(),
+        "the refused delivery was never owed"
+    );
+    assert!(
+        store
+            .get(event.delivery_id(&recipient("sid-notify")))
+            .is_some()
+    );
+    assert!(
+        store
+            .get(event.delivery_id(&recipient("audit-sink")))
+            .is_none(),
+        "a receiver added later was owed an earlier fact"
+    );
+}
+
+/// On a real store the plan first stored is the one carried out: a relay
+/// committed under one configuration and retried after `SID_EVENT_RECEIVERS`
+/// changed and SCIM targets were removed owes its fact to the receivers of
+/// the first plan, each kept as pending work, and to none added later.
 #[tokio::test]
 async fn test_owed_deliveries_survive_a_receiver_change() {
     let store = Arc::new(
@@ -219,63 +316,102 @@ async fn test_owed_deliveries_survive_a_receiver_change() {
     );
     let event = Event::new("src", event_types::SCIM_USER_PROVISIONED);
     let work = claimed(event.relay());
-    let before = EventRelayHandler::new(
-        Arc::new(RecordingBus::refusing(down)),
-        store.clone(),
-        receivers(),
-        CAPACITY,
-    );
-    let outcome = before.handle(&work).await;
-    assert!(matches!(outcome, WorkOutcome::Retry(_)), "{outcome:?}");
-
-    let after = EventRelayHandler::new(
-        Arc::new(RecordingBus::default()),
+    let outcome = EventRelayHandler::new(store.clone(), receivers(), CAPACITY)
+        .handle(&work)
+        .await;
+    assert!(matches!(outcome, WorkOutcome::Done(_)), "{outcome:?}");
+    let outcome = EventRelayHandler::new(
         store.clone(),
         vec![RequiredReceiver {
             recipient: recipient("audit-sink"),
             event_types: Vec::new(),
         }],
         CAPACITY,
-    );
-    let outcome = after.handle(&work).await;
+    )
+    .handle(&work)
+    .await;
     assert!(matches!(outcome, WorkOutcome::Done(_)), "{outcome:?}");
 
-    for name in ["sid-notify", "scim", "audit-sink"] {
+    let plan_id = event.fanout(&[]).id;
+    let plan = store.get_work(plan_id).await.unwrap().expect("plan stored");
+    assert_eq!(plan.state, sid_core::models::WorkState::Pending);
+    let payload = store
+        .export_work()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|w| w.record.id == plan_id)
+        .unwrap()
+        .payload;
+    let outcome =
+        EventFanoutHandler::new(Arc::new(RecordingBus::default()), store.clone(), CAPACITY)
+            .handle(&ClaimedWork {
+                id: plan_id,
+                kind: plan.kind,
+                payload,
+                attempt: 1,
+                max_attempts: plan.max_attempts,
+                generation: 1,
+                expires_at: None,
+            })
+            .await;
+    assert!(matches!(outcome, WorkOutcome::Done(_)), "{outcome:?}");
+
+    for name in ["sid-notify", "scim"] {
         let owed = store
             .get_work(event.delivery_id(&recipient(name)))
             .await
             .unwrap()
-            .unwrap_or_else(|| panic!("the delivery to {name} was not kept"));
+            .unwrap_or_else(|| panic!("the delivery to {name} was not owed"));
         assert_eq!(owed.state, sid_core::models::WorkState::Pending, "{name}");
     }
+    assert!(
+        store
+            .get_work(event.delivery_id(&recipient("audit-sink")))
+            .await
+            .unwrap()
+            .is_none(),
+        "a receiver added later was owed an earlier fact"
+    );
 }
 
-/// While the bus refuses, the relay stays owed, and the deliveries it
+/// While the bus refuses, the plan stays owed, and the deliveries it
 /// already stored stay owed as their own work.
 #[tokio::test]
-async fn test_relay_retries_while_bus_is_down() {
+async fn test_fanout_retries_while_bus_is_down() {
     let store = Arc::new(RecordingStore::default());
     let event = Event::new("src", event_types::USER_CREATED);
-    let outcome = relay(Arc::new(RecordingBus::refusing(down)), store.clone())
-        .handle(&claimed(event.relay()))
+    relay(store.clone()).handle(&claimed(event.relay())).await;
+    let plan = plan_of(&store, &event);
+    let outcome = fanout(Arc::new(RecordingBus::refusing(down)), store.clone())
+        .handle(&plan)
         .await;
     assert!(matches!(outcome, WorkOutcome::Retry(_)), "{outcome:?}");
-    assert_eq!(store.ids().len(), 1);
+    assert_eq!(store.ids().len(), 2, "plan and its delivery");
 }
 
-/// A delivery that cannot be stored (the store full) leaves the relay owed
-/// and publishes nothing yet.
+/// A plan that cannot be stored (the store full) leaves the relay owed; a
+/// delivery that cannot be stored leaves the plan owed and publishes nothing.
 #[tokio::test]
-async fn test_relay_retries_when_a_delivery_cannot_be_owed() {
-    let bus = Arc::new(RecordingBus::default());
-    let store = Arc::new(RecordingStore {
+async fn test_relay_retries_when_nothing_can_be_owed() {
+    let event = Event::new("src", event_types::USER_CREATED);
+    let full = Arc::new(RecordingStore {
         full: true,
         ..RecordingStore::default()
     });
-    let event = Event::new("src", event_types::USER_CREATED);
-    let outcome = relay(bus.clone(), store)
-        .handle(&claimed(event.relay()))
-        .await;
+    let outcome = relay(full).handle(&claimed(event.relay())).await;
+    assert!(matches!(outcome, WorkOutcome::Retry(_)), "{outcome:?}");
+
+    let bus = Arc::new(RecordingBus::default());
+    let store = Arc::new(RecordingStore::default());
+    relay(store.clone()).handle(&claimed(event.relay())).await;
+    let plan = plan_of(&store, &event);
+    store
+        .refuse
+        .lock()
+        .unwrap()
+        .insert(event.delivery_id(&recipient("sid-notify")));
+    let outcome = fanout(bus.clone(), store).handle(&plan).await;
     assert!(matches!(outcome, WorkOutcome::Retry(_)), "{outcome:?}");
     assert!(bus.published.lock().unwrap().is_empty());
 }
@@ -289,19 +425,29 @@ async fn test_relay_refuses_what_is_not_an_identity_fact() {
         event_types::ORG_TRIAL_ACTIVATED,
         "sid.unknown.v1",
     ] {
-        let bus = Arc::new(RecordingBus::default());
         let store = Arc::new(RecordingStore::default());
         let event = Event::new("src", event_type);
-        let outcome = relay(bus.clone(), store.clone())
-            .handle(&claimed(event.relay()))
-            .await;
+        let outcome = relay(store.clone()).handle(&claimed(event.relay())).await;
         assert!(
             matches!(outcome, WorkOutcome::Permanent(_)),
             "{event_type}: {outcome:?}"
         );
-        assert!(store.ids().is_empty(), "{event_type} was owed");
-        assert!(bus.published.lock().unwrap().is_empty());
+        assert!(store.ids().is_empty(), "{event_type} was planned");
     }
+}
+
+/// A plan that is not one can never be carried out.
+#[tokio::test]
+async fn test_fanout_malformed_plan_is_permanent() {
+    let mut work = claimed(Event::new("src", event_types::USER_CREATED).fanout(&[]));
+    work.payload = b"{}".to_vec();
+    let outcome = fanout(
+        Arc::new(RecordingBus::default()),
+        Arc::new(RecordingStore::default()),
+    )
+    .handle(&work)
+    .await;
+    assert!(matches!(outcome, WorkOutcome::Permanent(_)), "{outcome:?}");
 }
 
 /// A payload that is not an event can never be relayed.
@@ -309,12 +455,9 @@ async fn test_relay_refuses_what_is_not_an_identity_fact() {
 async fn test_relay_malformed_payload_is_permanent() {
     let mut work = claimed(Event::new("src", event_types::USER_CREATED).relay());
     work.payload = b"not json".to_vec();
-    let outcome = relay(
-        Arc::new(RecordingBus::default()),
-        Arc::new(RecordingStore::default()),
-    )
-    .handle(&work)
-    .await;
+    let outcome = relay(Arc::new(RecordingStore::default()))
+        .handle(&work)
+        .await;
     assert!(matches!(outcome, WorkOutcome::Permanent(_)), "{outcome:?}");
 }
 

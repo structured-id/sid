@@ -696,8 +696,10 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         sid_infra::TopologyRole::from_env(sid_infra::TopologyRole::Own)?,
     )
     .await?;
-    let required_receivers =
-        required_receivers(std::env::var("SID_EVENT_RECEIVERS").ok().as_deref())?;
+    let required_receivers = required_receivers(
+        &nats_mode,
+        std::env::var("SID_EVENT_RECEIVERS").ok().as_deref(),
+    )?;
 
     let identity_svc = Arc::new(IdentityServiceImpl::new(
         storage.clone(),
@@ -1363,43 +1365,37 @@ pub fn spawn_ce_background_tasks(c: &CeComponents) {
     }
 }
 
-/// The notification receiver every fact is owed to unless the deployment
-/// names others.
-const DEFAULT_EVENT_RECEIVER: &str = "sid-notify";
-
 /// The receivers `SID_EVENT_RECEIVERS` names (comma-separated; `none` for a
 /// deployment without any), each owed every fact: its own routing decides
-/// what it acts on. Unset is the notification service.
+/// what it acts on. On the bundled bus (the single-binary installation, which
+/// runs no separate receiver) unset names none; on an external bus the
+/// deployment must name them, so a missing setting is not read as "none".
 pub(crate) fn required_receivers(
+    mode: &crate::embedded_nats::EventBusMode,
     setting: Option<&str>,
 ) -> anyhow::Result<Vec<sid_core::models::RequiredReceiver>> {
-    let names: Vec<&str> = match setting.map(str::trim) {
-        None | Some("") => vec![DEFAULT_EVENT_RECEIVER],
-        Some("none") => Vec::new(),
-        Some(list) => list.split(',').map(str::trim).collect(),
-    };
-    names
-        .into_iter()
-        .map(|name| {
-            sid_core::models::WorkRecipient::new(name)
-                .map(|recipient| sid_core::models::RequiredReceiver {
-                    recipient,
-                    event_types: Vec::new(),
-                })
-                .map_err(|e| anyhow::anyhow!("SID_EVENT_RECEIVERS: {e}"))
-        })
-        .collect()
+    use crate::embedded_nats::EventBusMode;
+    match (setting.map(str::trim), mode) {
+        (None | Some(""), EventBusMode::Embedded) => Ok(Vec::new()),
+        (None | Some(""), EventBusMode::External(_)) => anyhow::bail!(
+            "SID_EVENT_RECEIVERS is required with an external bus: name the receivers (e.g. sid-notify) or `none`"
+        ),
+        (Some(list), _) => sid_core::models::RequiredReceiver::parse_list(list)
+            .map_err(|e| anyhow::anyhow!("SID_EVENT_RECEIVERS: {e}")),
+    }
 }
 
 /// Start the runner for work the storage commits with a mutation (owed
 /// back-channel logouts, relayed events and their deliveries, contestation
 /// checks). Every replica runs one; leases keep an attempt on a single
 /// replica. Facts are owed to the deployment's required receivers and to
-/// `also_required` (receivers this server runs). Runs until `shutdown`
-/// resolves, then lets attempts in flight record their outcome.
+/// `also_required` (receivers this server runs, whose work is `also_run`).
+/// Runs until `shutdown` resolves, then lets attempts in flight record their
+/// outcome.
 pub fn spawn_work_runner(
     c: &CeComponents,
     also_required: &[sid_core::models::RequiredReceiver],
+    also_run: Vec<Arc<dyn WorkHandler>>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
     let receivers = c
@@ -1408,15 +1404,19 @@ pub fn spawn_work_runner(
         .chain(also_required)
         .cloned()
         .collect();
-    let handlers: Vec<Arc<dyn WorkHandler>> = vec![
+    let mut handlers: Vec<Arc<dyn WorkHandler>> = vec![
         Arc::new(BackChannelLogoutHandler::new(
             c.issuers.clone(),
             c.storage.clone(),
         )),
         Arc::new(EventRelayHandler::new(
-            c.event_bus.clone(),
             c.storage.clone(),
             receivers,
+            sid_storage::OWED_WORK_CAPACITY,
+        )),
+        Arc::new(sid_authn::event_relay::EventFanoutHandler::new(
+            c.event_bus.clone(),
+            c.storage.clone(),
             sid_storage::OWED_WORK_CAPACITY,
         )),
         Arc::new(sid_authn::event_relay::EventDeliveryHandler::new(
@@ -1428,6 +1428,7 @@ pub fn spawn_work_runner(
         c.auth_svc.enrollment_handler(),
         c.auth_svc.owner_purge_handler(),
     ];
+    handlers.extend(also_run);
     let worker = format!("sid-server-{}-{}", std::process::id(), uuid::Uuid::now_v7());
     let runner = WorkRunner::new(c.storage.clone(), worker, handlers, RunnerConfig::default())
         .map_err(|e| anyhow::anyhow!("work runner: {e}"))?;

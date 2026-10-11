@@ -2,7 +2,9 @@
 use super::*;
 use crate::template::TemplateEngine;
 use chrono::Utc;
+use sid_authn::event_relay::{EventFanoutHandler, EventRelayHandler};
 use sid_authn::work_runner::{RunnerConfig, WorkRunner};
+use sid_core::models::RequiredReceiver;
 use sid_core::models::event::EventFilter;
 use sid_core::models::{WorkRecord, WorkState};
 use sid_plugin::InProcessEventBus;
@@ -278,7 +280,9 @@ async fn test_deliver_outcomes() {
 }
 
 /// End to end: an accepted event is routed and delivered by the runner; a
-/// delivery that fails for good ends failed and its alert is published.
+/// delivery that fails for good ends failed, and its alert is relayed as
+/// every fact is: owed to the deployment's other required receivers and
+/// published to history.
 #[tokio::test]
 async fn test_runner_delivers_and_alerts_dead_letters() {
     let store = store().await;
@@ -300,7 +304,19 @@ async fn test_runner_delivers_and_alerts_dead_letters() {
             Arc::clone(&email),
             webhook,
         ]))),
-        Arc::new(DlqAlertHandler::new(bus.clone())),
+        Arc::new(EventRelayHandler::new(
+            Arc::clone(&store),
+            vec![RequiredReceiver {
+                recipient: WorkRecipient::new("audit-sink").unwrap(),
+                event_types: Vec::new(),
+            }],
+            100,
+        )),
+        Arc::new(EventFanoutHandler::new(
+            bus.clone(),
+            Arc::clone(&store),
+            100,
+        )),
     ];
     let config = RunnerConfig {
         concurrency: 4,
@@ -326,6 +342,12 @@ async fn test_runner_delivers_and_alerts_dead_letters() {
     assert_eq!(dead_record.state, WorkState::Failed);
     assert_eq!(dead_record.attempts, 1, "a rejected delivery was retried");
     assert_eq!(alert.data["work_id"], dead_record.id.to_string());
+    let owed = store
+        .get_work(alert.delivery_id(&WorkRecipient::new("audit-sink").unwrap()))
+        .await
+        .unwrap()
+        .expect("the alert was not owed to the required receiver");
+    assert_eq!(owed.state, WorkState::Pending);
 
     let sent = format!("deliver:{}:security_alert:email", event.id);
     let sent_record = record(store.as_ref(), &sent).await.unwrap();

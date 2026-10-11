@@ -17,6 +17,7 @@ use crate::template::TemplateEngine;
 use crate::template_store::TemplateStore;
 
 use sid_authn::caller::{Caller, authenticate};
+use sid_authn::event_relay::{EventDeliveryHandler, EventFanoutHandler, EventRelayHandler};
 use sid_authn::jwt::TokenVerifier;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::work_runner::{RunnerConfig, WorkHandler, WorkRunner};
@@ -32,7 +33,7 @@ use sid_storage::PgWorkStore;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tonic::transport::Server as TonicServer;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 /// Notification server combining NATS consumer and gRPC API.
 pub struct NotifyServer {
@@ -164,6 +165,11 @@ impl NotifyServer {
             .map_err(|e| anyhow::anyhow!("NATS event bus: {e}"))?,
         );
         info!(url = %self.config.nats_url, receiver = %self.config.receiver, "Connected to NATS");
+        // A consumer that cannot be opened stops startup: serving without it
+        // would look healthy while owed work piles up.
+        let deliveries = delivery::open_work(bus.as_ref(), self.config.receiver.clone())
+            .await
+            .map_err(|e| anyhow::anyhow!("notification work consumer: {e}"))?;
 
         // Delivery jobs run in this process under leases shared with every replica.
         let handlers: Vec<Arc<dyn WorkHandler>> = vec![
@@ -174,7 +180,20 @@ impl NotifyServer {
                 self.config.job_capacity,
             )),
             Arc::new(delivery::DeliverHandler::new(self.dispatcher.clone())),
-            Arc::new(delivery::DlqAlertHandler::new(Arc::clone(&bus))),
+            // This service's own facts (dead-letter alerts) are relayed as
+            // every fact is: owed to the other required receivers, then
+            // published to history.
+            Arc::new(EventRelayHandler::new(
+                Arc::clone(&self.jobs),
+                self.config.event_receivers.clone(),
+                self.config.job_capacity,
+            )),
+            Arc::new(EventFanoutHandler::new(
+                Arc::clone(&bus),
+                Arc::clone(&self.jobs),
+                self.config.job_capacity,
+            )),
+            Arc::new(EventDeliveryHandler::new(Arc::clone(&bus))),
         ];
         let worker = format!("sid-notify-{}-{}", std::process::id(), uuid::Uuid::now_v7());
         let runner = WorkRunner::new(
@@ -192,23 +211,17 @@ impl NotifyServer {
         // stored, and stays with the bus otherwise.
         let jobs = Arc::clone(&self.jobs);
         let capacity = self.config.job_capacity;
-        let receiver = self.config.receiver.clone();
-        let consumer_bus = bus;
         let consumer_stopped = stopped.clone().wait();
         let consumer_handle = tokio::spawn(async move {
-            let consumed = delivery::consume_work(
-                consumer_bus.as_ref(),
-                receiver,
+            delivery::accept_work(
+                deliveries,
                 jobs.as_ref(),
                 capacity,
                 || waker.wake(),
                 consumer_stopped,
             )
             .await;
-            match consumed {
-                Ok(()) => info!("notification work consumer stopped"),
-                Err(e) => error!("notification work cannot be consumed: {e}"),
-            }
+            info!("notification work consumer stopped");
         });
 
         // gRPC reflection service.

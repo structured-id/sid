@@ -51,6 +51,8 @@ pub struct CeServices {
     /// Receivers this server runs that facts are owed to (SCIM outbound
     /// provisioning while targets are configured).
     receivers: Vec<sid_core::models::RequiredReceiver>,
+    /// The work those receivers run on this server's work runner.
+    work_handlers: Vec<std::sync::Arc<dyn sid_authn::work_runner::WorkHandler>>,
     #[cfg(feature = "dev-perf-test")]
     test_svc: std::sync::Arc<crate::grpc::test_service::TestServiceImpl>,
 }
@@ -71,6 +73,7 @@ impl CeServices {
         let mut services = Self {
             services: served,
             receivers: Vec::new(),
+            work_handlers: Vec::new(),
             #[cfg(feature = "dev-perf-test")]
             test_svc: test_svc.clone(),
         };
@@ -181,7 +184,10 @@ impl CeServices {
                     ),
                 ))
                 .await;
-            services.receivers.extend(start_scim_outbound(c).await?);
+            if let Some((receiver, handler)) = start_scim_outbound(c).await? {
+                services.receivers.push(receiver);
+                services.work_handlers.push(handler);
+            }
             info!("SCIM 2.0 inbound provisioning enabled");
         }
 
@@ -238,11 +244,17 @@ async fn scim_service(c: &CeComponents) -> anyhow::Result<sid_scim::grpc::ScimSe
 
 /// Configured targets that cannot be loaded or served stop startup: running
 /// without them would silently stop provisioning. With targets, outbound
-/// provisioning is a receiver every SCIM fact is owed to.
+/// provisioning is a receiver every SCIM fact is owed to, and its
+/// per-target dispatch jobs run on the work runner.
 #[cfg(feature = "scim")]
 async fn start_scim_outbound(
     c: &CeComponents,
-) -> anyhow::Result<Option<sid_core::models::RequiredReceiver>> {
+) -> anyhow::Result<
+    Option<(
+        sid_core::models::RequiredReceiver,
+        std::sync::Arc<dyn sid_authn::work_runner::WorkHandler>,
+    )>,
+> {
     let targets = c
         .storage
         .list_scim_outbound_targets(sid_core::models::ProjectId::system())
@@ -255,13 +267,17 @@ async fn start_scim_outbound(
         c.storage.clone(),
         c.event_bus.clone(),
         targets,
+        sid_storage::OWED_WORK_CAPACITY,
     ));
-    worker
+    std::sync::Arc::clone(&worker)
         .start()
         .await
         .map_err(|e| anyhow::anyhow!("SCIM outbound worker: {e}"))?;
     info!("SCIM outbound worker started");
-    Ok(Some(sid_scim::outbound::worker::required_receiver()))
+    Ok(Some((
+        sid_scim::outbound::worker::required_receiver(),
+        worker,
+    )))
 }
 
 #[cfg(feature = "dev-perf-test")]
@@ -326,7 +342,12 @@ pub async fn serve(
         c.login_url.as_ref(),
     )?;
 
-    let work_runner = spawn_work_runner(&c, &services.receivers, stopped.clone().wait())?;
+    let work_runner = spawn_work_runner(
+        &c,
+        &services.receivers,
+        services.work_handlers.clone(),
+        stopped.clone().wait(),
+    )?;
     let settlements = crate::init::spawn_cleanup_settlements(&c, stopped.clone().wait());
 
     let (routes, health) = services.services.into_parts();
