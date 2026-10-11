@@ -414,6 +414,24 @@ async fn test_only_the_owner_creates_the_topology() {
     drop_topology(&t).await;
 }
 
+/// Replicas of the topology owner starting at once (each creating the
+/// missing streams) both come up on the one set of streams, as defined.
+#[tokio::test]
+async fn test_owner_replicas_prepare_together() {
+    let t = topology();
+    let (a, b) = (jetstream().await, jetstream().await);
+    let (first, second) = tokio::join!(
+        t.prepare(&a, TopologyRole::Own),
+        t.prepare(&b, TopologyRole::Own)
+    );
+    first.expect("first owner replica");
+    second.expect("second owner replica");
+    t.prepare(&a, TopologyRole::Verify)
+        .await
+        .expect("the streams are as defined");
+    drop_topology(&t).await;
+}
+
 /// An earlier broad stream holding the subjects is refused, not changed:
 /// its messages, cursors and settings stay as they are.
 #[tokio::test]

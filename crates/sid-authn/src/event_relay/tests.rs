@@ -206,6 +206,50 @@ async fn test_relay_owes_only_matching_receivers_with_stable_ids() {
     assert_eq!(store.ids(), [notify, notify]);
 }
 
+/// A delivery owed before the deployment's receivers change stays owed:
+/// the relay retried under the new set (`SID_EVENT_RECEIVERS` changed, SCIM
+/// targets removed) adds the new receivers and erases none of the earlier
+/// obligations, which the store keeps as their own pending work.
+#[tokio::test]
+async fn test_owed_deliveries_survive_a_receiver_change() {
+    let store = Arc::new(
+        sid_storage::sqlite::SqliteBackend::new_in_memory()
+            .await
+            .unwrap(),
+    );
+    let event = Event::new("src", event_types::SCIM_USER_PROVISIONED);
+    let work = claimed(event.relay());
+    let before = EventRelayHandler::new(
+        Arc::new(RecordingBus::refusing(down)),
+        store.clone(),
+        receivers(),
+        CAPACITY,
+    );
+    let outcome = before.handle(&work).await;
+    assert!(matches!(outcome, WorkOutcome::Retry(_)), "{outcome:?}");
+
+    let after = EventRelayHandler::new(
+        Arc::new(RecordingBus::default()),
+        store.clone(),
+        vec![RequiredReceiver {
+            recipient: recipient("audit-sink"),
+            event_types: Vec::new(),
+        }],
+        CAPACITY,
+    );
+    let outcome = after.handle(&work).await;
+    assert!(matches!(outcome, WorkOutcome::Done(_)), "{outcome:?}");
+
+    for name in ["sid-notify", "scim", "audit-sink"] {
+        let owed = store
+            .get_work(event.delivery_id(&recipient(name)))
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("the delivery to {name} was not kept"));
+        assert_eq!(owed.state, sid_core::models::WorkState::Pending, "{name}");
+    }
+}
+
 /// While the bus refuses, the relay stays owed, and the deliveries it
 /// already stored stay owed as their own work.
 #[tokio::test]

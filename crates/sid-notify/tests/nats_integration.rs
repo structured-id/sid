@@ -280,6 +280,35 @@ async fn test_history_alone_is_not_work() {
     drop_topology(&t).await;
 }
 
+/// A standalone notify needs no sid-server: named the topology owner it
+/// prepares the streams itself and takes the work producers hand over;
+/// without an owner having prepared them it is not ready rather than
+/// creating them unasked.
+#[tokio::test]
+async fn test_standalone_notify_without_sid_server() {
+    let store = job_store().await;
+    let mut t = Topology::with_root(format!("s{}", uuid::Uuid::now_v7().simple())).unwrap();
+    t.work_max_bytes = 8 << 20;
+    let unprepared = NatsEventBus::connect(&nats_url(), t.clone(), TopologyRole::Verify).await;
+    assert!(unprepared.is_err(), "a verifier ran on a missing topology");
+
+    let notify = Arc::new(
+        NatsEventBus::connect(&nats_url(), t.clone(), TopologyRole::Own)
+            .await
+            .expect("notify owns the topology"),
+    );
+    let producer = NatsEventBus::connect(&nats_url(), t.clone(), TopologyRole::Verify)
+        .await
+        .expect("a producer verifies notify's topology");
+    let event = Event::new("sid-test", event_types::SESSION_REVOKED);
+    owe(&producer, &event).await;
+    let (stop, handle) = run_notify(notify, store.clone(), 1_000);
+    assert!(accepted(&store, &event, Duration::from_secs(10)).await);
+    stop.send(()).unwrap();
+    handle.await.unwrap();
+    drop_topology(&t).await;
+}
+
 /// The service starts with its database and the configured channels.
 #[tokio::test]
 async fn test_notify_server_init() {
