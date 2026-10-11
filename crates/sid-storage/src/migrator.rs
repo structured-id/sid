@@ -665,7 +665,7 @@ async fn apply_pending(conn: &mut sqlx::PgConnection, last: Option<&str>) -> Sid
 
 /// Validate schema name to prevent SQL injection.
 /// Only allows alphanumeric characters, underscores, and hyphens.
-pub(crate) fn validate_schema_name(name: &str) -> SidResult<()> {
+pub fn validate_schema_name(name: &str) -> SidResult<()> {
     if name.is_empty() || name.len() > 63 {
         return Err(SidError::Validation(
             "Schema name must be 1-63 characters".into(),
@@ -680,6 +680,14 @@ pub(crate) fn validate_schema_name(name: &str) -> SidResult<()> {
         ));
     }
     Ok(())
+}
+
+/// Validate a PostgreSQL connection URL with the parser the backend connects
+/// with, without connecting.
+pub fn validate_database_url(url: &str) -> SidResult<()> {
+    url.parse::<sqlx::postgres::PgConnectOptions>()
+        .map(drop)
+        .map_err(|e| SidError::Validation(format!("Invalid database URL: {e}")))
 }
 
 #[cfg(test)]
