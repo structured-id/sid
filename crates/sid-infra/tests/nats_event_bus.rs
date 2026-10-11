@@ -384,6 +384,56 @@ async fn test_replay_reads_history_only() {
     drop_topology(&t).await;
 }
 
+/// A replay the reader is not keeping up with is held back by the server:
+/// it sends no more than the reader's channel and the unacknowledged bound
+/// hold, rather than pushing the whole history into a client buffer that
+/// drops what overflows. Every event still arrives once the reader reads.
+#[tokio::test]
+async fn test_replay_waits_for_a_slow_reader() {
+    use futures::future::join_all;
+    let t = topology();
+    let bus = owner(&t).await;
+    let start = chrono::Utc::now() - chrono::Duration::seconds(5);
+    const EVENTS: usize = 3_000;
+    for chunk in (0..EVENTS).collect::<Vec<_>>().chunks(200) {
+        join_all(
+            chunk
+                .iter()
+                .map(|_| bus.publish(Event::new("sid-test", event_types::USER_CREATED))),
+        )
+        .await
+        .into_iter()
+        .for_each(|r| r.unwrap());
+    }
+    let mut replayed = bus
+        .replay(start, None, EventFilter::default())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let js = jetstream().await;
+    let stream = js.get_stream(t.history_stream()).await.unwrap();
+    let mut names = stream.consumer_names();
+    let name = futures::StreamExt::next(&mut names).await.unwrap().unwrap();
+    let mut consumer: async_nats::jetstream::consumer::PushConsumer =
+        stream.get_consumer(&name).await.unwrap();
+    let delivered = consumer.info().await.unwrap().delivered.stream_sequence;
+    assert!(
+        delivered < EVENTS as u64,
+        "the whole history was pushed past a reader that read nothing ({delivered})"
+    );
+
+    let mut read = 0;
+    while let Ok(Some(_)) = tokio::time::timeout(Duration::from_secs(5), replayed.recv()).await {
+        read += 1;
+        if read == EVENTS {
+            break;
+        }
+    }
+    assert_eq!(read, EVENTS, "a replayed event was lost");
+    drop_topology(&t).await;
+}
+
 /// Only the owner creates the streams; a process that verifies is not ready
 /// while they are missing or differ, and works once they are as defined.
 #[tokio::test]

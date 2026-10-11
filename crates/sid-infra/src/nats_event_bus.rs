@@ -164,7 +164,10 @@ impl EventBus for NatsEventBus {
         let config = jetstream::consumer::push::Config {
             filter_subjects: subjects,
             deliver_policy: jetstream::consumer::DeliverPolicy::New,
-            ack_policy: jetstream::consumer::AckPolicy::None,
+            ack_policy: jetstream::consumer::AckPolicy::Explicit,
+            // The server waits once this many are unacknowledged, so the
+            // client's own buffer never overflows (see [`forward_history`]).
+            max_ack_pending: HISTORY_IN_FLIGHT,
             deliver_subject,
             ..Default::default()
         };
@@ -183,24 +186,7 @@ impl EventBus for NatsEventBus {
             .map_err(|e| EventBusError::SubscribeFailed(format!("messages stream: {e}")))?;
 
         let (tx, rx) = mpsc::channel(SUBSCRIPTION_CAPACITY);
-        // Forward NATS messages into the bounded channel: a full channel makes
-        // this task wait, so a slow subscriber slows its own consumer only.
-        tokio::spawn(async move {
-            use futures::StreamExt;
-            let mut messages = messages;
-            while let Some(Ok(msg)) = messages.next().await {
-                match serde_json::from_slice::<Event>(&msg.payload) {
-                    Ok(event) => {
-                        if let Err(e) = event.validate() {
-                            tracing::warn!("invalid CloudEvents envelope, skipping: {e}");
-                        } else if tx.send(event).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(e) => tracing::warn!("failed to deserialize NATS event: {e}"),
-                }
-            }
-        });
+        tokio::spawn(forward_history(messages, tx, None));
         Ok(rx)
     }
 
@@ -323,7 +309,8 @@ impl EventBus for NatsEventBus {
             deliver_policy: jetstream::consumer::DeliverPolicy::ByStartTime {
                 start_time: opt_start_time,
             },
-            ack_policy: jetstream::consumer::AckPolicy::None,
+            ack_policy: jetstream::consumer::AckPolicy::Explicit,
+            max_ack_pending: HISTORY_IN_FLIGHT,
             deliver_subject: self.client.new_inbox(),
             ..Default::default()
         };
@@ -343,26 +330,7 @@ impl EventBus for NatsEventBus {
             .map_err(|e| EventBusError::SubscribeFailed(format!("replay messages: {e}")))?;
 
         let (tx, rx) = mpsc::channel(SUBSCRIPTION_CAPACITY);
-        // Forward replayed events until `to` cutoff or stream end.
-        tokio::spawn(async move {
-            use futures::StreamExt;
-            let mut messages = messages;
-            while let Some(Ok(msg)) = messages.next().await {
-                match serde_json::from_slice::<Event>(&msg.payload) {
-                    Ok(event) => {
-                        if to.is_some_and(|cutoff| event.time >= cutoff) {
-                            break;
-                        }
-                        if let Err(e) = event.validate() {
-                            tracing::warn!("replay: invalid CloudEvents envelope, skipping: {e}");
-                        } else if tx.send(event).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(e) => tracing::warn!("replay: failed to deserialize event: {e}"),
-                }
-            }
-        });
+        tokio::spawn(forward_history(messages, tx, to));
         Ok(rx)
     }
 
@@ -373,6 +341,41 @@ impl EventBus for NatsEventBus {
             Ok(())
         } else {
             Err(EventBusError::NotConnected)
+        }
+    }
+}
+
+/// History messages a reader may hold unacknowledged before the server waits.
+/// Each is acknowledged only after it reached the reader's bounded channel,
+/// so the server stops sending while the reader is behind, instead of the
+/// client dropping what its buffer cannot hold.
+const HISTORY_IN_FLIGHT: i64 = SUBSCRIPTION_CAPACITY as i64;
+
+/// Forward history `messages` into `tx` until the stream ends, the reader
+/// goes away, or an event at or after `cutoff` arrives. A message is
+/// acknowledged once forwarded (or skipped as unreadable), which is what
+/// lets the server send the next one.
+async fn forward_history(
+    mut messages: jetstream::consumer::push::Messages,
+    tx: mpsc::Sender<Event>,
+    cutoff: Option<chrono::DateTime<chrono::Utc>>,
+) {
+    use futures::StreamExt;
+    while let Some(Ok(msg)) = messages.next().await {
+        match serde_json::from_slice::<Event>(&msg.payload) {
+            Ok(event) if cutoff.is_some_and(|cutoff| event.time >= cutoff) => break,
+            Ok(event) => match event.validate() {
+                Err(e) => tracing::warn!("invalid CloudEvents envelope, skipping: {e}"),
+                Ok(()) => {
+                    if tx.send(event).await.is_err() {
+                        break;
+                    }
+                }
+            },
+            Err(e) => tracing::warn!("failed to deserialize NATS event: {e}"),
+        }
+        if let Err(e) = msg.ack().await {
+            tracing::warn!("acknowledge a history event: {e}");
         }
     }
 }

@@ -213,10 +213,13 @@ async fn a_separate_evaluator_acts_on_relayed_cleanup() {
     assert_eq!(reported[0].id, reported[2].id, "the same report again");
 }
 
-/// A settlement that cannot be reported leaves its event unacknowledged: it
-/// is delivered again, acted on again (harmlessly) and reported then.
+/// A settlement that cannot be reported (the work stream full) does not hold
+/// its cleanup event: the effect is done and the event is acknowledged, so
+/// its slot frees up. The authority keeps the cleanup owed until a
+/// settlement is recorded and relays it again; the repeat is done again
+/// harmlessly and reported then, so no report is lost.
 #[tokio::test]
-async fn an_unreported_settlement_is_retried() {
+async fn an_unreported_settlement_frees_its_event() {
     let storage = sqlite().await;
     let installation = sid_core::models::OrgId::generate();
     let (ops, evaluation) = split(storage.clone(), installation, manager(3), manager(3));
@@ -227,7 +230,8 @@ async fn an_unreported_settlement_is_retried() {
         serde_json::to_value(aborted).unwrap(),
     );
     let (settled, _) = relay_reporting(evaluation, vec![abort], false).await;
-    assert!(matches!(settled[0], Settlement::Retry(_)), "{settled:?}");
+    assert_eq!(settled, [Settlement::Done]);
+    assert_eq!(keys(&storage, &aborted.owner_domain).await, 0, "reclaimed");
 }
 
 /// The credential authority records the settlements reported for it, once

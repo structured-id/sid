@@ -5,8 +5,8 @@ use chrono::Utc;
 use sid_authn::event_relay::{EventFanoutHandler, EventRelayHandler};
 use sid_authn::work_runner::{RunnerConfig, WorkRunner};
 use sid_core::models::RequiredReceiver;
+use sid_core::models::WorkState;
 use sid_core::models::event::EventFilter;
-use sid_core::models::{WorkRecord, WorkState};
 use sid_plugin::InProcessEventBus;
 use sid_plugin::notification::{
     ChannelHealth, DeliveryReceipt, NotificationChannel, RenderedMessage,
@@ -101,10 +101,6 @@ fn claimed(kind_name: &str, payload: Vec<u8>) -> ClaimedWork {
     }
 }
 
-async fn record(store: &dyn WorkStore, name: &str) -> Option<WorkRecord> {
-    store.get_work(stable_id(name)).await.unwrap()
-}
-
 fn route_handler(store: &Arc<dyn WorkStore>, resolver: RecipientResolver) -> RouteHandler {
     RouteHandler::new(
         RoutingTable::default_ce_rules(),
@@ -157,6 +153,34 @@ async fn test_accept_event_refused_when_full() {
 
 /// Routing stores one delivery per (template, channel) with a stable id; a
 /// second routing attempt stores nothing new.
+/// Two producers may reuse an event id: each event is its own notification,
+/// so routing them stores deliveries for both rather than taking the second
+/// for a repeat of the first.
+#[tokio::test]
+async fn test_same_id_from_two_sources_is_two_notifications() {
+    let store = store().await;
+    let handler = route_handler(&store, RecipientResolver::without_identity());
+    let first = security_event();
+    let mut second = first.clone();
+    second.source = "sid-other".into();
+    for event in [&first, &second] {
+        let work = claimed(ROUTE, serde_json::to_vec(event).unwrap());
+        assert_eq!(
+            handler.handle(&work).await,
+            WorkOutcome::Done(Some("2 deliveries".into()))
+        );
+    }
+    let deliveries = store
+        .claim_work(&[kind(DELIVER)], "w", 10, Duration::from_secs(30))
+        .await
+        .unwrap();
+    assert_eq!(
+        deliveries.len(),
+        4,
+        "a second source's deliveries were dropped"
+    );
+}
+
 #[tokio::test]
 async fn test_route_fans_out_once() {
     let store = store().await;
@@ -171,9 +195,9 @@ async fn test_route_fans_out_once() {
     handler.handle(&work).await;
 
     for channel in ["email", "webhook"] {
-        let name = format!("deliver:{}:security_alert:{channel}", event.id);
+        let id = delivery_job_id(&event, "security_alert", channel);
         assert!(
-            record(store.as_ref(), &name).await.is_some(),
+            store.get_work(id).await.unwrap().is_some(),
             "{channel} missing"
         );
     }
@@ -337,8 +361,11 @@ async fn test_runner_delivers_and_alerts_dead_letters() {
     stop.send(()).unwrap();
     handle.await.unwrap();
 
-    let dead = format!("deliver:{}:security_alert:webhook", event.id);
-    let dead_record = record(store.as_ref(), &dead).await.unwrap();
+    let dead_record = store
+        .get_work(delivery_job_id(&event, "security_alert", "webhook"))
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(dead_record.state, WorkState::Failed);
     assert_eq!(dead_record.attempts, 1, "a rejected delivery was retried");
     assert_eq!(alert.data["work_id"], dead_record.id.to_string());
@@ -349,8 +376,11 @@ async fn test_runner_delivers_and_alerts_dead_letters() {
         .expect("the alert was not owed to the required receiver");
     assert_eq!(owed.state, WorkState::Pending);
 
-    let sent = format!("deliver:{}:security_alert:email", event.id);
-    let sent_record = record(store.as_ref(), &sent).await.unwrap();
+    let sent_record = store
+        .get_work(delivery_job_id(&event, "security_alert", "email"))
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(sent_record.state, WorkState::Completed);
     assert_eq!(sent_record.result.as_deref(), Some("smtp:email:m-42"));
     assert_eq!(email.sent.lock().unwrap().len(), 1);

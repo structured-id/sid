@@ -5,8 +5,8 @@
 //! committed with the decision that made it. The evaluator consumes those
 //! events durably and acts on each (it reclaims the enrollment's key, or
 //! destroys the owner's keys), addresses the settlement back to the
-//! authority, and only then acknowledges the event; both effects are
-//! idempotent in its store. The credential authority records the
+//! authority, and acknowledges the event once the effect is done; both
+//! effects are idempotent in its store. The credential authority records the
 //! settlements it consumes and keeps each cleanup owed, relaying it again,
 //! until its settlement is recorded: the settlement, not the handoff,
 //! establishes that the keys are gone. A standalone installation does
@@ -161,15 +161,18 @@ pub async fn consume_relayed_cleanup(
         .await?;
     while let Some(delivery) = deliveries.recv().await {
         let settlement = match settle(&evaluation, source, &delivery.event).await {
-            // Reported before the event is acknowledged: a lost report
-            // leaves the event to be delivered and reported again.
-            (Settlement::Done, Some(cleanup)) => match report(bus, source, cleanup).await {
-                Ok(()) => Settlement::Done,
-                Err(e) => {
-                    warn!("report a cleanup settlement: {e}");
-                    Settlement::Retry(RETRY)
+            // The effect is done, so the event is acknowledged whether or not
+            // its report goes out: holding it until the report does would keep
+            // a full work stream full, the report and the event waiting on each
+            // other. A report that did not go out is not lost: the authority
+            // keeps the cleanup owed and relays it again until a settlement is
+            // recorded, and the repeat is done again harmlessly and reported.
+            (Settlement::Done, Some(cleanup)) => {
+                if let Err(e) = report(bus, source, cleanup).await {
+                    warn!("report a cleanup settlement: {e}; the authority relays it again");
                 }
-            },
+                Settlement::Done
+            }
             (settlement, _) => settlement,
         };
         delivery.settle(settlement);

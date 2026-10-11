@@ -61,6 +61,15 @@ pub fn route_job_id(event: &Event) -> WorkId {
     stable_id(&format!("route:{}", event.relay_id()))
 }
 
+/// The delivery job of `event` through `template` to `channel`: one per event
+/// `(source, id)`, template and channel.
+pub fn delivery_job_id(event: &Event, template: &str, channel: &str) -> WorkId {
+    stable_id(&format!(
+        "deliver:{}:{template}:{channel}",
+        event.relay_id()
+    ))
+}
+
 /// Accept an inbound event: store its routing job. Once this returns `Ok`
 /// the event may be settled; on `Err` it must not be.
 pub async fn accept_event(
@@ -238,10 +247,7 @@ impl WorkHandler for RouteHandler {
                     Err(e) => return WorkOutcome::Permanent(format!("delivery job: {e}")),
                 };
                 let mut delivery = NewWork::new(kind(DELIVER), payload);
-                delivery.id = stable_id(&format!(
-                    "deliver:{}:{}:{}",
-                    event.id, rule.template, channel
-                ));
+                delivery.id = delivery_job_id(&event, &rule.template, channel);
                 delivery.max_attempts = MAX_ATTEMPTS;
                 // A delivery stored by an earlier attempt is kept as it is.
                 if let Err(e) = self.store.enqueue_work(&delivery, self.capacity).await {
