@@ -189,15 +189,10 @@ impl Writer {
                 // the joined rows, so a user with two matching emails moved
                 // the page.
                 let (source, owner, column) = self.values_of(attr);
-                let mut matches = self.comparison(&column, op, value, attr.case_exact());
-                if attr == Attr::UserName && op == Op::Eq {
-                    // The same match as the whole login, so the login index
-                    // (principal_type, lower(value)) finds it without a scan.
-                    let login = self.bind(format!("{value}{}", self.suffix));
-                    matches.push_str(&format!(" AND lower(pr.value) = lower({login})"));
-                }
+                let matches = self.comparison(&column, op, value, attr.case_exact());
+                let indexed = self.indexed_login(attr, op, value);
                 self.sql.push_str(&format!(
-                    "p.id IN (SELECT {owner} FROM {source} AND {column} <> '' AND {matches})"
+                    "p.id IN (SELECT {owner} FROM {source} AND {column} <> '' AND {matches}{indexed})"
                 ));
             }
             _ => {
@@ -210,12 +205,38 @@ impl Writer {
         Ok(())
     }
 
+    /// For a PostgreSQL `userName eq`, the same match on the whole login, so
+    /// the login index (principal_type, folded value) finds it without a
+    /// scan; otherwise nothing. SQLite has no such index: it folds with
+    /// `sid_fold`, which an index would need on every connection that writes
+    /// the file.
+    fn indexed_login(&mut self, attr: Attr, op: Op, value: &str) -> String {
+        match (self.dialect, attr, op, value) {
+            #[cfg(feature = "storage-pg")]
+            (Dialect::Postgres, Attr::UserName, Op::Eq, value) => {
+                let login = self.bind(format!("{value}{}", self.suffix));
+                format!(" AND {} = {}", self.fold("pr.value"), self.fold(&login))
+            }
+            _ => String::new(),
+        }
+    }
+
+    /// `expr` in Unicode lower case, whatever locale the database was created
+    /// with: PostgreSQL's `lower()` under the built-in `pg_c_utf8` collation
+    /// (under a `C` locale plain `lower()` folds ASCII only), SQLite's
+    /// `sid_fold` (its built-in `lower()` always folds ASCII only).
+    fn fold(&self, expr: &str) -> String {
+        match self.dialect {
+            #[cfg(feature = "storage-pg")]
+            Dialect::Postgres => format!("lower(({expr}) COLLATE pg_c_utf8)"),
+            #[cfg(feature = "storage-sqlite")]
+            Dialect::Sqlite => format!("sid_fold({expr})"),
+        }
+    }
+
     /// `column op value`, with case folded unless the attribute is case-exact
     /// (RFC 7644 §3.4.2.2).
     fn comparison(&mut self, column: &str, op: Op, value: &str, case_exact: bool) -> String {
-        let fold = |s: String| {
-            if case_exact { s } else { format!("lower({s})") }
-        };
         // Ordering compares code points, the same on both engines.
         let (contains, collate) = match self.dialect {
             #[cfg(feature = "storage-pg")]
@@ -223,8 +244,12 @@ impl Writer {
             #[cfg(feature = "storage-sqlite")]
             Dialect::Sqlite => ("instr", ""),
         };
-        let a = fold(column.to_string());
-        let b = fold(self.bind(value.to_string()));
+        let value = self.bind(value.to_string());
+        let (a, b) = if case_exact {
+            (column.to_string(), value)
+        } else {
+            (self.fold(column), self.fold(&value))
+        };
         match op {
             Op::Eq => format!("{a} = {b}"),
             Op::Ne => format!("{a} <> {b}"),
@@ -233,10 +258,11 @@ impl Writer {
             Op::EndsWith => format!(
                 "length({a}) >= length({b}) AND substr({a}, length({a}) - length({b}) + 1) = {b}"
             ),
-            Op::Greater => format!("{a}{collate} > {b}"),
-            Op::GreaterOrEqual => format!("{a}{collate} >= {b}"),
-            Op::Less => format!("{a}{collate} < {b}"),
-            Op::LessOrEqual => format!("{a}{collate} <= {b}"),
+            // On both sides: a folded value carries the folding collation.
+            Op::Greater => format!("({a}){collate} > ({b}){collate}"),
+            Op::GreaterOrEqual => format!("({a}){collate} >= ({b}){collate}"),
+            Op::Less => format!("({a}){collate} < ({b}){collate}"),
+            Op::LessOrEqual => format!("({a}){collate} <= ({b}){collate}"),
         }
     }
 

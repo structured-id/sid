@@ -8,6 +8,9 @@ services:
       POSTGRES_DB: sid
     ports:
       - "54399:5432"
+    # Parallel queries take dynamic shared memory from /dev/shm; Docker's
+    # 64 MB default runs out under the parallel test suite.
+    shm_size: 512mb
     # PostgreSQL 18 images keep the cluster in a versioned directory under
     # /var/lib/postgresql.
     tmpfs:

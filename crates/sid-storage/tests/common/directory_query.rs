@@ -293,6 +293,38 @@ pub async fn test_directory_comparison_semantics(backend: &dyn StorageBackend) {
     );
 }
 
+/// A case-insensitive comparison folds case beyond ASCII (`caseExact: false`,
+/// RFC 7643 §2.2): `ÉLODIE` finds `élodie` on every engine, in a login, an
+/// email, the display name and an extension attribute, by every operator
+/// that folds.
+pub async fn test_directory_folds_unicode_case(backend: &dyn StorageBackend) {
+    let domain = domain();
+    add_user(
+        backend,
+        &domain,
+        "élodie",
+        &[&format!("élodie@{domain}")],
+        &[("title", "Ingénieure")],
+    )
+    .await;
+    add_user(backend, &domain, "zoé", &[], &[]).await;
+    let found = async |filter: F| names(backend, &query(&domain, filter, 0, 10)).await.1;
+
+    for filter in [
+        compare(Attr::UserName, Op::Eq, "ÉLODIE"),
+        compare(Attr::UserName, Op::StartsWith, "ÉL"),
+        compare(Attr::Email, Op::Eq, &format!("ÉLODIE@{domain}")),
+        compare(Attr::DisplayName, Op::Contains, "ÉLODIE"),
+        compare(Attr::Title, Op::Eq, "INGÉNIEURE"),
+    ] {
+        assert_eq!(found(filter.clone()).await, vec!["élodie"], "{filter:?}");
+    }
+    assert_eq!(
+        found(compare(Attr::UserName, Op::EndsWith, "OÉ")).await,
+        vec!["zoé"]
+    );
+}
+
 /// The page carries each user's own principals, emails and metadata, and
 /// `active` follows suspension.
 pub async fn test_directory_users_carry_their_attributes(backend: &dyn StorageBackend) {

@@ -665,6 +665,11 @@ async fn test_directory_omits_retired_profiles() {
 }
 
 #[tokio::test]
+async fn test_directory_folds_unicode_case() {
+    common::directory_query::test_directory_folds_unicode_case(&setup().await).await;
+}
+
+#[tokio::test]
 async fn test_profile_username_uniqueness() {
     common::test_profile_username_uniqueness(&setup().await).await;
 }

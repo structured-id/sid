@@ -9,6 +9,7 @@
 //! **Not the default CE backend** — full CE uses PostgreSQL+AGE.
 //! Enable via `storage-sqlite` feature flag.
 
+mod fold;
 mod migrations;
 mod schema;
 
@@ -128,6 +129,7 @@ impl SqliteBackend {
 
         let pool = SqlitePoolOptions::new()
             .max_connections(4)
+            .after_connect(|conn, _| Box::pin(fold::register(conn)))
             .connect_with(options)
             .await
             .map_err(|e| SidError::Storage(format!("SQLite connection failed: {e}")))?;
@@ -147,6 +149,7 @@ impl SqliteBackend {
         // Multiple connections would create separate databases.
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
+            .after_connect(|conn, _| Box::pin(fold::register(conn)))
             .connect_with(options)
             .await
             .map_err(|e| SidError::Storage(format!("SQLite memory pool failed: {e}")))?;

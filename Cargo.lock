@@ -6281,6 +6281,7 @@ dependencies = [
  "chrono",
  "futures",
  "group 0.14.0",
+ "libsqlite3-sys",
  "pasta_curves",
  "secrecy",
  "serde",
