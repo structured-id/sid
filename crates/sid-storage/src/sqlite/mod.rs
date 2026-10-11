@@ -9,6 +9,7 @@
 //! **Not the default CE backend** — full CE uses PostgreSQL+AGE.
 //! Enable via `storage-sqlite` feature flag.
 
+mod fold;
 mod migrations;
 mod schema;
 
@@ -128,6 +129,7 @@ impl SqliteBackend {
 
         let pool = SqlitePoolOptions::new()
             .max_connections(4)
+            .after_connect(|conn, _| Box::pin(fold::register(conn)))
             .connect_with(options)
             .await
             .map_err(|e| SidError::Storage(format!("SQLite connection failed: {e}")))?;
@@ -147,6 +149,7 @@ impl SqliteBackend {
         // Multiple connections would create separate databases.
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
+            .after_connect(|conn, _| Box::pin(fold::register(conn)))
             .connect_with(options)
             .await
             .map_err(|e| SidError::Storage(format!("SQLite memory pool failed: {e}")))?;
@@ -1202,6 +1205,13 @@ impl StorageBackend for SqliteBackend {
 
     async fn count_profiles(&self) -> SidResult<u64> {
         self.count_profiles_impl().await
+    }
+
+    async fn query_directory(
+        &self,
+        query: &sid_core::models::DirectoryQuery,
+    ) -> SidResult<sid_core::models::DirectoryPage> {
+        self.query_directory_impl(query).await
     }
 
     async fn list_profiles_with_status(

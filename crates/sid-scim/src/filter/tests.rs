@@ -99,170 +99,97 @@ fn test_empty_filter() {
     assert!(matches!(result, Err(FilterError::UnexpectedEnd)));
 }
 
-/// A filter names the emails attribute through any branch; other attributes
-/// sharing its prefix as text do not count.
-#[test]
-fn test_references() {
-    let emails = parse_filter(r#"active eq true and not emails.value co "@a.com""#).unwrap();
-    assert!(emails.references("emails"));
-    assert!(parse_filter("emails pr").unwrap().references("emails"));
-    let other = parse_filter(r#"emailsLegacy eq "x" or userName eq "a""#).unwrap();
-    assert!(!other.references("emails"));
+// ── Translation to the directory query ──
+// What a translated filter matches is the storage contract, run against
+// every engine by the storage conformance suite.
+
+fn directory(input: &str) -> Result<DirectoryFilter, FilterError> {
+    to_directory(&parse_filter(input).unwrap())
 }
 
-// ── Filter matching tests ──
-
-fn test_user() -> proto::ScimUser {
-    proto::ScimUser {
-        id: "test-id".into(),
-        user_name: "alice.smith".into(),
-        display_name: "Alice Smith".into(),
-        external_id: "EMP-42".into(),
-        department: "Engineering".into(),
-        title: "Senior Engineer".into(),
-        active: true,
-        name: Some(proto::ScimName {
-            formatted: "Alice Smith".into(),
-            given_name: "Alice".into(),
-            family_name: "Smith".into(),
-            ..Default::default()
-        }),
-        emails: vec![
-            proto::ScimEmail {
-                value: "alice@acme.com".into(),
-                r#type: "work".into(),
-                primary: true,
+/// Every attribute the directory holds is named case-insensitively; a
+/// multi-valued attribute by itself means its values; the enterprise
+/// department may be named by its URN.
+#[test]
+fn test_attributes_translate() {
+    for (path, attribute) in [
+        ("userName", DirectoryAttribute::UserName),
+        ("USERNAME", DirectoryAttribute::UserName),
+        ("displayName", DirectoryAttribute::DisplayName),
+        ("name.givenName", DirectoryAttribute::GivenName),
+        ("name.familyName", DirectoryAttribute::FamilyName),
+        ("name.formatted", DirectoryAttribute::FormattedName),
+        ("externalId", DirectoryAttribute::ExternalId),
+        ("title", DirectoryAttribute::Title),
+        ("department", DirectoryAttribute::Department),
+        (
+            "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:department",
+            DirectoryAttribute::Department,
+        ),
+        ("emails", DirectoryAttribute::Email),
+        ("emails.value", DirectoryAttribute::Email),
+        ("phoneNumbers.value", DirectoryAttribute::Phone),
+    ] {
+        assert_eq!(
+            directory(&format!(r#"{path} eq "x""#)).unwrap(),
+            DirectoryFilter::Compare {
+                attribute,
+                operator: DirectoryOperator::Eq,
+                value: "x".into(),
             },
-            proto::ScimEmail {
-                value: "alice.personal@mail.com".into(),
-                r#type: "home".into(),
-                primary: false,
-            },
-        ],
-        phone_numbers: vec![proto::ScimPhoneNumber {
-            value: "+1-555-0100".into(),
-            r#type: "work".into(),
-            primary: true,
-        }],
-        ..Default::default()
+            "{path}"
+        );
     }
+    assert_eq!(
+        directory("active eq true").unwrap(),
+        DirectoryFilter::Compare {
+            attribute: DirectoryAttribute::Active,
+            operator: DirectoryOperator::Eq,
+            value: "true".into(),
+        }
+    );
 }
 
+/// Every operator and every logical form keeps its meaning.
 #[test]
-fn test_match_username_eq() {
-    let user = test_user();
-    let f = parse_filter(r#"userName eq "alice.smith""#).unwrap();
-    assert!(matches_user(&f, &user));
+fn test_operators_and_logic_translate() {
+    for (op, operator) in [
+        ("ne", DirectoryOperator::Ne),
+        ("co", DirectoryOperator::Contains),
+        ("sw", DirectoryOperator::StartsWith),
+        ("ew", DirectoryOperator::EndsWith),
+        ("gt", DirectoryOperator::Greater),
+        ("ge", DirectoryOperator::GreaterOrEqual),
+        ("lt", DirectoryOperator::Less),
+        ("le", DirectoryOperator::LessOrEqual),
+    ] {
+        assert!(matches!(
+            directory(&format!(r#"title {op} "x""#)).unwrap(),
+            DirectoryFilter::Compare { operator: o, .. } if o == operator
+        ));
+    }
+    assert!(matches!(
+        directory(r#"title eq "a" and not emails pr or userName sw "b""#).unwrap(),
+        DirectoryFilter::And(_, _)
+    ));
+    assert_eq!(
+        directory("emails pr").unwrap(),
+        DirectoryFilter::Present(DirectoryAttribute::Email)
+    );
 }
 
+/// An attribute the directory does not hold, anywhere in the filter, is an
+/// invalid filter: answering with nothing would read as "no such user".
 #[test]
-fn test_match_username_eq_case_insensitive() {
-    let user = test_user();
-    let f = parse_filter(r#"userName eq "Alice.Smith""#).unwrap();
-    assert!(matches_user(&f, &user));
-}
-
-#[test]
-fn test_match_username_ne() {
-    let user = test_user();
-    let f = parse_filter(r#"userName ne "bob""#).unwrap();
-    assert!(matches_user(&f, &user));
-}
-
-#[test]
-fn test_match_display_name_co() {
-    let user = test_user();
-    let f = parse_filter(r#"displayName co "Smith""#).unwrap();
-    assert!(matches_user(&f, &user));
-}
-
-#[test]
-fn test_match_display_name_sw() {
-    let user = test_user();
-    let f = parse_filter(r#"displayName sw "Alice""#).unwrap();
-    assert!(matches_user(&f, &user));
-}
-
-#[test]
-fn test_match_active_eq_true() {
-    let user = test_user();
-    let f = parse_filter("active eq true").unwrap();
-    assert!(matches_user(&f, &user));
-}
-
-#[test]
-fn test_match_active_eq_false_no_match() {
-    let user = test_user();
-    let f = parse_filter("active eq false").unwrap();
-    assert!(!matches_user(&f, &user));
-}
-
-#[test]
-fn test_match_department_eq() {
-    let user = test_user();
-    let f = parse_filter(r#"department eq "Engineering""#).unwrap();
-    assert!(matches_user(&f, &user));
-}
-
-#[test]
-fn test_match_and_filter() {
-    let user = test_user();
-    let f = parse_filter(r#"userName eq "alice.smith" and active eq true"#).unwrap();
-    assert!(matches_user(&f, &user));
-}
-
-#[test]
-fn test_match_and_filter_fails() {
-    let user = test_user();
-    let f = parse_filter(r#"userName eq "alice.smith" and active eq false"#).unwrap();
-    assert!(!matches_user(&f, &user));
-}
-
-#[test]
-fn test_match_or_filter() {
-    let user = test_user();
-    let f = parse_filter(r#"department eq "Sales" or department eq "Engineering""#).unwrap();
-    assert!(matches_user(&f, &user));
-}
-
-#[test]
-fn test_match_not_filter() {
-    let user = test_user();
-    let f = parse_filter("not active eq false").unwrap();
-    assert!(matches_user(&f, &user));
-}
-
-#[test]
-fn test_match_email_multivalued() {
-    let user = test_user();
-    let f = parse_filter(r#"emails.value co "@acme.com""#).unwrap();
-    assert!(matches_user_multivalued(&f, &user));
-}
-
-#[test]
-fn test_match_email_multivalued_second_value() {
-    let user = test_user();
-    let f = parse_filter(r#"emails.value co "@mail.com""#).unwrap();
-    assert!(matches_user_multivalued(&f, &user));
-}
-
-#[test]
-fn test_match_email_multivalued_no_match() {
-    let user = test_user();
-    let f = parse_filter(r#"emails.value co "@unknown.com""#).unwrap();
-    assert!(!matches_user_multivalued(&f, &user));
-}
-
-#[test]
-fn test_match_name_given_name() {
-    let user = test_user();
-    let f = parse_filter(r#"name.givenName eq "Alice""#).unwrap();
-    assert!(matches_user(&f, &user));
-}
-
-#[test]
-fn test_match_external_id() {
-    let user = test_user();
-    let f = parse_filter(r#"externalId eq "EMP-42""#).unwrap();
-    assert!(matches_user(&f, &user));
+fn test_unknown_attribute_is_refused() {
+    for input in [
+        r#"nickName eq "x""#,
+        r#"userName eq "a" or emailsArchive eq "x""#,
+        "not groups pr",
+    ] {
+        assert!(
+            matches!(directory(input), Err(FilterError::UnknownAttribute(_))),
+            "{input}"
+        );
+    }
 }

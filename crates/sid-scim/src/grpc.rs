@@ -331,136 +331,50 @@ impl ScimService for ScimServiceImpl {
             std::cmp::min(req.count, 1000)
         };
 
-        // Parse SCIM filter (if provided)
-        let parsed_filter = if !req.filter.is_empty() {
-            Some(filter::parse_filter(&req.filter).map_err(|_| refusal::invalid_filter())?)
-        } else {
+        // The filter is applied by storage, before the page, over the whole
+        // directory (RFC 7644 §3.4.2.2, §3.4.2.4).
+        let filter = if req.filter.is_empty() {
             None
-        };
-
-        // When filter is present, we need to fetch all profiles then filter in-memory.
-        // When no filter, use storage-level pagination.
-        if let Some(ref f) = parsed_filter {
-            // Fetch all profiles (filter requires full scan)
-            let profiles = self
-                .storage
-                .list_profiles(0, 10000) // CE: reasonable upper bound
-                .await
-                .map_err(storage_failure)?;
-
-            // Contacts are read before matching only when the filter names
-            // them; otherwise only for the users that match.
-            let filter_needs_emails = f.references("emails");
-            let mut all_resources = Vec::new();
-            for profile in &profiles {
-                let identifiers = self
-                    .storage
-                    .get_principals_by_profile(profile.id)
-                    .await
-                    .map_err(storage_failure)?;
-                let metadata = self
-                    .storage
-                    .list_profile_metadata(profile.id)
-                    .await
-                    .map_err(storage_failure)?;
-                let mut emails = Vec::new();
-                if filter_needs_emails {
-                    emails = self
-                        .storage
-                        .list_profile_emails(profile.id)
-                        .await
-                        .map_err(storage_failure)?;
-                }
-                let user = |emails: &[sid_core::models::ProfileEmail]| {
-                    sid_to_scim_user(
-                        profile,
-                        &identifiers,
-                        emails,
-                        &metadata,
-                        &[], // Skip group lookups for list (performance)
-                        &self.org_ctx.org_domain,
-                        &self.base_url,
-                    )
-                };
-
-                if !filter::matches_user_multivalued(f, &user(&emails)) {
-                    continue;
-                }
-                if !filter_needs_emails {
-                    emails = self
-                        .storage
-                        .list_profile_emails(profile.id)
-                        .await
-                        .map_err(storage_failure)?;
-                }
-                all_resources.push(user(&emails));
-            }
-
-            let total = all_resources.len() as i32;
-            let offset = (start_index - 1) as usize;
-            let resources: Vec<proto::ScimUser> = all_resources
-                .into_iter()
-                .skip(offset)
-                .take(count as usize)
-                .collect();
-
-            Ok(Response::new(proto::ScimListUsersResponse {
-                resources,
-                total_results: total,
-                start_index,
-                items_per_page: count,
-            }))
         } else {
-            // No filter: use storage-level pagination
-            let offset = (start_index - 1) as u64;
-            let profiles = self
-                .storage
-                .list_profiles(offset, count as u64)
-                .await
-                .map_err(storage_failure)?;
-
-            let total = self
-                .storage
-                .count_profiles()
-                .await
-                .map_err(storage_failure)?;
-
-            let mut resources = Vec::with_capacity(profiles.len());
-            for profile in &profiles {
-                let identifiers = self
-                    .storage
-                    .get_principals_by_profile(profile.id)
-                    .await
-                    .map_err(storage_failure)?;
-                let metadata = self
-                    .storage
-                    .list_profile_metadata(profile.id)
-                    .await
-                    .map_err(storage_failure)?;
-                let emails = self
-                    .storage
-                    .list_profile_emails(profile.id)
-                    .await
-                    .map_err(storage_failure)?;
-
-                resources.push(sid_to_scim_user(
-                    profile,
-                    &identifiers,
-                    &emails,
-                    &metadata,
-                    &[],
+            let parsed =
+                filter::parse_filter(&req.filter).map_err(|_| refusal::invalid_filter())?;
+            Some(filter::to_directory(&parsed).map_err(|_| refusal::invalid_filter())?)
+        };
+        let query = sid_core::models::DirectoryQuery {
+            org_domain: self.org_ctx.org_domain.clone(),
+            filter,
+            offset: u64::try_from(start_index - 1).expect("start_index is at least 1"),
+            limit: u64::try_from(count).expect("count is positive"),
+        };
+        let page = match self.storage.query_directory(&query).await {
+            Ok(page) => page,
+            // A comparison the attribute does not support (`active gt`).
+            Err(sid_core::Error::Validation(_)) => return Err(refusal::invalid_filter()),
+            Err(e) => return Err(storage_failure(e)),
+        };
+        let resources: Vec<proto::ScimUser> = page
+            .users
+            .iter()
+            .map(|user| {
+                sid_to_scim_user(
+                    &user.profile,
+                    &user.principals,
+                    &user.emails,
+                    &user.metadata,
+                    &[], // Groups are read per user, not for a list.
                     &self.org_ctx.org_domain,
                     &self.base_url,
-                ));
-            }
+                )
+            })
+            .collect();
 
-            Ok(Response::new(proto::ScimListUsersResponse {
-                resources,
-                total_results: total as i32,
-                start_index,
-                items_per_page: count,
-            }))
-        }
+        Ok(Response::new(proto::ScimListUsersResponse {
+            total_results: i32::try_from(page.total).unwrap_or(i32::MAX),
+            start_index,
+            // RFC 7644 §3.4.2: the number of resources returned.
+            items_per_page: i32::try_from(resources.len()).expect("a page is at most 1000"),
+            resources,
+        }))
     }
 
     #[instrument(skip_all, fields(id = %request.get_ref().id))]

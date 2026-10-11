@@ -523,6 +523,99 @@ async fn test_list_users_filter_username_eq() {
     assert_eq!(response.resources[0].user_name, username);
 }
 
+/// A user created after more than ten thousand others is found by a
+/// userName filter: the filter runs over the whole directory, not over its
+/// first ten thousand profiles (the bug this guards against answered an
+/// empty, error-free list).
+#[tokio::test]
+async fn test_list_users_filter_finds_a_user_beyond_ten_thousand() {
+    let (service, storage) = setup().await;
+    let existing = storage.count_profiles().await.unwrap();
+    let mut writers = tokio::task::JoinSet::new();
+    for _ in 0..10_001u64.saturating_sub(existing) {
+        if writers.len() >= 16 {
+            writers.join_next().await.unwrap().unwrap();
+        }
+        let storage = storage.clone();
+        writers.spawn(async move {
+            storage
+                .create_profile(
+                    &Profile::new(None::<String>),
+                    sid_core::models::AuditEntry::system("test", "profile").into(),
+                )
+                .await
+                .unwrap();
+        });
+    }
+    while let Some(written) = writers.join_next().await {
+        written.unwrap();
+    }
+    let username = unique_username();
+    service
+        .create_user(provisioned(create_user_request(&username)))
+        .await
+        .unwrap();
+
+    let response = service
+        .list_users(provisioned(proto::ScimListUsersRequest {
+            filter: format!(r#"userName eq "{username}""#),
+            start_index: 1,
+            count: 100,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(response.total_results, 1);
+    assert_eq!(response.resources.len(), 1);
+    assert_eq!(response.resources[0].user_name, username);
+    assert_eq!(response.items_per_page, 1, "the resources returned");
+}
+
+/// `itemsPerPage` is the number of resources on the page, not the count
+/// asked for (RFC 7644 §3.4.2): a last page holds fewer.
+#[tokio::test]
+async fn test_list_users_items_per_page_counts_the_page() {
+    let (service, _) = setup().await;
+    let prefix = unique_username();
+    for i in 0..3 {
+        service
+            .create_user(provisioned(create_user_request(&format!("{prefix}_{i}"))))
+            .await
+            .unwrap();
+    }
+    let response = service
+        .list_users(provisioned(proto::ScimListUsersRequest {
+            filter: format!(r#"userName sw "{prefix}""#),
+            start_index: 3,
+            count: 2,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(response.total_results, 3);
+    assert_eq!(response.resources.len(), 1);
+    assert_eq!(response.items_per_page, 1);
+}
+
+/// An attribute the directory does not hold, or a comparison its type does
+/// not support, is an invalid filter, never an empty result.
+#[tokio::test]
+async fn test_list_users_unsupported_filter_is_invalid() {
+    let (service, _) = setup().await;
+    for filter in [r#"nickName eq "x""#, "active gt true"] {
+        let err = service
+            .list_users(provisioned(proto::ScimListUsersRequest {
+                filter: filter.into(),
+                start_index: 1,
+                count: 10,
+            }))
+            .await
+            .expect_err(filter);
+        assert_eq!(err.code(), tonic::Code::InvalidArgument, "{filter}");
+    }
+}
+
 #[tokio::test]
 async fn test_list_users_filter_department_eq() {
     let (service, _) = setup().await;

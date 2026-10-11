@@ -26,6 +26,8 @@ pub use postgres::{PgHistoryKeyStore, PgWorkStore, PostgresBackend};
 pub use postgres_blob::PostgresBlobStore;
 
 #[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
+mod directory_query;
+#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
 mod key_versions;
 #[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
 mod policy_evidence;

@@ -36,6 +36,7 @@ pub mod device;
 pub mod device_attestation;
 pub mod device_authorization;
 pub mod directory;
+pub mod directory_query;
 pub mod dpop;
 pub mod durable_work;
 pub mod email_provider;
@@ -131,6 +132,10 @@ pub use device_authorization::{
     DevicePoll, USER_CODE_LENGTH,
 };
 pub use directory::{DirectoryGroupWrite, DirectoryUserWrite, DirectoryWriteMode};
+pub use directory_query::{
+    DirectoryAttribute, DirectoryFilter, DirectoryOperator, DirectoryPage, DirectoryQuery,
+    DirectoryUser,
+};
 pub use dpop::{DPopBinding, DPopProof, HttpMethod};
 pub use durable_work::{
     ClaimedWork, NewWork, WorkFailure, WorkId, WorkKind, WorkRecord, WorkSnapshot, WorkState,
