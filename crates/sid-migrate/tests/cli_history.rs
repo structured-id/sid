@@ -153,7 +153,8 @@ async fn cli_refuses_a_schema_for_sqlite() {
 
 /// Every URL and option pair is checked before any input is read or any
 /// database is reached: a wrong target (a schema for SQLite, a malformed
-/// PostgreSQL schema) neither waits on its input nor connects to (and
+/// PostgreSQL schema, a history-key store that is not PostgreSQL) neither
+/// waits on its input nor connects to (and
 /// migrates) the source first. The input here does not exist and the
 /// databases refuse connections, so a late check reports those instead.
 #[tokio::test]
@@ -164,6 +165,7 @@ async fn cli_refuses_a_bad_target_before_any_io() {
     let unreachable = "postgres://sid:sid_dev@127.0.0.1:1/sid";
     let sqlite_schema = "no PostgreSQL schema";
     let malformed_schema = "Schema name";
+    let history_keys_url = "history key store is a PostgreSQL database";
     let runs = [
         (
             vec![
@@ -224,6 +226,30 @@ async fn cli_refuses_a_bad_target_before_any_io() {
                 "tenant a",
             ],
             malformed_schema,
+        ),
+        (
+            vec![
+                "import",
+                "--target",
+                unreachable,
+                "--history-keys",
+                "sqlite:///tmp/keys.db",
+                "--input",
+                missing.to_str().unwrap(),
+            ],
+            history_keys_url,
+        ),
+        (
+            vec![
+                "migrate",
+                "--source",
+                unreachable,
+                "--target",
+                unreachable,
+                "--target-history-keys",
+                "sqlite:///tmp/keys.db",
+            ],
+            history_keys_url,
         ),
     ];
     for (args, refusal) in runs {

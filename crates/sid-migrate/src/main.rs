@@ -444,6 +444,11 @@ fn check_backend(url: &str, schema: Option<&str>, history_keys: Option<&str>) ->
         if let Some(schema) = schema {
             sid_storage::migrator::validate_schema_name(schema)?;
         }
+        if let Some(keys) = history_keys
+            && !(keys.starts_with("postgres://") || keys.starts_with("postgresql://"))
+        {
+            bail!("the history key store is a PostgreSQL database; give it a postgres:// URL");
+        }
     } else {
         bail!("Unsupported database URL scheme. Use 'sqlite://' or 'postgres://'.");
     }
