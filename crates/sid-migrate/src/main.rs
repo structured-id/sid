@@ -167,6 +167,7 @@ async fn main() -> Result<()> {
             include_audit,
             history_keys,
         } => {
+            check_backend(&source, schema.as_deref(), history_keys.as_deref())?;
             info!(output = %output.display(), "starting export");
             let store =
                 connect_backend(&source, schema.as_deref(), history_keys.as_deref()).await?;
@@ -216,6 +217,7 @@ async fn main() -> Result<()> {
             schema,
             history_keys,
         } => {
+            check_backend(&target, schema.as_deref(), history_keys.as_deref())?;
             info!(input = %input.display(), "starting import");
             let json = tokio::fs::read_to_string(&input)
                 .await
@@ -248,6 +250,16 @@ async fn main() -> Result<()> {
             source_history_keys,
             target_history_keys,
         } => {
+            check_backend(
+                &source,
+                source_schema.as_deref(),
+                source_history_keys.as_deref(),
+            )?;
+            check_backend(
+                &target,
+                target_schema.as_deref(),
+                target_history_keys.as_deref(),
+            )?;
             info!("starting direct migration");
             let source_store = connect_backend(
                 &source,
@@ -308,6 +320,16 @@ async fn main() -> Result<()> {
             source_history_keys,
             target_history_keys,
         } => {
+            check_backend(
+                &source,
+                source_schema.as_deref(),
+                source_history_keys.as_deref(),
+            )?;
+            check_backend(
+                &target,
+                target_schema.as_deref(),
+                target_history_keys.as_deref(),
+            )?;
             info!("starting verification");
             let source_store = connect_backend(
                 &source,
@@ -356,12 +378,10 @@ async fn connect_backend(
     schema: Option<&str>,
     history_keys: Option<&str>,
 ) -> Result<Store> {
+    check_backend(url, schema, history_keys)?;
     if url.starts_with("sqlite:") {
         #[cfg(feature = "storage-sqlite")]
         {
-            if history_keys.is_some() {
-                bail!("a SQLite installation keeps its history keys in its own file");
-            }
             let path = url.strip_prefix("sqlite://").unwrap_or(url);
             let backend = sid_storage::sqlite::SqliteBackend::new(path)
                 .await
@@ -372,10 +392,8 @@ async fn connect_backend(
             })
         }
         #[cfg(not(feature = "storage-sqlite"))]
-        {
-            bail!("SQLite support not compiled in. Enable the `storage-sqlite` feature.");
-        }
-    } else if url.starts_with("postgres://") || url.starts_with("postgresql://") {
+        unreachable!("refused by check_backend")
+    } else {
         #[cfg(feature = "storage-pg")]
         {
             let backend = sid_storage::PostgresBackend::new(url, schema.map(String::from))
@@ -396,10 +414,52 @@ async fn connect_backend(
             })
         }
         #[cfg(not(feature = "storage-pg"))]
-        {
+        unreachable!("refused by check_backend")
+    }
+}
+
+/// Whether `url` with these options names a backend this build can open,
+/// decided before any input is read or any database reached, so a wrong
+/// target never waits on its input or lets the source be connected and
+/// migrated first.
+fn check_backend(url: &str, schema: Option<&str>, history_keys: Option<&str>) -> Result<()> {
+    if url.starts_with("sqlite:") {
+        // A PostgreSQL schema means nothing to a SQLite file: refused, never
+        // silently ignored.
+        if schema.is_some() {
+            bail!("a SQLite installation has no PostgreSQL schema; drop the schema option");
+        }
+        if history_keys.is_some() {
+            bail!("a SQLite installation keeps its history keys in its own file");
+        }
+        if !cfg!(feature = "storage-sqlite") {
+            bail!("SQLite support not compiled in. Enable the `storage-sqlite` feature.");
+        }
+    } else if url.starts_with("postgres://") || url.starts_with("postgresql://") {
+        if !cfg!(feature = "storage-pg") {
             bail!("PostgreSQL support not compiled in. Enable the `storage-pg` feature.");
+        }
+        if let Some(keys) = history_keys
+            && !(keys.starts_with("postgres://") || keys.starts_with("postgresql://"))
+        {
+            bail!("the history key store is a PostgreSQL database; give it a postgres:// URL");
+        }
+        // The rules the backend applies when it connects: its URL parser and
+        // its schema-name check. A URL that parses but names no reachable
+        // host is only known by connecting.
+        #[cfg(feature = "storage-pg")]
+        {
+            use sid_storage::migrator::{validate_database_url, validate_schema_name};
+            validate_database_url(url)?;
+            if let Some(schema) = schema {
+                validate_schema_name(schema)?;
+            }
+            if let Some(keys) = history_keys {
+                validate_database_url(keys)?;
+            }
         }
     } else {
         bail!("Unsupported database URL scheme. Use 'sqlite://' or 'postgres://'.");
     }
+    Ok(())
 }

@@ -122,6 +122,182 @@ async fn source_with_history(dir: &std::path::Path, org: &Organization) -> Sourc
 /// A real file-backed source moves its nonempty history and the evaluator's
 /// keys through JSON and the CLI; an existing output file is neither
 /// overwritten nor made world-readable.
+/// A PostgreSQL schema has no meaning for a SQLite installation: asking for
+/// one is refused before anything is read or written, never ignored.
+#[tokio::test]
+async fn cli_refuses_a_schema_for_sqlite() {
+    let dir = tempfile::tempdir().unwrap();
+    let org = Organization::implicit_community("sid.example.com");
+    let source = source_with_history(dir.path(), &org).await;
+    let output_path = dir.path().join("snapshot.json");
+    let exported = run(&[
+        "export",
+        "--source",
+        &source.url,
+        "--schema",
+        "tenant_a",
+        "--output",
+        output_path.to_str().unwrap(),
+    ]);
+    assert!(
+        !exported.status.success(),
+        "a schema for SQLite was accepted"
+    );
+    assert!(
+        String::from_utf8_lossy(&exported.stderr).contains("schema"),
+        "{}",
+        String::from_utf8_lossy(&exported.stderr)
+    );
+    assert!(!output_path.exists(), "nothing is written");
+}
+
+/// Every URL and option pair is checked before any input is read or any
+/// database is reached: a wrong target (a schema for SQLite, a malformed
+/// PostgreSQL schema, a history-key store that is not PostgreSQL, a
+/// PostgreSQL URL that does not parse) neither
+/// waits on its input nor connects to (and
+/// migrates) the source first. The input here does not exist and the
+/// databases refuse connections, so a late check reports those instead.
+#[tokio::test]
+async fn cli_refuses_a_bad_target_before_any_io() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = format!("sqlite://{}", dir.path().join("target.sqlite").display());
+    let missing = dir.path().join("missing.json");
+    let unreachable = "postgres://sid:sid_dev@127.0.0.1:1/sid";
+    // A URL the backend's own parser refuses (the port is out of range).
+    let malformed = "postgres://sid@127.0.0.1:99999/sid";
+    let sqlite_schema = "no PostgreSQL schema";
+    let malformed_schema = "Schema name";
+    let history_keys_url = "history key store is a PostgreSQL database";
+    let malformed_url = "Invalid database URL";
+    let runs = [
+        (
+            vec![
+                "import",
+                "--target",
+                &target,
+                "--schema",
+                "tenant_a",
+                "--input",
+                missing.to_str().unwrap(),
+            ],
+            sqlite_schema,
+        ),
+        (
+            vec![
+                "migrate",
+                "--source",
+                unreachable,
+                "--target",
+                &target,
+                "--target-schema",
+                "tenant_a",
+            ],
+            sqlite_schema,
+        ),
+        (
+            vec![
+                "verify",
+                "--source",
+                unreachable,
+                "--target",
+                &target,
+                "--target-schema",
+                "tenant_a",
+            ],
+            sqlite_schema,
+        ),
+        (
+            vec![
+                "import",
+                "--target",
+                unreachable,
+                "--schema",
+                "tenant a",
+                "--input",
+                missing.to_str().unwrap(),
+            ],
+            malformed_schema,
+        ),
+        (
+            vec![
+                "migrate",
+                "--source",
+                unreachable,
+                "--target",
+                unreachable,
+                "--target-schema",
+                "tenant a",
+            ],
+            malformed_schema,
+        ),
+        (
+            vec![
+                "import",
+                "--target",
+                unreachable,
+                "--history-keys",
+                "sqlite:///tmp/keys.db",
+                "--input",
+                missing.to_str().unwrap(),
+            ],
+            history_keys_url,
+        ),
+        (
+            vec![
+                "migrate",
+                "--source",
+                unreachable,
+                "--target",
+                unreachable,
+                "--target-history-keys",
+                "sqlite:///tmp/keys.db",
+            ],
+            history_keys_url,
+        ),
+        (
+            vec![
+                "import",
+                "--target",
+                malformed,
+                "--input",
+                missing.to_str().unwrap(),
+            ],
+            malformed_url,
+        ),
+        (
+            vec!["migrate", "--source", unreachable, "--target", malformed],
+            malformed_url,
+        ),
+        (
+            vec![
+                "import",
+                "--target",
+                unreachable,
+                "--history-keys",
+                malformed,
+                "--input",
+                missing.to_str().unwrap(),
+            ],
+            malformed_url,
+        ),
+    ];
+    for (args, refusal) in runs {
+        let refused = run(&args);
+        let stderr = String::from_utf8_lossy(&refused.stderr);
+        assert!(!refused.status.success(), "{args:?} was accepted");
+        assert!(stderr.contains(refusal), "{args:?}: {stderr}");
+        assert!(
+            !stderr.contains("failed to"),
+            "{args:?} did I/O first: {stderr}"
+        );
+    }
+    assert!(
+        !dir.path().join("target.sqlite").exists(),
+        "nothing created"
+    );
+}
+
 #[tokio::test]
 async fn cli_moves_history_and_protects_the_export() {
     let dir = tempfile::tempdir().unwrap();

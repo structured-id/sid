@@ -120,7 +120,8 @@ fn an_issuer_serves_only_its_organizations_clients() {
 #[test]
 fn signing_key_debug_hides_the_sealed_key() {
     let key = IssuerSigningKey {
-        issuer_id: IssuerId::generate(),
+        // An id that itself contains "171", the decimal of the sealed byte.
+        issuer_id: IssuerId::parse("01a12a66-9149-75ab-be43-171a898242a2").unwrap(),
         generation: 1,
         key_id: "kid".into(),
         public_key: [7; 32],
@@ -129,6 +130,8 @@ fn signing_key_debug_hides_the_sealed_key() {
         created_at: chrono::DateTime::UNIX_EPOCH,
     };
     let shown = format!("{key:?}");
-    assert!(!shown.contains("171"), "sealed bytes printed: {shown}");
+    // The bytes as a derived Debug prints them; a bare "171" also occurs in
+    // ids and timestamps.
+    assert!(!shown.contains("171, 171"), "sealed bytes printed: {shown}");
     assert!(shown.contains("REDACTED"));
 }
