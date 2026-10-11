@@ -439,15 +439,24 @@ fn check_backend(url: &str, schema: Option<&str>, history_keys: Option<&str>) ->
         if !cfg!(feature = "storage-pg") {
             bail!("PostgreSQL support not compiled in. Enable the `storage-pg` feature.");
         }
-        // The same rule the backend applies when it connects.
-        #[cfg(feature = "storage-pg")]
-        if let Some(schema) = schema {
-            sid_storage::migrator::validate_schema_name(schema)?;
-        }
         if let Some(keys) = history_keys
             && !(keys.starts_with("postgres://") || keys.starts_with("postgresql://"))
         {
             bail!("the history key store is a PostgreSQL database; give it a postgres:// URL");
+        }
+        // The rules the backend applies when it connects: its URL parser and
+        // its schema-name check. A URL that parses but names no reachable
+        // host is only known by connecting.
+        #[cfg(feature = "storage-pg")]
+        {
+            use sid_storage::migrator::{validate_database_url, validate_schema_name};
+            validate_database_url(url)?;
+            if let Some(schema) = schema {
+                validate_schema_name(schema)?;
+            }
+            if let Some(keys) = history_keys {
+                validate_database_url(keys)?;
+            }
         }
     } else {
         bail!("Unsupported database URL scheme. Use 'sqlite://' or 'postgres://'.");

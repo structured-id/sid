@@ -153,7 +153,8 @@ async fn cli_refuses_a_schema_for_sqlite() {
 
 /// Every URL and option pair is checked before any input is read or any
 /// database is reached: a wrong target (a schema for SQLite, a malformed
-/// PostgreSQL schema, a history-key store that is not PostgreSQL) neither
+/// PostgreSQL schema, a history-key store that is not PostgreSQL, a
+/// PostgreSQL URL that does not parse) neither
 /// waits on its input nor connects to (and
 /// migrates) the source first. The input here does not exist and the
 /// databases refuse connections, so a late check reports those instead.
@@ -163,9 +164,12 @@ async fn cli_refuses_a_bad_target_before_any_io() {
     let target = format!("sqlite://{}", dir.path().join("target.sqlite").display());
     let missing = dir.path().join("missing.json");
     let unreachable = "postgres://sid:sid_dev@127.0.0.1:1/sid";
+    // A URL the backend's own parser refuses (the port is out of range).
+    let malformed = "postgres://sid@127.0.0.1:99999/sid";
     let sqlite_schema = "no PostgreSQL schema";
     let malformed_schema = "Schema name";
     let history_keys_url = "history key store is a PostgreSQL database";
+    let malformed_url = "Invalid database URL";
     let runs = [
         (
             vec![
@@ -250,6 +254,32 @@ async fn cli_refuses_a_bad_target_before_any_io() {
                 "sqlite:///tmp/keys.db",
             ],
             history_keys_url,
+        ),
+        (
+            vec![
+                "import",
+                "--target",
+                malformed,
+                "--input",
+                missing.to_str().unwrap(),
+            ],
+            malformed_url,
+        ),
+        (
+            vec!["migrate", "--source", unreachable, "--target", malformed],
+            malformed_url,
+        ),
+        (
+            vec![
+                "import",
+                "--target",
+                unreachable,
+                "--history-keys",
+                malformed,
+                "--input",
+                missing.to_str().unwrap(),
+            ],
+            malformed_url,
         ),
     ];
     for (args, refusal) in runs {

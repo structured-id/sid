@@ -682,5 +682,13 @@ pub fn validate_schema_name(name: &str) -> SidResult<()> {
     Ok(())
 }
 
+/// Validate a PostgreSQL connection URL with the parser the backend connects
+/// with, without connecting.
+pub fn validate_database_url(url: &str) -> SidResult<()> {
+    url.parse::<sqlx::postgres::PgConnectOptions>()
+        .map(drop)
+        .map_err(|e| SidError::Validation(format!("Invalid database URL: {e}")))
+}
+
 #[cfg(test)]
 mod tests;
