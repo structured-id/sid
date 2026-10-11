@@ -151,6 +151,64 @@ async fn cli_refuses_a_schema_for_sqlite() {
     assert!(!output_path.exists(), "nothing is written");
 }
 
+/// Every URL and option pair is checked before any input is read or any
+/// database is reached: a wrong SQLite target neither waits on its input nor
+/// connects to (and migrates) the source first. The input here does not
+/// exist and the source refuses connections, so a late check reports those.
+#[tokio::test]
+async fn cli_refuses_a_bad_target_before_any_io() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = format!("sqlite://{}", dir.path().join("target.sqlite").display());
+    let missing = dir.path().join("missing.json");
+    let unreachable = "postgres://sid:sid_dev@127.0.0.1:1/sid";
+    let runs = [
+        vec![
+            "import",
+            "--target",
+            &target,
+            "--schema",
+            "tenant_a",
+            "--input",
+            missing.to_str().unwrap(),
+        ],
+        vec![
+            "migrate",
+            "--source",
+            unreachable,
+            "--target",
+            &target,
+            "--target-schema",
+            "tenant_a",
+        ],
+        vec![
+            "verify",
+            "--source",
+            unreachable,
+            "--target",
+            &target,
+            "--target-schema",
+            "tenant_a",
+        ],
+    ];
+    for args in runs {
+        let refused = run(&args);
+        let stderr = String::from_utf8_lossy(&refused.stderr);
+        assert!(!refused.status.success(), "{args:?} was accepted");
+        assert!(
+            stderr.contains("no PostgreSQL schema"),
+            "{args:?}: {stderr}"
+        );
+        assert!(
+            !stderr.contains("failed to"),
+            "{args:?} did I/O first: {stderr}"
+        );
+    }
+    assert!(
+        !dir.path().join("target.sqlite").exists(),
+        "nothing created"
+    );
+}
+
 #[tokio::test]
 async fn cli_moves_history_and_protects_the_export() {
     let dir = tempfile::tempdir().unwrap();
