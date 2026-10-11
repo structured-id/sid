@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! `sid_fold(text)`: Unicode lower case, registered on every SQLite connection
-//! the backend opens. SQLite's built-in `lower()` folds ASCII only, so a
-//! case-insensitive comparison (`caseExact: false`, RFC 7643 §2.2) of
-//! `ÉLODIE` with `élodie` needs this to agree with PostgreSQL's `lower()`.
+//! `sid_fold(text)`: Unicode simple lower case, registered on every SQLite
+//! connection the backend opens. SQLite's built-in `lower()` folds ASCII
+//! only, so a case-insensitive comparison (`caseExact: false`, RFC 7643 §2.2)
+//! of `ÉLODIE` with `élodie` needs this to agree with PostgreSQL, which folds
+//! under `pg_c_utf8`: simple case mapping, each code point to one.
 
 use libsqlite3_sys as ffi;
 use sqlx::SqliteConnection;
@@ -40,7 +41,20 @@ pub(crate) async fn register(conn: &mut SqliteConnection) -> Result<(), sqlx::Er
     }
 }
 
-/// `sid_fold(x)`: NULL for NULL, otherwise `x` as text in lower case.
+/// The simple lowercase mapping of `c` (UnicodeData.txt field 13), as
+/// PostgreSQL's `pg_c_utf8` applies it. `str::to_lowercase` is not it: it
+/// adds the contextual final sigma (`Σ` → `ς`). `char::to_lowercase` adds no
+/// context and differs only for U+0130 `İ`, the one code point whose full
+/// lowercase (SpecialCasing.txt) is two, `i` + U+0307; its simple mapping is
+/// the first of them, `i`.
+fn simple_lowercase(c: char) -> char {
+    c.to_lowercase().next().unwrap_or(c)
+}
+
+#[cfg(test)]
+mod tests;
+
+/// `sid_fold(x)`: NULL for NULL, otherwise `x` as text in simple lower case.
 unsafe extern "C" fn fold(
     ctx: *mut ffi::sqlite3_context,
     n_arg: c_int,
@@ -70,7 +84,7 @@ unsafe extern "C" fn fold(
             ffi::sqlite3_result_error_code(ctx, ffi::SQLITE_MISMATCH);
             return;
         };
-        let folded = text.to_lowercase();
+        let folded: String = text.chars().map(simple_lowercase).collect();
         let Ok(folded_len) = c_int::try_from(folded.len()) else {
             ffi::sqlite3_result_error_toobig(ctx);
             return;

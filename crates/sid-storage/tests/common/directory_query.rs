@@ -323,6 +323,20 @@ pub async fn test_directory_folds_unicode_case(backend: &dyn StorageBackend) {
         found(compare(Attr::UserName, Op::EndsWith, "OÉ")).await,
         vec!["zoé"]
     );
+
+    // Simple case mapping, one code point to one, as on every engine:
+    // `İ` folds to `i` (not `i` + combining dot), and a final `Σ` to `σ`
+    // (not the contextual `ς`).
+    add_user(backend, &domain, "İrem", &[], &[]).await;
+    add_user(backend, &domain, "ΟΔΟΣ", &[], &[]).await;
+    assert_eq!(
+        found(compare(Attr::UserName, Op::Eq, "irem")).await,
+        vec!["İrem"]
+    );
+    assert_eq!(
+        found(compare(Attr::UserName, Op::Eq, "οδοσ")).await,
+        vec!["ΟΔΟΣ"]
+    );
 }
 
 /// The page carries each user's own principals, emails and metadata, and
