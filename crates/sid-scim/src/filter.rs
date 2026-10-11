@@ -4,7 +4,7 @@
 //! Parses filter strings like `userName eq "john"` or `emails.value co "@acme.com"`.
 //! CE supports basic operators: eq, ne, co, sw, ew, gt, lt, ge, le.
 
-use sid_proto::sid::v1 as proto;
+use sid_core::models::{DirectoryAttribute, DirectoryFilter, DirectoryOperator};
 
 /// A parsed SCIM filter expression.
 #[derive(Debug, Clone, PartialEq)]
@@ -59,6 +59,8 @@ pub enum FilterError {
     ExpectedQuotedValue,
     #[error("syntax error at position {0}: {1}")]
     SyntaxError(usize, String),
+    #[error("cannot filter on attribute: {0}")]
+    UnknownAttribute(String),
 }
 
 /// Parse a SCIM filter string into a structured filter.
@@ -158,103 +160,60 @@ fn parse_comparison(input: &str) -> Result<ScimFilter, FilterError> {
     Ok(ScimFilter::Compare { attr, op, value })
 }
 
-/// Check if a SCIM User resource matches a parsed filter.
-///
-/// Evaluates the filter against ScimUser fields in-memory.
-/// CE supports: userName, displayName, externalId, active, emails.value,
-/// phoneNumbers.value, department, title.
-pub fn matches_user(filter: &ScimFilter, user: &proto::ScimUser) -> bool {
-    match filter {
-        ScimFilter::Compare { attr, op, value } => {
-            let field_value = resolve_user_attr(attr, user);
-            match field_value {
-                Some(v) => compare_str(&v, op, value),
-                None => false,
-            }
-        }
-        ScimFilter::And(left, right) => matches_user(left, user) && matches_user(right, user),
-        ScimFilter::Or(left, right) => matches_user(left, user) || matches_user(right, user),
-        ScimFilter::Not(inner) => !matches_user(inner, user),
-        ScimFilter::Present { attr } => resolve_user_attr(attr, user).is_some(),
-    }
+/// The User attribute a filter names (RFC 7644 §3.4.2.2: attribute names are
+/// case-insensitive; the enterprise extension's `department` may be named by
+/// its full URN). `None` for an attribute this directory cannot filter on.
+fn user_attribute(path: &str) -> Option<DirectoryAttribute> {
+    const ENTERPRISE: &str = "urn:ietf:params:scim:schemas:extension:enterprise:2.0:user:";
+    let path = path.to_ascii_lowercase();
+    let path = path.strip_prefix(ENTERPRISE).unwrap_or(&path);
+    Some(match path {
+        "username" => DirectoryAttribute::UserName,
+        "displayname" => DirectoryAttribute::DisplayName,
+        "name.givenname" => DirectoryAttribute::GivenName,
+        "name.familyname" => DirectoryAttribute::FamilyName,
+        "name.formatted" => DirectoryAttribute::FormattedName,
+        "externalid" => DirectoryAttribute::ExternalId,
+        "title" => DirectoryAttribute::Title,
+        "department" => DirectoryAttribute::Department,
+        "active" => DirectoryAttribute::Active,
+        // A multi-valued attribute filtered by itself means its values.
+        "emails" | "emails.value" => DirectoryAttribute::Email,
+        "phonenumbers" | "phonenumbers.value" => DirectoryAttribute::Phone,
+        _ => return None,
+    })
 }
 
-/// Resolve a SCIM attribute path to a string value from a ScimUser.
-fn resolve_user_attr(attr: &str, user: &proto::ScimUser) -> Option<String> {
-    match attr {
-        "userName" => Some(user.user_name.clone()),
-        "displayName" => Some(user.display_name.clone()),
-        "externalId" => Some(user.external_id.clone()),
-        "title" => Some(user.title.clone()),
-        "department" => Some(user.department.clone()),
-        "active" => Some(user.active.to_string()),
-        "name.givenName" => user.name.as_ref().map(|n| n.given_name.clone()),
-        "name.familyName" => user.name.as_ref().map(|n| n.family_name.clone()),
-        "name.formatted" => user.name.as_ref().map(|n| n.formatted.clone()),
-        "emails.value" => {
-            // Multi-valued: match if ANY email matches
-            if user.emails.is_empty() {
-                None
-            } else {
-                // Return first email for presence check; compare checks all
-                Some(user.emails[0].value.clone())
-            }
+/// The directory query a User filter asks: an attribute the directory does
+/// not hold is an `invalidFilter` (RFC 7644 §3.12), never an empty result.
+pub fn to_directory(filter: &ScimFilter) -> Result<DirectoryFilter, FilterError> {
+    let attribute =
+        |attr: &str| user_attribute(attr).ok_or_else(|| FilterError::UnknownAttribute(attr.into()));
+    Ok(match filter {
+        ScimFilter::Compare { attr, op, value } => DirectoryFilter::Compare {
+            attribute: attribute(attr)?,
+            operator: match op {
+                CompareOp::Eq => DirectoryOperator::Eq,
+                CompareOp::Ne => DirectoryOperator::Ne,
+                CompareOp::Co => DirectoryOperator::Contains,
+                CompareOp::Sw => DirectoryOperator::StartsWith,
+                CompareOp::Ew => DirectoryOperator::EndsWith,
+                CompareOp::Gt => DirectoryOperator::Greater,
+                CompareOp::Ge => DirectoryOperator::GreaterOrEqual,
+                CompareOp::Lt => DirectoryOperator::Less,
+                CompareOp::Le => DirectoryOperator::LessOrEqual,
+            },
+            value: value.clone(),
+        },
+        ScimFilter::Present { attr } => DirectoryFilter::Present(attribute(attr)?),
+        ScimFilter::And(a, b) => {
+            DirectoryFilter::And(Box::new(to_directory(a)?), Box::new(to_directory(b)?))
         }
-        "phoneNumbers.value" => {
-            if user.phone_numbers.is_empty() {
-                None
-            } else {
-                Some(user.phone_numbers[0].value.clone())
-            }
+        ScimFilter::Or(a, b) => {
+            DirectoryFilter::Or(Box::new(to_directory(a)?), Box::new(to_directory(b)?))
         }
-        _ => None,
-    }
-}
-
-/// Compare a field value against a filter value using the given operator.
-fn compare_str(field: &str, op: &CompareOp, filter_value: &str) -> bool {
-    match op {
-        CompareOp::Eq => field.eq_ignore_ascii_case(filter_value),
-        CompareOp::Ne => !field.eq_ignore_ascii_case(filter_value),
-        CompareOp::Co => field.to_lowercase().contains(&filter_value.to_lowercase()),
-        CompareOp::Sw => field
-            .to_lowercase()
-            .starts_with(&filter_value.to_lowercase()),
-        CompareOp::Ew => field.to_lowercase().ends_with(&filter_value.to_lowercase()),
-        CompareOp::Gt => field > filter_value,
-        CompareOp::Lt => field < filter_value,
-        CompareOp::Ge => field >= filter_value,
-        CompareOp::Le => field <= filter_value,
-    }
-}
-
-impl ScimFilter {
-    /// Whether any comparison or presence check names an attribute under
-    /// `prefix` (`"emails"` for `emails.value`, `emails`).
-    pub fn references(&self, prefix: &str) -> bool {
-        match self {
-            Self::Compare { attr, .. } | Self::Present { attr } => {
-                attr == prefix || attr.starts_with(&format!("{prefix}."))
-            }
-            Self::And(a, b) | Self::Or(a, b) => a.references(prefix) || b.references(prefix),
-            Self::Not(inner) => inner.references(prefix),
-        }
-    }
-}
-
-/// Multi-valued attribute comparison: for emails.value and phoneNumbers.value,
-/// check if ANY value in the collection matches.
-pub fn matches_user_multivalued(filter: &ScimFilter, user: &proto::ScimUser) -> bool {
-    match filter {
-        ScimFilter::Compare { attr, op, value } if attr == "emails.value" => {
-            user.emails.iter().any(|e| compare_str(&e.value, op, value))
-        }
-        ScimFilter::Compare { attr, op, value } if attr == "phoneNumbers.value" => user
-            .phone_numbers
-            .iter()
-            .any(|p| compare_str(&p.value, op, value)),
-        _ => matches_user(filter, user),
-    }
+        ScimFilter::Not(inner) => DirectoryFilter::Not(Box::new(to_directory(inner)?)),
+    })
 }
 
 #[cfg(test)]

@@ -22,7 +22,7 @@ default = ["storage-pg"]
 storage-pg = ["dep:sqlx", "sqlx?/postgres", "sid-ids/sqlx-postgres"]
 
 # SQLite backend (embedded-dev mode)
-storage-sqlite = ["dep:sqlx", "sqlx?/sqlite", "sid-ids/sqlx-sqlite"]
+storage-sqlite = ["dep:sqlx", "sqlx?/sqlite", "sid-ids/sqlx-sqlite", "dep:libsqlite3-sys"]
 
 [dependencies]
 sid-ids = { workspace = true, features = ["std", "serde"] }
@@ -32,6 +32,9 @@ sid-plugin = { workspace = true }
 
 # SQL — backend layer (features selected per storage backend)
 sqlx = { workspace = true, features = ["runtime-tokio", "uuid", "chrono", "json"], optional = true }
+# SQLite's C API, for the SQL functions SID registers on its connections. The
+# version sqlx links: one SQLite library per binary.
+libsqlite3-sys = { version = "0.37", optional = true }
 
 # Async
 async-trait = { workspace = true }

@@ -3048,6 +3048,102 @@ impl StorageBackend for PostgresBackend {
         Ok(row.0 as u64)
     }
 
+    async fn query_directory(
+        &self,
+        query: &sid_core::models::DirectoryQuery,
+    ) -> SidResult<sid_core::models::DirectoryPage> {
+        use crate::directory_query::{Dialect, condition};
+        let failed = |e: sqlx::Error| SidError::Storage(format!("directory query: {e}"));
+        let condition = condition(Dialect::Postgres, query)?;
+        let offset = i64::try_from(query.offset)
+            .map_err(|_| SidError::Validation("directory offset out of range".into()))?;
+        let limit = i64::try_from(query.limit)
+            .map_err(|_| SidError::Validation("directory limit out of range".into()))?;
+        let next = condition.binds.len() + 1;
+        // The total and the page read one snapshot.
+        let mut tx = self.pool.begin().await.map_err(failed)?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .execute(&mut *tx)
+            .await
+            .map_err(failed)?;
+
+        let count_sql = format!("SELECT count(*) FROM profiles p WHERE {}", condition.sql);
+        let mut count = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(count_sql));
+        for value in &condition.binds {
+            count = count.bind(value);
+        }
+        let total = count.fetch_one(&mut *tx).await.map_err(failed)?;
+
+        let page_sql = format!(
+            "SELECT p.* FROM profiles p WHERE {} ORDER BY p.created_at, p.id LIMIT ${} OFFSET ${}",
+            condition.sql,
+            next,
+            next + 1
+        );
+        let mut page =
+            sqlx::query_as::<_, crate::pg_row::ProfileRow>(sqlx::AssertSqlSafe(page_sql));
+        for value in &condition.binds {
+            page = page.bind(value);
+        }
+        let profiles: Vec<Profile> = page
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(failed)?
+            .into_iter()
+            .map(|r| r.into_domain())
+            .collect::<SidResult<_>>()?;
+
+        // The page's attributes, one query each, not one per profile.
+        let ids: Vec<uuid::Uuid> = profiles.iter().map(|p| p.id.into_uuid()).collect();
+        let principals = sqlx::query_as::<_, crate::pg_row::PrincipalRow>(
+            "SELECT p.id, p.principal_type, p.value, p.verified, p.verified_at,
+                    p.verification_expires, p.assigned_profile_id, p.assignment_revision,
+                    p.email_policy_revision, p.created_at, p.updated_at,
+                    pb.id AS binding_id, pb.profile_id,
+                    pb.is_primary, pb.source_field, pb.source_email_id, pb.source_phone_id
+             FROM principals p
+             JOIN principal_bindings pb ON pb.principal_id = p.id
+             WHERE pb.profile_id = ANY($1)",
+        )
+        .bind(&ids)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(failed)?
+        .into_iter()
+        .map(|r| r.into_domain())
+        .collect::<SidResult<Vec<Principal>>>()?;
+        let emails: Vec<ProfileEmail> = sqlx::query_as::<_, crate::pg_row::ProfileEmailRow>(
+            "SELECT * FROM profile_emails WHERE profile_id = ANY($1)
+             ORDER BY profile_id, is_primary DESC, created_at",
+        )
+        .bind(&ids)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(failed)?
+        .into_iter()
+        .map(|r| r.into_domain())
+        .collect();
+        let metadata: Vec<ProfileMetadata> =
+            sqlx::query_as::<_, crate::pg_row::ProfileMetadataRow>(
+                "SELECT * FROM profile_metadata WHERE profile_id = ANY($1)",
+            )
+            .bind(&ids)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(failed)?
+            .into_iter()
+            .map(|r| r.into_domain())
+            .collect();
+        tx.commit().await.map_err(failed)?;
+
+        Ok(sid_core::models::DirectoryPage {
+            total: u64::try_from(total).expect("a count is not negative"),
+            users: crate::directory_query::assemble(profiles, principals, emails, metadata),
+        })
+    }
+
     async fn list_sessions_by_profile(&self, profile_id: ProfileId) -> SidResult<Vec<Session>> {
         let rows = sqlx::query_as::<_, crate::pg_row::SessionRow>(
             "SELECT * FROM sessions WHERE profile_id = $1",

@@ -657,6 +657,80 @@ async fn provisions_over_http_on_postgres() {
     provisions_over_http(Engine::Postgres).await;
 }
 
+/// `GET /Users` with `query`, asked with `bearer`.
+async fn list_users(replica: &Replica, bearer: &str, query: &[(&str, &str)]) -> (u16, Value) {
+    let url =
+        url::Url::parse_with_params(&format!("{}/scim/v2/Users", replica.base), query).unwrap();
+    let response = http().get(url).bearer_auth(bearer).send().await.unwrap();
+    let status = response.status().as_u16();
+    (status, response.json().await.unwrap())
+}
+
+/// A filtered listing over HTTP (RFC 7644 §3.4.2): the filter is applied
+/// before the page, `totalResults` counts every match on the last page,
+/// `itemsPerPage` the resources returned, `count=0` returns only the total,
+/// and an attribute the directory does not hold is an `invalidFilter`.
+async fn queries_over_http(engine: Engine) {
+    let installation = installation(engine).await;
+    let replica = installation.replica().await;
+    let connector = replica.connector().await;
+    replica.grant(&installation, &connector).await;
+    let bearer = replica
+        .issue(&connector, pb::ConnectorCredentialKind::ScimBearer)
+        .await;
+    let prefix = unique_name();
+    for i in 0..3 {
+        let (status, user) = replica
+            .send(
+                reqwest::Method::POST,
+                "/Users",
+                Some(&bearer),
+                Some(new_user(&format!("{prefix}_{i}"))),
+            )
+            .await;
+        assert_eq!(status, 201, "create user: {user}");
+    }
+    let filter = format!("userName sw \"{prefix}\"");
+
+    let (status, last) = list_users(
+        &replica,
+        &bearer,
+        &[("filter", &filter), ("startIndex", "3"), ("count", "2")],
+    )
+    .await;
+    assert_eq!(status, 200, "{last}");
+    assert_eq!(last["totalResults"], json!(3));
+    assert_eq!(last["itemsPerPage"], json!(1));
+    assert_eq!(
+        last["Resources"][0]["userName"],
+        json!(format!("{prefix}_2"))
+    );
+
+    let (status, total) =
+        list_users(&replica, &bearer, &[("filter", &filter), ("count", "0")]).await;
+    assert_eq!(status, 200, "{total}");
+    assert_eq!(total["totalResults"], json!(3));
+    assert_eq!(total["itemsPerPage"], json!(0));
+    assert!(
+        total["Resources"].as_array().is_none_or(Vec::is_empty),
+        "{total}"
+    );
+
+    let (status, refused) = list_users(&replica, &bearer, &[("filter", "nickName eq \"x\"")]).await;
+    assert_eq!(status, 400, "{refused}");
+    assert_eq!(refused["scimType"], json!("invalidFilter"));
+}
+
+#[tokio::test]
+async fn queries_over_http_on_postgres() {
+    queries_over_http(Engine::Postgres).await;
+}
+
+#[tokio::test]
+async fn queries_over_http_on_sqlite() {
+    queries_over_http(Engine::Sqlite).await;
+}
+
 #[tokio::test]
 async fn provisions_over_http_on_sqlite() {
     provisions_over_http(Engine::Sqlite).await;

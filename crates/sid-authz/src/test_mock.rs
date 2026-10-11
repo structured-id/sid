@@ -504,6 +504,12 @@ impl sid_plugin::StorageBackend for MockStorage {
     async fn count_profiles(&self) -> Result<u64> {
         unimplemented!()
     }
+    async fn query_directory(
+        &self,
+        _: &sid_core::models::DirectoryQuery,
+    ) -> Result<sid_core::models::DirectoryPage> {
+        unimplemented!()
+    }
     async fn list_profiles_with_status(&self, _: ProfileStatus) -> Result<Vec<Profile>> {
         Ok(vec![])
     }

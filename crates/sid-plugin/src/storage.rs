@@ -884,6 +884,17 @@ pub trait StorageBackend: WorkStore + Send + Sync + 'static {
     /// Count total profiles.
     async fn count_profiles(&self) -> Result<u64>;
 
+    /// One page of the user directory: the users matching `query.filter`
+    /// (all when none), in the order of [`list_profiles`](Self::list_profiles),
+    /// with the total of the whole matching set. The filter is applied before
+    /// the page, with its values bound as parameters; the page's principals,
+    /// emails and metadata are read in batches, a fixed number of queries per
+    /// page. Closed and purged profiles are not part of the directory.
+    async fn query_directory(
+        &self,
+        query: &sid_core::models::DirectoryQuery,
+    ) -> Result<sid_core::models::DirectoryPage>;
+
     /// Profiles in `status` (for lifecycle jobs: closures due, purges due).
     async fn list_profiles_with_status(
         &self,

@@ -2590,6 +2590,45 @@ impl StorageBackend for MockStorage {
         Ok(inner.profiles.len() as u64)
     }
 
+    /// The unfiltered directory, in the trait's order. Filters are matched by
+    /// the real engines only (storage conformance, the SCIM HTTP tests): a
+    /// second copy of their semantics here would drift from them.
+    async fn query_directory(
+        &self,
+        query: &sid_core::models::DirectoryQuery,
+    ) -> SidResult<sid_core::models::DirectoryPage> {
+        if query.filter.is_some() {
+            return Err(sid_core::Error::Storage(
+                "the mock storage matches no directory filter".into(),
+            ));
+        }
+        let mut profiles: Vec<Profile> = {
+            let inner = self.inner.lock().unwrap();
+            inner
+                .profiles
+                .values()
+                .filter(|p| !p.status.is_terminal())
+                .cloned()
+                .collect()
+        };
+        profiles.sort_by_key(|p| (p.created_at, p.id));
+        let total = profiles.len() as u64;
+        let mut users = Vec::new();
+        for profile in profiles
+            .into_iter()
+            .skip(query.offset as usize)
+            .take(query.limit as usize)
+        {
+            users.push(sid_core::models::DirectoryUser {
+                principals: self.get_principals_by_profile(profile.id).await?,
+                emails: self.list_profile_emails(profile.id).await?,
+                metadata: self.list_profile_metadata(profile.id).await?,
+                profile,
+            });
+        }
+        Ok(sid_core::models::DirectoryPage { total, users })
+    }
+
     async fn list_profiles_with_status(&self, status: ProfileStatus) -> SidResult<Vec<Profile>> {
         let inner = self.inner.lock().unwrap();
         let mut found: Vec<Profile> = inner
