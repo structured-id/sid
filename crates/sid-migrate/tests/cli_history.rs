@@ -122,6 +122,35 @@ async fn source_with_history(dir: &std::path::Path, org: &Organization) -> Sourc
 /// A real file-backed source moves its nonempty history and the evaluator's
 /// keys through JSON and the CLI; an existing output file is neither
 /// overwritten nor made world-readable.
+/// A PostgreSQL schema has no meaning for a SQLite installation: asking for
+/// one is refused before anything is read or written, never ignored.
+#[tokio::test]
+async fn cli_refuses_a_schema_for_sqlite() {
+    let dir = tempfile::tempdir().unwrap();
+    let org = Organization::implicit_community("sid.example.com");
+    let source = source_with_history(dir.path(), &org).await;
+    let output_path = dir.path().join("snapshot.json");
+    let exported = run(&[
+        "export",
+        "--source",
+        &source.url,
+        "--schema",
+        "tenant_a",
+        "--output",
+        output_path.to_str().unwrap(),
+    ]);
+    assert!(
+        !exported.status.success(),
+        "a schema for SQLite was accepted"
+    );
+    assert!(
+        String::from_utf8_lossy(&exported.stderr).contains("schema"),
+        "{}",
+        String::from_utf8_lossy(&exported.stderr)
+    );
+    assert!(!output_path.exists(), "nothing is written");
+}
+
 #[tokio::test]
 async fn cli_moves_history_and_protects_the_export() {
     let dir = tempfile::tempdir().unwrap();

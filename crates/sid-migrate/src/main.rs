@@ -357,6 +357,11 @@ async fn connect_backend(
     history_keys: Option<&str>,
 ) -> Result<Store> {
     if url.starts_with("sqlite:") {
+        // A PostgreSQL schema means nothing to a SQLite file: refused, never
+        // silently ignored.
+        if schema.is_some() {
+            bail!("a SQLite installation has no PostgreSQL schema; drop the schema option");
+        }
         #[cfg(feature = "storage-sqlite")]
         {
             if history_keys.is_some() {
