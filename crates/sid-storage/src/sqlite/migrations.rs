@@ -54,7 +54,19 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 8,
         sql: HISTORY_OWNER_PURGE,
     },
+    Migration {
+        version: 9,
+        sql: LOGIN_LOOKUP,
+    },
 ];
+
+/// A login looked up regardless of case (a SCIM `userName eq`, RFC 7643
+/// §4.1.1 `caseExact: false`) uses an index instead of scanning every login;
+/// the PostgreSQL migration 060 states the contract.
+const LOGIN_LOOKUP: &str = "
+CREATE INDEX IF NOT EXISTS idx_principals_type_lower_value
+    ON principals (principal_type, lower(value));
+";
 
 /// Fences of purged owners; the evaluator's PostgreSQL migration 004 states
 /// the contract.

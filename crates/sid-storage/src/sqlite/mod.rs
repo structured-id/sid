@@ -1204,6 +1204,13 @@ impl StorageBackend for SqliteBackend {
         self.count_profiles_impl().await
     }
 
+    async fn query_directory(
+        &self,
+        query: &sid_core::models::DirectoryQuery,
+    ) -> SidResult<sid_core::models::DirectoryPage> {
+        self.query_directory_impl(query).await
+    }
+
     async fn list_profiles_with_status(
         &self,
         status: sid_core::models::ProfileStatus,

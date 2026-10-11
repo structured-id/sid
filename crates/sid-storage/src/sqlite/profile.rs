@@ -1421,6 +1421,109 @@ impl SqliteBackend {
         rows.iter().map(row_to_profile).collect()
     }
 
+    pub(crate) async fn query_directory_impl(
+        &self,
+        query: &sid_core::models::DirectoryQuery,
+    ) -> SidResult<sid_core::models::DirectoryPage> {
+        use crate::directory_query::{Dialect, condition};
+        let failed = |e: sqlx::Error| SidError::Storage(format!("directory query: {e}"));
+        let condition = condition(Dialect::Sqlite, query)?;
+        let offset = i64::try_from(query.offset)
+            .map_err(|_| SidError::Validation("directory offset out of range".into()))?;
+        let limit = i64::try_from(query.limit)
+            .map_err(|_| SidError::Validation("directory limit out of range".into()))?;
+        let next = condition.binds.len() + 1;
+        // The total and the page read one snapshot.
+        let mut tx = self.pool.begin().await.map_err(failed)?;
+
+        let count_sql = format!("SELECT count(*) FROM profiles p WHERE {}", condition.sql);
+        let mut count = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(count_sql));
+        for value in &condition.binds {
+            count = count.bind(value);
+        }
+        let total = count.fetch_one(&mut *tx).await.map_err(failed)?;
+
+        let page_sql = format!(
+            "SELECT p.* FROM profiles p WHERE {} ORDER BY p.created_at, p.id LIMIT ?{} OFFSET ?{}",
+            condition.sql,
+            next,
+            next + 1
+        );
+        let mut page = sqlx::query(sqlx::AssertSqlSafe(page_sql));
+        for value in &condition.binds {
+            page = page.bind(value);
+        }
+        let profiles: Vec<Profile> = page
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(failed)?
+            .iter()
+            .map(row_to_profile)
+            .collect::<SidResult<_>>()?;
+        // The page's attributes, one query each, not one per profile.
+        let mut principals = Vec::new();
+        let mut emails = Vec::new();
+        let mut metadata = Vec::new();
+        if !profiles.is_empty() {
+            let ids = vec!["?"; profiles.len()].join(", ");
+            let mut read = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "SELECT pr.*,
+                        pb.profile_id AS pb_profile_id,
+                        pb.is_primary AS pb_is_primary, pb.source_field AS pb_source_field,
+                        pb.source_email_id AS pb_source_email_id,
+                        pb.source_phone_id AS pb_source_phone_id
+                 FROM principals pr
+                 INNER JOIN principal_bindings pb ON pr.id = pb.principal_id
+                 WHERE pb.profile_id IN ({ids})"
+            )));
+            for profile in &profiles {
+                read = read.bind(profile.id);
+            }
+            principals = read
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(failed)?
+                .iter()
+                .map(row_to_principal)
+                .collect::<SidResult<_>>()?;
+            let mut read = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "SELECT * FROM profile_emails WHERE profile_id IN ({ids})
+                 ORDER BY profile_id, is_primary DESC, created_at"
+            )));
+            for profile in &profiles {
+                read = read.bind(profile.id);
+            }
+            emails = read
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(failed)?
+                .iter()
+                .map(row_to_profile_email)
+                .collect::<SidResult<_>>()?;
+            let mut read = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "SELECT * FROM profile_metadata WHERE profile_id IN ({ids})"
+            )));
+            for profile in &profiles {
+                read = read.bind(profile.id);
+            }
+            metadata = read
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(failed)?
+                .iter()
+                .map(row_to_profile_metadata)
+                .collect::<SidResult<_>>()?;
+        }
+        tx.commit().await.map_err(failed)?;
+
+        Ok(sid_core::models::DirectoryPage {
+            total: u64::try_from(total).expect("a count is not negative"),
+            users: crate::directory_query::assemble(profiles, principals, emails, metadata),
+        })
+    }
+
     pub(crate) async fn count_profiles_impl(&self) -> SidResult<u64> {
         let row = sqlx::query("SELECT COUNT(*) as cnt FROM profiles")
             .fetch_one(&self.pool)

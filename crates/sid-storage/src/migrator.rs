@@ -375,6 +375,10 @@ const MIGRATIONS: &[Migration] = &[
         name: "20261010_059_audit_partition_schema_qualified",
         sql: include_str!("../../../migrations/20261010_059_audit_partition_schema_qualified.sql"),
     },
+    Migration {
+        name: "20261011_060_principal_login_lookup",
+        sql: include_str!("../../../migrations/20261011_060_principal_login_lookup.sql"),
+    },
 ];
 
 /// The history evaluator's own store, in execution order: applied by the

@@ -24,6 +24,7 @@ pub mod consent;
 pub mod device;
 pub mod device_auth;
 pub mod directory;
+pub mod directory_query;
 pub mod email_policy;
 pub mod export_job;
 pub mod flow_action;

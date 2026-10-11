@@ -578,6 +578,33 @@ async fn test_profile_list_pages_cover_each_profile_once() {
     common::test_profile_list_pages_cover_each_profile_once(&setup().await).await;
 }
 
+// ─── User directory query ───
+
+#[tokio::test]
+async fn test_directory_finds_a_user_beyond_ten_thousand() {
+    common::directory_query::test_directory_finds_a_user_beyond_ten_thousand(&setup().await).await;
+}
+
+#[tokio::test]
+async fn test_directory_filters_before_pagination() {
+    common::directory_query::test_directory_filters_before_pagination(&setup().await).await;
+}
+
+#[tokio::test]
+async fn test_directory_comparison_semantics() {
+    common::directory_query::test_directory_comparison_semantics(&setup().await).await;
+}
+
+#[tokio::test]
+async fn test_directory_users_carry_their_attributes() {
+    common::directory_query::test_directory_users_carry_their_attributes(&setup().await).await;
+}
+
+#[tokio::test]
+async fn test_directory_omits_retired_profiles() {
+    common::directory_query::test_directory_omits_retired_profiles(&setup().await).await;
+}
+
 #[tokio::test]
 async fn test_profile_username_uniqueness() {
     common::test_profile_username_uniqueness(&setup().await).await;
