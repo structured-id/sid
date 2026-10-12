@@ -25,7 +25,6 @@ tracing = { workspace = true }
 sid-proto = { workspace = true, optional = true }
 structured-proxy = { version = "8.1.1", default-features = false, optional = true }
 prost-reflect = { workspace = true, optional = true }
-serde_yaml = { workspace = true, optional = true }
 anyhow = { workspace = true, optional = true }
 
 [features]
@@ -33,11 +32,12 @@ http = [
     "dep:sid-proto",
     "dep:structured-proxy",
     "dep:prost-reflect",
-    "dep:serde_yaml",
     "dep:anyhow",
 ]
 
 [dev-dependencies]
+# Configurations in the tests are written as YAML, as operators write them.
+serde-saphyr = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
 # The Redis tests share one server, so each takes a key of its own.
 uuid = { workspace = true }

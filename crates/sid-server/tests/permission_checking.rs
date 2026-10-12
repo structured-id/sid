@@ -1319,7 +1319,7 @@ applications:
         orders = a.orders.indicator,
         wiki = a.wiki.indicator,
     ));
-    let config: sid_auth::config::AuthConfig = serde_yaml::from_str(&format!(
+    let config: sid_auth::config::AuthConfig = serde_saphyr::from_str(&format!(
         "upstream: http://{addr}\nissuer_url: {base}\nroute_policy_path: {}\n\
          authz_checker:\n  issuer: {issuer}\n  client_id: {CHECKER}\n  authentication: {authentication}\n",
         route_file.path().display()

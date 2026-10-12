@@ -463,7 +463,7 @@ pub fn http_transcoder(
     sign_in: Option<&url::Url>,
 ) -> anyhow::Result<Option<structured_proxy::ProxyServer>> {
     let mut config = match (config_file, bind) {
-        (Some(path), _) => serde_yaml::from_str(
+        (Some(path), _) => serde_saphyr::from_str(
             &std::fs::read_to_string(path)
                 .map_err(|e| anyhow::anyhow!("SID_HTTP_CONFIG {path}: {e}"))?,
         )
@@ -487,23 +487,23 @@ pub fn http_transcoder(
 /// wildcard or `null` origin in the list stops startup.
 #[cfg(feature = "http")]
 pub fn allow_sign_in_origin(
-    config: &mut serde_yaml::Value,
+    config: &mut serde_json::Value,
     origin: &url::Origin,
 ) -> anyhow::Result<()> {
     let map = config
-        .as_mapping_mut()
+        .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("the HTTP configuration must be a mapping"))?;
     let cors = map
-        .entry("cors".into())
-        .or_insert_with(|| serde_yaml::Mapping::new().into());
+        .entry("cors")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
     let cors = cors
-        .as_mapping_mut()
+        .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("the HTTP configuration's cors must be a mapping"))?;
     let origins = cors
-        .entry("origins".into())
-        .or_insert_with(|| serde_yaml::Sequence::new().into());
+        .entry("origins")
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
     let origins = origins
-        .as_sequence_mut()
+        .as_array_mut()
         .ok_or_else(|| anyhow::anyhow!("cors.origins must be a list"))?;
     if let Some(any) = origins
         .iter()
