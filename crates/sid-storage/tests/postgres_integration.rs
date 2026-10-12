@@ -639,9 +639,38 @@ async fn test_profile_list_pages_cover_each_profile_once() {
 
 // ─── User directory query ───
 
+/// Seed plain profiles until `backend` holds at least `n`, in one statement
+/// and without audit: a scenario that needs only their number does not pay
+/// for ten thousand audited writes. Every field but the id is that of a new
+/// profile.
+async fn seed_profiles(backend: &PostgresBackend, n: u64) {
+    let shortfall = n.saturating_sub(backend.count_profiles().await.unwrap());
+    let like = sid_core::models::Profile::new(None::<String>);
+    sqlx::query(
+        "INSERT INTO profiles (
+            id, profile_type, roles, status, visibility, max_assurance,
+            migration_pending, created_at, updated_at
+         )
+         SELECT uuidv7(), $2, $3, $4, $5, $6, $7, now(), now()
+         FROM generate_series(1, $1)",
+    )
+    .bind(i64::try_from(shortfall).unwrap())
+    .bind(like.profile_type.as_str())
+    .bind(like.roles.join(" "))
+    .bind(like.status.as_str())
+    .bind(like.visibility.as_str())
+    .bind(like.max_assurance.as_str())
+    .bind(like.migration_pending)
+    .execute(backend.pool())
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn test_directory_finds_a_user_beyond_ten_thousand() {
-    common::directory_query::test_directory_finds_a_user_beyond_ten_thousand(&setup().await).await;
+    let backend = setup().await;
+    seed_profiles(&backend, common::directory_query::DIRECTORY_BEYOND).await;
+    common::directory_query::test_directory_finds_a_user_beyond_ten_thousand(&backend).await;
 }
 
 #[tokio::test]
