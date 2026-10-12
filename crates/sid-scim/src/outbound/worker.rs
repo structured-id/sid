@@ -326,6 +326,9 @@ impl ScimOutboundWorker {
         let entity = profile_id.into_uuid();
         let kind = OutboundEntityType::User;
 
+        // A create recorded as sent is looked up first; when the lookup
+        // finds nothing (the create never landed) `known` stays empty and the
+        // create below is sent again.
         let known = match self.find_downstream_id(target.id, entity, kind).await? {
             Some(id) => Some(id),
             None if self.creation_sent(target.id, entity, kind).await? => {
@@ -402,6 +405,7 @@ impl ScimOutboundWorker {
             members,
         };
 
+        // As for a user: a create the lookup does not find is sent again.
         let known = match known {
             Some(id) => Some(id),
             None if self.creation_sent(target.id, entity, kind).await? => {

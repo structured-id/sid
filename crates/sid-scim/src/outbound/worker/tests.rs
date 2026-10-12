@@ -503,6 +503,32 @@ async fn test_a_lost_create_response_creates_the_user_once() {
     );
 }
 
+/// A create recorded as sent but that never reached the target (refused,
+/// or the process stopped before sending) is sent again: the lookup finding
+/// nothing lets the next attempt create the user.
+#[tokio::test]
+async fn test_a_create_that_never_landed_is_sent_again() {
+    let (endpoint, down) = downstream().await;
+    let t = target("app", true, &endpoint);
+    let (storage, worker) = worker(vec![t.clone()]).await;
+    let alice = stored_profile(&storage, "alice").await;
+    down.lock().unwrap().fail_with = Some(503);
+    let provisioned = user_event(event_types::SCIM_USER_PROVISIONED, alice.id);
+
+    assert!(matches!(
+        first(&worker, &provisioned).await,
+        Settlement::Retry(_)
+    ));
+    assert!(down.lock().unwrap().users.is_empty());
+    down.lock().unwrap().fail_with = None;
+    assert_eq!(
+        worker.process(&provisioned, 2, &Hold::unbounded()).await,
+        Settlement::Done
+    );
+    assert_eq!(down.lock().unwrap().users.len(), 1, "never created");
+    assert_eq!(dead_letters(&storage, &t).await, 0);
+}
+
 /// An inactive user the target never had is not created.
 #[tokio::test]
 async fn test_an_inactive_user_is_not_created() {
