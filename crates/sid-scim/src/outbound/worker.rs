@@ -378,7 +378,14 @@ impl ScimOutboundWorker {
             }
             return Ok(());
         };
-        if mapper::resolve_group_mapping(&group.name, &target.group_push).is_none() {
+        // The name mapping decides which groups start being pushed. A group
+        // the target already has keeps following its state under its
+        // downstream id after a rename (`PUT /Groups/{id}`), whatever its new
+        // name: skipping it would leave the old name and removed members on
+        // the target.
+        if known.is_none()
+            && mapper::resolve_group_mapping(&group.name, &target.group_push).is_none()
+        {
             return Ok(());
         }
         let mut members = Vec::new();

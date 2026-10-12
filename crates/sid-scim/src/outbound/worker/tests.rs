@@ -604,6 +604,59 @@ async fn test_a_group_follows_its_current_membership() {
     assert!(down.lock().unwrap().groups.is_empty());
 }
 
+/// A pushed group renamed to a name the mapping does not list is still the
+/// group the target has: the rename and the members removed with it reach
+/// the target (`PUT /Groups/{id}`), they are not skipped.
+#[tokio::test]
+async fn test_a_renamed_pushed_group_keeps_following_its_state() {
+    let (endpoint, down) = downstream().await;
+    let (storage, worker) = worker(vec![target("app", true, &endpoint)]).await;
+    let (alice, bob) = (
+        stored_profile(&storage, "alice").await,
+        stored_profile(&storage, "bob").await,
+    );
+    for p in [&alice, &bob] {
+        let provisioned = user_event(event_types::SCIM_USER_PROVISIONED, p.id);
+        assert_eq!(first(&worker, &provisioned).await, Settlement::Done);
+    }
+    let group = Group::new(ProjectId::system(), "Engineering");
+    let mut write = DirectoryGroupWrite::new(DirectoryWriteMode::Create, group.clone());
+    write.add_members.push(GroupMember::new(group.id, alice.id));
+    write.add_members.push(GroupMember::new(group.id, bob.id));
+    storage
+        .write_directory_group(&write, AuditEntry::system("test", "group").into())
+        .await
+        .unwrap();
+    let created = group_event(event_types::SCIM_GROUP_CREATED, group.id);
+    assert_eq!(first(&worker, &created).await, Settlement::Done);
+
+    let mut renamed = group.clone();
+    renamed.name = "Platform".into();
+    let mut rename = DirectoryGroupWrite::new(DirectoryWriteMode::Update, renamed);
+    rename.remove_members.push(bob.id);
+    storage
+        .write_directory_group(&rename, AuditEntry::system("test", "rename").into())
+        .await
+        .unwrap();
+    let updated = group_event(event_types::SCIM_GROUP_UPDATED, group.id);
+    assert_eq!(first(&worker, &updated).await, Settlement::Done);
+
+    let d = down.lock().unwrap();
+    assert_eq!(d.groups.len(), 1, "the renamed group was created again");
+    let alice_id = d
+        .users
+        .iter()
+        .find(|u| u["userName"] == json!("alice"))
+        .unwrap()["id"]
+        .clone();
+    assert_eq!(d.groups[0]["displayName"], json!("Platform"));
+    assert_eq!(
+        d.groups[0]["members"],
+        json!([{"value": alice_id}]),
+        "the member removed with the rename kept the downstream membership"
+    );
+}
+
 /// A failure a later attempt may cure is left for the redelivery, after the
 /// target's backoff, without a dead letter; at the target's last attempt it
 /// is recorded.
