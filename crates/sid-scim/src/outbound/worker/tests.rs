@@ -594,9 +594,42 @@ async fn test_a_transient_failure_is_retried_then_recorded() {
         first(&worker, &provisioned).await,
         Settlement::Retry(Duration::from_secs(1))
     );
+    assert_eq!(
+        worker.process(&provisioned, 2, &Hold::unbounded()).await,
+        Settlement::Retry(Duration::from_secs(2))
+    );
     assert_eq!(dead_letters(&storage, &t).await, 0, "recorded too early");
     assert_eq!(
         worker.process(&provisioned, 3, &Hold::unbounded()).await,
+        Settlement::Done
+    );
+    assert_eq!(dead_letters(&storage, &t).await, 1);
+}
+
+/// A target's attempts are its own: an event delivered many times for other
+/// reasons (another target's retries, a lost hold) does not use them up, so
+/// a target's first transient failure is retried, and only its own last
+/// attempt records the failure.
+#[tokio::test]
+async fn test_a_targets_attempts_are_its_own() {
+    let (endpoint, down) = downstream().await;
+    let t = target("app", true, &endpoint);
+    let (storage, worker) = worker(vec![t.clone()]).await;
+    let alice = stored_profile(&storage, "alice").await;
+    down.lock().unwrap().fail_with = Some(503);
+    let provisioned = user_event(event_types::SCIM_USER_PROVISIONED, alice.id);
+
+    for delivery in 5..7 {
+        assert!(matches!(
+            worker
+                .process(&provisioned, delivery, &Hold::unbounded())
+                .await,
+            Settlement::Retry(_)
+        ));
+        assert_eq!(dead_letters(&storage, &t).await, 0, "recorded too early");
+    }
+    assert_eq!(
+        worker.process(&provisioned, 7, &Hold::unbounded()).await,
         Settlement::Done
     );
     assert_eq!(dead_letters(&storage, &t).await, 1);

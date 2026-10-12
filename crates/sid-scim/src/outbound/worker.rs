@@ -42,6 +42,9 @@ const SCIM_EVENTS: &str = "sid.scim.*";
 /// Where a target's outcome for an event is recorded.
 pub const DISPATCH_OUTCOME_NAMESPACE: &str = "scim.outbound.dispatched";
 
+/// Where each failed attempt at an event for a target is recorded.
+const FAILED_ATTEMPT_NAMESPACE: &str = "scim.outbound.attempt_failed";
+
 /// Where a create sent to a target is recorded before it is sent: a later
 /// attempt finding no mapping looks the resource up rather than create it
 /// twice when the response was lost.
@@ -175,20 +178,39 @@ impl ScimOutboundWorker {
             let recorded = match self.dispatch(target, &client, event).await {
                 Ok(()) => self.record_taken(target, event).await,
                 // A lost hold is no failure of the target: it is not counted.
-                Err(e)
-                    if e.is_transient()
-                        && (matches!(e, ScimClientError::NotHeld)
-                            || attempt < u64::from(target.sync_config.max_retry_attempts)) =>
-                {
-                    warn!(
+                Err(ScimClientError::NotHeld) => {
+                    retry = later(retry, NOT_HELD_RETRY);
+                    continue;
+                }
+                Err(e) if e.is_transient() => {
+                    // The target's own attempts, not the event's deliveries:
+                    // another target's retries do not use them up.
+                    let failed = match self.count_failure(event, target).await {
+                        Ok(failed) => failed,
+                        Err(count) => {
+                            warn!(target = %target.display_name, error = %count, "SCIM attempt not counted");
+                            retry = later(retry, UNRECORDED_RETRY);
+                            continue;
+                        }
+                    };
+                    if failed < target.sync_config.max_retry_attempts {
+                        warn!(
+                            target = %target.display_name,
+                            event_type = %event.event_type,
+                            failed,
+                            error = %e,
+                            "SCIM outbound dispatch will be retried"
+                        );
+                        retry = later(retry, backoff(&e, u64::from(failed), target));
+                        continue;
+                    }
+                    error!(
                         target = %target.display_name,
                         event_type = %event.event_type,
-                        attempt,
                         error = %e,
-                        "SCIM outbound dispatch will be retried"
+                        "SCIM outbound dispatch failed at its last attempt"
                     );
-                    retry = later(retry, backoff(&e, attempt, target));
-                    continue;
+                    self.handle_dispatch_failure(target, event, &e).await
                 }
                 Err(e) => {
                     error!(
@@ -205,6 +227,41 @@ impl ScimOutboundWorker {
             }
         }
         retry.map_or(Settlement::Done, Settlement::Retry)
+    }
+
+    /// Count a failed attempt at `event` for `target`: its number, from 1.
+    /// Each is its own durable record, so replicas share the count and a
+    /// delivery repeated for another reason counts nothing.
+    async fn count_failure(
+        &self,
+        event: &Event,
+        target: &ScimOutboundTarget,
+    ) -> Result<u32, sid_core::Error> {
+        let last = target.sync_config.max_retry_attempts.max(1);
+        for failed in 1..=last {
+            let key = OperationKey::parse(&format!(
+                "{}:{failed}",
+                outcome_key(event, target.id).as_str()
+            ))
+            .expect("an outcome key and a number make a valid key");
+            let ctx = MutationContext::from(AuditEntry::system(
+                "scim.outbound.attempt_failed",
+                &event.event_type,
+            ))
+            .with_operation(OperationCompletion::new(
+                FAILED_ATTEMPT_NAMESPACE,
+                key,
+                "failed",
+                &[],
+                Vec::new(),
+            ));
+            match self.storage.record_outcome(ctx).await {
+                Ok(()) => return Ok(failed),
+                Err(sid_core::Error::OperationCompleted(_)) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(last)
     }
 
     /// Record that `target` took `event`. Whether it is recorded: a target
