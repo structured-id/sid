@@ -453,6 +453,23 @@ async fn test_a_late_deactivation_does_not_roll_back_the_user() {
     );
 }
 
+/// An update the relay published before the provisioning it followed (the
+/// stages before the bus run concurrently) creates the user once: the
+/// update pushes the current state, and the late provisioning finds the user
+/// mapped and replaces it rather than creating another.
+#[tokio::test]
+async fn test_an_update_before_its_provisioning_creates_the_user_once() {
+    let (endpoint, down) = downstream().await;
+    let (storage, worker) = worker(vec![target("app", true, &endpoint)]).await;
+    let alice = stored_profile(&storage, "alice").await;
+    let provisioned = user_event(event_types::SCIM_USER_PROVISIONED, alice.id);
+    let updated = user_event(event_types::SCIM_USER_UPDATED, alice.id);
+
+    assert_eq!(first(&worker, &updated).await, Settlement::Done);
+    assert_eq!(first(&worker, &provisioned).await, Settlement::Done);
+    assert_eq!(down.lock().unwrap().users.len(), 1, "created twice");
+}
+
 /// A create whose response was lost (the target stored it, the answer never
 /// arrived) is not created a second time: the next attempt finds it by
 /// userName and pushes the state to it.

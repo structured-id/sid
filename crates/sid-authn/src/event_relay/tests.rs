@@ -527,11 +527,15 @@ async fn test_observed_event_uses_the_observation_capacity() {
     };
 }
 
-/// Hourly retries over the attempt budget outlast a day-long outage.
+/// A broker that stays down, or a work stream that stays full, never ends a
+/// required handoff: at the relay's slowest pace its attempts outlast a
+/// century, so it is still pending when the broker returns.
 #[test]
-fn test_relay_budget_outlasts_a_day() {
-    let total: u64 = (1..sid_core::models::EVENT_RELAY_ATTEMPTS)
-        .map(|a| RELAY_RETRY.after(a).as_secs())
-        .sum();
-    assert!(total > 86_400, "relay gives up after {total} s");
+fn test_relay_budget_outlasts_any_outage() {
+    let slowest = RELAY_RETRY.after(u32::MAX).as_secs();
+    let lasts = u64::from(sid_core::models::EVENT_RELAY_ATTEMPTS) * slowest;
+    assert!(
+        lasts > 100 * 365 * 86_400,
+        "a handoff gives up after {lasts} s"
+    );
 }

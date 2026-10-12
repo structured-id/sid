@@ -31,9 +31,12 @@ pub const EVENT_FANOUT_KIND: &str = "event.fanout";
 const EVENT_FANOUT_NAMESPACE: uuid::Uuid =
     uuid::Uuid::from_u128(0x5e81_c3a0_2d74_4b9f_86e1_0af2_93c7_4d58);
 
-/// Relay attempts before the event is recorded failed: with the relay's
-/// schedule this outlasts a broker outage of more than a day.
-pub const EVENT_RELAY_ATTEMPTS: u32 = 40;
+/// Attempts at handing a committed fact on (relay, plan, delivery): as many
+/// as every store can count (a signed 32-bit column). A broker that is down
+/// or a work stream that is full leaves the handoff pending, not failed, so
+/// it goes on once the broker is back; a refusal no attempt can cure (an
+/// unroutable type, a malformed payload) still ends it at once.
+pub const EVENT_RELAY_ATTEMPTS: u32 = i32::MAX.unsigned_abs();
 
 /// Namespace of relay ids, one per `(source, id)`.
 const EVENT_RELAY_NAMESPACE: uuid::Uuid =

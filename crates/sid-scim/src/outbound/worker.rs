@@ -123,7 +123,9 @@ impl ScimOutboundWorker {
                 recipient: receiver.recipient,
                 event_types: receiver.event_types,
                 // One delivery at a time across replicas: two pushes of the
-                // same resource never run at once.
+                // same resource never run at once. Their order is not relied
+                // on (the relay may publish a later change first): each push
+                // carries the current state, so any order converges.
                 ordered: true,
             })
             .await?;
