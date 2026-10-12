@@ -30,3 +30,5 @@ sid-authz = { path = "../sid-authz" }
 secrecy = { workspace = true }
 sqlx = { workspace = true }
 tonic-types = { workspace = true }
+# A stand-in downstream SCIM server for the outbound worker tests.
+axum = { workspace = true }

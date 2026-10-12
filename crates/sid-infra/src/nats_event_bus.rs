@@ -14,19 +14,36 @@ use sid_core::models::event::{
     Event, EventFamily, EventFilter, EventRoute, WorkRecipient, event_route,
 };
 use sid_plugin::event_bus::{
-    Delivery, DurableConsumer, EventBus, EventBusError, EventBusResult, SUBSCRIPTION_CAPACITY,
-    Settlement,
+    Delivery, DurableConsumer, EventBus, EventBusError, EventBusResult, Hold,
+    SUBSCRIPTION_CAPACITY, Settlement,
 };
 use tokio::sync::mpsc;
 
 use crate::nats_topology::{Topology, TopologyRole};
 
-/// How long a durable consumer may hold a delivery unsettled before it is
-/// delivered again.
-const DURABLE_ACK_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
-
 /// When a delivery dropped unsettled is delivered again.
 const DURABLE_REDELIVERY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Renewals of an unsettled delivery per acknowledgement wait: a missed one
+/// still leaves most of the wait.
+const RENEWALS_PER_ACK_WAIT: u32 = 4;
+
+/// Renew `msg` for another `ack_wait`, the server confirming it. The hold
+/// it gives ends at a tenth of the wait before the server's own deadline,
+/// counted from before the renewal was sent; `None` when unconfirmed.
+async fn renew(
+    msg: &jetstream::Message,
+    ack_wait: std::time::Duration,
+) -> Option<tokio::time::Instant> {
+    let sent = tokio::time::Instant::now();
+    match msg.double_ack_with(jetstream::AckKind::Progress).await {
+        Ok(()) => Some(sent + ack_wait - ack_wait / 10),
+        Err(e) => {
+            tracing::warn!("renew a delivery: {e}");
+            None
+        }
+    }
+}
 
 /// How often the server confirms a durable consumer's open pull; two missed
 /// in a row reopen it.
@@ -207,9 +224,10 @@ impl EventBus for NatsEventBus {
             durable_name: Some(name.clone()),
             deliver_policy: jetstream::consumer::DeliverPolicy::All,
             ack_policy: jetstream::consumer::AckPolicy::Explicit,
-            // A delivery not settled in time (a hung or killed consumer) is
-            // delivered again; no limit, so redelivery never drops an event.
-            ack_wait: DURABLE_ACK_WAIT,
+            // A delivery neither settled nor renewed in time (a hung or
+            // killed consumer) is delivered again; no limit, so redelivery
+            // never drops an event.
+            ack_wait: self.topology.work_ack_wait,
             max_deliver: -1,
             filter_subjects: subjects,
             ..Default::default()
@@ -222,6 +240,7 @@ impl EventBus for NatsEventBus {
         }
         let jetstream = self.jetstream.clone();
         let stream = self.topology.work_stream();
+        let ack_wait = self.topology.work_ack_wait;
         // Opened once here, so a consumer that cannot be set up is refused to
         // the caller rather than retried unseen.
         let messages = open_durable(&jetstream, &stream, &name, &config).await?;
@@ -260,7 +279,17 @@ impl EventBus for NatsEventBus {
                 let settlement = match event {
                     Err(e) => Settlement::Reject(format!("not an event: {e}")),
                     Ok(event) => {
-                        let (delivery, outcome) = Delivery::new(event);
+                        let attempt = msg
+                            .info()
+                            .ok()
+                            .and_then(|info| u64::try_from(info.delivered).ok())
+                            .unwrap_or(1);
+                        let first = renew(&msg, ack_wait)
+                            .await
+                            .unwrap_or_else(tokio::time::Instant::now);
+                        let (deadline, hold) = tokio::sync::watch::channel(first);
+                        let (delivery, mut outcome) =
+                            Delivery::held(event, attempt, Hold::until(hold));
                         if tx.send(delivery).await.is_err() {
                             // The consumer stopped: the event stays its own.
                             if let Err(e) = msg.ack_with(AckKind::Nak(None)).await {
@@ -268,10 +297,24 @@ impl EventBus for NatsEventBus {
                             }
                             break;
                         }
-                        // Dropped unsettled: delivered again.
-                        outcome
-                            .await
-                            .unwrap_or(Settlement::Retry(DURABLE_REDELIVERY))
+                        // Renewed while it is processed, so a slow consumer
+                        // keeps it rather than another replica getting it.
+                        let every = ack_wait / RENEWALS_PER_ACK_WAIT;
+                        let mut renewal =
+                            tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+                        loop {
+                            tokio::select! {
+                                // Dropped unsettled: delivered again.
+                                settled = &mut outcome => {
+                                    break settled.unwrap_or(Settlement::Retry(DURABLE_REDELIVERY));
+                                }
+                                _ = renewal.tick() => {
+                                    if let Some(until) = renew(&msg, ack_wait).await {
+                                        deadline.send_replace(until);
+                                    }
+                                }
+                            }
+                        }
                     }
                 };
                 let acked = match &settlement {

@@ -360,6 +360,50 @@ async fn test_ordered_consumer_holds_later_events_across_replicas() {
     drop_topology(&t).await;
 }
 
+/// A delivery its consumer is still processing is renewed past the
+/// acknowledgement wait, so another replica does not get it meanwhile, and
+/// its hold stays ahead; one settled for retry comes again as attempt 2.
+#[tokio::test]
+async fn test_a_delivery_in_progress_stays_with_its_replica() {
+    let mut t = topology();
+    t.work_ack_wait = Duration::from_secs(2);
+    let bus = owner(&t).await;
+    let receiver = recipient("slow");
+    let event = Event::new("sid-test", event_types::USER_CREATED);
+    bus.deliver(&receiver, event.delivery_id(&receiver), &event)
+        .await
+        .unwrap();
+    let replica = owner(&t).await;
+    let mut at_a = bus.consume(consumer_of("slow")).await.unwrap();
+    let held = next(&mut at_a).await;
+    assert_eq!(held.attempt, 1);
+    let mut at_b = replica.consume(consumer_of("slow")).await.unwrap();
+
+    let started = tokio::time::Instant::now();
+    while started.elapsed() < Duration::from_secs(7) {
+        let left = held
+            .hold()
+            .remaining()
+            .expect("a broker delivery is bounded");
+        assert!(left > Duration::ZERO, "the hold ran out while renewed");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), at_b.recv())
+                .await
+                .is_err(),
+            "another replica got a delivery still in progress"
+        );
+    }
+    held.settle(Settlement::Retry(Duration::from_millis(100)));
+    let again = tokio::select! {
+        d = next(&mut at_a) => d,
+        d = next(&mut at_b) => d,
+    };
+    assert_eq!(again.event.id, event.id);
+    assert_eq!(again.attempt, 2, "the redelivery is not counted");
+    again.settle(Settlement::Done);
+    drop_topology(&t).await;
+}
+
 /// A full work stream refuses new work instead of evicting what it holds:
 /// the producer keeps its obligation and the held work is still delivered.
 #[tokio::test]

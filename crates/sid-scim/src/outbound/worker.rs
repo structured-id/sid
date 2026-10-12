@@ -1,31 +1,37 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! SCIM outbound worker.
 //!
-//! Consumes corporate profile/group change events durably, one at a time in
-//! the order they were committed, and dispatches each to every enabled
-//! target. A target's outcome (taken, or its failure recorded in the
-//! dead-letter store) is recorded per (event, target) in the same commit as
-//! anything it stores, so a redelivered event goes only to the targets that
-//! have no outcome yet: a target that took it, or whose failure was
-//! recorded, never gets it or its dead letter twice.
+//! Consumes corporate profile/group change events durably and pushes the
+//! current state of the resource each one names to every enabled target. An
+//! event only says what changed: the push carries what the directory holds
+//! now, so a repeated, late or reordered event never restores an older
+//! state. Deliveries are taken one at a time across replicas, and a request
+//! is sent only while the delivery is certainly still this replica's, so two
+//! pushes of one resource do not race.
+//!
+//! A target's outcome (taken, or its failure recorded in the dead-letter
+//! store) is recorded per (event, target) in the same commit as anything it
+//! stores, so a redelivered event goes only to the targets without one.
+//! Effects on a target are at least once: a create whose response was lost
+//! is looked up on the next attempt before it is created again.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
 use sid_core::models::{
-    AuditEntry, MutationContext, OperationCompletion, OperationKey, OutboundEntityType, ProfileId,
-    ScimOutboundRecord, ScimOutboundTarget, ScimOutboundTargetId,
+    AuditEntry, GroupId, MutationContext, OperationCompletion, OperationKey, OutboundEntityType,
+    ProfileId, ScimOutboundRecord, ScimOutboundTarget, ScimOutboundTargetId,
     event::{Event, RequiredReceiver, WorkRecipient, event_types},
 };
 use sid_plugin::StorageBackend;
-use sid_plugin::event_bus::{Delivery, DurableConsumer, EventBus, Settlement};
+use sid_plugin::event_bus::{Delivery, DurableConsumer, EventBus, Hold, Settlement};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use super::client::{ScimClientError, ScimHttpClient};
-use super::mapper::{self, ScimPatchPayload};
+use super::mapper::{self, ScimGroupPayload, ScimMemberPayload};
 
 /// The receiver SCIM outbound work is addressed to.
 pub const SCIM_OUTBOUND_RECEIVER: &str = "sid-scim-outbound";
@@ -36,9 +42,23 @@ const SCIM_EVENTS: &str = "sid.scim.*";
 /// Where a target's outcome for an event is recorded.
 pub const DISPATCH_OUTCOME_NAMESPACE: &str = "scim.outbound.dispatched";
 
+/// Where a create sent to a target is recorded before it is sent: a later
+/// attempt finding no mapping looks the resource up rather than create it
+/// twice when the response was lost.
+const CREATION_NAMESPACE: &str = "scim.outbound.creating";
+
 /// When an event some target's outcome could not be recorded for is
 /// delivered again.
 const UNRECORDED_RETRY: Duration = Duration::from_secs(30);
+
+/// When an event whose hold ran out before a request is delivered again.
+const NOT_HELD_RETRY: Duration = Duration::from_secs(1);
+
+/// The longest pause before a failed dispatch is tried again.
+const MAX_BACKOFF: Duration = Duration::from_secs(60 * 60);
+
+/// The SCIM core Group schema (RFC 7643 §8.7.1).
+const GROUP_SCHEMA: &str = "urn:ietf:params:scim:schemas:core:2.0:Group";
 
 /// Namespace of the ids a target's failure records carry for an event.
 const FAILURE_NAMESPACE: Uuid = Uuid::from_u128(0x2c6f_91d4_7a30_4e85_b1c9_5d02_e64a_8f17);
@@ -102,8 +122,8 @@ impl ScimOutboundWorker {
             .consume(DurableConsumer {
                 recipient: receiver.recipient,
                 event_types: receiver.event_types,
-                // An entity's changes reach a target in commit order: an
-                // update never overtakes the create whose mapping it needs.
+                // One delivery at a time across replicas: two pushes of the
+                // same resource never run at once.
                 ordered: true,
             })
             .await?;
@@ -113,23 +133,28 @@ impl ScimOutboundWorker {
 
     async fn process_events(self: Arc<Self>, mut rx: mpsc::Receiver<Delivery>) {
         while let Some(delivery) = rx.recv().await {
-            let settlement = self.process(&delivery.event).await;
+            let settlement = self
+                .process(&delivery.event, delivery.attempt, delivery.hold())
+                .await;
             delivery.settle(settlement);
         }
 
         info!("SCIM outbound worker stopped (event channel closed)");
     }
 
-    /// Dispatch `event` to every enabled target that has no recorded outcome
-    /// for it. It is settled once every target has one, and left with the bus
-    /// (delivered again, to those targets only) otherwise.
-    pub(crate) async fn process(&self, event: &Event) -> Settlement {
+    /// Dispatch delivery number `attempt` of `event`, held as `hold` says,
+    /// to every enabled target that has no recorded outcome for it. A target
+    /// failing in a way a later attempt may cure, within its attempts, is
+    /// left for the redelivery; any other failure is recorded. The event is
+    /// settled once every target has an outcome.
+    pub(crate) async fn process(&self, event: &Event, attempt: u64, hold: &Hold) -> Settlement {
         debug!(
             event_type = %event.event_type,
             subject = ?event.subject,
+            attempt,
             "processing SCIM outbound event"
         );
-        let mut unrecorded = false;
+        let mut retry: Option<Duration> = None;
         for target in self.targets.iter().filter(|t| t.enabled) {
             match self
                 .storage
@@ -140,12 +165,29 @@ impl ScimOutboundWorker {
                 Ok(None) => {}
                 Err(e) => {
                     warn!(target = %target.display_name, error = %e, "SCIM outcome not read");
-                    unrecorded = true;
+                    retry = later(retry, UNRECORDED_RETRY);
                     continue;
                 }
             }
-            let recorded = match self.dispatch_to_target(target, event).await {
+            let client = ScimHttpClient::new(target, hold.clone());
+            let recorded = match self.dispatch(target, &client, event).await {
                 Ok(()) => self.record_taken(target, event).await,
+                // A lost hold is no failure of the target: it is not counted.
+                Err(e)
+                    if e.is_transient()
+                        && (matches!(e, ScimClientError::NotHeld)
+                            || attempt < u64::from(target.sync_config.max_retry_attempts)) =>
+                {
+                    warn!(
+                        target = %target.display_name,
+                        event_type = %event.event_type,
+                        attempt,
+                        error = %e,
+                        "SCIM outbound dispatch will be retried"
+                    );
+                    retry = later(retry, backoff(&e, attempt, target));
+                    continue;
+                }
                 Err(e) => {
                     error!(
                         target = %target.display_name,
@@ -156,13 +198,11 @@ impl ScimOutboundWorker {
                     self.handle_dispatch_failure(target, event, &e).await
                 }
             };
-            unrecorded |= !recorded;
+            if !recorded {
+                retry = later(retry, UNRECORDED_RETRY);
+            }
         }
-        if unrecorded {
-            Settlement::Retry(UNRECORDED_RETRY)
-        } else {
-            Settlement::Done
-        }
+        retry.map_or(Settlement::Done, Settlement::Retry)
     }
 
     /// Record that `target` took `event`. Whether it is recorded: a target
@@ -182,35 +222,28 @@ impl ScimOutboundWorker {
         }
     }
 
-    /// Dispatch a single event to a single outbound target.
-    async fn dispatch_to_target(
+    /// Push the current state of the resource `event` names to `target`.
+    async fn dispatch(
         &self,
         target: &ScimOutboundTarget,
+        client: &ScimHttpClient,
         event: &Event,
     ) -> Result<(), ScimClientError> {
-        let client = ScimHttpClient::new(target);
-
         match event.event_type.as_str() {
-            t if t == event_types::SCIM_USER_PROVISIONED => {
-                self.handle_user_provisioned(target, &client, event).await
+            t if t == event_types::SCIM_USER_PROVISIONED
+                || t == event_types::SCIM_USER_UPDATED
+                || t == event_types::SCIM_USER_DEACTIVATED
+                || t == event_types::SCIM_USER_REACTIVATED =>
+            {
+                let profile_id = extract_profile_id(&event.data)?;
+                self.sync_user(target, client, profile_id).await
             }
-            t if t == event_types::SCIM_USER_UPDATED => {
-                self.handle_user_updated(target, &client, event).await
-            }
-            t if t == event_types::SCIM_USER_DEACTIVATED => {
-                self.handle_user_deactivated(target, &client, event).await
-            }
-            t if t == event_types::SCIM_USER_REACTIVATED => {
-                self.handle_user_reactivated(target, &client, event).await
-            }
-            t if t == event_types::SCIM_GROUP_CREATED => {
-                self.handle_group_created(target, &client, event).await
-            }
-            t if t == event_types::SCIM_GROUP_UPDATED => {
-                self.handle_group_updated(target, &client, event).await
-            }
-            t if t == event_types::SCIM_GROUP_DELETED => {
-                self.handle_group_deleted(target, &client, event).await
+            t if t == event_types::SCIM_GROUP_CREATED
+                || t == event_types::SCIM_GROUP_UPDATED
+                || t == event_types::SCIM_GROUP_DELETED =>
+            {
+                let group_id = GroupId(extract_uuid_field(&event.data, "group_id")?);
+                self.sync_group(target, client, group_id).await
             }
             _ => {
                 debug!(event_type = %event.event_type, "ignoring unknown event type");
@@ -219,312 +252,171 @@ impl ScimOutboundWorker {
         }
     }
 
-    /// POST /Users — provision a new user to downstream app.
-    async fn handle_user_provisioned(
+    /// Push a user's current state: replace every mapped attribute where the
+    /// target has the user, create it where it does not and it is active
+    /// (an inactive user the target never had needs nothing).
+    async fn sync_user(
         &self,
         target: &ScimOutboundTarget,
         client: &ScimHttpClient,
-        event: &Event,
+        profile_id: ProfileId,
     ) -> Result<(), ScimClientError> {
-        let profile_id = extract_profile_id(&event.data)?;
-
-        // Load profile data from storage
         let (profile, principals, metadata) = self.load_profile_data(profile_id).await?;
-
-        let payload =
+        let user =
             mapper::build_scim_user(&profile, &principals, &metadata, &target.attribute_mapping);
+        let entity = profile_id.into_uuid();
+        let kind = OutboundEntityType::User;
 
-        let response = client.create_user(&payload).await?;
-
-        // Store downstream mapping for future PATCH/DELETE
-        if let Some(downstream_id) = response.id {
-            self.save_outbound_record(
-                target.id,
-                profile_id.into_uuid(),
-                OutboundEntityType::User,
-                &downstream_id,
-            )
-            .await;
+        let known = match self.find_downstream_id(target.id, entity, kind).await? {
+            Some(id) => Some(id),
+            None if self.creation_sent(target.id, entity, kind).await? => {
+                let found = client.find_user(&user.user_name).await?;
+                self.adopt(target.id, entity, kind, found).await?
+            }
+            None => None,
+        };
+        if let Some(id) = known {
+            client.replace_user(&id, &user).await?;
+            info!(target = %target.display_name, %profile_id, "user state pushed downstream");
+            return Ok(());
         }
-
-        info!(
-            target = %target.display_name,
-            profile_id = %profile_id,
-            "user provisioned to downstream"
-        );
-
+        if !user.active {
+            return Ok(());
+        }
+        self.mark_creation(target.id, entity, kind).await?;
+        let created = match client.create_user(&user).await? {
+            Some(id) => Some(id),
+            None => client.find_user(&user.user_name).await?,
+        };
+        self.adopt(target.id, entity, kind, created)
+            .await?
+            .ok_or_else(|| ScimClientError::Unreachable("the created user was not found".into()))?;
+        info!(target = %target.display_name, %profile_id, "user provisioned downstream");
         Ok(())
     }
 
-    /// PATCH /Users/{id} — update user in downstream app.
-    async fn handle_user_updated(
+    /// Push a group's current state when it is pushed to `target`: its name
+    /// and its whole membership (members the target has), or its deletion
+    /// once it is gone.
+    async fn sync_group(
         &self,
         target: &ScimOutboundTarget,
         client: &ScimHttpClient,
-        event: &Event,
+        group_id: GroupId,
     ) -> Result<(), ScimClientError> {
-        let profile_id = extract_profile_id(&event.data)?;
-
-        let downstream_id = match self
-            .find_downstream_id(target.id, profile_id.into_uuid(), OutboundEntityType::User)
-            .await
-        {
-            Some(id) => id,
-            None => {
-                // Not previously provisioned — do a full POST instead
-                return self.handle_user_provisioned(target, client, event).await;
+        if !target.group_push.enabled {
+            return Ok(());
+        }
+        let entity = group_id.0;
+        let kind = OutboundEntityType::Group;
+        let known = self.find_downstream_id(target.id, entity, kind).await?;
+        let Some(group) = self.storage.get_group(group_id).await.map_err(storage)? else {
+            if let Some(id) = known {
+                client.delete_group(&id).await?;
             }
+            return Ok(());
         };
-
-        let (profile, principals, metadata) = self.load_profile_data(profile_id).await?;
-
-        let payload =
-            mapper::build_scim_user(&profile, &principals, &metadata, &target.attribute_mapping);
-
-        // Build a PATCH with replace operations for all mapped attributes
-        let json_value = serde_json::to_value(&payload)
-            .map_err(|e| ScimClientError::Serialization(e.to_string()))?;
-
-        let mut ops = Vec::new();
-        if let serde_json::Value::Object(map) = json_value {
-            for (key, value) in map {
-                if key == "schemas" {
-                    continue;
-                }
-                ops.push(mapper::ScimPatchOp {
-                    op: "replace".into(),
-                    path: Some(key),
-                    value: Some(value),
+        if mapper::resolve_group_mapping(&group.name, &target.group_push).is_none() {
+            return Ok(());
+        }
+        let mut members = Vec::new();
+        for member in self
+            .storage
+            .list_group_members(group_id)
+            .await
+            .map_err(storage)?
+        {
+            let user = member.profile_id.into_uuid();
+            if let Some(id) = self
+                .find_downstream_id(target.id, user, OutboundEntityType::User)
+                .await?
+            {
+                members.push(ScimMemberPayload {
+                    value: id,
+                    display: None,
                 });
             }
         }
+        let payload = ScimGroupPayload {
+            schemas: vec![GROUP_SCHEMA.into()],
+            display_name: group.name.clone(),
+            members,
+        };
 
-        let patch = ScimPatchPayload::new(ops);
-        client.update_user(&downstream_id, &patch).await?;
-
-        info!(
-            target = %target.display_name,
-            profile_id = %profile_id,
-            "user updated in downstream"
-        );
-
-        Ok(())
-    }
-
-    /// PATCH /Users/{id} active=false — deactivate user in downstream.
-    async fn handle_user_deactivated(
-        &self,
-        target: &ScimOutboundTarget,
-        client: &ScimHttpClient,
-        event: &Event,
-    ) -> Result<(), ScimClientError> {
-        let profile_id = extract_profile_id(&event.data)?;
-
-        let downstream_id = match self
-            .find_downstream_id(target.id, profile_id.into_uuid(), OutboundEntityType::User)
-            .await
-        {
-            Some(id) => id,
-            None => {
-                debug!(
-                    target = %target.display_name,
-                    profile_id = %profile_id,
-                    "user not found in downstream, skipping deactivation"
-                );
-                return Ok(());
+        let known = match known {
+            Some(id) => Some(id),
+            None if self.creation_sent(target.id, entity, kind).await? => {
+                let found = client.find_group(&group.name).await?;
+                self.adopt(target.id, entity, kind, found).await?
             }
+            None => None,
         };
-
-        client.deactivate_user(&downstream_id).await?;
-
-        info!(
-            target = %target.display_name,
-            profile_id = %profile_id,
-            "user deactivated in downstream"
-        );
-
+        if let Some(id) = known {
+            return client.replace_group(&id, &payload).await;
+        }
+        self.mark_creation(target.id, entity, kind).await?;
+        let created = match client.create_group(&payload).await? {
+            Some(id) => Some(id),
+            None => client.find_group(&group.name).await?,
+        };
+        self.adopt(target.id, entity, kind, created)
+            .await?
+            .ok_or_else(|| {
+                ScimClientError::Unreachable("the created group was not found".into())
+            })?;
         Ok(())
     }
 
-    /// PATCH /Users/{id} active=true — reactivate user in downstream.
-    async fn handle_user_reactivated(
+    /// Whether a create of `entity` was ever sent to `target`.
+    async fn creation_sent(
         &self,
-        target: &ScimOutboundTarget,
-        client: &ScimHttpClient,
-        event: &Event,
-    ) -> Result<(), ScimClientError> {
-        let profile_id = extract_profile_id(&event.data)?;
-
-        let downstream_id = match self
-            .find_downstream_id(target.id, profile_id.into_uuid(), OutboundEntityType::User)
+        target: ScimOutboundTargetId,
+        entity: Uuid,
+        kind: OutboundEntityType,
+    ) -> Result<bool, ScimClientError> {
+        self.storage
+            .get_operation_result(CREATION_NAMESPACE, &creation_key(target, entity, kind))
             .await
-        {
-            Some(id) => id,
-            None => {
-                // Not previously provisioned — do a full POST instead
-                return self.handle_user_provisioned(target, client, event).await;
-            }
-        };
-
-        let patch = ScimPatchPayload::reactivate();
-        client.update_user(&downstream_id, &patch).await?;
-
-        info!(
-            target = %target.display_name,
-            profile_id = %profile_id,
-            "user reactivated in downstream"
-        );
-
-        Ok(())
+            .map(|found| found.is_some())
+            .map_err(storage)
     }
 
-    /// POST /Groups — create group in downstream.
-    async fn handle_group_created(
+    /// Record that a create of `entity` is about to be sent to `target`.
+    async fn mark_creation(
         &self,
-        target: &ScimOutboundTarget,
-        client: &ScimHttpClient,
-        event: &Event,
+        target: ScimOutboundTargetId,
+        entity: Uuid,
+        kind: OutboundEntityType,
     ) -> Result<(), ScimClientError> {
-        if !target.group_push.enabled {
-            return Ok(());
+        let ctx = MutationContext::from(AuditEntry::system(
+            "scim.outbound.creating",
+            entity.to_string(),
+        ))
+        .with_operation(OperationCompletion::new(
+            CREATION_NAMESPACE,
+            creation_key(target, entity, kind),
+            "create",
+            &[],
+            Vec::new(),
+        ));
+        match self.storage.record_outcome(ctx).await {
+            Ok(()) | Err(sid_core::Error::OperationCompleted(_)) => Ok(()),
+            Err(e) => Err(storage(e)),
         }
-
-        let group_id = extract_uuid_field(&event.data, "group_id")?;
-        let group_name = event
-            .data
-            .get("display_name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-
-        // Check if this group is mapped
-        if mapper::resolve_group_mapping(group_name, &target.group_push).is_none() {
-            return Ok(());
-        }
-
-        let payload = mapper::ScimGroupPayload {
-            schemas: vec!["urn:ietf:params:scim:schemas:core:2.0:Group".into()],
-            display_name: group_name.to_string(),
-            members: Vec::new(),
-        };
-
-        let response = client.create_group(&payload).await?;
-
-        if let Some(downstream_id) = response.id {
-            self.save_outbound_record(
-                target.id,
-                group_id,
-                OutboundEntityType::Group,
-                &downstream_id,
-            )
-            .await;
-        }
-
-        Ok(())
     }
 
-    /// PATCH /Groups/{id} — update group members.
-    async fn handle_group_updated(
+    /// Map `entity` to the downstream resource `found`, if any.
+    async fn adopt(
         &self,
-        target: &ScimOutboundTarget,
-        client: &ScimHttpClient,
-        event: &Event,
-    ) -> Result<(), ScimClientError> {
-        if !target.group_push.enabled {
-            return Ok(());
+        target: ScimOutboundTargetId,
+        entity: Uuid,
+        kind: OutboundEntityType,
+        found: Option<String>,
+    ) -> Result<Option<String>, ScimClientError> {
+        if let Some(id) = &found {
+            self.save_outbound_record(target, entity, kind, id).await?;
         }
-
-        let group_id = extract_uuid_field(&event.data, "group_id")?;
-
-        let downstream_id = match self
-            .find_downstream_id(target.id, group_id, OutboundEntityType::Group)
-            .await
-        {
-            Some(id) => id,
-            None => return Ok(()),
-        };
-
-        // Build patch from event data
-        let mut ops = Vec::new();
-
-        if let Some(add_members) = event.data.get("add_members").and_then(|v| v.as_array()) {
-            let member_ids: Vec<String> = add_members
-                .iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect();
-            if !member_ids.is_empty() {
-                // Look up downstream IDs for each member
-                let mut downstream_member_ids = Vec::new();
-                for mid in &member_ids {
-                    if let Ok(uuid) = Uuid::parse_str(mid)
-                        && let Some(did) = self
-                            .find_downstream_id(target.id, uuid, OutboundEntityType::User)
-                            .await
-                    {
-                        downstream_member_ids.push(did);
-                    }
-                }
-                if !downstream_member_ids.is_empty() {
-                    let patch = ScimPatchPayload::add_members(downstream_member_ids);
-                    ops.extend(patch.operations);
-                }
-            }
-        }
-
-        if let Some(remove_members) = event.data.get("remove_members").and_then(|v| v.as_array()) {
-            let member_ids: Vec<String> = remove_members
-                .iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect();
-            if !member_ids.is_empty() {
-                let mut downstream_member_ids = Vec::new();
-                for mid in &member_ids {
-                    if let Ok(uuid) = Uuid::parse_str(mid)
-                        && let Some(did) = self
-                            .find_downstream_id(target.id, uuid, OutboundEntityType::User)
-                            .await
-                    {
-                        downstream_member_ids.push(did);
-                    }
-                }
-                if !downstream_member_ids.is_empty() {
-                    let patch = ScimPatchPayload::remove_members(downstream_member_ids);
-                    ops.extend(patch.operations);
-                }
-            }
-        }
-
-        if !ops.is_empty() {
-            let patch = ScimPatchPayload::new(ops);
-            client.update_group(&downstream_id, &patch).await?;
-        }
-
-        Ok(())
-    }
-
-    /// DELETE /Groups/{id} — delete group from downstream.
-    async fn handle_group_deleted(
-        &self,
-        target: &ScimOutboundTarget,
-        client: &ScimHttpClient,
-        event: &Event,
-    ) -> Result<(), ScimClientError> {
-        if !target.group_push.enabled {
-            return Ok(());
-        }
-
-        let group_id = extract_uuid_field(&event.data, "group_id")?;
-
-        let downstream_id = match self
-            .find_downstream_id(target.id, group_id, OutboundEntityType::Group)
-            .await
-        {
-            Some(id) => id,
-            None => return Ok(()),
-        };
-
-        client.delete_group(&downstream_id).await?;
-
-        Ok(())
+        Ok(found)
     }
 
     // ── Failure handling (DLQ, error recording, sid-notify) ──
@@ -645,7 +537,7 @@ impl ScimOutboundWorker {
             .storage
             .get_profile(profile_id)
             .await
-            .map_err(|e| ScimClientError::Unreachable(format!("storage error: {e}")))?
+            .map_err(storage)?
             .ok_or_else(|| {
                 ScimClientError::Serialization(format!("profile {profile_id} not found"))
             })?;
@@ -654,46 +546,42 @@ impl ScimOutboundWorker {
             .storage
             .get_principals_by_profile(profile_id)
             .await
-            .map_err(|e| ScimClientError::Unreachable(format!("storage error: {e}")))?;
+            .map_err(storage)?;
 
         let metadata = self
             .storage
             .list_profile_metadata(profile_id)
             .await
-            .map_err(|e| ScimClientError::Unreachable(format!("storage error: {e}")))?;
+            .map_err(storage)?;
 
         Ok((profile, principals, metadata))
     }
 
-    /// Look up downstream SCIM resource ID from outbound records.
+    /// The downstream id `target` has for an entity. An unreadable mapping
+    /// is an error, never taken for a missing one (that would create the
+    /// resource a second time).
     async fn find_downstream_id(
         &self,
         target_id: ScimOutboundTargetId,
         sid_entity_id: Uuid,
         entity_type: OutboundEntityType,
-    ) -> Option<String> {
-        match self
+    ) -> Result<Option<String>, ScimClientError> {
+        Ok(self
             .storage
             .get_scim_outbound_record(target_id, sid_entity_id, entity_type)
             .await
-        {
-            Ok(Some(record)) => Some(record.downstream_id),
-            Ok(None) => None,
-            Err(e) => {
-                warn!(error = %e, "failed to look up outbound record");
-                None
-            }
-        }
+            .map_err(storage)?
+            .map(|record| record.downstream_id))
     }
 
-    /// Save a mapping record after successful outbound provisioning.
+    /// Save the mapping of an entity to its downstream resource.
     async fn save_outbound_record(
         &self,
         target_id: ScimOutboundTargetId,
         sid_entity_id: Uuid,
         entity_type: OutboundEntityType,
         downstream_id: &str,
-    ) {
+    ) -> Result<(), ScimClientError> {
         let now = Utc::now();
         let record = ScimOutboundRecord {
             target_id,
@@ -707,20 +595,57 @@ impl ScimOutboundWorker {
             updated_at: now,
         };
 
-        if let Err(e) = self
-            .storage
+        self.storage
             .record_scim_outbound_sync(
                 &record,
                 AuditEntry::system("scim.outbound.record_saved", downstream_id).into(),
             )
             .await
-        {
-            warn!(
-                error = %e,
-                downstream_id,
-                "failed to save outbound record"
-            );
+            .map_err(storage)
+    }
+}
+
+/// A storage failure, which a later attempt may not meet.
+fn storage(e: sid_core::Error) -> ScimClientError {
+    ScimClientError::Unreachable(format!("storage error: {e}"))
+}
+
+/// The key a create of `entity` sent to `target` is recorded under.
+fn creation_key(
+    target: ScimOutboundTargetId,
+    entity: Uuid,
+    kind: OutboundEntityType,
+) -> OperationKey {
+    OperationKey::parse(&format!("{}:{}:{}", target.0, entity, kind.as_str()))
+        .expect("two UUIDs and a kind make a valid key")
+}
+
+/// The later of a pending retry and `delay`.
+fn later(pending: Option<Duration>, delay: Duration) -> Option<Duration> {
+    Some(pending.map_or(delay, |pending| pending.max(delay)))
+}
+
+/// When delivery number `attempt` failing with `error` is tried again: the
+/// target's own Retry-After, or its backoff doubling per attempt, at most
+/// [`MAX_BACKOFF`].
+fn backoff(error: &ScimClientError, attempt: u64, target: &ScimOutboundTarget) -> Duration {
+    match error {
+        ScimClientError::RateLimited { retry_after_secs } => {
+            Duration::from_secs(*retry_after_secs).min(MAX_BACKOFF)
         }
+        ScimClientError::NotHeld => NOT_HELD_RETRY,
+        _ => u32::try_from(attempt.max(1) - 1)
+            .ok()
+            .and_then(|doublings| 2u64.checked_pow(doublings))
+            .and_then(|factor| {
+                target
+                    .sync_config
+                    .retry_backoff_base_secs
+                    .checked_mul(factor)
+            })
+            .map(Duration::from_secs)
+            .filter(|delay| *delay <= MAX_BACKOFF)
+            .unwrap_or(MAX_BACKOFF),
     }
 }
 
@@ -755,6 +680,7 @@ fn error_class(error: &ScimClientError) -> &'static str {
         ScimClientError::Conflict { .. } => "conflict",
         ScimClientError::AuthFailed { .. } => "auth_failed",
         ScimClientError::Serialization(_) => "serialization",
+        ScimClientError::NotHeld => "not_held",
     }
 }
 

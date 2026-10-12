@@ -56,6 +56,9 @@ pub struct Topology {
     pub work_max_bytes: i64,
     /// Copies of each stream in a clustered server.
     pub replicas: usize,
+    /// How long a durable consumer's delivery stays its own without a sign
+    /// of progress before it is delivered again.
+    pub work_ack_wait: Duration,
 }
 
 impl Default for Topology {
@@ -66,6 +69,7 @@ impl Default for Topology {
             work_max_messages: 1_000_000,
             work_max_bytes: 1 << 30,
             replicas: 1,
+            work_ack_wait: Duration::from_secs(60),
         }
     }
 }

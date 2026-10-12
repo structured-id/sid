@@ -85,20 +85,82 @@ pub enum Settlement {
     Reject(String),
 }
 
+/// How long a delivery is certainly still its consumer's alone: before then
+/// no replica receives the same event. The bus renews it while the delivery
+/// is unsettled; when it cannot (a lost broker connection), it runs out and
+/// the event may go to another replica. Measured from before each renewal
+/// was sent, so it ends no later than the broker's own deadline.
+#[derive(Debug, Clone)]
+pub struct Hold(Option<tokio::sync::watch::Receiver<tokio::time::Instant>>);
+
+impl Hold {
+    /// Held until settled: no other consumer can receive the event meanwhile.
+    pub fn unbounded() -> Self {
+        Self(None)
+    }
+
+    /// Held until the instant `deadline` currently names.
+    pub fn until(deadline: tokio::sync::watch::Receiver<tokio::time::Instant>) -> Self {
+        Self(Some(deadline))
+    }
+
+    /// The time left, `None` when unbounded. A hold that ran out has none.
+    pub fn remaining(&self) -> Option<std::time::Duration> {
+        self.0.as_ref().map(|deadline| {
+            deadline
+                .borrow()
+                .checked_duration_since(tokio::time::Instant::now())
+                .unwrap_or(std::time::Duration::ZERO)
+        })
+    }
+
+    /// Whether it lasts at least `span` more: an effect that takes up to
+    /// `span` and starts now ends before another replica can start it.
+    pub fn lasts(&self, span: std::time::Duration) -> bool {
+        self.remaining().is_none_or(|left| left >= span)
+    }
+}
+
 /// One event handed to a durable consumer. The bus acknowledges it only on
 /// [`Settlement::Done`]: until the consumer settles it, the event remains
 /// the consumer's. A delivery dropped unsettled is delivered again.
 #[derive(Debug)]
 pub struct Delivery {
     pub event: Event,
+    /// Which delivery of the event this is, from 1.
+    pub attempt: u64,
+    hold: Hold,
     settled: tokio::sync::oneshot::Sender<Settlement>,
 }
 
 impl Delivery {
-    /// A delivery of `event` and the receiver its settlement arrives on.
+    /// A first delivery of `event`, held until settled, and the receiver its
+    /// settlement arrives on.
     pub fn new(event: Event) -> (Self, tokio::sync::oneshot::Receiver<Settlement>) {
+        Self::held(event, 1, Hold::unbounded())
+    }
+
+    /// Delivery number `attempt` of `event`, held as `hold` says.
+    pub fn held(
+        event: Event,
+        attempt: u64,
+        hold: Hold,
+    ) -> (Self, tokio::sync::oneshot::Receiver<Settlement>) {
         let (settled, outcome) = tokio::sync::oneshot::channel();
-        (Self { event, settled }, outcome)
+        (
+            Self {
+                event,
+                attempt,
+                hold,
+                settled,
+            },
+            outcome,
+        )
+    }
+
+    /// How long the delivery is certainly still this consumer's alone.
+    pub fn hold(&self) -> &Hold {
+        &self.hold
     }
 
     /// Settle the delivery. A bus that stopped waiting delivers it again.
