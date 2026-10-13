@@ -103,16 +103,19 @@ impl ScimHttpClient {
         ))
     }
 
-    /// PATCH /Users/{id} replacing every mapped attribute with `payload`.
+    /// PATCH /Users/{id} replacing every mapped attribute with `payload` and
+    /// removing the mapped attributes at `absent`, which the user no longer
+    /// carries.
     pub async fn replace_user(
         &self,
         downstream_id: &str,
         payload: &ScimUserPayload,
+        absent: &[String],
     ) -> Result<(), ScimClientError> {
         let url = format!("{}/Users/{}", self.endpoint_url, downstream_id);
         let patch = ScimPatchPayload::replace_user(payload)?;
         self.send("PATCH", &url, Some(&patch), &[]).await?;
-        Ok(())
+        self.remove_paths(&url, absent).await
     }
 
     /// The id of the one user named `user_name` (RFC 7644 §3.4.2.2 filter).
@@ -144,8 +147,31 @@ impl ScimHttpClient {
         let patch = ScimPatchPayload::replace_group(payload);
         self.send("PATCH", &url, Some(&patch), &[]).await?;
         if payload.members.is_empty() {
-            let clear = ScimPatchPayload::remove_members();
-            match self.send("PATCH", &url, Some(&clear), &[]).await {
+            self.remove_paths(&url, &["members".to_string()]).await?;
+        }
+        Ok(())
+    }
+
+    /// PATCH the resource at `url` removing the attributes at `paths`. A
+    /// server that refuses one it has nothing at as `noTarget` (RFC 7644
+    /// §3.12; §3.5.2.2 has such a removal succeed) refuses the whole atomic
+    /// patch, so the paths then go one by one, a `noTarget` meaning that one
+    /// is already gone.
+    async fn remove_paths(&self, url: &str, paths: &[String]) -> Result<(), ScimClientError> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        match self
+            .send("PATCH", url, Some(&ScimPatchPayload::remove(paths)), &[])
+            .await
+        {
+            Ok(_) => return Ok(()),
+            Err(ScimClientError::Rejected { status: 400, body }) if no_target(&body) => {}
+            Err(e) => return Err(e),
+        }
+        for path in paths {
+            let one = ScimPatchPayload::remove(std::slice::from_ref(path));
+            match self.send("PATCH", url, Some(&one), &[]).await {
                 Ok(_) => {}
                 Err(ScimClientError::Rejected { status: 400, body }) if no_target(&body) => {}
                 Err(e) => return Err(e),

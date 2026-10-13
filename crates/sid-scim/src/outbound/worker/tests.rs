@@ -719,6 +719,79 @@ async fn test_a_group_follows_its_current_membership() {
     assert!(down.lock().unwrap().groups.is_empty());
 }
 
+/// An attribute the user no longer has is removed downstream, not left at
+/// its old value: the push carries the whole current state. Pushing again,
+/// when the target has nothing left to remove, still succeeds.
+#[tokio::test]
+async fn test_attributes_the_user_lost_are_removed_downstream() {
+    let (endpoint, down) = downstream().await;
+    let t = target("app", true, &endpoint);
+    let (storage, worker) = worker(vec![t.clone()]).await;
+    let mut alice = stored_profile(&storage, "alice").await;
+    alice.given_name = Some("Alice".into());
+    alice.family_name = Some("Smith".into());
+    assert!(
+        storage
+            .update_profile(&alice, AuditEntry::system("test", "name").into())
+            .await
+            .unwrap()
+    );
+    let provisioned = user_event(event_types::SCIM_USER_PROVISIONED, alice.id);
+    assert_eq!(first(&worker, &provisioned).await, Settlement::Done);
+    assert!(down.lock().unwrap().users[0].get("name").is_some());
+
+    let mut alice = storage.get_profile(alice.id).await.unwrap().unwrap();
+    alice.given_name = None;
+    alice.family_name = None;
+    assert!(
+        storage
+            .update_profile(&alice, AuditEntry::system("test", "unname").into())
+            .await
+            .unwrap()
+    );
+    let updated = user_event(event_types::SCIM_USER_UPDATED, alice.id);
+    for _ in 0..2 {
+        assert_eq!(first(&worker, &updated).await, Settlement::Done);
+        {
+            let d = down.lock().unwrap();
+            assert!(d.users[0].get("name").is_none(), "{}", d.users[0]);
+            assert!(d.users[0].get("displayName").is_none(), "{}", d.users[0]);
+        }
+    }
+    assert_eq!(dead_letters(&storage, &t).await, 0);
+}
+
+/// A member whose user the target did not have yet when the group was
+/// pushed (the group's event came first) joins the downstream group once
+/// the user is created: creating a user pushes the groups it is in.
+#[tokio::test]
+async fn test_a_member_created_after_its_group_joins_it() {
+    let (endpoint, down) = downstream().await;
+    let t = target("app", true, &endpoint);
+    let (storage, worker) = worker(vec![t.clone()]).await;
+    let alice = stored_profile(&storage, "alice").await;
+    let group = Group::new(ProjectId::system(), "Engineering");
+    let mut write = DirectoryGroupWrite::new(DirectoryWriteMode::Create, group.clone());
+    write.add_members.push(GroupMember::new(group.id, alice.id));
+    storage
+        .write_directory_group(&write, AuditEntry::system("test", "group").into())
+        .await
+        .unwrap();
+
+    let created = group_event(event_types::SCIM_GROUP_CREATED, group.id);
+    assert_eq!(first(&worker, &created).await, Settlement::Done);
+    let provisioned = user_event(event_types::SCIM_USER_PROVISIONED, alice.id);
+    assert_eq!(first(&worker, &provisioned).await, Settlement::Done);
+
+    let d = down.lock().unwrap();
+    let alice_id = d.users[0]["id"].clone();
+    assert_eq!(
+        d.groups[0]["members"],
+        json!([{"value": alice_id}]),
+        "the member never joined the downstream group"
+    );
+}
+
 /// A group without members, pushed again with a new name, gets the name
 /// even from a provider that refuses to remove an attribute it does not
 /// have: the rename is not lost with a membership removal that had nothing

@@ -355,7 +355,8 @@ impl ScimOutboundWorker {
             None => None,
         };
         if let Some(id) = known {
-            client.replace_user(&id, &user).await?;
+            let absent = mapper::absent_user_paths(&user, &target.attribute_mapping)?;
+            client.replace_user(&id, &user, &absent).await?;
             info!(target = %target.display_name, %profile_id, "user state pushed downstream");
             return Ok(());
         }
@@ -371,6 +372,22 @@ impl ScimOutboundWorker {
             .await?
             .ok_or_else(|| ScimClientError::Unreachable("the created user was not found".into()))?;
         info!(target = %target.display_name, %profile_id, "user provisioned downstream");
+        // A group pushed before this user existed downstream left the user
+        // out: push again each group of the user the target already has.
+        for group in self
+            .storage
+            .list_groups_for_profile(profile_id)
+            .await
+            .map_err(storage)?
+        {
+            if self
+                .find_downstream_id(target.id, group.id.0, OutboundEntityType::Group)
+                .await?
+                .is_some()
+            {
+                self.sync_group(target, client, group.id).await?;
+            }
+        }
         Ok(())
     }
 

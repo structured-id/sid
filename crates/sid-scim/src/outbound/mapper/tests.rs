@@ -153,6 +153,30 @@ fn test_literal_mapping() {
     assert_eq!(payload.extra.get("custom_field").unwrap(), "constant");
 }
 
+/// Every attribute the mapping writes and the user lacks is to be removed:
+/// a lost sub-attribute of `name` alone while `name` stays, the whole `name`
+/// once none of it is left, never `userName` or `active`.
+#[test]
+fn test_absent_user_paths() {
+    let mut profile = test_profile();
+    profile.family_name = None;
+    let user = build_scim_user(&profile, &[], &[], &AttributeMapping::default());
+    let absent = absent_user_paths(&user, &AttributeMapping::default()).unwrap();
+    assert!(
+        absent.contains(&"name.familyName".to_string()),
+        "{absent:?}"
+    );
+    assert!(!absent.iter().any(|p| p == "name" || p == "name.givenName"));
+    assert!(absent.contains(&"emails".to_string()), "{absent:?}");
+    assert!(!absent.iter().any(|p| p == "userName" || p == "active"));
+
+    profile.given_name = None;
+    let user = build_scim_user(&profile, &[], &[], &AttributeMapping::default());
+    let absent = absent_user_paths(&user, &AttributeMapping::default()).unwrap();
+    assert!(absent.contains(&"name".to_string()), "{absent:?}");
+    assert!(!absent.iter().any(|p| p.starts_with("name.")), "{absent:?}");
+}
+
 #[test]
 fn test_metadata_path_resolution() {
     let profile = test_profile();
@@ -272,7 +296,7 @@ fn test_replace_group_sets_the_whole_membership() {
             .all(|op| op.path.as_deref() != Some("members")),
         "the membership rides with the rename"
     );
-    let clear = ScimPatchPayload::remove_members();
+    let clear = ScimPatchPayload::remove(&["members".to_string()]);
     assert_eq!(clear.operations.len(), 1);
     assert_eq!(clear.operations[0].op, "remove");
     assert_eq!(clear.operations[0].path.as_deref(), Some("members"));

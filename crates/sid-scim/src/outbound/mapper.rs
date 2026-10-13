@@ -145,17 +145,80 @@ impl ScimPatchPayload {
         Self::new(operations)
     }
 
-    /// Remove every member of a group (RFC 7644 §3.5.2.2): a replacement
-    /// with an empty value is not one every server accepts. A server may
-    /// refuse it as `noTarget` when the group has no members, and a patch is
-    /// atomic, so it goes alone rather than taking other changes down with it.
-    pub fn remove_members() -> Self {
-        Self::new(vec![ScimPatchOp {
-            op: "remove".into(),
-            path: Some("members".into()),
-            value: None,
-        }])
+    /// Remove every attribute at `paths` (RFC 7644 §3.5.2.2), such as a
+    /// group's `members` (a replacement with an empty value is not one every
+    /// server accepts). A server may refuse a path it has nothing at as
+    /// `noTarget`, and a patch is atomic, so removals go apart from other
+    /// changes rather than taking them down too.
+    pub fn remove(paths: &[String]) -> Self {
+        Self::new(
+            paths
+                .iter()
+                .map(|path| ScimPatchOp {
+                    op: "remove".into(),
+                    path: Some(path.clone()),
+                    value: None,
+                })
+                .collect(),
+        )
     }
+}
+
+/// The attributes the default mapping writes besides `userName` and
+/// `active`, which every user carries.
+const DEFAULT_USER_PATHS: [&str; 9] = [
+    "displayName",
+    "name.givenName",
+    "name.familyName",
+    "name.formatted",
+    "emails",
+    "phoneNumbers",
+    "externalId",
+    "title",
+    "department",
+];
+
+/// The attribute paths `mapping` writes that `user` does not carry now: a
+/// push removes them, so the target is left without what the user lost. A
+/// `name` with none of its mapped sub-attributes left is removed as a whole;
+/// otherwise each missing sub-attribute is, since a replacement of `name`
+/// leaves the sub-attributes it does not name unchanged (RFC 7644 §3.5.2.3).
+pub fn absent_user_paths(
+    user: &ScimUserPayload,
+    mapping: &AttributeMapping,
+) -> Result<Vec<String>, super::client::ScimClientError> {
+    let Value::Object(held) = serde_json::to_value(user)
+        .map_err(|e| super::client::ScimClientError::Serialization(e.to_string()))?
+    else {
+        return Err(super::client::ScimClientError::Serialization(
+            "a user is not an object".into(),
+        ));
+    };
+    let written: Vec<&str> = if mapping.mappings.is_empty() {
+        DEFAULT_USER_PATHS.to_vec()
+    } else {
+        mapping
+            .mappings
+            .iter()
+            .map(|entry| entry.scim_path.as_str())
+            .filter(|path| !matches!(*path, "userName" | "active"))
+            .collect()
+    };
+    let name = held.get("name");
+    let mut absent = Vec::new();
+    for path in written {
+        let missing = match path.strip_prefix("name.") {
+            Some(_) if name.is_none() => "name",
+            Some(sub) if name.and_then(|n| n.get(sub)).is_none() => path,
+            Some(_) => continue,
+            None if held.contains_key(path) => continue,
+            None => path,
+        };
+        if !absent.iter().any(|p| p == missing) {
+            absent.push(missing.to_string());
+        }
+    }
+    Ok(absent)
 }
 
 /// Build a SCIM User payload from SID profile data using the configured attribute mapping.
