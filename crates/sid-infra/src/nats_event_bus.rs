@@ -113,6 +113,35 @@ impl NatsEventBus {
             .map_err(|e| EventBusError::PublishFailed(format!("ack: {e}")))?;
         Ok(())
     }
+
+    /// The history on `subjects` from `deliver`, read in order by an ordered
+    /// consumer: nothing is acknowledged, so the server never sends an event
+    /// again, however long the reader takes. It is pulled a batch at a time,
+    /// the next batch only once the reader took the last, so a reader that
+    /// is behind holds the server back; a consumer the server dropped meanwhile
+    /// is recreated from the last event read.
+    async fn read_history(
+        &self,
+        subjects: Vec<String>,
+        deliver: jetstream::consumer::DeliverPolicy,
+    ) -> EventBusResult<jetstream::consumer::pull::Ordered> {
+        let stream = self
+            .jetstream
+            .get_stream(self.topology.history_stream())
+            .await
+            .map_err(|e| EventBusError::SubscribeFailed(format!("get stream: {e}")))?;
+        stream
+            .create_consumer(jetstream::consumer::pull::OrderedConfig {
+                filter_subjects: subjects,
+                deliver_policy: deliver,
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| EventBusError::SubscribeFailed(format!("create consumer: {e}")))?
+            .messages()
+            .await
+            .map_err(|e| EventBusError::SubscribeFailed(format!("messages stream: {e}")))
+    }
 }
 
 /// Refuses `event` unless its route is one `accepts`.
@@ -175,33 +204,11 @@ impl EventBus for NatsEventBus {
             .topology
             .history_filters(&filter.event_types)
             .map_err(EventBusError::SubscribeFailed)?;
-        // An observer: an ephemeral consumer that sees what is published
-        // while it exists and keeps nothing for it.
-        let deliver_subject = self.client.new_inbox();
-        let config = jetstream::consumer::push::Config {
-            filter_subjects: subjects,
-            deliver_policy: jetstream::consumer::DeliverPolicy::New,
-            ack_policy: jetstream::consumer::AckPolicy::Explicit,
-            // The server waits once this many are unacknowledged, so the
-            // client's own buffer never overflows (see [`forward_history`]).
-            max_ack_pending: HISTORY_IN_FLIGHT,
-            deliver_subject,
-            ..Default::default()
-        };
-        let stream = self
-            .jetstream
-            .get_stream(self.topology.history_stream())
-            .await
-            .map_err(|e| EventBusError::SubscribeFailed(format!("get stream: {e}")))?;
-        let consumer = stream
-            .create_consumer(config)
-            .await
-            .map_err(|e| EventBusError::SubscribeFailed(format!("create consumer: {e}")))?;
-        let messages = consumer
-            .messages()
-            .await
-            .map_err(|e| EventBusError::SubscribeFailed(format!("messages stream: {e}")))?;
-
+        // An observer: sees what is published while it exists and keeps
+        // nothing for it.
+        let messages = self
+            .read_history(subjects, jetstream::consumer::DeliverPolicy::New)
+            .await?;
         let (tx, rx) = mpsc::channel(SUBSCRIPTION_CAPACITY);
         tokio::spawn(forward_history(messages, tx, None));
         Ok(rx)
@@ -346,38 +353,18 @@ impl EventBus for NatsEventBus {
             .history_filters(&filter.event_types)
             .map_err(EventBusError::SubscribeFailed)?;
 
-        // Ephemeral consumer on the history only: replay reads facts and
-        // never hands anyone work.
+        // On the history only: replay reads facts and never hands anyone work.
         let nanos = from
             .timestamp_nanos_opt()
             .ok_or_else(|| EventBusError::InvalidReplayWindow(format!("start {from}")))?;
-        let opt_start_time = time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(nanos))
+        let start_time = time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(nanos))
             .map_err(|e| EventBusError::InvalidReplayWindow(format!("start {from}: {e}")))?;
-        let config = jetstream::consumer::push::Config {
-            filter_subjects: subjects,
-            deliver_policy: jetstream::consumer::DeliverPolicy::ByStartTime {
-                start_time: opt_start_time,
-            },
-            ack_policy: jetstream::consumer::AckPolicy::Explicit,
-            max_ack_pending: HISTORY_IN_FLIGHT,
-            deliver_subject: self.client.new_inbox(),
-            ..Default::default()
-        };
-
-        let stream = self
-            .jetstream
-            .get_stream(self.topology.history_stream())
-            .await
-            .map_err(|e| EventBusError::SubscribeFailed(format!("get stream: {e}")))?;
-        let consumer = stream
-            .create_consumer(config)
-            .await
-            .map_err(|e| EventBusError::SubscribeFailed(format!("create replay consumer: {e}")))?;
-        let messages = consumer
-            .messages()
-            .await
-            .map_err(|e| EventBusError::SubscribeFailed(format!("replay messages: {e}")))?;
-
+        let messages = self
+            .read_history(
+                subjects,
+                jetstream::consumer::DeliverPolicy::ByStartTime { start_time },
+            )
+            .await?;
         let (tx, rx) = mpsc::channel(SUBSCRIPTION_CAPACITY);
         tokio::spawn(forward_history(messages, tx, to));
         Ok(rx)
@@ -394,23 +381,23 @@ impl EventBus for NatsEventBus {
     }
 }
 
-/// History messages a reader may hold unacknowledged before the server waits.
-/// Each is acknowledged only after it reached the reader's bounded channel,
-/// so the server stops sending while the reader is behind, instead of the
-/// client dropping what its buffer cannot hold.
-const HISTORY_IN_FLIGHT: i64 = SUBSCRIPTION_CAPACITY as i64;
-
-/// Forward history `messages` into `tx` until the stream ends, the reader
-/// goes away, or an event at or after `cutoff` arrives. A message is
-/// acknowledged once forwarded (or skipped as unreadable), which is what
-/// lets the server send the next one.
+/// Forward history `messages` into `tx` until the stream ends or fails, the
+/// reader goes away, or an event at or after `cutoff` arrives. While `tx` is
+/// full nothing more is read, which is what holds the server back.
 async fn forward_history(
-    mut messages: jetstream::consumer::push::Messages,
+    mut messages: jetstream::consumer::pull::Ordered,
     tx: mpsc::Sender<Event>,
     cutoff: Option<chrono::DateTime<chrono::Utc>>,
 ) {
     use futures::StreamExt;
-    while let Some(Ok(msg)) = messages.next().await {
+    while let Some(read) = messages.next().await {
+        let msg = match read {
+            Ok(msg) => msg,
+            Err(e) => {
+                tracing::warn!("history read ended: {e}");
+                break;
+            }
+        };
         match serde_json::from_slice::<Event>(&msg.payload) {
             Ok(event) if cutoff.is_some_and(|cutoff| event.time >= cutoff) => break,
             Ok(event) => match event.validate() {
@@ -422,9 +409,6 @@ async fn forward_history(
                 }
             },
             Err(e) => tracing::warn!("failed to deserialize NATS event: {e}"),
-        }
-        if let Err(e) = msg.ack().await {
-            tracing::warn!("acknowledge a history event: {e}");
         }
     }
 }

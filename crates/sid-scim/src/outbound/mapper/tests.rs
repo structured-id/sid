@@ -261,15 +261,22 @@ fn test_replace_group_sets_the_whole_membership() {
     assert_eq!(members.op, "replace");
     assert_eq!(members.value, Some(serde_json::json!([{"value": "u1"}])));
 
+    // An empty membership is a removal sent on its own, so a provider's
+    // noTarget for a group without members cannot reject the rename with it.
     group.members.clear();
     let patch = ScimPatchPayload::replace_group(&group);
-    let members = patch
-        .operations
-        .iter()
-        .find(|op| op.path.as_deref() == Some("members"))
-        .unwrap();
-    assert_eq!(members.op, "remove");
-    assert_eq!(members.value, None);
+    assert!(
+        patch
+            .operations
+            .iter()
+            .all(|op| op.path.as_deref() != Some("members")),
+        "the membership rides with the rename"
+    );
+    let clear = ScimPatchPayload::remove_members();
+    assert_eq!(clear.operations.len(), 1);
+    assert_eq!(clear.operations[0].op, "remove");
+    assert_eq!(clear.operations[0].path.as_deref(), Some("members"));
+    assert_eq!(clear.operations[0].value, None);
 }
 
 #[test]

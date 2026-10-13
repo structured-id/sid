@@ -70,6 +70,51 @@ async fn test_an_unheld_delivery_sends_no_request() {
     assert!(matches!(refused, ScimClientError::NotHeld), "{refused}");
 }
 
+/// A lookup proves absence only by a well-formed empty ListResponse; one
+/// match gives its id, several are a conflict, and anything unreadable is
+/// an error rather than "not found" (which would create the resource again).
+#[test]
+fn test_a_lookup_reads_only_a_list_response() {
+    use serde_json::json;
+    assert_eq!(
+        single_match(Some(json!({"totalResults": 0}))).unwrap(),
+        None
+    );
+    assert_eq!(
+        single_match(Some(json!({"totalResults": 0, "Resources": []}))).unwrap(),
+        None
+    );
+    assert_eq!(
+        single_match(Some(
+            json!({"totalResults": 1, "Resources": [{"id": "u1", "userName": "alice"}]})
+        ))
+        .unwrap(),
+        Some("u1".to_string())
+    );
+    assert!(matches!(
+        single_match(Some(
+            json!({"totalResults": 2, "Resources": [{"id": "u1"}, {"id": "u2"}]})
+        )),
+        Err(ScimClientError::Conflict { .. })
+    ));
+    for unreadable in [
+        None,
+        Some(json!({})),
+        Some(json!({"Resources": []})),
+        Some(json!({"totalResults": 1})),
+        Some(json!({"totalResults": 1, "Resources": "alice"})),
+        Some(json!({"totalResults": 1, "Resources": [{"userName": "alice"}]})),
+        Some(json!({"totalResults": 1, "Resources": []})),
+        Some(json!({"totalResults": 0, "Resources": [{"id": "u1"}]})),
+    ] {
+        let refused = single_match(unreadable.clone()).unwrap_err();
+        assert!(
+            matches!(refused, ScimClientError::Malformed(_)) && refused.is_transient(),
+            "{unreadable:?}: {refused}"
+        );
+    }
+}
+
 /// Which failures a later attempt may cure: never a rejection the target
 /// will repeat.
 #[test]

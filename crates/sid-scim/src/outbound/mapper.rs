@@ -120,18 +120,17 @@ impl ScimPatchPayload {
         ))
     }
 
-    /// Replace a group's name and its whole membership. An empty membership
-    /// is a removal of every member (RFC 7644 §3.5.2.2): a replacement with
-    /// an empty value is not one every server accepts.
+    /// Replace a group's name and, when it has members, its whole
+    /// membership. An empty membership is not part of this patch: it is
+    /// [`Self::remove_members`], sent on its own (see there).
     pub fn replace_group(group: &ScimGroupPayload) -> Self {
-        let members = if group.members.is_empty() {
-            ScimPatchOp {
-                op: "remove".into(),
-                path: Some("members".into()),
-                value: None,
-            }
-        } else {
-            ScimPatchOp {
+        let mut operations = vec![ScimPatchOp {
+            op: "replace".into(),
+            path: Some("displayName".into()),
+            value: Some(json!(group.display_name)),
+        }];
+        if !group.members.is_empty() {
+            operations.push(ScimPatchOp {
                 op: "replace".into(),
                 path: Some("members".into()),
                 value: Some(Value::Array(
@@ -141,16 +140,21 @@ impl ScimPatchPayload {
                         .map(|m| json!({"value": m.value}))
                         .collect(),
                 )),
-            }
-        };
-        Self::new(vec![
-            ScimPatchOp {
-                op: "replace".into(),
-                path: Some("displayName".into()),
-                value: Some(json!(group.display_name)),
-            },
-            members,
-        ])
+            });
+        }
+        Self::new(operations)
+    }
+
+    /// Remove every member of a group (RFC 7644 §3.5.2.2): a replacement
+    /// with an empty value is not one every server accepts. A server may
+    /// refuse it as `noTarget` when the group has no members, and a patch is
+    /// atomic, so it goes alone rather than taking other changes down with it.
+    pub fn remove_members() -> Self {
+        Self::new(vec![ScimPatchOp {
+            op: "remove".into(),
+            path: Some("members".into()),
+            value: None,
+        }])
     }
 }
 

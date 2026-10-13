@@ -265,6 +265,10 @@ struct Downstream {
     requests: usize,
     /// Store the next create, then answer 500: its response is lost.
     lose_next_create: bool,
+    /// Answer the next lookup 200 with this body instead of a list.
+    garble_next_find: Option<&'static str>,
+    /// Creates received.
+    creates: usize,
     /// Answer every request with this status, changing nothing.
     fail_with: Option<u16>,
 }
@@ -307,6 +311,7 @@ async fn downstream() -> (String, Shared) {
     ) -> Result<(StatusCode, Json<Value>), StatusCode> {
         admit(&state).await?;
         let mut d = state.lock().unwrap();
+        d.creates += 1;
         let key = unique_by(&kind);
         if d.resources(&kind).iter().any(|r| r[key] == body[key]) {
             return Err(StatusCode::CONFLICT);
@@ -322,47 +327,61 @@ async fn downstream() -> (String, Shared) {
         State(state): State<Shared>,
         Path(kind): Path<String>,
         Query(query): Query<HashMap<String, String>>,
-    ) -> Result<Json<Value>, StatusCode> {
+    ) -> Result<String, StatusCode> {
         admit(&state).await?;
         let filter = query.get("filter").ok_or(StatusCode::BAD_REQUEST)?;
         let (attribute, literal) = filter.split_once(" eq ").ok_or(StatusCode::BAD_REQUEST)?;
         let wanted: String = serde_json::from_str(literal).map_err(|_| StatusCode::BAD_REQUEST)?;
         let mut d = state.lock().unwrap();
+        if let Some(garbled) = d.garble_next_find.take() {
+            return Ok(garbled.to_string());
+        }
         let found: Vec<Value> = d
             .resources(&kind)
             .iter()
             .filter(|r| r[attribute] == json!(wanted))
             .cloned()
             .collect();
-        Ok(Json(
-            json!({"totalResults": found.len(), "Resources": found}),
-        ))
+        Ok(json!({"totalResults": found.len(), "Resources": found}).to_string())
     }
     async fn modify(
         State(state): State<Shared>,
         Path((kind, id)): Path<(String, String)>,
         Json(body): Json<Value>,
-    ) -> Result<Json<Value>, StatusCode> {
-        admit(&state).await?;
+    ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+        let invalid = |scim_type: &str| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"status": "400", "scimType": scim_type})),
+            )
+        };
+        admit(&state).await.map_err(|s| (s, Json(json!({}))))?;
         let mut d = state.lock().unwrap();
         let resource = d
             .resources(&kind)
             .iter_mut()
             .find(|r| r["id"] == json!(id))
-            .ok_or(StatusCode::NOT_FOUND)?;
+            .ok_or((StatusCode::NOT_FOUND, Json(json!({}))))?;
+        // Atomic (RFC 7644 §3.5.2): every operation applies, or none does.
+        let mut patched = resource.clone();
         for op in body["Operations"]
             .as_array()
-            .ok_or(StatusCode::BAD_REQUEST)?
+            .ok_or_else(|| invalid("invalidSyntax"))?
         {
-            let path = op["path"].as_str().ok_or(StatusCode::BAD_REQUEST)?;
+            let path = op["path"].as_str().ok_or_else(|| invalid("invalidPath"))?;
             match op["op"].as_str() {
-                Some("replace") => resource[path] = op["value"].clone(),
+                Some("replace") => patched[path] = op["value"].clone(),
+                // A strict provider: removing what is not there is noTarget
+                // (RFC 7644 §3.5.2.2).
                 Some("remove") => {
-                    resource.as_object_mut().unwrap().remove(path);
+                    if patched.as_object_mut().unwrap().remove(path).is_none() {
+                        return Err(invalid("noTarget"));
+                    }
                 }
-                _ => return Err(StatusCode::BAD_REQUEST),
+                _ => return Err(invalid("invalidSyntax")),
             }
         }
+        *resource = patched;
         Ok(Json(resource.clone()))
     }
     async fn delete(
@@ -503,6 +522,48 @@ async fn test_a_lost_create_response_creates_the_user_once() {
     );
 }
 
+/// After a lost create response, a lookup answered with something that is
+/// not a readable list (not JSON, no `Resources`, a match without `id`)
+/// proves nothing about the user: the attempt is retried, never turned into
+/// a second create, and the next readable lookup finds the user.
+#[tokio::test]
+async fn test_an_unreadable_lookup_after_a_lost_create_creates_nothing() {
+    for garbled in [
+        "not json",
+        "{}",
+        r#"{"totalResults": 1, "Resources": "alice"}"#,
+        r#"{"totalResults": 1, "Resources": [{"userName": "alice"}]}"#,
+    ] {
+        let (endpoint, down) = downstream().await;
+        let t = target("app", true, &endpoint);
+        let (storage, worker) = worker(vec![t.clone()]).await;
+        let alice = stored_profile(&storage, "alice").await;
+        down.lock().unwrap().lose_next_create = true;
+        let provisioned = user_event(event_types::SCIM_USER_PROVISIONED, alice.id);
+        assert!(matches!(
+            first(&worker, &provisioned).await,
+            Settlement::Retry(_)
+        ));
+
+        down.lock().unwrap().garble_next_find = Some(garbled);
+        assert!(
+            matches!(
+                worker.process(&provisioned, 2, &Hold::unbounded()).await,
+                Settlement::Retry(_)
+            ),
+            "{garbled}: not retried"
+        );
+        assert_eq!(down.lock().unwrap().creates, 1, "{garbled}: created again");
+        assert_eq!(
+            worker.process(&provisioned, 3, &Hold::unbounded()).await,
+            Settlement::Done,
+            "{garbled}"
+        );
+        assert_eq!(down.lock().unwrap().creates, 1, "{garbled}: created again");
+        assert_eq!(dead_letters(&storage, &t).await, 0, "{garbled}");
+    }
+}
+
 /// A create recorded as sent but that never reached the target (refused,
 /// or the process stopped before sending) is sent again: the lookup finding
 /// nothing lets the next attempt create the user.
@@ -602,6 +663,48 @@ async fn test_a_group_follows_its_current_membership() {
         assert_eq!(first(&worker, &deleted).await, Settlement::Done);
     }
     assert!(down.lock().unwrap().groups.is_empty());
+}
+
+/// A group without members, pushed again with a new name, gets the name
+/// even from a provider that refuses to remove an attribute it does not
+/// have: the rename is not lost with a membership removal that had nothing
+/// to remove.
+#[tokio::test]
+async fn test_an_empty_group_is_renamed() {
+    let (endpoint, down) = downstream().await;
+    let t = target("app", true, &endpoint);
+    let (storage, worker) = worker(vec![t.clone()]).await;
+    let group = Group::new(ProjectId::system(), "Engineering");
+    storage
+        .write_directory_group(
+            &DirectoryGroupWrite::new(DirectoryWriteMode::Create, group.clone()),
+            AuditEntry::system("test", "group").into(),
+        )
+        .await
+        .unwrap();
+    let created = group_event(event_types::SCIM_GROUP_CREATED, group.id);
+    assert_eq!(first(&worker, &created).await, Settlement::Done);
+
+    let mut renamed = group.clone();
+    renamed.name = "Platform".into();
+    storage
+        .write_directory_group(
+            &DirectoryGroupWrite::new(DirectoryWriteMode::Update, renamed),
+            AuditEntry::system("test", "rename").into(),
+        )
+        .await
+        .unwrap();
+    let updated = group_event(event_types::SCIM_GROUP_UPDATED, group.id);
+    for _ in 0..2 {
+        assert_eq!(first(&worker, &updated).await, Settlement::Done);
+    }
+    {
+        let d = down.lock().unwrap();
+        assert_eq!(d.groups.len(), 1);
+        assert_eq!(d.groups[0]["displayName"], json!("Platform"));
+        assert!(d.groups[0].get("members").is_none());
+    }
+    assert_eq!(dead_letters(&storage, &t).await, 0);
 }
 
 /// A pushed group renamed to a name the mapping does not list is still the

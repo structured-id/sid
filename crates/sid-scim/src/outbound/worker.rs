@@ -750,6 +750,7 @@ fn error_class(error: &ScimClientError) -> &'static str {
         ScimClientError::Conflict { .. } => "conflict",
         ScimClientError::AuthFailed { .. } => "auth_failed",
         ScimClientError::Serialization(_) => "serialization",
+        ScimClientError::Malformed(_) => "malformed",
         ScimClientError::NotHeld => "not_held",
     }
 }

@@ -39,6 +39,10 @@ pub enum ScimClientError {
     AuthFailed { status: u16 },
     #[error("serialization error: {0}")]
     Serialization(String),
+    /// A successful response that is not what the request returns; a later
+    /// attempt may get a readable one.
+    #[error("unreadable response: {0}")]
+    Malformed(String),
     /// The event may go to another replica before a request would end: none
     /// is sent, so two replicas never write the same resource at once.
     #[error("the delivery is no longer certainly held")]
@@ -49,7 +53,10 @@ impl ScimClientError {
     /// Whether a later attempt may succeed where this one did not.
     pub fn is_transient(&self) -> bool {
         match self {
-            Self::Unreachable(_) | Self::RateLimited { .. } | Self::NotHeld => true,
+            Self::Unreachable(_)
+            | Self::RateLimited { .. }
+            | Self::NotHeld
+            | Self::Malformed(_) => true,
             Self::Rejected { status, .. } => *status >= 500,
             Self::Conflict { .. } | Self::AuthFailed { .. } | Self::Serialization(_) => false,
         }
@@ -119,7 +126,10 @@ impl ScimHttpClient {
         ))
     }
 
-    /// PATCH /Groups/{id} replacing its name and its whole membership.
+    /// PATCH /Groups/{id} replacing its name and its whole membership; an
+    /// empty membership is a second PATCH removing the members, which a group
+    /// that has none may answer with `noTarget` (RFC 7644 §3.12): nothing to
+    /// remove is the state wanted.
     pub async fn replace_group(
         &self,
         downstream_id: &str,
@@ -128,6 +138,14 @@ impl ScimHttpClient {
         let url = format!("{}/Groups/{}", self.endpoint_url, downstream_id);
         let patch = ScimPatchPayload::replace_group(payload);
         self.send("PATCH", &url, Some(&patch), &[]).await?;
+        if payload.members.is_empty() {
+            let clear = ScimPatchPayload::remove_members();
+            match self.send("PATCH", &url, Some(&clear), &[]).await {
+                Ok(_) => {}
+                Err(ScimClientError::Rejected { status: 400, body }) if no_target(&body) => {}
+                Err(e) => return Err(e),
+            }
+        }
         Ok(())
     }
 
@@ -160,20 +178,13 @@ impl ScimHttpClient {
         let filter = format!("{attribute} eq {literal}");
         let found = self
             .send::<()>("GET", &url, None, &[("filter", &filter)])
-            .await?
-            .unwrap_or(Value::Null);
-        let resources = found
-            .get("Resources")
-            .and_then(Value::as_array)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-        match resources {
-            [] => Ok(None),
-            [one] => Ok(one.get("id").and_then(Value::as_str).map(String::from)),
-            _ => Err(ScimClientError::Conflict {
-                body: format!("{} {resource} match {filter}", resources.len()),
-            }),
-        }
+            .await?;
+        single_match(found).map_err(|e| match e {
+            ScimClientError::Conflict { body } => ScimClientError::Conflict {
+                body: format!("{body} {resource} match {filter}"),
+            },
+            other => other,
+        })
     }
 
     /// Send one SCIM request: the response body, if any.
@@ -266,6 +277,45 @@ impl ScimHttpClient {
 /// The `id` of a returned SCIM resource.
 fn resource_id(body: Option<Value>) -> Option<String> {
     body?.get("id")?.as_str().map(String::from)
+}
+
+/// Whether an error response is `noTarget`: the path matched nothing
+/// (RFC 7644 §3.12).
+fn no_target(body: &str) -> bool {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|error| error.get("scimType")?.as_str().map(|t| t == "noTarget"))
+        .unwrap_or(false)
+}
+
+/// The id of the one resource a filtered query found: `None` only for a
+/// well-formed empty ListResponse (RFC 7644 §3.4.2: `totalResults` always,
+/// `Resources` whenever it is not zero). Anything else is no proof that the
+/// resource is absent, and taking it for one would create it a second time.
+fn single_match(body: Option<Value>) -> Result<Option<String>, ScimClientError> {
+    let malformed = |why: &str| Err(ScimClientError::Malformed(format!("list response: {why}")));
+    let Some(body) = body else {
+        return malformed("no JSON body");
+    };
+    let Some(total) = body.get("totalResults").and_then(Value::as_u64) else {
+        return malformed("no totalResults");
+    };
+    let resources = match body.get("Resources") {
+        None if total == 0 => &[][..],
+        Some(Value::Array(resources)) => resources.as_slice(),
+        _ => return malformed("no Resources list"),
+    };
+    match (total, resources) {
+        (0, []) => Ok(None),
+        (1, [one]) => match one.get("id").and_then(Value::as_str) {
+            Some(id) => Ok(Some(id.to_string())),
+            None => malformed("a match without id"),
+        },
+        (0 | 1, _) => malformed("totalResults disagrees with Resources"),
+        (more, _) => Err(ScimClientError::Conflict {
+            body: more.to_string(),
+        }),
+    }
 }
 
 #[cfg(test)]

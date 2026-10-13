@@ -495,9 +495,9 @@ async fn test_replay_reads_history_only() {
 }
 
 /// A replay the reader is not keeping up with is held back by the server:
-/// it sends no more than the reader's channel and the unacknowledged bound
-/// hold, rather than pushing the whole history into a client buffer that
-/// drops what overflows. Every event still arrives once the reader reads.
+/// it sends no more than the reader's channel and the batch in flight hold,
+/// rather than pushing the whole history into a client buffer that drops
+/// what overflows. Every event still arrives once the reader reads.
 #[tokio::test]
 async fn test_replay_waits_for_a_slow_reader() {
     use futures::future::join_all;
@@ -525,7 +525,7 @@ async fn test_replay_waits_for_a_slow_reader() {
     let stream = js.get_stream(t.history_stream()).await.unwrap();
     let mut names = stream.consumer_names();
     let name = futures::StreamExt::next(&mut names).await.unwrap().unwrap();
-    let mut consumer: async_nats::jetstream::consumer::PushConsumer =
+    let mut consumer: async_nats::jetstream::consumer::PullConsumer =
         stream.get_consumer(&name).await.unwrap();
     let delivered = consumer.info().await.unwrap().delivered.stream_sequence;
     assert!(
@@ -541,6 +541,45 @@ async fn test_replay_waits_for_a_slow_reader() {
         }
     }
     assert_eq!(read, EVENTS, "a replayed event was lost");
+    drop_topology(&t).await;
+}
+
+/// A reader that stops for longer than the server would wait for an
+/// acknowledgement (30s by default) still gets every replayed event exactly
+/// once: nothing it has not read yet is sent to it a second time.
+#[tokio::test]
+async fn test_a_stalled_replay_reader_gets_each_event_once() {
+    use futures::future::join_all;
+    use std::collections::HashSet;
+    let t = topology();
+    let bus = owner(&t).await;
+    let start = chrono::Utc::now() - chrono::Duration::seconds(5);
+    const EVENTS: usize = 3_000;
+    for chunk in (0..EVENTS).collect::<Vec<_>>().chunks(200) {
+        join_all(
+            chunk
+                .iter()
+                .map(|_| bus.publish(Event::new("sid-test", event_types::USER_CREATED))),
+        )
+        .await
+        .into_iter()
+        .for_each(|r| r.unwrap());
+    }
+    let mut replayed = bus
+        .replay(start, None, EventFilter::default())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(40)).await;
+
+    let mut seen = HashSet::new();
+    let mut read = 0;
+    while let Ok(Some(event)) = tokio::time::timeout(Duration::from_secs(5), replayed.recv()).await
+    {
+        read += 1;
+        seen.insert(event.id);
+    }
+    assert_eq!(seen.len(), EVENTS, "a replayed event was lost");
+    assert_eq!(read, EVENTS, "a replayed event arrived twice");
     drop_topology(&t).await;
 }
 
