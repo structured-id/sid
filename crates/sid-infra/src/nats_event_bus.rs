@@ -45,6 +45,14 @@ async fn renew(
     }
 }
 
+/// Whether a delivery held until `deadline` may still be renewed at `now`.
+/// Once the hold ran out, the server may have handed the event to another
+/// replica and still accept a late renewal from this one
+/// (nats-io/nats-server#4786): the hold stays out and nothing is renewed.
+fn may_renew(deadline: tokio::time::Instant, now: tokio::time::Instant) -> bool {
+    now < deadline
+}
+
 /// How often the server confirms a durable consumer's open pull; two missed
 /// in a row reopen it.
 const DURABLE_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -316,6 +324,10 @@ impl EventBus for NatsEventBus {
                                     break settled.unwrap_or(Settlement::Retry(DURABLE_REDELIVERY));
                                 }
                                 _ = renewal.tick() => {
+                                    let held = *deadline.borrow();
+                                    if !may_renew(held, tokio::time::Instant::now()) {
+                                        continue;
+                                    }
                                     if let Some(until) = renew(&msg, ack_wait).await {
                                         deadline.send_replace(until);
                                     }
@@ -427,10 +439,22 @@ async fn open_durable(
         .get_stream(stream)
         .await
         .map_err(|e| EventBusError::SubscribeFailed(format!("get stream: {e}")))?;
-    let durable = stream
+    let mut durable: jetstream::consumer::Consumer<jetstream::consumer::pull::Config> = stream
         .get_or_create_consumer(name, config.clone())
         .await
         .map_err(|e| EventBusError::SubscribeFailed(format!("durable consumer {name}: {e}")))?;
+    // An existing consumer is taken as it is (only push or pull is
+    // checked): one defined otherwise would weaken the receiver's guarantees
+    // unseen, so it is refused, and no process changes it.
+    let found = durable
+        .info()
+        .await
+        .map_err(|e| EventBusError::SubscribeFailed(format!("durable consumer {name}: {e}")))?;
+    if let Some(field) = durable_differs(&found.config, config) {
+        return Err(EventBusError::SubscribeFailed(format!(
+            "durable consumer {name} exists with another {field}"
+        )));
+    }
     durable
         .stream()
         .max_messages_per_batch(1)
@@ -439,6 +463,40 @@ async fn open_durable(
         .messages()
         .await
         .map_err(|e| EventBusError::SubscribeFailed(format!("messages stream: {e}")))
+}
+
+/// The first setting of `wanted` that the existing consumer `found` does not
+/// have. The pending limit counts only when `wanted` sets one (an ordered
+/// consumer); otherwise the server's default stands.
+fn durable_differs(
+    found: &jetstream::consumer::Config,
+    wanted: &jetstream::consumer::pull::Config,
+) -> Option<&'static str> {
+    let subjects = |single: &String, many: &[String]| {
+        let mut all: Vec<String> = many.to_vec();
+        if !single.is_empty() {
+            all.push(single.clone());
+        }
+        all.sort();
+        all
+    };
+    if found.deliver_policy != wanted.deliver_policy {
+        Some("deliver policy")
+    } else if found.ack_policy != wanted.ack_policy {
+        Some("ack policy")
+    } else if found.ack_wait != wanted.ack_wait {
+        Some("acknowledgement wait")
+    } else if found.max_deliver != wanted.max_deliver {
+        Some("delivery limit")
+    } else if wanted.max_ack_pending != 0 && found.max_ack_pending != wanted.max_ack_pending {
+        Some("pending limit")
+    } else if subjects(&found.filter_subject, &found.filter_subjects)
+        != subjects(&wanted.filter_subject, &wanted.filter_subjects)
+    {
+        Some("subject filter")
+    } else {
+        None
+    }
 }
 
 /// Open the durable consumer `name` again, pausing between failed tries,
@@ -461,3 +519,6 @@ async fn reopen_durable(
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

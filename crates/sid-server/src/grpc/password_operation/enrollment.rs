@@ -143,20 +143,20 @@ impl EnrollmentHandler {
         }
     }
 
-    /// Relay `admission`'s abort once more, as a new event of `attempt` of
-    /// the work `work`: the earlier one may have aged out unconsumed.
+    /// Relay `admission`'s abort once more, as the event of the work `work`
+    /// (its later attempts find it relayed): the earlier one may have ended
+    /// without effect.
     async fn relay_again(
         &self,
         source: &str,
         admission: &EnrollmentAdmission,
         work: WorkId,
-        attempt: u32,
     ) -> Result<(), String> {
         let ctx = MutationContext::from(AuditEntry::system(
             "password_history.enrollment_abort_relayed",
             "password_history",
         ))
-        .with_work(abort_event(source, admission, Some((work, attempt)))?);
+        .with_work(abort_event(source, admission, Some(work))?);
         self.storage
             .record_outcome(ctx)
             .await
@@ -176,13 +176,17 @@ enum Abort {
 
 /// The id of the event telling a separate evaluator that `operation`
 /// aborted: the one owed with the abort itself (`relay` none; a retried
-/// abort owes the same one), then one per (work, attempt) relaying it again.
-pub(crate) fn abort_event_id(operation: uuid::Uuid, relay: Option<(WorkId, u32)>) -> uuid::Uuid {
+/// abort owes the same one), then one per work `relay` relaying it again.
+/// The attempts of a work share it: while the evaluator is away the event
+/// waits in its queue, and another per attempt would only pile up beside
+/// it; a successor work (the attempts ran out) relays anew, in case that
+/// one ended without effect.
+pub(crate) fn abort_event_id(operation: uuid::Uuid, relay: Option<WorkId>) -> uuid::Uuid {
     match relay {
         None => uuid::Uuid::new_v5(&ABORT_EVENT_NAMESPACE, operation.as_bytes()),
-        Some((work, attempt)) => uuid::Uuid::new_v5(
+        Some(work) => uuid::Uuid::new_v5(
             &ABORT_EVENT_NAMESPACE,
-            format!("{operation}:{}:{attempt}", work.0).as_bytes(),
+            format!("{operation}:{}", work.0).as_bytes(),
         ),
     }
 }
@@ -192,7 +196,7 @@ pub(crate) fn abort_event_id(operation: uuid::Uuid, relay: Option<(WorkId, u32)>
 fn abort_event(
     source: &str,
     admission: &EnrollmentAdmission,
-    relay: Option<(WorkId, u32)>,
+    relay: Option<WorkId>,
 ) -> Result<NewWork, String> {
     let mut event = Event::new(source, event_types::PASSWORD_HISTORY_ENROLLMENT_ABORTED)
         .with_data(serde_json::to_value(admission).map_err(|e| format!("event data: {e}"))?);
@@ -231,10 +235,10 @@ impl WorkHandler for EnrollmentHandler {
             // The first relayed event is owed in the abort's transaction; the
             // separate evaluator reclaims the key as it consumes it
             // ([`super::consume_relayed_cleanup`]) and reports the
-            // settlement. Until that is recorded the abort stays owed and a
-            // later attempt relays it again, so an abort whose handoff ended
-            // without effect (a rejected event, a failed delivery) is still
-            // carried out.
+            // settlement. Until that is recorded the abort stays owed and the
+            // work relays it again once, its successor anew, so an abort
+            // whose handoff ended without effect (a rejected event, a failed
+            // delivery) is still carried out.
             EvaluatorDelivery::Relay { source } => {
                 let cleanup = RelayedCleanup::Enrollment {
                     operation: admission.operation,
@@ -244,10 +248,7 @@ impl WorkHandler for EnrollmentHandler {
                     Ok(false) if matches!(aborted, Abort::Now) => {
                         WorkOutcome::Retry("abort relayed; awaiting the evaluator".into())
                     }
-                    Ok(false) => match self
-                        .relay_again(source, &admission, work.id, work.attempt)
-                        .await
-                    {
+                    Ok(false) => match self.relay_again(source, &admission, work.id).await {
                         Ok(()) => {
                             WorkOutcome::Retry("abort relayed again; awaiting the evaluator".into())
                         }

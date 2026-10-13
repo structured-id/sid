@@ -248,6 +248,45 @@ async fn test_durable_consumer_recovers_from_a_lost_consumer() {
     drop_topology(&t).await;
 }
 
+/// A durable consumer that already exists with another definition (made
+/// unordered, or with another acknowledgement wait) is refused, not used
+/// with weaker guarantees than the receiver asked for.
+#[tokio::test]
+async fn test_a_differing_durable_consumer_is_refused() {
+    let t = topology();
+    let bus = owner(&t).await;
+    drop(bus.consume(consumer_of("drift")).await.unwrap());
+    let ordered = DurableConsumer {
+        ordered: true,
+        ..consumer_of("drift")
+    };
+    assert!(
+        bus.consume(ordered).await.is_err(),
+        "an unordered consumer was taken as ordered"
+    );
+
+    jetstream()
+        .await
+        .get_stream(t.work_stream())
+        .await
+        .unwrap()
+        .create_consumer(jetstream::consumer::pull::Config {
+            durable_name: Some("slow".into()),
+            ack_policy: jetstream::consumer::AckPolicy::Explicit,
+            ack_wait: t.work_ack_wait * 2,
+            max_deliver: -1,
+            filter_subjects: t.work_filters(&recipient("slow"), &[]).unwrap(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        bus.consume(consumer_of("slow")).await.is_err(),
+        "another acknowledgement wait was taken"
+    );
+    drop_topology(&t).await;
+}
+
 /// Independent receivers each hold their own copy, so one settling does not
 /// settle the other; replicas of one receiver share its work, each event
 /// going to one of them.

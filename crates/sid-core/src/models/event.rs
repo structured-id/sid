@@ -173,17 +173,22 @@ pub struct RequiredReceiver {
 impl RequiredReceiver {
     /// The receivers a deployment lists (comma-separated names, or `none`),
     /// each owed every fact: its own routing decides what it acts on. A name
-    /// that is not an address token, or an empty one, is refused.
+    /// that is not an address token, or an empty one, is refused, and so is
+    /// `none` among names: no receiver by that name would ever settle the
+    /// facts owed to it.
     pub fn parse_list(list: &str) -> crate::Result<Vec<Self>> {
         match list.trim() {
             "none" => Ok(Vec::new()),
             list => list
                 .split(',')
-                .map(|name| {
-                    WorkRecipient::new(name.trim()).map(|recipient| Self {
+                .map(|name| match name.trim() {
+                    "none" => Err(crate::Error::Validation(format!(
+                        "`none` names no receiver and cannot be listed with others: {list:?}"
+                    ))),
+                    name => WorkRecipient::new(name).map(|recipient| Self {
                         recipient,
                         event_types: Vec::new(),
-                    })
+                    }),
                 })
                 .collect(),
         }

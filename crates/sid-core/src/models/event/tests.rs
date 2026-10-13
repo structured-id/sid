@@ -197,6 +197,24 @@ fn test_required_receiver_patterns() {
     assert!(all.requires(event_types::SESSION_CREATED));
 }
 
+/// `none` names no receiver only on its own: within a list it is refused,
+/// not taken for a receiver named `none` that nothing would ever settle.
+#[test]
+fn test_none_is_not_a_receiver_in_a_list() {
+    assert!(RequiredReceiver::parse_list(" none ").unwrap().is_empty());
+    for mixed in ["none,sid-notify", "sid-notify, none", "none,none"] {
+        assert!(RequiredReceiver::parse_list(mixed).is_err(), "{mixed}");
+    }
+    assert_eq!(
+        RequiredReceiver::parse_list("sid-notify,audit-sink")
+            .unwrap()
+            .iter()
+            .map(|r| r.recipient.to_string())
+            .collect::<Vec<_>>(),
+        ["sid-notify", "audit-sink"]
+    );
+}
+
 // ── Validation tests ──
 
 #[test]
