@@ -17,6 +17,29 @@ use axum::routing::{get, patch};
 use axum::{Json, Router};
 use serde_json::{Value, json};
 
+/// Outbound provisioning is owed the facts it pushes and nothing else: its
+/// own failure facts are not delivered back to it, where every recorded
+/// failure would be dispatched again to each target as a no-op.
+#[test]
+fn test_the_receiver_takes_only_what_it_pushes() {
+    let receiver = required_receiver();
+    for pushed in [
+        event_types::SCIM_USER_PROVISIONED,
+        event_types::SCIM_USER_UPDATED,
+        event_types::SCIM_USER_DEACTIVATED,
+        event_types::SCIM_USER_REACTIVATED,
+        event_types::SCIM_GROUP_CREATED,
+        event_types::SCIM_GROUP_UPDATED,
+        event_types::SCIM_GROUP_DELETED,
+    ] {
+        assert!(receiver.requires(pushed), "{pushed} not owed");
+    }
+    assert!(
+        !receiver.requires(event_types::SCIM_OUTBOUND_FAILED),
+        "its own failure fact is owed back to it"
+    );
+}
+
 #[test]
 fn test_extract_profile_id_valid() {
     let uuid = Uuid::now_v7();
@@ -252,6 +275,37 @@ async fn test_an_unrecorded_failure_retries_only_its_target() {
         1,
         "a failure recorded twice"
     );
+}
+
+/// A failure of SID's own storage is no failure of the target: the event is
+/// retried, the target's attempts are not used up and nothing goes to its
+/// dead-letter store, however many deliveries the storage keeps failing.
+#[tokio::test]
+async fn test_a_storage_failure_spends_no_target_attempts() {
+    let (endpoint, down) = downstream().await;
+    let t = target("app", true, &endpoint);
+    let (storage, worker) = worker(vec![t.clone()]).await;
+    let alice = stored_profile(&storage, "alice").await;
+    // The mappings cannot be read; the attempt counter and dead letters can.
+    sqlx::query("DROP TABLE scim_outbound_records")
+        .execute(storage.pool())
+        .await
+        .unwrap();
+    let provisioned = user_event(event_types::SCIM_USER_PROVISIONED, alice.id);
+
+    for attempt in 1..=u64::from(t.sync_config.max_retry_attempts) + 2 {
+        assert!(
+            matches!(
+                worker
+                    .process(&provisioned, attempt, &Hold::unbounded())
+                    .await,
+                Settlement::Retry(_)
+            ),
+            "attempt {attempt} settled"
+        );
+    }
+    assert_eq!(dead_letters(&storage, &t).await, 0, "moved to the DLQ");
+    assert_eq!(down.lock().unwrap().requests, 0);
 }
 
 // ── A stand-in downstream SCIM server ──

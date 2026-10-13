@@ -145,14 +145,15 @@ impl Topology {
         })
     }
 
-    /// A topology under subject root `root` (one token: letters, digits,
-    /// `-`, `_`).
+    /// A topology under subject root `root` (one token: lower-case letters,
+    /// digits, `-`). Stream names write the root upper case with `_` for
+    /// `-`; on that alphabet no two roots get the same streams.
     pub fn with_root(root: impl Into<String>) -> Result<Self, TopologyError> {
         let root = root.into();
         let valid = !root.is_empty()
             && root
                 .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
         if !valid {
             return Err(TopologyError::Config(format!(
                 "invalid subject root {root:?}"

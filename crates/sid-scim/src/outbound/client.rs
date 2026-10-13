@@ -43,6 +43,10 @@ pub enum ScimClientError {
     /// attempt may get a readable one.
     #[error("unreadable response: {0}")]
     Malformed(String),
+    /// SID's own storage failed: no failure of the target, which may not
+    /// even have been asked.
+    #[error("storage error: {0}")]
+    Storage(String),
     /// The event may go to another replica before a request would end: none
     /// is sent, so two replicas never write the same resource at once.
     #[error("the delivery is no longer certainly held")]
@@ -56,7 +60,8 @@ impl ScimClientError {
             Self::Unreachable(_)
             | Self::RateLimited { .. }
             | Self::NotHeld
-            | Self::Malformed(_) => true,
+            | Self::Malformed(_)
+            | Self::Storage(_) => true,
             Self::Rejected { status, .. } => *status >= 500,
             Self::Conflict { .. } | Self::AuthFailed { .. } | Self::Serialization(_) => false,
         }

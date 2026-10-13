@@ -105,3 +105,20 @@ fn test_root_is_one_token() {
         assert!(Topology::with_root(invalid).is_err(), "{invalid:?}");
     }
 }
+
+/// Distinct roots never share stream names: a root another one would be
+/// written as (upper case, `_` for `-`) is refused, so `team-a` and `sid`
+/// keep their streams to themselves.
+#[test]
+fn test_roots_never_share_stream_names() {
+    for ambiguous in ["SID", "Team-a", "team_a"] {
+        assert!(
+            Topology::with_root(ambiguous).is_err(),
+            "{ambiguous:?} would share its streams with another root"
+        );
+    }
+    assert_ne!(
+        Topology::with_root("team-a").unwrap().history_stream(),
+        Topology::with_root("teama").unwrap().history_stream()
+    );
+}

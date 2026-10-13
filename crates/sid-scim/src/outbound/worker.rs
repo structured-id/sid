@@ -36,8 +36,17 @@ use super::mapper::{self, ScimGroupPayload, ScimMemberPayload};
 /// The receiver SCIM outbound work is addressed to.
 pub const SCIM_OUTBOUND_RECEIVER: &str = "sid-scim-outbound";
 
-/// The event types outbound provisioning acts on.
-const SCIM_EVENTS: &str = "sid.scim.*";
+/// The event types outbound provisioning acts on, by name: a pattern over
+/// `sid.scim.*` would also take its own failure facts back.
+const SCIM_EVENTS: [&str; 7] = [
+    event_types::SCIM_USER_PROVISIONED,
+    event_types::SCIM_USER_UPDATED,
+    event_types::SCIM_USER_DEACTIVATED,
+    event_types::SCIM_USER_REACTIVATED,
+    event_types::SCIM_GROUP_CREATED,
+    event_types::SCIM_GROUP_UPDATED,
+    event_types::SCIM_GROUP_DELETED,
+];
 
 /// Where a target's outcome for an event is recorded.
 pub const DISPATCH_OUTCOME_NAMESPACE: &str = "scim.outbound.dispatched";
@@ -89,7 +98,7 @@ fn outcome(event: &Event, target: ScimOutboundTargetId, method: &str) -> Operati
 pub fn required_receiver() -> RequiredReceiver {
     RequiredReceiver {
         recipient: WorkRecipient::new(SCIM_OUTBOUND_RECEIVER).expect("the receiver is a token"),
-        event_types: vec![SCIM_EVENTS.into()],
+        event_types: SCIM_EVENTS.iter().map(|t| (*t).to_string()).collect(),
     }
 }
 
@@ -180,6 +189,14 @@ impl ScimOutboundWorker {
                 // A lost hold is no failure of the target: it is not counted.
                 Err(ScimClientError::NotHeld) => {
                     retry = later(retry, NOT_HELD_RETRY);
+                    continue;
+                }
+                // Neither is a failure of SID's own storage: retried like an
+                // outcome that could not be recorded, the target's attempts
+                // left for its own failures.
+                Err(ScimClientError::Storage(e)) => {
+                    warn!(target = %target.display_name, error = %e, "SCIM dispatch stopped by storage");
+                    retry = later(retry, UNRECORDED_RETRY);
                     continue;
                 }
                 Err(e) if e.is_transient() => {
@@ -677,7 +694,7 @@ impl ScimOutboundWorker {
 
 /// A storage failure, which a later attempt may not meet.
 fn storage(e: sid_core::Error) -> ScimClientError {
-    ScimClientError::Unreachable(format!("storage error: {e}"))
+    ScimClientError::Storage(e.to_string())
 }
 
 /// The key a create of `entity` sent to `target` is recorded under.
@@ -751,6 +768,7 @@ fn error_class(error: &ScimClientError) -> &'static str {
         ScimClientError::AuthFailed { .. } => "auth_failed",
         ScimClientError::Serialization(_) => "serialization",
         ScimClientError::Malformed(_) => "malformed",
+        ScimClientError::Storage(_) => "storage",
         ScimClientError::NotHeld => "not_held",
     }
 }
