@@ -325,6 +325,8 @@ struct Downstream {
     creates: usize,
     /// Answer every request with this status, changing nothing.
     fail_with: Option<u16>,
+    /// Answer the next modification with this status, changing nothing.
+    fail_next_modify: Option<u16>,
 }
 
 type Shared = Arc<Mutex<Downstream>>;
@@ -411,6 +413,9 @@ async fn downstream() -> (String, Shared) {
         };
         admit(&state).await.map_err(|s| (s, Json(json!({}))))?;
         let mut d = state.lock().unwrap();
+        if let Some(status) = d.fail_next_modify.take() {
+            return Err((StatusCode::from_u16(status).unwrap(), Json(json!({}))));
+        }
         let resource = d
             .resources(&kind)
             .iter_mut()
@@ -790,6 +795,176 @@ async fn test_a_member_created_after_its_group_joins_it() {
         json!([{"value": alice_id}]),
         "the member never joined the downstream group"
     );
+}
+
+/// A bus recording the durable consumers opened on it.
+#[derive(Default)]
+struct RecordingBus {
+    consumers: Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl EventBus for RecordingBus {
+    async fn publish(&self, _: Event) -> sid_plugin::event_bus::EventBusResult<()> {
+        Ok(())
+    }
+
+    async fn subscribe(
+        &self,
+        _: sid_core::models::EventFilter,
+    ) -> sid_plugin::event_bus::EventBusResult<mpsc::Receiver<Event>> {
+        Ok(mpsc::channel(1).1)
+    }
+
+    async fn consume(
+        &self,
+        consumer: DurableConsumer,
+    ) -> sid_plugin::event_bus::EventBusResult<mpsc::Receiver<Delivery>> {
+        self.consumers
+            .lock()
+            .unwrap()
+            .push(consumer.recipient.to_string());
+        Ok(mpsc::channel(1).1)
+    }
+
+    async fn health_check(&self) -> sid_plugin::event_bus::EventBusResult<()> {
+        Ok(())
+    }
+}
+
+/// Without targets (the last one removed) the worker still consumes its
+/// work, so deliveries owed while targets were configured are settled
+/// rather than left in the work stream; no new fact is owed to it.
+#[tokio::test]
+async fn test_work_owed_before_the_last_target_was_removed_is_consumed() {
+    let (storage, idle) = worker(Vec::new()).await;
+    let bus = Arc::new(RecordingBus::default());
+    let owed = Arc::new(ScimOutboundWorker::new(
+        storage.clone(),
+        bus.clone(),
+        Vec::new(),
+    ))
+    .start_owed()
+    .await
+    .unwrap();
+    assert!(owed.is_none(), "facts are owed to a worker without targets");
+    assert_eq!(
+        *bus.consumers.lock().unwrap(),
+        [SCIM_OUTBOUND_RECEIVER],
+        "the owed work is not consumed"
+    );
+
+    // With no target to push to, a delivery is settled.
+    let alice = stored_profile(&storage, "alice").await;
+    let provisioned = user_event(event_types::SCIM_USER_PROVISIONED, alice.id);
+    assert_eq!(first(&idle, &provisioned).await, Settlement::Done);
+}
+
+/// A bus that keeps no work (a single-binary deployment) cannot hold any
+/// owed to the worker: without targets it starts without consuming.
+#[tokio::test]
+async fn test_a_worker_without_targets_starts_on_a_bus_that_keeps_no_work() {
+    let (storage, _) = worker(Vec::new()).await;
+    let owed = Arc::new(ScimOutboundWorker::new(
+        storage,
+        Arc::new(InProcessEventBus::new()),
+        Vec::new(),
+    ))
+    .start_owed()
+    .await
+    .unwrap();
+    assert!(owed.is_none());
+}
+
+/// With targets, facts are owed to the worker.
+#[tokio::test]
+async fn test_facts_are_owed_to_a_worker_with_targets() {
+    let (storage, _) = worker(Vec::new()).await;
+    let bus = Arc::new(RecordingBus::default());
+    let target = target("app", true, "http://127.0.0.1:9/scim/v2");
+    let owed = Arc::new(ScimOutboundWorker::new(storage, bus.clone(), vec![target]))
+        .start_owed()
+        .await
+        .unwrap();
+    assert!(owed.is_some());
+    assert_eq!(*bus.consumers.lock().unwrap(), [SCIM_OUTBOUND_RECEIVER]);
+}
+
+/// A stored group named Engineering with `member`, pushed to the target
+/// before the member's user exists there.
+async fn group_pushed_before(
+    worker: &ScimOutboundWorker,
+    storage: &SqliteBackend,
+    member: ProfileId,
+) {
+    let group = Group::new(ProjectId::system(), "Engineering");
+    let mut write = DirectoryGroupWrite::new(DirectoryWriteMode::Create, group.clone());
+    write.add_members.push(GroupMember::new(group.id, member));
+    storage
+        .write_directory_group(&write, AuditEntry::system("test", "group").into())
+        .await
+        .unwrap();
+    let created = group_event(event_types::SCIM_GROUP_CREATED, group.id);
+    assert_eq!(first(worker, &created).await, Settlement::Done);
+}
+
+/// The downstream group's members are exactly the user named `name`.
+fn assert_sole_member(down: &Shared, name: &str) {
+    let d = down.lock().unwrap();
+    let user = d
+        .users
+        .iter()
+        .find(|u| u["userName"] == json!(name))
+        .unwrap();
+    assert_eq!(
+        d.groups[0]["members"],
+        json!([{"value": user["id"]}]),
+        "the member never joined the downstream group"
+    );
+}
+
+/// A user whose create response was lost is found and mapped by the next
+/// attempt, which also brings it into the groups pushed without it.
+#[tokio::test]
+async fn test_a_member_adopted_after_a_lost_create_joins_its_group() {
+    let (endpoint, down) = downstream().await;
+    let (storage, worker) = worker(vec![target("app", true, &endpoint)]).await;
+    let alice = stored_profile(&storage, "alice").await;
+    group_pushed_before(&worker, &storage, alice.id).await;
+
+    down.lock().unwrap().lose_next_create = true;
+    let provisioned = user_event(event_types::SCIM_USER_PROVISIONED, alice.id);
+    assert!(matches!(
+        first(&worker, &provisioned).await,
+        Settlement::Retry(_)
+    ));
+    assert_eq!(
+        worker.process(&provisioned, 2, &Hold::unbounded()).await,
+        Settlement::Done
+    );
+    assert_sole_member(&down, "alice");
+}
+
+/// Pushing a new member's groups that fails after the user is mapped is
+/// resumed by the next attempt, which finds the user already mapped.
+#[tokio::test]
+async fn test_a_failed_push_of_a_new_members_groups_is_resumed() {
+    let (endpoint, down) = downstream().await;
+    let (storage, worker) = worker(vec![target("app", true, &endpoint)]).await;
+    let alice = stored_profile(&storage, "alice").await;
+    group_pushed_before(&worker, &storage, alice.id).await;
+
+    down.lock().unwrap().fail_next_modify = Some(503);
+    let provisioned = user_event(event_types::SCIM_USER_PROVISIONED, alice.id);
+    assert!(matches!(
+        first(&worker, &provisioned).await,
+        Settlement::Retry(_)
+    ));
+    assert_eq!(
+        worker.process(&provisioned, 2, &Hold::unbounded()).await,
+        Settlement::Done
+    );
+    assert_sole_member(&down, "alice");
 }
 
 /// A group without members, pushed again with a new name, gets the name

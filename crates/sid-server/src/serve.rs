@@ -238,7 +238,8 @@ async fn scim_service(c: &CeComponents) -> anyhow::Result<sid_scim::grpc::ScimSe
 
 /// Configured targets that cannot be loaded or served stop startup: running
 /// without them would silently stop provisioning. With targets, outbound
-/// provisioning is a receiver every SCIM fact is owed to.
+/// provisioning is a receiver every SCIM fact is owed to; without, it still
+/// settles the work owed before the last target was removed.
 #[cfg(feature = "scim")]
 async fn start_scim_outbound(
     c: &CeComponents,
@@ -248,20 +249,17 @@ async fn start_scim_outbound(
         .list_scim_outbound_targets(sid_core::models::ProjectId::system())
         .await
         .map_err(|e| anyhow::anyhow!("loading SCIM outbound targets: {e}"))?;
-    if targets.is_empty() {
-        return Ok(None);
-    }
     let worker = std::sync::Arc::new(sid_scim::outbound::worker::ScimOutboundWorker::new(
         c.storage.clone(),
         c.event_bus.clone(),
         targets,
     ));
-    worker
-        .start()
+    let owed = worker
+        .start_owed()
         .await
         .map_err(|e| anyhow::anyhow!("SCIM outbound worker: {e}"))?;
     info!("SCIM outbound worker started");
-    Ok(Some(sid_scim::outbound::worker::required_receiver()))
+    Ok(owed)
 }
 
 #[cfg(feature = "dev-perf-test")]

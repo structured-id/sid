@@ -59,6 +59,10 @@ const FAILED_ATTEMPT_NAMESPACE: &str = "scim.outbound.attempt_failed";
 /// twice when the response was lost.
 const CREATION_NAMESPACE: &str = "scim.outbound.creating";
 
+/// Where it is recorded that a downstream user was brought into the
+/// target's groups it belongs to.
+const JOINED_NAMESPACE: &str = "scim.outbound.groups_joined";
+
 /// When an event some target's outcome could not be recorded for is
 /// delivered again.
 const UNRECORDED_RETRY: Duration = Duration::from_secs(30);
@@ -74,6 +78,10 @@ const GROUP_SCHEMA: &str = "urn:ietf:params:scim:schemas:core:2.0:Group";
 
 /// Namespace of the ids a target's failure records carry for an event.
 const FAILURE_NAMESPACE: Uuid = Uuid::from_u128(0x2c6f_91d4_7a30_4e85_b1c9_5d02_e64a_8f17);
+
+/// Namespace of the ids standing for a downstream user id in a key: the
+/// target chooses that id, and a key accepts only some characters.
+const DOWNSTREAM_ID_NAMESPACE: Uuid = Uuid::from_u128(0x8d41_0e6b_53c2_4f7a_9e18_b2d6_74a3_c905);
 
 /// The key a target's outcome for `event` is recorded under.
 pub(crate) fn outcome_key(event: &Event, target: ScimOutboundTargetId) -> OperationKey {
@@ -143,6 +151,26 @@ impl ScimOutboundWorker {
             .await?;
         info!(targets = self.targets.len(), "SCIM outbound worker started");
         Ok(tokio::spawn(self.process_events(rx)))
+    }
+
+    /// Start the worker, and the receiver every SCIM fact is owed to while
+    /// targets are configured. It consumes without targets too: work owed
+    /// before the last target was removed is settled (there is nothing to
+    /// push it to) instead of staying in the work stream, which keeps work
+    /// whatever its age.
+    pub async fn start_owed(
+        self: Arc<Self>,
+    ) -> Result<Option<RequiredReceiver>, sid_plugin::event_bus::EventBusError> {
+        let owed = (!self.targets.is_empty()).then(required_receiver);
+        match self.start().await {
+            Ok(_) => Ok(owed),
+            // A bus that keeps no work holds none owed to the worker: without
+            // targets there is nothing to settle.
+            Err(sid_plugin::event_bus::EventBusError::DurableUnsupported) if owed.is_none() => {
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     async fn process_events(self: Arc<Self>, mut rx: mpsc::Receiver<Delivery>) {
@@ -354,26 +382,55 @@ impl ScimOutboundWorker {
             }
             None => None,
         };
-        if let Some(id) = known {
+        let downstream = if let Some(id) = known {
             let absent = mapper::absent_user_paths(&user, &target.attribute_mapping)?;
             client.replace_user(&id, &user, &absent).await?;
             info!(target = %target.display_name, %profile_id, "user state pushed downstream");
-            return Ok(());
-        }
-        if !user.active {
-            return Ok(());
-        }
-        self.mark_creation(target.id, entity, kind).await?;
-        let created = match client.create_user(&user).await? {
-            Some(id) => Some(id),
-            None => client.find_user(&user.user_name).await?,
+            id
+        } else {
+            if !user.active {
+                return Ok(());
+            }
+            self.mark_creation(target.id, entity, kind).await?;
+            let created = match client.create_user(&user).await? {
+                Some(id) => Some(id),
+                None => client.find_user(&user.user_name).await?,
+            };
+            let id = self
+                .adopt(target.id, entity, kind, created)
+                .await?
+                .ok_or_else(|| {
+                    ScimClientError::Unreachable("the created user was not found".into())
+                })?;
+            info!(target = %target.display_name, %profile_id, "user provisioned downstream");
+            id
         };
-        self.adopt(target.id, entity, kind, created)
-            .await?
-            .ok_or_else(|| ScimClientError::Unreachable("the created user was not found".into()))?;
-        info!(target = %target.display_name, %profile_id, "user provisioned downstream");
-        // A group pushed before this user existed downstream left the user
-        // out: push again each group of the user the target already has.
+        self.join_groups(target, client, profile_id, &downstream)
+            .await
+    }
+
+    /// Bring the user `downstream` into each of its groups the target has,
+    /// once per downstream user: a group pushed before the target had the
+    /// user left it out. Recorded only when every group is pushed, so a push
+    /// that stopped part way, or a create whose response was lost and which
+    /// a later attempt adopted, is completed by the user's next push.
+    async fn join_groups(
+        &self,
+        target: &ScimOutboundTarget,
+        client: &ScimHttpClient,
+        profile_id: ProfileId,
+        downstream: &str,
+    ) -> Result<(), ScimClientError> {
+        let key = joined_key(target.id, profile_id, downstream);
+        if self
+            .storage
+            .get_operation_result(JOINED_NAMESPACE, &key)
+            .await
+            .map_err(storage)?
+            .is_some()
+        {
+            return Ok(());
+        }
         for group in self
             .storage
             .list_groups_for_profile(profile_id)
@@ -388,7 +445,21 @@ impl ScimOutboundWorker {
                 self.sync_group(target, client, group.id).await?;
             }
         }
-        Ok(())
+        let ctx = MutationContext::from(AuditEntry::system(
+            "scim.outbound.groups_joined",
+            profile_id.to_string(),
+        ))
+        .with_operation(OperationCompletion::new(
+            JOINED_NAMESPACE,
+            key,
+            "joined",
+            &[],
+            Vec::new(),
+        ));
+        match self.storage.record_outcome(ctx).await {
+            Ok(()) | Err(sid_core::Error::OperationCompleted(_)) => Ok(()),
+            Err(e) => Err(storage(e)),
+        }
     }
 
     /// Push a group's current state when it is pushed to `target`: its name
@@ -722,6 +793,19 @@ fn creation_key(
 ) -> OperationKey {
     OperationKey::parse(&format!("{}:{}:{}", target.0, entity, kind.as_str()))
         .expect("two UUIDs and a kind make a valid key")
+}
+
+/// The key under which the user `downstream` of `profile` is recorded as
+/// brought into its groups on `target`. Another downstream user (the target
+/// lost the first, a new one was created) is brought in again.
+fn joined_key(target: ScimOutboundTargetId, profile: ProfileId, downstream: &str) -> OperationKey {
+    let downstream = Uuid::new_v5(&DOWNSTREAM_ID_NAMESPACE, downstream.as_bytes());
+    OperationKey::parse(&format!(
+        "{}:{}:{downstream}",
+        target.0,
+        profile.into_uuid()
+    ))
+    .expect("three UUIDs make a valid key")
 }
 
 /// The later of a pending retry and `delay`.
