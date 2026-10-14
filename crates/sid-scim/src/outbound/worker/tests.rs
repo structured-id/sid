@@ -581,6 +581,83 @@ async fn test_a_lost_create_response_creates_the_user_once() {
     );
 }
 
+/// A user renamed after a create whose response was lost is found under the
+/// name the create was sent with, not created again under the new one, and
+/// then takes the new name.
+#[tokio::test]
+async fn test_a_user_renamed_after_a_lost_create_is_created_once() {
+    let (endpoint, down) = downstream().await;
+    let t = target("app", true, &endpoint);
+    let (storage, worker) = worker(vec![t.clone()]).await;
+    let alice = stored_profile(&storage, "alice").await;
+    down.lock().unwrap().lose_next_create = true;
+    let provisioned = user_event(event_types::SCIM_USER_PROVISIONED, alice.id);
+    assert!(matches!(
+        first(&worker, &provisioned).await,
+        Settlement::Retry(_)
+    ));
+
+    let mut renamed = storage.get_profile(alice.id).await.unwrap().unwrap();
+    renamed.username = Some("alicia".into());
+    assert!(
+        storage
+            .update_profile(&renamed, AuditEntry::system("test", "rename").into())
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        worker.process(&provisioned, 2, &Hold::unbounded()).await,
+        Settlement::Done
+    );
+    let d = down.lock().unwrap();
+    assert_eq!(d.users.len(), 1, "created again under the new name");
+    assert_eq!(d.users[0]["userName"], json!("alicia"));
+}
+
+/// The same for a group: renamed after its create's response was lost, it
+/// is found under the name it was created with and renamed, once.
+#[tokio::test]
+async fn test_a_group_renamed_after_a_lost_create_is_created_once() {
+    let (endpoint, down) = downstream().await;
+    let mut t = target("app", true, &endpoint);
+    t.group_push.mapping.push(GroupMappingEntry {
+        sid_group: "Platform".into(),
+        target_group: "platform".into(),
+    });
+    let (storage, worker) = worker(vec![t.clone()]).await;
+    let group = Group::new(ProjectId::system(), "Engineering");
+    storage
+        .write_directory_group(
+            &DirectoryGroupWrite::new(DirectoryWriteMode::Create, group.clone()),
+            AuditEntry::system("test", "group").into(),
+        )
+        .await
+        .unwrap();
+    down.lock().unwrap().lose_next_create = true;
+    let created = group_event(event_types::SCIM_GROUP_CREATED, group.id);
+    assert!(matches!(
+        first(&worker, &created).await,
+        Settlement::Retry(_)
+    ));
+
+    let mut renamed = group.clone();
+    renamed.name = "Platform".into();
+    storage
+        .write_directory_group(
+            &DirectoryGroupWrite::new(DirectoryWriteMode::Update, renamed),
+            AuditEntry::system("test", "rename").into(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        worker.process(&created, 2, &Hold::unbounded()).await,
+        Settlement::Done
+    );
+    let d = down.lock().unwrap();
+    assert_eq!(d.groups.len(), 1, "created again under the new name");
+    assert_eq!(d.groups[0]["displayName"], json!("Platform"));
+}
+
 /// After a lost create response, a lookup answered with something that is
 /// not a readable list (not JSON, no `Resources`, a match without `id`)
 /// proves nothing about the user: the attempt is retried, never turned into
@@ -1117,6 +1194,53 @@ async fn test_a_targets_attempts_are_its_own() {
         Settlement::Done
     );
     assert_eq!(dead_letters(&storage, &t).await, 1);
+}
+
+/// A mapped user's failure is counted on its mapping in the commit that
+/// records it: while the mapping cannot be written nothing of the failure
+/// is (no dead letter, no outcome) and the event is retried, and once it
+/// can, the dead letter and the count land together.
+#[tokio::test]
+async fn test_a_failure_is_counted_with_its_dead_letter() {
+    let (endpoint, down) = downstream().await;
+    let t = target("app", true, &endpoint);
+    let (storage, worker) = worker(vec![t.clone()]).await;
+    let alice = stored_profile(&storage, "alice").await;
+    let provisioned = user_event(event_types::SCIM_USER_PROVISIONED, alice.id);
+    assert_eq!(first(&worker, &provisioned).await, Settlement::Done);
+
+    down.lock().unwrap().fail_with = Some(400);
+    sqlx::query(
+        "CREATE TRIGGER unwritable BEFORE UPDATE ON scim_outbound_records \
+         BEGIN SELECT RAISE(ABORT, 'unwritable'); END",
+    )
+    .execute(storage.pool())
+    .await
+    .unwrap();
+    let updated = user_event(event_types::SCIM_USER_UPDATED, alice.id);
+    assert_eq!(
+        first(&worker, &updated).await,
+        Settlement::Retry(UNRECORDED_RETRY),
+        "settled with the failure uncounted"
+    );
+    assert_eq!(dead_letters(&storage, &t).await, 0);
+
+    sqlx::query("DROP TRIGGER unwritable")
+        .execute(storage.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        worker.process(&updated, 2, &Hold::unbounded()).await,
+        Settlement::Done
+    );
+    assert_eq!(dead_letters(&storage, &t).await, 1);
+    let mapped = storage
+        .get_scim_outbound_record(t.id, alice.id.into_uuid(), OutboundEntityType::User)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(mapped.failure_count, 1);
+    assert!(mapped.last_error.is_some());
 }
 
 /// A delivery whose hold would end before a request does sends nothing and

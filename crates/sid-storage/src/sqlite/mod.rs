@@ -2656,24 +2656,12 @@ impl StorageBackend for SqliteBackend {
     ) -> SidResult<()> {
         self.record_scim_outbound_sync_impl(record, ctx).await
     }
-    async fn record_scim_outbound_failure(
+    async fn record_scim_outbound_dead_letter(
         &self,
-        target_id: sid_core::models::ScimOutboundTargetId,
-        sid_entity_id: uuid::Uuid,
-        entity_type: sid_core::models::OutboundEntityType,
-        error: &str,
-        at: chrono::DateTime<chrono::Utc>,
+        entry: &sid_core::models::OutboundDlqEntry,
         ctx: MutationContext,
-    ) -> SidResult<bool> {
-        self.record_scim_outbound_failure_impl(
-            target_id,
-            sid_entity_id,
-            entity_type,
-            error,
-            at,
-            ctx,
-        )
-        .await
+    ) -> SidResult<()> {
+        self.record_scim_outbound_dead_letter_impl(entry, ctx).await
     }
     async fn get_scim_outbound_record(
         &self,

@@ -92,6 +92,20 @@ fn test_removal_controls_are_compared() {
     assert_eq!(differs(&rollup, &work).as_deref(), Some("allow_rollup"));
 }
 
+/// A stream that takes no publication (sealed) or confirms none (no
+/// acknowledgement) would leave every handoff retrying while the service
+/// reports itself started, so either differs.
+#[test]
+fn test_streams_refusing_publications_differ() {
+    let work = Topology::default().work_config();
+    let mut sealed = work.clone();
+    sealed.sealed = true;
+    assert_eq!(differs(&sealed, &work).as_deref(), Some("sealed"));
+    let mut no_ack = work.clone();
+    no_ack.no_ack = true;
+    assert_eq!(differs(&no_ack, &work).as_deref(), Some("no_ack"));
+}
+
 /// A subject root is one token; stream names follow it.
 #[test]
 fn test_root_is_one_token() {

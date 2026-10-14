@@ -54,9 +54,10 @@ pub const DISPATCH_OUTCOME_NAMESPACE: &str = "scim.outbound.dispatched";
 /// Where each failed attempt at an event for a target is recorded.
 const FAILED_ATTEMPT_NAMESPACE: &str = "scim.outbound.attempt_failed";
 
-/// Where a create sent to a target is recorded before it is sent: a later
-/// attempt finding no mapping looks the resource up rather than create it
-/// twice when the response was lost.
+/// Where each create sent to a target is recorded before it is sent, with
+/// the name it went out under: a later attempt finding no mapping looks the
+/// resource up under each of those names (the resource may have been renamed
+/// since) rather than create it twice when a response was lost.
 const CREATION_NAMESPACE: &str = "scim.outbound.creating";
 
 /// Where it is recorded that a downstream user was brought into the
@@ -371,16 +372,22 @@ impl ScimOutboundWorker {
         let entity = profile_id.into_uuid();
         let kind = OutboundEntityType::User;
 
-        // A create recorded as sent is looked up first; when the lookup
-        // finds nothing (the create never landed) `known` stays empty and the
-        // create below is sent again.
-        let known = match self.find_downstream_id(target.id, entity, kind).await? {
-            Some(id) => Some(id),
-            None if self.creation_sent(target.id, entity, kind).await? => {
-                let found = client.find_user(&user.user_name).await?;
-                self.adopt(target.id, entity, kind, found).await?
+        // The creates recorded as sent are looked up first, under the names
+        // they went out with; when none is found (none landed) `known` stays
+        // empty and the create below is sent again.
+        let (known, sent) = match self.find_downstream_id(target.id, entity, kind).await? {
+            Some(id) => (Some(id), Vec::new()),
+            None => {
+                let sent = self.creations_sent(target.id, entity, kind).await?;
+                let mut found = None;
+                for name in sent.iter().rev() {
+                    found = client.find_user(name).await?;
+                    if found.is_some() {
+                        break;
+                    }
+                }
+                (self.adopt(target.id, entity, kind, found).await?, sent)
             }
-            None => None,
         };
         let downstream = if let Some(id) = known {
             let absent = mapper::absent_user_paths(&user, &target.attribute_mapping)?;
@@ -391,7 +398,8 @@ impl ScimOutboundWorker {
             if !user.active {
                 return Ok(());
             }
-            self.mark_creation(target.id, entity, kind).await?;
+            self.mark_creation(target.id, entity, kind, &sent, &user.user_name)
+                .await?;
             let created = match client.create_user(&user).await? {
                 Some(id) => Some(id),
                 None => client.find_user(&user.user_name).await?,
@@ -476,7 +484,24 @@ impl ScimOutboundWorker {
         }
         let entity = group_id.0;
         let kind = OutboundEntityType::Group;
-        let known = self.find_downstream_id(target.id, entity, kind).await?;
+        // As for a user: the creates recorded as sent are looked up first,
+        // under the names they went out with, before anything decides on the
+        // group, so a group whose create landed unseen is deleted or renamed
+        // like any other the target has.
+        let (known, sent) = match self.find_downstream_id(target.id, entity, kind).await? {
+            Some(id) => (Some(id), Vec::new()),
+            None => {
+                let sent = self.creations_sent(target.id, entity, kind).await?;
+                let mut found = None;
+                for name in sent.iter().rev() {
+                    found = client.find_group(name).await?;
+                    if found.is_some() {
+                        break;
+                    }
+                }
+                (self.adopt(target.id, entity, kind, found).await?, sent)
+            }
+        };
         let Some(group) = self.storage.get_group(group_id).await.map_err(storage)? else {
             if let Some(id) = known {
                 client.delete_group(&id).await?;
@@ -517,19 +542,11 @@ impl ScimOutboundWorker {
             members,
         };
 
-        // As for a user: a create the lookup does not find is sent again.
-        let known = match known {
-            Some(id) => Some(id),
-            None if self.creation_sent(target.id, entity, kind).await? => {
-                let found = client.find_group(&group.name).await?;
-                self.adopt(target.id, entity, kind, found).await?
-            }
-            None => None,
-        };
         if let Some(id) = known {
             return client.replace_group(&id, &payload).await;
         }
-        self.mark_creation(target.id, entity, kind).await?;
+        self.mark_creation(target.id, entity, kind, &sent, &group.name)
+            .await?;
         let created = match client.create_group(&payload).await? {
             Some(id) => Some(id),
             None => client.find_group(&group.name).await?,
@@ -542,41 +559,66 @@ impl ScimOutboundWorker {
         Ok(())
     }
 
-    /// Whether a create of `entity` was ever sent to `target`.
-    async fn creation_sent(
+    /// The names (`userName`, `displayName`) the creates of `entity` sent to
+    /// `target` went out under, in the order they were sent.
+    async fn creations_sent(
         &self,
         target: ScimOutboundTargetId,
         entity: Uuid,
         kind: OutboundEntityType,
-    ) -> Result<bool, ScimClientError> {
-        self.storage
-            .get_operation_result(CREATION_NAMESPACE, &creation_key(target, entity, kind))
-            .await
-            .map(|found| found.is_some())
-            .map_err(storage)
+    ) -> Result<Vec<String>, ScimClientError> {
+        let mut sent = Vec::new();
+        loop {
+            let key = creation_key(target, entity, kind, sent.len() + 1);
+            let Some(record) = self
+                .storage
+                .get_operation_result(CREATION_NAMESPACE, &key)
+                .await
+                .map_err(storage)?
+            else {
+                return Ok(sent);
+            };
+            let name = String::from_utf8(record.completion.result)
+                .map_err(|e| ScimClientError::Storage(format!("a recorded create: {e}")))?;
+            sent.push(name);
+        }
     }
 
-    /// Record that a create of `entity` is about to be sent to `target`.
+    /// Record that a create of `entity` named `name` is about to be sent to
+    /// `target`, after the creates `sent`; nothing when the last of them went
+    /// out under the same name.
     async fn mark_creation(
         &self,
         target: ScimOutboundTargetId,
         entity: Uuid,
         kind: OutboundEntityType,
+        sent: &[String],
+        name: &str,
     ) -> Result<(), ScimClientError> {
-        let ctx = MutationContext::from(AuditEntry::system(
-            "scim.outbound.creating",
-            entity.to_string(),
-        ))
-        .with_operation(OperationCompletion::new(
-            CREATION_NAMESPACE,
-            creation_key(target, entity, kind),
-            "create",
-            &[],
-            Vec::new(),
-        ));
-        match self.storage.record_outcome(ctx).await {
-            Ok(()) | Err(sid_core::Error::OperationCompleted(_)) => Ok(()),
-            Err(e) => Err(storage(e)),
+        if sent.last().is_some_and(|last| last == name) {
+            return Ok(());
+        }
+        let mut number = sent.len();
+        loop {
+            number += 1;
+            let ctx = MutationContext::from(AuditEntry::system(
+                "scim.outbound.creating",
+                entity.to_string(),
+            ))
+            .with_operation(OperationCompletion::new(
+                CREATION_NAMESPACE,
+                creation_key(target, entity, kind, number),
+                "create",
+                name.as_bytes(),
+                name.as_bytes().to_vec(),
+            ));
+            match self.storage.record_outcome(ctx).await {
+                Ok(()) => return Ok(()),
+                // Another attempt recorded a create under this number since
+                // `sent` was read: this one goes after it.
+                Err(sid_core::Error::OperationCompleted(_)) => {}
+                Err(e) => return Err(storage(e)),
+            }
         }
     }
 
@@ -596,9 +638,10 @@ impl ScimOutboundWorker {
 
     // ── Failure handling (DLQ, error recording, sid-notify) ──
 
-    /// Handle a failed dispatch: save the dead letter, owe the failure event
-    /// and record the target's outcome in one commit, then count the error.
-    /// Whether the failure is recorded (now or by an earlier attempt).
+    /// Handle a failed dispatch: save the dead letter, count the error on the
+    /// entity's mapping, owe the failure event and record the target's
+    /// outcome in one commit. Whether the failure is recorded (now or by an
+    /// earlier attempt).
     async fn handle_dispatch_failure(
         &self,
         target: &ScimOutboundTarget,
@@ -653,46 +696,22 @@ impl ScimOutboundWorker {
         ))
         .with_work(failure_event.relay())
         .with_operation(outcome(event, target.id, "failed"));
+        // The error is counted on the entity's mapping in the same commit, so
+        // a recorded failure is always counted, and a repeated dispatch, which
+        // finds the outcome, never counts it twice.
         match self
             .storage
-            .create_outbound_dlq_entry(&dlq_entry, ctx)
+            .record_scim_outbound_dead_letter(&dlq_entry, ctx)
             .await
         {
-            Ok(()) => {}
+            Ok(()) => true,
             // An earlier attempt recorded this failure already.
-            Err(sid_core::Error::OperationCompleted(_)) => return true,
+            Err(sid_core::Error::OperationCompleted(_)) => true,
             Err(e) => {
                 warn!(error = %e, "failed to save DLQ entry and its alert");
-                return false;
+                false
             }
         }
-
-        // Counted once the failure is recorded, so a repeated dispatch does
-        // not count it twice. Counted in place on the stored mapping: a stale
-        // copy would undo a concurrent success (its downstream id and cleared
-        // error) and lose counts.
-        if let Some(entity_id) = sid_entity_id {
-            let entity_type = if event.event_type.contains("group") {
-                OutboundEntityType::Group
-            } else {
-                OutboundEntityType::User
-            };
-            if let Err(e) = self
-                .storage
-                .record_scim_outbound_failure(
-                    target.id,
-                    entity_id,
-                    entity_type,
-                    &error.to_string(),
-                    now,
-                    AuditEntry::system("scim.outbound.error_recorded", error.to_string()).into(),
-                )
-                .await
-            {
-                warn!(error = %e, "failed to update outbound record with error");
-            }
-        }
-        true
     }
 
     // ── Storage helpers ──
@@ -785,14 +804,21 @@ fn storage(e: sid_core::Error) -> ScimClientError {
     ScimClientError::Storage(e.to_string())
 }
 
-/// The key a create of `entity` sent to `target` is recorded under.
+/// The key create number `number` (from 1) of `entity` sent to `target` is
+/// recorded under.
 fn creation_key(
     target: ScimOutboundTargetId,
     entity: Uuid,
     kind: OutboundEntityType,
+    number: usize,
 ) -> OperationKey {
-    OperationKey::parse(&format!("{}:{}:{}", target.0, entity, kind.as_str()))
-        .expect("two UUIDs and a kind make a valid key")
+    OperationKey::parse(&format!(
+        "{}:{}:{}:{number}",
+        target.0,
+        entity,
+        kind.as_str()
+    ))
+    .expect("two UUIDs, a kind and a number make a valid key")
 }
 
 /// The key under which the user `downstream` of `profile` is recorded as

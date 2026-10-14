@@ -308,10 +308,11 @@ fn filters(prefix: &str, patterns: &[String]) -> Result<Vec<String>, String> {
         .collect()
 }
 
-/// The definition's fields that decide retention and placement, as the
-/// server reports them, compared with what the topology requires.
+/// The definition's fields that decide retention, placement and whether a
+/// publication is taken and confirmed, as the server reports them, compared
+/// with what the topology requires.
 fn differs(found: &stream::Config, wanted: &stream::Config) -> Option<String> {
-    let checks: [(&str, bool); 12] = [
+    let checks: [(&str, bool); 14] = [
         ("subjects", found.subjects != wanted.subjects),
         ("retention", found.retention != wanted.retention),
         ("storage", found.storage != wanted.storage),
@@ -327,6 +328,10 @@ fn differs(found: &stream::Config, wanted: &stream::Config) -> Option<String> {
             found.allow_message_ttl != wanted.allow_message_ttl,
         ),
         ("allow_rollup", found.allow_rollup != wanted.allow_rollup),
+        // Either would leave every publication retrying: a sealed stream
+        // takes none, one without acknowledgements confirms none.
+        ("sealed", found.sealed != wanted.sealed),
+        ("no_ack", found.no_ack != wanted.no_ack),
         ("replicas", found.num_replicas != wanted.num_replicas),
     ];
     let differing: Vec<&str> = checks

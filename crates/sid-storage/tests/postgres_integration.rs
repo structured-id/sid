@@ -938,42 +938,53 @@ async fn test_audit_actor_types_round_trip() {
 
 #[tokio::test]
 async fn test_audit_retention_keeps_chains_verifiable() {
-    let backend = setup().await;
-    let pool = backend.pool().clone();
-    let log = sid_storage::audit_log::PostgresAuditLog::new(pool.clone());
-    common::audit_retention::test_audit_retention_keeps_chains_verifiable(
-        &backend,
-        &log,
-        |r: sid_core::models::audit::AuditRecord| {
-            let pool = pool.clone();
-            async move {
-                sqlx::query(
-                    "INSERT INTO audit_records (id, timestamp, chain_id, sequence, actor_id,
-                        actor_type, action, resource, outcome, metadata, ip_address, device_id,
-                        prev_hash, hash)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
-                )
-                .bind(&r.id)
-                .bind(r.timestamp)
-                .bind(&r.chain_id)
-                .bind(r.sequence as i64)
-                .bind(&r.actor_id)
-                .bind(r.actor_type.to_string())
-                .bind(&r.action)
-                .bind(&r.resource)
-                .bind(r.outcome.to_string())
-                .bind(&r.metadata)
-                .bind(&r.ip_address)
-                .bind(&r.device_id)
-                .bind(&r.prev_hash)
-                .bind(&r.hash)
-                .execute(&pool)
-                .await
-                .unwrap();
-            }
-        },
-    )
+    // Retention drops every month of its schema that ended before the cut,
+    // whoever wrote it: in the shared schema it would race the scenarios
+    // that create and drop months there, so it runs in its own.
+    let (backend, schema) = isolated("retention").await;
+    let outcome = tokio::spawn({
+        let backend = backend.clone();
+        async move {
+            let pool = backend.pool().clone();
+            let log = sid_storage::audit_log::PostgresAuditLog::new(pool.clone());
+            common::audit_retention::test_audit_retention_keeps_chains_verifiable(
+                &backend,
+                &log,
+                |r: sid_core::models::audit::AuditRecord| {
+                    let pool = pool.clone();
+                    async move {
+                        sqlx::query(
+                            "INSERT INTO audit_records (id, timestamp, chain_id, sequence,
+                                actor_id, actor_type, action, resource, outcome, metadata,
+                                ip_address, device_id, prev_hash, hash)
+                             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                                $14)",
+                        )
+                        .bind(&r.id)
+                        .bind(r.timestamp)
+                        .bind(&r.chain_id)
+                        .bind(r.sequence as i64)
+                        .bind(&r.actor_id)
+                        .bind(r.actor_type.to_string())
+                        .bind(&r.action)
+                        .bind(&r.resource)
+                        .bind(r.outcome.to_string())
+                        .bind(&r.metadata)
+                        .bind(&r.ip_address)
+                        .bind(&r.device_id)
+                        .bind(&r.prev_hash)
+                        .bind(&r.hash)
+                        .execute(&pool)
+                        .await
+                        .unwrap();
+                    }
+                },
+            )
+            .await;
+        }
+    })
     .await;
+    finish_isolated(&backend, &schema, outcome).await;
 }
 
 /// Retention works on the installation's own schema: an expired partition

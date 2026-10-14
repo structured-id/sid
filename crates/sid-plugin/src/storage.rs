@@ -2138,17 +2138,15 @@ pub trait StorageBackend: WorkStore + Send + Sync + 'static {
         ctx: MutationContext,
     ) -> Result<()>;
 
-    /// Count a failed delivery on an existing mapping in place, keeping the
-    /// downstream id; `false` when there is no mapping.
-    async fn record_scim_outbound_failure(
+    /// Record a failed delivery in one commit: store `entry` in the outbound
+    /// DLQ and count it on the mapping of its entity, if there is one, in
+    /// place (keeping the downstream id), so the dead letter and the count
+    /// never part. An existing id is `Conflict`, never replaced.
+    async fn record_scim_outbound_dead_letter(
         &self,
-        target_id: ScimOutboundTargetId,
-        sid_entity_id: Uuid,
-        entity_type: OutboundEntityType,
-        error: &str,
-        at: chrono::DateTime<chrono::Utc>,
+        entry: &OutboundDlqEntry,
         ctx: MutationContext,
-    ) -> Result<bool>;
+    ) -> Result<()>;
 
     /// Find downstream ID for a SID entity in a specific target.
     async fn get_scim_outbound_record(
@@ -2158,8 +2156,8 @@ pub trait StorageBackend: WorkStore + Send + Sync + 'static {
         entity_type: OutboundEntityType,
     ) -> Result<Option<ScimOutboundRecord>>;
 
-    /// Store a failed delivery in the outbound DLQ; an existing id is
-    /// `Conflict`, never replaced.
+    /// Store a dead letter as it stands (snapshot import), counting nothing;
+    /// an existing id is `Conflict`, never replaced.
     async fn create_outbound_dlq_entry(
         &self,
         entry: &OutboundDlqEntry,

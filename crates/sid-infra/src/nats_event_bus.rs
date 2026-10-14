@@ -486,6 +486,13 @@ fn durable_differs(
         Some("ack policy")
     } else if found.ack_wait != wanted.ack_wait {
         Some("acknowledgement wait")
+    } else if found.backoff != wanted.backoff {
+        // A backoff replaces the acknowledgement wait for redelivery, so a
+        // held event would be handed on before its hold ends.
+        Some("redelivery backoff")
+    } else if found.headers_only != wanted.headers_only {
+        // Without its payload every event would be settled as malformed.
+        Some("payload delivery")
     } else if found.max_deliver != wanted.max_deliver {
         Some("delivery limit")
     } else if wanted.max_ack_pending != 0 && found.max_ack_pending != wanted.max_ack_pending {
