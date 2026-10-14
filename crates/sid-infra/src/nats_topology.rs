@@ -229,6 +229,8 @@ impl Topology {
             // Unlimited, written as the server reports it.
             max_messages: -1,
             max_bytes: -1,
+            max_messages_per_subject: -1,
+            max_message_size: -1,
             num_replicas: self.replicas,
             metadata: Self::metadata(),
             ..Default::default()
@@ -252,6 +254,9 @@ impl Topology {
             // so it takes effect once however late it comes.
             max_messages: self.work_max_messages,
             max_bytes: self.work_max_bytes,
+            // Unlimited, written as the server reports it.
+            max_messages_per_subject: -1,
+            max_message_size: -1,
             discard: stream::DiscardPolicy::New,
             deny_delete: true,
             deny_purge: true,
@@ -312,13 +317,24 @@ fn filters(prefix: &str, patterns: &[String]) -> Result<Vec<String>, String> {
 /// publication is taken and confirmed, as the server reports them, compared
 /// with what the topology requires.
 fn differs(found: &stream::Config, wanted: &stream::Config) -> Option<String> {
-    let checks: [(&str, bool); 14] = [
+    let checks: [(&str, bool); 16] = [
         ("subjects", found.subjects != wanted.subjects),
         ("retention", found.retention != wanted.retention),
         ("storage", found.storage != wanted.storage),
         ("max_age", found.max_age != wanted.max_age),
         ("max_messages", found.max_messages != wanted.max_messages),
         ("max_bytes", found.max_bytes != wanted.max_bytes),
+        // A per-subject cap evicts an unexpired fact of one type from
+        // history, or refuses a second one as work; a size cap refuses a
+        // large publication, which then retries forever.
+        (
+            "max_messages_per_subject",
+            found.max_messages_per_subject != wanted.max_messages_per_subject,
+        ),
+        (
+            "max_message_size",
+            found.max_message_size != wanted.max_message_size,
+        ),
         ("discard", found.discard != wanted.discard),
         ("deny_delete", found.deny_delete != wanted.deny_delete),
         ("deny_purge", found.deny_purge != wanted.deny_purge),

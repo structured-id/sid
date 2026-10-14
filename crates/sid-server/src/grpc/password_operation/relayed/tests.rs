@@ -10,14 +10,19 @@ use tokio::sync::mpsc;
 const AUTHORITY: &str = "sid-credentials.sid.example.com";
 
 /// A bus handing the consumer the deliveries a test feeds it and keeping
-/// what is addressed to the credential authority, or refusing every handoff.
+/// what is addressed to the credential authority, once it stopped refusing
+/// handoffs.
 struct Feed {
     deliveries: std::sync::Mutex<Option<mpsc::Receiver<Delivery>>>,
     published: Arc<std::sync::Mutex<Vec<Event>>>,
-    publishes: bool,
+    /// Handoffs still refused before the bus takes them.
+    refusals: std::sync::atomic::AtomicUsize,
     /// The durable consumer the consumer under test must open.
     consumer: WorkRecipient,
 }
+
+/// Every handoff refused, as by a work stream that stays full.
+const ALWAYS: usize = usize::MAX;
 
 #[tonic::async_trait]
 impl EventBus for Feed {
@@ -33,7 +38,16 @@ impl EventBus for Feed {
         delivery: sid_core::models::WorkId,
         event: &Event,
     ) -> EventBusResult<()> {
-        if !self.publishes {
+        use std::sync::atomic::Ordering;
+        let refused = self
+            .refusals
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| match left {
+                0 => None,
+                ALWAYS => Some(ALWAYS),
+                left => Some(left - 1),
+            })
+            .is_ok();
+        if refused {
             return Err(EventBusError::NotConnected);
         }
         assert_eq!(*recipient, settlement_consumer(AUTHORITY));
@@ -59,12 +73,12 @@ impl EventBus for Feed {
 }
 
 /// Deliver `events` one at a time to a consumer run on a [`Feed`] under the
-/// durable consumer `name`, as the bus does; how each was settled, and what
-/// the consumer published.
+/// durable consumer `name`, as the bus does, its handoffs refused `refusals`
+/// times; how each was settled, and what the consumer published.
 async fn feed<F, Fut>(
     name: WorkRecipient,
     events: Vec<Event>,
-    publishes: bool,
+    refusals: usize,
     run: F,
 ) -> (Vec<Settlement>, Vec<Event>)
 where
@@ -76,7 +90,7 @@ where
     let consumer = tokio::spawn(run(Feed {
         deliveries: std::sync::Mutex::new(Some(rx)),
         published: published.clone(),
-        publishes,
+        refusals: refusals.into(),
         consumer: name,
     }));
     let mut settled = Vec::new();
@@ -93,20 +107,20 @@ where
 
 /// Deliver `events` to the evaluator's cleanup consumer.
 async fn relay(evaluation: Arc<HistoryEvaluation>, events: Vec<Event>) -> Vec<Settlement> {
-    relay_reporting(evaluation, events, true).await.0
+    relay_reporting(evaluation, events, 0).await.0
 }
 
-/// [`relay`], with a bus that takes the settlement reports or refuses them,
-/// and what was reported.
+/// [`relay`], with a bus that refuses the first `refusals` settlement
+/// reports, and what was reported.
 async fn relay_reporting(
     evaluation: Arc<HistoryEvaluation>,
     events: Vec<Event>,
-    publishes: bool,
+    refusals: usize,
 ) -> (Vec<Settlement>, Vec<Event>) {
     feed(
         cleanup_consumer(AUTHORITY),
         events,
-        publishes,
+        refusals,
         |bus| async move { consume_relayed_cleanup(&bus, evaluation, AUTHORITY).await },
     )
     .await
@@ -179,7 +193,7 @@ async fn a_separate_evaluator_acts_on_relayed_cleanup() {
         .unwrap(),
     );
     let (settled, reported) =
-        relay_reporting(evaluation, vec![abort.clone(), purge, abort], true).await;
+        relay_reporting(evaluation, vec![abort.clone(), purge, abort], 0).await;
     assert_eq!(
         settled,
         vec![Settlement::Done, Settlement::Done, Settlement::Done]
@@ -215,9 +229,7 @@ async fn a_separate_evaluator_acts_on_relayed_cleanup() {
 
 /// A settlement that cannot be reported (the work stream full) does not hold
 /// its cleanup event: the effect is done and the event is acknowledged, so
-/// its slot frees up. The authority keeps the cleanup owed until a
-/// settlement is recorded and relays it again; the repeat is done again
-/// harmlessly and reported then, so no report is lost.
+/// its slot frees up.
 #[tokio::test]
 async fn an_unreported_settlement_frees_its_event() {
     let storage = sqlite().await;
@@ -229,9 +241,63 @@ async fn an_unreported_settlement_frees_its_event() {
         event_types::PASSWORD_HISTORY_ENROLLMENT_ABORTED,
         serde_json::to_value(aborted).unwrap(),
     );
-    let (settled, _) = relay_reporting(evaluation, vec![abort], false).await;
+    let (settled, _) = relay_reporting(evaluation, vec![abort], ALWAYS).await;
     assert_eq!(settled, [Settlement::Done]);
     assert_eq!(keys(&storage, &aborted.owner_domain).await, 0, "reclaimed");
+}
+
+/// A refused report is offered again after its cleanup event is
+/// acknowledged, which frees a slot of a full work stream: the authority does
+/// not wait for its own relay of the cleanup, which by then may have already
+/// gone out, to learn the keys are gone.
+#[tokio::test]
+async fn a_refused_report_is_offered_again() {
+    let storage = sqlite().await;
+    let installation = sid_core::models::OrgId::generate();
+    let (ops, evaluation) = split(storage.clone(), installation, manager(3), manager(3));
+    let aborted = enrolled(&ops, installation).await;
+    let abort = event(
+        AUTHORITY,
+        event_types::PASSWORD_HISTORY_ENROLLMENT_ABORTED,
+        serde_json::to_value(aborted).unwrap(),
+    );
+    let (tx, rx) = mpsc::channel(1);
+    let published = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let bus = Feed {
+        deliveries: std::sync::Mutex::new(Some(rx)),
+        published: published.clone(),
+        refusals: 2.into(),
+        consumer: cleanup_consumer(AUTHORITY),
+    };
+    let retry = [Duration::from_millis(10), Duration::from_millis(10)];
+    let consumer = tokio::spawn(async move {
+        consume_relayed_cleanup_retrying(&bus, evaluation, AUTHORITY, &retry).await
+    });
+    let (delivery, outcome) = Delivery::new(abort);
+    tx.send(delivery).await.unwrap();
+    assert_eq!(outcome.await.unwrap(), Settlement::Done);
+
+    // Refused once more on its first retry, then taken.
+    let reported = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(report) = published.lock().unwrap().first().cloned() {
+                break report;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the refused report is offered again");
+    let settled: CleanupSettled = serde_json::from_value(reported.data).unwrap();
+    assert_eq!(
+        settled.cleanup,
+        RelayedCleanup::Enrollment {
+            operation: aborted.operation
+        }
+    );
+    drop(tx);
+    consumer.await.unwrap().unwrap();
+    assert_eq!(published.lock().unwrap().len(), 1, "reported once");
 }
 
 /// The credential authority records the settlements reported for it, once
@@ -261,7 +327,7 @@ async fn the_authority_records_its_own_settlements() {
             report(AUTHORITY),
             report(AUTHORITY),
         ],
-        true,
+        0,
         |bus| async move { consume_cleanup_settlements(&bus, backend, AUTHORITY).await },
     )
     .await;

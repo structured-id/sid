@@ -106,6 +106,32 @@ fn test_streams_refusing_publications_differ() {
     assert_eq!(differs(&no_ack, &work).as_deref(), Some("no_ack"));
 }
 
+/// A per-subject cap evicts (history) or refuses (work) a second fact of one
+/// type, and a message size cap refuses a large publication: either stream
+/// carrying one differs.
+#[test]
+fn test_per_subject_and_size_caps_differ() {
+    let t = Topology::default();
+    for wanted in [t.history_config(), t.work_config()] {
+        let mut per_subject = wanted.clone();
+        per_subject.max_messages_per_subject = 1;
+        assert_eq!(
+            differs(&per_subject, &wanted).as_deref(),
+            Some("max_messages_per_subject"),
+            "{}",
+            wanted.name
+        );
+        let mut sized = wanted.clone();
+        sized.max_message_size = 1024;
+        assert_eq!(
+            differs(&sized, &wanted).as_deref(),
+            Some("max_message_size"),
+            "{}",
+            wanted.name
+        );
+    }
+}
+
 /// A subject root is one token; stream names follow it.
 #[test]
 fn test_root_is_one_token() {

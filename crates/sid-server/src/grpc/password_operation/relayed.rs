@@ -140,6 +140,21 @@ const RETRY: Duration = Duration::from_secs(30);
 /// the obligation stays until it does.
 const RETAINED_RETRY: Duration = Duration::from_secs(60 * 60);
 
+/// When a settlement report the bus refused is offered again: soon, as a full
+/// work stream frees up while its consumers acknowledge, then less often.
+const REPORT_RETRY: &[Duration] = &[
+    Duration::from_secs(1),
+    Duration::from_secs(5),
+    Duration::from_secs(30),
+    Duration::from_secs(120),
+    Duration::from_secs(600),
+    Duration::from_secs(3600),
+];
+
+/// Refused reports a consumer offers again; past them, and past the last
+/// retry, the authority relaying the cleanup again is the only retry.
+const PENDING_REPORTS: usize = 10_000;
+
 /// Consume the relayed cleanup of the credential authority named `source` on
 /// `bus`, acting on each event through `evaluation`, until the bus ends the
 /// consumer. The authenticity of an event is the bus's: the NATS account holds
@@ -151,6 +166,17 @@ pub async fn consume_relayed_cleanup(
     evaluation: Arc<HistoryEvaluation>,
     source: &str,
 ) -> EventBusResult<()> {
+    consume_relayed_cleanup_retrying(bus, evaluation, source, REPORT_RETRY).await
+}
+
+/// [`consume_relayed_cleanup`], offering a refused report again after each
+/// delay of `retry` in turn.
+async fn consume_relayed_cleanup_retrying(
+    bus: &dyn EventBus,
+    evaluation: Arc<HistoryEvaluation>,
+    source: &str,
+    retry: &[Duration],
+) -> EventBusResult<()> {
     let mut deliveries = bus
         .consume(DurableConsumer {
             recipient: cleanup_consumer(source),
@@ -161,25 +187,90 @@ pub async fn consume_relayed_cleanup(
             ordered: false,
         })
         .await?;
-    while let Some(delivery) = deliveries.recv().await {
-        let settlement = match settle(&evaluation, source, &delivery.event).await {
-            // The effect is done, so the event is acknowledged whether or not
-            // its report goes out: holding it until the report does would keep
-            // a full work stream full, the report and the event waiting on each
-            // other. A report that did not go out is not lost: the authority
-            // keeps the cleanup owed and relays it again until a settlement is
-            // recorded, and the repeat is done again harmlessly and reported.
-            (Settlement::Done, Some(cleanup)) => {
-                if let Err(e) = report(bus, source, cleanup).await {
-                    warn!("report a cleanup settlement: {e}; the authority relays it again");
+    let mut refused = RefusedReports::default();
+    loop {
+        let due = refused.next_due();
+        tokio::select! {
+            delivery = deliveries.recv() => {
+                let Some(delivery) = delivery else { break };
+                match settle(&evaluation, source, &delivery.event).await {
+                    // The effect is done, so the event is acknowledged whether
+                    // or not its report goes out: holding it until the report
+                    // does would keep a full work stream full, the report and
+                    // the event waiting on each other. A refused report is
+                    // offered again once the acknowledgement frees a slot; the
+                    // authority also keeps the cleanup owed until a settlement
+                    // is recorded, relaying it again, in case this process
+                    // ends before the report goes out.
+                    (Settlement::Done, Some(cleanup)) => {
+                        let reported = report(bus, source, cleanup).await;
+                        delivery.settle(Settlement::Done);
+                        if let Err(e) = reported {
+                            warn!("report a cleanup settlement: {e}; it is offered again");
+                            refused.add(cleanup, retry);
+                        }
+                    }
+                    (settlement, _) => delivery.settle(settlement),
                 }
-                Settlement::Done
             }
-            (settlement, _) => settlement,
-        };
-        delivery.settle(settlement);
+            // Disabled while nothing is pending: the instant is then unused.
+            () = tokio::time::sleep_until(due.unwrap_or_else(tokio::time::Instant::now)),
+                if due.is_some() =>
+            {
+                refused.offer_due(bus, source, retry).await;
+            }
+        }
     }
     Ok(())
+}
+
+/// Settlement reports the bus refused, each with the retry it is at and when
+/// it is offered again.
+#[derive(Default)]
+struct RefusedReports(Vec<(RelayedCleanup, usize, tokio::time::Instant)>);
+
+impl RefusedReports {
+    /// When the next report is offered again, if any is pending.
+    fn next_due(&self) -> Option<tokio::time::Instant> {
+        self.0.iter().map(|&(_, _, due)| due).min()
+    }
+
+    /// Offer `cleanup`'s report again after the first delay of `retry`.
+    fn add(&mut self, cleanup: RelayedCleanup, retry: &[Duration]) {
+        if self.0.iter().any(|(pending, _, _)| *pending == cleanup) {
+            return;
+        }
+        let Some(&delay) = retry.first() else { return };
+        if self.0.len() >= PENDING_REPORTS {
+            warn!("too many refused settlement reports; the authority relays the cleanup again");
+            return;
+        }
+        self.0
+            .push((cleanup, 0, tokio::time::Instant::now() + delay));
+    }
+
+    /// Offer every report that is due again, keeping those still refused
+    /// until their next delay of `retry`.
+    async fn offer_due(&mut self, bus: &dyn EventBus, source: &str, retry: &[Duration]) {
+        let now = tokio::time::Instant::now();
+        let mut kept = Vec::with_capacity(self.0.len());
+        for (cleanup, attempt, due) in std::mem::take(&mut self.0) {
+            if due > now {
+                kept.push((cleanup, attempt, due));
+                continue;
+            }
+            let Err(e) = report(bus, source, cleanup).await else {
+                continue;
+            };
+            match retry.get(attempt + 1) {
+                Some(&delay) => kept.push((cleanup, attempt + 1, now + delay)),
+                None => warn!(
+                    "report a cleanup settlement: {e}; the authority relays the cleanup again"
+                ),
+            }
+        }
+        self.0 = kept;
+    }
 }
 
 /// Tell the credential authority `authority` that `cleanup` is settled.
