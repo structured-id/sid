@@ -17,14 +17,14 @@ fred = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
 time = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 # The HTTP form of a service's own annotated RPCs (`http` feature).
 sid-proto = { workspace = true, optional = true }
-structured-proxy = { version = "8.1.1", default-features = false, optional = true }
+structured-proxy = { version = "8.1.2", default-features = false, optional = true }
 prost-reflect = { workspace = true, optional = true }
-serde_yaml = { workspace = true, optional = true }
 anyhow = { workspace = true, optional = true }
 
 [features]
@@ -32,11 +32,12 @@ http = [
     "dep:sid-proto",
     "dep:structured-proxy",
     "dep:prost-reflect",
-    "dep:serde_yaml",
     "dep:anyhow",
 ]
 
 [dev-dependencies]
+# Configurations in the tests are written as YAML, as operators write them.
+serde-saphyr = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
 # The Redis tests share one server, so each takes a key of its own.
 uuid = { workspace = true }

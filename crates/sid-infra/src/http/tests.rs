@@ -6,7 +6,7 @@ use super::*;
 /// listed, keeps its listen address and names no upstream of its own.
 #[test]
 fn forwards_the_headers_the_rpcs_read() {
-    let config: serde_yaml::Value = serde_yaml::from_str(
+    let config: serde_json::Value = serde_saphyr::from_str(
         "listen: { http: \"127.0.0.1:8080\" }\nforwarded_headers: [x-request-id]\n",
     )
     .unwrap();
@@ -28,8 +28,8 @@ fn forwards_the_headers_the_rpcs_read() {
 /// elsewhere; it is refused instead of silently ignored.
 #[test]
 fn an_upstream_in_the_configuration_is_refused() {
-    let config: serde_yaml::Value =
-        serde_yaml::from_str("upstream: { default: \"http://elsewhere:1\" }\n").unwrap();
+    let config: serde_json::Value =
+        serde_saphyr::from_str("upstream: { default: \"http://elsewhere:1\" }\n").unwrap();
     let error = embedded_transcoder(&config, &[], |_| true)
         .err()
         .expect("an upstream is refused");
@@ -39,7 +39,7 @@ fn an_upstream_in_the_configuration_is_refused() {
 /// Configuration that is not a mapping is refused.
 #[test]
 fn non_mapping_config_is_refused() {
-    let config = serde_yaml::Value::String("listen".into());
+    let config = serde_json::Value::String("listen".into());
     assert!(embedded_transcoder(&config, &[], |_| true).is_err());
 }
 

@@ -6,7 +6,7 @@ use sid_authn::client_credential::ClientAuthentication;
 #[test]
 fn minimal_config_takes_defaults() {
     let config: AuthConfig =
-        serde_yaml::from_str("upstream: http://sid:50051\nissuer_url: https://sid.example.com\n")
+        serde_saphyr::from_str("upstream: http://sid:50051\nissuer_url: https://sid.example.com\n")
             .unwrap();
     assert_eq!(config.grpc_listen, "0.0.0.0:50061");
     assert!(config.login_url.is_empty());
@@ -19,7 +19,7 @@ fn minimal_config_takes_defaults() {
 /// A misspelled key is refused instead of leaving the default in force.
 #[test]
 fn unknown_keys_are_refused() {
-    let result: Result<AuthConfig, _> = serde_yaml::from_str(
+    let result: Result<AuthConfig, _> = serde_saphyr::from_str(
         "upstream: http://sid:50051\nissuer_url: https://sid.example.com\nroute_policies: /x\n",
     );
     assert!(result.is_err());
@@ -28,9 +28,9 @@ fn unknown_keys_are_refused() {
 /// Upstream and issuer have no default: a deployment names them.
 #[test]
 fn upstream_and_issuer_are_required() {
-    let result: Result<AuthConfig, _> = serde_yaml::from_str("issuer_url: https://x.example\n");
+    let result: Result<AuthConfig, _> = serde_saphyr::from_str("issuer_url: https://x.example\n");
     assert!(result.is_err());
-    let result: Result<AuthConfig, _> = serde_yaml::from_str("upstream: http://sid:50051\n");
+    let result: Result<AuthConfig, _> = serde_saphyr::from_str("upstream: http://sid:50051\n");
     assert!(result.is_err());
 }
 
@@ -38,7 +38,7 @@ fn upstream_and_issuer_are_required() {
 /// method; a method's fields belong to it alone.
 #[test]
 fn the_checker_credential_names_one_method() {
-    let config: AuthConfig = serde_yaml::from_str(
+    let config: AuthConfig = serde_saphyr::from_str(
         "upstream: http://sid:50051\nissuer_url: https://sid.example.com\nauthz_checker:\n  \
          issuer: https://sid.example.com/i/0123456789abcdef0123456789abcdef\n  \
          client_id: route-checker\n  \
@@ -52,7 +52,7 @@ fn the_checker_credential_names_one_method() {
         ClientAuthentication::PrivateKeyJwt { key_id: None, .. }
     ));
 
-    let mixed: Result<AuthConfig, _> = serde_yaml::from_str(
+    let mixed: Result<AuthConfig, _> = serde_saphyr::from_str(
         "upstream: http://sid:50051\nissuer_url: https://sid.example.com\nauthz_checker:\n  \
          issuer: https://sid.example.com/i/0123456789abcdef0123456789abcdef\n  \
          client_id: route-checker\n  \
@@ -64,7 +64,7 @@ fn the_checker_credential_names_one_method() {
 /// The reference file shipped with the crate parses.
 #[test]
 fn reference_file_parses() {
-    let config: AuthConfig = serde_yaml::from_str(include_str!("../../sid-auth.yaml")).unwrap();
+    let config: AuthConfig = serde_saphyr::from_str(include_str!("../../sid-auth.yaml")).unwrap();
     assert_eq!(config.issuer_url, "https://auth.example.com");
     #[cfg(feature = "http")]
     assert!(config.http.is_some());

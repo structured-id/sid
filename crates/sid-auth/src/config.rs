@@ -41,7 +41,7 @@ pub struct AuthConfig {
     /// the request headers it forwards are set by this service.
     #[cfg(feature = "http")]
     #[serde(default)]
-    pub http: Option<serde_yaml::Value>,
+    pub http: Option<serde_json::Value>,
 }
 
 /// The variable prefix of the permission-checking client.
@@ -104,7 +104,7 @@ impl AuthConfig {
     pub fn from_yaml(path: &str) -> anyhow::Result<Self> {
         let contents = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("failed to read config {path}: {e}"))?;
-        serde_yaml::from_str(&contents)
+        serde_saphyr::from_str(&contents)
             .map_err(|e| anyhow::anyhow!("failed to parse config {path}: {e}"))
     }
 

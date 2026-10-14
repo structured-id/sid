@@ -199,7 +199,7 @@ applications:
         ),
     )
     .unwrap();
-    let config: sid_auth::config::AuthConfig = serde_yaml::from_str(&format!(
+    let config: sid_auth::config::AuthConfig = serde_saphyr::from_str(&format!(
         "upstream: http://{addr}\nissuer_url: {base}\nroute_policy_path: {}\nhttp:\n  listen: {{ http: \"127.0.0.1:0\" }}\n",
         routes.path().display()
     ))

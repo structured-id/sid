@@ -4,7 +4,9 @@
 //! Reads from environment variables:
 //! - `SID_NATS_URL` — NATS server URL (required, e.g., `nats://127.0.0.1:4222`)
 //! - `SID_NOTIFY_BIND` — gRPC bind address (default: `0.0.0.0:9040`)
-//! - `SID_NOTIFY_QUEUE_GROUP` — NATS queue group name (default: `sid-notify`)
+//! - `SID_NOTIFY_RECEIVER` — the receiver facts are owed to; replicas share it (default: `sid-notify`)
+//! - `SID_EVENT_RECEIVERS` — the deployment's required receivers, as producers list them (required; `none` for none); this service owes its own facts to all but itself
+//! - `SID_NATS_TOPOLOGY` and the `SID_NATS_*` bounds — the event topology, as for every SID service
 //! - `SID_NOTIFY_DATABASE_URL` — PostgreSQL URL for delivery jobs and templates (required)
 //! - `SID_NOTIFY_JOB_CAPACITY` — open jobs per kind before events stay with the broker (default: 100000)
 //! - `SID_IDENTITY_GRPC_ADDRESS` — sid-identity gRPC address for recipient resolution (optional, e.g., `http://127.0.0.1:9000`)
@@ -24,6 +26,8 @@
 
 use std::net::SocketAddr;
 
+use sid_core::models::{RequiredReceiver, WorkRecipient};
+
 use crate::channels::smtp::{EmailAuthMethod, SmtpConfig, SmtpTlsMode};
 use crate::channels::web_push::VapidConfig;
 
@@ -36,8 +40,13 @@ pub struct NotifyConfig {
     /// gRPC server bind address.
     pub grpc_bind: SocketAddr,
 
-    /// NATS queue group name for load-balanced consumption.
-    pub queue_group: String,
+    /// The receiver every fact is owed to as addressed work: producers name
+    /// the same one in `SID_EVENT_RECEIVERS`, and replicas share its work.
+    pub receiver: WorkRecipient,
+
+    /// The receivers the facts this service raises (dead-letter alerts) are
+    /// owed to: the deployment's required receivers other than itself.
+    pub event_receivers: Vec<RequiredReceiver>,
 
     /// SMTP channel configuration.
     pub smtp: SmtpConfig,
@@ -84,8 +93,17 @@ impl NotifyConfig {
             .parse()
             .map_err(|e| ConfigError::Invalid("SID_NOTIFY_BIND", format!("{e}")))?;
 
-        let queue_group =
-            std::env::var("SID_NOTIFY_QUEUE_GROUP").unwrap_or_else(|_| "sid-notify".into());
+        let receiver = WorkRecipient::new(
+            std::env::var("SID_NOTIFY_RECEIVER").unwrap_or_else(|_| DEFAULT_RECEIVER.into()),
+        )
+        .map_err(|e| ConfigError::Invalid("SID_NOTIFY_RECEIVER", e.to_string()))?;
+        let event_receivers = other_receivers(
+            &receiver,
+            &std::env::var("SID_EVENT_RECEIVERS")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .ok_or(ConfigError::Missing("SID_EVENT_RECEIVERS"))?,
+        )?;
 
         let smtp_host = std::env::var("SID_SMTP_HOST").unwrap_or_else(|_| "localhost".into());
         let smtp_port: u16 = std::env::var("SID_SMTP_PORT")
@@ -197,7 +215,8 @@ impl NotifyConfig {
         Ok(Self {
             nats_url,
             grpc_bind,
-            queue_group,
+            receiver,
+            event_receivers,
             smtp,
             smtp_enabled,
             webhook_enabled,
@@ -213,6 +232,22 @@ impl NotifyConfig {
 
 /// Open jobs per kind when `SID_NOTIFY_JOB_CAPACITY` is unset.
 pub const DEFAULT_JOB_CAPACITY: u64 = 100_000;
+
+/// The receiver when `SID_NOTIFY_RECEIVER` is unset.
+pub const DEFAULT_RECEIVER: &str = "sid-notify";
+
+/// The receivers `list` names other than `own`: this service does not route
+/// its own facts, so owing them to itself would only fill its queue.
+pub fn other_receivers(
+    own: &WorkRecipient,
+    list: &str,
+) -> Result<Vec<RequiredReceiver>, ConfigError> {
+    Ok(RequiredReceiver::parse_list(list)
+        .map_err(|e| ConfigError::Invalid("SID_EVENT_RECEIVERS", e.to_string()))?
+        .into_iter()
+        .filter(|r| r.recipient != *own)
+        .collect())
+}
 
 /// Configuration error.
 #[derive(Debug, thiserror::Error)]
@@ -236,7 +271,8 @@ mod tests {
         let config = NotifyConfig {
             nats_url: "nats://127.0.0.1:4222".into(),
             grpc_bind: "0.0.0.0:9040".parse().unwrap(),
-            queue_group: "sid-notify".into(),
+            receiver: WorkRecipient::new(DEFAULT_RECEIVER).unwrap(),
+            event_receivers: Vec::new(),
             smtp: SmtpConfig::default(),
             smtp_enabled: true,
             webhook_enabled: true,
@@ -250,7 +286,7 @@ mod tests {
 
         assert_eq!(config.nats_url, "nats://127.0.0.1:4222");
         assert_eq!(config.grpc_bind.port(), 9040);
-        assert_eq!(config.queue_group, "sid-notify");
+        assert_eq!(config.receiver.as_str(), "sid-notify");
         assert_eq!(config.smtp.host, "localhost");
         assert_eq!(config.smtp.port, 587);
         assert!(config.smtp_enabled);
@@ -263,7 +299,8 @@ mod tests {
         let config = NotifyConfig {
             nats_url: "nats://127.0.0.1:4222".into(),
             grpc_bind: "0.0.0.0:9040".parse().unwrap(),
-            queue_group: "sid-notify".into(),
+            receiver: WorkRecipient::new(DEFAULT_RECEIVER).unwrap(),
+            event_receivers: Vec::new(),
             smtp: SmtpConfig::default(),
             smtp_enabled: true,
             webhook_enabled: true,
@@ -284,6 +321,24 @@ mod tests {
         assert_eq!(vapid.subject, "mailto:admin@sid.example.com");
     }
 
+    /// This service's facts are owed to every listed receiver but itself;
+    /// `none` lists none, and an invalid name is refused.
+    #[test]
+    fn test_other_receivers_exclude_this_service() {
+        let own = WorkRecipient::new(DEFAULT_RECEIVER).unwrap();
+        let names = |list| {
+            other_receivers(&own, list)
+                .unwrap()
+                .into_iter()
+                .map(|r| r.recipient.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names("sid-notify, audit-sink"), ["audit-sink"]);
+        assert_eq!(names("sid-notify"), Vec::<String>::new());
+        assert_eq!(names("none"), Vec::<String>::new());
+        assert!(other_receivers(&own, "a.b").is_err());
+    }
+
     #[test]
     fn test_config_error_display() {
         let err = ConfigError::Missing("SID_NATS_URL");
@@ -299,7 +354,8 @@ mod tests {
         let config = NotifyConfig {
             nats_url: "nats://127.0.0.1:4222".into(),
             grpc_bind: "0.0.0.0:9040".parse().unwrap(),
-            queue_group: "sid-notify".into(),
+            receiver: WorkRecipient::new(DEFAULT_RECEIVER).unwrap(),
+            event_receivers: Vec::new(),
             smtp: SmtpConfig::default(),
             smtp_enabled: false,
             webhook_enabled: false,

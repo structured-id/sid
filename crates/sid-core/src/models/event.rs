@@ -16,16 +16,217 @@ use super::durable_work::{NewWork, WorkId, WorkKind};
 /// CloudEvents 1.0 spec version constant.
 pub const CLOUDEVENTS_SPEC_VERSION: &str = "1.0";
 
-/// Work kind publishing a committed event to the event bus.
+/// Work kind relaying a committed fact: it owes the fact to each required
+/// receiver of its type and publishes it to the retained history.
 pub const EVENT_RELAY_KIND: &str = "event.relay";
 
-/// Relay attempts before the event is recorded failed: with the relay's
-/// schedule this outlasts a broker outage of more than a day.
-pub const EVENT_RELAY_ATTEMPTS: u32 = 40;
+/// Work kind handing an event to one addressed receiver.
+pub const EVENT_DELIVERY_KIND: &str = "event.deliver";
 
-/// Namespace of relay ids for events whose id is not a UUID.
+/// Work kind carrying a relayed fact's fixed plan: the receivers it is owed
+/// to, then its history publication.
+pub const EVENT_FANOUT_KIND: &str = "event.fanout";
+
+/// Namespace of fan-out plan ids, one per relayed fact.
+const EVENT_FANOUT_NAMESPACE: uuid::Uuid =
+    uuid::Uuid::from_u128(0x5e81_c3a0_2d74_4b9f_86e1_0af2_93c7_4d58);
+
+/// Attempts at handing a committed fact on (relay, plan, delivery): as many
+/// as every store can count (a signed 32-bit column). A broker that is down
+/// or a work stream that is full leaves the handoff pending, not failed, so
+/// it goes on once the broker is back; a refusal no attempt can cure (an
+/// unroutable type, a malformed payload) still ends it at once.
+pub const EVENT_RELAY_ATTEMPTS: u32 = i32::MAX.unsigned_abs();
+
+/// Namespace of relay ids, one per `(source, id)`.
 const EVENT_RELAY_NAMESPACE: uuid::Uuid =
     uuid::Uuid::from_u128(0x3b8f_0c21_9e47_4d5a_b612_7f0e_a95c_2d18);
+
+/// Namespace of delivery ids, one per `(source, id, receiver)`.
+const EVENT_DELIVERY_NAMESPACE: uuid::Uuid =
+    uuid::Uuid::from_u128(0x9d26_47e1_0b8c_4f35_a7e2_51c9_6d08_3fa4);
+
+/// `parts` encoded so that no two different sequences give the same bytes:
+/// each part is prefixed with its length.
+fn identity_key(parts: &[&[u8]]) -> Vec<u8> {
+    let mut key = Vec::with_capacity(parts.iter().map(|p| p.len() + 8).sum());
+    for part in parts {
+        key.extend_from_slice(&(part.len() as u64).to_be_bytes());
+        key.extend_from_slice(part);
+    }
+    key
+}
+
+/// The transport family that carries an event type. Families never share
+/// transport subjects; which family a type belongs to is fixed by
+/// [`event_route`], never inferred from the type's name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventFamily {
+    /// Facts and work of the identity engine (CE, EE and SaaS tenants).
+    Identity,
+    /// Management facts of the private SaaS platform.
+    Platform,
+}
+
+impl EventFamily {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Identity => "identity",
+            Self::Platform => "platform",
+        }
+    }
+}
+
+/// How an event type travels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventRoute {
+    /// A fact: kept in the family's retained history for replay and
+    /// observers, and owed to every receiver the deployment requires for
+    /// its type.
+    Fact(EventFamily),
+    /// Work between named services: handed only to the receiver its producer
+    /// addresses, never kept in history.
+    Addressed(EventFamily),
+}
+
+impl EventRoute {
+    pub const fn family(self) -> EventFamily {
+        match self {
+            Self::Fact(family) | Self::Addressed(family) => family,
+        }
+    }
+}
+
+/// The route of `event_type`; `None` for a type the registry does not know,
+/// which is refused rather than routed anywhere.
+pub fn event_route(event_type: &str) -> Option<EventRoute> {
+    use event_types::{IDENTITY_ADDRESSED, IDENTITY_FACTS, PLATFORM_FACTS};
+    if IDENTITY_FACTS.contains(&event_type) {
+        Some(EventRoute::Fact(EventFamily::Identity))
+    } else if IDENTITY_ADDRESSED.contains(&event_type) {
+        Some(EventRoute::Addressed(EventFamily::Identity))
+    } else if PLATFORM_FACTS.contains(&event_type) {
+        Some(EventRoute::Fact(EventFamily::Platform))
+    } else {
+        None
+    }
+}
+
+/// A logical service that receives addressed work: stable across restarts,
+/// shared by its replicas, distinct per independent receiver. It is a
+/// transport address token: ASCII letters, digits, `-` and `_`, 1-128
+/// characters.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct WorkRecipient(String);
+
+impl WorkRecipient {
+    pub fn new(name: impl Into<String>) -> crate::Result<Self> {
+        let name = name.into();
+        let valid = (1..=128).contains(&name.len())
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+        if valid {
+            Ok(Self(name))
+        } else {
+            Err(crate::Error::Validation(format!(
+                "invalid work recipient: {name:?}"
+            )))
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for WorkRecipient {
+    type Error = crate::Error;
+
+    fn try_from(name: String) -> crate::Result<Self> {
+        Self::new(name)
+    }
+}
+
+impl From<WorkRecipient> for String {
+    fn from(recipient: WorkRecipient) -> Self {
+        recipient.0
+    }
+}
+
+impl std::fmt::Display for WorkRecipient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// The receiver SCIM outbound work is addressed to: built into the server,
+/// owed only the SCIM facts it acts on.
+pub const SCIM_OUTBOUND_RECEIVER: &str = "sid-scim-outbound";
+
+/// A receiver the deployment requires for some fact types: every committed
+/// fact whose type matches is owed to it, whether or not it is running.
+#[derive(Debug, Clone)]
+pub struct RequiredReceiver {
+    pub recipient: WorkRecipient,
+    /// Type patterns (exact, `prefix.*` or `prefix.>`); empty is every fact.
+    pub event_types: Vec<String>,
+}
+
+impl RequiredReceiver {
+    /// The receivers a deployment lists (comma-separated names, or `none`),
+    /// each owed every fact: its own routing decides what it acts on. A name
+    /// that is not an address token, or an empty one, is refused, and so is
+    /// `none` among names: no receiver by that name would ever settle the
+    /// facts owed to it. The built-in [`SCIM_OUTBOUND_RECEIVER`] is refused
+    /// too: it consumes only its own facts, so every other fact owed to it
+    /// would stay unsettled.
+    pub fn parse_list(list: &str) -> crate::Result<Vec<Self>> {
+        match list.trim() {
+            "none" => Ok(Vec::new()),
+            list => list
+                .split(',')
+                .map(|name| match name.trim() {
+                    "none" => Err(crate::Error::Validation(format!(
+                        "`none` names no receiver and cannot be listed with others: {list:?}"
+                    ))),
+                    SCIM_OUTBOUND_RECEIVER => Err(crate::Error::Validation(format!(
+                        "{SCIM_OUTBOUND_RECEIVER} is built in and owed only its own facts; \
+                         it is not listed: {list:?}"
+                    ))),
+                    name => WorkRecipient::new(name).map(|recipient| Self {
+                        recipient,
+                        event_types: Vec::new(),
+                    }),
+                })
+                .collect(),
+        }
+    }
+
+    pub fn requires(&self, event_type: &str) -> bool {
+        self.event_types.is_empty()
+            || self
+                .event_types
+                .iter()
+                .any(|pattern| type_matches(pattern, event_type))
+    }
+}
+
+/// The input of [`EVENT_FANOUT_KIND`] work: a fact and the receivers it is
+/// owed to, fixed when the plan is first stored.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventFanout {
+    pub event: Event,
+    pub receivers: Vec<WorkRecipient>,
+}
+
+/// The input of [`EVENT_DELIVERY_KIND`] work: one event for one receiver.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventDelivery {
+    pub recipient: WorkRecipient,
+    pub event: Event,
+}
 
 /// SID-specific extension attribute name for monotonic sequence.
 const EXT_SEQUENCE: &str = "sequence";
@@ -139,17 +340,85 @@ impl Event {
         self
     }
 
-    /// The durable work that publishes this event once the mutation carrying
-    /// it commits (transactional outbox). Its id follows from the event id,
-    /// so the same event is owed once however often the mutation is retried.
+    /// The durable work that relays this fact once the mutation carrying it
+    /// commits (transactional outbox). Its id follows from the event's
+    /// `(source, id)`, so the same event is owed once however often the
+    /// mutation is retried, and two producers' events never share it.
     pub fn relay(&self) -> NewWork {
         let kind = WorkKind::new(EVENT_RELAY_KIND).expect("the relay kind is valid");
         let payload = serde_json::to_vec(self).expect("an event serializes");
         let mut work = NewWork::new(kind, payload);
-        work.id =
-            WorkId(uuid::Uuid::parse_str(&self.id).unwrap_or_else(|_| {
-                uuid::Uuid::new_v5(&EVENT_RELAY_NAMESPACE, self.id.as_bytes())
-            }));
+        work.id = self.relay_id();
+        work.max_attempts = EVENT_RELAY_ATTEMPTS;
+        work
+    }
+
+    /// The stable identity of this event's relay, one per `(source, id)`. It
+    /// is also the transport's message id for the history publication.
+    pub fn relay_id(&self) -> WorkId {
+        WorkId(uuid::Uuid::new_v5(
+            &EVENT_RELAY_NAMESPACE,
+            &identity_key(&[self.source.as_bytes(), self.id.as_bytes()]),
+        ))
+    }
+
+    /// The fan-out plan owing this fact to `receivers`. Its id follows from
+    /// the event alone, not from the receivers, so the store keeps the plan
+    /// first written: a retry under another configuration changes nothing.
+    pub fn fanout(&self, receivers: &[WorkRecipient]) -> NewWork {
+        /// [`EventFanout`] as written, borrowing what it carries.
+        #[derive(Serialize)]
+        struct Written<'a> {
+            event: &'a Event,
+            receivers: &'a [WorkRecipient],
+        }
+        let kind = WorkKind::new(EVENT_FANOUT_KIND).expect("the fan-out kind is valid");
+        let payload = serde_json::to_vec(&Written {
+            event: self,
+            receivers,
+        })
+        .expect("a plan serializes");
+        let mut work = NewWork::new(kind, payload);
+        work.id = WorkId(uuid::Uuid::new_v5(
+            &EVENT_FANOUT_NAMESPACE,
+            self.relay_id().0.as_bytes(),
+        ));
+        work.max_attempts = EVENT_RELAY_ATTEMPTS;
+        work
+    }
+
+    /// The stable identity of this event's handoff to `recipient`: the same
+    /// across retries, distinct per receiver and per `(source, id)`. It is
+    /// also the transport's message id for the handoff.
+    pub fn delivery_id(&self, recipient: &WorkRecipient) -> WorkId {
+        WorkId(uuid::Uuid::new_v5(
+            &EVENT_DELIVERY_NAMESPACE,
+            &identity_key(&[
+                EVENT_DELIVERY_KIND.as_bytes(),
+                self.source.as_bytes(),
+                self.id.as_bytes(),
+                recipient.as_str().as_bytes(),
+            ]),
+        ))
+    }
+
+    /// The durable work that hands this event to `recipient`, identified by
+    /// [`Event::delivery_id`].
+    pub fn deliver(&self, recipient: &WorkRecipient) -> NewWork {
+        /// [`EventDelivery`] as written, borrowing what it carries.
+        #[derive(Serialize)]
+        struct Written<'a> {
+            recipient: &'a WorkRecipient,
+            event: &'a Event,
+        }
+        let kind = WorkKind::new(EVENT_DELIVERY_KIND).expect("the delivery kind is valid");
+        let payload = serde_json::to_vec(&Written {
+            recipient,
+            event: self,
+        })
+        .expect("a delivery serializes");
+        let mut work = NewWork::new(kind, payload);
+        work.id = self.delivery_id(recipient);
         work.max_attempts = EVENT_RELAY_ATTEMPTS;
         work
     }
@@ -403,6 +672,10 @@ pub mod event_types {
     pub const GOVERNANCE_ROLE_EXPIRING: &str = "sid.governance.role_expiring.v1";
     pub const GOVERNANCE_ROLE_EXPIRED: &str = "sid.governance.role_expired.v1";
 
+    // Password reset
+    pub const PASSWORD_RESET_REQUESTED: &str = "sid.auth.password_reset_requested.v1";
+    pub const PASSWORD_RESET_COMPLETED: &str = "sid.auth.password_reset_completed.v1";
+
     // Organization (SaaS)
     pub const ORG_TRIAL_ACTIVATED: &str = "sid.organization.trial_activated.v1";
 
@@ -428,9 +701,106 @@ pub mod event_types {
     pub const SCIM_GROUP_CREATED: &str = "sid.scim.group_created.v1";
     pub const SCIM_GROUP_UPDATED: &str = "sid.scim.group_updated.v1";
     pub const SCIM_GROUP_DELETED: &str = "sid.scim.group_deleted.v1";
+    pub const SCIM_OUTBOUND_FAILED: &str = "sid.scim.outbound_failed.v1";
+
+    /// Facts of the identity engine.
+    pub const IDENTITY_FACTS: &[&str] = &[
+        USER_CREATED,
+        USER_DEACTIVATED,
+        USER_LOCKED,
+        USER_UNLOCKED,
+        USER_DELETED,
+        PROFILE_CLAIM_CHANGED,
+        PROFILE_EMAIL_CHANGED,
+        SESSION_CREATED,
+        SESSION_REVOKED,
+        MFA_ENROLLED,
+        MFA_DISABLED,
+        MFA_RECOVERY_CODE_USED,
+        SECURITY_BRUTE_FORCE,
+        SECURITY_SUSPICIOUS_LOGIN,
+        SECURITY_CREDENTIAL_ROTATED,
+        SECURITY_COUNTRY_BLOCKED,
+        SECURITY_TOR_BLOCKED,
+        SECURITY_DATACENTER_IP,
+        SECURITY_LOCATION_SWITCH,
+        ADMIN_CREATED,
+        ADMIN_POLICY_CHANGED,
+        FEDERATION_PEER_CONNECTED,
+        FEDERATION_PEER_DISCONNECTED,
+        FEDERATION_SYNC_COMPLETED,
+        CREDENTIAL_REVOKED,
+        REFRESH_TOKEN_REVOKED,
+        PROFILE_SUSPENDED,
+        PROFILE_CLOSED,
+        CONSENT_GRANTED,
+        CONSENT_REVOKED,
+        NOTIFY_DLQ,
+        CERT_EXPIRING,
+        CERT_ROTATED,
+        CLOSURE_REQUESTED,
+        CLOSURE_EXPORT_READY,
+        CLOSURE_GRACE_PERIOD,
+        CLOSURE_CANCELLED,
+        CLOSURE_PURGED,
+        PAT_CREATED,
+        PAT_REVOKED,
+        PAT_EXPIRED,
+        MACHINE_USER_CREATED,
+        MACHINE_USER_SUSPENDED,
+        MACHINE_USER_CREDENTIAL_ROTATED,
+        MACHINE_USER_CREDENTIAL_EXPIRING,
+        MACHINE_USER_CREDENTIAL_EXPIRED,
+        PROFILE_GRANT_CREATED,
+        PROFILE_GRANT_REVOKED,
+        PROFILE_GRANT_UPDATED,
+        GOVERNANCE_ROLE_EXPIRING,
+        GOVERNANCE_ROLE_EXPIRED,
+        PRINCIPAL_CONTESTED,
+        PRINCIPAL_LOST,
+        PRINCIPAL_OWNERSHIP_SUPERSEDED,
+        SCIM_USER_PROVISIONED,
+        SCIM_USER_UPDATED,
+        SCIM_USER_DEACTIVATED,
+        SCIM_USER_REACTIVATED,
+        SCIM_GROUP_CREATED,
+        SCIM_GROUP_UPDATED,
+        SCIM_GROUP_DELETED,
+        SCIM_OUTBOUND_FAILED,
+        PASSWORD_RESET_REQUESTED,
+        PASSWORD_RESET_COMPLETED,
+    ];
+
+    /// Identity work addressed to a named receiver: the password-history
+    /// cleanup between a credential authority and its separate evaluator.
+    pub const IDENTITY_ADDRESSED: &[&str] = &[
+        PASSWORD_HISTORY_ENROLLMENT_ABORTED,
+        PASSWORD_HISTORY_OWNER_PURGED,
+        PASSWORD_HISTORY_CLEANUP_SETTLED,
+    ];
+
+    /// Facts of the private SaaS platform; an identity runtime never
+    /// publishes them.
+    pub const PLATFORM_FACTS: &[&str] = &[ORG_TRIAL_ACTIVATED];
 }
 
-/// Filter for event subscriptions.
+/// Whether the type pattern `pattern` (exact, `prefix.*` or `prefix.>`)
+/// matches `event_type`.
+fn type_matches(pattern: &str, event_type: &str) -> bool {
+    match pattern
+        .strip_suffix(".*")
+        .or_else(|| pattern.strip_suffix(".>"))
+    {
+        Some(prefix) => event_type
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.starts_with('.')),
+        None => event_type == pattern,
+    }
+}
+
+/// Filter of an observing subscription: each subscriber sees every matching
+/// fact published while it is subscribed, and nothing is kept for it. Work
+/// a receiver must not lose is consumed durably instead.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EventFilter {
     /// Event type patterns to subscribe to (e.g., "sid.user.*", "sid.security.brute_force.v1").
@@ -439,44 +809,16 @@ pub struct EventFilter {
 
     /// Attribute filters (key=value pairs). All must match.
     pub attributes: std::collections::HashMap<String, String>,
-
-    /// Queue group name for load-balanced consumption.
-    ///
-    /// When set, NATS JetStream creates a durable consumer with this queue group.
-    /// Among N instances subscribing with the same queue_group, each event is
-    /// delivered to exactly ONE instance (load balanced, not broadcast).
-    ///
-    /// When `None`, the consumer is ephemeral and each instance receives ALL events
-    /// (fan-out / broadcast mode). This is correct for notification-style consumers
-    /// but WRONG for work queues (leads to N× processing).
-    ///
-    /// Convention: use service binary name as queue group (e.g., "sid-notify", "sid-scim-worker").
-    pub queue_group: Option<String>,
 }
 
 impl EventFilter {
     /// Check if an event matches this filter.
     pub fn matches(&self, event: &Event) -> bool {
-        // Check event type patterns
-        if !self.event_types.is_empty() {
-            let type_match = self.event_types.iter().any(|pattern| {
-                if pattern.ends_with(".*") {
-                    let prefix = &pattern[..pattern.len() - 2];
-                    event.event_type.starts_with(prefix)
-                } else if pattern.ends_with(".>") {
-                    // NATS-style wildcard: matches any suffix
-                    let prefix = &pattern[..pattern.len() - 2];
-                    event.event_type.starts_with(prefix)
-                } else {
-                    event.event_type == *pattern
-                }
-            });
-            if !type_match {
-                return false;
-            }
-        }
-
-        true
+        self.event_types.is_empty()
+            || self
+                .event_types
+                .iter()
+                .any(|pattern| type_matches(pattern, &event.event_type))
     }
 }
 

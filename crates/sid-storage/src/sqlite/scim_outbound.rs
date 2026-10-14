@@ -2,7 +2,6 @@
 //! SCIM outbound provisioning targets, sync records and dead letters for
 //! SQLite backend.
 
-use chrono::{DateTime, Utc};
 use sid_core::{
     Error as SidError, Result as SidResult,
     models::{
@@ -85,6 +84,30 @@ fn row_to_dlq_entry(row: &sqlx::sqlite::SqliteRow) -> SidResult<OutboundDlqEntry
 
 fn record_audit_key(target_id: ScimOutboundTargetId, sid_entity_id: Uuid) -> String {
     format!("scim_outbound_record:{}:{}", target_id.0, sid_entity_id)
+}
+
+/// Insert `entry` into the outbound DLQ within `tx`; an existing id is
+/// `Conflict`.
+async fn insert_dlq_entry(tx: &mut super::WriteTx, entry: &OutboundDlqEntry) -> SidResult<()> {
+    sqlx::query(
+        "INSERT INTO scim_outbound_dlq (id, target_id, event_type, payload, sid_entity_id, \
+            entity_type, error, attempts, first_attempt, last_attempt) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(entry.id.to_string())
+    .bind(entry.target_id.0.to_string())
+    .bind(&entry.event_type)
+    .bind(to_json(&entry.payload, "payload")?)
+    .bind(entry.sid_entity_id.to_string())
+    .bind(entry.entity_type.as_str())
+    .bind(&entry.error)
+    .bind(i64::from(entry.attempts))
+    .bind(fmt_dt(&entry.first_attempt))
+    .bind(fmt_dt(&entry.last_attempt))
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| super::insert_error("outbound dlq entry", e))?;
+    Ok(())
 }
 
 impl SqliteBackend {
@@ -221,36 +244,29 @@ impl SqliteBackend {
         .await
     }
 
-    pub(crate) async fn record_scim_outbound_failure_impl(
+    /// Store `entry` and count it on its entity's mapping, if any, in place,
+    /// in one commit.
+    pub(crate) async fn record_scim_outbound_dead_letter_impl(
         &self,
-        target_id: ScimOutboundTargetId,
-        sid_entity_id: Uuid,
-        entity_type: OutboundEntityType,
-        error: &str,
-        at: DateTime<Utc>,
+        entry: &OutboundDlqEntry,
         audit: MutationContext,
-    ) -> SidResult<bool> {
+    ) -> SidResult<()> {
         let mut tx = self.begin_write().await?;
-        let recorded = sqlx::query(
+        insert_dlq_entry(&mut tx, entry).await?;
+        sqlx::query(
             "UPDATE scim_outbound_records SET last_error = ?, \
                 failure_count = failure_count + 1, updated_at = ? \
              WHERE target_id = ? AND sid_entity_id = ? AND entity_type = ?",
         )
-        .bind(error)
-        .bind(fmt_dt(&at))
-        .bind(target_id.0.to_string())
-        .bind(sid_entity_id.to_string())
-        .bind(entity_type.as_str())
+        .bind(&entry.error)
+        .bind(fmt_dt(&entry.last_attempt))
+        .bind(entry.target_id.0.to_string())
+        .bind(entry.sid_entity_id.to_string())
+        .bind(entry.entity_type.as_str())
         .execute(&mut *tx)
         .await
-        .map_err(|e| SidError::Storage(format!("record scim failure: {e}")))?
-        .rows_affected()
-            == 1;
-        if !recorded {
-            return Ok(false);
-        }
-        Self::commit_mutation(tx, &record_audit_key(target_id, sid_entity_id), audit).await?;
-        Ok(true)
+        .map_err(|e| SidError::Storage(format!("record scim failure: {e}")))?;
+        Self::commit_mutation(tx, &format!("outbound_dlq:{}", entry.id), audit).await
     }
 
     pub(crate) async fn get_scim_outbound_record_impl(
@@ -278,24 +294,7 @@ impl SqliteBackend {
         audit: MutationContext,
     ) -> SidResult<()> {
         let mut tx = self.begin_write().await?;
-        sqlx::query(
-            "INSERT INTO scim_outbound_dlq (id, target_id, event_type, payload, sid_entity_id, \
-                entity_type, error, attempts, first_attempt, last_attempt) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(entry.id.to_string())
-        .bind(entry.target_id.0.to_string())
-        .bind(&entry.event_type)
-        .bind(to_json(&entry.payload, "payload")?)
-        .bind(entry.sid_entity_id.to_string())
-        .bind(entry.entity_type.as_str())
-        .bind(&entry.error)
-        .bind(i64::from(entry.attempts))
-        .bind(fmt_dt(&entry.first_attempt))
-        .bind(fmt_dt(&entry.last_attempt))
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| super::insert_error("outbound dlq entry", e))?;
+        insert_dlq_entry(&mut tx, entry).await?;
         Self::commit_mutation(tx, &format!("outbound_dlq:{}", entry.id), audit).await
     }
 

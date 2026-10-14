@@ -69,7 +69,7 @@ impl AppRegistry {
 
     /// Parse from YAML string.
     pub fn from_yaml(yaml: &str) -> Result<Self, RegistryError> {
-        serde_yaml::from_str(yaml).map_err(RegistryError::YamlError)
+        serde_saphyr::from_str(yaml).map_err(RegistryError::YamlError)
     }
 
     /// Find an application by ID.
@@ -94,7 +94,7 @@ pub enum RegistryError {
     #[error("failed to read registry file {0}: {1}")]
     IoError(String, std::io::Error),
     #[error("invalid YAML: {0}")]
-    YamlError(#[from] serde_yaml::Error),
+    YamlError(#[from] serde_saphyr::Error),
 }
 
 #[cfg(test)]

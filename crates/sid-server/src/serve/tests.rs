@@ -122,18 +122,18 @@ fn test_sign_in_origin_refuses_wildcard_origins() {
         .unwrap()
         .origin();
     for listed in ["*", "null"] {
-        let mut config: serde_yaml::Value =
-            serde_yaml::from_str(&format!("cors: {{ origins: [\"{listed}\"] }}")).unwrap();
+        let mut config: serde_json::Value =
+            serde_saphyr::from_str(&format!("cors: {{ origins: [\"{listed}\"] }}")).unwrap();
         assert!(
             super::allow_sign_in_origin(&mut config, &origin).is_err(),
             "{listed}"
         );
     }
-    let mut config: serde_yaml::Value = serde_yaml::from_str("listen: { http: \"x\" }").unwrap();
+    let mut config: serde_json::Value = serde_saphyr::from_str("listen: { http: \"x\" }").unwrap();
     super::allow_sign_in_origin(&mut config, &origin).unwrap();
     super::allow_sign_in_origin(&mut config, &origin).unwrap();
     assert_eq!(
         config["cors"]["origins"],
-        serde_yaml::from_str::<serde_yaml::Value>("[\"https://login.sid.example.com\"]").unwrap()
+        serde_json::json!(["https://login.sid.example.com"])
     );
 }

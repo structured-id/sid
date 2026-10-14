@@ -223,12 +223,33 @@ async fn an_abort_before_its_preparation_fences_it() {
     );
 }
 
+/// The handoff to the evaluator of `source` of the abort event `id`.
+fn handoff(source: &str, id: uuid::Uuid) -> WorkId {
+    let mut event = Event::new(source, event_types::PASSWORD_HISTORY_ENROLLMENT_ABORTED);
+    event.id = id.to_string();
+    event.delivery_id(&super::super::relayed::cleanup_consumer(source))
+}
+
+/// Handoffs of events to receivers the store holds, done or not.
+async fn deliveries(storage: &dyn StorageBackend) -> usize {
+    storage
+        .export_work()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|w| w.record.kind.as_str() == sid_core::models::EVENT_DELIVERY_KIND)
+        .count()
+}
+
 /// With a separate evaluator, the abort is recorded together with the event
-/// that tells it, and stays owed until the evaluator's settlement is
-/// recorded: a later attempt relays it again (the first event may have aged
-/// out of the stream), and only the settlement ends the work.
+/// that tells it, addressed to the evaluator, and stays owed until the
+/// evaluator's settlement is recorded: a later attempt relays it again (the
+/// first handoff may have ended without effect), once per work, so the
+/// attempts during an evaluator outage do not pile up handoffs beside the
+/// one waiting in its queue. Only the settlement ends the work.
 #[tokio::test]
 async fn a_separate_evaluator_is_told_with_the_abort_until_it_settles() {
+    const SOURCE: &str = "https://sid.example.com";
     let storage = sqlite().await;
     let installation = sid_core::models::OrgId::generate();
     let (ops, _) = split(storage.clone(), installation, manager(3), manager(3));
@@ -236,7 +257,7 @@ async fn a_separate_evaluator_is_told_with_the_abort_until_it_settles() {
     let handler = EnrollmentHandler::new(
         storage.clone(),
         EvaluatorDelivery::Relay {
-            source: "https://sid.example.com".into(),
+            source: SOURCE.into(),
         },
     );
     let mut work = claimed(storage.as_ref(), id, domain).await;
@@ -244,16 +265,23 @@ async fn a_separate_evaluator_is_told_with_the_abort_until_it_settles() {
         matches!(handler.handle(&work).await, WorkOutcome::Retry(_)),
         "relayed, not settled"
     );
-    let first = WorkId(abort_event_id(id.into_uuid(), None));
+    let first = handoff(SOURCE, abort_event_id(id.into_uuid(), None));
     let relay = storage.get_work(first).await.unwrap().expect("relay owed");
-    assert_eq!(relay.kind.as_str(), sid_core::models::EVENT_RELAY_KIND);
+    assert_eq!(relay.kind.as_str(), sid_core::models::EVENT_DELIVERY_KIND);
 
-    work.attempt = 2;
-    assert!(matches!(handler.handle(&work).await, WorkOutcome::Retry(_)));
-    let again = WorkId(abort_event_id(id.into_uuid(), Some((work.id, 2))));
+    for attempt in 2..=3 {
+        work.attempt = attempt;
+        assert!(matches!(handler.handle(&work).await, WorkOutcome::Retry(_)));
+    }
+    let again = handoff(SOURCE, abort_event_id(id.into_uuid(), Some(work.id)));
     assert!(
         storage.get_work(again).await.unwrap().is_some(),
         "relayed again"
+    );
+    assert_eq!(
+        deliveries(storage.as_ref()).await,
+        2,
+        "each attempt handed the abort over anew"
     );
 
     // Its attempts run out unsettled (an evaluator outage): the cleanup goes
@@ -282,7 +310,10 @@ async fn a_separate_evaluator_is_told_with_the_abort_until_it_settles() {
     assert!(matches!(handler.handle(&next).await, WorkOutcome::Retry(_)));
     assert!(
         storage
-            .get_work(WorkId(abort_event_id(id.into_uuid(), Some((next.id, 1)))))
+            .get_work(handoff(
+                SOURCE,
+                abort_event_id(id.into_uuid(), Some(next.id))
+            ))
             .await
             .unwrap()
             .is_some(),

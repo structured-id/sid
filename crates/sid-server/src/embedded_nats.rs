@@ -42,17 +42,22 @@ pub struct ConnectedBus {
     pub embedded: Option<EmbeddedNats>,
 }
 
-/// Start (if embedded) and connect the event bus, or fail.
+/// Start (if embedded) and connect the event bus on `topology`, or fail. The
+/// bundled server is this installation's own, so this process owns its
+/// topology; on an external one it takes `role`.
 pub async fn connect_event_bus(
     mode: &EventBusMode,
     data_dir: &Path,
+    topology: sid_infra::Topology,
+    role: sid_infra::TopologyRole,
 ) -> Result<ConnectedBus, EventBusStartError> {
     match mode {
         EventBusMode::Embedded => {
             let (embedded, url) = EmbeddedNats::spawn(&data_dir.join("nats"))?;
-            let bus = sid_infra::NatsEventBus::connect(&url)
-                .await
-                .map_err(|e| EventBusStartError::Connect(e.to_string()))?;
+            let bus =
+                sid_infra::NatsEventBus::connect(&url, topology, sid_infra::TopologyRole::Own)
+                    .await
+                    .map_err(|e| EventBusStartError::Connect(e.to_string()))?;
             info!(port = embedded.port(), "Event bus: embedded NATS");
             Ok(ConnectedBus {
                 bus: Arc::new(bus),
@@ -60,7 +65,7 @@ pub async fn connect_event_bus(
             })
         }
         EventBusMode::External(url) => {
-            let bus = sid_infra::NatsEventBus::connect(url)
+            let bus = sid_infra::NatsEventBus::connect(url, topology, role)
                 .await
                 .map_err(|e| EventBusStartError::Connect(e.to_string()))?;
             info!("Event bus: external NATS at {url}");

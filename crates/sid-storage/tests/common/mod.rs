@@ -1965,26 +1965,27 @@ pub async fn test_scim_outbound_roundtrip(backend: &dyn StorageBackend) {
         Err(sid_core::Error::Conflict(_))
     ));
 
-    // Concurrent failures are all counted and keep the downstream id.
+    // Concurrent dead letters are all stored and all counted on the mapping,
+    // which keeps its downstream id.
+    let dead_letter = |entity: Uuid, error: &str| OutboundDlqEntry {
+        id: Uuid::now_v7(),
+        target_id: target.id,
+        event_type: "sid.scim.user.updated.v1".into(),
+        payload: serde_json::json!({ "profile_id": entity }),
+        sid_entity_id: entity,
+        entity_type: OutboundEntityType::User,
+        error: error.into(),
+        attempts: 3,
+        first_attempt: now,
+        last_attempt: now,
+    };
+    let (first, second) = (dead_letter(user, "503"), dead_letter(user, "504"));
     let (a, b) = tokio::join!(
-        backend.record_scim_outbound_failure(
-            target.id,
-            user,
-            OutboundEntityType::User,
-            "503",
-            now,
-            test_audit()
-        ),
-        backend.record_scim_outbound_failure(
-            target.id,
-            user,
-            OutboundEntityType::User,
-            "504",
-            now,
-            test_audit()
-        ),
+        backend.record_scim_outbound_dead_letter(&first, test_audit()),
+        backend.record_scim_outbound_dead_letter(&second, test_audit()),
     );
-    assert!(a.unwrap() && b.unwrap());
+    a.unwrap();
+    b.unwrap();
     let failing = backend
         .get_scim_outbound_record(target.id, user, OutboundEntityType::User)
         .await
@@ -1993,19 +1994,38 @@ pub async fn test_scim_outbound_roundtrip(backend: &dyn StorageBackend) {
     assert_eq!(failing.failure_count, 2, "a concurrent failure was lost");
     assert_eq!(failing.downstream_id, "ext-42");
     assert!(failing.last_error.is_some());
-    assert!(
-        !backend
-            .record_scim_outbound_failure(
-                target.id,
-                Uuid::now_v7(),
-                OutboundEntityType::User,
-                "503",
-                now,
-                test_audit()
-            )
+    // A dead letter whose id is taken stores and counts nothing.
+    let mut repeated = second.clone();
+    repeated.error = "500".into();
+    assert!(matches!(
+        backend
+            .record_scim_outbound_dead_letter(&repeated, test_audit())
+            .await,
+        Err(sid_core::Error::Conflict(_))
+    ));
+    assert_eq!(
+        backend
+            .get_scim_outbound_record(target.id, user, OutboundEntityType::User)
             .await
-            .unwrap(),
-        "a failure without a mapping records nothing"
+            .unwrap()
+            .unwrap()
+            .failure_count,
+        2,
+        "a refused dead letter was counted"
+    );
+    // A dead letter of an entity without a mapping is stored and makes none.
+    let unmapped = Uuid::now_v7();
+    backend
+        .record_scim_outbound_dead_letter(&dead_letter(unmapped, "503"), test_audit())
+        .await
+        .unwrap();
+    assert!(
+        backend
+            .get_scim_outbound_record(target.id, unmapped, OutboundEntityType::User)
+            .await
+            .unwrap()
+            .is_none(),
+        "a failure without a mapping made one"
     );
 
     // A later success points at the new downstream id and clears the error,
@@ -2063,8 +2083,19 @@ pub async fn test_scim_outbound_roundtrip(backend: &dyn StorageBackend) {
         Err(sid_core::Error::Conflict(_))
     ));
     let letters = backend.list_outbound_dlq_entries(target.id).await.unwrap();
-    assert_eq!(letters.len(), 1);
-    assert_eq!(letters[0].payload, letter.payload);
+    assert_eq!(letters.len(), 4, "three recorded failures and one import");
+    let imported = letters.iter().find(|l| l.id == letter.id).unwrap();
+    assert_eq!(imported.payload, letter.payload);
+    // An imported dead letter counts nothing.
+    assert_eq!(
+        backend
+            .get_scim_outbound_record(target.id, user, OutboundEntityType::User)
+            .await
+            .unwrap()
+            .unwrap()
+            .failure_count,
+        0
+    );
 
     // Disabled targets are not listed for delivery.
     let disabled = ScimOutboundTarget {

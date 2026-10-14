@@ -45,11 +45,11 @@ tokio = { workspace = true }
 # Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }
-serde_yaml = { workspace = true }
+serde-saphyr = { workspace = true }
 
 # HTTP form of forward auth: the embedded annotation transcoder
 # (crates.io/crates/structured-proxy). Its own JWT and TLS stacks stay off.
-structured-proxy = { version = "8.1.1", default-features = false, optional = true }
+structured-proxy = { version = "8.1.2", default-features = false, optional = true }
 
 # Logging
 tracing = { workspace = true }

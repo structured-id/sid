@@ -5638,9 +5638,10 @@ async fn test_password_reset_event_carries_no_secret() {
     let mut events = svc
         .event_bus
         .subscribe(sid_core::models::event::EventFilter {
-            event_types: vec!["sid.auth.password_reset_requested.v1".to_string()],
+            event_types: vec![
+                sid_core::models::event::event_types::PASSWORD_RESET_REQUESTED.to_string(),
+            ],
             attributes: Default::default(),
-            queue_group: None,
         })
         .await
         .unwrap();
