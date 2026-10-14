@@ -5677,7 +5677,7 @@ impl AuthService for AuthServiceImpl {
         // address. It is owed by the commit that stores the reset session.
         let requested = sid_core::models::event::Event::new(
             format!("profile/{}", profile.id),
-            "sid.auth.password_reset_requested.v1",
+            sid_core::models::event::event_types::PASSWORD_RESET_REQUESTED,
         )
         .with_data(serde_json::json!({
             "reset_session_id": session.id.to_string(),
@@ -5870,7 +5870,7 @@ impl AuthService for AuthServiceImpl {
         );
         let completed = sid_core::models::event::Event::new(
             format!("profile/{}", profile_id),
-            "sid.auth.password_reset_completed.v1",
+            sid_core::models::event::event_types::PASSWORD_RESET_COMPLETED,
         );
         let ctx = MutationContext::from(AuditEntry::user(
             profile_id.to_string(),

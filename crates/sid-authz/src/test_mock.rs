@@ -1860,15 +1860,11 @@ impl sid_plugin::StorageBackend for MockStorage {
     ) -> Result<()> {
         unimplemented!()
     }
-    async fn record_scim_outbound_failure(
+    async fn record_scim_outbound_dead_letter(
         &self,
-        _: ScimOutboundTargetId,
-        _: uuid::Uuid,
-        _: OutboundEntityType,
-        _: &str,
-        _: chrono::DateTime<chrono::Utc>,
+        _: &OutboundDlqEntry,
         _: MutationContext,
-    ) -> Result<bool> {
+    ) -> Result<()> {
         unimplemented!()
     }
     async fn get_scim_outbound_record(

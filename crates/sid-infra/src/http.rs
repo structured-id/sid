@@ -13,27 +13,28 @@ use structured_proxy::upstream::Upstream;
 
 /// A transcoder for the RPCs in the proto files `files` selects.
 ///
-/// `config` is a structured-proxy configuration (listen address, CORS, rate
-/// limits, health, metrics). It names no upstream: [`serve`] hands the
+/// `config` is a structured-proxy configuration tree, read from YAML or built
+/// in code (listen address, CORS, rate limits, health, metrics). It names no
+/// upstream: [`serve`] hands the
 /// transcoder the service's own gRPC services. `forwarded_headers` are
 /// forwarded whatever it lists, since the RPCs read them as metadata.
 pub fn embedded_transcoder(
-    config: &serde_yaml::Value,
+    config: &serde_json::Value,
     forwarded_headers: &[&str],
     files: impl Fn(&str) -> bool,
 ) -> anyhow::Result<ProxyServer> {
     let mut config = config.clone();
     let map = config
-        .as_mapping_mut()
+        .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("the HTTP configuration must be a mapping"))?;
     anyhow::ensure!(
         !map.contains_key("upstream"),
         "the HTTP configuration names no upstream: it serves this service's own RPCs"
     );
 
-    let mut forwarded: Vec<serde_yaml::Value> = map
+    let mut forwarded: Vec<serde_json::Value> = map
         .get("forwarded_headers")
-        .and_then(|v| v.as_sequence())
+        .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
     for name in forwarded_headers {
@@ -45,7 +46,9 @@ pub fn embedded_transcoder(
 
     let pool =
         prost_reflect::DescriptorPool::decode(sid_proto::descriptor_set_of(files).as_slice())?;
-    Ok(ProxyServer::from_yaml_str(&serde_yaml::to_string(&config)?)?.with_descriptors(pool))
+    // JSON text is YAML (YAML 1.2 §1.3), so the transcoder reads the
+    // configuration as it reads its own file.
+    Ok(ProxyServer::from_yaml_str(&serde_json::to_string(&config)?)?.with_descriptors(pool))
 }
 
 /// Serve `proxy` on its listen address in front of `upstream`, the service's
@@ -83,12 +86,8 @@ pub async fn serve_on<U: Upstream>(
 }
 
 /// A structured-proxy configuration listening on `bind` and nothing else.
-pub fn listening_on(bind: &str) -> serde_yaml::Value {
-    let mut listen = serde_yaml::Mapping::new();
-    listen.insert("http".into(), bind.into());
-    let mut config = serde_yaml::Mapping::new();
-    config.insert("listen".into(), listen.into());
-    config.into()
+pub fn listening_on(bind: &str) -> serde_json::Value {
+    serde_json::json!({ "listen": { "http": bind } })
 }
 
 #[cfg(test)]

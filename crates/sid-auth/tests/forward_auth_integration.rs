@@ -323,7 +323,7 @@ async fn harness_with(authz: MockAuthz, registry_down: bool) -> Harness {
         ),
     )
     .await;
-    let config: sid_auth::config::AuthConfig = serde_yaml::from_str(&format!(
+    let config: sid_auth::config::AuthConfig = serde_saphyr::from_str(&format!(
         "upstream: http://{upstream}\n\
          issuer_url: https://sid.example.com\n\
          login_url: https://sid.example.com/auth/login\n\

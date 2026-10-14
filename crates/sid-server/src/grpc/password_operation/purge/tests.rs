@@ -126,11 +126,33 @@ async fn a_deleted_owners_keys_are_destroyed() {
     );
 }
 
-/// With a separate evaluator, the purge owes the event that tells it until
-/// the evaluator's settlement is recorded: a later attempt relays it again,
-/// and only the settlement ends the work.
+/// The handoff to the evaluator of `source` of the purge event `id`.
+fn handoff(source: &str, id: uuid::Uuid) -> WorkId {
+    let mut event = Event::new(source, event_types::PASSWORD_HISTORY_OWNER_PURGED);
+    event.id = id.to_string();
+    event.delivery_id(&super::super::relayed::cleanup_consumer(source))
+}
+
+/// Handoffs of events to receivers the store holds, done or not.
+async fn deliveries(storage: &dyn StorageBackend) -> usize {
+    storage
+        .export_work()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|w| w.record.kind.as_str() == sid_core::models::EVENT_DELIVERY_KIND)
+        .count()
+}
+
+/// With a separate evaluator, the purge owes the event that tells it,
+/// addressed to the evaluator, until the evaluator's settlement is recorded.
+/// The attempts of one work share one handoff: while the evaluator is away
+/// the first stays in its queue, and another would only pile up beside it.
+/// A successor (the attempts ran out) relays anew, in case that one ended
+/// without effect. Only the settlement ends the work.
 #[tokio::test]
 async fn a_separate_evaluator_is_told_of_the_purge_until_it_settles() {
+    const SOURCE: &str = "https://sid.example.com";
     let (storage, org, profile, _, _) = owner_with_a_key().await;
     let purge = owner_purge(storage.as_ref(), profile)
         .await
@@ -140,22 +162,24 @@ async fn a_separate_evaluator_is_told_of_the_purge_until_it_settles() {
     let handler = OwnerPurgeHandler::new(
         storage.clone(),
         EvaluatorDelivery::Relay {
-            source: "https://sid.example.com".into(),
+            source: SOURCE.into(),
         },
     );
     let mut work = claimed(storage.as_ref(), purge.id).await;
     assert!(matches!(handler.handle(&work).await, WorkOutcome::Retry(_)));
     let domain = sid_authn::password_history::owner_domain(org.id.as_bytes(), profile);
-    let event = WorkId(purge_event_id(&domain, work.id, 1));
+    let event = handoff(SOURCE, purge_event_id(&domain, work.id));
     let relay = storage.get_work(event).await.unwrap().expect("relay owed");
-    assert_eq!(relay.kind.as_str(), sid_core::models::EVENT_RELAY_KIND);
+    assert_eq!(relay.kind.as_str(), sid_core::models::EVENT_DELIVERY_KIND);
 
-    work.attempt = 2;
-    assert!(matches!(handler.handle(&work).await, WorkOutcome::Retry(_)));
-    let again = WorkId(purge_event_id(&domain, work.id, 2));
-    assert!(
-        storage.get_work(again).await.unwrap().is_some(),
-        "relayed again"
+    for attempt in 2..=3 {
+        work.attempt = attempt;
+        assert!(matches!(handler.handle(&work).await, WorkOutcome::Retry(_)));
+    }
+    assert_eq!(
+        deliveries(storage.as_ref()).await,
+        1,
+        "each attempt handed the purge over anew"
     );
 
     // Its attempts run out unsettled (an evaluator outage): the purge goes on
@@ -174,12 +198,13 @@ async fn a_separate_evaluator_is_told_of_the_purge_until_it_settles() {
     assert!(matches!(handler.handle(&work).await, WorkOutcome::Retry(_)));
     assert!(
         storage
-            .get_work(WorkId(purge_event_id(&domain, work.id, 1)))
+            .get_work(handoff(SOURCE, purge_event_id(&domain, work.id)))
             .await
             .unwrap()
             .is_some(),
         "the successor relays anew"
     );
+    assert_eq!(deliveries(storage.as_ref()).await, 2);
 
     super::super::relayed::record_settlement(
         storage.as_ref(),

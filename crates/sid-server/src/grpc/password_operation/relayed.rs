@@ -1,21 +1,21 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! The relayed cleanup between a credential authority and a separate
 //! evaluator. The credential authority owes an aborted first enrollment's
-//! and a deleted owner's cleanup as an event relayed with the decision that
-//! made it. The evaluator consumes those events durably and acts on each (it
-//! reclaims the enrollment's key, or destroys the owner's keys), reports the
-//! settlement, and only then acknowledges the event; both effects are
-//! idempotent in its store. The credential authority records the
+//! and a deleted owner's cleanup as an event addressed to its evaluator,
+//! committed with the decision that made it. The evaluator consumes those
+//! events durably and acts on each (it reclaims the enrollment's key, or
+//! destroys the owner's keys), addresses the settlement back to the
+//! authority, and acknowledges the event once the effect is done; both
+//! effects are idempotent in its store. The credential authority records the
 //! settlements it consumes and keeps each cleanup owed, relaying it again,
-//! until its settlement is recorded: an event lost to the stream's limits
-//! or an evaluator outage is never lost to the obligation. A standalone
-//! installation does neither: its evaluator runs in process and is told
-//! directly.
+//! until its settlement is recorded: the settlement, not the handoff,
+//! establishes that the keys are gone. A standalone installation does
+//! neither: its evaluator runs in process and is told directly.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use sid_core::models::event::{Event, event_types};
+use sid_core::models::event::{Event, WorkRecipient, event_types};
 use sid_core::models::{
     AuditEntry, CLEANUP_SETTLED_NAMESPACE, CleanupSettled, EnrollmentAdmission, EnrollmentCleanup,
     MutationContext, OperationCompletion, OwnerPurge, RelayedCleanup,
@@ -30,26 +30,25 @@ use super::HistoryEvaluation;
 const CONSUMER_AUTHORITY_NAMESPACE: uuid::Uuid =
     uuid::Uuid::from_u128(0x71c4_2e9a_5b03_4f68_a2d7_c815_3e6f_09b4);
 
-/// A durable consumer's name for credential authority `authority`: every
-/// replica serving that authority shares it, and deployments of different
-/// authorities on one bus each get their own copy of every event rather than
-/// sharing, and rejecting, each other's. The tag keeps the name within the
-/// characters a consumer name allows.
-fn consumer_name(prefix: &str, authority: &str) -> String {
+/// A receiver for credential authority `authority`: every replica serving
+/// that authority shares it, and deployments of different authorities on
+/// one bus each have their own rather than sharing, and rejecting, each
+/// other's work. The tag keeps the name within an address token.
+fn receiver(prefix: &str, authority: &str) -> WorkRecipient {
     let tag = uuid::Uuid::new_v5(&CONSUMER_AUTHORITY_NAMESPACE, authority.as_bytes());
-    format!("{prefix}-{}", tag.simple())
+    WorkRecipient::new(format!("{prefix}-{}", tag.simple())).expect("a tagged prefix is a token")
 }
 
-/// The durable consumer every replica of a separate evaluator serving
-/// `authority` shares.
-pub fn cleanup_consumer(authority: &str) -> String {
-    consumer_name("password-history-evaluator-cleanup", authority)
+/// The separate evaluator serving `authority`: the cleanup is addressed
+/// to it.
+pub fn cleanup_consumer(authority: &str) -> WorkRecipient {
+    receiver("password-history-evaluator-cleanup", authority)
 }
 
-/// The durable consumer every replica of credential authority `authority`
-/// shares, with a separate evaluator.
-pub fn settlement_consumer(authority: &str) -> String {
-    consumer_name("password-history-cleanup-settlements", authority)
+/// Credential authority `authority`, with a separate evaluator: the
+/// settlements are addressed to it.
+pub fn settlement_consumer(authority: &str) -> WorkRecipient {
+    receiver("password-history-cleanup-settlements", authority)
 }
 
 /// The method a recorded settlement carries.
@@ -107,8 +106,9 @@ pub async fn consume_cleanup_settlements(
 ) -> EventBusResult<()> {
     let mut deliveries = bus
         .consume(DurableConsumer {
-            name: settlement_consumer(authority),
+            recipient: settlement_consumer(authority),
             event_types: vec![event_types::PASSWORD_HISTORY_CLEANUP_SETTLED.into()],
+            ordered: false,
         })
         .await?;
     while let Some(delivery) = deliveries.recv().await {
@@ -140,6 +140,21 @@ const RETRY: Duration = Duration::from_secs(30);
 /// the obligation stays until it does.
 const RETAINED_RETRY: Duration = Duration::from_secs(60 * 60);
 
+/// When a settlement report the bus refused is offered again: soon, as a full
+/// work stream frees up while its consumers acknowledge, then less often.
+const REPORT_RETRY: &[Duration] = &[
+    Duration::from_secs(1),
+    Duration::from_secs(5),
+    Duration::from_secs(30),
+    Duration::from_secs(120),
+    Duration::from_secs(600),
+    Duration::from_secs(3600),
+];
+
+/// Refused reports a consumer offers again; past them, and past the last
+/// retry, the authority relaying the cleanup again is the only retry.
+const PENDING_REPORTS: usize = 10_000;
+
 /// Consume the relayed cleanup of the credential authority named `source` on
 /// `bus`, acting on each event through `evaluation`, until the bus ends the
 /// consumer. The authenticity of an event is the bus's: the NATS account holds
@@ -151,31 +166,111 @@ pub async fn consume_relayed_cleanup(
     evaluation: Arc<HistoryEvaluation>,
     source: &str,
 ) -> EventBusResult<()> {
+    consume_relayed_cleanup_retrying(bus, evaluation, source, REPORT_RETRY).await
+}
+
+/// [`consume_relayed_cleanup`], offering a refused report again after each
+/// delay of `retry` in turn.
+async fn consume_relayed_cleanup_retrying(
+    bus: &dyn EventBus,
+    evaluation: Arc<HistoryEvaluation>,
+    source: &str,
+    retry: &[Duration],
+) -> EventBusResult<()> {
     let mut deliveries = bus
         .consume(DurableConsumer {
-            name: cleanup_consumer(source),
+            recipient: cleanup_consumer(source),
             event_types: vec![
                 event_types::PASSWORD_HISTORY_ENROLLMENT_ABORTED.into(),
                 event_types::PASSWORD_HISTORY_OWNER_PURGED.into(),
             ],
+            ordered: false,
         })
         .await?;
-    while let Some(delivery) = deliveries.recv().await {
-        let settlement = match settle(&evaluation, source, &delivery.event).await {
-            // Reported before the event is acknowledged: a lost report
-            // leaves the event to be delivered and reported again.
-            (Settlement::Done, Some(cleanup)) => match report(bus, source, cleanup).await {
-                Ok(()) => Settlement::Done,
-                Err(e) => {
-                    warn!("report a cleanup settlement: {e}");
-                    Settlement::Retry(RETRY)
+    let mut refused = RefusedReports::default();
+    loop {
+        let due = refused.next_due();
+        tokio::select! {
+            delivery = deliveries.recv() => {
+                let Some(delivery) = delivery else { break };
+                match settle(&evaluation, source, &delivery.event).await {
+                    // The effect is done, so the event is acknowledged whether
+                    // or not its report goes out: holding it until the report
+                    // does would keep a full work stream full, the report and
+                    // the event waiting on each other. A refused report is
+                    // offered again once the acknowledgement frees a slot; the
+                    // authority also keeps the cleanup owed until a settlement
+                    // is recorded, relaying it again, in case this process
+                    // ends before the report goes out.
+                    (Settlement::Done, Some(cleanup)) => {
+                        let reported = report(bus, source, cleanup).await;
+                        delivery.settle(Settlement::Done);
+                        if let Err(e) = reported {
+                            warn!("report a cleanup settlement: {e}; it is offered again");
+                            refused.add(cleanup, retry);
+                        }
+                    }
+                    (settlement, _) => delivery.settle(settlement),
                 }
-            },
-            (settlement, _) => settlement,
-        };
-        delivery.settle(settlement);
+            }
+            // Disabled while nothing is pending: the instant is then unused.
+            () = tokio::time::sleep_until(due.unwrap_or_else(tokio::time::Instant::now)),
+                if due.is_some() =>
+            {
+                refused.offer_due(bus, source, retry).await;
+            }
+        }
     }
     Ok(())
+}
+
+/// Settlement reports the bus refused, each with the retry it is at and when
+/// it is offered again.
+#[derive(Default)]
+struct RefusedReports(Vec<(RelayedCleanup, usize, tokio::time::Instant)>);
+
+impl RefusedReports {
+    /// When the next report is offered again, if any is pending.
+    fn next_due(&self) -> Option<tokio::time::Instant> {
+        self.0.iter().map(|&(_, _, due)| due).min()
+    }
+
+    /// Offer `cleanup`'s report again after the first delay of `retry`.
+    fn add(&mut self, cleanup: RelayedCleanup, retry: &[Duration]) {
+        if self.0.iter().any(|(pending, _, _)| *pending == cleanup) {
+            return;
+        }
+        let Some(&delay) = retry.first() else { return };
+        if self.0.len() >= PENDING_REPORTS {
+            warn!("too many refused settlement reports; the authority relays the cleanup again");
+            return;
+        }
+        self.0
+            .push((cleanup, 0, tokio::time::Instant::now() + delay));
+    }
+
+    /// Offer every report that is due again, keeping those still refused
+    /// until their next delay of `retry`.
+    async fn offer_due(&mut self, bus: &dyn EventBus, source: &str, retry: &[Duration]) {
+        let now = tokio::time::Instant::now();
+        let mut kept = Vec::with_capacity(self.0.len());
+        for (cleanup, attempt, due) in std::mem::take(&mut self.0) {
+            if due > now {
+                kept.push((cleanup, attempt, due));
+                continue;
+            }
+            let Err(e) = report(bus, source, cleanup).await else {
+                continue;
+            };
+            match retry.get(attempt + 1) {
+                Some(&delay) => kept.push((cleanup, attempt + 1, now + delay)),
+                None => warn!(
+                    "report a cleanup settlement: {e}; the authority relays the cleanup again"
+                ),
+            }
+        }
+        self.0 = kept;
+    }
 }
 
 /// Tell the credential authority `authority` that `cleanup` is settled.
@@ -193,13 +288,17 @@ async fn report(
         event_types::PASSWORD_HISTORY_CLEANUP_SETTLED,
     )
     .with_data(serde_json::to_value(&settled).expect("a settlement serializes"));
-    // One per cleanup: a repeated report is the same event.
+    // One per cleanup: a repeated report is the same event and the same
+    // handoff. Its owner until the bus accepts it is the cleanup event this
+    // evaluator has not yet acknowledged.
     event.id = uuid::Uuid::new_v5(
         &SETTLED_EVENT_NAMESPACE,
         cleanup.settlement_key().as_str().as_bytes(),
     )
     .to_string();
-    bus.publish(event).await
+    let authority = settlement_consumer(authority);
+    bus.deliver(&authority, event.delivery_id(&authority), &event)
+        .await
 }
 
 /// What acting on `event` came to, and the cleanup it settled.

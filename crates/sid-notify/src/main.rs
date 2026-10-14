@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! StructuredID Notification Service — standalone binary.
 //!
-//! Consumes events from NATS JetStream and delivers notifications
-//! through configured channels (email, webhook, web push).
+//! Consumes the facts owed to it from NATS JetStream and delivers
+//! notifications through configured channels (email, webhook, web push).
 //!
 //! ## Usage
 //!
@@ -33,7 +33,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(
         nats = %config.nats_url,
         bind = %config.grpc_bind,
-        group = %config.queue_group,
+        receiver = %config.receiver,
         smtp = config.smtp_enabled,
         webhook = config.webhook_enabled,
         vapid = config.vapid.is_some(),

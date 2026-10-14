@@ -10,7 +10,7 @@ upstream:
 oidc:
   issuer_url: "https://sid.example.com"
 "#;
-    let config: ProxyConfig = serde_yaml::from_str(yaml).unwrap();
+    let config: ProxyConfig = serde_saphyr::from_str(yaml).unwrap();
     assert_eq!(config.grpc_upstream(), "http://127.0.0.1:50051");
     assert_eq!(config.issuer_url(), "https://sid.example.com");
     assert_eq!(config.bind_addr(), "0.0.0.0:8080"); // default
@@ -44,7 +44,7 @@ shield:
       class: "auth"
 cache_url: "redis://cache:6379"
 "#;
-    let config: ProxyConfig = serde_yaml::from_str(yaml).unwrap();
+    let config: ProxyConfig = serde_saphyr::from_str(yaml).unwrap();
     assert_eq!(config.service.name, "my-proxy");
     assert_eq!(config.bind_addr(), "0.0.0.0:9090");
     assert_eq!(config.grpc_upstream(), "http://grpc:50051");
@@ -74,7 +74,7 @@ fn test_settings_this_proxy_does_not_read_are_refused() {
             "upstream: {{ default: \"http://grpc:50051\" }}\noidc: {{ issuer_url: \"https://x.example\" }}\n{extra}\n"
         );
         assert!(
-            serde_yaml::from_str::<ProxyConfig>(&yaml).is_err(),
+            serde_saphyr::from_str::<ProxyConfig>(&yaml).is_err(),
             "{extra}"
         );
     }
@@ -107,7 +107,7 @@ fn test_default_endpoint_classes() {
 #[test]
 fn test_reference_yaml_parses() {
     let yaml = include_str!("../../sid-auth-proxy.yaml");
-    let config: ProxyConfig = serde_yaml::from_str(yaml).unwrap();
+    let config: ProxyConfig = serde_saphyr::from_str(yaml).unwrap();
     assert_eq!(config.service.name, "sid-auth-proxy");
     assert_eq!(config.bind_addr(), "0.0.0.0:8080");
     assert_eq!(config.grpc_upstream(), "http://127.0.0.1:50051");
@@ -140,11 +140,11 @@ bff:
   enabled: true
   dev_mode: true
 "#;
-    let dev: ProxyConfig = serde_yaml::from_str(yaml).unwrap();
+    let dev: ProxyConfig = serde_saphyr::from_str(yaml).unwrap();
     assert_eq!(dev.bff_cookie_name(), "sid-bff");
 
     let prod: ProxyConfig =
-        serde_yaml::from_str(&yaml.replace("dev_mode: true", "dev_mode: false")).unwrap();
+        serde_saphyr::from_str(&yaml.replace("dev_mode: true", "dev_mode: false")).unwrap();
     assert_eq!(prod.bff_cookie_name(), "__Host-sid-bff");
 }
 
@@ -164,7 +164,7 @@ bff:
   idle_timeout: 600
   pending_ttl: 45
 "#;
-    let config: ProxyConfig = serde_yaml::from_str(yaml).unwrap();
+    let config: ProxyConfig = serde_saphyr::from_str(yaml).unwrap();
     assert_eq!(config.bff_max_age(), 7200);
     assert_eq!(config.bff_idle_timeout(), 600);
     assert_eq!(config.bff_pending_ttl(), 45);
@@ -183,7 +183,7 @@ bff:
   client_key: "/etc/sid/bff-key.pem"
   api_upstream: "http://sid:8080"
 "#;
-    let config: ProxyConfig = serde_yaml::from_str(yaml).unwrap();
+    let config: ProxyConfig = serde_saphyr::from_str(yaml).unwrap();
     assert_eq!(config.bff_client_key(), Some("/etc/sid/bff-key.pem"));
     assert_eq!(config.bff_api_upstream(), Some("http://sid:8080"));
 }

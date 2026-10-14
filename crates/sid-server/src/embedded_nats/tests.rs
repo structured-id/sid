@@ -1,6 +1,18 @@
 use super::*;
 
-use sid_core::models::event::{Event, EventFilter};
+use sid_core::models::event::{Event, EventFilter, WorkRecipient, event_types};
+use sid_plugin::event_bus::{DurableConsumer, Settlement};
+
+/// The bus of `mode` on the default topology, owned by this process.
+async fn connect(mode: &EventBusMode, dir: &Path) -> Result<ConnectedBus, EventBusStartError> {
+    connect_event_bus(
+        mode,
+        dir,
+        sid_infra::Topology::default(),
+        sid_infra::TopologyRole::Own,
+    )
+    .await
+}
 
 #[test]
 fn test_find_available_port() {
@@ -41,7 +53,7 @@ fn mode_from_setting() {
 async fn unreachable_external_nats_is_an_error() {
     let dir = tempfile::tempdir().unwrap();
     let mode = EventBusMode::External("nats://127.0.0.1:1".into());
-    let result = connect_event_bus(&mode, dir.path()).await;
+    let result = connect(&mode, dir.path()).await;
     assert!(matches!(result, Err(EventBusStartError::Connect(_))));
 }
 
@@ -61,7 +73,7 @@ fn test_embedded_nats_spawn_and_stop() {
 #[tokio::test]
 async fn test_embedded_nats_event_bus_publish_subscribe() {
     let dir = tempfile::tempdir().unwrap();
-    let connected = connect_event_bus(&EventBusMode::Embedded, dir.path())
+    let connected = connect(&EventBusMode::Embedded, dir.path())
         .await
         .expect("nats-server must be installed");
 
@@ -94,13 +106,13 @@ async fn embedded_jetstream_survives_restart() {
     let event = Event::new("test", "sid.user.created.v1").with_subject("profile/restart");
     let id = event.id.clone();
 
-    let first = connect_event_bus(&EventBusMode::Embedded, dir.path())
+    let first = connect(&EventBusMode::Embedded, dir.path())
         .await
         .expect("nats-server must be installed");
     first.bus.publish(event).await.unwrap();
     drop(first);
 
-    let second = connect_event_bus(&EventBusMode::Embedded, dir.path())
+    let second = connect(&EventBusMode::Embedded, dir.path())
         .await
         .expect("restart");
     let mut replay = second
@@ -121,4 +133,42 @@ async fn embedded_jetstream_survives_restart() {
         seen,
         "event published before the restart must be replayable"
     );
+}
+
+/// Work handed to a receiver that has not run yet is still its after the
+/// bundled server restarts: the work stream lives under the data directory.
+#[tokio::test]
+async fn embedded_work_survives_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let notify = WorkRecipient::new("sid-notify").unwrap();
+    let event = Event::new("test", event_types::SESSION_REVOKED);
+
+    let first = connect(&EventBusMode::Embedded, dir.path())
+        .await
+        .expect("nats-server must be installed");
+    first
+        .bus
+        .deliver(&notify, event.delivery_id(&notify), &event)
+        .await
+        .unwrap();
+    drop(first);
+
+    let second = connect(&EventBusMode::Embedded, dir.path())
+        .await
+        .expect("restart");
+    let mut deliveries = second
+        .bus
+        .consume(DurableConsumer {
+            recipient: notify,
+            event_types: Vec::new(),
+            ordered: false,
+        })
+        .await
+        .unwrap();
+    let delivered = tokio::time::timeout(std::time::Duration::from_secs(10), deliveries.recv())
+        .await
+        .expect("work in time")
+        .expect("consumer open");
+    assert_eq!(delivered.event.id, event.id);
+    delivered.settle(Settlement::Done);
 }

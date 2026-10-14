@@ -1251,8 +1251,18 @@ impl TestServices {
 
         let contest =
             sid_authn::principal_contest::PrincipalContestHandler::new(self.storage.clone());
-        let relay = sid_authn::event_relay::EventRelayHandler::new(self.event_bus.clone());
-        let handlers: [&dyn WorkHandler; 2] = [&contest, &relay];
+        // No required receivers: the tests observe the published history.
+        let relay = sid_authn::event_relay::EventRelayHandler::new(
+            self.storage.clone(),
+            Vec::new(),
+            sid_storage::OWED_WORK_CAPACITY,
+        );
+        let fanout = sid_authn::event_relay::EventFanoutHandler::new(
+            self.event_bus.clone(),
+            self.storage.clone(),
+            sid_storage::OWED_WORK_CAPACITY,
+        );
+        let handlers: [&dyn WorkHandler; 3] = [&contest, &relay, &fanout];
         for handler in handlers {
             self.run_owed(handler).await;
         }

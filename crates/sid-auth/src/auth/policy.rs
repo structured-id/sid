@@ -200,7 +200,7 @@ impl PolicyEngine {
     /// Parse policies from YAML string.
     pub fn from_yaml(yaml: &str) -> Result<Self, PolicyError> {
         let config: RoutePolicyConfig =
-            serde_yaml::from_str(yaml).map_err(PolicyError::YamlError)?;
+            serde_saphyr::from_str(yaml).map_err(PolicyError::YamlError)?;
         Self::from_config(config)
     }
 
@@ -337,7 +337,7 @@ pub enum PolicyError {
     #[error("failed to read policy file {0}: {1}")]
     IoError(String, std::io::Error),
     #[error("invalid YAML: {0}")]
-    YamlError(#[from] serde_yaml::Error),
+    YamlError(#[from] serde_saphyr::Error),
     #[error("invalid glob pattern '{0}': {1}")]
     GlobError(String, globset::Error),
     #[error("invalid HTTP method '{0}'")]

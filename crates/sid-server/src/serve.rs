@@ -48,6 +48,9 @@ use crate::init::{CeComponents, spawn_work_runner};
 /// service together.
 pub struct CeServices {
     services: sid_serve::Services,
+    /// Receivers this server runs that facts are owed to (SCIM outbound
+    /// provisioning while targets are configured).
+    receivers: Vec<sid_core::models::RequiredReceiver>,
     #[cfg(feature = "dev-perf-test")]
     test_svc: std::sync::Arc<crate::grpc::test_service::TestServiceImpl>,
 }
@@ -67,6 +70,7 @@ impl CeServices {
 
         let mut services = Self {
             services: served,
+            receivers: Vec::new(),
             #[cfg(feature = "dev-perf-test")]
             test_svc: test_svc.clone(),
         };
@@ -177,7 +181,7 @@ impl CeServices {
                     ),
                 ))
                 .await;
-            start_scim_outbound(c).await?;
+            services.receivers.extend(start_scim_outbound(c).await?);
             info!("SCIM 2.0 inbound provisioning enabled");
         }
 
@@ -233,28 +237,29 @@ async fn scim_service(c: &CeComponents) -> anyhow::Result<sid_scim::grpc::ScimSe
 }
 
 /// Configured targets that cannot be loaded or served stop startup: running
-/// without them would silently stop provisioning.
+/// without them would silently stop provisioning. With targets, outbound
+/// provisioning is a receiver every SCIM fact is owed to; without, it still
+/// settles the work owed before the last target was removed.
 #[cfg(feature = "scim")]
-async fn start_scim_outbound(c: &CeComponents) -> anyhow::Result<()> {
+async fn start_scim_outbound(
+    c: &CeComponents,
+) -> anyhow::Result<Option<sid_core::models::RequiredReceiver>> {
     let targets = c
         .storage
         .list_scim_outbound_targets(sid_core::models::ProjectId::system())
         .await
         .map_err(|e| anyhow::anyhow!("loading SCIM outbound targets: {e}"))?;
-    if targets.is_empty() {
-        return Ok(());
-    }
     let worker = std::sync::Arc::new(sid_scim::outbound::worker::ScimOutboundWorker::new(
         c.storage.clone(),
         c.event_bus.clone(),
         targets,
     ));
-    worker
-        .start()
+    let owed = worker
+        .start_owed()
         .await
         .map_err(|e| anyhow::anyhow!("SCIM outbound worker: {e}"))?;
     info!("SCIM outbound worker started");
-    Ok(())
+    Ok(owed)
 }
 
 #[cfg(feature = "dev-perf-test")]
@@ -319,7 +324,7 @@ pub async fn serve(
         c.login_url.as_ref(),
     )?;
 
-    let work_runner = spawn_work_runner(&c, stopped.clone().wait())?;
+    let work_runner = spawn_work_runner(&c, &services.receivers, stopped.clone().wait())?;
     let settlements = crate::init::spawn_cleanup_settlements(&c, stopped.clone().wait());
 
     let (routes, health) = services.services.into_parts();
@@ -456,7 +461,7 @@ pub fn http_transcoder(
     sign_in: Option<&url::Url>,
 ) -> anyhow::Result<Option<structured_proxy::ProxyServer>> {
     let mut config = match (config_file, bind) {
-        (Some(path), _) => serde_yaml::from_str(
+        (Some(path), _) => serde_saphyr::from_str(
             &std::fs::read_to_string(path)
                 .map_err(|e| anyhow::anyhow!("SID_HTTP_CONFIG {path}: {e}"))?,
         )
@@ -480,23 +485,23 @@ pub fn http_transcoder(
 /// wildcard or `null` origin in the list stops startup.
 #[cfg(feature = "http")]
 pub fn allow_sign_in_origin(
-    config: &mut serde_yaml::Value,
+    config: &mut serde_json::Value,
     origin: &url::Origin,
 ) -> anyhow::Result<()> {
     let map = config
-        .as_mapping_mut()
+        .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("the HTTP configuration must be a mapping"))?;
     let cors = map
-        .entry("cors".into())
-        .or_insert_with(|| serde_yaml::Mapping::new().into());
+        .entry("cors")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
     let cors = cors
-        .as_mapping_mut()
+        .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("the HTTP configuration's cors must be a mapping"))?;
     let origins = cors
-        .entry("origins".into())
-        .or_insert_with(|| serde_yaml::Sequence::new().into());
+        .entry("origins")
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
     let origins = origins
-        .as_sequence_mut()
+        .as_array_mut()
         .ok_or_else(|| anyhow::anyhow!("cors.origins must be a list"))?;
     if let Some(any) = origins
         .iter()

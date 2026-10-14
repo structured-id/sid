@@ -44,6 +44,36 @@ fn insert_error(what: &str, e: sqlx::Error) -> SidError {
     }
 }
 
+/// Insert `entry` into the outbound DLQ within `tx`; an existing id is
+/// `Conflict`.
+async fn insert_dlq_entry(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    entry: &OutboundDlqEntry,
+) -> SidResult<()> {
+    sqlx::query(
+        "INSERT INTO scim_outbound_dlq (id, target_id, event_type, payload, sid_entity_id,
+            entity_type, error, attempts, first_attempt, last_attempt)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+    )
+    .bind(entry.id)
+    .bind(entry.target_id.0)
+    .bind(&entry.event_type)
+    .bind(&entry.payload)
+    .bind(entry.sid_entity_id)
+    .bind(entry.entity_type.as_str())
+    .bind(&entry.error)
+    .bind(
+        i32::try_from(entry.attempts)
+            .map_err(|e| SidError::Validation(format!("dlq attempts: {e}")))?,
+    )
+    .bind(entry.first_attempt)
+    .bind(entry.last_attempt)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| insert_error("outbound dlq entry", e))?;
+    Ok(())
+}
+
 /// A write refused by a referential constraint. PostgreSQL 18 reports an
 /// `ON DELETE/UPDATE RESTRICT` refusal as SQLSTATE 23001 `restrict_violation`
 /// (PostgreSQL 18 docs, Appendix A), not as 23503 `foreign_key_violation`.
@@ -7474,48 +7504,36 @@ impl StorageBackend for PostgresBackend {
         Ok(())
     }
 
-    async fn record_scim_outbound_failure(
+    async fn record_scim_outbound_dead_letter(
         &self,
-        target_id: ScimOutboundTargetId,
-        sid_entity_id: Uuid,
-        entity_type: OutboundEntityType,
-        error: &str,
-        at: chrono::DateTime<chrono::Utc>,
+        entry: &OutboundDlqEntry,
         audit: MutationContext,
-    ) -> SidResult<bool> {
+    ) -> SidResult<()> {
         let mut tx = self
             .pool
             .begin()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
-        let recorded = sqlx::query(
+        insert_dlq_entry(&mut tx, entry).await?;
+        // Counted in place: a concurrent success or failure is not undone.
+        sqlx::query(
             "UPDATE scim_outbound_records SET last_error = $4,
                 failure_count = failure_count + 1, updated_at = $5
              WHERE target_id = $1 AND sid_entity_id = $2 AND entity_type = $3",
         )
-        .bind(target_id.0)
-        .bind(sid_entity_id)
-        .bind(entity_type.as_str())
-        .bind(error)
-        .bind(at)
+        .bind(entry.target_id.0)
+        .bind(entry.sid_entity_id)
+        .bind(entry.entity_type.as_str())
+        .bind(&entry.error)
+        .bind(entry.last_attempt)
         .execute(&mut *tx)
         .await
-        .map_err(|e| SidError::Storage(format!("record scim failure: {e}")))?
-        .rows_affected()
-            == 1;
-        if !recorded {
-            return Ok(false);
-        }
-        Self::audit_in_tx(
-            &mut tx,
-            &format!("scim_outbound_record:{}:{}", target_id.0, sid_entity_id),
-            audit,
-        )
-        .await?;
+        .map_err(|e| SidError::Storage(format!("record scim failure: {e}")))?;
+        Self::audit_in_tx(&mut tx, &format!("outbound_dlq:{}", entry.id), audit).await?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
-        Ok(true)
+        Ok(())
     }
 
     async fn get_scim_outbound_record(
@@ -7546,28 +7564,7 @@ impl StorageBackend for PostgresBackend {
             .begin()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
-        let et = entry.entity_type.as_str();
-        sqlx::query(
-            "INSERT INTO scim_outbound_dlq (id, target_id, event_type, payload, sid_entity_id,
-                entity_type, error, attempts, first_attempt, last_attempt)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
-        )
-        .bind(entry.id)
-        .bind(entry.target_id.0)
-        .bind(&entry.event_type)
-        .bind(&entry.payload)
-        .bind(entry.sid_entity_id)
-        .bind(et)
-        .bind(&entry.error)
-        .bind(
-            i32::try_from(entry.attempts)
-                .map_err(|e| SidError::Validation(format!("dlq attempts: {e}")))?,
-        )
-        .bind(entry.first_attempt)
-        .bind(entry.last_attempt)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| insert_error("outbound dlq entry", e))?;
+        insert_dlq_entry(&mut tx, entry).await?;
         Self::audit_in_tx(&mut tx, &format!("outbound_dlq:{}", entry.id), audit).await?;
         tx.commit()
             .await
