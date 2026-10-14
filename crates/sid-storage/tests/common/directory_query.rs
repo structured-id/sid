@@ -6,7 +6,6 @@
 //! comparison, and retired profiles are never listed.
 
 use chrono::Utc;
-use futures::StreamExt;
 use sid_core::models::profile_email::EmailLabel;
 use sid_core::models::{
     DirectoryAttribute as Attr, DirectoryFilter as F, DirectoryOperator as Op, DirectoryQuery,
@@ -115,19 +114,20 @@ async fn names(backend: &dyn StorageBackend, q: &DirectoryQuery) -> (u64, Vec<St
     (page.total, names)
 }
 
+/// The profiles a directory must hold before the user that
+/// [`test_directory_finds_a_user_beyond_ten_thousand`] looks for.
+pub const DIRECTORY_BEYOND: u64 = 10_001;
+
 /// A user created after more than ten thousand others is found by its
 /// userName: the whole directory is filtered, not a bounded prefix of it.
+/// The harness seeds the [`DIRECTORY_BEYOND`] profiles first, in bulk: only
+/// their number matters here.
 pub async fn test_directory_finds_a_user_beyond_ten_thousand(backend: &dyn StorageBackend) {
     let existing = backend.count_profiles().await.unwrap();
-    let needed = 10_001u64.saturating_sub(existing);
-    futures::stream::iter(0..needed)
-        .for_each_concurrent(16, |_| async {
-            backend
-                .create_profile(&Profile::new(None::<String>), test_audit())
-                .await
-                .unwrap();
-        })
-        .await;
+    assert!(
+        existing >= DIRECTORY_BEYOND,
+        "the harness seeded {existing} profiles, not {DIRECTORY_BEYOND}"
+    );
     let domain = domain();
     add_user(backend, &domain, "late.arrival", &[], &[]).await;
 

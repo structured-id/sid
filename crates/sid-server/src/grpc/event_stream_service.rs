@@ -220,7 +220,6 @@ impl EventStreamService for EventStreamServiceImpl {
         let filter = EventFilter {
             event_types: req.event_types,
             attributes: req.filters,
-            queue_group: None, // gRPC streams are per-client (fan-out)
         };
 
         info!("New event stream subscription: {:?}", filter.event_types);
@@ -253,7 +252,6 @@ impl EventStreamService for EventStreamServiceImpl {
         let filter = EventFilter {
             event_types: req.event_types,
             attributes: Default::default(),
-            queue_group: None,
         };
 
         info!(

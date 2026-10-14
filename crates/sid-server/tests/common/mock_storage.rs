@@ -4827,16 +4827,12 @@ impl StorageBackend for MockStorage {
     ) -> SidResult<()> {
         Ok(())
     }
-    async fn record_scim_outbound_failure(
+    async fn record_scim_outbound_dead_letter(
         &self,
-        _: ScimOutboundTargetId,
-        _: Uuid,
-        _: sid_core::models::OutboundEntityType,
-        _: &str,
-        _: chrono::DateTime<chrono::Utc>,
+        _: &OutboundDlqEntry,
         _: MutationContext,
-    ) -> SidResult<bool> {
-        Ok(false)
+    ) -> SidResult<()> {
+        Ok(())
     }
     async fn get_scim_outbound_record(
         &self,

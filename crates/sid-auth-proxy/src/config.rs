@@ -301,7 +301,7 @@ impl ProxyConfig {
     pub fn from_yaml(path: &str) -> anyhow::Result<Self> {
         let contents = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("Failed to read config {}: {}", path, e))?;
-        let config: Self = serde_yaml::from_str(&contents)
+        let config: Self = serde_saphyr::from_str(&contents)
             .map_err(|e| anyhow::anyhow!("Failed to parse config {}: {}", path, e))?;
         Ok(config)
     }

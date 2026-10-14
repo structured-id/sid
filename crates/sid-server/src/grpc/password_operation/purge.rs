@@ -56,33 +56,26 @@ impl OwnerPurgeHandler {
     }
 }
 
-/// The id of the event that attempt `attempt` of the purge work `work`
-/// relays for `owner_domain`: one per attempt, so each relays anew, and the
-/// same for a repeated deletion, which owes the same work.
-pub(crate) fn purge_event_id(owner_domain: &[u8; 32], work: WorkId, attempt: u32) -> uuid::Uuid {
+/// The id of the event the purge work `work` relays for `owner_domain`, the
+/// same for a repeated deletion, which owes the same work. The attempts of
+/// a work share it: while the evaluator is away the event waits in its
+/// queue, and another per attempt would only pile up beside it; a successor
+/// work (the attempts ran out) relays anew, in case that one ended without
+/// effect.
+pub(crate) fn purge_event_id(owner_domain: &[u8; 32], work: WorkId) -> uuid::Uuid {
     uuid::Uuid::new_v5(
         &PURGE_EVENT_NAMESPACE,
-        &[
-            owner_domain.as_slice(),
-            work.0.as_bytes(),
-            &attempt.to_be_bytes(),
-        ]
-        .concat(),
+        &[owner_domain.as_slice(), work.0.as_bytes()].concat(),
     )
 }
 
-/// The relayed event telling a separate evaluator that `purge`'s owner was
-/// deleted, for attempt `attempt` of the work `work`.
-fn purge_event(
-    source: &str,
-    purge: &OwnerPurge,
-    work: WorkId,
-    attempt: u32,
-) -> Result<NewWork, String> {
+/// The event telling the separate evaluator of `source` that `purge`'s
+/// owner was deleted, addressed to it, for the work `work`.
+fn purge_event(source: &str, purge: &OwnerPurge, work: WorkId) -> Result<NewWork, String> {
     let mut event = Event::new(source, event_types::PASSWORD_HISTORY_OWNER_PURGED)
         .with_data(serde_json::to_value(purge).map_err(|e| format!("event data: {e}"))?);
-    event.id = purge_event_id(&purge.owner_domain, work, attempt).to_string();
-    Ok(event.relay())
+    event.id = purge_event_id(&purge.owner_domain, work).to_string();
+    Ok(event.deliver(&super::relayed::cleanup_consumer(source)))
 }
 
 #[tonic::async_trait]
@@ -118,9 +111,10 @@ impl WorkHandler for OwnerPurgeHandler {
                 }
             }
             // The purge stays owed until the separate evaluator's settlement
-            // is recorded: each attempt before then relays it again, so an
-            // event that aged out of the stream or met an evaluator outage
-            // is not lost ([`super::consume_cleanup_settlements`]).
+            // is recorded: the work relays it once, its successor anew, so a
+            // purge whose handoff ended without effect (a rejected event, a
+            // failed delivery) is still carried out
+            // ([`super::consume_cleanup_settlements`]).
             EvaluatorDelivery::Relay { source } => {
                 let cleanup = RelayedCleanup::OwnerPurge {
                     owner_domain: purge.owner_domain,
@@ -130,7 +124,7 @@ impl WorkHandler for OwnerPurgeHandler {
                     Ok(false) => {}
                     Err(e) => return WorkOutcome::Retry(format!("settlement: {e}")),
                 }
-                let event = match purge_event(source, &purge, work.id, work.attempt) {
+                let event = match purge_event(source, &purge, work.id) {
                     Ok(event) => event,
                     Err(e) => return WorkOutcome::Permanent(e),
                 };

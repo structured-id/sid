@@ -1,18 +1,28 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! SCIM HTTP client for outbound provisioning.
 //!
-//! Sends SCIM requests (POST/PATCH/DELETE) to downstream app endpoints.
-//! Handles authentication, retries with exponential backoff, and error classification.
+//! Sends SCIM requests to a downstream app endpoint, one attempt each:
+//! retrying is the delivery's, so an attempt never outlives the hold that
+//! keeps the event from another replica.
 
 use std::time::Duration;
 
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, RETRY_AFTER};
 use reqwest::{Client, StatusCode};
 use serde::Serialize;
-use sid_core::models::{OutboundAuthConfig, OutboundSyncConfig, ScimOutboundTarget};
-use tracing::{debug, warn};
+use serde_json::Value;
+use sid_core::models::{OutboundAuthConfig, ScimOutboundTarget};
+use sid_plugin::event_bus::Hold;
+use tracing::warn;
 
 use super::mapper::{ScimGroupPayload, ScimPatchPayload, ScimUserPayload};
+
+/// The longest one request may take.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// The hold a request needs before it is sent: its timeout and the time to
+/// get it on the wire.
+pub const REQUEST_SPAN: Duration = Duration::from_secs(25);
 
 /// Error types for SCIM outbound operations.
 #[derive(Debug, thiserror::Error)]
@@ -29,15 +39,33 @@ pub enum ScimClientError {
     AuthFailed { status: u16 },
     #[error("serialization error: {0}")]
     Serialization(String),
+    /// A successful response that is not what the request returns; a later
+    /// attempt may get a readable one.
+    #[error("unreadable response: {0}")]
+    Malformed(String),
+    /// SID's own storage failed: no failure of the target, which may not
+    /// even have been asked.
+    #[error("storage error: {0}")]
+    Storage(String),
+    /// The event may go to another replica before a request would end: none
+    /// is sent, so two replicas never write the same resource at once.
+    #[error("the delivery is no longer certainly held")]
+    NotHeld,
 }
 
-/// Response from a successful SCIM operation.
-#[derive(Debug, Clone)]
-pub struct ScimResponse {
-    /// Resource ID returned by the downstream app.
-    pub id: Option<String>,
-    /// HTTP status code.
-    pub status: u16,
+impl ScimClientError {
+    /// Whether a later attempt may succeed where this one did not.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::Unreachable(_)
+            | Self::RateLimited { .. }
+            | Self::NotHeld
+            | Self::Malformed(_)
+            | Self::Storage(_) => true,
+            Self::Rejected { status, .. } => *status >= 500,
+            Self::Conflict { .. } | Self::AuthFailed { .. } | Self::Serialization(_) => false,
+        }
+    }
 }
 
 /// SCIM HTTP client for a single outbound target.
@@ -45,13 +73,14 @@ pub struct ScimHttpClient {
     http: Client,
     endpoint_url: String,
     auth: OutboundAuthConfig,
-    sync_config: OutboundSyncConfig,
+    /// How long the delivery being dispatched is this replica's alone.
+    hold: Hold,
 }
 
 impl ScimHttpClient {
-    pub fn new(target: &ScimOutboundTarget) -> Self {
+    pub fn new(target: &ScimOutboundTarget, hold: Hold) -> Self {
         let http = sid_plugin::client_builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(REQUEST_TIMEOUT)
             .build()
             .expect("failed to create HTTP client");
 
@@ -59,128 +88,152 @@ impl ScimHttpClient {
             http,
             endpoint_url: target.endpoint_url.trim_end_matches('/').to_string(),
             auth: target.auth.clone(),
-            sync_config: target.sync_config.clone(),
+            hold,
         }
     }
 
-    /// POST /Users — create a user in the downstream app.
-    /// Returns the downstream SCIM resource ID.
+    /// POST /Users: the id the downstream app assigned, when it returned one.
     pub async fn create_user(
         &self,
         payload: &ScimUserPayload,
-    ) -> Result<ScimResponse, ScimClientError> {
+    ) -> Result<Option<String>, ScimClientError> {
         let url = format!("{}/Users", self.endpoint_url);
-        self.send_with_retry("POST", &url, Some(payload), None)
-            .await
-    }
-
-    /// PATCH /Users/{id} — update a user in the downstream app.
-    pub async fn update_user(
-        &self,
-        downstream_id: &str,
-        patch: &ScimPatchPayload,
-    ) -> Result<ScimResponse, ScimClientError> {
-        let url = format!("{}/Users/{}", self.endpoint_url, downstream_id);
-        self.send_with_retry("PATCH", &url, Some(patch), None).await
-    }
-
-    /// PATCH /Users/{id} with active=false — deactivate a user.
-    pub async fn deactivate_user(
-        &self,
-        downstream_id: &str,
-    ) -> Result<ScimResponse, ScimClientError> {
-        let patch = ScimPatchPayload::deactivate();
-        self.update_user(downstream_id, &patch).await
-    }
-
-    /// POST /Groups — create a group in the downstream app.
-    pub async fn create_group(
-        &self,
-        payload: &ScimGroupPayload,
-    ) -> Result<ScimResponse, ScimClientError> {
-        let url = format!("{}/Groups", self.endpoint_url);
-        self.send_with_retry("POST", &url, Some(payload), None)
-            .await
-    }
-
-    /// PATCH /Groups/{id} — update group members.
-    pub async fn update_group(
-        &self,
-        downstream_id: &str,
-        patch: &ScimPatchPayload,
-    ) -> Result<ScimResponse, ScimClientError> {
-        let url = format!("{}/Groups/{}", self.endpoint_url, downstream_id);
-        self.send_with_retry("PATCH", &url, Some(patch), None).await
-    }
-
-    /// DELETE /Groups/{id} — delete a group.
-    pub async fn delete_group(&self, downstream_id: &str) -> Result<ScimResponse, ScimClientError> {
-        let url = format!("{}/Groups/{}", self.endpoint_url, downstream_id);
-        self.send_with_retry::<()>("DELETE", &url, None, None).await
-    }
-
-    /// Send a request with exponential backoff retry.
-    async fn send_with_retry<T: Serialize>(
-        &self,
-        method: &str,
-        url: &str,
-        body: Option<&T>,
-        retry_after_override: Option<u64>,
-    ) -> Result<ScimResponse, ScimClientError> {
-        let max_attempts = self.sync_config.max_retry_attempts;
-        let base_secs = self.sync_config.retry_backoff_base_secs;
-        let mut next_delay_override: Option<u64> = retry_after_override;
-
-        for attempt in 0..max_attempts {
-            if attempt > 0 {
-                let delay = next_delay_override
-                    .take()
-                    .unwrap_or_else(|| base_secs * 2u64.pow(attempt.saturating_sub(1)));
-                debug!(attempt, delay_secs = delay, url, "retrying SCIM request");
-                tokio::time::sleep(Duration::from_secs(delay)).await;
-            }
-
-            match self.send_once(method, url, body).await {
-                Ok(response) => return Ok(response),
-                Err(ScimClientError::RateLimited { retry_after_secs }) => {
-                    if attempt + 1 < max_attempts {
-                        warn!(attempt, retry_after_secs, url, "rate limited, will retry");
-                        next_delay_override = Some(retry_after_secs);
-                        continue;
-                    }
-                    return Err(ScimClientError::RateLimited { retry_after_secs });
-                }
-                Err(ScimClientError::Unreachable(msg)) => {
-                    if attempt + 1 < max_attempts {
-                        warn!(attempt, %msg, url, "downstream unreachable, will retry");
-                        continue;
-                    }
-                    return Err(ScimClientError::Unreachable(msg));
-                }
-                Err(e @ ScimClientError::Rejected { status, .. }) if status >= 500 => {
-                    if attempt + 1 < max_attempts {
-                        warn!(attempt, status, url, "server error, will retry");
-                        continue;
-                    }
-                    return Err(e);
-                }
-                Err(e) => return Err(e),
-            }
-        }
-
-        Err(ScimClientError::Unreachable(
-            "max retry attempts exhausted".into(),
+        Ok(resource_id(
+            self.send("POST", &url, Some(payload), &[]).await?,
         ))
     }
 
-    /// Send a single SCIM request (no retry).
-    async fn send_once<T: Serialize>(
+    /// PATCH /Users/{id} replacing every mapped attribute with `payload` and
+    /// removing the mapped attributes at `absent`, which the user no longer
+    /// carries.
+    pub async fn replace_user(
+        &self,
+        downstream_id: &str,
+        payload: &ScimUserPayload,
+        absent: &[String],
+    ) -> Result<(), ScimClientError> {
+        let url = format!("{}/Users/{}", self.endpoint_url, downstream_id);
+        let patch = ScimPatchPayload::replace_user(payload)?;
+        self.send("PATCH", &url, Some(&patch), &[]).await?;
+        self.remove_paths(&url, absent).await
+    }
+
+    /// The id of the one user named `user_name` (RFC 7644 §3.4.2.2 filter).
+    pub async fn find_user(&self, user_name: &str) -> Result<Option<String>, ScimClientError> {
+        self.find("Users", "userName", user_name).await
+    }
+
+    /// POST /Groups: the id the downstream app assigned, when it returned one.
+    pub async fn create_group(
+        &self,
+        payload: &ScimGroupPayload,
+    ) -> Result<Option<String>, ScimClientError> {
+        let url = format!("{}/Groups", self.endpoint_url);
+        Ok(resource_id(
+            self.send("POST", &url, Some(payload), &[]).await?,
+        ))
+    }
+
+    /// PATCH /Groups/{id} replacing its name and its whole membership; an
+    /// empty membership is a second PATCH removing the members, which a group
+    /// that has none may answer with `noTarget` (RFC 7644 §3.12): nothing to
+    /// remove is the state wanted.
+    pub async fn replace_group(
+        &self,
+        downstream_id: &str,
+        payload: &ScimGroupPayload,
+    ) -> Result<(), ScimClientError> {
+        let url = format!("{}/Groups/{}", self.endpoint_url, downstream_id);
+        let patch = ScimPatchPayload::replace_group(payload);
+        self.send("PATCH", &url, Some(&patch), &[]).await?;
+        if payload.members.is_empty() {
+            self.remove_paths(&url, &["members".to_string()]).await?;
+        }
+        Ok(())
+    }
+
+    /// PATCH the resource at `url` removing the attributes at `paths`. A
+    /// server that refuses one it has nothing at as `noTarget` (RFC 7644
+    /// §3.12; §3.5.2.2 has such a removal succeed) refuses the whole atomic
+    /// patch, so the paths then go one by one, a `noTarget` meaning that one
+    /// is already gone.
+    async fn remove_paths(&self, url: &str, paths: &[String]) -> Result<(), ScimClientError> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        match self
+            .send("PATCH", url, Some(&ScimPatchPayload::remove(paths)), &[])
+            .await
+        {
+            Ok(_) => return Ok(()),
+            Err(ScimClientError::Rejected { status: 400, body }) if no_target(&body) => {}
+            Err(e) => return Err(e),
+        }
+        for path in paths {
+            let one = ScimPatchPayload::remove(std::slice::from_ref(path));
+            match self.send("PATCH", url, Some(&one), &[]).await {
+                Ok(_) => {}
+                Err(ScimClientError::Rejected { status: 400, body }) if no_target(&body) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+
+    /// The id of the one group named `display_name`.
+    pub async fn find_group(&self, display_name: &str) -> Result<Option<String>, ScimClientError> {
+        self.find("Groups", "displayName", display_name).await
+    }
+
+    /// DELETE /Groups/{id}. One already gone (404, RFC 7644 §3.6) is deleted.
+    pub async fn delete_group(&self, downstream_id: &str) -> Result<(), ScimClientError> {
+        let url = format!("{}/Groups/{}", self.endpoint_url, downstream_id);
+        match self.send::<()>("DELETE", &url, None, &[]).await {
+            Ok(_) | Err(ScimClientError::Rejected { status: 404, .. }) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The id of the one `resource` whose `attribute` equals `value`; more
+    /// than one is a conflict, not a guess.
+    async fn find(
+        &self,
+        resource: &str,
+        attribute: &str,
+        value: &str,
+    ) -> Result<Option<String>, ScimClientError> {
+        let url = format!("{}/{resource}", self.endpoint_url);
+        // A filter compares to a JSON string literal (RFC 7644 §3.4.2.2).
+        let literal = serde_json::to_string(value)
+            .map_err(|e| ScimClientError::Serialization(e.to_string()))?;
+        let filter = format!("{attribute} eq {literal}");
+        let found = self
+            .send::<()>("GET", &url, None, &[("filter", &filter)])
+            .await?;
+        single_match(found).map_err(|e| match e {
+            ScimClientError::Conflict { body } => ScimClientError::Conflict {
+                body: format!("{body} {resource} match {filter}"),
+            },
+            other => other,
+        })
+    }
+
+    /// Send one SCIM request: the response body, if any.
+    async fn send<T: Serialize>(
         &self,
         method: &str,
         url: &str,
         body: Option<&T>,
-    ) -> Result<ScimResponse, ScimClientError> {
+        query: &[(&str, &str)],
+    ) -> Result<Option<Value>, ScimClientError> {
+        if !self.hold.lasts(REQUEST_SPAN) {
+            return Err(ScimClientError::NotHeld);
+        }
         let mut request = match method {
+            "GET" => self.http.get(
+                reqwest::Url::parse_with_params(url, query)
+                    .map_err(|e| ScimClientError::Serialization(format!("query: {e}")))?,
+            ),
             "POST" => self.http.post(url),
             "PATCH" => self.http.patch(url),
             "PUT" => self.http.put(url),
@@ -221,22 +274,8 @@ impl ScimHttpClient {
         let status_code = status.as_u16();
 
         match status {
-            StatusCode::OK | StatusCode::CREATED | StatusCode::NO_CONTENT => {
-                let id = if status != StatusCode::NO_CONTENT {
-                    // Try to extract resource ID from response body
-                    response
-                        .json::<serde_json::Value>()
-                        .await
-                        .ok()
-                        .and_then(|v| v.get("id").and_then(|id| id.as_str().map(String::from)))
-                } else {
-                    None
-                };
-                Ok(ScimResponse {
-                    id,
-                    status: status_code,
-                })
-            }
+            StatusCode::NO_CONTENT => Ok(None),
+            StatusCode::OK | StatusCode::CREATED => Ok(response.json::<Value>().await.ok()),
             StatusCode::TOO_MANY_REQUESTS => {
                 let retry_after = response
                     .headers()
@@ -266,73 +305,49 @@ impl ScimHttpClient {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use chrono::Utc;
-    use sid_core::models::{
-        AttributeMapping, GroupPushConfig, OutboundSyncConfig, ProjectId, ScimOutboundTarget,
-        ScimOutboundTargetId,
+/// The `id` of a returned SCIM resource.
+fn resource_id(body: Option<Value>) -> Option<String> {
+    body?.get("id")?.as_str().map(String::from)
+}
+
+/// Whether an error response is `noTarget`: the path matched nothing
+/// (RFC 7644 §3.12).
+fn no_target(body: &str) -> bool {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|error| error.get("scimType")?.as_str().map(|t| t == "noTarget"))
+        .unwrap_or(false)
+}
+
+/// The id of the one resource a filtered query found: `None` only for a
+/// well-formed empty ListResponse (RFC 7644 §3.4.2: `totalResults` always,
+/// `Resources` whenever it is not zero). Anything else is no proof that the
+/// resource is absent, and taking it for one would create it a second time.
+fn single_match(body: Option<Value>) -> Result<Option<String>, ScimClientError> {
+    let malformed = |why: &str| Err(ScimClientError::Malformed(format!("list response: {why}")));
+    let Some(body) = body else {
+        return malformed("no JSON body");
     };
-
-    fn test_target() -> ScimOutboundTarget {
-        ScimOutboundTarget {
-            id: ScimOutboundTargetId::new(),
-            client_id: "test-app".into(),
-            project_id: ProjectId::system(),
-            display_name: "Test App".into(),
-            endpoint_url: "https://scim.example.com/v2".into(),
-            auth: OutboundAuthConfig::Bearer {
-                token_secret: "test-token".into(),
-            },
-            attribute_mapping: AttributeMapping::default(),
-            group_push: GroupPushConfig::default(),
-            sync_config: OutboundSyncConfig {
-                max_retry_attempts: 3,
-                retry_backoff_base_secs: 1,
-            },
-            enabled: true,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        }
-    }
-
-    #[test]
-    fn test_client_construction() {
-        let target = test_target();
-        let client = ScimHttpClient::new(&target);
-        assert_eq!(client.endpoint_url, "https://scim.example.com/v2");
-    }
-
-    #[test]
-    fn test_client_strips_trailing_slash() {
-        let mut target = test_target();
-        target.endpoint_url = "https://scim.example.com/v2/".into();
-        let client = ScimHttpClient::new(&target);
-        assert_eq!(client.endpoint_url, "https://scim.example.com/v2");
-    }
-
-    #[test]
-    fn test_scim_client_error_display() {
-        let err = ScimClientError::Unreachable("connection refused".into());
-        assert!(err.to_string().contains("connection refused"));
-
-        let err = ScimClientError::RateLimited {
-            retry_after_secs: 30,
-        };
-        assert!(err.to_string().contains("429"));
-
-        let err = ScimClientError::AuthFailed { status: 401 };
-        assert!(err.to_string().contains("401"));
-    }
-
-    #[test]
-    fn test_scim_response_debug() {
-        let resp = ScimResponse {
-            id: Some("downstream-123".into()),
-            status: 201,
-        };
-        assert_eq!(resp.id.as_deref(), Some("downstream-123"));
-        assert_eq!(resp.status, 201);
+    let Some(total) = body.get("totalResults").and_then(Value::as_u64) else {
+        return malformed("no totalResults");
+    };
+    let resources = match body.get("Resources") {
+        None if total == 0 => &[][..],
+        Some(Value::Array(resources)) => resources.as_slice(),
+        _ => return malformed("no Resources list"),
+    };
+    match (total, resources) {
+        (0, []) => Ok(None),
+        (1, [one]) => match one.get("id").and_then(Value::as_str) {
+            Some(id) => Ok(Some(id.to_string())),
+            None => malformed("a match without id"),
+        },
+        (0 | 1, _) => malformed("totalResults disagrees with Resources"),
+        (more, _) => Err(ScimClientError::Conflict {
+            body: more.to_string(),
+        }),
     }
 }
+
+#[cfg(test)]
+mod tests;

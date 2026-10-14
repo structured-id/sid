@@ -2,9 +2,11 @@
 use super::*;
 use crate::template::TemplateEngine;
 use chrono::Utc;
+use sid_authn::event_relay::{EventFanoutHandler, EventRelayHandler};
 use sid_authn::work_runner::{RunnerConfig, WorkRunner};
+use sid_core::models::RequiredReceiver;
+use sid_core::models::WorkState;
 use sid_core::models::event::EventFilter;
-use sid_core::models::{WorkRecord, WorkState};
 use sid_plugin::InProcessEventBus;
 use sid_plugin::notification::{
     ChannelHealth, DeliveryReceipt, NotificationChannel, RenderedMessage,
@@ -99,10 +101,6 @@ fn claimed(kind_name: &str, payload: Vec<u8>) -> ClaimedWork {
     }
 }
 
-async fn record(store: &dyn WorkStore, name: &str) -> Option<WorkRecord> {
-    store.get_work(stable_id(name)).await.unwrap()
-}
-
 fn route_handler(store: &Arc<dyn WorkStore>, resolver: RecipientResolver) -> RouteHandler {
     RouteHandler::new(
         RoutingTable::default_ce_rules(),
@@ -112,18 +110,20 @@ fn route_handler(store: &Arc<dyn WorkStore>, resolver: RecipientResolver) -> Rou
     )
 }
 
-/// An accepted event is owned by one routing job, however often the broker
-/// redelivers it; a payload that is not an event is still owned.
+/// An accepted event is owned by one routing job, however often the bus
+/// redelivers it (also after a crash between storing and settling); another
+/// producer's event with the same id is a different fact with its own job.
 #[tokio::test]
 async fn test_accept_event_is_idempotent_per_event() {
     let store = store().await;
     let event = security_event();
-    let payload = serde_json::to_vec(&event).unwrap();
-    accept_event(store.as_ref(), &payload, 10).await.unwrap();
-    accept_event(store.as_ref(), &payload, 10).await.unwrap();
+    accept_event(store.as_ref(), &event, 10).await.unwrap();
+    accept_event(store.as_ref(), &event, 10).await.unwrap();
 
-    let route = record(store.as_ref(), &format!("route:{}", event.id))
+    let route = store
+        .get_work(route_job_id(&event))
         .await
+        .unwrap()
         .expect("accepted event has no routing job");
     assert_eq!(route.state, WorkState::Pending);
     assert_eq!(route.max_attempts, MAX_ATTEMPTS);
@@ -133,23 +133,16 @@ async fn test_accept_event_is_idempotent_per_event() {
         .unwrap();
     assert_eq!(claimed.len(), 1, "a redelivered event was stored twice");
 
-    accept_event(store.as_ref(), b"not json", 10).await.unwrap();
-    let garbage = store
-        .get_work(WorkId(Uuid::new_v5(&ID_NAMESPACE, b"not json")))
-        .await
-        .unwrap();
-    assert!(
-        garbage.is_some(),
-        "an unreadable event was dropped instead of owned"
-    );
+    let mut other_source = event.clone();
+    other_source.source = "sid-other".into();
+    assert_ne!(route_job_id(&other_source), route_job_id(&event));
 }
 
-/// A full job store refuses the event, so the broker keeps it.
+/// A full job store refuses the event, so the bus keeps it.
 #[tokio::test]
 async fn test_accept_event_refused_when_full() {
     let store = store().await;
-    let first = serde_json::to_vec(&security_event()).unwrap();
-    let second = serde_json::to_vec(&security_event()).unwrap();
+    let (first, second) = (security_event(), security_event());
     accept_event(store.as_ref(), &first, 1).await.unwrap();
     let refused = accept_event(store.as_ref(), &second, 1).await;
     assert!(matches!(
@@ -160,6 +153,34 @@ async fn test_accept_event_refused_when_full() {
 
 /// Routing stores one delivery per (template, channel) with a stable id; a
 /// second routing attempt stores nothing new.
+/// Two producers may reuse an event id: each event is its own notification,
+/// so routing them stores deliveries for both rather than taking the second
+/// for a repeat of the first.
+#[tokio::test]
+async fn test_same_id_from_two_sources_is_two_notifications() {
+    let store = store().await;
+    let handler = route_handler(&store, RecipientResolver::without_identity());
+    let first = security_event();
+    let mut second = first.clone();
+    second.source = "sid-other".into();
+    for event in [&first, &second] {
+        let work = claimed(ROUTE, serde_json::to_vec(event).unwrap());
+        assert_eq!(
+            handler.handle(&work).await,
+            WorkOutcome::Done(Some("2 deliveries".into()))
+        );
+    }
+    let deliveries = store
+        .claim_work(&[kind(DELIVER)], "w", 10, Duration::from_secs(30))
+        .await
+        .unwrap();
+    assert_eq!(
+        deliveries.len(),
+        4,
+        "a second source's deliveries were dropped"
+    );
+}
+
 #[tokio::test]
 async fn test_route_fans_out_once() {
     let store = store().await;
@@ -174,9 +195,9 @@ async fn test_route_fans_out_once() {
     handler.handle(&work).await;
 
     for channel in ["email", "webhook"] {
-        let name = format!("deliver:{}:security_alert:{channel}", event.id);
+        let id = delivery_job_id(&event, "security_alert", channel);
         assert!(
-            record(store.as_ref(), &name).await.is_some(),
+            store.get_work(id).await.unwrap().is_some(),
             "{channel} missing"
         );
     }
@@ -283,7 +304,9 @@ async fn test_deliver_outcomes() {
 }
 
 /// End to end: an accepted event is routed and delivered by the runner; a
-/// delivery that fails for good ends failed and its alert is published.
+/// delivery that fails for good ends failed, and its alert is relayed as
+/// every fact is: owed to the deployment's other required receivers and
+/// published to history.
 #[tokio::test]
 async fn test_runner_delivers_and_alerts_dead_letters() {
     let store = store().await;
@@ -305,7 +328,19 @@ async fn test_runner_delivers_and_alerts_dead_letters() {
             Arc::clone(&email),
             webhook,
         ]))),
-        Arc::new(DlqAlertHandler::new(bus.clone())),
+        Arc::new(EventRelayHandler::new(
+            Arc::clone(&store),
+            vec![RequiredReceiver {
+                recipient: WorkRecipient::new("audit-sink").unwrap(),
+                event_types: Vec::new(),
+            }],
+            100,
+        )),
+        Arc::new(EventFanoutHandler::new(
+            bus.clone(),
+            Arc::clone(&store),
+            100,
+        )),
     ];
     let config = RunnerConfig {
         concurrency: 4,
@@ -317,9 +352,7 @@ async fn test_runner_delivers_and_alerts_dead_letters() {
     let handle = tokio::spawn(runner.run(async move { stopped.await.unwrap_or(()) }));
 
     let event = security_event();
-    accept_event(store.as_ref(), &serde_json::to_vec(&event).unwrap(), 100)
-        .await
-        .unwrap();
+    accept_event(store.as_ref(), &event, 100).await.unwrap();
 
     let alert = tokio::time::timeout(Duration::from_secs(10), alerts.recv())
         .await
@@ -328,14 +361,26 @@ async fn test_runner_delivers_and_alerts_dead_letters() {
     stop.send(()).unwrap();
     handle.await.unwrap();
 
-    let dead = format!("deliver:{}:security_alert:webhook", event.id);
-    let dead_record = record(store.as_ref(), &dead).await.unwrap();
+    let dead_record = store
+        .get_work(delivery_job_id(&event, "security_alert", "webhook"))
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(dead_record.state, WorkState::Failed);
     assert_eq!(dead_record.attempts, 1, "a rejected delivery was retried");
     assert_eq!(alert.data["work_id"], dead_record.id.to_string());
+    let owed = store
+        .get_work(alert.delivery_id(&WorkRecipient::new("audit-sink").unwrap()))
+        .await
+        .unwrap()
+        .expect("the alert was not owed to the required receiver");
+    assert_eq!(owed.state, WorkState::Pending);
 
-    let sent = format!("deliver:{}:security_alert:email", event.id);
-    let sent_record = record(store.as_ref(), &sent).await.unwrap();
+    let sent_record = store
+        .get_work(delivery_job_id(&event, "security_alert", "email"))
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(sent_record.state, WorkState::Completed);
     assert_eq!(sent_record.result.as_deref(), Some("smtp:email:m-42"));
     assert_eq!(email.sent.lock().unwrap().len(), 1);

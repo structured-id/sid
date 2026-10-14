@@ -83,6 +83,9 @@ pub struct CeComponents {
     /// The bundled `nats-server` behind `event_bus` in embedded mode; it is
     /// stopped when dropped, so it lives as long as the components.
     pub embedded_nats: Option<Arc<crate::embedded_nats::EmbeddedNats>>,
+    /// The receivers every committed fact of their types is owed to, whether
+    /// or not they are running (`SID_EVENT_RECEIVERS`).
+    pub required_receivers: Vec<sid_core::models::RequiredReceiver>,
     pub cache_backend: Arc<dyn CacheBackend>,
     pub app_state: AppState,
     pub issuer: String,
@@ -681,11 +684,22 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
     // stops startup, and committed work waits in the database.
     let nats_setting = std::env::var("SID_NATS_URL").ok();
     let nats_mode = crate::embedded_nats::EventBusMode::from_setting(nats_setting.as_deref())?;
+    // This server is the installation's bootstrap, so it owns the event
+    // topology unless the deployment names another owner.
     let crate::embedded_nats::ConnectedBus {
         bus: event_bus,
         embedded: embedded_nats,
-    } = crate::embedded_nats::connect_event_bus(&nats_mode, std::path::Path::new(&data_dir))
-        .await?;
+    } = crate::embedded_nats::connect_event_bus(
+        &nats_mode,
+        std::path::Path::new(&data_dir),
+        sid_infra::Topology::from_env()?,
+        sid_infra::TopologyRole::from_env(sid_infra::TopologyRole::Own)?,
+    )
+    .await?;
+    let required_receivers = required_receivers(
+        &nats_mode,
+        std::env::var("SID_EVENT_RECEIVERS").ok().as_deref(),
+    )?;
 
     let identity_svc = Arc::new(IdentityServiceImpl::new(
         storage.clone(),
@@ -976,6 +990,7 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         feature_flags,
         event_bus,
         embedded_nats: embedded_nats.map(Arc::new),
+        required_receivers,
         cache_backend,
         app_state,
         issuer,
@@ -1350,20 +1365,61 @@ pub fn spawn_ce_background_tasks(c: &CeComponents) {
     }
 }
 
+/// The receivers `SID_EVENT_RECEIVERS` names (comma-separated; `none` for a
+/// deployment without any), each owed every fact: its own routing decides
+/// what it acts on. On the bundled bus (the single-binary installation, which
+/// runs no separate receiver) unset names none; on an external bus the
+/// deployment must name them, so a missing setting is not read as "none".
+pub(crate) fn required_receivers(
+    mode: &crate::embedded_nats::EventBusMode,
+    setting: Option<&str>,
+) -> anyhow::Result<Vec<sid_core::models::RequiredReceiver>> {
+    use crate::embedded_nats::EventBusMode;
+    match (setting.map(str::trim), mode) {
+        (None | Some(""), EventBusMode::Embedded) => Ok(Vec::new()),
+        (None | Some(""), EventBusMode::External(_)) => anyhow::bail!(
+            "SID_EVENT_RECEIVERS is required with an external bus: name the receivers (e.g. sid-notify) or `none`"
+        ),
+        (Some(list), _) => sid_core::models::RequiredReceiver::parse_list(list)
+            .map_err(|e| anyhow::anyhow!("SID_EVENT_RECEIVERS: {e}")),
+    }
+}
+
 /// Start the runner for work the storage commits with a mutation (owed
-/// back-channel logouts, relayed events, contestation checks). Every replica
-/// runs one; leases keep an attempt on a single replica. Runs until
-/// `shutdown` resolves, then lets attempts in flight record their outcome.
+/// back-channel logouts, relayed events and their deliveries, contestation
+/// checks). Every replica runs one; leases keep an attempt on a single
+/// replica. Facts are owed to the deployment's required receivers and to
+/// `also_required` (receivers this server runs). Runs until `shutdown`
+/// resolves, then lets attempts in flight record their outcome.
 pub fn spawn_work_runner(
     c: &CeComponents,
+    also_required: &[sid_core::models::RequiredReceiver],
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
+    let receivers = c
+        .required_receivers
+        .iter()
+        .chain(also_required)
+        .cloned()
+        .collect();
     let handlers: Vec<Arc<dyn WorkHandler>> = vec![
         Arc::new(BackChannelLogoutHandler::new(
             c.issuers.clone(),
             c.storage.clone(),
         )),
-        Arc::new(EventRelayHandler::new(c.event_bus.clone())),
+        Arc::new(EventRelayHandler::new(
+            c.storage.clone(),
+            receivers,
+            sid_storage::OWED_WORK_CAPACITY,
+        )),
+        Arc::new(sid_authn::event_relay::EventFanoutHandler::new(
+            c.event_bus.clone(),
+            c.storage.clone(),
+            sid_storage::OWED_WORK_CAPACITY,
+        )),
+        Arc::new(sid_authn::event_relay::EventDeliveryHandler::new(
+            c.event_bus.clone(),
+        )),
         Arc::new(sid_authn::principal_contest::PrincipalContestHandler::new(
             c.storage.clone(),
         )),

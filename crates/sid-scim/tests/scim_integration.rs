@@ -530,26 +530,29 @@ async fn test_list_users_filter_username_eq() {
 #[tokio::test]
 async fn test_list_users_filter_finds_a_user_beyond_ten_thousand() {
     let (service, storage) = setup().await;
-    let existing = storage.count_profiles().await.unwrap();
-    let mut writers = tokio::task::JoinSet::new();
-    for _ in 0..10_001u64.saturating_sub(existing) {
-        if writers.len() >= 16 {
-            writers.join_next().await.unwrap().unwrap();
-        }
-        let storage = storage.clone();
-        writers.spawn(async move {
-            storage
-                .create_profile(
-                    &Profile::new(None::<String>),
-                    sid_core::models::AuditEntry::system("test", "profile").into(),
-                )
-                .await
-                .unwrap();
-        });
-    }
-    while let Some(written) = writers.join_next().await {
-        written.unwrap();
-    }
+    // Only their number matters: seeded in one statement, without the
+    // audited write each profile created through the store pays for.
+    let shortfall = 10_001u64.saturating_sub(storage.count_profiles().await.unwrap());
+    let like = Profile::new(None::<String>);
+    let pool = storage_pool().await;
+    sqlx::query(
+        "INSERT INTO profiles (
+            id, profile_type, roles, status, visibility, max_assurance,
+            migration_pending, created_at, updated_at
+         )
+         SELECT uuidv7(), $2, $3, $4, $5, $6, $7, now(), now()
+         FROM generate_series(1, $1)",
+    )
+    .bind(i64::try_from(shortfall).unwrap())
+    .bind(like.profile_type.as_str())
+    .bind(like.roles.join(" "))
+    .bind(like.status.as_str())
+    .bind(like.visibility.as_str())
+    .bind(like.max_assurance.as_str())
+    .bind(like.migration_pending)
+    .execute(&pool)
+    .await
+    .unwrap();
     let username = unique_username();
     service
         .create_user(provisioned(create_user_request(&username)))

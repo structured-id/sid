@@ -96,45 +96,129 @@ impl ScimPatchPayload {
         }
     }
 
-    pub fn deactivate() -> Self {
-        Self::new(vec![ScimPatchOp {
+    /// Replace every attribute `user` carries (RFC 7644 §3.5.2.3): the
+    /// resource takes the current state whatever it held, so a repeated or
+    /// late push restores the same state rather than an older one.
+    pub fn replace_user(user: &ScimUserPayload) -> Result<Self, super::client::ScimClientError> {
+        let Value::Object(attributes) = serde_json::to_value(user)
+            .map_err(|e| super::client::ScimClientError::Serialization(e.to_string()))?
+        else {
+            return Err(super::client::ScimClientError::Serialization(
+                "a user is not an object".into(),
+            ));
+        };
+        Ok(Self::new(
+            attributes
+                .into_iter()
+                .filter(|(name, _)| name != "schemas")
+                .map(|(name, value)| ScimPatchOp {
+                    op: "replace".into(),
+                    path: Some(name),
+                    value: Some(value),
+                })
+                .collect(),
+        ))
+    }
+
+    /// Replace a group's name and, when it has members, its whole
+    /// membership. An empty membership is not part of this patch: it is
+    /// [`Self::remove_members`], sent on its own (see there).
+    pub fn replace_group(group: &ScimGroupPayload) -> Self {
+        let mut operations = vec![ScimPatchOp {
             op: "replace".into(),
-            path: Some("active".into()),
-            value: Some(json!(false)),
-        }])
+            path: Some("displayName".into()),
+            value: Some(json!(group.display_name)),
+        }];
+        if !group.members.is_empty() {
+            operations.push(ScimPatchOp {
+                op: "replace".into(),
+                path: Some("members".into()),
+                value: Some(Value::Array(
+                    group
+                        .members
+                        .iter()
+                        .map(|m| json!({"value": m.value}))
+                        .collect(),
+                )),
+            });
+        }
+        Self::new(operations)
     }
 
-    pub fn reactivate() -> Self {
-        Self::new(vec![ScimPatchOp {
-            op: "replace".into(),
-            path: Some("active".into()),
-            value: Some(json!(true)),
-        }])
+    /// Remove every attribute at `paths` (RFC 7644 §3.5.2.2), such as a
+    /// group's `members` (a replacement with an empty value is not one every
+    /// server accepts). A server may refuse a path it has nothing at as
+    /// `noTarget`, and a patch is atomic, so removals go apart from other
+    /// changes rather than taking them down too.
+    pub fn remove(paths: &[String]) -> Self {
+        Self::new(
+            paths
+                .iter()
+                .map(|path| ScimPatchOp {
+                    op: "remove".into(),
+                    path: Some(path.clone()),
+                    value: None,
+                })
+                .collect(),
+        )
     }
+}
 
-    pub fn add_members(member_ids: Vec<String>) -> Self {
-        let members: Vec<Value> = member_ids
-            .into_iter()
-            .map(|id| json!({"value": id}))
-            .collect();
-        Self::new(vec![ScimPatchOp {
-            op: "add".into(),
-            path: Some("members".into()),
-            value: Some(Value::Array(members)),
-        }])
-    }
+/// The attributes the default mapping writes besides `userName` and
+/// `active`, which every user carries.
+const DEFAULT_USER_PATHS: [&str; 9] = [
+    "displayName",
+    "name.givenName",
+    "name.familyName",
+    "name.formatted",
+    "emails",
+    "phoneNumbers",
+    "externalId",
+    "title",
+    "department",
+];
 
-    pub fn remove_members(member_ids: Vec<String>) -> Self {
-        let members: Vec<Value> = member_ids
-            .into_iter()
-            .map(|id| json!({"value": id}))
-            .collect();
-        Self::new(vec![ScimPatchOp {
-            op: "remove".into(),
-            path: Some("members".into()),
-            value: Some(Value::Array(members)),
-        }])
+/// The attribute paths `mapping` writes that `user` does not carry now: a
+/// push removes them, so the target is left without what the user lost. A
+/// `name` with none of its mapped sub-attributes left is removed as a whole;
+/// otherwise each missing sub-attribute is, since a replacement of `name`
+/// leaves the sub-attributes it does not name unchanged (RFC 7644 §3.5.2.3).
+pub fn absent_user_paths(
+    user: &ScimUserPayload,
+    mapping: &AttributeMapping,
+) -> Result<Vec<String>, super::client::ScimClientError> {
+    let Value::Object(held) = serde_json::to_value(user)
+        .map_err(|e| super::client::ScimClientError::Serialization(e.to_string()))?
+    else {
+        return Err(super::client::ScimClientError::Serialization(
+            "a user is not an object".into(),
+        ));
+    };
+    let written: Vec<&str> = if mapping.mappings.is_empty() {
+        DEFAULT_USER_PATHS.to_vec()
+    } else {
+        mapping
+            .mappings
+            .iter()
+            .map(|entry| entry.scim_path.as_str())
+            .filter(|path| !matches!(*path, "userName" | "active"))
+            .collect()
+    };
+    let name = held.get("name");
+    let mut absent = Vec::new();
+    for path in written {
+        let missing = match path.strip_prefix("name.") {
+            Some(_) if name.is_none() => "name",
+            Some(sub) if name.and_then(|n| n.get(sub)).is_none() => path,
+            Some(_) => continue,
+            None if held.contains_key(path) => continue,
+            None => path,
+        };
+        if !absent.iter().any(|p| p == missing) {
+            absent.push(missing.to_string());
+        }
     }
+    Ok(absent)
 }
 
 /// Build a SCIM User payload from SID profile data using the configured attribute mapping.
@@ -397,256 +481,4 @@ pub fn resolve_group_mapping(sid_group_name: &str, config: &GroupPushConfig) -> 
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use chrono::Utc;
-    use sid_core::models::{
-        AttributeMappingEntry, GroupMappingEntry, PrincipalId, ProfileAssurance, ProfileId,
-        ProfileType, ProfileVisibility,
-    };
-
-    fn test_profile() -> Profile {
-        Profile {
-            id: ProfileId::generate(),
-            profile_type: ProfileType::Corporate,
-            username: Some("alice.smith".into()),
-            given_name: Some("Alice".into()),
-            family_name: Some("Smith".into()),
-            middle_name: None,
-            honorific_prefix: None,
-            honorific_suffix: None,
-            roles: vec![],
-            status: ProfileStatus::Provisioned,
-            max_assurance: ProfileAssurance::default(),
-            visibility: ProfileVisibility::Private,
-            manager_id: None,
-            migration_pending: false,
-            migration_started_at: None,
-            migration_completed_at: None,
-            revision: 0,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        }
-    }
-
-    fn test_principals(profile_id: ProfileId) -> Vec<Principal> {
-        vec![
-            Principal {
-                id: PrincipalId::new(),
-                profile_id,
-                principal_type: PrincipalType::Username,
-                value: "alice.smith#acme.corp".into(),
-                is_primary: true,
-                verified: false,
-                verified_at: None,
-                verification_expires: None,
-                assigned_profile_id: None,
-                assignment_revision: 0,
-                email_policy_revision: None,
-                source_field: None,
-                source_email_id: None,
-                source_phone_id: None,
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-            },
-            Principal {
-                id: PrincipalId::new(),
-                profile_id,
-                principal_type: PrincipalType::Email,
-                value: "alice@acme.com".into(),
-                is_primary: false,
-                verified: false,
-                verified_at: None,
-                verification_expires: None,
-                assigned_profile_id: None,
-                assignment_revision: 0,
-                email_policy_revision: Some(sid_core::models::INSTALLATION_EMAIL_POLICY_REVISION),
-                source_field: Some("email".into()),
-                source_email_id: None,
-                source_phone_id: None,
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-            },
-        ]
-    }
-
-    fn test_metadata(profile_id: ProfileId) -> Vec<ProfileMetadata> {
-        vec![
-            ProfileMetadata::new(profile_id, "employee_id", serde_json::json!("EMP-001")),
-            ProfileMetadata::new(profile_id, "department", serde_json::json!("Engineering")),
-            // given_name/family_name are now Profile fields, not metadata
-        ]
-    }
-
-    #[test]
-    fn test_default_mapping_builds_full_user() {
-        let profile = test_profile();
-        let principals = test_principals(profile.id);
-        let metadata = test_metadata(profile.id);
-
-        let payload = build_scim_user(
-            &profile,
-            &principals,
-            &metadata,
-            &AttributeMapping::default(),
-        );
-
-        assert_eq!(payload.user_name, "alice.smith");
-        assert_eq!(payload.display_name.as_deref(), Some("Alice Smith"));
-        assert!(payload.active); // Provisioned = active for downstream
-        assert_eq!(payload.external_id.as_deref(), Some("EMP-001"));
-        assert_eq!(payload.department.as_deref(), Some("Engineering"));
-        assert_eq!(payload.emails.len(), 1);
-        assert_eq!(payload.emails[0].value, "alice@acme.com");
-        assert_eq!(
-            payload.name.as_ref().unwrap().given_name.as_deref(),
-            Some("Alice")
-        );
-        assert_eq!(
-            payload.name.as_ref().unwrap().family_name.as_deref(),
-            Some("Smith")
-        );
-    }
-
-    #[test]
-    fn test_custom_mapping_overrides_username() {
-        let profile = test_profile();
-        let principals = test_principals(profile.id);
-        let metadata = test_metadata(profile.id);
-
-        let mapping = AttributeMapping {
-            mappings: vec![
-                AttributeMappingEntry {
-                    scim_path: "userName".into(),
-                    source: MappingSource::Path {
-                        path: "profile.email".into(),
-                    },
-                },
-                AttributeMappingEntry {
-                    scim_path: "active".into(),
-                    source: MappingSource::StatusCheck {
-                        active_value: "provisioned".into(),
-                    },
-                },
-            ],
-        };
-
-        let payload = build_scim_user(&profile, &principals, &metadata, &mapping);
-        assert_eq!(payload.user_name, "alice@acme.com");
-        assert!(payload.active);
-    }
-
-    #[test]
-    fn test_literal_mapping() {
-        let profile = test_profile();
-        let principals = test_principals(profile.id);
-        let mapping = AttributeMapping {
-            mappings: vec![AttributeMappingEntry {
-                scim_path: "custom_field".into(),
-                source: MappingSource::Literal {
-                    value: serde_json::json!("constant"),
-                },
-            }],
-        };
-
-        let payload = build_scim_user(&profile, &principals, &[], &mapping);
-        assert_eq!(payload.extra.get("custom_field").unwrap(), "constant");
-    }
-
-    #[test]
-    fn test_metadata_path_resolution() {
-        let profile = test_profile();
-        let principals = test_principals(profile.id);
-        let metadata = test_metadata(profile.id);
-
-        let mapping = AttributeMapping {
-            mappings: vec![AttributeMappingEntry {
-                scim_path: "externalId".into(),
-                source: MappingSource::Path {
-                    path: "metadata.employee_id".into(),
-                },
-            }],
-        };
-
-        let payload = build_scim_user(&profile, &principals, &metadata, &mapping);
-        assert_eq!(payload.external_id.as_deref(), Some("EMP-001"));
-    }
-
-    #[test]
-    fn test_extract_login_strips_domain() {
-        let profile = test_profile();
-        let principals = test_principals(profile.id);
-        assert_eq!(extract_login(&profile, &principals), "alice.smith");
-    }
-
-    #[test]
-    fn test_extract_login_fallback_to_username() {
-        let profile = test_profile();
-        assert_eq!(extract_login(&profile, &[]), "alice.smith");
-    }
-
-    #[test]
-    fn test_group_mapping_resolution() {
-        let config = GroupPushConfig {
-            enabled: true,
-            mapping: vec![GroupMappingEntry {
-                sid_group: "Engineering".into(),
-                target_group: "S0001".into(),
-            }],
-        };
-
-        assert_eq!(
-            resolve_group_mapping("Engineering", &config),
-            Some("S0001".into())
-        );
-        assert_eq!(resolve_group_mapping("Sales", &config), None);
-    }
-
-    #[test]
-    fn test_group_mapping_disabled() {
-        let config = GroupPushConfig::default(); // enabled=false
-        assert_eq!(resolve_group_mapping("Engineering", &config), None);
-    }
-
-    #[test]
-    fn test_patch_payload_deactivate() {
-        let patch = ScimPatchPayload::deactivate();
-        assert_eq!(patch.operations.len(), 1);
-        assert_eq!(patch.operations[0].op, "replace");
-        assert_eq!(patch.operations[0].path.as_deref(), Some("active"));
-        assert_eq!(patch.operations[0].value, Some(serde_json::json!(false)));
-    }
-
-    #[test]
-    fn test_patch_payload_add_members() {
-        let patch = ScimPatchPayload::add_members(vec!["user1".into(), "user2".into()]);
-        assert_eq!(patch.operations.len(), 1);
-        assert_eq!(patch.operations[0].op, "add");
-    }
-
-    #[test]
-    fn test_scim_user_payload_serializes() {
-        let profile = test_profile();
-        let principals = test_principals(profile.id);
-        let metadata = test_metadata(profile.id);
-
-        let payload = build_scim_user(
-            &profile,
-            &principals,
-            &metadata,
-            &AttributeMapping::default(),
-        );
-        let json = serde_json::to_string(&payload).unwrap();
-        assert!(json.contains("\"userName\""));
-        assert!(json.contains("\"displayName\""));
-        assert!(json.contains("\"emails\""));
-    }
-
-    #[test]
-    fn test_suspended_profile_inactive() {
-        let mut profile = test_profile();
-        profile.status = ProfileStatus::Suspended;
-        let payload = build_scim_user(&profile, &[], &[], &AttributeMapping::default());
-        assert!(!payload.active);
-    }
-}
+mod tests;

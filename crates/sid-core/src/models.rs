@@ -145,7 +145,11 @@ pub use email_provider::{
 };
 pub use enforcement::{EnforcementAction, EnforcementDecision, PolicyViolation, RequiredAction};
 pub use enterprise_registration::{EnterpriseId, EnterpriseRegistration};
-pub use event::{EVENT_RELAY_ATTEMPTS, EVENT_RELAY_KIND, Event, EventFilter};
+pub use event::{
+    EVENT_DELIVERY_KIND, EVENT_FANOUT_KIND, EVENT_RELAY_ATTEMPTS, EVENT_RELAY_KIND, Event,
+    EventDelivery, EventFamily, EventFanout, EventFilter, EventRoute, RequiredReceiver,
+    WorkRecipient, event_route,
+};
 pub use incident::{
     AffectedEntity, AffectedEntityType, ContainmentAction, DetectionSource, Impact, Incident,
     IncidentCategory, IncidentData, IncidentId, PostMortemReport, Severity, TimelineEntry,

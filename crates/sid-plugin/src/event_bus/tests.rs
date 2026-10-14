@@ -2,14 +2,24 @@ use super::*;
 use sid_core::models::event::event_types;
 
 /// The in-process bus keeps no event until it is settled, so it refuses a
-/// durable consumer instead of consuming lossily.
+/// durable consumer, and the addressed work one would consume, instead of
+/// handling either lossily.
 #[tokio::test]
 async fn test_in_process_bus_refuses_durable_consumption() {
-    let refused = InProcessEventBus::new()
+    let bus = InProcessEventBus::new();
+    let recipient = WorkRecipient::new("test").unwrap();
+    let refused = bus
         .consume(DurableConsumer {
-            name: "test".into(),
+            recipient: recipient.clone(),
             event_types: vec![event_types::USER_CREATED.into()],
+            ordered: false,
         })
+        .await
+        .unwrap_err();
+    assert!(matches!(refused, EventBusError::DurableUnsupported));
+    let event = Event::new("test", event_types::USER_CREATED);
+    let refused = bus
+        .deliver(&recipient, event.delivery_id(&recipient), &event)
         .await
         .unwrap_err();
     assert!(matches!(refused, EventBusError::DurableUnsupported));

@@ -580,9 +580,47 @@ async fn test_profile_list_pages_cover_each_profile_once() {
 
 // ─── User directory query ───
 
+/// Seed plain profiles until `backend` holds at least `n`, in one
+/// transaction and without audit: a scenario that needs only their number
+/// does not pay for ten thousand audited writes. Every field but the id is
+/// that of a new profile.
+async fn seed_profiles(backend: &SqliteBackend, n: u64) {
+    use sid_plugin::storage::StorageBackend;
+    let shortfall = n.saturating_sub(backend.count_profiles().await.unwrap());
+    let like = sid_core::models::Profile::new(None::<String>);
+    // The store's own timestamp form (RFC 3339, microseconds, `Z`).
+    let at = like
+        .created_at
+        .to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+    let mut tx = backend.pool().begin().await.unwrap();
+    for _ in 0..shortfall {
+        sqlx::query(
+            "INSERT INTO profiles (
+                id, profile_type, roles, status, visibility, max_assurance,
+                migration_pending, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(uuid::Uuid::now_v7().to_string())
+        .bind(like.profile_type.as_str())
+        .bind(like.roles.join(" "))
+        .bind(like.status.as_str())
+        .bind(like.visibility.as_str())
+        .bind(like.max_assurance.as_str())
+        .bind(like.migration_pending)
+        .bind(&at)
+        .bind(&at)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    }
+    tx.commit().await.unwrap();
+}
+
 #[tokio::test]
 async fn test_directory_finds_a_user_beyond_ten_thousand() {
-    common::directory_query::test_directory_finds_a_user_beyond_ten_thousand(&setup().await).await;
+    let backend = setup().await;
+    seed_profiles(&backend, common::directory_query::DIRECTORY_BEYOND).await;
+    common::directory_query::test_directory_finds_a_user_beyond_ten_thousand(&backend).await;
 }
 
 #[tokio::test]
