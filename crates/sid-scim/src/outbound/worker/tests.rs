@@ -615,7 +615,8 @@ async fn test_a_user_renamed_after_a_lost_create_is_created_once() {
 }
 
 /// The same for a group: renamed after its create's response was lost, it
-/// is found under the name it was created with and renamed, once.
+/// is found under the downstream name it was created with and given the one
+/// its new name maps to, once.
 #[tokio::test]
 async fn test_a_group_renamed_after_a_lost_create_is_created_once() {
     let (endpoint, down) = downstream().await;
@@ -655,7 +656,7 @@ async fn test_a_group_renamed_after_a_lost_create_is_created_once() {
     );
     let d = down.lock().unwrap();
     assert_eq!(d.groups.len(), 1, "created again under the new name");
-    assert_eq!(d.groups[0]["displayName"], json!("Platform"));
+    assert_eq!(d.groups[0]["displayName"], json!("platform"));
 }
 
 /// After a lost create response, a lookup answered with something that is
@@ -1042,6 +1043,44 @@ async fn test_a_failed_push_of_a_new_members_groups_is_resumed() {
         Settlement::Done
     );
     assert_sole_member(&down, "alice");
+}
+
+/// A group the mapping lists is pushed under its configured downstream name,
+/// on create and on every later push: a membership update does not rename
+/// it to the SID name.
+#[tokio::test]
+async fn test_a_mapped_group_keeps_its_downstream_name() {
+    let (endpoint, down) = downstream().await;
+    let (storage, worker) = worker(vec![target("app", true, &endpoint)]).await;
+    let alice = stored_profile(&storage, "alice").await;
+    let provisioned = user_event(event_types::SCIM_USER_PROVISIONED, alice.id);
+    assert_eq!(first(&worker, &provisioned).await, Settlement::Done);
+    let group = Group::new(ProjectId::system(), "Engineering");
+    storage
+        .write_directory_group(
+            &DirectoryGroupWrite::new(DirectoryWriteMode::Create, group.clone()),
+            AuditEntry::system("test", "group").into(),
+        )
+        .await
+        .unwrap();
+    let created = group_event(event_types::SCIM_GROUP_CREATED, group.id);
+    assert_eq!(first(&worker, &created).await, Settlement::Done);
+    assert_eq!(
+        down.lock().unwrap().groups[0]["displayName"],
+        json!("engineering")
+    );
+
+    let mut join = DirectoryGroupWrite::new(DirectoryWriteMode::Update, group.clone());
+    join.add_members.push(GroupMember::new(group.id, alice.id));
+    storage
+        .write_directory_group(&join, AuditEntry::system("test", "join").into())
+        .await
+        .unwrap();
+    let updated = group_event(event_types::SCIM_GROUP_UPDATED, group.id);
+    assert_eq!(first(&worker, &updated).await, Settlement::Done);
+    let d = down.lock().unwrap();
+    assert_eq!(d.groups.len(), 1);
+    assert_eq!(d.groups[0]["displayName"], json!("engineering"));
 }
 
 /// A group without members, pushed again with a new name, gets the name

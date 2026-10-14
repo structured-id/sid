@@ -508,16 +508,18 @@ impl ScimOutboundWorker {
             }
             return Ok(());
         };
-        // The name mapping decides which groups start being pushed. A group
-        // the target already has keeps following its state under its
-        // downstream id after a rename (`PUT /Groups/{id}`), whatever its new
-        // name: skipping it would leave the old name and removed members on
+        // The name mapping decides which groups start being pushed, and the
+        // name each goes out under: the configured downstream group, not the
+        // SID name. A group the target already has keeps following its state
+        // under its downstream id after a rename (`PUT /Groups/{id}`); one
+        // renamed to a name the mapping does not list takes its SID name,
+        // since skipping it would leave the old name and removed members on
         // the target.
-        if known.is_none()
-            && mapper::resolve_group_mapping(&group.name, &target.group_push).is_none()
-        {
+        let mapped = mapper::resolve_group_mapping(&group.name, &target.group_push);
+        if known.is_none() && mapped.is_none() {
             return Ok(());
         }
+        let display_name = mapped.unwrap_or_else(|| group.name.clone());
         let mut members = Vec::new();
         for member in self
             .storage
@@ -538,18 +540,18 @@ impl ScimOutboundWorker {
         }
         let payload = ScimGroupPayload {
             schemas: vec![GROUP_SCHEMA.into()],
-            display_name: group.name.clone(),
+            display_name,
             members,
         };
 
         if let Some(id) = known {
             return client.replace_group(&id, &payload).await;
         }
-        self.mark_creation(target.id, entity, kind, &sent, &group.name)
+        self.mark_creation(target.id, entity, kind, &sent, &payload.display_name)
             .await?;
         let created = match client.create_group(&payload).await? {
             Some(id) => Some(id),
-            None => client.find_group(&group.name).await?,
+            None => client.find_group(&payload.display_name).await?,
         };
         self.adopt(target.id, entity, kind, created)
             .await?

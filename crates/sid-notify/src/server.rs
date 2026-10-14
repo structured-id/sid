@@ -182,7 +182,9 @@ impl NotifyServer {
             Arc::new(delivery::DeliverHandler::new(self.dispatcher.clone())),
             // This service's own facts (dead-letter alerts) are relayed as
             // every fact is: owed to the other required receivers, then
-            // published to history.
+            // published to history. They replace the `notify.dlq_alert` work
+            // of builds before any release, which no release carries, so no
+            // installation has such work to drain.
             Arc::new(EventRelayHandler::new(
                 Arc::clone(&self.jobs),
                 self.config.event_receivers.clone(),
