@@ -129,6 +129,10 @@ pub struct Delivery {
     pub event: Event,
     /// Which delivery of the event this is, from 1.
     pub attempt: u64,
+    /// Handed over from a consumer of the version before the identity
+    /// topology, which may already have recorded the effect under that
+    /// version's key.
+    pub earlier: bool,
     hold: Hold,
     settled: tokio::sync::oneshot::Sender<Settlement>,
 }
@@ -151,6 +155,7 @@ impl Delivery {
             Self {
                 event,
                 attempt,
+                earlier: false,
                 hold,
                 settled,
             },

@@ -70,6 +70,18 @@ pub fn delivery_job_id(event: &Event, template: &str, channel: &str) -> WorkId {
     ))
 }
 
+/// The routing job the version before the identity topology stored `event`
+/// under: keyed by the event id alone.
+fn earlier_route_job_id(event: &Event) -> WorkId {
+    stable_id(&format!("route:{}", event.id))
+}
+
+/// The delivery job that version stored for `event`, `template` and
+/// `channel`.
+fn earlier_delivery_job_id(event: &Event, template: &str, channel: &str) -> WorkId {
+    stable_id(&format!("deliver:{}:{template}:{channel}", event.id))
+}
+
 /// Accept an inbound event: store its routing job. Once this returns `Ok`
 /// the event may be settled; on `Err` it must not be.
 pub async fn accept_event(
@@ -77,12 +89,22 @@ pub async fn accept_event(
     event: &Event,
     capacity: u64,
 ) -> sid_core::Result<()> {
+    accept_as(store, event, route_job_id(event), capacity).await
+}
+
+/// [`accept_event`] under the routing job id `id`.
+async fn accept_as(
+    store: &dyn WorkStore,
+    event: &Event,
+    id: WorkId,
+    capacity: u64,
+) -> sid_core::Result<()> {
     // The event's identity names the job, so a redelivered event is stored
     // once, also when it was stored just before a crash cut its settlement.
     let payload = serde_json::to_vec(event)
         .map_err(|e| sid_core::Error::Internal(format!("event payload: {e}")))?;
     let mut work = NewWork::new(kind(ROUTE), payload);
-    work.id = route_job_id(event);
+    work.id = id;
     work.max_attempts = MAX_ATTEMPTS;
     store.enqueue_work(&work, capacity).await.map(|_| ())
 }
@@ -125,7 +147,14 @@ pub async fn accept_work(
             },
             () = &mut stop => return,
         };
-        match accept_event(store, &delivery.event, capacity).await {
+        // An event handed over from the earlier version's consumer may
+        // already have its routing job under that version's key.
+        let id = if delivery.earlier {
+            earlier_route_job_id(&delivery.event)
+        } else {
+            route_job_id(&delivery.event)
+        };
+        match accept_as(store, &delivery.event, id, capacity).await {
             Ok(()) => {
                 delivery.settle(Settlement::Done);
                 accepted();
@@ -233,6 +262,9 @@ impl WorkHandler for RouteHandler {
             Err(e @ ResolveError::Unavailable(_)) => return WorkOutcome::Retry(e.to_string()),
         };
 
+        // A routing job of the earlier version keeps that version's delivery
+        // keys: a delivery it stored before the move is not stored again.
+        let earlier = work.id == earlier_route_job_id(&event);
         let mut stored = 0usize;
         for rule in rules {
             for channel in &rule.channels {
@@ -248,7 +280,11 @@ impl WorkHandler for RouteHandler {
                     Err(e) => return WorkOutcome::Permanent(format!("delivery job: {e}")),
                 };
                 let mut delivery = NewWork::new(kind(DELIVER), payload);
-                delivery.id = delivery_job_id(&event, &rule.template, channel);
+                delivery.id = if earlier {
+                    earlier_delivery_job_id(&event, &rule.template, channel)
+                } else {
+                    delivery_job_id(&event, &rule.template, channel)
+                };
                 delivery.max_attempts = MAX_ATTEMPTS;
                 // A delivery stored by an earlier attempt is kept as it is.
                 if let Err(e) = self.store.enqueue_work(&delivery, self.capacity).await {

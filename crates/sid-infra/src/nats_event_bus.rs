@@ -19,7 +19,7 @@ use sid_plugin::event_bus::{
 };
 use tokio::sync::mpsc;
 
-use crate::nats_topology::{Topology, TopologyRole};
+use crate::nats_topology::{HANDED_OVER_FROM, Topology, TopologyRole, earlier_stream};
 
 /// When a delivery dropped unsettled is delivered again.
 const DURABLE_REDELIVERY: std::time::Duration = std::time::Duration::from_secs(5);
@@ -150,6 +150,79 @@ impl NatsEventBus {
             .await
             .map_err(|e| EventBusError::SubscribeFailed(format!("messages stream: {e}")))
     }
+
+    /// What the earlier events stream still keeps from `start_time`, read in
+    /// order, or `None` when there is no such stream or it keeps nothing
+    /// from then.
+    async fn read_archive(
+        &self,
+        start_time: time::OffsetDateTime,
+    ) -> EventBusResult<Option<jetstream::consumer::pull::Ordered>> {
+        let failed = |e: &dyn std::fmt::Display| EventBusError::SubscribeFailed(format!("{e}"));
+        let Some(stream) = earlier_stream(&self.topology, &self.jetstream)
+            .await
+            .map_err(|e| failed(&e))?
+        else {
+            return Ok(None);
+        };
+        let mut consumer = stream
+            .create_consumer(jetstream::consumer::pull::OrderedConfig {
+                deliver_policy: jetstream::consumer::DeliverPolicy::ByStartTime { start_time },
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| failed(&e))?;
+        let pending = consumer.info().await.map_err(|e| failed(&e))?.num_pending;
+        if pending == 0 {
+            return Ok(None);
+        }
+        consumer.messages().await.map(Some).map_err(|e| failed(&e))
+    }
+}
+
+/// Forward the earlier version's history `messages` matching `filter` into
+/// `tx` until nothing is left to read or an event at or after `cutoff`
+/// arrives, returning the relay ids forwarded; `None` once the reader is
+/// gone. The stream takes no more events, so reading ends once the reader
+/// reached what it held.
+async fn forward_archive(
+    mut messages: jetstream::consumer::pull::Ordered,
+    filter: &EventFilter,
+    tx: &mpsc::Sender<Event>,
+    cutoff: Option<chrono::DateTime<chrono::Utc>>,
+) -> Option<std::collections::HashSet<WorkId>> {
+    use futures::StreamExt;
+    let mut seen = std::collections::HashSet::new();
+    while let Some(read) = messages.next().await {
+        let msg = match read {
+            Ok(msg) => msg,
+            Err(e) => {
+                tracing::warn!("earlier history read ended: {e}");
+                break;
+            }
+        };
+        let last = msg.info().map_or(true, |info| info.pending == 0);
+        match serde_json::from_slice::<Event>(&msg.payload) {
+            Ok(event) if cutoff.is_some_and(|cutoff| event.time >= cutoff) => break,
+            // The earlier stream kept every event; history is the facts.
+            Ok(event)
+                if event.validate().is_ok()
+                    && event_route(&event.event_type).is_some_and(identity_fact)
+                    && filter.matches(&event) =>
+            {
+                seen.insert(event.relay_id());
+                if tx.send(event).await.is_err() {
+                    return None;
+                }
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("failed to deserialize an earlier event: {e}"),
+        }
+        if last {
+            break;
+        }
+    }
+    Some(seen)
 }
 
 /// Refuses `event` unless its route is one `accepts`.
@@ -218,7 +291,12 @@ impl EventBus for NatsEventBus {
             .read_history(subjects, jetstream::consumer::DeliverPolicy::New)
             .await?;
         let (tx, rx) = mpsc::channel(SUBSCRIPTION_CAPACITY);
-        tokio::spawn(forward_history(messages, tx, None));
+        tokio::spawn(forward_history(
+            messages,
+            tx,
+            None,
+            std::collections::HashSet::new(),
+        ));
         Ok(rx)
     }
 
@@ -303,8 +381,12 @@ impl EventBus for NatsEventBus {
                             .await
                             .unwrap_or_else(tokio::time::Instant::now);
                         let (deadline, hold) = tokio::sync::watch::channel(first);
-                        let (delivery, mut outcome) =
+                        let (mut delivery, mut outcome) =
                             Delivery::held(event, attempt, Hold::until(hold));
+                        delivery.earlier = msg
+                            .headers
+                            .as_ref()
+                            .is_some_and(|h| h.get(HANDED_OVER_FROM).is_some());
                         if tx.send(delivery).await.is_err() {
                             // The consumer stopped: the event stays its own.
                             if let Err(e) = msg.ack_with(AckKind::Nak(None)).await {
@@ -371,6 +453,7 @@ impl EventBus for NatsEventBus {
             .ok_or_else(|| EventBusError::InvalidReplayWindow(format!("start {from}")))?;
         let start_time = time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(nanos))
             .map_err(|e| EventBusError::InvalidReplayWindow(format!("start {from}: {e}")))?;
+        let archive = self.read_archive(start_time).await?;
         let messages = self
             .read_history(
                 subjects,
@@ -378,7 +461,19 @@ impl EventBus for NatsEventBus {
             )
             .await?;
         let (tx, rx) = mpsc::channel(SUBSCRIPTION_CAPACITY);
-        tokio::spawn(forward_history(messages, tx, to));
+        tokio::spawn(async move {
+            // The earlier version's history comes first; an event its outbox
+            // published there and again into this history after the move is
+            // read once.
+            let seen = match archive {
+                None => std::collections::HashSet::new(),
+                Some(archive) => match forward_archive(archive, &filter, &tx, to).await {
+                    Some(seen) => seen,
+                    None => return,
+                },
+            };
+            forward_history(messages, tx, to, seen).await;
+        });
         Ok(rx)
     }
 
@@ -394,12 +489,14 @@ impl EventBus for NatsEventBus {
 }
 
 /// Forward history `messages` into `tx` until the stream ends or fails, the
-/// reader goes away, or an event at or after `cutoff` arrives. While `tx` is
-/// full nothing more is read, which is what holds the server back.
+/// reader goes away, or an event at or after `cutoff` arrives, leaving out
+/// the events whose relay id is in `seen`. While `tx` is full nothing more
+/// is read, which is what holds the server back.
 async fn forward_history(
     mut messages: jetstream::consumer::pull::Ordered,
     tx: mpsc::Sender<Event>,
     cutoff: Option<chrono::DateTime<chrono::Utc>>,
+    seen: std::collections::HashSet<WorkId>,
 ) {
     use futures::StreamExt;
     while let Some(read) = messages.next().await {
@@ -412,6 +509,7 @@ async fn forward_history(
         };
         match serde_json::from_slice::<Event>(&msg.payload) {
             Ok(event) if cutoff.is_some_and(|cutoff| event.time >= cutoff) => break,
+            Ok(event) if seen.contains(&event.relay_id()) => {}
             Ok(event) => match event.validate() {
                 Err(e) => tracing::warn!("invalid CloudEvents envelope, skipping: {e}"),
                 Ok(()) => {
