@@ -12,7 +12,9 @@
 //!
 //! One owner per deployment creates these streams; every process, the owner
 //! included, verifies existing ones and is not ready while they differ.
-//! Nothing here changes a stream that exists.
+//! Nothing here changes a stream of this topology that exists; the only
+//! stream the owner changes is an earlier version's broad events stream,
+//! which it moves out of the way ([`earlier`]).
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -59,6 +61,9 @@ pub struct Topology {
     /// How long a durable consumer's delivery stays its own without a sign
     /// of progress before it is delivered again.
     pub work_ack_wait: Duration,
+    /// The receiver each durable consumer of the earlier broad stream owes
+    /// its unsettled events to, by consumer name; see [`earlier`].
+    pub earlier_receivers: Vec<(String, WorkRecipient)>,
 }
 
 impl Default for Topology {
@@ -70,6 +75,7 @@ impl Default for Topology {
             work_max_bytes: 1 << 30,
             replicas: 1,
             work_ack_wait: Duration::from_secs(60),
+            earlier_receivers: Vec::new(),
         }
     }
 }
@@ -129,10 +135,16 @@ fn env_number<T: std::str::FromStr + PartialOrd + Default>(
 impl Topology {
     /// The deployment's topology: `SID_NATS_HISTORY_MAX_AGE_SECS`,
     /// `SID_NATS_WORK_MAX_MESSAGES`, `SID_NATS_WORK_MAX_BYTES` and
-    /// `SID_NATS_REPLICAS` over the defaults. Every process of a deployment
-    /// reads the same values: one that differs is not ready.
+    /// `SID_NATS_REPLICAS` over the defaults, and the receivers of the
+    /// earlier stream's consumers (`SID_NATS_EARLIER_CONSUMERS`). Every
+    /// process of a deployment reads the same values: one that differs is
+    /// not ready.
     pub fn from_env() -> Result<Self, TopologyError> {
         let default = Self::default();
+        let earlier_receivers = match std::env::var("SID_NATS_EARLIER_CONSUMERS") {
+            Err(_) => Vec::new(),
+            Ok(list) => earlier::parse_receivers(&list)?,
+        };
         Ok(Self {
             history_max_age: Duration::from_secs(env_number(
                 "SID_NATS_HISTORY_MAX_AGE_SECS",
@@ -141,6 +153,7 @@ impl Topology {
             work_max_messages: env_number("SID_NATS_WORK_MAX_MESSAGES", default.work_max_messages)?,
             work_max_bytes: env_number("SID_NATS_WORK_MAX_BYTES", default.work_max_bytes)?,
             replicas: env_number("SID_NATS_REPLICAS", default.replicas)?,
+            earlier_receivers,
             ..default
         })
     }
@@ -177,6 +190,12 @@ impl Topology {
     /// The addressed work stream.
     pub fn work_stream(&self) -> String {
         format!("{}_IDENTITY_WORK", self.stream_prefix())
+    }
+
+    /// The broad stream an earlier version kept every event in, on
+    /// `<root>.>`: `SID_EVENTS`.
+    pub fn earlier_stream(&self) -> String {
+        format!("{}_EVENTS", self.stream_prefix())
     }
 
     fn history_prefix(&self) -> String {
@@ -271,15 +290,23 @@ impl Topology {
     }
 
     /// Bring the streams to this definition (`Own`) or check that they are
-    /// (`Verify`). A stream of another name holding the subjects, or one a
-    /// newer version defined, is left untouched and refused.
+    /// (`Verify`). The owner first moves an earlier broad stream out of the
+    /// way and then hands the work its consumers still owe to their
+    /// receivers ([`earlier`]). Any other stream holding the subjects, or one
+    /// a newer version defined, is left untouched and refused.
     pub async fn prepare(
         &self,
         js: &jetstream::Context,
         role: TopologyRole,
     ) -> Result<(), TopologyError> {
+        if role == TopologyRole::Own {
+            earlier::fence(self, js).await?;
+        }
         for config in [self.history_config(), self.work_config()] {
             prepare_stream(js, config, role).await?;
+        }
+        if role == TopologyRole::Own {
+            earlier::retire(self, js).await?;
         }
         Ok(())
     }
@@ -398,14 +425,11 @@ async fn prepare_stream(
                 .ok_or_else(|| TopologyError::Nats(format!("create {}: {e}", wanted.name)))?,
         },
     };
-    // A stream of another name holding these subjects (an earlier broad
-    // `SID_EVENTS` on `sid.>`) is refused and left as it is: deleting it
-    // would lose its history and the work its consumers have not settled,
-    // and moving its contents into this topology is a controlled transition
-    // of its own (stopping its writers, keeping unsettled work from expiring,
-    // carrying consumer positions, resuming after an interruption), not
-    // something a starting server may do. Until that transition runs, the
-    // server does not start on such a deployment.
+    // A stream of another name holding these subjects is refused and left as
+    // it is: deleting it would lose its history and the work its consumers
+    // have not settled. The installation's own earlier `SID_EVENTS` no longer
+    // holds them here when the owner prepares (it was fenced first); a
+    // verifier waits until the owner has done so.
     if held_by != wanted.name {
         return Err(TopologyError::Conflict {
             subjects: probe,
@@ -445,6 +469,8 @@ async fn prepare_stream(
         }),
     }
 }
+
+mod earlier;
 
 #[cfg(test)]
 mod tests;
