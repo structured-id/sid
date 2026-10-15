@@ -56,8 +56,10 @@ pub struct Connection {
     pub redirect_uri: String,
 }
 
-/// The account API's answer as the one connection representation.
-fn answered(answer: AccountConnection) -> ClientConnection {
+/// The account API's answer as the one connection representation. SID
+/// answers only a proof signed by `kid` that verifies against the client's
+/// registered keys, so that key is the one registered key the answer names.
+fn answered(answer: AccountConnection, kid: &str) -> ClientConnection {
     ClientConnection {
         issuer: answer.issuer,
         client_id: answer.client_id,
@@ -65,22 +67,33 @@ fn answered(answer: AccountConnection) -> ClientConnection {
         scopes: answer.scopes,
         redirect_uri: answer.redirect_uri,
         token_endpoint_auth_method: answer.token_endpoint_auth_method,
+        key_ids: vec![kid.to_owned()],
     }
 }
 
 impl Connection {
-    /// The connection the deployment delivered in the file at `path`.
-    pub fn load(path: &Path, installation_url: &str) -> anyhow::Result<Self> {
+    /// The connection the deployment delivered in the file at `path`, for
+    /// the BFF's key `kid`.
+    pub fn load(path: &Path, installation_url: &str, kid: &str) -> anyhow::Result<Self> {
         let json = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("BFF connection {path:?} cannot be read: {e}"))?;
-        Self::parse(&json, installation_url)
+        Self::parse(&json, installation_url, kid)
             .map_err(|e| anyhow::anyhow!("BFF connection {path:?}: {e}"))
     }
 
     /// A delivered connection bundle: JSON of exactly the registration's
-    /// fields, validated as [`Connection::accept`] does.
-    pub fn parse(json: &str, installation_url: &str) -> anyhow::Result<Self> {
+    /// fields, validated as [`Connection::accept`] does, for a client that
+    /// registered the BFF's key `kid`. Unlike discovery, nothing proved the
+    /// pairing of bundle and key: a bundle of another client would pass
+    /// every authorization and fail every code redemption.
+    pub fn parse(json: &str, installation_url: &str, kid: &str) -> anyhow::Result<Self> {
         let bundle: ClientConnection = serde_json::from_str(json)?;
+        if !bundle.key_ids.iter().any(|registered| registered == kid) {
+            anyhow::bail!(
+                "the client key {kid} is not registered for client {}",
+                bundle.client_id
+            );
+        }
         Ok(Self::accept(bundle, installation_url)?)
     }
 
@@ -129,11 +142,22 @@ impl Connection {
         })
     }
 
-    /// What sessions and pending sign-ins are bound to: the issuer, client
-    /// and resource their tokens are issued for. A replaced connection
-    /// matches none of the records made under the former one.
+    /// What sessions and pending sign-ins are bound to: the issuer, client,
+    /// resource and scope set their tokens are issued for. A replaced
+    /// connection, a narrowed scope set included, matches none of the records
+    /// made under the former one; the order scopes are listed in does not
+    /// change what they grant (RFC 6749 §3.3).
     pub fn binding(&self) -> String {
-        format!("{}\n{}\n{}", self.issuer, self.client_id, self.resource)
+        let mut scopes: Vec<&str> = self.scopes.iter().map(String::as_str).collect();
+        scopes.sort_unstable();
+        scopes.dedup();
+        format!(
+            "{}\n{}\n{}\n{}",
+            self.issuer,
+            self.client_id,
+            self.resource,
+            scopes.join(" ")
+        )
     }
 
     /// The issuer's token endpoint, the audience of every client assertion
@@ -229,7 +253,7 @@ impl AccountLink {
                     .get_account_connection(GetAccountConnectionRequest { proof })
                     .await?
                     .into_inner();
-                Connection::accept(answered(answer), &self.installation_url)
+                Connection::accept(answered(answer, self.key.kid()), &self.installation_url)
             })
             .await
     }

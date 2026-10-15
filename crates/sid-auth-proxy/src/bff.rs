@@ -390,12 +390,11 @@ pub(crate) async fn signed_in(
     let (_, connection) = connected(state).await?;
     // Tokens issued to another client, by another issuer or for another API
     // (a connection replaced since) are not used under this one.
+    // The session is left in place: during a rollout a replica holding its
+    // connection shares the cache and still serves it. One whose connection
+    // is gone everywhere expires with its idle window.
     if session.connection != connection.binding() {
-        tracing::info!("BFF: session of another connection ended");
-        if let Err(e) = state.bff_sessions.destroy_session(&session_id).await {
-            tracing::error!(error = %e, "BFF: cannot destroy a session of another connection");
-            return Err(StatusCode::SERVICE_UNAVAILABLE);
-        }
+        tracing::info!("BFF: session of another connection refused");
         return Err(StatusCode::UNAUTHORIZED);
     }
     // A SID session ended elsewhere (sign-out on another device, an

@@ -78,7 +78,7 @@ async fn main() -> anyhow::Result<()> {
             let link = match config.bff_connection() {
                 Some(path) => {
                     let connection =
-                        Connection::load(std::path::Path::new(path), &installation_url)?;
+                        Connection::load(std::path::Path::new(path), &installation_url, key.kid())?;
                     tracing::info!(
                         issuer = %connection.issuer,
                         client_id = %connection.client_id,

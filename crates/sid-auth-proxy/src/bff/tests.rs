@@ -281,6 +281,7 @@ pub(crate) fn test_connection() -> Connection {
             ],
             redirect_uri: CALLBACK.into(),
             token_endpoint_auth_method: "private_key_jwt".into(),
+            key_ids: vec!["bff-key".into()],
         },
         "https://sid.example.com",
     )
@@ -304,10 +305,12 @@ pub(crate) fn bff_test_state() -> ProxyState {
 const OTHER_CONNECTION: &str = "https://sid.example.com/i/0123456789abcdef0123456789abcdef\nother-web\nhttps://sid.example.com/account";
 
 /// A session made under another connection (a delivered bundle that has
-/// since been replaced) is not this BFF's: it is refused and ended, never
-/// read with its stored claims or tokens.
+/// since been replaced) is not this BFF's: it is refused, never read with its
+/// stored claims or tokens. It is left in place: during a rollout a replica
+/// of the other connection shares the cache and still serves it, and erasing
+/// it here would sign its user out there.
 #[tokio::test]
-async fn test_a_session_of_another_connection_is_ended() {
+async fn test_a_session_of_another_connection_is_refused_and_kept() {
     let state = bff_test_state();
     let sessions = state.bff_sessions.clone();
     let (session_id, _) = sessions
@@ -325,7 +328,7 @@ async fn test_a_session_of_another_connection_is_ended() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    assert!(sessions.get_session(&session_id).await.unwrap().is_none());
+    assert!(sessions.get_session(&session_id).await.unwrap().is_some());
 }
 
 /// A sign-in started under another connection is not completed under this

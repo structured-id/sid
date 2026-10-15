@@ -95,6 +95,7 @@ async fn the_connection_is_the_stored_registration() {
         "https://account.sid.example.com/auth/callback"
     );
     assert_eq!(connection.token_endpoint_auth_method, "private_key_jwt");
+    assert_eq!(connection.key_ids, ["bff-1"]);
 }
 
 /// A resource of another issuer would send the BFF's tokens to an API that
@@ -180,6 +181,15 @@ async fn a_client_the_bffs_key_cannot_authenticate_is_refused() {
     let mut r = registration().await;
     r.client.jwks = None;
     assert!(refused(r.connection()), "private_key_jwt without keys");
+}
+
+/// The BFF's callback needs an ID token, issued only for `openid` (OIDC Core
+/// 1.0 §3.1.2.1): a client that may not request it gets no connection.
+#[tokio::test]
+async fn a_client_without_openid_is_refused() {
+    let mut r = registration().await;
+    r.client.allowed_scopes.retain(|s| s != "openid");
+    assert!(refused(r.connection()));
 }
 
 /// Access granted to another client, or to another resource, is not this

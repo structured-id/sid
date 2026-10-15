@@ -29,6 +29,10 @@ pub struct ClientConnection {
     pub redirect_uri: String,
     /// How the client authenticates at the token endpoint (RFC 7591 §2).
     pub token_endpoint_auth_method: String,
+    /// `kid`s of the client's registered keys (RFC 7517 §4.5): the issuer
+    /// finds the key that verifies a client assertion by its `kid`, so a
+    /// BFF whose key is not among them cannot authenticate as this client.
+    pub key_ids: Vec<String>,
 }
 
 impl ClientConnection {
@@ -36,7 +40,8 @@ impl ClientConnection {
     /// reaches through `access`, as stored. A registration that cannot serve
     /// this BFF's sign-ins is never a connection: a disabled client, one the
     /// issuer does not serve, one that does not authenticate with registered
-    /// keys (`private_key_jwt`), one without the code or refresh grant, a
+    /// keys (`private_key_jwt`) or may not request `openid`, one without the
+    /// code or refresh grant, a
     /// resource that is not a target or is another issuer's, access that is
     /// not this client's to this resource, or a client without exactly one
     /// callback.
@@ -58,6 +63,11 @@ impl ClientConnection {
             || client.credential_problem().is_some()
         {
             return unusable("the client does not authenticate with registered keys");
+        }
+        // The BFF's callback needs an ID token, issued only for `openid`
+        // (OIDC Core 1.0 §3.1.2.1).
+        if !client.allowed_scopes.iter().any(|s| s == "openid") {
+            return unusable("the client may not request openid");
         }
         if !resource.is_target() {
             return unusable("the resource is not a token target");
@@ -86,6 +96,15 @@ impl ClientConnection {
             return unusable("the client does not have exactly one callback");
         };
         let redirect_uri = redirect_uri.clone();
+        // Present: `credential_problem` refused a private_key_jwt client
+        // without keys above, and every registered key has a kid.
+        let key_ids = client
+            .jwks
+            .iter()
+            .flat_map(|set| set.keys())
+            .filter_map(|key| key.get("kid").and_then(|kid| kid.as_str()))
+            .map(str::to_owned)
+            .collect();
         Ok(Self {
             issuer: issuer.canonical_url.clone(),
             client_id: client.client_id.clone(),
@@ -93,6 +112,7 @@ impl ClientConnection {
             scopes: client.allowed_scopes.clone(),
             redirect_uri,
             token_endpoint_auth_method: client.token_endpoint_auth_method.to_string(),
+            key_ids,
         })
     }
 }

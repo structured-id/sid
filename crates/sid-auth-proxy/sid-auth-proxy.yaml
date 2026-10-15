@@ -61,7 +61,8 @@ shield:
 #   # the public JWK Set it prints (SID_ACCOUNT_CLIENT_JWKS).
 #   client_key: "/etc/sid/bff-key.pem"
 #   # Connection bundle delivered by installation tooling (JSON: issuer,
-#   # client_id, resource, scopes, redirect_uri, token_endpoint_auth_method).
+#   # client_id, resource, scopes, redirect_uri, token_endpoint_auth_method,
+#   # key_ids); client_key must be one of the registered key_ids.
 #   # Unset: the account integration's, asked of SID with the client key.
 #   # connection: "/etc/sid/bff-connection.json"
 #   # The gRPC-Web endpoint of the connection's API behind `/api/*`.

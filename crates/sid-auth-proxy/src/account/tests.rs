@@ -4,6 +4,8 @@ use super::*;
 
 const INSTALLATION: &str = "https://sid.example.com";
 const HANDLE: &str = "0123456789abcdef0123456789abcdef";
+/// The `kid` of the BFF's key, registered for the client.
+const KID: &str = "bff-key";
 
 fn bundle() -> ClientConnection {
     ClientConnection {
@@ -13,6 +15,7 @@ fn bundle() -> ClientConnection {
         scopes: vec!["openid".into(), "account".into()],
         redirect_uri: "https://account.sid.example.com/auth/callback".into(),
         token_endpoint_auth_method: "private_key_jwt".into(),
+        key_ids: vec!["previous-key".into(), KID.into()],
     }
 }
 
@@ -42,7 +45,7 @@ fn the_account_api_answer_is_the_same_connection() {
         token_endpoint_auth_method: b.token_endpoint_auth_method.clone(),
     };
     assert_eq!(
-        Connection::accept(answered(answer), INSTALLATION).unwrap(),
+        Connection::accept(answered(answer, KID), INSTALLATION).unwrap(),
         Connection::accept(b, INSTALLATION).unwrap()
     );
 }
@@ -84,17 +87,33 @@ fn an_unusable_connection_is_refused() {
 fn a_delivered_bundle_is_parsed_and_validated() {
     let json = serde_json::to_string(&bundle()).unwrap();
     assert_eq!(
-        Connection::parse(&json, INSTALLATION).unwrap(),
+        Connection::parse(&json, INSTALLATION, KID).unwrap(),
         Connection::accept(bundle(), INSTALLATION).unwrap()
     );
 
-    assert!(Connection::parse("{", INSTALLATION).is_err());
+    assert!(Connection::parse("{", INSTALLATION, KID).is_err());
     let mut extended = serde_json::to_value(bundle()).unwrap();
     extended["client_secret"] = "s3cret".into();
-    assert!(Connection::parse(&extended.to_string(), INSTALLATION).is_err());
+    assert!(Connection::parse(&extended.to_string(), INSTALLATION, KID).is_err());
     let mut foreign = bundle();
     foreign.issuer = format!("https://other.example.com/i/{HANDLE}");
-    assert!(Connection::parse(&serde_json::to_string(&foreign).unwrap(), INSTALLATION).is_err());
+    assert!(
+        Connection::parse(&serde_json::to_string(&foreign).unwrap(), INSTALLATION, KID).is_err()
+    );
+}
+
+/// A bundle of a client that did not register the BFF's key (another
+/// client's bundle beside this key) is refused at start: every code
+/// redemption would fail with `invalid_client`.
+#[test]
+fn a_bundle_of_a_client_without_the_bffs_key_is_refused() {
+    let json = serde_json::to_string(&bundle()).unwrap();
+    assert!(Connection::parse(&json, INSTALLATION, "another-key").is_err());
+    let mut keyless = bundle();
+    keyless.key_ids.clear();
+    assert!(
+        Connection::parse(&serde_json::to_string(&keyless).unwrap(), INSTALLATION, KID).is_err()
+    );
 }
 
 /// The callback goes into protocol requests exactly as registered: SID
@@ -117,11 +136,34 @@ fn the_callback_is_sent_as_registered() {
     );
 }
 
+/// Scopes are part of what a session's tokens were issued for: a bundle that
+/// narrows them is another connection, while their order is not.
+#[test]
+fn the_binding_covers_the_scopes_but_not_their_order() {
+    let base = Connection::accept(bundle(), INSTALLATION).unwrap();
+    let mut narrowed = bundle();
+    narrowed.scopes = vec!["openid".into()];
+    assert_ne!(
+        Connection::accept(narrowed, INSTALLATION)
+            .unwrap()
+            .binding(),
+        base.binding()
+    );
+    let mut reordered = bundle();
+    reordered.scopes.reverse();
+    assert_eq!(
+        Connection::accept(reordered, INSTALLATION)
+            .unwrap()
+            .binding(),
+        base.binding()
+    );
+}
+
 /// A bundle file that cannot be read is an error, never a fallback.
 #[test]
 fn a_missing_bundle_file_is_an_error() {
     let missing = std::env::temp_dir().join("sid-bff-connection-that-does-not-exist.json");
-    assert!(Connection::load(&missing, INSTALLATION).is_err());
+    assert!(Connection::load(&missing, INSTALLATION, KID).is_err());
 }
 
 /// The authorization request is the code flow with S256 PKCE, for the
