@@ -180,10 +180,9 @@ impl NatsEventBus {
     }
 }
 
-/// Forward the earlier version's history `messages` matching `filter` into
-/// `tx` until nothing is left to read or an event at or after `cutoff`
-/// arrives, returning the relay ids forwarded; `None` once the reader is
-/// gone. The stream takes no more events, so reading ends once the reader
+/// Forward the earlier version's history `messages` matching `filter` and
+/// dated before `cutoff` into `tx` until nothing is left to read, returning
+/// the relay ids forwarded; `None` once the reader is gone. The stream takes no more events, so reading ends once the reader
 /// reached what it held.
 async fn forward_archive(
     mut messages: jetstream::consumer::pull::Ordered,
@@ -203,7 +202,10 @@ async fn forward_archive(
         };
         let last = msg.info().map_or(true, |info| info.pending == 0);
         match serde_json::from_slice::<Event>(&msg.payload) {
-            Ok(event) if cutoff.is_some_and(|cutoff| event.time >= cutoff) => break,
+            // The archive interleaved producers whose clocks need not agree,
+            // so an event past the window ends nothing: the archive is read
+            // whole and each event is taken or left on its own.
+            Ok(event) if cutoff.is_some_and(|cutoff| event.time >= cutoff) => {}
             // The earlier stream kept every event; history is the facts.
             Ok(event)
                 if event.validate().is_ok()

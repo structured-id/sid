@@ -571,6 +571,71 @@ async fn test_replay_reads_the_archive_first() {
     drop_all(&t).await;
 }
 
+/// The age limit comes back once no durable consumer owes anything, even
+/// while an ephemeral reader (a replay, an observer) is still open.
+#[tokio::test]
+async fn test_the_age_limit_returns_beside_an_ephemeral_reader() {
+    let t = topology();
+    seed_earlier(&t, Duration::from_secs(3600)).await;
+    earlier_pull(&t, "old-notify").await;
+    let event = Event::new("sid-test", event_types::USER_CREATED);
+    publish_earlier(&t, &event).await;
+    let reader = jetstream()
+        .await
+        .get_stream(t.earlier_stream())
+        .await
+        .unwrap()
+        .create_consumer(consumer::pull::OrderedConfig::default())
+        .await
+        .unwrap();
+
+    t.prepare(&jetstream().await, TopologyRole::Own)
+        .await
+        .unwrap();
+    assert_eq!(received(&t, "sid-notify", 1).await, [event.id]);
+    let config = earlier_config(&t).await.expect("the archive stays");
+    assert_eq!(
+        config.max_age,
+        Duration::from_secs(3600),
+        "the age limit stayed suspended"
+    );
+    drop(reader);
+    drop_all(&t).await;
+}
+
+/// The archive is read whole: an event dated at or after the end of the
+/// window does not end the replay before a later fact inside it, since the
+/// earlier stream interleaved producers whose clocks need not agree.
+#[tokio::test]
+async fn test_replay_reads_the_whole_archive_window() {
+    let t = topology();
+    seed_earlier(&t, Duration::from_secs(3600)).await;
+    let now = chrono::Utc::now();
+    let mut ahead = Event::new("sid-test", event_types::USER_CREATED);
+    ahead.time = now + chrono::Duration::hours(1);
+    let inside = Event::new("sid-test", event_types::USER_CREATED);
+    publish_earlier(&t, &ahead).await;
+    publish_earlier(&t, &inside).await;
+
+    let bus = NatsEventBus::connect(&nats_url(), t.clone(), TopologyRole::Own)
+        .await
+        .unwrap();
+    let mut replayed = bus
+        .replay(
+            now - chrono::Duration::hours(1),
+            Some(now + chrono::Duration::minutes(1)),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    let event = tokio::time::timeout(Duration::from_secs(10), replayed.recv())
+        .await
+        .expect("the fact inside the window was not replayed")
+        .expect("replay open");
+    assert_eq!(event.id, inside.id);
+    drop_all(&t).await;
+}
+
 /// A process that only verifies leaves the earlier stream to the owner and
 /// is not ready while it still holds the subjects.
 #[tokio::test]
