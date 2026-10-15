@@ -14,6 +14,10 @@ const LONG: Duration = Duration::from_secs(3600);
 /// here rather than at every construction.
 const PENDING: Duration = Duration::from_secs(300);
 
+/// The connection binding records are made under; the store keeps it, the
+/// BFF compares it.
+const CONN: &str = "https://sid.example.com/i/0123456789abcdef0123456789abcdef\naccount-web\nhttps://sid.example.com/account";
+
 /// A store with the two session lifetimes a test cares about.
 fn build(
     cache: Arc<dyn CacheBackend>,
@@ -141,7 +145,7 @@ impl CacheBackend for BrokenCache {
 async fn test_create_and_get_session() {
     let s = store();
     let (id, csrf) = s
-        .create_session("access".into(), None, test_claims())
+        .create_session("access".into(), None, test_claims(), CONN)
         .await
         .unwrap();
 
@@ -155,7 +159,7 @@ async fn test_create_and_get_session() {
 async fn test_create_session_with_refresh_token() {
     let s = store();
     let (id, _) = s
-        .create_session("access".into(), Some("refresh".into()), test_claims())
+        .create_session("access".into(), Some("refresh".into()), test_claims(), CONN)
         .await
         .unwrap();
     let got = s.get_session(&id).await.unwrap().unwrap();
@@ -172,7 +176,7 @@ async fn test_nonexistent_session() {
 async fn test_destroy_session() {
     let s = store();
     let (id, _) = s
-        .create_session("access".into(), None, test_claims())
+        .create_session("access".into(), None, test_claims(), CONN)
         .await
         .unwrap();
     s.destroy_session(&id).await.unwrap();
@@ -189,7 +193,7 @@ async fn test_destroy_nonexistent_is_noop() {
 async fn test_destroy_twice_is_idempotent() {
     let s = store();
     let (id, _) = s
-        .create_session("access".into(), None, test_claims())
+        .create_session("access".into(), None, test_claims(), CONN)
         .await
         .unwrap();
     s.destroy_session(&id).await.unwrap();
@@ -201,7 +205,7 @@ async fn test_destroy_twice_is_idempotent() {
 async fn test_get_session_updates_last_access() {
     let s = store();
     let (id, _) = s
-        .create_session("access".into(), None, test_claims())
+        .create_session("access".into(), None, test_claims(), CONN)
         .await
         .unwrap();
     let first = s.get_session(&id).await.unwrap().unwrap();
@@ -221,7 +225,7 @@ async fn test_a_read_within_half_the_window_writes_nothing() {
     let cache = Arc::new(CountingCache::new());
     let s = build(cache.clone(), LONG, Duration::from_secs(3600));
     let (id, _) = s
-        .create_session("access".into(), None, test_claims())
+        .create_session("access".into(), None, test_claims(), CONN)
         .await
         .unwrap();
     let after_create = cache.writes();
@@ -243,7 +247,7 @@ async fn test_a_read_past_half_the_window_refreshes_it() {
     let cache = Arc::new(CountingCache::new());
     let s = build(cache.clone(), LONG, Duration::from_millis(100));
     let (id, _) = s
-        .create_session("access".into(), None, test_claims())
+        .create_session("access".into(), None, test_claims(), CONN)
         .await
         .unwrap();
     let after_create = cache.writes();
@@ -265,11 +269,11 @@ async fn test_a_read_past_half_the_window_refreshes_it() {
 async fn test_create_multiple_sessions_unique_ids() {
     let s = store();
     let (a, _) = s
-        .create_session("a".into(), None, test_claims())
+        .create_session("a".into(), None, test_claims(), CONN)
         .await
         .unwrap();
     let (b, _) = s
-        .create_session("b".into(), None, test_claims())
+        .create_session("b".into(), None, test_claims(), CONN)
         .await
         .unwrap();
     assert_ne!(a, b);
@@ -281,7 +285,7 @@ async fn test_create_multiple_sessions_unique_ids() {
 async fn test_session_id_is_hex_of_32_bytes() {
     let s = store();
     let (id, csrf) = s
-        .create_session("access".into(), None, test_claims())
+        .create_session("access".into(), None, test_claims(), CONN)
         .await
         .unwrap();
     for token in [&id, &csrf] {
@@ -302,7 +306,7 @@ async fn test_session_expires_when_idle() {
         Duration::from_millis(50),
     );
     let (id, _) = s
-        .create_session("access".into(), None, test_claims())
+        .create_session("access".into(), None, test_claims(), CONN)
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(80)).await;
@@ -320,7 +324,7 @@ async fn test_use_pushes_the_idle_window_out() {
         Duration::from_millis(400),
     );
     let (id, _) = s
-        .create_session("access".into(), None, test_claims())
+        .create_session("access".into(), None, test_claims(), CONN)
         .await
         .unwrap();
     for _ in 0..5 {
@@ -342,7 +346,7 @@ async fn test_session_expires_at_max_age_despite_use() {
         LONG,
     );
     let (id, _) = s
-        .create_session("access".into(), None, test_claims())
+        .create_session("access".into(), None, test_claims(), CONN)
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(30)).await;
@@ -358,7 +362,7 @@ async fn test_expired_session_is_deleted_not_just_hidden() {
     let cache: Arc<dyn CacheBackend> = Arc::new(InMemoryCacheBackend::new());
     let s = build(cache.clone(), Duration::from_millis(40), LONG);
     let (id, _) = s
-        .create_session("access".into(), None, test_claims())
+        .create_session("access".into(), None, test_claims(), CONN)
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(60)).await;
@@ -383,22 +387,22 @@ async fn test_pending_expires_on_its_configured_ttl() {
         Duration::from_millis(50),
     );
     let state = s
-        .store_pending("verifier".into(), "nonce".into(), "/dashboard".into())
+        .store_pending("verifier".into(), "nonce".into(), "/dashboard".into(), CONN)
         .await
         .unwrap();
 
     assert!(
-        s.take_pending(&state).await.unwrap().is_some(),
+        s.take_pending(&state, CONN).await.unwrap().is_some(),
         "still inside the window"
     );
 
     let state = s
-        .store_pending("verifier".into(), "nonce".into(), "/dashboard".into())
+        .store_pending("verifier".into(), "nonce".into(), "/dashboard".into(), CONN)
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(80)).await;
     assert!(
-        s.take_pending(&state).await.unwrap().is_none(),
+        s.take_pending(&state, CONN).await.unwrap().is_none(),
         "a callback arriving after the configured window gets nothing"
     );
 }
@@ -409,22 +413,22 @@ async fn test_pending_expires_on_its_configured_ttl() {
 async fn test_a_longer_configured_ttl_outlives_the_old_default() {
     let s = BffSessionStore::new(Arc::new(InMemoryCacheBackend::new()), LONG, LONG, LONG);
     let state = s
-        .store_pending("verifier".into(), "nonce".into(), "/dashboard".into())
+        .store_pending("verifier".into(), "nonce".into(), "/dashboard".into(), CONN)
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(80)).await;
-    assert!(s.take_pending(&state).await.unwrap().is_some());
+    assert!(s.take_pending(&state, CONN).await.unwrap().is_some());
 }
 
 #[tokio::test]
 async fn test_store_pending_returns_unique_state() {
     let s = store();
     let a = s
-        .store_pending("v1".into(), "n1".into(), "/a".into())
+        .store_pending("v1".into(), "n1".into(), "/a".into(), CONN)
         .await
         .unwrap();
     let b = s
-        .store_pending("v2".into(), "n2".into(), "/b".into())
+        .store_pending("v2".into(), "n2".into(), "/b".into(), CONN)
         .await
         .unwrap();
     assert_ne!(a, b);
@@ -434,25 +438,59 @@ async fn test_store_pending_returns_unique_state() {
 async fn test_take_pending_returns_what_was_stored() {
     let s = store();
     let state = s
-        .store_pending("verifier".into(), "nonce".into(), "/after-login".into())
+        .store_pending(
+            "verifier".into(),
+            "nonce".into(),
+            "/after-login".into(),
+            CONN,
+        )
         .await
         .unwrap();
-    let taken = s.take_pending(&state).await.unwrap().expect("pending");
+    let taken = s
+        .take_pending(&state, CONN)
+        .await
+        .unwrap()
+        .expect("pending");
     assert_eq!(taken.code_verifier, "verifier");
     assert_eq!(taken.nonce, "nonce");
     assert_eq!(taken.redirect_url, "/after-login");
+}
+
+/// A pending sign-in is found only under the binding it was started with,
+/// and asking under another does not consume it: a replica of that binding
+/// still completes it.
+#[tokio::test]
+async fn test_a_pending_sign_in_is_found_only_under_its_binding() {
+    let s = store();
+    let state = s
+        .store_pending("v".into(), "n".into(), "/".into(), CONN)
+        .await
+        .unwrap();
+    assert!(s.take_pending(&state, "another").await.unwrap().is_none());
+    assert!(s.take_pending(&state, CONN).await.unwrap().is_some());
+}
+
+/// A session keeps the connection it was made under, for the BFF to compare.
+#[tokio::test]
+async fn test_a_session_keeps_its_connection() {
+    let s = store();
+    let (id, _) = s
+        .create_session("access".into(), None, test_claims(), CONN)
+        .await
+        .unwrap();
+    assert_eq!(s.get_session(&id).await.unwrap().unwrap().connection, CONN);
 }
 
 #[tokio::test]
 async fn test_take_pending_consumes_it() {
     let s = store();
     let state = s
-        .store_pending("v".into(), "n".into(), "/".into())
+        .store_pending("v".into(), "n".into(), "/".into(), CONN)
         .await
         .unwrap();
-    assert!(s.take_pending(&state).await.unwrap().is_some());
+    assert!(s.take_pending(&state, CONN).await.unwrap().is_some());
     assert!(
-        s.take_pending(&state).await.unwrap().is_none(),
+        s.take_pending(&state, CONN).await.unwrap().is_none(),
         "a second callback with the same state gets nothing"
     );
 }
@@ -460,7 +498,12 @@ async fn test_take_pending_consumes_it() {
 #[tokio::test]
 async fn test_take_pending_nonexistent() {
     let s = store();
-    assert!(s.take_pending("never-issued").await.unwrap().is_none());
+    assert!(
+        s.take_pending("never-issued", CONN)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 /// The replay this protects against arrives at two replicas at once. Exactly
@@ -469,11 +512,11 @@ async fn test_take_pending_nonexistent() {
 async fn test_take_pending_is_claimed_once_across_replicas() {
     let (a, b) = replica_pair();
     let state = a
-        .store_pending("v".into(), "n".into(), "/".into())
+        .store_pending("v".into(), "n".into(), "/".into(), CONN)
         .await
         .unwrap();
 
-    let (first, second) = tokio::join!(a.take_pending(&state), b.take_pending(&state));
+    let (first, second) = tokio::join!(a.take_pending(&state, CONN), b.take_pending(&state, CONN));
     let winners = [first.unwrap().is_some(), second.unwrap().is_some()]
         .iter()
         .filter(|w| **w)
@@ -488,7 +531,7 @@ async fn test_take_pending_is_claimed_once_across_replicas() {
 async fn test_session_created_on_one_replica_is_readable_on_another() {
     let (a, b) = replica_pair();
     let (id, csrf) = a
-        .create_session("access".into(), Some("refresh".into()), test_claims())
+        .create_session("access".into(), Some("refresh".into()), test_claims(), CONN)
         .await
         .unwrap();
 
@@ -501,10 +544,14 @@ async fn test_session_created_on_one_replica_is_readable_on_another() {
 async fn test_pending_stored_on_one_replica_is_taken_on_another() {
     let (a, b) = replica_pair();
     let state = a
-        .store_pending("verifier".into(), "nonce".into(), "/done".into())
+        .store_pending("verifier".into(), "nonce".into(), "/done".into(), CONN)
         .await
         .unwrap();
-    let taken = b.take_pending(&state).await.unwrap().expect("visible on B");
+    let taken = b
+        .take_pending(&state, CONN)
+        .await
+        .unwrap()
+        .expect("visible on B");
     assert_eq!(taken.code_verifier, "verifier");
 }
 
@@ -513,7 +560,7 @@ async fn test_pending_stored_on_one_replica_is_taken_on_another() {
 async fn test_logout_on_one_replica_ends_the_session_on_another() {
     let (a, b) = replica_pair();
     let (id, _) = a
-        .create_session("access".into(), None, test_claims())
+        .create_session("access".into(), None, test_claims(), CONN)
         .await
         .unwrap();
     a.destroy_session(&id).await.unwrap();
@@ -527,7 +574,7 @@ async fn test_a_replica_started_later_sees_existing_sessions() {
     let cache: Arc<dyn CacheBackend> = Arc::new(InMemoryCacheBackend::new());
     let old = build(cache.clone(), LONG, LONG);
     let (id, _) = old
-        .create_session("access".into(), None, test_claims())
+        .create_session("access".into(), None, test_claims(), CONN)
         .await
         .unwrap();
     drop(old);
@@ -552,7 +599,8 @@ async fn test_unreachable_cache_is_an_error_not_an_empty_store() {
         Err(SessionStoreError::Backend(_))
     ));
     assert!(matches!(
-        s.create_session("a".into(), None, test_claims()).await,
+        s.create_session("a".into(), None, test_claims(), CONN)
+            .await,
         Err(SessionStoreError::Backend(_))
     ));
     assert!(matches!(
@@ -567,11 +615,12 @@ async fn test_unreachable_cache_is_an_error_not_an_empty_store() {
 async fn test_unreachable_cache_does_not_hand_out_a_pending_authorization() {
     let s = build(Arc::new(BrokenCache), LONG, LONG);
     assert!(matches!(
-        s.take_pending(&plausible_id()).await,
+        s.take_pending(&plausible_id(), CONN).await,
         Err(SessionStoreError::Backend(_))
     ));
     assert!(matches!(
-        s.store_pending("v".into(), "n".into(), "/".into()).await,
+        s.store_pending("v".into(), "n".into(), "/".into(), CONN)
+            .await,
         Err(SessionStoreError::Backend(_))
     ));
 }
@@ -591,6 +640,42 @@ async fn test_unreadable_value_is_an_error_not_a_missing_session() {
     ));
 }
 
+/// Records of the previous shape (before sessions and sign-ins carried their
+/// connection) stay in a shared cache while replicas are replaced. A new
+/// replica must not read them: not as a session (503 for its user), not as
+/// a sign-in to complete. They are someone else's key space and expire there.
+#[tokio::test]
+async fn test_records_of_the_previous_shape_are_not_read() {
+    let cache: Arc<dyn CacheBackend> = Arc::new(InMemoryCacheBackend::new());
+    let id = plausible_id();
+    let previous_session = serde_json::json!({
+        "access_token": "a",
+        "refresh_token": null,
+        "claims": test_claims(),
+        "csrf_token": "c",
+        "created_at": Utc::now(),
+        "last_access": Utc::now(),
+    });
+    let previous_pending = serde_json::json!({
+        "code_verifier": "v",
+        "nonce": "n",
+        "redirect_url": "/",
+        "created_at": Utc::now(),
+    });
+    for (key, value) in [
+        (format!("bff:sess:{id}"), &previous_session),
+        (format!("bff:pending:{id}"), &previous_pending),
+    ] {
+        cache
+            .set(&key, &serde_json::to_vec(value).unwrap(), LONG)
+            .await
+            .unwrap();
+    }
+    let s = build(cache, LONG, LONG);
+    assert!(s.get_session(&id).await.unwrap().is_none());
+    assert!(s.take_pending(&id, CONN).await.unwrap().is_none());
+}
+
 // ── Keys and redaction ──
 
 /// Sessions and pending authorizations share a cache with everything else that
@@ -599,7 +684,7 @@ async fn test_unreadable_value_is_an_error_not_a_missing_session() {
 async fn test_a_pending_state_is_not_readable_as_a_session() {
     let (a, _b) = replica_pair();
     let state = a
-        .store_pending("v".into(), "n".into(), "/".into())
+        .store_pending("v".into(), "n".into(), "/".into(), CONN)
         .await
         .unwrap();
     assert!(a.get_session(&state).await.unwrap().is_none());
@@ -623,7 +708,7 @@ async fn test_a_client_supplied_id_of_the_wrong_shape_never_reaches_the_cache() 
             s.get_session(bogus).await.unwrap().is_none(),
             "accepted {bogus:?}"
         );
-        assert!(s.take_pending(bogus).await.unwrap().is_none());
+        assert!(s.take_pending(bogus, CONN).await.unwrap().is_none());
     }
 }
 
@@ -632,16 +717,16 @@ async fn test_a_client_supplied_id_of_the_wrong_shape_never_reaches_the_cache() 
 async fn test_issued_ids_pass_the_shape_check() {
     let s = store();
     let (id, _) = s
-        .create_session("access".into(), None, test_claims())
+        .create_session("access".into(), None, test_claims(), CONN)
         .await
         .unwrap();
     assert!(s.get_session(&id).await.unwrap().is_some());
 
     let state = s
-        .store_pending("v".into(), "n".into(), "/".into())
+        .store_pending("v".into(), "n".into(), "/".into(), CONN)
         .await
         .unwrap();
-    assert!(s.take_pending(&state).await.unwrap().is_some());
+    assert!(s.take_pending(&state, CONN).await.unwrap().is_some());
 }
 
 #[test]
@@ -653,6 +738,7 @@ fn test_debug_hides_the_tokens() {
         csrf_token: "super-secret-csrf".into(),
         created_at: Utc::now(),
         last_access: Utc::now(),
+        connection: CONN.into(),
     };
     let rendered = format!("{session:?}");
     assert!(!rendered.contains("super-secret"), "{rendered}");

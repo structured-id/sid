@@ -85,6 +85,7 @@ async fn signed_in_state(
             "access-1".into(),
             refresh_token.map(str::to_owned),
             claims(exp),
+            &crate::bff::tests::test_connection().binding(),
         )
         .await
         .unwrap();

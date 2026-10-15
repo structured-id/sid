@@ -22,10 +22,18 @@ use sid_plugin::cache::{CacheBackend, CacheError};
 use sid_auth::auth::jwt::ForwardAuthClaims;
 
 /// Key prefix for sessions. Separate from `pending` so one cannot be read as
-/// the other, and from every other user of the same cache.
-const SESSION_PREFIX: &str = "bff:sess:";
-/// Key prefix for pending authorizations.
-const PENDING_PREFIX: &str = "bff:pending:";
+/// the other, and from every other user of the same cache. The prefixes of
+/// both records name their shape: a change of shape takes a new prefix, so
+/// replicas of different versions over one cache never read each other's
+/// records, and the old ones expire unread. The cookie keeps its configured
+/// name: while a rollout that changes the shape is in progress a browser may
+/// be asked to sign in again on a replica of the other version, which costs
+/// a sign-in for the minutes of the rollout, whereas reading both shapes or
+/// carrying two cookies would keep every former shape alive in the code.
+const SESSION_PREFIX: &str = "bff:sess:2:";
+/// Key prefix for pending authorizations, followed by the digest of the
+/// sign-in binding they were started under.
+const PENDING_PREFIX: &str = "bff:pending:3:";
 /// Key prefix for the claim on a session's refresh.
 const REFRESH_PREFIX: &str = "bff:refresh:";
 
@@ -67,6 +75,10 @@ pub struct BffSession {
     pub csrf_token: String,
     pub created_at: DateTime<Utc>,
     pub last_access: DateTime<Utc>,
+    /// The connection its tokens were issued under
+    /// ([`crate::account::Connection::binding`]); a BFF with another
+    /// connection does not use the session.
+    pub connection: String,
 }
 
 /// Hand-written so that a session reaching a log or an error message does not
@@ -116,12 +128,14 @@ impl BffSessionStore {
         }
     }
 
-    /// Store a new session, return (session_id, csrf_token).
+    /// Store a new session issued under `connection`, return
+    /// (session_id, csrf_token).
     pub async fn create_session(
         &self,
         access_token: String,
         refresh_token: Option<String>,
         claims: ForwardAuthClaims,
+        connection: &str,
     ) -> SessionResult<(String, String)> {
         let session_id = generate_token();
         let csrf_token = generate_token(); // separate random token
@@ -133,6 +147,7 @@ impl BffSessionStore {
             csrf_token: csrf_token.clone(),
             created_at: now,
             last_access: now,
+            connection: connection.to_owned(),
         };
         self.write(&session_id, &session).await?;
         Ok((session_id, csrf_token))
@@ -217,12 +232,15 @@ impl BffSessionStore {
         Ok(true)
     }
 
-    /// Store a pending OAuth2 authorization, return its `state` parameter.
+    /// Store a pending OAuth2 authorization started under the sign-in
+    /// binding `connection` ([`crate::account::Connection::sign_in_binding`]),
+    /// return its `state` parameter.
     pub async fn store_pending(
         &self,
         code_verifier: String,
         nonce: String,
         redirect_url: String,
+        connection: &str,
     ) -> SessionResult<String> {
         let state = generate_token();
         let pending = PendingAuth {
@@ -233,7 +251,7 @@ impl BffSessionStore {
         };
         self.cache
             .set(
-                &pending_key(&state),
+                &pending_key(connection, &state),
                 &serde_json::to_vec(&pending)?,
                 self.pending_ttl,
             )
@@ -241,18 +259,25 @@ impl BffSessionStore {
         Ok(state)
     }
 
-    /// Take a pending authorization, exactly once across every replica.
+    /// Take a pending authorization started under the sign-in binding
+    /// `connection`, exactly once across every replica.
     ///
     /// A read followed by a delete would let two callbacks carrying the same
     /// `state` both succeed, which is the replay `state` exists to prevent; the
-    /// cache's atomic take gives the value to one of them only.
-    pub async fn take_pending(&self, state: &str) -> SessionResult<Option<PendingAuth>> {
+    /// cache's atomic take gives the value to one of them only. One started
+    /// under another binding is not found and stays for a replica of that
+    /// binding, which shares the cache during a rollout.
+    pub async fn take_pending(
+        &self,
+        state: &str,
+        connection: &str,
+    ) -> SessionResult<Option<PendingAuth>> {
         // Same reasoning as `get_session`: the state parameter comes back from
         // the browser, and only our own shape can name a pending flow.
         if !is_issued_shape(state) {
             return Ok(None);
         }
-        let Some(raw) = self.cache.take(&pending_key(state)).await? else {
+        let Some(raw) = self.cache.take(&pending_key(connection, state)).await? else {
             return Ok(None);
         };
         Ok(Some(serde_json::from_slice(&raw)?))
@@ -287,8 +312,14 @@ fn session_key(id: &str) -> String {
     format!("{SESSION_PREFIX}{id}")
 }
 
-fn pending_key(state: &str) -> String {
-    format!("{PENDING_PREFIX}{state}")
+/// The key of a pending authorization: its sign-in binding's SHA-256, so the
+/// key stays short and carries no URL, then its state.
+fn pending_key(connection: &str, state: &str) -> String {
+    use base64::Engine as _;
+    use sha2::Digest as _;
+    let digest = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(sha2::Sha256::digest(connection.as_bytes()));
+    format!("{PENDING_PREFIX}{digest}:{state}")
 }
 
 fn refresh_key(id: &str) -> String {

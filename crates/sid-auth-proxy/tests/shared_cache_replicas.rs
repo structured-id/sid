@@ -29,6 +29,9 @@ const LONG: Duration = Duration::from_secs(3600);
 /// configured and vary only the two session lifetimes.
 const PENDING: Duration = Duration::from_secs(300);
 
+/// The connection binding records are made under.
+const CONN: &str = "https://sid.example.com/i/0123456789abcdef0123456789abcdef\napp-web\nhttps://app.sid.example.com/api";
+
 /// A store with the two session lifetimes a test cares about.
 fn build(
     cache: Arc<dyn CacheBackend>,
@@ -114,7 +117,7 @@ async fn session_created_on_one_replica_is_served_by_the_other() {
     let (a, b) = store_pair().await;
 
     let (id, csrf) = a
-        .create_session("access".into(), Some("refresh".into()), test_claims())
+        .create_session("access".into(), Some("refresh".into()), test_claims(), CONN)
         .await
         .unwrap();
 
@@ -132,7 +135,7 @@ async fn logout_on_one_replica_ends_the_session_on_the_other() {
     let (a, b) = store_pair().await;
 
     let (id, _) = a
-        .create_session("access".into(), None, test_claims())
+        .create_session("access".into(), None, test_claims(), CONN)
         .await
         .unwrap();
     assert!(b.get_session(&id).await.unwrap().is_some());
@@ -149,7 +152,7 @@ async fn a_replica_started_later_serves_an_existing_session() {
     let cache = shared_cache().await;
     let first = build(cache.clone(), LONG, LONG);
     let (id, _) = first
-        .create_session("access".into(), None, test_claims())
+        .create_session("access".into(), None, test_claims(), CONN)
         .await
         .unwrap();
 
@@ -168,7 +171,7 @@ async fn a_session_past_its_absolute_deadline_is_gone_on_both_replicas() {
     let b = build(cache, short, LONG);
 
     let (id, _) = a
-        .create_session("access".into(), None, test_claims())
+        .create_session("access".into(), None, test_claims(), CONN)
         .await
         .unwrap();
     assert!(b.get_session(&id).await.unwrap().is_some());
@@ -192,7 +195,7 @@ async fn the_idle_window_is_the_ttl_redis_actually_applies() {
     let b = build(cache, LONG, idle);
 
     let (id, _) = a
-        .create_session("access".into(), None, test_claims())
+        .create_session("access".into(), None, test_claims(), CONN)
         .await
         .unwrap();
 
@@ -216,7 +219,12 @@ async fn one_replica_refreshes_a_session() {
         .map(|_| Arc::new(build(cache.clone(), LONG, LONG)))
         .collect();
     let (id, _) = stores[0]
-        .create_session("access-1".into(), Some("refresh-1".into()), test_claims())
+        .create_session(
+            "access-1".into(),
+            Some("refresh-1".into()),
+            test_claims(),
+            CONN,
+        )
         .await
         .unwrap();
 
@@ -263,11 +271,16 @@ async fn pending_authorization_stored_on_one_replica_is_taken_on_the_other() {
             "verifier".into(),
             "nonce".into(),
             "https://app.sid.example.com/".into(),
+            CONN,
         )
         .await
         .unwrap();
 
-    let taken = b.take_pending(&state).await.unwrap().expect("B takes it");
+    let taken = b
+        .take_pending(&state, CONN)
+        .await
+        .unwrap()
+        .expect("B takes it");
     assert_eq!(taken.code_verifier, "verifier");
     assert_eq!(taken.redirect_url, "https://app.sid.example.com/");
 }
@@ -280,13 +293,14 @@ async fn a_pending_authorization_is_taken_exactly_once_across_replicas() {
             "verifier".into(),
             "nonce".into(),
             "https://app.sid.example.com/".into(),
+            CONN,
         )
         .await
         .unwrap();
 
     // Both replicas race for the same `state`, which is precisely the replay
     // the parameter exists to stop. A read-then-delete would let both through.
-    let (first, second) = tokio::join!(a.take_pending(&state), b.take_pending(&state));
+    let (first, second) = tokio::join!(a.take_pending(&state, CONN), b.take_pending(&state, CONN));
     let winners = [first.unwrap(), second.unwrap()]
         .iter()
         .filter(|v| v.is_some())
@@ -306,6 +320,7 @@ async fn many_concurrent_takes_still_produce_one_winner() {
             "verifier".into(),
             "nonce".into(),
             "https://app.sid.example.com/".into(),
+            CONN,
         )
         .await
         .unwrap();
@@ -315,9 +330,9 @@ async fn many_concurrent_takes_still_produce_one_winner() {
         for _ in 0..4 {
             let store = store.clone();
             let state = state.clone();
-            tasks.push(tokio::spawn(
-                async move { store.take_pending(&state).await },
-            ));
+            tasks.push(tokio::spawn(async move {
+                store.take_pending(&state, CONN).await
+            }));
         }
     }
 

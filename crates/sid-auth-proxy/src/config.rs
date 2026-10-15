@@ -229,8 +229,9 @@ fn default_endpoint_classes() -> Vec<EndpointClassPattern> {
 /// BFF (Backend-for-Frontend) config.
 ///
 /// Issuer, client, resource, scopes and callback are not settings: SID
-/// provisions the account integration and hands them to the holder of the
-/// client key, so an operator never copies them by hand.
+/// hands the account integration's to the holder of the client key, and
+/// installation tooling delivers any other registration's as a connection
+/// bundle, so an operator never copies them by hand.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BffConfig {
@@ -258,8 +259,14 @@ pub struct BffConfig {
     /// token endpoint assertions with it. The BFF is off without it.
     #[serde(default)]
     pub client_key: Option<String>,
-    /// The account API's gRPC-Web endpoint, where `/api/*` goes with the
-    /// `/api` prefix removed.
+    /// Path of the connection bundle the deployment delivered for this
+    /// BFF's client: JSON of the committed registration (issuer, client,
+    /// resource, scopes, callback, authentication method). Unset, the BFF
+    /// asks the account API for the account integration's.
+    #[serde(default)]
+    pub connection: Option<String>,
+    /// The gRPC-Web endpoint of the connection's API, where `/api/*` goes
+    /// with the `/api` prefix removed.
     #[serde(default)]
     pub api_upstream: Option<String>,
     /// Dev mode: no Secure flag on the cookies (a plain-HTTP localhost), and
@@ -277,6 +284,7 @@ impl Default for BffConfig {
             idle_timeout: default_bff_idle_timeout(),
             pending_ttl: default_bff_pending_ttl(),
             client_key: None,
+            connection: None,
             api_upstream: None,
             dev_mode: false,
         }
@@ -357,6 +365,9 @@ impl ProxyConfig {
                 client_key: std::env::var("SID_BFF_CLIENT_KEY")
                     .ok()
                     .filter(|path| !path.is_empty()),
+                connection: std::env::var("SID_BFF_CONNECTION")
+                    .ok()
+                    .filter(|path| !path.is_empty()),
                 api_upstream: std::env::var("SID_BFF_API_UPSTREAM")
                     .ok()
                     .filter(|url| !url.is_empty()),
@@ -410,7 +421,12 @@ impl ProxyConfig {
         self.bff.client_key.as_deref()
     }
 
-    /// The account API's gRPC-Web endpoint.
+    /// Path of the delivered connection bundle.
+    pub fn bff_connection(&self) -> Option<&str> {
+        self.bff.connection.as_deref()
+    }
+
+    /// The gRPC-Web endpoint of the connection's API.
     pub fn bff_api_upstream(&self) -> Option<&str> {
         self.bff.api_upstream.as_deref()
     }
