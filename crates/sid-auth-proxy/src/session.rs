@@ -55,6 +55,10 @@ pub struct PendingAuth {
     pub nonce: String,
     pub redirect_url: String,
     pub created_at: DateTime<Utc>,
+    /// The connection the sign-in was started under
+    /// ([`crate::account::Connection::binding`]); the callback completes it
+    /// under that one only.
+    pub connection: String,
 }
 
 /// A BFF session: the tokens a browser never sees, held server-side under an
@@ -67,6 +71,10 @@ pub struct BffSession {
     pub csrf_token: String,
     pub created_at: DateTime<Utc>,
     pub last_access: DateTime<Utc>,
+    /// The connection its tokens were issued under
+    /// ([`crate::account::Connection::binding`]); a BFF with another
+    /// connection does not use the session.
+    pub connection: String,
 }
 
 /// Hand-written so that a session reaching a log or an error message does not
@@ -116,12 +124,14 @@ impl BffSessionStore {
         }
     }
 
-    /// Store a new session, return (session_id, csrf_token).
+    /// Store a new session issued under `connection`, return
+    /// (session_id, csrf_token).
     pub async fn create_session(
         &self,
         access_token: String,
         refresh_token: Option<String>,
         claims: ForwardAuthClaims,
+        connection: &str,
     ) -> SessionResult<(String, String)> {
         let session_id = generate_token();
         let csrf_token = generate_token(); // separate random token
@@ -133,6 +143,7 @@ impl BffSessionStore {
             csrf_token: csrf_token.clone(),
             created_at: now,
             last_access: now,
+            connection: connection.to_owned(),
         };
         self.write(&session_id, &session).await?;
         Ok((session_id, csrf_token))
@@ -217,12 +228,14 @@ impl BffSessionStore {
         Ok(true)
     }
 
-    /// Store a pending OAuth2 authorization, return its `state` parameter.
+    /// Store a pending OAuth2 authorization started under `connection`,
+    /// return its `state` parameter.
     pub async fn store_pending(
         &self,
         code_verifier: String,
         nonce: String,
         redirect_url: String,
+        connection: &str,
     ) -> SessionResult<String> {
         let state = generate_token();
         let pending = PendingAuth {
@@ -230,6 +243,7 @@ impl BffSessionStore {
             nonce,
             redirect_url,
             created_at: Utc::now(),
+            connection: connection.to_owned(),
         };
         self.cache
             .set(

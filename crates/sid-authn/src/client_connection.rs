@@ -32,10 +32,11 @@ pub struct ClientConnection {
 impl ClientConnection {
     /// The connection of `client` under `issuer` for `resource`, which it
     /// reaches through `access`, as stored. A registration that cannot serve
-    /// this BFF's sign-ins is never a connection: a client the issuer does
-    /// not serve, one without the code or refresh grant, a resource of
-    /// another issuer, access that is not this client's to this resource, or
-    /// a client without exactly one callback.
+    /// this BFF's sign-ins is never a connection: a disabled client, one the
+    /// issuer does not serve, one without the code or refresh grant, a
+    /// resource that is not a target or is another issuer's, access that is
+    /// not this client's to this resource, or a client without exactly one
+    /// callback.
     pub fn of(
         issuer: &OidcIssuer,
         client: &OAuth2Client,
@@ -43,6 +44,14 @@ impl ClientConnection {
         access: &ResourceAccess,
     ) -> SidResult<Self> {
         let unusable = |why: &str| Err(SidError::InvalidState(why.into()));
+        // The issuer refuses a disabled client and issues no token for a
+        // resource that is not a target.
+        if !client.active {
+            return unusable("the client is disabled");
+        }
+        if !resource.is_target() {
+            return unusable("the resource is not a token target");
+        }
         // An issuer serves the clients of its recipient organization only.
         if client.org_id != Some(issuer.recipient_org) {
             return unusable("the client is not of the issuer's organization");

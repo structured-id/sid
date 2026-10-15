@@ -69,7 +69,12 @@ async fn login_handler(
     // state nobody can verify would make the callback unverifiable.
     let state_param = match state
         .bff_sessions
-        .store_pending(code_verifier, nonce.clone(), return_to)
+        .store_pending(
+            code_verifier,
+            nonce.clone(),
+            return_to,
+            &connection.binding(),
+        )
         .await
     {
         Ok(s) => s,
@@ -133,6 +138,12 @@ async fn callback_handler(
         }
     };
 
+    // A sign-in started under another connection (a bundle replaced since)
+    // is not completed under this one.
+    if pending.connection != connection.binding() {
+        tracing::warn!("BFF callback: sign-in started under another connection");
+        return StatusCode::BAD_REQUEST.into_response();
+    }
     // The answer must come from the integration's issuer (RFC 9207 §2.4).
     if params.iss.as_deref() != Some(connection.issuer.as_str()) {
         tracing::warn!("BFF callback: authorization response from another issuer");
@@ -191,7 +202,12 @@ async fn callback_handler(
     // (`/auth/userinfo`), never in a cookie the page would have to find.
     let (session_id, _csrf_token) = match state
         .bff_sessions
-        .create_session(tokens.access_token, tokens.refresh_token, claims)
+        .create_session(
+            tokens.access_token,
+            tokens.refresh_token,
+            claims,
+            &connection.binding(),
+        )
         .await
     {
         Ok(pair) => pair,
@@ -252,9 +268,10 @@ async fn logout_handler(
     State(state): State<ProxyState>,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    if state.bff().is_none() {
-        return StatusCode::NOT_FOUND.into_response();
-    }
+    let binding = match connected(&state).await {
+        Ok((_, connection)) => connection.binding(),
+        Err(status) => return status.into_response(),
+    };
     let Some(session_id) = extract_bff_cookie(&headers, &state.bff_cookie_name) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
@@ -271,7 +288,10 @@ async fn logout_handler(
                 tracing::error!(error = %e, "BFF logout: cannot destroy the session");
                 return StatusCode::SERVICE_UNAVAILABLE.into_response();
             }
-            revoke_grant(&state, session).await;
+            // A grant of another connection is not this client's to revoke.
+            if session.connection == binding {
+                revoke_grant(&state, session).await;
+            }
         }
         Ok(None) => {} // already gone; clear the cookies anyway
         Err(e) => {
@@ -337,17 +357,16 @@ async fn userinfo_handler(
     .into_response()
 }
 
-/// The session the request's cookie names, when it is live and its SID
-/// session was not ended elsewhere. 404 with the BFF off, 401 without a live
-/// session, 503 when that cannot be told: an outage must not look like a
-/// signed-out user, or every browser signs itself out at once.
+/// The session the request's cookie names, when it is live, was made under
+/// this BFF's connection and its SID session was not ended elsewhere. 404
+/// with the BFF off, 401 without a live session, 503 when that cannot be
+/// told: an outage must not look like a signed-out user, or every browser
+/// signs itself out at once.
 pub(crate) async fn signed_in(
     state: &ProxyState,
     headers: &axum::http::HeaderMap,
 ) -> Result<(String, BffSession), StatusCode> {
-    if state.bff().is_none() {
-        return Err(StatusCode::NOT_FOUND);
-    }
+    let (_, connection) = connected(state).await?;
     let Some(session_id) = extract_bff_cookie(headers, &state.bff_cookie_name) else {
         return Err(StatusCode::UNAUTHORIZED);
     };
@@ -359,6 +378,16 @@ pub(crate) async fn signed_in(
             return Err(StatusCode::SERVICE_UNAVAILABLE);
         }
     };
+    // Tokens issued to another client, by another issuer or for another API
+    // (a connection replaced since) are not used under this one.
+    if session.connection != connection.binding() {
+        tracing::info!("BFF: session of another connection ended");
+        if let Err(e) = state.bff_sessions.destroy_session(&session_id).await {
+            tracing::error!(error = %e, "BFF: cannot destroy a session of another connection");
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+        return Err(StatusCode::UNAUTHORIZED);
+    }
     // A SID session ended elsewhere (sign-out on another device, an
     // administrator's kill) ends this BFF session with it.
     match state

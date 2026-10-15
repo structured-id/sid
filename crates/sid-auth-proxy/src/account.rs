@@ -129,6 +129,13 @@ impl Connection {
         })
     }
 
+    /// What sessions and pending sign-ins are bound to: the issuer, client
+    /// and resource their tokens are issued for. A replaced connection
+    /// matches none of the records made under the former one.
+    pub fn binding(&self) -> String {
+        format!("{}\n{}\n{}", self.issuer, self.client_id, self.resource)
+    }
+
     /// The issuer's token endpoint, the audience of every client assertion
     /// (RFC 7523 §3).
     pub fn token_endpoint(&self) -> String {

@@ -3,7 +3,7 @@ use crate::system_integration::{AccountSettings, ensure_account_integration};
 use chrono::{SubsecRound, Utc};
 use sid_core::models::{
     AuditEntry, ClientKeySet, IssuerAuthority, IssuerHandle, IssuerId, IssuerSigningKey,
-    MutationContext, Organization, ResourceId,
+    MutationContext, Organization, ResourceId, ResourceState,
 };
 use sid_plugin::storage::StorageBackend;
 use sid_storage::sqlite::SqliteBackend;
@@ -147,6 +147,20 @@ async fn a_client_without_the_code_or_refresh_grant_is_refused() {
         let mut r = registration().await;
         r.client.grant_types.retain(|g| g != grant);
         assert!(refused(r.connection()), "without {grant}");
+    }
+}
+
+/// A disabled client, or a resource that is not a token target (inactive or
+/// retired), has every sign-in refused: no connection names it.
+#[tokio::test]
+async fn a_disabled_client_or_untargetable_resource_is_refused() {
+    let mut r = registration().await;
+    r.client.active = false;
+    assert!(refused(r.connection()), "disabled client");
+    for state in [ResourceState::Inactive, ResourceState::Retired] {
+        let mut r = registration().await;
+        r.resource.state = state;
+        assert!(refused(r.connection()), "{state:?}");
     }
 }
 
