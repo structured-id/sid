@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! The BFF's link to the account integration SID provisioned for it: the
-//! connection details it learns by proving its key, and the token endpoint
-//! calls it makes as that confidential client (`private_key_jwt`,
-//! RFC 7523 §2.2).
+//! The BFF's link to the web client SID registered for it: the connection
+//! details, delivered by the deployment or learned from the account API by
+//! proving its key, and the token endpoint calls it makes as that
+//! confidential client (`private_key_jwt`, RFC 7523 §2.2).
 
+use std::path::Path;
+
+use sid_authn::client_connection::ClientConnection;
 use sid_core::models::IssuerHandle;
 use sid_proto::sid::v1::auth_service_client::AuthServiceClient;
 use sid_proto::sid::v1::system_integration_service_client::SystemIntegrationServiceClient;
@@ -32,40 +35,65 @@ pub enum LinkError {
     Key(#[from] anyhow::Error),
 }
 
-/// What the BFF needs to sign users in and call the account API, as SID
-/// provisioned it. Never edited by hand: an operator configures only the key.
+/// What the BFF needs to sign users in and call its API, as SID registered
+/// its client. Never edited by hand: SID or the deployment's installation
+/// tooling supplies it, an operator configures only the key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Connection {
     /// Exact issuer identifier, `{installation}/i/{handle}`.
     pub issuer: String,
     /// The handle in `issuer`, which names it in token endpoint calls.
     pub issuer_handle: String,
-    /// The account web client.
+    /// The BFF's web client.
     pub client_id: String,
-    /// Resource indicator of the account API (RFC 8707 §2).
+    /// Resource indicator of the API the BFF forwards to (RFC 8707 §2).
     pub resource: String,
     /// Scopes the BFF requests.
     pub scopes: Vec<String>,
-    /// The client's registered callback on the account origin.
+    /// The client's registered callback on the BFF's origin.
     pub redirect_uri: url::Url,
 }
 
+/// The account API's answer as the one connection representation.
+fn answered(answer: AccountConnection) -> ClientConnection {
+    ClientConnection {
+        issuer: answer.issuer,
+        client_id: answer.client_id,
+        resource: answer.resource,
+        scopes: answer.scopes,
+        redirect_uri: answer.redirect_uri,
+        token_endpoint_auth_method: answer.token_endpoint_auth_method,
+    }
+}
+
 impl Connection {
-    /// The details of `answer`, accepted only when they name an issuer of
+    /// The connection the deployment delivered in the file at `path`.
+    pub fn load(path: &Path, installation_url: &str) -> anyhow::Result<Self> {
+        let json = std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("BFF connection {path:?} cannot be read: {e}"))?;
+        Self::parse(&json, installation_url)
+            .map_err(|e| anyhow::anyhow!("BFF connection {path:?}: {e}"))
+    }
+
+    /// A delivered connection bundle: JSON of exactly the registration's
+    /// fields, validated as [`Connection::accept`] does.
+    pub fn parse(json: &str, installation_url: &str) -> anyhow::Result<Self> {
+        let bundle: ClientConnection = serde_json::from_str(json)?;
+        Ok(Self::accept(bundle, installation_url)?)
+    }
+
+    /// The details of `bundle`, accepted only when they name an issuer of
     /// `installation_url` and the client authenticates with its key: a
     /// connection that would have the BFF sign in elsewhere, or as a client
     /// holding a secret it does not have, is refused rather than followed.
-    pub fn from_answer(
-        answer: AccountConnection,
-        installation_url: &str,
-    ) -> Result<Self, LinkError> {
-        if answer.token_endpoint_auth_method != "private_key_jwt" {
+    pub fn accept(bundle: ClientConnection, installation_url: &str) -> Result<Self, LinkError> {
+        if bundle.token_endpoint_auth_method != "private_key_jwt" {
             return Err(LinkError::Invalid(
                 "the client does not authenticate by key",
             ));
         }
         let prefix = format!("{}/i/", installation_url.trim_end_matches('/'));
-        let issuer_handle = answer
+        let issuer_handle = bundle
             .issuer
             .strip_prefix(&prefix)
             .filter(|handle| IssuerHandle::parse(handle).is_ok())
@@ -73,17 +101,17 @@ impl Connection {
                 "the issuer is not one of this installation's",
             ))?
             .to_owned();
-        if answer.client_id.is_empty() || answer.resource.is_empty() || answer.scopes.is_empty() {
+        if bundle.client_id.is_empty() || bundle.resource.is_empty() || bundle.scopes.is_empty() {
             return Err(LinkError::Invalid("client, resource or scopes missing"));
         }
-        let redirect_uri = url::Url::parse(&answer.redirect_uri)
+        let redirect_uri = url::Url::parse(&bundle.redirect_uri)
             .map_err(|_| LinkError::Invalid("the callback is not a URL"))?;
         Ok(Self {
-            issuer: answer.issuer,
+            issuer: bundle.issuer,
             issuer_handle,
-            client_id: answer.client_id,
-            resource: answer.resource,
-            scopes: answer.scopes,
+            client_id: bundle.client_id,
+            resource: bundle.resource,
+            scopes: bundle.scopes,
             redirect_uri,
         })
     }
@@ -115,8 +143,8 @@ impl Connection {
     }
 }
 
-/// The BFF as the account client: its key, its channel to SID, and the
-/// connection details, learned once per process.
+/// The BFF as its web client: its key, its channel to SID, and the
+/// connection details, delivered or learned once per process.
 pub struct AccountLink {
     key: ClientKey,
     installation_url: String,
@@ -148,21 +176,27 @@ impl AccountLink {
         }
     }
 
-    /// A link that already knows its connection, for tests without SID.
-    #[cfg(test)]
-    pub(crate) fn connected(key: ClientKey, connection: Connection) -> Self {
+    /// A link whose connection the deployment delivered: it is never asked
+    /// of SID.
+    pub fn delivered(
+        key: ClientKey,
+        installation_url: String,
+        channel: tonic::transport::Channel,
+        connection: Connection,
+    ) -> Self {
         Self {
             key,
-            installation_url: "https://sid.example.com".into(),
-            channel: crate::test_channel(),
+            installation_url,
+            channel,
             connection: OnceCell::new_with(Some(connection)),
         }
     }
 
-    /// The connection details. Asked of SID on first use and kept: SID never
-    /// replaces the issuer or client of a provisioned integration, so they
-    /// hold for the life of the process. A failed ask is not kept, so the BFF
-    /// becomes ready as soon as SID has provisioned the integration.
+    /// The connection details: the delivered ones, or else asked of the
+    /// account API on first use and kept. SID never replaces the issuer or
+    /// client of a registration, so they hold for the life of the process.
+    /// A failed ask is not kept, so the BFF becomes ready as soon as SID has
+    /// provisioned the integration.
     pub async fn connection(&self) -> Result<&Connection, LinkError> {
         self.connection
             .get_or_try_init(|| async {
@@ -175,7 +209,7 @@ impl AccountLink {
                     .get_account_connection(GetAccountConnectionRequest { proof })
                     .await?
                     .into_inner();
-                Connection::from_answer(answer, &self.installation_url)
+                Connection::accept(answered(answer), &self.installation_url)
             })
             .await
     }

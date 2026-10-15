@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use sid_authn::client_assertion::{AssertionJtiCache, validate_key_proof};
+use sid_authn::client_connection::ClientConnection;
 use sid_authn::system_integration::account_integration;
 use sid_core::grpc_error::{ApiError, ErrorReason};
 use sid_core::models::IssuerAuthority;
@@ -105,19 +106,15 @@ impl SystemIntegrationService for SystemIntegrationServiceImpl {
                     "the account API is not under the account client's issuer".into(),
                 ))
             })?;
-        let redirect_uri = integration
-            .client
-            .redirect_uris
-            .first()
-            .cloned()
-            .ok_or_else(unavailable)?;
+        let connection = ClientConnection::of(&issuer, &integration.client, &integration.resource)
+            .map_err(|_| unavailable())?;
         Ok(Response::new(AccountConnection {
-            issuer: issuer.canonical_url,
-            client_id: integration.client.client_id,
-            resource: integration.resource.indicator.to_string(),
-            scopes: integration.client.allowed_scopes,
-            redirect_uri,
-            token_endpoint_auth_method: integration.client.token_endpoint_auth_method.to_string(),
+            issuer: connection.issuer,
+            client_id: connection.client_id,
+            resource: connection.resource,
+            scopes: connection.scopes,
+            redirect_uri: connection.redirect_uri,
+            token_endpoint_auth_method: connection.token_endpoint_auth_method,
         }))
     }
 }

@@ -203,8 +203,8 @@ const CALLBACK: &str = "https://account.sid.example.com/auth/callback";
 
 /// The connection SID would give the test BFF.
 pub(crate) fn test_connection() -> Connection {
-    Connection::from_answer(
-        sid_proto::sid::v1::AccountConnection {
+    Connection::accept(
+        sid_authn::client_connection::ClientConnection {
             issuer: BFF_ISSUER.into(),
             client_id: "account-web".into(),
             resource: "https://sid.example.com/account".into(),
@@ -225,7 +225,12 @@ pub(crate) fn test_connection() -> Connection {
 pub(crate) fn bff_test_state() -> ProxyState {
     let (key, _) = crate::client_key::ClientKey::generate().unwrap();
     let mut state = crate::test_state();
-    state.account = Some(Arc::new(AccountLink::connected(key, test_connection())));
+    state.account = Some(Arc::new(AccountLink::delivered(
+        key,
+        "https://sid.example.com".into(),
+        crate::test_channel(),
+        test_connection(),
+    )));
     state
 }
 

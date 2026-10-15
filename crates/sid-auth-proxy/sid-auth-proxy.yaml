@@ -48,9 +48,10 @@ shield:
 # Shared cache for BFF sessions and rate-limit counters across replicas.
 # cache_url: "redis://cache:6379"
 
-# BFF for the account application. SID provisions the account integration
-# and gives its issuer, client, API and callback to the holder of the client
-# key; none of them is configured here.
+# BFF for a registered web client. For the account application SID gives
+# the account integration's issuer, client, API and callback to the holder of
+# the client key; for another registration installation tooling delivers
+# them as a connection bundle. None of them is configured by hand.
 # bff:
 #   enabled: false
 #   cookie_name: "__Host-sid-bff"
@@ -59,5 +60,9 @@ shield:
 #   # Ed25519 private key (PKCS#8 PEM) from `sid-auth-proxy keygen`; SID gets
 #   # the public JWK Set it prints (SID_ACCOUNT_CLIENT_JWKS).
 #   client_key: "/etc/sid/bff-key.pem"
-#   # The account API's gRPC-Web endpoint behind `/api/*`.
+#   # Connection bundle delivered by installation tooling (JSON: issuer,
+#   # client_id, resource, scopes, redirect_uri, token_endpoint_auth_method).
+#   # Unset: the account integration's, asked of SID with the client key.
+#   # connection: "/etc/sid/bff-connection.json"
+#   # The gRPC-Web endpoint of the connection's API behind `/api/*`.
 #   api_upstream: "http://sid-server:8080"
