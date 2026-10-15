@@ -7,7 +7,9 @@
 //! apart from it.
 
 use serde::{Deserialize, Serialize};
-use sid_core::models::{OAuth2Client, OidcIssuer, ProtectedResource, ResourceAccess};
+use sid_core::models::{
+    OAuth2Client, OidcIssuer, ProtectedResource, ResourceAccess, TokenEndpointAuthMethod,
+};
 use sid_core::{Error as SidError, Result as SidResult};
 
 /// Connection details of one registered web client.
@@ -33,7 +35,8 @@ impl ClientConnection {
     /// The connection of `client` under `issuer` for `resource`, which it
     /// reaches through `access`, as stored. A registration that cannot serve
     /// this BFF's sign-ins is never a connection: a disabled client, one the
-    /// issuer does not serve, one without the code or refresh grant, a
+    /// issuer does not serve, one that does not authenticate with registered
+    /// keys (`private_key_jwt`), one without the code or refresh grant, a
     /// resource that is not a target or is another issuer's, access that is
     /// not this client's to this resource, or a client without exactly one
     /// callback.
@@ -48,6 +51,13 @@ impl ClientConnection {
         // resource that is not a target.
         if !client.active {
             return unusable("the client is disabled");
+        }
+        // The BFF authenticates with its private key only, against the keys
+        // registered for it.
+        if client.token_endpoint_auth_method != TokenEndpointAuthMethod::PrivateKeyJwt
+            || client.credential_problem().is_some()
+        {
+            return unusable("the client does not authenticate with registered keys");
         }
         if !resource.is_target() {
             return unusable("the resource is not a token target");

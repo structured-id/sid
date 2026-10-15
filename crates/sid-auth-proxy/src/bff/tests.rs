@@ -157,6 +157,41 @@ async fn test_no_cookie_is_unauthenticated_without_a_connection() {
     }
 }
 
+/// A cookie naming no stored session (stale, fabricated) is told apart by the
+/// store alone: 401 for userinfo and the API, cookies cleared on logout, with
+/// no question to SID about the connection.
+#[tokio::test]
+async fn test_a_cookie_without_a_session_needs_no_connection() {
+    let mut state = bff_test_state();
+    let (key, _) = crate::client_key::ClientKey::generate().unwrap();
+    state.account = Some(Arc::new(AccountLink::new(
+        key,
+        "https://sid.example.com".into(),
+        crate::test_channel(),
+    )));
+    let cookie = format!("{}={}", state.bff_cookie_name, plausible_session_id());
+    for (request, expected) in [
+        (Request::get("/auth/userinfo"), StatusCode::UNAUTHORIZED),
+        (Request::post("/api/x"), StatusCode::UNAUTHORIZED),
+        (Request::post("/auth/logout"), StatusCode::NO_CONTENT),
+    ] {
+        let request = request
+            .header("cookie", &cookie)
+            .body(Body::empty())
+            .unwrap();
+        let path = request.uri().path().to_owned();
+        let response = routes()
+            .layer(axum::extract::connect_info::MockConnectInfo(
+                std::net::SocketAddr::from(([192, 0, 2, 7], 40000)),
+            ))
+            .with_state(state.clone())
+            .oneshot(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected, "{path}");
+    }
+}
+
 #[tokio::test]
 async fn test_login_reports_unavailable_when_the_store_is_down() {
     let app = routes().with_state(broken_store_state());

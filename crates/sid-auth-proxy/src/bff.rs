@@ -275,13 +275,13 @@ async fn logout_handler(
     let Some(session_id) = extract_bff_cookie(&headers, &state.bff_cookie_name) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    let binding = match connected(&state).await {
-        Ok((_, connection)) => connection.binding(),
-        Err(status) => return status.into_response(),
-    };
-
     match state.bff_sessions.get_session(&session_id).await {
         Ok(Some(session)) => {
+            // The connection is asked for only once a session needs it.
+            let binding = match connected(&state).await {
+                Ok((_, connection)) => connection.binding(),
+                Err(status) => return status.into_response(),
+            };
             if !csrf_matches(&headers, &session) {
                 tracing::warn!("BFF logout: CSRF token mismatch");
                 return StatusCode::FORBIDDEN.into_response();
@@ -373,12 +373,12 @@ pub(crate) async fn signed_in(
     if state.bff().is_none() {
         return Err(StatusCode::NOT_FOUND);
     }
-    // No cookie is a determinable 401: the connection is asked for only when
-    // there is a session whose binding it must check.
+    // No cookie, or one naming no session, is a determinable 401: the
+    // connection is asked for only when there is a session whose binding it
+    // must check.
     let Some(session_id) = extract_bff_cookie(headers, &state.bff_cookie_name) else {
         return Err(StatusCode::UNAUTHORIZED);
     };
-    let (_, connection) = connected(state).await?;
     let session = match state.bff_sessions.get_session(&session_id).await {
         Ok(Some(s)) => s,
         Ok(None) => return Err(StatusCode::UNAUTHORIZED),
@@ -387,6 +387,7 @@ pub(crate) async fn signed_in(
             return Err(StatusCode::SERVICE_UNAVAILABLE);
         }
     };
+    let (_, connection) = connected(state).await?;
     // Tokens issued to another client, by another issuer or for another API
     // (a connection replaced since) are not used under this one.
     if session.connection != connection.binding() {

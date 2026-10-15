@@ -164,6 +164,24 @@ async fn a_disabled_client_or_untargetable_resource_is_refused() {
     }
 }
 
+/// The BFF authenticates with its private key only. A client registered for
+/// a secret or for no authentication, or a `private_key_jwt` client without
+/// keys, would yield a bundle the BFF refuses at start or a sign-in whose
+/// code it cannot redeem: no connection names it.
+#[tokio::test]
+async fn a_client_the_bffs_key_cannot_authenticate_is_refused() {
+    use sid_core::models::TokenEndpointAuthMethod as M;
+    for method in [M::ClientSecretBasic, M::ClientSecretPost, M::None] {
+        let mut r = registration().await;
+        r.client.token_endpoint_auth_method = method;
+        r.client.client_secret_hash = Some(vec![1]);
+        assert!(refused(r.connection()), "{method:?}");
+    }
+    let mut r = registration().await;
+    r.client.jwks = None;
+    assert!(refused(r.connection()), "private_key_jwt without keys");
+}
+
 /// Access granted to another client, or to another resource, is not this
 /// client's access to this resource: the issuer would refuse every request
 /// for the target.
