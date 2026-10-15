@@ -266,9 +266,15 @@ async fn restore_age(
     let Some(kept) = config.metadata.remove(SUSPENDED_AGE_KEY) else {
         return Ok(());
     };
-    // Another owner replica may still be handing over.
-    if info.state.consumer_count > 0 {
-        return Ok(());
+    // Another owner replica may still be handing over a durable consumer;
+    // an ephemeral reader (a replay, an observer) owes nothing.
+    let mut listed = stream.consumers();
+    while let Some(consumer) = listed.next().await {
+        let consumer =
+            consumer.map_err(|e| nats(&format!("consumers of {}", t.earlier_stream()), e))?;
+        if consumer.config.durable_name.is_some() {
+            return Ok(());
+        }
     }
     let secs = kept.parse::<u64>().map_err(|_| TopologyError::NotReady {
         stream: t.earlier_stream(),
