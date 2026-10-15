@@ -471,6 +471,7 @@ async fn prepare_stream(
 }
 
 mod earlier;
+pub(crate) use earlier::{HANDED_OVER_FROM, earlier_stream};
 
 #[cfg(test)]
 mod tests;

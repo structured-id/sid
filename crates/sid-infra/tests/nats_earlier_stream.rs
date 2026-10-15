@@ -167,6 +167,7 @@ async fn received(t: &Topology, name: &str, count: usize) -> Vec<String> {
     let mut ids = Vec::new();
     for _ in 0..count {
         let delivery = next(&mut deliveries).await;
+        assert!(delivery.earlier, "a handed-over event is not marked so");
         ids.push(delivery.event.id.clone());
         delivery.settle(Settlement::Done);
     }
@@ -193,6 +194,11 @@ async fn drop_all(t: &Topology) {
         if let Err(e) = js.delete_stream(&name).await {
             eprintln!("delete {name}: {e}");
         }
+    }
+    // Left by a test that stopped the handover halfway.
+    let bucket = format!("{}_EARLIER_RECEIVERS", root(t).to_uppercase());
+    if let Err(e) = js.delete_key_value(&bucket).await {
+        eprintln!("delete {bucket}: {e}");
     }
 }
 
@@ -408,6 +414,159 @@ async fn test_the_archive_goes_once_it_aged_out() {
     assert!(
         earlier_config(&t).await.is_none(),
         "the empty archive stayed"
+    );
+    drop_all(&t).await;
+}
+
+/// What an earlier consumer `name` still owes.
+async fn owed(t: &Topology, name: &str) -> u64 {
+    let info = jetstream()
+        .await
+        .get_stream(t.earlier_stream())
+        .await
+        .unwrap()
+        .consumer_info(name)
+        .await
+        .unwrap();
+    info.num_pending + info.num_ack_pending as u64
+}
+
+/// Publish a message that is not an event where the earlier version kept
+/// its events.
+async fn publish_garbage(t: &Topology) {
+    jetstream()
+        .await
+        .publish(format!("{}.user.created.v1", root(t)), "garbage".into())
+        .await
+        .unwrap()
+        .await
+        .unwrap();
+}
+
+/// An owed event does not expire while the transition waits: the age limit
+/// is suspended until nothing is owed, then restored.
+#[tokio::test]
+async fn test_owed_events_outlive_the_age_limit() {
+    let mut t = topology();
+    t.earlier_receivers.clear();
+    seed_earlier(&t, Duration::from_secs(2)).await;
+    earlier_pull(&t, "old-notify").await;
+    let event = Event::new("sid-test", event_types::USER_CREATED);
+    publish_earlier(&t, &event).await;
+
+    let js = jetstream().await;
+    assert!(t.prepare(&js, TopologyRole::Own).await.is_err());
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    assert_eq!(owed(&t, "old-notify").await, 1, "an owed event expired");
+
+    let mut mapped = t.clone();
+    mapped.earlier_receivers = vec![("old-notify".into(), recipient("sid-notify"))];
+    mapped.prepare(&js, TopologyRole::Own).await.unwrap();
+    assert_eq!(received(&mapped, "sid-notify", 1).await, [event.id]);
+    if let Some(config) = earlier_config(&t).await {
+        assert_eq!(config.max_age, Duration::from_secs(2), "age not restored");
+    }
+    drop_all(&t).await;
+}
+
+/// A handover the work stream has no room for is refused before it starts:
+/// stopping it halfway would keep the owner from starting the receivers
+/// that free the room.
+#[tokio::test]
+async fn test_a_work_stream_without_room_keeps_the_owner_not_ready() {
+    let mut t = topology();
+    t.work_max_messages = 2;
+    seed_earlier(&t, Duration::from_secs(3600)).await;
+    earlier_pull(&t, "old-notify").await;
+    for _ in 0..3 {
+        publish_earlier(&t, &Event::new("sid-test", event_types::USER_CREATED)).await;
+    }
+
+    let refused = t.prepare(&jetstream().await, TopologyRole::Own).await;
+    assert!(
+        matches!(&refused, Err(TopologyError::NotReady { reason, .. }) if reason.contains("room")),
+        "{refused:?}"
+    );
+    assert_eq!(owed(&t, "old-notify").await, 3, "part of the handover ran");
+    drop_all(&t).await;
+}
+
+/// A message the earlier consumer owes that is not an event keeps the
+/// owner not ready and stays owed: nothing is dropped.
+#[tokio::test]
+async fn test_a_message_that_is_not_an_event_stays_owed() {
+    let t = topology();
+    seed_earlier(&t, Duration::from_secs(3600)).await;
+    earlier_pull(&t, "old-notify").await;
+    publish_garbage(&t).await;
+
+    let refused = t.prepare(&jetstream().await, TopologyRole::Own).await;
+    assert!(
+        matches!(&refused, Err(TopologyError::NotReady { reason, .. }) if reason.contains("not an event")),
+        "{refused:?}"
+    );
+    assert!(has_earlier_consumer(&t, "old-notify").await);
+    assert_eq!(owed(&t, "old-notify").await, 1, "the message was dropped");
+    drop_all(&t).await;
+}
+
+/// The first owner to hand a consumer over records its receiver; an owner
+/// configured with another one waits rather than splitting the consumer's
+/// events between two receivers.
+#[tokio::test]
+async fn test_an_owner_configured_otherwise_follows_the_recorded_receiver() {
+    let t = topology();
+    seed_earlier(&t, Duration::from_secs(3600)).await;
+    earlier_pull(&t, "old-notify").await;
+    publish_garbage(&t).await;
+    let js = jetstream().await;
+    assert!(t.prepare(&js, TopologyRole::Own).await.is_err());
+
+    let mut other = t.clone();
+    other.earlier_receivers = vec![("old-notify".into(), recipient("sid-other"))];
+    let refused = other.prepare(&js, TopologyRole::Own).await;
+    assert!(
+        matches!(&refused, Err(TopologyError::NotReady { reason, .. }) if reason.contains("being handed over to sid-notify")),
+        "{refused:?}"
+    );
+    drop_all(&t).await;
+}
+
+/// Replay reads the archive before the identity history, each fact once:
+/// an event the earlier outbox published there and again after the move is
+/// not read twice.
+#[tokio::test]
+async fn test_replay_reads_the_archive_first() {
+    let t = topology();
+    seed_earlier(&t, Duration::from_secs(3600)).await;
+    let first = Event::new("sid-test", event_types::USER_CREATED);
+    let second = Event::new("sid-test", event_types::USER_CREATED);
+    publish_earlier(&t, &first).await;
+    publish_earlier(&t, &second).await;
+    let since = chrono::Utc::now() - chrono::Duration::hours(1);
+
+    let bus = NatsEventBus::connect(&nats_url(), t.clone(), TopologyRole::Own)
+        .await
+        .unwrap();
+    let third = Event::new("sid-test", event_types::USER_CREATED);
+    bus.publish(second.clone()).await.unwrap();
+    bus.publish(third.clone()).await.unwrap();
+
+    let mut replayed = bus.replay(since, None, Default::default()).await.unwrap();
+    let mut ids = Vec::new();
+    for _ in 0..3 {
+        let event = tokio::time::timeout(Duration::from_secs(10), replayed.recv())
+            .await
+            .expect("a replayed event in time")
+            .expect("replay open");
+        ids.push(event.id);
+    }
+    assert_eq!(ids, [first.id, second.id, third.id]);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), replayed.recv())
+            .await
+            .is_err(),
+        "an event was replayed twice"
     );
     drop_all(&t).await;
 }

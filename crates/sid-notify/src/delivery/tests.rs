@@ -138,6 +138,57 @@ async fn test_accept_event_is_idempotent_per_event() {
     assert_ne!(route_job_id(&other_source), route_job_id(&event));
 }
 
+/// The version before the identity topology stored an event's routing job
+/// under the event id alone. An event that version accepted but never
+/// settled is handed over again after the move: it must find that job
+/// rather than store a second one and notify twice.
+#[tokio::test]
+async fn test_handed_over_event_finds_the_earlier_routing_job() {
+    let store = store().await;
+    let event = security_event();
+    let mut earlier = NewWork::new(kind(ROUTE), serde_json::to_vec(&event).unwrap());
+    earlier.id = stable_id(&format!("route:{}", event.id));
+    store.enqueue_work(&earlier, 10).await.unwrap();
+
+    let (tx, rx) = mpsc::channel(1);
+    let (mut delivery, outcome) = Delivery::new(event);
+    delivery.earlier = true;
+    tx.send(delivery).await.unwrap();
+    drop(tx);
+    accept_work(rx, store.as_ref(), 10, || {}, std::future::pending()).await;
+    assert!(matches!(outcome.await, Ok(Settlement::Done)));
+
+    let claimed = store
+        .claim_work(&[kind(ROUTE)], "w", 10, Duration::from_secs(30))
+        .await
+        .unwrap();
+    assert_eq!(claimed.len(), 1, "a handed-over event was routed twice");
+}
+
+/// A routing job the earlier version stored keeps that version's delivery
+/// keys, so a delivery it already stored is not stored again.
+#[tokio::test]
+async fn test_earlier_routing_job_keeps_its_delivery_keys() {
+    let store = store().await;
+    let handler = route_handler(&store, RecipientResolver::without_identity());
+    let event = security_event();
+    let mut sent = NewWork::new(kind(DELIVER), b"{}".to_vec());
+    sent.id = stable_id(&format!("deliver:{}:security_alert:email", event.id));
+    store.enqueue_work(&sent, 10).await.unwrap();
+
+    let mut work = claimed(ROUTE, serde_json::to_vec(&event).unwrap());
+    work.id = stable_id(&format!("route:{}", event.id));
+    assert_eq!(
+        handler.handle(&work).await,
+        WorkOutcome::Done(Some("2 deliveries".into()))
+    );
+    let deliveries = store
+        .claim_work(&[kind(DELIVER)], "w", 10, Duration::from_secs(30))
+        .await
+        .unwrap();
+    assert_eq!(deliveries.len(), 2, "an earlier delivery was stored again");
+}
+
 /// A full job store refuses the event, so the bus keeps it.
 #[tokio::test]
 async fn test_accept_event_refused_when_full() {
