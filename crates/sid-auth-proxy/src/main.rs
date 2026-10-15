@@ -17,7 +17,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
-use sid_auth_proxy::account::AccountLink;
+use sid_auth_proxy::account::{AccountLink, Connection};
 use sid_auth_proxy::client_key::ClientKey;
 use sid_auth_proxy::config::ProxyConfig;
 use sid_auth_proxy::session::BffSessionStore;
@@ -72,14 +72,30 @@ async fn main() -> anyhow::Result<()> {
             let key =
                 ClientKey::from_pem(&pem).with_context(|| format!("BFF client key {path:?}"))?;
             tracing::info!(kid = %key.kid(), "BFF client key loaded");
-            Some(Arc::new(AccountLink::new(
-                key,
-                config.issuer_url().to_string(),
-                grpc_channel.clone(),
-            )))
+            let installation_url = config.issuer_url().to_string();
+            // A delivered bundle that cannot be read or validated stops the
+            // BFF here, never falls back to discovering another connection.
+            let link = match config.bff_connection() {
+                Some(path) => {
+                    let connection =
+                        Connection::load(std::path::Path::new(path), &installation_url, key.kid())?;
+                    tracing::info!(
+                        issuer = %connection.issuer,
+                        client_id = %connection.client_id,
+                        resource = %connection.resource,
+                        "BFF connection delivered"
+                    );
+                    AccountLink::delivered(key, installation_url, grpc_channel.clone(), connection)
+                }
+                None => AccountLink::new(key, installation_url, grpc_channel.clone()),
+            };
+            Some(Arc::new(link))
         }
         None => None,
     };
+    if config.bff_connection().is_some() && account.is_none() {
+        anyhow::bail!("a BFF connection is configured without the client key that signs for it");
+    }
     if config.bff_enabled() && account.is_none() {
         tracing::warn!("BFF enabled without a client key: its endpoints stay off");
     }

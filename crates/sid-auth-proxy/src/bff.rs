@@ -69,7 +69,12 @@ async fn login_handler(
     // state nobody can verify would make the callback unverifiable.
     let state_param = match state
         .bff_sessions
-        .store_pending(code_verifier, nonce.clone(), return_to)
+        .store_pending(
+            code_verifier,
+            nonce.clone(),
+            return_to,
+            &connection.sign_in_binding(),
+        )
         .await
     {
         Ok(s) => s,
@@ -119,10 +124,19 @@ async fn callback_handler(
         Err(status) => return status.into_response(),
     };
 
-    let pending = match state.bff_sessions.take_pending(&params.state).await {
+    // A sign-in started under another connection or callback (a bundle
+    // replaced since) is not found under this one, and stays for a replica
+    // that still holds that connection.
+    let pending = match state
+        .bff_sessions
+        .take_pending(&params.state, &connection.sign_in_binding())
+        .await
+    {
         Ok(Some(p)) => p,
         Ok(None) => {
-            tracing::warn!("BFF callback: unknown, expired or already used state parameter");
+            tracing::warn!(
+                "BFF callback: unknown, expired, already used or another connection's state"
+            );
             return StatusCode::BAD_REQUEST.into_response();
         }
         Err(e) => {
@@ -191,7 +205,12 @@ async fn callback_handler(
     // (`/auth/userinfo`), never in a cookie the page would have to find.
     let (session_id, _csrf_token) = match state
         .bff_sessions
-        .create_session(tokens.access_token, tokens.refresh_token, claims)
+        .create_session(
+            tokens.access_token,
+            tokens.refresh_token,
+            claims,
+            &connection.binding(),
+        )
         .await
     {
         Ok(pair) => pair,
@@ -255,10 +274,10 @@ async fn logout_handler(
     if state.bff().is_none() {
         return StatusCode::NOT_FOUND.into_response();
     }
+    // Without a cookie there is nothing to end, whatever SID can answer.
     let Some(session_id) = extract_bff_cookie(&headers, &state.bff_cookie_name) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-
     match state.bff_sessions.get_session(&session_id).await {
         Ok(Some(session)) => {
             if !csrf_matches(&headers, &session) {
@@ -295,7 +314,9 @@ async fn logout_handler(
 /// Revoke the grant behind a destroyed session (RFC 7009 §2.1), so its
 /// refresh token dies with it. The session is already gone, and with it the
 /// only copy of the token, so a failure here leaves nothing anyone holds:
-/// it is logged, not reported to the user.
+/// it is logged, not reported to the user. This is also the only part of
+/// logout that needs the connection, so SID being unreachable never keeps a
+/// user signed in.
 async fn revoke_grant(state: &ProxyState, session: BffSession) {
     let Some(refresh_token) = session.refresh_token else {
         return;
@@ -304,6 +325,8 @@ async fn revoke_grant(state: &ProxyState, session: BffSession) {
         return;
     };
     let revoked = match link.connection().await {
+        // A grant of another connection is not this client's to revoke.
+        Ok(connection) if session.connection != connection.binding() => return,
         Ok(connection) => link.revoke(connection, refresh_token).await,
         Err(e) => Err(e),
     };
@@ -337,10 +360,11 @@ async fn userinfo_handler(
     .into_response()
 }
 
-/// The session the request's cookie names, when it is live and its SID
-/// session was not ended elsewhere. 404 with the BFF off, 401 without a live
-/// session, 503 when that cannot be told: an outage must not look like a
-/// signed-out user, or every browser signs itself out at once.
+/// The session the request's cookie names, when it is live, was made under
+/// this BFF's connection and its SID session was not ended elsewhere. 404
+/// with the BFF off, 401 without a live session, 503 when that cannot be
+/// told: an outage must not look like a signed-out user, or every browser
+/// signs itself out at once.
 pub(crate) async fn signed_in(
     state: &ProxyState,
     headers: &axum::http::HeaderMap,
@@ -348,6 +372,9 @@ pub(crate) async fn signed_in(
     if state.bff().is_none() {
         return Err(StatusCode::NOT_FOUND);
     }
+    // No cookie, or one naming no session, is a determinable 401: the
+    // connection is asked for only when there is a session whose binding it
+    // must check.
     let Some(session_id) = extract_bff_cookie(headers, &state.bff_cookie_name) else {
         return Err(StatusCode::UNAUTHORIZED);
     };
@@ -359,6 +386,16 @@ pub(crate) async fn signed_in(
             return Err(StatusCode::SERVICE_UNAVAILABLE);
         }
     };
+    let (_, connection) = connected(state).await?;
+    // Tokens issued to another client, by another issuer or for another API
+    // (a connection replaced since) are not used under this one.
+    // The session is left in place: during a rollout a replica holding its
+    // connection shares the cache and still serves it. One whose connection
+    // is gone everywhere expires with its idle window.
+    if session.connection != connection.binding() {
+        tracing::info!("BFF: session of another connection refused");
+        return Err(StatusCode::UNAUTHORIZED);
+    }
     // A SID session ended elsewhere (sign-out on another device, an
     // administrator's kill) ends this BFF session with it.
     match state

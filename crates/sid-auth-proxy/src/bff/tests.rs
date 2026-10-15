@@ -127,6 +127,71 @@ async fn test_login_without_a_connection_is_unavailable() {
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
+/// Without a session cookie there is nobody signed in, whether or not SID can
+/// answer for the connection: 401 for userinfo, the API and logout's
+/// missing-cookie case, never a 503 an anonymous visitor cannot act on.
+#[tokio::test]
+async fn test_no_cookie_is_unauthenticated_without_a_connection() {
+    let mut state = bff_test_state();
+    let (key, _) = crate::client_key::ClientKey::generate().unwrap();
+    state.account = Some(Arc::new(AccountLink::new(
+        key,
+        "https://sid.example.com".into(),
+        crate::test_channel(),
+    )));
+    for request in [
+        Request::get("/auth/userinfo").body(Body::empty()).unwrap(),
+        Request::post("/api/x").body(Body::empty()).unwrap(),
+        Request::post("/auth/logout").body(Body::empty()).unwrap(),
+    ] {
+        let path = request.uri().path().to_owned();
+        let response = routes()
+            .layer(axum::extract::connect_info::MockConnectInfo(
+                std::net::SocketAddr::from(([192, 0, 2, 7], 40000)),
+            ))
+            .with_state(state.clone())
+            .oneshot(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
+    }
+}
+
+/// A cookie naming no stored session (stale, fabricated) is told apart by the
+/// store alone: 401 for userinfo and the API, cookies cleared on logout, with
+/// no question to SID about the connection.
+#[tokio::test]
+async fn test_a_cookie_without_a_session_needs_no_connection() {
+    let mut state = bff_test_state();
+    let (key, _) = crate::client_key::ClientKey::generate().unwrap();
+    state.account = Some(Arc::new(AccountLink::new(
+        key,
+        "https://sid.example.com".into(),
+        crate::test_channel(),
+    )));
+    let cookie = format!("{}={}", state.bff_cookie_name, plausible_session_id());
+    for (request, expected) in [
+        (Request::get("/auth/userinfo"), StatusCode::UNAUTHORIZED),
+        (Request::post("/api/x"), StatusCode::UNAUTHORIZED),
+        (Request::post("/auth/logout"), StatusCode::NO_CONTENT),
+    ] {
+        let request = request
+            .header("cookie", &cookie)
+            .body(Body::empty())
+            .unwrap();
+        let path = request.uri().path().to_owned();
+        let response = routes()
+            .layer(axum::extract::connect_info::MockConnectInfo(
+                std::net::SocketAddr::from(([192, 0, 2, 7], 40000)),
+            ))
+            .with_state(state.clone())
+            .oneshot(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected, "{path}");
+    }
+}
+
 #[tokio::test]
 async fn test_login_reports_unavailable_when_the_store_is_down() {
     let app = routes().with_state(broken_store_state());
@@ -203,8 +268,8 @@ const CALLBACK: &str = "https://account.sid.example.com/auth/callback";
 
 /// The connection SID would give the test BFF.
 pub(crate) fn test_connection() -> Connection {
-    Connection::from_answer(
-        sid_proto::sid::v1::AccountConnection {
+    Connection::accept(
+        sid_authn::client_connection::ClientConnection {
             issuer: BFF_ISSUER.into(),
             client_id: "account-web".into(),
             resource: "https://sid.example.com/account".into(),
@@ -216,6 +281,7 @@ pub(crate) fn test_connection() -> Connection {
             ],
             redirect_uri: CALLBACK.into(),
             token_endpoint_auth_method: "private_key_jwt".into(),
+            key_ids: vec!["bff-key".into()],
         },
         "https://sid.example.com",
     )
@@ -225,8 +291,150 @@ pub(crate) fn test_connection() -> Connection {
 pub(crate) fn bff_test_state() -> ProxyState {
     let (key, _) = crate::client_key::ClientKey::generate().unwrap();
     let mut state = crate::test_state();
-    state.account = Some(Arc::new(AccountLink::connected(key, test_connection())));
+    state.account = Some(Arc::new(AccountLink::delivered(
+        key,
+        "https://sid.example.com".into(),
+        crate::test_channel(),
+        test_connection(),
+    )));
     state
+}
+
+/// The binding of a connection the test BFF does not have: the same issuer
+/// and resource, another client (a bundle replaced since).
+const OTHER_CONNECTION: &str = "https://sid.example.com/i/0123456789abcdef0123456789abcdef\nother-web\nhttps://sid.example.com/account";
+
+/// A session made under another connection (a delivered bundle that has
+/// since been replaced) is not this BFF's: it is refused, never read with its
+/// stored claims or tokens. It is left in place: during a rollout a replica
+/// of the other connection shares the cache and still serves it, and erasing
+/// it here would sign its user out there.
+#[tokio::test]
+async fn test_a_session_of_another_connection_is_refused_and_kept() {
+    let state = bff_test_state();
+    let sessions = state.bff_sessions.clone();
+    let (session_id, _) = sessions
+        .create_session("token".into(), None, session_claims(), OTHER_CONNECTION)
+        .await
+        .unwrap();
+    let response = routes()
+        .with_state(state)
+        .oneshot(
+            Request::get("/auth/userinfo")
+                .header("cookie", format!("__Host-sid-bff={session_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(sessions.get_session(&session_id).await.unwrap().is_some());
+}
+
+/// A sign-in started under another connection is not completed under this
+/// one: its code would be redeemed by a client it was not issued to. It is
+/// not consumed either: during a rollout the callback may reach a replica of
+/// the other connection on retry, which still completes it.
+#[tokio::test]
+async fn test_a_pending_sign_in_of_another_connection_is_refused_and_kept() {
+    let state = bff_test_state();
+    let sessions = state.bff_sessions.clone();
+    let state_param = state
+        .bff_sessions
+        .store_pending(
+            "verifier".into(),
+            "nonce".into(),
+            "/".into(),
+            OTHER_CONNECTION,
+        )
+        .await
+        .unwrap();
+    let uri = format!(
+        "/auth/callback?state={state_param}&code=abc&iss={}",
+        urlencode(BFF_ISSUER)
+    );
+    let response = routes()
+        .with_state(state)
+        .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        sessions
+            .take_pending(&state_param, OTHER_CONNECTION)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+/// A sign-in started before the callback changed is not completed under the
+/// new one: its code is redeemable only with the redirect URI it was issued
+/// for (RFC 6749 §4.1.3).
+#[tokio::test]
+async fn test_a_pending_sign_in_under_another_callback_is_refused() {
+    let state = bff_test_state();
+    let other_callback = format!(
+        "{}\nhttps://old.sid.example.com/auth/callback",
+        test_connection().binding()
+    );
+    let state_param = state
+        .bff_sessions
+        .store_pending(
+            "verifier".into(),
+            "nonce".into(),
+            "/".into(),
+            &other_callback,
+        )
+        .await
+        .unwrap();
+    let uri = format!(
+        "/auth/callback?state={state_param}&code=abc&iss={}",
+        urlencode(BFF_ISSUER)
+    );
+    let response = routes()
+        .with_state(state)
+        .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+/// Logout of a live session needs no answer from SID: the session is ended
+/// and the cookies cleared even while the connection cannot be learned; only
+/// the grant's revocation, best effort, would need it.
+#[tokio::test]
+async fn test_logout_ends_the_session_without_a_connection() {
+    let mut state = bff_test_state();
+    let (key, _) = crate::client_key::ClientKey::generate().unwrap();
+    state.account = Some(Arc::new(AccountLink::new(
+        key,
+        "https://sid.example.com".into(),
+        crate::test_channel(),
+    )));
+    let sessions = state.bff_sessions.clone();
+    let (session_id, csrf) = sessions
+        .create_session(
+            "token".into(),
+            Some("refresh".into()),
+            session_claims(),
+            &test_connection().binding(),
+        )
+        .await
+        .unwrap();
+    let response = routes()
+        .with_state(state)
+        .oneshot(
+            Request::post("/auth/logout")
+                .header("cookie", format!("__Host-sid-bff={session_id}"))
+                .header("x-csrf-token", csrf)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(sessions.get_session(&session_id).await.unwrap().is_none());
 }
 
 /// Login goes to the authorization endpoint of the BFF client's issuer.
@@ -255,7 +463,12 @@ async fn test_callback_from_another_issuer_is_refused() {
         let state = bff_test_state();
         let state_param = state
             .bff_sessions
-            .store_pending("verifier".into(), "nonce".into(), "/".into())
+            .store_pending(
+                "verifier".into(),
+                "nonce".into(),
+                "/".into(),
+                &test_connection().sign_in_binding(),
+            )
             .await
             .unwrap();
         let mut uri = format!("/auth/callback?state={state_param}&code=abc");
@@ -372,7 +585,11 @@ async fn test_login_with_a_foreign_return_path_returns_to_the_root() {
         .unwrap()
         .1
         .into_owned();
-    let pending = sessions.take_pending(&state_param).await.unwrap().unwrap();
+    let pending = sessions
+        .take_pending(&state_param, &test_connection().sign_in_binding())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(pending.redirect_url, "/");
 }
 
@@ -396,7 +613,12 @@ async fn test_callback_auth_error_returns_403() {
     // Store a pending auth first
     let state_param = state
         .bff_sessions
-        .store_pending("verifier".into(), "nonce".into(), "/".into())
+        .store_pending(
+            "verifier".into(),
+            "nonce".into(),
+            "/".into(),
+            &test_connection().sign_in_binding(),
+        )
         .await
         .unwrap();
     let app = routes().with_state(state);
@@ -436,7 +658,7 @@ async fn test_logout_clears_cookie() {
     };
     let (session_id, csrf_token) = state
         .bff_sessions
-        .create_session("token".into(), None, claims)
+        .create_session("token".into(), None, claims, &test_connection().binding())
         .await
         .unwrap();
     assert!(
@@ -524,7 +746,12 @@ async fn test_userinfo_valid_session_returns_claims() {
     let state = bff_test_state();
     let (session_id, _csrf) = state
         .bff_sessions
-        .create_session("access_token".into(), None, session_claims())
+        .create_session(
+            "access_token".into(),
+            None,
+            session_claims(),
+            &test_connection().binding(),
+        )
         .await
         .unwrap();
     let app = routes().with_state(state);
@@ -558,7 +785,12 @@ async fn test_userinfo_carries_the_sessions_csrf_token() {
     let state = bff_test_state();
     let (session_id, csrf) = state
         .bff_sessions
-        .create_session("access_token".into(), None, session_claims())
+        .create_session(
+            "access_token".into(),
+            None,
+            session_claims(),
+            &test_connection().binding(),
+        )
         .await
         .unwrap();
     let app = routes().with_state(state);
@@ -584,7 +816,12 @@ async fn test_userinfo_revoked_session_signs_out() {
     let state = bff_test_state();
     let (session_id, _csrf) = state
         .bff_sessions
-        .create_session("access_token".into(), None, session_claims())
+        .create_session(
+            "access_token".into(),
+            None,
+            session_claims(),
+            &test_connection().binding(),
+        )
         .await
         .unwrap();
     state
@@ -634,16 +871,28 @@ async fn test_pending_store_and_take() {
         std::time::Duration::from_secs(300),
     );
     let state = store
-        .store_pending("verifier123".into(), "nonce123".into(), "/dashboard".into())
+        .store_pending(
+            "verifier123".into(),
+            "nonce123".into(),
+            "/dashboard".into(),
+            &test_connection().sign_in_binding(),
+        )
         .await
         .unwrap();
     assert!(!state.is_empty());
 
-    let pending = store.take_pending(&state).await.unwrap().unwrap();
+    let binding = test_connection().sign_in_binding();
+    let pending = store.take_pending(&state, &binding).await.unwrap().unwrap();
     assert_eq!(pending.code_verifier, "verifier123");
     assert_eq!(pending.nonce, "nonce123");
     assert_eq!(pending.redirect_url, "/dashboard");
 
     // Second take returns None (consumed)
-    assert!(store.take_pending(&state).await.unwrap().is_none());
+    assert!(
+        store
+            .take_pending(&state, &binding)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }

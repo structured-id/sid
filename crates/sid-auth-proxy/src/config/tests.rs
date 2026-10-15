@@ -148,6 +148,24 @@ bff:
     assert_eq!(prod.bff_cookie_name(), "__Host-sid-bff");
 }
 
+/// A delivered connection bundle is named by path in the file; without one
+/// the BFF discovers the account integration's.
+#[test]
+fn test_bff_connection_path() {
+    let yaml = r#"
+upstream:
+  default: "http://127.0.0.1:50051"
+oidc:
+  issuer_url: "https://sid.example.com"
+bff:
+  enabled: true
+  connection: "/run/bff/connection.json"
+"#;
+    let config: ProxyConfig = serde_saphyr::from_str(yaml).unwrap();
+    assert_eq!(config.bff_connection(), Some("/run/bff/connection.json"));
+    assert_eq!(BffConfig::default().connection, None);
+}
+
 /// A setting nothing reads is not a setting. These three decide how long a
 /// session and a half-finished login survive, so the accessors the proxy
 /// builds its store from are checked against a file that sets them.

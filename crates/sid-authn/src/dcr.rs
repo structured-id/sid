@@ -273,7 +273,7 @@ pub fn validate_post_logout_redirect_uris(
 }
 
 /// Validate a single redirect URI.
-fn validate_redirect_uri(uri: &str, app_type: ApplicationType) -> Result<(), DcrError> {
+pub(crate) fn validate_redirect_uri(uri: &str, app_type: ApplicationType) -> Result<(), DcrError> {
     let parsed = url::Url::parse(uri).map_err(|_| DcrError::InvalidRedirectUri(uri.to_string()))?;
 
     match app_type {
