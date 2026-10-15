@@ -31,23 +31,34 @@ pub struct ClientConnection {
 
 impl ClientConnection {
     /// The connection of `client` under `issuer` for `resource`, as stored.
-    /// A resource of another issuer or a client without a callback is a
-    /// registration that cannot serve a sign-in, never a connection.
+    /// A client the issuer does not serve, a resource of another issuer, or
+    /// a client without exactly one callback is a registration that cannot
+    /// serve this BFF's sign-ins, never a connection.
     pub fn of(
         issuer: &OidcIssuer,
         client: &OAuth2Client,
         resource: &ProtectedResource,
     ) -> SidResult<Self> {
+        // An issuer serves the clients of its recipient organization only.
+        if client.org_id != Some(issuer.recipient_org) {
+            return Err(SidError::InvalidState(
+                "the client is not of the issuer's organization".into(),
+            ));
+        }
         if resource.issuer_id != issuer.id {
             return Err(SidError::InvalidState(
                 "the resource is not under the client's issuer".into(),
             ));
         }
-        let redirect_uri = client
-            .redirect_uris
-            .first()
-            .cloned()
-            .ok_or_else(|| SidError::InvalidState("the client has no callback".into()))?;
+        // With several callbacks nothing says which is this BFF's, and the
+        // authorization response must come back to the instance holding the
+        // sign-in's state and PKCE verifier.
+        let [redirect_uri] = client.redirect_uris.as_slice() else {
+            return Err(SidError::InvalidState(
+                "the client does not have exactly one callback".into(),
+            ));
+        };
+        let redirect_uri = redirect_uri.clone();
         Ok(Self {
             issuer: issuer.canonical_url.clone(),
             client_id: client.client_id.clone(),

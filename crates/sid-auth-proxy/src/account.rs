@@ -7,7 +7,7 @@
 use std::path::Path;
 
 use sid_authn::client_connection::ClientConnection;
-use sid_core::models::IssuerHandle;
+use sid_core::models::{IssuerHandle, ResourceIndicator};
 use sid_proto::sid::v1::auth_service_client::AuthServiceClient;
 use sid_proto::sid::v1::system_integration_service_client::SystemIntegrationServiceClient;
 use sid_proto::sid::v1::{
@@ -101,8 +101,17 @@ impl Connection {
                 "the issuer is not one of this installation's",
             ))?
             .to_owned();
-        if bundle.client_id.is_empty() || bundle.resource.is_empty() || bundle.scopes.is_empty() {
-            return Err(LinkError::Invalid("client, resource or scopes missing"));
+        if bundle.client_id.is_empty() {
+            return Err(LinkError::Invalid("the client is missing"));
+        }
+        // A target SID would refuse at every authorization request is a
+        // broken deployment, refused here (RFC 8707 §2).
+        ResourceIndicator::parse(&bundle.resource)
+            .map_err(|_| LinkError::Invalid("the resource is not a resource indicator"))?;
+        // The callback requires an ID token, which SID issues only when
+        // `openid` was requested (OIDC Core 1.0 §3.1.2.1).
+        if !bundle.scopes.iter().any(|s| s == "openid") {
+            return Err(LinkError::Invalid("the scopes lack openid"));
         }
         let redirect_uri = url::Url::parse(&bundle.redirect_uri)
             .map_err(|_| LinkError::Invalid("the callback is not a URL"))?;

@@ -99,6 +99,38 @@ async fn a_client_without_a_callback_is_refused() {
     ));
 }
 
+/// A client of another organization is not served by this issuer: its
+/// sign-ins would all be refused, so no connection names the pair.
+#[tokio::test]
+async fn a_client_of_another_organization_is_refused() {
+    let (issuer, mut client, resource) = registration().await;
+    client.org_id = Some(sid_core::models::OrgId::generate());
+    assert!(matches!(
+        ClientConnection::of(&issuer, &client, &resource),
+        Err(SidError::InvalidState(_))
+    ));
+    client.org_id = None;
+    assert!(matches!(
+        ClientConnection::of(&issuer, &client, &resource),
+        Err(SidError::InvalidState(_))
+    ));
+}
+
+/// A client with several callbacks gives no way to tell which one is this
+/// BFF's: picking one could send the authorization response to another
+/// deployment, so the connection is refused.
+#[tokio::test]
+async fn a_client_with_several_callbacks_is_refused() {
+    let (issuer, mut client, resource) = registration().await;
+    client
+        .redirect_uris
+        .push("https://other.sid.example.com/auth/callback".into());
+    assert!(matches!(
+        ClientConnection::of(&issuer, &client, &resource),
+        Err(SidError::InvalidState(_))
+    ));
+}
+
 /// The bundle a deployment delivers reads back as the same connection, and a
 /// field this version does not know is refused rather than ignored.
 #[tokio::test]

@@ -52,13 +52,19 @@ fn the_account_api_answer_is_the_same_connection() {
 /// without its target, is refused, wherever it came from.
 #[test]
 fn an_unusable_connection_is_refused() {
-    let cases: [fn(&mut ClientConnection); 7] = [
+    let cases: [fn(&mut ClientConnection); 10] = [
         |c| c.issuer = format!("https://other.example.com/i/{HANDLE}"),
         |c| c.issuer = format!("{INSTALLATION}/i/not-a-handle"),
         |c| c.token_endpoint_auth_method = "client_secret_basic".into(),
         |c| c.client_id = String::new(),
         |c| c.resource = String::new(),
+        // RFC 8707 §2: an absolute URI without a fragment.
+        |c| c.resource = "not-a-uri".into(),
+        |c| c.resource = format!("{INSTALLATION}/account#part"),
         |c| c.scopes.clear(),
+        // The callback needs an ID token, issued only for `openid`
+        // (OIDC Core 1.0 §3.1.2.1).
+        |c| c.scopes = vec!["account".into()],
         |c| c.redirect_uri = "not a url".into(),
     ];
     for spoil in cases {
