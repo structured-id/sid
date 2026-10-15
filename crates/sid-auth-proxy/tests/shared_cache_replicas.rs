@@ -276,7 +276,11 @@ async fn pending_authorization_stored_on_one_replica_is_taken_on_the_other() {
         .await
         .unwrap();
 
-    let taken = b.take_pending(&state).await.unwrap().expect("B takes it");
+    let taken = b
+        .take_pending(&state, CONN)
+        .await
+        .unwrap()
+        .expect("B takes it");
     assert_eq!(taken.code_verifier, "verifier");
     assert_eq!(taken.redirect_url, "https://app.sid.example.com/");
 }
@@ -296,7 +300,7 @@ async fn a_pending_authorization_is_taken_exactly_once_across_replicas() {
 
     // Both replicas race for the same `state`, which is precisely the replay
     // the parameter exists to stop. A read-then-delete would let both through.
-    let (first, second) = tokio::join!(a.take_pending(&state), b.take_pending(&state));
+    let (first, second) = tokio::join!(a.take_pending(&state, CONN), b.take_pending(&state, CONN));
     let winners = [first.unwrap(), second.unwrap()]
         .iter()
         .filter(|v| v.is_some())
@@ -326,9 +330,9 @@ async fn many_concurrent_takes_still_produce_one_winner() {
         for _ in 0..4 {
             let store = store.clone();
             let state = state.clone();
-            tasks.push(tokio::spawn(
-                async move { store.take_pending(&state).await },
-            ));
+            tasks.push(tokio::spawn(async move {
+                store.take_pending(&state, CONN).await
+            }));
         }
     }
 

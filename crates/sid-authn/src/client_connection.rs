@@ -8,7 +8,8 @@
 
 use serde::{Deserialize, Serialize};
 use sid_core::models::{
-    OAuth2Client, OidcIssuer, ProtectedResource, ResourceAccess, TokenEndpointAuthMethod,
+    ApplicationType, OAuth2Client, OidcIssuer, ProtectedResource, ResourceAccess,
+    TokenEndpointAuthMethod, scope_list,
 };
 use sid_core::{Error as SidError, Result as SidResult};
 
@@ -40,7 +41,8 @@ impl ClientConnection {
     /// reaches through `access`, as stored. A registration that cannot serve
     /// this BFF's sign-ins is never a connection: a disabled client, one the
     /// issuer does not serve, one that does not authenticate with registered
-    /// keys (`private_key_jwt`) or may not request `openid`, one without the
+    /// keys (`private_key_jwt`), is not a web client, may not request
+    /// `openid` or holds a malformed scope, one without the
     /// code or refresh grant, a
     /// resource that is not a target or is another issuer's, access that is
     /// not this client's to this resource, or a client without exactly one
@@ -64,11 +66,21 @@ impl ClientConnection {
         {
             return unusable("the client does not authenticate with registered keys");
         }
+        // A BFF is a web client: another kind's callback does not come back
+        // to it.
+        if client.application_type != ApplicationType::Web {
+            return unusable("the client is not a web client");
+        }
         // The BFF's callback needs an ID token, issued only for `openid`
         // (OIDC Core 1.0 §3.1.2.1).
         if !client.allowed_scopes.iter().any(|s| s == "openid") {
             return unusable("the client may not request openid");
         }
+        // An entry that is not one scope token would reach the issuer as
+        // several, none of them a registered scope (RFC 6749 §3.3).
+        let Ok(scopes) = scope_list(&client.allowed_scopes) else {
+            return unusable("a scope of the client is not a scope token");
+        };
         if !resource.is_target() {
             return unusable("the resource is not a token target");
         }
@@ -109,7 +121,7 @@ impl ClientConnection {
             issuer: issuer.canonical_url.clone(),
             client_id: client.client_id.clone(),
             resource: resource.indicator.to_string(),
-            scopes: client.allowed_scopes.clone(),
+            scopes,
             redirect_uri,
             token_endpoint_auth_method: client.token_endpoint_auth_method.to_string(),
             key_ids,

@@ -392,7 +392,7 @@ async fn test_pending_expires_on_its_configured_ttl() {
         .unwrap();
 
     assert!(
-        s.take_pending(&state).await.unwrap().is_some(),
+        s.take_pending(&state, CONN).await.unwrap().is_some(),
         "still inside the window"
     );
 
@@ -402,7 +402,7 @@ async fn test_pending_expires_on_its_configured_ttl() {
         .unwrap();
     tokio::time::sleep(Duration::from_millis(80)).await;
     assert!(
-        s.take_pending(&state).await.unwrap().is_none(),
+        s.take_pending(&state, CONN).await.unwrap().is_none(),
         "a callback arriving after the configured window gets nothing"
     );
 }
@@ -417,7 +417,7 @@ async fn test_a_longer_configured_ttl_outlives_the_old_default() {
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(80)).await;
-    assert!(s.take_pending(&state).await.unwrap().is_some());
+    assert!(s.take_pending(&state, CONN).await.unwrap().is_some());
 }
 
 #[tokio::test]
@@ -446,11 +446,28 @@ async fn test_take_pending_returns_what_was_stored() {
         )
         .await
         .unwrap();
-    let taken = s.take_pending(&state).await.unwrap().expect("pending");
+    let taken = s
+        .take_pending(&state, CONN)
+        .await
+        .unwrap()
+        .expect("pending");
     assert_eq!(taken.code_verifier, "verifier");
     assert_eq!(taken.nonce, "nonce");
     assert_eq!(taken.redirect_url, "/after-login");
-    assert_eq!(taken.connection, CONN);
+}
+
+/// A pending sign-in is found only under the binding it was started with,
+/// and asking under another does not consume it: a replica of that binding
+/// still completes it.
+#[tokio::test]
+async fn test_a_pending_sign_in_is_found_only_under_its_binding() {
+    let s = store();
+    let state = s
+        .store_pending("v".into(), "n".into(), "/".into(), CONN)
+        .await
+        .unwrap();
+    assert!(s.take_pending(&state, "another").await.unwrap().is_none());
+    assert!(s.take_pending(&state, CONN).await.unwrap().is_some());
 }
 
 /// A session keeps the connection it was made under, for the BFF to compare.
@@ -471,9 +488,9 @@ async fn test_take_pending_consumes_it() {
         .store_pending("v".into(), "n".into(), "/".into(), CONN)
         .await
         .unwrap();
-    assert!(s.take_pending(&state).await.unwrap().is_some());
+    assert!(s.take_pending(&state, CONN).await.unwrap().is_some());
     assert!(
-        s.take_pending(&state).await.unwrap().is_none(),
+        s.take_pending(&state, CONN).await.unwrap().is_none(),
         "a second callback with the same state gets nothing"
     );
 }
@@ -481,7 +498,12 @@ async fn test_take_pending_consumes_it() {
 #[tokio::test]
 async fn test_take_pending_nonexistent() {
     let s = store();
-    assert!(s.take_pending("never-issued").await.unwrap().is_none());
+    assert!(
+        s.take_pending("never-issued", CONN)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 /// The replay this protects against arrives at two replicas at once. Exactly
@@ -494,7 +516,7 @@ async fn test_take_pending_is_claimed_once_across_replicas() {
         .await
         .unwrap();
 
-    let (first, second) = tokio::join!(a.take_pending(&state), b.take_pending(&state));
+    let (first, second) = tokio::join!(a.take_pending(&state, CONN), b.take_pending(&state, CONN));
     let winners = [first.unwrap().is_some(), second.unwrap().is_some()]
         .iter()
         .filter(|w| **w)
@@ -525,7 +547,11 @@ async fn test_pending_stored_on_one_replica_is_taken_on_another() {
         .store_pending("verifier".into(), "nonce".into(), "/done".into(), CONN)
         .await
         .unwrap();
-    let taken = b.take_pending(&state).await.unwrap().expect("visible on B");
+    let taken = b
+        .take_pending(&state, CONN)
+        .await
+        .unwrap()
+        .expect("visible on B");
     assert_eq!(taken.code_verifier, "verifier");
 }
 
@@ -589,7 +615,7 @@ async fn test_unreachable_cache_is_an_error_not_an_empty_store() {
 async fn test_unreachable_cache_does_not_hand_out_a_pending_authorization() {
     let s = build(Arc::new(BrokenCache), LONG, LONG);
     assert!(matches!(
-        s.take_pending(&plausible_id()).await,
+        s.take_pending(&plausible_id(), CONN).await,
         Err(SessionStoreError::Backend(_))
     ));
     assert!(matches!(
@@ -647,7 +673,7 @@ async fn test_records_of_the_previous_shape_are_not_read() {
     }
     let s = build(cache, LONG, LONG);
     assert!(s.get_session(&id).await.unwrap().is_none());
-    assert!(s.take_pending(&id).await.unwrap().is_none());
+    assert!(s.take_pending(&id, CONN).await.unwrap().is_none());
 }
 
 // ── Keys and redaction ──
@@ -682,7 +708,7 @@ async fn test_a_client_supplied_id_of_the_wrong_shape_never_reaches_the_cache() 
             s.get_session(bogus).await.unwrap().is_none(),
             "accepted {bogus:?}"
         );
-        assert!(s.take_pending(bogus).await.unwrap().is_none());
+        assert!(s.take_pending(bogus, CONN).await.unwrap().is_none());
     }
 }
 
@@ -700,7 +726,7 @@ async fn test_issued_ids_pass_the_shape_check() {
         .store_pending("v".into(), "n".into(), "/".into(), CONN)
         .await
         .unwrap();
-    assert!(s.take_pending(&state).await.unwrap().is_some());
+    assert!(s.take_pending(&state, CONN).await.unwrap().is_some());
 }
 
 #[test]

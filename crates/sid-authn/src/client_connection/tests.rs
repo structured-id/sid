@@ -192,6 +192,35 @@ async fn a_client_without_openid_is_refused() {
     assert!(refused(r.connection()));
 }
 
+/// A native client's callback does not come back to the BFF: the
+/// authorization response would leave its sign-in state behind. Only a web
+/// client is a BFF's.
+#[tokio::test]
+async fn a_client_that_is_not_web_is_refused() {
+    use sid_core::models::ApplicationType;
+    for kind in [
+        ApplicationType::Native,
+        ApplicationType::Spa,
+        ApplicationType::Api,
+    ] {
+        let mut r = registration().await;
+        r.client.application_type = kind;
+        assert!(refused(r.connection()), "{kind:?}");
+    }
+}
+
+/// A stored entry that is not one scope token would reach the issuer split
+/// into several, none of them the registered entry (RFC 6749 §3.3): the
+/// registration gets no connection.
+#[tokio::test]
+async fn a_client_with_a_malformed_scope_is_refused() {
+    let mut r = registration().await;
+    r.client
+        .allowed_scopes
+        .push("orders.read orders.write".into());
+    assert!(refused(r.connection()));
+}
+
 /// Access granted to another client, or to another resource, is not this
 /// client's access to this resource: the issuer would refuse every request
 /// for the target.

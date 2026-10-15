@@ -73,7 +73,7 @@ async fn login_handler(
             code_verifier,
             nonce.clone(),
             return_to,
-            &connection.binding(),
+            &connection.sign_in_binding(),
         )
         .await
     {
@@ -124,10 +124,19 @@ async fn callback_handler(
         Err(status) => return status.into_response(),
     };
 
-    let pending = match state.bff_sessions.take_pending(&params.state).await {
+    // A sign-in started under another connection or callback (a bundle
+    // replaced since) is not found under this one, and stays for a replica
+    // that still holds that connection.
+    let pending = match state
+        .bff_sessions
+        .take_pending(&params.state, &connection.sign_in_binding())
+        .await
+    {
         Ok(Some(p)) => p,
         Ok(None) => {
-            tracing::warn!("BFF callback: unknown, expired or already used state parameter");
+            tracing::warn!(
+                "BFF callback: unknown, expired, already used or another connection's state"
+            );
             return StatusCode::BAD_REQUEST.into_response();
         }
         Err(e) => {
@@ -138,12 +147,6 @@ async fn callback_handler(
         }
     };
 
-    // A sign-in started under another connection (a bundle replaced since)
-    // is not completed under this one.
-    if pending.connection != connection.binding() {
-        tracing::warn!("BFF callback: sign-in started under another connection");
-        return StatusCode::BAD_REQUEST.into_response();
-    }
     // The answer must come from the integration's issuer (RFC 9207 §2.4).
     if params.iss.as_deref() != Some(connection.issuer.as_str()) {
         tracing::warn!("BFF callback: authorization response from another issuer");
@@ -277,11 +280,6 @@ async fn logout_handler(
     };
     match state.bff_sessions.get_session(&session_id).await {
         Ok(Some(session)) => {
-            // The connection is asked for only once a session needs it.
-            let binding = match connected(&state).await {
-                Ok((_, connection)) => connection.binding(),
-                Err(status) => return status.into_response(),
-            };
             if !csrf_matches(&headers, &session) {
                 tracing::warn!("BFF logout: CSRF token mismatch");
                 return StatusCode::FORBIDDEN.into_response();
@@ -292,10 +290,7 @@ async fn logout_handler(
                 tracing::error!(error = %e, "BFF logout: cannot destroy the session");
                 return StatusCode::SERVICE_UNAVAILABLE.into_response();
             }
-            // A grant of another connection is not this client's to revoke.
-            if session.connection == binding {
-                revoke_grant(&state, session).await;
-            }
+            revoke_grant(&state, session).await;
         }
         Ok(None) => {} // already gone; clear the cookies anyway
         Err(e) => {
@@ -319,7 +314,9 @@ async fn logout_handler(
 /// Revoke the grant behind a destroyed session (RFC 7009 §2.1), so its
 /// refresh token dies with it. The session is already gone, and with it the
 /// only copy of the token, so a failure here leaves nothing anyone holds:
-/// it is logged, not reported to the user.
+/// it is logged, not reported to the user. This is also the only part of
+/// logout that needs the connection, so SID being unreachable never keeps a
+/// user signed in.
 async fn revoke_grant(state: &ProxyState, session: BffSession) {
     let Some(refresh_token) = session.refresh_token else {
         return;
@@ -328,6 +325,8 @@ async fn revoke_grant(state: &ProxyState, session: BffSession) {
         return;
     };
     let revoked = match link.connection().await {
+        // A grant of another connection is not this client's to revoke.
+        Ok(connection) if session.connection != connection.binding() => return,
         Ok(connection) => link.revoke(connection, refresh_token).await,
         Err(e) => Err(e),
     };

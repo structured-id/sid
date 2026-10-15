@@ -7,7 +7,7 @@
 use std::path::Path;
 
 use sid_authn::client_connection::ClientConnection;
-use sid_core::models::{IssuerHandle, ResourceIndicator};
+use sid_core::models::{IssuerHandle, ResourceIndicator, scope_list};
 use sid_proto::sid::v1::auth_service_client::AuthServiceClient;
 use sid_proto::sid::v1::system_integration_service_client::SystemIntegrationServiceClient;
 use sid_proto::sid::v1::{
@@ -128,6 +128,10 @@ impl Connection {
         if !bundle.scopes.iter().any(|s| s == "openid") {
             return Err(LinkError::Invalid("the scopes lack openid"));
         }
+        // An entry that is not one scope token would reach the issuer as
+        // several, none of them a registered scope (RFC 6749 §3.3).
+        let scopes = scope_list(&bundle.scopes)
+            .map_err(|_| LinkError::Invalid("a scope is not a scope token"))?;
         // Parsed only to refuse what is not a URL; the registered spelling is
         // what goes into requests.
         url::Url::parse(&bundle.redirect_uri)
@@ -137,7 +141,7 @@ impl Connection {
             issuer_handle,
             client_id: bundle.client_id,
             resource: bundle.resource,
-            scopes: bundle.scopes,
+            scopes,
             redirect_uri: bundle.redirect_uri,
         })
     }
@@ -158,6 +162,15 @@ impl Connection {
             self.resource,
             scopes.join(" ")
         )
+    }
+
+    /// What a pending sign-in is bound to: [`Connection::binding`] and the
+    /// callback. A code is redeemed only with the redirect URI it was issued
+    /// for (RFC 6749 §4.1.3), so a sign-in started before the callback
+    /// changed cannot complete under the new one. Sessions do not depend on
+    /// the callback and stay bound to [`Connection::binding`].
+    pub fn sign_in_binding(&self) -> String {
+        format!("{}\n{}", self.binding(), self.redirect_uri)
     }
 
     /// The issuer's token endpoint, the audience of every client assertion

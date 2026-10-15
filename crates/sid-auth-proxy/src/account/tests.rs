@@ -55,7 +55,11 @@ fn the_account_api_answer_is_the_same_connection() {
 /// without its target, is refused, wherever it came from.
 #[test]
 fn an_unusable_connection_is_refused() {
-    let cases: [fn(&mut ClientConnection); 10] = [
+    let cases: [fn(&mut ClientConnection); 12] = [
+        // Two scopes in one entry would be split by the issuer and match
+        // neither registered scope (RFC 6749 §3.3).
+        |c| c.scopes.push("orders.read orders.write".into()),
+        |c| c.scopes.push(String::new()),
         |c| c.issuer = format!("https://other.example.com/i/{HANDLE}"),
         |c| c.issuer = format!("{INSTALLATION}/i/not-a-handle"),
         |c| c.token_endpoint_auth_method = "client_secret_basic".into(),
@@ -157,6 +161,18 @@ fn the_binding_covers_the_scopes_but_not_their_order() {
             .binding(),
         base.binding()
     );
+}
+
+/// A pending sign-in is bound to the callback as well: a bundle that changes
+/// only the callback keeps sessions but not sign-ins started before it.
+#[test]
+fn the_sign_in_binding_covers_the_callback() {
+    let base = Connection::accept(bundle(), INSTALLATION).unwrap();
+    let mut moved = bundle();
+    moved.redirect_uri = "https://new.sid.example.com/auth/callback".into();
+    let moved = Connection::accept(moved, INSTALLATION).unwrap();
+    assert_eq!(moved.binding(), base.binding());
+    assert_ne!(moved.sign_in_binding(), base.sign_in_binding());
 }
 
 /// A bundle file that cannot be read is an error, never a fallback.

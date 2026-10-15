@@ -332,10 +332,13 @@ async fn test_a_session_of_another_connection_is_refused_and_kept() {
 }
 
 /// A sign-in started under another connection is not completed under this
-/// one: its code would be redeemed by a client it was not issued to.
+/// one: its code would be redeemed by a client it was not issued to. It is
+/// not consumed either: during a rollout the callback may reach a replica of
+/// the other connection on retry, which still completes it.
 #[tokio::test]
-async fn test_a_pending_sign_in_of_another_connection_is_refused() {
+async fn test_a_pending_sign_in_of_another_connection_is_refused_and_kept() {
     let state = bff_test_state();
+    let sessions = state.bff_sessions.clone();
     let state_param = state
         .bff_sessions
         .store_pending(
@@ -356,6 +359,82 @@ async fn test_a_pending_sign_in_of_another_connection_is_refused() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        sessions
+            .take_pending(&state_param, OTHER_CONNECTION)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+/// A sign-in started before the callback changed is not completed under the
+/// new one: its code is redeemable only with the redirect URI it was issued
+/// for (RFC 6749 §4.1.3).
+#[tokio::test]
+async fn test_a_pending_sign_in_under_another_callback_is_refused() {
+    let state = bff_test_state();
+    let other_callback = format!(
+        "{}\nhttps://old.sid.example.com/auth/callback",
+        test_connection().binding()
+    );
+    let state_param = state
+        .bff_sessions
+        .store_pending(
+            "verifier".into(),
+            "nonce".into(),
+            "/".into(),
+            &other_callback,
+        )
+        .await
+        .unwrap();
+    let uri = format!(
+        "/auth/callback?state={state_param}&code=abc&iss={}",
+        urlencode(BFF_ISSUER)
+    );
+    let response = routes()
+        .with_state(state)
+        .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+/// Logout of a live session needs no answer from SID: the session is ended
+/// and the cookies cleared even while the connection cannot be learned; only
+/// the grant's revocation, best effort, would need it.
+#[tokio::test]
+async fn test_logout_ends_the_session_without_a_connection() {
+    let mut state = bff_test_state();
+    let (key, _) = crate::client_key::ClientKey::generate().unwrap();
+    state.account = Some(Arc::new(AccountLink::new(
+        key,
+        "https://sid.example.com".into(),
+        crate::test_channel(),
+    )));
+    let sessions = state.bff_sessions.clone();
+    let (session_id, csrf) = sessions
+        .create_session(
+            "token".into(),
+            Some("refresh".into()),
+            session_claims(),
+            &test_connection().binding(),
+        )
+        .await
+        .unwrap();
+    let response = routes()
+        .with_state(state)
+        .oneshot(
+            Request::post("/auth/logout")
+                .header("cookie", format!("__Host-sid-bff={session_id}"))
+                .header("x-csrf-token", csrf)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(sessions.get_session(&session_id).await.unwrap().is_none());
 }
 
 /// Login goes to the authorization endpoint of the BFF client's issuer.
@@ -388,7 +467,7 @@ async fn test_callback_from_another_issuer_is_refused() {
                 "verifier".into(),
                 "nonce".into(),
                 "/".into(),
-                &test_connection().binding(),
+                &test_connection().sign_in_binding(),
             )
             .await
             .unwrap();
@@ -506,7 +585,11 @@ async fn test_login_with_a_foreign_return_path_returns_to_the_root() {
         .unwrap()
         .1
         .into_owned();
-    let pending = sessions.take_pending(&state_param).await.unwrap().unwrap();
+    let pending = sessions
+        .take_pending(&state_param, &test_connection().sign_in_binding())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(pending.redirect_url, "/");
 }
 
@@ -534,7 +617,7 @@ async fn test_callback_auth_error_returns_403() {
             "verifier".into(),
             "nonce".into(),
             "/".into(),
-            &test_connection().binding(),
+            &test_connection().sign_in_binding(),
         )
         .await
         .unwrap();
@@ -792,17 +875,24 @@ async fn test_pending_store_and_take() {
             "verifier123".into(),
             "nonce123".into(),
             "/dashboard".into(),
-            &test_connection().binding(),
+            &test_connection().sign_in_binding(),
         )
         .await
         .unwrap();
     assert!(!state.is_empty());
 
-    let pending = store.take_pending(&state).await.unwrap().unwrap();
+    let binding = test_connection().sign_in_binding();
+    let pending = store.take_pending(&state, &binding).await.unwrap().unwrap();
     assert_eq!(pending.code_verifier, "verifier123");
     assert_eq!(pending.nonce, "nonce123");
     assert_eq!(pending.redirect_url, "/dashboard");
 
     // Second take returns None (consumed)
-    assert!(store.take_pending(&state).await.unwrap().is_none());
+    assert!(
+        store
+            .take_pending(&state, &binding)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
