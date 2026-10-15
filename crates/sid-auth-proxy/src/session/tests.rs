@@ -614,6 +614,42 @@ async fn test_unreadable_value_is_an_error_not_a_missing_session() {
     ));
 }
 
+/// Records of the previous shape (before sessions and sign-ins carried their
+/// connection) stay in a shared cache while replicas are replaced. A new
+/// replica must not read them: not as a session (503 for its user), not as
+/// a sign-in to complete. They are someone else's key space and expire there.
+#[tokio::test]
+async fn test_records_of_the_previous_shape_are_not_read() {
+    let cache: Arc<dyn CacheBackend> = Arc::new(InMemoryCacheBackend::new());
+    let id = plausible_id();
+    let previous_session = serde_json::json!({
+        "access_token": "a",
+        "refresh_token": null,
+        "claims": test_claims(),
+        "csrf_token": "c",
+        "created_at": Utc::now(),
+        "last_access": Utc::now(),
+    });
+    let previous_pending = serde_json::json!({
+        "code_verifier": "v",
+        "nonce": "n",
+        "redirect_url": "/",
+        "created_at": Utc::now(),
+    });
+    for (key, value) in [
+        (format!("bff:sess:{id}"), &previous_session),
+        (format!("bff:pending:{id}"), &previous_pending),
+    ] {
+        cache
+            .set(&key, &serde_json::to_vec(value).unwrap(), LONG)
+            .await
+            .unwrap();
+    }
+    let s = build(cache, LONG, LONG);
+    assert!(s.get_session(&id).await.unwrap().is_none());
+    assert!(s.take_pending(&id).await.unwrap().is_none());
+}
+
 // ── Keys and redaction ──
 
 /// Sessions and pending authorizations share a cache with everything else that

@@ -268,12 +268,16 @@ async fn logout_handler(
     State(state): State<ProxyState>,
     headers: axum::http::HeaderMap,
 ) -> Response {
+    if state.bff().is_none() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    // Without a cookie there is nothing to end, whatever SID can answer.
+    let Some(session_id) = extract_bff_cookie(&headers, &state.bff_cookie_name) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
     let binding = match connected(&state).await {
         Ok((_, connection)) => connection.binding(),
         Err(status) => return status.into_response(),
-    };
-    let Some(session_id) = extract_bff_cookie(&headers, &state.bff_cookie_name) else {
-        return StatusCode::UNAUTHORIZED.into_response();
     };
 
     match state.bff_sessions.get_session(&session_id).await {
@@ -366,10 +370,15 @@ pub(crate) async fn signed_in(
     state: &ProxyState,
     headers: &axum::http::HeaderMap,
 ) -> Result<(String, BffSession), StatusCode> {
-    let (_, connection) = connected(state).await?;
+    if state.bff().is_none() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    // No cookie is a determinable 401: the connection is asked for only when
+    // there is a session whose binding it must check.
     let Some(session_id) = extract_bff_cookie(headers, &state.bff_cookie_name) else {
         return Err(StatusCode::UNAUTHORIZED);
     };
+    let (_, connection) = connected(state).await?;
     let session = match state.bff_sessions.get_session(&session_id).await {
         Ok(Some(s)) => s,
         Ok(None) => return Err(StatusCode::UNAUTHORIZED),

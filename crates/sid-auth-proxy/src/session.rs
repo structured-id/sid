@@ -22,10 +22,13 @@ use sid_plugin::cache::{CacheBackend, CacheError};
 use sid_auth::auth::jwt::ForwardAuthClaims;
 
 /// Key prefix for sessions. Separate from `pending` so one cannot be read as
-/// the other, and from every other user of the same cache.
-const SESSION_PREFIX: &str = "bff:sess:";
+/// the other, and from every other user of the same cache. The prefixes of
+/// both records name their shape: a change of shape takes a new prefix, so
+/// replicas of different versions over one cache never read each other's
+/// records, and the old ones expire unread.
+const SESSION_PREFIX: &str = "bff:sess:2:";
 /// Key prefix for pending authorizations.
-const PENDING_PREFIX: &str = "bff:pending:";
+const PENDING_PREFIX: &str = "bff:pending:2:";
 /// Key prefix for the claim on a session's refresh.
 const REFRESH_PREFIX: &str = "bff:refresh:";
 

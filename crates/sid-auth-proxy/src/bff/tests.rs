@@ -127,6 +127,36 @@ async fn test_login_without_a_connection_is_unavailable() {
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
+/// Without a session cookie there is nobody signed in, whether or not SID can
+/// answer for the connection: 401 for userinfo, the API and logout's
+/// missing-cookie case, never a 503 an anonymous visitor cannot act on.
+#[tokio::test]
+async fn test_no_cookie_is_unauthenticated_without_a_connection() {
+    let mut state = bff_test_state();
+    let (key, _) = crate::client_key::ClientKey::generate().unwrap();
+    state.account = Some(Arc::new(AccountLink::new(
+        key,
+        "https://sid.example.com".into(),
+        crate::test_channel(),
+    )));
+    for request in [
+        Request::get("/auth/userinfo").body(Body::empty()).unwrap(),
+        Request::post("/api/x").body(Body::empty()).unwrap(),
+        Request::post("/auth/logout").body(Body::empty()).unwrap(),
+    ] {
+        let path = request.uri().path().to_owned();
+        let response = routes()
+            .layer(axum::extract::connect_info::MockConnectInfo(
+                std::net::SocketAddr::from(([192, 0, 2, 7], 40000)),
+            ))
+            .with_state(state.clone())
+            .oneshot(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
+    }
+}
+
 #[tokio::test]
 async fn test_login_reports_unavailable_when_the_store_is_down() {
     let app = routes().with_state(broken_store_state());
