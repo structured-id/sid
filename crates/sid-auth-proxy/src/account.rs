@@ -50,8 +50,10 @@ pub struct Connection {
     pub resource: String,
     /// Scopes the BFF requests.
     pub scopes: Vec<String>,
-    /// The client's registered callback on the BFF's origin.
-    pub redirect_uri: url::Url,
+    /// The client's registered callback on the BFF's origin, exactly as
+    /// registered: SID compares redirect URIs as strings, so a normalized
+    /// spelling would be another callback.
+    pub redirect_uri: String,
 }
 
 /// The account API's answer as the one connection representation.
@@ -113,7 +115,9 @@ impl Connection {
         if !bundle.scopes.iter().any(|s| s == "openid") {
             return Err(LinkError::Invalid("the scopes lack openid"));
         }
-        let redirect_uri = url::Url::parse(&bundle.redirect_uri)
+        // Parsed only to refuse what is not a URL; the registered spelling is
+        // what goes into requests.
+        url::Url::parse(&bundle.redirect_uri)
             .map_err(|_| LinkError::Invalid("the callback is not a URL"))?;
         Ok(Self {
             issuer: bundle.issuer,
@@ -121,7 +125,7 @@ impl Connection {
             client_id: bundle.client_id,
             resource: bundle.resource,
             scopes: bundle.scopes,
-            redirect_uri,
+            redirect_uri: bundle.redirect_uri,
         })
     }
 
@@ -141,7 +145,7 @@ impl Connection {
         url.query_pairs_mut()
             .append_pair("response_type", "code")
             .append_pair("client_id", &self.client_id)
-            .append_pair("redirect_uri", self.redirect_uri.as_str())
+            .append_pair("redirect_uri", &self.redirect_uri)
             .append_pair("scope", &self.scopes.join(" "))
             .append_pair("resource", &self.resource)
             .append_pair("code_challenge", code_challenge)
@@ -236,7 +240,7 @@ impl AccountLink {
             OAuth2TokenRequest {
                 grant_type: "authorization_code".into(),
                 code: Some(code),
-                redirect_uri: Some(connection.redirect_uri.to_string()),
+                redirect_uri: Some(connection.redirect_uri.clone()),
                 code_verifier: Some(code_verifier),
                 ..Default::default()
             },

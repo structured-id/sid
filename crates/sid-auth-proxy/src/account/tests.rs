@@ -97,6 +97,26 @@ fn a_delivered_bundle_is_parsed_and_validated() {
     assert!(Connection::parse(&serde_json::to_string(&foreign).unwrap(), INSTALLATION).is_err());
 }
 
+/// The callback goes into protocol requests exactly as registered: SID
+/// compares redirect URIs as strings, so a normalized spelling (lowercased
+/// host) would be an unregistered callback.
+#[test]
+fn the_callback_is_sent_as_registered() {
+    let mut b = bundle();
+    b.redirect_uri = "https://Account.SID.example.com/auth/callback".into();
+    let connection = Connection::accept(b, INSTALLATION).unwrap();
+    assert_eq!(
+        connection.redirect_uri,
+        "https://Account.SID.example.com/auth/callback"
+    );
+    let url = connection.authorize_url("challenge", "state-1", "nonce-1");
+    let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+    assert_eq!(
+        query["redirect_uri"],
+        "https://Account.SID.example.com/auth/callback"
+    );
+}
+
 /// A bundle file that cannot be read is an error, never a fallback.
 #[test]
 fn a_missing_bundle_file_is_an_error() {

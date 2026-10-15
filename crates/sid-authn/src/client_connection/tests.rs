@@ -3,7 +3,7 @@ use crate::system_integration::{AccountSettings, ensure_account_integration};
 use chrono::{SubsecRound, Utc};
 use sid_core::models::{
     AuditEntry, ClientKeySet, IssuerAuthority, IssuerHandle, IssuerId, IssuerSigningKey,
-    MutationContext, Organization,
+    MutationContext, Organization, ResourceId,
 };
 use sid_plugin::storage::StorageBackend;
 use sid_storage::sqlite::SqliteBackend;
@@ -14,9 +14,22 @@ fn ctx() -> MutationContext {
     AuditEntry::system("test", "connection").into()
 }
 
-/// The issuer and a registered web client with its resource, as the account
-/// integration stores them.
-async fn registration() -> (OidcIssuer, OAuth2Client, ProtectedResource) {
+/// A registered web client with its issuer, resource and access, as the
+/// account integration stores them.
+struct Registration {
+    issuer: OidcIssuer,
+    client: OAuth2Client,
+    resource: ProtectedResource,
+    access: ResourceAccess,
+}
+
+impl Registration {
+    fn connection(&self) -> SidResult<ClientConnection> {
+        ClientConnection::of(&self.issuer, &self.client, &self.resource, &self.access)
+    }
+}
+
+async fn registration() -> Registration {
     let storage = SqliteBackend::new_in_memory().await.unwrap();
     let org = Organization::implicit_community("sid.example.com");
     storage
@@ -54,7 +67,16 @@ async fn registration() -> (OidcIssuer, OAuth2Client, ProtectedResource) {
     let integration = ensure_account_integration(&storage, &issuer, INSTALLATION, &settings)
         .await
         .unwrap();
-    (issuer, integration.client, integration.resource)
+    Registration {
+        issuer,
+        client: integration.client,
+        resource: integration.resource,
+        access: integration.access.expect("the integration grants access"),
+    }
+}
+
+fn refused(result: SidResult<ClientConnection>) -> bool {
+    matches!(result, Err(SidError::InvalidState(_)))
 }
 
 /// The connection names exactly what the registration holds: the issuer's
@@ -62,12 +84,12 @@ async fn registration() -> (OidcIssuer, OAuth2Client, ProtectedResource) {
 /// its callback and `private_key_jwt`.
 #[tokio::test]
 async fn the_connection_is_the_stored_registration() {
-    let (issuer, client, resource) = registration().await;
-    let connection = ClientConnection::of(&issuer, &client, &resource).unwrap();
-    assert_eq!(connection.issuer, issuer.canonical_url);
-    assert_eq!(connection.client_id, client.client_id);
+    let r = registration().await;
+    let connection = r.connection().unwrap();
+    assert_eq!(connection.issuer, r.issuer.canonical_url);
+    assert_eq!(connection.client_id, r.client.client_id);
     assert_eq!(connection.resource, format!("{INSTALLATION}/account"));
-    assert_eq!(connection.scopes, client.allowed_scopes);
+    assert_eq!(connection.scopes, r.client.allowed_scopes);
     assert_eq!(
         connection.redirect_uri,
         "https://account.sid.example.com/auth/callback"
@@ -79,41 +101,29 @@ async fn the_connection_is_the_stored_registration() {
 /// does not trust them: no connection is made of it.
 #[tokio::test]
 async fn a_resource_of_another_issuer_is_refused() {
-    let (issuer, client, mut resource) = registration().await;
-    resource.issuer_id = IssuerId::generate();
-    assert!(matches!(
-        ClientConnection::of(&issuer, &client, &resource),
-        Err(SidError::InvalidState(_))
-    ));
+    let mut r = registration().await;
+    r.resource.issuer_id = IssuerId::generate();
+    assert!(refused(r.connection()));
 }
 
 /// A client without a callback cannot complete a sign-in, and no callback is
 /// invented for it.
 #[tokio::test]
 async fn a_client_without_a_callback_is_refused() {
-    let (issuer, mut client, resource) = registration().await;
-    client.redirect_uris.clear();
-    assert!(matches!(
-        ClientConnection::of(&issuer, &client, &resource),
-        Err(SidError::InvalidState(_))
-    ));
+    let mut r = registration().await;
+    r.client.redirect_uris.clear();
+    assert!(refused(r.connection()));
 }
 
 /// A client of another organization is not served by this issuer: its
 /// sign-ins would all be refused, so no connection names the pair.
 #[tokio::test]
 async fn a_client_of_another_organization_is_refused() {
-    let (issuer, mut client, resource) = registration().await;
-    client.org_id = Some(sid_core::models::OrgId::generate());
-    assert!(matches!(
-        ClientConnection::of(&issuer, &client, &resource),
-        Err(SidError::InvalidState(_))
-    ));
-    client.org_id = None;
-    assert!(matches!(
-        ClientConnection::of(&issuer, &client, &resource),
-        Err(SidError::InvalidState(_))
-    ));
+    let mut r = registration().await;
+    r.client.org_id = Some(sid_core::models::OrgId::generate());
+    assert!(refused(r.connection()));
+    r.client.org_id = None;
+    assert!(refused(r.connection()));
 }
 
 /// A client with several callbacks gives no way to tell which one is this
@@ -121,22 +131,45 @@ async fn a_client_of_another_organization_is_refused() {
 /// deployment, so the connection is refused.
 #[tokio::test]
 async fn a_client_with_several_callbacks_is_refused() {
-    let (issuer, mut client, resource) = registration().await;
-    client
+    let mut r = registration().await;
+    r.client
         .redirect_uris
         .push("https://other.sid.example.com/auth/callback".into());
-    assert!(matches!(
-        ClientConnection::of(&issuer, &client, &resource),
-        Err(SidError::InvalidState(_))
-    ));
+    assert!(refused(r.connection()));
+}
+
+/// The BFF runs the authorization code flow and refreshes: a client
+/// registered without either grant would have every sign-in or refresh
+/// refused, so no connection is made of it.
+#[tokio::test]
+async fn a_client_without_the_code_or_refresh_grant_is_refused() {
+    for grant in ["authorization_code", "refresh_token"] {
+        let mut r = registration().await;
+        r.client.grant_types.retain(|g| g != grant);
+        assert!(refused(r.connection()), "without {grant}");
+    }
+}
+
+/// Access granted to another client, or to another resource, is not this
+/// client's access to this resource: the issuer would refuse every request
+/// for the target.
+#[tokio::test]
+async fn access_of_another_client_or_resource_is_refused() {
+    let mut r = registration().await;
+    r.access.client_id = "another-client".into();
+    assert!(refused(r.connection()));
+
+    let mut r = registration().await;
+    r.access.resource_id = ResourceId::generate();
+    assert!(refused(r.connection()));
 }
 
 /// The bundle a deployment delivers reads back as the same connection, and a
 /// field this version does not know is refused rather than ignored.
 #[tokio::test]
 async fn the_bundle_round_trips_and_refuses_unknown_fields() {
-    let (issuer, client, resource) = registration().await;
-    let connection = ClientConnection::of(&issuer, &client, &resource).unwrap();
+    let r = registration().await;
+    let connection = r.connection().unwrap();
     let bundle = serde_json::to_string(&connection).unwrap();
     assert_eq!(
         serde_json::from_str::<ClientConnection>(&bundle).unwrap(),

@@ -7,7 +7,7 @@
 //! apart from it.
 
 use serde::{Deserialize, Serialize};
-use sid_core::models::{OAuth2Client, OidcIssuer, ProtectedResource};
+use sid_core::models::{OAuth2Client, OidcIssuer, ProtectedResource, ResourceAccess};
 use sid_core::{Error as SidError, Result as SidResult};
 
 /// Connection details of one registered web client.
@@ -30,33 +30,41 @@ pub struct ClientConnection {
 }
 
 impl ClientConnection {
-    /// The connection of `client` under `issuer` for `resource`, as stored.
-    /// A client the issuer does not serve, a resource of another issuer, or
-    /// a client without exactly one callback is a registration that cannot
-    /// serve this BFF's sign-ins, never a connection.
+    /// The connection of `client` under `issuer` for `resource`, which it
+    /// reaches through `access`, as stored. A registration that cannot serve
+    /// this BFF's sign-ins is never a connection: a client the issuer does
+    /// not serve, one without the code or refresh grant, a resource of
+    /// another issuer, access that is not this client's to this resource, or
+    /// a client without exactly one callback.
     pub fn of(
         issuer: &OidcIssuer,
         client: &OAuth2Client,
         resource: &ProtectedResource,
+        access: &ResourceAccess,
     ) -> SidResult<Self> {
+        let unusable = |why: &str| Err(SidError::InvalidState(why.into()));
         // An issuer serves the clients of its recipient organization only.
         if client.org_id != Some(issuer.recipient_org) {
-            return Err(SidError::InvalidState(
-                "the client is not of the issuer's organization".into(),
-            ));
+            return unusable("the client is not of the issuer's organization");
+        }
+        // The BFF signs in with the code flow and keeps sessions by refresh.
+        if !client.is_grant_type_allowed("authorization_code")
+            || !client.is_grant_type_allowed("refresh_token")
+        {
+            return unusable("the client lacks the code or refresh grant");
         }
         if resource.issuer_id != issuer.id {
-            return Err(SidError::InvalidState(
-                "the resource is not under the client's issuer".into(),
-            ));
+            return unusable("the resource is not under the client's issuer");
+        }
+        // Without its access the issuer refuses every request for the target.
+        if access.client_id != client.client_id || access.resource_id != resource.id {
+            return unusable("the access is not the client's to the resource");
         }
         // With several callbacks nothing says which is this BFF's, and the
         // authorization response must come back to the instance holding the
         // sign-in's state and PKCE verifier.
         let [redirect_uri] = client.redirect_uris.as_slice() else {
-            return Err(SidError::InvalidState(
-                "the client does not have exactly one callback".into(),
-            ));
+            return unusable("the client does not have exactly one callback");
         };
         let redirect_uri = redirect_uri.clone();
         Ok(Self {

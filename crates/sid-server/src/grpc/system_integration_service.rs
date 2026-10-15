@@ -106,8 +106,10 @@ impl SystemIntegrationService for SystemIntegrationServiceImpl {
                     "the account API is not under the account client's issuer".into(),
                 ))
             })?;
-        let connection = ClientConnection::of(&issuer, &integration.client, &integration.resource)
-            .map_err(|_| unavailable())?;
+        let access = integration.access.as_ref().ok_or_else(unavailable)?;
+        let connection =
+            ClientConnection::of(&issuer, &integration.client, &integration.resource, access)
+                .map_err(|_| unavailable())?;
         Ok(Response::new(AccountConnection {
             issuer: connection.issuer,
             client_id: connection.client_id,
