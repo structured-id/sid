@@ -698,10 +698,12 @@ async fn test_owner_replicas_prepare_together() {
     drop_topology(&t).await;
 }
 
-/// An earlier broad stream holding the subjects is refused, not changed:
-/// its messages, cursors and settings stay as they are.
+/// A broad stream that is not this installation's earlier stream (another
+/// name) holding the subjects is refused, not changed: its messages,
+/// cursors and settings stay as they are. The earlier stream itself is moved
+/// (`nats_earlier_stream.rs`).
 #[tokio::test]
-async fn test_broad_earlier_stream_is_left_alone() {
+async fn test_a_foreign_broad_stream_is_left_alone() {
     let t = topology();
     let root = t
         .history_subject(event_types::USER_CREATED)
@@ -711,7 +713,7 @@ async fn test_broad_earlier_stream_is_left_alone() {
         .unwrap()
         .to_string();
     let js = jetstream().await;
-    let broad = format!("{}_EVENTS", root.to_ascii_uppercase());
+    let broad = format!("{}_FOREIGN", root.to_ascii_uppercase());
     js.create_stream(stream::Config {
         name: broad.clone(),
         subjects: vec![format!("{root}.>")],
