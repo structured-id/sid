@@ -25,7 +25,11 @@ use sid_auth::auth::jwt::ForwardAuthClaims;
 /// the other, and from every other user of the same cache. The prefixes of
 /// both records name their shape: a change of shape takes a new prefix, so
 /// replicas of different versions over one cache never read each other's
-/// records, and the old ones expire unread.
+/// records, and the old ones expire unread. The cookie keeps its configured
+/// name: while a rollout that changes the shape is in progress a browser may
+/// be asked to sign in again on a replica of the other version, which costs
+/// a sign-in for the minutes of the rollout, whereas reading both shapes or
+/// carrying two cookies would keep every former shape alive in the code.
 const SESSION_PREFIX: &str = "bff:sess:2:";
 /// Key prefix for pending authorizations, followed by the digest of the
 /// sign-in binding they were started under.

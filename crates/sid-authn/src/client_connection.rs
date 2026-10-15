@@ -107,6 +107,12 @@ impl ClientConnection {
         let [redirect_uri] = client.redirect_uris.as_slice() else {
             return unusable("the client does not have exactly one callback");
         };
+        // A stored callback was not necessarily registered through dynamic
+        // registration: it must still be one a web client may have
+        // (RFC 6749 §3.1.2), or the browser never returns to the BFF.
+        if crate::dcr::validate_redirect_uri(redirect_uri, ApplicationType::Web).is_err() {
+            return unusable("the callback is not a web redirect URI");
+        }
         let redirect_uri = redirect_uri.clone();
         // Present: `credential_problem` refused a private_key_jwt client
         // without keys above, and every registered key has a kid.

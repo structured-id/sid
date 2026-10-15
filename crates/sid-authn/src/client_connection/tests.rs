@@ -209,6 +209,22 @@ async fn a_client_that_is_not_web_is_refused() {
     }
 }
 
+/// A callback a web client could not register (a custom scheme, plain HTTP
+/// to another host, a fragment) does not bring the browser back to the BFF
+/// (RFC 6749 §3.1.2): the registration gets no connection.
+#[tokio::test]
+async fn a_callback_that_is_not_a_web_redirect_is_refused() {
+    for callback in [
+        "com.example:/callback",
+        "http://account.sid.example.com/auth/callback",
+        "https://account.sid.example.com/auth/callback#part",
+    ] {
+        let mut r = registration().await;
+        r.client.redirect_uris = vec![callback.into()];
+        assert!(refused(r.connection()), "{callback}");
+    }
+}
+
 /// A stored entry that is not one scope token would reach the issuer split
 /// into several, none of them the registered entry (RFC 6749 §3.3): the
 /// registration gets no connection.
