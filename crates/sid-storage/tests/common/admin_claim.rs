@@ -180,6 +180,169 @@ pub async fn test_registration_claims_instance(backend: &dyn StorageBackend) {
     assert!(!plain.is_admin());
 }
 
+/// A centrally managed installation consumes no local claim: adopting the
+/// policy removes the stored claim, the database refuses to store one again
+/// (an older replica that knows nothing of the policy fails loudly rather
+/// than opening a claim), and the stale token creates no administrator
+/// through the role grant or a registration. The policy is never undone, and
+/// ordinary registration is not trapped behind the missing administrator.
+pub async fn test_central_management_refuses_local_claims(backend: &dyn StorageBackend) {
+    use sid_core::models::{BootstrapPolicy, CentralAdoption, NewRegistration};
+    assert!(!backend.admin_exists().await.unwrap());
+    assert_eq!(
+        backend.bootstrap_policy().await.unwrap(),
+        BootstrapPolicy::SelfManaged
+    );
+    let claim = Uuid::now_v7().as_bytes().to_vec();
+    backend
+        .insert_instance_secret(InstanceSecret::AdminClaim, &claim, test_audit())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        backend
+            .adopt_central_management(test_audit())
+            .await
+            .unwrap(),
+        CentralAdoption::Adopted
+    );
+    assert_eq!(
+        backend.bootstrap_policy().await.unwrap(),
+        BootstrapPolicy::CentrallyManaged
+    );
+    assert!(claim_stored(backend).await.is_none());
+
+    // An older replica writing a claim again is refused by the database,
+    // and the stale token is refused on both paths.
+    let rewritten = backend
+        .insert_instance_secret(InstanceSecret::AdminClaim, &claim, test_audit())
+        .await;
+    assert!(rewritten.is_err(), "{rewritten:?}");
+    assert!(claim_stored(backend).await.is_none());
+    let claimer = stored_profile(backend, "central_claimer").await;
+    assert!(
+        !backend
+            .claim_first_admin(&claim, &with_admin(claimer.clone()), test_audit())
+            .await
+            .unwrap()
+    );
+    let registration = NewRegistration::new(
+        create_test_profile("central_registrant"),
+        sid_core::models::SignupIdentifier::Username("central_registrant"),
+        None,
+    )
+    .unwrap()
+    .claiming_instance(claim.clone());
+    let result = backend.register_profile(&registration, test_audit()).await;
+    assert!(
+        matches!(result, Err(sid_core::Error::InvalidState(_))),
+        "{result:?}"
+    );
+    assert!(!backend.admin_exists().await.unwrap());
+    assert!(
+        !backend
+            .get_profile(claimer.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_admin()
+    );
+
+    // Ordinary registration is available without a local administrator.
+    let plain = NewRegistration::new(
+        create_test_profile("central_plain"),
+        sid_core::models::SignupIdentifier::Username("central_plain"),
+        None,
+    )
+    .unwrap();
+    backend
+        .register_profile(&plain, test_audit())
+        .await
+        .unwrap();
+
+    // Adopting again changes nothing, also once a provisioned
+    // administrator exists.
+    backend
+        .create_profile(
+            &with_admin(create_test_profile("central_admin")),
+            test_audit(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        backend
+            .adopt_central_management(test_audit())
+            .await
+            .unwrap(),
+        CentralAdoption::AlreadyCentral
+    );
+    assert_eq!(
+        backend.bootstrap_policy().await.unwrap(),
+        BootstrapPolicy::CentrallyManaged
+    );
+}
+
+/// A claimed self-managed installation is not made centrally managed: the
+/// adoption is refused and changes nothing.
+pub async fn test_claimed_installation_stays_self_managed(backend: &dyn StorageBackend) {
+    use sid_core::models::{BootstrapPolicy, CentralAdoption};
+    let claim = Uuid::now_v7().as_bytes().to_vec();
+    backend
+        .insert_instance_secret(InstanceSecret::AdminClaim, &claim, test_audit())
+        .await
+        .unwrap();
+    let owner = stored_profile(backend, "self_owner").await;
+    assert!(
+        backend
+            .claim_first_admin(&claim, &with_admin(owner), test_audit())
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        backend
+            .adopt_central_management(test_audit())
+            .await
+            .unwrap(),
+        CentralAdoption::LocalAdministrator
+    );
+    assert_eq!(
+        backend.bootstrap_policy().await.unwrap(),
+        BootstrapPolicy::SelfManaged
+    );
+}
+
+/// An adoption racing a claim: exactly one takes effect. Either the
+/// installation becomes centrally managed with no administrator, or the
+/// claimer becomes administrator and the installation stays self-managed.
+pub async fn test_adoption_races_claim(backend: &dyn StorageBackend) {
+    use sid_core::models::{BootstrapPolicy, CentralAdoption};
+    let claim = Uuid::now_v7().as_bytes().to_vec();
+    backend
+        .insert_instance_secret(InstanceSecret::AdminClaim, &claim, test_audit())
+        .await
+        .unwrap();
+    let claimer = with_admin(stored_profile(backend, "racing_claimer").await);
+    let (adopted, claimed) = tokio::join!(
+        backend.adopt_central_management(test_audit()),
+        backend.claim_first_admin(&claim, &claimer, test_audit()),
+    );
+    let (adopted, claimed) = (adopted.unwrap(), claimed.unwrap());
+    let policy = backend.bootstrap_policy().await.unwrap();
+    let admin = backend.admin_exists().await.unwrap();
+    match (adopted, claimed) {
+        (CentralAdoption::Adopted, false) => {
+            assert_eq!(policy, BootstrapPolicy::CentrallyManaged);
+            assert!(!admin);
+        }
+        (CentralAdoption::LocalAdministrator, true) => {
+            assert_eq!(policy, BootstrapPolicy::SelfManaged);
+            assert!(admin);
+        }
+        other => panic!("both or neither took effect: {other:?}"),
+    }
+    assert!(claim_stored(backend).await.is_none());
+}
+
 async fn claim_stored(backend: &dyn StorageBackend) -> Option<Vec<u8>> {
     backend
         .get_instance_secret(InstanceSecret::AdminClaim)

@@ -41,6 +41,11 @@ pub const OWED_WORK_CAPACITY: u64 = 100_000;
 const ADMIN_EXISTS_SQL: &str =
     "SELECT EXISTS (SELECT 1 FROM profiles WHERE ' ' || roles || ' ' LIKE '% admin %')";
 
+/// Whether the installation is centrally managed (`bootstrap_policy` holds
+/// its row).
+#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
+const CENTRALLY_MANAGED_SQL: &str = "SELECT EXISTS (SELECT 1 FROM bootstrap_policy)";
+
 /// How many email keys stay quarantined after the email policy cutover.
 #[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
 const QUARANTINED_EMAIL_KEYS_SQL: &str =

@@ -129,7 +129,13 @@ fn key_generation(generation: u32) -> SidResult<i32> {
 use crate::key_versions::{key_derivation_name, key_version_params};
 use sid_core::models::machine_user::MachineUserStatus;
 
-use crate::{ADMIN_EXISTS_SQL, OWED_WORK_CAPACITY};
+use crate::{ADMIN_EXISTS_SQL, CENTRALLY_MANAGED_SQL, OWED_WORK_CAPACITY};
+
+/// Consumes the admin claim `$2` (sealed) stored as `$1`, only on a
+/// self-managed installation: a centrally managed one consumes no local
+/// claim token, even one stored before it became centrally managed.
+const CONSUME_ADMIN_CLAIM_SQL: &str = "DELETE FROM instance_secrets
+     WHERE name = $1 AND sealed = $2 AND NOT EXISTS (SELECT 1 FROM bootstrap_policy)";
 
 /// An initial access token counter as the `INTEGER` column holds it.
 fn iat_count(n: u32) -> SidResult<i32> {
@@ -1249,15 +1255,14 @@ impl StorageBackend for PostgresBackend {
         // removed row serializes two registrants holding the same claim, and a
         // refusal drops the transaction with nothing written.
         if let Some(claim) = instance_claim {
-            let consumed =
-                sqlx::query("DELETE FROM instance_secrets WHERE name = $1 AND sealed = $2")
-                    .bind(sid_core::models::InstanceSecret::AdminClaim.as_str())
-                    .bind(claim)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(|e| SidError::Storage(format!("consume admin claim: {e}")))?
-                    .rows_affected()
-                    == 1;
+            let consumed = sqlx::query(CONSUME_ADMIN_CLAIM_SQL)
+                .bind(sid_core::models::InstanceSecret::AdminClaim.as_str())
+                .bind(claim)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| SidError::Storage(format!("consume admin claim: {e}")))?
+                .rows_affected()
+                == 1;
             let admin_exists: bool = sqlx::query_scalar(ADMIN_EXISTS_SQL)
                 .fetch_one(&mut *tx)
                 .await
@@ -3966,6 +3971,72 @@ impl StorageBackend for PostgresBackend {
             .map_err(|e| SidError::Storage(format!("admin exists: {e}")))
     }
 
+    async fn bootstrap_policy(&self) -> SidResult<sid_core::models::BootstrapPolicy> {
+        let central: bool = sqlx::query_scalar(CENTRALLY_MANAGED_SQL)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| SidError::Storage(format!("bootstrap policy: {e}")))?;
+        Ok(if central {
+            sid_core::models::BootstrapPolicy::CentrallyManaged
+        } else {
+            sid_core::models::BootstrapPolicy::SelfManaged
+        })
+    }
+
+    async fn adopt_central_management(
+        &self,
+        audit: MutationContext,
+    ) -> SidResult<sid_core::models::CentralAdoption> {
+        use sid_core::models::CentralAdoption;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?;
+        // The table lock waits for every write in progress (an insertion of
+        // the first claim included, which a row lock cannot cover while the
+        // row does not exist yet) and holds off new ones until the policy is
+        // committed: a claim inserted before is removed here, and one inserted
+        // after is refused by the policy trigger. Reads go on.
+        sqlx::query("LOCK TABLE instance_secrets IN SHARE ROW EXCLUSIVE MODE")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| SidError::Storage(format!("lock instance secrets: {e}")))?;
+        sqlx::query("DELETE FROM instance_secrets WHERE name = $1")
+            .bind(sid_core::models::InstanceSecret::AdminClaim.as_str())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| SidError::Storage(format!("remove admin claim: {e}")))?;
+        let adopted = sqlx::query(
+            "INSERT INTO bootstrap_policy (scope, policy) VALUES ('installation', 'centrally_managed')
+             ON CONFLICT (scope) DO NOTHING",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("adopt central management: {e}")))?
+        .rows_affected()
+            == 1;
+        if !adopted {
+            // The removal of a stale claim stands either way.
+            tx.commit()
+                .await
+                .map_err(|e| SidError::Storage(e.to_string()))?;
+            return Ok(CentralAdoption::AlreadyCentral);
+        }
+        let admin_exists: bool = sqlx::query_scalar(ADMIN_EXISTS_SQL)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| SidError::Storage(format!("admin exists: {e}")))?;
+        if admin_exists {
+            return Ok(CentralAdoption::LocalAdministrator);
+        }
+        Self::audit_in_tx(&mut tx, "installation:bootstrap_policy", audit).await?;
+        tx.commit()
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?;
+        Ok(CentralAdoption::Adopted)
+    }
+
     async fn claim_first_admin(
         &self,
         claim_sealed: &[u8],
@@ -3979,7 +4050,7 @@ impl StorageBackend for PostgresBackend {
             .map_err(|e| SidError::Storage(e.to_string()))?;
         // Removing the claim row first locks it: a concurrent claimer waits
         // here and then finds nothing to remove.
-        let consumed = sqlx::query("DELETE FROM instance_secrets WHERE name = $1 AND sealed = $2")
+        let consumed = sqlx::query(CONSUME_ADMIN_CLAIM_SQL)
             .bind(sid_core::models::InstanceSecret::AdminClaim.as_str())
             .bind(claim_sealed)
             .execute(&mut *tx)

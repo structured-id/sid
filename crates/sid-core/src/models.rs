@@ -27,6 +27,7 @@ pub mod auth_flow;
 pub mod authz;
 pub mod backchannel_logout;
 pub mod blob;
+pub mod bootstrap_policy;
 pub mod branding;
 pub mod certificate;
 pub mod claim_mapping;
@@ -107,6 +108,7 @@ pub use authz::{
 };
 pub use backchannel_logout::{LOGOUT_DELIVERY_ATTEMPTS, LOGOUT_DELIVERY_KIND, LogoutDelivery};
 pub use blob::{BlobError, BlobMeta, BlobStorageStatus, EncryptedBlob};
+pub use bootstrap_policy::{BootstrapPolicy, CentralAdoption};
 pub use branding::{
     BackgroundConfig, BrandingAssets, BrandingConfig, BrandingConfigId, BrandingStatus,
     BrandingText, ButtonStyle, DarkModeConfig, DarkModeTokens, DesignTokens,
