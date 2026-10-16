@@ -19,7 +19,7 @@ use axum::{Json, Router};
 use subtle::ConstantTimeEq;
 
 use crate::ProxyState;
-use crate::account::{AccountLink, Connection};
+use crate::account::{AccountLink, Connection, LinkError};
 use crate::session::BffSession;
 
 /// BFF routes.
@@ -264,7 +264,7 @@ struct CallbackParams {
 }
 
 /// `POST /auth/logout`: end the BFF session. Requires the CSRF token.
-/// Answers `{"grant": "revoked" | "not_revoked" | "none"}`.
+/// Answers `{"grant": "revoked" | "not_revoked" | "none" | "unknown"}`.
 ///
 /// Ends the application session only: the IdP's own sign-in session is the
 /// IdP's to end (RP-initiated logout), and the account UI does that itself.
@@ -293,7 +293,9 @@ async fn logout_handler(
             }
             revoke_grant(&state, session).await
         }
-        Ok(None) => GrantOutcome::None, // already gone; clear the cookies anyway
+        // Already gone, perhaps expired with its grant still alive: clear the
+        // cookies anyway, and say nothing is known of the grant.
+        Ok(None) => GrantOutcome::Unknown,
         Err(e) => {
             tracing::error!(error = %e, "BFF logout: cannot read the session");
             return StatusCode::SERVICE_UNAVAILABLE.into_response();
@@ -329,6 +331,30 @@ enum GrantOutcome {
     NotRevoked,
     /// No grant stood behind the session.
     None,
+    /// Not known: the session was already gone, or the revocation's answer
+    /// was lost after it may have been committed.
+    Unknown,
+}
+
+/// The outcome of a revocation call that failed. A refusal SID answered
+/// leaves the grant alive; a call whose answer was lost or broken may have
+/// been committed (gRPC status codes, `Unavailable` to `DataLoss`).
+fn revocation_failure(failure: &LinkError) -> GrantOutcome {
+    use tonic::Code;
+    match failure {
+        LinkError::Rpc(status) => match status.code() {
+            Code::Unavailable
+            | Code::Cancelled
+            | Code::DeadlineExceeded
+            | Code::Unknown
+            | Code::Internal
+            | Code::Aborted
+            | Code::DataLoss => GrantOutcome::Unknown,
+            _ => GrantOutcome::NotRevoked,
+        },
+        // Nothing was sent.
+        LinkError::Invalid(_) | LinkError::Key(_) => GrantOutcome::NotRevoked,
+    }
 }
 
 /// Revoke the grant behind a destroyed session (RFC 7009 §2.1), so its
@@ -342,19 +368,24 @@ async fn revoke_grant(state: &ProxyState, session: BffSession) -> GrantOutcome {
     let Some(link) = state.bff() else {
         return GrantOutcome::NotRevoked;
     };
-    let revoked = match link.connection().await {
+    let connection = match link.connection().await {
         // A grant of another connection is not this client's to revoke.
         Ok(connection) if session.connection != connection.binding() => {
             return GrantOutcome::NotRevoked;
         }
-        Ok(connection) => link.revoke(connection, refresh_token).await,
-        Err(e) => Err(e),
+        Ok(connection) => connection,
+        // No revocation was sent.
+        Err(e) => {
+            tracing::warn!(error = %e, "BFF logout: no connection; the grant was not revoked");
+            return GrantOutcome::NotRevoked;
+        }
     };
-    match revoked {
+    match link.revoke(connection, refresh_token).await {
         Ok(()) => GrantOutcome::Revoked,
         Err(e) => {
-            tracing::warn!(error = %e, "BFF logout: the grant was not revoked");
-            GrantOutcome::NotRevoked
+            let outcome = revocation_failure(&e);
+            tracing::warn!(error = %e, ?outcome, "BFF logout: revocation failed");
+            outcome
         }
     }
 }

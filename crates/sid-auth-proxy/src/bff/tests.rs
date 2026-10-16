@@ -199,8 +199,9 @@ async fn test_a_cookie_without_a_session_needs_no_connection() {
             .unwrap();
         assert_eq!(response.status(), expected, "{path}");
         if path == "/auth/logout" {
-            // No session, so no grant behind it to report on.
-            assert_eq!(logout_grant(response).await, "none");
+            // The session may have expired with its grant still alive: the
+            // proxy cannot say what became of it (regression: reported none).
+            assert_eq!(logout_grant(response).await, "unknown");
         }
     }
 }
@@ -650,6 +651,48 @@ async fn test_callback_auth_error_returns_403() {
 
     let response = app.oneshot(req).await.unwrap();
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+/// A revocation SID refused leaves the grant alive; one whose answer was
+/// lost or broken may have been committed, so its outcome is unknown
+/// (regression: every failure was reported as not revoked).
+#[test]
+fn test_revocation_failure_outcome() {
+    use tonic::Code;
+    for code in [
+        Code::Unavailable,
+        Code::Cancelled,
+        Code::DeadlineExceeded,
+        Code::Unknown,
+        Code::Internal,
+        Code::Aborted,
+        Code::DataLoss,
+    ] {
+        let failure = crate::account::LinkError::Rpc(tonic::Status::new(code, "lost"));
+        assert_eq!(
+            revocation_failure(&failure),
+            GrantOutcome::Unknown,
+            "{code:?}"
+        );
+    }
+    for code in [
+        Code::InvalidArgument,
+        Code::Unauthenticated,
+        Code::PermissionDenied,
+        Code::NotFound,
+        Code::FailedPrecondition,
+        Code::ResourceExhausted,
+        Code::Unimplemented,
+    ] {
+        let failure = crate::account::LinkError::Rpc(tonic::Status::new(code, "refused"));
+        assert_eq!(
+            revocation_failure(&failure),
+            GrantOutcome::NotRevoked,
+            "{code:?}"
+        );
+    }
+    let unsigned = crate::account::LinkError::Key(anyhow::anyhow!("no key"));
+    assert_eq!(revocation_failure(&unsigned), GrantOutcome::NotRevoked);
 }
 
 #[tokio::test]
