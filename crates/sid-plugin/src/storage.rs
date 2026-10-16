@@ -14,15 +14,15 @@ use sid_core::models::provisioning_connector::{
     ProvisioningCredentialId,
 };
 use sid_core::models::{
-    AccessRequest, AccessRequestId, AuthCodeRedemption, AuthorizationCode, CedarPolicy,
-    CedarPolicyId, ClosureRequest, Credential, CredentialId, CredentialType, Device,
-    DeviceAuthCodeId, DeviceAuthorizationCode, DeviceId, DeviceTrustChange, DirectoryGroupWrite,
-    DirectoryUserWrite, EmailSettings, ExportJob, Group, GroupId, GroupMember, HistoryCommit,
-    ImpersonationGrant, InitialAccessToken, InitialAccessTokenId, Invite, InviteFilter, InviteId,
-    MachineUser, MachineUserCredential, MachineUserId, MagicLinkSession, MutationContext,
-    NewRegistration, OAuth2Client, OutboundDlqEntry, OutboundEntityType, PasswordHistory, PatId,
-    PersonalAccessToken, PhoneSettings, Principal, PrincipalBinding, PrincipalEntity, PrincipalId,
-    PrincipalType, Profile, ProfileEmail, ProfileEmailId, ProfileGrant, ProfileGrantId, ProfileId,
+    AccessRequest, AccessRequestId, CedarPolicy, CedarPolicyId, ClosureRequest, Credential,
+    CredentialId, CredentialType, Device, DeviceAuthCodeId, DeviceAuthorizationCode, DeviceId,
+    DeviceTrustChange, DirectoryGroupWrite, DirectoryUserWrite, EmailSettings, ExportJob, Group,
+    GroupId, GroupMember, HistoryCommit, ImpersonationGrant, InitialAccessToken,
+    InitialAccessTokenId, Invite, InviteFilter, InviteId, MachineUser, MachineUserCredential,
+    MachineUserId, MagicLinkSession, MutationContext, NewRegistration, OAuth2Client,
+    OutboundDlqEntry, OutboundEntityType, PasswordHistory, PatId, PersonalAccessToken,
+    PhoneSettings, Principal, PrincipalBinding, PrincipalEntity, PrincipalId, PrincipalType,
+    Profile, ProfileEmail, ProfileEmailId, ProfileGrant, ProfileGrantId, ProfileId,
     ProfileMetadata, ProfilePhone, ProfilePhoneId, Project, ProjectChange, ProjectId, RefreshToken,
     RegistrationSource, RegistrationSourceType, Role, RoleAssignment, RoleAssignmentId, RoleId,
     ScimOutboundRecord, ScimOutboundTarget, ScimOutboundTargetId, Session, SessionAuthentication,
@@ -31,7 +31,7 @@ use sid_core::models::{
 };
 use uuid::Uuid;
 
-use crate::{ClientResourceRegistry, WorkStore};
+use crate::{ClientResourceRegistry, GrantStore, WorkStore};
 
 /// The right to run one background job, exclusive across every instance on
 /// the same store until released.
@@ -68,7 +68,9 @@ impl JobLock {
 /// entry and its work in one transaction; a backend that cannot do that for
 /// an operation refuses work there instead of storing it apart.
 #[async_trait]
-pub trait StorageBackend: WorkStore + ClientResourceRegistry + Send + Sync + 'static {
+pub trait StorageBackend:
+    WorkStore + ClientResourceRegistry + GrantStore<Owner = ProfileId> + Send + Sync + 'static
+{
     /// Returns the unique name of this backend.
     fn name(&self) -> &'static str;
 
@@ -588,51 +590,7 @@ pub trait StorageBackend: WorkStore + ClientResourceRegistry + Send + Sync + 'st
         ctx: MutationContext,
     ) -> Result<bool>;
 
-    /// Atomic session creation with concurrent limit enforcement.
-    ///
-    /// Session creation is serialized per profile, so two concurrent logins
-    /// cannot both pass the limit check. The session is inserted like
-    /// [`Self::create_session`]: an existing id is a `Conflict`.
-    ///
-    /// If `max_sessions` is 0, no limit is enforced.
-    /// If the profile has `max_sessions` or more active sessions, the oldest are
-    /// evicted (FIFO) to make room for the new one, with the sessions they
-    /// authenticated; each evicted session owes what [`SessionEnd`] names,
-    /// with reason `SessionLimit`.
-    ///
-    /// Returns the list of evicted session IDs (empty if under limit or unlimited).
-    async fn create_session_atomic(
-        &self,
-        session: &Session,
-        max_sessions: u32,
-        ctx: MutationContext,
-    ) -> Result<Vec<SessionId>>;
-
-    /// Get a session by ID.
-    async fn get_session(&self, id: SessionId) -> Result<Option<Session>>;
-
-    /// The session a browser signed in with, by the hash of its cookie's
-    /// secret; expiry and revocation are the caller's to check.
-    async fn get_session_by_browser_secret(
-        &self,
-        hash: &sid_core::models::BrowserSecretHash,
-    ) -> Result<Option<Session>>;
-
-    /// Record activity on session `id` at `at`; last activity only moves
-    /// forward. An unknown session is left alone.
-    async fn touch_session(&self, id: SessionId, at: chrono::DateTime<chrono::Utc>) -> Result<()>;
-
-    /// Delete a session by ID and the sessions it authenticated
-    /// (`authenticated_by`), returning the ids of every session ended. Each
-    /// ended session's work under `end` ([`SessionEnd::owed`]) commits with
-    /// the deletion; deleting a session that is already gone ends and owes
-    /// nothing.
-    async fn delete_session(
-        &self,
-        id: SessionId,
-        end: &SessionEnd,
-        ctx: MutationContext,
-    ) -> Result<Vec<SessionId>>;
+    // Session creation, lookup, activity and deletion are `GrantStore`'s.
 
     /// Delete all sessions of a profile and return them. Every deleted session
     /// owes what [`SessionEnd::owed`] names under `end` (its client's
@@ -947,59 +905,8 @@ pub trait StorageBackend: WorkStore + ClientResourceRegistry + Send + Sync + 'st
     /// never replaced.
     async fn create_refresh_token(&self, token: &RefreshToken, ctx: MutationContext) -> Result<()>;
 
-    /// Get a refresh token by its hash.
-    async fn get_refresh_token_by_hash(&self, token_hash: &[u8]) -> Result<Option<RefreshToken>>;
-
-    /// Revoke all refresh tokens for a session. Returns count revoked.
-    async fn revoke_refresh_tokens_by_session(
-        &self,
-        session_id: SessionId,
-        ctx: MutationContext,
-    ) -> Result<u64>;
-
-    /// Revoke every refresh token of a rotation family, including those still
-    /// inside a grace window, so none of them can be used again. Returns the
-    /// count changed. Used when a rotated token is reused (theft).
-    async fn revoke_refresh_tokens_by_family(
-        &self,
-        family_id: Uuid,
-        ctx: MutationContext,
-    ) -> Result<u64>;
-
-    /// Rotate a refresh token in one transaction: `old_id` is marked replaced
-    /// by `new` (revoked, usable until `grace_expires_at` for a client retry,
-    /// an existing grace window is kept) and `new` is stored. Returns `false`,
-    /// writing nothing, when `old_id` is neither active nor inside its grace
-    /// window (expired, or revoked by sign-out or theft meanwhile).
-    async fn rotate_refresh_token(
-        &self,
-        old_id: Uuid,
-        new: &RefreshToken,
-        grace_expires_at: DateTime<Utc>,
-        ctx: MutationContext,
-    ) -> Result<bool>;
-
-    // === AUTHORIZATION CODE OPERATIONS ===
-
-    /// Insert an authorization code; an existing code hash is `Conflict`.
-    async fn create_auth_code(&self, code: &AuthorizationCode, ctx: MutationContext) -> Result<()>;
-
-    /// Get an authorization code by its hash.
-    async fn get_auth_code_by_hash(&self, code_hash: &[u8]) -> Result<Option<AuthorizationCode>>;
-
-    /// Redeem an authorization code exactly once (RFC 6749 §4.1.2).
-    ///
-    /// In one transaction: mark the code used only if it is not used yet, bind
-    /// it to `session`, and store `session` and `refresh_token`. Of any number
-    /// of concurrent redemptions exactly one gets `Redeemed`; the others get
-    /// `AlreadyRedeemed` with the first redemption's session and store nothing.
-    async fn redeem_auth_code(
-        &self,
-        code_hash: &[u8],
-        session: &Session,
-        refresh_token: &RefreshToken,
-        ctx: MutationContext,
-    ) -> Result<AuthCodeRedemption>;
+    // Refresh lookup, rotation and revocation, and authorization codes, are
+    // `GrantStore`'s.
 
     // === INITIAL ACCESS TOKEN OPERATIONS (DCR) ===
 

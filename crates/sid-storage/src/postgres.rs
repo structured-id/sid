@@ -27,9 +27,9 @@ use sid_core::{
         WebAuthnUserHandle,
     },
 };
-use sid_plugin::ClientResourceRegistry;
 use sid_plugin::audit::AuditLog;
 use sid_plugin::storage::StorageBackend;
+use sid_plugin::{ClientResourceRegistry, GrantStore};
 use sqlx::PgPool;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -1176,6 +1176,358 @@ impl ClientResourceRegistry for PostgresBackend {
         resource: sid_core::models::ResourceId,
     ) -> SidResult<Option<sid_core::models::ResourceAccess>> {
         self.resource_access_impl(client_id, resource).await
+    }
+}
+
+#[async_trait]
+impl GrantStore for PostgresBackend {
+    type Owner = ProfileId;
+
+    async fn create_session_atomic(
+        &self,
+        session: &Session,
+        max_sessions: u32,
+        mut audit: MutationContext,
+    ) -> SidResult<Vec<SessionId>> {
+        if max_sessions == 0 {
+            self.create_session(session, audit).await?;
+            return Ok(vec![]);
+        }
+
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| SidError::Storage(format!("begin tx: {e}")))?;
+
+        // The profile row lock serializes session creation per profile for
+        // every replica and version alike, until commit or rollback. It does
+        // not block other rows that merely reference the profile.
+        sqlx::query("SELECT 1 FROM profiles WHERE id = $1 FOR NO KEY UPDATE")
+            .bind(session.owner)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| SidError::Storage(format!("lock profile: {e}")))?;
+
+        // Count active (non-expired) sessions for this profile.
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sessions WHERE profile_id = $1 AND expires_at > NOW()",
+        )
+        .bind(session.owner)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("count sessions: {e}")))?;
+
+        // Evict oldest sessions if at or over limit.
+        let mut evicted = Vec::new();
+        if count >= max_sessions as i64 {
+            let to_evict = (count - max_sessions as i64 + 1) as i64; // +1 for the new session
+            let rows: Vec<(SessionId, Option<String>)> = sqlx::query_as(
+                "SELECT id, client_id FROM sessions \
+                 WHERE profile_id = $1 AND expires_at > NOW() \
+                 ORDER BY created_at ASC \
+                 LIMIT $2",
+            )
+            .bind(session.owner)
+            .bind(to_evict)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| SidError::Storage(format!("list evictable: {e}")))?;
+
+            let end = SessionEnd::new(RevocationReason::SessionLimit, "system");
+            for (sid, _) in &rows {
+                // An evicted session ends like any other and owes the same,
+                // and so do the sessions it authenticated.
+                for ended in session::end_with_dependents(&mut tx, *sid).await? {
+                    audit.work.extend(end.owed_by(&ended));
+                    evicted.push(ended.id);
+                }
+            }
+        }
+
+        // Insert the new session within the same transaction.
+        session::write(&mut tx, session).await?;
+
+        Self::audit_in_tx(&mut tx, &format!("profile:{}", session.owner), audit).await?;
+
+        tx.commit()
+            .await
+            .map_err(|e| SidError::Storage(format!("commit tx: {e}")))?;
+
+        Ok(evicted)
+    }
+
+    async fn get_session(&self, id: SessionId) -> SidResult<Option<Session>> {
+        let row =
+            sqlx::query_as::<_, crate::pg_row::SessionRow>("SELECT * FROM sessions WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| SidError::Storage(format!("Query failed: {}", e)))?;
+        row.map(|r| r.into_domain()).transpose()
+    }
+
+    async fn get_session_by_browser_secret(
+        &self,
+        hash: &sid_core::models::BrowserSecretHash,
+    ) -> SidResult<Option<Session>> {
+        let row = sqlx::query_as::<_, crate::pg_row::SessionRow>(
+            "SELECT * FROM sessions WHERE browser_secret_hash = $1",
+        )
+        .bind(hash.as_bytes().as_slice())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(format!("session by browser secret: {e}")))?;
+        row.map(|r| r.into_domain()).transpose()
+    }
+
+    async fn touch_session(
+        &self,
+        id: SessionId,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> SidResult<()> {
+        // GREATEST ignores a NULL argument, so a first touch sets the value.
+        sqlx::query(
+            "UPDATE sessions SET last_activity_at = GREATEST(last_activity_at, $2) WHERE id = $1",
+        )
+        .bind(id)
+        .bind(at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(format!("touch session: {e}")))?;
+        Ok(())
+    }
+
+    async fn delete_session(
+        &self,
+        id: SessionId,
+        end: &SessionEnd,
+        mut audit: MutationContext,
+    ) -> SidResult<Vec<SessionId>> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?;
+        // What each ended session owes commits in this transaction.
+        let ended = session::end_with_dependents(&mut tx, id).await?;
+        for session in &ended {
+            audit.work.extend(end.owed_by(session));
+        }
+        Self::audit_in_tx(&mut tx, &format!("session:{id}"), audit).await?;
+        tx.commit()
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?;
+        Ok(ended.into_iter().map(|session| session.id).collect())
+    }
+
+    async fn get_refresh_token_by_hash(
+        &self,
+        token_hash: &[u8],
+    ) -> SidResult<Option<RefreshToken>> {
+        let row = sqlx::query_as::<_, crate::pg_row::RefreshTokenRow>(
+            "SELECT * FROM refresh_tokens WHERE token_hash = $1",
+        )
+        .bind(token_hash)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(format!("Query failed: {}", e)))?;
+        Ok(row.map(|r| r.into_domain()))
+    }
+
+    async fn revoke_refresh_tokens_by_session(
+        &self,
+        session_id: SessionId,
+        audit: MutationContext,
+    ) -> SidResult<u64> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?;
+        // Tokens in a grace window are revoked too: the window ends with them.
+        let result = sqlx::query(
+            "UPDATE refresh_tokens SET revoked = true, grace_expires_at = NULL
+             WHERE session_id = $1 AND (revoked = false OR grace_expires_at IS NOT NULL)",
+        )
+        .bind(session_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("Update failed: {}", e)))?;
+        Self::audit_in_tx(&mut tx, &format!("session:{session_id}"), audit).await?;
+        tx.commit()
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?;
+        Ok(result.rows_affected())
+    }
+
+    async fn revoke_refresh_tokens_by_family(
+        &self,
+        family_id: Uuid,
+        audit: MutationContext,
+    ) -> SidResult<u64> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?;
+        let result = sqlx::query(
+            "UPDATE refresh_tokens SET revoked = true, grace_expires_at = NULL
+             WHERE family_id = $1 AND (revoked = false OR grace_expires_at IS NOT NULL)",
+        )
+        .bind(family_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("Update failed: {}", e)))?;
+        Self::audit_in_tx(&mut tx, &format!("token_family:{}", family_id), audit).await?;
+        tx.commit()
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?;
+        Ok(result.rows_affected())
+    }
+
+    async fn rotate_refresh_token(
+        &self,
+        old_id: Uuid,
+        new: &RefreshToken,
+        grace_expires_at: chrono::DateTime<chrono::Utc>,
+        audit: MutationContext,
+    ) -> SidResult<bool> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?;
+        let rotated = sqlx::query(
+            "UPDATE refresh_tokens SET revoked = true, replaced_by = $2,
+                grace_expires_at = COALESCE(grace_expires_at, $3)
+             WHERE id = $1 AND expires_at > NOW()
+               AND (revoked = false OR grace_expires_at > NOW())",
+        )
+        .bind(old_id)
+        .bind(new.id)
+        .bind(grace_expires_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("rotate refresh token: {e}")))?
+        .rows_affected()
+            == 1;
+        if !rotated {
+            return Ok(false);
+        }
+        refresh_token::insert(&mut tx, new).await?;
+        Self::audit_in_tx(&mut tx, &format!("token_family:{}", new.family_id), audit).await?;
+        tx.commit()
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?;
+        Ok(true)
+    }
+
+    async fn create_auth_code(
+        &self,
+        code: &AuthorizationCode,
+        audit: MutationContext,
+    ) -> SidResult<()> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?;
+        sqlx::query(
+            "INSERT INTO authorization_codes (code_hash, profile_id, client_id, redirect_uri,
+                scopes, code_challenge, nonce, expires_at, created_at, used, resource_id,
+                authenticated_at, amr, assurance_level, elevation_level, elevation_until,
+                authorizing_session_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)",
+        )
+        .bind(&code.code_hash)
+        .bind(code.owner)
+        .bind(&code.client_id)
+        .bind(&code.redirect_uri)
+        .bind(code.scopes.join(" "))
+        .bind(&code.code_challenge)
+        .bind(&code.nonce)
+        .bind(code.expires_at)
+        .bind(code.created_at)
+        .bind(code.used)
+        .bind(code.resource)
+        .bind(code.authentication.authenticated_at)
+        .bind(code.authentication.amr.join(" "))
+        .bind(code.authentication.assurance_level.as_str())
+        .bind(code.authentication.elevation.map(|e| e.level.as_str()))
+        .bind(code.authentication.elevation.map(|e| e.until))
+        .bind(code.authentication.session)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| insert_error("authorization code", e))?;
+        Self::audit_in_tx(&mut tx, &format!("auth_code:{}", code.client_id), audit).await?;
+        tx.commit()
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn get_auth_code_by_hash(
+        &self,
+        code_hash: &[u8],
+    ) -> SidResult<Option<AuthorizationCode>> {
+        let row = sqlx::query_as::<_, crate::pg_row::AuthCodeRow>(
+            "SELECT * FROM authorization_codes WHERE code_hash = $1",
+        )
+        .bind(code_hash)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(format!("Query failed: {}", e)))?;
+        row.map(|r| r.into_domain()).transpose()
+    }
+
+    async fn redeem_auth_code(
+        &self,
+        code_hash: &[u8],
+        session: &Session,
+        refresh_token: &RefreshToken,
+        audit: MutationContext,
+    ) -> SidResult<AuthCodeRedemption> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?;
+
+        // The conditional update decides a race: the row lock makes every other
+        // redemption wait, then see `used = true` and update nothing.
+        let redeemed = sqlx::query(
+            "UPDATE authorization_codes SET used = true, session_id = $2
+             WHERE code_hash = $1 AND used = false",
+        )
+        .bind(code_hash)
+        .bind(session.id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("redeem auth code: {e}")))?
+        .rows_affected()
+            == 1;
+        if !redeemed {
+            let session_id: Option<Option<SessionId>> = sqlx::query_scalar(
+                "SELECT session_id FROM authorization_codes WHERE code_hash = $1",
+            )
+            .bind(code_hash)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| SidError::Storage(format!("read auth code: {e}")))?;
+            return Ok(AuthCodeRedemption::AlreadyRedeemed {
+                session_id: session_id.flatten(),
+            });
+        }
+
+        session::write(&mut tx, session).await?;
+        refresh_token::insert(&mut tx, refresh_token).await?;
+
+        Self::audit_in_tx(&mut tx, &format!("profile:{}", session.owner), audit).await?;
+        tx.commit()
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?;
+        Ok(AuthCodeRedemption::Redeemed)
     }
 }
 
@@ -2558,144 +2910,6 @@ impl StorageBackend for PostgresBackend {
         Ok(true)
     }
 
-    async fn create_session_atomic(
-        &self,
-        session: &Session,
-        max_sessions: u32,
-        mut audit: MutationContext,
-    ) -> SidResult<Vec<SessionId>> {
-        if max_sessions == 0 {
-            self.create_session(session, audit).await?;
-            return Ok(vec![]);
-        }
-
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| SidError::Storage(format!("begin tx: {e}")))?;
-
-        // The profile row lock serializes session creation per profile for
-        // every replica and version alike, until commit or rollback. It does
-        // not block other rows that merely reference the profile.
-        sqlx::query("SELECT 1 FROM profiles WHERE id = $1 FOR NO KEY UPDATE")
-            .bind(session.owner)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| SidError::Storage(format!("lock profile: {e}")))?;
-
-        // Count active (non-expired) sessions for this profile.
-        let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM sessions WHERE profile_id = $1 AND expires_at > NOW()",
-        )
-        .bind(session.owner)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|e| SidError::Storage(format!("count sessions: {e}")))?;
-
-        // Evict oldest sessions if at or over limit.
-        let mut evicted = Vec::new();
-        if count >= max_sessions as i64 {
-            let to_evict = (count - max_sessions as i64 + 1) as i64; // +1 for the new session
-            let rows: Vec<(SessionId, Option<String>)> = sqlx::query_as(
-                "SELECT id, client_id FROM sessions \
-                 WHERE profile_id = $1 AND expires_at > NOW() \
-                 ORDER BY created_at ASC \
-                 LIMIT $2",
-            )
-            .bind(session.owner)
-            .bind(to_evict)
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(|e| SidError::Storage(format!("list evictable: {e}")))?;
-
-            let end = SessionEnd::new(RevocationReason::SessionLimit, "system");
-            for (sid, _) in &rows {
-                // An evicted session ends like any other and owes the same,
-                // and so do the sessions it authenticated.
-                for ended in session::end_with_dependents(&mut tx, *sid).await? {
-                    audit.work.extend(end.owed_by(&ended));
-                    evicted.push(ended.id);
-                }
-            }
-        }
-
-        // Insert the new session within the same transaction.
-        session::write(&mut tx, session).await?;
-
-        Self::audit_in_tx(&mut tx, &format!("profile:{}", session.owner), audit).await?;
-
-        tx.commit()
-            .await
-            .map_err(|e| SidError::Storage(format!("commit tx: {e}")))?;
-
-        Ok(evicted)
-    }
-
-    async fn get_session(&self, id: SessionId) -> SidResult<Option<Session>> {
-        let row =
-            sqlx::query_as::<_, crate::pg_row::SessionRow>("SELECT * FROM sessions WHERE id = $1")
-                .bind(id)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|e| SidError::Storage(format!("Query failed: {}", e)))?;
-        row.map(|r| r.into_domain()).transpose()
-    }
-
-    async fn get_session_by_browser_secret(
-        &self,
-        hash: &sid_core::models::BrowserSecretHash,
-    ) -> SidResult<Option<Session>> {
-        let row = sqlx::query_as::<_, crate::pg_row::SessionRow>(
-            "SELECT * FROM sessions WHERE browser_secret_hash = $1",
-        )
-        .bind(hash.as_bytes().as_slice())
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| SidError::Storage(format!("session by browser secret: {e}")))?;
-        row.map(|r| r.into_domain()).transpose()
-    }
-
-    async fn touch_session(
-        &self,
-        id: SessionId,
-        at: chrono::DateTime<chrono::Utc>,
-    ) -> SidResult<()> {
-        // GREATEST ignores a NULL argument, so a first touch sets the value.
-        sqlx::query(
-            "UPDATE sessions SET last_activity_at = GREATEST(last_activity_at, $2) WHERE id = $1",
-        )
-        .bind(id)
-        .bind(at)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| SidError::Storage(format!("touch session: {e}")))?;
-        Ok(())
-    }
-
-    async fn delete_session(
-        &self,
-        id: SessionId,
-        end: &SessionEnd,
-        mut audit: MutationContext,
-    ) -> SidResult<Vec<SessionId>> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| SidError::Storage(e.to_string()))?;
-        // What each ended session owes commits in this transaction.
-        let ended = session::end_with_dependents(&mut tx, id).await?;
-        for session in &ended {
-            audit.work.extend(end.owed_by(session));
-        }
-        Self::audit_in_tx(&mut tx, &format!("session:{id}"), audit).await?;
-        tx.commit()
-            .await
-            .map_err(|e| SidError::Storage(e.to_string()))?;
-        Ok(ended.into_iter().map(|session| session.id).collect())
-    }
-
     async fn delete_sessions_by_profile(
         &self,
         profile_id: ProfileId,
@@ -3327,217 +3541,6 @@ impl StorageBackend for PostgresBackend {
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
         Ok(())
-    }
-
-    async fn get_refresh_token_by_hash(
-        &self,
-        token_hash: &[u8],
-    ) -> SidResult<Option<RefreshToken>> {
-        let row = sqlx::query_as::<_, crate::pg_row::RefreshTokenRow>(
-            "SELECT * FROM refresh_tokens WHERE token_hash = $1",
-        )
-        .bind(token_hash)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| SidError::Storage(format!("Query failed: {}", e)))?;
-        Ok(row.map(|r| r.into_domain()))
-    }
-
-    async fn revoke_refresh_tokens_by_session(
-        &self,
-        session_id: SessionId,
-        audit: MutationContext,
-    ) -> SidResult<u64> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| SidError::Storage(e.to_string()))?;
-        // Tokens in a grace window are revoked too: the window ends with them.
-        let result = sqlx::query(
-            "UPDATE refresh_tokens SET revoked = true, grace_expires_at = NULL
-             WHERE session_id = $1 AND (revoked = false OR grace_expires_at IS NOT NULL)",
-        )
-        .bind(session_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| SidError::Storage(format!("Update failed: {}", e)))?;
-        Self::audit_in_tx(&mut tx, &format!("session:{session_id}"), audit).await?;
-        tx.commit()
-            .await
-            .map_err(|e| SidError::Storage(e.to_string()))?;
-        Ok(result.rows_affected())
-    }
-
-    async fn revoke_refresh_tokens_by_family(
-        &self,
-        family_id: Uuid,
-        audit: MutationContext,
-    ) -> SidResult<u64> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| SidError::Storage(e.to_string()))?;
-        let result = sqlx::query(
-            "UPDATE refresh_tokens SET revoked = true, grace_expires_at = NULL
-             WHERE family_id = $1 AND (revoked = false OR grace_expires_at IS NOT NULL)",
-        )
-        .bind(family_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| SidError::Storage(format!("Update failed: {}", e)))?;
-        Self::audit_in_tx(&mut tx, &format!("token_family:{}", family_id), audit).await?;
-        tx.commit()
-            .await
-            .map_err(|e| SidError::Storage(e.to_string()))?;
-        Ok(result.rows_affected())
-    }
-
-    async fn rotate_refresh_token(
-        &self,
-        old_id: Uuid,
-        new: &RefreshToken,
-        grace_expires_at: chrono::DateTime<chrono::Utc>,
-        audit: MutationContext,
-    ) -> SidResult<bool> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| SidError::Storage(e.to_string()))?;
-        let rotated = sqlx::query(
-            "UPDATE refresh_tokens SET revoked = true, replaced_by = $2,
-                grace_expires_at = COALESCE(grace_expires_at, $3)
-             WHERE id = $1 AND expires_at > NOW()
-               AND (revoked = false OR grace_expires_at > NOW())",
-        )
-        .bind(old_id)
-        .bind(new.id)
-        .bind(grace_expires_at)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| SidError::Storage(format!("rotate refresh token: {e}")))?
-        .rows_affected()
-            == 1;
-        if !rotated {
-            return Ok(false);
-        }
-        refresh_token::insert(&mut tx, new).await?;
-        Self::audit_in_tx(&mut tx, &format!("token_family:{}", new.family_id), audit).await?;
-        tx.commit()
-            .await
-            .map_err(|e| SidError::Storage(e.to_string()))?;
-        Ok(true)
-    }
-
-    // === AUTHORIZATION CODE OPERATIONS ===
-
-    async fn create_auth_code(
-        &self,
-        code: &AuthorizationCode,
-        audit: MutationContext,
-    ) -> SidResult<()> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| SidError::Storage(e.to_string()))?;
-        sqlx::query(
-            "INSERT INTO authorization_codes (code_hash, profile_id, client_id, redirect_uri,
-                scopes, code_challenge, nonce, expires_at, created_at, used, resource_id,
-                authenticated_at, amr, assurance_level, elevation_level, elevation_until,
-                authorizing_session_id)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)",
-        )
-        .bind(&code.code_hash)
-        .bind(code.owner)
-        .bind(&code.client_id)
-        .bind(&code.redirect_uri)
-        .bind(code.scopes.join(" "))
-        .bind(&code.code_challenge)
-        .bind(&code.nonce)
-        .bind(code.expires_at)
-        .bind(code.created_at)
-        .bind(code.used)
-        .bind(code.resource)
-        .bind(code.authentication.authenticated_at)
-        .bind(code.authentication.amr.join(" "))
-        .bind(code.authentication.assurance_level.as_str())
-        .bind(code.authentication.elevation.map(|e| e.level.as_str()))
-        .bind(code.authentication.elevation.map(|e| e.until))
-        .bind(code.authentication.session)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| insert_error("authorization code", e))?;
-        Self::audit_in_tx(&mut tx, &format!("auth_code:{}", code.client_id), audit).await?;
-        tx.commit()
-            .await
-            .map_err(|e| SidError::Storage(e.to_string()))?;
-        Ok(())
-    }
-
-    async fn get_auth_code_by_hash(
-        &self,
-        code_hash: &[u8],
-    ) -> SidResult<Option<AuthorizationCode>> {
-        let row = sqlx::query_as::<_, crate::pg_row::AuthCodeRow>(
-            "SELECT * FROM authorization_codes WHERE code_hash = $1",
-        )
-        .bind(code_hash)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| SidError::Storage(format!("Query failed: {}", e)))?;
-        row.map(|r| r.into_domain()).transpose()
-    }
-
-    async fn redeem_auth_code(
-        &self,
-        code_hash: &[u8],
-        session: &Session,
-        refresh_token: &RefreshToken,
-        audit: MutationContext,
-    ) -> SidResult<AuthCodeRedemption> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| SidError::Storage(e.to_string()))?;
-
-        // The conditional update decides a race: the row lock makes every other
-        // redemption wait, then see `used = true` and update nothing.
-        let redeemed = sqlx::query(
-            "UPDATE authorization_codes SET used = true, session_id = $2
-             WHERE code_hash = $1 AND used = false",
-        )
-        .bind(code_hash)
-        .bind(session.id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| SidError::Storage(format!("redeem auth code: {e}")))?
-        .rows_affected()
-            == 1;
-        if !redeemed {
-            let session_id: Option<Option<SessionId>> = sqlx::query_scalar(
-                "SELECT session_id FROM authorization_codes WHERE code_hash = $1",
-            )
-            .bind(code_hash)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|e| SidError::Storage(format!("read auth code: {e}")))?;
-            return Ok(AuthCodeRedemption::AlreadyRedeemed {
-                session_id: session_id.flatten(),
-            });
-        }
-
-        session::write(&mut tx, session).await?;
-        refresh_token::insert(&mut tx, refresh_token).await?;
-
-        Self::audit_in_tx(&mut tx, &format!("profile:{}", session.owner), audit).await?;
-        tx.commit()
-            .await
-            .map_err(|e| SidError::Storage(e.to_string()))?;
-        Ok(AuthCodeRedemption::Redeemed)
     }
 
     // === INITIAL ACCESS TOKEN OPERATIONS (DCR) ===
