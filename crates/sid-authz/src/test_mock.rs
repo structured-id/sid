@@ -94,6 +94,81 @@ impl sid_plugin::ClientResourceRegistry for MockStorage {
 }
 
 #[async_trait::async_trait]
+impl sid_plugin::GrantStore for MockStorage {
+    type Owner = sid_core::models::ProfileId;
+
+    async fn create_session_atomic(
+        &self,
+        _: &Session,
+        _: u32,
+        _: MutationContext,
+    ) -> Result<Vec<SessionId>> {
+        unimplemented!()
+    }
+    async fn get_session(&self, _: SessionId) -> Result<Option<Session>> {
+        unimplemented!()
+    }
+    async fn get_session_by_browser_secret(
+        &self,
+        _: &sid_core::models::BrowserSecretHash,
+    ) -> Result<Option<Session>> {
+        unimplemented!()
+    }
+    async fn touch_session(&self, _: SessionId, _: chrono::DateTime<chrono::Utc>) -> Result<()> {
+        unimplemented!()
+    }
+    async fn delete_session(
+        &self,
+        _: SessionId,
+        _: &sid_core::models::SessionEnd,
+        _audit: MutationContext,
+    ) -> Result<Vec<SessionId>> {
+        unimplemented!()
+    }
+    async fn get_refresh_token_by_hash(&self, _: &[u8]) -> Result<Option<RefreshToken>> {
+        unimplemented!()
+    }
+    async fn revoke_refresh_tokens_by_session(
+        &self,
+        _: SessionId,
+        _audit: MutationContext,
+    ) -> Result<u64> {
+        unimplemented!()
+    }
+    async fn revoke_refresh_tokens_by_family(
+        &self,
+        _: uuid::Uuid,
+        _audit: MutationContext,
+    ) -> Result<u64> {
+        unimplemented!()
+    }
+    async fn rotate_refresh_token(
+        &self,
+        _: uuid::Uuid,
+        _: &RefreshToken,
+        _: chrono::DateTime<chrono::Utc>,
+        _audit: MutationContext,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
+    async fn create_auth_code(&self, _: &AuthorizationCode, _audit: MutationContext) -> Result<()> {
+        unimplemented!()
+    }
+    async fn get_auth_code_by_hash(&self, _: &[u8]) -> Result<Option<AuthorizationCode>> {
+        unimplemented!()
+    }
+    async fn redeem_auth_code(
+        &self,
+        _: &[u8],
+        _: &Session,
+        _: &RefreshToken,
+        _audit: MutationContext,
+    ) -> Result<sid_core::models::AuthCodeRedemption> {
+        unimplemented!()
+    }
+}
+
+#[async_trait::async_trait]
 impl sid_plugin::StorageBackend for MockStorage {
     fn name(&self) -> &'static str {
         "mock"
@@ -430,34 +505,6 @@ impl sid_plugin::StorageBackend for MockStorage {
     ) -> Result<bool> {
         unimplemented!()
     }
-    async fn create_session_atomic(
-        &self,
-        _: &Session,
-        _: u32,
-        _: MutationContext,
-    ) -> Result<Vec<SessionId>> {
-        unimplemented!()
-    }
-    async fn get_session(&self, _: SessionId) -> Result<Option<Session>> {
-        unimplemented!()
-    }
-    async fn get_session_by_browser_secret(
-        &self,
-        _: &sid_core::models::BrowserSecretHash,
-    ) -> Result<Option<Session>> {
-        unimplemented!()
-    }
-    async fn touch_session(&self, _: SessionId, _: chrono::DateTime<chrono::Utc>) -> Result<()> {
-        unimplemented!()
-    }
-    async fn delete_session(
-        &self,
-        _: SessionId,
-        _: &sid_core::models::SessionEnd,
-        _audit: MutationContext,
-    ) -> Result<Vec<SessionId>> {
-        unimplemented!()
-    }
     async fn delete_sessions_by_profile(
         &self,
         _: ProfileId,
@@ -584,49 +631,6 @@ impl sid_plugin::StorageBackend for MockStorage {
 
     // === REFRESH TOKEN ===
     async fn create_refresh_token(&self, _: &RefreshToken, _audit: MutationContext) -> Result<()> {
-        unimplemented!()
-    }
-    async fn get_refresh_token_by_hash(&self, _: &[u8]) -> Result<Option<RefreshToken>> {
-        unimplemented!()
-    }
-    async fn revoke_refresh_tokens_by_session(
-        &self,
-        _: SessionId,
-        _audit: MutationContext,
-    ) -> Result<u64> {
-        unimplemented!()
-    }
-    async fn revoke_refresh_tokens_by_family(
-        &self,
-        _: uuid::Uuid,
-        _audit: MutationContext,
-    ) -> Result<u64> {
-        unimplemented!()
-    }
-    async fn rotate_refresh_token(
-        &self,
-        _: uuid::Uuid,
-        _: &RefreshToken,
-        _: chrono::DateTime<chrono::Utc>,
-        _audit: MutationContext,
-    ) -> Result<bool> {
-        unimplemented!()
-    }
-
-    // === AUTHORIZATION CODE ===
-    async fn create_auth_code(&self, _: &AuthorizationCode, _audit: MutationContext) -> Result<()> {
-        unimplemented!()
-    }
-    async fn get_auth_code_by_hash(&self, _: &[u8]) -> Result<Option<AuthorizationCode>> {
-        unimplemented!()
-    }
-    async fn redeem_auth_code(
-        &self,
-        _: &[u8],
-        _: &Session,
-        _: &RefreshToken,
-        _audit: MutationContext,
-    ) -> Result<sid_core::models::AuthCodeRedemption> {
         unimplemented!()
     }
 

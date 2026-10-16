@@ -53,8 +53,8 @@ pub use audit::SqliteAuditLog;
 use async_trait::async_trait;
 use sid_core::models::MutationContext;
 use sid_core::{Error as SidError, Result as SidResult};
-use sid_plugin::ClientResourceRegistry;
 use sid_plugin::storage::StorageBackend;
+use sid_plugin::{ClientResourceRegistry, GrantStore};
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use std::str::FromStr;
@@ -361,6 +361,117 @@ impl ClientResourceRegistry for SqliteBackend {
         resource: sid_core::models::ResourceId,
     ) -> SidResult<Option<sid_core::models::ResourceAccess>> {
         self.resource_access_impl(client_id, resource).await
+    }
+}
+
+// ─── GrantStore impl — see session.rs and auth.rs ───
+
+#[async_trait]
+impl GrantStore for SqliteBackend {
+    type Owner = sid_core::models::ProfileId;
+
+    async fn create_session_atomic(
+        &self,
+        session: &sid_core::models::Session,
+        max_sessions: u32,
+        ctx: MutationContext,
+    ) -> SidResult<Vec<sid_core::models::SessionId>> {
+        self.create_session_atomic_impl(session, max_sessions, ctx)
+            .await
+    }
+
+    async fn get_session(
+        &self,
+        id: sid_core::models::SessionId,
+    ) -> SidResult<Option<sid_core::models::Session>> {
+        self.get_session_impl(id).await
+    }
+
+    async fn get_session_by_browser_secret(
+        &self,
+        hash: &sid_core::models::BrowserSecretHash,
+    ) -> SidResult<Option<sid_core::models::Session>> {
+        self.get_session_by_browser_secret_impl(hash).await
+    }
+
+    async fn touch_session(
+        &self,
+        id: sid_core::models::SessionId,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> SidResult<()> {
+        self.touch_session_impl(id, at).await
+    }
+
+    async fn delete_session(
+        &self,
+        id: sid_core::models::SessionId,
+        end: &sid_core::models::SessionEnd,
+        ctx: MutationContext,
+    ) -> SidResult<Vec<sid_core::models::SessionId>> {
+        // Commits owed work in its own transaction: no refusal needed.
+        self.delete_session_impl(id, end, ctx).await
+    }
+
+    async fn get_refresh_token_by_hash(
+        &self,
+        token_hash: &[u8],
+    ) -> SidResult<Option<sid_core::models::RefreshToken>> {
+        self.get_refresh_token_by_hash_impl(token_hash).await
+    }
+
+    async fn revoke_refresh_tokens_by_session(
+        &self,
+        session_id: sid_core::models::SessionId,
+        audit: MutationContext,
+    ) -> SidResult<u64> {
+        self.revoke_refresh_tokens_by_session_impl(session_id, audit)
+            .await
+    }
+
+    async fn revoke_refresh_tokens_by_family(
+        &self,
+        family_id: uuid::Uuid,
+        audit: MutationContext,
+    ) -> SidResult<u64> {
+        self.revoke_refresh_tokens_by_family_impl(family_id, audit)
+            .await
+    }
+
+    async fn rotate_refresh_token(
+        &self,
+        old_id: uuid::Uuid,
+        new: &sid_core::models::RefreshToken,
+        grace_expires_at: chrono::DateTime<chrono::Utc>,
+        audit: MutationContext,
+    ) -> SidResult<bool> {
+        self.rotate_refresh_token_impl(old_id, new, grace_expires_at, audit)
+            .await
+    }
+
+    async fn create_auth_code(
+        &self,
+        code: &sid_core::models::AuthorizationCode,
+        audit: MutationContext,
+    ) -> SidResult<()> {
+        self.create_auth_code_impl(code, audit).await
+    }
+
+    async fn get_auth_code_by_hash(
+        &self,
+        code_hash: &[u8],
+    ) -> SidResult<Option<sid_core::models::AuthorizationCode>> {
+        self.get_auth_code_by_hash_impl(code_hash).await
+    }
+
+    async fn redeem_auth_code(
+        &self,
+        code_hash: &[u8],
+        session: &sid_core::models::Session,
+        refresh_token: &sid_core::models::RefreshToken,
+        audit: MutationContext,
+    ) -> SidResult<sid_core::models::AuthCodeRedemption> {
+        self.redeem_auth_code_impl(code_hash, session, refresh_token, audit)
+            .await
     }
 }
 
@@ -929,48 +1040,6 @@ impl StorageBackend for SqliteBackend {
             .await
     }
 
-    async fn create_session_atomic(
-        &self,
-        session: &sid_core::models::Session,
-        max_sessions: u32,
-        ctx: MutationContext,
-    ) -> SidResult<Vec<sid_core::models::SessionId>> {
-        self.create_session_atomic_impl(session, max_sessions, ctx)
-            .await
-    }
-
-    async fn get_session(
-        &self,
-        id: sid_core::models::SessionId,
-    ) -> SidResult<Option<sid_core::models::Session>> {
-        self.get_session_impl(id).await
-    }
-
-    async fn get_session_by_browser_secret(
-        &self,
-        hash: &sid_core::models::BrowserSecretHash,
-    ) -> SidResult<Option<sid_core::models::Session>> {
-        self.get_session_by_browser_secret_impl(hash).await
-    }
-
-    async fn touch_session(
-        &self,
-        id: sid_core::models::SessionId,
-        at: chrono::DateTime<chrono::Utc>,
-    ) -> SidResult<()> {
-        self.touch_session_impl(id, at).await
-    }
-
-    async fn delete_session(
-        &self,
-        id: sid_core::models::SessionId,
-        end: &sid_core::models::SessionEnd,
-        ctx: MutationContext,
-    ) -> SidResult<Vec<sid_core::models::SessionId>> {
-        // Commits owed work in its own transaction: no refusal needed.
-        self.delete_session_impl(id, end, ctx).await
-    }
-
     // Commits owed work in its own transaction: no refusal needed.
     async fn delete_sessions_by_profile(
         &self,
@@ -1307,69 +1376,6 @@ impl StorageBackend for SqliteBackend {
         audit: MutationContext,
     ) -> SidResult<()> {
         self.create_refresh_token_impl(token, audit).await
-    }
-
-    async fn get_refresh_token_by_hash(
-        &self,
-        token_hash: &[u8],
-    ) -> SidResult<Option<sid_core::models::RefreshToken>> {
-        self.get_refresh_token_by_hash_impl(token_hash).await
-    }
-
-    async fn revoke_refresh_tokens_by_session(
-        &self,
-        session_id: sid_core::models::SessionId,
-        audit: MutationContext,
-    ) -> SidResult<u64> {
-        self.revoke_refresh_tokens_by_session_impl(session_id, audit)
-            .await
-    }
-
-    async fn revoke_refresh_tokens_by_family(
-        &self,
-        family_id: uuid::Uuid,
-        audit: MutationContext,
-    ) -> SidResult<u64> {
-        self.revoke_refresh_tokens_by_family_impl(family_id, audit)
-            .await
-    }
-
-    async fn rotate_refresh_token(
-        &self,
-        old_id: uuid::Uuid,
-        new: &sid_core::models::RefreshToken,
-        grace_expires_at: chrono::DateTime<chrono::Utc>,
-        audit: MutationContext,
-    ) -> SidResult<bool> {
-        self.rotate_refresh_token_impl(old_id, new, grace_expires_at, audit)
-            .await
-    }
-
-    // Authorization code operations — see auth.rs
-    async fn create_auth_code(
-        &self,
-        code: &sid_core::models::AuthorizationCode,
-        audit: MutationContext,
-    ) -> SidResult<()> {
-        self.create_auth_code_impl(code, audit).await
-    }
-
-    async fn get_auth_code_by_hash(
-        &self,
-        code_hash: &[u8],
-    ) -> SidResult<Option<sid_core::models::AuthorizationCode>> {
-        self.get_auth_code_by_hash_impl(code_hash).await
-    }
-
-    async fn redeem_auth_code(
-        &self,
-        code_hash: &[u8],
-        session: &sid_core::models::Session,
-        refresh_token: &sid_core::models::RefreshToken,
-        audit: MutationContext,
-    ) -> SidResult<sid_core::models::AuthCodeRedemption> {
-        self.redeem_auth_code_impl(code_hash, session, refresh_token, audit)
-            .await
     }
 
     // Initial access token operations — see auth.rs

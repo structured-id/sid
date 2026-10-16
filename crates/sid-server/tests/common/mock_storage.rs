@@ -4,7 +4,7 @@
 use async_trait::async_trait;
 use sid_core::Result as SidResult;
 use sid_core::models::*;
-use sid_plugin::{ClientResourceRegistry, StorageBackend};
+use sid_plugin::{ClientResourceRegistry, GrantStore, StorageBackend};
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use uuid::Uuid;
@@ -965,6 +965,218 @@ impl ClientResourceRegistry for MockStorage {
             .iter()
             .find(|a| a.client_id == client_id && a.resource_id == resource)
             .cloned())
+    }
+}
+
+#[async_trait]
+impl GrantStore for MockStorage {
+    type Owner = ProfileId;
+
+    async fn create_session_atomic(
+        &self,
+        session: &Session,
+        max_sessions: u32,
+        ctx: MutationContext,
+    ) -> SidResult<Vec<SessionId>> {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.sessions.contains_key(&session.id) {
+            return Err(sid_core::Error::Conflict("session already exists".into()));
+        }
+        let mut evicted = Vec::new();
+        if max_sessions > 0 {
+            let now = chrono::Utc::now();
+            let mut active: Vec<Session> = inner
+                .sessions
+                .values()
+                .filter(|s| s.owner == session.owner && s.expires_at > now)
+                .cloned()
+                .collect();
+            active.sort_by_key(|s| s.created_at);
+            // Below the limit (the new session included) nothing is evicted.
+            let excess = (active.len() + 1).saturating_sub(max_sessions as usize);
+            let end = SessionEnd::new(RevocationReason::SessionLimit, "system");
+            for oldest in active.into_iter().take(excess) {
+                for ended in inner.end_with_dependents(oldest.id) {
+                    for owed in end.owed_by(&ended) {
+                        inner.enqueue(&owed, u64::MAX)?;
+                    }
+                    evicted.push(ended.id);
+                }
+            }
+        }
+        inner.owe(&ctx)?;
+        inner.sessions.insert(session.id, session.clone());
+        Ok(evicted)
+    }
+
+    async fn get_session(&self, id: SessionId) -> SidResult<Option<Session>> {
+        let inner = self.inner.lock().unwrap();
+        if inner.session_reads_fail {
+            return Err(sid_core::Error::Storage("sessions unreadable".into()));
+        }
+        Ok(inner.sessions.get(&id).cloned())
+    }
+
+    async fn get_session_by_browser_secret(
+        &self,
+        hash: &sid_core::models::BrowserSecretHash,
+    ) -> SidResult<Option<Session>> {
+        let inner = self.inner.lock().unwrap();
+        Ok(inner
+            .sessions
+            .values()
+            .find(|s| s.browser_secret_hash.as_ref() == Some(hash))
+            .cloned())
+    }
+
+    async fn touch_session(
+        &self,
+        id: SessionId,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> SidResult<()> {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(session) = inner.sessions.get_mut(&id) {
+            session.last_activity_at = Some(session.last_activity_at.map_or(at, |t| t.max(at)));
+        }
+        Ok(())
+    }
+
+    async fn delete_session(
+        &self,
+        id: SessionId,
+        end: &SessionEnd,
+        mut ctx: MutationContext,
+    ) -> SidResult<Vec<SessionId>> {
+        let mut inner = self.inner.lock().unwrap();
+        let ended = inner.end_with_dependents(id);
+        for session in &ended {
+            ctx.work.extend(end.owed_by(session));
+        }
+        inner.owe(&ctx)?;
+        Ok(ended.into_iter().map(|session| session.id).collect())
+    }
+
+    async fn get_refresh_token_by_hash(&self, hash: &[u8]) -> SidResult<Option<RefreshToken>> {
+        let inner = self.inner.lock().unwrap();
+        Ok(inner.refresh_tokens_by_hash.get(hash).cloned())
+    }
+
+    async fn revoke_refresh_tokens_by_session(
+        &self,
+        session_id: SessionId,
+        _audit: MutationContext,
+    ) -> SidResult<u64> {
+        let mut inner = self.inner.lock().unwrap();
+        let mut count = 0u64;
+        for token in inner.refresh_tokens_by_hash.values_mut() {
+            if token.session_id == session_id
+                && (!token.revoked || token.grace_expires_at.is_some())
+            {
+                token.revoked = true;
+                token.grace_expires_at = None;
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    async fn revoke_refresh_tokens_by_family(
+        &self,
+        family_id: Uuid,
+        _audit: MutationContext,
+    ) -> SidResult<u64> {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.refresh_revocation_fails {
+            return Err(sid_core::Error::Storage("storage unavailable".into()));
+        }
+        let mut count = 0u64;
+        for token in inner.refresh_tokens_by_hash.values_mut() {
+            if token.family_id == family_id && (!token.revoked || token.grace_expires_at.is_some())
+            {
+                token.revoked = true;
+                token.grace_expires_at = None;
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    async fn rotate_refresh_token(
+        &self,
+        old_id: Uuid,
+        new: &RefreshToken,
+        grace_expires_at: chrono::DateTime<chrono::Utc>,
+        _audit: MutationContext,
+    ) -> SidResult<bool> {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.refresh_rotation_fails {
+            return Err(sid_core::Error::Storage("storage unavailable".into()));
+        }
+        let Some(old) = inner
+            .refresh_tokens_by_hash
+            .values_mut()
+            .find(|t| t.id == old_id)
+        else {
+            return Ok(false);
+        };
+        if old.is_expired() || (old.revoked && !old.is_within_grace_window()) {
+            return Ok(false);
+        }
+        old.revoked = true;
+        old.replaced_by = Some(new.id);
+        old.grace_expires_at.get_or_insert(grace_expires_at);
+        inner
+            .refresh_tokens_by_hash
+            .insert(new.token_hash.clone(), new.clone());
+        Ok(true)
+    }
+
+    async fn create_auth_code(
+        &self,
+        code: &AuthorizationCode,
+        _audit: MutationContext,
+    ) -> SidResult<()> {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.auth_codes_by_hash.contains_key(&code.code_hash) {
+            return Err(sid_core::Error::Conflict(
+                "authorization code exists".into(),
+            ));
+        }
+        inner
+            .auth_codes_by_hash
+            .insert(code.code_hash.clone(), code.clone());
+        Ok(())
+    }
+
+    async fn get_auth_code_by_hash(&self, hash: &[u8]) -> SidResult<Option<AuthorizationCode>> {
+        let inner = self.inner.lock().unwrap();
+        Ok(inner.auth_codes_by_hash.get(hash).cloned())
+    }
+
+    async fn redeem_auth_code(
+        &self,
+        hash: &[u8],
+        session: &Session,
+        refresh_token: &RefreshToken,
+        _audit: MutationContext,
+    ) -> SidResult<AuthCodeRedemption> {
+        // One lock covers the check and the writes, like the database transaction.
+        let mut inner = self.inner.lock().unwrap();
+        let Some(code) = inner.auth_codes_by_hash.get_mut(hash) else {
+            return Ok(AuthCodeRedemption::AlreadyRedeemed { session_id: None });
+        };
+        if code.used {
+            return Ok(AuthCodeRedemption::AlreadyRedeemed {
+                session_id: code.session_id,
+            });
+        }
+        code.used = true;
+        code.session_id = Some(session.id);
+        inner.sessions.insert(session.id, session.clone());
+        inner
+            .refresh_tokens_by_hash
+            .insert(refresh_token.token_hash.clone(), refresh_token.clone());
+        Ok(AuthCodeRedemption::Redeemed)
     }
 }
 
@@ -2067,90 +2279,6 @@ impl StorageBackend for MockStorage {
         Ok(true)
     }
 
-    async fn create_session_atomic(
-        &self,
-        session: &Session,
-        max_sessions: u32,
-        ctx: MutationContext,
-    ) -> SidResult<Vec<SessionId>> {
-        let mut inner = self.inner.lock().unwrap();
-        if inner.sessions.contains_key(&session.id) {
-            return Err(sid_core::Error::Conflict("session already exists".into()));
-        }
-        let mut evicted = Vec::new();
-        if max_sessions > 0 {
-            let now = chrono::Utc::now();
-            let mut active: Vec<Session> = inner
-                .sessions
-                .values()
-                .filter(|s| s.owner == session.owner && s.expires_at > now)
-                .cloned()
-                .collect();
-            active.sort_by_key(|s| s.created_at);
-            // Below the limit (the new session included) nothing is evicted.
-            let excess = (active.len() + 1).saturating_sub(max_sessions as usize);
-            let end = SessionEnd::new(RevocationReason::SessionLimit, "system");
-            for oldest in active.into_iter().take(excess) {
-                for ended in inner.end_with_dependents(oldest.id) {
-                    for owed in end.owed_by(&ended) {
-                        inner.enqueue(&owed, u64::MAX)?;
-                    }
-                    evicted.push(ended.id);
-                }
-            }
-        }
-        inner.owe(&ctx)?;
-        inner.sessions.insert(session.id, session.clone());
-        Ok(evicted)
-    }
-
-    async fn get_session(&self, id: SessionId) -> SidResult<Option<Session>> {
-        let inner = self.inner.lock().unwrap();
-        if inner.session_reads_fail {
-            return Err(sid_core::Error::Storage("sessions unreadable".into()));
-        }
-        Ok(inner.sessions.get(&id).cloned())
-    }
-
-    async fn get_session_by_browser_secret(
-        &self,
-        hash: &sid_core::models::BrowserSecretHash,
-    ) -> SidResult<Option<Session>> {
-        let inner = self.inner.lock().unwrap();
-        Ok(inner
-            .sessions
-            .values()
-            .find(|s| s.browser_secret_hash.as_ref() == Some(hash))
-            .cloned())
-    }
-
-    async fn touch_session(
-        &self,
-        id: SessionId,
-        at: chrono::DateTime<chrono::Utc>,
-    ) -> SidResult<()> {
-        let mut inner = self.inner.lock().unwrap();
-        if let Some(session) = inner.sessions.get_mut(&id) {
-            session.last_activity_at = Some(session.last_activity_at.map_or(at, |t| t.max(at)));
-        }
-        Ok(())
-    }
-
-    async fn delete_session(
-        &self,
-        id: SessionId,
-        end: &SessionEnd,
-        mut ctx: MutationContext,
-    ) -> SidResult<Vec<SessionId>> {
-        let mut inner = self.inner.lock().unwrap();
-        let ended = inner.end_with_dependents(id);
-        for session in &ended {
-            ctx.work.extend(end.owed_by(session));
-        }
-        inner.owe(&ctx)?;
-        Ok(ended.into_iter().map(|session| session.id).collect())
-    }
-
     async fn delete_sessions_by_profile(
         &self,
         profile_id: ProfileId,
@@ -2759,129 +2887,6 @@ impl StorageBackend for MockStorage {
             .refresh_tokens_by_hash
             .insert(token.token_hash.clone(), token.clone());
         Ok(())
-    }
-
-    async fn get_refresh_token_by_hash(&self, hash: &[u8]) -> SidResult<Option<RefreshToken>> {
-        let inner = self.inner.lock().unwrap();
-        Ok(inner.refresh_tokens_by_hash.get(hash).cloned())
-    }
-
-    async fn revoke_refresh_tokens_by_session(
-        &self,
-        session_id: SessionId,
-        _audit: MutationContext,
-    ) -> SidResult<u64> {
-        let mut inner = self.inner.lock().unwrap();
-        let mut count = 0u64;
-        for token in inner.refresh_tokens_by_hash.values_mut() {
-            if token.session_id == session_id
-                && (!token.revoked || token.grace_expires_at.is_some())
-            {
-                token.revoked = true;
-                token.grace_expires_at = None;
-                count += 1;
-            }
-        }
-        Ok(count)
-    }
-
-    async fn revoke_refresh_tokens_by_family(
-        &self,
-        family_id: Uuid,
-        _audit: MutationContext,
-    ) -> SidResult<u64> {
-        let mut inner = self.inner.lock().unwrap();
-        if inner.refresh_revocation_fails {
-            return Err(sid_core::Error::Storage("storage unavailable".into()));
-        }
-        let mut count = 0u64;
-        for token in inner.refresh_tokens_by_hash.values_mut() {
-            if token.family_id == family_id && (!token.revoked || token.grace_expires_at.is_some())
-            {
-                token.revoked = true;
-                token.grace_expires_at = None;
-                count += 1;
-            }
-        }
-        Ok(count)
-    }
-
-    async fn rotate_refresh_token(
-        &self,
-        old_id: Uuid,
-        new: &RefreshToken,
-        grace_expires_at: chrono::DateTime<chrono::Utc>,
-        _audit: MutationContext,
-    ) -> SidResult<bool> {
-        let mut inner = self.inner.lock().unwrap();
-        if inner.refresh_rotation_fails {
-            return Err(sid_core::Error::Storage("storage unavailable".into()));
-        }
-        let Some(old) = inner
-            .refresh_tokens_by_hash
-            .values_mut()
-            .find(|t| t.id == old_id)
-        else {
-            return Ok(false);
-        };
-        if old.is_expired() || (old.revoked && !old.is_within_grace_window()) {
-            return Ok(false);
-        }
-        old.revoked = true;
-        old.replaced_by = Some(new.id);
-        old.grace_expires_at.get_or_insert(grace_expires_at);
-        inner
-            .refresh_tokens_by_hash
-            .insert(new.token_hash.clone(), new.clone());
-        Ok(true)
-    }
-
-    async fn create_auth_code(
-        &self,
-        code: &AuthorizationCode,
-        _audit: MutationContext,
-    ) -> SidResult<()> {
-        let mut inner = self.inner.lock().unwrap();
-        if inner.auth_codes_by_hash.contains_key(&code.code_hash) {
-            return Err(sid_core::Error::Conflict(
-                "authorization code exists".into(),
-            ));
-        }
-        inner
-            .auth_codes_by_hash
-            .insert(code.code_hash.clone(), code.clone());
-        Ok(())
-    }
-
-    async fn get_auth_code_by_hash(&self, hash: &[u8]) -> SidResult<Option<AuthorizationCode>> {
-        let inner = self.inner.lock().unwrap();
-        Ok(inner.auth_codes_by_hash.get(hash).cloned())
-    }
-
-    async fn redeem_auth_code(
-        &self,
-        hash: &[u8],
-        session: &Session,
-        refresh_token: &RefreshToken,
-        _audit: MutationContext,
-    ) -> SidResult<AuthCodeRedemption> {
-        // One lock covers the check and the writes, like the database transaction.
-        let mut inner = self.inner.lock().unwrap();
-        let Some(code) = inner.auth_codes_by_hash.get_mut(hash) else {
-            return Ok(AuthCodeRedemption::AlreadyRedeemed { session_id: None });
-        };
-        if code.used {
-            return Ok(AuthCodeRedemption::AlreadyRedeemed {
-                session_id: code.session_id,
-            });
-        }
-        code.used = true;
-        code.session_id = Some(session.id);
-        inner.sessions.insert(session.id, session.clone());
-        inner
-            .refresh_tokens_by_hash
-            .insert(refresh_token.token_hash.clone(), refresh_token.clone());
-        Ok(AuthCodeRedemption::Redeemed)
     }
 
     // === INITIAL ACCESS TOKEN OPERATIONS (DCR) ===

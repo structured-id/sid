@@ -17,6 +17,7 @@ pub mod client_registry;
 pub mod crypto;
 pub mod event_bus;
 pub mod geoip;
+pub mod grant_store;
 pub mod history_keys;
 pub mod http;
 pub mod legacy_hash;
@@ -39,6 +40,7 @@ pub use crypto::{
 };
 pub use event_bus::{EventBus, EventBusError, EventBusResult, InProcessEventBus};
 pub use geoip::{GeoIpError, GeoIpProvider, GeoLocation};
+pub use grant_store::GrantStore;
 pub use http::client_builder;
 pub use legacy_hash::{HashError, LegacyHashVerifier};
 pub use mfa::{
