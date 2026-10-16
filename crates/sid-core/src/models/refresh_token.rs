@@ -110,6 +110,13 @@ pub struct ValidatedRefreshToken<O = ProfileId> {
 }
 
 impl<O: Copy> ValidatedRefreshToken<O> {
+    /// Account that owns this token.
+    pub fn owner(&self) -> O {
+        self.inner.owner
+    }
+}
+
+impl<O> ValidatedRefreshToken<O> {
     /// Token record ID.
     pub fn id(&self) -> Uuid {
         self.inner.id
@@ -118,11 +125,6 @@ impl<O: Copy> ValidatedRefreshToken<O> {
     /// Session this token belongs to.
     pub fn session_id(&self) -> SessionId {
         self.inner.session_id
-    }
-
-    /// Account that owns this token.
-    pub fn owner(&self) -> O {
-        self.inner.owner
     }
 
     /// OAuth2 client that requested this token.

@@ -21,6 +21,33 @@ fn make_token(expires_in: Duration, revoked: bool) -> RefreshToken {
     }
 }
 
+// A host's owner type need not be `Copy`: everything but `owner()` reads
+// without it, so the refresh grant stays usable for any owner.
+#[test]
+fn test_validated_token_reads_without_a_copy_owner() {
+    let id = Uuid::now_v7();
+    let token = RefreshToken {
+        id,
+        token_hash: vec![1],
+        session_id: SessionId::generate(),
+        owner: String::from("account"),
+        client_id: "test-client".to_string(),
+        scopes: vec!["openid".into()],
+        resource: ResourceId::generate(),
+        expires_at: Utc::now() + Duration::days(1),
+        created_at: Utc::now(),
+        revoked: false,
+        replaced_by: None,
+        family_id: id,
+        grace_expires_at: None,
+        dpop_jkt: None,
+    };
+    let validated = token.validate().expect("validate should succeed");
+    assert_eq!(validated.id(), id);
+    assert_eq!(validated.client_id(), "test-client");
+    assert_eq!(validated.family_id(), id);
+}
+
 fn make_token_with_grace(expires_in: Duration, revoked: bool, grace_secs: i64) -> RefreshToken {
     let mut token = make_token(expires_in, revoked);
     token.grace_expires_at = Some(Utc::now() + Duration::seconds(grace_secs));

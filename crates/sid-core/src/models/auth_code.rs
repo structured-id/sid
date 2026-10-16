@@ -100,7 +100,9 @@ impl<O: Copy> ExchangedCode<O> {
     pub fn owner(&self) -> O {
         self.inner.owner
     }
+}
 
+impl<O> ExchangedCode<O> {
     /// OAuth2 client that requested this code.
     pub fn client_id(&self) -> &str {
         &self.inner.client_id
