@@ -14,6 +14,8 @@ pub mod authz;
 pub mod blob_store;
 pub mod cache;
 pub mod client_registry;
+#[cfg(feature = "conformance")]
+pub mod conformance;
 pub mod crypto;
 pub mod event_bus;
 pub mod geoip;
