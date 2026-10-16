@@ -453,7 +453,7 @@ impl SignedIn {
                 },
                 &self.profile.id.to_string(),
                 None,
-                &self.profile,
+                &self.profile.roles,
                 &self.session,
                 &scopes,
                 binding.as_ref(),

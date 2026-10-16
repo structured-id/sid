@@ -376,7 +376,7 @@ async fn test_issue_tokens() {
         .issue_tokens(
             &signer,
             &profile.id.to_string(),
-            &profile,
+            &profile.roles,
             &session,
             &client,
             &target,
@@ -384,8 +384,11 @@ async fn test_issue_tokens() {
             Some("nonce123"),
             None,
             None,
-            None,
-            None,
+            Some(IdTokenSource {
+                profile: &profile,
+                email: None,
+                phone: None,
+            }),
         )
         .expect("Token issuance should succeed");
 
@@ -438,7 +441,7 @@ async fn test_issue_tokens_without_openid_scope() {
         .issue_tokens(
             &signer,
             &profile.id.to_string(),
-            &profile,
+            &profile.roles,
             &session,
             &client,
             &target,
@@ -447,11 +450,127 @@ async fn test_issue_tokens_without_openid_scope() {
             None,
             None,
             None,
-            None,
         )
         .expect("Token issuance should succeed");
 
     assert!(response.id_token.is_none()); // No openid scope → no id_token
+}
+
+/// An account that is not a local Profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OtherAccount(u64);
+
+// A host whose account is not a Profile issues access and refresh tokens
+// for it: no Profile is needed, and the refresh token is the session's
+// account's.
+#[tokio::test]
+async fn test_issue_tokens_for_an_account_that_is_not_a_profile() {
+    let server = OAuth2Server::new(create_test_jwt());
+    let (issuers, issuer) = crate::test_support::installation_issuer().await;
+    let signer = issuers.signer(&issuer).await.unwrap();
+    let session = Session::new(
+        OtherAccount(7),
+        "127.0.0.1".into(),
+        chrono::Utc::now() + chrono::Duration::hours(1),
+    );
+    let client = create_test_client();
+    let target = orders_target(&client);
+
+    let (response, refresh) = server
+        .issue_tokens(
+            &signer,
+            "account-session-reference",
+            &[],
+            &session,
+            &client,
+            &target,
+            &["orders.read".to_string()],
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("tokens for a non-Profile account");
+
+    assert!(response.id_token.is_none());
+    assert_eq!(refresh.owner, OtherAccount(7));
+    let claims = issuers
+        .verifier(&issuer)
+        .await
+        .unwrap()
+        .validate_access_token_for(&response.access_token, ORDERS)
+        .unwrap();
+    assert_eq!(claims.sub, "account-session-reference");
+    assert!(claims.pid.is_none());
+}
+
+// An owner that is not `Copy` (a host's own account reference) gets tokens
+// too, and its refresh token carries that owner.
+#[tokio::test]
+async fn test_issue_tokens_for_an_owner_that_is_not_copy() {
+    let server = OAuth2Server::new(create_test_jwt());
+    let (issuers, issuer) = crate::test_support::installation_issuer().await;
+    let signer = issuers.signer(&issuer).await.unwrap();
+    let session = Session::new(
+        "account-7".to_string(),
+        "127.0.0.1".into(),
+        chrono::Utc::now() + chrono::Duration::hours(1),
+    );
+    let client = create_test_client();
+    let target = orders_target(&client);
+
+    let (_, refresh) = server
+        .issue_tokens(
+            &signer,
+            "account-session-reference",
+            &[],
+            &session,
+            &client,
+            &target,
+            &["orders.read".to_string()],
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("tokens for a non-Copy owner");
+
+    assert_eq!(refresh.owner, "account-7");
+
+    // The refresh token it got is validated for rotation like any other.
+    let validated = server
+        .validate_refresh(refresh, &client)
+        .expect("its refresh token validates");
+    assert_eq!(validated.owner(), "account-7");
+}
+
+// `openid` asks for an ID token, which is built from the account's Profile:
+// without one the grant is refused rather than issued without it.
+#[tokio::test]
+async fn test_openid_without_an_id_token_source_is_refused() {
+    let server = OAuth2Server::new(create_test_jwt());
+    let (issuers, issuer) = crate::test_support::installation_issuer().await;
+    let signer = issuers.signer(&issuer).await.unwrap();
+    let profile = create_test_profile();
+    let session = create_test_session(&profile);
+    let client = create_test_client();
+    let target = orders_target(&client);
+
+    let result = server.issue_tokens(
+        &signer,
+        &profile.id.to_string(),
+        &profile.roles,
+        &session,
+        &client,
+        &target,
+        &["openid".to_string()],
+        None,
+        None,
+        None,
+        None,
+    );
+
+    assert!(result.is_err());
 }
 
 #[test]

@@ -41,6 +41,7 @@ pub mod dpop;
 pub mod email;
 pub mod event_relay;
 pub mod geoip;
+pub mod grant;
 pub mod instance_org;
 pub mod instance_secret;
 pub mod ip_intelligence;

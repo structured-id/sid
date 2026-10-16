@@ -452,7 +452,7 @@ impl TestIssuer {
                 },
                 &pairwise,
                 None,
-                profile,
+                &profile.roles,
                 &session,
                 &[],
                 binding.as_ref(),

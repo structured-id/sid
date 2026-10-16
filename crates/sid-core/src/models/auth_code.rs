@@ -95,14 +95,12 @@ pub struct ExchangedCode<O = ProfileId> {
     inner: AuthorizationCode<O>,
 }
 
-impl<O: Copy> ExchangedCode<O> {
-    /// Account that authorized this code.
-    pub fn owner(&self) -> O {
-        self.inner.owner
-    }
-}
-
 impl<O> ExchangedCode<O> {
+    /// Account that authorized this code.
+    pub fn owner(&self) -> &O {
+        &self.inner.owner
+    }
+
     /// OAuth2 client that requested this code.
     pub fn client_id(&self) -> &str {
         &self.inner.client_id
