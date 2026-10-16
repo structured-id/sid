@@ -52,9 +52,11 @@ pub trait GrantStore: Send + Sync {
     async fn touch_session(&self, id: SessionId, at: DateTime<Utc>) -> Result<()>;
 
     /// Delete a session by ID and the sessions it authenticated
-    /// (`authenticated_by`), returning the ids of every session ended. What
-    /// each ended session owes under `end` commits with the deletion;
-    /// deleting a session that is already gone ends and owes nothing.
+    /// (`authenticated_by`), returning the ids of every session ended. In
+    /// one transaction: their refresh tokens end with them and what each
+    /// ended session owes under `end` commits with the deletion; on failure
+    /// nothing changes. Deleting a session that is already gone ends and
+    /// owes nothing.
     async fn delete_session(
         &self,
         id: SessionId,
