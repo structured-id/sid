@@ -90,6 +90,7 @@ async fn test_pg_enrollment_create_list_revoke_lifecycle() {
             metadata: Default::default(),
             expires_at: None,
             never_expires: false,
+            unlimited_uses: false,
         },
         &bearer,
     );
@@ -152,6 +153,7 @@ async fn test_pg_enrollment_bulk_create_persists() {
             metadata: Default::default(),
             expires_at: None,
             never_expires: false,
+            unlimited_uses: false,
         },
         &bearer,
     );
@@ -205,6 +207,7 @@ async fn test_pg_enrollment_rpcs_require_a_token() {
                 metadata: Default::default(),
                 expires_at: None,
                 never_expires: false,
+                unlimited_uses: false,
             },
             &bearer,
         ))
@@ -274,6 +277,7 @@ async fn test_pg_enrollment_list_pages_through_every_invite() {
                 metadata: Default::default(),
                 expires_at: None,
                 never_expires: false,
+                unlimited_uses: false,
             },
             &bearer,
         ))
@@ -334,6 +338,7 @@ async fn test_pg_enrollment_refuses_values_it_would_replace() {
                     metadata: Default::default(),
                     expires_at: Some(expires_at),
                     never_expires: false,
+                    unlimited_uses: false,
                 },
                 &bearer,
             ))
@@ -351,6 +356,7 @@ async fn test_pg_enrollment_refuses_values_it_would_replace() {
                 metadata: Default::default(),
                 expires_at: None,
                 never_expires: false,
+                unlimited_uses: false,
             },
             &bearer,
         ))
@@ -447,6 +453,7 @@ async fn test_pg_enrollment_rpcs_refuse_a_non_admin() {
                 metadata: Default::default(),
                 expires_at: None,
                 never_expires: false,
+                unlimited_uses: false,
             },
             &token,
         ))
@@ -462,6 +469,7 @@ async fn test_pg_enrollment_rpcs_refuse_a_non_admin() {
                 metadata: Default::default(),
                 expires_at: None,
                 never_expires: false,
+                unlimited_uses: false,
             },
             &token,
         ))

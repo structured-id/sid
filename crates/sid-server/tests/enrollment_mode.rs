@@ -487,6 +487,34 @@ async fn new_invites_take_the_stored_defaults() {
     // The request's own limit wins over the default.
     assert_eq!(invite(&svc, &service, &admin, 2).await.max_uses, 2);
 
+    // An unlimited invite stays reachable under a default limit, and asking
+    // for both a limit and none is refused.
+    let unlimited = create_invite(
+        &svc,
+        &service,
+        &admin,
+        sid_proto::sid::v1::admin::CreateInviteRequest {
+            unlimited_uses: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(unlimited.max_uses, 0);
+    let err = create_invite(
+        &svc,
+        &service,
+        &admin,
+        sid_proto::sid::v1::admin::CreateInviteRequest {
+            unlimited_uses: true,
+            max_uses: 3,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code(), Code::InvalidArgument);
+
     // A never-expiring invite stays reachable under a default expiry, and
     // asking for both an expiry and none is refused.
     let forever = create_invite(

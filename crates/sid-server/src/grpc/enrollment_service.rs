@@ -110,13 +110,21 @@ impl EnrollmentServiceImpl {
 
     /// The use limit and expiry of a new invite: those the request gives,
     /// else the stored policy's defaults (a default expiry of 0 hours is
-    /// none); `never_expires` asks for no expiry whatever the default.
+    /// none); `never_expires` asks for no expiry and `unlimited_uses` for no
+    /// use limit, whatever the defaults.
     async fn invite_terms(
         &self,
         max_uses: u32,
+        unlimited_uses: bool,
         expires_at: Option<prost_types::Timestamp>,
         never_expires: bool,
     ) -> Result<(u32, Option<chrono::DateTime<chrono::Utc>>), Status> {
+        if unlimited_uses && max_uses != 0 {
+            return Err(invalid_field(
+                "unlimited_uses",
+                "an invite with a use limit cannot also be unlimited",
+            ));
+        }
         if max_uses > crate::enrollment::MAX_INVITE_USES {
             return Err(invalid_field(
                 "max_uses",
@@ -134,10 +142,11 @@ impl EnrollmentServiceImpl {
             .await
             .map_err(storage_failure)?
             .invite;
-        let max_uses = if max_uses == 0 {
-            defaults.default_max_uses
-        } else {
-            max_uses
+        // 0 stores no limit (Invite.max_uses).
+        let max_uses = match max_uses {
+            0 if unlimited_uses => 0,
+            0 => defaults.default_max_uses,
+            limit => limit,
         };
         let expires_at = match expires_at {
             Some(at) => Some(at),
@@ -281,7 +290,12 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
         let req = request.into_inner();
 
         let (max_uses, expires_at) = self
-            .invite_terms(req.max_uses, req.expires_at, req.never_expires)
+            .invite_terms(
+                req.max_uses,
+                req.unlimited_uses,
+                req.expires_at,
+                req.never_expires,
+            )
             .await?;
 
         let invite = Invite {
@@ -420,7 +434,12 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
         }
 
         let (max_uses, expires_at) = self
-            .invite_terms(req.max_uses, req.expires_at, req.never_expires)
+            .invite_terms(
+                req.max_uses,
+                req.unlimited_uses,
+                req.expires_at,
+                req.never_expires,
+            )
             .await?;
         let created_by_name = self.creator_name(created_by).await?;
 
