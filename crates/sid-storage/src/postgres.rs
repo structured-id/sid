@@ -29,7 +29,7 @@ use sid_core::{
 };
 use sid_plugin::audit::AuditLog;
 use sid_plugin::storage::StorageBackend;
-use sid_plugin::{ClientResourceRegistry, GrantStore};
+use sid_plugin::{ClientResourceRegistry, GrantStore, IssuerStore};
 use sqlx::PgPool;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -1176,6 +1176,133 @@ impl ClientResourceRegistry for PostgresBackend {
         resource: sid_core::models::ResourceId,
     ) -> SidResult<Option<sid_core::models::ResourceAccess>> {
         self.resource_access_impl(client_id, resource).await
+    }
+}
+
+#[async_trait]
+impl IssuerStore for PostgresBackend {
+    async fn oidc_issuer_for(
+        &self,
+        authority: sid_core::models::IssuerAuthority,
+        recipient_org: sid_core::models::OrgId,
+    ) -> SidResult<Option<sid_core::models::OidcIssuer>> {
+        let row: Option<IssuerRow> = sqlx::query_as(
+            "SELECT id, handle, canonical_url, authority, recipient_org, created_at
+                 FROM oidc_issuers WHERE authority = $1 AND recipient_org = $2",
+        )
+        .bind(authority.as_str())
+        .bind(recipient_org)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(format!("oidc issuer: {e}")))?;
+        row.map(issuer_from_row).transpose()
+    }
+
+    async fn oidc_issuer_by_handle(
+        &self,
+        handle: &sid_core::models::IssuerHandle,
+    ) -> SidResult<Option<sid_core::models::OidcIssuer>> {
+        let row: Option<IssuerRow> = sqlx::query_as(
+            "SELECT id, handle, canonical_url, authority, recipient_org, created_at
+                 FROM oidc_issuers WHERE handle = $1",
+        )
+        .bind(handle.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(format!("oidc issuer by handle: {e}")))?;
+        row.map(issuer_from_row).transpose()
+    }
+
+    async fn insert_oidc_issuer(
+        &self,
+        issuer: &sid_core::models::OidcIssuer,
+        first_key: &sid_core::models::IssuerSigningKey,
+        audit: MutationContext,
+    ) -> SidResult<bool> {
+        issuer.check_first_key(first_key)?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?;
+        let inserted = sqlx::query(
+            "INSERT INTO oidc_issuers (id, handle, canonical_url, authority, recipient_org, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (authority, recipient_org) DO NOTHING",
+        )
+        .bind(issuer.id)
+        .bind(issuer.handle.as_str())
+        .bind(&issuer.canonical_url)
+        .bind(issuer.authority.as_str())
+        .bind(issuer.recipient_org)
+        .bind(issuer.created_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| insert_error("oidc issuer", e))?
+        .rows_affected()
+            == 1;
+        if inserted {
+            sqlx::query(
+                "INSERT INTO oidc_issuer_signing_keys
+                     (issuer_id, generation, key_id, public_key, sealed_private_key, created_at)
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+            )
+            .bind(first_key.issuer_id)
+            .bind(key_generation(first_key.generation)?)
+            .bind(&first_key.key_id)
+            .bind(first_key.public_key.as_slice())
+            .bind(&first_key.sealed_private_key)
+            .bind(first_key.created_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| insert_error("oidc issuer signing key", e))?;
+            Self::audit_in_tx(&mut tx, &format!("oidc_issuer:{}", issuer.id), audit).await?;
+        }
+        tx.commit()
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?;
+        Ok(inserted)
+    }
+
+    async fn oidc_issuer_signing_keys(
+        &self,
+        issuer: sid_core::models::IssuerId,
+    ) -> SidResult<Vec<sid_core::models::IssuerSigningKey>> {
+        let rows: Vec<(
+            sid_core::models::IssuerId,
+            i32,
+            String,
+            Vec<u8>,
+            Vec<u8>,
+            chrono::DateTime<chrono::Utc>,
+        )> = sqlx::query_as(
+            "SELECT issuer_id, generation, key_id, public_key, sealed_private_key, created_at
+                 FROM oidc_issuer_signing_keys WHERE issuer_id = $1 ORDER BY generation",
+        )
+        .bind(issuer)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(format!("oidc issuer signing keys: {e}")))?;
+        rows.into_iter()
+            .map(
+                |(issuer_id, generation, key_id, public_key, sealed_private_key, created_at)| {
+                    let stored = |what: &str| {
+                        SidError::Storage(format!("signing key of issuer {issuer_id}: {what}"))
+                    };
+                    Ok(sid_core::models::IssuerSigningKey {
+                        issuer_id,
+                        generation: u32::try_from(generation)
+                            .map_err(|_| stored("negative generation"))?,
+                        key_id,
+                        public_key: public_key
+                            .try_into()
+                            .map_err(|_| stored("public key is not 32 bytes"))?,
+                        sealed_private_key,
+                        created_at,
+                    })
+                },
+            )
+            .collect()
     }
 }
 
@@ -3845,130 +3972,6 @@ impl StorageBackend for PostgresBackend {
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
         Ok(assigned)
-    }
-
-    async fn oidc_issuer_for(
-        &self,
-        authority: sid_core::models::IssuerAuthority,
-        recipient_org: sid_core::models::OrgId,
-    ) -> SidResult<Option<sid_core::models::OidcIssuer>> {
-        let row: Option<IssuerRow> = sqlx::query_as(
-            "SELECT id, handle, canonical_url, authority, recipient_org, created_at
-                 FROM oidc_issuers WHERE authority = $1 AND recipient_org = $2",
-        )
-        .bind(authority.as_str())
-        .bind(recipient_org)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| SidError::Storage(format!("oidc issuer: {e}")))?;
-        row.map(issuer_from_row).transpose()
-    }
-
-    async fn oidc_issuer_by_handle(
-        &self,
-        handle: &sid_core::models::IssuerHandle,
-    ) -> SidResult<Option<sid_core::models::OidcIssuer>> {
-        let row: Option<IssuerRow> = sqlx::query_as(
-            "SELECT id, handle, canonical_url, authority, recipient_org, created_at
-                 FROM oidc_issuers WHERE handle = $1",
-        )
-        .bind(handle.as_str())
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| SidError::Storage(format!("oidc issuer by handle: {e}")))?;
-        row.map(issuer_from_row).transpose()
-    }
-
-    async fn insert_oidc_issuer(
-        &self,
-        issuer: &sid_core::models::OidcIssuer,
-        first_key: &sid_core::models::IssuerSigningKey,
-        audit: MutationContext,
-    ) -> SidResult<bool> {
-        issuer.check_first_key(first_key)?;
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| SidError::Storage(e.to_string()))?;
-        let inserted = sqlx::query(
-            "INSERT INTO oidc_issuers (id, handle, canonical_url, authority, recipient_org, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6)
-             ON CONFLICT (authority, recipient_org) DO NOTHING",
-        )
-        .bind(issuer.id)
-        .bind(issuer.handle.as_str())
-        .bind(&issuer.canonical_url)
-        .bind(issuer.authority.as_str())
-        .bind(issuer.recipient_org)
-        .bind(issuer.created_at)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| insert_error("oidc issuer", e))?
-        .rows_affected()
-            == 1;
-        if inserted {
-            sqlx::query(
-                "INSERT INTO oidc_issuer_signing_keys
-                     (issuer_id, generation, key_id, public_key, sealed_private_key, created_at)
-                 VALUES ($1, $2, $3, $4, $5, $6)",
-            )
-            .bind(first_key.issuer_id)
-            .bind(key_generation(first_key.generation)?)
-            .bind(&first_key.key_id)
-            .bind(first_key.public_key.as_slice())
-            .bind(&first_key.sealed_private_key)
-            .bind(first_key.created_at)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| insert_error("oidc issuer signing key", e))?;
-            Self::audit_in_tx(&mut tx, &format!("oidc_issuer:{}", issuer.id), audit).await?;
-        }
-        tx.commit()
-            .await
-            .map_err(|e| SidError::Storage(e.to_string()))?;
-        Ok(inserted)
-    }
-
-    async fn oidc_issuer_signing_keys(
-        &self,
-        issuer: sid_core::models::IssuerId,
-    ) -> SidResult<Vec<sid_core::models::IssuerSigningKey>> {
-        let rows: Vec<(
-            sid_core::models::IssuerId,
-            i32,
-            String,
-            Vec<u8>,
-            Vec<u8>,
-            chrono::DateTime<chrono::Utc>,
-        )> = sqlx::query_as(
-            "SELECT issuer_id, generation, key_id, public_key, sealed_private_key, created_at
-                 FROM oidc_issuer_signing_keys WHERE issuer_id = $1 ORDER BY generation",
-        )
-        .bind(issuer)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| SidError::Storage(format!("oidc issuer signing keys: {e}")))?;
-        rows.into_iter()
-            .map(
-                |(issuer_id, generation, key_id, public_key, sealed_private_key, created_at)| {
-                    let stored = |what: &str| {
-                        SidError::Storage(format!("signing key of issuer {issuer_id}: {what}"))
-                    };
-                    Ok(sid_core::models::IssuerSigningKey {
-                        issuer_id,
-                        generation: u32::try_from(generation)
-                            .map_err(|_| stored("negative generation"))?,
-                        key_id,
-                        public_key: public_key
-                            .try_into()
-                            .map_err(|_| stored("public key is not 32 bytes"))?,
-                        sealed_private_key,
-                        created_at,
-                    })
-                },
-            )
-            .collect()
     }
 
     async fn admin_exists(&self) -> SidResult<bool> {
