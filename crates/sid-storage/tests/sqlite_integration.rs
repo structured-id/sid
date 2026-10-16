@@ -743,36 +743,45 @@ async fn test_session_save_and_get() {
 }
 
 #[tokio::test]
-async fn test_session_found_by_browser_secret() {
-    common::browser_session::test_session_found_by_browser_secret(&setup().await).await;
-}
-
-#[tokio::test]
-async fn test_browser_secret_is_unique() {
-    common::browser_session::test_browser_secret_is_unique(&setup().await).await;
-}
-
-#[tokio::test]
 async fn test_ending_a_session_ends_what_it_authenticated() {
     common::browser_session::test_ending_a_session_ends_what_it_authenticated(&setup().await).await;
 }
 
-#[tokio::test]
-async fn test_touch_session_keeps_latest_activity() {
-    common::browser_session::test_touch_session_keeps_latest_activity(std::sync::Arc::new(
-        setup().await,
-    ))
-    .await;
+// ─── Grant store conformance ───
+
+/// Run grant store conformance `scenario` against this backend.
+macro_rules! grant_store {
+    ($($scenario:ident),* $(,)?) => {$(
+        #[tokio::test]
+        async fn $scenario() {
+            let backend = setup().await;
+            sid_plugin::conformance::grant_store::$scenario(
+                &common::grant_conformance::ProfileGrants(&backend),
+            )
+            .await;
+        }
+    )*};
 }
 
-#[tokio::test]
-async fn test_session_delete() {
-    common::test_session_delete(&setup().await).await;
-}
+mod grant_store {
+    use super::*;
 
-#[tokio::test]
-async fn test_session_end_takes_refresh_tokens() {
-    common::test_session_end_takes_refresh_tokens(&setup().await).await;
+    grant_store!(
+        session_create_never_replaces,
+        session_end,
+        session_end_ends_what_it_authenticated,
+        session_end_takes_refresh_tokens,
+        session_limit_evicts_oldest,
+        session_found_by_browser_secret,
+        touch_session_keeps_latest_activity,
+        auth_code_roundtrip,
+        auth_code_redeem_once,
+        auth_code_concurrent_redeem,
+        refresh_token_roundtrip,
+        rotate_refresh_token,
+        rotate_after_sign_out_is_refused,
+        concurrent_rotation,
+    );
 }
 
 #[tokio::test]
@@ -1096,33 +1105,6 @@ async fn test_list_credentials_by_type_pages() {
 #[tokio::test]
 async fn test_oauth2_client_not_found() {
     common::test_oauth2_client_not_found(&setup().await).await;
-}
-
-// ─── Refresh Token CRUD (shared) ───
-
-#[tokio::test]
-async fn test_refresh_token_save_and_get() {
-    common::test_refresh_token_save_and_get(&setup().await).await;
-}
-
-#[tokio::test]
-async fn test_refresh_token_revoke() {
-    common::test_refresh_token_revoke(&setup().await).await;
-}
-
-#[tokio::test]
-async fn test_rotate_refresh_token() {
-    common::test_rotate_refresh_token(&setup().await).await;
-}
-
-#[tokio::test]
-async fn test_rotate_after_sign_out_is_refused() {
-    common::test_rotate_after_sign_out_is_refused(&setup().await).await;
-}
-
-#[tokio::test]
-async fn test_refresh_token_revoke_by_session() {
-    common::test_refresh_token_revoke_by_session(&setup().await).await;
 }
 
 // ─── Durable work (shared) ───
@@ -1672,33 +1654,6 @@ async fn test_mutation_is_always_audited() {
     let chain = format!("profile:{}", profile.id);
     assert_eq!(log.query(&chain, None, None).await.unwrap().len(), 2);
     assert!(log.verify_chain(&chain).await.unwrap().valid);
-}
-
-// ─── Authorization Code CRUD (shared) ───
-
-#[tokio::test]
-async fn test_auth_code_save_and_get() {
-    common::test_auth_code_save_and_get(&setup().await).await;
-}
-
-#[tokio::test]
-async fn test_auth_code_redeem_once() {
-    common::test_auth_code_redeem_once(&setup().await).await;
-}
-
-#[tokio::test]
-async fn test_auth_code_create_never_replaces() {
-    common::test_auth_code_create_never_replaces(&setup().await).await;
-}
-
-#[tokio::test]
-async fn test_auth_code_concurrent_redeem() {
-    common::test_auth_code_concurrent_redeem(&setup().await).await;
-}
-
-#[tokio::test]
-async fn test_auth_code_not_found() {
-    common::test_auth_code_not_found(&setup().await).await;
 }
 
 // ─── Magic Link (shared) ───
