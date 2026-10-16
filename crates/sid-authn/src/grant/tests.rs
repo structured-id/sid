@@ -19,8 +19,8 @@ const ORDERS: &str = "https://resources.example/orders";
 const REDIRECT: &str = "https://cabinet.example/callback";
 const VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
 
-/// An account of another host: no Profile behind it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// An account of another host: no Profile behind it, and not `Copy`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Account(u64);
 
 impl Display for Account {
@@ -375,8 +375,8 @@ impl GrantHost for Host {
         Ok(None)
     }
 
-    async fn account(&self, owner: Account) -> Result<Option<Account>, &'static str> {
-        Ok((!self.gone.contains(&owner)).then_some(owner))
+    async fn account(&self, owner: &Account) -> Result<Option<Account>, &'static str> {
+        Ok((!self.gone.contains(owner)).then(|| owner.clone()))
     }
 
     async fn claims(

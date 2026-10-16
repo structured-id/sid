@@ -66,10 +66,10 @@ impl GrantHost for ProfileGrant<'_> {
             .await
     }
 
-    async fn account(&self, owner: ProfileId) -> Result<Option<Profile>, Status> {
+    async fn account(&self, owner: &ProfileId) -> Result<Option<Profile>, Status> {
         self.service
             .storage
-            .get_profile(owner)
+            .get_profile(*owner)
             .await
             .map_err(storage_failure)
     }

@@ -87,7 +87,7 @@ pub struct AccountClaims {
 #[async_trait]
 pub trait GrantHost: Send + Sync {
     /// The authenticated account sessions, codes and refresh tokens belong to.
-    type Owner: Copy + Display + Send + Sync + 'static;
+    type Owner: Clone + Display + Send + Sync + 'static;
     /// The account the host resolves an owner to.
     type Account: Send + Sync;
     /// A refusal or failure of the host, returned as is.
@@ -112,7 +112,7 @@ pub trait GrantHost: Send + Sync {
     async fn proof(&self) -> Result<Option<DPopBinding>, Self::Error>;
 
     /// The account `owner` names; `None` when it no longer exists.
-    async fn account(&self, owner: Self::Owner) -> Result<Option<Self::Account>, Self::Error>;
+    async fn account(&self, owner: &Self::Owner) -> Result<Option<Self::Account>, Self::Error>;
 
     /// The claims the tokens issued to `client` by `issuer` carry for
     /// `account` under `scopes`.
@@ -218,7 +218,7 @@ pub async fn redeem_code<H: GrantHost>(
     // The application's session reports the authentication of the session
     // that authorized the code (`auth_time`, `amr`, `acr`) and ends with it.
     let mut session = Session::new(
-        owner,
+        owner.clone(),
         host.session_address(),
         Utc::now() + Duration::hours(GRANT_SESSION_TTL_HOURS),
     )
