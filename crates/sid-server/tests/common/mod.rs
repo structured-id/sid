@@ -730,6 +730,8 @@ struct Options {
     magic_links: bool,
     /// The security policy; None keeps the CE default.
     security_policy: Option<sid_core::models::SecurityPolicy>,
+    /// The enrollment mode the deployment pins; None pins nothing.
+    enrollment_pin: Option<sid_core::models::EnrollmentMode>,
 }
 
 /// What the authentication service is built from besides its storage and
@@ -753,6 +755,8 @@ pub struct AuthOptions {
     pub security_policy: Option<sid_core::models::SecurityPolicy>,
     /// The history evaluator's store, co-located as CE runs it.
     pub history_keys: Arc<dyn sid_plugin::history_keys::HistoryKeyStore>,
+    /// The enrollment mode the deployment pins; None pins nothing.
+    pub enrollment_pin: Option<sid_core::models::EnrollmentMode>,
 }
 
 /// The authentication service over `storage` and `cache`, as a server start
@@ -776,6 +780,7 @@ pub fn auth_service(
         cascade,
         security_policy,
         history_keys,
+        enrollment_pin,
     } = options;
     // Registration, change and reset run their OPAQUE on the ZKPP server
     // whether or not proofs are verified, as a server start builds it:
@@ -827,7 +832,8 @@ pub fn auth_service(
             history_keys: test_key_manager(),
         },
     )
-    .with_sign_in_page(&url::Url::parse(SIGN_IN_PAGE).unwrap());
+    .with_sign_in_page(&url::Url::parse(SIGN_IN_PAGE).unwrap())
+    .with_enrollment_pin(enrollment_pin);
     Arc::new(match security_policy {
         Some(policy) => service.with_security_policy(policy),
         None => service,
@@ -929,6 +935,7 @@ impl TestServices {
                 zkpp: Some((verifiers, config)),
                 magic_links: false,
                 security_policy: None,
+                enrollment_pin: None,
             },
         )
     }
@@ -948,6 +955,25 @@ impl TestServices {
                 zkpp: Some((vec![verifier], config)),
                 magic_links: false,
                 security_policy: Some(policy),
+                enrollment_pin: None,
+            },
+        )
+    }
+
+    /// TestServices whose deployment pins the enrollment mode to `mode`.
+    #[allow(dead_code)]
+    pub fn with_enrollment_pin(
+        storage: MockStorage,
+        mode: sid_core::models::EnrollmentMode,
+    ) -> Self {
+        Self::with_options(
+            storage,
+            FeatureFlagService::disabled(),
+            Options {
+                zkpp: None,
+                magic_links: false,
+                security_policy: None,
+                enrollment_pin: Some(mode),
             },
         )
     }
@@ -961,6 +987,7 @@ impl TestServices {
                 zkpp: None,
                 magic_links: true,
                 security_policy: None,
+                enrollment_pin: None,
             },
         )
     }
@@ -973,6 +1000,7 @@ impl TestServices {
                 zkpp: None,
                 magic_links: false,
                 security_policy: None,
+                enrollment_pin: None,
             },
         )
     }
@@ -993,6 +1021,7 @@ impl TestServices {
                 zkpp: None,
                 magic_links: false,
                 security_policy: None,
+                enrollment_pin: None,
             },
         )
     }
@@ -1047,6 +1076,7 @@ impl TestServices {
                 zkpp: None,
                 magic_links: false,
                 security_policy: None,
+                enrollment_pin: None,
             },
         );
         replica
@@ -1068,6 +1098,7 @@ impl TestServices {
             zkpp,
             magic_links,
             security_policy,
+            enrollment_pin,
         } = options;
         let storage: Arc<dyn StorageBackend> = mock_storage.clone();
         // Provisioned as a server start provisions it; a replica over the same
@@ -1152,6 +1183,7 @@ impl TestServices {
                 cascade: cascade_service.clone(),
                 security_policy,
                 history_keys: mock_storage.clone(),
+                enrollment_pin,
             },
         );
 

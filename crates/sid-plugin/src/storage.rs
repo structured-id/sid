@@ -990,6 +990,21 @@ pub trait StorageBackend:
         ctx: MutationContext,
     ) -> Result<sid_core::models::CentralAdoption>;
 
+    /// The installation's stored enrollment policy; `None` until one is set.
+    async fn enrollment_policy(&self) -> Result<Option<sid_core::models::EnrollmentPolicy>>;
+
+    /// Store `policy` as the installation's enrollment policy, replacing the
+    /// one stored, with its audit entry in the same transaction; `mode` says
+    /// whether its mode replaces the stored one. A domain-restricted mode
+    /// without an allowed domain is refused (`Error::Validation`), whichever
+    /// side supplied the mode.
+    async fn set_enrollment_policy(
+        &self,
+        policy: &sid_core::models::EnrollmentPolicy,
+        mode: sid_core::models::ModeWrite,
+        ctx: MutationContext,
+    ) -> Result<()>;
+
     /// Make `profile` (already carrying the administrator role, at the
     /// revision it was read at) the first administrator, consuming the admin
     /// claim stored as `claim_sealed`. The claim is removed and the profile

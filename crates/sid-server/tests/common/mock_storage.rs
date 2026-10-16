@@ -51,6 +51,8 @@ pub struct MockStorageInner {
     instance_secrets: HashMap<sid_core::models::InstanceSecret, Vec<u8>>,
     /// The installation was recorded centrally managed.
     centrally_managed: bool,
+    enrollment_policy: Option<sid_core::models::EnrollmentPolicy>,
+    invites: Vec<sid_core::models::Invite>,
     instance_organization: Option<sid_core::models::Organization>,
     oidc_issuers: Vec<sid_core::models::OidcIssuer>,
     oidc_issuer_keys: Vec<sid_core::models::IssuerSigningKey>,
@@ -1364,6 +1366,29 @@ impl StorageBackend for MockStorage {
             return Err(sid_core::Error::Conflict(
                 "principal already registered".into(),
             ));
+        }
+        if let Some(ref gate) = registration.enrollment {
+            let stored = inner.enrollment_policy.clone();
+            if let Some(code) = gate
+                .admit(stored)
+                .map_err(sid_core::Error::RegistrationRestricted)?
+                .invite
+            {
+                let code = code.trim().to_uppercase();
+                let now = chrono::Utc::now();
+                let invite = inner.invites.iter_mut().find(|i| {
+                    i.code.to_uppercase() == code
+                        && i.active
+                        && (i.max_uses == 0 || i.use_count < i.max_uses)
+                        && i.expires_at.is_none_or(|at| at > now)
+                });
+                let Some(invite) = invite else {
+                    return Err(sid_core::Error::RegistrationRestricted(
+                        sid_core::enrollment::EnrollmentDenialReason::InviteInvalid,
+                    ));
+                };
+                invite.use_count += 1;
+            }
         }
         if let Some(ref claim) = registration.instance_claim {
             let key = sid_core::models::InstanceSecret::AdminClaim;
@@ -3103,6 +3128,34 @@ impl StorageBackend for MockStorage {
             .instance_secrets
             .remove(&sid_core::models::InstanceSecret::AdminClaim);
         Ok(CentralAdoption::Adopted)
+    }
+
+    async fn enrollment_policy(&self) -> SidResult<Option<sid_core::models::EnrollmentPolicy>> {
+        Ok(self.inner.lock().unwrap().enrollment_policy.clone())
+    }
+
+    async fn set_enrollment_policy(
+        &self,
+        policy: &sid_core::models::EnrollmentPolicy,
+        mode: sid_core::models::ModeWrite,
+        _ctx: MutationContext,
+    ) -> SidResult<()> {
+        let mut inner = self.inner.lock().unwrap();
+        let mut stored = policy.clone();
+        if let (sid_core::models::ModeWrite::KeepStored, Some(current)) =
+            (mode, inner.enrollment_policy.as_ref())
+        {
+            stored.mode = current.mode;
+        }
+        if stored.mode == sid_core::models::EnrollmentMode::DomainRestricted
+            && stored.allowed_domains.is_empty()
+        {
+            return Err(sid_core::Error::Validation(
+                "a domain-restricted enrollment mode needs an allowed domain".into(),
+            ));
+        }
+        inner.enrollment_policy = Some(stored);
+        Ok(())
     }
 
     async fn claim_first_admin(
@@ -5023,19 +5076,35 @@ impl StorageBackend for MockStorage {
     }
     async fn create_invite(
         &self,
-        _: &sid_core::models::Invite,
+        invite: &sid_core::models::Invite,
         _: MutationContext,
     ) -> SidResult<()> {
+        self.inner.lock().unwrap().invites.push(invite.clone());
         Ok(())
     }
     async fn get_invite(
         &self,
-        _: sid_core::models::InviteId,
+        id: sid_core::models::InviteId,
     ) -> SidResult<Option<sid_core::models::Invite>> {
-        Ok(None)
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .invites
+            .iter()
+            .find(|i| i.id == id)
+            .cloned())
     }
-    async fn get_invite_by_code(&self, _: &str) -> SidResult<Option<sid_core::models::Invite>> {
-        Ok(None)
+    async fn get_invite_by_code(&self, code: &str) -> SidResult<Option<sid_core::models::Invite>> {
+        let code = code.trim().to_uppercase();
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .invites
+            .iter()
+            .find(|i| i.code.to_uppercase() == code)
+            .cloned())
     }
     async fn list_invites(
         &self,
