@@ -467,11 +467,6 @@ async fn test_history_key_versions_are_insert_only() {
 }
 
 #[tokio::test]
-async fn test_ended_work_is_purged() {
-    common::work::test_ended_work_is_purged(&setup().await).await;
-}
-
-#[tokio::test]
 async fn test_operation_results_are_purged_by_method() {
     common::operation::test_operation_results_are_purged_by_method(&setup().await).await;
 }
@@ -1109,61 +1104,36 @@ async fn test_oauth2_client_not_found() {
     common::test_oauth2_client_not_found(&setup().await).await;
 }
 
-// ─── Durable work (shared) ───
+// ─── Durable work ───
 
-#[tokio::test]
-async fn test_work_enqueue_is_idempotent() {
-    common::work::test_work_enqueue_is_idempotent(&setup().await).await;
+/// Run work store conformance `scenario` against this backend.
+macro_rules! work_store {
+    ($($scenario:ident),* $(,)?) => {$(
+        #[tokio::test]
+        async fn $scenario() {
+            sid_plugin::conformance::work_store::$scenario(&setup().await).await;
+        }
+    )*};
 }
 
-#[tokio::test]
-async fn test_work_capacity_is_enforced_per_kind() {
-    common::work::test_work_capacity_is_enforced_per_kind(&setup().await).await;
-}
+mod work_store {
+    use super::*;
 
-#[tokio::test]
-async fn test_work_capacity_holds_under_concurrency() {
-    common::work::test_work_capacity_holds_under_concurrency(&setup().await).await;
-}
-
-#[tokio::test]
-async fn test_work_lease_fences_stale_worker() {
-    common::work::test_work_lease_fences_stale_worker(&setup().await).await;
-}
-
-#[tokio::test]
-async fn test_work_live_lease_is_exclusive() {
-    common::work::test_work_live_lease_is_exclusive(&setup().await).await;
-}
-
-#[tokio::test]
-async fn test_work_retries_then_fails() {
-    common::work::test_work_retries_then_fails(&setup().await).await;
-}
-
-#[tokio::test]
-async fn test_work_expired_and_future_are_not_claimed() {
-    common::work::test_work_expired_and_future_are_not_claimed(&setup().await).await;
-}
-
-#[tokio::test]
-async fn test_work_abandoned_last_attempt_fails() {
-    common::work::test_work_abandoned_last_attempt_fails(&setup().await).await;
-}
-
-#[tokio::test]
-async fn test_work_concurrent_claims_do_not_overlap() {
-    common::work::test_work_concurrent_claims_do_not_overlap(&setup().await).await;
-}
-
-#[tokio::test]
-async fn test_work_concurrent_enqueue_stores_once() {
-    common::work::test_work_concurrent_enqueue_stores_once(&setup().await).await;
-}
-
-#[tokio::test]
-async fn test_work_dead_letter_alert_commits_with_failure() {
-    common::work::test_work_dead_letter_alert_commits_with_failure(&setup().await).await;
+    work_store!(
+        enqueue_is_idempotent,
+        concurrent_enqueue_stores_once,
+        capacity_is_enforced_per_kind,
+        capacity_holds_under_concurrency,
+        ended_work_is_purged,
+        live_lease_is_exclusive,
+        lease_fences_stale_worker,
+        retries_then_fails,
+        dead_letter_alert_commits_with_failure,
+        expired_and_future_are_not_claimed,
+        abandoned_last_attempt_fails,
+        concurrent_claims_do_not_overlap,
+        export_import_round_trip,
+    );
 }
 
 #[tokio::test]
@@ -1394,11 +1364,6 @@ async fn test_cedar_policy_concurrent_update() {
 #[tokio::test]
 async fn test_expired_role_assignments_owe_event() {
     common::work::test_expired_role_assignments_owe_event(&setup().await).await;
-}
-
-#[tokio::test]
-async fn test_work_export_import_round_trip() {
-    common::work::test_work_export_import_round_trip(&setup().await).await;
 }
 
 #[tokio::test]
