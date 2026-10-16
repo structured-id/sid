@@ -10,7 +10,7 @@
 use sid_core::Result as SidResult;
 pub use sid_core::models::{IssuerId, ResourceIndicator};
 use sid_core::models::{MachineUser, OAuth2Client, ProtectedResource, ResourceAccess, ResourceId};
-use sid_plugin::storage::StorageBackend;
+use sid_plugin::ClientResourceRegistry;
 
 /// Why a request's target is refused. Every case is `invalid_target`
 /// (RFC 8707 §2).
@@ -152,7 +152,7 @@ pub fn exchange_indicator(
 /// The target of a new grant for `requester` under `issuer`: the resource
 /// `requested` names, or the requester's default when none is named.
 pub async fn select_target<'r>(
-    storage: &dyn StorageBackend,
+    storage: &dyn ClientResourceRegistry,
     issuer: IssuerId,
     requester: impl Into<Requester<'r>>,
     requested: Option<&ResourceIndicator>,
@@ -180,7 +180,7 @@ pub async fn select_target<'r>(
 /// same resource, and the resource must still accept tokens from `issuer`
 /// for this client.
 pub async fn resume_target<'r>(
-    storage: &dyn StorageBackend,
+    storage: &dyn ClientResourceRegistry,
     issuer: IssuerId,
     requester: impl Into<Requester<'r>>,
     bound: ResourceId,
@@ -204,7 +204,7 @@ pub async fn resume_target<'r>(
 /// resource is refused. Its access comes from its grants, which the resource
 /// checks on every request, not from a client access entry.
 pub async fn connector_target(
-    storage: &dyn StorageBackend,
+    storage: &dyn ClientResourceRegistry,
     issuer: IssuerId,
     directory: &ResourceIndicator,
     requested: Option<&ResourceIndicator>,
@@ -226,7 +226,7 @@ pub async fn connector_target(
 
 /// `resource` as a target of `client_id`: active, with access.
 async fn permitted(
-    storage: &dyn StorageBackend,
+    storage: &dyn ClientResourceRegistry,
     client_id: &str,
     resource: Option<ProtectedResource>,
 ) -> SidResult<Result<Target, TargetRefusal>> {
