@@ -971,6 +971,40 @@ async fn test_instance_organization_and_clients() {
 }
 
 #[tokio::test]
+async fn test_enrollment_policy_stored_and_replaced() {
+    common::enrollment_policy::test_enrollment_policy_stored_and_replaced(&setup().await).await;
+}
+
+#[tokio::test]
+async fn test_registration_admitted_by_the_stored_policy() {
+    common::enrollment_policy::test_registration_admitted_by_the_stored_policy(&setup().await)
+        .await;
+}
+
+#[tokio::test]
+async fn test_kept_mode_and_domains_enforced() {
+    common::enrollment_policy::test_kept_mode_and_domains_enforced(&setup().await).await;
+}
+
+#[tokio::test]
+async fn test_admission_records_its_source() {
+    common::enrollment_policy::test_admission_records_its_source(&setup().await).await;
+}
+
+#[tokio::test]
+async fn test_invite_spent_once_by_concurrent_registrations() {
+    let backend = setup().await;
+    let log = sid_storage::sqlite::SqliteAuditLog::new(backend.pool().clone());
+    common::enrollment_policy::test_invite_spent_once_by_concurrent_registrations(&backend, &log)
+        .await;
+}
+
+#[tokio::test]
+async fn test_enrollment_policy_keeps_invite_range() {
+    common::enrollment_policy::test_enrollment_policy_keeps_invite_range(&setup().await).await;
+}
+
+#[tokio::test]
 async fn test_admin_claim_consumed_once() {
     common::admin_claim::test_admin_claim_consumed_once(&setup().await).await;
 }

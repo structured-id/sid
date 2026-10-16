@@ -34,6 +34,18 @@ pub async fn try_register(
     password: &[u8],
     claim_token: Option<&str>,
 ) -> Result<OpaqueZkppRegistrationFinishResponse, tonic::Status> {
+    try_register_invited(start, finish, principal, password, claim_token, None).await
+}
+
+/// As [`try_register`], presenting `invite_code`.
+pub async fn try_register_invited(
+    start: &TestServices,
+    finish: &TestServices,
+    principal: &str,
+    password: &[u8],
+    claim_token: Option<&str>,
+    invite_code: Option<&str>,
+) -> Result<OpaqueZkppRegistrationFinishResponse, tonic::Status> {
     let started = zkpp_client::start(password);
     let prepared = start
         .auth
@@ -41,6 +53,7 @@ pub async fn try_register(
             principal: principal.to_string(),
             registration_request: started.request.clone(),
             claim_token: claim_token.map(str::to_string),
+            invite_code: invite_code.map(str::to_string),
         }))
         .await?
         .into_inner();

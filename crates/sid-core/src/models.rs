@@ -220,7 +220,9 @@ pub use provisioning_connector::{
     ProvisioningCredential, ProvisioningCredentialId, ProvisioningDirection,
 };
 pub use refresh_token::{RefreshToken, RefreshTokenError, ValidatedRefreshToken};
-pub use registration::{NewRegistration, SignupIdentifier};
+pub use registration::{
+    Admission, EnrollmentGate, NewRegistration, SignupIdentifier, SourceRecording,
+};
 pub use registration_source::{RegistrationSource, RegistrationSourceType, UtmParams};
 pub use revocation::{
     CascadeEntry, CascadeTier, RevocationId, RevocationMode, RevocationReason, RevocationRequest,
@@ -233,7 +235,7 @@ pub use scim_outbound::{
 };
 pub use security_policy::{
     AuthPolicy, CountryMode, CurrentPasswordRule, DevicePolicy, EnforcementConfig, EnforcementMode,
-    EnrollmentMode, EnrollmentPolicy, GraceExpiryAction, InviteConfig, MfaEnforcement,
+    EnrollmentMode, EnrollmentPolicy, GraceExpiryAction, InviteConfig, MfaEnforcement, ModeWrite,
     NetworkPolicy, NetworkViolationReaction, PasswordPolicy, PrincipalPolicy, SecurityPolicy,
     SecurityPolicyId, SessionDecayConfig, SessionPolicy,
 };

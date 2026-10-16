@@ -584,6 +584,11 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
     let management = management_setting(std::env::var("SID_INSTALLATION_MANAGEMENT"))?;
     apply_bootstrap_policy(storage.as_ref(), management.as_deref()).await?;
     announce_admin_claim(storage.as_ref(), key_manager.as_ref()).await?;
+    let enrollment_pin =
+        crate::enrollment::pinned_mode_setting(std::env::var(crate::enrollment::PIN_VARIABLE))?;
+    if let Some(mode) = enrollment_pin {
+        info!(%mode, "enrollment mode pinned by the deployment");
+    }
 
     // The installation's organization, and every application in it.
     let organization = sid_authn::instance_org::ensure(storage.as_ref(), &instance_domain)
@@ -922,7 +927,8 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         authz_engine.clone(),
         history_authority,
     )
-    .with_trusted_proxies(trusted_proxies);
+    .with_trusted_proxies(trusted_proxies)
+    .with_enrollment_pin(enrollment_pin);
     let auth_svc = Arc::new(match &login_url {
         Some(page) => auth_svc.with_sign_in_page(page),
         None => auth_svc,
@@ -1012,11 +1018,14 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         jwt.clone(),
         revocation_cache.clone(),
     ));
-    let enrollment_svc = Arc::new(crate::grpc::enrollment_service::EnrollmentServiceImpl::new(
-        storage.clone(),
-        jwt.clone(),
-        revocation_cache.clone(),
-    ));
+    let enrollment_svc = Arc::new(
+        crate::grpc::enrollment_service::EnrollmentServiceImpl::new(
+            storage.clone(),
+            jwt.clone(),
+            revocation_cache.clone(),
+        )
+        .with_pinned_mode(enrollment_pin),
+    );
     let security_svc = Arc::new(crate::grpc::security_service::SecurityServiceImpl::new(
         storage.clone(),
         jwt.clone(),

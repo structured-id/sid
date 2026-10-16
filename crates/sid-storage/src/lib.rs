@@ -46,6 +46,88 @@ const ADMIN_EXISTS_SQL: &str =
 #[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
 const CENTRALLY_MANAGED_SQL: &str = "SELECT EXISTS (SELECT 1 FROM bootstrap_policy)";
 
+/// The installation's enrollment policy row.
+#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
+const ENROLLMENT_POLICY_SQL: &str = "SELECT mode, allowed_domains, track_source, \
+     invite_default_max_uses, invite_default_expiry_hours \
+     FROM enrollment_policy WHERE scope = 'installation'";
+
+/// The PostgreSQL lock a registration takes on the policy table: registrations
+/// share it, and a policy change (`LOCK_ENROLLMENT_POLICY_FOR_CHANGE_SQL`)
+/// conflicts with it, so a registration committed after a change was decided
+/// under it and one in progress holds the change back until it commits. A
+/// table lock rather than a row lock, because the row may not exist yet; and
+/// the table is the installation's own, so installations sharing a database
+/// in separate schemas never wait on each other.
+#[cfg(feature = "storage-pg")]
+const LOCK_ENROLLMENT_POLICY_FOR_REGISTRATION_SQL: &str =
+    "LOCK TABLE enrollment_policy IN SHARE MODE";
+
+/// The record of a registration's use of invite `invite`, for the invite's
+/// own audit chain: same actor and origin as the registration's record.
+#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
+fn invite_use_entry(
+    registration: &sid_core::models::AuditEntry,
+    invite: uuid::Uuid,
+) -> sid_core::models::AuditEntry {
+    sid_core::models::AuditEntry {
+        action: "invite.use".into(),
+        resource: format!("invite:{invite}"),
+        ..registration.clone()
+    }
+}
+
+/// The lock a policy change takes: conflicts with registrations and with
+/// another change (PostgreSQL documentation 13.3.1, table-level locks).
+#[cfg(feature = "storage-pg")]
+const LOCK_ENROLLMENT_POLICY_FOR_CHANGE_SQL: &str =
+    "LOCK TABLE enrollment_policy IN SHARE ROW EXCLUSIVE MODE";
+
+/// An enrollment policy write's failure: the schema's refusal of a
+/// domain-restricted mode without a domain is the caller's to fix.
+#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
+fn enrollment_policy_write_error(e: sqlx::Error) -> sid_core::Error {
+    let refused = e.as_database_error().is_some_and(|db| {
+        db.constraint() == Some("enrollment_policy_domains_for_restricted_mode")
+            || db
+                .message()
+                .contains("enrollment_policy_domains_for_restricted_mode")
+    });
+    if refused {
+        sid_core::Error::Validation(
+            "a domain-restricted enrollment mode needs an allowed domain".into(),
+        )
+    } else {
+        sid_core::Error::Storage(format!("set enrollment policy: {e}"))
+    }
+}
+
+/// The enrollment policy a stored row holds; a value the schema's checks
+/// should have refused is an error, never read as a default.
+#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
+fn enrollment_policy_from_row(
+    mode: &str,
+    allowed_domains: Vec<String>,
+    track_source: bool,
+    max_uses: i64,
+    expiry_hours: i64,
+) -> sid_core::Result<sid_core::models::EnrollmentPolicy> {
+    let stored = |what: &str, e: String| {
+        sid_core::Error::Storage(format!("stored enrollment policy {what}: {e}"))
+    };
+    Ok(sid_core::models::EnrollmentPolicy {
+        mode: mode.parse().map_err(|e| stored("mode", e))?,
+        invite: sid_core::models::InviteConfig {
+            default_max_uses: u32::try_from(max_uses)
+                .map_err(|e| stored("invite max uses", e.to_string()))?,
+            default_expiry_hours: u32::try_from(expiry_hours)
+                .map_err(|e| stored("invite expiry", e.to_string()))?,
+        },
+        allowed_domains,
+        track_source,
+    })
+}
+
 /// How many email keys stay quarantined after the email policy cutover.
 #[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
 const QUARANTINED_EMAIL_KEYS_SQL: &str =

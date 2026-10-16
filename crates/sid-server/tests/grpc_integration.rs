@@ -1244,6 +1244,7 @@ async fn test_opaque_register_start_invalid_message() {
         principal: "alice@sid.example.com".to_string(),
         registration_request: vec![0xFF, 0xFF], // invalid OPAQUE message
         claim_token: None,
+        invite_code: None,
     });
 
     let err = svc
@@ -2304,6 +2305,7 @@ async fn zkpp_register_without_proof(
             principal: principal.to_string(),
             registration_request: client_registration.message.serialize().to_vec(),
             claim_token: None,
+            invite_code: None,
         }))
         .await
         .unwrap()
@@ -7310,6 +7312,8 @@ async fn test_enrollment_create_invite_with_bearer_uses_real_profile_id() {
             max_uses: 1,
             metadata: Default::default(),
             expires_at: None,
+            never_expires: false,
+            unlimited_uses: false,
         },
         &bearer,
     );
@@ -7342,6 +7346,8 @@ async fn test_enrollment_create_invite_without_bearer_is_rejected() {
         max_uses: 5,
         metadata: Default::default(),
         expires_at: None,
+        never_expires: false,
+        unlimited_uses: false,
     });
     let err = svc.create_invite(req).await.unwrap_err();
     assert_eq!(err.code(), tonic::Code::Unauthenticated);
@@ -8233,19 +8239,23 @@ async fn test_enrollment_get_policy_returns_ce_defaults() {
         .unwrap()
         .into_inner();
 
-    // CE defaults: Open mode, track_source = true
+    // Nothing stored, nothing pinned: the CE defaults, Open mode, tracked.
+    assert_eq!(resp.mode(), sid_proto::sid::v1::admin::EnrollmentMode::Open);
+    assert!(!resp.mode_pinned);
     assert!(resp.invite.is_some());
     assert!(resp.track_source);
 }
 
+/// An anonymous caller cannot change who may register; nothing is stored.
 #[tokio::test]
-async fn test_enrollment_update_policy_returns_unimplemented() {
+async fn test_enrollment_update_policy_requires_authentication() {
+    use sid_plugin::StorageBackend;
     use sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService;
 
-    let storage = MockStorage::new();
+    let storage = Arc::new(MockStorage::new());
     let jwt = test_jwt();
     let svc = sid_server::grpc::enrollment_service::EnrollmentServiceImpl::new(
-        Arc::new(storage),
+        storage.clone(),
         jwt,
         common::test_revocation(),
     );
@@ -8253,7 +8263,8 @@ async fn test_enrollment_update_policy_returns_unimplemented() {
     let req =
         Request::new(sid_proto::sid::v1::admin::UpdateEnrollmentPolicyRequest { policy: None });
     let err = svc.update_enrollment_policy(req).await.unwrap_err();
-    assert_eq!(err.code(), tonic::Code::Unimplemented);
+    assert_eq!(err.code(), tonic::Code::Unauthenticated);
+    assert_eq!(storage.enrollment_policy().await.unwrap(), None);
 }
 
 #[tokio::test]
@@ -8301,6 +8312,8 @@ async fn test_enrollment_create_invite_returns_valid_response() {
             max_uses: 3,
             metadata: Default::default(),
             expires_at: None,
+            never_expires: false,
+            unlimited_uses: false,
         },
         &token,
     );
@@ -8332,6 +8345,8 @@ async fn test_enrollment_create_invite_default_max_uses() {
             max_uses: 0,
             metadata: Default::default(),
             expires_at: None,
+            never_expires: false,
+            unlimited_uses: false,
         },
         &token,
     );
@@ -8433,6 +8448,8 @@ async fn test_enrollment_bulk_create_invites() {
             max_uses: 2,
             metadata: Default::default(),
             expires_at: None,
+            never_expires: false,
+            unlimited_uses: false,
         },
         &token,
     );
@@ -8470,6 +8487,8 @@ async fn test_enrollment_bulk_create_zero_returns_error() {
             max_uses: 1,
             metadata: Default::default(),
             expires_at: None,
+            never_expires: false,
+            unlimited_uses: false,
         },
         &token,
     );
