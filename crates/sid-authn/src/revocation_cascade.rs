@@ -268,16 +268,15 @@ impl RevocationCascadeService {
         Ok(())
     }
 
-    /// Revoke a single session with cascade to refresh tokens, audited as
-    /// `action`, and the sessions it authenticated. Each deleted session owes
-    /// its client a back-channel logout.
+    /// Revoke a single session with its refresh tokens, audited as `action`,
+    /// and the sessions it authenticated. Each deleted session owes its
+    /// client a back-channel logout.
     ///
     /// Cascade order:
     /// 1. Revoke session in in-memory cache (immediate).
-    /// 2. Revoke refresh tokens for this session (immediate).
-    /// 3. Delete session and its dependents from DB (their refresh tokens go
-    ///    with them).
-    /// 4. Revoke the dependents in the cache.
+    /// 2. End the session and its dependents in storage, one transition: their
+    ///    refresh tokens and what they owe end with them, or nothing changes.
+    /// 3. Revoke the dependents in the cache.
     pub async fn revoke_session(
         &self,
         session_id: SessionId,
@@ -299,25 +298,10 @@ impl RevocationCascadeService {
             .await
             .err();
 
-        // 2. Revoke refresh tokens.
-        let revoked = self
-            .storage
-            .revoke_refresh_tokens_by_session(
-                session_id,
-                AuditEntry::system(action, session_id.to_string()).into(),
-            )
-            .await?;
-
-        if revoked > 0 {
-            req.add_cascade(
-                RevocationTarget::RefreshToken,
-                format!("session:{session_id}"),
-                CascadeTier::Immediate,
-            );
-        }
-
-        // 3. Delete session from DB, with what it owes, and the sessions it
-        //    authenticated.
+        // 2. End the session, the sessions it authenticated and their refresh
+        //    tokens in one storage transition, with what they owe.
+        //    A session's refresh tokens are part of its end, so the report
+        //    names the sessions only, as a profile's revocation does.
         let ended = self
             .storage
             .delete_session(
@@ -327,7 +311,7 @@ impl RevocationCascadeService {
             )
             .await?;
 
-        // 4. The dependents' access tokens stop too.
+        // 3. The dependents' access tokens stop too.
         let mut unpropagated = unpropagated;
         for dependent in ended.into_iter().filter(|id| *id != session_id) {
             if let Err(e) = self
