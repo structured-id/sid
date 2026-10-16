@@ -60,6 +60,81 @@ fn phone_signup_links_its_contact_row() {
     assert_eq!(registration.principal.email_policy_revision, None);
 }
 
+fn stored(mode: EnrollmentMode, domains: &[&str]) -> Option<EnrollmentPolicy> {
+    let mut policy = SecurityPolicy::ce_default().enrollment;
+    policy.mode = mode;
+    policy.allowed_domains = domains.iter().map(|d| (*d).to_string()).collect();
+    Some(policy)
+}
+
+fn gate(
+    pinned: Option<EnrollmentMode>,
+    email: Option<&str>,
+    invite: Option<&str>,
+) -> EnrollmentGate {
+    EnrollmentGate {
+        pinned,
+        email: email.map(str::to_string),
+        invite_code: invite.map(str::to_string),
+    }
+}
+
+/// Nothing stored is the open default; a stored mode applies; a pinned mode
+/// applies over whatever is stored.
+#[test]
+fn gate_applies_the_pinned_mode_over_the_stored() {
+    assert_eq!(gate(None, None, None).admit(None), Ok(None));
+    assert_eq!(
+        gate(None, None, None).admit(stored(EnrollmentMode::AdminOnly, &[])),
+        Err(EnrollmentDenialReason::AdminOnly)
+    );
+    assert_eq!(
+        gate(Some(EnrollmentMode::AdminOnly), None, None).admit(stored(EnrollmentMode::Open, &[])),
+        Err(EnrollmentDenialReason::AdminOnly)
+    );
+    assert_eq!(
+        gate(Some(EnrollmentMode::Open), None, None).admit(stored(EnrollmentMode::AdminOnly, &[])),
+        Ok(None)
+    );
+}
+
+/// Invite-only admits a presented code and names it to spend; without one it
+/// refuses. Other modes spend no invite even when a code is presented.
+#[test]
+fn gate_names_the_invite_to_spend_only_when_invite_only() {
+    let invite_only = || stored(EnrollmentMode::InviteOnly, &[]);
+    assert_eq!(
+        gate(None, None, Some("ABCD1234")).admit(invite_only()),
+        Ok(Some("ABCD1234"))
+    );
+    assert_eq!(
+        gate(None, None, None).admit(invite_only()),
+        Err(EnrollmentDenialReason::InviteRequired)
+    );
+    assert_eq!(
+        gate(None, None, Some("ABCD1234")).admit(stored(EnrollmentMode::Open, &[])),
+        Ok(None)
+    );
+}
+
+/// Domain-restricted admits only an email in an allowed domain.
+#[test]
+fn gate_checks_the_email_domain() {
+    let restricted = || stored(EnrollmentMode::DomainRestricted, &["acme.example"]);
+    assert_eq!(
+        gate(None, Some("a@acme.example"), None).admit(restricted()),
+        Ok(None)
+    );
+    assert!(matches!(
+        gate(None, Some("a@other.example"), None).admit(restricted()),
+        Err(EnrollmentDenialReason::DomainNotAllowed { .. })
+    ));
+    assert_eq!(
+        gate(None, None, None).admit(restricted()),
+        Err(EnrollmentDenialReason::EmailRequired)
+    );
+}
+
 /// A malformed phone number is refused instead of being stored as a zero.
 #[test]
 fn invalid_signup_identifier_is_refused() {

@@ -46,6 +46,20 @@ const ADMIN_EXISTS_SQL: &str =
 #[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
 const CENTRALLY_MANAGED_SQL: &str = "SELECT EXISTS (SELECT 1 FROM bootstrap_policy)";
 
+/// The installation's enrollment policy row.
+#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
+const ENROLLMENT_POLICY_SQL: &str = "SELECT mode, allowed_domains, track_source, \
+     invite_default_max_uses, invite_default_expiry_hours \
+     FROM enrollment_policy WHERE scope = 'installation'";
+
+/// The PostgreSQL transaction-level advisory lock between a policy change
+/// (exclusive) and the registrations it governs (shared): a registration
+/// committed after a change was decided under it, and one in progress
+/// holds the change back until it commits. A lock rather than a row lock,
+/// because the row may not exist yet.
+#[cfg(feature = "storage-pg")]
+const ENROLLMENT_POLICY_LOCK: i64 = 0x5349_445f_454e_524f;
+
 /// The enrollment policy a stored row holds; a value the schema's checks
 /// should have refused is an error, never read as a default.
 #[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]

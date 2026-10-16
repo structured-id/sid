@@ -87,6 +87,7 @@ async fn registered_with(
             principal: principal.to_string(),
             registration_request: started.request.clone(),
             claim_token: None,
+            invite_code: None,
         }))
         .await
         .expect("registration start")
@@ -509,6 +510,7 @@ async fn server_registration_response(svc: &TestServices) -> Vec<u8> {
             principal: "someone-else@sid.example.com".to_string(),
             registration_request: started.request,
             claim_token: None,
+            invite_code: None,
         }))
         .await
         .expect("a registration start")
@@ -545,6 +547,7 @@ async fn test_a_replaced_history_key_keeps_the_retained_password_refused() {
             principal: PRINCIPAL.to_string(),
             registration_request: started.request.clone(),
             claim_token: None,
+            invite_code: None,
         }))
         .await
         .unwrap()
@@ -694,6 +697,7 @@ async fn server_public_key(svc: &TestServices) -> Vec<u8> {
             principal: "someone-else@sid.example.com".to_string(),
             registration_request: started.request,
             claim_token: None,
+            invite_code: None,
         }))
         .await
         .expect("a registration start")
@@ -995,6 +999,7 @@ async fn a_change_proved_against_a_replaced_password_does_not_commit() {
             principal: PRINCIPAL.to_string(),
             registration_request: started.request.clone(),
             claim_token: None,
+            invite_code: None,
         }))
         .await
         .unwrap()

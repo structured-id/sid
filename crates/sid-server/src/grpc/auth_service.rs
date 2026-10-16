@@ -72,8 +72,9 @@ pub(crate) use authorize::{BrowserAuthorization, PendingAuthorization};
 pub(crate) use end_session::{EndSession, LogoutRequest};
 use refusal::{
     anomaly_unavailable, authentication_failed, captcha_required, ceremony_expired,
-    mfa_not_enrolled, registration_restricted, session_ended, session_provisional, sign_in_refused,
-    step_up_after_anomaly, step_up_to_acr, step_up_to_amr, too_many_attempts,
+    enrollment_requirement, mfa_not_enrolled, registration_restricted, session_ended,
+    session_provisional, sign_in_refused, step_up_after_anomaly, step_up_to_acr, step_up_to_amr,
+    too_many_attempts,
 };
 
 /// Check implied auth level for a given authentication method.
@@ -319,6 +320,10 @@ pub(crate) enum PendingRegistration {
         /// The sealed instance claim the start verified: the account becomes
         /// the first administrator and consumes it when it is committed.
         instance_claim: Option<Vec<u8>>,
+        /// The invite code presented, spent with the account when the
+        /// enrollment mode is invite-only.
+        #[serde(default)]
+        invite_code: Option<String>,
     },
     /// The identifier already belongs to an account. Start still evaluates the
     /// OPRF under a key that exists nowhere, so the answer looks like any other;
@@ -1900,7 +1905,9 @@ impl AuthServiceImpl {
         &self,
         principal: &str,
         claim_token: Option<&str>,
+        invite_code: Option<&str>,
     ) -> Result<PendingRegistration, Status> {
+        let invite_code = invite_code.map(str::trim).filter(|c| !c.is_empty());
         let handle = parse_handle(principal)?;
         let principal_type = handle.principal_type.to_principal_type();
         let (value, email) = (handle.normalized, handle.email);
@@ -1917,7 +1924,7 @@ impl AuthServiceImpl {
                     return Ok(PendingRegistration::ExistingAccount { principal_type });
                 }
                 let instance_claim = self
-                    .check_self_registration(principal_type, &value, claim_token)
+                    .check_self_registration(principal_type, &value, claim_token, invite_code)
                     .await?;
                 Ok(PendingRegistration::NewAccount {
                     profile_id: ProfileId::generate(),
@@ -1925,6 +1932,7 @@ impl AuthServiceImpl {
                     value,
                     email,
                     instance_claim,
+                    invite_code: invite_code.map(str::to_string),
                 })
             }
             Err(status) => Err(status),
@@ -1944,15 +1952,23 @@ impl AuthServiceImpl {
         history: Option<HistoryCommit>,
         completion: Option<OperationCompletion>,
     ) -> Result<(ProfileId, CredentialId), Status> {
-        let (profile_id, principal_type, value, email, instance_claim) = match pending {
+        let (profile_id, principal_type, value, email, instance_claim, invite_code) = match pending
+        {
             PendingRegistration::NewAccount {
                 profile_id,
                 principal_type,
                 value,
                 email,
                 instance_claim,
-                ..
-            } => (profile_id, principal_type, value, email, instance_claim),
+                invite_code,
+            } => (
+                profile_id,
+                principal_type,
+                value,
+                email,
+                instance_claim,
+                invite_code,
+            ),
             PendingRegistration::ExistingAccount { principal_type } => {
                 return Err(already_registered(principal_type));
             }
@@ -1966,22 +1982,31 @@ impl AuthServiceImpl {
             );
         }
         let credential_id = credential.id;
-        // The claim registration is admitted by its token whatever the mode;
-        // any other one by the policy as it is now.
-        let enrollment = match instance_claim {
-            Some(_) => crate::enrollment::stored_or_default(self.storage.as_ref())
-                .await
-                .map_err(storage_failure)?,
-            None => self.admitted_by_enrollment(principal_type, &value).await?,
-        };
+        let track_source = crate::enrollment::stored_or_default(self.storage.as_ref())
+            .await
+            .map_err(storage_failure)?
+            .track_source;
         let mut registration = new_self_registration(
             profile_id,
             principal_type,
             &value,
             email.as_ref(),
             credential,
-            enrollment.track_source,
+            track_source,
         )?;
+        // The claim registration is admitted by its token whatever the mode;
+        // any other one by the policy the storage reads in the account's own
+        // transaction, so a policy changed since the start applies to it.
+        if instance_claim.is_none() {
+            if !self.feature_flags.is_registration_enabled().await {
+                return Err(not_configured("registration"));
+            }
+            registration = registration.admitted_by(sid_core::models::EnrollmentGate {
+                pinned: self.enrollment_pin,
+                email: matches!(principal_type, PrincipalType::Email).then(|| value.clone()),
+                invite_code,
+            });
+        }
         if let Some(history) = history {
             registration = registration
                 .with_history(history)
@@ -2014,6 +2039,11 @@ impl AuthServiceImpl {
             Err(sid_core::Error::InvalidState(_)) => {
                 return Err(registration_restricted("instance_claim"));
             }
+            // The policy in force at the commit refuses it, or its invite is
+            // no longer usable.
+            Err(sid_core::Error::RegistrationRestricted(reason)) => {
+                return Err(registration_restricted(enrollment_requirement(&reason)));
+            }
             Err(e) => {
                 return Err(super::password_operation::commit_refusal(
                     e,
@@ -2044,12 +2074,12 @@ impl AuthServiceImpl {
     /// instance claim token, whatever the mode (enrollment-policy.md, First
     /// Administrator); it returns the sealed claim to consume with the account.
     /// Otherwise the registration switch and the enrollment policy decide.
-    /// Self-registration carries no invite, so invite-only and admin-only modes refuse it.
     async fn check_self_registration(
         &self,
         principal_type: PrincipalType,
         value: &str,
         claim_token: Option<&str>,
+        invite_code: Option<&str>,
     ) -> Result<Option<Vec<u8>>, Status> {
         use sid_authn::admin_claim::{self, ClaimError};
         if admin_claim::is_open(self.storage.as_ref())
@@ -2079,18 +2109,21 @@ impl AuthServiceImpl {
                 Err(e) => return Err(internal("verify instance claim", e)),
             }
         }
-        self.admitted_by_enrollment(principal_type, value).await?;
+        self.admitted_by_enrollment(principal_type, value, invite_code)
+            .await?;
         Ok(None)
     }
 
-    /// The enrollment policy in force, when it admits a self-registration of
-    /// `value`: checked when the registration starts and again when it is
-    /// committed, so a policy closed in between applies to it.
+    /// Refuse a self-registration of `value` the enrollment policy in force
+    /// does not admit, before the client spends work on its proof. The
+    /// storage decides again when the account commits, under the policy then
+    /// in force, and spends the invite there.
     async fn admitted_by_enrollment(
         &self,
         principal_type: PrincipalType,
         value: &str,
-    ) -> Result<sid_core::models::EnrollmentPolicy, Status> {
+        invite_code: Option<&str>,
+    ) -> Result<(), Status> {
         use sid_core::enrollment::EnrollmentDenialReason;
         if !self.feature_flags.is_registration_enabled().await {
             return Err(not_configured("registration"));
@@ -2099,15 +2132,25 @@ impl AuthServiceImpl {
             .await
             .map_err(storage_failure)?;
         let email = matches!(principal_type, PrincipalType::Email).then_some(value);
-        if let EnrollmentDecision::Deny(reason) = evaluate_enrollment(&policy, email, None) {
-            return Err(registration_restricted(match reason {
-                EnrollmentDenialReason::AdminOnly => "admin_only",
-                EnrollmentDenialReason::InviteRequired => "invite",
-                EnrollmentDenialReason::EmailRequired => "email",
-                EnrollmentDenialReason::DomainNotAllowed { .. } => "email_domain",
-            }));
+        if let EnrollmentDecision::Deny(reason) = evaluate_enrollment(&policy, email, invite_code) {
+            return Err(registration_restricted(enrollment_requirement(&reason)));
         }
-        Ok(policy)
+        if policy.mode == sid_core::models::EnrollmentMode::InviteOnly
+            && let Some(code) = invite_code
+        {
+            let usable = self
+                .storage
+                .get_invite_by_code(code)
+                .await
+                .map_err(storage_failure)?
+                .is_some_and(|invite| invite.is_usable());
+            if !usable {
+                return Err(registration_restricted(enrollment_requirement(
+                    &EnrollmentDenialReason::InviteInvalid,
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Refuse unless the caller's own interactive session may bind a new
@@ -2960,7 +3003,11 @@ impl AuthService for AuthServiceImpl {
         let req = request.into_inner();
         let (_, charged) = parse_principal(&req.principal)?;
         let pending = self
-            .begin_registration(&req.principal, req.claim_token.as_deref())
+            .begin_registration(
+                &req.principal,
+                req.claim_token.as_deref(),
+                req.invite_code.as_deref(),
+            )
             .await?;
         let owner = match &pending {
             PendingRegistration::NewAccount { profile_id, .. } => OperationOwner::New(*profile_id),

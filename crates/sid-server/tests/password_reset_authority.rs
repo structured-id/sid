@@ -131,6 +131,7 @@ async fn register_from_device(svc: &TestServices, principal: &str, password: &[u
             principal: principal.to_string(),
             registration_request: started.request.clone(),
             claim_token: None,
+            invite_code: None,
         }))
         .await
         .expect("registration start")

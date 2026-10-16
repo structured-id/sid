@@ -5,6 +5,8 @@ use super::{
     Credential, EmailLabel, HistoryCommit, PhoneLabel, Principal, PrincipalId, PrincipalType,
     Profile, ProfileEmail, ProfileEmailId, ProfilePhone, ProfilePhoneId, RegistrationSource,
 };
+use super::{EnrollmentMode, EnrollmentPolicy, SecurityPolicy};
+use crate::enrollment::{EnrollmentDecision, EnrollmentDenialReason, evaluate_enrollment};
 use crate::{Error, Result};
 
 /// The identifier a new account signs up with.
@@ -43,6 +45,43 @@ impl SignupIdentifier<'_> {
     }
 }
 
+/// The admission of a self-registration under the enrollment policy, which
+/// the storage applies in the account's own transaction, so a policy changed
+/// meanwhile applies to it: the deployment's pinned mode and what the
+/// registrant presented.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnrollmentGate {
+    /// The mode the deployment pins over the stored one.
+    pub pinned: Option<EnrollmentMode>,
+    /// The registrant's email address, for a domain-restricted policy.
+    pub email: Option<String>,
+    /// The invite code presented, for an invite-only policy.
+    pub invite_code: Option<String>,
+}
+
+impl EnrollmentGate {
+    /// Admit the registration under `stored` (`None`: the defaults) with the
+    /// pinned mode over it: the invite code to spend with the account when
+    /// the mode is invite-only, or why it is refused.
+    pub fn admit(
+        &self,
+        stored: Option<EnrollmentPolicy>,
+    ) -> core::result::Result<Option<&str>, EnrollmentDenialReason> {
+        let mut policy = stored.unwrap_or_else(|| SecurityPolicy::ce_default().enrollment);
+        if let Some(mode) = self.pinned {
+            policy.mode = mode;
+        }
+        match evaluate_enrollment(&policy, self.email.as_deref(), self.invite_code.as_deref()) {
+            EnrollmentDecision::Deny(reason) => Err(reason),
+            EnrollmentDecision::Allow => Ok(if policy.mode == EnrollmentMode::InviteOnly {
+                self.invite_code.as_deref()
+            } else {
+                None
+            }),
+        }
+    }
+}
+
 /// Everything a new account starts with: the profile, its single signup
 /// principal, the contact rows, the first credential (absent when an
 /// administrator provisions the account and its owner sets one up later) and
@@ -66,9 +105,20 @@ pub struct NewRegistration {
     /// accepted proof, written with the account. Absent for an unproven
     /// password (D018: no trusted history) or no password.
     pub history: Option<HistoryCommit>,
+    /// A self-registration's admission under the enrollment policy, checked
+    /// and its invite spent in the account's transaction. Absent for an
+    /// administrator's provisioning and for the instance claim, which the
+    /// policy does not govern.
+    pub enrollment: Option<EnrollmentGate>,
 }
 
 impl NewRegistration {
+    /// Admit this self-registration through `gate` when it is committed.
+    pub fn admitted_by(mut self, gate: EnrollmentGate) -> Self {
+        self.enrollment = Some(gate);
+        self
+    }
+
     /// Attach the history the registered password's accepted proof writes;
     /// it must be the new profile's.
     pub fn with_history(mut self, history: HistoryCommit) -> Result<Self> {
@@ -122,6 +172,7 @@ impl NewRegistration {
             source: None,
             instance_claim: None,
             history: None,
+            enrollment: None,
         };
         match identifier {
             SignupIdentifier::Username(_) => {

@@ -47,6 +47,7 @@ async fn register_and_sign_in(svc: &TestServices, registered: &str, typed: &str)
             principal: registered.to_string(),
             registration_request: started.request.clone(),
             claim_token: None,
+            invite_code: None,
         }))
         .await
         .unwrap_or_else(|e| panic!("registration start for {registered}: {e:?}"))

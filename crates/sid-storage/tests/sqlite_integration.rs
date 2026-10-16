@@ -972,6 +972,18 @@ async fn test_enrollment_policy_stored_and_replaced() {
 }
 
 #[tokio::test]
+async fn test_registration_admitted_by_the_stored_policy() {
+    common::enrollment_policy::test_registration_admitted_by_the_stored_policy(&setup().await)
+        .await;
+}
+
+#[tokio::test]
+async fn test_invite_spent_once_by_concurrent_registrations() {
+    common::enrollment_policy::test_invite_spent_once_by_concurrent_registrations(&setup().await)
+        .await;
+}
+
+#[tokio::test]
 async fn test_enrollment_policy_keeps_invite_range() {
     common::enrollment_policy::test_enrollment_policy_keeps_invite_range(&setup().await).await;
 }

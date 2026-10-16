@@ -4,9 +4,140 @@
 //! Needs a backend whose policy was never set (an isolated schema or a fresh
 //! database): the scenario starts from the unset state.
 
-use super::test_audit;
-use sid_core::models::{EnrollmentMode, EnrollmentPolicy, InviteConfig};
+use super::{create_test_profile, test_audit, test_invite};
+use sid_core::enrollment::EnrollmentDenialReason;
+use sid_core::models::{
+    EnrollmentGate, EnrollmentMode, EnrollmentPolicy, InviteConfig, NewRegistration,
+    SignupIdentifier,
+};
 use sid_plugin::storage::StorageBackend;
+use uuid::Uuid;
+
+/// A self-registration of a fresh username through `gate`.
+fn gated(name: &str, gate: EnrollmentGate) -> NewRegistration {
+    NewRegistration::new(
+        create_test_profile(name),
+        SignupIdentifier::Username(name),
+        None,
+    )
+    .unwrap()
+    .admitted_by(gate)
+}
+
+fn plain_gate(invite_code: Option<&str>) -> EnrollmentGate {
+    EnrollmentGate {
+        pinned: None,
+        email: None,
+        invite_code: invite_code.map(str::to_string),
+    }
+}
+
+/// The policy decides in the account's own transaction: a registration under
+/// a closed policy stores nothing, and the same one is admitted once the
+/// policy opens. A pinned mode applies over the stored one.
+pub async fn test_registration_admitted_by_the_stored_policy(backend: &dyn StorageBackend) {
+    let tag = Uuid::now_v7().simple().to_string();
+    backend
+        .set_enrollment_policy(&policy(EnrollmentMode::AdminOnly, &[]), test_audit())
+        .await
+        .unwrap();
+    let closed = gated(&format!("closed_{}", &tag[..12]), plain_gate(None));
+    let refused = backend.register_profile(&closed, test_audit()).await;
+    assert!(
+        matches!(
+            refused,
+            Err(sid_core::Error::RegistrationRestricted(
+                EnrollmentDenialReason::AdminOnly
+            ))
+        ),
+        "{refused:?}"
+    );
+    assert!(
+        backend
+            .get_profile(closed.profile.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    backend
+        .set_enrollment_policy(&policy(EnrollmentMode::Open, &[]), test_audit())
+        .await
+        .unwrap();
+    backend
+        .register_profile(&closed, test_audit())
+        .await
+        .unwrap();
+
+    let pinned = gated(
+        &format!("pinned_{}", &tag[..12]),
+        EnrollmentGate {
+            pinned: Some(EnrollmentMode::AdminOnly),
+            ..plain_gate(None)
+        },
+    );
+    assert!(matches!(
+        backend.register_profile(&pinned, test_audit()).await,
+        Err(sid_core::Error::RegistrationRestricted(
+            EnrollmentDenialReason::AdminOnly
+        ))
+    ));
+}
+
+/// Under an invite-only policy a single-use invite admits exactly one of two
+/// concurrent registrations; the other, and one with an unknown code, store
+/// nothing.
+pub async fn test_invite_spent_once_by_concurrent_registrations(backend: &dyn StorageBackend) {
+    let tag = Uuid::now_v7().simple().to_string();
+    let admin = create_test_profile(&format!("inviter_{}", &tag[..12]));
+    backend.create_profile(&admin, test_audit()).await.unwrap();
+    let invite = test_invite(admin.id, 1);
+    backend.create_invite(&invite, test_audit()).await.unwrap();
+    backend
+        .set_enrollment_policy(&policy(EnrollmentMode::InviteOnly, &[]), test_audit())
+        .await
+        .unwrap();
+
+    let code = invite.code.to_lowercase();
+    let a = gated(&format!("inv_a_{}", &tag[..12]), plain_gate(Some(&code)));
+    let b = gated(&format!("inv_b_{}", &tag[..12]), plain_gate(Some(&code)));
+    let (ra, rb) = tokio::join!(
+        backend.register_profile(&a, test_audit()),
+        backend.register_profile(&b, test_audit())
+    );
+    let invalid = |r: &sid_core::Result<()>| {
+        matches!(
+            r,
+            Err(sid_core::Error::RegistrationRestricted(
+                EnrollmentDenialReason::InviteInvalid
+            ))
+        )
+    };
+    assert!(
+        (ra.is_ok() && invalid(&rb)) || (rb.is_ok() && invalid(&ra)),
+        "{ra:?} {rb:?}"
+    );
+    let stored = |id| async move { backend.get_profile(id).await.unwrap().is_some() };
+    assert_ne!(stored(a.profile.id).await, stored(b.profile.id).await);
+    assert_eq!(
+        backend
+            .get_invite(invite.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .use_count,
+        1
+    );
+
+    let unknown = gated(
+        &format!("inv_x_{}", &tag[..12]),
+        plain_gate(Some("ZZZZ9999")),
+    );
+    assert!(invalid(
+        &backend.register_profile(&unknown, test_audit()).await
+    ));
+    assert!(!stored(unknown.profile.id).await);
+}
 
 fn policy(mode: EnrollmentMode, allowed_domains: &[&str]) -> EnrollmentPolicy {
     EnrollmentPolicy {

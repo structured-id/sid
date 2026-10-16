@@ -63,17 +63,21 @@ pub enum Refusal {
 }
 
 /// `policy` as it is stored: allowed domains trimmed, lowercased and without
-/// repeats (registration compares them case-insensitively). Refused when it
-/// changes a pinned mode or lists no usable domain for domain-restricted
-/// enrollment.
+/// repeats (registration compares them case-insensitively). While a mode is
+/// pinned the request carries that mode, as the API reports it, and the
+/// `stored_mode` is kept, so removing the pin restores it. Refused when it
+/// changes a pinned mode or leaves a domain-restricted mode without a usable
+/// domain.
 pub fn validated(
     mut policy: EnrollmentPolicy,
     pinned: Option<EnrollmentMode>,
+    stored_mode: EnrollmentMode,
 ) -> Result<EnrollmentPolicy, Refusal> {
-    if let Some(mode) = pinned
-        && policy.mode != mode
-    {
-        return Err(Refusal::Pinned(mode));
+    if let Some(mode) = pinned {
+        if policy.mode != mode {
+            return Err(Refusal::Pinned(mode));
+        }
+        policy.mode = stored_mode;
     }
     let mut domains = Vec::with_capacity(policy.allowed_domains.len());
     for domain in &policy.allowed_domains {

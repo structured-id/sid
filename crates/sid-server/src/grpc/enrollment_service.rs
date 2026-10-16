@@ -6,7 +6,9 @@
 use sid_authn::caller::{Caller, authenticate};
 use sid_authn::jwt::JwtService;
 use sid_authn::revocation_cache::RevocationCache;
-use sid_core::grpc_error::refuse::{invalid_field, missing_field, not_found, storage_failure};
+use sid_core::grpc_error::refuse::{
+    internal, invalid_field, missing_field, not_found, storage_failure,
+};
 use sid_core::grpc_error::{ApiError, ErrorReason};
 use sid_core::models::{
     AuditEntry, Invite, InviteFilter, InviteId, InviteStatus, ProfileId, generate_invite_code,
@@ -106,6 +108,38 @@ impl EnrollmentServiceImpl {
         self
     }
 
+    /// The use limit and expiry of a new invite: those the request gives,
+    /// else the stored policy's defaults (a default expiry of 0 hours is
+    /// none).
+    async fn invite_terms(
+        &self,
+        max_uses: u32,
+        expires_at: Option<prost_types::Timestamp>,
+    ) -> Result<(u32, Option<chrono::DateTime<chrono::Utc>>), Status> {
+        let expires_at = invite_expiry(expires_at)?;
+        let defaults = crate::enrollment::stored_or_default(self.storage.as_ref())
+            .await
+            .map_err(storage_failure)?
+            .invite;
+        let max_uses = if max_uses == 0 {
+            defaults.default_max_uses
+        } else {
+            max_uses
+        };
+        let expires_at = match expires_at {
+            Some(at) => Some(at),
+            None if defaults.default_expiry_hours > 0 => Some(
+                chrono::Utc::now()
+                    .checked_add_signed(chrono::Duration::hours(i64::from(
+                        defaults.default_expiry_hours,
+                    )))
+                    .ok_or_else(|| internal("invite expiry", "the default expiry overflows"))?,
+            ),
+            None => None,
+        };
+        Ok((max_uses, expires_at))
+    }
+
     /// The policy in force, as the API reports it.
     async fn policy_in_force(&self) -> Result<ProtoEnrollmentPolicy, Status> {
         let policy = crate::enrollment::effective(self.storage.as_ref(), self.pinned_mode)
@@ -186,22 +220,25 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
             .policy
             .ok_or_else(|| missing_field("policy"))
             .and_then(enrollment_policy_from_proto)?;
-        let policy =
-            crate::enrollment::validated(policy, self.pinned_mode).map_err(
-                |refusal| match refusal {
-                    Refusal::Pinned(_) => Status::from(
-                        ApiError::new(ErrorReason::InvalidState, refusal.to_string())
-                            .with_precondition(
-                                "pinned_by_deployment",
-                                "enrollment_policy.mode",
-                                refusal.to_string(),
-                            ),
-                    ),
-                    Refusal::NoDomain | Refusal::BadDomain(_) => {
-                        invalid_field("policy.allowed_domains", refusal.to_string())
-                    }
-                },
-            )?;
+        let stored_mode = crate::enrollment::stored_or_default(self.storage.as_ref())
+            .await
+            .map_err(storage_failure)?
+            .mode;
+        let policy = crate::enrollment::validated(policy, self.pinned_mode, stored_mode).map_err(
+            |refusal| match refusal {
+                Refusal::Pinned(_) => Status::from(
+                    ApiError::new(ErrorReason::InvalidState, refusal.to_string())
+                        .with_precondition(
+                            "pinned_by_deployment",
+                            "enrollment_policy.mode",
+                            refusal.to_string(),
+                        ),
+                ),
+                Refusal::NoDomain | Refusal::BadDomain(_) => {
+                    invalid_field("policy.allowed_domains", refusal.to_string())
+                }
+            },
+        )?;
         self.storage
             .set_enrollment_policy(
                 &policy,
@@ -226,8 +263,7 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
         let created_by = self.admin(&request).await?.profile_id;
         let req = request.into_inner();
 
-        let max_uses = if req.max_uses == 0 { 1 } else { req.max_uses };
-        let expires_at = invite_expiry(req.expires_at)?;
+        let (max_uses, expires_at) = self.invite_terms(req.max_uses, req.expires_at).await?;
 
         let invite = Invite {
             id: InviteId::new(),
@@ -364,8 +400,7 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
             ));
         }
 
-        let max_uses = if req.max_uses == 0 { 1 } else { req.max_uses };
-        let expires_at = invite_expiry(req.expires_at)?;
+        let (max_uses, expires_at) = self.invite_terms(req.max_uses, req.expires_at).await?;
         let created_by_name = self.creator_name(created_by).await?;
 
         let mut invites = Vec::with_capacity(count as usize);

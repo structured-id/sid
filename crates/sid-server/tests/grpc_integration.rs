@@ -1244,6 +1244,7 @@ async fn test_opaque_register_start_invalid_message() {
         principal: "alice@sid.example.com".to_string(),
         registration_request: vec![0xFF, 0xFF], // invalid OPAQUE message
         claim_token: None,
+        invite_code: None,
     });
 
     let err = svc
@@ -2304,6 +2305,7 @@ async fn zkpp_register_without_proof(
             principal: principal.to_string(),
             registration_request: client_registration.message.serialize().to_vec(),
             claim_token: None,
+            invite_code: None,
         }))
         .await
         .unwrap()

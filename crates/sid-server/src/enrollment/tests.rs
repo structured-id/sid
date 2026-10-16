@@ -38,21 +38,41 @@ fn test_pinned_mode_setting() {
 }
 
 /// A pinned mode cannot be changed through the API; the other fields can,
-/// so long as the mode stays the pinned one.
+/// so long as the request carries the pinned mode.
 #[test]
 fn test_validated_refuses_changing_pinned_mode() {
     assert_eq!(
         validated(
             policy(EnrollmentMode::Open, &[]),
-            Some(EnrollmentMode::AdminOnly)
+            Some(EnrollmentMode::AdminOnly),
+            EnrollmentMode::Open,
         ),
         Err(Refusal::Pinned(EnrollmentMode::AdminOnly))
     );
-    let mut same = policy(EnrollmentMode::AdminOnly, &[]);
-    same.track_source = false;
+}
+
+/// Regression: an update of other fields under a pin wrote the pinned mode
+/// into the store, so removing the pin left the installation in it. The
+/// stored mode is kept, and the domain check applies to the mode stored.
+#[test]
+fn test_validated_keeps_the_stored_mode_under_a_pin() {
+    let mut request = policy(EnrollmentMode::AdminOnly, &[]);
+    request.track_source = false;
+    let stored = validated(
+        request,
+        Some(EnrollmentMode::AdminOnly),
+        EnrollmentMode::Open,
+    )
+    .unwrap();
+    assert_eq!(stored.mode, EnrollmentMode::Open);
+    assert!(!stored.track_source);
     assert_eq!(
-        validated(same.clone(), Some(EnrollmentMode::AdminOnly)),
-        Ok(same)
+        validated(
+            policy(EnrollmentMode::AdminOnly, &[]),
+            Some(EnrollmentMode::AdminOnly),
+            EnrollmentMode::DomainRestricted,
+        ),
+        Err(Refusal::NoDomain)
     );
 }
 
@@ -61,20 +81,22 @@ fn test_validated_refuses_changing_pinned_mode() {
 /// is refused rather than stored as a policy that admits no one.
 #[test]
 fn test_validated_normalizes_and_checks_domains() {
+    let open = EnrollmentMode::Open;
     assert_eq!(
         validated(
             policy(
                 EnrollmentMode::DomainRestricted,
                 &[" Acme.Example ", "acme.example", "xn--bcher-kva.example"]
             ),
-            None
+            None,
+            open,
         )
         .unwrap()
         .allowed_domains,
         vec!["acme.example", "xn--bcher-kva.example"]
     );
     assert_eq!(
-        validated(policy(EnrollmentMode::DomainRestricted, &[]), None),
+        validated(policy(EnrollmentMode::DomainRestricted, &[]), None, open),
         Err(Refusal::NoDomain)
     );
     for bad in [
@@ -87,12 +109,12 @@ fn test_validated_normalizes_and_checks_domains() {
     ] {
         assert!(
             matches!(
-                validated(policy(EnrollmentMode::DomainRestricted, &[bad]), None),
+                validated(policy(EnrollmentMode::DomainRestricted, &[bad]), None, open),
                 Err(Refusal::BadDomain(_))
             ),
             "{bad:?} accepted"
         );
     }
     // Other modes need no domain.
-    assert!(validated(policy(EnrollmentMode::InviteOnly, &[]), None).is_ok());
+    assert!(validated(policy(EnrollmentMode::InviteOnly, &[]), None, open).is_ok());
 }

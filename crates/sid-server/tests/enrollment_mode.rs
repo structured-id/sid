@@ -6,7 +6,7 @@
 mod common;
 
 use common::mock_storage::MockStorage;
-use common::opaque_client::try_register;
+use common::opaque_client::{try_register, try_register_invited};
 use common::{TestServices, fresh_token, zkpp_client};
 use sid_core::models::{EnrollmentMode, PrincipalType, Profile};
 use sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService;
@@ -173,6 +173,7 @@ async fn mode_closed_mid_registration_refuses_its_commit() {
             principal: "in_flight".to_string(),
             registration_request: started.request.clone(),
             claim_token: None,
+            invite_code: None,
         }))
         .await
         .unwrap()
@@ -258,4 +259,157 @@ async fn update_is_an_administrator_action_and_validated() {
     .await
     .unwrap();
     assert_eq!(stored.allowed_domains, vec!["acme.example"]);
+}
+
+/// An invite an administrator created, as the API creates it.
+async fn invite(
+    svc: &TestServices,
+    service: &EnrollmentServiceImpl,
+    admin: &Profile,
+    max_uses: u32,
+) -> sid_proto::sid::v1::admin::Invite {
+    let mut request = Request::new(sid_proto::sid::v1::admin::CreateInviteRequest {
+        max_uses,
+        expires_at: None,
+        metadata: Default::default(),
+    });
+    let bearer = fresh_token(svc, admin).await;
+    request
+        .metadata_mut()
+        .insert("authorization", format!("Bearer {bearer}").parse().unwrap());
+    service.create_invite(request).await.unwrap().into_inner()
+}
+
+/// Regression: an invite-only installation refused every self-registration,
+/// since none could carry an invite. A valid invite admits one registration
+/// per use; a used-up, unknown or missing code is refused, with nothing
+/// stored.
+#[tokio::test]
+async fn invite_only_admits_a_registration_per_invite_use() {
+    let admin = administrator();
+    let svc = TestServices::new(MockStorage::new().with_profile(admin.clone()));
+    let service = enrollment(&svc, None);
+    update(&svc, &service, &admin, policy(ProtoMode::InviteOnly, &[]))
+        .await
+        .unwrap();
+    let code = invite(&svc, &service, &admin, 1).await.code;
+
+    try_register_invited(&svc, &svc, "invited", PASSWORD, None, Some(&code))
+        .await
+        .unwrap();
+    assert!(registered(&svc, "invited").await);
+
+    for (who, presented) in [
+        ("second", Some(code.as_str())),
+        ("guesser", Some("ZZZZ9999")),
+        ("uninvited", None),
+    ] {
+        let err = try_register_invited(&svc, &svc, who, PASSWORD, None, presented)
+            .await
+            .unwrap_err();
+        assert_eq!(requirement(&err), "invite", "{who}");
+        assert!(!registered(&svc, who).await, "{who}");
+    }
+}
+
+/// Two registrations started with a single-use invite while it was unused:
+/// the account committed first spends it, the other is refused at its commit.
+#[tokio::test]
+async fn single_use_invite_admits_one_of_two_in_flight() {
+    let admin = administrator();
+    let svc = TestServices::new(MockStorage::new().with_profile(admin.clone()));
+    let service = enrollment(&svc, None);
+    update(&svc, &service, &admin, policy(ProtoMode::InviteOnly, &[]))
+        .await
+        .unwrap();
+    let code = invite(&svc, &service, &admin, 1).await.code;
+
+    let start = |principal: &'static str| {
+        let started = zkpp_client::start(PASSWORD);
+        let request = OpaqueZkppRegistrationStartRequest {
+            principal: principal.to_string(),
+            registration_request: started.request.clone(),
+            claim_token: None,
+            invite_code: Some(code.clone()),
+        };
+        (started, request)
+    };
+    let mut prepared = Vec::new();
+    for principal in ["first_in", "second_in"] {
+        let (started, request) = start(principal);
+        let response = svc
+            .auth
+            .opaque_zkpp_registration_start(Request::new(request))
+            .await
+            .unwrap()
+            .into_inner();
+        prepared.push((principal, started, response));
+    }
+    let mut outcomes = Vec::new();
+    for (principal, started, response) in prepared {
+        let outcome = svc
+            .auth
+            .opaque_zkpp_registration_finish(Request::new(OpaqueZkppRegistrationFinishRequest {
+                operation_id: response.history.unwrap().operation_id,
+                registration_record: zkpp_client::finish(
+                    started,
+                    PASSWORD,
+                    &response.registration_response,
+                ),
+                proof: None,
+            }))
+            .await;
+        outcomes.push((principal, outcome));
+    }
+    assert!(outcomes[0].1.is_ok());
+    let err = outcomes[1].1.as_ref().unwrap_err();
+    assert_eq!(requirement(err), "invite");
+    assert!(registered(&svc, "first_in").await);
+    assert!(!registered(&svc, "second_in").await);
+}
+
+/// Regression: under a pin, an update of other fields stored the pinned
+/// mode, so removing the pin left the installation in it. The stored mode
+/// stays what it was.
+#[tokio::test]
+async fn update_under_a_pin_keeps_the_stored_mode() {
+    let admin = administrator();
+    let svc = TestServices::with_enrollment_pin(
+        MockStorage::new().with_profile(admin.clone()),
+        EnrollmentMode::AdminOnly,
+    );
+    let pinned = enrollment(&svc, Some(EnrollmentMode::AdminOnly));
+    let mut request = policy(ProtoMode::AdminOnly, &[]);
+    request.track_source = false;
+    let reported = update(&svc, &pinned, &admin, request).await.unwrap();
+    assert_eq!(reported.mode(), ProtoMode::AdminOnly);
+    assert!(reported.mode_pinned);
+
+    let stored = svc.storage.enrollment_policy().await.unwrap().unwrap();
+    assert_eq!(stored.mode, EnrollmentMode::Open);
+    assert!(!stored.track_source);
+}
+
+/// Regression: the stored invite defaults were ignored; an invite created
+/// without its own limits got one use and no expiry whatever was stored.
+#[tokio::test]
+async fn new_invites_take_the_stored_defaults() {
+    let admin = administrator();
+    let svc = TestServices::new(MockStorage::new().with_profile(admin.clone()));
+    let service = enrollment(&svc, None);
+    let mut defaults = policy(ProtoMode::InviteOnly, &[]);
+    defaults.invite = Some(InviteConfig {
+        default_max_uses: 5,
+        default_expiry_hours: 48,
+    });
+    update(&svc, &service, &admin, defaults).await.unwrap();
+
+    let created = invite(&svc, &service, &admin, 0).await;
+    assert_eq!(created.max_uses, 5);
+    let expires = created.expires_at.expect("the default expiry").seconds;
+    let in_48h = (chrono::Utc::now() + chrono::Duration::hours(48)).timestamp();
+    assert!((expires - in_48h).abs() <= 60, "{expires} vs {in_48h}");
+
+    // The request's own limit wins over the default.
+    assert_eq!(invite(&svc, &service, &admin, 2).await.max_uses, 2);
 }

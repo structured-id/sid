@@ -258,6 +258,7 @@ async fn password_lifecycle(adapter: &str) {
             principal: omitted_principal.clone(),
             registration_request: request,
             claim_token: None,
+            invite_code: None,
         })
         .await
         .unwrap()
@@ -298,6 +299,7 @@ async fn password_lifecycle(adapter: &str) {
             principal: principal.clone(),
             registration_request: request,
             claim_token: None,
+            invite_code: None,
         })
         .await
         .unwrap()
@@ -365,6 +367,7 @@ async fn password_lifecycle(adapter: &str) {
             principal: other_principal.clone(),
             registration_request: request,
             claim_token: None,
+            invite_code: None,
         })
         .await
         .unwrap()
