@@ -603,6 +603,13 @@ impl IssuerVerifier {
     }
 }
 
+/// The issuer a browser call addressed by its path (`/i/{handle}/grpc/...`),
+/// resolved from the registry before the call reached its service. Only the
+/// server's issuer route puts it in a call's extensions; a client cannot
+/// send it.
+#[derive(Debug, Clone)]
+pub struct AddressedIssuer(pub OidcIssuer);
+
 /// The installation's issuers, looked up by handle, with their signers
 /// opened once per key generation.
 ///

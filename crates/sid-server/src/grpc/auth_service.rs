@@ -3626,7 +3626,9 @@ impl AuthService for AuthServiceImpl {
         request: Request<OAuth2AuthorizeRequest>,
     ) -> Result<Response<OAuth2AuthorizeResponse>, Status> {
         self.check_maintenance().await?;
-        let (client, issuer) = self.authorize_client(request.get_ref()).await?;
+        let (client, issuer) = self
+            .authorize_client(request.get_ref(), request.extensions().get())
+            .await?;
 
         // The bearer token names the session; the code carries that session's
         // authentication, so it must still authorize and be fresh enough for
