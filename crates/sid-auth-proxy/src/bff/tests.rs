@@ -21,6 +21,15 @@ fn broken_store_state() -> ProxyState {
     state
 }
 
+/// What a logout answered about the grant behind the session.
+async fn logout_grant(response: Response) -> String {
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    json["grant"].as_str().unwrap().to_owned()
+}
+
 struct UnreachableCache;
 
 #[async_trait::async_trait]
@@ -173,7 +182,7 @@ async fn test_a_cookie_without_a_session_needs_no_connection() {
     for (request, expected) in [
         (Request::get("/auth/userinfo"), StatusCode::UNAUTHORIZED),
         (Request::post("/api/x"), StatusCode::UNAUTHORIZED),
-        (Request::post("/auth/logout"), StatusCode::NO_CONTENT),
+        (Request::post("/auth/logout"), StatusCode::OK),
     ] {
         let request = request
             .header("cookie", &cookie)
@@ -189,6 +198,10 @@ async fn test_a_cookie_without_a_session_needs_no_connection() {
             .await
             .unwrap();
         assert_eq!(response.status(), expected, "{path}");
+        if path == "/auth/logout" {
+            // No session, so no grant behind it to report on.
+            assert_eq!(logout_grant(response).await, "none");
+        }
     }
 }
 
@@ -401,8 +414,9 @@ async fn test_a_pending_sign_in_under_another_callback_is_refused() {
 }
 
 /// Logout of a live session needs no answer from SID: the session is ended
-/// and the cookies cleared even while the connection cannot be learned; only
-/// the grant's revocation, best effort, would need it.
+/// and the cookies cleared even while the connection cannot be learned. The
+/// answer says the grant was not revoked, so the caller can tell a local end
+/// from a full one.
 #[tokio::test]
 async fn test_logout_ends_the_session_without_a_connection() {
     let mut state = bff_test_state();
@@ -433,7 +447,9 @@ async fn test_logout_ends_the_session_without_a_connection() {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.headers().get("set-cookie").is_some());
+    assert_eq!(logout_grant(response).await, "not_revoked");
     assert!(sessions.get_session(&session_id).await.unwrap().is_none());
 }
 
@@ -681,15 +697,18 @@ async fn test_logout_clears_cookie() {
         .unwrap();
 
     let response = app.oneshot(req).await.unwrap();
-    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(response.status(), StatusCode::OK);
     let set_cookie = response
         .headers()
         .get("set-cookie")
         .unwrap()
         .to_str()
-        .unwrap();
+        .unwrap()
+        .to_owned();
     assert!(set_cookie.contains("Max-Age=0"));
     assert!(set_cookie.contains("__Host-sid-bff="));
+    // A session without a refresh token holds no grant to revoke.
+    assert_eq!(logout_grant(response).await, "none");
 }
 
 #[tokio::test]

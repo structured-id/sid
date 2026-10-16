@@ -264,6 +264,7 @@ struct CallbackParams {
 }
 
 /// `POST /auth/logout`: end the BFF session. Requires the CSRF token.
+/// Answers `{"grant": "revoked" | "not_revoked" | "none"}`.
 ///
 /// Ends the application session only: the IdP's own sign-in session is the
 /// IdP's to end (RP-initiated logout), and the account UI does that itself.
@@ -278,7 +279,7 @@ async fn logout_handler(
     let Some(session_id) = extract_bff_cookie(&headers, &state.bff_cookie_name) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    match state.bff_sessions.get_session(&session_id).await {
+    let grant = match state.bff_sessions.get_session(&session_id).await {
         Ok(Some(session)) => {
             if !csrf_matches(&headers, &session) {
                 tracing::warn!("BFF logout: CSRF token mismatch");
@@ -290,48 +291,71 @@ async fn logout_handler(
                 tracing::error!(error = %e, "BFF logout: cannot destroy the session");
                 return StatusCode::SERVICE_UNAVAILABLE.into_response();
             }
-            revoke_grant(&state, session).await;
+            revoke_grant(&state, session).await
         }
-        Ok(None) => {} // already gone; clear the cookies anyway
+        Ok(None) => GrantOutcome::None, // already gone; clear the cookies anyway
         Err(e) => {
             tracing::error!(error = %e, "BFF logout: cannot read the session");
             return StatusCode::SERVICE_UNAVAILABLE.into_response();
         }
-    }
+    };
 
     let secure_flag = if state.bff_dev_mode { "" } else { " Secure;" };
     let clear_session = format!(
         "{}=; Path=/; HttpOnly;{secure_flag} SameSite=Lax; Max-Age=0",
         state.bff_cookie_name,
     );
-    let mut response = StatusCode::NO_CONTENT.into_response();
+    let mut response = Json(LogoutResult { grant }).into_response();
     if let Ok(val) = clear_session.parse() {
         response.headers_mut().append("set-cookie", val);
     }
     response
 }
 
+/// What `POST /auth/logout` answers once the session is ended.
+#[derive(serde::Serialize)]
+struct LogoutResult {
+    grant: GrantOutcome,
+}
+
+/// What became of the grant behind an ended session.
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum GrantOutcome {
+    /// The issuer revoked it: its refresh token no longer works.
+    Revoked,
+    /// The session held a grant the issuer did not revoke; it lives until
+    /// it expires, though nobody holds its token any more.
+    NotRevoked,
+    /// No grant stood behind the session.
+    None,
+}
+
 /// Revoke the grant behind a destroyed session (RFC 7009 §2.1), so its
-/// refresh token dies with it. The session is already gone, and with it the
-/// only copy of the token, so a failure here leaves nothing anyone holds:
-/// it is logged, not reported to the user. This is also the only part of
-/// logout that needs the connection, so SID being unreachable never keeps a
-/// user signed in.
-async fn revoke_grant(state: &ProxyState, session: BffSession) {
+/// refresh token dies with it. This is the only part of logout that needs
+/// the connection, so SID being unreachable never keeps a user signed in;
+/// the outcome tells the caller whether the grant went with the session.
+async fn revoke_grant(state: &ProxyState, session: BffSession) -> GrantOutcome {
     let Some(refresh_token) = session.refresh_token else {
-        return;
+        return GrantOutcome::None;
     };
     let Some(link) = state.bff() else {
-        return;
+        return GrantOutcome::NotRevoked;
     };
     let revoked = match link.connection().await {
         // A grant of another connection is not this client's to revoke.
-        Ok(connection) if session.connection != connection.binding() => return,
+        Ok(connection) if session.connection != connection.binding() => {
+            return GrantOutcome::NotRevoked;
+        }
         Ok(connection) => link.revoke(connection, refresh_token).await,
         Err(e) => Err(e),
     };
-    if let Err(e) = revoked {
-        tracing::warn!(error = %e, "BFF logout: the grant was not revoked");
+    match revoked {
+        Ok(()) => GrantOutcome::Revoked,
+        Err(e) => {
+            tracing::warn!(error = %e, "BFF logout: the grant was not revoked");
+            GrantOutcome::NotRevoked
+        }
     }
 }
 
