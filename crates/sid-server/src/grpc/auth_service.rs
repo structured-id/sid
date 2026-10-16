@@ -6071,7 +6071,7 @@ impl AuthServiceImpl {
         // Look up profile
         let profile = self
             .storage
-            .get_profile(exchanged.owner())
+            .get_profile(*exchanged.owner())
             .await
             .map_err(storage_failure)?
             .ok_or_else(|| {
@@ -6254,7 +6254,7 @@ impl AuthServiceImpl {
         // Look up profile and session
         let profile = self
             .storage
-            .get_profile(validated.owner())
+            .get_profile(*validated.owner())
             .await
             .map_err(storage_failure)?
             .ok_or_else(|| {

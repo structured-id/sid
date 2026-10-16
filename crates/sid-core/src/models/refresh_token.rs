@@ -109,14 +109,12 @@ pub struct ValidatedRefreshToken<O = ProfileId> {
     inner: RefreshToken<O>,
 }
 
-impl<O: Copy> ValidatedRefreshToken<O> {
-    /// Account that owns this token.
-    pub fn owner(&self) -> O {
-        self.inner.owner
-    }
-}
-
 impl<O> ValidatedRefreshToken<O> {
+    /// Account that owns this token.
+    pub fn owner(&self) -> &O {
+        &self.inner.owner
+    }
+
     /// Token record ID.
     pub fn id(&self) -> Uuid {
         self.inner.id

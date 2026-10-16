@@ -99,7 +99,7 @@ fn test_exchange_valid_code_consumes_self() {
     let exchanged = code.exchange().expect("exchange should succeed");
     // code is consumed: cannot be used again (compile error if attempted)
 
-    assert_eq!(exchanged.owner(), profile_id);
+    assert_eq!(*exchanged.owner(), profile_id);
     assert_eq!(exchanged.client_id(), "test-client");
     assert_eq!(
         exchanged.redirect_uri(),

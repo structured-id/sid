@@ -536,6 +536,12 @@ async fn test_issue_tokens_for_an_owner_that_is_not_copy() {
         .expect("tokens for a non-Copy owner");
 
     assert_eq!(refresh.owner, "account-7");
+
+    // The refresh token it got is validated for rotation like any other.
+    let validated = server
+        .validate_refresh(refresh, &client)
+        .expect("its refresh token validates");
+    assert_eq!(validated.owner(), "account-7");
 }
 
 // `openid` asks for an ID token, which is built from the account's Profile:
