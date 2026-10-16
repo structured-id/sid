@@ -10,6 +10,7 @@ use sid_core::models::{
     MachineUserCredential, MachineUserStatus, MutationContext, OAuth2Client, OidcIssuer, OwnerType,
     ProjectId, ResourceIndicator, TokenEndpointAuthMethod,
 };
+use sid_plugin::ClientResourceRegistry;
 use sid_storage::sqlite::SqliteBackend;
 use tonic::Code;
 

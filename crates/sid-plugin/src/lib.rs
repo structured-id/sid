@@ -13,6 +13,7 @@ pub mod auth;
 pub mod authz;
 pub mod blob_store;
 pub mod cache;
+pub mod client_registry;
 pub mod crypto;
 pub mod event_bus;
 pub mod geoip;
@@ -31,6 +32,7 @@ pub use auth::{AuthContext, AuthProvider, AuthResult};
 pub use authz::{AuthzCheckRequest, AuthzCheckResponse, AuthzEngine, AuthzError};
 pub use blob_store::BlobStore;
 pub use cache::{CacheBackend, CacheError, CacheResult, NoCacheBackend};
+pub use client_registry::ClientResourceRegistry;
 pub use crypto::{
     CurveId, LoginState, OpaqueError, OpaqueOperations, OpaqueSetupHandle, SessionKey,
     StoredCredential,

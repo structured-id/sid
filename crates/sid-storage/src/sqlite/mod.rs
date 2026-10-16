@@ -53,6 +53,7 @@ pub use audit::SqliteAuditLog;
 use async_trait::async_trait;
 use sid_core::models::MutationContext;
 use sid_core::{Error as SidError, Result as SidResult};
+use sid_plugin::ClientResourceRegistry;
 use sid_plugin::storage::StorageBackend;
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
@@ -325,6 +326,42 @@ where
     let raw: String = col(row, name)?;
     raw.parse()
         .map_err(|e: String| SidError::Storage(format!("column {name}: {e}")))
+}
+
+// ─── ClientResourceRegistry impl — see project.rs and application.rs ───
+
+#[async_trait]
+impl ClientResourceRegistry for SqliteBackend {
+    async fn get_oauth2_client(
+        &self,
+        client_id: &str,
+    ) -> SidResult<Option<sid_core::models::OAuth2Client>> {
+        self.get_oauth2_client_impl(client_id).await
+    }
+
+    async fn get_protected_resource(
+        &self,
+        id: sid_core::models::ResourceId,
+    ) -> SidResult<Option<sid_core::models::ProtectedResource>> {
+        self.get_protected_resource_impl(id).await
+    }
+
+    async fn protected_resource_by_indicator(
+        &self,
+        issuer: sid_core::models::IssuerId,
+        indicator: &sid_core::models::ResourceIndicator,
+    ) -> SidResult<Option<sid_core::models::ProtectedResource>> {
+        self.protected_resource_by_indicator_impl(issuer, indicator)
+            .await
+    }
+
+    async fn resource_access(
+        &self,
+        client_id: &str,
+        resource: sid_core::models::ResourceId,
+    ) -> SidResult<Option<sid_core::models::ResourceAccess>> {
+        self.resource_access_impl(client_id, resource).await
+    }
 }
 
 // ─── StorageBackend trait impl — delegates to domain modules ───
@@ -1005,13 +1042,6 @@ impl StorageBackend for SqliteBackend {
     }
 
     // OAuth2 client operations — see project.rs
-    async fn get_oauth2_client(
-        &self,
-        client_id: &str,
-    ) -> SidResult<Option<sid_core::models::OAuth2Client>> {
-        self.get_oauth2_client_impl(client_id).await
-    }
-
     async fn update_oauth2_client(
         &self,
         client: &sid_core::models::OAuth2Client,
@@ -1107,13 +1137,6 @@ impl StorageBackend for SqliteBackend {
         self.create_protected_resource_impl(resource, ctx).await
     }
 
-    async fn get_protected_resource(
-        &self,
-        id: sid_core::models::ResourceId,
-    ) -> SidResult<Option<sid_core::models::ProtectedResource>> {
-        self.get_protected_resource_impl(id).await
-    }
-
     async fn protected_resource_of_application(
         &self,
         id: sid_core::models::ApplicationId,
@@ -1135,15 +1158,6 @@ impl StorageBackend for SqliteBackend {
         ctx: MutationContext,
     ) -> SidResult<bool> {
         self.import_protected_resource_impl(resource, ctx).await
-    }
-
-    async fn protected_resource_by_indicator(
-        &self,
-        issuer: sid_core::models::IssuerId,
-        indicator: &sid_core::models::ResourceIndicator,
-    ) -> SidResult<Option<sid_core::models::ProtectedResource>> {
-        self.protected_resource_by_indicator_impl(issuer, indicator)
-            .await
     }
 
     async fn update_protected_resource(
@@ -1170,14 +1184,6 @@ impl StorageBackend for SqliteBackend {
     ) -> SidResult<bool> {
         self.remove_resource_access_impl(client_id, resource, ctx)
             .await
-    }
-
-    async fn resource_access(
-        &self,
-        client_id: &str,
-        resource: sid_core::models::ResourceId,
-    ) -> SidResult<Option<sid_core::models::ResourceAccess>> {
-        self.resource_access_impl(client_id, resource).await
     }
 
     async fn list_resource_access_by_client(

@@ -4,7 +4,7 @@
 use async_trait::async_trait;
 use sid_core::Result as SidResult;
 use sid_core::models::*;
-use sid_plugin::StorageBackend;
+use sid_plugin::{ClientResourceRegistry, StorageBackend};
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use uuid::Uuid;
@@ -924,6 +924,47 @@ impl sid_plugin::history_keys::HistoryKeyStore for MockStorage {
 
     async fn import_keys(&self, _: &KeyArchive, _: AuditEntry) -> SidResult<bool> {
         unimplemented!("instance transfer is tested against the real backends")
+    }
+}
+
+#[async_trait]
+impl ClientResourceRegistry for MockStorage {
+    async fn get_oauth2_client(&self, client_id: &str) -> SidResult<Option<OAuth2Client>> {
+        let inner = self.inner.lock().unwrap();
+        if inner.client_reads_fail {
+            return Err(sid_core::Error::Storage("read oauth2 client".into()));
+        }
+        Ok(inner.oauth2_clients.get(client_id).cloned())
+    }
+
+    async fn get_protected_resource(&self, id: ResourceId) -> SidResult<Option<ProtectedResource>> {
+        Ok(self.inner.lock().unwrap().resources.get(&id).cloned())
+    }
+
+    async fn protected_resource_by_indicator(
+        &self,
+        issuer: IssuerId,
+        indicator: &ResourceIndicator,
+    ) -> SidResult<Option<ProtectedResource>> {
+        let inner = self.inner.lock().unwrap();
+        Ok(inner
+            .resources
+            .values()
+            .find(|r| r.issuer_id == issuer && &r.indicator == indicator)
+            .cloned())
+    }
+
+    async fn resource_access(
+        &self,
+        client_id: &str,
+        resource: ResourceId,
+    ) -> SidResult<Option<ResourceAccess>> {
+        let inner = self.inner.lock().unwrap();
+        Ok(inner
+            .resource_access
+            .iter()
+            .find(|a| a.client_id == client_id && a.resource_id == resource)
+            .cloned())
     }
 }
 
@@ -2131,14 +2172,6 @@ impl StorageBackend for MockStorage {
         Ok(ended)
     }
 
-    async fn get_oauth2_client(&self, client_id: &str) -> SidResult<Option<OAuth2Client>> {
-        let inner = self.inner.lock().unwrap();
-        if inner.client_reads_fail {
-            return Err(sid_core::Error::Storage("read oauth2 client".into()));
-        }
-        Ok(inner.oauth2_clients.get(client_id).cloned())
-    }
-
     async fn update_oauth2_client(
         &self,
         client: &OAuth2Client,
@@ -2382,10 +2415,6 @@ impl StorageBackend for MockStorage {
         Ok(())
     }
 
-    async fn get_protected_resource(&self, id: ResourceId) -> SidResult<Option<ProtectedResource>> {
-        Ok(self.inner.lock().unwrap().resources.get(&id).cloned())
-    }
-
     async fn protected_resource_of_application(
         &self,
         id: ApplicationId,
@@ -2432,19 +2461,6 @@ impl StorageBackend for MockStorage {
         }
         inner.resources.insert(resource.id, resource.clone());
         Ok(true)
-    }
-
-    async fn protected_resource_by_indicator(
-        &self,
-        issuer: IssuerId,
-        indicator: &ResourceIndicator,
-    ) -> SidResult<Option<ProtectedResource>> {
-        let inner = self.inner.lock().unwrap();
-        Ok(inner
-            .resources
-            .values()
-            .find(|r| r.issuer_id == issuer && &r.indicator == indicator)
-            .cloned())
     }
 
     async fn update_protected_resource(
@@ -2522,19 +2538,6 @@ impl StorageBackend for MockStorage {
             .resource_access
             .retain(|a| !(a.client_id == client_id && a.resource_id == resource));
         Ok(inner.resource_access.len() != before)
-    }
-
-    async fn resource_access(
-        &self,
-        client_id: &str,
-        resource: ResourceId,
-    ) -> SidResult<Option<ResourceAccess>> {
-        let inner = self.inner.lock().unwrap();
-        Ok(inner
-            .resource_access
-            .iter()
-            .find(|a| a.client_id == client_id && a.resource_id == resource)
-            .cloned())
     }
 
     async fn list_resource_access_by_client(
