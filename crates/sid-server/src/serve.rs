@@ -44,6 +44,9 @@ use sid_proto::sid::v1::{
 
 use crate::init::{CeComponents, spawn_work_runner};
 
+#[cfg(feature = "http")]
+pub mod browser_route;
+
 /// The services one server exposes: routed and reported on the gRPC health
 /// service together.
 pub struct CeServices {
@@ -335,7 +338,7 @@ pub async fn serve(
     #[cfg(feature = "http")]
     let mut http = http_proxy.map(|proxy| {
         info!(bind = %proxy.config().listen.http, "HTTP transcoder listening");
-        let upstream = transcoder_upstream(routes.clone());
+        let upstream = transcoder_upstream(routes.clone(), c.issuers.clone());
         let http_stopped = stopped.clone().wait();
         tokio::spawn(
             async move { sid_infra::http::serve(&proxy, upstream, http_stopped, drain).await },
@@ -399,14 +402,19 @@ pub async fn serve(
 }
 
 /// The services the embedded transcoder calls in process: gRPC-Web answered
-/// here, and every transcoded call carrying the HTTP request it was made
-/// from (see [`transcoded_request`]).
+/// here, browser sign-in calls addressed to an issuer of `issuers` (see
+/// [`browser_route`]), and every transcoded call carrying the HTTP request
+/// it was made from (see [`transcoded_request`]).
 #[cfg(feature = "http")]
 pub fn transcoder_upstream(
     routes: tonic::service::Routes,
+    issuers: std::sync::Arc<sid_authn::issuer::IssuerRegistry>,
 ) -> impl structured_proxy::upstream::Upstream {
     tower::ServiceBuilder::new()
         .layer(tonic_web::GrpcWebLayer::new())
+        .layer(tower::layer::layer_fn(move |inner| {
+            browser_route::IssuerRoute::new(inner, issuers.clone())
+        }))
         .map_request(transcoded_request)
         .service(routes)
 }

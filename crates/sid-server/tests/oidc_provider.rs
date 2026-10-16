@@ -6,6 +6,7 @@
 mod common;
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use common::TestServices;
@@ -213,10 +214,15 @@ async fn over_http(provider: OidcProviderServiceImpl) -> String {
     let proxy = sid_server::serve::http_transcoder(Some("127.0.0.1:0"), None, None)
         .unwrap()
         .expect("a bind address gives a transcoder");
-    // The server's own composition of what the transcoder calls.
-    let routes = sid_server::serve::transcoder_upstream(tonic::service::Routes::new(
-        OidcProviderServiceServer::new(provider),
-    ));
+    // The server's own composition of what the transcoder calls. No browser
+    // call is addressed to an issuer here, so the route's registry is empty.
+    let routes = sid_server::serve::transcoder_upstream(
+        tonic::service::Routes::new(OidcProviderServiceServer::new(provider)),
+        Arc::new(sid_authn::issuer::IssuerRegistry::new(
+            Arc::new(MockStorage::new()),
+            common::test_key_manager(),
+        )),
+    );
     // Bound before the task starts: a request queues until it is accepted.
     // Serves until the test's runtime ends.
     tokio::spawn(async move {
