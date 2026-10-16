@@ -6368,6 +6368,7 @@ dependencies = [
  "anyhow",
  "axum",
  "http-body-util",
+ "percent-encoding",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",

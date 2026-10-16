@@ -23,6 +23,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{Request, State};
+use axum::http::request::Parts;
 use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
@@ -43,6 +44,7 @@ pub enum BundleError {
 /// A compiled UI bundle and where it is served.
 #[derive(Debug, Clone)]
 pub struct UiBundle {
+    /// The bundle directory, canonical: every served file resolves inside it.
     dir: PathBuf,
     mount: String,
     config: Arc<[u8]>,
@@ -52,14 +54,22 @@ impl UiBundle {
     /// The bundle in `dir`, served under `mount` (`/account/`), with the
     /// deployment's public configuration `config` (a JSON object).
     ///
-    /// The configuration must name its `environment` and `release`; it is
-    /// served as given, so it must hold only public values.
+    /// The mount is a literal path of unreserved characters (RFC 3986
+    /// §2.3) and `/`, so it never reads as route syntax. The configuration
+    /// must name its `environment` and `release`; it is served as given, so
+    /// it must hold only public values.
     pub fn new(dir: &Path, mount: &str, config: &[u8]) -> Result<Self, BundleError> {
-        if !mount.starts_with('/') || !mount.ends_with('/') {
+        let literal = mount
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-._~/".contains(&b));
+        if !mount.starts_with('/') || !mount.ends_with('/') || !literal || mount.contains("//") {
             return Err(BundleError::Mount(mount.to_owned()));
         }
+        let dir = dir
+            .canonicalize()
+            .map_err(|_| BundleError::NoShell(dir.to_path_buf()))?;
         if !dir.join("index.html").is_file() {
-            return Err(BundleError::NoShell(dir.to_path_buf()));
+            return Err(BundleError::NoShell(dir));
         }
         let value: serde_json::Value = serde_json::from_slice(config)
             .map_err(|e| BundleError::Config(format!("not JSON: {e}")))?;
@@ -73,7 +83,7 @@ impl UiBundle {
             }
         }
         Ok(Self {
-            dir: dir.to_path_buf(),
+            dir,
             mount: mount.to_owned(),
             config: config.into(),
         })
@@ -104,7 +114,9 @@ async fn serve(State(bundle): State<Arc<UiBundle>>, request: Request) -> Respons
     if !matches!(*request.method(), Method::GET | Method::HEAD) {
         return StatusCode::METHOD_NOT_ALLOWED.into_response();
     }
-    let path = request.uri().path().to_owned();
+    // The body is never read; the parts are what a file request needs.
+    let (request, _) = request.into_parts();
+    let path = request.uri.path().to_owned();
     let rest = path.strip_prefix(&bundle.mount).unwrap_or("");
     let mut response = if rest == "config.json" {
         let mut response = Response::new(Body::from(bundle.config.to_vec()));
@@ -113,32 +125,50 @@ async fn serve(State(bundle): State<Arc<UiBundle>>, request: Request) -> Respons
             HeaderValue::from_static("application/json"),
         );
         no_store(response)
-    } else if has_extension(rest) {
+    } else if rest.starts_with("assets/") || has_extension(rest) {
+        // Everything under assets/ is build output, extension or not.
         let cache = if rest.starts_with("assets/") {
             IMMUTABLE
         } else {
             NO_STORE
         };
-        let file = file_request(&request, rest);
-        let response = match ServeDir::new(&bundle.dir).oneshot(file).await {
-            Ok(response) => response.map(Body::new),
-            Err(never) => match never {},
-        };
-        if response.status().is_success() {
-            with_cache(response, cache)
-        } else {
+        match file(&bundle, &request, rest).await {
             // A missing file stays a 404, never the shell.
-            StatusCode::NOT_FOUND.into_response()
+            Some(response) if response.status() == StatusCode::NOT_FOUND => {
+                StatusCode::NOT_FOUND.into_response()
+            }
+            // Success, a 304 to a revalidation or a 412 keep their status.
+            Some(response) => with_cache(response, cache),
+            None => StatusCode::NOT_FOUND.into_response(),
         }
     } else {
-        let shell = file_request(&request, "index.html");
-        match ServeDir::new(&bundle.dir).oneshot(shell).await {
-            Ok(response) => no_store(response.map(Body::new)),
-            Err(never) => match never {},
+        match file(&bundle, &request, "index.html").await {
+            Some(response) => no_store(response),
+            None => StatusCode::NOT_FOUND.into_response(),
         }
     };
     isolate(&mut response);
     response
+}
+
+/// The bundle's `rest` (a path as the request spelled it) answered for
+/// `request`, or `None` when it does not resolve to a file inside the
+/// bundle: a symlink is followed only while its target stays inside.
+async fn file(bundle: &UiBundle, request: &Parts, rest: &str) -> Option<Response> {
+    let decoded = percent_encoding::percent_decode_str(rest)
+        .decode_utf8()
+        .ok()?;
+    let resolved = tokio::fs::canonicalize(bundle.dir.join(decoded.as_ref()))
+        .await
+        .ok()?;
+    if !resolved.starts_with(&bundle.dir) {
+        return None;
+    }
+    let file = file_request(request, rest);
+    match ServeDir::new(&bundle.dir).oneshot(file).await {
+        Ok(response) => Some(response.map(Body::new)),
+        Err(never) => match never {},
+    }
 }
 
 /// Whether the last path segment names a file (`app.js`), not a page.
@@ -149,11 +179,11 @@ fn has_extension(rest: &str) -> bool {
 }
 
 /// `request` for `file`, relative to the bundle directory.
-fn file_request(request: &Request, file: &str) -> Request {
+fn file_request(request: &Parts, file: &str) -> Request {
     let mut builder = Request::builder()
-        .method(request.method().clone())
+        .method(request.method.clone())
         .uri(format!("/{file}"));
-    for (name, value) in request.headers() {
+    for (name, value) in &request.headers {
         builder = builder.header(name, value);
     }
     builder

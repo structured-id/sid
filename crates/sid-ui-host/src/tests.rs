@@ -123,6 +123,73 @@ async fn test_missing_files_are_not_found() {
     }
 }
 
+/// Everything under `assets/` is build output, extension or not: served
+/// when it exists, 404 when it does not, never the shell.
+#[tokio::test]
+async fn test_extensionless_assets_are_files() {
+    let dir = bundle_dir("extensionless");
+    std::fs::write(dir.join("assets/runtime-config"), "data").unwrap();
+    let app = router(UiBundle::new(&dir, "/account/", CONFIG).unwrap());
+    let (status, response) = get_path(&app, Method::GET, "/account/assets/runtime-config").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body(response).await, "data");
+    let (status, response) = get_path(&app, Method::GET, "/account/assets/missing").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(!body(response).await.contains("shell"));
+}
+
+/// A revalidation the file still satisfies stays a 304, not a 404.
+#[tokio::test]
+async fn test_conditional_requests_keep_their_status() {
+    let app = app("conditional");
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/account/assets/app-abc123.js")
+                .header(header::IF_MODIFIED_SINCE, "Fri, 31 Dec 2100 23:59:59 GMT")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+}
+
+/// A symlink in the bundle never leads outside it.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_symlinks_out_of_the_bundle_are_refused() {
+    let dir = bundle_dir("symlink");
+    let outside = std::env::temp_dir().join(format!("sid-ui-host-secret-{}", std::process::id()));
+    std::fs::write(&outside, "secret").unwrap();
+    std::os::unix::fs::symlink(&outside, dir.join("assets/leak.txt")).unwrap();
+    std::os::unix::fs::symlink(&outside, dir.join("leak.txt")).unwrap();
+    let app = router(UiBundle::new(&dir, "/account/", CONFIG).unwrap());
+    for path in ["/account/assets/leak.txt", "/account/leak.txt"] {
+        let (status, response) = get_path(&app, Method::GET, path).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+        assert!(!body(response).await.contains("secret"), "{path}");
+    }
+}
+
+/// A mount path is a literal path, never route syntax that would capture
+/// other paths of the host.
+#[test]
+fn test_route_syntax_in_mounts_is_refused() {
+    let dir = bundle_dir("mountsyntax");
+    for mount in ["/{tenant}/", "/*all/", "/a//b/", "/a b/", "/:id/"] {
+        assert!(
+            matches!(
+                UiBundle::new(&dir, mount, CONFIG),
+                Err(BundleError::Mount(_))
+            ),
+            "{mount}"
+        );
+    }
+    assert!(UiBundle::new(&dir, "/account/v-2_x.y~/", CONFIG).is_ok());
+}
+
 /// A file at the bundle root is served, uncached.
 #[tokio::test]
 async fn test_root_files_are_served() {
