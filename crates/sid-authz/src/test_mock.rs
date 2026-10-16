@@ -94,6 +94,37 @@ impl sid_plugin::ClientResourceRegistry for MockStorage {
 }
 
 #[async_trait::async_trait]
+impl sid_plugin::IssuerStore for MockStorage {
+    async fn oidc_issuer_for(
+        &self,
+        _: sid_core::models::IssuerAuthority,
+        _: OrgId,
+    ) -> Result<Option<sid_core::models::OidcIssuer>> {
+        unimplemented!()
+    }
+    async fn oidc_issuer_by_handle(
+        &self,
+        _: &sid_core::models::IssuerHandle,
+    ) -> Result<Option<sid_core::models::OidcIssuer>> {
+        unimplemented!()
+    }
+    async fn insert_oidc_issuer(
+        &self,
+        _: &sid_core::models::OidcIssuer,
+        _: &sid_core::models::IssuerSigningKey,
+        _audit: MutationContext,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
+    async fn oidc_issuer_signing_keys(
+        &self,
+        _: sid_core::models::IssuerId,
+    ) -> Result<Vec<sid_core::models::IssuerSigningKey>> {
+        unimplemented!()
+    }
+}
+
+#[async_trait::async_trait]
 impl sid_plugin::GrantStore for MockStorage {
     type Owner = sid_core::models::ProfileId;
 
@@ -679,33 +710,6 @@ impl sid_plugin::StorageBackend for MockStorage {
         unimplemented!()
     }
     async fn assign_unowned_clients(&self, _: OrgId, _audit: MutationContext) -> Result<u64> {
-        unimplemented!()
-    }
-    async fn oidc_issuer_for(
-        &self,
-        _: sid_core::models::IssuerAuthority,
-        _: OrgId,
-    ) -> Result<Option<sid_core::models::OidcIssuer>> {
-        unimplemented!()
-    }
-    async fn oidc_issuer_by_handle(
-        &self,
-        _: &sid_core::models::IssuerHandle,
-    ) -> Result<Option<sid_core::models::OidcIssuer>> {
-        unimplemented!()
-    }
-    async fn insert_oidc_issuer(
-        &self,
-        _: &sid_core::models::OidcIssuer,
-        _: &sid_core::models::IssuerSigningKey,
-        _audit: MutationContext,
-    ) -> Result<bool> {
-        unimplemented!()
-    }
-    async fn oidc_issuer_signing_keys(
-        &self,
-        _: sid_core::models::IssuerId,
-    ) -> Result<Vec<sid_core::models::IssuerSigningKey>> {
         unimplemented!()
     }
     async fn admin_exists(&self) -> Result<bool> {

@@ -969,6 +969,78 @@ impl ClientResourceRegistry for MockStorage {
 }
 
 #[async_trait]
+impl sid_plugin::IssuerStore for MockStorage {
+    async fn oidc_issuer_for(
+        &self,
+        authority: sid_core::models::IssuerAuthority,
+        recipient_org: sid_core::models::OrgId,
+    ) -> SidResult<Option<sid_core::models::OidcIssuer>> {
+        let inner = self.inner.lock().unwrap();
+        Ok(inner
+            .oidc_issuers
+            .iter()
+            .find(|i| i.authority == authority && i.recipient_org == recipient_org)
+            .cloned())
+    }
+
+    async fn oidc_issuer_by_handle(
+        &self,
+        handle: &sid_core::models::IssuerHandle,
+    ) -> SidResult<Option<sid_core::models::OidcIssuer>> {
+        let inner = self.inner.lock().unwrap();
+        Ok(inner
+            .oidc_issuers
+            .iter()
+            .find(|i| &i.handle == handle)
+            .cloned())
+    }
+
+    async fn insert_oidc_issuer(
+        &self,
+        issuer: &sid_core::models::OidcIssuer,
+        first_key: &sid_core::models::IssuerSigningKey,
+        _ctx: MutationContext,
+    ) -> SidResult<bool> {
+        issuer.check_first_key(first_key)?;
+        let mut inner = self.inner.lock().unwrap();
+        if inner
+            .oidc_issuers
+            .iter()
+            .any(|i| i.authority == issuer.authority && i.recipient_org == issuer.recipient_org)
+        {
+            return Ok(false);
+        }
+        if inner
+            .oidc_issuers
+            .iter()
+            .any(|i| i.handle == issuer.handle || i.canonical_url == issuer.canonical_url)
+        {
+            return Err(sid_core::Error::Conflict(
+                "oidc issuer already exists".into(),
+            ));
+        }
+        inner.oidc_issuers.push(issuer.clone());
+        inner.oidc_issuer_keys.push(first_key.clone());
+        Ok(true)
+    }
+
+    async fn oidc_issuer_signing_keys(
+        &self,
+        issuer: sid_core::models::IssuerId,
+    ) -> SidResult<Vec<sid_core::models::IssuerSigningKey>> {
+        let inner = self.inner.lock().unwrap();
+        let mut keys: Vec<_> = inner
+            .oidc_issuer_keys
+            .iter()
+            .filter(|k| k.issuer_id == issuer)
+            .cloned()
+            .collect();
+        keys.sort_by_key(|k| k.generation);
+        Ok(keys)
+    }
+}
+
+#[async_trait]
 impl GrantStore for MockStorage {
     type Owner = ProfileId;
 
@@ -2987,75 +3059,6 @@ impl StorageBackend for MockStorage {
             }
         }
         Ok(assigned)
-    }
-
-    async fn oidc_issuer_for(
-        &self,
-        authority: sid_core::models::IssuerAuthority,
-        recipient_org: sid_core::models::OrgId,
-    ) -> SidResult<Option<sid_core::models::OidcIssuer>> {
-        let inner = self.inner.lock().unwrap();
-        Ok(inner
-            .oidc_issuers
-            .iter()
-            .find(|i| i.authority == authority && i.recipient_org == recipient_org)
-            .cloned())
-    }
-
-    async fn oidc_issuer_by_handle(
-        &self,
-        handle: &sid_core::models::IssuerHandle,
-    ) -> SidResult<Option<sid_core::models::OidcIssuer>> {
-        let inner = self.inner.lock().unwrap();
-        Ok(inner
-            .oidc_issuers
-            .iter()
-            .find(|i| &i.handle == handle)
-            .cloned())
-    }
-
-    async fn insert_oidc_issuer(
-        &self,
-        issuer: &sid_core::models::OidcIssuer,
-        first_key: &sid_core::models::IssuerSigningKey,
-        _ctx: MutationContext,
-    ) -> SidResult<bool> {
-        issuer.check_first_key(first_key)?;
-        let mut inner = self.inner.lock().unwrap();
-        if inner
-            .oidc_issuers
-            .iter()
-            .any(|i| i.authority == issuer.authority && i.recipient_org == issuer.recipient_org)
-        {
-            return Ok(false);
-        }
-        if inner
-            .oidc_issuers
-            .iter()
-            .any(|i| i.handle == issuer.handle || i.canonical_url == issuer.canonical_url)
-        {
-            return Err(sid_core::Error::Conflict(
-                "oidc issuer already exists".into(),
-            ));
-        }
-        inner.oidc_issuers.push(issuer.clone());
-        inner.oidc_issuer_keys.push(first_key.clone());
-        Ok(true)
-    }
-
-    async fn oidc_issuer_signing_keys(
-        &self,
-        issuer: sid_core::models::IssuerId,
-    ) -> SidResult<Vec<sid_core::models::IssuerSigningKey>> {
-        let inner = self.inner.lock().unwrap();
-        let mut keys: Vec<_> = inner
-            .oidc_issuer_keys
-            .iter()
-            .filter(|k| k.issuer_id == issuer)
-            .cloned()
-            .collect();
-        keys.sort_by_key(|k| k.generation);
-        Ok(keys)
     }
 
     async fn admin_exists(&self) -> SidResult<bool> {
