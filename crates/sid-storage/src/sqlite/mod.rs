@@ -1459,6 +1459,17 @@ impl StorageBackend for SqliteBackend {
         self.admin_exists_impl().await
     }
 
+    async fn bootstrap_policy(&self) -> SidResult<sid_core::models::BootstrapPolicy> {
+        self.bootstrap_policy_impl().await
+    }
+
+    async fn adopt_central_management(
+        &self,
+        audit: MutationContext,
+    ) -> SidResult<sid_core::models::CentralAdoption> {
+        self.adopt_central_management_impl(audit).await
+    }
+
     async fn claim_first_admin(
         &self,
         claim_sealed: &[u8],

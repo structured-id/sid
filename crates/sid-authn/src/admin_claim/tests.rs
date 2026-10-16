@@ -163,6 +163,27 @@ async fn verify_returns_the_stored_claim_only_for_the_token() {
     ));
 }
 
+/// A start racing the adoption of central management: the creation it began
+/// as self-managed is refused once the policy is recorded, and that is no
+/// claim, not a failed start. A creation that fails on a self-managed
+/// installation is still a failure.
+#[tokio::test]
+async fn creation_refused_by_adoption_is_no_claim() {
+    let (central, keys) = (storage().await, key_manager());
+    central
+        .adopt_central_management(AuditEntry::system("test", "bootstrap_policy").into())
+        .await
+        .unwrap();
+    let refused = create_claim(&central, keys.as_ref()).await;
+    assert!(refused.is_err());
+    assert!(settled(&central, refused).await.unwrap().is_none());
+
+    let self_managed = storage().await;
+    let failed: Result<SecretString, InstanceSecretError<core::convert::Infallible>> =
+        Err(InstanceSecretError::Malformed);
+    assert!(settled(&self_managed, failed).await.is_err());
+}
+
 /// The token is stored only sealed.
 #[tokio::test]
 async fn token_is_stored_sealed() {
