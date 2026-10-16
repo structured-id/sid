@@ -978,6 +978,11 @@ async fn test_registration_admitted_by_the_stored_policy() {
 }
 
 #[tokio::test]
+async fn test_kept_mode_and_domains_enforced() {
+    common::enrollment_policy::test_kept_mode_and_domains_enforced(&setup().await).await;
+}
+
+#[tokio::test]
 async fn test_admission_records_its_source() {
     common::enrollment_policy::test_admission_records_its_source(&setup().await).await;
 }

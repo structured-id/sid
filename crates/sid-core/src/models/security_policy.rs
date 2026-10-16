@@ -420,6 +420,16 @@ impl EnrollmentMode {
     }
 }
 
+/// How an enrollment policy update writes its mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModeWrite {
+    /// The update's mode replaces the stored one.
+    Replace,
+    /// The stored mode stays, read in the update's own transaction; with
+    /// nothing stored yet, the update's mode is written.
+    KeepStored,
+}
+
 parse_stored!(
     EnrollmentMode,
     "enrollment mode",

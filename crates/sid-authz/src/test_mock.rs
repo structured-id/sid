@@ -730,6 +730,7 @@ impl sid_plugin::StorageBackend for MockStorage {
     async fn set_enrollment_policy(
         &self,
         _: &sid_core::models::EnrollmentPolicy,
+        _: sid_core::models::ModeWrite,
         _audit: MutationContext,
     ) -> Result<()> {
         unimplemented!()

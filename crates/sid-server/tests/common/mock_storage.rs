@@ -3137,9 +3137,24 @@ impl StorageBackend for MockStorage {
     async fn set_enrollment_policy(
         &self,
         policy: &sid_core::models::EnrollmentPolicy,
+        mode: sid_core::models::ModeWrite,
         _ctx: MutationContext,
     ) -> SidResult<()> {
-        self.inner.lock().unwrap().enrollment_policy = Some(policy.clone());
+        let mut inner = self.inner.lock().unwrap();
+        let mut stored = policy.clone();
+        if let (sid_core::models::ModeWrite::KeepStored, Some(current)) =
+            (mode, inner.enrollment_policy.as_ref())
+        {
+            stored.mode = current.mode;
+        }
+        if stored.mode == sid_core::models::EnrollmentMode::DomainRestricted
+            && stored.allowed_domains.is_empty()
+        {
+            return Err(sid_core::Error::Validation(
+                "a domain-restricted enrollment mode needs an allowed domain".into(),
+            ));
+        }
+        inner.enrollment_policy = Some(stored);
         Ok(())
     }
 

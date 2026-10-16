@@ -99,6 +99,27 @@ fn test_validated_checks_the_pinned_mode_and_use_range() {
     assert!(validated(wide, None, EnrollmentMode::Open).is_ok());
 }
 
+/// Regression: a default expiry beyond what a time can hold panicked when an
+/// invite was created. It is refused when stored, and computed without a
+/// panic; 0 hours is no expiry.
+#[test]
+fn test_default_expiry_is_bounded() {
+    let now = chrono::Utc::now();
+    assert_eq!(default_expiry(now, 0), Some(None));
+    assert_eq!(
+        default_expiry(now, 2),
+        Some(Some(now + chrono::TimeDelta::hours(2)))
+    );
+    assert_eq!(default_expiry(now, u32::MAX), None);
+
+    let mut far = policy(EnrollmentMode::Open, &[]);
+    far.invite.default_expiry_hours = u32::MAX;
+    assert_eq!(
+        validated(far, None, EnrollmentMode::Open),
+        Err(Refusal::ExpiryTooFar)
+    );
+}
+
 /// Domains are stored as registration compares them; a domain-restricted
 /// policy without a usable domain, or with something that is no domain name,
 /// is refused rather than stored as a policy that admits no one.

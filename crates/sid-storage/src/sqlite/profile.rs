@@ -85,6 +85,15 @@ async fn admit_registration(
     Ok(admission.source())
 }
 
+/// Whether the policy stored now tracks registration sources, read in the
+/// write transaction `tx`, which holds the database lock.
+async fn policy_tracks_source(tx: &mut sqlx::SqliteConnection) -> SidResult<bool> {
+    Ok(stored_enrollment_policy(&mut *tx).await?.map_or(
+        sid_core::models::security_policy::CE_ENROLLMENT_TRACK_SOURCE,
+        |p| p.track_source,
+    ))
+}
+
 /// Insert a new credential; an existing id is a `Conflict`, never an update.
 pub(super) async fn insert_credential<'e, E>(exec: E, credential: &Credential) -> SidResult<()>
 where
@@ -430,19 +439,29 @@ impl SqliteBackend {
             instance_claim,
             history,
             enrollment,
+            source_recording,
         } = registration;
         let mut tx = self.begin_write().await?;
 
         // The write transaction holds the database lock: the policy read here
-        // is the one in force when the account commits.
-        // A self-registration records the source its admitting policy decides.
-        let admitted_source;
-        let source = match enrollment {
-            Some(gate) => {
-                admitted_source = admit_registration(&mut tx, gate).await?;
-                &admitted_source
+        // is the one in force when the account commits. A self-registration
+        // records the source its admitting policy decides; one recorded while
+        // tracked asks the policy here.
+        let decided_source;
+        let source = match (enrollment, source_recording) {
+            (Some(gate), _) => {
+                decided_source = admit_registration(&mut tx, gate).await?;
+                &decided_source
             }
-            None => source,
+            (None, sid_core::models::SourceRecording::WhilePolicyTracks) => {
+                decided_source = if policy_tracks_source(&mut tx).await? {
+                    source.clone()
+                } else {
+                    None
+                };
+                &decided_source
+            }
+            (None, sid_core::models::SourceRecording::AsGiven) => source,
         };
 
         // The first administrator's registration consumes the claim first; a
@@ -1202,6 +1221,7 @@ impl SqliteBackend {
     pub(crate) async fn set_enrollment_policy_impl(
         &self,
         policy: &sid_core::models::EnrollmentPolicy,
+        mode: sid_core::models::ModeWrite,
         audit: MutationContext,
     ) -> SidResult<()> {
         let domains = serde_json::to_string(&policy.allowed_domains)
@@ -1212,7 +1232,7 @@ impl SqliteBackend {
                  invite_default_max_uses, invite_default_expiry_hours, updated_at)
              VALUES ('installation', ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
              ON CONFLICT (scope) DO UPDATE SET
-                 mode = excluded.mode,
+                 mode = CASE WHEN ? THEN enrollment_policy.mode ELSE excluded.mode END,
                  allowed_domains = excluded.allowed_domains,
                  track_source = excluded.track_source,
                  invite_default_max_uses = excluded.invite_default_max_uses,
@@ -1224,9 +1244,10 @@ impl SqliteBackend {
         .bind(policy.track_source)
         .bind(i64::from(policy.invite.default_max_uses))
         .bind(i64::from(policy.invite.default_expiry_hours))
+        .bind(mode == sid_core::models::ModeWrite::KeepStored)
         .execute(&mut *tx)
         .await
-        .map_err(|e| SidError::Storage(e.to_string()))?;
+        .map_err(crate::enrollment_policy_write_error)?;
         Self::commit_mutation(tx, "installation:enrollment_policy", audit).await
     }
 

@@ -75,7 +75,9 @@ CREATE TABLE enrollment_policy (
     track_source                INTEGER NOT NULL CHECK (track_source IN (0, 1)),
     invite_default_max_uses     INTEGER NOT NULL CHECK (invite_default_max_uses BETWEEN 0 AND 4294967295),
     invite_default_expiry_hours INTEGER NOT NULL CHECK (invite_default_expiry_hours BETWEEN 0 AND 4294967295),
-    updated_at                  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    updated_at                  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    CONSTRAINT enrollment_policy_domains_for_restricted_mode
+        CHECK (mode <> 'domain_restricted' OR json_array_length(allowed_domains) > 0)
 );
 ";
 

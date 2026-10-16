@@ -133,12 +133,34 @@ pub struct NewRegistration {
     /// administrator's provisioning and for the instance claim, which the
     /// policy does not govern.
     pub enrollment: Option<EnrollmentGate>,
+    /// Whether `source` is recorded as given or only while the enrollment
+    /// policy, read in the account's transaction, tracks sources. A gated
+    /// self-registration records the source its admission decides instead.
+    pub source_recording: SourceRecording,
+}
+
+/// How a registration's given source is recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SourceRecording {
+    /// Recorded as given.
+    #[default]
+    AsGiven,
+    /// Recorded only while the policy in force when the account commits
+    /// tracks sources.
+    WhilePolicyTracks,
 }
 
 impl NewRegistration {
     /// Admit this self-registration through `gate` when it is committed.
     pub fn admitted_by(mut self, gate: EnrollmentGate) -> Self {
         self.enrollment = Some(gate);
+        self
+    }
+
+    /// Record the given source only while the policy in force when the
+    /// account commits tracks sources.
+    pub fn recording_source_while_tracked(mut self) -> Self {
+        self.source_recording = SourceRecording::WhilePolicyTracks;
         self
     }
 
@@ -196,6 +218,7 @@ impl NewRegistration {
             instance_claim: None,
             history: None,
             enrollment: None,
+            source_recording: SourceRecording::AsGiven,
         };
         match identifier {
             SignupIdentifier::Username(_) => {

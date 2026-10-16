@@ -300,6 +300,57 @@ async fn closed_policy_refuses_held_and_free_identifiers_alike() {
     assert_eq!(requirement(&free), "admin_only");
 }
 
+/// Regression: a registration started while open and finished after the
+/// policy closed answered ALREADY_EXISTS for a held identifier and
+/// REGISTRATION_RESTRICTED for a free one. Both finishes are now refused
+/// alike.
+#[tokio::test]
+async fn policy_closed_mid_registration_refuses_held_and_free_alike() {
+    let admin = administrator();
+    let svc = TestServices::new(MockStorage::new().with_profile(admin.clone()));
+    let service = enrollment(&svc, None);
+    try_register(&svc, &svc, "held_late", PASSWORD, None)
+        .await
+        .unwrap();
+
+    let mut started = Vec::new();
+    for principal in ["held_late", "free_late"] {
+        let client = zkpp_client::start(PASSWORD);
+        let response = svc
+            .auth
+            .opaque_zkpp_registration_start(Request::new(OpaqueZkppRegistrationStartRequest {
+                principal: principal.to_string(),
+                registration_request: client.request.clone(),
+                claim_token: None,
+                invite_code: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        started.push((client, response));
+    }
+    update(&svc, &service, &admin, policy(ProtoMode::AdminOnly, &[]))
+        .await
+        .unwrap();
+
+    for (client, response) in started {
+        let err = svc
+            .auth
+            .opaque_zkpp_registration_finish(Request::new(OpaqueZkppRegistrationFinishRequest {
+                operation_id: response.history.unwrap().operation_id,
+                registration_record: zkpp_client::finish(
+                    client,
+                    PASSWORD,
+                    &response.registration_response,
+                ),
+                proof: None,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(requirement(&err), "admin_only");
+    }
+}
+
 /// An invite cannot ask for more uses than an invite stores.
 #[tokio::test]
 async fn invite_use_limit_beyond_storage_is_refused() {

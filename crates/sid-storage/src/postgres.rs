@@ -203,6 +203,21 @@ async fn admit_registration(
     Ok(admission.source())
 }
 
+/// Whether the policy stored now tracks registration sources, read in `tx`
+/// under the shared policy lock, so an update cannot slip between this
+/// decision and the account's commit.
+async fn policy_tracks_source(tx: &mut sqlx::PgConnection) -> SidResult<bool> {
+    sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
+        .bind(crate::ENROLLMENT_POLICY_LOCK)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("lock enrollment policy: {e}")))?;
+    Ok(stored_enrollment_policy(&mut *tx).await?.map_or(
+        sid_core::models::security_policy::CE_ENROLLMENT_TRACK_SOURCE,
+        |p| p.track_source,
+    ))
+}
+
 /// An initial access token counter as the `INTEGER` column holds it.
 fn iat_count(n: u32) -> SidResult<i32> {
     i32::try_from(n).map_err(|_| SidError::Validation(format!("client count {n} out of range")))
@@ -1828,6 +1843,7 @@ impl StorageBackend for PostgresBackend {
             instance_claim,
             history,
             enrollment,
+            source_recording,
         } = registration;
         let mut tx = self
             .pool
@@ -1835,14 +1851,23 @@ impl StorageBackend for PostgresBackend {
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
 
-        // A self-registration records the source its admitting policy decides.
-        let admitted_source;
-        let source = match enrollment {
-            Some(gate) => {
-                admitted_source = admit_registration(&mut tx, gate).await?;
-                &admitted_source
+        // A self-registration records the source its admitting policy
+        // decides; one recorded while tracked asks the policy here.
+        let decided_source;
+        let source = match (enrollment, source_recording) {
+            (Some(gate), _) => {
+                decided_source = admit_registration(&mut tx, gate).await?;
+                &decided_source
             }
-            None => source,
+            (None, sid_core::models::SourceRecording::WhilePolicyTracks) => {
+                decided_source = if policy_tracks_source(&mut tx).await? {
+                    source.clone()
+                } else {
+                    None
+                };
+                &decided_source
+            }
+            (None, sid_core::models::SourceRecording::AsGiven) => source,
         };
 
         // The first administrator's registration consumes the claim first: the
@@ -4135,6 +4160,7 @@ impl StorageBackend for PostgresBackend {
     async fn set_enrollment_policy(
         &self,
         policy: &sid_core::models::EnrollmentPolicy,
+        mode: sid_core::models::ModeWrite,
         audit: MutationContext,
     ) -> SidResult<()> {
         let mut tx = self
@@ -4153,7 +4179,7 @@ impl StorageBackend for PostgresBackend {
                  invite_default_max_uses, invite_default_expiry_hours, updated_at)
              VALUES ('installation', $1, $2, $3, $4, $5, NOW())
              ON CONFLICT (scope) DO UPDATE SET
-                 mode = EXCLUDED.mode,
+                 mode = CASE WHEN $6 THEN enrollment_policy.mode ELSE EXCLUDED.mode END,
                  allowed_domains = EXCLUDED.allowed_domains,
                  track_source = EXCLUDED.track_source,
                  invite_default_max_uses = EXCLUDED.invite_default_max_uses,
@@ -4165,9 +4191,10 @@ impl StorageBackend for PostgresBackend {
         .bind(policy.track_source)
         .bind(i64::from(policy.invite.default_max_uses))
         .bind(i64::from(policy.invite.default_expiry_hours))
+        .bind(mode == sid_core::models::ModeWrite::KeepStored)
         .execute(&mut *tx)
         .await
-        .map_err(|e| SidError::Storage(format!("set enrollment policy: {e}")))?;
+        .map_err(crate::enrollment_policy_write_error)?;
         Self::audit_in_tx(&mut tx, "installation:enrollment_policy", audit).await?;
         tx.commit()
             .await

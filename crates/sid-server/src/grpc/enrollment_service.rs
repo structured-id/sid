@@ -11,7 +11,8 @@ use sid_core::grpc_error::refuse::{
 };
 use sid_core::grpc_error::{ApiError, ErrorReason};
 use sid_core::models::{
-    AuditEntry, Invite, InviteFilter, InviteId, InviteStatus, ProfileId, generate_invite_code,
+    AuditEntry, Invite, InviteFilter, InviteId, InviteStatus, ModeWrite, ProfileId,
+    generate_invite_code,
 };
 use sid_plugin::storage::StorageBackend;
 use std::sync::Arc;
@@ -151,14 +152,14 @@ impl EnrollmentServiceImpl {
         let expires_at = match expires_at {
             Some(at) => Some(at),
             None if never_expires => None,
-            None if defaults.default_expiry_hours > 0 => Some(
-                chrono::Utc::now()
-                    .checked_add_signed(chrono::Duration::hours(i64::from(
-                        defaults.default_expiry_hours,
-                    )))
-                    .ok_or_else(|| internal("invite expiry", "the default expiry overflows"))?,
-            ),
-            None => None,
+            // Stored defaults are checked when stored; one that is not
+            // representable now is an inconsistency, not a client error.
+            None => {
+                crate::enrollment::default_expiry(chrono::Utc::now(), defaults.default_expiry_hours)
+                    .ok_or_else(|| {
+                        internal("invite expiry", "the default expiry is not representable")
+                    })?
+            }
         };
         Ok((max_uses, expires_at))
     }
@@ -263,11 +264,22 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
                 Refusal::TooManyUses => {
                     invalid_field("policy.invite.default_max_uses", refusal.to_string())
                 }
+                Refusal::ExpiryTooFar => {
+                    invalid_field("policy.invite.default_expiry_hours", refusal.to_string())
+                }
             },
         )?;
+        // Under a pin the stored mode stays, decided in the write's own
+        // transaction; the mode read above is written only when none is
+        // stored yet.
+        let mode_write = match self.pinned_mode {
+            Some(_) => ModeWrite::KeepStored,
+            None => ModeWrite::Replace,
+        };
         self.storage
             .set_enrollment_policy(
                 &policy,
+                mode_write,
                 AuditEntry::admin(
                     caller.profile_id.to_string(),
                     "enrollment_policy.update",
@@ -276,7 +288,14 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
                 .into(),
             )
             .await
-            .map_err(storage_failure)?;
+            .map_err(|e| match e {
+                // The stored mode, kept under a pin, is domain-restricted
+                // and the update leaves it without a domain.
+                sid_core::Error::Validation(message) => {
+                    invalid_field("policy.allowed_domains", message)
+                }
+                e => storage_failure(e),
+            })?;
         info!(mode = %policy.mode, "enrollment policy updated");
         self.policy_in_force().await.map(Response::new)
     }

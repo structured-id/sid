@@ -328,8 +328,20 @@ pub(crate) enum PendingRegistration {
     /// The identifier already belongs to an account. Start still evaluates the
     /// OPRF under a key that exists nowhere, so the answer looks like any other;
     /// finishing commits nothing, so a registration never attaches to an
-    /// existing account.
-    ExistingAccount { principal_type: PrincipalType },
+    /// existing account. It keeps what a new account's commit is admitted
+    /// by, so its finish is refused alike before it tells the identifier is
+    /// held.
+    ExistingAccount {
+        principal_type: PrincipalType,
+        #[serde(default)]
+        value: String,
+        #[serde(default)]
+        invite_code: Option<String>,
+        /// The start presented the open instance claim, which a new
+        /// account's commit is admitted by instead of the policy.
+        #[serde(default)]
+        by_claim: bool,
+    },
 }
 
 /// `ALREADY_EXISTS` with the error-model reason for the identifier kind.
@@ -1917,8 +1929,14 @@ impl AuthServiceImpl {
         let instance_claim = self
             .check_self_registration(principal_type, &value, claim_token, invite_code)
             .await?;
+        let existing = || PendingRegistration::ExistingAccount {
+            principal_type,
+            value: value.clone(),
+            invite_code: invite_code.map(str::to_string),
+            by_claim: instance_claim.is_some(),
+        };
         match self.resolve_profile(principal).await {
-            Ok(_) => Ok(PendingRegistration::ExistingAccount { principal_type }),
+            Ok(_) => Ok(existing()),
             Err(status) if status.code() == Code::Unauthenticated => {
                 let held = self
                     .storage
@@ -1927,7 +1945,7 @@ impl AuthServiceImpl {
                     .map_err(storage_failure)?;
                 if held.is_some() {
                     // Held but not resolvable (contested, closed): never registered over.
-                    return Ok(PendingRegistration::ExistingAccount { principal_type });
+                    return Ok(existing());
                 }
                 Ok(PendingRegistration::NewAccount {
                     profile_id: ProfileId::generate(),
@@ -1972,8 +1990,8 @@ impl AuthServiceImpl {
                 instance_claim,
                 invite_code,
             ),
-            PendingRegistration::ExistingAccount { principal_type } => {
-                return Err(already_registered(principal_type));
+            held @ PendingRegistration::ExistingAccount { .. } => {
+                return Err(self.refuse_held(&held).await);
             }
         };
 
@@ -2123,6 +2141,30 @@ impl AuthServiceImpl {
         self.admitted_by_enrollment(principal_type, value, invite_code)
             .await?;
         Ok(None)
+    }
+
+    /// The refusal of a held identifier's registration finish: the one a new
+    /// account's commit would get under the policy in force now, else
+    /// ALREADY_EXISTS. A closed policy refuses a held and a free identifier
+    /// alike, so the finish tells no more than the start.
+    async fn refuse_held(&self, pending: &PendingRegistration) -> Status {
+        let PendingRegistration::ExistingAccount {
+            principal_type,
+            value,
+            invite_code,
+            by_claim,
+        } = pending
+        else {
+            return internal("registration finish", "not a held identifier");
+        };
+        if !by_claim
+            && let Err(refused) = self
+                .admitted_by_enrollment(*principal_type, value, invite_code.as_deref())
+                .await
+        {
+            return refused;
+        }
+        already_registered(*principal_type)
     }
 
     /// Refuse a self-registration of `value` the enrollment policy in force
@@ -3083,8 +3125,8 @@ impl AuthService for AuthServiceImpl {
         let pending = pending.clone();
         let profile_id = match &pending {
             PendingRegistration::NewAccount { profile_id, .. } => *profile_id,
-            PendingRegistration::ExistingAccount { principal_type } => {
-                return Err(already_registered(*principal_type));
+            held @ PendingRegistration::ExistingAccount { .. } => {
+                return Err(self.refuse_held(held).await);
             }
         };
         let credential = done.credential(profile_id, done.password_file.clone());

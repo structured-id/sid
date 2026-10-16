@@ -60,6 +60,25 @@ const ENROLLMENT_POLICY_SQL: &str = "SELECT mode, allowed_domains, track_source,
 #[cfg(feature = "storage-pg")]
 const ENROLLMENT_POLICY_LOCK: i64 = 0x5349_445f_454e_524f;
 
+/// An enrollment policy write's failure: the schema's refusal of a
+/// domain-restricted mode without a domain is the caller's to fix.
+#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
+fn enrollment_policy_write_error(e: sqlx::Error) -> sid_core::Error {
+    let refused = e.as_database_error().is_some_and(|db| {
+        db.constraint() == Some("enrollment_policy_domains_for_restricted_mode")
+            || db
+                .message()
+                .contains("enrollment_policy_domains_for_restricted_mode")
+    });
+    if refused {
+        sid_core::Error::Validation(
+            "a domain-restricted enrollment mode needs an allowed domain".into(),
+        )
+    } else {
+        sid_core::Error::Storage(format!("set enrollment policy: {e}"))
+    }
+}
+
 /// The enrollment policy a stored row holds; a value the schema's checks
 /// should have refused is an error, never read as a default.
 #[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]

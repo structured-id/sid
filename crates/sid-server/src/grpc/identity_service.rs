@@ -618,11 +618,9 @@ impl IdentityService for IdentityServiceImpl {
                 parse_e164(&phone.normalized).map_err(|e| invalid_field("phone", e.to_string()))?,
             );
         }
-        // Where the account came from is stored with it.
-        if crate::enrollment::stored_or_default(self.storage.as_ref())
-            .await
-            .map_err(storage_failure)?
-            .track_source
+        // Where the account came from is stored with it while the policy in
+        // force when it commits tracks sources: the storage decides in the
+        // account's transaction.
         {
             let mut source = RegistrationSource::admin_created(caller.profile_id);
             if let Some(referrer) = &req.referrer_id {
@@ -648,7 +646,9 @@ impl IdentityService for IdentityServiceImpl {
                     content: utm.content.clone().unwrap_or_default(),
                 };
             }
-            registration = registration.with_source(source);
+            registration = registration
+                .with_source(source)
+                .recording_source_while_tracked();
         }
         let profile = registration.profile.clone();
 

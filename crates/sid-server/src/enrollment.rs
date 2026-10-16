@@ -63,6 +63,23 @@ pub enum Refusal {
     /// A default use limit above what an invite can store.
     #[error("the default invite use limit is at most {MAX_INVITE_USES}")]
     TooManyUses,
+    /// A default expiry later than any representable time.
+    #[error("the default invite expiry is too far in the future")]
+    ExpiryTooFar,
+}
+
+/// When an invite created at `now` expires under a default of `hours`
+/// (0: never); `None` when that time cannot be represented.
+pub fn default_expiry(
+    now: chrono::DateTime<chrono::Utc>,
+    hours: u32,
+) -> Option<Option<chrono::DateTime<chrono::Utc>>> {
+    if hours == 0 {
+        return Some(None);
+    }
+    chrono::TimeDelta::try_hours(i64::from(hours))
+        .and_then(|delta| now.checked_add_signed(delta))
+        .map(Some)
 }
 
 /// The largest use limit an invite stores (a signed 32-bit column).
@@ -87,6 +104,9 @@ pub fn validated(
     }
     if policy.invite.default_max_uses > MAX_INVITE_USES {
         return Err(Refusal::TooManyUses);
+    }
+    if default_expiry(chrono::Utc::now(), policy.invite.default_expiry_hours).is_none() {
+        return Err(Refusal::ExpiryTooFar);
     }
     let mut domains = Vec::with_capacity(policy.allowed_domains.len());
     for domain in &policy.allowed_domains {

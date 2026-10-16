@@ -10,5 +10,9 @@ CREATE TABLE IF NOT EXISTS enrollment_policy (
     track_source                BOOLEAN NOT NULL,
     invite_default_max_uses     BIGINT NOT NULL CHECK (invite_default_max_uses BETWEEN 0 AND 4294967295),
     invite_default_expiry_hours BIGINT NOT NULL CHECK (invite_default_expiry_hours BETWEEN 0 AND 4294967295),
-    updated_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    -- A domain-restricted mode without a domain admits no one; refused here
+    -- so no combination of concurrent updates can store it.
+    CONSTRAINT enrollment_policy_domains_for_restricted_mode
+        CHECK (mode <> 'domain_restricted' OR cardinality(allowed_domains) > 0)
 );
