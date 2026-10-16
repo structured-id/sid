@@ -21,7 +21,7 @@ fn test_only_client_sessions_owe_a_logout() {
     let ended = session(Some("rp"));
     let owed = LogoutDelivery::for_ended_session(&ended).unwrap();
     assert_eq!(owed.client_id, "rp");
-    assert_eq!(owed.profile_id, ended.profile_id.to_string());
+    assert_eq!(owed.profile_id, ended.owner.to_string());
     assert_eq!(owed.session_id, ended.id.to_string());
     assert!(LogoutDelivery::for_ended_session(&session(None)).is_none());
 }

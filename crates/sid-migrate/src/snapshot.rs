@@ -17,6 +17,9 @@ use sid_core::models::{
     SodConflictRule, UpstreamIdentity, UpstreamProvider, WorkSnapshot,
 };
 
+/// The snapshot format this build writes and reads.
+pub const SNAPSHOT_VERSION: u32 = 6;
+
 /// Data snapshot from a SID instance.
 ///
 /// Contains all persistent entities needed to recreate the instance state.
@@ -211,11 +214,31 @@ pub struct SnapshotMetadata {
 }
 
 impl Snapshot {
+    /// Read a snapshot of this build's format from `json`. The version is read
+    /// before the body, so an older format is refused for what it is.
+    pub fn parse(json: &str) -> anyhow::Result<Self> {
+        #[derive(Deserialize)]
+        struct Header {
+            metadata: Version,
+        }
+        #[derive(Deserialize)]
+        struct Version {
+            version: u32,
+        }
+        let header: Header = serde_json::from_str(json)?;
+        anyhow::ensure!(
+            header.metadata.version == SNAPSHOT_VERSION,
+            "unsupported snapshot format version {}: export a new snapshot (format {SNAPSHOT_VERSION})",
+            header.metadata.version
+        );
+        Ok(serde_json::from_str(json)?)
+    }
+
     /// Create a new empty snapshot with metadata.
     pub fn new(source_backend: &str, source_url: &str) -> Self {
         Self {
             metadata: SnapshotMetadata {
-                version: 5,
+                version: SNAPSHOT_VERSION,
                 installation_org: None,
                 created_at: Utc::now(),
                 source_backend: source_backend.to_string(),

@@ -212,7 +212,7 @@ async fn own_session(
         .get_session(session_id)
         .await
         .map_err(storage_failure)?
-        .filter(|s| s.profile_id == caller.profile_id && !s.is_expired())
+        .filter(|s| s.owner == caller.profile_id && !s.is_expired())
         .ok_or_else(invalid)
 }
 

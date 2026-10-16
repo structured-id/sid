@@ -30,14 +30,16 @@ impl fmt::Display for AuthCodeError {
 
 impl std::error::Error for AuthCodeError {}
 
-/// Authorization code (stored as SHA-256 hash, never plaintext).
+/// Authorization code (stored as SHA-256 hash, never plaintext). `O` is the
+/// account that authorized it, as the issuing host types it: a local Profile
+/// by default.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuthorizationCode {
+pub struct AuthorizationCode<O = ProfileId> {
     /// SHA-256 hash of the authorization code string.
     pub code_hash: Vec<u8>,
 
-    /// Profile that authorized this code.
-    pub profile_id: ProfileId,
+    /// Account that authorized this code.
+    pub owner: O,
 
     /// OAuth2 client that requested this code.
     pub client_id: String,
@@ -89,16 +91,18 @@ pub enum AuthCodeRedemption {
 /// Provides read access to authorization data needed for token issuance.
 /// Cannot be "un-exchanged" — the original code is consumed by `exchange()`.
 #[derive(Debug)]
-pub struct ExchangedCode {
-    inner: AuthorizationCode,
+pub struct ExchangedCode<O = ProfileId> {
+    inner: AuthorizationCode<O>,
 }
 
-impl ExchangedCode {
-    /// Profile that authorized this code.
-    pub fn profile_id(&self) -> ProfileId {
-        self.inner.profile_id
+impl<O: Copy> ExchangedCode<O> {
+    /// Account that authorized this code.
+    pub fn owner(&self) -> O {
+        self.inner.owner
     }
+}
 
+impl<O> ExchangedCode<O> {
     /// OAuth2 client that requested this code.
     pub fn client_id(&self) -> &str {
         &self.inner.client_id
@@ -145,7 +149,7 @@ impl ExchangedCode {
     }
 }
 
-impl AuthorizationCode {
+impl<O> AuthorizationCode<O> {
     /// Check if code is expired.
     pub fn is_expired(&self) -> bool {
         Utc::now() > self.expires_at
@@ -164,7 +168,7 @@ impl AuthorizationCode {
     /// Callers must still redeem it atomically in storage
     /// (`StorageBackend::redeem_auth_code`): this in-memory check alone does
     /// not stop two concurrent exchanges.
-    pub fn exchange(self) -> Result<ExchangedCode, AuthCodeError> {
+    pub fn exchange(self) -> Result<ExchangedCode<O>, AuthCodeError> {
         if self.used {
             return Err(AuthCodeError::AlreadyUsed);
         }

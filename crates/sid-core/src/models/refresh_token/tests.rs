@@ -7,7 +7,7 @@ fn make_token(expires_in: Duration, revoked: bool) -> RefreshToken {
         id,
         token_hash: vec![1, 2, 3],
         session_id: SessionId::generate(),
-        profile_id: ProfileId::generate(),
+        owner: ProfileId::generate(),
         client_id: "test-client".to_string(),
         scopes: vec!["openid".into(), "profile".into()],
         resource: ResourceId::generate(),
@@ -19,6 +19,33 @@ fn make_token(expires_in: Duration, revoked: bool) -> RefreshToken {
         grace_expires_at: None,
         dpop_jkt: None,
     }
+}
+
+// A host's owner type need not be `Copy`: everything but `owner()` reads
+// without it, so the refresh grant stays usable for any owner.
+#[test]
+fn test_validated_token_reads_without_a_copy_owner() {
+    let id = Uuid::now_v7();
+    let token = RefreshToken {
+        id,
+        token_hash: vec![1],
+        session_id: SessionId::generate(),
+        owner: String::from("account"),
+        client_id: "test-client".to_string(),
+        scopes: vec!["openid".into()],
+        resource: ResourceId::generate(),
+        expires_at: Utc::now() + Duration::days(1),
+        created_at: Utc::now(),
+        revoked: false,
+        replaced_by: None,
+        family_id: id,
+        grace_expires_at: None,
+        dpop_jkt: None,
+    };
+    let validated = token.validate().expect("validate should succeed");
+    assert_eq!(validated.id(), id);
+    assert_eq!(validated.client_id(), "test-client");
+    assert_eq!(validated.family_id(), id);
 }
 
 fn make_token_with_grace(expires_in: Duration, revoked: bool, grace_secs: i64) -> RefreshToken {
@@ -107,7 +134,7 @@ fn test_validate_valid_token_consumes_self() {
         id,
         token_hash: vec![1, 2, 3],
         session_id,
-        profile_id,
+        owner: profile_id,
         client_id: "test-client".to_string(),
         scopes: vec!["openid".into(), "profile".into()],
         resource,
@@ -123,7 +150,7 @@ fn test_validate_valid_token_consumes_self() {
     let validated = token.validate().expect("validate should succeed");
 
     assert_eq!(validated.session_id(), session_id);
-    assert_eq!(validated.profile_id(), profile_id);
+    assert_eq!(validated.owner(), profile_id);
     assert_eq!(validated.client_id(), "test-client");
     assert_eq!(validated.scopes(), &["openid", "profile"]);
     assert_eq!(validated.resource(), resource);

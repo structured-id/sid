@@ -2529,7 +2529,7 @@ impl StorageBackend for PostgresBackend {
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
         session::write(&mut tx, session).await?;
-        Self::audit_in_tx(&mut tx, &format!("profile:{}", session.profile_id), audit).await?;
+        Self::audit_in_tx(&mut tx, &format!("profile:{}", session.owner), audit).await?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -2579,7 +2579,7 @@ impl StorageBackend for PostgresBackend {
         // every replica and version alike, until commit or rollback. It does
         // not block other rows that merely reference the profile.
         sqlx::query("SELECT 1 FROM profiles WHERE id = $1 FOR NO KEY UPDATE")
-            .bind(session.profile_id)
+            .bind(session.owner)
             .execute(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(format!("lock profile: {e}")))?;
@@ -2588,7 +2588,7 @@ impl StorageBackend for PostgresBackend {
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM sessions WHERE profile_id = $1 AND expires_at > NOW()",
         )
-        .bind(session.profile_id)
+        .bind(session.owner)
         .fetch_one(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("count sessions: {e}")))?;
@@ -2603,7 +2603,7 @@ impl StorageBackend for PostgresBackend {
                  ORDER BY created_at ASC \
                  LIMIT $2",
             )
-            .bind(session.profile_id)
+            .bind(session.owner)
             .bind(to_evict)
             .fetch_all(&mut *tx)
             .await
@@ -2623,7 +2623,7 @@ impl StorageBackend for PostgresBackend {
         // Insert the new session within the same transaction.
         session::write(&mut tx, session).await?;
 
-        Self::audit_in_tx(&mut tx, &format!("profile:{}", session.profile_id), audit).await?;
+        Self::audit_in_tx(&mut tx, &format!("profile:{}", session.owner), audit).await?;
 
         tx.commit()
             .await
@@ -3451,7 +3451,7 @@ impl StorageBackend for PostgresBackend {
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)",
         )
         .bind(&code.code_hash)
-        .bind(code.profile_id)
+        .bind(code.owner)
         .bind(&code.client_id)
         .bind(&code.redirect_uri)
         .bind(code.scopes.join(" "))
@@ -3533,7 +3533,7 @@ impl StorageBackend for PostgresBackend {
         session::write(&mut tx, session).await?;
         refresh_token::insert(&mut tx, refresh_token).await?;
 
-        Self::audit_in_tx(&mut tx, &format!("profile:{}", session.profile_id), audit).await?;
+        Self::audit_in_tx(&mut tx, &format!("profile:{}", session.owner), audit).await?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
