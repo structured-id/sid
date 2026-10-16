@@ -69,6 +69,8 @@ pub struct MockStorageInner {
     refresh_revocation_fails: bool,
     /// Refresh-token rotation fails as a storage fault would.
     refresh_rotation_fails: bool,
+    /// Ending a session fails as a storage fault would.
+    session_end_fails: bool,
     /// Counting a profile's active reset sessions fails as a storage fault would.
     reset_count_fails: bool,
     /// Storing a reset session fails as a storage fault would.
@@ -278,6 +280,13 @@ impl MockStorage {
     #[allow(dead_code)]
     pub fn with_failing_refresh_revocation(self) -> Self {
         self.inner.lock().unwrap().refresh_revocation_fails = true;
+        self
+    }
+
+    /// Storage whose session end (`delete_session`) fails with a storage fault.
+    #[allow(dead_code)]
+    pub fn with_failing_session_end(self) -> Self {
+        self.inner.lock().unwrap().session_end_fails = true;
         self
     }
 
@@ -1048,6 +1057,9 @@ impl GrantStore for MockStorage {
         mut ctx: MutationContext,
     ) -> SidResult<Vec<SessionId>> {
         let mut inner = self.inner.lock().unwrap();
+        if inner.session_end_fails {
+            return Err(sid_core::Error::Storage("storage unavailable".into()));
+        }
         let ended = inner.end_with_dependents(id);
         for session in &ended {
             ctx.work.extend(end.owed_by(session));
@@ -5470,7 +5482,8 @@ impl MockStorageInner {
         self.principals.values().filter(move |r| r.id == id)
     }
 
-    /// Remove session `id` and the sessions it authenticated; returns them.
+    /// Remove session `id` and the sessions it authenticated, with their
+    /// refresh tokens (the real backends' foreign key cascade); returns them.
     fn end_with_dependents(&mut self, id: SessionId) -> Vec<Session> {
         let ended: Vec<Session> = self
             .sessions
@@ -5481,6 +5494,8 @@ impl MockStorageInner {
         for session in &ended {
             self.sessions.remove(&session.id);
         }
+        self.refresh_tokens_by_hash
+            .retain(|_, token| !ended.iter().any(|s| s.id == token.session_id));
         ended
     }
 
