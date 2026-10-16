@@ -152,6 +152,58 @@ async fn root_calls_pass_unchanged() {
     );
 }
 
+/// An authorization addressed to one issuer by its path completes only that
+/// issuer's requests: another issuer's handle in the request is a client
+/// unknown at this endpoint, refused before the caller is looked at. The
+/// handle of the addressed issuer passes on to the next check (sign-in).
+#[tokio::test]
+async fn authorization_is_bound_to_the_addressed_issuer() {
+    use sid_proto::sid::v1::OAuth2AuthorizeRequest;
+    use sid_proto::sid::v1::auth_service_server::AuthService;
+    use tonic_types::StatusExt;
+
+    let svc = TestServices::new(MockStorage::new().with_client(common::test_client()));
+    let request = |addressed: &sid_core::models::OidcIssuer| {
+        let mut request = tonic::Request::new(OAuth2AuthorizeRequest {
+            client_id: "test-client".into(),
+            redirect_uri: "https://app.sid.example.com/callback".into(),
+            response_type: "code".into(),
+            scope: Some("openid".into()),
+            code_challenge: Some("E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM".into()),
+            code_challenge_method: Some("S256".into()),
+            issuer_handle: svc.issuer.handle.to_string(),
+            ..Default::default()
+        });
+        request
+            .extensions_mut()
+            .insert(AddressedIssuer(addressed.clone()));
+        request
+    };
+    let mut other = svc.issuer.clone();
+    other.handle = sid_core::models::IssuerHandle::generate();
+
+    let refused = svc
+        .auth
+        .o_auth2_authorize(request(&other))
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code(), tonic::Code::NotFound);
+    assert_eq!(
+        refused
+            .get_details_error_info()
+            .and_then(|info| info.metadata.get("field").cloned())
+            .as_deref(),
+        Some("client_id")
+    );
+
+    let same = svc
+        .auth
+        .o_auth2_authorize(request(&svc.issuer))
+        .await
+        .unwrap_err();
+    assert_eq!(same.code(), tonic::Code::Unauthenticated);
+}
+
 /// Every published path names a method of the served protocol, so the
 /// sign-in surface has no entry that could never be answered.
 #[test]

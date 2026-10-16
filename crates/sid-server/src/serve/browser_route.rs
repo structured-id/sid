@@ -17,23 +17,29 @@ use tonic::Status;
 use tonic::body::Body;
 use tonic::codegen::{BoxFuture, Service, http};
 
-/// The gRPC paths of the sign-in surface: the calls a sign-in page makes
-/// before it holds an account session (ceremonies, their factors, the
-/// installation's registration state). The signed-in user's own account goes
-/// through the account API, never through an issuer path.
+/// The gRPC paths of the sign-in surface: every step of a ceremony a sign-in
+/// page runs before it holds an account session (entry points included),
+/// their factors and the installation's registration state. The signed-in
+/// user's own account goes through the account API, never through an issuer
+/// path.
 pub const BROWSER_METHODS: &[&str] = &[
+    "/sid.v1.authn.AuthService/ResolvePrincipal",
+    "/sid.v1.authn.AuthService/GetZkppPolicy",
     "/sid.v1.authn.AuthService/OpaqueLoginStart",
     "/sid.v1.authn.AuthService/OpaqueLoginFinish",
     "/sid.v1.authn.AuthService/OpaqueRegistrationStart",
     "/sid.v1.authn.AuthService/OpaqueRegistrationFinish",
     "/sid.v1.authn.AuthService/OpaqueZkppRegistrationStart",
     "/sid.v1.authn.AuthService/OpaqueZkppRegistrationFinish",
+    "/sid.v1.authn.AuthService/LegacyMigrateStart",
+    "/sid.v1.authn.AuthService/LegacyMigrateFinish",
     "/sid.v1.authn.AuthService/WebAuthnAuthenticationStart",
     "/sid.v1.authn.AuthService/WebAuthnAuthenticationFinish",
     "/sid.v1.authn.AuthService/VerifyTotp",
     "/sid.v1.authn.AuthService/VerifySmsMfa",
     "/sid.v1.authn.AuthService/ResendSmsMfa",
     "/sid.v1.authn.AuthService/VerifyRecoveryCode",
+    "/sid.v1.authn.AuthService/RequestOtp",
     "/sid.v1.authn.AuthService/VerifyOtp",
     "/sid.v1.authn.AuthService/ResendOtp",
     "/sid.v1.authn.AuthService/ResendEmailVerification",

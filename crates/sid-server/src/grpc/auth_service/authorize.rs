@@ -126,10 +126,12 @@ impl AuthServiceImpl {
     /// RFC 6749 §4.1.2.1 forbids for an unknown client or an unregistered URI.
     /// Those two errors are marked so the front channel shows them instead of
     /// redirecting. A client of another issuer than the one whose endpoint
-    /// this is counts as unknown.
+    /// this is counts as unknown, as does a request naming another issuer
+    /// than the one a call `addressed` by its path.
     pub(crate) async fn authorize_client(
         &self,
         request: &OAuth2AuthorizeRequest,
+        addressed: Option<&sid_authn::issuer::AddressedIssuer>,
     ) -> Result<(OAuth2Client, OidcIssuer), Status> {
         let unknown_client = || {
             Status::from(
@@ -137,6 +139,11 @@ impl AuthServiceImpl {
                     .with_metadata("field", "client_id"),
             )
         };
+        if addressed
+            .is_some_and(|addressed| addressed.0.handle.to_string() != request.issuer_handle)
+        {
+            return Err(unknown_client());
+        }
         let client = self
             .storage
             .get_oauth2_client(&request.client_id)
@@ -318,7 +325,8 @@ impl AuthServiceImpl {
     ) -> Result<BrowserAuthorization, Status> {
         self.check_maintenance().await?;
         let request = pending.request();
-        let (client, issuer) = self.authorize_client(&request).await?;
+        // The endpoint's own path named the issuer the request was kept for.
+        let (client, issuer) = self.authorize_client(&request, None).await?;
         let prompt = Prompt::parse(pending.prompt.as_deref()).map_err(authorize_refusal)?;
         let now = Utc::now();
 
