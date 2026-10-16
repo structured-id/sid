@@ -62,7 +62,15 @@ impl UiBundle {
         let literal = mount
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"-._~/".contains(&b));
-        if !mount.starts_with('/') || !mount.ends_with('/') || !literal || mount.contains("//") {
+        // A `.` or `..` segment would be normalized away by the browser
+        // (WHATWG URL, path state), leaving the UI unreachable.
+        let dot_segment = mount.split('/').any(|s| s == "." || s == "..");
+        if !mount.starts_with('/')
+            || !mount.ends_with('/')
+            || !literal
+            || mount.contains("//")
+            || dot_segment
+        {
             return Err(BundleError::Mount(mount.to_owned()));
         }
         let dir = dir
@@ -124,6 +132,9 @@ const IMMUTABLE: &str = "public, max-age=31536000, immutable";
 /// once.
 const NO_STORE: &str = "no-store";
 
+/// Routed with `any` so other methods get a 405 with `Allow`. A HEAD answer
+/// still has no body: axum's method router drops it for every route, `any`
+/// included (`test_head_has_no_body`).
 async fn serve(State(bundle): State<Arc<UiBundle>>, request: Request) -> Response {
     let mut response = respond(&bundle, request).await;
     isolate(&mut response);

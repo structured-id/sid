@@ -288,6 +288,38 @@ async fn test_errors_are_never_cached() {
     }
 }
 
+/// A dot segment in a mount would be normalized away by the browser, so the
+/// UI would be unreachable; it is refused.
+#[test]
+fn test_dot_segments_in_mounts_are_refused() {
+    let dir = bundle_dir("dotmount");
+    for mount in ["/./", "/../", "/account/../ui/", "/a/./b/"] {
+        assert!(
+            matches!(
+                UiBundle::new(&dir, mount, CONFIG),
+                Err(BundleError::Mount(_))
+            ),
+            "{mount}"
+        );
+    }
+    assert!(UiBundle::new(&dir, "/v1.2/", CONFIG).is_ok());
+}
+
+/// A HEAD answer has the GET headers and no body, the configuration included.
+#[tokio::test]
+async fn test_head_has_no_body() {
+    let app = app("headbody");
+    for path in [
+        "/account/config.json",
+        "/account/login",
+        "/account/assets/app-abc123.js",
+    ] {
+        let (status, response) = get_path(&app, Method::HEAD, path).await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+        assert_eq!(body(response).await, "", "{path}");
+    }
+}
+
 /// A file at the bundle root is served, uncached.
 #[tokio::test]
 async fn test_root_files_are_served() {
