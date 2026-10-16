@@ -5,6 +5,7 @@ use sid_core::models::{
     AuditEntry, ClientKeySet, IssuerAuthority, IssuerHandle, IssuerId, IssuerSigningKey,
     MutationContext, Organization, ResourceId, ResourceState,
 };
+use sid_plugin::IssuerStore;
 use sid_plugin::storage::StorageBackend;
 use sid_storage::sqlite::SqliteBackend;
 
