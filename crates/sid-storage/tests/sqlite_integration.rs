@@ -972,6 +972,21 @@ async fn test_registration_claims_instance() {
 }
 
 #[tokio::test]
+async fn test_central_management_refuses_local_claims() {
+    common::admin_claim::test_central_management_refuses_local_claims(&setup().await).await;
+}
+
+#[tokio::test]
+async fn test_claimed_installation_stays_self_managed() {
+    common::admin_claim::test_claimed_installation_stays_self_managed(&setup().await).await;
+}
+
+#[tokio::test]
+async fn test_adoption_races_claim() {
+    common::admin_claim::test_adoption_races_claim(&setup().await).await;
+}
+
+#[tokio::test]
 async fn test_last_administrator_cannot_request_closure() {
     common::admin_claim::test_last_administrator_cannot_request_closure(&setup().await).await;
 }

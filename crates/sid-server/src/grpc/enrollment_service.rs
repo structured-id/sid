@@ -136,15 +136,25 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
         Ok(Response::new(enrollment_policy_to_proto(&ce.enrollment)))
     }
 
-    /// Public: the registration page asks for the claim token while this is false.
+    /// Public: the registration page asks for the claim token while the claim
+    /// is open.
     #[tracing::instrument(skip_all, fields(rpc = "get_instance_status"))]
     async fn get_instance_status(
         &self,
         _request: Request<()>,
     ) -> Result<Response<sid_proto::sid::v1::admin::InstanceStatus>, Status> {
-        let claimed = self.storage.admin_exists().await.map_err(storage_failure)?;
+        use sid_authn::admin_claim::ClaimState;
+        use sid_proto::sid::v1::admin::AdministratorClaim;
+        let claim = match sid_authn::admin_claim::state(self.storage.as_ref())
+            .await
+            .map_err(storage_failure)?
+        {
+            ClaimState::Open => AdministratorClaim::Open,
+            ClaimState::Claimed => AdministratorClaim::Claimed,
+            ClaimState::Unavailable => AdministratorClaim::Unavailable,
+        };
         Ok(Response::new(sid_proto::sid::v1::admin::InstanceStatus {
-            claimed,
+            claim: claim.into(),
         }))
     }
 

@@ -49,6 +49,8 @@ pub struct MockStorageInner {
     device_codes: HashMap<DeviceAuthCodeId, DeviceAuthorizationCode>,
     key_versions: Vec<sid_keys::KeyVersionParams>,
     instance_secrets: HashMap<sid_core::models::InstanceSecret, Vec<u8>>,
+    /// The installation was recorded centrally managed.
+    centrally_managed: bool,
     instance_organization: Option<sid_core::models::Organization>,
     oidc_issuers: Vec<sid_core::models::OidcIssuer>,
     oidc_issuer_keys: Vec<sid_core::models::IssuerSigningKey>,
@@ -1029,6 +1031,7 @@ impl StorageBackend for MockStorage {
         if let Some(ref claim) = registration.instance_claim {
             let key = sid_core::models::InstanceSecret::AdminClaim;
             let open = inner.instance_secrets.get(&key) == Some(claim)
+                && !inner.centrally_managed
                 && !inner.profiles.values().any(Profile::is_admin);
             if !open {
                 return Err(sid_core::Error::InvalidState(
@@ -2932,6 +2935,11 @@ impl StorageBackend for MockStorage {
         _audit: MutationContext,
     ) -> SidResult<bool> {
         let mut inner = self.inner.lock().unwrap();
+        if inner.centrally_managed && secret == sid_core::models::InstanceSecret::AdminClaim {
+            return Err(sid_core::Error::InvalidState(
+                "centrally managed installation: no administrator claim".into(),
+            ));
+        }
         if inner.instance_secrets.contains_key(&secret) {
             return Ok(false);
         }
@@ -3047,6 +3055,33 @@ impl StorageBackend for MockStorage {
         Ok(inner.profiles.values().any(Profile::is_admin))
     }
 
+    async fn bootstrap_policy(&self) -> SidResult<sid_core::models::BootstrapPolicy> {
+        Ok(if self.inner.lock().unwrap().centrally_managed {
+            sid_core::models::BootstrapPolicy::CentrallyManaged
+        } else {
+            sid_core::models::BootstrapPolicy::SelfManaged
+        })
+    }
+
+    async fn adopt_central_management(
+        &self,
+        _ctx: MutationContext,
+    ) -> SidResult<sid_core::models::CentralAdoption> {
+        use sid_core::models::CentralAdoption;
+        let mut inner = self.inner.lock().unwrap();
+        if inner.centrally_managed {
+            return Ok(CentralAdoption::AlreadyCentral);
+        }
+        if inner.profiles.values().any(Profile::is_admin) {
+            return Ok(CentralAdoption::LocalAdministrator);
+        }
+        inner.centrally_managed = true;
+        inner
+            .instance_secrets
+            .remove(&sid_core::models::InstanceSecret::AdminClaim);
+        Ok(CentralAdoption::Adopted)
+    }
+
     async fn claim_first_admin(
         &self,
         claim_sealed: &[u8],
@@ -3056,7 +3091,9 @@ impl StorageBackend for MockStorage {
         {
             let mut inner = self.inner.lock().unwrap();
             let claim = sid_core::models::InstanceSecret::AdminClaim;
-            if inner.instance_secrets.get(&claim).map(Vec::as_slice) != Some(claim_sealed) {
+            if inner.centrally_managed
+                || inner.instance_secrets.get(&claim).map(Vec::as_slice) != Some(claim_sealed)
+            {
                 return Ok(false);
             }
             inner.instance_secrets.remove(&claim);
