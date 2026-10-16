@@ -54,7 +54,7 @@ use async_trait::async_trait;
 use sid_core::models::MutationContext;
 use sid_core::{Error as SidError, Result as SidResult};
 use sid_plugin::storage::StorageBackend;
-use sid_plugin::{ClientResourceRegistry, GrantStore};
+use sid_plugin::{ClientResourceRegistry, GrantStore, IssuerStore};
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use std::str::FromStr;
@@ -361,6 +361,42 @@ impl ClientResourceRegistry for SqliteBackend {
         resource: sid_core::models::ResourceId,
     ) -> SidResult<Option<sid_core::models::ResourceAccess>> {
         self.resource_access_impl(client_id, resource).await
+    }
+}
+
+// ─── IssuerStore impl — see oidc_issuer.rs ───
+
+#[async_trait]
+impl IssuerStore for SqliteBackend {
+    async fn oidc_issuer_for(
+        &self,
+        authority: sid_core::models::IssuerAuthority,
+        recipient_org: sid_core::models::OrgId,
+    ) -> SidResult<Option<sid_core::models::OidcIssuer>> {
+        self.oidc_issuer_for_impl(authority, recipient_org).await
+    }
+
+    async fn oidc_issuer_by_handle(
+        &self,
+        handle: &sid_core::models::IssuerHandle,
+    ) -> SidResult<Option<sid_core::models::OidcIssuer>> {
+        self.oidc_issuer_by_handle_impl(handle).await
+    }
+
+    async fn insert_oidc_issuer(
+        &self,
+        issuer: &sid_core::models::OidcIssuer,
+        first_key: &sid_core::models::IssuerSigningKey,
+        audit: MutationContext,
+    ) -> SidResult<bool> {
+        self.insert_oidc_issuer_impl(issuer, first_key, audit).await
+    }
+
+    async fn oidc_issuer_signing_keys(
+        &self,
+        issuer: sid_core::models::IssuerId,
+    ) -> SidResult<Vec<sid_core::models::IssuerSigningKey>> {
+        self.oidc_issuer_signing_keys_impl(issuer).await
     }
 }
 
@@ -1434,37 +1470,6 @@ impl StorageBackend for SqliteBackend {
         audit: MutationContext,
     ) -> SidResult<u64> {
         self.assign_unowned_clients_impl(org_id, audit).await
-    }
-
-    async fn oidc_issuer_for(
-        &self,
-        authority: sid_core::models::IssuerAuthority,
-        recipient_org: sid_core::models::OrgId,
-    ) -> SidResult<Option<sid_core::models::OidcIssuer>> {
-        self.oidc_issuer_for_impl(authority, recipient_org).await
-    }
-
-    async fn oidc_issuer_by_handle(
-        &self,
-        handle: &sid_core::models::IssuerHandle,
-    ) -> SidResult<Option<sid_core::models::OidcIssuer>> {
-        self.oidc_issuer_by_handle_impl(handle).await
-    }
-
-    async fn insert_oidc_issuer(
-        &self,
-        issuer: &sid_core::models::OidcIssuer,
-        first_key: &sid_core::models::IssuerSigningKey,
-        audit: MutationContext,
-    ) -> SidResult<bool> {
-        self.insert_oidc_issuer_impl(issuer, first_key, audit).await
-    }
-
-    async fn oidc_issuer_signing_keys(
-        &self,
-        issuer: sid_core::models::IssuerId,
-    ) -> SidResult<Vec<sid_core::models::IssuerSigningKey>> {
-        self.oidc_issuer_signing_keys_impl(issuer).await
     }
 
     async fn admin_exists(&self) -> SidResult<bool> {

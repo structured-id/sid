@@ -47,8 +47,13 @@ fn ms(time: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
         .expect("a current time truncates")
 }
 
+/// A new session of `owner`, its times at the precision every store keeps.
 fn session<O>(owner: O) -> Session<O> {
-    Session::new(owner, "127.0.0.1".into(), Utc::now() + Duration::hours(1))
+    let mut session = Session::new(owner, "127.0.0.1".into(), Utc::now() + Duration::hours(1));
+    session.authenticated_at = ms(session.authenticated_at);
+    session.created_at = ms(session.created_at);
+    session.expires_at = ms(session.expires_at);
+    session
 }
 
 /// A hash no other scenario on the same database uses.
