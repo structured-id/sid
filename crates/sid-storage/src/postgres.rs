@@ -27,6 +27,7 @@ use sid_core::{
         WebAuthnUserHandle,
     },
 };
+use sid_plugin::ClientResourceRegistry;
 use sid_plugin::audit::AuditLog;
 use sid_plugin::storage::StorageBackend;
 use sqlx::PgPool;
@@ -1137,6 +1138,44 @@ impl AnomalyEventRow {
             reaction: self.reaction,
             timestamp: self.timestamp,
         }
+    }
+}
+
+#[async_trait]
+impl ClientResourceRegistry for PostgresBackend {
+    async fn get_oauth2_client(&self, client_id: &str) -> SidResult<Option<OAuth2Client>> {
+        let row = sqlx::query_as::<_, crate::pg_row::OAuth2ClientRow>(
+            "SELECT * FROM oauth2_clients WHERE client_id = $1",
+        )
+        .bind(client_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(format!("Query failed: {}", e)))?;
+        row.map(|r| r.into_domain()).transpose()
+    }
+
+    async fn get_protected_resource(
+        &self,
+        id: sid_core::models::ResourceId,
+    ) -> SidResult<Option<sid_core::models::ProtectedResource>> {
+        self.get_protected_resource_impl(id).await
+    }
+
+    async fn protected_resource_by_indicator(
+        &self,
+        issuer: sid_core::models::IssuerId,
+        indicator: &sid_core::models::ResourceIndicator,
+    ) -> SidResult<Option<sid_core::models::ProtectedResource>> {
+        self.protected_resource_by_indicator_impl(issuer, indicator)
+            .await
+    }
+
+    async fn resource_access(
+        &self,
+        client_id: &str,
+        resource: sid_core::models::ResourceId,
+    ) -> SidResult<Option<sid_core::models::ResourceAccess>> {
+        self.resource_access_impl(client_id, resource).await
     }
 }
 
@@ -2825,17 +2864,6 @@ impl StorageBackend for PostgresBackend {
 
     // === OAUTH2 CLIENT OPERATIONS ===
 
-    async fn get_oauth2_client(&self, client_id: &str) -> SidResult<Option<OAuth2Client>> {
-        let row = sqlx::query_as::<_, crate::pg_row::OAuth2ClientRow>(
-            "SELECT * FROM oauth2_clients WHERE client_id = $1",
-        )
-        .bind(client_id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| SidError::Storage(format!("Query failed: {}", e)))?;
-        row.map(|r| r.into_domain()).transpose()
-    }
-
     async fn delete_oauth2_client(&self, client_id: &str, audit: MutationContext) -> SidResult<()> {
         self.delete_oauth2_client_impl(client_id, audit).await
     }
@@ -2910,13 +2938,6 @@ impl StorageBackend for PostgresBackend {
         self.create_protected_resource_impl(resource, ctx).await
     }
 
-    async fn get_protected_resource(
-        &self,
-        id: sid_core::models::ResourceId,
-    ) -> SidResult<Option<sid_core::models::ProtectedResource>> {
-        self.get_protected_resource_impl(id).await
-    }
-
     async fn protected_resource_of_application(
         &self,
         id: sid_core::models::ApplicationId,
@@ -2938,15 +2959,6 @@ impl StorageBackend for PostgresBackend {
         ctx: MutationContext,
     ) -> SidResult<bool> {
         self.import_protected_resource_impl(resource, ctx).await
-    }
-
-    async fn protected_resource_by_indicator(
-        &self,
-        issuer: sid_core::models::IssuerId,
-        indicator: &sid_core::models::ResourceIndicator,
-    ) -> SidResult<Option<sid_core::models::ProtectedResource>> {
-        self.protected_resource_by_indicator_impl(issuer, indicator)
-            .await
     }
 
     async fn update_protected_resource(
@@ -2975,14 +2987,6 @@ impl StorageBackend for PostgresBackend {
     ) -> SidResult<bool> {
         self.remove_resource_access_impl(client_id, resource, ctx)
             .await
-    }
-
-    async fn resource_access(
-        &self,
-        client_id: &str,
-        resource: sid_core::models::ResourceId,
-    ) -> SidResult<Option<sid_core::models::ResourceAccess>> {
-        self.resource_access_impl(client_id, resource).await
     }
 
     async fn list_resource_access_by_client(

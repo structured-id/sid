@@ -31,7 +31,7 @@ use sid_core::models::{
 };
 use uuid::Uuid;
 
-use crate::WorkStore;
+use crate::{ClientResourceRegistry, WorkStore};
 
 /// The right to run one background job, exclusive across every instance on
 /// the same store until released.
@@ -68,7 +68,7 @@ impl JobLock {
 /// entry and its work in one transaction; a backend that cannot do that for
 /// an operation refuses work there instead of storing it apart.
 #[async_trait]
-pub trait StorageBackend: WorkStore + Send + Sync + 'static {
+pub trait StorageBackend: WorkStore + ClientResourceRegistry + Send + Sync + 'static {
     /// Returns the unique name of this backend.
     fn name(&self) -> &'static str;
 
@@ -684,9 +684,7 @@ pub trait StorageBackend: WorkStore + Send + Sync + 'static {
     async fn ensure_system_project(&self, ctx: MutationContext) -> Result<()>;
 
     // === OAUTH2 CLIENT OPERATIONS ===
-
-    /// Get an OAuth2 client by client_id.
-    async fn get_oauth2_client(&self, client_id: &str) -> Result<Option<OAuth2Client>>;
+    // Reading a client is `ClientResourceRegistry::get_oauth2_client`.
 
     /// Store `client` over the stored client of its `client_id` while that is
     /// still at `client.revision`, moving the revision on; `client_id`,
@@ -786,12 +784,6 @@ pub trait StorageBackend: WorkStore + Send + Sync + 'static {
         ctx: MutationContext,
     ) -> Result<()>;
 
-    /// A protected resource by id, retired ones included.
-    async fn get_protected_resource(
-        &self,
-        id: sid_core::models::ResourceId,
-    ) -> Result<Option<sid_core::models::ProtectedResource>>;
-
     /// The resource role of application `id`, if it has one.
     async fn protected_resource_of_application(
         &self,
@@ -816,13 +808,6 @@ pub trait StorageBackend: WorkStore + Send + Sync + 'static {
         resource: &sid_core::models::ProtectedResource,
         ctx: MutationContext,
     ) -> Result<bool>;
-
-    /// The resource `indicator` names under `issuer`, retired ones included.
-    async fn protected_resource_by_indicator(
-        &self,
-        issuer: sid_core::models::IssuerId,
-        indicator: &sid_core::models::ResourceIndicator,
-    ) -> Result<Option<sid_core::models::ProtectedResource>>;
 
     /// Store `resource`'s scopes and state over the stored resource while
     /// that is still at `resource.revision` and not retired, moving the
@@ -854,13 +839,6 @@ pub trait StorageBackend: WorkStore + Send + Sync + 'static {
         resource: sid_core::models::ResourceId,
         ctx: MutationContext,
     ) -> Result<bool>;
-
-    /// The access `client_id` has to `resource`, if any.
-    async fn resource_access(
-        &self,
-        client_id: &str,
-        resource: sid_core::models::ResourceId,
-    ) -> Result<Option<sid_core::models::ResourceAccess>>;
 
     /// Every access `client_id` holds, oldest first.
     async fn list_resource_access_by_client(

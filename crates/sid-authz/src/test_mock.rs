@@ -67,6 +67,33 @@ impl sid_plugin::WorkStore for MockStorage {
 }
 
 #[async_trait::async_trait]
+impl sid_plugin::ClientResourceRegistry for MockStorage {
+    async fn get_oauth2_client(&self, _: &str) -> Result<Option<OAuth2Client>> {
+        unimplemented!()
+    }
+    async fn get_protected_resource(
+        &self,
+        _: sid_core::models::ResourceId,
+    ) -> Result<Option<sid_core::models::ProtectedResource>> {
+        unimplemented!()
+    }
+    async fn protected_resource_by_indicator(
+        &self,
+        _: sid_core::models::IssuerId,
+        _: &sid_core::models::ResourceIndicator,
+    ) -> Result<Option<sid_core::models::ProtectedResource>> {
+        unimplemented!()
+    }
+    async fn resource_access(
+        &self,
+        _: &str,
+        _: sid_core::models::ResourceId,
+    ) -> Result<Option<sid_core::models::ResourceAccess>> {
+        unimplemented!()
+    }
+}
+
+#[async_trait::async_trait]
 impl sid_plugin::StorageBackend for MockStorage {
     fn name(&self) -> &'static str {
         "mock"
@@ -477,9 +504,6 @@ impl sid_plugin::StorageBackend for MockStorage {
     }
 
     // === OAUTH2 CLIENT ===
-    async fn get_oauth2_client(&self, _: &str) -> Result<Option<OAuth2Client>> {
-        unimplemented!()
-    }
     async fn update_oauth2_client(
         &self,
         _: &OAuth2Client,
@@ -801,12 +825,6 @@ impl sid_plugin::StorageBackend for MockStorage {
     ) -> Result<()> {
         unimplemented!()
     }
-    async fn get_protected_resource(
-        &self,
-        _: sid_core::models::ResourceId,
-    ) -> Result<Option<sid_core::models::ProtectedResource>> {
-        unimplemented!()
-    }
     async fn protected_resource_of_application(
         &self,
         _: sid_core::models::ApplicationId,
@@ -825,13 +843,6 @@ impl sid_plugin::StorageBackend for MockStorage {
         _: &sid_core::models::ProtectedResource,
         _: MutationContext,
     ) -> Result<bool> {
-        unimplemented!()
-    }
-    async fn protected_resource_by_indicator(
-        &self,
-        _: sid_core::models::IssuerId,
-        _: &sid_core::models::ResourceIndicator,
-    ) -> Result<Option<sid_core::models::ProtectedResource>> {
         unimplemented!()
     }
     async fn update_protected_resource(
@@ -854,13 +865,6 @@ impl sid_plugin::StorageBackend for MockStorage {
         _: sid_core::models::ResourceId,
         _: MutationContext,
     ) -> Result<bool> {
-        unimplemented!()
-    }
-    async fn resource_access(
-        &self,
-        _: &str,
-        _: sid_core::models::ResourceId,
-    ) -> Result<Option<sid_core::models::ResourceAccess>> {
         unimplemented!()
     }
     async fn list_resource_access_by_client(

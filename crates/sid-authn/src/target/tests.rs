@@ -5,6 +5,7 @@ use sid_core::models::{
     MutationContext, OAuth2Client, OidcIssuer, Organization, ProjectId, ProtectedResource,
     ResourceAccess, ResourceId, ResourceState,
 };
+use sid_plugin::StorageBackend;
 use sid_storage::sqlite::SqliteBackend;
 
 fn ctx() -> MutationContext {
