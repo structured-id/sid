@@ -13,9 +13,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use anyhow::Context;
-use axum::Router;
-use axum::routing::get;
-use sid_ui_host::{UiBundle, router};
+use sid_ui_host::{UiBundle, standalone};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -33,9 +31,7 @@ async fn main() -> anyhow::Result<()> {
     // there is no other environment's configuration to fall back to.
     let bundle = UiBundle::new(&dir, &mount, &config)?;
 
-    let app = Router::new()
-        .route("/health", get(|| async { "ok" }))
-        .merge(router(bundle));
+    let app = standalone(bundle)?;
 
     let bind = std::env::var("SID_UI_BIND").unwrap_or_else(|_| "0.0.0.0:8080".to_owned());
     let addr: SocketAddr = bind

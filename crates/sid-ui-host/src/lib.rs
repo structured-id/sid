@@ -28,7 +28,7 @@ use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use tower::ServiceExt;
-use tower_http::services::ServeDir;
+use tower_http::services::ServeFile;
 
 /// Why a bundle cannot be served.
 #[derive(Debug, thiserror::Error)]
@@ -68,8 +68,10 @@ impl UiBundle {
         let dir = dir
             .canonicalize()
             .map_err(|_| BundleError::NoShell(dir.to_path_buf()))?;
-        if !dir.join("index.html").is_file() {
-            return Err(BundleError::NoShell(dir));
+        // The shell must be servable under the same rule as every request.
+        match dir.join("index.html").canonicalize() {
+            Ok(shell) if shell.starts_with(&dir) && shell.is_file() => {}
+            _ => return Err(BundleError::NoShell(dir)),
         }
         let value: serde_json::Value = serde_json::from_slice(config)
             .map_err(|e| BundleError::Config(format!("not JSON: {e}")))?;
@@ -105,67 +107,110 @@ pub fn router(bundle: UiBundle) -> Router {
         .with_state(Arc::new(bundle))
 }
 
+/// The standalone service's routes: `bundle` beside `GET /health`. A bundle
+/// mounted at `/health/` would take that route, so it is refused.
+pub fn standalone(bundle: UiBundle) -> Result<Router, BundleError> {
+    if bundle.mount == "/health/" {
+        return Err(BundleError::Mount(bundle.mount));
+    }
+    Ok(Router::new()
+        .route("/health", axum::routing::get(|| async { "ok" }))
+        .merge(router(bundle)))
+}
+
 /// A content-addressed asset never changes under its name.
 const IMMUTABLE: &str = "public, max-age=31536000, immutable";
-/// The shell and the configuration must follow each release at once.
+/// The shell, the configuration and every error must follow each release at
+/// once.
 const NO_STORE: &str = "no-store";
 
 async fn serve(State(bundle): State<Arc<UiBundle>>, request: Request) -> Response {
+    let mut response = respond(&bundle, request).await;
+    isolate(&mut response);
+    response
+}
+
+async fn respond(bundle: &UiBundle, request: Request) -> Response {
     if !matches!(*request.method(), Method::GET | Method::HEAD) {
-        return StatusCode::METHOD_NOT_ALLOWED.into_response();
+        let mut response = StatusCode::METHOD_NOT_ALLOWED.into_response();
+        // RFC 9110 §15.5.6: a 405 names the methods the resource answers.
+        response
+            .headers_mut()
+            .insert(header::ALLOW, HeaderValue::from_static("GET, HEAD"));
+        return response;
     }
-    // The body is never read; the parts are what a file request needs.
+    // The body is never read; the parts are what a file response needs.
     let (request, _) = request.into_parts();
-    let path = request.uri.path().to_owned();
-    let rest = path.strip_prefix(&bundle.mount).unwrap_or("");
-    let mut response = if rest == "config.json" {
+    let raw = request.uri.path().strip_prefix(&bundle.mount).unwrap_or("");
+    // Classified as the browser means it: `robots%2Etxt` is `robots.txt`.
+    let Ok(rest) = percent_encoding::percent_decode_str(raw).decode_utf8() else {
+        return not_found();
+    };
+    if rest == "config.json" {
         let mut response = Response::new(Body::from(bundle.config.to_vec()));
         response.headers_mut().insert(
             header::CONTENT_TYPE,
             HeaderValue::from_static("application/json"),
         );
-        no_store(response)
-    } else if rest.starts_with("assets/") || has_extension(rest) {
+        return no_store(response);
+    }
+    if rest.starts_with("assets/") || has_extension(&rest) {
         // Everything under assets/ is build output, extension or not.
         let cache = if rest.starts_with("assets/") {
             IMMUTABLE
         } else {
             NO_STORE
         };
-        match file(&bundle, &request, rest).await {
+        return match file(bundle, &request, &rest).await {
             // A missing file stays a 404, never the shell.
-            Some(response) if response.status() == StatusCode::NOT_FOUND => {
-                StatusCode::NOT_FOUND.into_response()
+            Some(response) if response.status() == StatusCode::NOT_FOUND => not_found(),
+            // The file or a revalidation of it carries the file's policy.
+            Some(response)
+                if response.status().is_success()
+                    || response.status() == StatusCode::NOT_MODIFIED =>
+            {
+                with_cache(response, cache)
             }
-            // Success, a 304 to a revalidation or a 412 keep their status.
-            Some(response) => with_cache(response, cache),
-            None => StatusCode::NOT_FOUND.into_response(),
-        }
-    } else {
-        match file(&bundle, &request, "index.html").await {
+            // A request-specific error (412, 416) is never stored.
             Some(response) => no_store(response),
-            None => StatusCode::NOT_FOUND.into_response(),
-        }
-    };
-    isolate(&mut response);
-    response
+            None => not_found(),
+        };
+    }
+    match file(bundle, &request, "index.html").await {
+        Some(response) => no_store(response),
+        None => not_found(),
+    }
 }
 
-/// The bundle's `rest` (a path as the request spelled it) answered for
-/// `request`, or `None` when it does not resolve to a file inside the
-/// bundle: a symlink is followed only while its target stays inside.
+/// A 404 nothing keeps: a later release may add the file.
+fn not_found() -> Response {
+    no_store(StatusCode::NOT_FOUND.into_response())
+}
+
+/// The bundle's file `rest` (decoded) answered for `request`, or `None` when
+/// it does not resolve to a regular file inside the bundle: a symlink is
+/// followed only while its target stays inside, and a directory is never
+/// listed or redirected.
+///
+/// The resolved path is checked, then that path is opened. Swapping a file
+/// in between would take write access to the bundle directory, which
+/// already decides everything this host serves; no boundary is crossed.
 async fn file(bundle: &UiBundle, request: &Parts, rest: &str) -> Option<Response> {
-    let decoded = percent_encoding::percent_decode_str(rest)
-        .decode_utf8()
-        .ok()?;
-    let resolved = tokio::fs::canonicalize(bundle.dir.join(decoded.as_ref()))
-        .await
-        .ok()?;
+    let resolved = tokio::fs::canonicalize(bundle.dir.join(rest)).await.ok()?;
     if !resolved.starts_with(&bundle.dir) {
         return None;
     }
-    let file = file_request(request, rest);
-    match ServeDir::new(&bundle.dir).oneshot(file).await {
+    if !tokio::fs::metadata(&resolved).await.ok()?.is_file() {
+        return None;
+    }
+    let mut builder = Request::builder().method(request.method.clone()).uri("/");
+    for (name, value) in &request.headers {
+        builder = builder.header(name, value);
+    }
+    let file_request = builder
+        .body(Body::empty())
+        .expect("a request rebuilt from a valid one is valid");
+    match ServeFile::new(resolved).oneshot(file_request).await {
         Ok(response) => Some(response.map(Body::new)),
         Err(never) => match never {},
     }
@@ -176,19 +221,6 @@ fn has_extension(rest: &str) -> bool {
     rest.rsplit('/')
         .next()
         .is_some_and(|last| last.contains('.'))
-}
-
-/// `request` for `file`, relative to the bundle directory.
-fn file_request(request: &Parts, file: &str) -> Request {
-    let mut builder = Request::builder()
-        .method(request.method.clone())
-        .uri(format!("/{file}"));
-    for (name, value) in &request.headers {
-        builder = builder.header(name, value);
-    }
-    builder
-        .body(Body::empty())
-        .expect("a request rebuilt from a valid one is valid")
 }
 
 fn no_store(response: Response) -> Response {

@@ -190,6 +190,104 @@ fn test_route_syntax_in_mounts_is_refused() {
     assert!(UiBundle::new(&dir, "/account/v-2_x.y~/", CONFIG).is_ok());
 }
 
+/// The standalone service refuses a mount that would collide with its own
+/// health route instead of panicking while building routes.
+#[test]
+fn test_standalone_refuses_the_health_mount() {
+    let dir = bundle_dir("healthmount");
+    let bundle = UiBundle::new(&dir, "/health/", CONFIG).unwrap();
+    assert!(matches!(standalone(bundle), Err(BundleError::Mount(_))));
+    assert!(standalone(UiBundle::new(&dir, "/account/", CONFIG).unwrap()).is_ok());
+}
+
+/// A shell that leads outside the bundle is refused at start, as every
+/// page would later fail.
+#[cfg(unix)]
+#[test]
+fn test_shell_outside_the_bundle_is_refused() {
+    let dir = std::env::temp_dir().join(format!("sid-ui-host-shelllink-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let outside = std::env::temp_dir().join(format!("sid-ui-host-outshell-{}", std::process::id()));
+    std::fs::write(&outside, "shell").unwrap();
+    std::os::unix::fs::symlink(&outside, dir.join("index.html")).unwrap();
+    assert!(matches!(
+        UiBundle::new(&dir, "/account/", CONFIG),
+        Err(BundleError::NoShell(_))
+    ));
+}
+
+/// Paths are classified as the browser means them: an escaped dot or letter
+/// is the same file request.
+#[tokio::test]
+async fn test_escaped_paths_are_classified_decoded() {
+    let dir = bundle_dir("escaped");
+    std::fs::write(dir.join("assets/runtime-config"), "data").unwrap();
+    let app = router(UiBundle::new(&dir, "/account/", CONFIG).unwrap());
+    let (status, response) = get_path(&app, Method::GET, "/account/%61ssets/runtime-config").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body(response).await, "data");
+    let (status, _) = get_path(&app, Method::GET, "/account/robots%2Etxt").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = get_path(&app, Method::GET, "/account/config%2Ejson").await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+/// A refused method says which ones the UI answers (RFC 9110 §15.5.6).
+#[tokio::test]
+async fn test_method_not_allowed_names_the_allowed() {
+    let (status, response) = get_path(&app("allow"), Method::DELETE, "/account/login").await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(
+        header_of(&response, header::ALLOW).as_deref(),
+        Some("GET, HEAD")
+    );
+}
+
+/// A directory is not a file: it is a 404, never a redirect that would leave
+/// the mount.
+#[tokio::test]
+async fn test_directories_are_not_found() {
+    let dir = bundle_dir("directory");
+    std::fs::create_dir_all(dir.join("assets/icons")).unwrap();
+    let app = router(UiBundle::new(&dir, "/account/", CONFIG).unwrap());
+    let (status, response) = get_path(&app, Method::GET, "/account/assets/icons").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(header_of(&response, header::LOCATION).is_none());
+}
+
+/// Only a successful asset or its revalidation is cached for good; a
+/// request-specific error is not, and no 404 is cached at all.
+#[tokio::test]
+async fn test_errors_are_never_cached() {
+    let app = app("errorcache");
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/account/assets/app-abc123.js")
+                .header(header::RANGE, "bytes=1000-2000")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(
+        header_of(&response, header::CACHE_CONTROL).as_deref(),
+        Some("no-store")
+    );
+    for path in ["/account/favicon-missing.ico", "/account/assets/gone-1.js"] {
+        let (status, response) = get_path(&app, Method::GET, path).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+        assert_eq!(
+            header_of(&response, header::CACHE_CONTROL).as_deref(),
+            Some("no-store"),
+            "{path}"
+        );
+    }
+}
+
 /// A file at the bundle root is served, uncached.
 #[tokio::test]
 async fn test_root_files_are_served() {
