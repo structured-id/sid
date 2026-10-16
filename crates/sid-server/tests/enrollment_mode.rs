@@ -268,16 +268,31 @@ async fn invite(
     admin: &Profile,
     max_uses: u32,
 ) -> sid_proto::sid::v1::admin::Invite {
-    let mut request = Request::new(sid_proto::sid::v1::admin::CreateInviteRequest {
-        max_uses,
-        expires_at: None,
-        metadata: Default::default(),
-    });
+    create_invite(
+        svc,
+        service,
+        admin,
+        sid_proto::sid::v1::admin::CreateInviteRequest {
+            max_uses,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap()
+}
+
+async fn create_invite(
+    svc: &TestServices,
+    service: &EnrollmentServiceImpl,
+    admin: &Profile,
+    body: sid_proto::sid::v1::admin::CreateInviteRequest,
+) -> Result<sid_proto::sid::v1::admin::Invite, tonic::Status> {
+    let mut request = Request::new(body);
     let bearer = fresh_token(svc, admin).await;
     request
         .metadata_mut()
         .insert("authorization", format!("Bearer {bearer}").parse().unwrap());
-    service.create_invite(request).await.unwrap().into_inner()
+    service.create_invite(request).await.map(|r| r.into_inner())
 }
 
 /// Regression: an invite-only installation refused every self-registration,
@@ -412,4 +427,35 @@ async fn new_invites_take_the_stored_defaults() {
 
     // The request's own limit wins over the default.
     assert_eq!(invite(&svc, &service, &admin, 2).await.max_uses, 2);
+
+    // A never-expiring invite stays reachable under a default expiry, and
+    // asking for both an expiry and none is refused.
+    let forever = create_invite(
+        &svc,
+        &service,
+        &admin,
+        sid_proto::sid::v1::admin::CreateInviteRequest {
+            never_expires: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(forever.expires_at.is_none());
+    let err = create_invite(
+        &svc,
+        &service,
+        &admin,
+        sid_proto::sid::v1::admin::CreateInviteRequest {
+            never_expires: true,
+            expires_at: Some(prost_types::Timestamp {
+                seconds: (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp(),
+                nanos: 0,
+            }),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code(), Code::InvalidArgument);
 }

@@ -110,12 +110,19 @@ impl EnrollmentServiceImpl {
 
     /// The use limit and expiry of a new invite: those the request gives,
     /// else the stored policy's defaults (a default expiry of 0 hours is
-    /// none).
+    /// none); `never_expires` asks for no expiry whatever the default.
     async fn invite_terms(
         &self,
         max_uses: u32,
         expires_at: Option<prost_types::Timestamp>,
+        never_expires: bool,
     ) -> Result<(u32, Option<chrono::DateTime<chrono::Utc>>), Status> {
+        if never_expires && expires_at.is_some() {
+            return Err(invalid_field(
+                "never_expires",
+                "an invite with an expiry cannot also never expire",
+            ));
+        }
         let expires_at = invite_expiry(expires_at)?;
         let defaults = crate::enrollment::stored_or_default(self.storage.as_ref())
             .await
@@ -128,6 +135,7 @@ impl EnrollmentServiceImpl {
         };
         let expires_at = match expires_at {
             Some(at) => Some(at),
+            None if never_expires => None,
             None if defaults.default_expiry_hours > 0 => Some(
                 chrono::Utc::now()
                     .checked_add_signed(chrono::Duration::hours(i64::from(
@@ -263,7 +271,9 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
         let created_by = self.admin(&request).await?.profile_id;
         let req = request.into_inner();
 
-        let (max_uses, expires_at) = self.invite_terms(req.max_uses, req.expires_at).await?;
+        let (max_uses, expires_at) = self
+            .invite_terms(req.max_uses, req.expires_at, req.never_expires)
+            .await?;
 
         let invite = Invite {
             id: InviteId::new(),
@@ -400,7 +410,9 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
             ));
         }
 
-        let (max_uses, expires_at) = self.invite_terms(req.max_uses, req.expires_at).await?;
+        let (max_uses, expires_at) = self
+            .invite_terms(req.max_uses, req.expires_at, req.never_expires)
+            .await?;
         let created_by_name = self.creator_name(created_by).await?;
 
         let mut invites = Vec::with_capacity(count as usize);

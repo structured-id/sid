@@ -7312,6 +7312,7 @@ async fn test_enrollment_create_invite_with_bearer_uses_real_profile_id() {
             max_uses: 1,
             metadata: Default::default(),
             expires_at: None,
+            never_expires: false,
         },
         &bearer,
     );
@@ -7344,6 +7345,7 @@ async fn test_enrollment_create_invite_without_bearer_is_rejected() {
         max_uses: 5,
         metadata: Default::default(),
         expires_at: None,
+        never_expires: false,
     });
     let err = svc.create_invite(req).await.unwrap_err();
     assert_eq!(err.code(), tonic::Code::Unauthenticated);
@@ -8308,6 +8310,7 @@ async fn test_enrollment_create_invite_returns_valid_response() {
             max_uses: 3,
             metadata: Default::default(),
             expires_at: None,
+            never_expires: false,
         },
         &token,
     );
@@ -8339,6 +8342,7 @@ async fn test_enrollment_create_invite_default_max_uses() {
             max_uses: 0,
             metadata: Default::default(),
             expires_at: None,
+            never_expires: false,
         },
         &token,
     );
@@ -8440,6 +8444,7 @@ async fn test_enrollment_bulk_create_invites() {
             max_uses: 2,
             metadata: Default::default(),
             expires_at: None,
+            never_expires: false,
         },
         &token,
     );
@@ -8477,6 +8482,7 @@ async fn test_enrollment_bulk_create_zero_returns_error() {
             max_uses: 1,
             metadata: Default::default(),
             expires_at: None,
+            never_expires: false,
         },
         &token,
     );
