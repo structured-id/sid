@@ -268,9 +268,9 @@ impl RevocationCascadeService {
         Ok(())
     }
 
-    /// Revoke a single session with cascade to refresh tokens, audited as
-    /// `action`, and the sessions it authenticated. Each deleted session owes
-    /// its client a back-channel logout.
+    /// Revoke a single session with its refresh tokens, audited as `action`,
+    /// and the sessions it authenticated. Each deleted session owes its
+    /// client a back-channel logout.
     ///
     /// Cascade order:
     /// 1. Revoke session in in-memory cache (immediate).
@@ -300,6 +300,8 @@ impl RevocationCascadeService {
 
         // 2. End the session, the sessions it authenticated and their refresh
         //    tokens in one storage transition, with what they owe.
+        //    A session's refresh tokens are part of its end, so the report
+        //    names the sessions only, as a profile's revocation does.
         let ended = self
             .storage
             .delete_session(
@@ -308,13 +310,6 @@ impl RevocationCascadeService {
                 AuditEntry::system(action, session_id.to_string()).into(),
             )
             .await?;
-        if ended.contains(&session_id) {
-            req.add_cascade(
-                RevocationTarget::RefreshToken,
-                format!("session:{session_id}"),
-                CascadeTier::Immediate,
-            );
-        }
 
         // 3. The dependents' access tokens stop too.
         let mut unpropagated = unpropagated;

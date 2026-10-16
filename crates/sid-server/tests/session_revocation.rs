@@ -7,7 +7,9 @@ mod common;
 use common::mock_storage::MockStorage;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::revocation_cascade::RevocationCascadeService;
-use sid_core::models::{AuditEntry, ProfileId, RefreshToken, RevocationReason, Session};
+use sid_core::models::{
+    AuditEntry, ProfileId, RefreshToken, RevocationReason, RevocationTarget, Session,
+};
 use sid_plugin::{GrantStore, StorageBackend};
 use std::sync::Arc;
 use std::time::Duration;
@@ -125,4 +127,33 @@ async fn test_session_end_takes_refresh_tokens_with_it() {
         );
     }
     assert!(storage.get_session(dependent.id).await.unwrap().is_none());
+}
+
+// The report of a session end names only what ended: a browser session that
+// never held a refresh token counts as the session alone, and the sessions it
+// authenticated as one entry each.
+#[tokio::test]
+async fn test_session_end_reports_only_what_ended() {
+    let storage = Arc::new(MockStorage::new());
+    let parent = session();
+    let mut dependent = session();
+    dependent.authenticated_by = Some(parent.id);
+    let audit = || AuditEntry::system("test", "setup").into();
+    storage.create_session(&parent, audit()).await.unwrap();
+    storage.create_session(&dependent, audit()).await.unwrap();
+
+    let req = cascade(storage)
+        .revoke_session(
+            parent.id,
+            RevocationReason::Admin,
+            "admin",
+            "session.revoke",
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(req.cascade_entries.len(), 1);
+    assert_eq!(req.cascade_entries[0].target, RevocationTarget::Session);
+    assert_eq!(req.cascade_entries[0].entity_id, dependent.id.to_string());
+    assert_eq!(req.total_revoked(), 2);
 }
