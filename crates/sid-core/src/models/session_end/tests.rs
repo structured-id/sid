@@ -38,6 +38,25 @@ fn test_revoked_event_id_follows_session() {
     assert_ne!(first.id, other.id);
 }
 
+/// The lifecycle fact of a session whose owner is not a local Profile names
+/// the session, the reason and the actor category, and carries no owner: the
+/// same event id as the Profile-enriched form, without its `profile_id`.
+#[test]
+fn test_lifecycle_event_names_no_owner() {
+    let sid = SessionId::generate();
+    let end = SessionEnd::new(RevocationReason::UserRequested, "self");
+
+    let work = end.lifecycle_event(sid).relay();
+    let event: Event = serde_json::from_slice(&work.payload).unwrap();
+
+    assert_eq!(event.event_type, event_types::SESSION_REVOKED);
+    assert_eq!(event.data["session_id"], sid.to_string());
+    assert_eq!(event.data["reason"], "user_requested");
+    assert_eq!(event.data["by"], "self");
+    assert!(event.data.get("profile_id").is_none());
+    assert_eq!(work.id, end.owed(sid, ProfileId::generate(), None)[0].id);
+}
+
 /// The relayed event is `sid.session.revoked.v1` naming the session, its
 /// profile, the reason and the actor, as the event catalog defines it.
 #[test]
