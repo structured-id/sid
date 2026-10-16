@@ -5274,7 +5274,7 @@ async fn test_introspect_expired_token() {
             },
             &profile.id.to_string(),
             None,
-            &profile,
+            &profile.roles,
             &session,
             &["openid".to_string()],
             None,
