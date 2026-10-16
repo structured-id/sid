@@ -157,6 +157,11 @@ async fn respond(bundle: &UiBundle, request: Request) -> Response {
     let Ok(rest) = percent_encoding::percent_decode_str(raw).decode_utf8() else {
         return not_found();
     };
+    // No dot segment (an alias of another file under another cache policy,
+    // even behind an encoded `/`) and no hidden file (`.env`) is served.
+    if rest.split('/').any(|segment| segment.starts_with('.')) {
+        return not_found();
+    }
     if rest == "config.json" {
         let mut response = Response::new(Body::from(bundle.config.to_vec()));
         response.headers_mut().insert(

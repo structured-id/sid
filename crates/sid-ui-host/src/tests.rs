@@ -320,6 +320,32 @@ async fn test_head_has_no_body() {
     }
 }
 
+/// Dot segments (also behind encoded separators) and hidden files are never
+/// served: neither an alias of the shell under the asset cache policy nor
+/// a `.env` left in the bundle directory.
+#[tokio::test]
+async fn test_dot_and_hidden_segments_are_not_found() {
+    let dir = bundle_dir("hidden");
+    std::fs::write(dir.join(".env"), "SECRET=1").unwrap();
+    std::fs::create_dir_all(dir.join(".git")).unwrap();
+    std::fs::write(dir.join(".git/config"), "x").unwrap();
+    let app = router(UiBundle::new(&dir, "/account/", CONFIG).unwrap());
+    for path in [
+        "/account/.env",
+        "/account/.git/config",
+        "/account/assets%2F..%2Findex.html",
+        "/account/assets/.%2Fapp-abc123.js",
+    ] {
+        let (status, response) = get_path(&app, Method::GET, path).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+        let text = body(response).await;
+        assert!(
+            !text.contains("SECRET") && !text.contains("shell"),
+            "{path}"
+        );
+    }
+}
+
 /// A file at the bundle root is served, uncached.
 #[tokio::test]
 async fn test_root_files_are_served() {
