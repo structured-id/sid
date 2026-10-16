@@ -2236,6 +2236,65 @@ pub async fn test_session_delete(backend: &dyn StorageBackend) {
     assert!(backend.get_session(session.id).await.unwrap().is_none());
 }
 
+/// Ending a session takes its refresh tokens and those of the sessions it
+/// authenticated in the same transition: no refresh outlives its session,
+/// and a revocation needs no separate refresh-token write.
+pub async fn test_session_end_takes_refresh_tokens(backend: &dyn StorageBackend) {
+    let profile = create_test_profile("session_end_rt");
+    backend
+        .create_profile(&profile, test_audit())
+        .await
+        .unwrap();
+    let parent = create_test_session(profile.id);
+    let mut dependent = create_test_session(profile.id);
+    dependent.authenticated_by = Some(parent.id);
+    let resource = application::grant_resource(backend).await;
+    let mut hashes = Vec::new();
+    for session in [&parent, &dependent] {
+        backend.create_session(session, test_audit()).await.unwrap();
+        let id = Uuid::now_v7();
+        let hash = id.as_bytes().to_vec();
+        let token = RefreshToken {
+            id,
+            token_hash: hash.clone(),
+            session_id: session.id,
+            owner: profile.id,
+            client_id: "test-client".to_string(),
+            scopes: vec!["openid".into()],
+            resource,
+            expires_at: Utc::now() + Duration::days(30),
+            created_at: Utc::now(),
+            revoked: false,
+            replaced_by: None,
+            family_id: id,
+            grace_expires_at: None,
+            dpop_jkt: None,
+        };
+        backend
+            .create_refresh_token(&token, test_audit())
+            .await
+            .unwrap();
+        hashes.push(hash);
+    }
+
+    let ended = backend
+        .delete_session(parent.id, &test_session_end(), test_audit())
+        .await
+        .unwrap();
+
+    assert_eq!(ended.len(), 2);
+    for hash in &hashes {
+        assert!(
+            backend
+                .get_refresh_token_by_hash(hash)
+                .await
+                .unwrap()
+                .is_none(),
+            "a refresh token does not outlive its session"
+        );
+    }
+}
+
 pub async fn test_session_delete_by_profile(backend: &dyn StorageBackend) {
     let profile = create_test_profile("session_bulk");
     backend

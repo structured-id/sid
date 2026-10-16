@@ -823,6 +823,11 @@ async fn test_session_delete() {
 }
 
 #[tokio::test]
+async fn test_session_end_takes_refresh_tokens() {
+    common::test_session_end_takes_refresh_tokens(&setup().await).await;
+}
+
+#[tokio::test]
 async fn test_session_delete_by_profile() {
     common::test_session_delete_by_profile(&setup().await).await;
 }
