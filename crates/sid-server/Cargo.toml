@@ -20,6 +20,7 @@ sid-core = { workspace = true, features = ["grpc"] }
 sid-keys = { workspace = true }
 sid-plugin = { workspace = true }
 arc-swap = { workspace = true }
+async-trait = { workspace = true }
 sid-admin = { workspace = true }
 sid-authn = { workspace = true, features = ["grpc", "client-credential"] }
 sid-authz = { workspace = true }
@@ -125,7 +126,6 @@ dev-perf-test = []
 client-conformance = []
 
 [dev-dependencies]
-async-trait = { workspace = true }
 tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 sid-opaque-ke = { workspace = true }
