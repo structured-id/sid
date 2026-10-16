@@ -135,7 +135,7 @@ async fn user_token(svc: &TestServices, profile: &Profile, indicator: &str) -> S
             },
             &profile.id.to_string(),
             None,
-            profile,
+            &profile.roles,
             &session,
             &["api.read".to_string()],
             None,

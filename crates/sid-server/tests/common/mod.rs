@@ -551,7 +551,7 @@ pub async fn issue_application_token_to(
             },
             &profile.id.to_string(),
             None,
-            profile,
+            &profile.roles,
             &session,
             scopes,
             None,
