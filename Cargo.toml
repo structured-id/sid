@@ -146,7 +146,7 @@ idna = "1.1"
 # Mailbox parsing/validation and the Public Suffix List, shared with the other
 # structured-world products; `psl` is named so a PSL check never degrades to a
 # TLD syntax check.
-structured-email-address = { version = "0.0.20", default-features = false, features = ["std", "psl"] }
+structured-email-address = { version = "0.0.21", default-features = false, features = ["std", "psl"] }
 
 # Phone number validation (libphonenumber port)
 phonenumber = "0.3"
