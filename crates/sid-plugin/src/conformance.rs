@@ -4,3 +4,4 @@
 //! harness constructs that backend and runs every scenario against it.
 
 pub mod grant_store;
+pub mod work_store;
