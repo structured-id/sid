@@ -151,8 +151,9 @@ impl OidcProviderServiceImpl {
         };
 
         if method == Method::Post {
-            // Only an established client's request is kept.
-            if let Err(status) = self.auth.authorize_client(&pending.request()).await {
+            // Only an established client's request is kept. This endpoint's
+            // own path named the issuer.
+            if let Err(status) = self.auth.authorize_client(&pending.request(), None).await {
                 return Ok(refused(status));
             }
             let reference = self.auth.keep_authorization(&pending).await?;
