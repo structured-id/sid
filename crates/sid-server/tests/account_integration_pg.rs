@@ -14,6 +14,7 @@ use sid_core::models::{
     AuditEntry, ClientKeySet, IssuerAuthority, IssuerHandle, IssuerId, IssuerSigningKey,
     OidcIssuer, SystemIntegration,
 };
+use sid_plugin::IssuerStore;
 use sid_plugin::storage::StorageBackend;
 use sid_storage::PostgresBackend;
 use std::sync::Arc;

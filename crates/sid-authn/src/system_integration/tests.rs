@@ -3,7 +3,7 @@ use chrono::{SubsecRound, Utc};
 use sid_core::models::{
     IssuerAuthority, IssuerHandle, IssuerId, IssuerSigningKey, MutationContext, Organization,
 };
-use sid_plugin::ClientResourceRegistry;
+use sid_plugin::{ClientResourceRegistry, IssuerStore};
 use sid_storage::sqlite::SqliteBackend;
 
 const INSTALLATION: &str = "https://sid.example.com";

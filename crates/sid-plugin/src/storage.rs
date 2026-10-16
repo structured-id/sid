@@ -31,7 +31,7 @@ use sid_core::models::{
 };
 use uuid::Uuid;
 
-use crate::{ClientResourceRegistry, GrantStore, WorkStore};
+use crate::{ClientResourceRegistry, GrantStore, IssuerStore, WorkStore};
 
 /// The right to run one background job, exclusive across every instance on
 /// the same store until released.
@@ -69,7 +69,13 @@ impl JobLock {
 /// an operation refuses work there instead of storing it apart.
 #[async_trait]
 pub trait StorageBackend:
-    WorkStore + ClientResourceRegistry + GrantStore<Owner = ProfileId> + Send + Sync + 'static
+    WorkStore
+    + ClientResourceRegistry
+    + IssuerStore
+    + GrantStore<Owner = ProfileId>
+    + Send
+    + Sync
+    + 'static
 {
     /// Returns the unique name of this backend.
     fn name(&self) -> &'static str;
@@ -1017,38 +1023,6 @@ pub trait StorageBackend:
         org_id: sid_core::models::OrgId,
         ctx: MutationContext,
     ) -> Result<u64>;
-
-    // === OIDC ISSUERS ===
-
-    /// The issuer of `authority` for `recipient_org`, once provisioned.
-    async fn oidc_issuer_for(
-        &self,
-        authority: sid_core::models::IssuerAuthority,
-        recipient_org: sid_core::models::OrgId,
-    ) -> Result<Option<sid_core::models::OidcIssuer>>;
-
-    /// The issuer named by `handle`.
-    async fn oidc_issuer_by_handle(
-        &self,
-        handle: &sid_core::models::IssuerHandle,
-    ) -> Result<Option<sid_core::models::OidcIssuer>>;
-
-    /// Store `issuer` with its generation-1 signing key in one transaction.
-    /// Returns `false`, writing nothing, when its authority and organization
-    /// already have an issuer: concurrent provisioners agree on the first.
-    /// A key of another issuer or generation is a validation error.
-    async fn insert_oidc_issuer(
-        &self,
-        issuer: &sid_core::models::OidcIssuer,
-        first_key: &sid_core::models::IssuerSigningKey,
-        ctx: MutationContext,
-    ) -> Result<bool>;
-
-    /// Every signing key of `issuer`, ascending by generation.
-    async fn oidc_issuer_signing_keys(
-        &self,
-        issuer: sid_core::models::IssuerId,
-    ) -> Result<Vec<sid_core::models::IssuerSigningKey>>;
 
     /// The binding of `profile_id` to `scope`, allocated (with the profile's
     /// next binding index, recorded under `ctx`) when the profile has none
