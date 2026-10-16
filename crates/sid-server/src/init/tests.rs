@@ -576,6 +576,85 @@ async fn start_opens_the_claim_only_without_an_admin() {
     );
 }
 
+/// A centrally managed start removes a claim stored earlier and opens none,
+/// starts again unchanged, and keeps the policy when started unset.
+#[tokio::test]
+async fn central_start_offers_no_claim() {
+    let (storage, keys) = (store().await, keys());
+    announce_admin_claim(&storage, &keys).await.unwrap();
+    apply_bootstrap_policy(&storage, Some("central"))
+        .await
+        .unwrap();
+    announce_admin_claim(&storage, &keys).await.unwrap();
+    let claim = || async {
+        storage
+            .get_instance_secret(sid_core::models::InstanceSecret::AdminClaim)
+            .await
+            .unwrap()
+    };
+    assert!(claim().await.is_none());
+
+    for setting in [Some("central"), None] {
+        apply_bootstrap_policy(&storage, setting).await.unwrap();
+        announce_admin_claim(&storage, &keys).await.unwrap();
+        assert!(claim().await.is_none(), "{setting:?}");
+    }
+    assert_eq!(
+        storage.bootstrap_policy().await.unwrap(),
+        sid_core::models::BootstrapPolicy::CentrallyManaged
+    );
+}
+
+/// A centrally managed installation never starts self-managed, and a claimed
+/// self-managed one never starts centrally managed; neither start changes it.
+#[tokio::test]
+async fn start_refuses_a_policy_change() {
+    let (storage, _) = (store().await, keys());
+    apply_bootstrap_policy(&storage, Some("central"))
+        .await
+        .unwrap();
+    assert!(
+        apply_bootstrap_policy(&storage, Some("self"))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        storage.bootstrap_policy().await.unwrap(),
+        sid_core::models::BootstrapPolicy::CentrallyManaged
+    );
+
+    let storage = store().await;
+    let mut root = sid_core::models::Profile::new(Some("root"));
+    root.roles = vec!["admin".into()];
+    storage
+        .create_profile(&root, AuditEntry::system("test", "profile").into())
+        .await
+        .unwrap();
+    assert!(
+        apply_bootstrap_policy(&storage, Some("central"))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        storage.bootstrap_policy().await.unwrap(),
+        sid_core::models::BootstrapPolicy::SelfManaged
+    );
+}
+
+/// A setting other than `central` or `self` stops the start.
+#[tokio::test]
+async fn unknown_policy_setting_stops_the_start() {
+    let storage = store().await;
+    for setting in ["Central", "", "managed"] {
+        assert!(
+            apply_bootstrap_policy(&storage, Some(setting))
+                .await
+                .is_err(),
+            "{setting:?}"
+        );
+    }
+}
+
 /// A store that cannot be read stops the start.
 #[tokio::test]
 async fn unreadable_store_stops_the_start() {

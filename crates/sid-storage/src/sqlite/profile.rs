@@ -12,7 +12,13 @@ use sid_core::{
 };
 use sqlx::Row;
 
-use crate::ADMIN_EXISTS_SQL;
+use crate::{ADMIN_EXISTS_SQL, CENTRALLY_MANAGED_SQL};
+
+/// Consumes the admin claim stored under the first bound name with the second
+/// bound (sealed) value, only on a self-managed installation; the PostgreSQL
+/// backend's statement states the contract.
+const CONSUME_ADMIN_CLAIM_SQL: &str = "DELETE FROM instance_secrets
+     WHERE name = ? AND sealed = ? AND NOT EXISTS (SELECT 1 FROM bootstrap_policy)";
 
 use super::{
     SqliteBackend, col, dt_col, dt_col_opt, fmt_dt, fmt_dt_opt, insert_error, parse_dt,
@@ -369,15 +375,14 @@ impl SqliteBackend {
         // The first administrator's registration consumes the claim first; a
         // refusal drops the transaction with nothing written.
         if let Some(claim) = instance_claim {
-            let consumed =
-                sqlx::query("DELETE FROM instance_secrets WHERE name = ? AND sealed = ?")
-                    .bind(sid_core::models::InstanceSecret::AdminClaim.as_str())
-                    .bind(claim)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(|e| SidError::Storage(format!("consume admin claim: {e}")))?
-                    .rows_affected()
-                    == 1;
+            let consumed = sqlx::query(CONSUME_ADMIN_CLAIM_SQL)
+                .bind(sid_core::models::InstanceSecret::AdminClaim.as_str())
+                .bind(claim)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| SidError::Storage(format!("consume admin claim: {e}")))?
+                .rows_affected()
+                == 1;
             let admin_exists: bool = sqlx::query_scalar(ADMIN_EXISTS_SQL)
                 .fetch_one(&mut *tx)
                 .await
@@ -1056,6 +1061,56 @@ impl SqliteBackend {
             .map_err(|e| SidError::Storage(e.to_string()))
     }
 
+    pub(crate) async fn bootstrap_policy_impl(
+        &self,
+    ) -> SidResult<sid_core::models::BootstrapPolicy> {
+        let central: bool = sqlx::query_scalar(CENTRALLY_MANAGED_SQL)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?;
+        Ok(if central {
+            sid_core::models::BootstrapPolicy::CentrallyManaged
+        } else {
+            sid_core::models::BootstrapPolicy::SelfManaged
+        })
+    }
+
+    /// The PostgreSQL backend states the contract; the write transaction
+    /// holds the database lock, so a concurrent claim runs before or after.
+    pub(crate) async fn adopt_central_management_impl(
+        &self,
+        audit: MutationContext,
+    ) -> SidResult<sid_core::models::CentralAdoption> {
+        use sid_core::models::CentralAdoption;
+        let mut tx = self.begin_write().await?;
+        let adopted = sqlx::query(
+            "INSERT INTO bootstrap_policy (scope, policy) VALUES ('installation', 'centrally_managed')
+             ON CONFLICT (scope) DO NOTHING",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| SidError::Storage(e.to_string()))?
+        .rows_affected()
+            == 1;
+        if !adopted {
+            return Ok(CentralAdoption::AlreadyCentral);
+        }
+        let admin_exists: bool = sqlx::query_scalar(ADMIN_EXISTS_SQL)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?;
+        if admin_exists {
+            return Ok(CentralAdoption::LocalAdministrator);
+        }
+        sqlx::query("DELETE FROM instance_secrets WHERE name = ?")
+            .bind(sid_core::models::InstanceSecret::AdminClaim.as_str())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?;
+        Self::commit_mutation(tx, "installation:bootstrap_policy", audit).await?;
+        Ok(CentralAdoption::Adopted)
+    }
+
     pub(crate) async fn claim_first_admin_impl(
         &self,
         claim_sealed: &[u8],
@@ -1063,7 +1118,7 @@ impl SqliteBackend {
         audit: MutationContext,
     ) -> SidResult<bool> {
         let mut tx = self.begin_write().await?;
-        let consumed = sqlx::query("DELETE FROM instance_secrets WHERE name = ? AND sealed = ?")
+        let consumed = sqlx::query(CONSUME_ADMIN_CLAIM_SQL)
             .bind(sid_core::models::InstanceSecret::AdminClaim.as_str())
             .bind(claim_sealed)
             .execute(&mut *tx)

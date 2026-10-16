@@ -2050,7 +2050,16 @@ impl AuthServiceImpl {
             {
                 Ok(Some(sealed)) => return Ok(Some(sealed)),
                 // Claimed meanwhile: an ordinary registration from here on.
-                Ok(None) => {}
+                // Still open with no stored claim, nothing can be presented:
+                // the claim is not open to anyone.
+                Ok(None) => {
+                    if admin_claim::is_open(self.storage.as_ref())
+                        .await
+                        .map_err(|e| internal("check instance claim", e))?
+                    {
+                        return Err(registration_restricted("instance_claim"));
+                    }
+                }
                 Err(ClaimError::Mismatch) => return Err(registration_restricted("instance_claim")),
                 Err(e) => return Err(internal("verify instance claim", e)),
             }

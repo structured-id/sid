@@ -54,7 +54,21 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 8,
         sql: HISTORY_OWNER_PURGE,
     },
+    Migration {
+        version: 9,
+        sql: BOOTSTRAP_POLICY,
+    },
 ];
+
+/// The installation's bootstrap policy; the PostgreSQL migration 061 states
+/// the contract.
+const BOOTSTRAP_POLICY: &str = "
+CREATE TABLE bootstrap_policy (
+    scope      TEXT PRIMARY KEY CHECK (scope = 'installation'),
+    policy     TEXT NOT NULL CHECK (policy = 'centrally_managed'),
+    adopted_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+";
 
 /// Fences of purged owners; the evaluator's PostgreSQL migration 004 states
 /// the contract.

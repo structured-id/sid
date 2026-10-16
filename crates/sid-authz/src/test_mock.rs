@@ -683,6 +683,15 @@ impl sid_plugin::StorageBackend for MockStorage {
     async fn admin_exists(&self) -> Result<bool> {
         unimplemented!()
     }
+    async fn bootstrap_policy(&self) -> Result<sid_core::models::BootstrapPolicy> {
+        unimplemented!()
+    }
+    async fn adopt_central_management(
+        &self,
+        _audit: MutationContext,
+    ) -> Result<sid_core::models::CentralAdoption> {
+        unimplemented!()
+    }
     async fn claim_first_admin(
         &self,
         _: &[u8],

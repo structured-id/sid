@@ -9,7 +9,7 @@
 
 use base64::Engine;
 use secrecy::{ExposeSecret, SecretString};
-use sid_core::models::{AuditEntry, InstanceSecret, ProfileId};
+use sid_core::models::{AuditEntry, BootstrapPolicy, InstanceSecret, ProfileId};
 use sid_keys::KeyManager;
 use sid_plugin::StorageBackend;
 use subtle::ConstantTimeEq;
@@ -40,13 +40,39 @@ pub enum ClaimError {
     Storage(#[from] sid_core::Error),
 }
 
-/// The open claim token, created when the instance has no administrator yet;
-/// `None` once an administrator exists.
+/// Whether the installation offers a local administrator claim
+/// (enrollment-policy.md, First Administrator).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimState {
+    /// Self-managed, without an administrator: the claim token makes one.
+    Open,
+    /// Self-managed, with its first administrator.
+    Claimed,
+    /// Centrally managed: no local claim exists, administrator or not.
+    Unavailable,
+}
+
+/// The installation's claim state, from its bootstrap policy first: a
+/// centrally managed installation offers no claim whatever its
+/// administrators.
+pub async fn state(storage: &dyn StorageBackend) -> Result<ClaimState, sid_core::Error> {
+    if storage.bootstrap_policy().await? == BootstrapPolicy::CentrallyManaged {
+        return Ok(ClaimState::Unavailable);
+    }
+    Ok(if storage.admin_exists().await? {
+        ClaimState::Claimed
+    } else {
+        ClaimState::Open
+    })
+}
+
+/// The open claim token, created while the claim is open; `None` once an
+/// administrator exists or when the installation offers no claim.
 pub async fn open_claim(
     storage: &dyn StorageBackend,
     keys: &dyn KeyManager,
 ) -> Result<Option<SecretString>, InstanceSecretError<core::convert::Infallible>> {
-    if storage.admin_exists().await? {
+    if state(storage).await? != ClaimState::Open {
         return Ok(None);
     }
     let token = instance_secret::load_or_create(storage, keys, InstanceSecret::AdminClaim, || {
@@ -61,9 +87,10 @@ pub async fn open_claim(
     Ok(Some(SecretString::from(token)))
 }
 
-/// Whether the installation still waits for its first administrator.
+/// Whether the installation's claim is open: self-managed and still waiting
+/// for its first administrator.
 pub async fn is_open(storage: &dyn StorageBackend) -> Result<bool, ClaimError> {
-    Ok(!storage.admin_exists().await?)
+    Ok(state(storage).await? == ClaimState::Open)
 }
 
 /// Check `presented` against the open claim. `Some(sealed)` is the stored claim

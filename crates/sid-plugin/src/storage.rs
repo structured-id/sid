@@ -1082,13 +1082,28 @@ pub trait StorageBackend: WorkStore + Send + Sync + 'static {
     /// Whether any profile holds the administrator role.
     async fn admin_exists(&self) -> Result<bool>;
 
+    /// The installation's bootstrap policy: centrally managed once adopted,
+    /// else self-managed.
+    async fn bootstrap_policy(&self) -> Result<sid_core::models::BootstrapPolicy>;
+
+    /// Record the installation as centrally managed, removing any stored
+    /// admin claim in the same transaction, so no claim token is consumed
+    /// afterwards on any replica. Never undone. Refused, changing nothing,
+    /// while a local administrator exists (`LocalAdministrator`), unless it
+    /// already is centrally managed (`AlreadyCentral`). Serializes with a
+    /// concurrent claim: of the two, exactly one takes effect.
+    async fn adopt_central_management(
+        &self,
+        ctx: MutationContext,
+    ) -> Result<sid_core::models::CentralAdoption>;
+
     /// Make `profile` (already carrying the administrator role, at the
     /// revision it was read at) the first administrator, consuming the admin
     /// claim stored as `claim_sealed`. The claim is removed and the profile
     /// written in one transaction. Returns `false`, changing nothing, when
-    /// that claim is no longer stored, an administrator already exists or
-    /// the profile changed since it was read: of concurrent claimers exactly
-    /// one succeeds.
+    /// that claim is no longer stored, an administrator already exists, the
+    /// installation is centrally managed or the profile changed since it was
+    /// read: of concurrent claimers exactly one succeeds.
     async fn claim_first_admin(
         &self,
         claim_sealed: &[u8],

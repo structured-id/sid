@@ -12,6 +12,7 @@ use common::{TestServices, fresh_token, test_key_manager};
 use secrecy::{ExposeSecret, SecretString};
 use sid_core::models::Profile;
 use sid_proto::sid::v1::ClaimInstanceRequest;
+use sid_proto::sid::v1::admin::AdministratorClaim;
 use sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService;
 use sid_proto::sid::v1::admin_service_server::AdminService;
 use sid_server::grpc::enrollment_service::EnrollmentServiceImpl;
@@ -42,7 +43,8 @@ async fn is_admin(svc: &TestServices, principal: &str) -> bool {
         .is_admin()
 }
 
-async fn claimed(svc: &TestServices) -> bool {
+/// The claim state `GetInstanceStatus` reports.
+async fn claim_state(svc: &TestServices) -> AdministratorClaim {
     let enrollment = EnrollmentServiceImpl::new(
         svc.storage.clone(),
         svc.jwt.clone(),
@@ -53,7 +55,11 @@ async fn claimed(svc: &TestServices) -> bool {
         .await
         .unwrap()
         .into_inner()
-        .claimed
+        .claim()
+}
+
+async fn claimed(svc: &TestServices) -> bool {
+    claim_state(svc).await == AdministratorClaim::Claimed
 }
 
 /// Before the claim nobody registers, whatever the mode; the claim token makes
@@ -63,7 +69,7 @@ async fn claimed(svc: &TestServices) -> bool {
 async fn unclaimed_installation_registers_only_its_first_administrator() {
     let svc = TestServices::new(MockStorage::unclaimed());
     let token = claim_token(&svc).await;
-    assert!(!claimed(&svc).await);
+    assert_eq!(claim_state(&svc).await, AdministratorClaim::Open);
 
     let err = try_register(&svc, &svc, "squatter", PASSWORD, None)
         .await
@@ -92,6 +98,94 @@ async fn unclaimed_installation_registers_only_its_first_administrator() {
         !is_admin(&svc, "late").await,
         "a spent claim made an administrator"
     );
+}
+
+/// A self-managed installation with no administrator and no stored claim
+/// (lost, or never written) is not open to anyone: a registration presenting
+/// any token is refused like one without, never taken as an ordinary account.
+#[tokio::test]
+async fn unclaimed_installation_without_a_stored_claim_registers_nobody() {
+    let svc = TestServices::new(MockStorage::unclaimed());
+
+    for token in [None, Some("sidclaim_guess")] {
+        let err = try_register(&svc, &svc, "walk_in", PASSWORD, token)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.code(),
+            Code::PermissionDenied,
+            "{token:?}: {}",
+            err.message()
+        );
+    }
+    assert!(
+        svc.storage
+            .get_principal_by_value(sid_core::models::PrincipalType::Username, "walk_in")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// A centrally managed installation offers no local claim
+/// (enrollment-policy.md, First Administrator): its status says so without a
+/// local administrator, no token is opened, and a token stored before makes
+/// no administrator through registration or the signed-in claim. Ordinary
+/// registration follows the enrollment policy, not trapped behind the
+/// missing administrator.
+#[tokio::test]
+async fn centrally_managed_installation_offers_no_claim() {
+    let bob = Profile::new(Some("central_bob"));
+    let svc = TestServices::new(MockStorage::unclaimed().with_profile(bob.clone()));
+    let stale = claim_token(&svc).await;
+    svc.storage
+        .adopt_central_management(
+            sid_core::models::AuditEntry::system("test", "bootstrap_policy").into(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(claim_state(&svc).await, AdministratorClaim::Unavailable);
+    assert!(
+        sid_authn::admin_claim::open_claim(svc.storage.as_ref(), test_key_manager().as_ref())
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    try_register(
+        &svc,
+        &svc,
+        "stale_holder",
+        PASSWORD,
+        Some(stale.expose_secret()),
+    )
+    .await
+    .unwrap();
+    assert!(!is_admin(&svc, "stale_holder").await);
+    try_register(&svc, &svc, "provisioned", PASSWORD, None)
+        .await
+        .unwrap();
+    assert!(!is_admin(&svc, "provisioned").await);
+
+    let mut request = Request::new(ClaimInstanceRequest {
+        claim_token: stale.expose_secret().to_string(),
+    });
+    let bearer = fresh_token(&svc, &bob).await;
+    request
+        .metadata_mut()
+        .insert("authorization", format!("Bearer {bearer}").parse().unwrap());
+    let err = svc.admin.claim_instance(request).await.unwrap_err();
+    assert_eq!(err.code(), Code::FailedPrecondition, "{}", err.message());
+    assert!(
+        !svc.storage
+            .get_profile(bob.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_admin()
+    );
+    assert!(!svc.storage.admin_exists().await.unwrap());
+    assert_eq!(claim_state(&svc).await, AdministratorClaim::Unavailable);
 }
 
 /// A signed-in profile claims with the token, once; a wrong token and an

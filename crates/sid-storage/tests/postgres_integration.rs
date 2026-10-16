@@ -1267,6 +1267,49 @@ async fn test_registration_claims_instance() {
     finish_isolated(&backend, &schema, outcome).await;
 }
 
+/// Runs in its own schema: the scenario is an installation's bootstrap
+/// policy and first claim.
+#[tokio::test]
+async fn test_central_management_refuses_local_claims() {
+    let (backend, schema) = isolated("central").await;
+    let outcome =
+        tokio::spawn({
+            let backend = backend.clone();
+            async move {
+                common::admin_claim::test_central_management_refuses_local_claims(&backend).await
+            }
+        })
+        .await;
+    finish_isolated(&backend, &schema, outcome).await;
+}
+
+/// Runs in its own schema: the scenario is an installation's first claim.
+#[tokio::test]
+async fn test_claimed_installation_stays_self_managed() {
+    let (backend, schema) = isolated("selfmanaged").await;
+    let outcome =
+        tokio::spawn({
+            let backend = backend.clone();
+            async move {
+                common::admin_claim::test_claimed_installation_stays_self_managed(&backend).await
+            }
+        })
+        .await;
+    finish_isolated(&backend, &schema, outcome).await;
+}
+
+/// Runs in its own schema: the scenario is an installation's first claim.
+#[tokio::test]
+async fn test_adoption_races_claim() {
+    let (backend, schema) = isolated("adoptrace").await;
+    let outcome = tokio::spawn({
+        let backend = backend.clone();
+        async move { common::admin_claim::test_adoption_races_claim(&backend).await }
+    })
+    .await;
+    finish_isolated(&backend, &schema, outcome).await;
+}
+
 /// Runs in its own schema: the shared schema holds administrators from other
 /// tests, and the scenario counts the administrators left.
 #[tokio::test]

@@ -219,8 +219,58 @@ pub(crate) fn instance_domain(issuer: &str) -> anyhow::Result<String> {
         .with_context(|| format!("SID_ISSUER {issuer:?} is not a URL with a host"))
 }
 
-/// While the instance has no administrator, write its claim token to the log
-/// for the operator; a storage failure stops the start.
+/// Apply the installation's bootstrap policy `setting`
+/// (`SID_INSTALLATION_MANAGEMENT`): `central` records it centrally managed,
+/// which a self-managed installation with a local administrator refuses;
+/// `self` refuses an installation already centrally managed, which never
+/// returns to a local claim; unset keeps whatever is recorded. Any other value,
+/// a refusal or a storage failure stops the start.
+pub(crate) async fn apply_bootstrap_policy(
+    storage: &dyn StorageBackend,
+    setting: Option<&str>,
+) -> anyhow::Result<()> {
+    use sid_core::models::{BootstrapPolicy, CentralAdoption};
+    match setting {
+        Some("central") => match storage
+            .adopt_central_management(
+                AuditEntry::system("installation.centrally_managed", "bootstrap_policy").into(),
+            )
+            .await
+            .context("bootstrap policy")?
+        {
+            CentralAdoption::Adopted => {
+                info!("installation recorded centrally managed: it offers no local claim");
+                Ok(())
+            }
+            CentralAdoption::AlreadyCentral => Ok(()),
+            CentralAdoption::LocalAdministrator => anyhow::bail!(
+                "SID_INSTALLATION_MANAGEMENT=central: this installation has a local \
+                 administrator, it is self-managed"
+            ),
+        },
+        Some("self") => {
+            if storage
+                .bootstrap_policy()
+                .await
+                .context("bootstrap policy")?
+                == BootstrapPolicy::CentrallyManaged
+            {
+                anyhow::bail!(
+                    "SID_INSTALLATION_MANAGEMENT=self: this installation is centrally managed \
+                     and never returns to a local administrator claim"
+                );
+            }
+            Ok(())
+        }
+        None => Ok(()),
+        Some(other) => {
+            anyhow::bail!("SID_INSTALLATION_MANAGEMENT {other:?}: expected `central` or `self`")
+        }
+    }
+}
+
+/// While the instance's claim is open, write its token to the log for the
+/// operator; a storage failure stops the start.
 pub(crate) async fn announce_admin_claim(
     storage: &dyn StorageBackend,
     keys: &dyn sid_keys::KeyManager,
@@ -517,6 +567,11 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
     #[cfg(feature = "telemetry")]
     let sid_metrics = Arc::new(crate::metrics::SidMetrics::init());
 
+    apply_bootstrap_policy(
+        storage.as_ref(),
+        std::env::var("SID_INSTALLATION_MANAGEMENT").ok().as_deref(),
+    )
+    .await?;
     announce_admin_claim(storage.as_ref(), key_manager.as_ref()).await?;
 
     // The installation's organization, and every application in it.
