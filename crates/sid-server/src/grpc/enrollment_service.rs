@@ -117,6 +117,12 @@ impl EnrollmentServiceImpl {
         expires_at: Option<prost_types::Timestamp>,
         never_expires: bool,
     ) -> Result<(u32, Option<chrono::DateTime<chrono::Utc>>), Status> {
+        if max_uses > crate::enrollment::MAX_INVITE_USES {
+            return Err(invalid_field(
+                "max_uses",
+                format!("at most {}", crate::enrollment::MAX_INVITE_USES),
+            ));
+        }
         if never_expires && expires_at.is_some() {
             return Err(invalid_field(
                 "never_expires",
@@ -244,6 +250,9 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
                 ),
                 Refusal::NoDomain | Refusal::BadDomain(_) => {
                     invalid_field("policy.allowed_domains", refusal.to_string())
+                }
+                Refusal::TooManyUses => {
+                    invalid_field("policy.invite.default_max_uses", refusal.to_string())
                 }
             },
         )?;

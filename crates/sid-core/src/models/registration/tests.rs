@@ -79,21 +79,38 @@ fn gate(
     }
 }
 
+/// The invite an admission spends, or why the gate refused.
+fn invite_of(
+    gate: &EnrollmentGate,
+    stored: Option<EnrollmentPolicy>,
+) -> core::result::Result<Option<String>, EnrollmentDenialReason> {
+    gate.admit(stored).map(|a| a.invite.map(str::to_string))
+}
+
 /// Nothing stored is the open default; a stored mode applies; a pinned mode
 /// applies over whatever is stored.
 #[test]
 fn gate_applies_the_pinned_mode_over_the_stored() {
-    assert_eq!(gate(None, None, None).admit(None), Ok(None));
+    assert_eq!(invite_of(&gate(None, None, None), None), Ok(None));
     assert_eq!(
-        gate(None, None, None).admit(stored(EnrollmentMode::AdminOnly, &[])),
+        invite_of(
+            &gate(None, None, None),
+            stored(EnrollmentMode::AdminOnly, &[])
+        ),
         Err(EnrollmentDenialReason::AdminOnly)
     );
     assert_eq!(
-        gate(Some(EnrollmentMode::AdminOnly), None, None).admit(stored(EnrollmentMode::Open, &[])),
+        invite_of(
+            &gate(Some(EnrollmentMode::AdminOnly), None, None),
+            stored(EnrollmentMode::Open, &[])
+        ),
         Err(EnrollmentDenialReason::AdminOnly)
     );
     assert_eq!(
-        gate(Some(EnrollmentMode::Open), None, None).admit(stored(EnrollmentMode::AdminOnly, &[])),
+        invite_of(
+            &gate(Some(EnrollmentMode::Open), None, None),
+            stored(EnrollmentMode::AdminOnly, &[])
+        ),
         Ok(None)
     );
 }
@@ -104,15 +121,18 @@ fn gate_applies_the_pinned_mode_over_the_stored() {
 fn gate_names_the_invite_to_spend_only_when_invite_only() {
     let invite_only = || stored(EnrollmentMode::InviteOnly, &[]);
     assert_eq!(
-        gate(None, None, Some("ABCD1234")).admit(invite_only()),
-        Ok(Some("ABCD1234"))
+        invite_of(&gate(None, None, Some("ABCD1234")), invite_only()),
+        Ok(Some("ABCD1234".into()))
     );
     assert_eq!(
-        gate(None, None, None).admit(invite_only()),
+        invite_of(&gate(None, None, None), invite_only()),
         Err(EnrollmentDenialReason::InviteRequired)
     );
     assert_eq!(
-        gate(None, None, Some("ABCD1234")).admit(stored(EnrollmentMode::Open, &[])),
+        invite_of(
+            &gate(None, None, Some("ABCD1234")),
+            stored(EnrollmentMode::Open, &[])
+        ),
         Ok(None)
     );
 }
@@ -122,17 +142,46 @@ fn gate_names_the_invite_to_spend_only_when_invite_only() {
 fn gate_checks_the_email_domain() {
     let restricted = || stored(EnrollmentMode::DomainRestricted, &["acme.example"]);
     assert_eq!(
-        gate(None, Some("a@acme.example"), None).admit(restricted()),
+        invite_of(&gate(None, Some("a@acme.example"), None), restricted()),
         Ok(None)
     );
     assert!(matches!(
-        gate(None, Some("a@other.example"), None).admit(restricted()),
+        invite_of(&gate(None, Some("a@other.example"), None), restricted()),
         Err(EnrollmentDenialReason::DomainNotAllowed { .. })
     ));
     assert_eq!(
-        gate(None, None, None).admit(restricted()),
+        invite_of(&gate(None, None, None), restricted()),
         Err(EnrollmentDenialReason::EmailRequired)
     );
+}
+
+/// Regression: an invited account was recorded as a self-signup, and the
+/// tracking decision came from another snapshot than the admission. The
+/// source follows the admitting policy: by invite (normalized code), by
+/// itself, or none when the policy does not track.
+#[test]
+fn admission_records_the_source_its_policy_decides() {
+    use super::super::RegistrationSourceType;
+    let invite_only = stored(EnrollmentMode::InviteOnly, &[]);
+    let invited = gate(None, None, Some(" abcd1234 "));
+    let source = invited
+        .admit(invite_only.clone())
+        .unwrap()
+        .source()
+        .unwrap();
+    assert_eq!(source.source_type, RegistrationSourceType::Invite);
+    assert_eq!(source.source_id, "invite:ABCD1234");
+
+    let open = gate(None, None, None)
+        .admit(None)
+        .unwrap()
+        .source()
+        .unwrap();
+    assert_eq!(open.source_type, RegistrationSourceType::SelfSignup);
+
+    let mut untracked = invite_only.unwrap();
+    untracked.track_source = false;
+    assert!(invited.admit(Some(untracked)).unwrap().source().is_none());
 }
 
 /// A malformed phone number is refused instead of being stored as a zero.

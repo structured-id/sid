@@ -1278,6 +1278,18 @@ async fn test_registration_admitted_by_the_stored_policy() {
 
 /// Runs in its own schema: it makes the installation invite-only.
 #[tokio::test]
+async fn test_admission_records_its_source() {
+    let (backend, schema) = isolated("enrollsource").await;
+    let outcome = tokio::spawn({
+        let backend = backend.clone();
+        async move { common::enrollment_policy::test_admission_records_its_source(&backend).await }
+    })
+    .await;
+    finish_isolated(&backend, &schema, outcome).await;
+}
+
+/// Runs in its own schema: it makes the installation invite-only.
+#[tokio::test]
 async fn test_invite_spent_once_by_concurrent_registrations() {
     let (backend, schema) = isolated("enrollinvite").await;
     let outcome = tokio::spawn({

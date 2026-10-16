@@ -60,14 +60,20 @@ pub enum Refusal {
     /// An allowed domain that is not a domain name.
     #[error("{0:?} is not a domain name")]
     BadDomain(String),
+    /// A default use limit above what an invite can store.
+    #[error("the default invite use limit is at most {MAX_INVITE_USES}")]
+    TooManyUses,
 }
+
+/// The largest use limit an invite stores (a signed 32-bit column).
+pub const MAX_INVITE_USES: u32 = i32::MAX as u32;
 
 /// `policy` as it is stored: allowed domains trimmed, lowercased and without
 /// repeats (registration compares them case-insensitively). While a mode is
 /// pinned the request carries that mode, as the API reports it, and the
 /// `stored_mode` is kept, so removing the pin restores it. Refused when it
-/// changes a pinned mode or leaves a domain-restricted mode without a usable
-/// domain.
+/// changes a pinned mode, leaves a domain-restricted mode (stored or pinned)
+/// without a usable domain, or sets a default use limit no invite can hold.
 pub fn validated(
     mut policy: EnrollmentPolicy,
     pinned: Option<EnrollmentMode>,
@@ -78,6 +84,9 @@ pub fn validated(
             return Err(Refusal::Pinned(mode));
         }
         policy.mode = stored_mode;
+    }
+    if policy.invite.default_max_uses > MAX_INVITE_USES {
+        return Err(Refusal::TooManyUses);
     }
     let mut domains = Vec::with_capacity(policy.allowed_domains.len());
     for domain in &policy.allowed_domains {
@@ -102,7 +111,10 @@ pub fn validated(
             domains.push(domain);
         }
     }
-    if policy.mode == EnrollmentMode::DomainRestricted && domains.is_empty() {
+    // The domains apply under the mode in force (a pinned one) and under the
+    // stored one once the pin is removed.
+    let restricted = |mode: Option<EnrollmentMode>| mode == Some(EnrollmentMode::DomainRestricted);
+    if (restricted(Some(policy.mode)) || restricted(pinned)) && domains.is_empty() {
         return Err(Refusal::NoDomain);
     }
     policy.allowed_domains = domains;

@@ -220,7 +220,7 @@ pub use provisioning_connector::{
     ProvisioningCredential, ProvisioningCredentialId, ProvisioningDirection,
 };
 pub use refresh_token::{RefreshToken, RefreshTokenError, ValidatedRefreshToken};
-pub use registration::{EnrollmentGate, NewRegistration, SignupIdentifier};
+pub use registration::{Admission, EnrollmentGate, NewRegistration, SignupIdentifier};
 pub use registration_source::{RegistrationSource, RegistrationSourceType, UtmParams};
 pub use revocation::{
     CascadeEntry, CascadeTier, RevocationId, RevocationMode, RevocationReason, RevocationRequest,

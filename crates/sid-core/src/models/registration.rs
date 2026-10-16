@@ -61,24 +61,47 @@ pub struct EnrollmentGate {
 
 impl EnrollmentGate {
     /// Admit the registration under `stored` (`None`: the defaults) with the
-    /// pinned mode over it: the invite code to spend with the account when
-    /// the mode is invite-only, or why it is refused.
+    /// pinned mode over it, or say why it is refused.
     pub fn admit(
         &self,
         stored: Option<EnrollmentPolicy>,
-    ) -> core::result::Result<Option<&str>, EnrollmentDenialReason> {
+    ) -> core::result::Result<Admission<'_>, EnrollmentDenialReason> {
         let mut policy = stored.unwrap_or_else(|| SecurityPolicy::ce_default().enrollment);
         if let Some(mode) = self.pinned {
             policy.mode = mode;
         }
         match evaluate_enrollment(&policy, self.email.as_deref(), self.invite_code.as_deref()) {
             EnrollmentDecision::Deny(reason) => Err(reason),
-            EnrollmentDecision::Allow => Ok(if policy.mode == EnrollmentMode::InviteOnly {
-                self.invite_code.as_deref()
-            } else {
-                None
+            EnrollmentDecision::Allow => Ok(Admission {
+                invite: if policy.mode == EnrollmentMode::InviteOnly {
+                    self.invite_code.as_deref()
+                } else {
+                    None
+                },
+                track_source: policy.track_source,
             }),
         }
+    }
+}
+
+/// An admitted self-registration, decided by one policy snapshot: the
+/// invite it spends and whether its source is recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Admission<'a> {
+    /// The invite code to spend with the account (invite-only mode).
+    pub invite: Option<&'a str>,
+    /// Whether the policy records where accounts come from.
+    pub track_source: bool,
+}
+
+impl Admission<'_> {
+    /// The source the account records: by its invite or by itself, or
+    /// none when the policy does not track sources.
+    pub fn source(&self) -> Option<RegistrationSource> {
+        self.track_source.then(|| match self.invite {
+            Some(code) => RegistrationSource::from_invite(&code.trim().to_uppercase(), None),
+            None => RegistrationSource::self_signup(None),
+        })
     }
 }
 

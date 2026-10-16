@@ -51,19 +51,19 @@ pub(super) async fn stored_enrollment_policy(
 
 /// Admit a self-registration in its own write transaction `tx`, which holds
 /// the database lock: decide it by the policy stored now and spend its
-/// invite when the mode asks for one. The PostgreSQL backend states the
-/// contract.
+/// invite when the mode asks for one; returns the source that same policy
+/// records. The PostgreSQL backend states the contract.
 async fn admit_registration(
     tx: &mut sqlx::SqliteConnection,
     gate: &sid_core::models::EnrollmentGate,
-) -> SidResult<()> {
+) -> SidResult<Option<sid_core::models::RegistrationSource>> {
     use sid_core::enrollment::EnrollmentDenialReason;
     let stored = stored_enrollment_policy(&mut *tx).await?;
-    let Some(code) = gate
+    let admission = gate
         .admit(stored)
-        .map_err(SidError::RegistrationRestricted)?
-    else {
-        return Ok(());
+        .map_err(SidError::RegistrationRestricted)?;
+    let Some(code) = admission.invite else {
+        return Ok(admission.source());
     };
     let spent = sqlx::query(
         "UPDATE invites SET use_count = use_count + 1 \
@@ -82,7 +82,7 @@ async fn admit_registration(
             EnrollmentDenialReason::InviteInvalid,
         ));
     }
-    Ok(())
+    Ok(admission.source())
 }
 
 /// Insert a new credential; an existing id is a `Conflict`, never an update.
@@ -435,9 +435,15 @@ impl SqliteBackend {
 
         // The write transaction holds the database lock: the policy read here
         // is the one in force when the account commits.
-        if let Some(gate) = enrollment {
-            admit_registration(&mut tx, gate).await?;
-        }
+        // A self-registration records the source its admitting policy decides.
+        let admitted_source;
+        let source = match enrollment {
+            Some(gate) => {
+                admitted_source = admit_registration(&mut tx, gate).await?;
+                &admitted_source
+            }
+            None => source,
+        };
 
         // The first administrator's registration consumes the claim first; a
         // refusal drops the transaction with nothing written.

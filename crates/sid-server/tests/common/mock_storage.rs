@@ -1372,6 +1372,7 @@ impl StorageBackend for MockStorage {
             if let Some(code) = gate
                 .admit(stored)
                 .map_err(sid_core::Error::RegistrationRestricted)?
+                .invite
             {
                 let code = code.trim().to_uppercase();
                 let now = chrono::Utc::now();

@@ -978,6 +978,11 @@ async fn test_registration_admitted_by_the_stored_policy() {
 }
 
 #[tokio::test]
+async fn test_admission_records_its_source() {
+    common::enrollment_policy::test_admission_records_its_source(&setup().await).await;
+}
+
+#[tokio::test]
 async fn test_invite_spent_once_by_concurrent_registrations() {
     common::enrollment_policy::test_invite_spent_once_by_concurrent_registrations(&setup().await)
         .await;

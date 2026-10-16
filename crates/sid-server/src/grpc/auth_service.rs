@@ -1911,6 +1911,12 @@ impl AuthServiceImpl {
         let handle = parse_handle(principal)?;
         let principal_type = handle.principal_type.to_principal_type();
         let (value, email) = (handle.normalized, handle.email);
+        // Admission is decided before anything about the identifier is
+        // looked up: a refusal answers alike for a held and a free one, so
+        // a closed policy tells nobody which accounts exist.
+        let instance_claim = self
+            .check_self_registration(principal_type, &value, claim_token, invite_code)
+            .await?;
         match self.resolve_profile(principal).await {
             Ok(_) => Ok(PendingRegistration::ExistingAccount { principal_type }),
             Err(status) if status.code() == Code::Unauthenticated => {
@@ -1923,9 +1929,6 @@ impl AuthServiceImpl {
                     // Held but not resolvable (contested, closed): never registered over.
                     return Ok(PendingRegistration::ExistingAccount { principal_type });
                 }
-                let instance_claim = self
-                    .check_self_registration(principal_type, &value, claim_token, invite_code)
-                    .await?;
                 Ok(PendingRegistration::NewAccount {
                     profile_id: ProfileId::generate(),
                     principal_type,
@@ -1982,10 +1985,18 @@ impl AuthServiceImpl {
             );
         }
         let credential_id = credential.id;
-        let track_source = crate::enrollment::stored_or_default(self.storage.as_ref())
-            .await
-            .map_err(storage_failure)?
-            .track_source;
+        // A gated registration's source is decided by the storage from the
+        // policy that admits it; the claim registration follows the stored
+        // tracking setting.
+        let track_source = match instance_claim {
+            Some(_) => {
+                crate::enrollment::stored_or_default(self.storage.as_ref())
+                    .await
+                    .map_err(storage_failure)?
+                    .track_source
+            }
+            None => false,
+        };
         let mut registration = new_self_registration(
             profile_id,
             principal_type,

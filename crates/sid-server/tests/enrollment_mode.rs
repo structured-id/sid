@@ -261,6 +261,65 @@ async fn update_is_an_administrator_action_and_validated() {
     assert_eq!(stored.allowed_domains, vec!["acme.example"]);
 }
 
+/// Regression: under a closed policy the start answered a held identifier
+/// with a decoy and refused a free one, so a single request told whether an
+/// account exists. Both are now refused alike.
+#[tokio::test]
+async fn closed_policy_refuses_held_and_free_identifiers_alike() {
+    let admin = administrator();
+    let svc = TestServices::new(MockStorage::new().with_profile(admin.clone()));
+    let service = enrollment(&svc, None);
+    try_register(&svc, &svc, "held_name", PASSWORD, None)
+        .await
+        .unwrap();
+    update(&svc, &service, &admin, policy(ProtoMode::AdminOnly, &[]))
+        .await
+        .unwrap();
+
+    let start = |principal: &'static str| {
+        let started = zkpp_client::start(PASSWORD);
+        Request::new(OpaqueZkppRegistrationStartRequest {
+            principal: principal.to_string(),
+            registration_request: started.request,
+            claim_token: None,
+            invite_code: None,
+        })
+    };
+    let held = svc
+        .auth
+        .opaque_zkpp_registration_start(start("held_name"))
+        .await
+        .unwrap_err();
+    let free = svc
+        .auth
+        .opaque_zkpp_registration_start(start("free_name"))
+        .await
+        .unwrap_err();
+    assert_eq!(held.code(), free.code());
+    assert_eq!(requirement(&held), "admin_only");
+    assert_eq!(requirement(&free), "admin_only");
+}
+
+/// An invite cannot ask for more uses than an invite stores.
+#[tokio::test]
+async fn invite_use_limit_beyond_storage_is_refused() {
+    let admin = administrator();
+    let svc = TestServices::new(MockStorage::new().with_profile(admin.clone()));
+    let service = enrollment(&svc, None);
+    let err = create_invite(
+        &svc,
+        &service,
+        &admin,
+        sid_proto::sid::v1::admin::CreateInviteRequest {
+            max_uses: u32::MAX,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code(), Code::InvalidArgument);
+}
+
 /// An invite an administrator created, as the API creates it.
 async fn invite(
     svc: &TestServices,

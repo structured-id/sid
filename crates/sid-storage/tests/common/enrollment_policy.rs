@@ -84,6 +84,66 @@ pub async fn test_registration_admitted_by_the_stored_policy(backend: &dyn Stora
     ));
 }
 
+/// Regression: an invited account was recorded as a self-signup, and the
+/// tracking decision was read outside the account's transaction. The source
+/// is decided by the admitting policy: by invite while tracked, none when
+/// the policy does not track.
+pub async fn test_admission_records_its_source(backend: &dyn StorageBackend) {
+    use sid_core::models::RegistrationSourceType;
+    let tag = Uuid::now_v7().simple().to_string();
+    let admin = create_test_profile(&format!("srcadm_{}", &tag[..12]));
+    backend.create_profile(&admin, test_audit()).await.unwrap();
+    let invite = test_invite(admin.id, 5);
+    backend.create_invite(&invite, test_audit()).await.unwrap();
+    let mut tracked = policy(EnrollmentMode::InviteOnly, &[]);
+    tracked.track_source = true;
+    backend
+        .set_enrollment_policy(&tracked, test_audit())
+        .await
+        .unwrap();
+
+    let invited = gated(
+        &format!("src_inv_{}", &tag[..12]),
+        plain_gate(Some(&invite.code)),
+    );
+    backend
+        .register_profile(&invited, test_audit())
+        .await
+        .unwrap();
+    let source = backend
+        .get_registration_source(invited.profile.id)
+        .await
+        .unwrap()
+        .expect("a tracked registration records its source");
+    assert_eq!(source.source_type, RegistrationSourceType::Invite);
+    assert_eq!(
+        source.source_id,
+        format!("invite:{}", invite.code.to_uppercase())
+    );
+
+    let mut untracked = tracked;
+    untracked.track_source = false;
+    backend
+        .set_enrollment_policy(&untracked, test_audit())
+        .await
+        .unwrap();
+    let quiet = gated(
+        &format!("src_off_{}", &tag[..12]),
+        plain_gate(Some(&invite.code)),
+    );
+    backend
+        .register_profile(&quiet, test_audit())
+        .await
+        .unwrap();
+    assert!(
+        backend
+            .get_registration_source(quiet.profile.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
 /// Under an invite-only policy a single-use invite admits exactly one of two
 /// concurrent registrations; the other, and one with an unknown code, store
 /// nothing.

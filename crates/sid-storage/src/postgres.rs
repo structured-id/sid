@@ -163,11 +163,12 @@ async fn stored_enrollment_policy(
 
 /// Admit a self-registration in its own transaction `tx`: under the shared
 /// policy lock, decide it by the policy stored now and spend its invite
-/// when the mode asks for one. A refusal writes nothing.
+/// when the mode asks for one; returns the source that same policy records.
+/// A refusal writes nothing.
 async fn admit_registration(
     tx: &mut sqlx::PgConnection,
     gate: &sid_core::models::EnrollmentGate,
-) -> SidResult<()> {
+) -> SidResult<Option<sid_core::models::RegistrationSource>> {
     use sid_core::enrollment::EnrollmentDenialReason;
     sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
         .bind(crate::ENROLLMENT_POLICY_LOCK)
@@ -175,11 +176,11 @@ async fn admit_registration(
         .await
         .map_err(|e| SidError::Storage(format!("lock enrollment policy: {e}")))?;
     let stored = stored_enrollment_policy(&mut *tx).await?;
-    let Some(code) = gate
+    let admission = gate
         .admit(stored)
-        .map_err(SidError::RegistrationRestricted)?
-    else {
-        return Ok(());
+        .map_err(SidError::RegistrationRestricted)?;
+    let Some(code) = admission.invite else {
+        return Ok(admission.source());
     };
     // One use, only of a live invite: the condition and the increment are
     // one statement, so concurrent registrations never overspend it.
@@ -199,7 +200,7 @@ async fn admit_registration(
             EnrollmentDenialReason::InviteInvalid,
         ));
     }
-    Ok(())
+    Ok(admission.source())
 }
 
 /// An initial access token counter as the `INTEGER` column holds it.
@@ -1834,9 +1835,15 @@ impl StorageBackend for PostgresBackend {
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
 
-        if let Some(gate) = enrollment {
-            admit_registration(&mut tx, gate).await?;
-        }
+        // A self-registration records the source its admitting policy decides.
+        let admitted_source;
+        let source = match enrollment {
+            Some(gate) => {
+                admitted_source = admit_registration(&mut tx, gate).await?;
+                &admitted_source
+            }
+            None => source,
+        };
 
         // The first administrator's registration consumes the claim first: the
         // removed row serializes two registrants holding the same claim, and a

@@ -76,6 +76,29 @@ fn test_validated_keeps_the_stored_mode_under_a_pin() {
     );
 }
 
+/// Regression: a pinned domain-restricted mode over a stored open one took
+/// a policy without domains, though the mode in force then admitted no one.
+/// And a default use limit no invite can store was accepted.
+#[test]
+fn test_validated_checks_the_pinned_mode_and_use_range() {
+    assert_eq!(
+        validated(
+            policy(EnrollmentMode::DomainRestricted, &[]),
+            Some(EnrollmentMode::DomainRestricted),
+            EnrollmentMode::Open,
+        ),
+        Err(Refusal::NoDomain)
+    );
+    let mut wide = policy(EnrollmentMode::Open, &[]);
+    wide.invite.default_max_uses = MAX_INVITE_USES + 1;
+    assert_eq!(
+        validated(wide.clone(), None, EnrollmentMode::Open),
+        Err(Refusal::TooManyUses)
+    );
+    wide.invite.default_max_uses = MAX_INVITE_USES;
+    assert!(validated(wide, None, EnrollmentMode::Open).is_ok());
+}
+
 /// Domains are stored as registration compares them; a domain-restricted
 /// policy without a usable domain, or with something that is no domain name,
 /// is refused rather than stored as a policy that admits no one.
