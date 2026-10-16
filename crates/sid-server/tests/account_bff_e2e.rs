@@ -386,7 +386,12 @@ async fn sign_out_revokes_the_grant() {
             .unwrap(),
     )
     .await;
-    assert_eq!(logout.status(), StatusCode::NO_CONTENT);
+    assert_eq!(logout.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(logout.into_body(), 4096)
+        .await
+        .unwrap();
+    let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(result["grant"], "revoked");
     assert_eq!(
         send(&router, current_profile(&browser, true))
             .await
