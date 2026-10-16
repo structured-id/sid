@@ -3659,7 +3659,7 @@ impl AuthService for AuthServiceImpl {
             .get_session(session_id)
             .await
             .map_err(storage_failure)?
-            .filter(|session| session.profile_id == verified.caller.profile_id)
+            .filter(|session| session.owner == verified.caller.profile_id)
             .filter(|session| self.authorizes(session, now))
             .filter(|session| {
                 prompt
@@ -4053,13 +4053,13 @@ impl AuthService for AuthServiceImpl {
 
         match self.storage.get_session(session_id).await {
             // Someone else's session answers exactly like an unknown one.
-            Ok(Some(session)) if caller.require_self_or_admin(session.profile_id).is_ok() => {
+            Ok(Some(session)) if caller.require_self_or_admin(session.owner).is_ok() => {
                 let now = chrono::Utc::now();
                 let valid = session.expires_at > now;
 
                 Ok(Response::new(ValidateSessionResponse {
                     valid,
-                    profile_id: Some(session.profile_id.to_string()),
+                    profile_id: Some(session.owner.to_string()),
                     scopes: vec![],
                     expires_at: Some(super::convert::to_timestamp(session.expires_at)),
                 }))
@@ -5264,7 +5264,7 @@ impl AuthService for AuthServiceImpl {
         // Only credentials that may still authenticate offer a method.
         let enrolled_creds: Vec<Credential> = self
             .storage
-            .get_credentials_by_profile(session.profile_id, None)
+            .get_credentials_by_profile(session.owner, None)
             .await
             .map_err(storage_failure)?
             .into_iter()
@@ -6071,7 +6071,7 @@ impl AuthServiceImpl {
         // Look up profile
         let profile = self
             .storage
-            .get_profile(exchanged.profile_id())
+            .get_profile(exchanged.owner())
             .await
             .map_err(storage_failure)?
             .ok_or_else(|| {
@@ -6251,7 +6251,7 @@ impl AuthServiceImpl {
         // Look up profile and session
         let profile = self
             .storage
-            .get_profile(validated.profile_id())
+            .get_profile(validated.owner())
             .await
             .map_err(storage_failure)?
             .ok_or_else(|| {

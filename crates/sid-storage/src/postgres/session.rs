@@ -20,7 +20,7 @@ pub(super) async fn write(
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)",
     )
     .bind(session.id)
-    .bind(session.profile_id)
+    .bind(session.owner)
     .bind(&session.client_id)
     .bind(session.device_id)
     .bind(&session.ip_address)

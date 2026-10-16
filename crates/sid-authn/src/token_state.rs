@@ -101,7 +101,7 @@ pub async fn current_state(
     };
     Ok(match storage.get_session(session_id).await? {
         Some(session) if !session.is_expired() => TokenState::Active(TokenActor::Profile {
-            profile: session.profile_id,
+            profile: session.owner,
             session: session.id,
         }),
         _ => TokenState::Inactive,

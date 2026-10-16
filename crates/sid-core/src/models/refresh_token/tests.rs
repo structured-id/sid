@@ -7,7 +7,7 @@ fn make_token(expires_in: Duration, revoked: bool) -> RefreshToken {
         id,
         token_hash: vec![1, 2, 3],
         session_id: SessionId::generate(),
-        profile_id: ProfileId::generate(),
+        owner: ProfileId::generate(),
         client_id: "test-client".to_string(),
         scopes: vec!["openid".into(), "profile".into()],
         resource: ResourceId::generate(),
@@ -107,7 +107,7 @@ fn test_validate_valid_token_consumes_self() {
         id,
         token_hash: vec![1, 2, 3],
         session_id,
-        profile_id,
+        owner: profile_id,
         client_id: "test-client".to_string(),
         scopes: vec!["openid".into(), "profile".into()],
         resource,
@@ -123,7 +123,7 @@ fn test_validate_valid_token_consumes_self() {
     let validated = token.validate().expect("validate should succeed");
 
     assert_eq!(validated.session_id(), session_id);
-    assert_eq!(validated.profile_id(), profile_id);
+    assert_eq!(validated.owner(), profile_id);
     assert_eq!(validated.client_id(), "test-client");
     assert_eq!(validated.scopes(), &["openid", "profile"]);
     assert_eq!(validated.resource(), resource);

@@ -50,9 +50,11 @@ impl fmt::Display for RefreshTokenError {
 
 impl std::error::Error for RefreshTokenError {}
 
-/// Refresh token (stored as SHA-256 hash, never plaintext).
+/// Refresh token (stored as SHA-256 hash, never plaintext). `O` is the
+/// account that owns it, as the issuing host types it: a local Profile by
+/// default.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RefreshToken {
+pub struct RefreshToken<O = ProfileId> {
     /// Token record ID (UUIDv7).
     pub id: Uuid,
 
@@ -62,8 +64,8 @@ pub struct RefreshToken {
     /// Session this token belongs to.
     pub session_id: SessionId,
 
-    /// Profile that owns this token.
-    pub profile_id: ProfileId,
+    /// Account that owns this token.
+    pub owner: O,
 
     /// OAuth2 client that requested this token.
     pub client_id: String,
@@ -103,11 +105,11 @@ pub struct RefreshToken {
 /// Provides read access to token data needed for rotation and token issuance.
 /// Cannot be "un-validated" — the original token is consumed by `validate()`.
 #[derive(Debug)]
-pub struct ValidatedRefreshToken {
-    inner: RefreshToken,
+pub struct ValidatedRefreshToken<O = ProfileId> {
+    inner: RefreshToken<O>,
 }
 
-impl ValidatedRefreshToken {
+impl<O: Copy> ValidatedRefreshToken<O> {
     /// Token record ID.
     pub fn id(&self) -> Uuid {
         self.inner.id
@@ -118,9 +120,9 @@ impl ValidatedRefreshToken {
         self.inner.session_id
     }
 
-    /// Profile that owns this token.
-    pub fn profile_id(&self) -> ProfileId {
-        self.inner.profile_id
+    /// Account that owns this token.
+    pub fn owner(&self) -> O {
+        self.inner.owner
     }
 
     /// OAuth2 client that requested this token.
@@ -165,7 +167,7 @@ impl ValidatedRefreshToken {
     }
 }
 
-impl RefreshToken {
+impl<O> RefreshToken<O> {
     /// Check if token is expired.
     pub fn is_expired(&self) -> bool {
         Utc::now() > self.expires_at
@@ -197,7 +199,7 @@ impl RefreshToken {
     /// 4. Expired → `Expired`
     ///
     /// On `TheftDetected`, callers must revoke the entire token family.
-    pub fn validate(self) -> Result<ValidatedRefreshToken, RefreshTokenError> {
+    pub fn validate(self) -> Result<ValidatedRefreshToken<O>, RefreshTokenError> {
         if self.is_expired() {
             return Err(RefreshTokenError::Expired);
         }

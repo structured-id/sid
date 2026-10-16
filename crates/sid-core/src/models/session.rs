@@ -189,11 +189,12 @@ pub const MEDIUM_TRUST_HOURS: i64 = 12;
 /// Validated UUIDv7 identifier of a session; construction and decoding go through `sid_ids`.
 pub use sid_ids::SessionId;
 
-/// Session represents an active user session.
+/// Session represents an active user session. `O` is the authenticated
+/// account, as the owning host types it: a local Profile by default.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Session {
+pub struct Session<O = ProfileId> {
     pub id: SessionId,
-    pub profile_id: ProfileId,
+    pub owner: O,
 
     /// OAuth2 client that initiated this session (None for direct auth).
     pub client_id: Option<String>,
@@ -264,13 +265,13 @@ pub struct Session {
     pub authenticated_by: Option<SessionId>,
 }
 
-impl Session {
+impl<O> Session<O> {
     /// Create a new session.
-    pub fn new(profile_id: ProfileId, ip_address: String, expires_at: DateTime<Utc>) -> Self {
+    pub fn new(owner: O, ip_address: String, expires_at: DateTime<Utc>) -> Self {
         let now = Utc::now();
         Self {
             id: SessionId::generate(),
-            profile_id,
+            owner,
             client_id: None,
             device_id: None,
             ip_address,
@@ -291,14 +292,16 @@ impl Session {
             authenticated_by: None,
         }
     }
+}
 
+impl Session {
     /// Create a provisional session (from OTP/passwordless).
     /// TTL: 15 minutes, restricted scopes, passkey prompt enabled.
     pub fn new_provisional(profile_id: ProfileId, ip_address: String) -> Self {
         let now = Utc::now();
         Self {
             id: SessionId::generate(),
-            profile_id,
+            owner: profile_id,
             client_id: None,
             device_id: None,
             ip_address,
@@ -324,7 +327,9 @@ impl Session {
             authenticated_by: None,
         }
     }
+}
 
+impl<O> Session<O> {
     /// When and how this session authenticated, as a grant made from it
     /// carries it.
     pub fn grant_authentication(&self) -> GrantAuthentication {
@@ -440,7 +445,7 @@ impl Session {
     ///
     /// Returns `None` if the session is expired or provisional.
     /// This is the safe way to perform state-mutating operations on a session.
-    pub fn as_active(&mut self) -> Option<ActiveSession<'_>> {
+    pub fn as_active(&mut self) -> Option<ActiveSession<'_, O>> {
         if !self.is_expired() && !self.is_provisional {
             Some(ActiveSession(self))
         } else {
@@ -451,7 +456,7 @@ impl Session {
     /// Gateway: obtain typed wrapper if session is expired.
     ///
     /// Returns `None` if the session is still active.
-    pub fn as_expired(&self) -> Option<ExpiredSession<'_>> {
+    pub fn as_expired(&self) -> Option<ExpiredSession<'_, O>> {
         if self.is_expired() {
             Some(ExpiredSession(self))
         } else {
@@ -474,7 +479,9 @@ impl Session {
     pub fn scopes_string(&self) -> String {
         self.scopes.join(" ")
     }
+}
 
+impl Session {
     /// Parse scopes from space-separated string.
     pub fn parse_scopes(s: &str) -> Vec<String> {
         s.split_whitespace().map(String::from).collect()
@@ -485,9 +492,9 @@ impl Session {
 ///
 /// Guards state-mutating operations: elevate, enter_grace, revoke.
 /// Only obtainable through `Session::as_active()` gateway.
-pub struct ActiveSession<'a>(&'a mut Session);
+pub struct ActiveSession<'a, O = ProfileId>(&'a mut Session<O>);
 
-impl<'a> ActiveSession<'a> {
+impl<'a, O> ActiveSession<'a, O> {
     /// Elevate assurance level (e.g., after MFA verification).
     /// Only allows upgrading — never downgrades.
     pub fn elevate(&mut self, level: AuthLevel) {
@@ -510,7 +517,7 @@ impl<'a> ActiveSession<'a> {
     }
 
     /// Read-only access to the inner session.
-    pub fn inner(&self) -> &Session {
+    pub fn inner(&self) -> &Session<O> {
         self.0
     }
 }
@@ -519,11 +526,11 @@ impl<'a> ActiveSession<'a> {
 ///
 /// Read-only — no state mutations allowed.
 /// Represents a session that can only be inspected (for audit) or deleted.
-pub struct ExpiredSession<'a>(&'a Session);
+pub struct ExpiredSession<'a, O = ProfileId>(&'a Session<O>);
 
-impl<'a> ExpiredSession<'a> {
+impl<'a, O> ExpiredSession<'a, O> {
     /// Read-only access to the inner session.
-    pub fn inner(&self) -> &Session {
+    pub fn inner(&self) -> &Session<O> {
         self.0
     }
 

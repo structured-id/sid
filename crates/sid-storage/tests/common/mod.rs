@@ -412,7 +412,7 @@ pub async fn test_session_save_and_get(backend: &dyn StorageBackend) {
     assert!(retrieved.is_some());
     let retrieved = retrieved.unwrap();
     assert_eq!(retrieved.id, session.id);
-    assert_eq!(retrieved.profile_id, profile.id);
+    assert_eq!(retrieved.owner, profile.id);
     assert_eq!(retrieved.ip_address, "127.0.0.1");
 }
 
@@ -3347,7 +3347,7 @@ pub async fn test_refresh_token_save_and_get(backend: &dyn StorageBackend) {
         id: token_id,
         token_hash: token_hash.clone(),
         session_id: session.id,
-        profile_id: profile.id,
+        owner: profile.id,
         client_id: "test-client".to_string(),
         scopes: vec!["openid".into(), "profile".into()],
         resource: application::grant_resource(backend).await,
@@ -3396,7 +3396,7 @@ pub async fn test_refresh_token_revoke(backend: &dyn StorageBackend) {
         id: token_id,
         token_hash: token_hash.clone(),
         session_id: session.id,
-        profile_id: profile.id,
+        owner: profile.id,
         client_id: "test-client".to_string(),
         scopes: vec!["openid".into()],
         resource: application::grant_resource(backend).await,
@@ -3448,7 +3448,7 @@ pub async fn test_refresh_token_revoke_by_session(backend: &dyn StorageBackend) 
             id: Uuid::now_v7(),
             token_hash: Uuid::now_v7().as_bytes().to_vec(),
             session_id: session.id,
-            profile_id: profile.id,
+            owner: profile.id,
             client_id: "test-client".to_string(),
             scopes: vec!["openid".into()],
             resource: application::grant_resource(backend).await,
@@ -3484,7 +3484,7 @@ async fn refresh_token_in(
         id: Uuid::now_v7(),
         token_hash: Uuid::now_v7().as_bytes().to_vec(),
         session_id: session.id,
-        profile_id: session.profile_id,
+        owner: session.owner,
         client_id: "test-client".to_string(),
         scopes: vec!["openid".into()],
         resource: application::grant_resource(backend).await,
@@ -3676,7 +3676,7 @@ pub async fn test_auth_code_save_and_get(backend: &dyn StorageBackend) {
     let code_hash: Vec<u8> = Uuid::now_v7().as_bytes().to_vec();
     let code = AuthorizationCode {
         code_hash: code_hash.clone(),
-        profile_id: profile.id,
+        owner: profile.id,
         client_id: "test-client".to_string(),
         redirect_uri: "https://app.sid.example.com/callback".to_string(),
         scopes: vec!["openid".into()],
@@ -3715,7 +3715,7 @@ async fn stored_auth_code(backend: &dyn StorageBackend, name: &str) -> (Profile,
     let code_hash: Vec<u8> = Uuid::now_v7().as_bytes().to_vec();
     let code = AuthorizationCode {
         code_hash: code_hash.clone(),
-        profile_id: profile.id,
+        owner: profile.id,
         client_id: "test-client".to_string(),
         redirect_uri: "https://app.sid.example.com/callback".to_string(),
         scopes: vec!["openid".into()],
@@ -3744,7 +3744,7 @@ pub async fn test_auth_code_create_never_replaces(backend: &dyn StorageBackend) 
 
     let again = AuthorizationCode {
         code_hash: code_hash.clone(),
-        profile_id: profile.id,
+        owner: profile.id,
         client_id: "test-client".to_string(),
         redirect_uri: "https://app.sid.example.com/callback".to_string(),
         scopes: vec!["openid".into()],
@@ -3779,7 +3779,7 @@ pub async fn exchange_records(
         id: Uuid::now_v7(),
         token_hash: Uuid::now_v7().as_bytes().to_vec(),
         session_id: session.id,
-        profile_id: profile.id,
+        owner: profile.id,
         client_id: "test-client".to_string(),
         scopes: vec!["openid".into()],
         resource: application::grant_resource(backend).await,

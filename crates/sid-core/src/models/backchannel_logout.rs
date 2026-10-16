@@ -32,7 +32,7 @@ impl LogoutDelivery {
     pub fn for_ended_session(session: &super::session::Session) -> Option<Self> {
         session.client_id.as_ref().map(|client_id| Self {
             client_id: client_id.clone(),
-            profile_id: session.profile_id.to_string(),
+            profile_id: session.owner.to_string(),
             session_id: session.id.to_string(),
         })
     }
