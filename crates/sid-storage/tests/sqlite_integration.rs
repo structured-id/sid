@@ -998,7 +998,9 @@ async fn test_admission_records_its_source() {
 
 #[tokio::test]
 async fn test_invite_spent_once_by_concurrent_registrations() {
-    common::enrollment_policy::test_invite_spent_once_by_concurrent_registrations(&setup().await)
+    let backend = setup().await;
+    let log = sid_storage::sqlite::SqliteAuditLog::new(backend.pool().clone());
+    common::enrollment_policy::test_invite_spent_once_by_concurrent_registrations(&backend, &log)
         .await;
 }
 

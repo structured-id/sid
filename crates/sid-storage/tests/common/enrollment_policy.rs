@@ -247,8 +247,12 @@ fn tracked_again() -> EnrollmentPolicy {
 
 /// Under an invite-only policy a single-use invite admits exactly one of two
 /// concurrent registrations; the other, and one with an unknown code, store
-/// nothing.
-pub async fn test_invite_spent_once_by_concurrent_registrations(backend: &dyn StorageBackend) {
+/// nothing. The use is recorded in the invite's own audit chain, as any
+/// other use of it is (regression: registration spent it unrecorded).
+pub async fn test_invite_spent_once_by_concurrent_registrations(
+    backend: &dyn StorageBackend,
+    log: &dyn sid_plugin::AuditLog,
+) {
     let tag = Uuid::now_v7().simple().to_string();
     let admin = create_test_profile(&format!("inviter_{}", &tag[..12]));
     backend.create_profile(&admin, test_audit()).await.unwrap();
@@ -293,6 +297,11 @@ pub async fn test_invite_spent_once_by_concurrent_registrations(backend: &dyn St
             .use_count,
         1
     );
+    let chain = format!("invite:{}", invite.id.0);
+    // The invite's creation and its one use; the refused registration
+    // recorded nothing.
+    assert_eq!(log.query(&chain, None, None).await.unwrap().len(), 2);
+    assert!(log.verify_chain(&chain).await.unwrap().valid);
 
     let unknown = gated(
         &format!("inv_x_{}", &tag[..12]),

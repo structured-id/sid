@@ -51,11 +51,13 @@ pub(super) async fn stored_enrollment_policy(
 
 /// Admit a self-registration in its own write transaction `tx`, which holds
 /// the database lock: decide it by the policy stored now and spend its
-/// invite when the mode asks for one; returns the source that same policy
-/// records. The PostgreSQL backend states the contract.
+/// invite when the mode asks for one, recording that use in the invite's
+/// audit chain as `registration`'s actor; returns the source that same
+/// policy records. The PostgreSQL backend states the contract.
 async fn admit_registration(
     tx: &mut sqlx::SqliteConnection,
     gate: &sid_core::models::EnrollmentGate,
+    registration: &sid_core::models::AuditEntry,
 ) -> SidResult<Option<sid_core::models::RegistrationSource>> {
     use sid_core::enrollment::EnrollmentDenialReason;
     let stored = stored_enrollment_policy(&mut *tx).await?;
@@ -69,19 +71,27 @@ async fn admit_registration(
         "UPDATE invites SET use_count = use_count + 1 \
          WHERE UPPER(code) = ? AND active = 1 \
            AND (max_uses = 0 OR use_count < max_uses) \
-           AND (expires_at IS NULL OR expires_at > ?)",
+           AND (expires_at IS NULL OR expires_at > ?) \
+         RETURNING id",
     )
     .bind(code.trim().to_uppercase())
     .bind(fmt_dt(&chrono::Utc::now()))
-    .execute(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await
-    .map_err(|e| SidError::Storage(format!("spend invite: {e}")))?
-    .rows_affected();
-    if spent != 1 {
+    .map_err(|e| SidError::Storage(format!("spend invite: {e}")))?;
+    let Some(spent) = spent else {
         return Err(SidError::RegistrationRestricted(
             EnrollmentDenialReason::InviteInvalid,
         ));
-    }
+    };
+    let invite = super::uuid_col(&spent, "id")?;
+    super::audit::SqliteAuditLog::log_in_conn(
+        tx,
+        &format!("invite:{invite}"),
+        crate::invite_use_entry(registration, invite),
+    )
+    .await
+    .map_err(|e| SidError::Storage(format!("Audit log failed: {e}")))?;
     Ok(admission.source())
 }
 
@@ -450,7 +460,7 @@ impl SqliteBackend {
         let decided_source;
         let source = match (enrollment, source_recording) {
             (Some(gate), _) => {
-                decided_source = admit_registration(&mut tx, gate).await?;
+                decided_source = admit_registration(&mut tx, gate, &audit.audit).await?;
                 &decided_source
             }
             (None, sid_core::models::SourceRecording::WhilePolicyTracks) => {

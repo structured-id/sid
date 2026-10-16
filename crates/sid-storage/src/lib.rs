@@ -52,13 +52,36 @@ const ENROLLMENT_POLICY_SQL: &str = "SELECT mode, allowed_domains, track_source,
      invite_default_max_uses, invite_default_expiry_hours \
      FROM enrollment_policy WHERE scope = 'installation'";
 
-/// The PostgreSQL transaction-level advisory lock between a policy change
-/// (exclusive) and the registrations it governs (shared): a registration
-/// committed after a change was decided under it, and one in progress
-/// holds the change back until it commits. A lock rather than a row lock,
-/// because the row may not exist yet.
+/// The PostgreSQL lock a registration takes on the policy table: registrations
+/// share it, and a policy change (`LOCK_ENROLLMENT_POLICY_FOR_CHANGE_SQL`)
+/// conflicts with it, so a registration committed after a change was decided
+/// under it and one in progress holds the change back until it commits. A
+/// table lock rather than a row lock, because the row may not exist yet; and
+/// the table is the installation's own, so installations sharing a database
+/// in separate schemas never wait on each other.
 #[cfg(feature = "storage-pg")]
-const ENROLLMENT_POLICY_LOCK: i64 = 0x5349_445f_454e_524f;
+const LOCK_ENROLLMENT_POLICY_FOR_REGISTRATION_SQL: &str =
+    "LOCK TABLE enrollment_policy IN SHARE MODE";
+
+/// The record of a registration's use of invite `invite`, for the invite's
+/// own audit chain: same actor and origin as the registration's record.
+#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
+fn invite_use_entry(
+    registration: &sid_core::models::AuditEntry,
+    invite: uuid::Uuid,
+) -> sid_core::models::AuditEntry {
+    sid_core::models::AuditEntry {
+        action: "invite.use".into(),
+        resource: format!("invite:{invite}"),
+        ..registration.clone()
+    }
+}
+
+/// The lock a policy change takes: conflicts with registrations and with
+/// another change (PostgreSQL documentation 13.3.1, table-level locks).
+#[cfg(feature = "storage-pg")]
+const LOCK_ENROLLMENT_POLICY_FOR_CHANGE_SQL: &str =
+    "LOCK TABLE enrollment_policy IN SHARE ROW EXCLUSIVE MODE";
 
 /// An enrollment policy write's failure: the schema's refusal of a
 /// domain-restricted mode without a domain is the caller's to fix.

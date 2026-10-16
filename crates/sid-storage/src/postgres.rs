@@ -163,19 +163,20 @@ async fn stored_enrollment_policy(
 
 /// Admit a self-registration in its own transaction `tx`: under the shared
 /// policy lock, decide it by the policy stored now and spend its invite
-/// when the mode asks for one; returns the source that same policy records.
-/// A refusal writes nothing.
+/// when the mode asks for one, recording that use in the invite's audit
+/// chain as `registration`'s actor; returns the source that same policy
+/// records. A refusal writes nothing.
 async fn admit_registration(
-    tx: &mut sqlx::PgConnection,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     gate: &sid_core::models::EnrollmentGate,
+    registration: &sid_core::models::AuditEntry,
 ) -> SidResult<Option<sid_core::models::RegistrationSource>> {
     use sid_core::enrollment::EnrollmentDenialReason;
-    sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
-        .bind(crate::ENROLLMENT_POLICY_LOCK)
-        .execute(&mut *tx)
+    sqlx::query(crate::LOCK_ENROLLMENT_POLICY_FOR_REGISTRATION_SQL)
+        .execute(&mut **tx)
         .await
         .map_err(|e| SidError::Storage(format!("lock enrollment policy: {e}")))?;
-    let stored = stored_enrollment_policy(&mut *tx).await?;
+    let stored = stored_enrollment_policy(tx).await?;
     let admission = gate
         .admit(stored)
         .map_err(SidError::RegistrationRestricted)?;
@@ -192,14 +193,22 @@ async fn admit_registration(
          RETURNING id",
     )
     .bind(code.trim().to_uppercase())
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await
     .map_err(|e| SidError::Storage(format!("spend invite: {e}")))?;
-    if spent.is_none() {
+    let Some((invite,)) = spent else {
         return Err(SidError::RegistrationRestricted(
             EnrollmentDenialReason::InviteInvalid,
         ));
-    }
+    };
+    let chain = format!("invite:{invite}");
+    crate::audit_log::PostgresAuditLog::log_in_conn(
+        tx,
+        &chain,
+        crate::invite_use_entry(registration, invite),
+    )
+    .await
+    .map_err(|e| SidError::Storage(format!("Audit log failed: {e}")))?;
     Ok(admission.source())
 }
 
@@ -207,8 +216,7 @@ async fn admit_registration(
 /// under the shared policy lock, so an update cannot slip between this
 /// decision and the account's commit.
 async fn policy_tracks_source(tx: &mut sqlx::PgConnection) -> SidResult<bool> {
-    sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
-        .bind(crate::ENROLLMENT_POLICY_LOCK)
+    sqlx::query(crate::LOCK_ENROLLMENT_POLICY_FOR_REGISTRATION_SQL)
         .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("lock enrollment policy: {e}")))?;
@@ -1856,7 +1864,7 @@ impl StorageBackend for PostgresBackend {
         let decided_source;
         let source = match (enrollment, source_recording) {
             (Some(gate), _) => {
-                decided_source = admit_registration(&mut tx, gate).await?;
+                decided_source = admit_registration(&mut tx, gate, &audit.audit).await?;
                 &decided_source
             }
             (None, sid_core::models::SourceRecording::WhilePolicyTracks) => {
@@ -4169,8 +4177,7 @@ impl StorageBackend for PostgresBackend {
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
         // Waits for registrations deciding under the current policy.
-        sqlx::query("SELECT pg_advisory_xact_lock($1)")
-            .bind(crate::ENROLLMENT_POLICY_LOCK)
+        sqlx::query(crate::LOCK_ENROLLMENT_POLICY_FOR_CHANGE_SQL)
             .execute(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(format!("lock enrollment policy: {e}")))?;
