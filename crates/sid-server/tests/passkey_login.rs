@@ -125,12 +125,7 @@ async fn signed_in_profile(
     signed_in: &WebAuthnAuthenticationFinishResponse,
 ) -> sid_core::models::ProfileId {
     let id = sid_core::models::SessionId::parse(&signed_in.session_id).unwrap();
-    svc.storage
-        .get_session(id)
-        .await
-        .unwrap()
-        .unwrap()
-        .profile_id
+    svc.storage.get_session(id).await.unwrap().unwrap().owner
 }
 
 /// Each sign-in stores the authenticator's signature counter and when the

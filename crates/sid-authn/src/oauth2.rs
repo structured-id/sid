@@ -373,7 +373,7 @@ impl OAuth2Server {
 
         let code = AuthorizationCode {
             code_hash,
-            profile_id,
+            owner: profile_id,
             client_id: req.client_id.clone(),
             redirect_uri: req.redirect_uri.clone(),
             scopes: req.scopes.clone(),
@@ -511,7 +511,7 @@ impl OAuth2Server {
             id: token_id,
             token_hash: refresh_hash,
             session_id: session.id,
-            profile_id: profile.id,
+            owner: profile.id,
             client_id: client.client_id.clone(),
             scopes: scopes.to_vec(),
             resource: target.resource_id(),

@@ -222,8 +222,8 @@ async fn main() -> Result<()> {
             let json = tokio::fs::read_to_string(&input)
                 .await
                 .context("failed to read input file")?;
-            let snapshot: snapshot::Snapshot =
-                serde_json::from_str(&json).context("failed to parse snapshot JSON")?;
+            let snapshot =
+                snapshot::Snapshot::parse(&json).context("failed to parse snapshot JSON")?;
 
             info!(
                 version = snapshot.metadata.version,

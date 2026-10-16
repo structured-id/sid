@@ -189,7 +189,7 @@ impl AuthServiceImpl {
         session: &Session,
         req: OAuth2AuthorizeRequest,
     ) -> Result<OAuth2AuthorizeResponse, Status> {
-        let profile_id = session.profile_id;
+        let profile_id = session.owner;
 
         // ── Per-app policy enforcement ──
         // The org policy, the client's override and the level the relying

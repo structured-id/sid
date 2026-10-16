@@ -168,7 +168,7 @@ impl PostgresBackend {
             });
         }
         super::refresh_token::insert(&mut tx, refresh_token).await?;
-        Self::audit_in_tx(&mut tx, &format!("profile:{}", session.profile_id), ctx).await?;
+        Self::audit_in_tx(&mut tx, &format!("profile:{}", session.owner), ctx).await?;
         tx.commit().await.map_err(storage("commit"))?;
         Ok(DeviceCodeRedemption::Redeemed)
     }
