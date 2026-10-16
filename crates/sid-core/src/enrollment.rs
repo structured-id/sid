@@ -22,6 +22,9 @@ pub enum EnrollmentDenialReason {
     AdminOnly,
     /// Mode is InviteOnly but no invite code provided.
     InviteRequired,
+    /// Mode is InviteOnly and the code presented is unknown, expired,
+    /// revoked or used up.
+    InviteInvalid,
     /// Mode is DomainRestricted and email domain not in allowed list.
     DomainNotAllowed {
         domain: String,
@@ -36,6 +39,7 @@ impl std::fmt::Display for EnrollmentDenialReason {
         match self {
             Self::AdminOnly => write!(f, "self-registration is disabled (admin-only mode)"),
             Self::InviteRequired => write!(f, "registration requires a valid invite code"),
+            Self::InviteInvalid => write!(f, "the invite code is not valid"),
             Self::DomainNotAllowed { domain, .. } => {
                 write!(f, "email domain '{}' is not in the allowed list", domain)
             }

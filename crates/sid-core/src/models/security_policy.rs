@@ -270,7 +270,7 @@ pub struct PasskeyPromptConfig {
 }
 
 /// Configuration for the invite system.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InviteConfig {
     /// Default max uses for new invite codes. 1 = single-use.
     pub default_max_uses: u32,
@@ -283,7 +283,7 @@ pub struct InviteConfig {
 ///
 /// Controls who can create profiles and how registration is tracked.
 /// Sub-policy of `SecurityPolicy`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnrollmentPolicy {
     /// Registration gating mode.
     pub mode: EnrollmentMode,
@@ -419,6 +419,22 @@ impl EnrollmentMode {
         }
     }
 }
+
+/// How an enrollment policy update writes its mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModeWrite {
+    /// The update's mode replaces the stored one.
+    Replace,
+    /// The stored mode stays, read in the update's own transaction; with
+    /// nothing stored yet, the update's mode is written.
+    KeepStored,
+}
+
+parse_stored!(
+    EnrollmentMode,
+    "enrollment mode",
+    [Open, InviteOnly, AdminOnly, DomainRestricted]
+);
 
 impl std::fmt::Display for EnrollmentMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -956,6 +972,22 @@ mod tests {
             EnrollmentMode::DomainRestricted.as_str(),
             "domain_restricted"
         );
+    }
+
+    /// The stored and configured name parses back to its mode; anything else
+    /// is refused, never read as the default.
+    #[test]
+    fn test_enrollment_mode_parses_its_name_only() {
+        for mode in [
+            EnrollmentMode::Open,
+            EnrollmentMode::InviteOnly,
+            EnrollmentMode::AdminOnly,
+            EnrollmentMode::DomainRestricted,
+        ] {
+            assert_eq!(mode.as_str().parse::<EnrollmentMode>(), Ok(mode));
+        }
+        assert!("Open".parse::<EnrollmentMode>().is_err());
+        assert!("".parse::<EnrollmentMode>().is_err());
     }
 
     #[test]

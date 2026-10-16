@@ -724,6 +724,17 @@ impl sid_plugin::StorageBackend for MockStorage {
     ) -> Result<sid_core::models::CentralAdoption> {
         unimplemented!()
     }
+    async fn enrollment_policy(&self) -> Result<Option<sid_core::models::EnrollmentPolicy>> {
+        unimplemented!()
+    }
+    async fn set_enrollment_policy(
+        &self,
+        _: &sid_core::models::EnrollmentPolicy,
+        _: sid_core::models::ModeWrite,
+        _audit: MutationContext,
+    ) -> Result<()> {
+        unimplemented!()
+    }
     async fn claim_first_admin(
         &self,
         _: &[u8],

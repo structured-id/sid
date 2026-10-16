@@ -133,6 +133,20 @@ pub(super) fn registration_restricted(requirement: &'static str) -> tonic::Statu
     .into()
 }
 
+/// The requirement a REGISTRATION_RESTRICTED refusal names for `reason`; an
+/// invalid invite asks for a (valid) invite, as a missing one does.
+pub(super) fn enrollment_requirement(
+    reason: &sid_core::enrollment::EnrollmentDenialReason,
+) -> &'static str {
+    use sid_core::enrollment::EnrollmentDenialReason as R;
+    match reason {
+        R::AdminOnly => "admin_only",
+        R::InviteRequired | R::InviteInvalid => "invite",
+        R::EmailRequired => "email",
+        R::DomainNotAllowed { .. } => "email_domain",
+    }
+}
+
 /// SIGN_IN_REFUSED: a sign-in policy refuses this sign-in outright. The rule
 /// stays in the log and the security event; the client learns no rule.
 pub(super) fn sign_in_refused() -> tonic::Status {

@@ -25,6 +25,85 @@ use super::{
     parse_dt_opt, parsed_col,
 };
 
+/// The stored enrollment policy, read on `conn`; the allowed domains are a
+/// JSON array.
+pub(super) async fn stored_enrollment_policy(
+    conn: &mut sqlx::SqliteConnection,
+) -> SidResult<Option<sid_core::models::EnrollmentPolicy>> {
+    let row: Option<(String, String, bool, i64, i64)> =
+        sqlx::query_as(crate::ENROLLMENT_POLICY_SQL)
+            .fetch_optional(conn)
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?;
+    row.map(|(mode, domains, track_source, max_uses, expiry_hours)| {
+        let allowed_domains = serde_json::from_str(&domains)
+            .map_err(|e| SidError::Storage(format!("stored enrollment policy domains: {e}")))?;
+        crate::enrollment_policy_from_row(
+            &mode,
+            allowed_domains,
+            track_source,
+            max_uses,
+            expiry_hours,
+        )
+    })
+    .transpose()
+}
+
+/// Admit a self-registration in its own write transaction `tx`, which holds
+/// the database lock: decide it by the policy stored now and spend its
+/// invite when the mode asks for one, recording that use in the invite's
+/// audit chain as `registration`'s actor; returns the source that same
+/// policy records. The PostgreSQL backend states the contract.
+async fn admit_registration(
+    tx: &mut sqlx::SqliteConnection,
+    gate: &sid_core::models::EnrollmentGate,
+    registration: &sid_core::models::AuditEntry,
+) -> SidResult<Option<sid_core::models::RegistrationSource>> {
+    use sid_core::enrollment::EnrollmentDenialReason;
+    let stored = stored_enrollment_policy(&mut *tx).await?;
+    let admission = gate
+        .admit(stored)
+        .map_err(SidError::RegistrationRestricted)?;
+    let Some(code) = admission.invite else {
+        return Ok(admission.source());
+    };
+    let spent = sqlx::query(
+        "UPDATE invites SET use_count = use_count + 1 \
+         WHERE UPPER(code) = ? AND active = 1 \
+           AND (max_uses = 0 OR use_count < max_uses) \
+           AND (expires_at IS NULL OR expires_at > ?) \
+         RETURNING id",
+    )
+    .bind(code.trim().to_uppercase())
+    .bind(fmt_dt(&chrono::Utc::now()))
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| SidError::Storage(format!("spend invite: {e}")))?;
+    let Some(spent) = spent else {
+        return Err(SidError::RegistrationRestricted(
+            EnrollmentDenialReason::InviteInvalid,
+        ));
+    };
+    let invite = super::uuid_col(&spent, "id")?;
+    super::audit::SqliteAuditLog::log_in_conn(
+        tx,
+        &format!("invite:{invite}"),
+        crate::invite_use_entry(registration, invite),
+    )
+    .await
+    .map_err(|e| SidError::Storage(format!("Audit log failed: {e}")))?;
+    Ok(admission.source())
+}
+
+/// Whether the policy stored now tracks registration sources, read in the
+/// write transaction `tx`, which holds the database lock.
+async fn policy_tracks_source(tx: &mut sqlx::SqliteConnection) -> SidResult<bool> {
+    Ok(stored_enrollment_policy(&mut *tx).await?.map_or(
+        sid_core::models::security_policy::CE_ENROLLMENT_TRACK_SOURCE,
+        |p| p.track_source,
+    ))
+}
+
 /// Insert a new credential; an existing id is a `Conflict`, never an update.
 pub(super) async fn insert_credential<'e, E>(exec: E, credential: &Credential) -> SidResult<()>
 where
@@ -369,8 +448,31 @@ impl SqliteBackend {
             source,
             instance_claim,
             history,
+            enrollment,
+            source_recording,
         } = registration;
         let mut tx = self.begin_write().await?;
+
+        // The write transaction holds the database lock: the policy read here
+        // is the one in force when the account commits. A self-registration
+        // records the source its admitting policy decides; one recorded while
+        // tracked asks the policy here.
+        let decided_source;
+        let source = match (enrollment, source_recording) {
+            (Some(gate), _) => {
+                decided_source = admit_registration(&mut tx, gate, &audit.audit).await?;
+                &decided_source
+            }
+            (None, sid_core::models::SourceRecording::WhilePolicyTracks) => {
+                decided_source = if policy_tracks_source(&mut tx).await? {
+                    source.clone()
+                } else {
+                    None
+                };
+                &decided_source
+            }
+            (None, sid_core::models::SourceRecording::AsGiven) => source,
+        };
 
         // The first administrator's registration consumes the claim first; a
         // refusal drops the transaction with nothing written.
@@ -1113,6 +1215,50 @@ impl SqliteBackend {
         }
         Self::commit_mutation(tx, "installation:bootstrap_policy", audit).await?;
         Ok(CentralAdoption::Adopted)
+    }
+
+    pub(crate) async fn enrollment_policy_impl(
+        &self,
+    ) -> SidResult<Option<sid_core::models::EnrollmentPolicy>> {
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?;
+        stored_enrollment_policy(&mut conn).await
+    }
+
+    pub(crate) async fn set_enrollment_policy_impl(
+        &self,
+        policy: &sid_core::models::EnrollmentPolicy,
+        mode: sid_core::models::ModeWrite,
+        audit: MutationContext,
+    ) -> SidResult<()> {
+        let domains = serde_json::to_string(&policy.allowed_domains)
+            .map_err(|e| SidError::Storage(format!("enrollment policy domains: {e}")))?;
+        let mut tx = self.begin_write().await?;
+        sqlx::query(
+            "INSERT INTO enrollment_policy (scope, mode, allowed_domains, track_source,
+                 invite_default_max_uses, invite_default_expiry_hours, updated_at)
+             VALUES ('installation', ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+             ON CONFLICT (scope) DO UPDATE SET
+                 mode = CASE WHEN ? THEN enrollment_policy.mode ELSE excluded.mode END,
+                 allowed_domains = excluded.allowed_domains,
+                 track_source = excluded.track_source,
+                 invite_default_max_uses = excluded.invite_default_max_uses,
+                 invite_default_expiry_hours = excluded.invite_default_expiry_hours,
+                 updated_at = excluded.updated_at",
+        )
+        .bind(policy.mode.as_str())
+        .bind(domains)
+        .bind(policy.track_source)
+        .bind(i64::from(policy.invite.default_max_uses))
+        .bind(i64::from(policy.invite.default_expiry_hours))
+        .bind(mode == sid_core::models::ModeWrite::KeepStored)
+        .execute(&mut *tx)
+        .await
+        .map_err(crate::enrollment_policy_write_error)?;
+        Self::commit_mutation(tx, "installation:enrollment_policy", audit).await
     }
 
     pub(crate) async fn claim_first_admin_impl(

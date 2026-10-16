@@ -5,6 +5,8 @@ use super::{
     Credential, EmailLabel, HistoryCommit, PhoneLabel, Principal, PrincipalId, PrincipalType,
     Profile, ProfileEmail, ProfileEmailId, ProfilePhone, ProfilePhoneId, RegistrationSource,
 };
+use super::{EnrollmentMode, EnrollmentPolicy, SecurityPolicy};
+use crate::enrollment::{EnrollmentDecision, EnrollmentDenialReason, evaluate_enrollment};
 use crate::{Error, Result};
 
 /// The identifier a new account signs up with.
@@ -43,6 +45,66 @@ impl SignupIdentifier<'_> {
     }
 }
 
+/// The admission of a self-registration under the enrollment policy, which
+/// the storage applies in the account's own transaction, so a policy changed
+/// meanwhile applies to it: the deployment's pinned mode and what the
+/// registrant presented.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnrollmentGate {
+    /// The mode the deployment pins over the stored one.
+    pub pinned: Option<EnrollmentMode>,
+    /// The registrant's email address, for a domain-restricted policy.
+    pub email: Option<String>,
+    /// The invite code presented, for an invite-only policy.
+    pub invite_code: Option<String>,
+}
+
+impl EnrollmentGate {
+    /// Admit the registration under `stored` (`None`: the defaults) with the
+    /// pinned mode over it, or say why it is refused.
+    pub fn admit(
+        &self,
+        stored: Option<EnrollmentPolicy>,
+    ) -> core::result::Result<Admission<'_>, EnrollmentDenialReason> {
+        let mut policy = stored.unwrap_or_else(|| SecurityPolicy::ce_default().enrollment);
+        if let Some(mode) = self.pinned {
+            policy.mode = mode;
+        }
+        match evaluate_enrollment(&policy, self.email.as_deref(), self.invite_code.as_deref()) {
+            EnrollmentDecision::Deny(reason) => Err(reason),
+            EnrollmentDecision::Allow => Ok(Admission {
+                invite: if policy.mode == EnrollmentMode::InviteOnly {
+                    self.invite_code.as_deref()
+                } else {
+                    None
+                },
+                track_source: policy.track_source,
+            }),
+        }
+    }
+}
+
+/// An admitted self-registration, decided by one policy snapshot: the
+/// invite it spends and whether its source is recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Admission<'a> {
+    /// The invite code to spend with the account (invite-only mode).
+    pub invite: Option<&'a str>,
+    /// Whether the policy records where accounts come from.
+    pub track_source: bool,
+}
+
+impl Admission<'_> {
+    /// The source the account records: by its invite or by itself, or
+    /// none when the policy does not track sources.
+    pub fn source(&self) -> Option<RegistrationSource> {
+        self.track_source.then(|| match self.invite {
+            Some(code) => RegistrationSource::from_invite(&code.trim().to_uppercase(), None),
+            None => RegistrationSource::self_signup(None),
+        })
+    }
+}
+
 /// Everything a new account starts with: the profile, its single signup
 /// principal, the contact rows, the first credential (absent when an
 /// administrator provisions the account and its owner sets one up later) and
@@ -66,9 +128,42 @@ pub struct NewRegistration {
     /// accepted proof, written with the account. Absent for an unproven
     /// password (D018: no trusted history) or no password.
     pub history: Option<HistoryCommit>,
+    /// A self-registration's admission under the enrollment policy, checked
+    /// and its invite spent in the account's transaction. Absent for an
+    /// administrator's provisioning and for the instance claim, which the
+    /// policy does not govern.
+    pub enrollment: Option<EnrollmentGate>,
+    /// Whether `source` is recorded as given or only while the enrollment
+    /// policy, read in the account's transaction, tracks sources. A gated
+    /// self-registration records the source its admission decides instead.
+    pub source_recording: SourceRecording,
+}
+
+/// How a registration's given source is recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SourceRecording {
+    /// Recorded as given.
+    #[default]
+    AsGiven,
+    /// Recorded only while the policy in force when the account commits
+    /// tracks sources.
+    WhilePolicyTracks,
 }
 
 impl NewRegistration {
+    /// Admit this self-registration through `gate` when it is committed.
+    pub fn admitted_by(mut self, gate: EnrollmentGate) -> Self {
+        self.enrollment = Some(gate);
+        self
+    }
+
+    /// Record the given source only while the policy in force when the
+    /// account commits tracks sources.
+    pub fn recording_source_while_tracked(mut self) -> Self {
+        self.source_recording = SourceRecording::WhilePolicyTracks;
+        self
+    }
+
     /// Attach the history the registered password's accepted proof writes;
     /// it must be the new profile's.
     pub fn with_history(mut self, history: HistoryCommit) -> Result<Self> {
@@ -122,6 +217,8 @@ impl NewRegistration {
             source: None,
             instance_claim: None,
             history: None,
+            enrollment: None,
+            source_recording: SourceRecording::AsGiven,
         };
         match identifier {
             SignupIdentifier::Username(_) => {
