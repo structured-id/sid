@@ -232,7 +232,10 @@ async fn signer_output_verifies_with_the_issuers_jwks() {
     let signer = IssuerSigner::load(&storage, keys.as_ref(), issuer.clone())
         .await
         .unwrap();
-    let token = signer.sign(None, &claims_for(&issuer)).unwrap();
+    // Built once: `exp` comes from the clock, and a second rebuilt for the
+    // comparison could differ from the signed one.
+    let claims = claims_for(&issuer);
+    let token = signer.sign(None, &claims).unwrap();
 
     let header = decode_header(&token).unwrap();
     assert_eq!(header.alg, Algorithm::EdDSA);
@@ -242,7 +245,7 @@ async fn signer_output_verifies_with_the_issuers_jwks() {
     );
     assert_eq!(
         verify(&token, signer.jwks(), &issuer.canonical_url).unwrap(),
-        claims_for(&issuer)
+        claims
     );
     // A logout token carries its explicit type (Back-Channel Logout 1.0 §2.4).
     let typed = signer
