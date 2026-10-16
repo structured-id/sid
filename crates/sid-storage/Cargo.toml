@@ -64,6 +64,8 @@ secrecy = { workspace = true }
 # Field-encryption integration tests are #[tokio::test]; the library itself
 # needs no macros, so the attribute is enabled here only.
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# The capability conformance scenarios both backends run.
+sid-plugin = { workspace = true, features = ["conformance"] }
 # Two SQLite backends on one database file (instances sharing a store).
 tempfile = "3"
 # Many concurrent calls on one borrowed store (replicas racing).

@@ -25,7 +25,8 @@ async fn stored_session(backend: &dyn StorageBackend) -> Session {
     backend.get_session(session.id).await.unwrap().unwrap()
 }
 
-/// Creating a session never replaces one, through either create path.
+/// Creating a session without a limit never replaces one either; the limited
+/// path is the grant store's conformance.
 pub async fn test_create_session_never_replaces(backend: &dyn StorageBackend) {
     let session = stored_session(backend).await;
     let mut again = session.clone();
@@ -37,13 +38,6 @@ pub async fn test_create_session_never_replaces(backend: &dyn StorageBackend) {
         .await
         .expect_err("a create over an existing session");
     assert!(matches!(err, Error::Conflict(_)), "{err:?}");
-    for limit in [0, 5] {
-        let err = backend
-            .create_session_atomic(&again, limit, test_audit())
-            .await
-            .expect_err("a limited create over an existing session");
-        assert!(matches!(err, Error::Conflict(_)), "limit {limit}: {err:?}");
-    }
     let stored = backend.get_session(session.id).await.unwrap().unwrap();
     assert_eq!(stored.authentication(), session.authentication());
 }
