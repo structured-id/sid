@@ -530,10 +530,9 @@ pub async fn test_magic_link_consumed_once(backend: &dyn StorageBackend) {
     assert_eq!(winners, 1, "concurrent consumptions of one link");
 }
 
-/// Creating a session at the profile's limit evicts the oldest: the evicted
-/// session ends like any other (its client is owed a logout, committed with
-/// the eviction), a limit of 0 is unlimited, and concurrent sign-ins never
-/// leave more sessions than the limit.
+/// A session the limit evicts ends like any other: its client is owed a
+/// logout, committed with the eviction. Which session is evicted is the grant
+/// store's conformance.
 pub async fn test_session_limit_evicts_oldest(backend: &dyn StorageBackend) {
     let client = super::create_test_oauth2_client(&format!("limit_{}", Uuid::now_v7().simple()));
     super::application::store_client(backend, &client, super::test_audit())
@@ -548,82 +547,22 @@ pub async fn test_session_limit_evicts_oldest(backend: &dyn StorageBackend) {
     let mut oldest = super::create_test_session(profile.id);
     oldest.client_id = Some(client.client_id.clone());
     oldest.created_at = Utc::now() - Duration::minutes(2);
-    let mut middle = super::create_test_session(profile.id);
-    middle.created_at = Utc::now() - Duration::minutes(1);
-    for s in [&oldest, &middle] {
-        let evicted = backend
-            .create_session_atomic(s, 0, super::test_audit())
-            .await
-            .unwrap();
-        assert!(evicted.is_empty(), "a limit of 0 evicted a session");
-    }
+    backend
+        .create_session_atomic(&oldest, 0, super::test_audit())
+        .await
+        .unwrap();
 
     let newest = super::create_test_session(profile.id);
     let evicted = backend
-        .create_session_atomic(&newest, 2, super::test_audit())
+        .create_session_atomic(&newest, 1, super::test_audit())
         .await
         .unwrap();
-    assert_eq!(
-        evicted,
-        vec![oldest.id],
-        "the oldest session was not evicted"
-    );
-    assert!(backend.get_session(oldest.id).await.unwrap().is_none());
-    for kept in [&middle, &newest] {
-        assert!(backend.get_session(kept.id).await.unwrap().is_some());
-    }
+    assert_eq!(evicted, vec![oldest.id]);
     let owed = LogoutDelivery::for_ended_session(&oldest).unwrap().work();
     assert_eq!(
         backend.get_work(owed.id).await.unwrap().map(|r| r.state),
         Some(WorkState::Pending),
         "the evicted session's client was not owed a logout"
-    );
-
-    // Under the limit: nothing is evicted.
-    let other = super::create_test_profile("session_limit_under");
-    backend
-        .create_profile(&other, super::test_audit())
-        .await
-        .unwrap();
-    let evicted = backend
-        .create_session_atomic(
-            &super::create_test_session(other.id),
-            5,
-            super::test_audit(),
-        )
-        .await
-        .unwrap();
-    assert!(evicted.is_empty());
-
-    // Concurrent sign-ins at a limit of 2.
-    let racing = super::create_test_profile("session_limit_race");
-    backend
-        .create_profile(&racing, super::test_audit())
-        .await
-        .unwrap();
-    let s: Vec<_> = (0..6)
-        .map(|_| super::create_test_session(racing.id))
-        .collect();
-    let create = |i: usize| backend.create_session_atomic(&s[i], 2, super::test_audit());
-    let (a, b, c, d, e, f) = tokio::join!(
-        create(0),
-        create(1),
-        create(2),
-        create(3),
-        create(4),
-        create(5)
-    );
-    for result in [a, b, c, d, e, f] {
-        result.unwrap();
-    }
-    assert_eq!(
-        backend
-            .list_sessions_by_profile(racing.id)
-            .await
-            .unwrap()
-            .len(),
-        2,
-        "concurrent sign-ins exceeded the session limit"
     );
 }
 

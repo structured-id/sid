@@ -26,5 +26,9 @@ reqwest = { workspace = true }
 rustls = { workspace = true }
 url = { workspace = true }
 
+[features]
+# The capability conformance scenarios a backend's tests run against it.
+conformance = ["tokio/macros"]
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
