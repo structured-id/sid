@@ -25,7 +25,7 @@ use sid_core::models::{
 };
 use sid_core::{Error as SidError, Result as SidResult};
 use sid_keys::KeyManager;
-use sid_plugin::StorageBackend;
+use sid_plugin::{IssuerStore, StorageBackend};
 use url::Url;
 use zeroize::Zeroizing;
 
@@ -67,7 +67,7 @@ pub fn issuer_url(base: &Url, handle: &IssuerHandle) -> SidResult<String> {
 /// key under `base` on the first start. A later start keeps the stored one,
 /// whatever `base` it is given: the issuer URL changes only by migration.
 pub async fn ensure_local_issuer(
-    storage: &dyn StorageBackend,
+    storage: &dyn IssuerStore,
     keys: &dyn KeyManager,
     base: &Url,
     org: OrgId,
@@ -313,7 +313,7 @@ impl IssuerSigner {
     /// restore without the master key): no replacement key is created, so
     /// no token is ever signed by a key the issuer's published set lacks.
     pub async fn load(
-        storage: &dyn StorageBackend,
+        storage: &dyn IssuerStore,
         keys: &dyn KeyManager,
         issuer: OidcIssuer,
     ) -> SidResult<Self> {
@@ -616,7 +616,7 @@ pub struct AddressedIssuer(pub OidcIssuer);
 /// Holds only values derived from stored, never-changing rows (an issuer and
 /// one generation of its key), so every replica computes the same ones.
 pub struct IssuerRegistry {
-    storage: Arc<dyn StorageBackend>,
+    storage: Arc<dyn IssuerStore>,
     keys: Arc<dyn KeyManager>,
     signers: DashMap<IssuerId, Arc<IssuerSigner>>,
 }
@@ -630,7 +630,7 @@ impl std::fmt::Debug for IssuerRegistry {
 }
 
 impl IssuerRegistry {
-    pub fn new(storage: Arc<dyn StorageBackend>, keys: Arc<dyn KeyManager>) -> Self {
+    pub fn new(storage: Arc<dyn IssuerStore>, keys: Arc<dyn KeyManager>) -> Self {
         Self {
             storage,
             keys,
