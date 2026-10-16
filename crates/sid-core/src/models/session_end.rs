@@ -15,7 +15,9 @@ use uuid::Uuid;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionEnd {
     pub reason: RevocationReason,
-    /// The actor that ended the sessions: a ProfileId or `system`.
+    /// The actor that ended the sessions as the event names it: a local
+    /// ProfileId, `system`, or the actor's category where its identity stays
+    /// in the owning audit.
     pub by: String,
 }
 
@@ -54,15 +56,15 @@ impl SessionEnd {
         owed
     }
 
-    /// The `sid.session.revoked.v1` event of one ended session. A session
-    /// ends once, so its id follows from the session: ending it again owes
-    /// the same event, stored and published once.
-    pub fn revoked_event(&self, session_id: SessionId, profile_id: ProfileId) -> Event {
+    /// The `sid.session.revoked.v1` event of one ended session: the lifecycle
+    /// fact, which names no owner. A session ends once, so its id follows
+    /// from the session: ending it again owes the same event, stored and
+    /// published once.
+    pub fn lifecycle_event(&self, session_id: SessionId) -> Event {
         let mut event = Event::new("sid-session", event_types::SESSION_REVOKED)
             .with_subject(format!("session/{session_id}"))
             .with_data(serde_json::json!({
                 "session_id": session_id.to_string(),
-                "profile_id": profile_id.to_string(),
                 "reason": self.reason.as_str(),
                 "by": self.by,
             }));
@@ -71,6 +73,14 @@ impl SessionEnd {
             session_id.to_string().as_bytes(),
         )
         .to_string();
+        event
+    }
+
+    /// The lifecycle event of a local Profile's ended session, enriched with
+    /// that Profile.
+    pub fn revoked_event(&self, session_id: SessionId, profile_id: ProfileId) -> Event {
+        let mut event = self.lifecycle_event(session_id);
+        event.data["profile_id"] = serde_json::Value::String(profile_id.to_string());
         event
     }
 }
