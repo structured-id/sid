@@ -3993,9 +3993,15 @@ impl StorageBackend for PostgresBackend {
             .begin()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
-        // Removing the claim row first locks it against a concurrent claim:
-        // whichever commits first, the other then finds no claim to consume
-        // or the administrator it created.
+        // The table lock waits for every write in progress (an insertion of
+        // the first claim included, which a row lock cannot cover while the
+        // row does not exist yet) and holds off new ones until the policy is
+        // committed: a claim inserted before is removed here, and one inserted
+        // after is refused by the policy trigger. Reads go on.
+        sqlx::query("LOCK TABLE instance_secrets IN SHARE ROW EXCLUSIVE MODE")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| SidError::Storage(format!("lock instance secrets: {e}")))?;
         sqlx::query("DELETE FROM instance_secrets WHERE name = $1")
             .bind(sid_core::models::InstanceSecret::AdminClaim.as_str())
             .execute(&mut *tx)

@@ -75,6 +75,15 @@ pub async fn open_claim(
     if state(storage).await? != ClaimState::Open {
         return Ok(None);
     }
+    let created = create_claim(storage, keys).await;
+    settled(storage, created).await
+}
+
+/// The stored claim token, created when there is none.
+async fn create_claim(
+    storage: &dyn StorageBackend,
+    keys: &dyn KeyManager,
+) -> Result<SecretString, InstanceSecretError<core::convert::Infallible>> {
     let token = instance_secret::load_or_create(storage, keys, InstanceSecret::AdminClaim, || {
         let random = Zeroizing::new(rand::random::<[u8; 32]>());
         let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(random.as_slice());
@@ -84,7 +93,26 @@ pub async fn open_claim(
     })
     .await?;
     let token = String::from_utf8(token.to_vec()).map_err(|_| InstanceSecretError::Malformed)?;
-    Ok(Some(SecretString::from(token)))
+    Ok(SecretString::from(token))
+}
+
+/// `created`, read against the claim state again: a creation refused or lost
+/// because another replica made the installation centrally managed between
+/// the check and the write is no claim, not a failure.
+async fn settled(
+    storage: &dyn StorageBackend,
+    created: Result<SecretString, InstanceSecretError<core::convert::Infallible>>,
+) -> Result<Option<SecretString>, InstanceSecretError<core::convert::Infallible>> {
+    match created {
+        Ok(token) => Ok(Some(token)),
+        Err(e) => {
+            if state(storage).await? == ClaimState::Open {
+                Err(e)
+            } else {
+                Ok(None)
+            }
+        }
+    }
 }
 
 /// Whether the installation's claim is open: self-managed and still waiting

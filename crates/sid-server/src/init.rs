@@ -219,6 +219,20 @@ pub(crate) fn instance_domain(issuer: &str) -> anyhow::Result<String> {
         .with_context(|| format!("SID_ISSUER {issuer:?} is not a URL with a host"))
 }
 
+/// `SID_INSTALLATION_MANAGEMENT` as read: unset is `None`, a value that is no
+/// text stops the start like any other invalid value, never read as unset.
+pub(crate) fn management_setting(
+    read: Result<String, std::env::VarError>,
+) -> anyhow::Result<Option<String>> {
+    match read {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("SID_INSTALLATION_MANAGEMENT is not valid Unicode")
+        }
+    }
+}
+
 /// Apply the installation's bootstrap policy `setting`
 /// (`SID_INSTALLATION_MANAGEMENT`): `central` records it centrally managed,
 /// which a self-managed installation with a local administrator refuses;
@@ -567,11 +581,8 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
     #[cfg(feature = "telemetry")]
     let sid_metrics = Arc::new(crate::metrics::SidMetrics::init());
 
-    apply_bootstrap_policy(
-        storage.as_ref(),
-        std::env::var("SID_INSTALLATION_MANAGEMENT").ok().as_deref(),
-    )
-    .await?;
+    let management = management_setting(std::env::var("SID_INSTALLATION_MANAGEMENT"))?;
+    apply_bootstrap_policy(storage.as_ref(), management.as_deref()).await?;
     announce_admin_claim(storage.as_ref(), key_manager.as_ref()).await?;
 
     // The installation's organization, and every application in it.

@@ -641,6 +641,26 @@ async fn start_refuses_a_policy_change() {
     );
 }
 
+/// An unset setting is none; one that is no text stops the start rather than
+/// reading as unset (which would let a self-managed claim open).
+#[test]
+fn management_setting_refuses_non_text() {
+    assert_eq!(
+        management_setting(Err(std::env::VarError::NotPresent)).unwrap(),
+        None
+    );
+    assert_eq!(
+        management_setting(Ok("central".into())).unwrap().as_deref(),
+        Some("central")
+    );
+    assert!(
+        management_setting(Err(std::env::VarError::NotUnicode(
+            std::ffi::OsString::from("x")
+        )))
+        .is_err()
+    );
+}
+
 /// A setting other than `central` or `self` stops the start.
 #[tokio::test]
 async fn unknown_policy_setting_stops_the_start() {

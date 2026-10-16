@@ -1298,6 +1298,51 @@ async fn test_claimed_installation_stays_self_managed() {
     finish_isolated(&backend, &schema, outcome).await;
 }
 
+/// A replica of an older build inserting the first claim while the adoption
+/// runs (no claim row exists yet to lock): the adoption waits for that
+/// insertion and removes the claim, so none is left usable beside the
+/// central policy. Runs in its own schema: an installation's first claim.
+#[tokio::test]
+async fn test_adoption_serializes_with_first_claim_insertion() {
+    use sid_core::models::{BootstrapPolicy, CentralAdoption, InstanceSecret};
+    let (backend, schema) = isolated("adoptfirst").await;
+    let outcome = tokio::spawn({
+        let backend = backend.clone();
+        async move {
+            // The older replica's insertion, held open.
+            let mut older = backend.pool().begin().await.unwrap();
+            sqlx::query("INSERT INTO instance_secrets (name, sealed) VALUES ($1, $2)")
+                .bind(InstanceSecret::AdminClaim.as_str())
+                .bind(vec![7u8; 16])
+                .execute(&mut *older)
+                .await
+                .unwrap();
+            let adoption = tokio::spawn({
+                let backend = backend.clone();
+                async move { backend.adopt_central_management(common::test_audit()).await }
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            older.commit().await.unwrap();
+
+            assert_eq!(adoption.await.unwrap().unwrap(), CentralAdoption::Adopted);
+            assert_eq!(
+                backend.bootstrap_policy().await.unwrap(),
+                BootstrapPolicy::CentrallyManaged
+            );
+            assert!(
+                backend
+                    .get_instance_secret(InstanceSecret::AdminClaim)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "a claim was left usable beside the central policy"
+            );
+        }
+    })
+    .await;
+    finish_isolated(&backend, &schema, outcome).await;
+}
+
 /// Runs in its own schema: the scenario is an installation's first claim.
 #[tokio::test]
 async fn test_adoption_races_claim() {
