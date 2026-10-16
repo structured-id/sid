@@ -16,6 +16,7 @@ members = [
     "crates/sid-notify",
     "crates/sid-auth",
     "crates/sid-auth-proxy",
+    "crates/sid-ui-host",
     "crates/sid-attestation",
     "crates/sid-infra",
     "crates/sid-serve",

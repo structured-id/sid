@@ -1,0 +1,31 @@
+[package]
+name = "sid-ui-host"
+description = "StructuredID UI host: serves a compiled web UI bundle and its public configuration, standalone or embedded"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "sid-ui-host"
+path = "src/main.rs"
+
+[lib]
+name = "sid_ui_host"
+path = "src/lib.rs"
+
+[dependencies]
+axum = { workspace = true }
+tower = { workspace = true, features = ["util"] }
+tower-http = { workspace = true, features = ["fs"] }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+percent-encoding = "2"
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+http-body-util = "0.1"
