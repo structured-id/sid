@@ -404,13 +404,13 @@ impl OAuth2Server {
     /// Takes ownership of `code`, preventing re-validation or replay.
     /// On success, returns `ExchangedCode` with read access to authorization data.
     /// Checks: not used, not expired, PKCE, redirect_uri, client match.
-    pub fn validate_code_exchange(
+    pub fn validate_code_exchange<O>(
         &self,
         client: &OAuth2Client,
-        code: AuthorizationCode,
+        code: AuthorizationCode<O>,
         code_verifier: Option<&str>,
         redirect_uri: &str,
-    ) -> SidResult<ExchangedCode> {
+    ) -> SidResult<ExchangedCode<O>> {
         // Exchange consumes the code — validates not-used and not-expired
         let exchanged = code
             .exchange()
@@ -571,11 +571,11 @@ impl OAuth2Server {
     ///
     /// On `RefreshTokenError::Revoked`, callers should perform cascade revocation
     /// before calling this method — the error includes session_id for that purpose.
-    pub fn validate_refresh(
+    pub fn validate_refresh<O>(
         &self,
-        token: RefreshToken,
+        token: RefreshToken<O>,
         client: &OAuth2Client,
-    ) -> Result<ValidatedRefreshToken, RefreshRefusal> {
+    ) -> Result<ValidatedRefreshToken<O>, RefreshRefusal> {
         let validated = token.validate().map_err(|e| match e {
             RefreshTokenError::Expired => RefreshRefusal::Expired,
             RefreshTokenError::Revoked { .. } => RefreshRefusal::Revoked,
