@@ -124,7 +124,7 @@ fn test_access_token_audience() {
             },
             "subject",
             None,
-            &profile,
+            &profile.roles,
             &session,
             &scopes,
             None,
