@@ -6,10 +6,8 @@
 use sid_authn::caller::{Caller, authenticate};
 use sid_authn::jwt::JwtService;
 use sid_authn::revocation_cache::RevocationCache;
-use sid_core::grpc_error::ErrorReason;
-use sid_core::grpc_error::refuse::{
-    invalid_field, missing_field, not_found, not_in_this_build, storage_failure,
-};
+use sid_core::grpc_error::refuse::{invalid_field, missing_field, not_found, storage_failure};
+use sid_core::grpc_error::{ApiError, ErrorReason};
 use sid_core::models::{
     AuditEntry, Invite, InviteFilter, InviteId, InviteStatus, ProfileId, generate_invite_code,
 };
@@ -83,6 +81,8 @@ pub struct EnrollmentServiceImpl {
     storage: Arc<dyn StorageBackend>,
     jwt: Arc<JwtService>,
     revocation: Arc<RevocationCache>,
+    /// The enrollment mode the deployment pins over the stored one.
+    pinned_mode: Option<sid_core::models::EnrollmentMode>,
 }
 
 impl EnrollmentServiceImpl {
@@ -95,7 +95,25 @@ impl EnrollmentServiceImpl {
             storage,
             jwt,
             revocation,
+            pinned_mode: None,
         }
+    }
+
+    /// Report `mode` as the one in force and refuse updates changing it: the
+    /// deployment pins it (`SID_ENROLLMENT_MODE`).
+    pub fn with_pinned_mode(mut self, mode: Option<sid_core::models::EnrollmentMode>) -> Self {
+        self.pinned_mode = mode;
+        self
+    }
+
+    /// The policy in force, as the API reports it.
+    async fn policy_in_force(&self) -> Result<ProtoEnrollmentPolicy, Status> {
+        let policy = crate::enrollment::effective(self.storage.as_ref(), self.pinned_mode)
+            .await
+            .map_err(storage_failure)?;
+        let mut proto = enrollment_policy_to_proto(&policy);
+        proto.mode_pinned = self.pinned_mode.is_some();
+        Ok(proto)
     }
 
     /// Authenticate the caller and require the administrator role: invite codes
@@ -131,9 +149,7 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
         &self,
         _request: Request<()>,
     ) -> Result<Response<ProtoEnrollmentPolicy>, Status> {
-        // Hardcoded defaults.
-        let ce = sid_core::models::SecurityPolicy::ce_default();
-        Ok(Response::new(enrollment_policy_to_proto(&ce.enrollment)))
+        self.policy_in_force().await.map(Response::new)
     }
 
     /// Public: the registration page asks for the claim token while the claim
@@ -161,10 +177,45 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
     #[tracing::instrument(skip_all, fields(rpc = "update_enrollment_policy"))]
     async fn update_enrollment_policy(
         &self,
-        _request: Request<sid_proto::sid::v1::admin::UpdateEnrollmentPolicyRequest>,
+        request: Request<sid_proto::sid::v1::admin::UpdateEnrollmentPolicyRequest>,
     ) -> Result<Response<ProtoEnrollmentPolicy>, Status> {
-        // This build's enrollment policy is fixed.
-        Err(not_in_this_build("enrollment_policy"))
+        use crate::enrollment::Refusal;
+        let caller = self.admin(&request).await?;
+        let policy = request
+            .into_inner()
+            .policy
+            .ok_or_else(|| missing_field("policy"))
+            .and_then(enrollment_policy_from_proto)?;
+        let policy =
+            crate::enrollment::validated(policy, self.pinned_mode).map_err(
+                |refusal| match refusal {
+                    Refusal::Pinned(_) => Status::from(
+                        ApiError::new(ErrorReason::InvalidState, refusal.to_string())
+                            .with_precondition(
+                                "pinned_by_deployment",
+                                "enrollment_policy.mode",
+                                refusal.to_string(),
+                            ),
+                    ),
+                    Refusal::NoDomain | Refusal::BadDomain(_) => {
+                        invalid_field("policy.allowed_domains", refusal.to_string())
+                    }
+                },
+            )?;
+        self.storage
+            .set_enrollment_policy(
+                &policy,
+                AuditEntry::admin(
+                    caller.profile_id.to_string(),
+                    "enrollment_policy.update",
+                    "installation".to_string(),
+                )
+                .into(),
+            )
+            .await
+            .map_err(storage_failure)?;
+        info!(mode = %policy.mode, "enrollment policy updated");
+        self.policy_in_force().await.map(Response::new)
     }
 
     #[tracing::instrument(skip_all, fields(rpc = "create_invite"))]
@@ -433,7 +484,37 @@ fn enrollment_policy_to_proto(ep: &sid_core::models::EnrollmentPolicy) -> ProtoE
         }),
         allowed_domains: ep.allowed_domains.clone(),
         track_source: ep.track_source,
+        mode_pinned: false,
     }
+}
+
+/// An administrator's policy as stored. An unspecified or unknown mode and
+/// a missing invite configuration are refused, never read as a default; the
+/// output-only `mode_pinned` is ignored.
+#[allow(clippy::result_large_err)]
+fn enrollment_policy_from_proto(
+    p: ProtoEnrollmentPolicy,
+) -> Result<sid_core::models::EnrollmentPolicy, Status> {
+    use sid_core::models::EnrollmentMode;
+    use sid_proto::sid::v1::admin::EnrollmentMode as P;
+    let mode = match P::try_from(p.mode) {
+        Ok(P::Open) => EnrollmentMode::Open,
+        Ok(P::InviteOnly) => EnrollmentMode::InviteOnly,
+        Ok(P::AdminOnly) => EnrollmentMode::AdminOnly,
+        Ok(P::DomainRestricted) => EnrollmentMode::DomainRestricted,
+        Ok(P::Unspecified) => return Err(missing_field("policy.mode")),
+        Err(_) => return Err(invalid_field("policy.mode", "not an enrollment mode")),
+    };
+    let invite = p.invite.ok_or_else(|| missing_field("policy.invite"))?;
+    Ok(sid_core::models::EnrollmentPolicy {
+        mode,
+        invite: sid_core::models::InviteConfig {
+            default_max_uses: invite.default_max_uses,
+            default_expiry_hours: invite.default_expiry_hours,
+        },
+        allowed_domains: p.allowed_domains,
+        track_source: p.track_source,
+    })
 }
 
 fn enrollment_mode_to_proto(

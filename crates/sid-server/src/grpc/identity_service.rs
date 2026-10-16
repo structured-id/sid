@@ -619,7 +619,11 @@ impl IdentityService for IdentityServiceImpl {
             );
         }
         // Where the account came from is stored with it.
-        if SecurityPolicy::ce_default().enrollment.track_source {
+        if crate::enrollment::stored_or_default(self.storage.as_ref())
+            .await
+            .map_err(storage_failure)?
+            .track_source
+        {
             let mut source = RegistrationSource::admin_created(caller.profile_id);
             if let Some(referrer) = &req.referrer_id {
                 let rid = ProfileId::parse(referrer)

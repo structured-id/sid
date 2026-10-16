@@ -46,6 +46,32 @@ const ADMIN_EXISTS_SQL: &str =
 #[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
 const CENTRALLY_MANAGED_SQL: &str = "SELECT EXISTS (SELECT 1 FROM bootstrap_policy)";
 
+/// The enrollment policy a stored row holds; a value the schema's checks
+/// should have refused is an error, never read as a default.
+#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
+fn enrollment_policy_from_row(
+    mode: &str,
+    allowed_domains: Vec<String>,
+    track_source: bool,
+    max_uses: i64,
+    expiry_hours: i64,
+) -> sid_core::Result<sid_core::models::EnrollmentPolicy> {
+    let stored = |what: &str, e: String| {
+        sid_core::Error::Storage(format!("stored enrollment policy {what}: {e}"))
+    };
+    Ok(sid_core::models::EnrollmentPolicy {
+        mode: mode.parse().map_err(|e| stored("mode", e))?,
+        invite: sid_core::models::InviteConfig {
+            default_max_uses: u32::try_from(max_uses)
+                .map_err(|e| stored("invite max uses", e.to_string()))?,
+            default_expiry_hours: u32::try_from(expiry_hours)
+                .map_err(|e| stored("invite expiry", e.to_string()))?,
+        },
+        allowed_domains,
+        track_source,
+    })
+}
+
 /// How many email keys stay quarantined after the email policy cutover.
 #[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
 const QUARANTINED_EMAIL_KEYS_SQL: &str =

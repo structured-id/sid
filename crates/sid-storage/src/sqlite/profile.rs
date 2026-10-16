@@ -1115,6 +1115,62 @@ impl SqliteBackend {
         Ok(CentralAdoption::Adopted)
     }
 
+    pub(crate) async fn enrollment_policy_impl(
+        &self,
+    ) -> SidResult<Option<sid_core::models::EnrollmentPolicy>> {
+        let row: Option<(String, String, bool, i64, i64)> = sqlx::query_as(
+            "SELECT mode, allowed_domains, track_source, invite_default_max_uses,
+                    invite_default_expiry_hours
+             FROM enrollment_policy WHERE scope = 'installation'",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(e.to_string()))?;
+        row.map(|(mode, domains, track_source, max_uses, expiry_hours)| {
+            let allowed_domains = serde_json::from_str(&domains)
+                .map_err(|e| SidError::Storage(format!("stored enrollment policy domains: {e}")))?;
+            crate::enrollment_policy_from_row(
+                &mode,
+                allowed_domains,
+                track_source,
+                max_uses,
+                expiry_hours,
+            )
+        })
+        .transpose()
+    }
+
+    pub(crate) async fn set_enrollment_policy_impl(
+        &self,
+        policy: &sid_core::models::EnrollmentPolicy,
+        audit: MutationContext,
+    ) -> SidResult<()> {
+        let domains = serde_json::to_string(&policy.allowed_domains)
+            .map_err(|e| SidError::Storage(format!("enrollment policy domains: {e}")))?;
+        let mut tx = self.begin_write().await?;
+        sqlx::query(
+            "INSERT INTO enrollment_policy (scope, mode, allowed_domains, track_source,
+                 invite_default_max_uses, invite_default_expiry_hours, updated_at)
+             VALUES ('installation', ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+             ON CONFLICT (scope) DO UPDATE SET
+                 mode = excluded.mode,
+                 allowed_domains = excluded.allowed_domains,
+                 track_source = excluded.track_source,
+                 invite_default_max_uses = excluded.invite_default_max_uses,
+                 invite_default_expiry_hours = excluded.invite_default_expiry_hours,
+                 updated_at = excluded.updated_at",
+        )
+        .bind(policy.mode.as_str())
+        .bind(domains)
+        .bind(policy.track_source)
+        .bind(i64::from(policy.invite.default_max_uses))
+        .bind(i64::from(policy.invite.default_expiry_hours))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| SidError::Storage(e.to_string()))?;
+        Self::commit_mutation(tx, "installation:enrollment_policy", audit).await
+    }
+
     pub(crate) async fn claim_first_admin_impl(
         &self,
         claim_sealed: &[u8],

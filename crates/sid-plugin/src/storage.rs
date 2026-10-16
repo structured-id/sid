@@ -990,6 +990,17 @@ pub trait StorageBackend:
         ctx: MutationContext,
     ) -> Result<sid_core::models::CentralAdoption>;
 
+    /// The installation's stored enrollment policy; `None` until one is set.
+    async fn enrollment_policy(&self) -> Result<Option<sid_core::models::EnrollmentPolicy>>;
+
+    /// Store `policy` as the installation's enrollment policy, replacing the
+    /// one stored, with its audit entry in the same transaction.
+    async fn set_enrollment_policy(
+        &self,
+        policy: &sid_core::models::EnrollmentPolicy,
+        ctx: MutationContext,
+    ) -> Result<()>;
+
     /// Make `profile` (already carrying the administrator role, at the
     /// revision it was read at) the first administrator, consuming the admin
     /// claim stored as `claim_sealed`. The claim is removed and the profile

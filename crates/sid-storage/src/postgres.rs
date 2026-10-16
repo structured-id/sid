@@ -4047,6 +4047,65 @@ impl StorageBackend for PostgresBackend {
         Ok(CentralAdoption::Adopted)
     }
 
+    async fn enrollment_policy(&self) -> SidResult<Option<sid_core::models::EnrollmentPolicy>> {
+        let row: Option<(String, Vec<String>, bool, i64, i64)> = sqlx::query_as(
+            "SELECT mode, allowed_domains, track_source, invite_default_max_uses,
+                    invite_default_expiry_hours
+             FROM enrollment_policy WHERE scope = 'installation'",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(format!("enrollment policy: {e}")))?;
+        row.map(
+            |(mode, allowed_domains, track_source, max_uses, expiry_hours)| {
+                crate::enrollment_policy_from_row(
+                    &mode,
+                    allowed_domains,
+                    track_source,
+                    max_uses,
+                    expiry_hours,
+                )
+            },
+        )
+        .transpose()
+    }
+
+    async fn set_enrollment_policy(
+        &self,
+        policy: &sid_core::models::EnrollmentPolicy,
+        audit: MutationContext,
+    ) -> SidResult<()> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?;
+        sqlx::query(
+            "INSERT INTO enrollment_policy (scope, mode, allowed_domains, track_source,
+                 invite_default_max_uses, invite_default_expiry_hours, updated_at)
+             VALUES ('installation', $1, $2, $3, $4, $5, NOW())
+             ON CONFLICT (scope) DO UPDATE SET
+                 mode = EXCLUDED.mode,
+                 allowed_domains = EXCLUDED.allowed_domains,
+                 track_source = EXCLUDED.track_source,
+                 invite_default_max_uses = EXCLUDED.invite_default_max_uses,
+                 invite_default_expiry_hours = EXCLUDED.invite_default_expiry_hours,
+                 updated_at = NOW()",
+        )
+        .bind(policy.mode.as_str())
+        .bind(&policy.allowed_domains)
+        .bind(policy.track_source)
+        .bind(i64::from(policy.invite.default_max_uses))
+        .bind(i64::from(policy.invite.default_expiry_hours))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("set enrollment policy: {e}")))?;
+        Self::audit_in_tx(&mut tx, "installation:enrollment_policy", audit).await?;
+        tx.commit()
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))
+    }
+
     async fn claim_first_admin(
         &self,
         claim_sealed: &[u8],

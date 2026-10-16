@@ -1487,6 +1487,18 @@ impl StorageBackend for SqliteBackend {
         self.adopt_central_management_impl(audit).await
     }
 
+    async fn enrollment_policy(&self) -> SidResult<Option<sid_core::models::EnrollmentPolicy>> {
+        self.enrollment_policy_impl().await
+    }
+
+    async fn set_enrollment_policy(
+        &self,
+        policy: &sid_core::models::EnrollmentPolicy,
+        audit: MutationContext,
+    ) -> SidResult<()> {
+        self.set_enrollment_policy_impl(policy, audit).await
+    }
+
     async fn claim_first_admin(
         &self,
         claim_sealed: &[u8],

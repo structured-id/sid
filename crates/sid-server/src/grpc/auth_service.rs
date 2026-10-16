@@ -439,13 +439,14 @@ pub(crate) fn signup_identifier<'a>(
 
 /// Build the records a self-registration commits: the profile, its single signup
 /// principal, the contact row it came from, the first credential and, when the
-/// site tracks it, the self-signup source.
+/// enrollment policy tracks it (`track_source`), the self-signup source.
 fn new_self_registration(
     profile_id: ProfileId,
     principal_type: PrincipalType,
     value: &str,
     email: Option<&sid_authn::email::EmailHandle>,
     credential: Credential,
+    track_source: bool,
 ) -> Result<NewRegistration, tonic::Status> {
     let identifier = signup_identifier(principal_type, value, email)?;
     let username = matches!(principal_type, PrincipalType::Username).then_some(value);
@@ -453,16 +454,11 @@ fn new_self_registration(
     profile.id = profile_id;
     let registration = NewRegistration::new(profile, identifier, Some(credential))
         .map_err(|e| invalid_field("identifier", e.to_string()))?;
-    Ok(
-        if sid_core::models::security_policy::SecurityPolicy::ce_default()
-            .enrollment
-            .track_source
-        {
-            registration.with_source(sid_core::models::RegistrationSource::self_signup(None))
-        } else {
-            registration
-        },
-    )
+    Ok(if track_source {
+        registration.with_source(sid_core::models::RegistrationSource::self_signup(None))
+    } else {
+        registration
+    })
 }
 
 /// Whether `op` is a change of `credential_id` started by `caller`; any other
@@ -589,6 +585,8 @@ pub struct AuthServiceImpl {
     /// Origin of the browser sign-in page: a ceremony it runs sets the IdP
     /// session cookie. None sets no cookie.
     sign_in_origin: Option<url::Origin>,
+    /// The enrollment mode the deployment pins over the stored one.
+    enrollment_pin: Option<sid_core::models::EnrollmentMode>,
     /// Browser authorization requests kept while the user signs in, by
     /// reference, shared by every replica.
     continuations: ChallengeStore<authorize::PendingAuthorization>,
@@ -755,6 +753,7 @@ impl AuthServiceImpl {
             trusted_proxies: sid_authn::client_address::TrustedProxies::none(),
             authz,
             sign_in_origin: None,
+            enrollment_pin: None,
         }
     }
 
@@ -762,6 +761,13 @@ impl AuthServiceImpl {
     /// `sign_in` runs.
     pub fn with_sign_in_page(mut self, sign_in: &url::Url) -> Self {
         self.sign_in_origin = Some(sign_in.origin());
+        self
+    }
+
+    /// Apply `mode` to self-registration whatever mode is stored: the
+    /// deployment pins it (`SID_ENROLLMENT_MODE`).
+    pub fn with_enrollment_pin(mut self, mode: Option<sid_core::models::EnrollmentMode>) -> Self {
+        self.enrollment_pin = mode;
         self
     }
 
@@ -1960,12 +1966,21 @@ impl AuthServiceImpl {
             );
         }
         let credential_id = credential.id;
+        // The claim registration is admitted by its token whatever the mode;
+        // any other one by the policy as it is now.
+        let enrollment = match instance_claim {
+            Some(_) => crate::enrollment::stored_or_default(self.storage.as_ref())
+                .await
+                .map_err(storage_failure)?,
+            None => self.admitted_by_enrollment(principal_type, &value).await?,
+        };
         let mut registration = new_self_registration(
             profile_id,
             principal_type,
             &value,
             email.as_ref(),
             credential,
+            enrollment.track_source,
         )?;
         if let Some(history) = history {
             registration = registration
@@ -2037,7 +2052,6 @@ impl AuthServiceImpl {
         claim_token: Option<&str>,
     ) -> Result<Option<Vec<u8>>, Status> {
         use sid_authn::admin_claim::{self, ClaimError};
-        use sid_core::enrollment::EnrollmentDenialReason;
         if admin_claim::is_open(self.storage.as_ref())
             .await
             .map_err(|e| internal("check instance claim", e))?
@@ -2065,13 +2079,27 @@ impl AuthServiceImpl {
                 Err(e) => return Err(internal("verify instance claim", e)),
             }
         }
+        self.admitted_by_enrollment(principal_type, value).await?;
+        Ok(None)
+    }
+
+    /// The enrollment policy in force, when it admits a self-registration of
+    /// `value`: checked when the registration starts and again when it is
+    /// committed, so a policy closed in between applies to it.
+    async fn admitted_by_enrollment(
+        &self,
+        principal_type: PrincipalType,
+        value: &str,
+    ) -> Result<sid_core::models::EnrollmentPolicy, Status> {
+        use sid_core::enrollment::EnrollmentDenialReason;
         if !self.feature_flags.is_registration_enabled().await {
             return Err(not_configured("registration"));
         }
+        let policy = crate::enrollment::effective(self.storage.as_ref(), self.enrollment_pin)
+            .await
+            .map_err(storage_failure)?;
         let email = matches!(principal_type, PrincipalType::Email).then_some(value);
-        if let EnrollmentDecision::Deny(reason) =
-            evaluate_enrollment(&self.security_policy.enrollment, email, None)
-        {
+        if let EnrollmentDecision::Deny(reason) = evaluate_enrollment(&policy, email, None) {
             return Err(registration_restricted(match reason {
                 EnrollmentDenialReason::AdminOnly => "admin_only",
                 EnrollmentDenialReason::InviteRequired => "invite",
@@ -2079,7 +2107,7 @@ impl AuthServiceImpl {
                 EnrollmentDenialReason::DomainNotAllowed { .. } => "email_domain",
             }));
         }
-        Ok(None)
+        Ok(policy)
     }
 
     /// Refuse unless the caller's own interactive session may bind a new

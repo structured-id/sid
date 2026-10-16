@@ -8233,19 +8233,23 @@ async fn test_enrollment_get_policy_returns_ce_defaults() {
         .unwrap()
         .into_inner();
 
-    // CE defaults: Open mode, track_source = true
+    // Nothing stored, nothing pinned: the CE defaults, Open mode, tracked.
+    assert_eq!(resp.mode(), sid_proto::sid::v1::admin::EnrollmentMode::Open);
+    assert!(!resp.mode_pinned);
     assert!(resp.invite.is_some());
     assert!(resp.track_source);
 }
 
+/// An anonymous caller cannot change who may register; nothing is stored.
 #[tokio::test]
-async fn test_enrollment_update_policy_returns_unimplemented() {
+async fn test_enrollment_update_policy_requires_authentication() {
+    use sid_plugin::StorageBackend;
     use sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService;
 
-    let storage = MockStorage::new();
+    let storage = Arc::new(MockStorage::new());
     let jwt = test_jwt();
     let svc = sid_server::grpc::enrollment_service::EnrollmentServiceImpl::new(
-        Arc::new(storage),
+        storage.clone(),
         jwt,
         common::test_revocation(),
     );
@@ -8253,7 +8257,8 @@ async fn test_enrollment_update_policy_returns_unimplemented() {
     let req =
         Request::new(sid_proto::sid::v1::admin::UpdateEnrollmentPolicyRequest { policy: None });
     let err = svc.update_enrollment_policy(req).await.unwrap_err();
-    assert_eq!(err.code(), tonic::Code::Unimplemented);
+    assert_eq!(err.code(), tonic::Code::Unauthenticated);
+    assert_eq!(storage.enrollment_policy().await.unwrap(), None);
 }
 
 #[tokio::test]

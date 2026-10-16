@@ -1247,6 +1247,34 @@ async fn test_oidc_issuer_requires_its_organization() {
     common::oidc_issuer::test_oidc_issuer_requires_its_organization(&backend).await;
 }
 
+/// Runs in its own schema: the scenario starts with no policy stored.
+#[tokio::test]
+async fn test_enrollment_policy_stored_and_replaced() {
+    let (backend, schema) = isolated("enrollment").await;
+    let outcome = tokio::spawn({
+        let backend = backend.clone();
+        async move {
+            common::enrollment_policy::test_enrollment_policy_stored_and_replaced(&backend).await
+        }
+    })
+    .await;
+    finish_isolated(&backend, &schema, outcome).await;
+}
+
+/// Runs in its own schema: it writes the installation's single policy row.
+#[tokio::test]
+async fn test_enrollment_policy_keeps_invite_range() {
+    let (backend, schema) = isolated("enrollrange").await;
+    let outcome = tokio::spawn({
+        let backend = backend.clone();
+        async move {
+            common::enrollment_policy::test_enrollment_policy_keeps_invite_range(&backend).await
+        }
+    })
+    .await;
+    finish_isolated(&backend, &schema, outcome).await;
+}
+
 /// Runs in its own schema: the shared schema holds administrators from
 /// other tests, and the scenario is an instance's first claim.
 #[tokio::test]

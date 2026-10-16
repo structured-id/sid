@@ -967,6 +967,16 @@ async fn test_instance_organization_and_clients() {
 }
 
 #[tokio::test]
+async fn test_enrollment_policy_stored_and_replaced() {
+    common::enrollment_policy::test_enrollment_policy_stored_and_replaced(&setup().await).await;
+}
+
+#[tokio::test]
+async fn test_enrollment_policy_keeps_invite_range() {
+    common::enrollment_policy::test_enrollment_policy_keeps_invite_range(&setup().await).await;
+}
+
+#[tokio::test]
 async fn test_admin_claim_consumed_once() {
     common::admin_claim::test_admin_claim_consumed_once(&setup().await).await;
 }

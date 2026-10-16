@@ -51,6 +51,7 @@ pub struct MockStorageInner {
     instance_secrets: HashMap<sid_core::models::InstanceSecret, Vec<u8>>,
     /// The installation was recorded centrally managed.
     centrally_managed: bool,
+    enrollment_policy: Option<sid_core::models::EnrollmentPolicy>,
     instance_organization: Option<sid_core::models::Organization>,
     oidc_issuers: Vec<sid_core::models::OidcIssuer>,
     oidc_issuer_keys: Vec<sid_core::models::IssuerSigningKey>,
@@ -3103,6 +3104,19 @@ impl StorageBackend for MockStorage {
             .instance_secrets
             .remove(&sid_core::models::InstanceSecret::AdminClaim);
         Ok(CentralAdoption::Adopted)
+    }
+
+    async fn enrollment_policy(&self) -> SidResult<Option<sid_core::models::EnrollmentPolicy>> {
+        Ok(self.inner.lock().unwrap().enrollment_policy.clone())
+    }
+
+    async fn set_enrollment_policy(
+        &self,
+        policy: &sid_core::models::EnrollmentPolicy,
+        _ctx: MutationContext,
+    ) -> SidResult<()> {
+        self.inner.lock().unwrap().enrollment_policy = Some(policy.clone());
+        Ok(())
     }
 
     async fn claim_first_admin(
