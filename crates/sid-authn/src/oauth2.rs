@@ -469,7 +469,7 @@ impl OAuth2Server {
     /// its `roles`. An ID token needs `id_token`, the account's Profile and
     /// contacts: a grant with `openid` and no such source is refused.
     #[allow(clippy::too_many_arguments)]
-    pub fn issue_tokens<O: Copy>(
+    pub fn issue_tokens<O: Clone>(
         &self,
         issuer: &IssuerSigner,
         sub: &str,
@@ -528,7 +528,7 @@ impl OAuth2Server {
             id: token_id,
             token_hash: refresh_hash,
             session_id: session.id,
-            owner: session.owner,
+            owner: session.owner.clone(),
             client_id: client.client_id.clone(),
             scopes: scopes.to_vec(),
             resource: target.resource_id(),

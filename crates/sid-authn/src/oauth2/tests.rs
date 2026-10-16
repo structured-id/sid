@@ -504,6 +504,40 @@ async fn test_issue_tokens_for_an_account_that_is_not_a_profile() {
     assert!(claims.pid.is_none());
 }
 
+// An owner that is not `Copy` (a host's own account reference) gets tokens
+// too, and its refresh token carries that owner.
+#[tokio::test]
+async fn test_issue_tokens_for_an_owner_that_is_not_copy() {
+    let server = OAuth2Server::new(create_test_jwt());
+    let (issuers, issuer) = crate::test_support::installation_issuer().await;
+    let signer = issuers.signer(&issuer).await.unwrap();
+    let session = Session::new(
+        "account-7".to_string(),
+        "127.0.0.1".into(),
+        chrono::Utc::now() + chrono::Duration::hours(1),
+    );
+    let client = create_test_client();
+    let target = orders_target(&client);
+
+    let (_, refresh) = server
+        .issue_tokens(
+            &signer,
+            "account-session-reference",
+            &[],
+            &session,
+            &client,
+            &target,
+            &["orders.read".to_string()],
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("tokens for a non-Copy owner");
+
+    assert_eq!(refresh.owner, "account-7");
+}
+
 // `openid` asks for an ID token, which is built from the account's Profile:
 // without one the grant is refused rather than issued without it.
 #[tokio::test]
