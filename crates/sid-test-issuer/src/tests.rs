@@ -287,6 +287,7 @@ async fn a_split_history_evaluator_serves_only_the_credential_service() {
             principal: name.into(),
             registration_request: request,
             claim_token: None,
+            invite_code: None,
         })
     };
     // The installation waits for its first administrator, who registers

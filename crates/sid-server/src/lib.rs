@@ -8,6 +8,7 @@
 
 pub mod background_tasks;
 pub mod embedded_nats;
+pub mod enrollment;
 pub mod feature_flags;
 pub mod field_keys;
 pub mod grpc;

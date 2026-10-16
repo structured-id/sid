@@ -1251,6 +1251,158 @@ async fn test_oidc_issuer_requires_its_organization() {
     common::oidc_issuer::test_oidc_issuer_requires_its_organization(&backend).await;
 }
 
+/// Runs in its own schema: the scenario starts with no policy stored.
+#[tokio::test]
+async fn test_enrollment_policy_stored_and_replaced() {
+    let (backend, schema) = isolated("enrollment").await;
+    let outcome = tokio::spawn({
+        let backend = backend.clone();
+        async move {
+            common::enrollment_policy::test_enrollment_policy_stored_and_replaced(&backend).await
+        }
+    })
+    .await;
+    finish_isolated(&backend, &schema, outcome).await;
+}
+
+/// Runs in its own schema: it closes and opens the installation's policy.
+#[tokio::test]
+async fn test_registration_admitted_by_the_stored_policy() {
+    let (backend, schema) = isolated("enrolladmit").await;
+    let outcome = tokio::spawn({
+        let backend = backend.clone();
+        async move {
+            common::enrollment_policy::test_registration_admitted_by_the_stored_policy(&backend)
+                .await
+        }
+    })
+    .await;
+    finish_isolated(&backend, &schema, outcome).await;
+}
+
+/// Runs in its own schema: it writes the installation's single policy row.
+#[tokio::test]
+async fn test_kept_mode_and_domains_enforced() {
+    let (backend, schema) = isolated("enrollkeep").await;
+    let outcome = tokio::spawn({
+        let backend = backend.clone();
+        async move {
+            common::enrollment_policy::test_kept_mode_and_domains_enforced(&backend).await
+        }
+    })
+    .await;
+    finish_isolated(&backend, &schema, outcome).await;
+}
+
+/// Runs in its own schema: it makes the installation invite-only.
+#[tokio::test]
+async fn test_admission_records_its_source() {
+    let (backend, schema) = isolated("enrollsource").await;
+    let outcome = tokio::spawn({
+        let backend = backend.clone();
+        async move { common::enrollment_policy::test_admission_records_its_source(&backend).await }
+    })
+    .await;
+    finish_isolated(&backend, &schema, outcome).await;
+}
+
+/// Runs in its own schema: it makes the installation invite-only.
+#[tokio::test]
+async fn test_invite_spent_once_by_concurrent_registrations() {
+    let (backend, schema) = isolated("enrollinvite").await;
+    let outcome = tokio::spawn({
+        let backend = backend.clone();
+        async move {
+            let log = sid_storage::audit_log::PostgresAuditLog::new(backend.pool().clone());
+            common::enrollment_policy::test_invite_spent_once_by_concurrent_registrations(
+                &backend, &log,
+            )
+            .await
+        }
+    })
+    .await;
+    finish_isolated(&backend, &schema, outcome).await;
+}
+
+/// A self-registration of a fresh username under the stored policy.
+fn self_registration(name: &str) -> sid_core::models::NewRegistration {
+    sid_core::models::NewRegistration::new(
+        common::create_test_profile(name),
+        sid_core::models::SignupIdentifier::Username(name),
+        None,
+    )
+    .unwrap()
+    .admitted_by(sid_core::models::EnrollmentGate {
+        pinned: None,
+        email: None,
+        invite_code: None,
+    })
+}
+
+/// The lock between a policy change and the registrations it governs is the
+/// installation's own: a change held open in one schema holds back that
+/// installation's registrations and no other installation's in the same
+/// database (regression: one database-wide advisory lock stalled every
+/// installation's signups behind any one's policy change).
+#[tokio::test]
+async fn test_enrollment_policy_lock_is_per_installation() {
+    let (own, own_schema) = isolated("enrolllock_own").await;
+    let (other, other_schema) = isolated("enrolllock_other").await;
+    let outcome = tokio::spawn({
+        let (own, other) = (own.clone(), other.clone());
+        async move {
+            let tag = uuid::Uuid::now_v7().simple().to_string();
+            // A policy change in progress in `own`: the lock it holds until
+            // it commits.
+            let mut change = own.pool().begin().await.unwrap();
+            sqlx::query("LOCK TABLE enrollment_policy IN SHARE ROW EXCLUSIVE MODE")
+                .execute(&mut *change)
+                .await
+                .unwrap();
+
+            let elsewhere_name = format!("lock_b_{}", &tag[..12]);
+            let elsewhere = self_registration(&elsewhere_name);
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                other.register_profile(&elsewhere, common::test_audit()),
+            )
+            .await
+            .expect("another installation's registration waited on this policy change")
+            .unwrap();
+
+            let here_name = format!("lock_a_{}", &tag[..12]);
+            let here = self_registration(&here_name);
+            assert!(
+                tokio::time::timeout(
+                    std::time::Duration::from_millis(500),
+                    own.register_profile(&here, common::test_audit()),
+                )
+                .await
+                .is_err(),
+                "a registration did not wait for its installation's policy change"
+            );
+            change.rollback().await.unwrap();
+        }
+    })
+    .await;
+    finish_isolated(&other, &other_schema, Ok(())).await;
+    finish_isolated(&own, &own_schema, outcome).await;
+}
+
+/// Runs in its own schema: it writes the installation's single policy row.
+#[tokio::test]
+async fn test_enrollment_policy_keeps_invite_range() {
+    let (backend, schema) = isolated("enrollrange").await;
+    let outcome = tokio::spawn({
+        let backend = backend.clone();
+        async move {
+            common::enrollment_policy::test_enrollment_policy_keeps_invite_range(&backend).await
+        }
+    })
+    .await;
+    finish_isolated(&backend, &schema, outcome).await;
+}
+
 /// Runs in its own schema: the shared schema holds administrators from
 /// other tests, and the scenario is an instance's first claim.
 #[tokio::test]

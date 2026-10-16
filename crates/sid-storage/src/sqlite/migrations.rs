@@ -58,7 +58,28 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 9,
         sql: BOOTSTRAP_POLICY,
     },
+    Migration {
+        version: 10,
+        sql: ENROLLMENT_POLICY,
+    },
 ];
+
+/// The installation's enrollment policy; the PostgreSQL migration 062 states
+/// the contract. The allowed domains are a JSON array of strings.
+const ENROLLMENT_POLICY: &str = "
+CREATE TABLE enrollment_policy (
+    scope                       TEXT PRIMARY KEY CHECK (scope = 'installation'),
+    mode                        TEXT NOT NULL
+        CHECK (mode IN ('open', 'invite_only', 'admin_only', 'domain_restricted')),
+    allowed_domains             TEXT NOT NULL DEFAULT '[]' CHECK (json_type(allowed_domains) = 'array'),
+    track_source                INTEGER NOT NULL CHECK (track_source IN (0, 1)),
+    invite_default_max_uses     INTEGER NOT NULL CHECK (invite_default_max_uses BETWEEN 0 AND 4294967295),
+    invite_default_expiry_hours INTEGER NOT NULL CHECK (invite_default_expiry_hours BETWEEN 0 AND 4294967295),
+    updated_at                  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    CONSTRAINT enrollment_policy_domains_for_restricted_mode
+        CHECK (mode <> 'domain_restricted' OR json_array_length(allowed_domains) > 0)
+);
+";
 
 /// The installation's bootstrap policy; the PostgreSQL migration 061 states
 /// the contract.

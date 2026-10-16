@@ -6,12 +6,13 @@
 use sid_authn::caller::{Caller, authenticate};
 use sid_authn::jwt::JwtService;
 use sid_authn::revocation_cache::RevocationCache;
-use sid_core::grpc_error::ErrorReason;
 use sid_core::grpc_error::refuse::{
-    invalid_field, missing_field, not_found, not_in_this_build, storage_failure,
+    internal, invalid_field, missing_field, not_found, storage_failure,
 };
+use sid_core::grpc_error::{ApiError, ErrorReason};
 use sid_core::models::{
-    AuditEntry, Invite, InviteFilter, InviteId, InviteStatus, ProfileId, generate_invite_code,
+    AuditEntry, Invite, InviteFilter, InviteId, InviteStatus, ModeWrite, ProfileId,
+    generate_invite_code,
 };
 use sid_plugin::storage::StorageBackend;
 use std::sync::Arc;
@@ -83,6 +84,8 @@ pub struct EnrollmentServiceImpl {
     storage: Arc<dyn StorageBackend>,
     jwt: Arc<JwtService>,
     revocation: Arc<RevocationCache>,
+    /// The enrollment mode the deployment pins over the stored one.
+    pinned_mode: Option<sid_core::models::EnrollmentMode>,
 }
 
 impl EnrollmentServiceImpl {
@@ -95,7 +98,80 @@ impl EnrollmentServiceImpl {
             storage,
             jwt,
             revocation,
+            pinned_mode: None,
         }
+    }
+
+    /// Report `mode` as the one in force and refuse updates changing it: the
+    /// deployment pins it (`SID_ENROLLMENT_MODE`).
+    pub fn with_pinned_mode(mut self, mode: Option<sid_core::models::EnrollmentMode>) -> Self {
+        self.pinned_mode = mode;
+        self
+    }
+
+    /// The use limit and expiry of a new invite: those the request gives,
+    /// else the stored policy's defaults (a default expiry of 0 hours is
+    /// none); `never_expires` asks for no expiry and `unlimited_uses` for no
+    /// use limit, whatever the defaults.
+    async fn invite_terms(
+        &self,
+        max_uses: u32,
+        unlimited_uses: bool,
+        expires_at: Option<prost_types::Timestamp>,
+        never_expires: bool,
+    ) -> Result<(u32, Option<chrono::DateTime<chrono::Utc>>), Status> {
+        if unlimited_uses && max_uses != 0 {
+            return Err(invalid_field(
+                "unlimited_uses",
+                "an invite with a use limit cannot also be unlimited",
+            ));
+        }
+        if max_uses > crate::enrollment::MAX_INVITE_USES {
+            return Err(invalid_field(
+                "max_uses",
+                format!("at most {}", crate::enrollment::MAX_INVITE_USES),
+            ));
+        }
+        if never_expires && expires_at.is_some() {
+            return Err(invalid_field(
+                "never_expires",
+                "an invite with an expiry cannot also never expire",
+            ));
+        }
+        let expires_at = invite_expiry(expires_at)?;
+        let defaults = crate::enrollment::stored_or_default(self.storage.as_ref())
+            .await
+            .map_err(storage_failure)?
+            .invite;
+        // 0 stores no limit (Invite.max_uses).
+        let max_uses = match max_uses {
+            0 if unlimited_uses => 0,
+            0 => defaults.default_max_uses,
+            limit => limit,
+        };
+        let expires_at = match expires_at {
+            Some(at) => Some(at),
+            None if never_expires => None,
+            // Stored defaults are checked when stored; one that is not
+            // representable now is an inconsistency, not a client error.
+            None => {
+                crate::enrollment::default_expiry(chrono::Utc::now(), defaults.default_expiry_hours)
+                    .ok_or_else(|| {
+                        internal("invite expiry", "the default expiry is not representable")
+                    })?
+            }
+        };
+        Ok((max_uses, expires_at))
+    }
+
+    /// The policy in force, as the API reports it.
+    async fn policy_in_force(&self) -> Result<ProtoEnrollmentPolicy, Status> {
+        let policy = crate::enrollment::effective(self.storage.as_ref(), self.pinned_mode)
+            .await
+            .map_err(storage_failure)?;
+        let mut proto = enrollment_policy_to_proto(&policy);
+        proto.mode_pinned = self.pinned_mode.is_some();
+        Ok(proto)
     }
 
     /// Authenticate the caller and require the administrator role: invite codes
@@ -131,9 +207,7 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
         &self,
         _request: Request<()>,
     ) -> Result<Response<ProtoEnrollmentPolicy>, Status> {
-        // Hardcoded defaults.
-        let ce = sid_core::models::SecurityPolicy::ce_default();
-        Ok(Response::new(enrollment_policy_to_proto(&ce.enrollment)))
+        self.policy_in_force().await.map(Response::new)
     }
 
     /// Public: the registration page asks for the claim token while the claim
@@ -161,10 +235,69 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
     #[tracing::instrument(skip_all, fields(rpc = "update_enrollment_policy"))]
     async fn update_enrollment_policy(
         &self,
-        _request: Request<sid_proto::sid::v1::admin::UpdateEnrollmentPolicyRequest>,
+        request: Request<sid_proto::sid::v1::admin::UpdateEnrollmentPolicyRequest>,
     ) -> Result<Response<ProtoEnrollmentPolicy>, Status> {
-        // This build's enrollment policy is fixed.
-        Err(not_in_this_build("enrollment_policy"))
+        use crate::enrollment::Refusal;
+        let caller = self.admin(&request).await?;
+        let policy = request
+            .into_inner()
+            .policy
+            .ok_or_else(|| missing_field("policy"))
+            .and_then(enrollment_policy_from_proto)?;
+        let stored_mode = crate::enrollment::stored_or_default(self.storage.as_ref())
+            .await
+            .map_err(storage_failure)?
+            .mode;
+        let policy = crate::enrollment::validated(policy, self.pinned_mode, stored_mode).map_err(
+            |refusal| match refusal {
+                Refusal::Pinned(_) => Status::from(
+                    ApiError::new(ErrorReason::InvalidState, refusal.to_string())
+                        .with_precondition(
+                            "pinned_by_deployment",
+                            "enrollment_policy.mode",
+                            refusal.to_string(),
+                        ),
+                ),
+                Refusal::NoDomain | Refusal::BadDomain(_) => {
+                    invalid_field("policy.allowed_domains", refusal.to_string())
+                }
+                Refusal::TooManyUses => {
+                    invalid_field("policy.invite.default_max_uses", refusal.to_string())
+                }
+                Refusal::ExpiryTooFar => {
+                    invalid_field("policy.invite.default_expiry_hours", refusal.to_string())
+                }
+            },
+        )?;
+        // Under a pin the stored mode stays, decided in the write's own
+        // transaction; the mode read above is written only when none is
+        // stored yet.
+        let mode_write = match self.pinned_mode {
+            Some(_) => ModeWrite::KeepStored,
+            None => ModeWrite::Replace,
+        };
+        self.storage
+            .set_enrollment_policy(
+                &policy,
+                mode_write,
+                AuditEntry::admin(
+                    caller.profile_id.to_string(),
+                    "enrollment_policy.update",
+                    "installation".to_string(),
+                )
+                .into(),
+            )
+            .await
+            .map_err(|e| match e {
+                // The stored mode, kept under a pin, is domain-restricted
+                // and the update leaves it without a domain.
+                sid_core::Error::Validation(message) => {
+                    invalid_field("policy.allowed_domains", message)
+                }
+                e => storage_failure(e),
+            })?;
+        info!(mode = %policy.mode, "enrollment policy updated");
+        self.policy_in_force().await.map(Response::new)
     }
 
     #[tracing::instrument(skip_all, fields(rpc = "create_invite"))]
@@ -175,8 +308,14 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
         let created_by = self.admin(&request).await?.profile_id;
         let req = request.into_inner();
 
-        let max_uses = if req.max_uses == 0 { 1 } else { req.max_uses };
-        let expires_at = invite_expiry(req.expires_at)?;
+        let (max_uses, expires_at) = self
+            .invite_terms(
+                req.max_uses,
+                req.unlimited_uses,
+                req.expires_at,
+                req.never_expires,
+            )
+            .await?;
 
         let invite = Invite {
             id: InviteId::new(),
@@ -313,8 +452,14 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
             ));
         }
 
-        let max_uses = if req.max_uses == 0 { 1 } else { req.max_uses };
-        let expires_at = invite_expiry(req.expires_at)?;
+        let (max_uses, expires_at) = self
+            .invite_terms(
+                req.max_uses,
+                req.unlimited_uses,
+                req.expires_at,
+                req.never_expires,
+            )
+            .await?;
         let created_by_name = self.creator_name(created_by).await?;
 
         let mut invites = Vec::with_capacity(count as usize);
@@ -433,7 +578,37 @@ fn enrollment_policy_to_proto(ep: &sid_core::models::EnrollmentPolicy) -> ProtoE
         }),
         allowed_domains: ep.allowed_domains.clone(),
         track_source: ep.track_source,
+        mode_pinned: false,
     }
+}
+
+/// An administrator's policy as stored. An unspecified or unknown mode and
+/// a missing invite configuration are refused, never read as a default; the
+/// output-only `mode_pinned` is ignored.
+#[allow(clippy::result_large_err)]
+fn enrollment_policy_from_proto(
+    p: ProtoEnrollmentPolicy,
+) -> Result<sid_core::models::EnrollmentPolicy, Status> {
+    use sid_core::models::EnrollmentMode;
+    use sid_proto::sid::v1::admin::EnrollmentMode as P;
+    let mode = match P::try_from(p.mode) {
+        Ok(P::Open) => EnrollmentMode::Open,
+        Ok(P::InviteOnly) => EnrollmentMode::InviteOnly,
+        Ok(P::AdminOnly) => EnrollmentMode::AdminOnly,
+        Ok(P::DomainRestricted) => EnrollmentMode::DomainRestricted,
+        Ok(P::Unspecified) => return Err(missing_field("policy.mode")),
+        Err(_) => return Err(invalid_field("policy.mode", "not an enrollment mode")),
+    };
+    let invite = p.invite.ok_or_else(|| missing_field("policy.invite"))?;
+    Ok(sid_core::models::EnrollmentPolicy {
+        mode,
+        invite: sid_core::models::InviteConfig {
+            default_max_uses: invite.default_max_uses,
+            default_expiry_hours: invite.default_expiry_hours,
+        },
+        allowed_domains: p.allowed_domains,
+        track_source: p.track_source,
+    })
 }
 
 fn enrollment_mode_to_proto(

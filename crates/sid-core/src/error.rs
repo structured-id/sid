@@ -67,6 +67,11 @@ pub enum Error {
     #[error("Resource exhausted: {0}")]
     ResourceExhausted(String),
 
+    /// The enrollment policy in force refuses a self-registration; nothing
+    /// was written.
+    #[error("Registration restricted: {0}")]
+    RegistrationRestricted(crate::enrollment::EnrollmentDenialReason),
+
     /// Upstream dependency unavailable (database, cache, external service).
     #[error("Unavailable: {0}")]
     Unavailable(String),
@@ -105,6 +110,7 @@ impl Error {
                 | Self::RateLimited(_)
                 | Self::InvalidState(_)
                 | Self::PolicyViolation(_)
+                | Self::RegistrationRestricted(_)
         )
     }
 

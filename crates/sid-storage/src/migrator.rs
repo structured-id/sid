@@ -383,6 +383,10 @@ const MIGRATIONS: &[Migration] = &[
         name: "20261016_061_bootstrap_policy",
         sql: include_str!("../../../migrations/20261016_061_bootstrap_policy.sql"),
     },
+    Migration {
+        name: "20261016_062_enrollment_policy",
+        sql: include_str!("../../../migrations/20261016_062_enrollment_policy.sql"),
+    },
 ];
 
 /// The history evaluator's own store, in execution order: applied by the
