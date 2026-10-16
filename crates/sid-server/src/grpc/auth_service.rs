@@ -19,7 +19,7 @@ use sid_authn::jwt::JwtService;
 use sid_authn::legacy_hash::BuiltinLegacyVerifier;
 use sid_authn::magic_link::MagicLinkService;
 use sid_authn::normalize::{NormalizedPrincipal, normalize_principal};
-use sid_authn::oauth2::{OAuth2Server, TokenError};
+use sid_authn::oauth2::{IdTokenSource, OAuth2Server, TokenError};
 use sid_authn::opaque::OpaqueRouter;
 use sid_authn::opaque_zkpp::ZkppOpaqueServer;
 use sid_authn::otp::OtpService;
@@ -6134,7 +6134,7 @@ impl AuthServiceImpl {
             .issue_tokens(
                 &signer,
                 &sub,
-                &profile,
+                &profile.roles,
                 &session,
                 &client,
                 &target,
@@ -6142,8 +6142,11 @@ impl AuthServiceImpl {
                 exchanged.nonce(),
                 dpop_binding.as_ref(),
                 custom_claims.as_ref(),
-                primary_email.as_ref(),
-                primary_phone.as_ref(),
+                Some(IdTokenSource {
+                    profile: &profile,
+                    email: primary_email.as_ref(),
+                    phone: primary_phone.as_ref(),
+                }),
             )
             .map_err(|e| internal("issue tokens", e))?;
 
@@ -6317,7 +6320,7 @@ impl AuthServiceImpl {
             .issue_tokens(
                 &signer,
                 &sub,
-                &profile,
+                &profile.roles,
                 &_session,
                 &client,
                 &target,
@@ -6325,8 +6328,11 @@ impl AuthServiceImpl {
                 None,
                 dpop_binding.as_ref(),
                 custom_claims.as_ref(),
-                primary_email.as_ref(),
-                primary_phone.as_ref(),
+                Some(IdTokenSource {
+                    profile: &profile,
+                    email: primary_email.as_ref(),
+                    phone: primary_phone.as_ref(),
+                }),
             )
             .map_err(|e| internal("issue tokens", e))?;
 
@@ -6508,7 +6514,7 @@ impl AuthServiceImpl {
             .issue_tokens(
                 &signer,
                 &sub,
-                &profile,
+                &profile.roles,
                 &session,
                 &client,
                 &target,
@@ -6516,8 +6522,11 @@ impl AuthServiceImpl {
                 None,
                 None,
                 None,
-                primary_email.as_ref(),
-                primary_phone.as_ref(),
+                Some(IdTokenSource {
+                    profile: &profile,
+                    email: primary_email.as_ref(),
+                    phone: primary_phone.as_ref(),
+                }),
             )
             .map_err(|e| internal("issue tokens", e))?;
 

@@ -269,6 +269,15 @@ impl fmt::Debug for TokenResponse {
     }
 }
 
+/// What an ID token is built from: the authenticated account's Profile and
+/// its primary contacts, disclosed by scope.
+#[derive(Debug, Clone, Copy)]
+pub struct IdTokenSource<'a> {
+    pub profile: &'a Profile,
+    pub email: Option<&'a ProfileEmail>,
+    pub phone: Option<&'a ProfilePhone>,
+}
+
 /// OAuth2 error response.
 #[derive(Debug, Serialize)]
 pub struct OAuth2Error {
@@ -442,6 +451,8 @@ impl OAuth2Server {
     /// Issue tokens (access_token, refresh_token, optional id_token) as the
     /// client's `issuer`: its URL is `iss` and its key signs them.
     ///
+    /// The refresh token's owner is the session's.
+    ///
     /// The access token is for `target` alone: its `aud` is the resource
     /// indicator and its scope the part of `scopes` the target grants
     /// (RFC 8707, auth/oauth-resource-model.md). `scopes` are the client's
@@ -453,22 +464,25 @@ impl OAuth2Server {
     ///
     /// When `custom_claims` is provided, they are merged into the access token
     /// JWT payload (AUTH-017: static claim mapping).
+    ///
+    /// The tokens belong to the session's account, whatever its type, with
+    /// its `roles`. An ID token needs `id_token`, the account's Profile and
+    /// contacts: a grant with `openid` and no such source is refused.
     #[allow(clippy::too_many_arguments)]
-    pub fn issue_tokens(
+    pub fn issue_tokens<O: Copy>(
         &self,
         issuer: &IssuerSigner,
         sub: &str,
-        profile: &Profile,
-        session: &Session,
+        roles: &[String],
+        session: &Session<O>,
         client: &OAuth2Client,
         target: &crate::target::Target,
         scopes: &[String],
         nonce: Option<&str>,
         dpop_binding: Option<&DPopBinding>,
         custom_claims: Option<&std::collections::HashMap<String, serde_json::Value>>,
-        primary_email: Option<&ProfileEmail>,
-        primary_phone: Option<&ProfilePhone>,
-    ) -> SidResult<(TokenResponse, RefreshToken)> {
+        id_token: Option<IdTokenSource<'_>>,
+    ) -> SidResult<(TokenResponse, RefreshToken<O>)> {
         let token_scopes = target.granted_scopes(scopes);
         let access_token = self.jwt.access_token_signed_by(
             issuer,
@@ -478,7 +492,7 @@ impl OAuth2Server {
             },
             sub,
             None,
-            profile,
+            roles,
             session,
             &token_scopes,
             dpop_binding,
@@ -487,15 +501,18 @@ impl OAuth2Server {
 
         // Issue ID token if "openid" scope is present
         let id_token = if scopes.iter().any(|s| s == "openid") {
+            let source = id_token.ok_or_else(|| {
+                sid_core::Error::Internal("an ID token needs the account's profile".into())
+            })?;
             Some(self.jwt.id_token_signed_by(
                 issuer,
                 sub,
-                profile,
+                source.profile,
                 session,
                 &client.client_id,
                 nonce,
-                primary_email,
-                primary_phone,
+                source.email,
+                source.phone,
             )?)
         } else {
             None
@@ -511,7 +528,7 @@ impl OAuth2Server {
             id: token_id,
             token_hash: refresh_hash,
             session_id: session.id,
-            owner: profile.id,
+            owner: session.owner,
             client_id: client.client_id.clone(),
             scopes: scopes.to_vec(),
             resource: target.resource_id(),

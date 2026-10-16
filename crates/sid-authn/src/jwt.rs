@@ -501,7 +501,7 @@ impl JwtService {
             TokenAudience::Installation,
             sub,
             pid,
-            profile,
+            &profile.roles,
             session,
             scopes,
             dpop_binding,
@@ -511,15 +511,17 @@ impl JwtService {
 
     /// An access token issued by `signer` (its `iss` and key) to `audience`
     /// with this service's lifetime; otherwise as [`Self::issue_access_token`].
+    /// `roles` are the authenticated account's, whatever its type; the
+    /// session supplies the authentication evidence.
     #[allow(clippy::too_many_arguments)]
-    pub fn access_token_signed_by<S: TokenSigner>(
+    pub fn access_token_signed_by<S: TokenSigner, O>(
         &self,
         signer: &S,
         audience: TokenAudience<'_>,
         sub: &str,
         pid: Option<&str>,
-        profile: &Profile,
-        session: &Session,
+        roles: &[String],
+        session: &Session<O>,
         scopes: &[String],
         dpop_binding: Option<&DPopBinding>,
         custom_claims: Option<&std::collections::HashMap<String, serde_json::Value>>,
@@ -550,7 +552,7 @@ impl JwtService {
             auth_time: session.authenticated_at.timestamp(),
             acr: acr.acr_value().to_string(),
             scope: scopes.join(" "),
-            roles: profile.roles.join(" "),
+            roles: roles.join(" "),
             amr: session.amr.clone(),
             sid: session.id.to_string(),
             jti: uuid::Uuid::now_v7().to_string(),
@@ -692,12 +694,12 @@ impl JwtService {
     /// An ID token issued by `signer` with this service's lifetime;
     /// otherwise as [`Self::issue_id_token`].
     #[allow(clippy::too_many_arguments)]
-    pub fn id_token_signed_by<S: TokenSigner>(
+    pub fn id_token_signed_by<S: TokenSigner, O>(
         &self,
         signer: &S,
         sub: &str,
         profile: &Profile,
-        session: &Session,
+        session: &Session<O>,
         client_id: &str,
         nonce: Option<&str>,
         primary_email: Option<&ProfileEmail>,
@@ -898,8 +900,8 @@ fn pem_to_der(pem: &[u8]) -> SidResult<Vec<u8>> {
 
 /// The assurance a token issued at `now` carries, and its expiry: never past
 /// `ttl_end`, the session's end, or the step-up it claims.
-fn token_assurance(
-    session: &Session,
+fn token_assurance<O>(
+    session: &Session<O>,
     now: chrono::DateTime<Utc>,
     ttl_end: chrono::DateTime<Utc>,
 ) -> (sid_core::models::session::AuthLevel, chrono::DateTime<Utc>) {
