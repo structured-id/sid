@@ -2935,6 +2935,11 @@ impl StorageBackend for MockStorage {
         _audit: MutationContext,
     ) -> SidResult<bool> {
         let mut inner = self.inner.lock().unwrap();
+        if inner.centrally_managed && secret == sid_core::models::InstanceSecret::AdminClaim {
+            return Err(sid_core::Error::InvalidState(
+                "centrally managed installation: no administrator claim".into(),
+            ));
+        }
         if inner.instance_secrets.contains_key(&secret) {
             return Ok(false);
         }

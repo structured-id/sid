@@ -68,6 +68,20 @@ CREATE TABLE bootstrap_policy (
     policy     TEXT NOT NULL CHECK (policy = 'centrally_managed'),
     adopted_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
+
+CREATE TRIGGER instance_secrets_no_claim_when_centrally_managed_insert
+BEFORE INSERT ON instance_secrets
+WHEN NEW.name = 'admin_claim' AND EXISTS (SELECT 1 FROM bootstrap_policy)
+BEGIN
+    SELECT RAISE(ABORT, 'centrally managed installation: no administrator claim');
+END;
+
+CREATE TRIGGER instance_secrets_no_claim_when_centrally_managed_update
+BEFORE UPDATE ON instance_secrets
+WHEN NEW.name = 'admin_claim' AND EXISTS (SELECT 1 FROM bootstrap_policy)
+BEGIN
+    SELECT RAISE(ABORT, 'centrally managed installation: no administrator claim');
+END;
 ";
 
 /// Fences of purged owners; the evaluator's PostgreSQL migration 004 states

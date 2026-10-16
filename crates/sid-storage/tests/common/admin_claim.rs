@@ -181,10 +181,11 @@ pub async fn test_registration_claims_instance(backend: &dyn StorageBackend) {
 }
 
 /// A centrally managed installation consumes no local claim: adopting the
-/// policy removes the stored claim, and a claim stored before or written
-/// after it (an older replica) creates no administrator through the role
-/// grant or a registration. The policy is never undone, and ordinary
-/// registration is not trapped behind the missing local administrator.
+/// policy removes the stored claim, the database refuses to store one again
+/// (an older replica that knows nothing of the policy fails loudly rather
+/// than opening a claim), and the stale token creates no administrator
+/// through the role grant or a registration. The policy is never undone, and
+/// ordinary registration is not trapped behind the missing administrator.
 pub async fn test_central_management_refuses_local_claims(backend: &dyn StorageBackend) {
     use sid_core::models::{BootstrapPolicy, CentralAdoption, NewRegistration};
     assert!(!backend.admin_exists().await.unwrap());
@@ -211,11 +212,13 @@ pub async fn test_central_management_refuses_local_claims(backend: &dyn StorageB
     );
     assert!(claim_stored(backend).await.is_none());
 
-    // A claim written again (an older replica) is refused on both paths.
-    backend
+    // An older replica writing a claim again is refused by the database,
+    // and the stale token is refused on both paths.
+    let rewritten = backend
         .insert_instance_secret(InstanceSecret::AdminClaim, &claim, test_audit())
-        .await
-        .unwrap();
+        .await;
+    assert!(rewritten.is_err(), "{rewritten:?}");
+    assert!(claim_stored(backend).await.is_none());
     let claimer = stored_profile(backend, "central_claimer").await;
     assert!(
         !backend

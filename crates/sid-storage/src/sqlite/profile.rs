@@ -1083,6 +1083,11 @@ impl SqliteBackend {
     ) -> SidResult<sid_core::models::CentralAdoption> {
         use sid_core::models::CentralAdoption;
         let mut tx = self.begin_write().await?;
+        sqlx::query("DELETE FROM instance_secrets WHERE name = ?")
+            .bind(sid_core::models::InstanceSecret::AdminClaim.as_str())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| SidError::Storage(e.to_string()))?;
         let adopted = sqlx::query(
             "INSERT INTO bootstrap_policy (scope, policy) VALUES ('installation', 'centrally_managed')
              ON CONFLICT (scope) DO NOTHING",
@@ -1093,6 +1098,10 @@ impl SqliteBackend {
         .rows_affected()
             == 1;
         if !adopted {
+            // The removal of a stale claim stands either way.
+            tx.commit()
+                .await
+                .map_err(|e| SidError::Storage(e.to_string()))?;
             return Ok(CentralAdoption::AlreadyCentral);
         }
         let admin_exists: bool = sqlx::query_scalar(ADMIN_EXISTS_SQL)
@@ -1102,11 +1111,6 @@ impl SqliteBackend {
         if admin_exists {
             return Ok(CentralAdoption::LocalAdministrator);
         }
-        sqlx::query("DELETE FROM instance_secrets WHERE name = ?")
-            .bind(sid_core::models::InstanceSecret::AdminClaim.as_str())
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| SidError::Storage(e.to_string()))?;
         Self::commit_mutation(tx, "installation:bootstrap_policy", audit).await?;
         Ok(CentralAdoption::Adopted)
     }

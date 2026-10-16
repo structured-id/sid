@@ -4011,6 +4011,10 @@ impl StorageBackend for PostgresBackend {
         .rows_affected()
             == 1;
         if !adopted {
+            // The removal of a stale claim stands either way.
+            tx.commit()
+                .await
+                .map_err(|e| SidError::Storage(e.to_string()))?;
             return Ok(CentralAdoption::AlreadyCentral);
         }
         let admin_exists: bool = sqlx::query_scalar(ADMIN_EXISTS_SQL)

@@ -1072,6 +1072,8 @@ pub trait StorageBackend: WorkStore + Send + Sync + 'static {
 
     /// Store an instance secret. Returns `false`, writing nothing, when it
     /// already exists: concurrent starters agree on the first value stored.
+    /// An admin claim is refused (an error) on a centrally managed
+    /// installation, whichever build writes it.
     async fn insert_instance_secret(
         &self,
         secret: sid_core::models::InstanceSecret,
