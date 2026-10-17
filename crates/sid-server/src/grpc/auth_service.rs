@@ -7,7 +7,7 @@
 use crate::feature_flags::FeatureFlagService;
 use chrono::{Duration, Utc};
 use secrecy::{ExposeSecret, SecretBox};
-use sid_authn::anomaly::{AnomalyDetector, LoginContext, RuleReaction};
+use sid_authn::anomaly::AnomalyDetector;
 use sid_authn::challenge_store::ChallengeStore;
 use sid_authn::claim_mapping::resolve_claims;
 use sid_authn::client_auth::ClientAuthentication;
@@ -23,6 +23,7 @@ use sid_authn::oauth2::{IdTokenSource, OAuth2Server, TokenError};
 use sid_authn::opaque::OpaqueRouter;
 use sid_authn::opaque_zkpp::ZkppOpaqueServer;
 use sid_authn::otp::OtpService;
+use sid_authn::password_sign_in::PendingSignIn;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::revocation_cascade::RevocationCascadeService;
 use sid_authn::subject::{SubjectRule, resolve_subject};
@@ -47,7 +48,7 @@ use sid_core::models::{
     RevocationReason,
 };
 use sid_plugin::cache::CacheBackend;
-use sid_plugin::crypto::{LoginState, StoredCredential};
+use sid_plugin::crypto::StoredCredential;
 use sid_plugin::storage::StorageBackend;
 use sid_proto::sid::v1::auth_service_server::AuthService;
 use sid_proto::sid::v1::*;
@@ -66,41 +67,20 @@ use sid_core::grpc_error::refuse::{
 
 mod authorize;
 mod end_session;
+mod password_sign_in;
 mod refusal;
+mod sign_in_security;
 mod token_grant;
 pub(crate) use authorize::{BrowserAuthorization, PendingAuthorization};
 pub(crate) use end_session::{EndSession, LogoutRequest};
+use password_sign_in::ProfileSignIn;
 use refusal::{
-    anomaly_unavailable, authentication_failed, captcha_required, ceremony_expired,
-    enrollment_requirement, mfa_not_enrolled, registration_restricted, session_ended,
-    session_provisional, sign_in_refused, step_up_after_anomaly, step_up_to_acr, step_up_to_amr,
-    too_many_attempts,
+    anomaly_unavailable, authentication_failed, ceremony_expired, enrollment_requirement,
+    mfa_not_enrolled, registration_restricted, session_ended, session_provisional, sign_in_refused,
+    step_up_to_acr, step_up_to_amr, too_many_attempts,
 };
-
-/// Check implied auth level for a given authentication method.
-///
-/// Returns the auth level that a successful login with this method would grant.
-/// Used for pre-session policy enforcement (check policy before creating session).
-///
-/// When `passkey_satisfies_mfa` is true (CE default, NIST-aligned), a single passkey
-/// with user verification satisfies MFA: possession + biometric/PIN = two factors.
-/// When false, passkey grants only basic assurance (requires additional MFA for standard).
-///
-/// `user_verified` must be true for Standard — per NIST, the authenticator must have
-/// performed user verification (biometric or PIN). Without UV, passkey = single factor
-/// (possession only), so assurance remains Basic even if `passkey_satisfies_mfa` is true.
-fn implied_auth_level(
-    auth_method: &str,
-    passkey_satisfies_mfa: bool,
-    user_verified: bool,
-) -> sid_core::models::session::AuthLevel {
-    match auth_method {
-        "webauthn" if passkey_satisfies_mfa && user_verified => {
-            sid_core::models::session::AuthLevel::Standard
-        }
-        _ => sid_core::models::session::AuthLevel::Basic,
-    }
-}
+use sid_authn::sign_in_security::{device_id as compute_device_id, implied_auth_level};
+use sign_in_security::{ProfileSecurity, SecurityStatus};
 
 /// How a full sign-in authenticated.
 #[derive(Clone, Copy)]
@@ -256,21 +236,6 @@ fn extract_captcha_pass(metadata: &tonic::metadata::MetadataMap) -> Option<Strin
         .map(str::to_owned)
 }
 
-/// Compute a deterministic device_id from User-Agent string.
-///
-/// SHA-256(UA) → first 16 bytes → UUID v4 (deterministic).
-/// Same UA string always produces the same device_id.
-fn compute_device_id(user_agent: &str) -> uuid::Uuid {
-    use sha2::{Digest, Sha256};
-    let hash = Sha256::digest(user_agent.as_bytes());
-    let mut bytes = [0u8; 16];
-    bytes.copy_from_slice(&hash[..16]);
-    // Set UUID version 4 bits for format compliance.
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    uuid::Uuid::from_bytes(bytes)
-}
-
 /// Parse a principal string and determine its type.
 ///
 /// Delegates to `sid_authn::normalize::normalize_principal` for full
@@ -285,23 +250,6 @@ fn parse_principal(identifier: &str) -> Result<(PrincipalType, String), tonic::S
 /// policy revision its key was derived under.
 fn parse_handle(identifier: &str) -> Result<NormalizedPrincipal, tonic::Status> {
     normalize_principal(identifier).map_err(|e| invalid_field("identifier", e.to_string()))
-}
-
-/// Server state between OPAQUE login start and finish.
-#[derive(serde::Serialize, serde::Deserialize)]
-enum PendingLogin {
-    /// A login against the profile's password.
-    Password {
-        state: LoginState,
-        profile_id: ProfileId,
-        credential_id: CredentialId,
-    },
-    /// A login that cannot succeed: no profile holds the principal, or its
-    /// profile has no password. Stored and consumed like a real state and
-    /// refused like a wrong password, so neither the timing of either step nor
-    /// the answer tells whether the account exists. `identity` is the key its
-    /// failed attempts count against.
-    Decoy { identity: String },
 }
 
 /// What a pending OPAQUE registration may commit when it finishes.
@@ -536,7 +484,7 @@ pub struct AuthServiceImpl {
     pub(crate) revocation_cache: Arc<RevocationCache>,
     pub(crate) feature_flags: FeatureFlagService,
     /// OPAQUE login state between start and finish.
-    login_state: ChallengeStore<PendingLogin>,
+    login_state: ChallengeStore<PendingSignIn<ProfileId>>,
     /// Password registrations, changes and resets between their steps, and
     /// the history evaluator and checker they use.
     pub(crate) password_ops: Arc<super::password_operation::PasswordOperations>,
@@ -981,328 +929,20 @@ impl AuthServiceImpl {
         user_verified: bool,
         extras: LoginSecurityExtras<'_>,
     ) -> Result<(), Status> {
-        let user_agent = extras.user_agent;
-        let identity = profile_id.to_string();
-
-        // ── GeoIP resolution ──
-        let geo_location = if let Some(ip) = client_ip {
-            self.geoip.resolve(ip).await
-        } else {
-            None
-        };
-        let country = geo_location.as_ref().map(|g| g.country.clone());
-
-        // ── Stage 1: Anomaly detection ──
-        // Every rule runs on every sign-in; a solved CAPTCHA answers only a
-        // CAPTCHA requirement, never a lockout or a block.
-        // Evaluate CE hardcoded rules in priority order (first match wins).
-        // ── IP Intelligence enrichment ──
-        // A provider that cannot answer refuses the sign-in: an unknown IP
-        // would pass the blocklist it could not check.
-        let ip_classification = if let Some(ip) = client_ip {
-            self.ip_intelligence
-                .classify(ip)
-                .await
-                .map_err(anomaly_unavailable)?
-        } else {
-            Default::default()
-        };
-
-        // Rules read the sign-in history below; one that cannot be read
-        // refuses the sign-in like unreadable attempt state, since an empty
-        // history would switch the travel and location checks off.
-        // ── Previous sign-in: the baseline of the history rules ──
-        let previous = self
-            .storage
-            .get_most_recent_session_ip(profile_id)
-            .await
-            .map_err(anomaly_unavailable)?;
-        let prev_login_at = previous.as_ref().map(|(_, at)| *at);
-
-        // ── new_ip detection ──
-        let new_ip = if let Some(ip) = client_ip {
-            let ip_window = std::time::Duration::from_secs(90 * 24 * 3600); // 90 days
-            let seen = self
-                .storage
-                .has_recent_session_from_ip(profile_id, &ip.to_string(), ip_window)
-                .await
-                .map_err(anomaly_unavailable)?;
-            !seen
-        } else {
-            false
-        };
-
-        // ── Impossible travel: previous session location ──
-        // Only resolved with a current location to compare against.
-        let (prev_latitude, prev_longitude, prev_country) = match (&geo_location, &previous) {
-            (Some(_), Some((prev_ip, _))) => {
-                // Re-resolve previous IP via GeoIP (cache hit in most cases).
-                match prev_ip.parse::<std::net::IpAddr>() {
-                    Ok(prev_ip_addr) => match self.geoip.resolve(prev_ip_addr).await {
-                        Some(prev_geo) => (
-                            Some(prev_geo.latitude),
-                            Some(prev_geo.longitude),
-                            Some(prev_geo.country),
-                        ),
-                        None => (None, None, None),
-                    },
-                    Err(_) => (None, None, None),
-                }
-            }
-            _ => (None, None, None),
-        };
-
-        // ── Designated locations: suppress impossible travel between known locations ──
-        let designated_countries = self
-            .storage
-            .get_designated_countries(profile_id)
-            .await
-            .map_err(anomaly_unavailable)?;
-
-        // ── Device fingerprint: UA hash → device_id ──
-        let new_device = if let Some(ua) = user_agent {
-            let device_id = compute_device_id(ua);
-            let device_window = std::time::Duration::from_secs(90 * 24 * 3600); // 90 days
-            let seen = self
-                .storage
-                .has_recent_session_from_device(profile_id, device_id, device_window)
-                .await
-                .map_err(anomaly_unavailable)?;
-            !seen
-        } else {
-            false
-        };
-
-        let ctx = LoginContext {
-            identity: identity.clone(),
-            ip: client_ip,
-            country,
-            failed: false, // This is post-credential-success evaluation
-            new_device,
-            new_ip,
-            is_tor_exit: ip_classification.is_tor_exit(),
-            is_datacenter_ip: ip_classification.is_datacenter(),
-            is_blocklisted: ip_classification.is_blocklisted(),
-            latitude: geo_location.as_ref().map(|g| g.latitude),
-            longitude: geo_location.as_ref().map(|g| g.longitude),
-            prev_latitude,
-            prev_longitude,
-            prev_login_at,
-            prev_country,
-            designated_countries,
-        };
-
-        // Rules that cannot read the shared attempt state refuse the
-        // sign-in rather than skip the lockout.
-        let rule_match = self
-            .anomaly_detector
-            .evaluate(&ctx)
-            .await
-            .map_err(anomaly_unavailable)?;
-
-        match rule_match.reaction {
-            RuleReaction::Allow => {
-                // No anomaly detected — continue to policy evaluation.
-                // Publish location_switch event for observability.
-                if rule_match.rule == "location_switch" {
-                    info!(
-                        profile_id = %identity,
-                        rule = "location_switch",
-                        reason = %rule_match.reason,
-                        "Impossible travel suppressed: both locations are designated"
-                    );
-                    self.publish_security_event(
-                        &identity,
-                        "location_switch",
-                        "allow",
-                        &rule_match.reason,
-                        client_ip,
-                    )
-                    .await;
-                }
-            }
-            RuleReaction::HardNo => {
-                // Absolute deny — no override, no escalation.
-                warn!(
-                    profile_id = %identity,
-                    rule = rule_match.rule,
-                    reason = %rule_match.reason,
-                    "Anomaly: HardNo — login denied"
-                );
-                self.publish_security_event(
-                    &identity,
-                    rule_match.rule,
-                    rule_match.reaction.as_str(),
-                    &rule_match.reason,
-                    client_ip,
-                )
-                .await;
-                return Err(sign_in_refused());
-            }
-            RuleReaction::Block => {
-                warn!(
-                    profile_id = %identity,
-                    rule = rule_match.rule,
-                    reason = %rule_match.reason,
-                    "Anomaly: Block — login denied"
-                );
-                self.publish_security_event(
-                    &identity,
-                    rule_match.rule,
-                    rule_match.reaction.as_str(),
-                    &rule_match.reason,
-                    client_ip,
-                )
-                .await;
-                return Err(too_many_attempts(self.anomaly_detector.lockout_duration()));
-            }
-            RuleReaction::RequireCaptcha => {
-                let subject = sid_authn::captcha::CaptchaSubject {
-                    profile_id,
-                    client_ip,
-                };
-                if let Some(pass) = extras.captcha_pass
-                    && self
-                        .captcha_gate
-                        .redeem(pass, &subject)
-                        .await
-                        .map_err(anomaly_unavailable)?
-                {
-                    info!(
-                        profile_id = %identity,
-                        rule = rule_match.rule,
-                        "Anomaly: RequireCaptcha answered by a solved challenge"
-                    );
-                } else {
-                    warn!(
-                        profile_id = %identity,
-                        rule = rule_match.rule,
-                        reason = %rule_match.reason,
-                        "Anomaly: RequireCaptcha — issuing CAPTCHA challenge"
-                    );
-                    self.publish_security_event(
-                        &identity,
-                        rule_match.rule,
-                        rule_match.reaction.as_str(),
-                        &rule_match.reason,
-                        client_ip,
-                    )
-                    .await;
-                    // The challenge is recorded for this sign-in, so solving it
-                    // earns a pass only for this profile from this client.
-                    let challenge = self.captcha_provider.create_challenge();
-                    self.captcha_gate
-                        .asked(&challenge.challenge_id, &subject)
-                        .await
-                        .map_err(anomaly_unavailable)?;
-                    return Err(captcha_required(&challenge)?.into());
-                }
-            }
-            RuleReaction::StepUp => {
-                warn!(
-                    profile_id = %identity,
-                    rule = rule_match.rule,
-                    reason = %rule_match.reason,
-                    "Anomaly: StepUp required — MFA verification needed"
-                );
-                self.publish_security_event(
-                    &identity,
-                    rule_match.rule,
-                    rule_match.reaction.as_str(),
-                    &rule_match.reason,
-                    client_ip,
-                )
-                .await;
-                return Err(step_up_after_anomaly(rule_match.rule).into());
-            }
-        }
-
-        // ── Stage 2: Conditional access policy enforcement ──
-        // Use ConditionalAccessEngine to evaluate the implied auth level against
-        // the CE security policy. Creates a temporary session-like check object
-        // since the real session doesn't exist yet.
-        let implied = implied_auth_level(
-            auth_method,
-            self.security_policy.auth.passkey_satisfies_mfa,
+        let attempt = sid_authn::sign_in_security::SignInAttempt {
+            client_ip,
+            method: auth_method,
             user_verified,
-        );
-        let mut probe_session = sid_core::models::Session::new(
-            profile_id,
-            "probe".to_string(),
-            chrono::Utc::now() + chrono::Duration::hours(1),
-        );
-        probe_session.assurance_level = implied;
-
-        let decision = sid_authz::conditional_access::ConditionalAccessEngine::check(
-            &self.security_policy,
-            None, // per-app client override checked at authorize time
-            None,
-            &probe_session,
-        );
-
-        match decision.action {
-            sid_core::models::enforcement::EnforcementAction::Allow => {
-                // Policy satisfied — continue.
-            }
-            sid_core::models::enforcement::EnforcementAction::StepUp => {
-                info!(
-                    profile_id = %identity,
-                    auth_method,
-                    violations = ?decision.violations,
-                    "Policy enforcement: step-up required"
-                );
-                return Err(step_up_to_acr(self.security_policy.auth.min_acr.acr_value()).into());
-            }
-            sid_core::models::enforcement::EnforcementAction::Block => {
-                warn!(
-                    profile_id = %identity,
-                    auth_method,
-                    violations = ?decision.violations,
-                    "Policy enforcement: access denied"
-                );
-                return Err(sign_in_refused());
-            }
-            sid_core::models::enforcement::EnforcementAction::Grace => {
-                // No grace periods are configured, so this does not occur;
-                // if it does, treat as allow.
-            }
-        }
-
-        // Session limit is enforced atomically in create_session_atomic().
-        // No separate check here — the atomic method uses pg_advisory_xact_lock
-        // to prevent TOCTOU race conditions.
-
-        // Record successful login for IP reputation (self-learned provider).
-        // Both records are evidence for later sign-ins, not limits on this
-        // one: a failed write is reported and the sign-in proceeds.
-        if let Some(ip) = client_ip
-            && let Err(e) = self
-                .storage
-                .record_ip_reputation_event(&ip.to_string(), true)
-                .await
-        {
-            warn!(error = %e, "failed to record IP reputation event");
-        }
-
-        // Record login location for designated location tracking.
-        // After 3 logins from the same country, it becomes "designated"
-        // and impossible travel between designated locations is suppressed.
-        if let Some(geo) = &geo_location
-            && let Err(e) = self
-                .storage
-                .record_login_location(
-                    profile_id,
-                    &geo.country,
-                    geo.latitude,
-                    geo.longitude,
-                    3, // designated threshold
-                )
-                .await
-        {
-            warn!(error = %e, "failed to record login location");
-        }
-
-        Ok(())
+            captcha_pass: extras.captcha_pass,
+            user_agent: extras.user_agent,
+        };
+        sid_authn::sign_in_security::evaluate(
+            &ProfileSecurity { service: self },
+            &profile_id,
+            attempt,
+        )
+        .await
+        .map_err(|e: SecurityStatus| e.0)
     }
 
     /// Record an authentication on the active session `id`: `authenticate`
@@ -1425,35 +1065,6 @@ impl AuthServiceImpl {
             return Err(too_many_attempts(self.anomaly_detector.lockout_duration()));
         }
         Ok(())
-    }
-
-    /// Answer a login start that cannot succeed exactly like a real one: a
-    /// decoy OPAQUE response and a stored state that finish refuses like a
-    /// wrong password (RFC 9807 §10.9).
-    async fn decoy_login_start(
-        &self,
-        principal: &str,
-        credential_request: &[u8],
-        identity: String,
-    ) -> Result<OpaqueLoginStartResponse, Status> {
-        let fake_id = Self::fake_credential_id(principal);
-        let credential_response = self
-            .opaque_router
-            .fake_login_start(credential_request, &fake_id)
-            .map_err(|e| {
-                // A malformed request fails here as it would on a real
-                // account: the same answer either way.
-                warn!("OPAQUE fake login start failed: {}", e);
-                authentication_failed()
-            })?;
-        let state_key = uuid::Uuid::now_v7().to_string();
-        self.login_state
-            .insert(&state_key, &PendingLogin::Decoy { identity })
-            .await?;
-        Ok(OpaqueLoginStartResponse {
-            credential_response,
-            server_login_state: state_key,
-        })
     }
 
     /// Count a failed login attempt (brute force and stuffing limits). An
@@ -1937,16 +1548,6 @@ impl AuthServiceImpl {
             Err(s) if s.code() == tonic::Code::Unauthenticated => Ok(None),
             Err(s) => Err(s),
         }
-    }
-
-    /// Deterministic fake credential ID for anti-enumeration.
-    /// Same identifier always produces the same fake ID.
-    fn fake_credential_id(identifier: &str) -> Vec<u8> {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(b"sid-fake-credential-id:");
-        hasher.update(identifier.as_bytes());
-        hasher.finalize().to_vec()
     }
 
     /// Decide what a registration started for `principal` may commit. The
@@ -2875,91 +2476,18 @@ impl AuthService for AuthServiceImpl {
         request: Request<OpaqueLoginStartRequest>,
     ) -> Result<Response<OpaqueLoginStartResponse>, Status> {
         self.check_maintenance().await?;
+        let host = ProfileSignIn {
+            service: self,
+            client_ip: self.client_ip(&request),
+        };
         let req = request.into_inner();
-
-        // Anti-enumeration: a start that cannot succeed is answered like a
-        // real one (decoy), never refused early. Failed attempts count against
-        // the profile when one holds the principal, else against the principal.
-        let profile = self.resolve_profile_optional(&req.principal).await?;
-        let identity = profile
-            .as_ref()
-            .map_or_else(|| req.principal.clone(), |p| p.id.to_string());
-        self.refuse_if_locked(&identity).await?;
-
-        let Some(profile) = profile else {
-            return Ok(Response::new(
-                self.decoy_login_start(&req.principal, &req.credential_request, identity)
-                    .await?,
-            ));
-        };
-
-        // Get OPAQUE credential
-        let credentials = self
-            .storage
-            .get_credentials_by_profile(profile.id, Some(CredentialType::Opaque))
-            .await
-            .map_err(storage_failure)?;
-
-        // Storage keeps at most one active OPAQUE credential per profile; revoked
-        // rows stay for history and never authenticate.
-        let opaque_cred = match credentials.iter().find(|c| c.status.is_active()) {
-            Some(cred) => cred,
-            None => {
-                // No OPAQUE credential — check for legacy hash (migration case)
-                let legacy = self
-                    .storage
-                    .get_credentials_by_profile(profile.id, Some(CredentialType::LegacyHash))
-                    .await
-                    .map_err(storage_failure)?;
-
-                if !legacy.is_empty() {
-                    return Err(ApiError::new(
-                        ErrorReason::LegacyMigrationRequired,
-                        "the password must be migrated before signing in",
-                    )
-                    .with_precondition(
-                        "legacy_migration",
-                        "credential",
-                        "complete the password migration flow",
-                    )
-                    .into());
-                }
-                // A profile without a password (passkey-only, provisioned)
-                // is answered like an unknown principal.
-                return Ok(Response::new(
-                    self.decoy_login_start(&req.principal, &req.credential_request, identity)
-                        .await?,
-                ));
-            }
-        };
-
-        let credential_id = opaque_cred.opaque_credential_identifier();
-        let stored_cred = self.stored_password(opaque_cred).await?;
-        let (credential_response, login_state) = self
-            .opaque_router
-            // An ordinary sign-in has the empty context.
-            .login_start(&stored_cred, &req.credential_request, &credential_id, &[])
-            .map_err(|e| {
-                warn!("OPAQUE login start failed for {}: {}", req.principal, e);
-                authentication_failed()
-            })?;
-
-        // Store login state server-side, return key to client
-        let state_key = uuid::Uuid::now_v7().to_string();
-        self.login_state
-            .insert(
-                &state_key,
-                &PendingLogin::Password {
-                    state: login_state,
-                    profile_id: profile.id,
-                    credential_id: opaque_cred.id,
-                },
-            )
-            .await?;
-
+        let started =
+            sid_authn::password_sign_in::start(&host, &req.principal, &req.credential_request)
+                .await
+                .map_err(|e| e.0)?;
         Ok(Response::new(OpaqueLoginStartResponse {
-            credential_response,
-            server_login_state: state_key,
+            credential_response: started.credential_response,
+            server_login_state: started.state_key,
         }))
     }
 
@@ -2977,71 +2505,18 @@ impl AuthService for AuthServiceImpl {
         let captcha_pass = extract_captcha_pass(request.metadata());
         let req = request.into_inner();
 
-        // Retrieve login state
-        let pending = self
-            .login_state
-            .take(&req.server_login_state)
-            .await?
-            .ok_or_else(|| ceremony_expired("sign-in"))?;
-        let (login_state, profile_id, credential_id) = match pending {
-            PendingLogin::Password {
-                state,
-                profile_id,
-                credential_id,
-            } => (state, profile_id, credential_id),
-            PendingLogin::Decoy { identity } => {
-                // A lockout reached while this attempt was in flight answers
-                // the same here as for a real account.
-                self.refuse_if_locked(&identity).await?;
-                self.record_failed_login(&identity, client_ip).await?;
-                return Err(authentication_failed());
-            }
+        let host = ProfileSignIn {
+            service: self,
+            client_ip,
         };
-        // Checked before the password: during a lockout a right and a wrong
-        // password get the same answer.
-        self.refuse_if_locked(&profile_id.to_string()).await?;
-
-        // Verify OPAQUE login
-        let _session_key =
-            match self
-                .opaque_router
-                .login_finish(&login_state, &req.credential_finalization, &[])
-            {
-                Ok(key) => key,
-                Err(e) => {
-                    warn!("OPAQUE login finish failed: {}", e);
-                    self.record_failed_login(&profile_id.to_string(), client_ip)
-                        .await?;
-                    return Err(authentication_failed());
-                }
-            };
-
-        // A profile deleted while the sign-in was in flight signs nobody in.
-        let profile = self
-            .storage
-            .get_profile(profile_id)
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(authentication_failed)?;
-
-        // The password this login used must still be active: one revoked while
-        // the login was in flight neither signs in nor comes back to active.
-        let still_active = self
-            .storage
-            .mark_credential_used(
-                credential_id,
-                AuditEntry::user(
-                    profile.id.to_string(),
-                    "credential.used",
-                    credential_id.0.to_string(),
-                )
-                .into(),
-            )
-            .await
-            .map_err(storage_failure)?;
-        if !still_active {
-            return Err(authentication_failed());
-        }
+        let profile = sid_authn::password_sign_in::finish(
+            &host,
+            &req.server_login_state,
+            &req.credential_finalization,
+        )
+        .await
+        .map_err(|e| e.0)?
+        .account;
         // Evaluate login security (anomaly detection + policy enforcement).
         self.evaluate_login_security(
             profile.id,
