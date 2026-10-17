@@ -359,6 +359,34 @@ macro_rules! credential_store_isolated {
     )*};
 }
 
+// ─── Principal store conformance ───
+
+/// Run principal store conformance `scenario` against this backend.
+macro_rules! principal_store {
+    ($($scenario:ident),* $(,)?) => {$(
+        #[tokio::test]
+        async fn $scenario() {
+            let backend = setup().await;
+            sid_plugin::conformance::principal_store::$scenario(
+                &common::principal_conformance::ProfilePrincipals(&backend),
+            )
+            .await;
+        }
+    )*};
+}
+
+mod principal_store {
+    use super::*;
+
+    principal_store!(
+        held_principal_resolves_its_owner,
+        unknown_principal_resolves_nobody,
+        other_type_resolves_nobody,
+        other_key_revision_resolves_nobody,
+        released_principal_resolves_nobody,
+    );
+}
+
 mod credential_store {
     use super::*;
 
@@ -1867,6 +1895,11 @@ async fn test_claimant_leaving_keeps_assignment() {
 async fn test_profile_by_principal_is_assigned_holder() {
     common::principal_assignment::test_profile_by_principal_is_assigned_holder(&setup().await)
         .await;
+}
+
+#[tokio::test]
+async fn test_sign_in_routes_only_the_holder() {
+    common::principal_assignment::test_sign_in_routes_only_the_holder(&setup().await).await;
 }
 
 // ─── Service bindings ───

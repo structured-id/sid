@@ -31,7 +31,9 @@ use sid_core::models::{
 };
 use uuid::Uuid;
 
-use crate::{ClientResourceRegistry, CredentialStore, GrantStore, IssuerStore, WorkStore};
+use crate::{
+    ClientResourceRegistry, CredentialStore, GrantStore, IssuerStore, PrincipalStore, WorkStore,
+};
 
 /// The right to run one background job, exclusive across every instance on
 /// the same store until released.
@@ -74,6 +76,7 @@ pub trait StorageBackend:
     + IssuerStore
     + GrantStore<Owner = ProfileId>
     + CredentialStore<Owner = ProfileId>
+    + PrincipalStore<Owner = ProfileId>
     + Send
     + Sync
     + 'static
