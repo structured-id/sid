@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::*;
+use sid_plugin::CredentialStore;
 
 /// The bundled bus serves the single-binary installation, which runs no
 /// separate receiver: unset owes facts to nobody there, rather than to an

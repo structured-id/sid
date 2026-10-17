@@ -200,6 +200,124 @@ impl sid_plugin::GrantStore for MockStorage {
 }
 
 #[async_trait::async_trait]
+impl sid_plugin::CredentialStore for MockStorage {
+    type Owner = ProfileId;
+
+    async fn get_credential(&self, _: CredentialId) -> Result<Option<Credential>> {
+        unimplemented!()
+    }
+    async fn get_credentials_by_profile(
+        &self,
+        _: ProfileId,
+        _: Option<CredentialType>,
+    ) -> Result<Vec<Credential>> {
+        unimplemented!()
+    }
+    async fn mark_credential_used(
+        &self,
+        _: sid_core::models::CredentialId,
+        _audit: MutationContext,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
+    async fn replace_credential_data(
+        &self,
+        _: CredentialId,
+        _: &[u8],
+        _: &[u8],
+        _audit: MutationContext,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
+    async fn create_credential(&self, _: &Credential, _audit: MutationContext) -> Result<()> {
+        unimplemented!()
+    }
+    async fn set_credential_label(
+        &self,
+        _: CredentialId,
+        _: Option<&str>,
+        _: MutationContext,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
+    async fn change_password(
+        &self,
+        _: CredentialId,
+        _: &[u8],
+        _: &Credential,
+        _: Option<&sid_core::models::HistoryCommit>,
+        _: MutationContext,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
+    async fn get_password_history(
+        &self,
+        _: ProfileId,
+    ) -> Result<sid_core::models::PasswordHistory> {
+        unimplemented!()
+    }
+    async fn history_write_cutoff(&self) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
+        unimplemented!()
+    }
+    async fn raise_history_write_cutoff(
+        &self,
+        _: chrono::DateTime<chrono::Utc>,
+        _: MutationContext,
+    ) -> Result<chrono::DateTime<chrono::Utc>> {
+        unimplemented!()
+    }
+    async fn reseal_credential_data(
+        &self,
+        _: CredentialId,
+        _: &[u8],
+        _: &[u8],
+        _: MutationContext,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
+    async fn replace_credential(&self, _: &Credential, _audit: MutationContext) -> Result<()> {
+        unimplemented!()
+    }
+    async fn enroll_credential(
+        &self,
+        _: &Credential,
+        _: Option<&Credential>,
+        _: MutationContext,
+    ) -> Result<()> {
+        unimplemented!()
+    }
+    async fn delete_credential(&self, _: CredentialId, _audit: MutationContext) -> Result<()> {
+        unimplemented!()
+    }
+    async fn revoke_credential(
+        &self,
+        _: CredentialId,
+        _: MutationContext,
+    ) -> Result<CredentialRevocation> {
+        unimplemented!()
+    }
+    async fn delete_credentials_by_profile(&self, _: ProfileId, _: MutationContext) -> Result<u64> {
+        Ok(0)
+    }
+    async fn ensure_webauthn_user_handle(
+        &self,
+        _: ProfileId,
+        _: &str,
+        _: WebAuthnUserHandle,
+        _: MutationContext,
+    ) -> Result<WebAuthnUserHandle> {
+        unimplemented!()
+    }
+    async fn get_profile_by_webauthn_user_handle(
+        &self,
+        _: &str,
+        _: WebAuthnUserHandle,
+    ) -> Result<Option<ProfileId>> {
+        unimplemented!()
+    }
+}
+
+#[async_trait::async_trait]
 impl sid_plugin::StorageBackend for MockStorage {
     fn name(&self) -> &'static str {
         "mock"
@@ -225,17 +343,6 @@ impl sid_plugin::StorageBackend for MockStorage {
         unimplemented!()
     }
     async fn register_profile(&self, _: &NewRegistration, _audit: MutationContext) -> Result<()> {
-        unimplemented!()
-    }
-    async fn replace_credential(&self, _: &Credential, _audit: MutationContext) -> Result<()> {
-        unimplemented!()
-    }
-    async fn enroll_credential(
-        &self,
-        _: &Credential,
-        _: Option<&Credential>,
-        _: MutationContext,
-    ) -> Result<()> {
         unimplemented!()
     }
     async fn write_directory_user(
@@ -339,108 +446,6 @@ impl sid_plugin::StorageBackend for MockStorage {
         unimplemented!()
     }
 
-    // === CREDENTIAL ===
-    async fn get_credential(&self, _: CredentialId) -> Result<Option<Credential>> {
-        unimplemented!()
-    }
-    async fn get_credentials_by_profile(
-        &self,
-        _: ProfileId,
-        _: Option<CredentialType>,
-    ) -> Result<Vec<Credential>> {
-        unimplemented!()
-    }
-    async fn mark_credential_used(
-        &self,
-        _: sid_core::models::CredentialId,
-        _audit: MutationContext,
-    ) -> Result<bool> {
-        unimplemented!()
-    }
-    async fn replace_credential_data(
-        &self,
-        _: CredentialId,
-        _: &[u8],
-        _: &[u8],
-        _audit: MutationContext,
-    ) -> Result<bool> {
-        unimplemented!()
-    }
-    async fn create_credential(&self, _: &Credential, _audit: MutationContext) -> Result<()> {
-        unimplemented!()
-    }
-    async fn set_credential_label(
-        &self,
-        _: CredentialId,
-        _: Option<&str>,
-        _: MutationContext,
-    ) -> Result<bool> {
-        unimplemented!()
-    }
-    async fn change_password(
-        &self,
-        _: CredentialId,
-        _: &[u8],
-        _: &Credential,
-        _: Option<&sid_core::models::HistoryCommit>,
-        _: MutationContext,
-    ) -> Result<bool> {
-        unimplemented!()
-    }
-    async fn get_password_history(
-        &self,
-        _: ProfileId,
-    ) -> Result<sid_core::models::PasswordHistory> {
-        unimplemented!()
-    }
-    async fn history_write_cutoff(&self) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
-        unimplemented!()
-    }
-    async fn raise_history_write_cutoff(
-        &self,
-        _: chrono::DateTime<chrono::Utc>,
-        _: MutationContext,
-    ) -> Result<chrono::DateTime<chrono::Utc>> {
-        unimplemented!()
-    }
-    async fn reseal_credential_data(
-        &self,
-        _: CredentialId,
-        _: &[u8],
-        _: &[u8],
-        _: MutationContext,
-    ) -> Result<bool> {
-        unimplemented!()
-    }
-    async fn delete_credential(&self, _: CredentialId, _audit: MutationContext) -> Result<()> {
-        unimplemented!()
-    }
-    async fn revoke_credential(
-        &self,
-        _: CredentialId,
-        _: MutationContext,
-    ) -> Result<CredentialRevocation> {
-        unimplemented!()
-    }
-    async fn delete_credentials_by_profile(&self, _: ProfileId, _: MutationContext) -> Result<u64> {
-        Ok(0)
-    }
-    async fn ensure_webauthn_user_handle(
-        &self,
-        _: ProfileId,
-        _: &str,
-        _: WebAuthnUserHandle,
-        _: MutationContext,
-    ) -> Result<WebAuthnUserHandle> {
-        unimplemented!()
-    }
-    async fn get_profile_by_webauthn_user_handle(
-        &self,
-        _: &str,
-        _: WebAuthnUserHandle,
-    ) -> Result<Option<ProfileId>> {
-        unimplemented!()
-    }
     async fn revoke_consents_by_profile(&self, _: ProfileId, _: MutationContext) -> Result<u64> {
         Ok(0)
     }

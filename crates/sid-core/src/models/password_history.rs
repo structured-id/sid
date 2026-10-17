@@ -592,10 +592,11 @@ pub fn write_cutoff_instant(not_before: DateTime<Utc>) -> DateTime<Utc> {
 /// evaluator described them (the first active, the rest compare-only), the
 /// new entries (one per active epoch), and the retention that follows. A
 /// commit whose `expected_revision` is not the stored one writes nothing,
-/// credential included.
+/// credential included. `O` is the account type of the credential's
+/// authority; CE's is the local Profile.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HistoryCommit {
-    pub owner: ProfileId,
+pub struct HistoryCommit<O = ProfileId> {
+    pub owner: O,
     /// The revision the comparison was made against; `0` for an owner with
     /// no history row yet.
     pub expected_revision: i64,
@@ -614,7 +615,7 @@ pub struct HistoryCommit {
     pub max_age_days: u32,
 }
 
-impl HistoryCommit {
+impl<O> HistoryCommit<O> {
     /// Refuse a commit that could not be stored as stated.
     pub fn validate(&self) -> Result<()> {
         if !(1..=MAX_HISTORY_DEPTH).contains(&self.depth) {

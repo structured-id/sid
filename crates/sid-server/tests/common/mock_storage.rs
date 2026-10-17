@@ -4,7 +4,7 @@
 use async_trait::async_trait;
 use sid_core::Result as SidResult;
 use sid_core::models::*;
-use sid_plugin::{ClientResourceRegistry, GrantStore, StorageBackend};
+use sid_plugin::{ClientResourceRegistry, CredentialStore, GrantStore, StorageBackend};
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use uuid::Uuid;
@@ -1267,6 +1267,336 @@ impl GrantStore for MockStorage {
 }
 
 #[async_trait]
+impl CredentialStore for MockStorage {
+    type Owner = ProfileId;
+
+    async fn get_credential(&self, id: CredentialId) -> SidResult<Option<Credential>> {
+        let inner = self.inner.lock().unwrap();
+        Ok(inner.credentials.get(&id.0).cloned())
+    }
+
+    async fn get_credentials_by_profile(
+        &self,
+        profile_id: ProfileId,
+        credential_type: Option<CredentialType>,
+    ) -> SidResult<Vec<Credential>> {
+        let inner = self.inner.lock().unwrap();
+        if inner.credential_reads_fail {
+            return Err(sid_core::Error::Storage("credentials unreadable".into()));
+        }
+        Ok(inner
+            .credentials
+            .values()
+            .filter(|c| {
+                c.profile_id == profile_id && credential_type.is_none_or(|t| c.credential_type == t)
+            })
+            .cloned()
+            .collect())
+    }
+
+    async fn mark_credential_used(
+        &self,
+        id: sid_core::models::CredentialId,
+        _audit: MutationContext,
+    ) -> SidResult<bool> {
+        let mut inner = self.inner.lock().unwrap();
+        match inner.credentials.get_mut(&id.0) {
+            Some(credential) if credential.status.is_active() => {
+                credential.mark_used();
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    async fn replace_credential_data(
+        &self,
+        id: sid_core::models::CredentialId,
+        expected: &[u8],
+        data: &[u8],
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        let mut inner = self.inner.lock().unwrap();
+        match inner.credentials.get_mut(&id.0) {
+            Some(credential)
+                if credential.status.is_active() && credential.data.expose() == expected =>
+            {
+                credential.data = sid_core::models::CredentialData::new(data.to_vec());
+                credential.mark_used();
+                // Work is owed only by the swap that happened.
+                inner.owe(&ctx)?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    async fn create_credential(
+        &self,
+        credential: &Credential,
+        ctx: MutationContext,
+    ) -> SidResult<()> {
+        let mut inner = self.inner.lock().unwrap();
+        // Same invariants as the keys of the real backends: a create never
+        // replaces, and one active OPAQUE credential per profile.
+        let is_active_password =
+            |c: &Credential| c.credential_type == CredentialType::Opaque && c.status.is_active();
+        if inner.credentials.contains_key(&credential.id.0)
+            || (is_active_password(credential)
+                && inner
+                    .credentials
+                    .values()
+                    .any(|c| c.profile_id == credential.profile_id && is_active_password(c)))
+        {
+            return Err(sid_core::Error::Conflict(
+                "credential already exists".into(),
+            ));
+        }
+        inner.owe(&ctx)?;
+        inner
+            .credentials
+            .insert(credential.id.0, credential.clone());
+        Ok(())
+    }
+
+    async fn set_credential_label(
+        &self,
+        id: CredentialId,
+        label: Option<&str>,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        let mut inner = self.inner.lock().unwrap();
+        if !inner
+            .credentials
+            .get(&id.0)
+            .is_some_and(|c| c.status.is_active())
+        {
+            return Ok(false);
+        }
+        inner.owe(&ctx)?;
+        if let Some(credential) = inner.credentials.get_mut(&id.0) {
+            credential.label = label.map(str::to_string);
+        }
+        Ok(true)
+    }
+
+    async fn change_password(
+        &self,
+        id: CredentialId,
+        expected: &[u8],
+        new: &Credential,
+        history: Option<&HistoryCommit>,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        let mut inner = self.inner.lock().unwrap();
+        if !inner
+            .credentials
+            .get(&id.0)
+            .is_some_and(|c| c.status.is_active() && c.data.expose() == expected)
+        {
+            return Ok(false);
+        }
+        if let Some(history) = history {
+            if Some(history.owner) != inner.credentials.get(&id.0).map(|c| c.profile_id) {
+                return Err(sid_core::Error::Validation(
+                    "password history belongs to the credential's profile".into(),
+                ));
+            }
+            if !inner.apply_history(history)? {
+                return Ok(false);
+            }
+        }
+        inner.owe(&ctx)?;
+        if let Some(credential) = inner.credentials.get_mut(&id.0) {
+            credential.data = new.data.clone();
+            credential.policy_evidence = new.policy_evidence;
+            credential.opaque_credential_identifier = new.opaque_credential_identifier;
+            credential.last_used_at = Some(chrono::Utc::now());
+        }
+        Ok(true)
+    }
+
+    async fn get_password_history(&self, owner: ProfileId) -> SidResult<PasswordHistory> {
+        let inner = self.inner.lock().unwrap();
+        Ok(inner.histories.get(&owner).cloned().unwrap_or_default())
+    }
+
+    async fn history_write_cutoff(&self) -> SidResult<Option<chrono::DateTime<chrono::Utc>>> {
+        Ok(self.inner.lock().unwrap().history_write_cutoff)
+    }
+
+    async fn raise_history_write_cutoff(
+        &self,
+        not_before: chrono::DateTime<chrono::Utc>,
+        ctx: MutationContext,
+    ) -> SidResult<chrono::DateTime<chrono::Utc>> {
+        let not_before = sid_core::models::password_history::write_cutoff_instant(not_before);
+        let mut inner = self.inner.lock().unwrap();
+        match inner.history_write_cutoff {
+            Some(current) if current >= not_before => Ok(current),
+            _ => {
+                inner.owe(&ctx)?;
+                inner.history_write_cutoff = Some(not_before);
+                Ok(not_before)
+            }
+        }
+    }
+
+    async fn reseal_credential_data(
+        &self,
+        id: CredentialId,
+        expected: &[u8],
+        data: &[u8],
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        let mut inner = self.inner.lock().unwrap();
+        if !inner
+            .credentials
+            .get(&id.0)
+            .is_some_and(|c| c.data.expose() == expected)
+        {
+            return Ok(false);
+        }
+        inner.owe(&ctx)?;
+        if let Some(credential) = inner.credentials.get_mut(&id.0) {
+            credential.data = sid_core::models::CredentialData::new(data.to_vec());
+        }
+        Ok(true)
+    }
+
+    async fn replace_credential(
+        &self,
+        credential: &Credential,
+        _audit: MutationContext,
+    ) -> SidResult<()> {
+        let replaced = credential.credential_type.replaces();
+        if replaced.is_empty() {
+            return Err(sid_core::Error::Validation(
+                "this credential type is added, not replaced".into(),
+            ));
+        }
+        let mut inner = self.inner.lock().unwrap();
+        inner.credentials.retain(|_, c| {
+            c.profile_id != credential.profile_id || !replaced.contains(&c.credential_type)
+        });
+        inner
+            .credentials
+            .insert(credential.id.0, credential.clone());
+        Ok(())
+    }
+
+    async fn enroll_credential(
+        &self,
+        credential: &Credential,
+        recovery: Option<&Credential>,
+        ctx: MutationContext,
+    ) -> SidResult<()> {
+        if let Some(set) = recovery
+            && set.credential_type != CredentialType::Recovery
+        {
+            return Err(sid_core::Error::Validation(
+                "not a recovery-code set".into(),
+            ));
+        }
+        self.create_credential(credential, ctx).await?;
+        if let Some(set) = recovery {
+            self.replace_credential(set, AuditEntry::system("mock", "enroll").into())
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn delete_credential(&self, id: CredentialId, ctx: MutationContext) -> SidResult<()> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.credentials.remove(&id.0);
+        inner.owe(&ctx)
+    }
+
+    async fn revoke_credential(
+        &self,
+        id: CredentialId,
+        ctx: MutationContext,
+    ) -> SidResult<CredentialRevocation> {
+        // One lock: the check and the revocation are one step, as in a
+        // transaction of the real backends.
+        let mut inner = self.inner.lock().unwrap();
+        let Some(target) = inner.credentials.get(&id.0).cloned() else {
+            return Ok(CredentialRevocation::AlreadyGone);
+        };
+        if !target.status.is_active() {
+            return Ok(CredentialRevocation::AlreadyGone);
+        }
+        let other_primary = inner.credentials.values().any(|c| {
+            c.id != id
+                && c.profile_id == target.profile_id
+                && c.status.is_active()
+                && c.credential_type.is_primary()
+        });
+        if target.credential_type.is_primary() && !other_primary {
+            return Ok(CredentialRevocation::LastPrimary);
+        }
+        if let Some(credential) = inner.credentials.get_mut(&id.0) {
+            credential.status = sid_core::models::credential::CredentialStatus::Revoked;
+        }
+        inner.owe(&ctx)?;
+        Ok(CredentialRevocation::Revoked)
+    }
+
+    async fn delete_credentials_by_profile(
+        &self,
+        profile_id: ProfileId,
+        _audit: MutationContext,
+    ) -> SidResult<u64> {
+        let mut inner = self.inner.lock().unwrap();
+        let before = inner.credentials.len();
+        inner.credentials.retain(|_, c| c.profile_id != profile_id);
+        Ok((before - inner.credentials.len()) as u64)
+    }
+
+    async fn ensure_webauthn_user_handle(
+        &self,
+        profile_id: ProfileId,
+        rp_id: &str,
+        candidate: WebAuthnUserHandle,
+        ctx: MutationContext,
+    ) -> SidResult<WebAuthnUserHandle> {
+        let mut inner = self.inner.lock().unwrap();
+        if !inner.profiles.contains_key(&profile_id) {
+            return Err(sid_core::Error::NotFound(format!("profile {profile_id}")));
+        }
+        let key = (profile_id, rp_id.to_string());
+        if let Some(stored) = inner.webauthn_user_handles.get(&key) {
+            return Ok(*stored);
+        }
+        let taken = inner
+            .webauthn_user_handles
+            .iter()
+            .any(|((_, rp), h)| rp == rp_id && *h == candidate);
+        if taken {
+            return Err(sid_core::Error::Conflict(
+                "WebAuthn user handle already exists".into(),
+            ));
+        }
+        inner.owe(&ctx)?;
+        inner.webauthn_user_handles.insert(key, candidate);
+        Ok(candidate)
+    }
+
+    async fn get_profile_by_webauthn_user_handle(
+        &self,
+        rp_id: &str,
+        handle: WebAuthnUserHandle,
+    ) -> SidResult<Option<ProfileId>> {
+        let inner = self.inner.lock().unwrap();
+        Ok(inner
+            .webauthn_user_handles
+            .iter()
+            .find(|((_, rp), h)| rp == rp_id && **h == handle)
+            .map(|((profile, _), _)| *profile))
+    }
+}
+
+#[async_trait]
 impl StorageBackend for MockStorage {
     fn name(&self) -> &'static str {
         "mock"
@@ -1448,48 +1778,6 @@ impl StorageBackend for MockStorage {
         _: MutationContext,
     ) -> SidResult<()> {
         unimplemented!("directory writes are exercised by the storage conformance suite")
-    }
-
-    async fn replace_credential(
-        &self,
-        credential: &Credential,
-        _audit: MutationContext,
-    ) -> SidResult<()> {
-        let replaced = credential.credential_type.replaces();
-        if replaced.is_empty() {
-            return Err(sid_core::Error::Validation(
-                "this credential type is added, not replaced".into(),
-            ));
-        }
-        let mut inner = self.inner.lock().unwrap();
-        inner.credentials.retain(|_, c| {
-            c.profile_id != credential.profile_id || !replaced.contains(&c.credential_type)
-        });
-        inner
-            .credentials
-            .insert(credential.id.0, credential.clone());
-        Ok(())
-    }
-
-    async fn enroll_credential(
-        &self,
-        credential: &Credential,
-        recovery: Option<&Credential>,
-        ctx: MutationContext,
-    ) -> SidResult<()> {
-        if let Some(set) = recovery
-            && set.credential_type != CredentialType::Recovery
-        {
-            return Err(sid_core::Error::Validation(
-                "not a recovery-code set".into(),
-            ));
-        }
-        self.create_credential(credential, ctx).await?;
-        if let Some(set) = recovery {
-            self.replace_credential(set, AuditEntry::system("mock", "enroll").into())
-                .await?;
-        }
-        Ok(())
     }
 
     // === PROFILE PHONE ===
@@ -1887,289 +2175,6 @@ impl StorageBackend for MockStorage {
             })
             .count();
         Ok(count as i64)
-    }
-
-    async fn get_credential(&self, id: CredentialId) -> SidResult<Option<Credential>> {
-        let inner = self.inner.lock().unwrap();
-        Ok(inner.credentials.get(&id.0).cloned())
-    }
-
-    async fn get_credentials_by_profile(
-        &self,
-        profile_id: ProfileId,
-        credential_type: Option<CredentialType>,
-    ) -> SidResult<Vec<Credential>> {
-        let inner = self.inner.lock().unwrap();
-        if inner.credential_reads_fail {
-            return Err(sid_core::Error::Storage("credentials unreadable".into()));
-        }
-        Ok(inner
-            .credentials
-            .values()
-            .filter(|c| {
-                c.profile_id == profile_id && credential_type.is_none_or(|t| c.credential_type == t)
-            })
-            .cloned()
-            .collect())
-    }
-
-    async fn mark_credential_used(
-        &self,
-        id: sid_core::models::CredentialId,
-        _audit: MutationContext,
-    ) -> SidResult<bool> {
-        let mut inner = self.inner.lock().unwrap();
-        match inner.credentials.get_mut(&id.0) {
-            Some(credential) if credential.status.is_active() => {
-                credential.mark_used();
-                Ok(true)
-            }
-            _ => Ok(false),
-        }
-    }
-
-    async fn replace_credential_data(
-        &self,
-        id: sid_core::models::CredentialId,
-        expected: &[u8],
-        data: &[u8],
-        ctx: MutationContext,
-    ) -> SidResult<bool> {
-        let mut inner = self.inner.lock().unwrap();
-        match inner.credentials.get_mut(&id.0) {
-            Some(credential)
-                if credential.status.is_active() && credential.data.expose() == expected =>
-            {
-                credential.data = sid_core::models::CredentialData::new(data.to_vec());
-                credential.mark_used();
-                // Work is owed only by the swap that happened.
-                inner.owe(&ctx)?;
-                Ok(true)
-            }
-            _ => Ok(false),
-        }
-    }
-
-    async fn create_credential(
-        &self,
-        credential: &Credential,
-        ctx: MutationContext,
-    ) -> SidResult<()> {
-        let mut inner = self.inner.lock().unwrap();
-        // Same invariants as the keys of the real backends: a create never
-        // replaces, and one active OPAQUE credential per profile.
-        let is_active_password =
-            |c: &Credential| c.credential_type == CredentialType::Opaque && c.status.is_active();
-        if inner.credentials.contains_key(&credential.id.0)
-            || (is_active_password(credential)
-                && inner
-                    .credentials
-                    .values()
-                    .any(|c| c.profile_id == credential.profile_id && is_active_password(c)))
-        {
-            return Err(sid_core::Error::Conflict(
-                "credential already exists".into(),
-            ));
-        }
-        inner.owe(&ctx)?;
-        inner
-            .credentials
-            .insert(credential.id.0, credential.clone());
-        Ok(())
-    }
-
-    async fn set_credential_label(
-        &self,
-        id: CredentialId,
-        label: Option<&str>,
-        ctx: MutationContext,
-    ) -> SidResult<bool> {
-        let mut inner = self.inner.lock().unwrap();
-        if !inner
-            .credentials
-            .get(&id.0)
-            .is_some_and(|c| c.status.is_active())
-        {
-            return Ok(false);
-        }
-        inner.owe(&ctx)?;
-        if let Some(credential) = inner.credentials.get_mut(&id.0) {
-            credential.label = label.map(str::to_string);
-        }
-        Ok(true)
-    }
-
-    async fn change_password(
-        &self,
-        id: CredentialId,
-        expected: &[u8],
-        new: &Credential,
-        history: Option<&HistoryCommit>,
-        ctx: MutationContext,
-    ) -> SidResult<bool> {
-        let mut inner = self.inner.lock().unwrap();
-        if !inner
-            .credentials
-            .get(&id.0)
-            .is_some_and(|c| c.status.is_active() && c.data.expose() == expected)
-        {
-            return Ok(false);
-        }
-        if let Some(history) = history {
-            if Some(history.owner) != inner.credentials.get(&id.0).map(|c| c.profile_id) {
-                return Err(sid_core::Error::Validation(
-                    "password history belongs to the credential's profile".into(),
-                ));
-            }
-            if !inner.apply_history(history)? {
-                return Ok(false);
-            }
-        }
-        inner.owe(&ctx)?;
-        if let Some(credential) = inner.credentials.get_mut(&id.0) {
-            credential.data = new.data.clone();
-            credential.policy_evidence = new.policy_evidence;
-            credential.opaque_credential_identifier = new.opaque_credential_identifier;
-            credential.last_used_at = Some(chrono::Utc::now());
-        }
-        Ok(true)
-    }
-
-    async fn get_password_history(&self, owner: ProfileId) -> SidResult<PasswordHistory> {
-        let inner = self.inner.lock().unwrap();
-        Ok(inner.histories.get(&owner).cloned().unwrap_or_default())
-    }
-
-    async fn history_write_cutoff(&self) -> SidResult<Option<chrono::DateTime<chrono::Utc>>> {
-        Ok(self.inner.lock().unwrap().history_write_cutoff)
-    }
-
-    async fn raise_history_write_cutoff(
-        &self,
-        not_before: chrono::DateTime<chrono::Utc>,
-        ctx: MutationContext,
-    ) -> SidResult<chrono::DateTime<chrono::Utc>> {
-        let not_before = sid_core::models::password_history::write_cutoff_instant(not_before);
-        let mut inner = self.inner.lock().unwrap();
-        match inner.history_write_cutoff {
-            Some(current) if current >= not_before => Ok(current),
-            _ => {
-                inner.owe(&ctx)?;
-                inner.history_write_cutoff = Some(not_before);
-                Ok(not_before)
-            }
-        }
-    }
-
-    async fn reseal_credential_data(
-        &self,
-        id: CredentialId,
-        expected: &[u8],
-        data: &[u8],
-        ctx: MutationContext,
-    ) -> SidResult<bool> {
-        let mut inner = self.inner.lock().unwrap();
-        if !inner
-            .credentials
-            .get(&id.0)
-            .is_some_and(|c| c.data.expose() == expected)
-        {
-            return Ok(false);
-        }
-        inner.owe(&ctx)?;
-        if let Some(credential) = inner.credentials.get_mut(&id.0) {
-            credential.data = sid_core::models::CredentialData::new(data.to_vec());
-        }
-        Ok(true)
-    }
-
-    async fn delete_credential(&self, id: CredentialId, ctx: MutationContext) -> SidResult<()> {
-        let mut inner = self.inner.lock().unwrap();
-        inner.credentials.remove(&id.0);
-        inner.owe(&ctx)
-    }
-
-    async fn revoke_credential(
-        &self,
-        id: CredentialId,
-        ctx: MutationContext,
-    ) -> SidResult<CredentialRevocation> {
-        // One lock: the check and the revocation are one step, as in a
-        // transaction of the real backends.
-        let mut inner = self.inner.lock().unwrap();
-        let Some(target) = inner.credentials.get(&id.0).cloned() else {
-            return Ok(CredentialRevocation::AlreadyGone);
-        };
-        if !target.status.is_active() {
-            return Ok(CredentialRevocation::AlreadyGone);
-        }
-        let other_primary = inner.credentials.values().any(|c| {
-            c.id != id
-                && c.profile_id == target.profile_id
-                && c.status.is_active()
-                && c.credential_type.is_primary()
-        });
-        if target.credential_type.is_primary() && !other_primary {
-            return Ok(CredentialRevocation::LastPrimary);
-        }
-        if let Some(credential) = inner.credentials.get_mut(&id.0) {
-            credential.status = sid_core::models::credential::CredentialStatus::Revoked;
-        }
-        inner.owe(&ctx)?;
-        Ok(CredentialRevocation::Revoked)
-    }
-
-    async fn delete_credentials_by_profile(
-        &self,
-        profile_id: ProfileId,
-        _audit: MutationContext,
-    ) -> SidResult<u64> {
-        let mut inner = self.inner.lock().unwrap();
-        let before = inner.credentials.len();
-        inner.credentials.retain(|_, c| c.profile_id != profile_id);
-        Ok((before - inner.credentials.len()) as u64)
-    }
-
-    async fn ensure_webauthn_user_handle(
-        &self,
-        profile_id: ProfileId,
-        rp_id: &str,
-        candidate: WebAuthnUserHandle,
-        ctx: MutationContext,
-    ) -> SidResult<WebAuthnUserHandle> {
-        let mut inner = self.inner.lock().unwrap();
-        if !inner.profiles.contains_key(&profile_id) {
-            return Err(sid_core::Error::NotFound(format!("profile {profile_id}")));
-        }
-        let key = (profile_id, rp_id.to_string());
-        if let Some(stored) = inner.webauthn_user_handles.get(&key) {
-            return Ok(*stored);
-        }
-        let taken = inner
-            .webauthn_user_handles
-            .iter()
-            .any(|((_, rp), h)| rp == rp_id && *h == candidate);
-        if taken {
-            return Err(sid_core::Error::Conflict(
-                "WebAuthn user handle already exists".into(),
-            ));
-        }
-        inner.owe(&ctx)?;
-        inner.webauthn_user_handles.insert(key, candidate);
-        Ok(candidate)
-    }
-
-    async fn get_profile_by_webauthn_user_handle(
-        &self,
-        rp_id: &str,
-        handle: WebAuthnUserHandle,
-    ) -> SidResult<Option<ProfileId>> {
-        let inner = self.inner.lock().unwrap();
-        Ok(inner
-            .webauthn_user_handles
-            .iter()
-            .find(|((_, rp), h)| rp == rp_id && **h == handle)
-            .map(|((profile, _), _)| *profile))
     }
 
     async fn revoke_consents_by_profile(

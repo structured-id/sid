@@ -51,21 +51,6 @@ async fn test_register_profile_concurrent_single_winner() {
 }
 
 #[tokio::test]
-async fn test_single_active_password() {
-    common::test_single_active_password(&setup().await).await;
-}
-
-#[tokio::test]
-async fn test_replace_credential_data_is_compare_and_swap() {
-    common::test_replace_credential_data_is_compare_and_swap(&setup().await).await;
-}
-
-#[tokio::test]
-async fn test_mark_credential_used_only_when_active() {
-    common::test_mark_credential_used_only_when_active(&setup().await).await;
-}
-
-#[tokio::test]
 async fn test_create_machine_user_never_replaces() {
     common::machine::test_create_machine_user_never_replaces(&setup().await).await;
 }
@@ -290,85 +275,13 @@ async fn test_revoke_unused_pats() {
 }
 
 #[tokio::test]
-async fn test_credential_deletion() {
-    common::test_credential_deletion(&setup().await).await;
-}
-
-#[tokio::test]
-async fn test_create_credential_never_replaces() {
-    common::test_create_credential_never_replaces(&setup().await).await;
-}
-
-#[tokio::test]
-async fn test_credential_label_only_on_active() {
-    common::test_credential_label_only_on_active(&setup().await).await;
-}
-
-#[tokio::test]
-async fn test_change_password_is_compare_and_swap() {
-    common::test_change_password_is_compare_and_swap(&setup().await).await;
-}
-
-#[tokio::test]
-async fn test_webauthn_user_handle_is_created_once() {
-    common::webauthn_user_handle::test_user_handle_is_created_once(&setup().await).await;
-}
-
-#[tokio::test]
-async fn test_webauthn_concurrent_enrollments_agree_on_one_handle() {
-    common::webauthn_user_handle::test_concurrent_enrollments_agree_on_one_handle(&setup().await)
-        .await;
-}
-
-#[tokio::test]
-async fn test_webauthn_user_handle_resolves_only_at_its_rp() {
-    common::webauthn_user_handle::test_user_handle_resolves_only_at_its_rp(&setup().await).await;
-}
-
-#[tokio::test]
-async fn test_webauthn_user_handle_is_unique_per_rp() {
-    common::webauthn_user_handle::test_user_handle_is_unique_per_rp(&setup().await).await;
-}
-
-#[tokio::test]
-async fn test_webauthn_user_handle_needs_a_profile() {
-    common::webauthn_user_handle::test_user_handle_needs_a_profile(&setup().await).await;
-}
-
-#[tokio::test]
-async fn test_history_is_empty_until_written() {
-    common::password_history::test_history_is_empty_until_written(&setup().await).await;
-}
-
-#[tokio::test]
 async fn test_history_archive_preserves_lifecycle() {
     common::password_history::test_history_archive_preserves_lifecycle(&setup().await).await;
 }
 
 #[tokio::test]
-async fn test_history_rotation_is_published_by_its_commit() {
-    common::password_history::test_history_rotation_is_published_by_its_commit(&setup().await)
-        .await;
-}
-
-#[tokio::test]
-async fn test_history_descriptor_conflict_writes_nothing() {
-    common::password_history::test_history_descriptor_conflict_writes_nothing(&setup().await).await;
-}
-
-#[tokio::test]
 async fn test_registration_writes_first_history() {
     common::password_history::test_registration_writes_first_history(&setup().await).await;
-}
-
-#[tokio::test]
-async fn test_history_commit_is_compare_and_swap() {
-    common::password_history::test_history_commit_is_compare_and_swap(&setup().await).await;
-}
-
-#[tokio::test]
-async fn test_history_retains_depth() {
-    common::password_history::test_history_retains_depth(&setup().await).await;
 }
 
 #[tokio::test]
@@ -382,18 +295,62 @@ async fn test_reset_history_is_compare_and_swap() {
 }
 
 #[tokio::test]
-async fn test_history_of_another_owner_is_refused() {
-    common::password_history::test_history_of_another_owner_is_refused(&setup().await).await;
+async fn test_history_write_cutoff_fences_registration_and_reset() {
+    common::password_history::test_history_write_cutoff_fences_registration_and_reset(
+        &setup().await,
+    )
+    .await;
 }
 
-#[tokio::test]
-async fn test_history_write_cutoff_fences_commits() {
-    common::password_history::test_history_write_cutoff_fences_commits(&setup().await).await;
+// ─── Credential store conformance ───
+
+/// Run credential store conformance `scenario` against this backend. Each
+/// gets its own in-memory database, so the store-wide history write cutoff
+/// one raises reaches no other.
+macro_rules! credential_store {
+    ($($scenario:ident),* $(,)?) => {$(
+        #[tokio::test]
+        async fn $scenario() {
+            let backend = setup().await;
+            sid_plugin::conformance::credential_store::$scenario(
+                &common::credential_conformance::ProfileCredentials(&backend),
+            )
+            .await;
+        }
+    )*};
 }
 
-#[tokio::test]
-async fn test_history_write_cutoff_races_a_commit() {
-    common::password_history::test_history_write_cutoff_races_a_commit(&setup().await).await;
+mod credential_store {
+    use super::*;
+
+    credential_store!(
+        revoke_keeps_last_primary,
+        credential_deletion,
+        single_active_password,
+        replace_credential_data_is_compare_and_swap,
+        mark_used_only_when_active,
+        create_never_replaces,
+        label_only_on_active,
+        change_password_is_compare_and_swap,
+        reseal_keeps_status,
+        replace_password_swaps_only_password,
+        replace_recovery_codes_swaps_only_the_set,
+        policy_evidence_roundtrip,
+        enroll_stores_factor_with_codes,
+        history_is_empty_until_written,
+        history_rotation_is_published_by_its_commit,
+        history_descriptor_conflict_writes_nothing,
+        history_commit_is_compare_and_swap,
+        history_retains_depth,
+        history_of_another_owner_is_refused,
+        history_write_cutoff_fences_commits,
+        history_write_cutoff_races_a_commit,
+        user_handle_is_created_once,
+        concurrent_enrollments_agree_on_one_handle,
+        user_handle_resolves_only_at_its_rp,
+        user_handle_is_unique_per_rp,
+        user_handle_needs_an_owner,
+    );
 }
 
 #[tokio::test]
@@ -472,21 +429,6 @@ async fn test_operation_results_are_purged_by_method() {
 }
 
 #[tokio::test]
-async fn test_reseal_credential_data_keeps_status() {
-    common::test_reseal_credential_data_keeps_status(&setup().await).await;
-}
-
-#[tokio::test]
-async fn test_replace_password_swaps_only_password() {
-    common::test_replace_password_swaps_only_password(&setup().await).await;
-}
-
-#[tokio::test]
-async fn test_replace_recovery_codes_swaps_only_the_set() {
-    common::test_replace_recovery_codes_swaps_only_the_set(&setup().await).await;
-}
-
-#[tokio::test]
 async fn test_end_legacy_migration_is_one_write() {
     common::test_end_legacy_migration_is_one_write(&setup().await).await;
 }
@@ -509,16 +451,6 @@ async fn test_profile_lifecycle_scans() {
 #[tokio::test]
 async fn test_set_primary_profile_email() {
     common::test_set_primary_profile_email(&setup().await).await;
-}
-
-#[tokio::test]
-async fn test_enroll_credential_stores_factor_with_codes() {
-    common::test_enroll_credential_stores_factor_with_codes(&setup().await).await;
-}
-
-#[tokio::test]
-async fn test_credential_policy_evidence_roundtrip() {
-    common::test_credential_policy_evidence_roundtrip(&setup().await).await;
 }
 
 // ─── Profile CRUD (shared) ───
@@ -1179,11 +1111,6 @@ mod work_store {
 #[tokio::test]
 async fn test_session_end_owes_client_logout() {
     common::work::test_session_end_owes_client_logout(&setup().await).await;
-}
-
-#[tokio::test]
-async fn test_revoke_credential_keeps_last_primary() {
-    common::test_revoke_credential_keeps_last_primary(&setup().await).await;
 }
 
 #[tokio::test]

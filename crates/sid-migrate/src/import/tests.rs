@@ -1,7 +1,7 @@
 use super::*;
 use crate::export::export_snapshot;
 use sid_core::models::{BindingScope, Profile};
-use sid_plugin::{ClientResourceRegistry, IssuerStore};
+use sid_plugin::{ClientResourceRegistry, CredentialStore, IssuerStore};
 use sid_storage::sqlite::SqliteBackend;
 
 /// Export a standalone SQLite installation: its storage and the history

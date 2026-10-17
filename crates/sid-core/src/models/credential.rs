@@ -250,11 +250,12 @@ impl PolicyEvidence {
     }
 }
 
-/// Credential represents an authentication factor.
+/// Credential represents an authentication factor of an account. `O` is the
+/// account type of the authority that keeps it; CE's is the local Profile.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Credential {
+pub struct Credential<O = ProfileId> {
     pub id: CredentialId,
-    pub profile_id: ProfileId,
+    pub profile_id: O,
     pub credential_type: CredentialType,
     pub status: CredentialStatus,
 
@@ -296,10 +297,10 @@ pub struct Credential {
     pub legacy_algorithm: Option<String>,
 }
 
-impl Credential {
+impl<O> Credential<O> {
     /// Create a new credential
     pub fn new(
-        profile_id: ProfileId,
+        profile_id: O,
         credential_type: CredentialType,
         data: impl Into<CredentialData>,
         label: Option<String>,
@@ -321,21 +322,13 @@ impl Credential {
         }
     }
 
-    /// The OPAQUE credential identifier logins of this password evaluate
-    /// under: the stored one, else the profile id of a password installed
-    /// before identifiers were stored.
-    pub fn opaque_credential_identifier(&self) -> [u8; 16] {
-        self.opaque_credential_identifier
-            .unwrap_or_else(|| *self.profile_id.as_bytes())
-    }
-
     /// Update last used timestamp
     pub fn mark_used(&mut self) {
         self.last_used_at = Some(Utc::now());
     }
 
     /// Gateway: obtain a typed wrapper if credential is active.
-    pub fn as_active(&mut self) -> Option<ActiveCredential<'_>> {
+    pub fn as_active(&mut self) -> Option<ActiveCredential<'_, O>> {
         if self.status.is_active() {
             Some(ActiveCredential(self))
         } else {
@@ -344,11 +337,21 @@ impl Credential {
     }
 }
 
+impl Credential {
+    /// The OPAQUE credential identifier logins of this password evaluate
+    /// under: the stored one, else the profile id of a password installed
+    /// before identifiers were stored.
+    pub fn opaque_credential_identifier(&self) -> [u8; 16] {
+        self.opaque_credential_identifier
+            .unwrap_or_else(|| *self.profile_id.as_bytes())
+    }
+}
+
 /// Gateway wrapper for an active credential. Consume-self transitions
 /// prevent double-transition within a single scope.
-pub struct ActiveCredential<'a>(&'a mut Credential);
+pub struct ActiveCredential<'a, O = ProfileId>(&'a mut Credential<O>);
 
-impl<'a> ActiveCredential<'a> {
+impl<'a, O> ActiveCredential<'a, O> {
     /// Revoke this credential (admin action or security event).
     /// Consumes the wrapper — cannot use credential as active after revocation.
     pub fn revoke(self) {
@@ -356,7 +359,7 @@ impl<'a> ActiveCredential<'a> {
     }
 
     /// Access the underlying credential immutably.
-    pub fn inner(&self) -> &Credential {
+    pub fn inner(&self) -> &Credential<O> {
         self.0
     }
 }

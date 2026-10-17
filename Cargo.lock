@@ -6201,6 +6201,8 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
+ "group 0.14.0",
+ "pasta_curves",
  "reqwest",
  "rustls",
  "secrecy",
