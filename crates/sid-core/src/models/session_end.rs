@@ -31,7 +31,7 @@ impl SessionEnd {
 
     /// The work `ended` owes.
     pub fn owed_by(&self, ended: &Session) -> Vec<NewWork> {
-        self.owed(ended.id, ended.owner, ended.client_id.as_deref())
+        self.owed(ended.id, ended.profile_id, ended.client_id.as_deref())
     }
 
     /// The work one ended session owes.

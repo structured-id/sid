@@ -448,7 +448,7 @@ pub(super) async fn end_sessions(
     .collect::<SidResult<_>>()?;
     for ended in &sessions {
         ctx.work
-            .extend(end.owed(ended.id, ended.owner, ended.client_id.as_deref()));
+            .extend(end.owed(ended.id, ended.profile_id, ended.client_id.as_deref()));
     }
     Ok(sessions)
 }

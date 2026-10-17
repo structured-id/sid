@@ -17,7 +17,7 @@ fn authentication() -> GrantAuthentication {
 fn make_code(expires_in: Duration, used: bool) -> AuthorizationCode {
     AuthorizationCode {
         code_hash: vec![10, 20, 30],
-        owner: ProfileId::generate(),
+        profile_id: ProfileId::generate(),
         client_id: "test-client".to_string(),
         redirect_uri: "https://app.sid.example.com/callback".to_string(),
         scopes: vec!["openid".into(), "email".into()],
@@ -82,7 +82,7 @@ fn test_exchange_valid_code_consumes_self() {
     let authentication = authentication();
     let code = AuthorizationCode {
         code_hash: vec![10, 20, 30],
-        owner: profile_id,
+        profile_id,
         client_id: "test-client".to_string(),
         redirect_uri: "https://app.sid.example.com/callback".to_string(),
         scopes: vec!["openid".into(), "email".into()],
@@ -99,7 +99,7 @@ fn test_exchange_valid_code_consumes_self() {
     let exchanged = code.exchange().expect("exchange should succeed");
     // code is consumed: cannot be used again (compile error if attempted)
 
-    assert_eq!(*exchanged.owner(), profile_id);
+    assert_eq!(*exchanged.profile_id(), profile_id);
     assert_eq!(exchanged.client_id(), "test-client");
     assert_eq!(
         exchanged.redirect_uri(),
@@ -115,13 +115,13 @@ fn test_exchange_valid_code_consumes_self() {
     assert_eq!(exchanged.scopes_string(), "openid email");
 }
 
-// A host's owner type need not be `Copy`: everything but `owner()` reads
-// without it, so the code's grant data stays usable for any owner.
+// Another authority's representation of its stable user need not be `Copy`:
+// the code's grant data reads without it.
 #[test]
-fn test_exchanged_code_reads_without_a_copy_owner() {
+fn test_exchanged_code_reads_without_a_copy_profile_id() {
     let code = AuthorizationCode {
         code_hash: vec![1],
-        owner: String::from("account"),
+        profile_id: String::from("user"),
         client_id: "test-client".to_string(),
         redirect_uri: "https://app.sid.example.com/callback".to_string(),
         scopes: vec!["openid".into()],
