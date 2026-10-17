@@ -64,7 +64,7 @@ async fn provisioning_is_stable_across_starts() {
         .await
         .unwrap();
     assert_eq!(first, again);
-    assert_eq!(first.recipient_org, org);
+    assert_eq!(first.recipient, org);
     assert_eq!(first.authority, IssuerAuthority::Local);
     assert_eq!(
         first.canonical_url,
@@ -647,4 +647,119 @@ async fn the_stored_private_key_is_sealed() {
     assert!(crate::sealed_secret::is_sealed(
         &stored[0].sealed_private_key
     ));
+}
+
+/// A recipient that is not an organization: what a host serving its own
+/// account authority names its issuer's recipient as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OwnAuthority;
+
+/// An issuer store of such a host, in memory: one issuer per authority and
+/// recipient, first insert kept.
+#[derive(Default)]
+struct OwnIssuers {
+    rows: std::sync::Mutex<Vec<(OidcIssuer<OwnAuthority>, Vec<IssuerSigningKey>)>>,
+}
+
+#[async_trait::async_trait]
+impl IssuerStore<OwnAuthority> for OwnIssuers {
+    async fn oidc_issuer_for(
+        &self,
+        authority: IssuerAuthority,
+        recipient: &OwnAuthority,
+    ) -> SidResult<Option<OidcIssuer<OwnAuthority>>> {
+        let rows = self.rows.lock().unwrap();
+        Ok(rows
+            .iter()
+            .find(|(i, _)| i.authority == authority && &i.recipient == recipient)
+            .map(|(i, _)| i.clone()))
+    }
+
+    async fn oidc_issuer_by_handle(
+        &self,
+        handle: &IssuerHandle,
+    ) -> SidResult<Option<OidcIssuer<OwnAuthority>>> {
+        let rows = self.rows.lock().unwrap();
+        Ok(rows
+            .iter()
+            .find(|(i, _)| &i.handle == handle)
+            .map(|(i, _)| i.clone()))
+    }
+
+    async fn insert_oidc_issuer(
+        &self,
+        issuer: &OidcIssuer<OwnAuthority>,
+        first_key: &IssuerSigningKey,
+        _ctx: sid_core::models::MutationContext,
+    ) -> SidResult<bool> {
+        issuer.check_first_key(first_key)?;
+        let mut rows = self.rows.lock().unwrap();
+        if rows
+            .iter()
+            .any(|(i, _)| i.authority == issuer.authority && i.recipient == issuer.recipient)
+        {
+            return Ok(false);
+        }
+        rows.push((issuer.clone(), vec![first_key.clone()]));
+        Ok(true)
+    }
+
+    async fn oidc_issuer_signing_keys(&self, issuer: IssuerId) -> SidResult<Vec<IssuerSigningKey>> {
+        let rows = self.rows.lock().unwrap();
+        Ok(rows
+            .iter()
+            .find(|(i, _)| i.id == issuer)
+            .map(|(_, keys)| keys.clone())
+            .unwrap_or_default())
+    }
+}
+
+/// The issuer mechanics need no organization: a host provisions its own
+/// issuer once under its own recipient, resolves it by handle, signs with its
+/// key and verifies its own tokens only, with no organization anywhere.
+#[tokio::test]
+async fn an_issuer_serves_a_recipient_that_is_not_an_organization() {
+    let store = std::sync::Arc::new(OwnIssuers::default());
+    let keys = key_manager();
+    let issuer = ensure_local_issuer(store.as_ref(), keys.as_ref(), &base(), OwnAuthority)
+        .await
+        .unwrap();
+    let again = ensure_local_issuer(store.as_ref(), keys.as_ref(), &base(), OwnAuthority)
+        .await
+        .unwrap();
+    assert_eq!(issuer, again);
+    assert_eq!(issuer.recipient, OwnAuthority);
+
+    let registry: IssuerRegistry<OwnAuthority> = IssuerRegistry::new(store, keys);
+    assert_eq!(
+        registry.by_handle(issuer.handle.as_str()).await.unwrap(),
+        Some(issuer.clone())
+    );
+    assert!(
+        registry
+            .by_handle(IssuerHandle::generate().as_str())
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let signer = registry.signer(&issuer).await.unwrap();
+    let verifier = registry.verifier(&issuer).await.unwrap();
+    let own = signer
+        .sign(Some(AT_JWT), &access_claims(&issuer.canonical_url))
+        .unwrap();
+    assert_eq!(
+        verifier.validate_access_token(&own).unwrap().iss,
+        issuer.canonical_url
+    );
+
+    // An organization's issuer key, claiming this issuer, is not its key.
+    let (org_registry, org_issuer) = self::registry().await;
+    let forged = org_registry
+        .signer(&org_issuer)
+        .await
+        .unwrap()
+        .sign(Some(AT_JWT), &access_claims(&issuer.canonical_url))
+        .unwrap();
+    assert!(verifier.validate_access_token(&forged).is_err());
 }

@@ -98,7 +98,7 @@ impl sid_plugin::IssuerStore for MockStorage {
     async fn oidc_issuer_for(
         &self,
         _: sid_core::models::IssuerAuthority,
-        _: OrgId,
+        _: &OrgId,
     ) -> Result<Option<sid_core::models::OidcIssuer>> {
         unimplemented!()
     }
