@@ -119,17 +119,20 @@ pub fn resource(issuer: IssuerId) -> ProtectedResource {
     }
 }
 
-/// A registered client is read back by its id exactly as registered: every
-/// field issuance reads (tenancy, application type, default resource, keys,
-/// policy overrides, logout targets) holds a non-default value, so a store
-/// that drops or rewrites one fails here. An id never registered is no
-/// client.
+/// A registered client is read back by its id exactly as registered: the
+/// fields issuance reads (tenancy, default resource, keys, policy overrides,
+/// logout targets) hold non-default values, so a store that drops or rewrites
+/// one fails here. An id never registered is no client.
+///
+/// The client stays a web client: a `private_key_jwt` client with keys is
+/// confidential, and native and single-page clients are public, so another
+/// type would be a registration a harness using the real registration path
+/// refuses.
 pub async fn client_found_by_id<H: RegistryHarness>(h: &H) {
     let api = resource(h.issuer().await);
     h.register_resource(&api).await;
     let registered = OAuth2Client {
         default_resource: Some(api.id),
-        application_type: ApplicationType::Native,
         org_id: Some(h.organization().await),
         sector_identifier_uri: Some("https://app.sid.example.com/sector.json".into()),
         required_acr: Some(AuthLevel::Standard),
