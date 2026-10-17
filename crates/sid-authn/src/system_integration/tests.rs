@@ -39,7 +39,7 @@ async fn store() -> (SqliteBackend, OidcIssuer) {
         canonical_url: format!("{INSTALLATION}/i/{handle}"),
         handle,
         authority: IssuerAuthority::Local,
-        recipient: org.id,
+        recipient_org: org.id,
         created_at: now,
     };
     let key = IssuerSigningKey {
@@ -84,7 +84,7 @@ async fn the_integration_is_provisioned_in_the_registry() {
         client.redirect_uris,
         ["https://account.sid.example.com/auth/callback"]
     );
-    assert_eq!(client.org_id, Some(issuer.recipient));
+    assert_eq!(client.org_id, Some(issuer.recipient_org));
     assert_eq!(client.default_resource, Some(integration.resource.id));
     assert_eq!(integration.resource.issuer_id, issuer.id);
     assert_eq!(

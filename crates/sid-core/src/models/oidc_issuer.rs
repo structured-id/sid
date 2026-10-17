@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Logical OIDC issuers.
 //!
-//! One issuer exists for each issuing authority and recipient: an
-//! organization, or the recipient another authority defines. Its canonical
-//! URL names it by an opaque handle and never changes; tokens for the
-//! recipient's applications carry that URL as `iss` and are signed with the
-//! issuer's own keys.
+//! One issuer exists for each issuing authority and recipient organization.
+//! Its canonical URL names it by an opaque handle and never changes; tokens
+//! for the organization's applications carry that URL as `iss` and are signed
+//! with the issuer's own keys.
 
 use std::fmt;
 
@@ -102,18 +101,15 @@ parse_stored!(IssuerAuthority, "issuer authority", [Local]);
 
 /// A logical OIDC issuer. `handle` and `canonical_url` never change and are
 /// never given to another issuer.
-///
-/// `recipient` is whom the issuer serves, typed by the host that keeps it: an
-/// organization's issuer serves that organization's applications; another
-/// authority names its own recipient type, never a made-up organization.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OidcIssuer<R = OrgId> {
+pub struct OidcIssuer {
     pub id: IssuerId,
     pub handle: IssuerHandle,
     /// The exact `iss` value; stored, never rebuilt from a request.
     pub canonical_url: String,
     pub authority: IssuerAuthority,
-    pub recipient: R,
+    /// The organization whose applications this issuer serves.
+    pub recipient_org: OrgId,
     pub created_at: DateTime<Utc>,
 }
 
@@ -121,11 +117,9 @@ impl OidcIssuer {
     /// Whether this issuer serves a client registered to `client_org`: the
     /// organization's base issuer serves its clients and no one else's.
     pub fn serves(&self, client_org: Option<OrgId>) -> bool {
-        client_org == Some(self.recipient)
+        client_org == Some(self.recipient_org)
     }
-}
 
-impl<R> OidcIssuer<R> {
     /// Whether `key` may be this issuer's first key: its own, generation 1.
     pub fn check_first_key(&self, key: &IssuerSigningKey) -> crate::Result<()> {
         if key.issuer_id != self.id {

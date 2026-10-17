@@ -14,7 +14,6 @@ use uuid::Uuid;
 use super::*;
 use crate::jwt::JwtService;
 use crate::oauth2::compute_s256_challenge;
-use crate::test_support::OwnAuthority;
 
 const ORDERS: &str = "https://resources.example/orders";
 const REDIRECT: &str = "https://cabinet.example/callback";
@@ -268,13 +267,12 @@ fn target(client: &OAuth2Client) -> Target {
     Target::from_parts(resource, access)
 }
 
-/// A host of [`Account`]s answering one request, signing as its own issuer:
-/// no organization stands behind the account, its client or its issuer.
+/// A host of [`Account`]s answering one request.
 struct Host {
     grants: MemoryGrants,
     oauth2: OAuth2Server,
-    issuers: crate::issuer::IssuerRegistry<OwnAuthority>,
-    issuer: OidcIssuer<OwnAuthority>,
+    issuers: crate::issuer::IssuerRegistry,
+    issuer: OidcIssuer,
     client: OAuth2Client,
     target: Target,
     /// Accounts that no longer exist.
@@ -293,7 +291,7 @@ impl Host {
             )
             .expect("JWT service"),
         );
-        let (issuers, issuer) = crate::test_support::own_issuer().await;
+        let (issuers, issuer) = crate::test_support::installation_issuer().await;
         let client = client();
         let target = target(&client);
         Self {
@@ -346,7 +344,6 @@ impl Host {
 impl GrantHost for Host {
     type Owner = Account;
     type Account = Account;
-    type Recipient = OwnAuthority;
     type Error = &'static str;
 
     fn store(&self) -> &dyn GrantStore<Owner = Account> {
@@ -357,13 +354,13 @@ impl GrantHost for Host {
         &self.oauth2
     }
 
-    async fn client(&self) -> Result<(OAuth2Client, OidcIssuer<OwnAuthority>), &'static str> {
+    async fn client(&self) -> Result<(OAuth2Client, OidcIssuer), &'static str> {
         Ok((self.client.clone(), self.issuer.clone()))
     }
 
     async fn resume_target(
         &self,
-        _issuer: &OidcIssuer<OwnAuthority>,
+        _issuer: &OidcIssuer,
         _client: &OAuth2Client,
         bound: ResourceId,
     ) -> Result<Target, &'static str> {
@@ -385,7 +382,7 @@ impl GrantHost for Host {
     async fn claims(
         &self,
         account: &Account,
-        _issuer: &OidcIssuer<OwnAuthority>,
+        _issuer: &OidcIssuer,
         _client: &OAuth2Client,
         _scopes: &[String],
     ) -> Result<AccountClaims, &'static str> {
@@ -397,10 +394,7 @@ impl GrantHost for Host {
         })
     }
 
-    async fn signer(
-        &self,
-        issuer: &OidcIssuer<OwnAuthority>,
-    ) -> Result<Arc<IssuerSigner<OwnAuthority>>, &'static str> {
+    async fn signer(&self, issuer: &OidcIssuer) -> Result<Arc<IssuerSigner>, &'static str> {
         self.issuers.signer(issuer).await.map_err(|_| "no signer")
     }
 

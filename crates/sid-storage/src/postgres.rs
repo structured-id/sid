@@ -108,7 +108,7 @@ type IssuerRow = (
 );
 
 fn issuer_from_row(
-    (id, handle, canonical_url, authority, recipient, created_at): IssuerRow,
+    (id, handle, canonical_url, authority, recipient_org, created_at): IssuerRow,
 ) -> SidResult<sid_core::models::OidcIssuer> {
     let stored = |e: String| SidError::Storage(format!("oidc issuer {id}: {e}"));
     Ok(sid_core::models::OidcIssuer {
@@ -116,7 +116,7 @@ fn issuer_from_row(
         handle: sid_core::models::IssuerHandle::parse(&handle).map_err(stored)?,
         canonical_url,
         authority: authority.parse().map_err(stored)?,
-        recipient,
+        recipient_org,
         created_at,
     })
 }
@@ -1272,14 +1272,14 @@ impl IssuerStore for PostgresBackend {
     async fn oidc_issuer_for(
         &self,
         authority: sid_core::models::IssuerAuthority,
-        recipient_org: &sid_core::models::OrgId,
+        recipient_org: sid_core::models::OrgId,
     ) -> SidResult<Option<sid_core::models::OidcIssuer>> {
         let row: Option<IssuerRow> = sqlx::query_as(
             "SELECT id, handle, canonical_url, authority, recipient_org, created_at
                  FROM oidc_issuers WHERE authority = $1 AND recipient_org = $2",
         )
         .bind(authority.as_str())
-        .bind(*recipient_org)
+        .bind(recipient_org)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("oidc issuer: {e}")))?;
@@ -1322,7 +1322,7 @@ impl IssuerStore for PostgresBackend {
         .bind(issuer.handle.as_str())
         .bind(&issuer.canonical_url)
         .bind(issuer.authority.as_str())
-        .bind(issuer.recipient)
+        .bind(issuer.recipient_org)
         .bind(issuer.created_at)
         .execute(&mut *tx)
         .await

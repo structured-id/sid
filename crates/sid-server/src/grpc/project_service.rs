@@ -64,7 +64,7 @@ impl ProjectServiceImpl {
             feature_flags,
             jwt,
             revocation,
-            org: issuer.recipient,
+            org: issuer.recipient_org,
             issuer,
         }
     }
@@ -1791,7 +1791,7 @@ impl ProjectService for ProjectServiceImpl {
             unified_input: false,
             // The organization the issuer serves: its registration access
             // token manages it only under this issuer.
-            org_id: Some(issuer.recipient),
+            org_id: Some(issuer.recipient_org),
             revision: 0,
             created_at: now,
         };

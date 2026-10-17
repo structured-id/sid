@@ -27,6 +27,7 @@ use subtle::ConstantTimeEq;
 use uuid::Uuid;
 use zeroize::Zeroize;
 
+use crate::issuer::IssuerSigner;
 use crate::jwt::JwtService;
 
 /// OAuth2 server handling authorization, token exchange, and token management.
@@ -468,9 +469,9 @@ impl OAuth2Server {
     /// its `roles`. An ID token needs `id_token`, the account's Profile and
     /// contacts: a grant with `openid` and no such source is refused.
     #[allow(clippy::too_many_arguments)]
-    pub fn issue_tokens<O: Clone, S: crate::jwt::TokenSigner>(
+    pub fn issue_tokens<O: Clone>(
         &self,
-        issuer: &S,
+        issuer: &IssuerSigner,
         sub: &str,
         roles: &[String],
         session: &Session<O>,

@@ -20,7 +20,7 @@ fn issuer_from_row(row: &sqlx::sqlite::SqliteRow) -> SidResult<OidcIssuer> {
             .map_err(|e| SidError::Storage(format!("oidc issuer {id}: {e}")))?,
         canonical_url: col(row, "canonical_url")?,
         authority: parsed_col(row, "authority")?,
-        recipient: col(row, "recipient_org")?,
+        recipient_org: col(row, "recipient_org")?,
         created_at: dt_col(row, "created_at")?,
     })
 }
@@ -77,7 +77,7 @@ impl SqliteBackend {
         .bind(issuer.handle.as_str())
         .bind(&issuer.canonical_url)
         .bind(issuer.authority.as_str())
-        .bind(issuer.recipient)
+        .bind(issuer.recipient_org)
         .bind(fmt_dt(&issuer.created_at))
         .execute(&mut *tx)
         .await
