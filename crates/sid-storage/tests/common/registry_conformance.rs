@@ -7,14 +7,14 @@
 use async_trait::async_trait;
 use chrono::{SubsecRound, Utc};
 use sid_core::models::{
-    Application, ApplicationId, IssuerId, OAuth2Client, ProjectId, ProtectedResource,
+    Application, ApplicationId, IssuerId, OAuth2Client, OrgId, ProjectId, ProtectedResource,
     ResourceAccess, ResourceId,
 };
 use sid_plugin::conformance::client_registry::RegistryHarness;
 use sid_plugin::{ClientResourceRegistry, StorageBackend};
 
 use super::application::{instance_issuer, store_client};
-use super::test_audit;
+use super::{instance_org, test_audit};
 
 pub struct AdminRegistry<'a>(pub &'a dyn StorageBackend);
 
@@ -45,6 +45,10 @@ impl RegistryHarness for AdminRegistry<'_> {
     /// to name an indicator nothing is registered under.
     async fn other_issuer(&self) -> IssuerId {
         IssuerId::generate()
+    }
+
+    async fn organization(&self) -> OrgId {
+        instance_org(self.0).await
     }
 
     async fn register_client(&self, client: &OAuth2Client) {

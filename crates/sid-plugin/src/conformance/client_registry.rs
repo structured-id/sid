@@ -7,9 +7,9 @@
 use async_trait::async_trait;
 use chrono::{SubsecRound, Utc};
 use sid_core::models::{
-    ApplicationId, ApplicationType, EnforcementMode, IssuerId, LoginStrategy, OAuth2Client,
-    ProjectId, ProtectedResource, ResourceAccess, ResourceId, ResourceIndicator, ResourceState,
-    SubjectType, TokenEndpointAuthMethod,
+    ApplicationId, ApplicationType, AuthLevel, ClientKeySet, EnforcementMode, IssuerId,
+    LoginStrategy, OAuth2Client, OrgId, ProjectId, ProtectedResource, ResourceAccess, ResourceId,
+    ResourceIndicator, ResourceState, SubjectType, TokenEndpointAuthMethod,
 };
 use uuid::Uuid;
 
@@ -27,6 +27,9 @@ pub trait RegistryHarness: Send + Sync {
     /// Another issuer, distinct from [`Self::issuer`].
     async fn other_issuer(&self) -> IssuerId;
 
+    /// An organization a client may belong to.
+    async fn organization(&self) -> OrgId;
+
     /// Register `client` with whatever the store keeps around it.
     async fn register_client(&self, client: &OAuth2Client);
 
@@ -40,8 +43,17 @@ pub trait RegistryHarness: Send + Sync {
     async fn retire_resource(&self, resource: ResourceId);
 }
 
-/// A new confidential web client, its times at the millisecond precision
-/// every store keeps.
+/// The public signing key of a `private_key_jwt` client: the Ed25519 key of
+/// RFC 8037 Appendix A.2.
+fn client_keys() -> ClientKeySet {
+    ClientKeySet::from_json(
+        r#"{"keys":[{"kty":"OKP","crv":"Ed25519","kid":"conformance-1","x":"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"}]}"#,
+    )
+    .expect("a valid key set")
+}
+
+/// A new confidential web client that can authenticate by its registered
+/// method, its times at the millisecond precision every store keeps.
 pub fn client() -> OAuth2Client {
     let now = Utc::now().trunc_subsecs(3);
     OAuth2Client {
@@ -51,7 +63,7 @@ pub fn client() -> OAuth2Client {
         default_resource: None,
         application_type: ApplicationType::Web,
         client_secret_hash: None,
-        jwks: None,
+        jwks: Some(client_keys()),
         redirect_uris: vec!["https://app.sid.example.com/callback".into()],
         allowed_scopes: vec!["orders.read".into()],
         grant_types: vec!["authorization_code".into(), "refresh_token".into()],
@@ -107,10 +119,28 @@ pub fn resource(issuer: IssuerId) -> ProtectedResource {
     }
 }
 
-/// A registered client is read back by its id with what issuance checks;
-/// an unknown id is no client.
+/// A registered client is read back by its id exactly as registered: every
+/// field issuance reads (tenancy, application type, default resource, keys,
+/// policy overrides, logout targets) holds a non-default value, so a store
+/// that drops or rewrites one fails here. An id never registered is no
+/// client.
 pub async fn client_found_by_id<H: RegistryHarness>(h: &H) {
-    let registered = client();
+    let api = resource(h.issuer().await);
+    h.register_resource(&api).await;
+    let registered = OAuth2Client {
+        default_resource: Some(api.id),
+        application_type: ApplicationType::Native,
+        org_id: Some(h.organization().await),
+        sector_identifier_uri: Some("https://app.sid.example.com/sector.json".into()),
+        required_acr: Some(AuthLevel::Standard),
+        required_amr: vec!["hwk".into()],
+        enforcement_mode: EnforcementMode::Hard,
+        require_verified_email: Some(true),
+        backchannel_logout_uri: Some("https://app.sid.example.com/logout".into()),
+        backchannel_logout_session_required: true,
+        post_logout_redirect_uris: vec!["https://app.sid.example.com/signed-out".into()],
+        ..client()
+    };
     h.register_client(&registered).await;
     let read = h
         .registry()
@@ -118,20 +148,16 @@ pub async fn client_found_by_id<H: RegistryHarness>(h: &H) {
         .await
         .unwrap()
         .expect("the registered client");
-    assert_eq!(read.client_id, registered.client_id);
-    assert_eq!(read.redirect_uris, registered.redirect_uris);
-    assert_eq!(read.grant_types, registered.grant_types);
-    assert_eq!(read.response_types, registered.response_types);
-    assert_eq!(read.allowed_scopes, registered.allowed_scopes);
+    // The model has no equality of its own; its serialized form names every
+    // field.
     assert_eq!(
-        read.token_endpoint_auth_method,
-        registered.token_endpoint_auth_method
+        serde_json::to_value(&read).unwrap(),
+        serde_json::to_value(&registered).unwrap()
     );
-    assert_eq!(read.subject_type, registered.subject_type);
-    assert!(read.active);
+    let unknown = client().client_id;
     assert!(
         h.registry()
-            .get_oauth2_client("conformance-unknown")
+            .get_oauth2_client(&unknown)
             .await
             .unwrap()
             .is_none()
