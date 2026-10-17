@@ -221,12 +221,16 @@ async fn test_magic_link_cleanup_removes_expired() {
     let pool = backend.pool().clone();
     let storage: Arc<dyn StorageBackend> = Arc::new(backend);
     let outcome = tokio::spawn(cleanup_removes_expired(storage)).await;
-    sqlx::query(sqlx::AssertSqlSafe(format!(
-        "DROP SCHEMA \"{schema}\" CASCADE"
-    )))
-    .execute(&pool)
-    .await
-    .unwrap();
+    // The migrations also create the schema's database-wide reader role.
+    for statement in [
+        format!("DROP SCHEMA \"{schema}\" CASCADE"),
+        format!("DROP ROLE IF EXISTS \"{schema}_reader\""),
+    ] {
+        sqlx::query(sqlx::AssertSqlSafe(statement))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
     if let Err(panic) = outcome {
         std::panic::resume_unwind(panic.into_panic());
     }
