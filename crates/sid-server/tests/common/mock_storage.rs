@@ -1267,6 +1267,81 @@ impl GrantStore for MockStorage {
 }
 
 #[async_trait]
+impl sid_plugin::SignInHistoryStore for MockStorage {
+    type Owner = ProfileId;
+
+    async fn get_most_recent_session_ip(
+        &self,
+        profile_id: ProfileId,
+    ) -> SidResult<Option<(String, chrono::DateTime<chrono::Utc>)>> {
+        let inner = self.inner.lock().unwrap();
+        if inner.login_history_fails {
+            return Err(sid_core::Error::Storage("read recent session".into()));
+        }
+        let most_recent = inner
+            .sessions
+            .values()
+            .filter(|s| s.profile_id == profile_id)
+            .max_by_key(|s| s.created_at)
+            .map(|s| (s.ip_address.clone(), s.created_at));
+        Ok(most_recent)
+    }
+
+    async fn has_recent_session_from_ip(
+        &self,
+        profile_id: ProfileId,
+        ip: &str,
+        window: std::time::Duration,
+    ) -> SidResult<bool> {
+        let inner = self.inner.lock().unwrap();
+        if inner.login_history_fails {
+            return Err(sid_core::Error::Storage("read sessions by ip".into()));
+        }
+        let cutoff = chrono::Utc::now() - chrono::Duration::seconds(window.as_secs() as i64);
+        let found = inner
+            .sessions
+            .values()
+            .any(|s| s.profile_id == profile_id && s.ip_address == ip && s.created_at > cutoff);
+        Ok(found)
+    }
+
+    async fn has_recent_session_from_device(
+        &self,
+        profile_id: ProfileId,
+        device_id: uuid::Uuid,
+        window: std::time::Duration,
+    ) -> SidResult<bool> {
+        let inner = self.inner.lock().unwrap();
+        if inner.login_history_fails {
+            return Err(sid_core::Error::Storage("read sessions by device".into()));
+        }
+        let cutoff = chrono::Utc::now() - chrono::Duration::seconds(window.as_secs() as i64);
+        let found = inner.sessions.values().any(|s| {
+            s.profile_id == profile_id && s.device_id == Some(device_id) && s.created_at > cutoff
+        });
+        Ok(found)
+    }
+
+    async fn record_login_location(
+        &self,
+        _profile_id: ProfileId,
+        _country: &str,
+        _latitude: f64,
+        _longitude: f64,
+        _designated_threshold: u32,
+    ) -> SidResult<()> {
+        Ok(())
+    }
+
+    async fn get_designated_countries(&self, _profile_id: ProfileId) -> SidResult<Vec<String>> {
+        if self.inner.lock().unwrap().login_history_fails {
+            return Err(sid_core::Error::Storage("read designated countries".into()));
+        }
+        Ok(vec![])
+    }
+}
+
+#[async_trait]
 impl sid_plugin::PrincipalStore for MockStorage {
     type Owner = ProfileId;
 
@@ -2936,76 +3011,6 @@ impl StorageBackend for MockStorage {
             .cloned()
             .collect();
         Ok(sessions)
-    }
-
-    async fn get_most_recent_session_ip(
-        &self,
-        profile_id: ProfileId,
-    ) -> SidResult<Option<(String, chrono::DateTime<chrono::Utc>)>> {
-        let inner = self.inner.lock().unwrap();
-        if inner.login_history_fails {
-            return Err(sid_core::Error::Storage("read recent session".into()));
-        }
-        let most_recent = inner
-            .sessions
-            .values()
-            .filter(|s| s.profile_id == profile_id)
-            .max_by_key(|s| s.created_at)
-            .map(|s| (s.ip_address.clone(), s.created_at));
-        Ok(most_recent)
-    }
-
-    async fn has_recent_session_from_ip(
-        &self,
-        profile_id: ProfileId,
-        ip: &str,
-        window: std::time::Duration,
-    ) -> SidResult<bool> {
-        let inner = self.inner.lock().unwrap();
-        if inner.login_history_fails {
-            return Err(sid_core::Error::Storage("read sessions by ip".into()));
-        }
-        let cutoff = chrono::Utc::now() - chrono::Duration::seconds(window.as_secs() as i64);
-        let found = inner
-            .sessions
-            .values()
-            .any(|s| s.profile_id == profile_id && s.ip_address == ip && s.created_at > cutoff);
-        Ok(found)
-    }
-
-    async fn has_recent_session_from_device(
-        &self,
-        profile_id: ProfileId,
-        device_id: uuid::Uuid,
-        window: std::time::Duration,
-    ) -> SidResult<bool> {
-        let inner = self.inner.lock().unwrap();
-        if inner.login_history_fails {
-            return Err(sid_core::Error::Storage("read sessions by device".into()));
-        }
-        let cutoff = chrono::Utc::now() - chrono::Duration::seconds(window.as_secs() as i64);
-        let found = inner.sessions.values().any(|s| {
-            s.profile_id == profile_id && s.device_id == Some(device_id) && s.created_at > cutoff
-        });
-        Ok(found)
-    }
-
-    async fn record_login_location(
-        &self,
-        _profile_id: ProfileId,
-        _country: &str,
-        _latitude: f64,
-        _longitude: f64,
-        _designated_threshold: u32,
-    ) -> SidResult<()> {
-        Ok(())
-    }
-
-    async fn get_designated_countries(&self, _profile_id: ProfileId) -> SidResult<Vec<String>> {
-        if self.inner.lock().unwrap().login_history_fails {
-            return Err(sid_core::Error::Storage("read designated countries".into()));
-        }
-        Ok(vec![])
     }
 
     async fn create_refresh_token(
