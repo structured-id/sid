@@ -2,6 +2,7 @@
 
 use super::*;
 use secrecy::SecretBox;
+use sid_core::models::ProfileId;
 use sid_keys::{KeyVersionParams, RustCryptoPrimitives, SoftwareKeyManager};
 use std::sync::Arc;
 
@@ -91,6 +92,26 @@ async fn another_master_cannot_open() {
         .await
         .unwrap_err();
     assert!(matches!(err, SealedSecretError::KeyManager(_)), "{err:?}");
+}
+
+/// The contexts bind a sealed value to its owner's stable UUID, whatever the
+/// owner's type: a Profile's contexts are the ones stored values were sealed
+/// under, and a value sealed for one owner does not open under another
+/// owner's context. A presentation form could be shared by two owners or
+/// change, so it never names the owner.
+#[tokio::test]
+async fn contexts_bind_the_owner_id() {
+    let profile = pid();
+    assert_eq!(opaque_context(profile), format!("opaque:{profile}"));
+    assert_eq!(totp_context(profile), format!("totp:{profile}"));
+
+    let (a, b) = (uuid::Uuid::now_v7(), uuid::Uuid::now_v7());
+    assert_eq!(opaque_context(a), format!("opaque:{}", a.hyphenated()));
+    assert_eq!(totp_context(a), format!("totp:{}", a.hyphenated()));
+
+    let km = manager(7, &[1]);
+    let stored = seal(&km, &opaque_context(a), b"record").await.unwrap();
+    assert!(open(&km, &opaque_context(b), &stored).await.is_err());
 }
 
 /// A value under an older key version is returned re-sealed under the current one.
