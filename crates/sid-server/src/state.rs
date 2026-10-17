@@ -26,8 +26,6 @@ pub struct AppState {
     pub opaque_zkpp: Arc<arc_swap::ArcSwap<Option<Arc<ZkppOpaqueServer>>>>,
     /// In-memory revocation cache for instant access token invalidation.
     pub revocation_cache: Arc<RevocationCache>,
-    /// SHA-256 hash of the WebTransport certificate (if WebTransport is enabled).
-    pub wt_cert_hash: Option<String>,
     /// Runtime feature flag service (polls GitLab Unleash).
     pub feature_flags: FeatureFlagService,
     /// Issuer URL (e.g., "https://sid.example.com"). Used for verification_uri in device auth.
