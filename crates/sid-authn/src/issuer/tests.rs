@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::*;
-use crate::test_support::{foreign_key_manager, key_manager};
+use crate::test_support::{OwnAuthority, OwnIssuers, foreign_key_manager, key_manager};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use sid_storage::sqlite::SqliteBackend;
 
@@ -647,71 +647,6 @@ async fn the_stored_private_key_is_sealed() {
     assert!(crate::sealed_secret::is_sealed(
         &stored[0].sealed_private_key
     ));
-}
-
-/// A recipient that is not an organization: what a host serving its own
-/// account authority names its issuer's recipient as.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct OwnAuthority;
-
-/// An issuer store of such a host, in memory: one issuer per authority and
-/// recipient, first insert kept.
-#[derive(Default)]
-struct OwnIssuers {
-    rows: std::sync::Mutex<Vec<(OidcIssuer<OwnAuthority>, Vec<IssuerSigningKey>)>>,
-}
-
-#[async_trait::async_trait]
-impl IssuerStore<OwnAuthority> for OwnIssuers {
-    async fn oidc_issuer_for(
-        &self,
-        authority: IssuerAuthority,
-        recipient: &OwnAuthority,
-    ) -> SidResult<Option<OidcIssuer<OwnAuthority>>> {
-        let rows = self.rows.lock().unwrap();
-        Ok(rows
-            .iter()
-            .find(|(i, _)| i.authority == authority && &i.recipient == recipient)
-            .map(|(i, _)| i.clone()))
-    }
-
-    async fn oidc_issuer_by_handle(
-        &self,
-        handle: &IssuerHandle,
-    ) -> SidResult<Option<OidcIssuer<OwnAuthority>>> {
-        let rows = self.rows.lock().unwrap();
-        Ok(rows
-            .iter()
-            .find(|(i, _)| &i.handle == handle)
-            .map(|(i, _)| i.clone()))
-    }
-
-    async fn insert_oidc_issuer(
-        &self,
-        issuer: &OidcIssuer<OwnAuthority>,
-        first_key: &IssuerSigningKey,
-        _ctx: sid_core::models::MutationContext,
-    ) -> SidResult<bool> {
-        issuer.check_first_key(first_key)?;
-        let mut rows = self.rows.lock().unwrap();
-        if rows
-            .iter()
-            .any(|(i, _)| i.authority == issuer.authority && i.recipient == issuer.recipient)
-        {
-            return Ok(false);
-        }
-        rows.push((issuer.clone(), vec![first_key.clone()]));
-        Ok(true)
-    }
-
-    async fn oidc_issuer_signing_keys(&self, issuer: IssuerId) -> SidResult<Vec<IssuerSigningKey>> {
-        let rows = self.rows.lock().unwrap();
-        Ok(rows
-            .iter()
-            .find(|(i, _)| i.id == issuer)
-            .map(|(_, keys)| keys.clone())
-            .unwrap_or_default())
-    }
 }
 
 /// The issuer mechanics need no organization: a host provisions its own

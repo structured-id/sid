@@ -50,6 +50,17 @@ impl TokenSigner for JwtService {
     }
 }
 
+/// A shared signer signs as the signer it holds.
+impl<S: TokenSigner> TokenSigner for std::sync::Arc<S> {
+    fn iss(&self) -> &str {
+        S::iss(self)
+    }
+
+    fn sign_claims<T: Serialize>(&self, typ: Option<&str>, claims: &T) -> SidResult<String> {
+        S::sign_claims(self, typ, claims)
+    }
+}
+
 /// Verifies SID access tokens with the public key alone.
 ///
 /// Services that only accept tokens hold this, never the signing key, so a
