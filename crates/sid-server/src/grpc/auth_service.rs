@@ -287,23 +287,6 @@ fn parse_handle(identifier: &str) -> Result<NormalizedPrincipal, tonic::Status> 
     normalize_principal(identifier).map_err(|e| invalid_field("identifier", e.to_string()))
 }
 
-/// Server state between OPAQUE login start and finish.
-#[derive(serde::Serialize, serde::Deserialize)]
-enum PendingLogin {
-    /// A login against the profile's password.
-    Password {
-        state: LoginState,
-        profile_id: ProfileId,
-        credential_id: CredentialId,
-    },
-    /// A login that cannot succeed: no profile holds the principal, or its
-    /// profile has no password. Stored and consumed like a real state and
-    /// refused like a wrong password, so neither the timing of either step nor
-    /// the answer tells whether the account exists. `identity` is the key its
-    /// failed attempts count against.
-    Decoy { identity: String },
-}
-
 /// What a pending OPAQUE registration may commit when it finishes.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) enum PendingRegistration {
@@ -536,7 +519,7 @@ pub struct AuthServiceImpl {
     pub(crate) revocation_cache: Arc<RevocationCache>,
     pub(crate) feature_flags: FeatureFlagService,
     /// OPAQUE login state between start and finish.
-    login_state: ChallengeStore<PendingLogin>,
+    login_state: ChallengeStore<PendingSignIn<ProfileId>>,
     /// Password registrations, changes and resets between their steps, and
     /// the history evaluator and checker they use.
     pub(crate) password_ops: Arc<super::password_operation::PasswordOperations>,
@@ -1384,35 +1367,6 @@ impl AuthServiceImpl {
         Ok(())
     }
 
-    /// Answer a login start that cannot succeed exactly like a real one: a
-    /// decoy OPAQUE response and a stored state that finish refuses like a
-    /// wrong password (RFC 9807 §10.9).
-    async fn decoy_login_start(
-        &self,
-        principal: &str,
-        credential_request: &[u8],
-        identity: String,
-    ) -> Result<OpaqueLoginStartResponse, Status> {
-        let fake_id = Self::fake_credential_id(principal);
-        let credential_response = self
-            .opaque_router
-            .fake_login_start(credential_request, &fake_id)
-            .map_err(|e| {
-                // A malformed request fails here as it would on a real
-                // account: the same answer either way.
-                warn!("OPAQUE fake login start failed: {}", e);
-                authentication_failed()
-            })?;
-        let state_key = uuid::Uuid::now_v7().to_string();
-        self.login_state
-            .insert(&state_key, &PendingLogin::Decoy { identity })
-            .await?;
-        Ok(OpaqueLoginStartResponse {
-            credential_response,
-            server_login_state: state_key,
-        })
-    }
-
     /// Count a failed login attempt (brute force and stuffing limits). An
     /// attempt that cannot be counted refuses the request: an uncounted
     /// guess would never reach the lockout.
@@ -1894,16 +1848,6 @@ impl AuthServiceImpl {
             Err(s) if s.code() == tonic::Code::Unauthenticated => Ok(None),
             Err(s) => Err(s),
         }
-    }
-
-    /// Deterministic fake credential ID for anti-enumeration.
-    /// Same identifier always produces the same fake ID.
-    fn fake_credential_id(identifier: &str) -> Vec<u8> {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(b"sid-fake-credential-id:");
-        hasher.update(identifier.as_bytes());
-        hasher.finalize().to_vec()
     }
 
     /// Decide what a registration started for `principal` may commit. The
