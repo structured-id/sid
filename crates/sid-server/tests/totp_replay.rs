@@ -78,6 +78,37 @@ async fn code_is_accepted_once() {
     assert_eq!(err.code(), tonic::Code::Unauthenticated);
 }
 
+/// A verified code returns the elevated session's new token the way the
+/// caller presented its token, in `authorization` metadata, never in the
+/// body; the new token records the second factor.
+#[tokio::test]
+async fn verified_code_delivers_the_elevated_token_in_metadata() {
+    let profile = test_profile();
+    let svc = TestServices::new(MockStorage::new().with_profile(profile.clone()));
+    let seed = sid_authn::generate_secret();
+    let (bearer, session) = enrolled(&svc, &profile, &seed).await;
+
+    let verified = svc
+        .auth
+        .verify_totp(authed(
+            VerifyTotpRequest {
+                code: sid_authn::generate_current_totp(&seed),
+            },
+            &bearer,
+        ))
+        .await
+        .expect("verified");
+
+    let elevated = common::opaque_client::bearer(&verified);
+    assert_ne!(elevated, bearer);
+    let claims = svc.jwt.validate_access_token(&elevated).unwrap();
+    assert_eq!(claims.sid, session.id.to_string());
+    assert!(claims.amr.iter().any(|m| m == "otp"), "{:?}", claims.amr);
+    let body = verified.into_inner();
+    assert!(body.verified);
+    assert_eq!(body.session_id, Some(session.id.to_string()));
+}
+
 /// A code spent on MFA verification does not also complete a step-up.
 #[tokio::test]
 async fn code_spent_on_mfa_does_not_step_up() {
