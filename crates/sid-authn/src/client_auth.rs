@@ -4,10 +4,23 @@
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use secrecy::SecretBox;
-use sid_core::models::TokenEndpointAuthMethod;
+use sid_core::models::{OAuth2Client, TokenEndpointAuthMethod};
 
-use crate::client_assertion::JWT_BEARER_ASSERTION_TYPE;
-use crate::oauth2::TokenError;
+use crate::client_assertion::{
+    AssertionJtiCache, JWT_BEARER_ASSERTION_TYPE, validate_client_assertion_with_keys,
+};
+use crate::oauth2::{OAuth2Server, TokenError};
+
+/// Why a token request's credential does not authenticate its client.
+#[derive(Debug)]
+pub enum ClientRefusal {
+    /// The credential does not authenticate this client: `invalid_client`
+    /// (RFC 6749 §5.2).
+    Refused,
+    /// The assertion replay record cannot be reached, so a replay cannot be
+    /// ruled out; this is never success.
+    ReplayRecordUnavailable(String),
+}
 
 /// The client identity and credential a token request presents.
 pub enum ClientAuthentication {
@@ -118,6 +131,55 @@ impl ClientAuthentication {
             Self::Basic { secret, .. } | Self::Post { secret, .. } => Some(secret),
             Self::None { .. } | Self::Assertion { .. } => None,
         }
+    }
+
+    /// Check that this credential authenticates `client`, registered at the
+    /// issuer at `issuer_url`: the client is active, uses its registered
+    /// method, and a `private_key_jwt` assertion is for this issuer's token
+    /// endpoint and recorded against replay in `jti_cache`. Whether the
+    /// issuer serves the client is the caller's check.
+    pub async fn verify(
+        &self,
+        client: &OAuth2Client,
+        issuer_url: &str,
+        oauth2: &OAuth2Server,
+        jti_cache: &AssertionJtiCache,
+    ) -> Result<(), ClientRefusal> {
+        if !client.active || client.client_id != self.client_id() {
+            return Err(ClientRefusal::Refused);
+        }
+        if client.is_public() {
+            return match self {
+                Self::None { .. } => Ok(()),
+                _ => Err(ClientRefusal::Refused),
+            };
+        }
+        if self.method() != client.token_endpoint_auth_method {
+            return Err(ClientRefusal::Refused);
+        }
+        if let Self::Assertion { assertion, .. } = self {
+            let keys = client.jwks.as_ref().ok_or(ClientRefusal::Refused)?;
+            return match validate_client_assertion_with_keys(
+                assertion,
+                &client.client_id,
+                &crate::issuer::token_endpoint(issuer_url),
+                keys,
+                jti_cache,
+            )
+            .await
+            {
+                Ok(_) => Ok(()),
+                Err(sid_core::Error::Internal(e)) => Err(ClientRefusal::ReplayRecordUnavailable(e)),
+                Err(e) => {
+                    tracing::warn!(client_id = %client.client_id, error = %e, "client assertion refused");
+                    Err(ClientRefusal::Refused)
+                }
+            };
+        }
+        let secret = self.secret().ok_or(ClientRefusal::Refused)?;
+        oauth2
+            .authenticate_client(secret, client)
+            .map_err(|_| ClientRefusal::Refused)
     }
 }
 
