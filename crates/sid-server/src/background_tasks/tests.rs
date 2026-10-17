@@ -2,12 +2,12 @@ use super::*;
 use chrono::Duration;
 use sid_core::models::ProfileId;
 
-fn retention(pairs: &[(&str, &str)]) -> Result<AuditRetention, String> {
+fn retention(pairs: &[(&str, &str)]) -> anyhow::Result<AuditRetention> {
     AuditRetention::from_lookup(|k| {
-        pairs
+        Ok(pairs
             .iter()
             .find(|(name, _)| *name == k)
-            .map(|(_, v)| v.to_string())
+            .map(|(_, v)| v.to_string()))
     })
 }
 
@@ -45,6 +45,16 @@ fn audit_retention_refuses_bad_settings() {
         );
     }
     assert!(retention(&[("SID_AUDIT_RETENTION_ACTION", "purge")]).is_err());
+    // A setting the lookup cannot read is refused, not taken as unset.
+    assert!(
+        AuditRetention::from_lookup(|k| {
+            if k == "SID_AUDIT_RETENTION_DAYS" {
+                anyhow::bail!("{k} is not valid Unicode")
+            }
+            Ok(None)
+        })
+        .is_err()
+    );
 }
 
 fn make_profile(migration_pending: bool, started_days_ago: Option<i64>) -> Profile {

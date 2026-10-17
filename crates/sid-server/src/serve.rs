@@ -180,7 +180,7 @@ impl CeServices {
                         c.revocation_cache.clone(),
                         c.scim_issuer.clone(),
                         c.scim_resource.clone(),
-                        format!("{}/scim/v2", scim_server_url(c)),
+                        format!("{}/scim/v2", scim_server_url(c)?),
                     ),
                 ))
                 .await;
@@ -212,8 +212,8 @@ impl CeServices {
 
 /// The URL the SCIM endpoint is served under (its `/scim/v2` paths follow).
 #[cfg(feature = "scim")]
-fn scim_server_url(c: &CeComponents) -> String {
-    std::env::var("SID_SCIM_BASE_URL").unwrap_or_else(|_| c.issuer.clone())
+fn scim_server_url(c: &CeComponents) -> anyhow::Result<String> {
+    Ok(crate::init::env_setting("SID_SCIM_BASE_URL")?.unwrap_or_else(|| c.issuer.clone()))
 }
 
 /// The SCIM endpoint: a connector authenticates by its SCIM bearer or by an
@@ -227,7 +227,7 @@ async fn scim_service(c: &CeComponents) -> anyhow::Result<sid_scim::grpc::ScimSe
     )
     .await
     .map_err(|e| anyhow::anyhow!("SCIM resource token keys: {e}"))?;
-    let base_url = scim_server_url(c);
+    let base_url = scim_server_url(c)?;
     Ok(sid_scim::grpc::ScimServiceImpl::new(
         c.storage.clone(),
         sid_scim::mapping::ScimOrgContext::installation(&c.organization),
@@ -322,8 +322,8 @@ pub async fn serve(
     // built stops startup.
     #[cfg(feature = "http")]
     let http_proxy = http_transcoder(
-        std::env::var("SID_BIND").ok().as_deref(),
-        std::env::var("SID_HTTP_CONFIG").ok().as_deref(),
+        crate::init::env_setting("SID_BIND")?.as_deref(),
+        crate::init::env_setting("SID_HTTP_CONFIG")?.as_deref(),
         c.login_url.as_ref(),
     )?;
 
