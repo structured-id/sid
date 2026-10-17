@@ -4,7 +4,7 @@
 //! and its health status together), and on SIGTERM reports NOT_SERVING and
 //! stops within its drain interval.
 
-use std::net::{TcpListener, UdpSocket};
+use std::net::TcpListener;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
@@ -59,15 +59,6 @@ fn free_port() -> u16 {
         .port()
 }
 
-/// A free UDP port for the WebTransport endpoint of a server built with it.
-fn free_udp_port() -> u16 {
-    UdpSocket::bind("127.0.0.1:0")
-        .expect("bind an ephemeral UDP port")
-        .local_addr()
-        .expect("local address")
-        .port()
-}
-
 /// Starts `binary` against the test stack (PostgreSQL 54399 in its own schema,
 /// Redis 63799, NATS 4399), ignoring any SID setting of the caller.
 fn start(binary: &str, data_dir: &std::path::Path, port: u16, env: &[(&str, &str)]) -> Server {
@@ -91,11 +82,6 @@ fn start(binary: &str, data_dir: &std::path::Path, port: u16, env: &[(&str, &str
     .env("SID_IPINTEL_PROVIDERS", "none")
     .env("SID_ISSUER", "https://sid.example.com")
     .env("SID_GRPC_BIND", format!("127.0.0.1:{port}"))
-    .env("SID_WEBTRANSPORT_DEV_TLS", "true")
-    .env(
-        "SID_WEBTRANSPORT_BIND",
-        format!("127.0.0.1:{}", free_udp_port()),
-    )
     .envs(env.iter().copied());
     Server(cmd.spawn().expect("start the server"))
 }
