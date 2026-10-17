@@ -54,8 +54,6 @@ pub struct CeServices {
     /// Receivers this server runs that facts are owed to (SCIM outbound
     /// provisioning while targets are configured).
     receivers: Vec<sid_core::models::RequiredReceiver>,
-    #[cfg(feature = "dev-perf-test")]
-    test_svc: std::sync::Arc<crate::grpc::test_service::TestServiceImpl>,
 }
 
 impl CeServices {
@@ -74,8 +72,6 @@ impl CeServices {
         let mut services = Self {
             services: served,
             receivers: Vec::new(),
-            #[cfg(feature = "dev-perf-test")]
-            test_svc: test_svc.clone(),
         };
         services
             .add(IdentityServiceServer::from_arc(c.identity_svc.clone()))
@@ -291,33 +287,6 @@ pub async fn serve(
     let drain = sid_serve::shutdown::drain_interval_from_env()?;
     let (stopper, stopped) = sid_serve::stop_signal();
 
-    #[cfg(feature = "webtransport")]
-    let mut webtransport = {
-        let wt_config = sid_webtransport::config::Config::from_env()?;
-        let dispatcher = crate::webtransport_dispatch::register_all(&c.identity_svc, &c.auth_svc);
-        #[cfg(feature = "dev-perf-test")]
-        let dispatcher = {
-            let mut dispatcher = dispatcher;
-            crate::webtransport_dispatch::register_test_service(
-                &mut dispatcher,
-                &services.test_svc,
-            );
-            dispatcher
-        };
-        let mut wt_server = sid_webtransport::WebTransportServer::new(wt_config, dispatcher);
-        // A configured transport that cannot start stops startup.
-        wt_server.resolve_cert_hash().await?;
-        let wt_shutdown = stopped.clone().wait();
-        Some(tokio::spawn(async move {
-            wt_server
-                .serve(wt_shutdown, drain)
-                .await
-                .map_err(anyhow::Error::from)
-        }))
-    };
-    #[cfg(not(feature = "webtransport"))]
-    let mut webtransport: Option<tokio::task::JoinHandle<anyhow::Result<()>>> = None;
-
     // The HTTP form of the annotated RPCs; a configured one that cannot be
     // built stops startup.
     #[cfg(feature = "http")]
@@ -374,13 +343,9 @@ pub async fn serve(
     // every other listener stops too.
     stopper.stop();
 
-    // The HTTP listener and WebTransport drain within the same interval.
+    // The HTTP listener drains within the same interval.
     let http_drained = match http.as_mut() {
         Some(_) => finished(&mut http).await,
-        None => Ok(()),
-    };
-    let transport = match webtransport.as_mut() {
-        Some(_) => finished(&mut webtransport).await,
         None => Ok(()),
     };
     // Attempts in flight record their outcome before the process ends.
@@ -392,7 +357,6 @@ pub async fn serve(
     }
     served?;
     http_drained?;
-    transport?;
     drained?;
     if let Some(ended) = http_ended {
         ended?;
