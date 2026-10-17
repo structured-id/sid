@@ -9,7 +9,7 @@ use sid_authn::target::Target;
 use sid_core::grpc_error::refuse::{internal, storage_failure};
 use sid_core::models::dpop::DPopBinding;
 use sid_core::models::{
-    OAuth2Client, OidcIssuer, Profile, ProfileId, ResourceId, RevocationReason, SessionId,
+    OAuth2Client, OidcIssuer, Profile, ProfileId, ResourceId, RevocationReason, Session, SessionId,
 };
 use sid_plugin::GrantStore;
 use sid_proto::sid::v1::{OAuth2TokenRequest, OAuth2TokenResponse};
@@ -77,10 +77,12 @@ impl GrantHost for ProfileGrant<'_> {
 
     /// The Profile's primary contacts for the OIDC claims and its client's
     /// claim mappings (AUTH-017); a failed read fails the grant rather than
-    /// issue tokens missing the claims.
+    /// issue tokens missing the claims. The subject is the Profile's for this
+    /// client, whatever the grant's session.
     async fn claims(
         &self,
         profile: &Profile,
+        _session: &Session<ProfileId>,
         issuer: &OidcIssuer,
         client: &OAuth2Client,
         scopes: &[String],
