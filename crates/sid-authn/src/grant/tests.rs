@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! The grants over an account that is not a local Profile, with a grant store
-//! kept in memory.
+//! The grants of a serving authority that represents its stable user by
+//! something other than a local `ProfileId`, with a grant store kept in
+//! memory.
 
 use std::sync::Mutex;
 
@@ -19,7 +20,8 @@ const ORDERS: &str = "https://resources.example/orders";
 const REDIRECT: &str = "https://cabinet.example/callback";
 const VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
 
-/// An account of another host: no Profile behind it, and not `Copy`.
+/// Another authority's representation of its stable user: not a local
+/// `ProfileId`, and not `Copy`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Account(u64);
 
@@ -312,7 +314,7 @@ impl Host {
         self.grants.with(|g| {
             g.codes.push(AuthorizationCode {
                 code_hash: OAuth2Server::hash_token(&raw),
-                owner: account,
+                profile_id: account,
                 client_id: self.client.client_id.clone(),
                 redirect_uri: REDIRECT.into(),
                 scopes: vec!["account".into()],
@@ -427,33 +429,62 @@ fn refused<E: std::fmt::Debug>(failure: GrantFailure<E>) -> (TokenError, String)
     }
 }
 
-// A code an account that is not a Profile authorized is redeemed for tokens
-// carrying the host's subject and no `pid`; the session and refresh token are
-// the account's.
-#[tokio::test]
-async fn test_code_is_redeemed_for_a_non_profile_account() {
-    let host = Host::new().await;
-    let code = host.authorize(Account(7));
-
-    let response = redeem_code(&host, code_grant(&code)).await.unwrap();
-
-    assert!(response.id_token.is_none());
-    let claims = host
-        .issuers
+/// The verified access-token claims of `response`.
+async fn access_claims(host: &Host, response: &TokenResponse) -> crate::jwt::AccessTokenClaims {
+    host.issuers
         .verifier(&host.issuer)
         .await
         .unwrap()
         .validate_access_token_for(&response.access_token, ORDERS)
+        .unwrap()
+}
+
+// One user's two sign-ins are two sessions with their own identifiers, each
+// associated with the same user; the tokens carry the host's stable subject
+// for that user and no `pid`, and a renewal keeps both the session and the
+// user.
+#[tokio::test]
+async fn test_user_association_is_stable_across_sessions_and_renewal() {
+    let host = Host::new().await;
+    let first_code = host.authorize(Account(7));
+    let second_code = host.authorize(Account(7));
+
+    let first = redeem_code(&host, code_grant(&first_code)).await.unwrap();
+    let second = redeem_code(&host, code_grant(&second_code)).await.unwrap();
+
+    assert!(first.id_token.is_none());
+    for response in [&first, &second] {
+        let claims = access_claims(&host, response).await;
+        assert_eq!(claims.sub, "ref-7");
+        assert!(claims.pid.is_none());
+    }
+    let (first_session, second_session) = host.grants.with(|g| {
+        assert_eq!(g.sessions.len(), 2);
+        assert_ne!(g.sessions[0].id, g.sessions[1].id);
+        for session in &g.sessions {
+            assert_eq!(session.profile_id, Account(7));
+            assert_eq!(session.client_id.as_deref(), Some("cabinet"));
+        }
+        assert!(g.refresh.iter().all(|t| t.profile_id == Account(7)));
+        assert!(g.codes.iter().all(|c| c.used));
+        (g.sessions[0].id, g.sessions[1].id)
+    });
+
+    let renewed = refresh(&host, first.refresh_token.as_deref())
+        .await
         .unwrap();
-    assert_eq!(claims.sub, "ref-7");
-    assert!(claims.pid.is_none());
+    assert_eq!(access_claims(&host, &renewed).await.sub, "ref-7");
     host.grants.with(|g| {
-        assert_eq!(g.sessions.len(), 1);
-        assert_eq!(g.sessions[0].owner, Account(7));
-        assert_eq!(g.sessions[0].client_id.as_deref(), Some("cabinet"));
-        assert_eq!(g.refresh.len(), 1);
-        assert_eq!(g.refresh[0].owner, Account(7));
-        assert!(g.codes[0].used);
+        let rotated = g
+            .refresh
+            .iter()
+            .find(|t| {
+                t.token_hash == OAuth2Server::hash_token(renewed.refresh_token.as_deref().unwrap())
+            })
+            .unwrap();
+        assert_eq!(rotated.session_id, first_session);
+        assert_ne!(rotated.session_id, second_session);
+        assert_eq!(rotated.profile_id, Account(7));
     });
 }
 
@@ -536,7 +567,7 @@ async fn test_refresh_rotates_within_the_family() {
         assert!(old.revoked);
         assert_eq!(old.replaced_by, Some(rotated.id));
         assert_eq!(rotated.family_id, old.family_id);
-        assert_eq!(rotated.owner, Account(7));
+        assert_eq!(rotated.profile_id, Account(7));
         assert_eq!(rotated.session_id, old.session_id);
     });
 }

@@ -26,26 +26,31 @@ fn test_snapshot_empty_count() {
 #[test]
 fn test_snapshot_metadata_version() {
     let snapshot = Snapshot::new("postgresql", "postgres://localhost/sid");
-    // Version 6 names a session's and refresh token's account `owner`.
-    assert_eq!(snapshot.metadata.version, SNAPSHOT_VERSION);
+    // Version 4 carries the history evaluator's sealed keys apart from the
+    // history, besides the sealed setup required by OPAQUE files.
+    assert_eq!(snapshot.metadata.version, 5);
     assert_eq!(snapshot.metadata.source_backend, "postgresql");
 }
 
-// A snapshot of an older format is refused for its version, before its body
-// is read: a version-5 session names its account `profile_id`, which this
-// format no longer reads, and the operator must learn to export again.
+// A session exported in a snapshot names its Profile as `profile_id` and is
+// read back with the same Profile and session.
 #[test]
-fn test_older_format_is_refused_by_version() {
-    let mut value = serde_json::to_value(Snapshot::new("sqlite", "sqlite://a.db")).unwrap();
-    value["metadata"]["version"] = 5.into();
-    value["sessions"] = serde_json::json!([{ "id": "x", "profile_id": "y" }]);
-    let err = Snapshot::parse(&value.to_string()).unwrap_err().to_string();
-    assert!(err.contains("format version 5"), "{err}");
-}
+fn test_session_round_trips_with_its_profile() {
+    let profile = sid_core::models::ProfileId::generate();
+    let session = Session::new(
+        profile,
+        "127.0.0.1".into(),
+        chrono::Utc::now() + chrono::Duration::hours(1),
+    );
+    let mut snapshot = Snapshot::new("sqlite", "sqlite://a.db");
+    snapshot.sessions.push(session.clone());
 
-#[test]
-fn test_current_format_parses() {
-    let json = serde_json::to_string(&Snapshot::new("sqlite", "sqlite://a.db")).unwrap();
-    let parsed = Snapshot::parse(&json).unwrap();
-    assert_eq!(parsed.metadata.version, SNAPSHOT_VERSION);
+    let json = serde_json::to_value(&snapshot).unwrap();
+    assert_eq!(
+        json["sessions"][0]["profile_id"],
+        serde_json::json!(profile.to_string())
+    );
+    let read: Snapshot = serde_json::from_value(json).unwrap();
+    assert_eq!(read.sessions[0].id, session.id);
+    assert_eq!(read.sessions[0].profile_id, profile);
 }

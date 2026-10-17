@@ -5034,7 +5034,7 @@ async fn stored_refresh_token(svc: &TestServices, raw: &str) -> sid_core::models
         id,
         token_hash: sid_authn::oauth2::OAuth2Server::hash_token(raw),
         session_id: sid_core::models::SessionId::generate(),
-        owner: test_profile().id,
+        profile_id: test_profile().id,
         client_id: "test-client".to_string(),
         scopes: vec!["openid".to_string()],
         expires_at: chrono::Utc::now() + chrono::Duration::days(1),
@@ -5534,7 +5534,7 @@ async fn test_magic_link_verify_issues_provisional_session() {
         .await
         .unwrap()
         .expect("session stored");
-    assert_eq!(session.owner, profile.id);
+    assert_eq!(session.profile_id, profile.id);
     assert!(session.is_provisional);
     assert!(session.expires_at <= chrono::Utc::now() + chrono::Duration::minutes(15));
     let provisional = sid_core::models::Session::new_provisional(profile.id, String::new());
