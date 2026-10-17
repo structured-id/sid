@@ -16,6 +16,7 @@ pub mod cache;
 pub mod client_registry;
 #[cfg(feature = "conformance")]
 pub mod conformance;
+pub mod credential_store;
 pub mod crypto;
 pub mod event_bus;
 pub mod geoip;
@@ -37,6 +38,7 @@ pub use authz::{AuthzCheckRequest, AuthzCheckResponse, AuthzEngine, AuthzError};
 pub use blob_store::BlobStore;
 pub use cache::{CacheBackend, CacheError, CacheResult, NoCacheBackend};
 pub use client_registry::ClientResourceRegistry;
+pub use credential_store::CredentialStore;
 pub use crypto::{
     CurveId, LoginState, OpaqueError, OpaqueOperations, OpaqueSetupHandle, SessionKey,
     StoredCredential,

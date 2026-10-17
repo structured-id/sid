@@ -2,6 +2,7 @@
 //! Exercise the installed CLI path, including private output permissions.
 
 use sid_core::models::*;
+use sid_plugin::CredentialStore;
 use sid_plugin::history_keys::HistoryKeyStore;
 use sid_plugin::storage::StorageBackend;
 use sid_storage::sqlite::SqliteBackend;
