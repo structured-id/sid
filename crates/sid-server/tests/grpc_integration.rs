@@ -1344,12 +1344,14 @@ async fn test_e2e_opaque_registration_and_login() {
         }))
         .await
         .unwrap();
+    // A native client receives its token in metadata, never in the body.
+    let access_token = common::opaque_client::bearer(&resp);
+    assert!(resp.metadata().get("set-cookie").is_none());
     let token_resp = resp.into_inner();
-    assert!(!token_resp.access_token.is_empty());
     assert!(token_resp.expires_in > 0);
 
     // Step 4: Use token to get current profile
-    let req = authed_request(GetCurrentProfileRequest {}, &token_resp.access_token);
+    let req = authed_request(GetCurrentProfileRequest {}, &access_token);
     let resp = svc.identity.get_current_profile(req).await.unwrap();
     let me = resp.into_inner().profile.unwrap();
     // One signup principal (the email); no username was chosen.
@@ -5524,8 +5526,9 @@ async fn test_magic_link_verify_issues_provisional_session() {
             token,
         }))
         .await
-        .expect("verify")
-        .into_inner();
+        .expect("verify");
+    let access_token = common::opaque_client::bearer(&resp);
+    let resp = resp.into_inner();
 
     let session_id: sid_core::models::SessionId = resp.session_id.parse().unwrap();
     let session = svc
@@ -5542,7 +5545,7 @@ async fn test_magic_link_verify_issues_provisional_session() {
     // Mailbox possession over a second channel, as for an emailed code:
     // `mca` (RFC 8176 §2); the registry has no link method.
     assert_eq!(session.amr, vec!["mca".to_string()]);
-    let claims = svc.jwt.validate_access_token(&resp.access_token).unwrap();
+    let claims = svc.jwt.validate_access_token(&access_token).unwrap();
     assert!(claims.exp <= session.expires_at.timestamp());
     assert!(i64::from(resp.expires_in) <= 15 * 60);
 }

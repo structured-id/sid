@@ -79,7 +79,10 @@ async fn verified_reset(svc: &TestServices, profile: &Profile) -> (String, Passw
 
 /// Reset the password of `profile` to `NEW_PASSWORD`: verify, the OPAQUE
 /// start under the reset's operation, and the completion with the record.
-async fn complete(svc: &TestServices, profile: &Profile) -> CompletePasswordResetResponse {
+async fn complete(
+    svc: &TestServices,
+    profile: &Profile,
+) -> tonic::Response<CompletePasswordResetResponse> {
     complete_as(svc, profile, false).await
 }
 
@@ -88,7 +91,7 @@ async fn complete_as(
     svc: &TestServices,
     profile: &Profile,
     device: bool,
-) -> CompletePasswordResetResponse {
+) -> tonic::Response<CompletePasswordResetResponse> {
     let (reset_session_id, context) = verified_reset(svc, profile).await;
     let started = client::start(NEW_PASSWORD);
     let executed = svc
@@ -119,7 +122,6 @@ async fn complete_as(
         ))
         .await
         .expect("the reset completes")
-        .into_inner()
 }
 
 /// Register `principal` with `password` from the device on `PEER`.
@@ -159,7 +161,7 @@ async fn sign_in_from_device(
     svc: &TestServices,
     principal: &str,
     password: &[u8],
-) -> Result<OpaqueLoginFinishResponse, tonic::Status> {
+) -> Result<tonic::Response<OpaqueLoginFinishResponse>, tonic::Status> {
     let login = ClientLogin::<PallasCipherSuite>::start(&mut UnwrapErr(SysRng), password).unwrap();
     let started = svc
         .auth
@@ -185,7 +187,6 @@ async fn sign_in_from_device(
             server_login_state: started.server_login_state,
         }))
         .await
-        .map(|r| r.into_inner())
 }
 
 /// The sign-in a reset makes is a sign-in like any other: it records the
@@ -197,7 +198,7 @@ async fn a_reset_signs_in_with_the_clients_address_and_device() {
     let principal = "reset-device@sid.example.com";
     let profile = register_from_device(&svc, principal, OLD_PASSWORD).await;
 
-    let done = complete_as(&svc, &profile, true).await;
+    let done = complete_as(&svc, &profile, true).await.into_inner();
     let sessions = svc
         .storage
         .list_sessions_by_profile(profile.id)
@@ -205,7 +206,7 @@ async fn a_reset_signs_in_with_the_clients_address_and_device() {
         .unwrap();
     let session = sessions
         .iter()
-        .find(|s| s.id.to_string() == done.session_id)
+        .find(|s| Some(s.id.to_string()) == done.session_id)
         .expect("the reset's session");
     assert_eq!(session.ip_address, "203.0.113.7");
     assert!(
@@ -216,7 +217,7 @@ async fn a_reset_signs_in_with_the_clients_address_and_device() {
     let again = sign_in_from_device(&svc, principal, NEW_PASSWORD)
         .await
         .expect("the same device signs in again without a step-up");
-    assert!(!again.access_token.is_empty());
+    assert!(!common::opaque_client::bearer(&again).is_empty());
 }
 
 /// An account with a second factor: the password is replaced, no session is
@@ -237,11 +238,14 @@ async fn reset_of_account_with_second_factor_signs_nobody_in() {
     let done = complete(&svc, &profile).await;
 
     assert!(
-        done.access_token.is_empty(),
+        done.metadata().get("authorization").is_none(),
         "a mailbox proof signed in past the second factor"
     );
-    assert!(done.session_id.is_empty());
-    assert_eq!(done.expires_in, 0);
+    assert!(done.metadata().get("set-cookie").is_none());
+    let done = done.into_inner();
+    // No session: the fields are absent, not empty.
+    assert_eq!(done.session_id, None);
+    assert_eq!(done.expires_in, None);
     assert!(
         svc.storage
             .list_sessions_by_profile(profile.id)
@@ -266,7 +270,9 @@ async fn reset_of_password_only_account_signs_in() {
 
     let done = complete(&svc, &profile).await;
 
-    assert!(!done.access_token.is_empty());
-    assert!(!done.session_id.is_empty());
-    assert!(done.expires_in > 0);
+    let token = common::opaque_client::bearer(&done);
+    let done = done.into_inner();
+    let claims = svc.jwt.validate_access_token(&token).unwrap();
+    assert_eq!(Some(claims.sid), done.session_id);
+    assert!(done.expires_in.is_some_and(|secs| secs > 0));
 }
