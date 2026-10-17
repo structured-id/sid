@@ -67,7 +67,10 @@ pub trait CredentialStore: Send + Sync {
     /// `owner`'s history: its revision, every recorded epoch descriptor and
     /// every retained entry. An owner with no history reads as revision 0,
     /// empty.
-    async fn get_password_history(&self, owner: Self::Owner) -> Result<PasswordHistory>;
+    async fn get_password_history(
+        &self,
+        owner: Self::Owner,
+    ) -> Result<PasswordHistory<Self::Owner>>;
 
     /// The history write cutoff this store records; `None` when none was set.
     async fn history_write_cutoff(&self) -> Result<Option<chrono::DateTime<chrono::Utc>>>;
