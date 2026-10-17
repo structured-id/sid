@@ -67,7 +67,7 @@ impl ProvisioningServiceImpl {
             storage,
             jwt,
             revocation,
-            org: issuer.recipient,
+            org: issuer.recipient_org,
             issuer,
             directory,
             scim_base_url,

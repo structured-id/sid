@@ -984,13 +984,13 @@ impl sid_plugin::IssuerStore for MockStorage {
     async fn oidc_issuer_for(
         &self,
         authority: sid_core::models::IssuerAuthority,
-        recipient_org: &sid_core::models::OrgId,
+        recipient_org: sid_core::models::OrgId,
     ) -> SidResult<Option<sid_core::models::OidcIssuer>> {
         let inner = self.inner.lock().unwrap();
         Ok(inner
             .oidc_issuers
             .iter()
-            .find(|i| i.authority == authority && &i.recipient == recipient_org)
+            .find(|i| i.authority == authority && i.recipient_org == recipient_org)
             .cloned())
     }
 
@@ -1017,7 +1017,7 @@ impl sid_plugin::IssuerStore for MockStorage {
         if inner
             .oidc_issuers
             .iter()
-            .any(|i| i.authority == issuer.authority && i.recipient == issuer.recipient)
+            .any(|i| i.authority == issuer.authority && i.recipient_org == issuer.recipient_org)
         {
             return Ok(false);
         }

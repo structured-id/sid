@@ -33,7 +33,6 @@ struct ProfileGrant<'a> {
 impl GrantHost for ProfileGrant<'_> {
     type Owner = ProfileId;
     type Account = Profile;
-    type Recipient = sid_core::models::OrgId;
     type Error = Status;
 
     fn store(&self) -> &dyn GrantStore<Owner = ProfileId> {

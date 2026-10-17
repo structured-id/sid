@@ -47,7 +47,7 @@ async fn fixture() -> Fixture {
     let directory = sid_authn::issuer::ensure_scim_resource(svc.storage.as_ref(), &svc.issuer)
         .await
         .unwrap();
-    let org = svc.issuer.recipient;
+    let org = svc.issuer.recipient_org;
     let engine = Arc::new(sid_authz::CeAuthzEngine::new(svc.storage.clone()));
     let provisioning = ProvisioningServiceImpl::new(
         svc.storage.clone(),

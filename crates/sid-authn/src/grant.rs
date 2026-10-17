@@ -90,9 +90,6 @@ pub trait GrantHost: Send + Sync {
     type Owner: Clone + Display + Send + Sync + 'static;
     /// The account the host resolves an owner to.
     type Account: Send + Sync;
-    /// Whom the host's issuers serve: an organization, or the host's own
-    /// recipient.
-    type Recipient: Send + Sync + 'static;
     /// A refusal or failure of the host, returned as is.
     type Error: Send;
 
@@ -100,14 +97,13 @@ pub trait GrantHost: Send + Sync {
     fn oauth2(&self) -> &OAuth2Server;
 
     /// The client the request authenticates as and the issuer serving it.
-    /// The host checks that the issuer serves the client before answering.
-    async fn client(&self) -> Result<(OAuth2Client, OidcIssuer<Self::Recipient>), Self::Error>;
+    async fn client(&self) -> Result<(OAuth2Client, OidcIssuer), Self::Error>;
 
     /// The resource a grant bound to `bound` is redeemed for, if the request
     /// may have it (RFC 8707 §2.2).
     async fn resume_target(
         &self,
-        issuer: &OidcIssuer<Self::Recipient>,
+        issuer: &OidcIssuer,
         client: &OAuth2Client,
         bound: ResourceId,
     ) -> Result<Target, Self::Error>;
@@ -123,16 +119,13 @@ pub trait GrantHost: Send + Sync {
     async fn claims(
         &self,
         account: &Self::Account,
-        issuer: &OidcIssuer<Self::Recipient>,
+        issuer: &OidcIssuer,
         client: &OAuth2Client,
         scopes: &[String],
     ) -> Result<AccountClaims, Self::Error>;
 
     /// The signer of `issuer`.
-    async fn signer(
-        &self,
-        issuer: &OidcIssuer<Self::Recipient>,
-    ) -> Result<Arc<IssuerSigner<Self::Recipient>>, Self::Error>;
+    async fn signer(&self, issuer: &OidcIssuer) -> Result<Arc<IssuerSigner>, Self::Error>;
 
     /// End session `session` and what depends on it: one of its credentials
     /// was replayed, as `action` names.
