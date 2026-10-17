@@ -382,15 +382,18 @@ impl GrantHost for Host {
         Ok((!self.gone.contains(owner)).then(|| owner.clone()))
     }
 
+    /// The subject is a reference to the grant's own session, never a stable
+    /// alias of the account.
     async fn claims(
         &self,
-        account: &Account,
+        _account: &Account,
+        session: &Session<Account>,
         _issuer: &OidcIssuer<OwnAuthority>,
         _client: &OAuth2Client,
         _scopes: &[String],
     ) -> Result<AccountClaims, &'static str> {
         Ok(AccountClaims {
-            sub: format!("ref-{}", account.0),
+            sub: format!("ref-{}", session.id),
             roles: vec![],
             id_token: None,
             custom_claims: None,
@@ -451,7 +454,8 @@ async fn test_code_is_redeemed_for_a_non_profile_account() {
         .unwrap()
         .validate_access_token_for(&response.access_token, ORDERS)
         .unwrap();
-    assert_eq!(claims.sub, "ref-7");
+    let session = host.grants.with(|g| g.sessions[0].id);
+    assert_eq!(claims.sub, format!("ref-{session}"));
     assert!(claims.pid.is_none());
     host.grants.with(|g| {
         assert_eq!(g.sessions.len(), 1);
@@ -461,6 +465,49 @@ async fn test_code_is_redeemed_for_a_non_profile_account() {
         assert_eq!(g.refresh[0].owner, Account(7));
         assert!(g.codes[0].used);
     });
+}
+
+/// The access-token subject of `response`, verified.
+async fn subject(host: &Host, response: &TokenResponse) -> String {
+    host.issuers
+        .verifier(&host.issuer)
+        .await
+        .unwrap()
+        .validate_access_token_for(&response.access_token, ORDERS)
+        .unwrap()
+        .sub
+}
+
+// The host is given the grant's own session: two logins of one account get
+// different subjects, neither is the parent session that authorized the code,
+// and a refresh keeps the subject of its grant.
+#[tokio::test]
+async fn test_claims_see_the_grant_session() {
+    let host = Host::new().await;
+    let parent = |code: &str| {
+        host.grants.with(|g| {
+            g.codes
+                .iter()
+                .find(|c| c.code_hash == OAuth2Server::hash_token(code))
+                .unwrap()
+                .authentication
+                .session
+        })
+    };
+    let first_code = host.authorize(Account(7));
+    let second_code = host.authorize(Account(7));
+    let first = redeem_code(&host, code_grant(&first_code)).await.unwrap();
+    let second = redeem_code(&host, code_grant(&second_code)).await.unwrap();
+
+    let (first_sub, second_sub) = (subject(&host, &first).await, subject(&host, &second).await);
+    assert_ne!(first_sub, second_sub);
+    assert_ne!(first_sub, format!("ref-{}", parent(&first_code)));
+    assert_ne!(second_sub, format!("ref-{}", parent(&second_code)));
+
+    let refreshed = refresh(&host, first.refresh_token.as_deref())
+        .await
+        .unwrap();
+    assert_eq!(subject(&host, &refreshed).await, first_sub);
 }
 
 // A code used a second time is refused and the session of its first use

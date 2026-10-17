@@ -119,10 +119,13 @@ pub trait GrantHost: Send + Sync {
     async fn account(&self, owner: &Self::Owner) -> Result<Option<Self::Account>, Self::Error>;
 
     /// The claims the tokens issued to `client` by `issuer` carry for
-    /// `account` under `scopes`.
+    /// `account` under `scopes`, within `session`: the application session
+    /// the grant creates on code redemption and continues on refresh, never
+    /// the parent session that authorized the code.
     async fn claims(
         &self,
         account: &Self::Account,
+        session: &Session<Self::Owner>,
         issuer: &OidcIssuer<Self::Recipient>,
         client: &OAuth2Client,
         scopes: &[String],
@@ -235,7 +238,7 @@ pub async fn redeem_code<H: GrantHost>(
 
     let proof = host.proof().await.map_err(GrantFailure::Host)?;
     let claims = host
-        .claims(&account, &issuer, &client, exchanged.scopes())
+        .claims(&account, &session, &issuer, &client, exchanged.scopes())
         .await
         .map_err(GrantFailure::Host)?;
     let signer = host.signer(&issuer).await.map_err(GrantFailure::Host)?;
@@ -354,7 +357,7 @@ pub async fn refresh<H: GrantHost>(
     }
 
     let claims = host
-        .claims(&account, &issuer, &client, validated.scopes())
+        .claims(&account, &session, &issuer, &client, validated.scopes())
         .await
         .map_err(GrantFailure::Host)?;
     let signer = host.signer(&issuer).await.map_err(GrantFailure::Host)?;
