@@ -5,7 +5,7 @@
 //! AES-256-GCM field under a key held outside the database, bound to the
 //! record it belongs to, so a database dump alone yields nothing usable.
 
-use sid_core::models::{AuditEntry, Credential, CredentialId, CredentialType, ProfileId};
+use sid_core::models::{AuditEntry, Credential, CredentialId, CredentialType};
 use sid_keys::{EncryptedField, KeyManager, KeyManagerError};
 use sid_plugin::StorageBackend;
 use zeroize::Zeroizing;
@@ -48,14 +48,14 @@ impl std::fmt::Debug for Opened {
     }
 }
 
-/// Binding context of a profile's TOTP seed.
-pub fn totp_context(profile_id: ProfileId) -> String {
-    format!("totp:{profile_id}")
+/// Binding context of an account's TOTP seed.
+pub fn totp_context(owner: impl std::fmt::Display) -> String {
+    format!("totp:{owner}")
 }
 
-/// Binding context of a profile's OPAQUE envelope.
-pub fn opaque_context(profile_id: ProfileId) -> String {
-    format!("opaque:{profile_id}")
+/// Binding context of an account's OPAQUE envelope.
+pub fn opaque_context(owner: impl std::fmt::Display) -> String {
+    format!("opaque:{owner}")
 }
 
 /// Whether a stored value is in sealed form.

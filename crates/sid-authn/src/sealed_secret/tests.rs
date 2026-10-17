@@ -2,6 +2,7 @@
 
 use super::*;
 use secrecy::SecretBox;
+use sid_core::models::ProfileId;
 use sid_keys::{KeyVersionParams, RustCryptoPrimitives, SoftwareKeyManager};
 use std::sync::Arc;
 
@@ -91,6 +92,36 @@ async fn another_master_cannot_open() {
         .await
         .unwrap_err();
     assert!(matches!(err, SealedSecretError::KeyManager(_)), "{err:?}");
+}
+
+/// The contexts bind a sealed value to its owner whatever the owner's type:
+/// a Profile's contexts are the ones stored values were sealed under, and a
+/// value sealed for one owner does not open under another owner's context.
+#[tokio::test]
+async fn contexts_bind_any_owner() {
+    let profile = pid();
+    assert_eq!(opaque_context(profile), format!("opaque:{profile}"));
+    assert_eq!(totp_context(profile), format!("totp:{profile}"));
+
+    /// An account of another authority, displayed as its identifier.
+    struct Account(&'static str);
+    impl std::fmt::Display for Account {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+    assert_eq!(opaque_context(Account("a1")), "opaque:a1");
+    assert_eq!(totp_context(Account("a1")), "totp:a1");
+
+    let km = manager(7, &[1]);
+    let stored = seal(&km, &opaque_context(Account("a1")), b"record")
+        .await
+        .unwrap();
+    assert!(
+        open(&km, &opaque_context(Account("a2")), &stored)
+            .await
+            .is_err()
+    );
 }
 
 /// A value under an older key version is returned re-sealed under the current one.
