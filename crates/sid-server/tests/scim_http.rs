@@ -197,6 +197,7 @@ impl Installation {
                 security_policy: None,
                 history_keys: self.history_keys.clone(),
                 enrollment_pin: None,
+                browser_cookie: None,
             },
         );
         let project = Arc::new(ProjectServiceImpl::new(

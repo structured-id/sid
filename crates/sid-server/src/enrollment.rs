@@ -35,16 +35,13 @@ pub async fn effective(
 pub fn pinned_mode_setting(
     read: Result<String, std::env::VarError>,
 ) -> anyhow::Result<Option<EnrollmentMode>> {
-    match read {
-        Ok(value) => value
-            .parse()
-            .map(Some)
-            .map_err(|e| anyhow::anyhow!("{PIN_VARIABLE}: {e}")),
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(std::env::VarError::NotUnicode(_)) => {
-            anyhow::bail!("{PIN_VARIABLE} is not valid Unicode")
-        }
-    }
+    crate::init::setting(PIN_VARIABLE, read)?
+        .map(|value| {
+            value
+                .parse()
+                .map_err(|e| anyhow::anyhow!("{PIN_VARIABLE}: {e}"))
+        })
+        .transpose()
 }
 
 /// Why an administrator's policy is not stored.

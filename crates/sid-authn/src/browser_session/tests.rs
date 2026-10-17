@@ -4,12 +4,16 @@ fn url(s: &str) -> url::Url {
     url::Url::parse(s).unwrap()
 }
 
+fn cookie() -> BrowserCookie {
+    BrowserCookie::default()
+}
+
 /// The cookie carries the secret with the host-only attributes, and parsing
 /// it back yields the same secret, so the hash a session stores finds it.
 #[test]
 fn test_cookie_round_trips_the_secret() {
     let secret = BrowserSecret::generate();
-    let set = secret.set_cookie(3600);
+    let set = cookie().set(&secret, 3600);
     let value = set
         .strip_prefix("__Host-sid_session=")
         .and_then(|rest| rest.split(';').next())
@@ -19,9 +23,61 @@ fn test_cookie_round_trips_the_secret() {
     assert!(set.ends_with("; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=3600"));
     assert!(!set.contains("Domain"));
 
-    let header = format!("theme=dark; {COOKIE_NAME}={value}; lang=uk");
-    let parsed = BrowserSecret::from_cookie_headers([header.as_str()]).unwrap();
+    let header = format!("theme=dark; __Host-sid_session={value}; lang=uk");
+    let parsed = cookie().secret([header.as_str()]).unwrap();
     assert_eq!(parsed.hash(), secret.hash());
+}
+
+/// Authorities sharing a host each set, read and clear only their own
+/// cookie: one authority's secret is never another's, whichever comes first.
+#[test]
+fn test_each_authority_reads_only_its_own_cookie() {
+    let second = BrowserCookie::new("__Host-sid_second").unwrap();
+    let (theirs, ours) = (BrowserSecret::generate(), BrowserSecret::generate());
+    let theirs_pair = cookie().set(&theirs, 60);
+    let ours_pair = second.set(&ours, 60);
+    let header = format!(
+        "{}; {}",
+        theirs_pair.split(';').next().unwrap(),
+        ours_pair.split(';').next().unwrap()
+    );
+
+    assert_eq!(
+        second.secret([header.as_str()]).unwrap().hash(),
+        ours.hash()
+    );
+    assert_eq!(
+        cookie().secret([header.as_str()]).unwrap().hash(),
+        theirs.hash()
+    );
+    assert!(ours_pair.starts_with("__Host-sid_second="));
+    assert_eq!(
+        second.clear(),
+        "__Host-sid_second=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0"
+    );
+}
+
+/// A cookie name keeps the `__Host-` prefix and is a token: anything else
+/// would drop the host-only guarantee or break the header.
+#[test]
+fn test_cookie_name_is_a_host_only_token() {
+    for bad in [
+        "",
+        "sid_session",
+        "__Secure-sid",
+        "__Host-",
+        "__Host-a b",
+        "__Host-a;b",
+        "__Host-a=b",
+        "__Host-é",
+    ] {
+        assert!(BrowserCookie::new(bad).is_err(), "{bad:?}");
+    }
+    assert_eq!(
+        BrowserCookie::new("__Host-sid_second").unwrap().name(),
+        "__Host-sid_second"
+    );
+    assert_eq!(cookie().name(), "__Host-sid_session");
 }
 
 /// Every secret is fresh: two sessions never share a hash.
@@ -37,8 +93,8 @@ fn test_generated_secrets_differ() {
 #[test]
 fn test_max_age_is_not_negative() {
     assert!(
-        BrowserSecret::generate()
-            .set_cookie(-5)
+        cookie()
+            .set(&BrowserSecret::generate(), -5)
             .ends_with("Max-Age=0")
     );
 }
@@ -47,7 +103,7 @@ fn test_max_age_is_not_negative() {
 /// the cookie name no session.
 #[test]
 fn test_cookie_headers_without_one_secret_name_nothing() {
-    let value = BrowserSecret::generate().set_cookie(60);
+    let value = cookie().set(&BrowserSecret::generate(), 60);
     let pair = value.split(';').next().unwrap();
     for headers in [
         vec![],
@@ -57,22 +113,19 @@ fn test_cookie_headers_without_one_secret_name_nothing() {
         vec!["__Host-sid_session="],
         vec!["sid_session=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"],
     ] {
-        assert!(
-            BrowserSecret::from_cookie_headers(headers.clone()).is_none(),
-            "{headers:?}"
-        );
+        assert!(cookie().secret(headers.clone()).is_none(), "{headers:?}");
     }
     let twice = format!("{pair}; {pair}");
-    assert!(BrowserSecret::from_cookie_headers([twice.as_str()]).is_none());
-    assert!(BrowserSecret::from_cookie_headers([pair, pair]).is_none());
-    assert!(BrowserSecret::from_cookie_headers([pair]).is_some());
+    assert!(cookie().secret([twice.as_str()]).is_none());
+    assert!(cookie().secret([pair, pair]).is_none());
+    assert!(cookie().secret([pair]).is_some());
 }
 
 /// Clearing uses the attributes that set the cookie, with no lifetime.
 #[test]
 fn test_clear_cookie() {
     assert_eq!(
-        clear_cookie(),
+        cookie().clear(),
         "__Host-sid_session=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0"
     );
 }

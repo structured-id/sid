@@ -9,7 +9,6 @@
 //! only when a validated hint names the client that registered it (§3).
 
 use base64::Engine;
-use sid_authn::browser_session::BrowserSecret;
 use sid_authn::jwt::IdTokenClaims;
 use sid_core::models::Session;
 use tonic::metadata::MetadataMap;
@@ -142,14 +141,17 @@ impl AuthServiceImpl {
         }
     }
 
-    /// The session the browser's IdP session cookie in `metadata` names, if
-    /// it still exists.
-    async fn browser_session(&self, metadata: &MetadataMap) -> Result<Option<Session>, Status> {
+    /// The session this authority's IdP session cookie in `metadata` names,
+    /// if it still exists.
+    pub(super) async fn browser_session(
+        &self,
+        metadata: &MetadataMap,
+    ) -> Result<Option<Session>, Status> {
         let cookies = metadata
             .get_all("cookie")
             .iter()
             .filter_map(|value| value.to_str().ok());
-        let Some(secret) = BrowserSecret::from_cookie_headers(cookies) else {
+        let Some(secret) = self.browser_cookie.secret(cookies) else {
             return Ok(None);
         };
         self.storage

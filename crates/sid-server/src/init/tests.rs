@@ -641,24 +641,29 @@ async fn start_refuses_a_policy_change() {
     );
 }
 
-/// An unset setting is none; one that is no text stops the start rather than
-/// reading as unset (which would let a self-managed claim open).
+/// An unset setting is none; one that is no text stops the start, naming it,
+/// rather than reading as unset: an unset management setting would let a
+/// self-managed claim open, an unset cookie name would share the default
+/// cookie with another authority on the host.
 #[test]
-fn management_setting_refuses_non_text() {
+fn setting_refuses_non_text() {
+    const NAME: &str = "SID_BROWSER_SESSION_COOKIE";
     assert_eq!(
-        management_setting(Err(std::env::VarError::NotPresent)).unwrap(),
+        setting(NAME, Err(std::env::VarError::NotPresent)).unwrap(),
         None
     );
     assert_eq!(
-        management_setting(Ok("central".into())).unwrap().as_deref(),
+        setting(NAME, Ok("central".into())).unwrap().as_deref(),
         Some("central")
     );
-    assert!(
-        management_setting(Err(std::env::VarError::NotUnicode(
-            std::ffi::OsString::from("x")
-        )))
-        .is_err()
-    );
+    let error = setting(
+        NAME,
+        Err(std::env::VarError::NotUnicode(std::ffi::OsString::from(
+            "x",
+        ))),
+    )
+    .expect_err("a value that is no text was read as unset");
+    assert!(error.to_string().contains(NAME), "{error}");
 }
 
 /// A setting other than `central` or `self` stops the start.

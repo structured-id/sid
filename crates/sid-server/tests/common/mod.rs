@@ -732,6 +732,8 @@ struct Options {
     security_policy: Option<sid_core::models::SecurityPolicy>,
     /// The enrollment mode the deployment pins; None pins nothing.
     enrollment_pin: Option<sid_core::models::EnrollmentMode>,
+    /// This authority's browser-session cookie; None keeps the default.
+    browser_cookie: Option<sid_authn::browser_session::BrowserCookie>,
 }
 
 /// What the authentication service is built from besides its storage and
@@ -757,6 +759,8 @@ pub struct AuthOptions {
     pub history_keys: Arc<dyn sid_plugin::history_keys::HistoryKeyStore>,
     /// The enrollment mode the deployment pins; None pins nothing.
     pub enrollment_pin: Option<sid_core::models::EnrollmentMode>,
+    /// This authority's browser-session cookie; None keeps the default.
+    pub browser_cookie: Option<sid_authn::browser_session::BrowserCookie>,
 }
 
 /// The authentication service over `storage` and `cache`, as a server start
@@ -781,6 +785,7 @@ pub fn auth_service(
         security_policy,
         history_keys,
         enrollment_pin,
+        browser_cookie,
     } = options;
     // Registration, change and reset run their OPAQUE on the ZKPP server
     // whether or not proofs are verified, as a server start builds it:
@@ -833,7 +838,8 @@ pub fn auth_service(
         },
     )
     .with_sign_in_page(&url::Url::parse(SIGN_IN_PAGE).unwrap())
-    .with_enrollment_pin(enrollment_pin);
+    .with_enrollment_pin(enrollment_pin)
+    .with_browser_cookie(browser_cookie.unwrap_or_default());
     Arc::new(match security_policy {
         Some(policy) => service.with_security_policy(policy),
         None => service,
@@ -936,6 +942,7 @@ impl TestServices {
                 magic_links: false,
                 security_policy: None,
                 enrollment_pin: None,
+                browser_cookie: None,
             },
         )
     }
@@ -956,6 +963,7 @@ impl TestServices {
                 magic_links: false,
                 security_policy: Some(policy),
                 enrollment_pin: None,
+                browser_cookie: None,
             },
         )
     }
@@ -974,6 +982,28 @@ impl TestServices {
                 magic_links: false,
                 security_policy: None,
                 enrollment_pin: Some(mode),
+                browser_cookie: None,
+            },
+        )
+    }
+
+    /// TestServices whose authority names its browser-session cookie
+    /// `cookie`, as an installation sharing its host with another authority
+    /// configures it.
+    #[allow(dead_code)]
+    pub fn with_browser_cookie(
+        storage: MockStorage,
+        cookie: sid_authn::browser_session::BrowserCookie,
+    ) -> Self {
+        Self::with_options(
+            storage,
+            FeatureFlagService::disabled(),
+            Options {
+                zkpp: None,
+                magic_links: false,
+                security_policy: None,
+                enrollment_pin: None,
+                browser_cookie: Some(cookie),
             },
         )
     }
@@ -988,6 +1018,7 @@ impl TestServices {
                 magic_links: true,
                 security_policy: None,
                 enrollment_pin: None,
+                browser_cookie: None,
             },
         )
     }
@@ -1001,6 +1032,7 @@ impl TestServices {
                 magic_links: false,
                 security_policy: None,
                 enrollment_pin: None,
+                browser_cookie: None,
             },
         )
     }
@@ -1022,6 +1054,7 @@ impl TestServices {
                 magic_links: false,
                 security_policy: None,
                 enrollment_pin: None,
+                browser_cookie: None,
             },
         )
     }
@@ -1077,6 +1110,7 @@ impl TestServices {
                 magic_links: false,
                 security_policy: None,
                 enrollment_pin: None,
+                browser_cookie: None,
             },
         );
         replica
@@ -1099,6 +1133,7 @@ impl TestServices {
             magic_links,
             security_policy,
             enrollment_pin,
+            browser_cookie,
         } = options;
         let storage: Arc<dyn StorageBackend> = mock_storage.clone();
         // Provisioned as a server start provisions it; a replica over the same
@@ -1184,6 +1219,7 @@ impl TestServices {
                 security_policy,
                 history_keys: mock_storage.clone(),
                 enrollment_pin,
+                browser_cookie,
             },
         );
 
