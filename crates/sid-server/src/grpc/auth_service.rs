@@ -643,12 +643,12 @@ impl Delivery {
             Self::Cookie(cookie) => ("set-cookie", cookie),
             Self::Bearer(token) => ("authorization", format!("Bearer {}", token.expose_secret())),
         };
-        metadata.insert(
-            name,
-            value
-                .parse()
-                .map_err(|e| internal("encode session credential", e))?,
-        );
+        let mut value: tonic::metadata::MetadataValue<_> = value
+            .parse()
+            .map_err(|e| internal("encode session credential", e))?;
+        // A live credential: kept out of debug output and HPACK indexing.
+        value.set_sensitive(true);
+        metadata.insert(name, value);
         Ok(())
     }
 }

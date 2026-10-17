@@ -41,6 +41,14 @@ async fn sign_in_page_ceremony_sets_the_session_cookie() {
         .expect("login");
 
     assert!(response.metadata().get("authorization").is_none());
+    assert!(
+        response
+            .metadata()
+            .get("set-cookie")
+            .expect("the cookie")
+            .is_sensitive(),
+        "the delivered cookie is not marked sensitive"
+    );
     let cookies = set_cookies(&response);
     assert_eq!(cookies.len(), 1, "{cookies:?}");
     let cookie = &cookies[0];
@@ -105,6 +113,7 @@ async fn sign_in_sets_the_authoritys_configured_cookie() {
 
 /// A native client (no `Origin`) gets its access token in `authorization`
 /// metadata, and no cookie; the token is the session's and authenticates.
+/// The value is marked sensitive, so no layer logs or indexes it.
 #[tokio::test]
 async fn native_client_gets_the_token_in_metadata() {
     let svc = TestServices::new(MockStorage::new());
@@ -115,6 +124,14 @@ async fn native_client_gets_the_token_in_metadata() {
         .expect("login");
 
     assert!(set_cookies(&response).is_empty());
+    assert!(
+        response
+            .metadata()
+            .get("authorization")
+            .expect("the token")
+            .is_sensitive(),
+        "the delivered token is not marked sensitive"
+    );
     let token = bearer(&response);
     let body = response.into_inner();
     let claims = svc
