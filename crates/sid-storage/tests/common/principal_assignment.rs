@@ -228,6 +228,28 @@ pub async fn test_claimant_leaving_keeps_assignment(backend: &dyn StorageBackend
     assert_eq!(state.assignment_revision, 1);
 }
 
+/// Sign-in routes the holder, never a claimant, and nobody once the holder
+/// releases the address: the remaining claim is not elected.
+pub async fn test_sign_in_routes_only_the_holder(backend: &dyn StorageBackend) {
+    let value = address();
+    let holder = verified_holder(backend, &value).await;
+    let claimant = profile(backend, "claimant").await;
+    claim(backend, &claimant, &value).await;
+    let state = entity(backend, &value).await;
+    let route = || {
+        backend.resolve_sign_in_principal(PrincipalType::Email, &value, state.email_policy_revision)
+    };
+    assert_eq!(route().await.unwrap(), Some(holder.id));
+
+    assert!(
+        backend
+            .unbind_principal(state.id, holder.id, test_audit())
+            .await
+            .unwrap()
+    );
+    assert_eq!(route().await.unwrap(), None, "the claimant was elected");
+}
+
 /// Resolution by value returns the holder, never a claimant, whichever
 /// claim the storage happens to read first.
 pub async fn test_profile_by_principal_is_assigned_holder(backend: &dyn StorageBackend) {

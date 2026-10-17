@@ -39,6 +39,7 @@ pub mod operation;
 pub mod organization;
 pub mod password_history;
 pub mod principal_assignment;
+pub mod principal_conformance;
 pub mod project;
 pub mod provisioning_connector;
 pub mod registry_conformance;

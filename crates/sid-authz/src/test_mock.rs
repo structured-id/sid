@@ -200,6 +200,20 @@ impl sid_plugin::GrantStore for MockStorage {
 }
 
 #[async_trait::async_trait]
+impl sid_plugin::PrincipalStore for MockStorage {
+    type Owner = ProfileId;
+
+    async fn resolve_sign_in_principal(
+        &self,
+        _: PrincipalType,
+        _: &str,
+        _: Option<i64>,
+    ) -> Result<Option<ProfileId>> {
+        unimplemented!("principals are not used by the authz unit tests")
+    }
+}
+
+#[async_trait::async_trait]
 impl sid_plugin::CredentialStore for MockStorage {
     type Owner = ProfileId;
 

@@ -1267,6 +1267,26 @@ impl GrantStore for MockStorage {
 }
 
 #[async_trait]
+impl sid_plugin::PrincipalStore for MockStorage {
+    type Owner = ProfileId;
+
+    async fn resolve_sign_in_principal(
+        &self,
+        principal_type: PrincipalType,
+        value: &str,
+        key_revision: Option<i64>,
+    ) -> SidResult<Option<ProfileId>> {
+        sid_plugin::principal_store::resolve_profile_principal(
+            self,
+            principal_type,
+            value,
+            key_revision,
+        )
+        .await
+    }
+}
+
+#[async_trait]
 impl CredentialStore for MockStorage {
     type Owner = ProfileId;
 

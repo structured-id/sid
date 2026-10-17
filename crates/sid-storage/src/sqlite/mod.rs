@@ -511,6 +511,26 @@ impl GrantStore for SqliteBackend {
     }
 }
 
+#[async_trait]
+impl sid_plugin::PrincipalStore for SqliteBackend {
+    type Owner = sid_core::models::ProfileId;
+
+    async fn resolve_sign_in_principal(
+        &self,
+        principal_type: sid_core::models::PrincipalType,
+        value: &str,
+        key_revision: Option<i64>,
+    ) -> SidResult<Option<sid_core::models::ProfileId>> {
+        sid_plugin::principal_store::resolve_profile_principal(
+            self,
+            principal_type,
+            value,
+            key_revision,
+        )
+        .await
+    }
+}
+
 // Credential operations — see profile.rs
 #[async_trait]
 impl sid_plugin::CredentialStore for SqliteBackend {
