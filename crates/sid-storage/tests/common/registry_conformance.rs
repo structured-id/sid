@@ -52,6 +52,12 @@ impl RegistryHarness for AdminRegistry<'_> {
     }
 
     async fn register_client(&self, client: &OAuth2Client) {
+        // A default is a resource the client already has access to, so the
+        // administrative path never registers a client with one.
+        assert!(
+            client.default_resource.is_none(),
+            "a default resource is set after access is granted"
+        );
         self.0.ensure_system_project(test_audit()).await.unwrap();
         store_client(self.0, client, test_audit()).await.unwrap();
     }
@@ -77,6 +83,30 @@ impl RegistryHarness for AdminRegistry<'_> {
             .set_resource_access(access, test_audit())
             .await
             .unwrap();
+    }
+
+    async fn set_default_resource(&self, client: &str, resource: ResourceId) {
+        let mut stored = self
+            .0
+            .get_oauth2_client(client)
+            .await
+            .unwrap()
+            .expect("a registered client");
+        assert!(
+            self.0
+                .resource_access(client, resource)
+                .await
+                .unwrap()
+                .is_some(),
+            "a default resource is one the client has access to"
+        );
+        stored.default_resource = Some(resource);
+        assert!(
+            self.0
+                .update_oauth2_client(&stored, test_audit())
+                .await
+                .unwrap()
+        );
     }
 
     async fn retire_resource(&self, resource: ResourceId) {

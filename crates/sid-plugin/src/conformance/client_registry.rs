@@ -30,7 +30,8 @@ pub trait RegistryHarness: Send + Sync {
     /// An organization a client may belong to.
     async fn organization(&self) -> OrgId;
 
-    /// Register `client` with whatever the store keeps around it.
+    /// Register `client`, without a default resource, with whatever the store
+    /// keeps around it.
     async fn register_client(&self, client: &OAuth2Client);
 
     /// Register `resource`, active.
@@ -38,6 +39,9 @@ pub trait RegistryHarness: Send + Sync {
 
     /// Give the access `access` names.
     async fn grant_access(&self, access: &ResourceAccess);
+
+    /// Make `resource`, which `client` already has access to, its default.
+    async fn set_default_resource(&self, client: &str, resource: ResourceId);
 
     /// Retire `resource`: it stays readable, retired, under its indicator.
     async fn retire_resource(&self, resource: ResourceId);
@@ -127,12 +131,12 @@ pub fn resource(issuer: IssuerId) -> ProtectedResource {
 /// The client stays a web client: a `private_key_jwt` client with keys is
 /// confidential, and native and single-page clients are public, so another
 /// type would be a registration a harness using the real registration path
-/// refuses.
+/// refuses. Its default resource is set only after access to it is granted:
+/// a default never grants access by itself.
 pub async fn client_found_by_id<H: RegistryHarness>(h: &H) {
     let api = resource(h.issuer().await);
     h.register_resource(&api).await;
     let registered = OAuth2Client {
-        default_resource: Some(api.id),
         org_id: Some(h.organization().await),
         sector_identifier_uri: Some("https://app.sid.example.com/sector.json".into()),
         required_acr: Some(AuthLevel::Standard),
@@ -145,17 +149,32 @@ pub async fn client_found_by_id<H: RegistryHarness>(h: &H) {
         ..client()
     };
     h.register_client(&registered).await;
+    h.grant_access(&ResourceAccess {
+        client_id: registered.client_id.clone(),
+        resource_id: api.id,
+        scopes: vec!["orders.read".into()],
+        created_at: Utc::now().trunc_subsecs(3),
+    })
+    .await;
+    h.set_default_resource(&registered.client_id, api.id).await;
     let read = h
         .registry()
         .get_oauth2_client(&registered.client_id)
         .await
         .unwrap()
         .expect("the registered client");
+    // Setting the default is a change of the client, so its revision moved.
+    assert_ne!(read.revision, registered.revision);
+    let expected = OAuth2Client {
+        default_resource: Some(api.id),
+        revision: read.revision,
+        ..registered
+    };
     // The model has no equality of its own; its serialized form names every
     // field.
     assert_eq!(
         serde_json::to_value(&read).unwrap(),
-        serde_json::to_value(&registered).unwrap()
+        serde_json::to_value(&expected).unwrap()
     );
     let unknown = client().client_id;
     assert!(
