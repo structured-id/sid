@@ -1595,41 +1595,19 @@ impl AuthServiceImpl {
         issuer: &OidcIssuer,
         auth: &ClientAuthentication,
     ) -> Result<(), Status> {
-        if client.is_public() {
-            return match auth {
-                ClientAuthentication::None { .. } => Ok(()),
-                _ => Err(client_refused()),
-            };
-        }
-        if auth.method() != client.token_endpoint_auth_method {
-            return Err(client_refused());
-        }
-        if let ClientAuthentication::Assertion { assertion, .. } = auth {
-            let keys = client.jwks.as_ref().ok_or_else(client_refused)?;
-            return match sid_authn::client_assertion::validate_client_assertion_with_keys(
-                assertion,
-                &client.client_id,
-                &token_endpoint(issuer),
-                keys,
-                &self.assertion_jti_cache,
-            )
-            .await
-            {
-                Ok(_) => Ok(()),
-                Err(sid_core::Error::Internal(e)) => {
-                    // An unreachable replay record cannot rule out a replay.
-                    Err(dependency_unavailable("client assertion replay record", e))
-                }
-                Err(e) => {
-                    warn!(client_id = %client.client_id, error = %e, "client assertion refused");
-                    Err(client_refused())
-                }
-            };
-        }
-        let secret = auth.secret().ok_or_else(client_refused)?;
-        self.oauth2
-            .authenticate_client(secret, client)
-            .map_err(|_| client_refused())
+        auth.verify(
+            client,
+            &issuer.canonical_url,
+            &self.oauth2,
+            &self.assertion_jti_cache,
+        )
+        .await
+        .map_err(|refusal| match refusal {
+            sid_authn::client_auth::ClientRefusal::Refused => client_refused(),
+            sid_authn::client_auth::ClientRefusal::ReplayRecordUnavailable(e) => {
+                dependency_unavailable("client assertion replay record", e)
+            }
+        })
     }
 
     /// The machine user a token request authenticates as, the `kid` of the
