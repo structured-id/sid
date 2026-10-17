@@ -99,6 +99,8 @@ pub struct CeComponents {
     pub closure_service: Arc<AccountClosureService>,
     /// How long audit records are kept and what happens to them after.
     pub audit_retention: crate::background_tasks::AuditRetention,
+    /// Days a profile has to finish its password migration.
+    pub migration_deadline_days: i64,
     /// The installation's OIDC issuers and their signers.
     pub issuers: Arc<sid_authn::issuer::IssuerRegistry>,
     /// The sign-in page the authorization endpoint sends users to.
@@ -233,18 +235,23 @@ pub(crate) fn instance_domain(issuer: &str) -> anyhow::Result<String> {
         .with_context(|| format!("SID_ISSUER {issuer:?} is not a URL with a host"))
 }
 
-/// `SID_INSTALLATION_MANAGEMENT` as read: unset is `None`, a value that is no
-/// text stops the start like any other invalid value, never read as unset.
-pub(crate) fn management_setting(
+/// The setting `name` as `read` from the environment: unset is `None`, a
+/// value that is no text stops the start like any other invalid value,
+/// never read as unset.
+pub(crate) fn setting(
+    name: &str,
     read: Result<String, std::env::VarError>,
 ) -> anyhow::Result<Option<String>> {
     match read {
         Ok(value) => Ok(Some(value)),
         Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(std::env::VarError::NotUnicode(_)) => {
-            anyhow::bail!("SID_INSTALLATION_MANAGEMENT is not valid Unicode")
-        }
+        Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!("{name} is not valid Unicode"),
     }
+}
+
+/// The environment setting `name`, as [`setting`] reads it.
+pub fn env_setting(name: &str) -> anyhow::Result<Option<String>> {
+    setting(name, std::env::var(name))
 }
 
 /// Apply the installation's bootstrap policy `setting`
@@ -320,8 +327,8 @@ pub(crate) async fn announce_admin_claim(
 ///
 /// Does NOT start the server — caller assembles the tonic server and serves.
 pub async fn init_ce() -> anyhow::Result<CeComponents> {
-    let grpc_addr: SocketAddr = std::env::var("SID_GRPC_BIND")
-        .unwrap_or_else(|_| "127.0.0.1:50051".to_string())
+    let grpc_addr: SocketAddr = env_setting("SID_GRPC_BIND")?
+        .unwrap_or_else(|| "127.0.0.1:50051".to_string())
         .parse()?;
 
     // ── Storage backend ──
@@ -335,8 +342,9 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         Arc<dyn sid_plugin::audit::AuditLog>,
         LocalHistoryKeys,
     ) = {
-        let database_url = std::env::var("SID_DATABASE_URL").expect("SID_DATABASE_URL must be set");
-        let schema = std::env::var("SID_STORAGE_POSTGRESQL_SCHEMA").ok();
+        let database_url =
+            env_setting("SID_DATABASE_URL")?.context("SID_DATABASE_URL must be set")?;
+        let schema = env_setting("SID_STORAGE_POSTGRESQL_SCHEMA")?;
         if let Some(ref s) = schema {
             info!(
                 "Schema isolation enabled: tables will be created in schema '{}'",
@@ -370,7 +378,7 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         LocalHistoryKeys,
     ) = {
         let db_path =
-            std::env::var("SID_SQLITE_PATH").unwrap_or_else(|_| "/var/lib/sid/auth.db".to_string());
+            env_setting("SID_SQLITE_PATH")?.unwrap_or_else(|| "/var/lib/sid/auth.db".to_string());
         let backend = sid_storage::sqlite::SqliteBackend::new(&db_path)
             .await
             .context("SQLite storage and its migrations")?;
@@ -388,15 +396,14 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         .expect("Failed to ensure system project");
 
     // ── JWT keys ──
-    let data_dir = std::env::var("SID_DATA_DIR").unwrap_or_else(|_| "/var/lib/sid".into());
-    let jwt_private_key_path = std::env::var("SID_JWT_PRIVATE_KEY_PATH")
-        .unwrap_or_else(|_| format!("{}/jwt_private.pem", data_dir));
-    let jwt_public_key_path = std::env::var("SID_JWT_PUBLIC_KEY_PATH")
-        .unwrap_or_else(|_| format!("{}/jwt_public.pem", data_dir));
+    let data_dir = env_setting("SID_DATA_DIR")?.unwrap_or_else(|| "/var/lib/sid".into());
+    let jwt_private_key_path = env_setting("SID_JWT_PRIVATE_KEY_PATH")?
+        .unwrap_or_else(|| format!("{}/jwt_private.pem", data_dir));
+    let jwt_public_key_path = env_setting("SID_JWT_PUBLIC_KEY_PATH")?
+        .unwrap_or_else(|| format!("{}/jwt_public.pem", data_dir));
     // No default: the issuer names every token and the installation's
     // organization domain, so a guessed one would be wrong everywhere.
-    let issuer = std::env::var("SID_ISSUER")
-        .ok()
+    let issuer = env_setting("SID_ISSUER")?
         .filter(|issuer| !issuer.is_empty())
         .context("SID_ISSUER is required")?;
     let instance_domain = instance_domain(&issuer)?;
@@ -454,8 +461,8 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
 
     // A set but malformed or out-of-range lifetime stops startup rather than
     // silently falling back to a default.
-    let access_token_ttl = match std::env::var("SID_ACCESS_TOKEN_TTL_MINUTES") {
-        Ok(v) => v
+    let access_token_ttl = match env_setting("SID_ACCESS_TOKEN_TTL_MINUTES")? {
+        Some(v) => v
             .parse::<u32>()
             .map_err(|e| format!("SID_ACCESS_TOKEN_TTL_MINUTES: {e}"))
             .and_then(|m| {
@@ -463,18 +470,18 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
                     .map_err(|e| format!("SID_ACCESS_TOKEN_TTL_MINUTES: {e}"))
             })
             .unwrap_or_else(|e| panic!("{e}")),
-        Err(_) => sid_authn::jwt::AccessTokenTtl::default(),
+        None => sid_authn::jwt::AccessTokenTtl::default(),
     };
-    let refresh_token_ttl_days: i64 = match std::env::var("SID_REFRESH_TOKEN_TTL_DAYS") {
-        Ok(v) => v
+    let refresh_token_ttl_days: i64 = match env_setting("SID_REFRESH_TOKEN_TTL_DAYS")? {
+        Some(v) => v
             .parse()
             .unwrap_or_else(|e| panic!("SID_REFRESH_TOKEN_TTL_DAYS: {e}")),
-        Err(_) => 30,
+        None => 30,
     };
 
     // ── Field encryption: master key outside the database, versions inside ──
     let master_key_path =
-        std::env::var("SID_MASTER_KEY_FILE").unwrap_or_else(|_| format!("{}/master.key", data_dir));
+        env_setting("SID_MASTER_KEY_FILE")?.unwrap_or_else(|| format!("{}/master.key", data_dir));
     let key_manager = crate::field_keys::field_key_manager(
         storage.as_ref(),
         std::path::Path::new(&master_key_path),
@@ -527,8 +534,8 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
     // RP_ID must match the domain users access (e.g., "structured.id", "localhost").
     // RP_ORIGIN must include the scheme (e.g., "https://structured.id").
     // Defaults are safe for local development. Production MUST set these.
-    let rp_id = std::env::var("SID_RP_ID").unwrap_or_else(|_| "localhost".into());
-    let rp_origin = std::env::var("SID_RP_ORIGIN").unwrap_or_else(|_| "http://localhost".into());
+    let rp_id = env_setting("SID_RP_ID")?.unwrap_or_else(|| "localhost".into());
+    let rp_origin = env_setting("SID_RP_ORIGIN")?.unwrap_or_else(|| "http://localhost".into());
     let rp_origin_url = Url::parse(&rp_origin)?;
     let webauthn = Arc::new(WebAuthnServer::new(
         &rp_id,
@@ -558,7 +565,8 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
     };
 
     // ── ZKPP ──
-    let opaque_zkpp = init_zkpp(&opaque_router);
+    let zkpp_cache_dir = env_setting("SID_DATA_DIR")?.unwrap_or_else(|| ".sid-data".to_string());
+    let opaque_zkpp = init_zkpp(&opaque_router, &zkpp_cache_dir);
 
     // ── Revocation cache ──
     let revocation_cache = Arc::new(RevocationCache::new(
@@ -575,7 +583,7 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         .unwrap_or_else(|e| panic!("Revocation propagation: {e}"));
 
     // ── Feature flags ──
-    let feature_flags = init_feature_flags();
+    let feature_flags = init_feature_flags()?;
 
     // ── Telemetry ──
     #[cfg(feature = "telemetry")]
@@ -595,7 +603,7 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
     #[cfg(feature = "telemetry")]
     let sid_metrics = Arc::new(crate::metrics::SidMetrics::init());
 
-    let management = management_setting(std::env::var("SID_INSTALLATION_MANAGEMENT"))?;
+    let management = env_setting("SID_INSTALLATION_MANAGEMENT")?;
     apply_bootstrap_policy(storage.as_ref(), management.as_deref()).await?;
     announce_admin_claim(storage.as_ref(), key_manager.as_ref()).await?;
     let enrollment_pin =
@@ -661,8 +669,8 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
     // SID's own account UI, when the deployment serves one: its web client,
     // the account API and the access between them.
     if let Some(account) = account_settings(
-        std::env::var("SID_ACCOUNT_URL").ok().as_deref(),
-        std::env::var("SID_ACCOUNT_CLIENT_JWKS").ok().as_deref(),
+        env_setting("SID_ACCOUNT_URL")?.as_deref(),
+        env_setting("SID_ACCOUNT_CLIENT_JWKS")?.as_deref(),
     )? {
         let integration = sid_authn::system_integration::ensure_account_integration(
             storage.as_ref(),
@@ -754,20 +762,20 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
     ));
 
     let magic_link = magic_links_enabled(
-        std::env::var("SID_MAGIC_LINKS_ENABLED").ok().as_deref(),
+        env_setting("SID_MAGIC_LINKS_ENABLED")?.as_deref(),
         &sid_core::models::SecurityPolicy::ce_default(),
     )?
     .then(|| Arc::new(MagicLinkService::new(storage.clone())));
 
     let export_dir =
-        std::env::var("SID_EXPORT_DIR").unwrap_or_else(|_| "/tmp/sid-exports".to_string());
+        env_setting("SID_EXPORT_DIR")?.unwrap_or_else(|| "/tmp/sid-exports".to_string());
     let data_export = Arc::new(DataExportService::new(storage.clone(), export_dir));
 
     // Event bus: SID_NATS_URL unset / `embedded` bundles nats-server with
     // JetStream under the data directory, a nats:// or tls:// URL connects to
     // an external cluster. No in-process fallback: a bus that cannot start
     // stops startup, and committed work waits in the database.
-    let nats_setting = std::env::var("SID_NATS_URL").ok();
+    let nats_setting = env_setting("SID_NATS_URL")?;
     let nats_mode = crate::embedded_nats::EventBusMode::from_setting(nats_setting.as_deref())?;
     // This server is the installation's bootstrap, so it owns the event
     // topology unless the deployment names another owner.
@@ -781,10 +789,8 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         sid_infra::TopologyRole::from_env(sid_infra::TopologyRole::Own)?,
     )
     .await?;
-    let required_receivers = required_receivers(
-        &nats_mode,
-        std::env::var("SID_EVENT_RECEIVERS").ok().as_deref(),
-    )?;
+    let required_receivers =
+        required_receivers(&nats_mode, env_setting("SID_EVENT_RECEIVERS")?.as_deref())?;
 
     let identity_svc = Arc::new(IdentityServiceImpl::new(
         storage.clone(),
@@ -803,8 +809,8 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
     // Default: all providers enabled. Set to empty or "none" to disable all.
     // Valid values: tor, cloud, firehol, self_learned, allowlist
     // Air-gapped deployments: set to "self_learned,allowlist" (no external fetches).
-    let enabled_providers: Vec<String> = std::env::var("SID_IPINTEL_PROVIDERS")
-        .unwrap_or_else(|_| "tor,cloud,firehol,self_learned,allowlist".to_string())
+    let enabled_providers: Vec<String> = env_setting("SID_IPINTEL_PROVIDERS")?
+        .unwrap_or_else(|| "tor,cloud,firehol,self_learned,allowlist".to_string())
         .split(',')
         .map(|s| s.trim().to_lowercase())
         .filter(|s| !s.is_empty() && s != "none")
@@ -820,7 +826,7 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
 
     if enabled_providers.iter().any(|p| p == "cloud") {
         // Azure: optional, URL changes weekly. Configure via SID_IPINTEL_AZURE_URL.
-        let cloud_provider = if let Ok(azure_url) = std::env::var("SID_IPINTEL_AZURE_URL") {
+        let cloud_provider = if let Some(azure_url) = env_setting("SID_IPINTEL_AZURE_URL")? {
             Arc::new(CloudRangeProvider::with_azure(
                 cache_backend.clone(),
                 azure_url,
@@ -839,9 +845,9 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
     }
 
     if enabled_providers.iter().any(|p| p == "self_learned") {
-        let threshold: f32 = match std::env::var("SID_IPINTEL_REPUTATION_THRESHOLD") {
-            Err(_) => 0.7,
-            Ok(v) => v
+        let threshold: f32 = match env_setting("SID_IPINTEL_REPUTATION_THRESHOLD")? {
+            None => 0.7,
+            Some(v) => v
                 .parse()
                 .ok()
                 .filter(|t: &f32| (0.0..=1.0).contains(t))
@@ -895,7 +901,7 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
     // Proxies in front of this server whose X-Forwarded-For names the client;
     // unset means clients connect directly and headers are ignored.
     let trusted_proxies = sid_authn::client_address::TrustedProxies::parse(
-        &std::env::var("SID_TRUSTED_PROXIES").unwrap_or_default(),
+        &env_setting("SID_TRUSTED_PROXIES")?.unwrap_or_default(),
     )
     .map_err(|e| anyhow::anyhow!("SID_TRUSTED_PROXIES: {e}"))?;
 
@@ -907,9 +913,8 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
     let authz_engine: Arc<dyn sid_plugin::AuthzEngine> =
         Arc::new(sid_authz::CeAuthzEngine::new(storage.clone()));
 
-    let login_url = login_url(std::env::var("SID_LOGIN_URL").ok().as_deref(), &issuer)?;
-    let browser_cookie =
-        browser_cookie(std::env::var("SID_BROWSER_SESSION_COOKIE").ok().as_deref())?;
+    let login_url = login_url(env_setting("SID_LOGIN_URL")?.as_deref(), &issuer)?;
+    let browser_cookie = browser_cookie(env_setting("SID_BROWSER_SESSION_COOKIE")?.as_deref())?;
 
     let history_authority = password_history_authority(
         |name| std::env::var(name),
@@ -979,14 +984,14 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
     let cedar = CedarService::new();
     // The deployment names the services it trusts to confirm checks of
     // original requests; without the setting nobody is trusted.
-    let request_verifiers = match std::env::var("SID_AUTHZ_REQUEST_VERIFIERS_FILE") {
-        Ok(path) => {
+    let request_verifiers = match env_setting("SID_AUTHZ_REQUEST_VERIFIERS_FILE")? {
+        Some(path) => {
             let text = std::fs::read_to_string(&path)
                 .with_context(|| format!("read SID_AUTHZ_REQUEST_VERIFIERS_FILE {path}"))?;
             sid_authz::request_verifier::RequestVerifiers::from_json(&text)
                 .with_context(|| format!("SID_AUTHZ_REQUEST_VERIFIERS_FILE {path}"))?
         }
-        Err(_) => Default::default(),
+        None => Default::default(),
     };
     // Permission checkers authenticate with their own tokens for the
     // authorization API.
@@ -1056,12 +1061,17 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         revocation_cache.clone(),
     ));
 
-    let audit_retention =
-        crate::background_tasks::AuditRetention::from_lookup(|k| std::env::var(k).ok())
-            .map_err(|e| anyhow::anyhow!(e))?;
+    let audit_retention = crate::background_tasks::AuditRetention::from_lookup(env_setting)?;
+    let migration_deadline_days = match env_setting("SID_MIGRATION_DEADLINE_DAYS")? {
+        Some(v) => v
+            .parse()
+            .with_context(|| format!("SID_MIGRATION_DEADLINE_DAYS {v:?}"))?,
+        None => crate::background_tasks::DEFAULT_MIGRATION_DEADLINE_DAYS,
+    };
 
     Ok(CeComponents {
         audit_retention,
+        migration_deadline_days,
         issuers,
         login_url,
         authz_engine,
@@ -1389,10 +1399,7 @@ pub fn spawn_ce_background_tasks(c: &CeComponents) {
     // Migration deadline enforcement (daily)
     {
         let storage = c.storage.clone();
-        let deadline_days: i64 = std::env::var("SID_MIGRATION_DEADLINE_DAYS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(crate::background_tasks::DEFAULT_MIGRATION_DEADLINE_DAYS);
+        let deadline_days = c.migration_deadline_days;
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(86400));
             loop {
@@ -1622,11 +1629,7 @@ where
     use crate::grpc::password_operation::{PasswordHistoryAuthority, RemoteHistoryEvaluator};
     // A setting that is present but unreadable is refused, never read as
     // unset: that would quietly give this server the history keys.
-    let optional = |name: &str| match var(name) {
-        Ok(value) => Ok(Some(value)),
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(std::env::VarError::NotUnicode(_)) => Err(anyhow::anyhow!("{name} must be Unicode")),
-    };
+    let optional = |name: &str| setting(name, var(name));
     let required = |name: &str| var(name).map_err(|_| anyhow::anyhow!("{name} is required"));
     let cutoff = history_epoch_cutoff(var("SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE"))?;
     let audit = || AuditEntry::system("password_history.write_cutoff", "password_history");
@@ -1688,10 +1691,8 @@ fn history_epoch_cutoff(
     input: Result<String, std::env::VarError>,
 ) -> anyhow::Result<Option<chrono::DateTime<chrono::Utc>>> {
     const NAME: &str = "SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE";
-    let value = match input {
-        Ok(v) => v,
-        Err(std::env::VarError::NotPresent) => return Ok(None),
-        Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!("{NAME} must be Unicode"),
+    let Some(value) = setting(NAME, input)? else {
+        return Ok(None);
     };
     let cutoff = chrono::DateTime::parse_from_rfc3339(&value)
         .map_err(|_| anyhow::anyhow!("{NAME} must be an RFC 3339 instant"))?
@@ -1711,16 +1712,6 @@ fn zkpp_settings(
     skip: Result<String, std::env::VarError>,
     version: Result<String, std::env::VarError>,
 ) -> anyhow::Result<(bool, sid_authn::opaque_zkpp::ZkppConfig)> {
-    fn value(
-        name: &str,
-        input: Result<String, std::env::VarError>,
-    ) -> anyhow::Result<Option<String>> {
-        match input {
-            Ok(v) => Ok(Some(v)),
-            Err(std::env::VarError::NotPresent) => Ok(None),
-            Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!("{name} must be Unicode"),
-        }
-    }
     /// `default` when unset; an empty or unknown value is an error, never
     /// either answer.
     fn boolean(
@@ -1728,7 +1719,7 @@ fn zkpp_settings(
         input: Result<String, std::env::VarError>,
         default: bool,
     ) -> anyhow::Result<bool> {
-        match value(name, input)?.as_deref() {
+        match setting(name, input)?.as_deref() {
             None => Ok(default),
             Some("true" | "1") => Ok(true),
             Some("false" | "0") => Ok(false),
@@ -1745,7 +1736,7 @@ fn zkpp_settings(
         enabled || !require_proof,
         "with SID_ZKPP_ENABLED=false no proof can be verified: set SID_ZKPP_SKIP_PROOF=true to accept that"
     );
-    let policy_version = match value("SID_ZKPP_POLICY_VERSION", version)? {
+    let policy_version = match setting("SID_ZKPP_POLICY_VERSION", version)? {
         None => 1,
         Some(v) => v.parse::<u32>().map_err(|_| {
             anyhow::anyhow!("SID_ZKPP_POLICY_VERSION must be an unsigned policy version")
@@ -1768,7 +1759,11 @@ fn zkpp_settings(
 /// Initialize ZKPP with async keygen on the router's server setup.
 /// Password operations return UNAVAILABLE until the verifier is ready.
 /// Proofs are mandatory by default; optional setup still verifies every proof.
-fn init_zkpp(router: &Arc<OpaqueRouter>) -> Arc<arc_swap::ArcSwap<Option<Arc<ZkppOpaqueServer>>>> {
+/// The SRS is cached under `cache_dir`.
+fn init_zkpp(
+    router: &Arc<OpaqueRouter>,
+    cache_dir: &str,
+) -> Arc<arc_swap::ArcSwap<Option<Arc<ZkppOpaqueServer>>>> {
     let slot: Arc<arc_swap::ArcSwap<Option<Arc<ZkppOpaqueServer>>>> =
         Arc::new(arc_swap::ArcSwap::from_pointee(None));
 
@@ -1821,8 +1816,7 @@ fn init_zkpp(router: &Arc<OpaqueRouter>) -> Arc<arc_swap::ArcSwap<Option<Arc<Zkp
 
     // The SRS depends only on k and is cached; a verifying key per supported
     // number of history comparison domains is derived from it.
-    let cache_dir = std::env::var("SID_DATA_DIR").unwrap_or_else(|_| ".sid-data".to_string());
-    let cache_path = std::path::Path::new(&cache_dir).join("zkpp");
+    let cache_path = std::path::Path::new(cache_dir).join("zkpp");
     info!(
         "ZKPP verifying keys preparing in background (k={}) — non-ZKPP traffic is served meanwhile",
         sid_pake_core::circuit::ZKPP_K
@@ -1891,23 +1885,23 @@ fn init_zkpp(router: &Arc<OpaqueRouter>) -> Arc<arc_swap::ArcSwap<Option<Arc<Zkp
     slot
 }
 
-/// Initialize feature flag service from env vars.
-fn init_feature_flags() -> FeatureFlagService {
-    if std::env::var("SID_FEATURE_FLAGS_ENABLED")
-        .map(|v| v == "true" || v == "1")
-        .unwrap_or(false)
-    {
+/// Initialize feature flag service from env vars; a set but unreadable or
+/// malformed setting stops the start.
+fn init_feature_flags() -> anyhow::Result<FeatureFlagService> {
+    if env_setting("SID_FEATURE_FLAGS_ENABLED")?.is_some_and(|v| v == "true" || v == "1") {
         let config = FeatureFlagConfig {
-            api_url: std::env::var("SID_FEATURE_FLAGS_URL")
-                .expect("SID_FEATURE_FLAGS_URL must be set when feature flags enabled"),
-            instance_id: std::env::var("SID_FEATURE_FLAGS_INSTANCE_ID")
-                .expect("SID_FEATURE_FLAGS_INSTANCE_ID must be set when feature flags enabled"),
-            app_name: std::env::var("SID_FEATURE_FLAGS_APP_NAME")
-                .unwrap_or_else(|_| "production".into()),
-            poll_interval_secs: std::env::var("SID_FEATURE_FLAGS_POLL_INTERVAL")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(15),
+            api_url: env_setting("SID_FEATURE_FLAGS_URL")?
+                .context("SID_FEATURE_FLAGS_URL must be set when feature flags enabled")?,
+            instance_id: env_setting("SID_FEATURE_FLAGS_INSTANCE_ID")?
+                .context("SID_FEATURE_FLAGS_INSTANCE_ID must be set when feature flags enabled")?,
+            app_name: env_setting("SID_FEATURE_FLAGS_APP_NAME")?
+                .unwrap_or_else(|| "production".into()),
+            poll_interval_secs: match env_setting("SID_FEATURE_FLAGS_POLL_INTERVAL")? {
+                Some(v) => v
+                    .parse()
+                    .with_context(|| format!("SID_FEATURE_FLAGS_POLL_INTERVAL {v:?}"))?,
+                None => 15,
+            },
         };
         info!(
             "Feature flags enabled (url={}, interval={}s)",
@@ -1915,9 +1909,9 @@ fn init_feature_flags() -> FeatureFlagService {
         );
         let svc = FeatureFlagService::new(config);
         svc.start_polling();
-        svc
+        Ok(svc)
     } else {
-        FeatureFlagService::disabled()
+        Ok(FeatureFlagService::disabled())
     }
 }
 
