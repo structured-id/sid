@@ -359,6 +359,32 @@ macro_rules! credential_store_isolated {
     )*};
 }
 
+// ─── Sign-in history conformance ───
+
+/// Run sign-in history conformance `scenario` against this backend.
+macro_rules! sign_in_history {
+    ($($scenario:ident),* $(,)?) => {$(
+        #[tokio::test]
+        async fn $scenario() {
+            let backend = setup().await;
+            sid_plugin::conformance::sign_in_history::$scenario(
+                &common::sign_in_history_conformance::ProfileSignIns(&backend),
+            )
+            .await;
+        }
+    )*};
+}
+
+mod sign_in_history {
+    use super::*;
+
+    sign_in_history!(
+        most_recent_session_is_the_latest,
+        seen_address_and_device_are_per_account,
+        location_is_designated_at_threshold,
+    );
+}
+
 // ─── Principal store conformance ───
 
 /// Run principal store conformance `scenario` against this backend.

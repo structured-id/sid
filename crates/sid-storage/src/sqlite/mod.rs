@@ -512,6 +512,63 @@ impl GrantStore for SqliteBackend {
 }
 
 #[async_trait]
+impl sid_plugin::SignInHistoryStore for SqliteBackend {
+    type Owner = sid_core::models::ProfileId;
+
+    async fn get_most_recent_session_ip(
+        &self,
+        profile_id: sid_core::models::ProfileId,
+    ) -> SidResult<Option<(String, chrono::DateTime<chrono::Utc>)>> {
+        self.get_most_recent_session_ip_impl(profile_id).await
+    }
+
+    async fn has_recent_session_from_ip(
+        &self,
+        profile_id: sid_core::models::ProfileId,
+        ip: &str,
+        window: std::time::Duration,
+    ) -> SidResult<bool> {
+        self.has_recent_session_from_ip_impl(profile_id, ip, window)
+            .await
+    }
+
+    async fn has_recent_session_from_device(
+        &self,
+        profile_id: sid_core::models::ProfileId,
+        device_id: uuid::Uuid,
+        window: std::time::Duration,
+    ) -> SidResult<bool> {
+        self.has_recent_session_from_device_impl(profile_id, device_id, window)
+            .await
+    }
+
+    async fn record_login_location(
+        &self,
+        profile_id: sid_core::models::ProfileId,
+        country: &str,
+        latitude: f64,
+        longitude: f64,
+        designated_threshold: u32,
+    ) -> SidResult<()> {
+        self.record_login_location_impl(
+            profile_id,
+            country,
+            latitude,
+            longitude,
+            designated_threshold,
+        )
+        .await
+    }
+
+    async fn get_designated_countries(
+        &self,
+        profile_id: sid_core::models::ProfileId,
+    ) -> SidResult<Vec<String>> {
+        self.get_designated_countries_impl(profile_id).await
+    }
+}
+
+#[async_trait]
 impl sid_plugin::PrincipalStore for SqliteBackend {
     type Owner = sid_core::models::ProfileId;
 
@@ -1376,58 +1433,6 @@ impl StorageBackend for SqliteBackend {
         profile_id: sid_core::models::ProfileId,
     ) -> SidResult<Vec<sid_core::models::Session>> {
         self.list_sessions_by_profile_impl(profile_id).await
-    }
-
-    async fn get_most_recent_session_ip(
-        &self,
-        profile_id: sid_core::models::ProfileId,
-    ) -> SidResult<Option<(String, chrono::DateTime<chrono::Utc>)>> {
-        self.get_most_recent_session_ip_impl(profile_id).await
-    }
-
-    async fn has_recent_session_from_ip(
-        &self,
-        profile_id: sid_core::models::ProfileId,
-        ip: &str,
-        window: std::time::Duration,
-    ) -> SidResult<bool> {
-        self.has_recent_session_from_ip_impl(profile_id, ip, window)
-            .await
-    }
-
-    async fn has_recent_session_from_device(
-        &self,
-        profile_id: sid_core::models::ProfileId,
-        device_id: uuid::Uuid,
-        window: std::time::Duration,
-    ) -> SidResult<bool> {
-        self.has_recent_session_from_device_impl(profile_id, device_id, window)
-            .await
-    }
-
-    async fn record_login_location(
-        &self,
-        profile_id: sid_core::models::ProfileId,
-        country: &str,
-        latitude: f64,
-        longitude: f64,
-        designated_threshold: u32,
-    ) -> SidResult<()> {
-        self.record_login_location_impl(
-            profile_id,
-            country,
-            latitude,
-            longitude,
-            designated_threshold,
-        )
-        .await
-    }
-
-    async fn get_designated_countries(
-        &self,
-        profile_id: sid_core::models::ProfileId,
-    ) -> SidResult<Vec<String>> {
-        self.get_designated_countries_impl(profile_id).await
     }
 
     // Refresh token operations — see auth.rs

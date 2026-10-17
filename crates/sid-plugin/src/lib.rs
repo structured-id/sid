@@ -29,6 +29,7 @@ pub mod mfa;
 pub mod notification;
 pub mod otp;
 pub mod principal_store;
+pub mod sign_in_history;
 pub mod storage;
 pub mod upstream;
 pub mod work_store;
@@ -61,6 +62,7 @@ pub use notification::{
 pub use otp::{Locale, OtpChannel, OtpContext, OtpDeliveryResult, OtpTransport, OtpTransportError};
 pub use principal_store::PrincipalStore;
 pub use sid_keys::KeyVersionParams;
+pub use sign_in_history::SignInHistoryStore;
 pub use storage::StorageBackend;
 pub use upstream::{UpstreamAuthState, UpstreamIdpProvider};
 pub use work_store::WorkStore;
