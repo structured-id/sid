@@ -482,7 +482,7 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
     // ── Field encryption: master key outside the database, versions inside ──
     let master_key_path =
         env_setting("SID_MASTER_KEY_FILE")?.unwrap_or_else(|| format!("{}/master.key", data_dir));
-    let key_manager = crate::field_keys::field_key_manager(
+    let key_manager = sid_authn::field_keys::field_key_manager(
         storage.as_ref(),
         std::path::Path::new(&master_key_path),
     )
@@ -1647,9 +1647,10 @@ where
                 .await
                 .context("SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE: evaluator cutoff")?;
         }
-        let history_keys = crate::field_keys::field_key_manager(store.as_ref(), master_key_path)
-            .await
-            .context("password history evaluator keys")?;
+        let history_keys =
+            sid_authn::field_keys::field_key_manager(store.as_ref(), master_key_path)
+                .await
+                .context("password history evaluator keys")?;
         return Ok(PasswordHistoryAuthority::InProcess {
             store,
             history_keys,
