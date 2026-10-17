@@ -742,6 +742,33 @@ async fn test_ending_a_session_ends_what_it_authenticated() {
     common::browser_session::test_ending_a_session_ends_what_it_authenticated(&setup().await).await;
 }
 
+// ─── Client and resource registry conformance ───
+
+/// Run registry conformance `scenario` against this backend.
+macro_rules! client_registry {
+    ($($scenario:ident),* $(,)?) => {$(
+        #[tokio::test]
+        async fn $scenario() {
+            let backend = setup().await;
+            sid_plugin::conformance::client_registry::$scenario(
+                &common::registry_conformance::AdminRegistry(&backend),
+            )
+            .await;
+        }
+    )*};
+}
+
+mod client_registry {
+    use super::*;
+
+    client_registry!(
+        client_found_by_id,
+        resource_found_by_id_and_indicator,
+        retired_resource_still_found,
+        resource_access_exact,
+    );
+}
+
 // ─── Grant store conformance ───
 
 /// Run grant store conformance `scenario` against this backend.
