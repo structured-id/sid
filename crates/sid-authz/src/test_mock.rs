@@ -200,6 +200,47 @@ impl sid_plugin::GrantStore for MockStorage {
 }
 
 #[async_trait::async_trait]
+impl sid_plugin::SignInHistoryStore for MockStorage {
+    type Owner = ProfileId;
+
+    async fn get_most_recent_session_ip(
+        &self,
+        _: ProfileId,
+    ) -> Result<Option<(String, chrono::DateTime<chrono::Utc>)>> {
+        Ok(None)
+    }
+    async fn has_recent_session_from_ip(
+        &self,
+        _: ProfileId,
+        _: &str,
+        _: std::time::Duration,
+    ) -> Result<bool> {
+        Ok(false)
+    }
+    async fn has_recent_session_from_device(
+        &self,
+        _: ProfileId,
+        _: uuid::Uuid,
+        _: std::time::Duration,
+    ) -> Result<bool> {
+        Ok(false)
+    }
+    async fn record_login_location(
+        &self,
+        _: ProfileId,
+        _: &str,
+        _: f64,
+        _: f64,
+        _: u32,
+    ) -> Result<()> {
+        Ok(())
+    }
+    async fn get_designated_countries(&self, _: ProfileId) -> Result<Vec<String>> {
+        Ok(vec![])
+    }
+}
+
+#[async_trait::async_trait]
 impl sid_plugin::PrincipalStore for MockStorage {
     type Owner = ProfileId;
 
@@ -643,42 +684,6 @@ impl sid_plugin::StorageBackend for MockStorage {
     async fn list_sessions_by_profile(&self, _: ProfileId) -> Result<Vec<Session>> {
         unimplemented!()
     }
-    async fn get_most_recent_session_ip(
-        &self,
-        _: ProfileId,
-    ) -> Result<Option<(String, chrono::DateTime<chrono::Utc>)>> {
-        Ok(None)
-    }
-    async fn has_recent_session_from_ip(
-        &self,
-        _: ProfileId,
-        _: &str,
-        _: std::time::Duration,
-    ) -> Result<bool> {
-        Ok(false)
-    }
-    async fn has_recent_session_from_device(
-        &self,
-        _: ProfileId,
-        _: uuid::Uuid,
-        _: std::time::Duration,
-    ) -> Result<bool> {
-        Ok(false)
-    }
-    async fn record_login_location(
-        &self,
-        _: ProfileId,
-        _: &str,
-        _: f64,
-        _: f64,
-        _: u32,
-    ) -> Result<()> {
-        Ok(())
-    }
-    async fn get_designated_countries(&self, _: ProfileId) -> Result<Vec<String>> {
-        Ok(vec![])
-    }
-
     // === REFRESH TOKEN ===
     async fn create_refresh_token(&self, _: &RefreshToken, _audit: MutationContext) -> Result<()> {
         unimplemented!()

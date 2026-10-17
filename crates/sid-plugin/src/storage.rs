@@ -32,7 +32,8 @@ use sid_core::models::{
 use uuid::Uuid;
 
 use crate::{
-    ClientResourceRegistry, CredentialStore, GrantStore, IssuerStore, PrincipalStore, WorkStore,
+    ClientResourceRegistry, CredentialStore, GrantStore, IssuerStore, PrincipalStore,
+    SignInHistoryStore, WorkStore,
 };
 
 /// The right to run one background job, exclusive across every instance on
@@ -77,6 +78,7 @@ pub trait StorageBackend:
     + GrantStore<Owner = ProfileId>
     + CredentialStore<Owner = ProfileId>
     + PrincipalStore<Owner = ProfileId>
+    + SignInHistoryStore<Owner = ProfileId>
     + Send
     + Sync
     + 'static
@@ -702,56 +704,6 @@ pub trait StorageBackend:
 
     /// List sessions for a profile.
     async fn list_sessions_by_profile(&self, profile_id: ProfileId) -> Result<Vec<Session>>;
-
-    /// Get the most recent session's IP address and timestamp for a profile.
-    ///
-    /// Used for impossible travel detection: resolves previous IP via GeoIP
-    /// to get lat/lon, then compares with current login location.
-    async fn get_most_recent_session_ip(
-        &self,
-        profile_id: ProfileId,
-    ) -> Result<Option<(String, chrono::DateTime<chrono::Utc>)>>;
-
-    /// Check if a profile has had a session from a given IP within the time window.
-    ///
-    /// Used for `new_ip` anomaly detection: returns `true` if the IP has been
-    /// seen before, `false` if the IP is new for this profile.
-    async fn has_recent_session_from_ip(
-        &self,
-        profile_id: ProfileId,
-        ip: &str,
-        window: std::time::Duration,
-    ) -> Result<bool>;
-
-    /// Check if a profile has had a session with a given device_id within the time window.
-    ///
-    /// Used for `new_device` anomaly detection: returns `true` if the device
-    /// has been seen before, `false` if the device is new for this profile.
-    async fn has_recent_session_from_device(
-        &self,
-        profile_id: ProfileId,
-        device_id: uuid::Uuid,
-        window: std::time::Duration,
-    ) -> Result<bool>;
-
-    /// Record a login location for designated location tracking.
-    ///
-    /// UPSERT per (profile_id, country): increments login_count, updates last_seen,
-    /// sets designated=true when login_count >= threshold (default 3).
-    async fn record_login_location(
-        &self,
-        profile_id: ProfileId,
-        country: &str,
-        latitude: f64,
-        longitude: f64,
-        designated_threshold: u32,
-    ) -> Result<()>;
-
-    /// Get designated countries for a profile (login_count >= threshold).
-    ///
-    /// Used by impossible travel rule to suppress false positives from
-    /// roaming/network switching between known locations.
-    async fn get_designated_countries(&self, profile_id: ProfileId) -> Result<Vec<String>>;
 
     // === REFRESH TOKEN OPERATIONS ===
 
