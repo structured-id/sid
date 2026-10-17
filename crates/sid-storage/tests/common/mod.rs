@@ -414,7 +414,7 @@ pub async fn test_session_save_and_get(backend: &dyn StorageBackend) {
     assert!(retrieved.is_some());
     let retrieved = retrieved.unwrap();
     assert_eq!(retrieved.id, session.id);
-    assert_eq!(retrieved.owner, profile.id);
+    assert_eq!(retrieved.profile_id, profile.id);
     assert_eq!(retrieved.ip_address, "127.0.0.1");
 }
 
@@ -3319,7 +3319,7 @@ pub async fn exchange_records(
         id: Uuid::now_v7(),
         token_hash: Uuid::now_v7().as_bytes().to_vec(),
         session_id: session.id,
-        owner: profile.id,
+        profile_id: profile.id,
         client_id: "test-client".to_string(),
         scopes: vec!["openid".into()],
         resource: application::grant_resource(backend).await,

@@ -33,7 +33,7 @@ fn refresh_token(session: &Session, hash: &[u8]) -> RefreshToken {
         id,
         token_hash: hash.to_vec(),
         session_id: session.id,
-        owner: session.owner,
+        profile_id: session.profile_id,
         client_id: "client".into(),
         scopes: vec!["openid".into()],
         resource: sid_core::models::ResourceId::generate(),

@@ -18,7 +18,7 @@ pub(super) async fn insert(
     .bind(token.id)
     .bind(&token.token_hash)
     .bind(token.session_id)
-    .bind(token.owner)
+    .bind(token.profile_id)
     .bind(&token.client_id)
     .bind(token.scopes.join(" "))
     .bind(token.expires_at)

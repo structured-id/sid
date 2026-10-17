@@ -1285,7 +1285,7 @@ impl IdentityService for IdentityServiceImpl {
                 .into_iter()
                 .map(|s| Session {
                     id: s.id.to_string(),
-                    profile_id: s.owner.to_string(),
+                    profile_id: s.profile_id.to_string(),
                     client_id: s.client_id.unwrap_or_default(),
                     device_id: s.device_id.map(|d| d.to_string()),
                     ip_address: s.ip_address,
@@ -1322,7 +1322,7 @@ impl IdentityService for IdentityServiceImpl {
             .map_err(storage_failure)?;
         // An ended session is already revoked: nothing to do, and nothing about it
         // is disclosed.
-        let Some(owner) = session.as_ref().map(|s| s.owner) else {
+        let Some(owner) = session.as_ref().map(|s| s.profile_id) else {
             return Ok(Response::new(RevokeSessionResponse {}));
         };
         caller.require_self_or_admin(owner)?;

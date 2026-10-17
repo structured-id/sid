@@ -127,7 +127,7 @@ pub async fn test_session_end_owes_client_logout(backend: &dyn StorageBackend) {
         .unwrap();
     let end = SessionEnd::new(RevocationReason::Admin, "admin-actor");
     let logout = |s: &Session| LogoutDelivery::for_ended_session(s).map(|l| l.work().id);
-    let revoked = |s: &Session| end.revoked_event(s.id, s.owner).relay().id;
+    let revoked = |s: &Session| end.revoked_event(s.id, s.profile_id).relay().id;
 
     let mut single = super::create_test_session(profile.id);
     single.client_id = Some(client.client_id.clone());
