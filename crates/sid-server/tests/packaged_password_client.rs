@@ -189,10 +189,10 @@ async fn login(
             server_login_state: response.server_login_state,
         })
         .await
-        .map_err(|e| e.to_string())?
-        .into_inner();
-    assert!(!done.access_token.is_empty());
-    Ok(done.access_token)
+        .map_err(|e| e.to_string())?;
+    // Over the network the token arrives as the `authorization` response
+    // header, the only place a native client receives it.
+    Ok(common::opaque_client::bearer(&done))
 }
 
 /// A published client must complete every password lifecycle step against

@@ -615,33 +615,59 @@ pub struct AuthServiceImpl {
     logout_confirmations: ChallengeStore<end_session::LogoutConfirmation>,
 }
 
-/// A session a sign-in ceremony created: its id, its access token and the
-/// token's lifetime, and the `Set-Cookie` value for a ceremony run on the
-/// browser sign-in page.
+/// Who completes a sign-in ceremony: the browser sign-in page or a native
+/// client. It decides how the session's credential is delivered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CeremonyClient {
+    /// The configured sign-in page: the credential is the HttpOnly session
+    /// cookie, and no access token is issued.
+    Browser,
+    /// A client without `Origin`: the access token in `authorization`
+    /// response metadata.
+    Native,
+}
+
+/// How a session's credential reaches its client, never in the message.
+enum Delivery {
+    /// The `Set-Cookie` value of the browser's session cookie.
+    Cookie(String),
+    /// The session's access token, sent as `authorization: Bearer`.
+    Bearer(secrecy::SecretString),
+}
+
+impl Delivery {
+    /// Put the credential into `metadata`.
+    #[allow(clippy::result_large_err)]
+    fn deliver(self, metadata: &mut tonic::metadata::MetadataMap) -> Result<(), Status> {
+        let (name, value) = match self {
+            Self::Cookie(cookie) => ("set-cookie", cookie),
+            Self::Bearer(token) => ("authorization", format!("Bearer {}", token.expose_secret())),
+        };
+        let mut value: tonic::metadata::MetadataValue<_> = value
+            .parse()
+            .map_err(|e| internal("encode session credential", e))?;
+        // A live credential: kept out of debug output and HPACK indexing.
+        value.set_sensitive(true);
+        metadata.insert(name, value);
+        Ok(())
+    }
+}
+
+/// A session a sign-in ceremony created: its id, the lifetime of the
+/// credential delivered, and that credential.
 struct SignedIn {
     session_id: String,
-    access_token: String,
     expires_in: i64,
-    cookie: Option<String>,
+    delivery: Delivery,
 }
 
 impl SignedIn {
-    /// The ceremony's answer `message` builds from the session id, access
-    /// token and its lifetime, carrying the cookie when there is one.
-    fn respond<T>(
-        self,
-        message: impl FnOnce(String, String, i64) -> T,
-    ) -> Result<Response<T>, Status> {
-        let mut response =
-            Response::new(message(self.session_id, self.access_token, self.expires_in));
-        if let Some(cookie) = self.cookie {
-            response.metadata_mut().insert(
-                "set-cookie",
-                cookie
-                    .parse()
-                    .map_err(|e| internal("encode session cookie", e))?,
-            );
-        }
+    /// The ceremony's answer `message` builds from the session id and the
+    /// credential's lifetime, its credential in the response metadata.
+    #[allow(clippy::result_large_err)]
+    fn respond<T>(self, message: impl FnOnce(String, i64) -> T) -> Result<Response<T>, Status> {
+        let mut response = Response::new(message(self.session_id, self.expires_in));
+        self.delivery.deliver(response.metadata_mut())?;
         Ok(response)
     }
 }
@@ -808,20 +834,37 @@ impl AuthServiceImpl {
         self
     }
 
-    /// Whether `metadata` is a request of the sign-in page: exactly one
-    /// `Origin`, equal to that page's. The check is the login-CSRF defence of
-    /// the cookie a ceremony sets; another caller gets no cookie.
-    fn is_sign_in_page_request(&self, metadata: &tonic::metadata::MetadataMap) -> bool {
-        let Some(allowed) = &self.sign_in_origin else {
-            return false;
-        };
+    /// Who completes a sign-in ceremony sent with `metadata`, and so how its
+    /// credential is delivered: a request without `Origin` is a native
+    /// client; a browser sends `Origin` on every such request (Fetch
+    /// §3.1), and only the sign-in page may complete one, by exactly one
+    /// `Origin` equal to that page's. Any other browser request, including
+    /// `null`, a repeated `Origin` or one with no sign-in page configured, is
+    /// refused rather than answered as a native client: it is the login-CSRF
+    /// defence of the cookie and keeps the token out of page scripts.
+    #[allow(clippy::result_large_err)]
+    fn ceremony_client(
+        &self,
+        metadata: &tonic::metadata::MetadataMap,
+    ) -> Result<CeremonyClient, Status> {
         let mut origins = metadata.get_all("origin").iter();
-        match (origins.next(), origins.next()) {
-            (Some(origin), None) => origin
-                .to_str()
-                .is_ok_and(|origin| sid_authn::browser_session::origin_is(origin, allowed)),
-            _ => false,
+        let Some(origin) = origins.next() else {
+            return Ok(CeremonyClient::Native);
+        };
+        let sign_in_page = origins.next().is_none()
+            && self.sign_in_origin.as_ref().is_some_and(|allowed| {
+                origin
+                    .to_str()
+                    .is_ok_and(|origin| sid_authn::browser_session::origin_is(origin, allowed))
+            });
+        if !sign_in_page {
+            return Err(ApiError::new(
+                ErrorReason::SignInRefused,
+                "a browser signs in only on the configured sign-in page",
+            )
+            .into());
         }
+        Ok(CeremonyClient::Browser)
     }
 
     /// Accept `code` for `secret` once: a wrong code and a code already
@@ -2496,15 +2539,14 @@ impl AuthServiceImpl {
     /// Sets `assurance_level` and `amr` from how the sign-in authenticated.
     /// The session records the client's address and device: the sign-in
     /// history the new-device rule compares later sign-ins with.
-    /// A ceremony `metadata` shows the sign-in page ran also gets the IdP
-    /// session cookie: a fresh secret whose hash the session stores.
+    /// Its credential goes to `client` as [`Self::sign_in`] delivers it.
     async fn create_session_and_issue_tokens(
         &self,
         profile: &sid_core::models::Profile,
         method: LoginMethod,
         device_id: Option<uuid::Uuid>,
         client_ip: Option<std::net::IpAddr>,
-        metadata: &tonic::metadata::MetadataMap,
+        client: CeremonyClient,
     ) -> Result<SignedIn, Status> {
         // The installation's absolute lifetime, when it sets one.
         let lifetime = match self.security_policy.session.max_lifetime_hours {
@@ -2516,10 +2558,6 @@ impl AuthServiceImpl {
             session_address(client_ip),
             Utc::now() + lifetime,
         );
-        let browser = self
-            .is_sign_in_page_request(metadata)
-            .then(sid_authn::browser_session::BrowserSecret::generate);
-        session.browser_secret_hash = browser.as_ref().map(|secret| secret.hash());
         session.device_id = device_id;
         session.scopes = vec![
             "openid".to_string(),
@@ -2529,19 +2567,7 @@ impl AuthServiceImpl {
         session.assurance_level =
             method.auth_level(self.security_policy.auth.passkey_satisfies_mfa);
         session.amr = method.amr();
-        let expires_at = session.expires_at;
-        let (session_id, access_token, expires_in) = self
-            .persist_session_and_issue_token(profile, session)
-            .await?;
-        Ok(SignedIn {
-            session_id,
-            access_token,
-            expires_in,
-            cookie: browser.map(|secret| {
-                self.browser_cookie
-                    .set(&secret, (expires_at - Utc::now()).num_seconds())
-            }),
-        })
+        self.sign_in(profile, session, client).await
     }
 
     /// Provisional session for a weak-possession login (email OTP, magic link):
@@ -2553,21 +2579,73 @@ impl AuthServiceImpl {
         amr: &str,
         device_id: Option<uuid::Uuid>,
         client_ip: Option<std::net::IpAddr>,
-    ) -> Result<(String, String, i64), Status> {
+        client: CeremonyClient,
+    ) -> Result<SignedIn, Status> {
         let mut session =
             sid_core::models::Session::new_provisional(profile.id, session_address(client_ip));
         session.device_id = device_id;
         session.amr = vec![amr.to_string()];
-        self.persist_session_and_issue_token(profile, session).await
+        self.sign_in(profile, session, client).await
     }
 
-    /// Store `session` under the concurrent-session limit, announce it and issue
-    /// its access token. Returns (session id, token, seconds until the token expires).
-    async fn persist_session_and_issue_token(
+    /// Store `session` and deliver its credential to `client`: the browser
+    /// sign-in page gets the IdP session cookie, a fresh secret whose hash
+    /// the session stores, and no access token; a native client gets the
+    /// session's access token.
+    async fn sign_in(
         &self,
         profile: &sid_core::models::Profile,
-        session: sid_core::models::Session,
-    ) -> Result<(String, String, i64), Status> {
+        mut session: sid_core::models::Session,
+        client: CeremonyClient,
+    ) -> Result<SignedIn, Status> {
+        match client {
+            CeremonyClient::Browser => {
+                let secret = sid_authn::browser_session::BrowserSecret::generate();
+                session.browser_secret_hash = Some(secret.hash());
+                self.persist_session(profile, &session).await?;
+                // The cookie lives as long as the session it names.
+                let expires_in = (session.expires_at - Utc::now()).num_seconds();
+                Ok(SignedIn {
+                    session_id: session.id.to_string(),
+                    expires_in,
+                    delivery: Delivery::Cookie(self.browser_cookie.set(&secret, expires_in)),
+                })
+            }
+            CeremonyClient::Native => {
+                self.persist_session(profile, &session).await?;
+                let sub = profile.id.to_string();
+                let access_token = self
+                    .jwt
+                    .issue_access_token(
+                        &sub,
+                        Some(&sub),
+                        profile,
+                        &session,
+                        &session.scopes,
+                        None,
+                        None,
+                    )
+                    .map_err(|e| internal("issue access token", e))?;
+                // The token expires with the session when the session is shorter.
+                let expires_in = self
+                    .jwt
+                    .access_token_ttl_secs()
+                    .min((session.expires_at - Utc::now()).num_seconds());
+                Ok(SignedIn {
+                    session_id: session.id.to_string(),
+                    expires_in,
+                    delivery: Delivery::Bearer(access_token.into()),
+                })
+            }
+        }
+    }
+
+    /// Store `session` under the concurrent-session limit and announce it.
+    async fn persist_session(
+        &self,
+        profile: &sid_core::models::Profile,
+        session: &sid_core::models::Session,
+    ) -> Result<(), Status> {
         // The storage counts, evicts and inserts in one serialized step, and
         // owes each evicted session's client a logout; the same commit owes
         // the session.created event.
@@ -2587,7 +2665,7 @@ impl AuthServiceImpl {
         .with_work(created.relay());
         let evicted = self
             .storage
-            .create_session_atomic(&session, max_sessions, ctx)
+            .create_session_atomic(session, max_sessions, ctx)
             .await
             .map_err(storage_failure)?;
         if !evicted.is_empty() {
@@ -2617,28 +2695,7 @@ impl AuthServiceImpl {
                     &[KeyValue::new("chain_scope", "session")],
                 );
         }
-
-        let sub = profile.id.to_string();
-        let access_token = self
-            .jwt
-            .issue_access_token(
-                &sub,
-                Some(&sub),
-                profile,
-                &session,
-                &session.scopes,
-                None,
-                None,
-            )
-            .map_err(|e| internal("issue access token", e))?;
-
-        // The token expires with the session when the session is shorter.
-        let expires_in = self
-            .jwt
-            .access_token_ttl_secs()
-            .min((session.expires_at - Utc::now()).num_seconds());
-
-        Ok((session.id.to_string(), access_token, expires_in))
+        Ok(())
     }
 
     /// SERVICE_MAINTENANCE while the installation is in maintenance mode.
@@ -2935,10 +2992,12 @@ impl AuthService for AuthServiceImpl {
         request: Request<OpaqueLoginFinishRequest>,
     ) -> Result<Response<OpaqueLoginFinishResponse>, Status> {
         self.check_maintenance().await?;
+        // Refused before the attempt is consumed.
+        let client = self.ceremony_client(request.metadata())?;
         let client_ip = self.client_ip(&request);
         let user_agent = extract_user_agent(request.metadata());
         let captcha_pass = extract_captcha_pass(request.metadata());
-        let (metadata, _, req) = request.into_parts();
+        let req = request.into_inner();
 
         // Retrieve login state
         let pending = self
@@ -3024,19 +3083,16 @@ impl AuthService for AuthServiceImpl {
                 LoginMethod::Password,
                 user_agent.as_deref().map(compute_device_id),
                 client_ip,
-                &metadata,
+                client,
             )
             .await?;
 
         info!("OPAQUE login for profile {}", profile.id);
 
-        signed_in.respond(
-            |session_id, access_token, expires_in| OpaqueLoginFinishResponse {
-                session_id,
-                access_token,
-                expires_in,
-            },
-        )
+        signed_in.respond(|session_id, expires_in| OpaqueLoginFinishResponse {
+            session_id,
+            expires_in,
+        })
     }
 
     // ── OPAQUE-ZKPP ──
@@ -3644,10 +3700,12 @@ impl AuthService for AuthServiceImpl {
         request: Request<WebAuthnAuthenticationFinishRequest>,
     ) -> Result<Response<WebAuthnAuthenticationFinishResponse>, Status> {
         self.check_maintenance().await?;
+        // Refused before the ceremony is consumed.
+        let client = self.ceremony_client(request.metadata())?;
         let client_ip = self.client_ip(&request);
         let user_agent = extract_user_agent(request.metadata());
         let captcha_pass = extract_captcha_pass(request.metadata());
-        let (metadata, _, req) = request.into_parts();
+        let req = request.into_inner();
 
         let not_an_assertion = || invalid_field("credential", "not a WebAuthn assertion");
 
@@ -3740,19 +3798,18 @@ impl AuthService for AuthServiceImpl {
                 },
                 user_agent.as_deref().map(compute_device_id),
                 client_ip,
-                &metadata,
+                client,
             )
             .await?;
 
         info!("WebAuthn login for profile {}", profile.id);
 
-        signed_in.respond(|session_id, access_token, expires_in| {
-            WebAuthnAuthenticationFinishResponse {
+        signed_in.respond(
+            |session_id, expires_in| WebAuthnAuthenticationFinishResponse {
                 session_id,
-                access_token,
                 expires_in,
-            }
-        })
+            },
+        )
     }
 
     // ── OAuth2 ──
@@ -4089,6 +4146,8 @@ impl AuthService for AuthServiceImpl {
     ) -> Result<Response<VerifyMagicLinkResponse>, Status> {
         self.check_maintenance().await?;
         let magic_link = self.require_magic_links()?;
+        // Refused before the link is consumed.
+        let client = self.ceremony_client(request.metadata())?;
         let client_ip = self.client_ip(&request);
         let user_agent = extract_user_agent(request.metadata());
         let captcha_pass = extract_captcha_pass(request.metadata());
@@ -4128,22 +4187,23 @@ impl AuthService for AuthServiceImpl {
 
                 // A mailed link, like a mailed code, is mailbox possession over
                 // a second channel: `mca` (RFC 8176 §2).
-                let (session_id, access_token, expires_in) = self
+                let signed_in = self
                     .create_provisional_session_and_issue_tokens(
                         &profile,
                         "mca",
                         user_agent.as_deref().map(compute_device_id),
                         client_ip,
+                        client,
                     )
                     .await?;
 
                 info!("Magic link verified for profile {}", profile.id);
 
-                Ok(Response::new(VerifyMagicLinkResponse {
+                signed_in.respond(|session_id, expires_in| VerifyMagicLinkResponse {
                     session_id,
-                    access_token,
+                    // A provisional session lasts minutes.
                     expires_in: expires_in as i32,
-                }))
+                })
             }
             sid_authn::magic_link::MagicLinkVerifyResult::InvalidToken => {
                 // Record IP-level failed attempt (no profile_id available for magic link failures).
@@ -4501,10 +4561,12 @@ impl AuthService for AuthServiceImpl {
         request: Request<LegacyMigrateFinishRequest>,
     ) -> Result<Response<LegacyMigrateFinishResponse>, Status> {
         self.check_maintenance().await?;
+        // Refused before the migration is consumed.
+        let client = self.ceremony_client(request.metadata())?;
         let client_ip = self.client_ip(&request);
         let user_agent = extract_user_agent(request.metadata());
         let captcha_pass = extract_captcha_pass(request.metadata());
-        let (metadata, _, req) = request.into_parts();
+        let req = request.into_inner();
 
         // Retrieve migration state
         let migration = self
@@ -4604,7 +4666,7 @@ impl AuthService for AuthServiceImpl {
                 LoginMethod::Password,
                 user_agent.as_deref().map(compute_device_id),
                 client_ip,
-                &metadata,
+                client,
             )
             .await?;
 
@@ -4613,13 +4675,10 @@ impl AuthService for AuthServiceImpl {
             migration.profile_id
         );
 
-        signed_in.respond(
-            |session_id, access_token, expires_in| LegacyMigrateFinishResponse {
-                session_id,
-                access_token,
-                expires_in,
-            },
-        )
+        signed_in.respond(|session_id, expires_in| LegacyMigrateFinishResponse {
+            session_id,
+            expires_in,
+        })
     }
 
     #[instrument(skip_all, fields(method = "get_zkpp_policy"))]
@@ -4902,14 +4961,20 @@ impl AuthService for AuthServiceImpl {
 
         info!("TOTP step-up verified for profile {}", profile_id);
 
-        Ok(Response::new(MfaVerifyResponse {
+        // The caller presented the session's token, so the elevated one goes
+        // back the same way, whoever it is (a native client or a BFF).
+        SignedIn {
+            session_id: session_id.to_string(),
+            expires_in: self.jwt.access_token_ttl_secs(),
+            delivery: Delivery::Bearer(access_token.into()),
+        }
+        .respond(|session_id, expires_in| MfaVerifyResponse {
             verified: true,
-            session_id: Some(session_id.to_string()),
-            access_token: Some(access_token),
-            expires_in: Some(self.jwt.access_token_ttl_secs()),
+            session_id: Some(session_id),
+            expires_in: Some(expires_in),
             redirect_to: None,
             remaining_codes: None,
-        }))
+        })
     }
 
     // ── MFA: SMS ──
@@ -5027,7 +5092,7 @@ impl AuthService for AuthServiceImpl {
         Ok(Response::new(MfaVerifyResponse {
             verified: true,
             session_id: Some(session_id.to_string()),
-            access_token: None, // Recovery doesn't elevate — no new token needed.
+            // Recovery doesn't elevate: no new token is delivered.
             expires_in: None,
             redirect_to: None,
             remaining_codes: Some(remaining),
@@ -5084,6 +5149,8 @@ impl AuthService for AuthServiceImpl {
         request: Request<VerifyOtpRequest>,
     ) -> Result<Response<VerifyOtpResponse>, Status> {
         self.check_maintenance().await?;
+        // Refused before the code is spent.
+        let client = self.ceremony_client(request.metadata())?;
         let client_ip = self.client_ip(&request);
         let user_agent = extract_user_agent(request.metadata());
         let captcha_pass = extract_captcha_pass(request.metadata());
@@ -5120,24 +5187,24 @@ impl AuthService for AuthServiceImpl {
 
                 // An emailed code confirms the address over a second channel:
                 // `mca` (RFC 8176 §2), not `otp`, which names a code generator.
-                let (session_id, access_token, expires_in) = self
+                let signed_in = self
                     .create_provisional_session_and_issue_tokens(
                         &profile,
                         "mca",
                         user_agent.as_deref().map(compute_device_id),
                         client_ip,
+                        client,
                     )
                     .await?;
 
                 info!("OTP verified for profile {}", profile.id);
 
-                Ok(Response::new(VerifyOtpResponse {
+                signed_in.respond(|session_id, expires_in| VerifyOtpResponse {
                     verified: true,
                     redirect_to: None,
                     session_id: Some(session_id),
-                    access_token: Some(access_token),
                     expires_in: Some(expires_in),
-                }))
+                })
             }
             sid_authn::otp::OtpVerifyResult::InvalidCode { remaining_attempts } => {
                 self.record_ip_attempt(client_ip).await?;
@@ -5964,9 +6031,11 @@ impl AuthService for AuthServiceImpl {
         &self,
         request: Request<CompletePasswordResetRequest>,
     ) -> Result<Response<CompletePasswordResetResponse>, Status> {
+        // Refused before the reset is consumed.
+        let client = self.ceremony_client(request.metadata())?;
         let client_ip = self.client_ip(&request);
-        let (metadata, _, req) = request.into_parts();
-        let user_agent = extract_user_agent(&metadata);
+        let user_agent = extract_user_agent(request.metadata());
+        let req = request.into_inner();
         let zkpp = self.require_zkpp()?;
 
         let session = self.verified_reset_session(&req.reset_session_id).await?;
@@ -6052,7 +6121,7 @@ impl AuthService for AuthServiceImpl {
 
         // 4. The reset proved only the mailbox. An account protected by more
         //    than a password is not signed in by it: the new password still
-        //    has to pass the account's second factor at sign-in. The empty
+        //    has to pass the account's second factor at sign-in. The absent
         //    session fields say "password replaced, sign in".
         let active: Vec<Credential> = self
             .storage
@@ -6071,11 +6140,7 @@ impl AuthService for AuthServiceImpl {
                 "Password reset completed for profile {}; sign-in left to its second factor",
                 profile_id
             );
-            return Ok(Response::new(CompletePasswordResetResponse {
-                session_id: String::new(),
-                access_token: String::new(),
-                expires_in: 0,
-            }));
+            return Ok(Response::new(CompletePasswordResetResponse::default()));
         }
 
         // 5. The reset's sign-in is a sign-in like any other: its session
@@ -6092,19 +6157,18 @@ impl AuthService for AuthServiceImpl {
                 LoginMethod::Password,
                 user_agent.as_deref().map(compute_device_id),
                 client_ip,
-                &metadata,
+                client,
             )
             .await?;
 
         info!("Password reset completed for profile {}", profile_id);
 
-        signed_in.respond(
-            |session_id, access_token, expires_in| CompletePasswordResetResponse {
-                session_id,
-                access_token,
-                expires_in: expires_in as i32,
-            },
-        )
+        let expires_in = i32::try_from(signed_in.expires_in)
+            .map_err(|e| internal("session lifetime beyond the response field", e))?;
+        signed_in.respond(|session_id, _| CompletePasswordResetResponse {
+            session_id: Some(session_id),
+            expires_in: Some(expires_in),
+        })
     }
 }
 
