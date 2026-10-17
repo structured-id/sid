@@ -8,7 +8,7 @@
 
 use sid_core::models::{AuditEntry, InstanceSecret};
 use sid_keys::KeyManager;
-use sid_plugin::StorageBackend;
+use sid_plugin::InstanceSecretStore;
 use zeroize::Zeroizing;
 
 use crate::sealed_secret::{self, SealedSecretError};
@@ -37,7 +37,7 @@ pub fn context(secret: InstanceSecret) -> String {
 /// The stored value of `secret`, created with `create` and stored first when
 /// this is the instance's first start.
 pub async fn load_or_create<E, F>(
-    storage: &dyn StorageBackend,
+    storage: &dyn InstanceSecretStore,
     keys: &dyn KeyManager,
     secret: InstanceSecret,
     create: F,

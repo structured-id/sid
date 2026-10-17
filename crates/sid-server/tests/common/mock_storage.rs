@@ -1267,6 +1267,41 @@ impl GrantStore for MockStorage {
 }
 
 #[async_trait]
+impl sid_plugin::InstanceSecretStore for MockStorage {
+    async fn get_instance_secret(
+        &self,
+        secret: sid_core::models::InstanceSecret,
+    ) -> SidResult<Option<Vec<u8>>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .instance_secrets
+            .get(&secret)
+            .cloned())
+    }
+
+    async fn insert_instance_secret(
+        &self,
+        secret: sid_core::models::InstanceSecret,
+        sealed: &[u8],
+        _audit: MutationContext,
+    ) -> SidResult<bool> {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.centrally_managed && secret == sid_core::models::InstanceSecret::AdminClaim {
+            return Err(sid_core::Error::InvalidState(
+                "centrally managed installation: no administrator claim".into(),
+            ));
+        }
+        if inner.instance_secrets.contains_key(&secret) {
+            return Ok(false);
+        }
+        inner.instance_secrets.insert(secret, sealed.to_vec());
+        Ok(true)
+    }
+}
+
+#[async_trait]
 impl sid_plugin::SignInHistoryStore for MockStorage {
     type Owner = ProfileId;
 
@@ -3059,38 +3094,6 @@ impl StorageBackend for MockStorage {
             return Ok(false);
         }
         inner.key_versions.push(params.clone());
-        Ok(true)
-    }
-
-    async fn get_instance_secret(
-        &self,
-        secret: sid_core::models::InstanceSecret,
-    ) -> SidResult<Option<Vec<u8>>> {
-        Ok(self
-            .inner
-            .lock()
-            .unwrap()
-            .instance_secrets
-            .get(&secret)
-            .cloned())
-    }
-
-    async fn insert_instance_secret(
-        &self,
-        secret: sid_core::models::InstanceSecret,
-        sealed: &[u8],
-        _audit: MutationContext,
-    ) -> SidResult<bool> {
-        let mut inner = self.inner.lock().unwrap();
-        if inner.centrally_managed && secret == sid_core::models::InstanceSecret::AdminClaim {
-            return Err(sid_core::Error::InvalidState(
-                "centrally managed installation: no administrator claim".into(),
-            ));
-        }
-        if inner.instance_secrets.contains_key(&secret) {
-            return Ok(false);
-        }
-        inner.instance_secrets.insert(secret, sealed.to_vec());
         Ok(true)
     }
 

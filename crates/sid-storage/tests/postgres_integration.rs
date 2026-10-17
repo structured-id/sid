@@ -9,6 +9,7 @@
 mod common;
 
 use sid_plugin::AuditLog;
+use sid_plugin::InstanceSecretStore;
 use sid_plugin::storage::StorageBackend;
 use sid_storage::PostgresBackend;
 
@@ -357,6 +358,30 @@ macro_rules! credential_store_isolated {
             .await;
         }
     )*};
+}
+
+// ─── Instance secret conformance ───
+
+/// Run instance secret conformance `scenario` in a schema of its own:
+/// instance secrets are database-wide.
+macro_rules! instance_secret_store {
+    ($($scenario:ident),* $(,)?) => {$(
+        #[tokio::test]
+        async fn $scenario() {
+            let (backend, _) = isolated("instance_secret").await;
+            sid_plugin::conformance::instance_secret_store::$scenario(&backend).await;
+        }
+    )*};
+}
+
+mod instance_secret_store {
+    use super::*;
+
+    instance_secret_store!(
+        secret_is_absent_until_stored,
+        first_value_is_kept,
+        concurrent_inserts_agree,
+    );
 }
 
 // ─── Sign-in history conformance ───
@@ -1161,11 +1186,6 @@ async fn test_key_version_insert_once() {
 #[tokio::test]
 async fn test_key_version_concurrent_insert() {
     common::test_key_version_concurrent_insert(&setup().await).await;
-}
-
-#[tokio::test]
-async fn test_instance_secret_insert_once() {
-    common::test_instance_secret_insert_once(&setup().await).await;
 }
 
 /// A migrated schema of its own, for a scenario about the installation as a

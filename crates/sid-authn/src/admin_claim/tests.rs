@@ -3,6 +3,7 @@
 use super::*;
 use crate::test_support::key_manager;
 use sid_core::models::Profile;
+use sid_plugin::InstanceSecretStore;
 use sid_storage::sqlite::SqliteBackend;
 
 async fn storage() -> SqliteBackend {

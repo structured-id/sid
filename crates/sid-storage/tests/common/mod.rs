@@ -3151,44 +3151,6 @@ pub async fn test_key_version_concurrent_insert(backend: &dyn StorageBackend) {
     assert_eq!(ours.salt, winner.salt);
 }
 
-/// An instance secret is written once: of concurrent starters at most one
-/// insert wins (none when an earlier start already stored it), every later
-/// insert writes nothing, and all of them read back the same stored value.
-pub async fn test_instance_secret_insert_once(backend: &dyn StorageBackend) {
-    use sid_core::models::InstanceSecret;
-    let secret = InstanceSecret::OpaqueServerSetup;
-    let before = backend.get_instance_secret(secret).await.unwrap();
-    let (a, b) = (
-        Uuid::now_v7().as_bytes().to_vec(),
-        Uuid::now_v7().as_bytes().to_vec(),
-    );
-    let (ra, rb) = tokio::join!(
-        backend.insert_instance_secret(secret, &a, test_audit()),
-        backend.insert_instance_secret(secret, &b, test_audit()),
-    );
-    let (ra, rb) = (ra.unwrap(), rb.unwrap());
-    assert!(!(ra && rb), "two inserts of one secret both won");
-
-    let stored = backend.get_instance_secret(secret).await.unwrap().unwrap();
-    match (&before, ra, rb) {
-        (Some(earlier), false, false) => assert_eq!(&stored, earlier),
-        (None, true, false) => assert_eq!(stored, a),
-        (None, false, true) => assert_eq!(stored, b),
-        other => panic!("inconsistent insert outcome: {other:?}"),
-    }
-    let late = Uuid::now_v7().as_bytes().to_vec();
-    assert!(
-        !backend
-            .insert_instance_secret(secret, &late, test_audit())
-            .await
-            .unwrap()
-    );
-    assert_eq!(
-        backend.get_instance_secret(secret).await.unwrap().unwrap(),
-        stored
-    );
-}
-
 /// Paging credentials of one type visits each of them once, in id order,
 /// and nothing of another type.
 pub async fn test_list_credentials_by_type_pages(backend: &dyn StorageBackend) {
