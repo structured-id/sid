@@ -23,6 +23,7 @@ use sid_authn::oauth2::{IdTokenSource, OAuth2Server, TokenError};
 use sid_authn::opaque::OpaqueRouter;
 use sid_authn::opaque_zkpp::ZkppOpaqueServer;
 use sid_authn::otp::OtpService;
+use sid_authn::password_sign_in::PendingSignIn;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::revocation_cascade::RevocationCascadeService;
 use sid_authn::subject::{SubjectRule, resolve_subject};
@@ -47,7 +48,7 @@ use sid_core::models::{
     RevocationReason,
 };
 use sid_plugin::cache::CacheBackend;
-use sid_plugin::crypto::{LoginState, StoredCredential};
+use sid_plugin::crypto::StoredCredential;
 use sid_plugin::storage::StorageBackend;
 use sid_proto::sid::v1::auth_service_server::AuthService;
 use sid_proto::sid::v1::*;
@@ -66,10 +67,12 @@ use sid_core::grpc_error::refuse::{
 
 mod authorize;
 mod end_session;
+mod password_sign_in;
 mod refusal;
 mod token_grant;
 pub(crate) use authorize::{BrowserAuthorization, PendingAuthorization};
 pub(crate) use end_session::{EndSession, LogoutRequest};
+use password_sign_in::ProfileSignIn;
 use refusal::{
     anomaly_unavailable, authentication_failed, captcha_required, ceremony_expired,
     enrollment_requirement, mfa_not_enrolled, registration_restricted, session_ended,
@@ -2819,91 +2822,18 @@ impl AuthService for AuthServiceImpl {
         request: Request<OpaqueLoginStartRequest>,
     ) -> Result<Response<OpaqueLoginStartResponse>, Status> {
         self.check_maintenance().await?;
+        let host = ProfileSignIn {
+            service: self,
+            client_ip: self.client_ip(&request),
+        };
         let req = request.into_inner();
-
-        // Anti-enumeration: a start that cannot succeed is answered like a
-        // real one (decoy), never refused early. Failed attempts count against
-        // the profile when one holds the principal, else against the principal.
-        let profile = self.resolve_profile_optional(&req.principal).await?;
-        let identity = profile
-            .as_ref()
-            .map_or_else(|| req.principal.clone(), |p| p.id.to_string());
-        self.refuse_if_locked(&identity).await?;
-
-        let Some(profile) = profile else {
-            return Ok(Response::new(
-                self.decoy_login_start(&req.principal, &req.credential_request, identity)
-                    .await?,
-            ));
-        };
-
-        // Get OPAQUE credential
-        let credentials = self
-            .storage
-            .get_credentials_by_profile(profile.id, Some(CredentialType::Opaque))
-            .await
-            .map_err(storage_failure)?;
-
-        // Storage keeps at most one active OPAQUE credential per profile; revoked
-        // rows stay for history and never authenticate.
-        let opaque_cred = match credentials.iter().find(|c| c.status.is_active()) {
-            Some(cred) => cred,
-            None => {
-                // No OPAQUE credential — check for legacy hash (migration case)
-                let legacy = self
-                    .storage
-                    .get_credentials_by_profile(profile.id, Some(CredentialType::LegacyHash))
-                    .await
-                    .map_err(storage_failure)?;
-
-                if !legacy.is_empty() {
-                    return Err(ApiError::new(
-                        ErrorReason::LegacyMigrationRequired,
-                        "the password must be migrated before signing in",
-                    )
-                    .with_precondition(
-                        "legacy_migration",
-                        "credential",
-                        "complete the password migration flow",
-                    )
-                    .into());
-                }
-                // A profile without a password (passkey-only, provisioned)
-                // is answered like an unknown principal.
-                return Ok(Response::new(
-                    self.decoy_login_start(&req.principal, &req.credential_request, identity)
-                        .await?,
-                ));
-            }
-        };
-
-        let credential_id = opaque_cred.opaque_credential_identifier();
-        let stored_cred = self.stored_password(opaque_cred).await?;
-        let (credential_response, login_state) = self
-            .opaque_router
-            // An ordinary sign-in has the empty context.
-            .login_start(&stored_cred, &req.credential_request, &credential_id, &[])
-            .map_err(|e| {
-                warn!("OPAQUE login start failed for {}: {}", req.principal, e);
-                authentication_failed()
-            })?;
-
-        // Store login state server-side, return key to client
-        let state_key = uuid::Uuid::now_v7().to_string();
-        self.login_state
-            .insert(
-                &state_key,
-                &PendingLogin::Password {
-                    state: login_state,
-                    profile_id: profile.id,
-                    credential_id: opaque_cred.id,
-                },
-            )
-            .await?;
-
+        let started =
+            sid_authn::password_sign_in::start(&host, &req.principal, &req.credential_request)
+                .await
+                .map_err(|e| e.0)?;
         Ok(Response::new(OpaqueLoginStartResponse {
-            credential_response,
-            server_login_state: state_key,
+            credential_response: started.credential_response,
+            server_login_state: started.state_key,
         }))
     }
 
@@ -2921,71 +2851,18 @@ impl AuthService for AuthServiceImpl {
         let captcha_pass = extract_captcha_pass(request.metadata());
         let req = request.into_inner();
 
-        // Retrieve login state
-        let pending = self
-            .login_state
-            .take(&req.server_login_state)
-            .await?
-            .ok_or_else(|| ceremony_expired("sign-in"))?;
-        let (login_state, profile_id, credential_id) = match pending {
-            PendingLogin::Password {
-                state,
-                profile_id,
-                credential_id,
-            } => (state, profile_id, credential_id),
-            PendingLogin::Decoy { identity } => {
-                // A lockout reached while this attempt was in flight answers
-                // the same here as for a real account.
-                self.refuse_if_locked(&identity).await?;
-                self.record_failed_login(&identity, client_ip).await?;
-                return Err(authentication_failed());
-            }
+        let host = ProfileSignIn {
+            service: self,
+            client_ip,
         };
-        // Checked before the password: during a lockout a right and a wrong
-        // password get the same answer.
-        self.refuse_if_locked(&profile_id.to_string()).await?;
-
-        // Verify OPAQUE login
-        let _session_key =
-            match self
-                .opaque_router
-                .login_finish(&login_state, &req.credential_finalization, &[])
-            {
-                Ok(key) => key,
-                Err(e) => {
-                    warn!("OPAQUE login finish failed: {}", e);
-                    self.record_failed_login(&profile_id.to_string(), client_ip)
-                        .await?;
-                    return Err(authentication_failed());
-                }
-            };
-
-        // A profile deleted while the sign-in was in flight signs nobody in.
-        let profile = self
-            .storage
-            .get_profile(profile_id)
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(authentication_failed)?;
-
-        // The password this login used must still be active: one revoked while
-        // the login was in flight neither signs in nor comes back to active.
-        let still_active = self
-            .storage
-            .mark_credential_used(
-                credential_id,
-                AuditEntry::user(
-                    profile.id.to_string(),
-                    "credential.used",
-                    credential_id.0.to_string(),
-                )
-                .into(),
-            )
-            .await
-            .map_err(storage_failure)?;
-        if !still_active {
-            return Err(authentication_failed());
-        }
+        let profile = sid_authn::password_sign_in::finish(
+            &host,
+            &req.server_login_state,
+            &req.credential_finalization,
+        )
+        .await
+        .map_err(|e| e.0)?
+        .account;
         // Evaluate login security (anomaly detection + policy enforcement).
         self.evaluate_login_security(
             profile.id,
