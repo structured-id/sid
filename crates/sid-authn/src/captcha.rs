@@ -490,11 +490,14 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 // Captcha gate: who a challenge was asked of, and the pass it earns
 // ──────────────────────────────────────────────────────────────────────
 
-/// The sign-in a CAPTCHA was asked for: the profile whose credentials were
+/// The sign-in a CAPTCHA was asked for: the account whose credentials were
 /// presented and the client address they came from.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CaptchaSubject {
-    pub profile_id: sid_core::models::ProfileId,
+    /// The account, as its authority names it. Stored under the name the
+    /// challenges in flight already carry.
+    #[serde(rename = "profile_id")]
+    pub account: String,
     pub client_ip: Option<IpAddr>,
 }
 
