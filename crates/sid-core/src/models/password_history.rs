@@ -157,9 +157,9 @@ pub struct HistoryEpochDescriptor {
 /// the credential service's snapshot of the selection it committed, never a
 /// second retirement authority: the evaluator alone retires an epoch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HistoryEpoch {
+pub struct HistoryEpoch<O = ProfileId> {
     pub id: HistoryEpochId,
-    pub owner: ProfileId,
+    pub owner: O,
     pub suite: HistorySuite,
     /// The evaluator's public key `k·G`: a compressed Pallas point.
     pub public_key: [u8; 32],
@@ -171,7 +171,7 @@ pub struct HistoryEpoch {
     pub created_at: DateTime<Utc>,
 }
 
-impl HistoryEpoch {
+impl<O> HistoryEpoch<O> {
     /// The epoch's immutable public description.
     pub fn descriptor(&self) -> HistoryEpochDescriptor {
         HistoryEpochDescriptor {
@@ -251,18 +251,29 @@ pub struct HistoryEvidence {
 
 /// An owner's history as the checker reads it: the revision it was read at,
 /// every epoch not retired, and every retained entry.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct PasswordHistory {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PasswordHistory<O = ProfileId> {
     /// Moves on every write to this owner's history; a commit names the
     /// revision its comparison was made against and fails if it moved.
     pub revision: i64,
-    pub epochs: Vec<HistoryEpoch>,
+    pub epochs: Vec<HistoryEpoch<O>>,
     pub entries: Vec<HistoryEntry>,
 }
 
-impl PasswordHistory {
+/// An owner without history: revision 0, nothing in it.
+impl<O> Default for PasswordHistory<O> {
+    fn default() -> Self {
+        Self {
+            revision: 0,
+            epochs: Vec::new(),
+            entries: Vec::new(),
+        }
+    }
+}
+
+impl<O> PasswordHistory<O> {
     /// The epoch new entries go under, if the owner has one.
-    pub fn active_epoch(&self) -> Option<&HistoryEpoch> {
+    pub fn active_epoch(&self) -> Option<&HistoryEpoch<O>> {
         self.epochs
             .iter()
             .find(|e| e.status == HistoryEpochUse::Active)
@@ -271,8 +282,8 @@ impl PasswordHistory {
     /// The epochs a new password must be compared in, in the order the
     /// operation lists them: the active one first, then each compare-only
     /// epoch that still retains an entry. The client cannot choose these.
-    pub fn required_epochs(&self) -> Vec<&HistoryEpoch> {
-        let mut required: Vec<&HistoryEpoch> = self.active_epoch().into_iter().collect();
+    pub fn required_epochs(&self) -> Vec<&HistoryEpoch<O>> {
+        let mut required: Vec<&HistoryEpoch<O>> = self.active_epoch().into_iter().collect();
         required.extend(self.epochs.iter().filter(|e| {
             e.status == HistoryEpochUse::CompareOnly
                 && self.entries.iter().any(|entry| entry.epoch == e.id)
@@ -321,7 +332,7 @@ pub struct HistoryLiveSet {
 
 impl HistoryLiveSet {
     /// The live set of `history`, as read in one snapshot.
-    pub fn of(history: &PasswordHistory) -> Self {
+    pub fn of<O>(history: &PasswordHistory<O>) -> Self {
         let live: std::collections::BTreeSet<HistoryEpochId> =
             history.entries.iter().map(|e| e.epoch).collect();
         let settled: std::collections::BTreeSet<Uuid> = history
