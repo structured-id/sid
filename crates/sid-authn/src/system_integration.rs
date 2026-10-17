@@ -274,7 +274,7 @@ fn new_integration(
         show_federation_button: true,
         federation_timeout_ms: 500,
         unified_input: false,
-        org_id: Some(issuer.recipient_org),
+        org_id: Some(issuer.recipient),
         revision: 0,
         created_at: now,
     };

@@ -2,6 +2,9 @@
 //! Issuer store capability: the OIDC issuers a token service signs as and
 //! their signing keys. A host that keeps only authorization-server state
 //! provides this without the rest of [`crate::StorageBackend`].
+//!
+//! `R` is the issuer's recipient as the host types it: an organization in the
+//! organizational stores, the host's own recipient elsewhere.
 
 use async_trait::async_trait;
 use sid_core::Result;
@@ -10,24 +13,27 @@ use sid_core::models::{
 };
 
 #[async_trait]
-pub trait IssuerStore: Send + Sync {
-    /// The issuer of `authority` for `recipient_org`, once provisioned.
+pub trait IssuerStore<R = OrgId>: Send + Sync
+where
+    R: Send + Sync + 'static,
+{
+    /// The issuer of `authority` for `recipient`, once provisioned.
     async fn oidc_issuer_for(
         &self,
         authority: IssuerAuthority,
-        recipient_org: OrgId,
-    ) -> Result<Option<OidcIssuer>>;
+        recipient: &R,
+    ) -> Result<Option<OidcIssuer<R>>>;
 
     /// The issuer named by `handle`.
-    async fn oidc_issuer_by_handle(&self, handle: &IssuerHandle) -> Result<Option<OidcIssuer>>;
+    async fn oidc_issuer_by_handle(&self, handle: &IssuerHandle) -> Result<Option<OidcIssuer<R>>>;
 
     /// Store `issuer` with its generation-1 signing key in one transaction.
-    /// Returns `false`, writing nothing, when its authority and organization
+    /// Returns `false`, writing nothing, when its authority and recipient
     /// already have an issuer: concurrent provisioners agree on the first.
     /// A key of another issuer or generation is a validation error.
     async fn insert_oidc_issuer(
         &self,
-        issuer: &OidcIssuer,
+        issuer: &OidcIssuer<R>,
         first_key: &IssuerSigningKey,
         ctx: MutationContext,
     ) -> Result<bool>;

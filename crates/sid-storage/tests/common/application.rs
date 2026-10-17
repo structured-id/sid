@@ -25,7 +25,7 @@ pub async fn instance_issuer(backend: &dyn StorageBackend) -> IssuerId {
         canonical_url: format!("https://sid.example.com/i/{handle}"),
         handle,
         authority: IssuerAuthority::Local,
-        recipient_org: org,
+        recipient: org,
         created_at: now,
     };
     let key = IssuerSigningKey {
@@ -41,7 +41,7 @@ pub async fn instance_issuer(backend: &dyn StorageBackend) -> IssuerId {
         .await
         .unwrap();
     backend
-        .oidc_issuer_for(IssuerAuthority::Local, org)
+        .oidc_issuer_for(IssuerAuthority::Local, &org)
         .await
         .unwrap()
         .unwrap()

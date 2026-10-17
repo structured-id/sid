@@ -63,16 +63,23 @@ pub fn issuer_url(base: &Url, handle: &IssuerHandle) -> SidResult<String> {
     ))
 }
 
-/// The installation's own issuer for `org`, created with its first signing
-/// key under `base` on the first start. A later start keeps the stored one,
-/// whatever `base` it is given: the issuer URL changes only by migration.
-pub async fn ensure_local_issuer(
-    storage: &dyn IssuerStore,
+/// The installation's own issuer for `recipient` (its organization, or the
+/// host's own recipient), created with its first signing key under `base` on
+/// the first start. A later start keeps the stored one, whatever `base` it is
+/// given: the issuer URL changes only by migration.
+pub async fn ensure_local_issuer<R>(
+    storage: &dyn IssuerStore<R>,
     keys: &dyn KeyManager,
     base: &Url,
-    org: OrgId,
-) -> SidResult<OidcIssuer> {
-    if let Some(issuer) = storage.oidc_issuer_for(IssuerAuthority::Local, org).await? {
+    recipient: R,
+) -> SidResult<OidcIssuer<R>>
+where
+    R: Send + Sync + 'static,
+{
+    if let Some(issuer) = storage
+        .oidc_issuer_for(IssuerAuthority::Local, &recipient)
+        .await?
+    {
         return Ok(issuer);
     }
     let handle = IssuerHandle::generate();
@@ -81,10 +88,10 @@ pub async fn ensure_local_issuer(
         canonical_url: issuer_url(base, &handle)?,
         handle,
         authority: IssuerAuthority::Local,
-        recipient_org: org,
+        recipient,
         created_at: chrono::Utc::now(),
     };
-    let first_key = new_signing_key(keys, &issuer, 1).await?;
+    let first_key = new_signing_key(keys, issuer.id, 1).await?;
     // Replicas starting together race here: the first insert is kept and
     // every one of them reads that one back below.
     storage
@@ -95,7 +102,7 @@ pub async fn ensure_local_issuer(
         )
         .await?;
     storage
-        .oidc_issuer_for(IssuerAuthority::Local, org)
+        .oidc_issuer_for(IssuerAuthority::Local, &issuer.recipient)
         .await?
         .ok_or_else(|| SidError::Storage("oidc issuer missing right after it was stored".into()))
 }
@@ -256,7 +263,7 @@ async fn ensure_issuer_resource(
 /// half sealed under `keys`.
 async fn new_signing_key(
     keys: &dyn KeyManager,
-    issuer: &OidcIssuer,
+    issuer: IssuerId,
     generation: u32,
 ) -> SidResult<IssuerSigningKey> {
     let mut seed = Zeroizing::new([0u8; 32]);
@@ -266,13 +273,13 @@ async fn new_signing_key(
     let public_key = SigningKey::from_bytes(&seed).verifying_key().to_bytes();
     let sealed_private_key = sealed_secret::seal(
         keys,
-        &IssuerSigningKey::sealing_context(issuer.id, generation),
+        &IssuerSigningKey::sealing_context(issuer, generation),
         seed.as_ref(),
     )
     .await
     .map_err(|e| SidError::Internal(format!("sealing issuer signing key: {e}")))?;
     Ok(IssuerSigningKey {
-        issuer_id: issuer.id,
+        issuer_id: issuer,
         generation,
         key_id: key_id(&public_key),
         public_key,
@@ -288,15 +295,15 @@ fn key_id(public_key: &[u8; 32]) -> String {
 
 /// Signs tokens as one issuer, with its current key, and publishes the
 /// issuer's public keys.
-pub struct IssuerSigner {
-    issuer: OidcIssuer,
+pub struct IssuerSigner<R = OrgId> {
+    issuer: OidcIssuer<R>,
     generation: u32,
     key_id: String,
     encoding_key: EncodingKey,
     jwks: JwkSet,
 }
 
-impl std::fmt::Debug for IssuerSigner {
+impl<R> std::fmt::Debug for IssuerSigner<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IssuerSigner")
             .field("issuer", &self.issuer.canonical_url)
@@ -306,25 +313,27 @@ impl std::fmt::Debug for IssuerSigner {
     }
 }
 
-impl IssuerSigner {
+impl<R: Send + Sync + 'static> IssuerSigner<R> {
     /// The signer of `issuer`, opening its highest-generation key.
     ///
     /// Fails when the issuer has no key or its key cannot be opened (a
     /// restore without the master key): no replacement key is created, so
     /// no token is ever signed by a key the issuer's published set lacks.
     pub async fn load(
-        storage: &dyn IssuerStore,
+        storage: &dyn IssuerStore<R>,
         keys: &dyn KeyManager,
-        issuer: OidcIssuer,
+        issuer: OidcIssuer<R>,
     ) -> SidResult<Self> {
         let stored = storage.oidc_issuer_signing_keys(issuer.id).await?;
         Self::open(keys, issuer, &stored).await
     }
+}
 
+impl<R> IssuerSigner<R> {
     /// The signer of `issuer` over its `stored` keys, oldest generation first.
     async fn open(
         keys: &dyn KeyManager,
-        issuer: OidcIssuer,
+        issuer: OidcIssuer<R>,
         stored: &[IssuerSigningKey],
     ) -> SidResult<Self> {
         let current = stored.last().ok_or_else(|| {
@@ -378,7 +387,7 @@ impl IssuerSigner {
         })
     }
 
-    pub fn issuer(&self) -> &OidcIssuer {
+    pub fn issuer(&self) -> &OidcIssuer<R> {
         &self.issuer
     }
 
@@ -400,7 +409,7 @@ impl IssuerSigner {
     }
 }
 
-impl crate::jwt::TokenSigner for IssuerSigner {
+impl<R: Send + Sync> crate::jwt::TokenSigner for IssuerSigner<R> {
     fn iss(&self) -> &str {
         &self.issuer.canonical_url
     }
@@ -615,13 +624,13 @@ pub struct AddressedIssuer(pub OidcIssuer);
 ///
 /// Holds only values derived from stored, never-changing rows (an issuer and
 /// one generation of its key), so every replica computes the same ones.
-pub struct IssuerRegistry {
-    storage: Arc<dyn IssuerStore>,
+pub struct IssuerRegistry<R = OrgId> {
+    storage: Arc<dyn IssuerStore<R>>,
     keys: Arc<dyn KeyManager>,
-    signers: DashMap<IssuerId, Arc<IssuerSigner>>,
+    signers: DashMap<IssuerId, Arc<IssuerSigner<R>>>,
 }
 
-impl std::fmt::Debug for IssuerRegistry {
+impl<R> std::fmt::Debug for IssuerRegistry<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IssuerRegistry")
             .field("signers", &self.signers.len())
@@ -630,7 +639,16 @@ impl std::fmt::Debug for IssuerRegistry {
 }
 
 impl IssuerRegistry {
-    pub fn new(storage: Arc<dyn IssuerStore>, keys: Arc<dyn KeyManager>) -> Self {
+    /// The base issuer of `org`, if it has one.
+    pub async fn of_org(&self, org: OrgId) -> SidResult<Option<OidcIssuer>> {
+        self.storage
+            .oidc_issuer_for(IssuerAuthority::Local, &org)
+            .await
+    }
+}
+
+impl<R: Clone + Send + Sync + 'static> IssuerRegistry<R> {
+    pub fn new(storage: Arc<dyn IssuerStore<R>>, keys: Arc<dyn KeyManager>) -> Self {
         Self {
             storage,
             keys,
@@ -640,22 +658,15 @@ impl IssuerRegistry {
 
     /// The issuer named by `handle` as it appears in a request path; text
     /// that is not a stored handle names no issuer.
-    pub async fn by_handle(&self, handle: &str) -> SidResult<Option<OidcIssuer>> {
+    pub async fn by_handle(&self, handle: &str) -> SidResult<Option<OidcIssuer<R>>> {
         let Ok(handle) = IssuerHandle::parse(handle) else {
             return Ok(None);
         };
         self.storage.oidc_issuer_by_handle(&handle).await
     }
 
-    /// The base issuer of `org`, if it has one.
-    pub async fn of_org(&self, org: OrgId) -> SidResult<Option<OidcIssuer>> {
-        self.storage
-            .oidc_issuer_for(IssuerAuthority::Local, org)
-            .await
-    }
-
     /// The signer of `issuer` with its current key.
-    pub async fn signer(&self, issuer: &OidcIssuer) -> SidResult<Arc<IssuerSigner>> {
+    pub async fn signer(&self, issuer: &OidcIssuer<R>) -> SidResult<Arc<IssuerSigner<R>>> {
         let stored = self.storage.oidc_issuer_signing_keys(issuer.id).await?;
         let current = stored.last().map(|key| key.generation);
         if let Some(signer) = self.signers.get(&issuer.id)
@@ -671,7 +682,7 @@ impl IssuerRegistry {
 
     /// Every stored public key of `issuer` as (`kid`, Ed25519 key), oldest
     /// generation first.
-    pub async fn public_keys(&self, issuer: &OidcIssuer) -> SidResult<Vec<(String, [u8; 32])>> {
+    pub async fn public_keys(&self, issuer: &OidcIssuer<R>) -> SidResult<Vec<(String, [u8; 32])>> {
         let stored = self.storage.oidc_issuer_signing_keys(issuer.id).await?;
         Ok(stored
             .into_iter()
@@ -680,7 +691,7 @@ impl IssuerRegistry {
     }
 
     /// A verifier holding every stored key of `issuer`.
-    pub async fn verifier(&self, issuer: &OidcIssuer) -> SidResult<IssuerVerifier> {
+    pub async fn verifier(&self, issuer: &OidcIssuer<R>) -> SidResult<IssuerVerifier> {
         Ok(IssuerVerifier::new(
             issuer.canonical_url.clone(),
             self.public_keys(issuer).await?,

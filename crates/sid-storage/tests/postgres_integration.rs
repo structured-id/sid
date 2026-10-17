@@ -1230,8 +1230,21 @@ mod issuer_store {
     issuer_store!(
         issuer_provisioned_once,
         foreign_first_key_refused,
-        unknown_organization_refused,
+        unknown_handle_names_nothing,
     );
+
+    /// The organizational store's own rule: an issuer's recipient is an
+    /// organization it holds.
+    #[tokio::test]
+    async fn unknown_organization_refused() {
+        let (backend, schema) = isolated("issuer").await;
+        let outcome = tokio::spawn({
+            let backend = backend.clone();
+            async move { common::issuer_conformance::unknown_organization_refused(&backend).await }
+        })
+        .await;
+        finish_isolated(&backend, &schema, outcome).await;
+    }
 }
 
 #[tokio::test]

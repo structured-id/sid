@@ -46,7 +46,7 @@ impl SubjectRule {
     /// Profiles it manages, so its applications get the ProfileId; CE has no
     /// opt-in for internal application isolation.
     pub fn for_hop(issuer: &OidcIssuer, client: &OAuth2Client) -> sid_core::Result<Self> {
-        if client.org_id != Some(issuer.recipient_org) {
+        if client.org_id != Some(issuer.recipient) {
             return Err(sid_core::Error::Validation(format!(
                 "client {} is not a recipient of issuer {}",
                 client.client_id, issuer.canonical_url
