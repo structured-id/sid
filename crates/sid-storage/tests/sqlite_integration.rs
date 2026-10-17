@@ -320,6 +320,28 @@ macro_rules! credential_store {
     )*};
 }
 
+// ─── Instance secret conformance ───
+
+/// Run instance secret conformance `scenario` against a fresh database.
+macro_rules! instance_secret_store {
+    ($($scenario:ident),* $(,)?) => {$(
+        #[tokio::test]
+        async fn $scenario() {
+            sid_plugin::conformance::instance_secret_store::$scenario(&setup().await).await;
+        }
+    )*};
+}
+
+mod instance_secret_store {
+    use super::*;
+
+    instance_secret_store!(
+        secret_is_absent_until_stored,
+        first_value_is_kept,
+        concurrent_inserts_agree,
+    );
+}
+
 // ─── Sign-in history conformance ───
 
 /// Run sign-in history conformance `scenario` against this backend.
@@ -971,11 +993,6 @@ async fn test_key_version_insert_once() {
 #[tokio::test]
 async fn test_key_version_concurrent_insert() {
     common::test_key_version_concurrent_insert(&setup().await).await;
-}
-
-#[tokio::test]
-async fn test_instance_secret_insert_once() {
-    common::test_instance_secret_insert_once(&setup().await).await;
 }
 
 #[tokio::test]

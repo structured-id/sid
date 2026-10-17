@@ -200,6 +200,24 @@ impl sid_plugin::GrantStore for MockStorage {
 }
 
 #[async_trait::async_trait]
+impl sid_plugin::InstanceSecretStore for MockStorage {
+    async fn get_instance_secret(
+        &self,
+        _: sid_core::models::InstanceSecret,
+    ) -> Result<Option<Vec<u8>>> {
+        unimplemented!()
+    }
+    async fn insert_instance_secret(
+        &self,
+        _: sid_core::models::InstanceSecret,
+        _: &[u8],
+        _audit: MutationContext,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
+}
+
+#[async_trait::async_trait]
 impl sid_plugin::SignInHistoryStore for MockStorage {
     type Owner = ProfileId;
 
@@ -705,20 +723,6 @@ impl sid_plugin::StorageBackend for MockStorage {
     async fn insert_key_version(
         &self,
         _: &sid_plugin::KeyVersionParams,
-        _audit: MutationContext,
-    ) -> Result<bool> {
-        unimplemented!()
-    }
-    async fn get_instance_secret(
-        &self,
-        _: sid_core::models::InstanceSecret,
-    ) -> Result<Option<Vec<u8>>> {
-        unimplemented!()
-    }
-    async fn insert_instance_secret(
-        &self,
-        _: sid_core::models::InstanceSecret,
-        _: &[u8],
         _audit: MutationContext,
     ) -> Result<bool> {
         unimplemented!()
