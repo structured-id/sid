@@ -1200,31 +1200,38 @@ async fn test_instance_organization_and_clients() {
     finish_isolated(&backend, &schema, outcome).await;
 }
 
-/// Each runs in its own schema: the installation organization has exactly one
-/// local issuer.
-#[tokio::test]
-async fn test_oidc_issuer_registry() {
-    let (backend, schema) = isolated("issuer").await;
-    let outcome = tokio::spawn({
-        let backend = backend.clone();
-        async move { common::oidc_issuer::test_oidc_issuer_registry(&backend).await }
-    })
-    .await;
-    finish_isolated(&backend, &schema, outcome).await;
+// ─── Issuer store conformance ───
+
+/// Run issuer store conformance `scenario`, each in its own schema: the
+/// installation organization has exactly one local issuer.
+macro_rules! issuer_store {
+    ($($scenario:ident),* $(,)?) => {$(
+        #[tokio::test]
+        async fn $scenario() {
+            let (backend, schema) = isolated("issuer").await;
+            let outcome = tokio::spawn({
+                let backend = backend.clone();
+                async move {
+                    sid_plugin::conformance::issuer_store::$scenario(
+                        &common::issuer_conformance::InstanceIssuers(&backend),
+                    )
+                    .await
+                }
+            })
+            .await;
+            finish_isolated(&backend, &schema, outcome).await;
+        }
+    )*};
 }
 
-#[tokio::test]
-async fn test_oidc_issuer_refuses_a_foreign_first_key() {
-    let (backend, schema) = isolated("issuerkey").await;
-    let outcome =
-        tokio::spawn({
-            let backend = backend.clone();
-            async move {
-                common::oidc_issuer::test_oidc_issuer_refuses_a_foreign_first_key(&backend).await
-            }
-        })
-        .await;
-    finish_isolated(&backend, &schema, outcome).await;
+mod issuer_store {
+    use super::*;
+
+    issuer_store!(
+        issuer_provisioned_once,
+        foreign_first_key_refused,
+        unknown_organization_refused,
+    );
 }
 
 #[tokio::test]
@@ -1270,12 +1277,6 @@ async fn test_resource_listing_and_import() {
 #[tokio::test]
 async fn test_client_default_resource() {
     common::application::test_client_default_resource(&setup().await).await;
-}
-
-#[tokio::test]
-async fn test_oidc_issuer_requires_its_organization() {
-    let backend = setup().await;
-    common::oidc_issuer::test_oidc_issuer_requires_its_organization(&backend).await;
 }
 
 /// Runs in its own schema: the scenario starts with no policy stored.

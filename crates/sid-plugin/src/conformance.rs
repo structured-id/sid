@@ -5,4 +5,5 @@
 
 pub mod client_registry;
 pub mod grant_store;
+pub mod issuer_store;
 pub mod work_store;
