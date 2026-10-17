@@ -659,7 +659,6 @@ impl UpstreamService for UpstreamServiceImpl {
                 result: Some(handle_upstream_callback_response::Result::Success(
                     UpstreamAuthSuccess {
                         session_id,
-                        access_token: String::new(), // TODO: Issue JWT access token
                         expires_in: 3600,
                         new_profile_created: false,
                     },
@@ -751,7 +750,6 @@ impl UpstreamService for UpstreamServiceImpl {
             result: Some(handle_upstream_callback_response::Result::Success(
                 UpstreamAuthSuccess {
                     session_id,
-                    access_token: String::new(), // TODO: Issue JWT access token
                     expires_in: 3600,
                     new_profile_created: true,
                 },
