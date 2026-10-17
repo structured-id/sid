@@ -3,5 +3,6 @@
 //! its caller, whatever engine and account type it uses. A backend's test
 //! harness constructs that backend and runs every scenario against it.
 
+pub mod client_registry;
 pub mod grant_store;
 pub mod work_store;

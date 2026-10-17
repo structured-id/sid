@@ -40,6 +40,7 @@ pub mod password_history;
 pub mod principal_assignment;
 pub mod project;
 pub mod provisioning_connector;
+pub mod registry_conformance;
 pub mod role;
 pub mod service_binding;
 pub mod session;
