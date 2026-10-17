@@ -7,4 +7,5 @@ pub mod client_registry;
 pub mod credential_store;
 pub mod grant_store;
 pub mod issuer_store;
+pub mod principal_store;
 pub mod work_store;

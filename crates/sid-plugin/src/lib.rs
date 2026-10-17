@@ -28,6 +28,7 @@ pub mod legacy_hash;
 pub mod mfa;
 pub mod notification;
 pub mod otp;
+pub mod principal_store;
 pub mod storage;
 pub mod upstream;
 pub mod work_store;
@@ -58,6 +59,7 @@ pub use notification::{
     Recipient, RenderedMessage,
 };
 pub use otp::{Locale, OtpChannel, OtpContext, OtpDeliveryResult, OtpTransport, OtpTransportError};
+pub use principal_store::PrincipalStore;
 pub use sid_keys::KeyVersionParams;
 pub use storage::StorageBackend;
 pub use upstream::{UpstreamAuthState, UpstreamIdpProvider};

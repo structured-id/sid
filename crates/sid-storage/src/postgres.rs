@@ -8643,6 +8643,7 @@ mod job_lock;
 mod machine_credential;
 mod operation;
 mod password_history;
+mod principal_store;
 mod provisioning_connector;
 mod refresh_token;
 mod session;
