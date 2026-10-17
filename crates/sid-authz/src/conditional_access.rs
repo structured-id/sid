@@ -65,7 +65,7 @@ impl ConditionalAccessEngine {
     /// - `StepUp` if session auth level is below required (can be elevated).
     /// - `Block` if enforcement is `Hard` and requirements not met.
     /// - `Allow` (log-only) if enforcement is `Audit` and requirements not met.
-    pub fn evaluate(policy: &EffectivePolicy, session: &Session) -> EnforcementDecision {
+    pub fn evaluate<O>(policy: &EffectivePolicy, session: &Session<O>) -> EnforcementDecision {
         let mut violations = Vec::new();
 
         // Check the auth level in force now (a lapsed step-up no longer counts).
@@ -133,11 +133,11 @@ impl ConditionalAccessEngine {
     }
 
     /// Convenience: resolve + evaluate in one call.
-    pub fn check(
+    pub fn check<O>(
         org_policy: &SecurityPolicy,
         client: Option<&OAuth2Client>,
         requested: Option<AuthLevel>,
-        session: &Session,
+        session: &Session<O>,
     ) -> EnforcementDecision {
         let effective = Self::resolve_effective_policy(org_policy, client, requested);
         Self::evaluate(&effective, session)

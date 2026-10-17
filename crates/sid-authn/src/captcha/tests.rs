@@ -150,7 +150,7 @@ fn gates() -> (CaptchaGate, CaptchaGate) {
 
 fn subject(ip: &str) -> CaptchaSubject {
     CaptchaSubject {
-        profile_id: sid_core::models::ProfileId::generate(),
+        account: sid_core::models::ProfileId::generate().to_string(),
         client_ip: Some(ip.parse().unwrap()),
     }
 }
@@ -207,7 +207,7 @@ async fn pass_is_bound_to_profile_and_client() {
     let who = subject("198.51.100.7");
 
     let other_profile = CaptchaSubject {
-        profile_id: sid_core::models::ProfileId::generate(),
+        account: sid_core::models::ProfileId::generate().to_string(),
         ..who.clone()
     };
     let other_client = CaptchaSubject {
@@ -220,6 +220,17 @@ async fn pass_is_bound_to_profile_and_client() {
         assert!(!a.redeem(&pass, &stranger).await.unwrap());
         assert!(!a.redeem(&pass, &who).await.unwrap());
     }
+}
+
+/// A subject stored before the account field was renamed reads back the
+/// same: challenges in flight across an upgrade still earn their pass.
+#[test]
+fn stored_subject_keeps_its_field_name() {
+    let profile = sid_core::models::ProfileId::generate();
+    let earlier = serde_json::json!({ "profile_id": profile, "client_ip": "198.51.100.7" });
+    let read: CaptchaSubject = serde_json::from_value(earlier.clone()).unwrap();
+    assert_eq!(read.account, profile.to_string());
+    assert_eq!(serde_json::to_value(&read).unwrap(), earlier);
 }
 
 /// A made-up pass is refused.
