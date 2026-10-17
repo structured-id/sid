@@ -206,10 +206,37 @@ async fn test_magic_link_rate_limiting() {
     );
 }
 
+/// The cleanup deletes every expired link of the installation, so it runs in
+/// a schema of its own: on the shared schema it would remove the expired link
+/// `test_magic_link_expired` is verifying beside it.
 #[tokio::test]
 async fn test_magic_link_cleanup_removes_expired() {
-    let (_service, storage) = setup().await;
+    let schema = format!("magic_link_{}", uuid::Uuid::now_v7().simple());
+    let backend = PostgresBackend::new(&database_url(), Some(schema.clone()))
+        .await
+        .expect("Failed to connect to PostgreSQL. Is sid-test-postgres running?");
+    sid_storage::migrator::run_migrations(backend.pool(), Some(&schema))
+        .await
+        .expect("migrations in an isolated schema");
+    let pool = backend.pool().clone();
+    let storage: Arc<dyn StorageBackend> = Arc::new(backend);
+    let outcome = tokio::spawn(cleanup_removes_expired(storage)).await;
+    // The migrations also create the schema's database-wide reader role.
+    for statement in [
+        format!("DROP SCHEMA \"{schema}\" CASCADE"),
+        format!("DROP ROLE IF EXISTS \"{schema}_reader\""),
+    ] {
+        sqlx::query(sqlx::AssertSqlSafe(statement))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic.into_panic());
+    }
+}
 
+async fn cleanup_removes_expired(storage: Arc<dyn StorageBackend>) {
     // Create an expired session.
     let expired = MagicLinkSession {
         id: uuid::Uuid::now_v7(),
