@@ -511,6 +511,169 @@ impl GrantStore for SqliteBackend {
     }
 }
 
+// Credential operations — see profile.rs
+#[async_trait]
+impl sid_plugin::CredentialStore for SqliteBackend {
+    type Owner = sid_core::models::ProfileId;
+
+    async fn get_credential(
+        &self,
+        id: sid_core::models::CredentialId,
+    ) -> SidResult<Option<sid_core::models::Credential>> {
+        self.get_credential_impl(id).await
+    }
+
+    async fn get_credentials_by_profile(
+        &self,
+        profile_id: sid_core::models::ProfileId,
+        credential_type: Option<sid_core::models::CredentialType>,
+    ) -> SidResult<Vec<sid_core::models::Credential>> {
+        self.get_credentials_by_profile_impl(profile_id, credential_type)
+            .await
+    }
+
+    async fn create_credential(
+        &self,
+        credential: &sid_core::models::Credential,
+        audit: MutationContext,
+    ) -> SidResult<()> {
+        self.create_credential_impl(credential, audit).await
+    }
+
+    async fn set_credential_label(
+        &self,
+        id: sid_core::models::CredentialId,
+        label: Option<&str>,
+        audit: MutationContext,
+    ) -> SidResult<bool> {
+        self.set_credential_label_impl(id, label, audit).await
+    }
+
+    async fn change_password(
+        &self,
+        id: sid_core::models::CredentialId,
+        expected: &[u8],
+        new: &sid_core::models::Credential,
+        history: Option<&sid_core::models::HistoryCommit>,
+        audit: MutationContext,
+    ) -> SidResult<bool> {
+        self.change_password_impl(id, expected, new, history, audit)
+            .await
+    }
+
+    async fn get_password_history(
+        &self,
+        owner: sid_core::models::ProfileId,
+    ) -> SidResult<sid_core::models::PasswordHistory> {
+        self.get_password_history_impl(owner).await
+    }
+
+    async fn history_write_cutoff(&self) -> SidResult<Option<chrono::DateTime<chrono::Utc>>> {
+        self.history_write_cutoff_impl().await
+    }
+
+    async fn raise_history_write_cutoff(
+        &self,
+        not_before: chrono::DateTime<chrono::Utc>,
+        audit: MutationContext,
+    ) -> SidResult<chrono::DateTime<chrono::Utc>> {
+        self.raise_history_write_cutoff_impl(not_before, audit)
+            .await
+    }
+
+    async fn reseal_credential_data(
+        &self,
+        id: sid_core::models::CredentialId,
+        expected: &[u8],
+        data: &[u8],
+        audit: MutationContext,
+    ) -> SidResult<bool> {
+        self.reseal_credential_data_impl(id, expected, data, audit)
+            .await
+    }
+
+    async fn mark_credential_used(
+        &self,
+        id: sid_core::models::CredentialId,
+        audit: MutationContext,
+    ) -> SidResult<bool> {
+        self.mark_credential_used_impl(id, audit).await
+    }
+
+    async fn replace_credential_data(
+        &self,
+        id: sid_core::models::CredentialId,
+        expected: &[u8],
+        data: &[u8],
+        audit: MutationContext,
+    ) -> SidResult<bool> {
+        self.replace_credential_data_impl(id, expected, data, audit)
+            .await
+    }
+
+    async fn replace_credential(
+        &self,
+        credential: &sid_core::models::Credential,
+        audit: MutationContext,
+    ) -> SidResult<()> {
+        self.replace_credential_impl(credential, audit).await
+    }
+
+    async fn enroll_credential(
+        &self,
+        credential: &sid_core::models::Credential,
+        recovery: Option<&sid_core::models::Credential>,
+        ctx: MutationContext,
+    ) -> SidResult<()> {
+        self.enroll_credential_impl(credential, recovery, ctx).await
+    }
+
+    async fn delete_credential(
+        &self,
+        id: sid_core::models::CredentialId,
+        audit: MutationContext,
+    ) -> SidResult<()> {
+        self.delete_credential_impl(id, audit).await
+    }
+
+    async fn revoke_credential(
+        &self,
+        id: sid_core::models::CredentialId,
+        audit: MutationContext,
+    ) -> SidResult<sid_core::models::CredentialRevocation> {
+        self.revoke_credential_impl(id, audit).await
+    }
+
+    async fn delete_credentials_by_profile(
+        &self,
+        profile_id: sid_core::models::ProfileId,
+        audit: MutationContext,
+    ) -> SidResult<u64> {
+        self.delete_credentials_by_profile_impl(profile_id, audit)
+            .await
+    }
+
+    async fn ensure_webauthn_user_handle(
+        &self,
+        profile_id: sid_core::models::ProfileId,
+        rp_id: &str,
+        candidate: sid_core::models::WebAuthnUserHandle,
+        audit: MutationContext,
+    ) -> SidResult<sid_core::models::WebAuthnUserHandle> {
+        self.ensure_webauthn_user_handle_impl(profile_id, rp_id, candidate, audit)
+            .await
+    }
+
+    async fn get_profile_by_webauthn_user_handle(
+        &self,
+        rp_id: &str,
+        handle: sid_core::models::WebAuthnUserHandle,
+    ) -> SidResult<Option<sid_core::models::ProfileId>> {
+        self.get_profile_by_webauthn_user_handle_impl(rp_id, handle)
+            .await
+    }
+}
+
 // ─── StorageBackend trait impl — delegates to domain modules ───
 
 #[async_trait]
@@ -761,72 +924,6 @@ impl StorageBackend for SqliteBackend {
             .await
     }
 
-    // Credential operations — see profile.rs
-    async fn get_credential(
-        &self,
-        id: sid_core::models::CredentialId,
-    ) -> SidResult<Option<sid_core::models::Credential>> {
-        self.get_credential_impl(id).await
-    }
-
-    async fn get_credentials_by_profile(
-        &self,
-        profile_id: sid_core::models::ProfileId,
-        credential_type: Option<sid_core::models::CredentialType>,
-    ) -> SidResult<Vec<sid_core::models::Credential>> {
-        self.get_credentials_by_profile_impl(profile_id, credential_type)
-            .await
-    }
-
-    async fn create_credential(
-        &self,
-        credential: &sid_core::models::Credential,
-        audit: MutationContext,
-    ) -> SidResult<()> {
-        self.create_credential_impl(credential, audit).await
-    }
-
-    async fn set_credential_label(
-        &self,
-        id: sid_core::models::CredentialId,
-        label: Option<&str>,
-        audit: MutationContext,
-    ) -> SidResult<bool> {
-        self.set_credential_label_impl(id, label, audit).await
-    }
-
-    async fn change_password(
-        &self,
-        id: sid_core::models::CredentialId,
-        expected: &[u8],
-        new: &sid_core::models::Credential,
-        history: Option<&sid_core::models::HistoryCommit>,
-        audit: MutationContext,
-    ) -> SidResult<bool> {
-        self.change_password_impl(id, expected, new, history, audit)
-            .await
-    }
-
-    async fn get_password_history(
-        &self,
-        owner: sid_core::models::ProfileId,
-    ) -> SidResult<sid_core::models::PasswordHistory> {
-        self.get_password_history_impl(owner).await
-    }
-
-    async fn history_write_cutoff(&self) -> SidResult<Option<chrono::DateTime<chrono::Utc>>> {
-        self.history_write_cutoff_impl().await
-    }
-
-    async fn raise_history_write_cutoff(
-        &self,
-        not_before: chrono::DateTime<chrono::Utc>,
-        audit: MutationContext,
-    ) -> SidResult<chrono::DateTime<chrono::Utc>> {
-        self.raise_history_write_cutoff_impl(not_before, audit)
-            .await
-    }
-
     async fn export_password_history(
         &self,
         owner: sid_core::models::ProfileId,
@@ -840,53 +937,6 @@ impl StorageBackend for SqliteBackend {
         ctx: MutationContext,
     ) -> SidResult<bool> {
         self.import_password_history_impl(archive, ctx).await
-    }
-
-    async fn reseal_credential_data(
-        &self,
-        id: sid_core::models::CredentialId,
-        expected: &[u8],
-        data: &[u8],
-        audit: MutationContext,
-    ) -> SidResult<bool> {
-        self.reseal_credential_data_impl(id, expected, data, audit)
-            .await
-    }
-
-    async fn mark_credential_used(
-        &self,
-        id: sid_core::models::CredentialId,
-        audit: MutationContext,
-    ) -> SidResult<bool> {
-        self.mark_credential_used_impl(id, audit).await
-    }
-
-    async fn replace_credential_data(
-        &self,
-        id: sid_core::models::CredentialId,
-        expected: &[u8],
-        data: &[u8],
-        audit: MutationContext,
-    ) -> SidResult<bool> {
-        self.replace_credential_data_impl(id, expected, data, audit)
-            .await
-    }
-
-    async fn replace_credential(
-        &self,
-        credential: &sid_core::models::Credential,
-        audit: MutationContext,
-    ) -> SidResult<()> {
-        self.replace_credential_impl(credential, audit).await
-    }
-
-    async fn enroll_credential(
-        &self,
-        credential: &sid_core::models::Credential,
-        recovery: Option<&sid_core::models::Credential>,
-        ctx: MutationContext,
-    ) -> SidResult<()> {
-        self.enroll_credential_impl(credential, recovery, ctx).await
     }
 
     async fn write_directory_user(
@@ -903,51 +953,6 @@ impl StorageBackend for SqliteBackend {
         ctx: MutationContext,
     ) -> SidResult<()> {
         self.write_directory_group_impl(write, ctx).await
-    }
-
-    async fn delete_credential(
-        &self,
-        id: sid_core::models::CredentialId,
-        audit: MutationContext,
-    ) -> SidResult<()> {
-        self.delete_credential_impl(id, audit).await
-    }
-
-    async fn revoke_credential(
-        &self,
-        id: sid_core::models::CredentialId,
-        audit: MutationContext,
-    ) -> SidResult<sid_core::models::CredentialRevocation> {
-        self.revoke_credential_impl(id, audit).await
-    }
-
-    async fn delete_credentials_by_profile(
-        &self,
-        profile_id: sid_core::models::ProfileId,
-        audit: MutationContext,
-    ) -> SidResult<u64> {
-        self.delete_credentials_by_profile_impl(profile_id, audit)
-            .await
-    }
-
-    async fn ensure_webauthn_user_handle(
-        &self,
-        profile_id: sid_core::models::ProfileId,
-        rp_id: &str,
-        candidate: sid_core::models::WebAuthnUserHandle,
-        audit: MutationContext,
-    ) -> SidResult<sid_core::models::WebAuthnUserHandle> {
-        self.ensure_webauthn_user_handle_impl(profile_id, rp_id, candidate, audit)
-            .await
-    }
-
-    async fn get_profile_by_webauthn_user_handle(
-        &self,
-        rp_id: &str,
-        handle: sid_core::models::WebAuthnUserHandle,
-    ) -> SidResult<Option<sid_core::models::ProfileId>> {
-        self.get_profile_by_webauthn_user_handle_impl(rp_id, handle)
-            .await
     }
 
     async fn revoke_consents_by_profile(

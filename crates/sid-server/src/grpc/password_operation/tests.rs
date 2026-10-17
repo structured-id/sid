@@ -3,6 +3,7 @@ use super::*;
 use ff::PrimeField;
 use pasta_curves::pallas;
 use sid_core::models::MutationContext;
+use sid_plugin::CredentialStore;
 use sid_storage::sqlite::SqliteBackend;
 use tonic::Code;
 use tonic_types::StatusExt;

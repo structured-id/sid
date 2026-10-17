@@ -20,6 +20,9 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 # Many concurrent calls on one store in the conformance scenarios.
 futures = { workspace = true, optional = true }
+# History epochs in the conformance scenarios carry real Pallas public keys.
+pasta_curves = { workspace = true, optional = true }
+group = { workspace = true, optional = true }
 secrecy = { workspace = true }
 zeroize = { workspace = true }
 
@@ -30,7 +33,7 @@ url = { workspace = true }
 
 [features]
 # The capability conformance scenarios a backend's tests run against it.
-conformance = ["tokio/macros", "tokio/time", "dep:futures"]
+conformance = ["tokio/macros", "tokio/time", "dep:futures", "dep:pasta_curves", "dep:group"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
