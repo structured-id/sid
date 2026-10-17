@@ -8,7 +8,7 @@ mod common;
 use common::mock_storage::MockStorage;
 use common::opaque_client::{login_with_origins, register};
 use common::{SIGN_IN_ORIGIN, TestServices};
-use sid_authn::browser_session::{BrowserSecret, COOKIE_NAME};
+use sid_authn::browser_session::{BrowserCookie, DEFAULT_COOKIE_NAME};
 use sid_core::models::SessionId;
 
 const PASSWORD: &[u8] = b"browser-session-password-2026";
@@ -37,7 +37,10 @@ async fn sign_in_page_ceremony_sets_the_session_cookie() {
     let cookies = set_cookies(&response);
     assert_eq!(cookies.len(), 1, "{cookies:?}");
     let cookie = &cookies[0];
-    assert!(cookie.starts_with(&format!("{COOKIE_NAME}=")), "{cookie}");
+    assert!(
+        cookie.starts_with(&format!("{DEFAULT_COOKIE_NAME}=")),
+        "{cookie}"
+    );
     assert!(
         cookie.contains("; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age="),
         "{cookie}"
@@ -46,7 +49,9 @@ async fn sign_in_page_ceremony_sets_the_session_cookie() {
     let max_age: i64 = cookie.rsplit("Max-Age=").next().unwrap().parse().unwrap();
     assert!(max_age > 23 * 3600 && max_age <= 24 * 3600, "{max_age}");
 
-    let secret = BrowserSecret::from_cookie_headers([cookie.split(';').next().unwrap()]).unwrap();
+    let secret = BrowserCookie::default()
+        .secret([cookie.split(';').next().unwrap()])
+        .unwrap();
     let body = response.into_inner();
     let session = svc
         .storage

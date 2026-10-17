@@ -7,7 +7,7 @@
 
 use base64::Engine;
 use chrono::{DateTime, Utc};
-use sid_authn::browser_session::BrowserSecret;
+use sid_authn::browser_session::BrowserCookie;
 use sid_authn::oauth2::prompt::Prompt;
 use sid_core::models::{OAuth2Client, Session};
 use tonic::metadata::MetadataMap;
@@ -334,7 +334,7 @@ impl AuthServiceImpl {
             .get_all("cookie")
             .iter()
             .filter_map(|value| value.to_str().ok());
-        let session = match BrowserSecret::from_cookie_headers(cookies) {
+        let session = match BrowserCookie::default().secret(cookies) {
             Some(secret) => self
                 .storage
                 .get_session_by_browser_secret(&secret.hash())

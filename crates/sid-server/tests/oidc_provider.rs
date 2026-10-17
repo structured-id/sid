@@ -377,8 +377,8 @@ struct SignedIn {
 
 /// The `Cookie` header a browser sends for `secret`.
 fn cookie_of(secret: &sid_authn::browser_session::BrowserSecret) -> String {
-    secret
-        .set_cookie(3600)
+    sid_authn::browser_session::BrowserCookie::default()
+        .set(secret, 3600)
         .split(';')
         .next()
         .unwrap()

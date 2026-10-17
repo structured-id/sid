@@ -2517,8 +2517,10 @@ impl AuthServiceImpl {
             session_id,
             access_token,
             expires_in,
-            cookie: browser
-                .map(|secret| secret.set_cookie((expires_at - Utc::now()).num_seconds())),
+            cookie: browser.map(|secret| {
+                sid_authn::browser_session::BrowserCookie::default()
+                    .set(&secret, (expires_at - Utc::now()).num_seconds())
+            }),
         })
     }
 
