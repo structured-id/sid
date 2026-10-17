@@ -19,6 +19,3 @@ pub mod rate_limit;
 pub mod serve;
 pub mod state;
 pub mod telemetry;
-
-#[cfg(feature = "webtransport")]
-pub mod webtransport_dispatch;

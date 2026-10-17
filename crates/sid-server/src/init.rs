@@ -742,7 +742,6 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         opaque_router: opaque_router.clone(),
         opaque_zkpp: opaque_zkpp.clone(),
         revocation_cache: revocation_cache.clone(),
-        wt_cert_hash: None,
         feature_flags: feature_flags.clone(),
         issuer: issuer.clone(),
         #[cfg(feature = "telemetry")]

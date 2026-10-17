@@ -73,7 +73,6 @@ COMBOS=(
   "sid-infra|--features http"
   "sid-org-crypto|"
   "sid-org-crypto|--features k8s"
-  "sid-webtransport|"
   "sid-scim|"
   "sid-notify|"
   "sid-attestation|"
@@ -85,7 +84,6 @@ COMBOS=(
   "sid-migrate|--no-default-features --features storage-sqlite"
   "sid-server|"
   "sid-server|--no-default-features --features embedded-dev"
-  "sid-server|--features webtransport"
 )
 
 fail=0
