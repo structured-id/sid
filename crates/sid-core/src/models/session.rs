@@ -189,12 +189,12 @@ pub const MEDIUM_TRUST_HOURS: i64 = 12;
 /// Validated UUIDv7 identifier of a session; construction and decoding go through `sid_ids`.
 pub use sid_ids::SessionId;
 
-/// Session represents an active user session. `O` is the authenticated
-/// account, as the owning host types it: a local Profile by default.
+/// Session represents an active user session. `O` is how the serving
+/// authority represents its stable user: a local Profile by default.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session<O = ProfileId> {
     pub id: SessionId,
-    pub owner: O,
+    pub profile_id: O,
 
     /// OAuth2 client that initiated this session (None for direct auth).
     pub client_id: Option<String>,
@@ -267,11 +267,11 @@ pub struct Session<O = ProfileId> {
 
 impl<O> Session<O> {
     /// Create a new session.
-    pub fn new(owner: O, ip_address: String, expires_at: DateTime<Utc>) -> Self {
+    pub fn new(profile_id: O, ip_address: String, expires_at: DateTime<Utc>) -> Self {
         let now = Utc::now();
         Self {
             id: SessionId::generate(),
-            owner,
+            profile_id,
             client_id: None,
             device_id: None,
             ip_address,
@@ -301,7 +301,7 @@ impl Session {
         let now = Utc::now();
         Self {
             id: SessionId::generate(),
-            owner: profile_id,
+            profile_id,
             client_id: None,
             device_id: None,
             ip_address,

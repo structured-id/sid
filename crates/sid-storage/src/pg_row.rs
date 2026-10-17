@@ -435,7 +435,7 @@ impl SessionRow {
         let elevation = elevation(self.elevation_level, self.elevation_until)?;
         Ok(Session {
             id: self.id,
-            owner: self.profile_id,
+            profile_id: self.profile_id,
             client_id: self.client_id,
             device_id: self.device_id,
             ip_address: self.ip_address,
@@ -745,7 +745,7 @@ impl RefreshTokenRow {
             id: self.id,
             token_hash: self.token_hash,
             session_id: self.session_id,
-            owner: self.profile_id,
+            profile_id: self.profile_id,
             client_id: self.client_id,
             scopes: split_ws(&self.scopes),
             resource: self.resource_id,
@@ -790,7 +790,7 @@ impl AuthCodeRow {
     pub fn into_domain(self) -> SidResult<AuthorizationCode> {
         Ok(AuthorizationCode {
             code_hash: self.code_hash,
-            owner: self.profile_id,
+            profile_id: self.profile_id,
             client_id: self.client_id,
             redirect_uri: self.redirect_uri,
             scopes: split_ws(&self.scopes),

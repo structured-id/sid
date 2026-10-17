@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::*;
-use crate::test_support::{OwnAuthority, OwnIssuers, foreign_key_manager, key_manager};
+use crate::test_support::{foreign_key_manager, key_manager};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use sid_storage::sqlite::SqliteBackend;
 
@@ -64,7 +64,7 @@ async fn provisioning_is_stable_across_starts() {
         .await
         .unwrap();
     assert_eq!(first, again);
-    assert_eq!(first.recipient, org);
+    assert_eq!(first.recipient_org, org);
     assert_eq!(first.authority, IssuerAuthority::Local);
     assert_eq!(
         first.canonical_url,
@@ -647,54 +647,4 @@ async fn the_stored_private_key_is_sealed() {
     assert!(crate::sealed_secret::is_sealed(
         &stored[0].sealed_private_key
     ));
-}
-
-/// The issuer mechanics need no organization: a host provisions its own
-/// issuer once under its own recipient, resolves it by handle, signs with its
-/// key and verifies its own tokens only, with no organization anywhere.
-#[tokio::test]
-async fn an_issuer_serves_a_recipient_that_is_not_an_organization() {
-    let store = std::sync::Arc::new(OwnIssuers::default());
-    let keys = key_manager();
-    let issuer = ensure_local_issuer(store.as_ref(), keys.as_ref(), &base(), OwnAuthority)
-        .await
-        .unwrap();
-    let again = ensure_local_issuer(store.as_ref(), keys.as_ref(), &base(), OwnAuthority)
-        .await
-        .unwrap();
-    assert_eq!(issuer, again);
-    assert_eq!(issuer.recipient, OwnAuthority);
-
-    let registry: IssuerRegistry<OwnAuthority> = IssuerRegistry::new(store, keys);
-    assert_eq!(
-        registry.by_handle(issuer.handle.as_str()).await.unwrap(),
-        Some(issuer.clone())
-    );
-    assert!(
-        registry
-            .by_handle(IssuerHandle::generate().as_str())
-            .await
-            .unwrap()
-            .is_none()
-    );
-
-    let signer = registry.signer(&issuer).await.unwrap();
-    let verifier = registry.verifier(&issuer).await.unwrap();
-    let own = signer
-        .sign(Some(AT_JWT), &access_claims(&issuer.canonical_url))
-        .unwrap();
-    assert_eq!(
-        verifier.validate_access_token(&own).unwrap().iss,
-        issuer.canonical_url
-    );
-
-    // An organization's issuer key, claiming this issuer, is not its key.
-    let (org_registry, org_issuer) = self::registry().await;
-    let forged = org_registry
-        .signer(&org_issuer)
-        .await
-        .unwrap()
-        .sign(Some(AT_JWT), &access_claims(&issuer.canonical_url))
-        .unwrap();
-    assert!(verifier.validate_access_token(&forged).is_err());
 }

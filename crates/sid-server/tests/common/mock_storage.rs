@@ -984,13 +984,13 @@ impl sid_plugin::IssuerStore for MockStorage {
     async fn oidc_issuer_for(
         &self,
         authority: sid_core::models::IssuerAuthority,
-        recipient_org: &sid_core::models::OrgId,
+        recipient_org: sid_core::models::OrgId,
     ) -> SidResult<Option<sid_core::models::OidcIssuer>> {
         let inner = self.inner.lock().unwrap();
         Ok(inner
             .oidc_issuers
             .iter()
-            .find(|i| i.authority == authority && &i.recipient == recipient_org)
+            .find(|i| i.authority == authority && i.recipient_org == recipient_org)
             .cloned())
     }
 
@@ -1017,7 +1017,7 @@ impl sid_plugin::IssuerStore for MockStorage {
         if inner
             .oidc_issuers
             .iter()
-            .any(|i| i.authority == issuer.authority && i.recipient == issuer.recipient)
+            .any(|i| i.authority == issuer.authority && i.recipient_org == issuer.recipient_org)
         {
             return Ok(false);
         }
@@ -1071,7 +1071,7 @@ impl GrantStore for MockStorage {
             let mut active: Vec<Session> = inner
                 .sessions
                 .values()
-                .filter(|s| s.owner == session.owner && s.expires_at > now)
+                .filter(|s| s.profile_id == session.profile_id && s.expires_at > now)
                 .cloned()
                 .collect();
             active.sort_by_key(|s| s.created_at);
@@ -2398,10 +2398,10 @@ impl StorageBackend for MockStorage {
         let ended: Vec<Session> = inner
             .sessions
             .values()
-            .filter(|s| s.owner == profile_id)
+            .filter(|s| s.profile_id == profile_id)
             .cloned()
             .collect();
-        inner.sessions.retain(|_, s| s.owner != profile_id);
+        inner.sessions.retain(|_, s| s.profile_id != profile_id);
         for session in &ended {
             ctx.work.extend(end.owed_by(session));
         }
@@ -2907,7 +2907,7 @@ impl StorageBackend for MockStorage {
         let sessions: Vec<_> = inner
             .sessions
             .values()
-            .filter(|s| s.owner == profile_id)
+            .filter(|s| s.profile_id == profile_id)
             .cloned()
             .collect();
         Ok(sessions)
@@ -2924,7 +2924,7 @@ impl StorageBackend for MockStorage {
         let most_recent = inner
             .sessions
             .values()
-            .filter(|s| s.owner == profile_id)
+            .filter(|s| s.profile_id == profile_id)
             .max_by_key(|s| s.created_at)
             .map(|s| (s.ip_address.clone(), s.created_at));
         Ok(most_recent)
@@ -2944,7 +2944,7 @@ impl StorageBackend for MockStorage {
         let found = inner
             .sessions
             .values()
-            .any(|s| s.owner == profile_id && s.ip_address == ip && s.created_at > cutoff);
+            .any(|s| s.profile_id == profile_id && s.ip_address == ip && s.created_at > cutoff);
         Ok(found)
     }
 
@@ -2960,7 +2960,7 @@ impl StorageBackend for MockStorage {
         }
         let cutoff = chrono::Utc::now() - chrono::Duration::seconds(window.as_secs() as i64);
         let found = inner.sessions.values().any(|s| {
-            s.owner == profile_id && s.device_id == Some(device_id) && s.created_at > cutoff
+            s.profile_id == profile_id && s.device_id == Some(device_id) && s.created_at > cutoff
         });
         Ok(found)
     }
@@ -5436,10 +5436,10 @@ impl StorageBackend for MockStorage {
         let ended: Vec<Session> = inner
             .sessions
             .values()
-            .filter(|s| s.owner == profile_id)
+            .filter(|s| s.profile_id == profile_id)
             .cloned()
             .collect();
-        inner.sessions.retain(|_, s| s.owner != profile_id);
+        inner.sessions.retain(|_, s| s.profile_id != profile_id);
         for session in &ended {
             ctx.work.extend(end.owed_by(session));
         }

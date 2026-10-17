@@ -42,7 +42,7 @@ pub(super) fn row_to_session(row: &sqlx::sqlite::SqliteRow) -> SidResult<Session
 
     Ok(Session {
         id: col(row, "id")?,
-        owner: col(row, "profile_id")?,
+        profile_id: col(row, "profile_id")?,
         client_id: col(row, "client_id")?,
         device_id: device_id
             .map(|s| {
@@ -86,7 +86,7 @@ where
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(session.id)
-    .bind(session.owner)
+    .bind(session.profile_id)
     .bind(&session.client_id)
     .bind(session.device_id.map(|d| d.to_string()))
     .bind(&session.ip_address)
@@ -199,7 +199,7 @@ impl SqliteBackend {
             let active: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM sessions WHERE profile_id = ? AND expires_at > ?",
             )
-            .bind(session.owner)
+            .bind(session.profile_id)
             .bind(&now)
             .fetch_one(&mut *tx)
             .await
@@ -211,7 +211,7 @@ impl SqliteBackend {
                     "SELECT id FROM sessions WHERE profile_id = ? AND expires_at > ?
                      ORDER BY created_at ASC LIMIT ?",
                 )
-                .bind(session.owner)
+                .bind(session.profile_id)
                 .bind(&now)
                 .bind(excess)
                 .fetch_all(&mut *tx)
@@ -230,7 +230,7 @@ impl SqliteBackend {
             }
         }
         insert_session(&mut *tx, session).await?;
-        Self::commit_mutation(tx, &format!("profile:{}", session.owner), ctx).await?;
+        Self::commit_mutation(tx, &format!("profile:{}", session.profile_id), ctx).await?;
         Ok(evicted)
     }
 

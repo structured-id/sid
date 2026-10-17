@@ -27,6 +27,7 @@ use subtle::ConstantTimeEq;
 use uuid::Uuid;
 use zeroize::Zeroize;
 
+use crate::issuer::IssuerSigner;
 use crate::jwt::JwtService;
 
 /// OAuth2 server handling authorization, token exchange, and token management.
@@ -381,7 +382,7 @@ impl OAuth2Server {
 
         let code = AuthorizationCode {
             code_hash,
-            owner: profile_id,
+            profile_id,
             client_id: req.client_id.clone(),
             redirect_uri: req.redirect_uri.clone(),
             scopes: req.scopes.clone(),
@@ -468,9 +469,9 @@ impl OAuth2Server {
     /// its `roles`. An ID token needs `id_token`, the account's Profile and
     /// contacts: a grant with `openid` and no such source is refused.
     #[allow(clippy::too_many_arguments)]
-    pub fn issue_tokens<O: Clone, S: crate::jwt::TokenSigner>(
+    pub fn issue_tokens<O: Clone>(
         &self,
-        issuer: &S,
+        issuer: &IssuerSigner,
         sub: &str,
         roles: &[String],
         session: &Session<O>,
@@ -527,7 +528,7 @@ impl OAuth2Server {
             id: token_id,
             token_hash: refresh_hash,
             session_id: session.id,
-            owner: session.owner.clone(),
+            profile_id: session.profile_id.clone(),
             client_id: client.client_id.clone(),
             scopes: scopes.to_vec(),
             resource: target.resource_id(),

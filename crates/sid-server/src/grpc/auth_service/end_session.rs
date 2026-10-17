@@ -112,7 +112,7 @@ impl AuthServiceImpl {
                     .revoke_session(
                         application.id,
                         RevocationReason::UserRequested,
-                        &application.owner.to_string(),
+                        &application.profile_id.to_string(),
                         "session.end_session",
                     )
                     .await
@@ -238,7 +238,7 @@ impl AuthServiceImpl {
             .revoke_session(
                 browser.id,
                 RevocationReason::UserRequested,
-                &browser.owner.to_string(),
+                &browser.profile_id.to_string(),
                 "session.end_session",
             )
             .await
