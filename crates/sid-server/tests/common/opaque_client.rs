@@ -124,33 +124,69 @@ pub async fn start_login(
         .expect("login start")
 }
 
-/// A whole login on one replica whose finish carries each of `origins` as an
-/// `Origin` header, as a browser page sends it; the whole answer, metadata
-/// included.
-pub async fn login_with_origins(
+/// `finish` sent with each of `origins` as an `Origin` header, as a browser
+/// page sends it; the whole answer, metadata included.
+pub async fn finish_with_origins(
     svc: &TestServices,
-    principal: &str,
-    password: &[u8],
+    finish: OpaqueLoginFinishRequest,
     origins: &[&str],
-) -> tonic::Response<OpaqueLoginFinishResponse> {
-    let mut finish = Request::new(start_login(svc, principal, password).await);
+) -> Result<tonic::Response<OpaqueLoginFinishResponse>, tonic::Status> {
+    let mut finish = Request::new(finish);
     for origin in origins {
         finish
             .metadata_mut()
             .append("origin", origin.parse().unwrap());
     }
-    svc.auth.opaque_login_finish(finish).await.expect("login")
+    svc.auth.opaque_login_finish(finish).await
 }
 
-/// A whole login on one replica: start and finish.
+/// A whole login on one replica whose finish carries each of `origins`.
+pub async fn login_with_origins(
+    svc: &TestServices,
+    principal: &str,
+    password: &[u8],
+    origins: &[&str],
+) -> Result<tonic::Response<OpaqueLoginFinishResponse>, tonic::Status> {
+    let finish = start_login(svc, principal, password).await;
+    finish_with_origins(svc, finish, origins).await
+}
+
+/// A native client's completed login: the answer and the access token it
+/// received in `authorization` metadata.
+#[derive(Debug)]
+pub struct LoggedIn {
+    pub session_id: String,
+    pub access_token: String,
+    pub expires_in: i64,
+}
+
+/// The access token `response` delivers in its `authorization` metadata
+/// (`Bearer <token>`), as a native client reads it.
+pub fn bearer<T>(response: &tonic::Response<T>) -> String {
+    response
+        .metadata()
+        .get("authorization")
+        .expect("the access token in authorization metadata")
+        .to_str()
+        .unwrap()
+        .strip_prefix("Bearer ")
+        .expect("a Bearer credential")
+        .to_string()
+}
+
+/// A whole login on one replica by a native client: start and finish.
 pub async fn login(
     svc: &TestServices,
     principal: &str,
     password: &[u8],
-) -> Result<OpaqueLoginFinishResponse, tonic::Status> {
+) -> Result<LoggedIn, tonic::Status> {
     let finish = try_start_login(svc, principal, password).await?;
-    svc.auth
-        .opaque_login_finish(Request::new(finish))
-        .await
-        .map(|r| r.into_inner())
+    let response = svc.auth.opaque_login_finish(Request::new(finish)).await?;
+    let access_token = bearer(&response);
+    let body = response.into_inner();
+    Ok(LoggedIn {
+        session_id: body.session_id,
+        access_token,
+        expires_in: body.expires_in,
+    })
 }
