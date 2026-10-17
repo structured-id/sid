@@ -32,7 +32,7 @@ fn row_to_refresh_token(row: &sqlx::sqlite::SqliteRow) -> SidResult<RefreshToken
         id: uuid_col(row, "id")?,
         token_hash: col(row, "token_hash")?,
         session_id: col(row, "session_id")?,
-        owner: col(row, "profile_id")?,
+        profile_id: col(row, "profile_id")?,
         client_id: col(row, "client_id")?,
         scopes: words(row, "scopes")?,
         resource: col(row, "resource_id")?,
@@ -54,7 +54,7 @@ fn row_to_refresh_token(row: &sqlx::sqlite::SqliteRow) -> SidResult<RefreshToken
 fn row_to_auth_code(row: &sqlx::sqlite::SqliteRow) -> SidResult<AuthorizationCode> {
     Ok(AuthorizationCode {
         code_hash: col(row, "code_hash")?,
-        owner: col(row, "profile_id")?,
+        profile_id: col(row, "profile_id")?,
         client_id: col(row, "client_id")?,
         redirect_uri: col(row, "redirect_uri")?,
         scopes: words(row, "scopes")?,
@@ -110,7 +110,7 @@ pub(super) async fn insert_refresh_token(
     .bind(token.id.to_string())
     .bind(&token.token_hash)
     .bind(token.session_id)
-    .bind(token.owner)
+    .bind(token.profile_id)
     .bind(&token.client_id)
     .bind(token.scopes.join(" "))
     .bind(fmt_dt(&token.expires_at))
@@ -234,7 +234,7 @@ impl SqliteBackend {
                 authenticated_at, amr, assurance_level, elevation_level, elevation_until, authorizing_session_id)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
-        .bind(&code.code_hash).bind(code.owner)
+        .bind(&code.code_hash).bind(code.profile_id)
         .bind(&code.client_id)
         .bind(&code.redirect_uri)
         .bind(code.scopes.join(" "))

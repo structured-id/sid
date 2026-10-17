@@ -208,7 +208,7 @@ pub async fn redeem_code<H: GrantHost>(
         .await
         .map_err(GrantFailure::Host)?;
 
-    let owner = exchanged.owner();
+    let owner = exchanged.profile_id();
     let account = host
         .account(owner)
         .await
@@ -324,7 +324,7 @@ pub async fn refresh<H: GrantHost>(
         .await
         .map_err(GrantFailure::Host)?;
 
-    let owner = validated.owner();
+    let owner = validated.profile_id();
     let account = host
         .account(owner)
         .await

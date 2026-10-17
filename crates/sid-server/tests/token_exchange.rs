@@ -832,7 +832,7 @@ async fn test_impersonation_is_a_recorded_and_audited_session() {
         .await
         .unwrap()
         .expect("impersonation session stored");
-    assert_eq!(session.owner, profile.id);
+    assert_eq!(session.profile_id, profile.id);
     assert_eq!(session.client_id.as_deref(), Some("mu_test_exchange"));
     assert_eq!(session.expires_at.timestamp(), claims.exp);
     let audits = svc.mock_storage.session_audits();

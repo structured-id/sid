@@ -30,16 +30,16 @@ impl fmt::Display for AuthCodeError {
 
 impl std::error::Error for AuthCodeError {}
 
-/// Authorization code (stored as SHA-256 hash, never plaintext). `O` is the
-/// account that authorized it, as the issuing host types it: a local Profile
-/// by default.
+/// Authorization code (stored as SHA-256 hash, never plaintext). `O` is how
+/// the serving authority represents its stable user: a local Profile by
+/// default.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthorizationCode<O = ProfileId> {
     /// SHA-256 hash of the authorization code string.
     pub code_hash: Vec<u8>,
 
-    /// Account that authorized this code.
-    pub owner: O,
+    /// Profile that authorized this code.
+    pub profile_id: O,
 
     /// OAuth2 client that requested this code.
     pub client_id: String,
@@ -96,9 +96,9 @@ pub struct ExchangedCode<O = ProfileId> {
 }
 
 impl<O> ExchangedCode<O> {
-    /// Account that authorized this code.
-    pub fn owner(&self) -> &O {
-        &self.inner.owner
+    /// Profile that authorized this code.
+    pub fn profile_id(&self) -> &O {
+        &self.inner.profile_id
     }
 
     /// OAuth2 client that requested this code.

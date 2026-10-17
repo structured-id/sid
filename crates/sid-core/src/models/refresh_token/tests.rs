@@ -7,7 +7,7 @@ fn make_token(expires_in: Duration, revoked: bool) -> RefreshToken {
         id,
         token_hash: vec![1, 2, 3],
         session_id: SessionId::generate(),
-        owner: ProfileId::generate(),
+        profile_id: ProfileId::generate(),
         client_id: "test-client".to_string(),
         scopes: vec!["openid".into(), "profile".into()],
         resource: ResourceId::generate(),
@@ -21,16 +21,16 @@ fn make_token(expires_in: Duration, revoked: bool) -> RefreshToken {
     }
 }
 
-// A host's owner type need not be `Copy`: everything but `owner()` reads
-// without it, so the refresh grant stays usable for any owner.
+// Another authority's representation of its stable user need not be `Copy`:
+// the refresh grant data reads without it.
 #[test]
-fn test_validated_token_reads_without_a_copy_owner() {
+fn test_validated_token_reads_without_a_copy_profile_id() {
     let id = Uuid::now_v7();
     let token = RefreshToken {
         id,
         token_hash: vec![1],
         session_id: SessionId::generate(),
-        owner: String::from("account"),
+        profile_id: String::from("user"),
         client_id: "test-client".to_string(),
         scopes: vec!["openid".into()],
         resource: ResourceId::generate(),
@@ -134,7 +134,7 @@ fn test_validate_valid_token_consumes_self() {
         id,
         token_hash: vec![1, 2, 3],
         session_id,
-        owner: profile_id,
+        profile_id,
         client_id: "test-client".to_string(),
         scopes: vec!["openid".into(), "profile".into()],
         resource,
@@ -150,7 +150,7 @@ fn test_validate_valid_token_consumes_self() {
     let validated = token.validate().expect("validate should succeed");
 
     assert_eq!(validated.session_id(), session_id);
-    assert_eq!(*validated.owner(), profile_id);
+    assert_eq!(*validated.profile_id(), profile_id);
     assert_eq!(validated.client_id(), "test-client");
     assert_eq!(validated.scopes(), &["openid", "profile"]);
     assert_eq!(validated.resource(), resource);

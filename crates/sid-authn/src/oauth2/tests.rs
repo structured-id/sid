@@ -456,15 +456,16 @@ async fn test_issue_tokens_without_openid_scope() {
     assert!(response.id_token.is_none()); // No openid scope → no id_token
 }
 
-/// An account that is not a local Profile.
+/// Another authority's representation of its stable user, not a local
+/// `ProfileId`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct OtherAccount(u64);
 
-// A host whose account is not a Profile issues access and refresh tokens
-// for it: no Profile is needed, and the refresh token is the session's
-// account's.
+// An authority that represents its stable user by something other than a
+// local `ProfileId` gets access and refresh tokens; the refresh token keeps
+// the session's user.
 #[tokio::test]
-async fn test_issue_tokens_for_an_account_that_is_not_a_profile() {
+async fn test_issue_tokens_for_another_user_representation() {
     let server = OAuth2Server::new(create_test_jwt());
     let (issuers, issuer) = crate::test_support::installation_issuer().await;
     let signer = issuers.signer(&issuer).await.unwrap();
@@ -490,10 +491,10 @@ async fn test_issue_tokens_for_an_account_that_is_not_a_profile() {
             None,
             None,
         )
-        .expect("tokens for a non-Profile account");
+        .expect("tokens for another user representation");
 
     assert!(response.id_token.is_none());
-    assert_eq!(refresh.owner, OtherAccount(7));
+    assert_eq!(refresh.profile_id, OtherAccount(7));
     let claims = issuers
         .verifier(&issuer)
         .await
@@ -504,10 +505,10 @@ async fn test_issue_tokens_for_an_account_that_is_not_a_profile() {
     assert!(claims.pid.is_none());
 }
 
-// An owner that is not `Copy` (a host's own account reference) gets tokens
-// too, and its refresh token carries that owner.
+// A user representation that is not `Copy` gets tokens too, and its refresh
+// token carries that user.
 #[tokio::test]
-async fn test_issue_tokens_for_an_owner_that_is_not_copy() {
+async fn test_issue_tokens_for_a_user_representation_that_is_not_copy() {
     let server = OAuth2Server::new(create_test_jwt());
     let (issuers, issuer) = crate::test_support::installation_issuer().await;
     let signer = issuers.signer(&issuer).await.unwrap();
@@ -533,15 +534,15 @@ async fn test_issue_tokens_for_an_owner_that_is_not_copy() {
             None,
             None,
         )
-        .expect("tokens for a non-Copy owner");
+        .expect("tokens for a non-Copy user representation");
 
-    assert_eq!(refresh.owner, "account-7");
+    assert_eq!(refresh.profile_id, "account-7");
 
     // The refresh token it got is validated for rotation like any other.
     let validated = server
         .validate_refresh(refresh, &client)
         .expect("its refresh token validates");
-    assert_eq!(validated.owner(), "account-7");
+    assert_eq!(validated.profile_id(), "account-7");
 }
 
 // `openid` asks for an ID token, which is built from the account's Profile:

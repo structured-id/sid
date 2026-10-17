@@ -407,7 +407,7 @@ impl OidcProviderServiceImpl {
             Ok(_) => return Err(invalid_token(scheme)),
             Err(e) => return Err(internal(e)),
         };
-        let profile = match self.storage.get_profile(session.owner).await {
+        let profile = match self.storage.get_profile(session.profile_id).await {
             Ok(Some(profile)) => profile,
             Ok(None) => return Err(invalid_token(scheme)),
             Err(e) => return Err(internal(e)),

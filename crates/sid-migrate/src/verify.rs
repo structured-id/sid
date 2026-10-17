@@ -176,10 +176,10 @@ pub async fn verify_backends(
         // Check sessions reference valid profiles
         let sessions = target.list_sessions_by_profile(profile.id).await?;
         for session in &sessions {
-            if session.owner != profile.id {
+            if session.profile_id != profile.id {
                 integrity_issues.push(format!(
                     "session {} references profile {} but was fetched for profile {}",
-                    session.id, session.owner, profile.id,
+                    session.id, session.profile_id, profile.id,
                 ));
             }
         }

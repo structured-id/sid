@@ -50,9 +50,8 @@ impl fmt::Display for RefreshTokenError {
 
 impl std::error::Error for RefreshTokenError {}
 
-/// Refresh token (stored as SHA-256 hash, never plaintext). `O` is the
-/// account that owns it, as the issuing host types it: a local Profile by
-/// default.
+/// Refresh token (stored as SHA-256 hash, never plaintext). `O` is how the
+/// serving authority represents its stable user: a local Profile by default.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RefreshToken<O = ProfileId> {
     /// Token record ID (UUIDv7).
@@ -64,8 +63,8 @@ pub struct RefreshToken<O = ProfileId> {
     /// Session this token belongs to.
     pub session_id: SessionId,
 
-    /// Account that owns this token.
-    pub owner: O,
+    /// Profile this token was issued for.
+    pub profile_id: O,
 
     /// OAuth2 client that requested this token.
     pub client_id: String,
@@ -110,9 +109,9 @@ pub struct ValidatedRefreshToken<O = ProfileId> {
 }
 
 impl<O> ValidatedRefreshToken<O> {
-    /// Account that owns this token.
-    pub fn owner(&self) -> &O {
-        &self.inner.owner
+    /// Profile this token was issued for.
+    pub fn profile_id(&self) -> &O {
+        &self.inner.profile_id
     }
 
     /// Token record ID.

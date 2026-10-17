@@ -86,7 +86,7 @@ async fn code<H: GrantHarness>(
         .unwrap();
     AuthorizationCode {
         code_hash: Uuid::now_v7().as_bytes().to_vec(),
-        owner,
+        profile_id: owner,
         client_id: "conformance-client".into(),
         redirect_uri: "https://app.sid.example.com/callback".into(),
         scopes: vec!["openid".into()],
@@ -107,7 +107,7 @@ fn refresh<O: Clone>(session: &Session<O>, family: Uuid, resource: ResourceId) -
         id: Uuid::now_v7(),
         token_hash: Uuid::now_v7().as_bytes().to_vec(),
         session_id: session.id,
-        owner: session.owner.clone(),
+        profile_id: session.profile_id.clone(),
         client_id: "conformance-client".into(),
         scopes: vec!["openid".into()],
         resource,
@@ -142,7 +142,7 @@ async fn redeemed<H: GrantHarness>(
     session: &Session<H::Owner>,
     token: &RefreshToken<H::Owner>,
 ) {
-    let code = code(h, session.owner.clone(), token.resource).await;
+    let code = code(h, session.profile_id.clone(), token.resource).await;
     h.store().create_auth_code(&code, ctx()).await.unwrap();
     assert_eq!(
         h.store()
@@ -174,7 +174,7 @@ pub async fn session_create_never_replaces<H: GrantHarness>(h: &H) {
         assert!(matches!(err, Error::Conflict(_)), "limit {limit}: {err:?}");
     }
     let stored = h.store().get_session(first.id).await.unwrap().unwrap();
-    assert_eq!(stored.owner, first.owner);
+    assert_eq!(stored.profile_id, first.profile_id);
     assert_eq!(stored.authentication(), first.authentication());
 }
 
@@ -462,7 +462,7 @@ pub async fn auth_code_roundtrip<H: GrantHarness>(h: &H) {
         .unwrap()
         .expect("stored code");
     assert!(!stored.used);
-    assert_eq!(stored.owner, code.owner);
+    assert_eq!(stored.profile_id, code.profile_id);
     assert_eq!(stored.client_id, code.client_id);
     assert_eq!(stored.redirect_uri, code.redirect_uri);
     assert_eq!(stored.scopes, code.scopes);
@@ -586,7 +586,7 @@ pub async fn refresh_token_roundtrip<H: GrantHarness>(h: &H) {
     let stored = stored_refresh(h, &token).await.expect("stored token");
     assert_eq!(stored.id, token.id);
     assert_eq!(stored.session_id, s.id);
-    assert_eq!(stored.owner, s.owner);
+    assert_eq!(stored.profile_id, s.profile_id);
     assert_eq!(stored.client_id, token.client_id);
     assert_eq!(stored.scopes, token.scopes);
     assert_eq!(stored.resource, token.resource);
