@@ -61,6 +61,7 @@ pub mod operation;
 pub mod otp;
 pub mod passkey_prompt;
 pub mod password_history;
+pub mod password_sign_in;
 pub mod principal_contest;
 pub(crate) mod recovery;
 pub mod resource;
@@ -71,6 +72,7 @@ pub mod sealed_secret;
 #[cfg(feature = "grpc")]
 pub mod service_auth;
 pub mod session_limit;
+pub mod sign_in_security;
 pub mod step_up;
 pub mod subject;
 pub mod system_integration;
