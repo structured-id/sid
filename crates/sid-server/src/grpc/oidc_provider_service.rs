@@ -221,12 +221,9 @@ impl OidcProviderServiceImpl {
                 let mut answer = returned(return_to, "Signed out");
                 answer.metadata_mut().insert(
                     "set-cookie",
-                    sid_authn::browser_session::BrowserCookie::default()
-                        .clear()
-                        .parse()
-                        .map_err(|e| {
-                            sid_core::grpc_error::refuse::internal("encode session cookie", e)
-                        })?,
+                    self.auth.browser_cookie().clear().parse().map_err(|e| {
+                        sid_core::grpc_error::refuse::internal("encode session cookie", e)
+                    })?,
                 );
                 answer
             }

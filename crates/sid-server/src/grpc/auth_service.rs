@@ -602,6 +602,9 @@ pub struct AuthServiceImpl {
     /// Origin of the browser sign-in page: a ceremony it runs sets the IdP
     /// session cookie. None sets no cookie.
     sign_in_origin: Option<url::Origin>,
+    /// This authority's IdP session cookie, the only one it sets, reads and
+    /// clears.
+    browser_cookie: sid_authn::browser_session::BrowserCookie,
     /// The enrollment mode the deployment pins over the stored one.
     enrollment_pin: Option<sid_core::models::EnrollmentMode>,
     /// Browser authorization requests kept while the user signs in, by
@@ -770,6 +773,7 @@ impl AuthServiceImpl {
             trusted_proxies: sid_authn::client_address::TrustedProxies::none(),
             authz,
             sign_in_origin: None,
+            browser_cookie: sid_authn::browser_session::BrowserCookie::default(),
             enrollment_pin: None,
         }
     }
@@ -779,6 +783,22 @@ impl AuthServiceImpl {
     pub fn with_sign_in_page(mut self, sign_in: &url::Url) -> Self {
         self.sign_in_origin = Some(sign_in.origin());
         self
+    }
+
+    /// Name this authority's IdP session cookie `cookie`, as an installation
+    /// sharing its host with another authority configures it
+    /// (`SID_BROWSER_SESSION_COOKIE`).
+    pub fn with_browser_cookie(
+        mut self,
+        cookie: sid_authn::browser_session::BrowserCookie,
+    ) -> Self {
+        self.browser_cookie = cookie;
+        self
+    }
+
+    /// This authority's IdP session cookie.
+    pub(crate) fn browser_cookie(&self) -> &sid_authn::browser_session::BrowserCookie {
+        &self.browser_cookie
     }
 
     /// Apply `mode` to self-registration whatever mode is stored: the
@@ -2518,7 +2538,7 @@ impl AuthServiceImpl {
             access_token,
             expires_in,
             cookie: browser.map(|secret| {
-                sid_authn::browser_session::BrowserCookie::default()
+                self.browser_cookie
                     .set(&secret, (expires_at - Utc::now()).num_seconds())
             }),
         })

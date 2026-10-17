@@ -2,9 +2,27 @@
 //! The sign-in page the authorization endpoint sends users to
 //! (`SID_LOGIN_URL`).
 
-use sid_server::init::login_url;
+use sid_server::init::{browser_cookie, login_url};
 
 const ISSUER: &str = "https://sid.example.com";
+
+/// Unset or empty keeps the default IdP session cookie; a `__Host-` token
+/// names this authority's own; anything else stops the start.
+#[test]
+fn browser_cookie_configured() {
+    assert_eq!(browser_cookie(None).unwrap().name(), "__Host-sid_session");
+    assert_eq!(
+        browser_cookie(Some("")).unwrap().name(),
+        "__Host-sid_session"
+    );
+    assert_eq!(
+        browser_cookie(Some("__Host-sid_second")).unwrap().name(),
+        "__Host-sid_second"
+    );
+    for bad in ["sid_second", "__Host-", "__Host-a b"] {
+        assert!(browser_cookie(Some(bad)).is_err(), "{bad:?}");
+    }
+}
 
 /// Unset or empty means no sign-in page.
 #[test]

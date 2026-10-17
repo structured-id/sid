@@ -7,7 +7,6 @@
 
 use base64::Engine;
 use chrono::{DateTime, Utc};
-use sid_authn::browser_session::BrowserCookie;
 use sid_authn::oauth2::prompt::Prompt;
 use sid_core::models::{OAuth2Client, Session};
 use tonic::metadata::MetadataMap;
@@ -330,18 +329,7 @@ impl AuthServiceImpl {
         let prompt = Prompt::parse(pending.prompt.as_deref()).map_err(authorize_refusal)?;
         let now = Utc::now();
 
-        let cookies = metadata
-            .get_all("cookie")
-            .iter()
-            .filter_map(|value| value.to_str().ok());
-        let session = match BrowserCookie::default().secret(cookies) {
-            Some(secret) => self
-                .storage
-                .get_session_by_browser_secret(&secret.hash())
-                .await
-                .map_err(storage_failure)?,
-            None => None,
-        };
+        let session = self.browser_session(metadata).await?;
         let after = prompt.authenticated_after(pending.max_age, pending.arrived_at);
         let session = session.filter(|session| {
             self.authorizes(session, now)

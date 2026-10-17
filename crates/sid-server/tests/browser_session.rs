@@ -65,6 +65,32 @@ async fn sign_in_page_ceremony_sets_the_session_cookie() {
     assert_ne!(body.session_id, value);
 }
 
+/// An authority that names its own cookie, as one sharing its host with
+/// another authority does, sets that cookie and never the default one.
+#[tokio::test]
+async fn sign_in_sets_the_authoritys_configured_cookie() {
+    let configured = BrowserCookie::new("__Host-sid_second").unwrap();
+    let svc = TestServices::with_browser_cookie(MockStorage::new(), configured.clone());
+    register(&svc, &svc, "second@sid.example.com", PASSWORD).await;
+
+    let response =
+        login_with_origins(&svc, "second@sid.example.com", PASSWORD, &[SIGN_IN_ORIGIN]).await;
+
+    let cookies = set_cookies(&response);
+    assert_eq!(cookies.len(), 1, "{cookies:?}");
+    let pair = cookies[0].split(';').next().unwrap();
+    assert!(pair.starts_with("__Host-sid_second="), "{pair}");
+    assert!(BrowserCookie::default().secret([pair]).is_none());
+    let secret = configured.secret([pair]).unwrap();
+    let session = svc
+        .storage
+        .get_session(SessionId::parse(&response.into_inner().session_id).unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(session.browser_secret_hash, Some(secret.hash()));
+}
+
 /// A ceremony from anywhere else gets no cookie and its session no hash:
 /// no `Origin` (a native client), another origin, `null`, and two origins.
 #[tokio::test]

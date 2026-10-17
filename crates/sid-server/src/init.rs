@@ -182,6 +182,20 @@ pub fn login_url(value: Option<&str>, issuer: &str) -> anyhow::Result<Option<url
     Ok(Some(url))
 }
 
+/// This authority's IdP session cookie, from `SID_BROWSER_SESSION_COOKIE`.
+/// Unset or empty keeps the default name, for an authority alone on its host;
+/// an authority sharing its host with another names its own `__Host-` cookie,
+/// and any other value is a configuration error.
+pub fn browser_cookie(
+    value: Option<&str>,
+) -> anyhow::Result<sid_authn::browser_session::BrowserCookie> {
+    match value.filter(|v| !v.is_empty()) {
+        None => Ok(sid_authn::browser_session::BrowserCookie::default()),
+        Some(name) => sid_authn::browser_session::BrowserCookie::new(name)
+            .map_err(|e| anyhow::anyhow!("SID_BROWSER_SESSION_COOKIE: {e}")),
+    }
+}
+
 /// The account integration's settings from `SID_ACCOUNT_URL` (the account
 /// UI's public URL) and `SID_ACCOUNT_CLIENT_JWKS` (a file holding its BFF's
 /// public JWK Set). Neither set means the deployment serves no account UI;
@@ -894,6 +908,8 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         Arc::new(sid_authz::CeAuthzEngine::new(storage.clone()));
 
     let login_url = login_url(std::env::var("SID_LOGIN_URL").ok().as_deref(), &issuer)?;
+    let browser_cookie =
+        browser_cookie(std::env::var("SID_BROWSER_SESSION_COOKIE").ok().as_deref())?;
 
     let history_authority = password_history_authority(
         |name| std::env::var(name),
@@ -928,7 +944,8 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         history_authority,
     )
     .with_trusted_proxies(trusted_proxies)
-    .with_enrollment_pin(enrollment_pin);
+    .with_enrollment_pin(enrollment_pin)
+    .with_browser_cookie(browser_cookie);
     let auth_svc = Arc::new(match &login_url {
         Some(page) => auth_svc.with_sign_in_page(page),
         None => auth_svc,

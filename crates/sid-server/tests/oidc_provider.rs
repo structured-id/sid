@@ -377,7 +377,18 @@ struct SignedIn {
 
 /// The `Cookie` header a browser sends for `secret`.
 fn cookie_of(secret: &sid_authn::browser_session::BrowserSecret) -> String {
-    sid_authn::browser_session::BrowserCookie::default()
+    cookie_named(
+        &sid_authn::browser_session::BrowserCookie::default(),
+        secret,
+    )
+}
+
+/// The `Cookie` header a browser sends for `secret` in `cookie`.
+fn cookie_named(
+    cookie: &sid_authn::browser_session::BrowserCookie,
+    secret: &sid_authn::browser_session::BrowserSecret,
+) -> String {
+    cookie
         .set(secret, 3600)
         .split(';')
         .next()
@@ -386,6 +397,11 @@ fn cookie_of(secret: &sid_authn::browser_session::BrowserSecret) -> String {
 }
 
 async fn signed_in() -> SignedIn {
+    signed_in_with_cookie(sid_authn::browser_session::BrowserCookie::default()).await
+}
+
+/// A signed-in user of an authority whose browser-session cookie is `cookie`.
+async fn signed_in_with_cookie(cookie: sid_authn::browser_session::BrowserCookie) -> SignedIn {
     let mut profile = sid_core::models::Profile::new(Some("alice"));
     profile.given_name = Some("Alice".into());
     profile.family_name = Some("Smith".into());
@@ -396,10 +412,11 @@ async fn signed_in() -> SignedIn {
     );
     let secret = sid_authn::browser_session::BrowserSecret::generate();
     session.browser_secret_hash = Some(secret.hash());
-    let svc = TestServices::new(
+    let svc = TestServices::with_browser_cookie(
         MockStorage::new()
             .with_profile(profile.clone())
             .with_session(session.clone()),
+        cookie.clone(),
     );
     let now = chrono::Utc::now();
     svc.storage
@@ -426,7 +443,7 @@ async fn signed_in() -> SignedIn {
         provider,
         profile,
         session,
-        cookie: cookie_of(&secret),
+        cookie: cookie_named(&cookie, &secret),
     }
 }
 
@@ -1606,7 +1623,15 @@ async fn browser(login_url: Option<&str>) -> Browser {
 
 /// A browser whose test client is `client`.
 async fn browser_with(login_url: Option<&str>, client: sid_core::models::OAuth2Client) -> Browser {
-    let user = signed_in().await;
+    browser_of(signed_in().await, login_url, client).await
+}
+
+/// A browser of `user`, whose test client is `client`.
+async fn browser_of(
+    user: SignedIn,
+    login_url: Option<&str>,
+    client: sid_core::models::OAuth2Client,
+) -> Browser {
     common::store_client(&*user.svc.storage, &client)
         .await
         .unwrap();
@@ -2287,6 +2312,71 @@ async fn confirmation_of(response: reqwest::Response) -> String {
         .and_then(|rest| rest.split('"').next())
         .unwrap_or_else(|| panic!("no confirmation form: {html}"))
         .to_string()
+}
+
+/// An authority that names its own browser-session cookie reads and clears
+/// only that cookie: the same secret under the default name is no session,
+/// and ending single sign-on clears the configured cookie, not the default.
+#[tokio::test]
+async fn authorize_and_end_session_use_the_configured_cookie() {
+    let configured = sid_authn::browser_session::BrowserCookie::new("__Host-sid_second").unwrap();
+    let mut browser = browser_of(
+        signed_in_with_cookie(configured).await,
+        None,
+        common::test_client(),
+    )
+    .await;
+    let own = browser.user.cookie.clone();
+    assert!(own.starts_with("__Host-sid_second="), "{own}");
+
+    let query = redirect_query(
+        &browser
+            .get(&with_query(
+                &browser.authorize,
+                &authorize_query(REDIRECT_URI),
+            ))
+            .await,
+        REDIRECT_URI,
+    );
+    assert!(query.contains_key("code"), "{query:?}");
+
+    browser.user.cookie = own.replacen("__Host-sid_second=", "__Host-sid_session=", 1);
+    let query = redirect_query(
+        &browser
+            .get(&with_query(
+                &browser.authorize,
+                &authorize_query(REDIRECT_URI),
+            ))
+            .await,
+        REDIRECT_URI,
+    );
+    assert_eq!(query["error"], "login_required", "{query:?}");
+
+    browser.user.cookie = own;
+    let (_, id_token) = browser.application_session().await;
+    let ended = browser
+        .get(&with_query(
+            &browser.end_session,
+            &[
+                ("id_token_hint", id_token.as_str()),
+                ("client_id", "test-client"),
+            ],
+        ))
+        .await;
+    assert_eq!(ended.status(), 200);
+    let cleared: Vec<String> = ended
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .map(|v| v.to_str().unwrap().to_string())
+        .collect();
+    assert!(
+        cleared
+            .iter()
+            .any(|v| v.starts_with("__Host-sid_second=;") && v.ends_with("Max-Age=0")),
+        "{cleared:?}"
+    );
+    assert!(!clears_the_cookie(&ended), "{cleared:?}");
 }
 
 /// A valid `id_token_hint` whose application session reuses this browser's
