@@ -1621,7 +1621,7 @@ async fn applications_resources_and_access_survive_migration() {
         canonical_url: format!("https://sid.example.com/i/{handle}"),
         handle,
         authority: IssuerAuthority::Local,
-        recipient: org.id,
+        recipient_org: org.id,
         created_at: now,
     };
     let source = SqliteBackend::new_in_memory().await.unwrap();

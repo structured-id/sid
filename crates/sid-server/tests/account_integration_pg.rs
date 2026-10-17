@@ -47,7 +47,7 @@ async fn issuer(storage: &PostgresBackend) -> OidcIssuer {
         canonical_url: format!("https://sid.example.com/i/{handle}"),
         handle,
         authority: IssuerAuthority::Local,
-        recipient: org.id,
+        recipient_org: org.id,
         created_at: now,
     };
     let key = IssuerSigningKey {

@@ -1085,14 +1085,8 @@ mod issuer_store {
         issuer_provisioned_once,
         foreign_first_key_refused,
         unknown_handle_names_nothing,
+        unknown_organization_refused,
     );
-
-    /// The organizational store's own rule: an issuer's recipient is an
-    /// organization it holds.
-    #[tokio::test]
-    async fn unknown_organization_refused() {
-        common::issuer_conformance::unknown_organization_refused(&setup().await).await;
-    }
 }
 
 #[tokio::test]

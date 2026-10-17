@@ -97,7 +97,7 @@ impl SystemIntegrationService for SystemIntegrationServiceImpl {
         let org = integration.client.org_id.ok_or_else(unavailable)?;
         let issuer = self
             .storage
-            .oidc_issuer_for(IssuerAuthority::Local, &org)
+            .oidc_issuer_for(IssuerAuthority::Local, org)
             .await
             .map_err(internal)?
             .filter(|issuer| issuer.id == integration.resource.issuer_id)
