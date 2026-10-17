@@ -202,7 +202,7 @@ fn required_epochs_are_the_active_one_then_those_still_holding_entries() {
 /// rotated out) requires no comparison until one is created.
 #[test]
 fn an_owner_without_an_active_epoch_has_none_required() {
-    let history = PasswordHistory::default();
+    let history: PasswordHistory = PasswordHistory::default();
     assert!(history.active_epoch().is_none());
     assert!(history.required_epochs().is_empty());
 }
