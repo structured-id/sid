@@ -81,7 +81,7 @@ fn some_issuer() -> OidcIssuer {
         handle: IssuerHandle::generate(),
         canonical_url: "https://sid.example.com/i/x".into(),
         authority: IssuerAuthority::Local,
-        recipient_org: OrgId::generate(),
+        recipient: OrgId::generate(),
         created_at: chrono::Utc::now(),
     }
 }
@@ -111,7 +111,7 @@ fn first_key_must_be_the_issuers_generation_one() {
 #[test]
 fn an_issuer_serves_only_its_organizations_clients() {
     let issuer = some_issuer();
-    assert!(issuer.serves(Some(issuer.recipient_org)));
+    assert!(issuer.serves(Some(issuer.recipient)));
     assert!(!issuer.serves(Some(OrgId::generate())));
     assert!(!issuer.serves(None));
 }

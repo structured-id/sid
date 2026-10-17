@@ -44,7 +44,7 @@ async fn registration() -> Registration {
         canonical_url: format!("{INSTALLATION}/i/{handle}"),
         handle,
         authority: IssuerAuthority::Local,
-        recipient_org: org.id,
+        recipient: org.id,
         created_at: now,
     };
     let key = IssuerSigningKey {

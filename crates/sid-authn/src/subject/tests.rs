@@ -24,7 +24,7 @@ fn local_issuer(org: OrgId) -> OidcIssuer {
         canonical_url: format!("https://sid.example.com/i/{handle}"),
         handle,
         authority: IssuerAuthority::Local,
-        recipient_org: org,
+        recipient: org,
         created_at: Utc::now(),
     }
 }

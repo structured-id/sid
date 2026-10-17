@@ -85,7 +85,7 @@ impl ClientConnection {
             return unusable("the resource is not a token target");
         }
         // An issuer serves the clients of its recipient organization only.
-        if client.org_id != Some(issuer.recipient_org) {
+        if client.org_id != Some(issuer.recipient) {
             return unusable("the client is not of the issuer's organization");
         }
         // The BFF signs in with the code flow and keeps sessions by refresh.
