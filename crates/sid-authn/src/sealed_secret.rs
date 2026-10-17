@@ -48,14 +48,16 @@ impl std::fmt::Debug for Opened {
     }
 }
 
-/// Binding context of an account's TOTP seed.
-pub fn totp_context(owner: impl std::fmt::Display) -> String {
-    format!("totp:{owner}")
+/// Binding context of an account's TOTP seed, named by the account's stable
+/// id: a presentation form could be shared or change, unbinding the seed.
+pub fn totp_context(owner: impl Into<uuid::Uuid>) -> String {
+    format!("totp:{}", owner.into().hyphenated())
 }
 
-/// Binding context of an account's OPAQUE envelope.
-pub fn opaque_context(owner: impl std::fmt::Display) -> String {
-    format!("opaque:{owner}")
+/// Binding context of an account's OPAQUE envelope, named by the account's
+/// stable id.
+pub fn opaque_context(owner: impl Into<uuid::Uuid>) -> String {
+    format!("opaque:{}", owner.into().hyphenated())
 }
 
 /// Whether a stored value is in sealed form.
