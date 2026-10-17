@@ -371,9 +371,9 @@ impl IssuerStore for SqliteBackend {
     async fn oidc_issuer_for(
         &self,
         authority: sid_core::models::IssuerAuthority,
-        recipient_org: &sid_core::models::OrgId,
+        recipient_org: sid_core::models::OrgId,
     ) -> SidResult<Option<sid_core::models::OidcIssuer>> {
-        self.oidc_issuer_for_impl(authority, *recipient_org).await
+        self.oidc_issuer_for_impl(authority, recipient_org).await
     }
 
     async fn oidc_issuer_by_handle(
