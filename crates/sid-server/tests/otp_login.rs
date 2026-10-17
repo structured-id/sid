@@ -44,12 +44,13 @@ async fn unknown_address_takes_the_same_path() {
             session_id: Some(pending.otp_session_id),
         }))
         .await
-        .expect("a wrong code answers as for a held address")
-        .into_inner();
+        .expect("a wrong code answers as for a held address");
+    // A refused code opens nothing and delivers no credential.
+    assert!(verified.metadata().get("authorization").is_none());
+    assert!(verified.metadata().get("set-cookie").is_none());
+    let verified = verified.into_inner();
     assert!(!verified.verified);
-    // A refused code opens nothing.
     assert_eq!(verified.session_id, None);
-    assert_eq!(verified.access_token, None);
     assert_eq!(verified.expires_in, None);
 }
 
@@ -107,8 +108,10 @@ async fn code_signs_in_the_assigned_holder() {
             session_id: Some(pending.session_id.to_string()),
         }))
         .await
-        .unwrap()
-        .into_inner();
+        .unwrap();
+    // A native client gets the session's token in metadata.
+    let token = common::opaque_client::bearer(&verified);
+    let verified = verified.into_inner();
     assert!(verified.verified);
 
     let holder_sessions = svc
@@ -132,7 +135,6 @@ async fn code_signs_in_the_assigned_holder() {
         verified.session_id.as_deref(),
         Some(holder_sessions[0].id.to_string().as_str())
     );
-    let token = verified.access_token.expect("the session's access token");
     let claims = svc.jwt.validate_access_token(&token).unwrap();
     assert_eq!(claims.sid, holder_sessions[0].id.to_string());
     assert!(verified.expires_in.is_some_and(|secs| secs > 0));

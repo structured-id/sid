@@ -95,10 +95,9 @@ async fn opaque_ceremonies_finish_on_another_replica() {
         .auth
         .opaque_login_finish(Request::new(finish))
         .await
-        .unwrap()
-        .into_inner();
+        .unwrap();
 
-    assert!(!signed_in.access_token.is_empty());
+    assert!(!common::opaque_client::bearer(&signed_in).is_empty());
 }
 
 /// A password registered before a restart signs in after it: the restarted
@@ -114,10 +113,9 @@ async fn password_survives_a_restart() {
         .auth
         .opaque_login_finish(Request::new(finish))
         .await
-        .unwrap()
-        .into_inner();
+        .unwrap();
 
-    assert!(!signed_in.access_token.is_empty());
+    assert!(!common::opaque_client::bearer(&signed_in).is_empty());
 }
 
 /// The login state is consumed once across replicas: the same finish sent

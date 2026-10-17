@@ -21,6 +21,12 @@ pub fn register_all(
     let mut d = Dispatcher::new();
 
     // ── AuthService ──
+    //
+    // Ceremony completions that sign in (OpaqueLoginFinish,
+    // WebAuthnAuthenticationFinish) are not served here: a browser's session
+    // credential is only its HttpOnly cookie, which a WebTransport session
+    // neither sends nor sets (W3C WebTransport §6.2 credentials mode "omit",
+    // §14.2), and the metadata of a call here is written by page script.
 
     register_rpc!(
         d,
@@ -29,15 +35,6 @@ pub fn register_all(
         opaque_login_start,
         OpaqueLoginStartRequest,
         OpaqueLoginStartResponse
-    );
-
-    register_rpc!(
-        d,
-        auth_svc,
-        "sid.v1.AuthService/OpaqueLoginFinish",
-        opaque_login_finish,
-        OpaqueLoginFinishRequest,
-        OpaqueLoginFinishResponse
     );
 
     register_rpc!(
@@ -128,15 +125,6 @@ pub fn register_all(
         web_authn_authentication_start,
         WebAuthnAuthenticationStartRequest,
         WebAuthnAuthenticationStartResponse
-    );
-
-    register_rpc!(
-        d,
-        auth_svc,
-        "sid.v1.AuthService/WebAuthnAuthenticationFinish",
-        web_authn_authentication_finish,
-        WebAuthnAuthenticationFinishRequest,
-        WebAuthnAuthenticationFinishResponse
     );
 
     register_rpc!(
