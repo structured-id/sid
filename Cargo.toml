@@ -11,7 +11,6 @@ members = [
     "crates/sid-fed",
     "crates/sid-storage",
     "crates/sid-server",
-    "crates/sid-webtransport",
     "crates/sid-crypto",
     "crates/sid-notify",
     "crates/sid-auth",
@@ -249,7 +248,6 @@ sid-authz = { path = "crates/sid-authz" }
 sid-fed = { path = "crates/sid-fed" }
 sid-storage = { path = "crates/sid-storage", default-features = false }
 sid-pake-core = { path = "zkpp/crates/sid-pake-core" }
-sid-webtransport = { path = "crates/sid-webtransport" }
 sid-crypto = { path = "crates/sid-crypto", default-features = false }
 sid-notify = { path = "crates/sid-notify" }
 sid-auth = { path = "crates/sid-auth" }

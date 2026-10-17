@@ -2906,8 +2906,7 @@ impl AuthService for AuthServiceImpl {
     }
 
     /// How long, by this server's clock, the caller's session may still
-    /// change its password without the current password. Routed on
-    /// WebTransport too, like the change's own steps.
+    /// change its password without the current password.
     #[instrument(skip_all, fields(method = "get_password_change_requirement"))]
     async fn get_password_change_requirement(
         &self,

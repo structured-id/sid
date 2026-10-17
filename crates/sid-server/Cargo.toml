@@ -62,7 +62,6 @@ rand = { workspace = true }
 pasta_curves = { workspace = true }
 ff = { workspace = true }
 group = { workspace = true }
-sid-webtransport = { workspace = true, optional = true }
 sid-scim = { path = "../sid-scim", optional = true }
 sid-i18n = { workspace = true }
 dashmap = { workspace = true }
@@ -114,9 +113,6 @@ embedded-dev = ["sid-storage/storage-sqlite"]
 
 # SCIM 2.0 inbound provisioning (corporate profile management).
 scim = ["dep:sid-scim"]
-
-# HTTP/3 QUIC transport (experimental).
-webtransport = ["dep:sid-webtransport"]
 
 # Dev/test benchmarking utilities.
 dev-perf-test = []
