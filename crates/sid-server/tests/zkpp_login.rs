@@ -89,7 +89,6 @@ async fn register_and_sign_in(svc: &TestServices, registered: &str, typed: &str)
             server_login_state: started.server_login_state,
         }))
         .await
-        .expect("login finish")
-        .into_inner();
-    assert!(!signed_in.access_token.is_empty());
+        .expect("login finish");
+    assert!(!common::opaque_client::bearer(&signed_in).is_empty());
 }
