@@ -324,9 +324,18 @@ async fn test_reset_history_is_compare_and_swap() {
 
 #[tokio::test]
 async fn test_history_write_cutoff_fences_registration_and_reset() {
-    let (backend, _) = isolated("cutoff_reg").await;
-    common::password_history::test_history_write_cutoff_fences_registration_and_reset(&backend)
-        .await;
+    let (backend, schema) = isolated("cutoff_reg").await;
+    let outcome = tokio::spawn({
+        let backend = backend.clone();
+        async move {
+            common::password_history::test_history_write_cutoff_fences_registration_and_reset(
+                &backend,
+            )
+            .await
+        }
+    })
+    .await;
+    finish_isolated(&backend, &schema, outcome).await;
 }
 
 // ─── Credential store conformance ───
@@ -351,11 +360,18 @@ macro_rules! credential_store_isolated {
     ($($scenario:ident),* $(,)?) => {$(
         #[tokio::test]
         async fn $scenario() {
-            let (backend, _) = isolated("cred_cutoff").await;
-            sid_plugin::conformance::credential_store::$scenario(
-                &common::credential_conformance::ProfileCredentials(&backend),
-            )
+            let (backend, schema) = isolated("cred_cutoff").await;
+            let outcome = tokio::spawn({
+                let backend = backend.clone();
+                async move {
+                    sid_plugin::conformance::credential_store::$scenario(
+                        &common::credential_conformance::ProfileCredentials(&backend),
+                    )
+                    .await
+                }
+            })
             .await;
+            finish_isolated(&backend, &schema, outcome).await;
         }
     )*};
 }
@@ -368,8 +384,15 @@ macro_rules! instance_secret_store {
     ($($scenario:ident),* $(,)?) => {$(
         #[tokio::test]
         async fn $scenario() {
-            let (backend, _) = isolated("instance_secret").await;
-            sid_plugin::conformance::instance_secret_store::$scenario(&backend).await;
+            let (backend, schema) = isolated("instance_secret").await;
+            let outcome = tokio::spawn({
+                let backend = backend.clone();
+                async move {
+                    sid_plugin::conformance::instance_secret_store::$scenario(&backend).await
+                }
+            })
+            .await;
+            finish_isolated(&backend, &schema, outcome).await;
         }
     )*};
 }
@@ -476,10 +499,17 @@ mod credential_store {
 
 #[tokio::test]
 async fn test_write_cutoff_only_rises() {
-    let (backend, _) = isolated("key_cutoff").await;
-    let keys = sid_storage::PgHistoryKeyStore::new(backend.pool().clone());
-    keys.migrate().await.expect("history key migrations");
-    common::history_keys::test_write_cutoff_only_rises(&keys).await;
+    let (backend, schema) = isolated("key_cutoff").await;
+    let outcome = tokio::spawn({
+        let pool = backend.pool().clone();
+        async move {
+            let keys = sid_storage::PgHistoryKeyStore::new(pool);
+            keys.migrate().await.expect("history key migrations");
+            common::history_keys::test_write_cutoff_only_rises(&keys).await
+        }
+    })
+    .await;
+    finish_isolated(&backend, &schema, outcome).await;
 }
 
 // ─── History evaluator's key store ───
