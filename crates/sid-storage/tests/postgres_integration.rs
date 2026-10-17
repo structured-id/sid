@@ -215,20 +215,29 @@ async fn test_delete_outbound_dlq_entry() {
     common::cleanup::test_delete_outbound_dlq_entry(&setup().await).await;
 }
 
-#[tokio::test]
-async fn test_cleanup_expired_device_auth_codes() {
-    common::cleanup::test_cleanup_expired_device_auth_codes(&setup().await).await;
+/// Run cleanup `scenario` in a schema of its own: a cleanup deletes every
+/// expired row of the installation, so on the shared schema it would remove
+/// the rows of tests running beside it.
+macro_rules! isolated_cleanup {
+    ($($scenario:ident),* $(,)?) => {$(
+        #[tokio::test]
+        async fn $scenario() {
+            let (backend, schema) = isolated("cleanup").await;
+            let outcome = tokio::spawn({
+                let backend = backend.clone();
+                async move { common::cleanup::$scenario(&backend).await }
+            })
+            .await;
+            finish_isolated(&backend, &schema, outcome).await;
+        }
+    )*};
 }
 
-#[tokio::test]
-async fn test_delete_expired_magic_link_sessions() {
-    common::cleanup::test_delete_expired_magic_link_sessions(&setup().await).await;
-}
-
-#[tokio::test]
-async fn test_delete_expired_reset_sessions() {
-    common::cleanup::test_delete_expired_reset_sessions(&setup().await).await;
-}
+isolated_cleanup!(
+    test_cleanup_expired_device_auth_codes,
+    test_delete_expired_magic_link_sessions,
+    test_delete_expired_reset_sessions,
+);
 
 #[tokio::test]
 async fn test_decay_ip_reputation() {
