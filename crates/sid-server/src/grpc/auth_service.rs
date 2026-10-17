@@ -2344,47 +2344,25 @@ impl AuthServiceImpl {
         // of another policy revision (one whose address is not established
         // under the current rules) routes nobody. Every refusal reads the
         // same, so the answer does not reveal the state of the address.
+        //
+        // Sign-in resolves principals only; a profile's stored user name or
+        // email is not a second route to it.
+        let profile_id = self
+            .storage
+            .resolve_sign_in_principal(principal_type, &handle.normalized, handle.key_revision())
+            .await
+            .map_err(storage_failure)?
+            .ok_or_else(authentication_failed)?;
         match self
             .storage
-            .get_principal_by_value(principal_type, &handle.normalized)
+            .get_profile(profile_id)
             .await
+            .map_err(storage_failure)?
         {
-            Ok(Some(principal)) => {
-                let Some(profile_id) = principal.assigned_profile_id else {
-                    return Err(authentication_failed());
-                };
-                let bindings = self
-                    .storage
-                    .get_principal_bindings(principal.id)
-                    .await
-                    .map_err(storage_failure)?;
-                let has_claim = bindings.iter().any(|b| b.profile_id == profile_id);
-                if !sid_core::models::check_principal_eligibility(
-                    &principal,
-                    profile_id,
-                    has_claim,
-                    handle.key_revision(),
-                )
-                .is_eligible()
-                {
-                    return Err(authentication_failed());
-                }
-                match self
-                    .storage
-                    .get_profile(profile_id)
-                    .await
-                    .map_err(storage_failure)?
-                {
-                    Some(profile) if profile.status == sid_core::models::ProfileStatus::Active => {
-                        Ok(profile)
-                    }
-                    _ => Err(authentication_failed()),
-                }
+            Some(profile) if profile.status == sid_core::models::ProfileStatus::Active => {
+                Ok(profile)
             }
-            // Sign-in resolves principals only; a profile's stored user name or
-            // email is not a second route to it.
-            Ok(None) => Err(authentication_failed()),
-            Err(e) => Err(storage_failure(e)),
+            _ => Err(authentication_failed()),
         }
     }
 
