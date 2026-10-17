@@ -1034,14 +1034,31 @@ async fn test_last_administrator_cannot_request_closure() {
     common::admin_claim::test_last_administrator_cannot_request_closure(&setup().await).await;
 }
 
-#[tokio::test]
-async fn test_oidc_issuer_registry() {
-    common::oidc_issuer::test_oidc_issuer_registry(&setup().await).await;
+// ─── Issuer store conformance ───
+
+/// Run issuer store conformance `scenario`, each on a fresh database: the
+/// installation organization has exactly one local issuer.
+macro_rules! issuer_store {
+    ($($scenario:ident),* $(,)?) => {$(
+        #[tokio::test]
+        async fn $scenario() {
+            let backend = setup().await;
+            sid_plugin::conformance::issuer_store::$scenario(
+                &common::issuer_conformance::InstanceIssuers(&backend),
+            )
+            .await;
+        }
+    )*};
 }
 
-#[tokio::test]
-async fn test_oidc_issuer_refuses_a_foreign_first_key() {
-    common::oidc_issuer::test_oidc_issuer_refuses_a_foreign_first_key(&setup().await).await;
+mod issuer_store {
+    use super::*;
+
+    issuer_store!(
+        issuer_provisioned_once,
+        foreign_first_key_refused,
+        unknown_organization_refused,
+    );
 }
 
 #[tokio::test]
@@ -1087,11 +1104,6 @@ async fn test_resource_listing_and_import() {
 #[tokio::test]
 async fn test_client_default_resource() {
     common::application::test_client_default_resource(&setup().await).await;
-}
-
-#[tokio::test]
-async fn test_oidc_issuer_requires_its_organization() {
-    common::oidc_issuer::test_oidc_issuer_requires_its_organization(&setup().await).await;
 }
 
 #[tokio::test]
