@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! The IdP browser session: the random secret a browser's
-//! `__Host-sid_session` cookie holds, the cookie itself, and the same-site
-//! relation the sign-in page and the issuer host must share for the ceremony
-//! response to set it. The session stores only the secret's hash.
+//! The IdP browser session: the random secret an authority's browser cookie
+//! holds, the cookie itself, and the same-site relation the sign-in page and
+//! the issuer host must share for the ceremony response to set it. The
+//! session stores only the secret's hash.
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -11,15 +11,100 @@ use sha2::{Digest, Sha256};
 use sid_core::models::BrowserSecretHash;
 use zeroize::Zeroizing;
 
-/// The cookie's name. The `__Host-` prefix makes a browser accept it only
-/// with `Secure`, `Path=/` and no `Domain`, so it binds to the one host that
-/// set it (RFC 6265bis §4.1.3.2).
-pub const COOKIE_NAME: &str = "__Host-sid_session";
+/// The cookie name of an authority that is alone on its host.
+pub const DEFAULT_COOKIE_NAME: &str = "__Host-sid_session";
+
+/// The prefix that makes a browser accept a cookie only with `Secure`,
+/// `Path=/` and no `Domain`, so it binds to the one host that set it
+/// (RFC 6265bis §4.1.3.2).
+const HOST_PREFIX: &str = "__Host-";
 
 /// Attributes every value of the cookie carries: host-only, TLS only, out of
 /// reach of scripts, and sent on top-level navigations from other sites but
 /// not on their subrequests or POSTs (RFC 6265bis §5.6.7.1).
 const ATTRIBUTES: &str = "Path=/; Secure; HttpOnly; SameSite=Lax";
+
+/// A cookie name that is not a `__Host-` token.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("browser session cookie name {0:?} is not a __Host- cookie token")]
+pub struct InvalidCookieName(String);
+
+/// One authority's browser-session cookie. Authorities that share a host
+/// each have their own name and read, set and clear only that cookie, so one
+/// sign-in never replaces or reads another authority's session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserCookie {
+    name: String,
+}
+
+impl Default for BrowserCookie {
+    fn default() -> Self {
+        Self {
+            name: DEFAULT_COOKIE_NAME.to_owned(),
+        }
+    }
+}
+
+impl BrowserCookie {
+    /// The cookie named `name`: `__Host-` and at least one more token
+    /// character (RFC 6265bis §4.1.1 cookie-name, RFC 9110 §5.6.2 tchar).
+    pub fn new(name: &str) -> Result<Self, InvalidCookieName> {
+        let token = |b: u8| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b);
+        match name.strip_prefix(HOST_PREFIX) {
+            Some(rest) if !rest.is_empty() && rest.bytes().all(token) => Ok(Self {
+                name: name.to_owned(),
+            }),
+            _ => Err(InvalidCookieName(name.to_owned())),
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The `Set-Cookie` value carrying `secret` for `max_age_secs` seconds,
+    /// which the caller bounds by the session's absolute expiry.
+    pub fn set(&self, secret: &BrowserSecret, max_age_secs: i64) -> String {
+        format!(
+            "{}={}; {ATTRIBUTES}; Max-Age={}",
+            self.name,
+            URL_SAFE_NO_PAD.encode(secret.0.as_ref()),
+            max_age_secs.max(0)
+        )
+    }
+
+    /// The secret in the `Cookie` request header values `headers`, when this
+    /// cookie is present exactly once and holds a well-formed secret. Two
+    /// values are ambiguous and name no session: a `__Host-` cookie has one
+    /// host and one path, so a browser never sends two. Other cookies,
+    /// including other authorities' sessions, are ignored.
+    pub fn secret<'a>(&self, headers: impl IntoIterator<Item = &'a str>) -> Option<BrowserSecret> {
+        let mut found = None;
+        for header in headers {
+            // RFC 6265bis §4.2.1: cookie-pair *( ";" SP cookie-pair ).
+            for pair in header.split(';') {
+                let Some((name, value)) = pair.trim().split_once('=') else {
+                    continue;
+                };
+                if name != self.name {
+                    continue;
+                }
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(value);
+            }
+        }
+        BrowserSecret::decode(found?)
+    }
+
+    /// The `Set-Cookie` value that removes this cookie; its attributes match
+    /// the ones that set it, so the browser replaces that cookie
+    /// (RFC 6265bis §5.7).
+    pub fn clear(&self) -> String {
+        format!("{}=; {ATTRIBUTES}; Max-Age=0", self.name)
+    }
+}
 
 /// A browser session's 256-bit secret.
 pub struct BrowserSecret(Zeroizing<[u8; 32]>);
@@ -39,51 +124,11 @@ impl BrowserSecret {
         BrowserSecretHash::from_bytes(Sha256::digest(self.0.as_ref()).into())
     }
 
-    /// The `Set-Cookie` value carrying this secret for `max_age_secs`
-    /// seconds, which the caller bounds by the session's absolute expiry.
-    pub fn set_cookie(&self, max_age_secs: i64) -> String {
-        format!(
-            "{COOKIE_NAME}={}; {ATTRIBUTES}; Max-Age={}",
-            URL_SAFE_NO_PAD.encode(self.0.as_ref()),
-            max_age_secs.max(0)
-        )
-    }
-
-    /// The secret in the `Cookie` request header values `headers`, when the
-    /// cookie is present exactly once and holds a well-formed secret. Two
-    /// values are ambiguous and name no session: a `__Host-` cookie has one
-    /// host and one path, so a browser never sends two.
-    pub fn from_cookie_headers<'a>(headers: impl IntoIterator<Item = &'a str>) -> Option<Self> {
-        let mut found = None;
-        for header in headers {
-            // RFC 6265bis §4.2.1: cookie-pair *( ";" SP cookie-pair ).
-            for pair in header.split(';') {
-                let Some((name, value)) = pair.trim().split_once('=') else {
-                    continue;
-                };
-                if name != COOKIE_NAME {
-                    continue;
-                }
-                if found.is_some() {
-                    return None;
-                }
-                found = Some(value);
-            }
-        }
-        Self::decode(found?)
-    }
-
     fn decode(value: &str) -> Option<Self> {
         let decoded = Zeroizing::new(URL_SAFE_NO_PAD.decode(value).ok()?);
         let bytes: [u8; 32] = decoded.as_slice().try_into().ok()?;
         Some(Self(Zeroizing::new(bytes)))
     }
-}
-
-/// The `Set-Cookie` value that removes the cookie; its attributes match the
-/// ones that set it, so the browser replaces that cookie (RFC 6265bis §5.7).
-pub fn clear_cookie() -> String {
-    format!("{COOKIE_NAME}=; {ATTRIBUTES}; Max-Age=0")
 }
 
 /// Whether the request's `Origin` header value `origin` is exactly `allowed`

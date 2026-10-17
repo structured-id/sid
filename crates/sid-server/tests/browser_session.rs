@@ -8,7 +8,7 @@ mod common;
 use common::mock_storage::MockStorage;
 use common::opaque_client::{login_with_origins, register};
 use common::{SIGN_IN_ORIGIN, TestServices};
-use sid_authn::browser_session::{BrowserSecret, COOKIE_NAME};
+use sid_authn::browser_session::{BrowserCookie, DEFAULT_COOKIE_NAME};
 use sid_core::models::SessionId;
 
 const PASSWORD: &[u8] = b"browser-session-password-2026";
@@ -37,7 +37,10 @@ async fn sign_in_page_ceremony_sets_the_session_cookie() {
     let cookies = set_cookies(&response);
     assert_eq!(cookies.len(), 1, "{cookies:?}");
     let cookie = &cookies[0];
-    assert!(cookie.starts_with(&format!("{COOKIE_NAME}=")), "{cookie}");
+    assert!(
+        cookie.starts_with(&format!("{DEFAULT_COOKIE_NAME}=")),
+        "{cookie}"
+    );
     assert!(
         cookie.contains("; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age="),
         "{cookie}"
@@ -46,7 +49,9 @@ async fn sign_in_page_ceremony_sets_the_session_cookie() {
     let max_age: i64 = cookie.rsplit("Max-Age=").next().unwrap().parse().unwrap();
     assert!(max_age > 23 * 3600 && max_age <= 24 * 3600, "{max_age}");
 
-    let secret = BrowserSecret::from_cookie_headers([cookie.split(';').next().unwrap()]).unwrap();
+    let secret = BrowserCookie::default()
+        .secret([cookie.split(';').next().unwrap()])
+        .unwrap();
     let body = response.into_inner();
     let session = svc
         .storage
@@ -58,6 +63,32 @@ async fn sign_in_page_ceremony_sets_the_session_cookie() {
     let value = cookie.split(';').next().unwrap().split_once('=').unwrap().1;
     assert!(!body.access_token.contains(value));
     assert_ne!(body.session_id, value);
+}
+
+/// An authority that names its own cookie, as one sharing its host with
+/// another authority does, sets that cookie and never the default one.
+#[tokio::test]
+async fn sign_in_sets_the_authoritys_configured_cookie() {
+    let configured = BrowserCookie::new("__Host-sid_second").unwrap();
+    let svc = TestServices::with_browser_cookie(MockStorage::new(), configured.clone());
+    register(&svc, &svc, "second@sid.example.com", PASSWORD).await;
+
+    let response =
+        login_with_origins(&svc, "second@sid.example.com", PASSWORD, &[SIGN_IN_ORIGIN]).await;
+
+    let cookies = set_cookies(&response);
+    assert_eq!(cookies.len(), 1, "{cookies:?}");
+    let pair = cookies[0].split(';').next().unwrap();
+    assert!(pair.starts_with("__Host-sid_second="), "{pair}");
+    assert!(BrowserCookie::default().secret([pair]).is_none());
+    let secret = configured.secret([pair]).unwrap();
+    let session = svc
+        .storage
+        .get_session(SessionId::parse(&response.into_inner().session_id).unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(session.browser_secret_hash, Some(secret.hash()));
 }
 
 /// A ceremony from anywhere else gets no cookie and its session no hash:

@@ -33,12 +33,13 @@ impl Drop for TelemetryGuard {
 ///
 /// Returns a guard that must be held for the lifetime of the application.
 pub fn init_telemetry() -> Result<TelemetryGuard, Box<dyn std::error::Error>> {
-    let log_format = std::env::var("SID_LOG_FORMAT").unwrap_or_else(|_| "text".to_string());
+    let log_format =
+        crate::init::env_setting("SID_LOG_FORMAT")?.unwrap_or_else(|| "text".to_string());
     let env_filter = EnvFilter::from_default_env().add_directive("sid=info".parse()?);
 
     #[cfg(feature = "telemetry")]
     {
-        let otlp_endpoint = std::env::var("SID_OTLP_ENDPOINT").ok();
+        let otlp_endpoint = crate::init::env_setting("SID_OTLP_ENDPOINT")?;
 
         if let Some(endpoint) = otlp_endpoint {
             return init_with_otlp(log_format, env_filter, &endpoint);
@@ -73,7 +74,8 @@ fn init_with_otlp(
         .with_endpoint(endpoint)
         .build()?;
 
-    let service_name = std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "sid".to_string());
+    let service_name =
+        crate::init::env_setting("OTEL_SERVICE_NAME")?.unwrap_or_else(|| "sid".to_string());
 
     let provider = SdkTracerProvider::builder()
         .with_batch_exporter(exporter)

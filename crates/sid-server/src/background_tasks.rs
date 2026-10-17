@@ -31,9 +31,12 @@ pub struct AuditRetention {
 impl AuditRetention {
     /// `SID_AUDIT_RETENTION_DAYS` (default 365, 1 to 36500) and
     /// `SID_AUDIT_RETENTION_ACTION` (`archive`, the default, or `delete`);
-    /// anything else is an error, never a silent default.
-    pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Self, String> {
-        let days = match get("SID_AUDIT_RETENTION_DAYS") {
+    /// anything else, including a setting `get` cannot read, is an error,
+    /// never a silent default.
+    pub fn from_lookup(
+        get: impl Fn(&str) -> anyhow::Result<Option<String>>,
+    ) -> anyhow::Result<Self> {
+        let days = match get("SID_AUDIT_RETENTION_DAYS")? {
             None => 365,
             Some(v) => v
                 .trim()
@@ -41,16 +44,14 @@ impl AuditRetention {
                 .ok()
                 .filter(|d| (1..=36500).contains(d))
                 .ok_or_else(|| {
-                    format!("SID_AUDIT_RETENTION_DAYS must be 1 to 36500 days, got {v:?}")
+                    anyhow::anyhow!("SID_AUDIT_RETENTION_DAYS must be 1 to 36500 days, got {v:?}")
                 })?,
         };
-        let action = match get("SID_AUDIT_RETENTION_ACTION").as_deref().map(str::trim) {
+        let action = match get("SID_AUDIT_RETENTION_ACTION")?.as_deref().map(str::trim) {
             None | Some("archive") => RetentionAction::Archive,
             Some("delete") => RetentionAction::Delete,
             Some(other) => {
-                return Err(format!(
-                    "SID_AUDIT_RETENTION_ACTION must be archive or delete, got {other:?}"
-                ));
+                anyhow::bail!("SID_AUDIT_RETENTION_ACTION must be archive or delete, got {other:?}")
             }
         };
         Ok(Self { days, action })
