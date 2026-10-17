@@ -1,20 +1,34 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! The OIDC issuer registry: one issuer per authority and recipient
+//! [`IssuerStore`] scenarios: one issuer per authority and recipient
 //! organization, found by its handle, stored with its first signing key.
-//!
-//! Needs a backend of its own (an isolated schema or a fresh database): the
-//! installation organization has exactly one local issuer.
 
-use super::{instance_org, test_audit};
+use async_trait::async_trait;
 use chrono::{SubsecRound, Utc};
 use sid_core::models::{
-    IssuerAuthority, IssuerHandle, IssuerId, IssuerSigningKey, OidcIssuer, OrgId,
+    AuditEntry, IssuerAuthority, IssuerHandle, IssuerId, IssuerSigningKey, MutationContext,
+    OidcIssuer, OrgId,
 };
-use sid_plugin::storage::StorageBackend;
 
+use crate::IssuerStore;
+
+/// What a backend's harness supplies to the scenarios.
+#[async_trait]
+pub trait IssuerHarness: Send + Sync {
+    fn store(&self) -> &dyn IssuerStore;
+
+    /// An organization the store accepts as a recipient, without an issuer
+    /// yet. A store that keeps a single installation organization gives it,
+    /// so its harness runs each scenario on a fresh store.
+    async fn organization(&self) -> OrgId;
+}
+
+fn ctx() -> MutationContext {
+    AuditEntry::system("conformance", "issuer_store").into()
+}
+
+/// A new local issuer of `org` with its generation-1 key, its times at the
+/// millisecond precision every store keeps.
 fn issuer(org: OrgId) -> (OidcIssuer, IssuerSigningKey) {
-    // Millisecond precision: the coarsest any backend stores, so the values
-    // read back equal these exactly.
     let now = Utc::now().trunc_subsecs(3);
     let id = IssuerId::generate();
     let handle = IssuerHandle::generate();
@@ -37,21 +51,24 @@ fn issuer(org: OrgId) -> (OidcIssuer, IssuerSigningKey) {
     (issuer, key)
 }
 
-pub async fn test_oidc_issuer_registry(backend: &dyn StorageBackend) {
-    let org = instance_org(backend).await;
+/// Provisioners racing for one context store exactly one issuer, found by its
+/// authority and organization and by its handle, with its first key; the
+/// loser's handle names nothing, and a later provisioning writes nothing.
+pub async fn issuer_provisioned_once<H: IssuerHarness>(h: &H) {
+    let store = h.store();
+    let org = h.organization().await;
     assert!(
-        backend
+        store
             .oidc_issuer_for(IssuerAuthority::Local, org)
             .await
             .unwrap()
             .is_none()
     );
 
-    // Provisioners racing for one context: exactly one issuer is stored.
     let ((a, a_key), (b, b_key)) = (issuer(org), issuer(org));
     let (ra, rb) = tokio::join!(
-        backend.insert_oidc_issuer(&a, &a_key, test_audit()),
-        backend.insert_oidc_issuer(&b, &b_key, test_audit()),
+        store.insert_oidc_issuer(&a, &a_key, ctx()),
+        store.insert_oidc_issuer(&b, &b_key, ctx()),
     );
     let (ra, rb) = (ra.unwrap(), rb.unwrap());
     assert!(ra ^ rb, "inserts: {ra} {rb}");
@@ -61,37 +78,36 @@ pub async fn test_oidc_issuer_registry(backend: &dyn StorageBackend) {
         (&b, &b_key, &a)
     };
 
-    let stored = backend
+    let stored = store
         .oidc_issuer_for(IssuerAuthority::Local, org)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(&stored, winner);
     assert_eq!(
-        backend
+        store
             .oidc_issuer_by_handle(&winner.handle)
             .await
             .unwrap()
             .as_ref(),
         Some(winner)
     );
-    // The losing provisioner's handle names nothing.
     assert!(
-        backend
+        store
             .oidc_issuer_by_handle(&loser.handle)
             .await
             .unwrap()
             .is_none()
     );
     assert!(
-        backend
+        store
             .oidc_issuer_signing_keys(loser.id)
             .await
             .unwrap()
             .is_empty()
     );
 
-    let keys = backend.oidc_issuer_signing_keys(winner.id).await.unwrap();
+    let keys = store.oidc_issuer_signing_keys(winner.id).await.unwrap();
     assert_eq!(keys.len(), 1);
     assert_eq!(keys[0].generation, 1);
     assert_eq!(keys[0].key_id, winner_key.key_id);
@@ -99,16 +115,15 @@ pub async fn test_oidc_issuer_registry(backend: &dyn StorageBackend) {
     assert_eq!(keys[0].sealed_private_key, winner_key.sealed_private_key);
     assert_eq!(keys[0].created_at, winner_key.created_at);
 
-    // A later provisioning of the same context writes nothing.
     let (again, again_key) = issuer(org);
     assert!(
-        !backend
-            .insert_oidc_issuer(&again, &again_key, test_audit())
+        !store
+            .insert_oidc_issuer(&again, &again_key, ctx())
             .await
             .unwrap()
     );
     assert_eq!(
-        backend
+        store
             .oidc_issuer_for(IssuerAuthority::Local, org)
             .await
             .unwrap()
@@ -120,26 +135,27 @@ pub async fn test_oidc_issuer_registry(backend: &dyn StorageBackend) {
 
 /// A first key that belongs to another issuer, or is not generation 1, is
 /// refused and nothing is stored.
-pub async fn test_oidc_issuer_refuses_a_foreign_first_key(backend: &dyn StorageBackend) {
-    let org = instance_org(backend).await;
+pub async fn foreign_first_key_refused<H: IssuerHarness>(h: &H) {
+    let store = h.store();
+    let org = h.organization().await;
     let (issuer_a, _) = issuer(org);
     let (_, foreign_key) = issuer(org);
     assert!(
-        backend
-            .insert_oidc_issuer(&issuer_a, &foreign_key, test_audit())
+        store
+            .insert_oidc_issuer(&issuer_a, &foreign_key, ctx())
             .await
             .is_err()
     );
     let (issuer_b, mut second_generation) = issuer(org);
     second_generation.generation = 2;
     assert!(
-        backend
-            .insert_oidc_issuer(&issuer_b, &second_generation, test_audit())
+        store
+            .insert_oidc_issuer(&issuer_b, &second_generation, ctx())
             .await
             .is_err()
     );
     assert!(
-        backend
+        store
             .oidc_issuer_for(IssuerAuthority::Local, org)
             .await
             .unwrap()
@@ -147,17 +163,18 @@ pub async fn test_oidc_issuer_refuses_a_foreign_first_key(backend: &dyn StorageB
     );
 }
 
-/// An issuer serves an organization that exists.
-pub async fn test_oidc_issuer_requires_its_organization(backend: &dyn StorageBackend) {
+/// An issuer serves an organization the store knows.
+pub async fn unknown_organization_refused<H: IssuerHarness>(h: &H) {
+    let store = h.store();
     let (unknown, key) = issuer(OrgId::generate());
     assert!(
-        backend
-            .insert_oidc_issuer(&unknown, &key, test_audit())
+        store
+            .insert_oidc_issuer(&unknown, &key, ctx())
             .await
             .is_err()
     );
     assert!(
-        backend
+        store
             .oidc_issuer_by_handle(&unknown.handle)
             .await
             .unwrap()
