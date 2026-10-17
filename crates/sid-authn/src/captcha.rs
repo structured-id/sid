@@ -409,7 +409,7 @@ pub fn build_captcha_provider_from_env(
 /// first start and stored sealed, so a challenge issued by one replica
 /// verifies on any other and is never signed with a guessable key.
 pub async fn load_or_create_pow_key(
-    storage: &dyn sid_plugin::StorageBackend,
+    storage: &dyn sid_plugin::InstanceSecretStore,
     keys: &dyn sid_keys::KeyManager,
 ) -> Result<[u8; 32], crate::instance_secret::InstanceSecretError<std::convert::Infallible>> {
     let stored = crate::instance_secret::load_or_create(

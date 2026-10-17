@@ -32,8 +32,8 @@ use sid_core::models::{
 use uuid::Uuid;
 
 use crate::{
-    ClientResourceRegistry, CredentialStore, GrantStore, IssuerStore, PrincipalStore,
-    SignInHistoryStore, WorkStore,
+    ClientResourceRegistry, CredentialStore, GrantStore, InstanceSecretStore, IssuerStore,
+    PrincipalStore, SignInHistoryStore, WorkStore,
 };
 
 /// The right to run one background job, exclusive across every instance on
@@ -79,6 +79,7 @@ pub trait StorageBackend:
     + CredentialStore<Owner = ProfileId>
     + PrincipalStore<Owner = ProfileId>
     + SignInHistoryStore<Owner = ProfileId>
+    + InstanceSecretStore
     + Send
     + Sync
     + 'static
@@ -750,25 +751,6 @@ pub trait StorageBackend:
     async fn insert_key_version(
         &self,
         params: &sid_keys::KeyVersionParams,
-        ctx: MutationContext,
-    ) -> Result<bool>;
-
-    // === INSTANCE SECRETS ===
-
-    /// The sealed value of an instance secret, if one was stored.
-    async fn get_instance_secret(
-        &self,
-        secret: sid_core::models::InstanceSecret,
-    ) -> Result<Option<Vec<u8>>>;
-
-    /// Store an instance secret. Returns `false`, writing nothing, when it
-    /// already exists: concurrent starters agree on the first value stored.
-    /// An admin claim is refused (an error) on a centrally managed
-    /// installation, whichever build writes it.
-    async fn insert_instance_secret(
-        &self,
-        secret: sid_core::models::InstanceSecret,
-        sealed: &[u8],
         ctx: MutationContext,
     ) -> Result<bool>;
 

@@ -512,6 +512,26 @@ impl GrantStore for SqliteBackend {
 }
 
 #[async_trait]
+impl sid_plugin::InstanceSecretStore for SqliteBackend {
+    async fn get_instance_secret(
+        &self,
+        secret: sid_core::models::InstanceSecret,
+    ) -> SidResult<Option<Vec<u8>>> {
+        self.get_instance_secret_impl(secret).await
+    }
+
+    async fn insert_instance_secret(
+        &self,
+        secret: sid_core::models::InstanceSecret,
+        sealed: &[u8],
+        audit: MutationContext,
+    ) -> SidResult<bool> {
+        self.insert_instance_secret_impl(secret, sealed, audit)
+            .await
+    }
+}
+
+#[async_trait]
 impl sid_plugin::SignInHistoryStore for SqliteBackend {
     type Owner = sid_core::models::ProfileId;
 
@@ -1463,23 +1483,6 @@ impl StorageBackend for SqliteBackend {
         audit: MutationContext,
     ) -> SidResult<bool> {
         self.insert_key_version_impl(params, audit).await
-    }
-
-    async fn get_instance_secret(
-        &self,
-        secret: sid_core::models::InstanceSecret,
-    ) -> SidResult<Option<Vec<u8>>> {
-        self.get_instance_secret_impl(secret).await
-    }
-
-    async fn insert_instance_secret(
-        &self,
-        secret: sid_core::models::InstanceSecret,
-        sealed: &[u8],
-        audit: MutationContext,
-    ) -> SidResult<bool> {
-        self.insert_instance_secret_impl(secret, sealed, audit)
-            .await
     }
 
     async fn instance_organization(&self) -> SidResult<Option<sid_core::models::Organization>> {

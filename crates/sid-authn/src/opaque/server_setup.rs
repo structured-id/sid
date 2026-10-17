@@ -8,7 +8,7 @@
 
 use sid_core::models::InstanceSecret;
 use sid_keys::KeyManager;
-use sid_plugin::StorageBackend;
+use sid_plugin::InstanceSecretStore;
 use sid_plugin::crypto::{OpaqueError, OpaqueOperations, OpaqueSetupHandle};
 use zeroize::Zeroizing;
 
@@ -26,7 +26,7 @@ pub enum ServerSetupError {
 /// The stored server setup for `primary`, created and stored first when this
 /// is the instance's first start.
 pub async fn load_or_create(
-    storage: &dyn StorageBackend,
+    storage: &dyn InstanceSecretStore,
     keys: &dyn KeyManager,
     primary: &dyn OpaqueOperations,
 ) -> Result<OpaqueSetupHandle, ServerSetupError> {

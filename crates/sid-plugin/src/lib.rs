@@ -23,6 +23,7 @@ pub mod geoip;
 pub mod grant_store;
 pub mod history_keys;
 pub mod http;
+pub mod instance_secret_store;
 pub mod issuer_store;
 pub mod legacy_hash;
 pub mod mfa;
@@ -49,6 +50,7 @@ pub use event_bus::{EventBus, EventBusError, EventBusResult, InProcessEventBus};
 pub use geoip::{GeoIpError, GeoIpProvider, GeoLocation};
 pub use grant_store::GrantStore;
 pub use http::client_builder;
+pub use instance_secret_store::InstanceSecretStore;
 pub use issuer_store::IssuerStore;
 pub use legacy_hash::{HashError, LegacyHashVerifier};
 pub use mfa::{

@@ -3367,50 +3367,6 @@ impl StorageBackend for PostgresBackend {
             .map_err(|e| SidError::Storage(e.to_string()))?;
         Ok(())
     }
-    // === INSTANCE SECRETS ===
-
-    async fn get_instance_secret(
-        &self,
-        secret: sid_core::models::InstanceSecret,
-    ) -> SidResult<Option<Vec<u8>>> {
-        sqlx::query_scalar("SELECT sealed FROM instance_secrets WHERE name = $1")
-            .bind(secret.as_str())
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(|e| SidError::Storage(format!("get instance secret: {e}")))
-    }
-
-    async fn insert_instance_secret(
-        &self,
-        secret: sid_core::models::InstanceSecret,
-        sealed: &[u8],
-        audit: MutationContext,
-    ) -> SidResult<bool> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| SidError::Storage(e.to_string()))?;
-        let inserted = sqlx::query(
-            "INSERT INTO instance_secrets (name, sealed) VALUES ($1, $2)
-             ON CONFLICT (name) DO NOTHING",
-        )
-        .bind(secret.as_str())
-        .bind(sealed)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| SidError::Storage(format!("insert instance secret: {e}")))?
-        .rows_affected()
-            == 1;
-        if inserted {
-            Self::audit_in_tx(&mut tx, &format!("instance_secret:{secret}"), audit).await?;
-        }
-        tx.commit()
-            .await
-            .map_err(|e| SidError::Storage(e.to_string()))?;
-        Ok(inserted)
-    }
-
     async fn instance_organization(&self) -> SidResult<Option<sid_core::models::Organization>> {
         let row: Option<(
             sid_core::models::OrgId,
@@ -8550,6 +8506,7 @@ mod device_auth;
 mod directory;
 mod history_keys;
 pub use history_keys::PgHistoryKeyStore;
+mod instance_secret;
 mod job_lock;
 mod machine_credential;
 mod operation;
