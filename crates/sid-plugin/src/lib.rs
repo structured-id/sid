@@ -28,6 +28,7 @@ pub mod issuer_store;
 pub mod legacy_hash;
 pub mod mfa;
 pub mod notification;
+pub mod operation_result_store;
 pub mod otp;
 pub mod principal_store;
 pub mod sign_in_history;
@@ -61,6 +62,7 @@ pub use notification::{
     DeliveryError, DeliveryReceipt, DeliveryStatus, NotificationChannel, NotificationPriority,
     Recipient, RenderedMessage,
 };
+pub use operation_result_store::OperationResultStore;
 pub use otp::{Locale, OtpChannel, OtpContext, OtpDeliveryResult, OtpTransport, OtpTransportError};
 pub use principal_store::PrincipalStore;
 pub use sid_keys::KeyVersionParams;

@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Completions of keyed commands, committed with their effect.
 
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use sid_core::models::{OperationCompletion, OperationKey, OperationRecord};
+use sid_core::models::{MutationContext, OperationCompletion, OperationKey, OperationRecord};
 use sid_core::{Error as SidError, Result as SidResult};
+use sid_plugin::OperationResultStore;
 use sqlx::PgPool;
+
+use super::PostgresBackend;
 
 /// Record `operation` in `tx`. When another transaction already committed
 /// the key, this one must commit nothing: `OperationCompleted`. A concurrent
@@ -112,4 +116,60 @@ pub(super) async fn get(
             completed_at,
         },
     ))
+}
+
+#[async_trait]
+impl OperationResultStore for PostgresBackend {
+    async fn record_outcome(&self, ctx: MutationContext) -> SidResult<()> {
+        let chain = ctx
+            .operation
+            .as_ref()
+            .map(|o| format!("operation:{}", o.namespace))
+            .unwrap_or_else(|| "operation".to_string());
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| SidError::Storage(format!("begin: {e}")))?;
+        Self::audit_in_tx(&mut tx, &chain, ctx).await?;
+        tx.commit()
+            .await
+            .map_err(|e| SidError::Storage(format!("commit: {e}")))?;
+        Ok(())
+    }
+
+    async fn purge_operation_results(
+        &self,
+        namespace: &str,
+        method: &str,
+        before: DateTime<Utc>,
+    ) -> SidResult<u64> {
+        sqlx::query(
+            "DELETE FROM operation_results
+             WHERE namespace = $1 AND method = $2 AND completed_at < $3",
+        )
+        .bind(namespace)
+        .bind(method)
+        .bind(before)
+        .execute(&self.pool)
+        .await
+        .map(|done| done.rows_affected())
+        .map_err(|e| SidError::Storage(format!("purge operation results: {e}")))
+    }
+
+    async fn get_operation_result(
+        &self,
+        namespace: &str,
+        key: &OperationKey,
+    ) -> SidResult<Option<OperationRecord>> {
+        get(&self.pool, namespace, key).await
+    }
+
+    async fn export_operation_results(&self) -> SidResult<Vec<OperationRecord>> {
+        export(&self.pool).await
+    }
+
+    async fn import_operation_result(&self, record: &OperationRecord) -> SidResult<bool> {
+        import(&self.pool, record).await
+    }
 }

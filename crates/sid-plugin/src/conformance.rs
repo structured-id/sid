@@ -8,6 +8,7 @@ pub mod credential_store;
 pub mod grant_store;
 pub mod instance_secret_store;
 pub mod issuer_store;
+pub mod operation_result_store;
 pub mod principal_store;
 pub mod sign_in_history;
 pub mod work_store;

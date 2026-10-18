@@ -1,6 +1,7 @@
 use super::*;
 use sid_core::grpc_error::extract_error_info;
 use sid_core::models::{AuditEntry, MutationContext, Project};
+use sid_plugin::StorageBackend;
 use sid_storage::sqlite::SqliteBackend;
 
 const METHOD: &str = "sid.v1.ProjectService/CreateProject";
