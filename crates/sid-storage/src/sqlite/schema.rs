@@ -215,6 +215,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     -- Hash of the secret in a browser's IdP session cookie; the secret is
     -- never stored.
     browser_secret_hash BLOB UNIQUE,
+    -- The CSRF token of that browser session.
+    browser_csrf      BLOB,
     -- The IdP session whose authentication a session redeemed from a grant
     -- reuses; ending it ends this one.
     authenticated_by  TEXT REFERENCES sessions(id) ON DELETE SET NULL,

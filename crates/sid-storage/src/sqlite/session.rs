@@ -5,8 +5,9 @@ use super::{SqliteBackend, col, dt_col, dt_col_opt, fmt_dt, fmt_dt_opt, insert_e
 use sid_core::{
     Error as SidError, Result as SidResult,
     models::{
-        AuthLevel, BrowserSecretHash, MutationContext, ProfileId, RevocationReason, Session,
-        SessionAuthentication, SessionEnd, SessionId, session::Elevation,
+        AuthLevel, BrowserCsrfToken, BrowserSecretHash, MutationContext, ProfileId,
+        RevocationReason, Session, SessionAuthentication, SessionEnd, SessionId,
+        session::Elevation,
     },
 };
 
@@ -36,6 +37,7 @@ pub(super) fn row_to_session(row: &sqlx::sqlite::SqliteRow) -> SidResult<Session
     let assurance_level: String = col(row, "assurance_level")?;
     let elevation = elevation_col(row)?;
     let browser_secret_hash: Option<Vec<u8>> = col(row, "browser_secret_hash")?;
+    let browser_csrf: Option<Vec<u8>> = col(row, "browser_csrf")?;
     let device_id: Option<String> = col(row, "device_id")?;
     let scopes: String = col(row, "scopes")?;
     let amr: String = col(row, "amr")?;
@@ -68,6 +70,10 @@ pub(super) fn row_to_session(row: &sqlx::sqlite::SqliteRow) -> SidResult<Session
             .as_deref()
             .map(BrowserSecretHash::try_from)
             .transpose()?,
+        browser_csrf: browser_csrf
+            .as_deref()
+            .map(BrowserCsrfToken::try_from)
+            .transpose()?,
         authenticated_by: col(row, "authenticated_by")?,
     })
 }
@@ -82,8 +88,8 @@ where
         "INSERT INTO sessions (id, profile_id, client_id, device_id, ip_address, user_agent,
             scopes, assurance_level, elevation_level, elevation_until, is_provisional,
             passkey_prompt, authenticated_at, amr, policy_grace, grace_deadline, created_at,
-            expires_at, last_activity_at, browser_secret_hash, authenticated_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            expires_at, last_activity_at, browser_secret_hash, browser_csrf, authenticated_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(session.id)
     .bind(session.profile_id)
@@ -105,6 +111,7 @@ where
     .bind(fmt_dt(&session.expires_at))
     .bind(fmt_dt_opt(session.last_activity_at))
     .bind(session.browser_secret_hash.map(|h| h.as_bytes().to_vec()))
+    .bind(session.browser_csrf.map(|t| t.as_bytes().to_vec()))
     .bind(session.authenticated_by)
     .execute(executor)
     .await

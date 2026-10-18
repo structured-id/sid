@@ -8,7 +8,8 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rand::TryRng;
 use sha2::{Digest, Sha256};
-use sid_core::models::BrowserSecretHash;
+use sid_core::models::{BrowserCsrfToken, BrowserSecretHash};
+use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 /// The cookie name of an authority that is alone on its host.
@@ -128,6 +129,46 @@ impl BrowserSecret {
         let decoded = Zeroizing::new(URL_SAFE_NO_PAD.decode(value).ok()?);
         let bytes: [u8; 32] = decoded.as_slice().try_into().ok()?;
         Some(Self(Zeroizing::new(bytes)))
+    }
+}
+
+/// The request header a page echoes its session's CSRF token in.
+pub const CSRF_HEADER: &str = "x-csrf-token";
+
+/// A browser session's CSRF token, as the session stores it and as the page
+/// receives and echoes it: the synchronizer token pattern, bound to the one
+/// session it was generated with (OWASP CSRF Prevention Cheat Sheet,
+/// "Synchronizer Token Pattern").
+pub struct BrowserCsrf;
+
+impl BrowserCsrf {
+    /// A fresh token from the operating system's generator.
+    pub fn generate() -> BrowserCsrfToken {
+        let mut bytes = [0u8; 32];
+        rand::rngs::SysRng
+            .try_fill_bytes(&mut bytes)
+            .expect("the operating system random source is available");
+        BrowserCsrfToken::from_bytes(bytes)
+    }
+
+    /// The token as the page receives it.
+    pub fn encode(token: &BrowserCsrfToken) -> String {
+        URL_SAFE_NO_PAD.encode(token.as_bytes())
+    }
+
+    /// Whether `sent`, the [`CSRF_HEADER`] values of a request, is exactly
+    /// one value equal to `token`, compared in constant time so a mismatch
+    /// says nothing about how much of a guess was right.
+    pub fn matches<'a>(sent: impl IntoIterator<Item = &'a str>, token: &BrowserCsrfToken) -> bool {
+        let mut sent = sent.into_iter();
+        let (Some(value), None) = (sent.next(), sent.next()) else {
+            return false;
+        };
+        let Ok(decoded) = URL_SAFE_NO_PAD.decode(value) else {
+            return false;
+        };
+        decoded.len() == token.as_bytes().len()
+            && bool::from(decoded.as_slice().ct_eq(token.as_bytes()))
     }
 }
 

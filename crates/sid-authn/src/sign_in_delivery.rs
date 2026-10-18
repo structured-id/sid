@@ -11,7 +11,7 @@ use sid_core::models::Session;
 use tonic::metadata::{MetadataMap, MetadataValue};
 use tonic::{Response, Status};
 
-use crate::browser_session::{BrowserCookie, BrowserSecret, origin_is};
+use crate::browser_session::{BrowserCookie, BrowserCsrf, BrowserSecret, origin_is};
 
 /// Who completes a sign-in ceremony: the browser sign-in page or a native
 /// client. It decides how the session's credential is delivered.
@@ -108,10 +108,12 @@ impl SignedIn {
 pub struct BrowserCredential(BrowserSecret);
 
 impl BrowserCredential {
-    /// A fresh secret, whose hash `session` now stores.
+    /// A fresh secret, whose hash `session` now stores together with a fresh
+    /// CSRF token of its own.
     pub fn bind<O>(session: &mut Session<O>) -> Self {
         let secret = BrowserSecret::generate();
         session.browser_secret_hash = Some(secret.hash());
+        session.browser_csrf = Some(BrowserCsrf::generate());
         Self(secret)
     }
 

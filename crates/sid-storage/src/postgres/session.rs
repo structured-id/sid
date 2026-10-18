@@ -16,8 +16,8 @@ pub(super) async fn write(
             scopes, assurance_level, elevation_level, elevation_until,
             authenticated_at, amr, is_provisional, passkey_prompt, policy_grace,
             grace_deadline, created_at, expires_at, last_activity_at, browser_secret_hash,
-            authenticated_by
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)",
+            browser_csrf, authenticated_by
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)",
     )
     .bind(session.id)
     .bind(session.profile_id)
@@ -39,6 +39,7 @@ pub(super) async fn write(
     .bind(session.expires_at)
     .bind(session.last_activity_at)
     .bind(session.browser_secret_hash.map(|h| h.as_bytes().to_vec()))
+    .bind(session.browser_csrf.map(|t| t.as_bytes().to_vec()))
     .bind(session.authenticated_by)
     .execute(&mut **tx)
     .await
