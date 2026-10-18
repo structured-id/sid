@@ -35,9 +35,9 @@
 //! # Ok(()) }
 //! ```
 
-pub mod ca;
 pub mod envelope;
 pub mod error;
+pub mod issuance;
 pub mod kek_cache;
 pub mod kek_source;
 
