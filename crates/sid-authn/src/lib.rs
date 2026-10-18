@@ -73,6 +73,8 @@ pub mod sealed_secret;
 #[cfg(feature = "grpc")]
 pub mod service_auth;
 pub mod session_limit;
+#[cfg(feature = "grpc")]
+pub mod sign_in_refusal;
 pub mod sign_in_security;
 pub mod step_up;
 pub mod subject;
