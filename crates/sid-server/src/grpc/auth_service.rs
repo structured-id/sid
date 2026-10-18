@@ -57,9 +57,9 @@ use std::sync::Arc;
 use tonic::{Code, Request, Response, Status};
 use tracing::{info, instrument, warn};
 
-use super::password_operation::{
-    CurrentPasswordCheck, Finish, OperationOwner, OperationPurpose, PendingOperation,
-    change_context, operation_id,
+use super::password_operation::{Finish, OperationPurpose, PendingOperation};
+use sid_authn::password_operation::{
+    CurrentPasswordCheck, OperationOwner, change_context, operation_id,
 };
 use sid_core::grpc_error::refuse::{
     changed_concurrently, dependency_unavailable, internal, invalid_field, maintenance,
@@ -457,7 +457,7 @@ fn own_change(
                 Err(changed_concurrently())
             }
         }
-        _ => Err(super::password_operation::operation_not_pending()),
+        _ => Err(sid_authn::password_operation::operation_not_pending()),
     }
 }
 
@@ -490,7 +490,7 @@ pub struct AuthServiceImpl {
     /// the history evaluator and checker they use.
     pub(crate) password_ops: Arc<super::password_operation::PasswordOperations>,
     /// The history evaluator, when it runs in this process.
-    history_evaluation: Option<Arc<super::password_operation::HistoryEvaluation>>,
+    history_evaluation: Option<Arc<sid_authn::password_operation::HistoryEvaluation>>,
     /// Profile a WebAuthn ceremony was started for, keyed by its challenge:
     /// only that profile may finish it.
     webauthn_state: ChallengeStore<ProfileId>,
@@ -595,7 +595,7 @@ impl AuthServiceImpl {
         key_manager: Arc<dyn sid_keys::KeyManager>,
         cascade: Arc<RevocationCascadeService>,
         authz: Arc<dyn sid_plugin::AuthzEngine>,
-        password_history: super::password_operation::PasswordHistoryAuthority,
+        password_history: sid_authn::password_operation::PasswordHistoryAuthority,
     ) -> Self {
         let ttl = std::time::Duration::from_secs(300); // 5 minutes
         let captcha_gate =
@@ -1637,7 +1637,7 @@ impl AuthServiceImpl {
                 return Err(registration_restricted(enrollment_requirement(&reason)));
             }
             Err(e) => {
-                return Err(super::password_operation::commit_refusal(
+                return Err(sid_authn::password_operation::commit_refusal(
                     e,
                     storage_failure,
                 ));
@@ -2218,16 +2218,16 @@ impl AuthServiceImpl {
     /// its own service. Nobody prepares at it over the network: this
     /// process's credential service prepares in process. An evaluator that
     /// admits a remote credential service is a separate composition of
-    /// [`PasswordHistoryEvaluatorImpl`](super::password_operation::PasswordHistoryEvaluatorImpl)
+    /// [`PasswordHistoryEvaluatorImpl`](sid_authn::password_operation::PasswordHistoryEvaluatorImpl)
     /// with its own `PrepareAdmission`, with its own database and keys; this
     /// server never serves one.
     pub fn history_evaluator(
         &self,
-    ) -> Option<super::password_operation::PasswordHistoryEvaluatorImpl> {
+    ) -> Option<sid_authn::password_operation::PasswordHistoryEvaluatorImpl> {
         self.history_evaluation.clone().map(|evaluation| {
-            super::password_operation::PasswordHistoryEvaluatorImpl::new(
+            sid_authn::password_operation::PasswordHistoryEvaluatorImpl::new(
                 evaluation,
-                Arc::new(super::password_operation::InProcessOnly),
+                Arc::new(sid_authn::password_operation::InProcessOnly),
             )
         })
     }
@@ -2466,7 +2466,9 @@ impl AuthService for AuthServiceImpl {
             .await?;
         let owner = match &pending {
             PendingRegistration::NewAccount { profile_id, .. } => OperationOwner::New(*profile_id),
-            PendingRegistration::ExistingAccount { .. } => OperationOwner::Decoy,
+            PendingRegistration::ExistingAccount { .. } => {
+                OperationOwner::Decoy(ProfileId::generate())
+            }
         };
         let prepared = self
             .password_ops
@@ -2511,7 +2513,7 @@ impl AuthService for AuthServiceImpl {
                 req.proof,
                 |op| match op.purpose {
                     OperationPurpose::Registration { .. } => Ok(()),
-                    _ => Err(super::password_operation::operation_not_pending()),
+                    _ => Err(sid_authn::password_operation::operation_not_pending()),
                 },
             )
             .await?
@@ -2522,7 +2524,7 @@ impl AuthService for AuthServiceImpl {
             Finish::Ready(done) => *done,
         };
         let OperationPurpose::Registration { pending } = &done.operation.purpose else {
-            return Err(super::password_operation::operation_not_pending());
+            return Err(sid_authn::password_operation::operation_not_pending());
         };
         let pending = pending.clone();
         let profile_id = match &pending {
@@ -2788,7 +2790,7 @@ impl AuthService for AuthServiceImpl {
             .storage
             .change_password(credential.id, &current, &new, history.as_ref(), ctx)
             .await
-            .map_err(|e| super::password_operation::commit_refusal(e, storage_failure))?;
+            .map_err(|e| sid_authn::password_operation::commit_refusal(e, storage_failure))?;
         if !changed {
             return Err(changed_concurrently());
         }
@@ -5358,13 +5360,13 @@ impl AuthService for AuthServiceImpl {
                         reset = Some(session);
                         Ok(())
                     }
-                    _ => Err(super::password_operation::operation_not_pending()),
+                    _ => Err(sid_authn::password_operation::operation_not_pending()),
                 }
             })
             .await?;
         // The operation outlives nothing: a reset that expired or was
         // completed meanwhile does not go on.
-        let session = reset.ok_or_else(super::password_operation::operation_not_pending)?;
+        let session = reset.ok_or_else(sid_authn::password_operation::operation_not_pending)?;
         self.verified_reset_session(&session.to_string()).await?;
         Ok(Response::new(ExecutePasswordResetResponse {
             registration_response,
@@ -5400,7 +5402,7 @@ impl AuthService for AuthServiceImpl {
                 req.proof,
                 |op| match op.purpose {
                     OperationPurpose::Reset { session: s } if s == session.id => Ok(()),
-                    _ => Err(super::password_operation::operation_not_pending()),
+                    _ => Err(sid_authn::password_operation::operation_not_pending()),
                 },
             )
             .await?
@@ -5444,7 +5446,7 @@ impl AuthService for AuthServiceImpl {
             .storage
             .complete_password_reset(session.id, &new_cred, history.as_ref(), &end, ctx)
             .await
-            .map_err(|e| super::password_operation::commit_refusal(e, storage_failure))?
+            .map_err(|e| sid_authn::password_operation::commit_refusal(e, storage_failure))?
             // Completed, or expired, meanwhile: the reset starts again.
             .ok_or_else(|| ceremony_expired("password reset"))?;
 

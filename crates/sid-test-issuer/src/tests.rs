@@ -130,7 +130,7 @@ struct ServiceCaller {
 }
 
 #[tonic::async_trait]
-impl sid_server::grpc::password_operation::PrepareAdmission for ServiceCaller {
+impl sid_authn::password_operation::PrepareAdmission for ServiceCaller {
     async fn admit(
         &self,
         request: &tonic::Request<sid_proto::sid::v1::authn::PreparePasswordHistoryRequest>,
@@ -162,15 +162,15 @@ impl sid_server::grpc::password_operation::PrepareAdmission for ServiceCaller {
 async fn a_split_history_evaluator_serves_only_the_credential_service() {
     use group::{Curve, Group, GroupEncoding};
     use pasta_curves::pallas;
+    use sid_authn::password_operation::{
+        HistoryEvaluation, PasswordHistoryAuthority, PasswordHistoryEvaluatorImpl,
+        PrepareAdmission, RemoteHistoryEvaluator,
+    };
     use sid_proto::sid::v1::auth_service_server::AuthService;
     use sid_proto::sid::v1::authn::password_history_evaluator_service_client::PasswordHistoryEvaluatorServiceClient;
     use sid_proto::sid::v1::authn::password_history_evaluator_service_server::PasswordHistoryEvaluatorServiceServer;
     use sid_proto::sid::v1::authn::{
         EvaluatePasswordHistoryRequest, PreparePasswordHistoryRequest,
-    };
-    use sid_server::grpc::password_operation::{
-        HistoryEvaluation, PasswordHistoryAuthority, PasswordHistoryEvaluatorImpl,
-        PrepareAdmission, RemoteHistoryEvaluator,
     };
 
     const EVALUATOR: &str = "https://history.sid.example.com/";

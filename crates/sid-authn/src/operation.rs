@@ -69,7 +69,7 @@ impl KeyedCommand {
     /// needs a new key.
     pub async fn completed(
         &self,
-        storage: &dyn OperationResultStore,
+        storage: &(impl OperationResultStore + ?Sized),
     ) -> Result<Option<Vec<u8>>, Status> {
         let record = storage
             .get_operation_result(&self.namespace, &self.key)
@@ -107,7 +107,7 @@ impl KeyedCommand {
     /// attempt of this command committed.
     pub async fn committed_elsewhere(
         &self,
-        storage: &dyn OperationResultStore,
+        storage: &(impl OperationResultStore + ?Sized),
     ) -> Result<Vec<u8>, Status> {
         self.completed(storage).await?.ok_or_else(|| {
             ApiError::new(

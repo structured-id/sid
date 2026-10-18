@@ -837,7 +837,7 @@ pub fn auth_service(
         test_key_manager(),
         cascade,
         Arc::new(sid_authz::CeAuthzEngine::new(storage)),
-        sid_server::grpc::password_operation::PasswordHistoryAuthority::InProcess {
+        sid_authn::password_operation::PasswordHistoryAuthority::InProcess {
             store: history_keys,
             history_keys: test_key_manager(),
         },
@@ -869,7 +869,7 @@ pub struct TestServices {
     /// Shared, as the server shares it with the OIDC provider endpoints.
     pub auth: Arc<AuthServiceImpl>,
     /// The password history evaluator, co-located as CE serves it.
-    pub evaluator: sid_server::grpc::password_operation::PasswordHistoryEvaluatorImpl,
+    pub evaluator: sid_authn::password_operation::PasswordHistoryEvaluatorImpl,
     /// Shared, so a test can also serve it over the network.
     pub identity: Arc<IdentityServiceImpl>,
     /// Shared, as the server shares it with the OIDC provider endpoints.
