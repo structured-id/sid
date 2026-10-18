@@ -178,3 +178,32 @@ fn test_same_site() {
         assert!(!same_site(&url(a), &url(b)), "{a} {b}");
     }
 }
+
+/// The page echoes exactly the token it was given: the encoded token
+/// matches, another token, a truncated or extended value, a repeated header,
+/// a malformed value and no header do not.
+#[test]
+fn csrf_matches_only_the_session_token_once() {
+    let token = BrowserCsrf::generate();
+    let sent = BrowserCsrf::encode(&token);
+    assert_eq!(sent.len(), 43);
+    assert!(BrowserCsrf::matches([sent.as_str()], &token));
+
+    let other = BrowserCsrf::encode(&BrowserCsrf::generate());
+    let truncated = &sent[..42];
+    let extended = format!("{sent}A");
+    for refused in [
+        vec![other.as_str()],
+        vec![truncated],
+        vec![extended.as_str()],
+        vec![sent.as_str(), sent.as_str()],
+        vec!["not base64!"],
+        vec![""],
+        vec![],
+    ] {
+        assert!(
+            !BrowserCsrf::matches(refused.iter().copied(), &token),
+            "{refused:?} matched"
+        );
+    }
+}

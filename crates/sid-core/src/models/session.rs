@@ -181,6 +181,39 @@ impl std::fmt::Debug for BrowserSecretHash {
     }
 }
 
+/// The CSRF token of a browser session: random, generated with its secret
+/// and stored with the session, read by the page through the session's
+/// origin-checked context and echoed on every cookie-authenticated call.
+/// Unlike the secret it is kept as is, since the context read returns it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct BrowserCsrfToken([u8; 32]);
+
+impl BrowserCsrfToken {
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl TryFrom<&[u8]> for BrowserCsrfToken {
+    type Error = crate::Error;
+
+    fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
+        <[u8; 32]>::try_from(bytes)
+            .map(Self)
+            .map_err(|_| crate::Error::Storage("browser CSRF token is not 32 bytes".into()))
+    }
+}
+
+impl std::fmt::Debug for BrowserCsrfToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BrowserCsrfToken(..)")
+    }
+}
+
 /// CE hardcoded session decay thresholds (hours).
 pub const FULL_TRUST_HOURS: i64 = 1;
 pub const HIGH_TRUST_HOURS: i64 = 4;
@@ -259,6 +292,10 @@ pub struct Session<O = ProfileId> {
     #[serde(skip)]
     pub browser_secret_hash: Option<BrowserSecretHash>,
 
+    /// Set with `browser_secret_hash`: the CSRF token of that browser session.
+    #[serde(skip)]
+    pub browser_csrf: Option<BrowserCsrfToken>,
+
     /// For a session redeemed from a grant: the IdP session whose
     /// authentication it reuses. Ending that session ends this one; this
     /// session's own `id` is the `sid` its recipient sees.
@@ -289,6 +326,7 @@ impl<O> Session<O> {
             expires_at,
             last_activity_at: None,
             browser_secret_hash: None,
+            browser_csrf: None,
             authenticated_by: None,
         }
     }
@@ -324,6 +362,7 @@ impl Session {
             expires_at: now + chrono::Duration::minutes(15),
             last_activity_at: None,
             browser_secret_hash: None,
+            browser_csrf: None,
             authenticated_by: None,
         }
     }

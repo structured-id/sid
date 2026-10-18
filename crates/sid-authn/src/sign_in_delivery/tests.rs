@@ -152,3 +152,19 @@ fn browser_sign_in_binds_the_cookie_to_the_session() {
     BrowserCredential::bind(&mut again);
     assert_ne!(again.browser_secret_hash, session.browser_secret_hash);
 }
+
+/// Binding a browser gives the session its own CSRF token, and a new
+/// sign-in a new one: a replaced session's token is not carried over.
+#[test]
+fn browser_sign_in_gives_the_session_a_csrf_token() {
+    let mut session = Session::new(
+        ProfileId::generate(),
+        "127.0.0.1".into(),
+        Utc::now() + Duration::hours(1),
+    );
+    assert!(session.browser_csrf.is_none());
+    BrowserCredential::bind(&mut session);
+    let first = session.browser_csrf.expect("bound session has a token");
+    BrowserCredential::bind(&mut session);
+    assert_ne!(session.browser_csrf, Some(first));
+}
