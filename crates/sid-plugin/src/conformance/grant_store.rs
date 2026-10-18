@@ -11,8 +11,8 @@ use chrono::{Duration, DurationRound, Utc};
 use sid_core::Error;
 use sid_core::models::session::{AuthLevel, Elevation};
 use sid_core::models::{
-    AuditEntry, AuthCodeRedemption, AuthorizationCode, BrowserSecretHash, MutationContext,
-    RefreshToken, ResourceId, RevocationReason, Session, SessionEnd, SessionId,
+    AuditEntry, AuthCodeRedemption, AuthorizationCode, BrowserCsrfToken, BrowserSecretHash,
+    MutationContext, RefreshToken, ResourceId, RevocationReason, Session, SessionEnd, SessionId,
 };
 use uuid::Uuid;
 
@@ -363,12 +363,15 @@ pub async fn session_limit_evicts_oldest<H: GrantHarness>(h: &H) {
 }
 
 /// A session a browser signed in with is found by its secret's hash and only
-/// by it; one hash belongs to one session.
+/// by it, with the CSRF token it was stored with; one hash belongs to one
+/// session.
 pub async fn session_found_by_browser_secret<H: GrantHarness>(h: &H) {
     let owner = h.owner().await;
     let secret = browser_secret();
+    let csrf = BrowserCsrfToken::from_bytes(*browser_secret().as_bytes());
     let mut signed_in = session(owner.clone());
     signed_in.browser_secret_hash = Some(secret);
+    signed_in.browser_csrf = Some(csrf);
     h.store()
         .create_session_atomic(&signed_in, 0, ctx())
         .await
@@ -387,6 +390,16 @@ pub async fn session_found_by_browser_secret<H: GrantHarness>(h: &H) {
         .expect("the signed-in session");
     assert_eq!(found.id, signed_in.id);
     assert_eq!(found.browser_secret_hash, Some(secret));
+    assert_eq!(found.browser_csrf, Some(csrf));
+    assert_eq!(
+        h.store()
+            .get_session(signed_in.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .browser_csrf,
+        Some(csrf)
+    );
     assert!(
         h.store()
             .get_session_by_browser_secret(&browser_secret())
@@ -396,6 +409,7 @@ pub async fn session_found_by_browser_secret<H: GrantHarness>(h: &H) {
     );
     let stored_native = h.store().get_session(native.id).await.unwrap().unwrap();
     assert_eq!(stored_native.browser_secret_hash, None);
+    assert_eq!(stored_native.browser_csrf, None);
 
     let mut second = session(owner);
     second.browser_secret_hash = Some(secret);

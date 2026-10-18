@@ -404,6 +404,7 @@ pub struct SessionRow {
     pub expires_at: DateTime<Utc>,
     pub last_activity_at: Option<DateTime<Utc>>,
     pub browser_secret_hash: Option<Vec<u8>>,
+    pub browser_csrf: Option<Vec<u8>>,
     pub authenticated_by: Option<SessionId>,
 }
 
@@ -456,6 +457,11 @@ impl SessionRow {
                 .browser_secret_hash
                 .as_deref()
                 .map(sid_core::models::BrowserSecretHash::try_from)
+                .transpose()?,
+            browser_csrf: self
+                .browser_csrf
+                .as_deref()
+                .map(sid_core::models::BrowserCsrfToken::try_from)
                 .transpose()?,
             authenticated_by: self.authenticated_by,
         })
