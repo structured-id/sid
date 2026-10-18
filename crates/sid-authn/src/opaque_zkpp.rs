@@ -231,5 +231,7 @@ fn request_element(request: &RegistrationRequest<PallasCipherSuite>) -> SidResul
     Option::from(pallas::Affine::from_bytes(&bytes)).ok_or_else(invalid)
 }
 
+pub mod setup;
+
 #[cfg(test)]
 mod tests;

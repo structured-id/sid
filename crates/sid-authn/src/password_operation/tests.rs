@@ -1672,6 +1672,20 @@ fn a_step_without_its_operation_reads_as_expired() {
     );
 }
 
+/// An installation's organization and the same UUID name one history scope,
+/// so existing owners' domains are unchanged whichever form the credential
+/// authority passes.
+#[test]
+fn an_organization_and_its_uuid_are_one_history_scope() {
+    let org = sid_core::models::OrgId::generate();
+    let uuid = uuid::Uuid::from_bytes(*org.as_bytes());
+    assert_eq!(HistoryScope::from(org), HistoryScope::from(uuid));
+    assert_ne!(
+        HistoryScope::from(org),
+        HistoryScope::from(uuid::Uuid::now_v7())
+    );
+}
+
 /// The history write cutoff is a past RFC 3339 instant: an offset names the
 /// same instant, a date or a free form is refused, and so is any instant
 /// after `now`, which would replace every new epoch again and again.

@@ -324,6 +324,25 @@ pub enum Finish<O, P> {
     Completed(Vec<u8>),
 }
 
+/// The credential authority whose owners' history domains an operation
+/// derives: a standalone installation's organization, or another authority's
+/// own stable identifier. Only its sixteen bytes enter the domains, so an
+/// organization and its UUID name the same scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HistoryScope([u8; 16]);
+
+impl From<sid_core::models::OrgId> for HistoryScope {
+    fn from(org: sid_core::models::OrgId) -> Self {
+        Self(*org.as_bytes())
+    }
+}
+
+impl From<uuid::Uuid> for HistoryScope {
+    fn from(id: uuid::Uuid) -> Self {
+        Self(id.into_bytes())
+    }
+}
+
 /// The credential service's side of the lifecycle; one per replica. `S` is
 /// its store: the owners' credentials and password history, the owed work of
 /// first enrollments and the operations' durable results.
@@ -669,7 +688,7 @@ where
         storage: Arc<S>,
         cache: Arc<dyn CacheBackend>,
         field_keys: Arc<dyn sid_keys::KeyManager>,
-        installation: sid_core::models::OrgId,
+        installation: impl Into<HistoryScope>,
         authority: PasswordHistoryAuthority,
     ) -> (Self, Option<Arc<HistoryEvaluation>>) {
         match authority {
@@ -702,7 +721,7 @@ where
         storage: Arc<S>,
         cache: Arc<dyn CacheBackend>,
         operation_keys: Arc<dyn sid_keys::KeyManager>,
-        installation: sid_core::models::OrgId,
+        installation: impl Into<HistoryScope>,
         evaluator: Arc<dyn HistoryPreparation>,
     ) -> Self {
         Self {
@@ -718,7 +737,7 @@ where
                     .get(),
             )),
             ops: ChallengeStore::new(cache, operation_keys, "password-operation", OPERATION_TTL),
-            installation: *installation.as_bytes(),
+            installation: installation.into().0,
             depth: DEFAULT_HISTORY_DEPTH,
             enrollment_capacity: ENROLLMENT_CAPACITY,
         }
