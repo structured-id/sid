@@ -1,23 +1,27 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! The history evaluator's key store contract, run against every backend:
+//! [`HistoryKeyStore`] scenarios, the history evaluator's key store contract:
 //! keys are durable before first use, one owner domain never sees or resets
 //! another's keys, rotations and preparations agree under concurrency, and
 //! the lifecycle the credential service reports retires a replaced key only
 //! when no newer live set or pending operation still needs it. Retirement
 //! keeps the sealed key.
+//!
+//! The write cutoff and the compaction of fences are store-wide: a harness
+//! runs [`write_cutoff_only_rises`], [`abandoned_fences_are_compacted`] and
+//! [`purged_owner_keeps_nothing`] each on a store of its own.
 
 use chrono::Utc;
 use sid_core::models::{
-    HistoryEpochId, HistoryEpochUse, HistoryKsf, HistoryLiveSet, HistoryPreparation, HistorySuite,
-    KeyArchive, KeyEpoch, NewKeyEpoch, WrappedHistoryKey, history_key_context,
+    AuditEntry, HistoryEpochId, HistoryEpochUse, HistoryKsf, HistoryLiveSet, HistoryPreparation,
+    HistorySuite, KeyArchive, KeyEpoch, NewKeyEpoch, WrappedHistoryKey, history_key_context,
 };
-use sid_plugin::history_keys::HistoryKeyStore;
 use uuid::Uuid;
 
-use super::test_audit;
+use super::history_public_key;
+use crate::history_keys::HistoryKeyStore;
 
-fn audit() -> sid_core::models::AuditEntry {
-    test_audit().audit
+fn audit() -> AuditEntry {
+    AuditEntry::system("conformance", "history_keys")
 }
 
 /// A fresh owner domain.
@@ -35,7 +39,7 @@ fn new_epoch(owner_domain: [u8; 32], key: u8) -> NewKeyEpoch {
             id,
             owner_domain,
             suite: HistorySuite::PallasPoseidonV1,
-            public_key: super::history_public_key(key),
+            public_key: history_public_key(key),
             ksf: HistoryKsf::DEFAULT,
             ksf_salt: [key.wrapping_add(1); 32],
             status: HistoryEpochUse::Active,
@@ -102,7 +106,7 @@ async fn epoch_ids(store: &dyn HistoryKeyStore, owner_domain: [u8; 32]) -> Vec<H
 /// A new owner's first key is stored before any use and readable by epoch;
 /// an exact retry returns it; any other first epoch for that owner is a
 /// conflict, so a new-owner preparation never resets or forks a history.
-pub async fn test_first_epoch_never_resets_a_history(store: &dyn HistoryKeyStore) {
+pub async fn first_epoch_never_resets_a_history(store: &dyn HistoryKeyStore) {
     let domain = owner();
     let first = new_epoch(domain, 1);
     let operation = Uuid::now_v7();
@@ -152,7 +156,7 @@ pub async fn test_first_epoch_never_resets_a_history(store: &dyn HistoryKeyStore
 
 /// Ensuring an epoch writes it once; a second or a concurrent one gets the
 /// stored epoch back, so every operation of the owner uses one key.
-pub async fn test_epoch_is_ensured_once(store: &dyn HistoryKeyStore) {
+pub async fn epoch_is_ensured_once(store: &dyn HistoryKeyStore) {
     let domain = owner();
     let (a, b) = (new_epoch(domain, 5), new_epoch(domain, 6));
     let (ra, rb) = tokio::join!(
@@ -171,7 +175,7 @@ pub async fn test_epoch_is_ensured_once(store: &dyn HistoryKeyStore) {
 
 /// Owner domains are separate namespaces: one owner's keys are invisible to
 /// another, and a live set naming another owner's epoch is refused.
-pub async fn test_owner_domains_are_separate(store: &dyn HistoryKeyStore) {
+pub async fn owner_domains_are_separate(store: &dyn HistoryKeyStore) {
     let (mine, theirs) = (owner(), owner());
     let my_epoch = store
         .ensure_epoch(&new_epoch(mine, 8), audit())
@@ -206,7 +210,7 @@ pub async fn test_owner_domains_are_separate(store: &dyn HistoryKeyStore) {
 /// Rotation replaces the active epoch: the replaced one becomes
 /// compare-only; concurrent rotations from one epoch agree on one
 /// replacement; a stale rotation writes nothing.
-pub async fn test_epoch_rotation(store: &dyn HistoryKeyStore) {
+pub async fn epoch_rotation(store: &dyn HistoryKeyStore) {
     let domain = owner();
     let old = store
         .ensure_epoch(&new_epoch(domain, 11), audit())
@@ -245,7 +249,7 @@ pub async fn test_epoch_rotation(store: &dyn HistoryKeyStore) {
 /// - an older live set changes nothing and retires nothing;
 /// - an epoch a prepared operation uses is retired only once that operation
 ///   is named settled or has expired; retirement keeps the key.
-pub async fn test_lifecycle_follows_the_live_set(store: &dyn HistoryKeyStore) {
+pub async fn lifecycle_follows_the_live_set(store: &dyn HistoryKeyStore) {
     let domain = owner();
     let first = store
         .ensure_epoch(&new_epoch(domain, 41), audit())
@@ -313,7 +317,7 @@ pub async fn test_lifecycle_follows_the_live_set(store: &dyn HistoryKeyStore) {
 
 /// A live set older than an epoch's replacement cannot retire it: when it was
 /// read the epoch could still take entries.
-pub async fn test_stale_live_set_cannot_retire(store: &dyn HistoryKeyStore) {
+pub async fn stale_live_set_cannot_retire(store: &dyn HistoryKeyStore) {
     let domain = owner();
     let first = store
         .ensure_epoch(&new_epoch(domain, 51), audit())
@@ -349,7 +353,7 @@ pub async fn test_stale_live_set_cannot_retire(store: &dyn HistoryKeyStore) {
 /// handle on the store, and only rises: an equal or earlier raise (a retry
 /// after a lost acknowledgement, a replica with an older setting) changes
 /// nothing and reports the cutoff in force.
-pub async fn test_write_cutoff_only_rises(store: &dyn HistoryKeyStore) {
+pub async fn write_cutoff_only_rises(store: &dyn HistoryKeyStore) {
     let at = |offset_ms: i64| {
         chrono::DateTime::from_timestamp_micros(Utc::now().timestamp_micros()).unwrap()
             + chrono::Duration::milliseconds(offset_ms)
@@ -383,7 +387,7 @@ pub async fn test_write_cutoff_only_rises(store: &dyn HistoryKeyStore) {
 /// creates nothing; repeating the cleanup is harmless; a key the operation
 /// did not create, or one its owner's lifecycle or another operation still
 /// needs, is kept.
-pub async fn test_abandoned_enrollment_is_reclaimed(store: &dyn HistoryKeyStore) {
+pub async fn abandoned_enrollment_is_reclaimed(store: &dyn HistoryKeyStore) {
     // Created, then aborted: the key goes, and a late retry creates nothing.
     let domain = owner();
     let operation = Uuid::now_v7();
@@ -480,7 +484,7 @@ pub async fn test_abandoned_enrollment_is_reclaimed(store: &dyn HistoryKeyStore)
 /// A cleanup racing its operation's preparation: either the key was created
 /// first and is reclaimed, or the preparation is fenced; never a key left
 /// behind for an aborted operation.
-pub async fn test_cleanup_races_preparation(store: &dyn HistoryKeyStore) {
+pub async fn cleanup_races_preparation(store: &dyn HistoryKeyStore) {
     for key in 80..84 {
         let (domain, operation) = (owner(), Uuid::now_v7());
         let new = new_epoch(domain, key);
@@ -514,7 +518,7 @@ pub async fn test_cleanup_races_preparation(store: &dyn HistoryKeyStore) {
 /// lifecycle, and only its own; a preparation still in flight for it creates,
 /// imports or selects nothing afterwards. Repeating the purge is harmless,
 /// and its fence is compacted like an abandoned enrollment's.
-pub async fn test_purged_owner_keeps_nothing(store: &dyn HistoryKeyStore) {
+pub async fn purged_owner_keeps_nothing(store: &dyn HistoryKeyStore) {
     let (purged, kept) = (owner(), owner());
     let first = new_epoch(purged, 1);
     store
@@ -590,7 +594,7 @@ pub async fn test_purged_owner_keeps_nothing(store: &dyn HistoryKeyStore) {
 
 /// The evaluator's key versions are its own record: inserted once, never
 /// replaced, listed in version order.
-pub async fn test_history_key_versions_are_insert_only(store: &dyn HistoryKeyStore) {
+pub async fn key_versions_are_insert_only(store: &dyn HistoryKeyStore) {
     // The store may be shared with other scenarios: above its newest version.
     let base = store
         .list_key_versions()
@@ -613,7 +617,7 @@ pub async fn test_history_key_versions_are_insert_only(store: &dyn HistoryKeySto
 
 /// A fence is dropped only once older than asked; until then it still
 /// refuses its operation's preparation.
-pub async fn test_abandoned_fences_are_compacted(store: &dyn HistoryKeyStore) {
+pub async fn abandoned_fences_are_compacted(store: &dyn HistoryKeyStore) {
     let (domain, operation) = (owner(), Uuid::now_v7());
     store
         .abandon_enrollment(&domain, operation, audit())
@@ -645,7 +649,7 @@ pub async fn test_abandoned_fences_are_compacted(store: &dyn HistoryKeyStore) {
 
 /// A key transfer preserves every epoch, sealed key and replacement; exact
 /// repeats add nothing; a conflicting or malformed archive mutates nothing.
-pub async fn test_key_archive_round_trip(store: &dyn HistoryKeyStore) {
+pub async fn key_archive_round_trip(store: &dyn HistoryKeyStore) {
     let domain = owner();
     let now = chrono::DateTime::from_timestamp_micros(1_790_000_000_123_456).unwrap();
     let mut active = new_epoch(domain, 61);
