@@ -241,8 +241,8 @@ pub use security_policy::{
 };
 pub use service_binding::{BindingId, BindingScope, EmptyBindingScope, ServiceBinding};
 pub use session::{
-    AuthLevel, BrowserSecretHash, GrantAuthentication, Session, SessionAuthentication,
-    SessionDecayLevel, SessionId,
+    AuthLevel, BrowserCsrfToken, BrowserSecretHash, GrantAuthentication, Session,
+    SessionAuthentication, SessionDecayLevel, SessionId,
 };
 pub use session_end::SessionEnd;
 pub use site_registration::{SiteId, SiteRegistration, VerificationStatus};
