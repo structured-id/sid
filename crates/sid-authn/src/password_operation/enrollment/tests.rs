@@ -427,6 +427,49 @@ async fn ended_enrollment_records_are_compacted() {
     );
 }
 
+/// A separate evaluator compacts its own fences on the same retention as its
+/// credential authority's records: a fence is dropped only once no delayed
+/// preparation of its enrollment can still arrive.
+#[tokio::test]
+async fn a_separate_evaluator_compacts_only_ended_fences() {
+    let storage = sqlite().await;
+    let installation = sid_core::models::OrgId::generate();
+    let (ops, evaluation) = split(storage.clone(), installation, manager(3), manager(3));
+    let (aborted, domain) = enrolled(&ops, installation).await;
+    evaluation
+        .abandon_enrollment(&domain, aborted.into_uuid())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        compact_evaluator_fences(&evaluation, chrono::Utc::now())
+            .await
+            .unwrap(),
+        0,
+        "a young fence stays"
+    );
+    assert!(
+        storage
+            .history_keys()
+            .enrollment_abandoned(aborted.into_uuid())
+            .await
+            .unwrap()
+    );
+    let later = chrono::Utc::now() + chrono::Duration::days(2);
+    assert_eq!(
+        compact_evaluator_fences(&evaluation, later).await.unwrap(),
+        1
+    );
+    assert!(
+        !storage
+            .history_keys()
+            .enrollment_abandoned(aborted.into_uuid())
+            .await
+            .unwrap(),
+        "the ended fence is dropped"
+    );
+}
+
 /// First enrollments are bounded across replicas: at capacity a new one is
 /// refused before the evaluator makes its key.
 #[tokio::test]

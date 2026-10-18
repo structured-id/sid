@@ -59,7 +59,10 @@ use std::time::Duration;
 mod enrollment;
 mod purge;
 pub mod relayed;
-pub use enrollment::{EnrollmentHandler, EvaluatorDelivery, abort_event_id, compact_enrollments};
+pub use enrollment::{
+    EnrollmentHandler, EvaluatorDelivery, abort_event_id, compact_enrollments,
+    compact_evaluator_fences,
+};
 pub use purge::{OwnerPurgeHandler, purge_event_id};
 pub use relayed::{
     cleanup_consumer, consume_cleanup_settlements, consume_relayed_cleanup, settlement_consumer,
@@ -603,6 +606,33 @@ pub fn charge_key(actor: &str) -> String {
     use base64::Engine;
     use sha2::Digest;
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(actor.as_bytes()))
+}
+
+/// Why a history write cutoff setting is refused.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum HistoryCutoffError {
+    #[error("the history write cutoff must be an RFC 3339 instant")]
+    Malformed,
+    /// A future cutoff would replace every epoch created until then, again
+    /// at each operation: it names no compromise that has happened.
+    #[error("the history write cutoff must not be in the future")]
+    Future,
+}
+
+/// The history write cutoff `value` names: a past RFC 3339 instant, before
+/// which history epochs are replaced. The same setting is read by every
+/// store that keeps history keys or commits history.
+pub fn parse_history_write_cutoff(
+    value: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<chrono::DateTime<chrono::Utc>, HistoryCutoffError> {
+    let cutoff = chrono::DateTime::parse_from_rfc3339(value)
+        .map_err(|_| HistoryCutoffError::Malformed)?
+        .with_timezone(&chrono::Utc);
+    if cutoff > now {
+        return Err(HistoryCutoffError::Future);
+    }
+    Ok(cutoff)
 }
 
 /// Where a credential service's history evaluator runs.
