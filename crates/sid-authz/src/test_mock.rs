@@ -218,6 +218,34 @@ impl sid_plugin::InstanceSecretStore for MockStorage {
 }
 
 #[async_trait::async_trait]
+impl sid_plugin::OperationResultStore for MockStorage {
+    async fn record_outcome(&self, _: MutationContext) -> Result<()> {
+        unimplemented!()
+    }
+    async fn purge_operation_results(
+        &self,
+        _: &str,
+        _: &str,
+        _: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64> {
+        unimplemented!()
+    }
+    async fn get_operation_result(
+        &self,
+        _: &str,
+        _: &OperationKey,
+    ) -> Result<Option<OperationRecord>> {
+        unimplemented!()
+    }
+    async fn export_operation_results(&self) -> Result<Vec<OperationRecord>> {
+        unimplemented!()
+    }
+    async fn import_operation_result(&self, _: &OperationRecord) -> Result<bool> {
+        unimplemented!()
+    }
+}
+
+#[async_trait::async_trait]
 impl sid_plugin::SignInHistoryStore for MockStorage {
     type Owner = ProfileId;
 
@@ -1962,30 +1990,6 @@ impl sid_plugin::StorageBackend for MockStorage {
         _: chrono::DateTime<chrono::Utc>,
         _: MutationContext,
     ) -> Result<u64> {
-        unimplemented!()
-    }
-    async fn record_outcome(&self, _: MutationContext) -> Result<()> {
-        unimplemented!()
-    }
-    async fn purge_operation_results(
-        &self,
-        _: &str,
-        _: &str,
-        _: chrono::DateTime<chrono::Utc>,
-    ) -> Result<u64> {
-        unimplemented!()
-    }
-    async fn get_operation_result(
-        &self,
-        _: &str,
-        _: &OperationKey,
-    ) -> Result<Option<OperationRecord>> {
-        unimplemented!()
-    }
-    async fn export_operation_results(&self) -> Result<Vec<OperationRecord>> {
-        unimplemented!()
-    }
-    async fn import_operation_result(&self, _: &OperationRecord) -> Result<bool> {
         unimplemented!()
     }
     async fn get_flow_config(&self, _: ProjectId, _: FlowType) -> Result<Option<FlowConfig>> {

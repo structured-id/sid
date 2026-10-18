@@ -7868,62 +7868,6 @@ impl StorageBackend for PostgresBackend {
         job_lock::try_job_lock(&self.pool, job).await
     }
 
-    async fn record_outcome(&self, ctx: MutationContext) -> SidResult<()> {
-        let chain = ctx
-            .operation
-            .as_ref()
-            .map(|o| format!("operation:{}", o.namespace))
-            .unwrap_or_else(|| "operation".to_string());
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| SidError::Storage(format!("begin: {e}")))?;
-        Self::audit_in_tx(&mut tx, &chain, ctx).await?;
-        tx.commit()
-            .await
-            .map_err(|e| SidError::Storage(format!("commit: {e}")))?;
-        Ok(())
-    }
-
-    async fn purge_operation_results(
-        &self,
-        namespace: &str,
-        method: &str,
-        before: chrono::DateTime<chrono::Utc>,
-    ) -> SidResult<u64> {
-        sqlx::query(
-            "DELETE FROM operation_results
-             WHERE namespace = $1 AND method = $2 AND completed_at < $3",
-        )
-        .bind(namespace)
-        .bind(method)
-        .bind(before)
-        .execute(&self.pool)
-        .await
-        .map(|done| done.rows_affected())
-        .map_err(|e| SidError::Storage(format!("purge operation results: {e}")))
-    }
-
-    async fn get_operation_result(
-        &self,
-        namespace: &str,
-        key: &sid_core::models::OperationKey,
-    ) -> SidResult<Option<sid_core::models::OperationRecord>> {
-        operation::get(&self.pool, namespace, key).await
-    }
-
-    async fn export_operation_results(&self) -> SidResult<Vec<sid_core::models::OperationRecord>> {
-        operation::export(&self.pool).await
-    }
-
-    async fn import_operation_result(
-        &self,
-        record: &sid_core::models::OperationRecord,
-    ) -> SidResult<bool> {
-        operation::import(&self.pool, record).await
-    }
-
     async fn ensure_audit_partition(&self, month_start: chrono::NaiveDate) -> SidResult<bool> {
         audit_retention::ensure_partition(&self.pool, month_start).await
     }

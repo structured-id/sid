@@ -33,7 +33,7 @@ use uuid::Uuid;
 
 use crate::{
     ClientResourceRegistry, CredentialStore, GrantStore, InstanceSecretStore, IssuerStore,
-    PrincipalStore, SignInHistoryStore, WorkStore,
+    OperationResultStore, PrincipalStore, SignInHistoryStore, WorkStore,
 };
 
 /// The right to run one background job, exclusive across every instance on
@@ -80,6 +80,7 @@ pub trait StorageBackend:
     + PrincipalStore<Owner = ProfileId>
     + SignInHistoryStore<Owner = ProfileId>
     + InstanceSecretStore
+    + OperationResultStore
     + Send
     + Sync
     + 'static
@@ -2018,43 +2019,6 @@ pub trait StorageBackend:
     ) -> Result<Vec<(ProfileId, u64)>>;
 
     // === DISTRIBUTED LOCKING ===
-
-    /// Commit `ctx` alone: its keyed command's completion, its audit entry
-    /// and the work it owes, with no other state. A command that ends
-    /// without changing anything else (a terminal abort) is recorded this
-    /// way; when its key is already completed nothing is written and
-    /// `Error::OperationCompleted` is returned.
-    async fn record_outcome(&self, ctx: MutationContext) -> Result<()>;
-
-    /// Drop the completions of `method` in `namespace` recorded before
-    /// `before`, once their commands can no longer be retried or raced; the
-    /// command's owner decides when. Returns how many were dropped.
-    async fn purge_operation_results(
-        &self,
-        namespace: &str,
-        method: &str,
-        before: DateTime<Utc>,
-    ) -> Result<u64>;
-
-    /// The committed completion of the keyed command `key` in `namespace`
-    /// (recorded through [`MutationContext::operation`]), if any.
-    async fn get_operation_result(
-        &self,
-        namespace: &str,
-        key: &sid_core::models::OperationKey,
-    ) -> Result<Option<sid_core::models::OperationRecord>>;
-
-    /// Every committed completion, to carry to another store: a retry that
-    /// arrives after a migration must still find its result.
-    async fn export_operation_results(&self) -> Result<Vec<sid_core::models::OperationRecord>>;
-
-    /// Store an exported completion with its original completion time.
-    /// Returns `false`, writing nothing, when its key is already completed in
-    /// its namespace.
-    async fn import_operation_result(
-        &self,
-        record: &sid_core::models::OperationRecord,
-    ) -> Result<bool>;
 
     /// Take the lock of background job `job` unless some instance on this
     /// store holds it (`None`: the job is skipped this round). The lock is
