@@ -5,7 +5,7 @@
 
 use sid_core::grpc_error::{ApiError, ErrorReason};
 use sid_core::models::{OperationCompletion, OperationKey};
-use sid_plugin::storage::StorageBackend;
+use sid_plugin::OperationResultStore;
 use tonic::Status;
 use tonic::metadata::MetadataMap;
 
@@ -67,7 +67,10 @@ impl KeyedCommand {
     /// The recorded result when this command already completed. The same key
     /// used for another method or other inputs is a conflict: a new command
     /// needs a new key.
-    pub async fn completed(&self, storage: &dyn StorageBackend) -> Result<Option<Vec<u8>>, Status> {
+    pub async fn completed(
+        &self,
+        storage: &dyn OperationResultStore,
+    ) -> Result<Option<Vec<u8>>, Status> {
         let record = storage
             .get_operation_result(&self.namespace, &self.key)
             .await
@@ -104,7 +107,7 @@ impl KeyedCommand {
     /// attempt of this command committed.
     pub async fn committed_elsewhere(
         &self,
-        storage: &dyn StorageBackend,
+        storage: &dyn OperationResultStore,
     ) -> Result<Vec<u8>, Status> {
         self.completed(storage).await?.ok_or_else(|| {
             ApiError::new(
