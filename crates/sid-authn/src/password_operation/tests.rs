@@ -613,6 +613,52 @@ async fn a_registration_cleanup_is_due_after_its_commit_deadline() {
     );
 }
 
+/// A host step keeps what it changed in the operation, a refused step leaves
+/// the operation pending for the next one, and an unknown operation takes
+/// no step.
+#[tokio::test]
+async fn a_host_step_amends_the_pending_operation() {
+    let (ops, _) = split(
+        sqlite().await,
+        sid_core::models::OrgId::generate(),
+        manager(3),
+        manager(3),
+    );
+    let op = pending(change());
+    ops.store(&op).await.unwrap();
+
+    let amended = ops
+        .amend(&op.id, |pending| {
+            pending.registration_request = Some(b"staged".to_vec());
+            Ok(7)
+        })
+        .await
+        .unwrap();
+    assert_eq!(amended, 7);
+
+    let refused = ops
+        .amend(&op.id, |pending| {
+            assert_eq!(
+                pending.registration_request.as_deref(),
+                Some(&b"staged"[..])
+            );
+            Err::<(), _>(Status::permission_denied("not this caller"))
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code(), Code::PermissionDenied);
+
+    let kept = ops.take(&op.id).await.unwrap();
+    assert_eq!(kept.registration_request.as_deref(), Some(&b"staged"[..]));
+    assert_eq!(kept.expires_at, op.expires_at);
+
+    assert!(
+        ops.amend(&PasswordOperationId::generate(), |_| Ok(()))
+            .await
+            .is_err()
+    );
+}
+
 /// Replacing the active policy must invalidate a pending operation before
 /// decoding its record or accepting a permitted no-proof replacement. The
 /// operation's former version cannot become the new credential's evidence.
