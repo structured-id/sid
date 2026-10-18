@@ -62,7 +62,17 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 10,
         sql: ENROLLMENT_POLICY,
     },
+    Migration {
+        version: 11,
+        sql: BROWSER_CSRF,
+    },
 ];
+
+/// The CSRF token a browser session carries; the PostgreSQL migration 063
+/// states the contract.
+const BROWSER_CSRF: &str = "
+ALTER TABLE sessions ADD COLUMN browser_csrf BLOB;
+";
 
 /// The installation's enrollment policy; the PostgreSQL migration 062 states
 /// the contract. The allowed domains are a JSON array of strings.

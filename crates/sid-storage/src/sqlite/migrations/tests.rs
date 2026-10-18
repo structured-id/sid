@@ -208,6 +208,37 @@ async fn a_released_file_upgrades_to_the_latest_version() {
     assert!(has_table(&pool, "history_key_epochs").await);
 }
 
+async fn session_columns(pool: &SqlitePool) -> Vec<String> {
+    sqlx::query_scalar("SELECT name FROM pragma_table_info('sessions')")
+        .fetch_all(pool)
+        .await
+        .unwrap()
+}
+
+/// Regression: the browser session's CSRF column was added to the frozen
+/// baseline, so a released file (created from the baseline, at a version
+/// the new code reads as current) never got it and every session query
+/// failed. The baseline keeps the released sessions table; a migration adds
+/// the column to every file, released or new.
+#[tokio::test]
+async fn browser_csrf_reaches_released_files_by_migration() {
+    let (_dir, path) = scratch();
+    let pool = open(&path).await;
+    upgrade(&pool, BASELINE, &[]).await.unwrap();
+    assert!(
+        !session_columns(&pool)
+            .await
+            .contains(&"browser_csrf".to_string()),
+        "the released baseline has no CSRF column"
+    );
+    upgrade(&pool, BASELINE, MIGRATIONS).await.unwrap();
+    assert!(
+        session_columns(&pool)
+            .await
+            .contains(&"browser_csrf".to_string())
+    );
+}
+
 /// The history evaluator split converts only an empty history layout: a file
 /// holding history refuses the upgrade, its version and tables unchanged;
 /// emptied, it converts and its credential tables carry no key.
