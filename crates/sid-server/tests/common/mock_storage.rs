@@ -1267,6 +1267,59 @@ impl GrantStore for MockStorage {
 }
 
 #[async_trait]
+impl sid_plugin::OperationResultStore for MockStorage {
+    async fn record_outcome(&self, ctx: MutationContext) -> SidResult<()> {
+        self.inner.lock().unwrap().owe(&ctx)
+    }
+    async fn purge_operation_results(
+        &self,
+        namespace: &str,
+        method: &str,
+        before: chrono::DateTime<chrono::Utc>,
+    ) -> SidResult<u64> {
+        let mut inner = self.inner.lock().unwrap();
+        let held = inner.operations.len();
+        inner.operations.retain(|(ns, _), r| {
+            ns != namespace || r.completion.method != method || r.completed_at >= before
+        });
+        Ok((held - inner.operations.len()) as u64)
+    }
+    async fn get_operation_result(
+        &self,
+        namespace: &str,
+        key: &OperationKey,
+    ) -> SidResult<Option<OperationRecord>> {
+        let inner = self.inner.lock().unwrap();
+        Ok(inner
+            .operations
+            .get(&(namespace.to_string(), key.as_str().to_string()))
+            .cloned())
+    }
+    async fn export_operation_results(&self) -> SidResult<Vec<OperationRecord>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .operations
+            .values()
+            .cloned()
+            .collect())
+    }
+    async fn import_operation_result(&self, record: &OperationRecord) -> SidResult<bool> {
+        let slot = (
+            record.completion.namespace.clone(),
+            record.completion.key.as_str().to_string(),
+        );
+        let mut inner = self.inner.lock().unwrap();
+        if inner.operations.contains_key(&slot) {
+            return Ok(false);
+        }
+        inner.operations.insert(slot, record.clone());
+        Ok(true)
+    }
+}
+
+#[async_trait]
 impl sid_plugin::InstanceSecretStore for MockStorage {
     async fn get_instance_secret(
         &self,
@@ -5195,55 +5248,6 @@ impl StorageBackend for MockStorage {
         _: MutationContext,
     ) -> SidResult<u64> {
         unimplemented!("audit retention is exercised by the storage conformance suite")
-    }
-    async fn record_outcome(&self, ctx: MutationContext) -> SidResult<()> {
-        self.inner.lock().unwrap().owe(&ctx)
-    }
-    async fn purge_operation_results(
-        &self,
-        namespace: &str,
-        method: &str,
-        before: chrono::DateTime<chrono::Utc>,
-    ) -> SidResult<u64> {
-        let mut inner = self.inner.lock().unwrap();
-        let held = inner.operations.len();
-        inner.operations.retain(|(ns, _), r| {
-            ns != namespace || r.completion.method != method || r.completed_at >= before
-        });
-        Ok((held - inner.operations.len()) as u64)
-    }
-    async fn get_operation_result(
-        &self,
-        namespace: &str,
-        key: &OperationKey,
-    ) -> SidResult<Option<OperationRecord>> {
-        let inner = self.inner.lock().unwrap();
-        Ok(inner
-            .operations
-            .get(&(namespace.to_string(), key.as_str().to_string()))
-            .cloned())
-    }
-    async fn export_operation_results(&self) -> SidResult<Vec<OperationRecord>> {
-        Ok(self
-            .inner
-            .lock()
-            .unwrap()
-            .operations
-            .values()
-            .cloned()
-            .collect())
-    }
-    async fn import_operation_result(&self, record: &OperationRecord) -> SidResult<bool> {
-        let slot = (
-            record.completion.namespace.clone(),
-            record.completion.key.as_str().to_string(),
-        );
-        let mut inner = self.inner.lock().unwrap();
-        if inner.operations.contains_key(&slot) {
-            return Ok(false);
-        }
-        inner.operations.insert(slot, record.clone());
-        Ok(true)
     }
     async fn get_notification_preferences(
         &self,

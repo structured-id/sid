@@ -376,6 +376,31 @@ macro_rules! credential_store_isolated {
     )*};
 }
 
+// ─── Operation result conformance ───
+
+/// Run operation result conformance `scenario`; each one uses namespaces of
+/// its own.
+macro_rules! operation_result_store {
+    ($($scenario:ident),* $(,)?) => {$(
+        #[tokio::test]
+        async fn $scenario() {
+            sid_plugin::conformance::operation_result_store::$scenario(&setup().await).await;
+        }
+    )*};
+}
+
+mod operation_result_store {
+    use super::*;
+
+    operation_result_store!(
+        recorded_outcome_resolves,
+        completed_key_records_nothing,
+        concurrent_outcomes_record_once,
+        results_travel_between_stores,
+        results_are_purged_by_method,
+    );
+}
+
 // ─── Instance secret conformance ───
 
 /// Run instance secret conformance `scenario` in a schema of its own:
@@ -591,11 +616,6 @@ macro_rules! history_key_store_isolated {
 }
 
 history_key_store_isolated!(abandoned_fences_are_compacted, purged_owner_keeps_nothing);
-
-#[tokio::test]
-async fn test_operation_results_are_purged_by_method() {
-    common::operation::test_operation_results_are_purged_by_method(&setup().await).await;
-}
 
 #[tokio::test]
 async fn test_end_legacy_migration_is_one_write() {

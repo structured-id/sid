@@ -3,6 +3,7 @@ use super::super::tests::{change, manager, split, sqlite, zkpp_without_proofs};
 use super::super::*;
 use super::*;
 use sid_core::models::{WorkId, WorkState};
+use sid_plugin::OperationResultStore;
 use sid_plugin::work_store::WorkStore;
 use tonic::Code;
 
