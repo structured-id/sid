@@ -217,6 +217,8 @@ fn admit_request(request: &CaRequest) -> Result<(), IssuanceError> {
         return Err(IssuanceError::EmptyRelativeName);
     }
     // RFC 5280 §4.1.2.2: positive, so neither zero nor a negative encoding.
+    // `as_bytes` is the signed DER content (a positive value with its high
+    // bit set carries the 0x00 sign octet), so a leading 1 bit is negative.
     let serial = request.serial_number.as_bytes();
     if serial.iter().all(|b| *b == 0) || serial.first().is_some_and(|b| b & 0x80 != 0) {
         return Err(IssuanceError::NonPositiveSerial);
@@ -356,13 +358,32 @@ fn prepared(text: &str) -> Option<String> {
     if prepared.chars().any(prohibited) {
         return None;
     }
-    Some(
-        prepared
-            .split(' ')
-            .filter(|word| !word.is_empty())
-            .collect::<Vec<_>>()
-            .join(" "),
-    )
+    // RFC 4518 §2.6.1: a space is U+0020 followed by no combining mark; one
+    // that carries a mark is part of its word and is kept.
+    let is_mark = |c: char| {
+        matches!(
+            categories.get(c),
+            GeneralCategory::NonspacingMark
+                | GeneralCategory::SpacingMark
+                | GeneralCategory::EnclosingMark
+        )
+    };
+    let mut words: Vec<String> = Vec::new();
+    let mut word = String::new();
+    let mut chars = prepared.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == ' ' && !chars.peek().is_some_and(|&next| is_mark(next)) {
+            if !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+        } else {
+            word.push(c);
+        }
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    Some(words.join(" "))
 }
 
 /// The issuing certificate may sign this CA: it is a CA with `keyCertSign`,
@@ -371,6 +392,13 @@ fn prepared(text: &str) -> Option<String> {
 fn admit_issuer(certificate: &Certificate, request: &CaRequest) -> Result<(), IssuanceError> {
     let tbs = certificate.tbs_certificate();
     let malformed = |e: x509_cert::der::Error| IssuanceError::MalformedIssuer(e.to_string());
+    // Its subject becomes the issuer name of what it signs, which must be a
+    // non-empty distinguished name of non-empty RDNs (RFC 5280 §4.1.2.4).
+    if tbs.subject().is_empty() || tbs.subject().iter_rdn().any(|rdn| rdn.is_empty()) {
+        return Err(IssuanceError::MalformedIssuer(
+            "the issuing certificate's subject is not a distinguished name".into(),
+        ));
+    }
     let constraints = tbs
         .get_extension::<BasicConstraints>()
         .map_err(malformed)?

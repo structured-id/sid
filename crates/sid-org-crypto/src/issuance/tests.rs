@@ -468,6 +468,37 @@ async fn zero_serial_number_is_refused() {
     assert_eq!(key.calls.load(Ordering::SeqCst), 0);
 }
 
+// A positive serial whose magnitude has its high bit set (128, 0x80...) is
+// positive: `as_bytes` is the signed DER content, carrying the 0x00 sign
+// octet, so a serial counter passes 127.
+#[tokio::test]
+async fn serial_with_high_bit_is_positive() {
+    assert_eq!(SerialNumber::from(128u32).as_bytes(), [0x00, 0x80]);
+    for serial in [128u32, 255, 0x8000_0000] {
+        let key = counting();
+        let mut high = request("CN=Root", &key, 10, None);
+        high.serial_number = SerialNumber::from(serial);
+        let issued = issue_ca_certificate(Issuer::SelfIssued(&key), high).await;
+        assert!(issued.is_ok(), "{serial}: {issued:?}");
+    }
+}
+
+// A negative serial, as DER can carry it, is refused (RFC 5280 §4.1.2.2).
+#[tokio::test]
+async fn negative_serial_is_refused() {
+    let negative = SerialNumber::from_der(&[0x02, 0x01, 0xff]).unwrap();
+    assert_eq!(negative.as_bytes(), [0xff]);
+    let key = counting();
+    let mut request = request("CN=Root", &key, 10, None);
+    request.serial_number = negative;
+    let refused = issue_ca_certificate(Issuer::SelfIssued(&key), request).await;
+    assert!(
+        matches!(refused, Err(IssuanceError::NonPositiveSerial)),
+        "{refused:?}"
+    );
+    assert_eq!(key.calls.load(Ordering::SeqCst), 0);
+}
+
 // RFC 5280 §7.1: names differing only in case or insignificant spaces are the
 // same name, so they cannot slip a same-name replacement past the refusal.
 #[tokio::test]
@@ -553,6 +584,9 @@ fn distinct_names_stay_distinct_after_preparation() {
         ("CN=Root A", "CN=RootA"),
         ("CN=Root,O=Example", "CN=Root,O=Example2"),
         ("CN=\u{1e9e}", "CN=SS"),
+        // RFC 4518 §2.6.1: a SPACE followed by a combining mark is not a
+        // space, so it is not compressed with its neighbour.
+        ("CN=x \u{301}y", "CN=x  \u{301}y"),
     ] {
         assert!(
             !same_name(&Name::from_str(a).unwrap(), &Name::from_str(b).unwrap()),
@@ -599,6 +633,59 @@ async fn policy_constrained_request_is_refused() {
     assert_eq!(root_key.calls.load(Ordering::SeqCst), 0);
 }
 
+/// A self-issued certificate of `request` built past the request admission,
+/// as an issuer from outside this profile could be.
+async fn issued_past_admission(key: &Counting, request: CaRequest) -> Certificate {
+    let profile = CaProfile {
+        subject: request.subject.clone(),
+        issuer: request.subject,
+        path_len: request.path_len,
+        issuer_key_id: None,
+        extensions: request.extensions,
+    };
+    let mut builder = CertificateBuilder::new(
+        profile,
+        request.serial_number,
+        request.validity,
+        request.public_key,
+    )
+    .unwrap();
+    let tbs = builder.finalize(&SignerKey(key)).unwrap();
+    let certificate = PreparedCertificate {
+        builder,
+        tbs,
+        signer: key,
+    }
+    .sign()
+    .await
+    .unwrap();
+    key.calls.store(0, Ordering::SeqCst);
+    certificate
+}
+
+// An issuer whose own subject has an empty RDN would become the malformed
+// issuer name of everything it signs (RFC 5280 §4.1.2.4): refused.
+#[tokio::test]
+async fn issuer_with_malformed_subject_is_refused() {
+    let root_key = counting();
+    let mut malformed = request("CN=Root", &root_key, 10, Some(1));
+    malformed.subject = Name::from_der(&[0x30, 0x02, 0x31, 0x00]).unwrap();
+    let root = issued_past_admission(&root_key, malformed).await;
+    let refused = issue_ca_certificate(
+        Issuer::Ca {
+            certificate: &root,
+            signer: &root_key,
+        },
+        request("CN=Intermediate,O=Example", &signer(), 5, Some(0)),
+    )
+    .await;
+    assert!(
+        matches!(refused, Err(IssuanceError::MalformedIssuer(_))),
+        "{refused:?}"
+    );
+    assert_eq!(root_key.calls.load(Ordering::SeqCst), 0);
+}
+
 // An issuer carrying policy constraints (one not issued by this profile) is
 // refused before signing.
 #[tokio::test]
@@ -606,31 +693,7 @@ async fn policy_constrained_issuer_is_refused() {
     let root_key = counting();
     let mut constrained = request("CN=Root,O=Example", &root_key, 10, Some(1));
     constrained.extensions.push(policy_constraints());
-    // Built past the request admission, as an issuer from outside it would be.
-    let profile = CaProfile {
-        subject: constrained.subject.clone(),
-        issuer: constrained.subject,
-        path_len: constrained.path_len,
-        issuer_key_id: None,
-        extensions: constrained.extensions,
-    };
-    let mut builder = CertificateBuilder::new(
-        profile,
-        constrained.serial_number,
-        constrained.validity,
-        constrained.public_key,
-    )
-    .unwrap();
-    let tbs = builder.finalize(&SignerKey(&root_key)).unwrap();
-    let root = PreparedCertificate {
-        builder,
-        tbs,
-        signer: &root_key,
-    }
-    .sign()
-    .await
-    .unwrap();
-    root_key.calls.store(0, Ordering::SeqCst);
+    let root = issued_past_admission(&root_key, constrained).await;
     let refused = issue_ca_certificate(
         Issuer::Ca {
             certificate: &root,
