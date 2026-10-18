@@ -54,6 +54,32 @@ fn certificate_fingerprint_is_its_sha256() {
     );
 }
 
+// A confirmation read back at microsecond precision is the one given; a
+// different instant, reference or confirmer is not.
+#[test]
+fn confirmation_identity_ignores_sub_microseconds() {
+    use chrono::Timelike;
+    let given = RecoveryConfirmation {
+        confirmed_at: Utc::now().with_nanosecond(123_456_789).unwrap(),
+        ..confirmation()
+    };
+    let stored = RecoveryConfirmation {
+        confirmed_at: given.confirmed_at.with_nanosecond(123_456_000).unwrap(),
+        ..given.clone()
+    };
+    assert!(stored.is_same(&given));
+    let later = RecoveryConfirmation {
+        confirmed_at: given.confirmed_at.with_nanosecond(123_457_000).unwrap(),
+        ..given.clone()
+    };
+    assert!(!later.is_same(&given));
+    let other = RecoveryConfirmation {
+        reference: "other".into(),
+        ..given.clone()
+    };
+    assert!(!other.is_same(&given));
+}
+
 // Storage names round-trip and unknown names are refused.
 #[test]
 fn state_names_round_trip() {

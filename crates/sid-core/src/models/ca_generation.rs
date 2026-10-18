@@ -97,6 +97,18 @@ pub struct RecoveryConfirmation {
     pub confirmed_at: DateTime<Utc>,
 }
 
+impl RecoveryConfirmation {
+    /// Whether `other` is this confirmation again: the same reference and
+    /// confirmer at the same instant to the microsecond, the precision every
+    /// store keeps.
+    pub fn is_same(&self, other: &Self) -> bool {
+        use chrono::SubsecRound;
+        self.reference == other.reference
+            && self.confirmed_by == other.confirmed_by
+            && self.confirmed_at.trunc_subsecs(6) == other.confirmed_at.trunc_subsecs(6)
+    }
+}
+
 /// A generation to prepare.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewCaGeneration {

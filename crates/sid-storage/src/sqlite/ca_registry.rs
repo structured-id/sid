@@ -162,7 +162,7 @@ impl SqliteBackend {
             Recovery::Database => &g.database_recovery,
             Recovery::Keys => &g.key_recovery,
         };
-        if recorded.as_ref() == Some(given) {
+        if recorded.as_ref().is_some_and(|r| r.is_same(given)) {
             return Ok(g);
         }
         if g.state != CaState::Prepared || g.certificate.is_none() || recorded.is_some() {

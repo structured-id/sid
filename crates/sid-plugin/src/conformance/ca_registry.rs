@@ -3,7 +3,7 @@
 //! backend enforces, under concurrency. Each scenario uses an organization
 //! scope of its own, so scenarios share a store without seeing each other.
 
-use chrono::{SubsecRound, Utc};
+use chrono::{Timelike, Utc};
 use sid_core::Error;
 use sid_core::models::{
     AuditEntry, CaGeneration, CaGenerationId, CaScope, CaState, KeyCustody, MutationContext,
@@ -37,8 +37,9 @@ fn confirmation(reference: &str) -> RecoveryConfirmation {
     RecoveryConfirmation {
         reference: reference.into(),
         confirmed_by: "operator".into(),
-        // Millisecond precision: what every engine stores exactly.
-        confirmed_at: Utc::now().trunc_subsecs(3),
+        // Nanoseconds no engine keeps: a retry of this exact confirmation is
+        // still the same confirmation.
+        confirmed_at: Utc::now().with_nanosecond(123_456_789).unwrap(),
     }
 }
 
