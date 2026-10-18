@@ -83,6 +83,75 @@ async fn value_sealed_for_another_record_is_refused() {
     ));
 }
 
+/// The deployment's router registers new passwords on Pallas and verifies
+/// every curve this build implements; a password registered through one
+/// replica's router signs in through another's over the same store.
+#[tokio::test]
+async fn replicas_share_the_router_setup() {
+    use rand::rand_core::UnwrapErr;
+    use rand::rngs::SysRng;
+    use sid_opaque_ke::{
+        ClientLogin, ClientLoginFinishParameters, ClientRegistration,
+        ClientRegistrationFinishParameters, CredentialResponse, RegistrationResponse,
+    };
+    use sid_pake_core::pallas_opaque::PallasCipherSuite;
+    use sid_plugin::crypto::CurveId;
+
+    let (storage, keys) = (storage().await, key_manager());
+    let first = router(&storage, keys.as_ref()).await.unwrap();
+    let second = router(&storage, keys.as_ref()).await.unwrap();
+    assert_eq!(first.primary_curve(), CurveId::Pallas);
+    let mut curves = second.supported_curves();
+    curves.sort_by_key(|c| *c as u8);
+    assert_eq!(
+        curves,
+        vec![
+            CurveId::Pallas,
+            CurveId::Ristretto255,
+            CurveId::P256,
+            CurveId::P384,
+            CurveId::P521
+        ]
+    );
+
+    let (identifier, password) = (b"credential-1", b"correct horse");
+    let mut rng = UnwrapErr(SysRng);
+    let client = ClientRegistration::<PallasCipherSuite>::start(&mut rng, password).unwrap();
+    let (response, _) = first
+        .registration_start(&client.message.serialize(), identifier)
+        .unwrap();
+    let upload = client
+        .state
+        .finish(
+            &mut rng,
+            password,
+            RegistrationResponse::deserialize(&response).unwrap(),
+            ClientRegistrationFinishParameters::default(),
+        )
+        .unwrap();
+    let stored = first
+        .registration_finish(&upload.message.serialize())
+        .unwrap();
+    assert_eq!(stored.curve, CurveId::Pallas);
+
+    let client = ClientLogin::<PallasCipherSuite>::start(&mut rng, password).unwrap();
+    let (response, state) = second
+        .login_start(&stored, &client.message.serialize(), identifier, &[])
+        .unwrap();
+    let finish = client
+        .state
+        .finish(
+            &mut rng,
+            password,
+            CredentialResponse::deserialize(&response).unwrap(),
+            ClientLoginFinishParameters::default(),
+        )
+        .unwrap();
+    second
+        .login_finish(&state, &finish.message.serialize(), &[])
+        .unwrap();
+}
+
 /// A replica holding a different master secret cannot open the setup and
 /// fails to start instead of serving logins that could never succeed.
 #[tokio::test]

@@ -26,6 +26,7 @@ use sid_authn::otp::OtpService;
 use sid_authn::password_sign_in::PendingSignIn;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::revocation_cascade::RevocationCascadeService;
+use sid_authn::sign_in_delivery::{BrowserCredential, CeremonyClient, Delivery, SignedIn};
 use sid_authn::subject::{SubjectRule, resolve_subject};
 use sid_authn::webauthn::{
     AssertionPurpose, AssertionResponse, DiscoverableAssertionResponse, RegistrationResponse,
@@ -563,63 +564,6 @@ pub struct AuthServiceImpl {
     logout_confirmations: ChallengeStore<end_session::LogoutConfirmation>,
 }
 
-/// Who completes a sign-in ceremony: the browser sign-in page or a native
-/// client. It decides how the session's credential is delivered.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CeremonyClient {
-    /// The configured sign-in page: the credential is the HttpOnly session
-    /// cookie, and no access token is issued.
-    Browser,
-    /// A client without `Origin`: the access token in `authorization`
-    /// response metadata.
-    Native,
-}
-
-/// How a session's credential reaches its client, never in the message.
-enum Delivery {
-    /// The `Set-Cookie` value of the browser's session cookie.
-    Cookie(String),
-    /// The session's access token, sent as `authorization: Bearer`.
-    Bearer(secrecy::SecretString),
-}
-
-impl Delivery {
-    /// Put the credential into `metadata`.
-    #[allow(clippy::result_large_err)]
-    fn deliver(self, metadata: &mut tonic::metadata::MetadataMap) -> Result<(), Status> {
-        let (name, value) = match self {
-            Self::Cookie(cookie) => ("set-cookie", cookie),
-            Self::Bearer(token) => ("authorization", format!("Bearer {}", token.expose_secret())),
-        };
-        let mut value: tonic::metadata::MetadataValue<_> = value
-            .parse()
-            .map_err(|e| internal("encode session credential", e))?;
-        // A live credential: kept out of debug output and HPACK indexing.
-        value.set_sensitive(true);
-        metadata.insert(name, value);
-        Ok(())
-    }
-}
-
-/// A session a sign-in ceremony created: its id, the lifetime of the
-/// credential delivered, and that credential.
-struct SignedIn {
-    session_id: String,
-    expires_in: i64,
-    delivery: Delivery,
-}
-
-impl SignedIn {
-    /// The ceremony's answer `message` builds from the session id and the
-    /// credential's lifetime, its credential in the response metadata.
-    #[allow(clippy::result_large_err)]
-    fn respond<T>(self, message: impl FnOnce(String, i64) -> T) -> Result<Response<T>, Status> {
-        let mut response = Response::new(message(self.session_id, self.expires_in));
-        self.delivery.deliver(response.metadata_mut())?;
-        Ok(response)
-    }
-}
-
 /// Extra parameters for login security evaluation (avoids too_many_arguments).
 #[derive(Default)]
 struct LoginSecurityExtras<'a> {
@@ -782,37 +726,14 @@ impl AuthServiceImpl {
         self
     }
 
-    /// Who completes a sign-in ceremony sent with `metadata`, and so how its
-    /// credential is delivered: a request without `Origin` is a native
-    /// client; a browser sends `Origin` on every such request (Fetch
-    /// §3.1), and only the sign-in page may complete one, by exactly one
-    /// `Origin` equal to that page's. Any other browser request, including
-    /// `null`, a repeated `Origin` or one with no sign-in page configured, is
-    /// refused rather than answered as a native client: it is the login-CSRF
-    /// defence of the cookie and keeps the token out of page scripts.
+    /// Who completes a sign-in ceremony sent with `metadata`: a native
+    /// client, or this authority's sign-in page.
     #[allow(clippy::result_large_err)]
     fn ceremony_client(
         &self,
         metadata: &tonic::metadata::MetadataMap,
     ) -> Result<CeremonyClient, Status> {
-        let mut origins = metadata.get_all("origin").iter();
-        let Some(origin) = origins.next() else {
-            return Ok(CeremonyClient::Native);
-        };
-        let sign_in_page = origins.next().is_none()
-            && self.sign_in_origin.as_ref().is_some_and(|allowed| {
-                origin
-                    .to_str()
-                    .is_ok_and(|origin| sid_authn::browser_session::origin_is(origin, allowed))
-            });
-        if !sign_in_page {
-            return Err(ApiError::new(
-                ErrorReason::SignInRefused,
-                "a browser signs in only on the configured sign-in page",
-            )
-            .into());
-        }
-        Ok(CeremonyClient::Browser)
+        sid_authn::sign_in_delivery::ceremony_client(metadata, self.sign_in_origin.as_ref())
     }
 
     /// Accept `code` for `secret` once: a wrong code and a code already
@@ -2158,16 +2079,9 @@ impl AuthServiceImpl {
     ) -> Result<SignedIn, Status> {
         match client {
             CeremonyClient::Browser => {
-                let secret = sid_authn::browser_session::BrowserSecret::generate();
-                session.browser_secret_hash = Some(secret.hash());
+                let credential = BrowserCredential::bind(&mut session);
                 self.persist_session(profile, &session).await?;
-                // The cookie lives as long as the session it names.
-                let expires_in = (session.expires_at - Utc::now()).num_seconds();
-                Ok(SignedIn {
-                    session_id: session.id.to_string(),
-                    expires_in,
-                    delivery: Delivery::Cookie(self.browser_cookie.set(&secret, expires_in)),
-                })
+                Ok(credential.signed_in(&self.browser_cookie, &session))
             }
             CeremonyClient::Native => {
                 self.persist_session(profile, &session).await?;
