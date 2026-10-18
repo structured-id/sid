@@ -75,9 +75,22 @@ pub async fn compact_enrollments(
         )
         .await?;
     if let Some(evaluation) = evaluation {
-        dropped += evaluation.compact_abandoned(before).await?;
+        dropped += compact_evaluator_fences(evaluation, now).await?;
     }
     Ok(dropped)
+}
+
+/// Drop the evaluator's fences of first enrollments abandoned more than a
+/// day before `now`, on the retention of [`compact_enrollments`]. A separate
+/// evaluator runs it on its own store; the drop is idempotent, so replicas
+/// running it at once only repeat it. Returns how many fences were dropped.
+pub async fn compact_evaluator_fences(
+    evaluation: &HistoryEvaluation,
+    now: chrono::DateTime<chrono::Utc>,
+) -> sid_core::Result<u64> {
+    evaluation
+        .compact_abandoned(now - ENROLLMENT_RECORD_RETENTION)
+        .await
 }
 
 /// Where the evaluator is told of what the credential authority settled: an
