@@ -13,6 +13,7 @@ use x509_cert::Certificate;
 use x509_cert::builder::profile::BuilderProfile;
 use x509_cert::builder::{AsyncBuilder, CertificateBuilder};
 use x509_cert::der::asn1::BitString;
+use x509_cert::der::oid::AssociatedOid;
 use x509_cert::ext::pkix::{
     AuthorityKeyIdentifier, BasicConstraints, KeyUsage, KeyUsages, SubjectKeyIdentifier,
 };
@@ -67,6 +68,19 @@ pub enum IssuanceError {
     /// The requested validity is not within the issuing certificate's.
     #[error("the requested validity exceeds the issuer's")]
     Validity,
+    /// The requested validity ends before it begins.
+    #[error("the requested validity ends before it begins")]
+    ReversedValidity,
+    /// A CA certificate needs a subject (RFC 5280 §4.1.2.6).
+    #[error("a CA certificate needs a non-empty subject")]
+    EmptySubject,
+    /// The issuing CA would certify a subject of its own name: a replacement
+    /// signed by the CA it replaces, which SID never accepts as delegation.
+    #[error("an issuing CA cannot certify a CA of its own name")]
+    SameSubjectAsIssuer,
+    /// One extension would appear twice (RFC 5280 §4.2).
+    #[error("extension {0} would appear more than once")]
+    DuplicateExtension(x509_cert::der::asn1::ObjectIdentifier),
     /// An extension of the issuing certificate does not decode.
     #[error("malformed issuing certificate: {0}")]
     MalformedIssuer(String),
@@ -83,6 +97,7 @@ pub async fn issue_ca_certificate(
     issuer: Issuer<'_>,
     request: CaRequest,
 ) -> Result<Certificate, IssuanceError> {
+    admit_request(&request)?;
     let (signer, issuer_name, issuer_key_id) = match issuer {
         Issuer::SelfIssued(signer) => {
             if signer.public_key() != &request.public_key {
@@ -97,6 +112,13 @@ pub async fn issue_ca_certificate(
             let tbs = certificate.tbs_certificate();
             if signer.public_key() != tbs.subject_public_key_info() {
                 return Err(IssuanceError::WrongKey);
+            }
+            // A CA of the issuer's own name signed by the issuer is a
+            // replacement certified by the key it replaces: SID admits a
+            // replacement only from the parent, so this is no rollover path
+            // (and RFC 5280 §6.1.4 (l)'s self-issued exemption never applies).
+            if &request.subject == tbs.subject() {
+                return Err(IssuanceError::SameSubjectAsIssuer);
             }
             admit_issuer(certificate, &request)?;
             let key_id = tbs
@@ -133,6 +155,33 @@ pub async fn issue_ca_certificate(
         .map_err(|e| IssuanceError::Encoding(e.to_string()))
 }
 
+/// The request itself is a conforming CA certificate: a subject (RFC 5280
+/// §4.1.2.6), a validity that does not end before it begins, and no extension
+/// twice, neither among the caller's nor against the profile's (RFC 5280 §4.2).
+fn admit_request(request: &CaRequest) -> Result<(), IssuanceError> {
+    if request.subject == Name::default() {
+        return Err(IssuanceError::EmptySubject);
+    }
+    if request.validity.not_after.to_unix_duration()
+        < request.validity.not_before.to_unix_duration()
+    {
+        return Err(IssuanceError::ReversedValidity);
+    }
+    let mut seen = vec![
+        BasicConstraints::OID,
+        KeyUsage::OID,
+        SubjectKeyIdentifier::OID,
+        AuthorityKeyIdentifier::OID,
+    ];
+    for extension in &request.extensions {
+        if seen.contains(&extension.extn_id) {
+            return Err(IssuanceError::DuplicateExtension(extension.extn_id));
+        }
+        seen.push(extension.extn_id);
+    }
+    Ok(())
+}
+
 /// The issuing certificate may sign this CA: it is a CA with `keyCertSign`,
 /// its path length leaves room for the request (RFC 5280 §4.2.1.9), and the
 /// request's validity lies within its own.
@@ -145,6 +194,9 @@ fn admit_issuer(certificate: &Certificate, request: &CaRequest) -> Result<(), Is
         .map(|(_, c)| c)
         .filter(|c| c.ca)
         .ok_or(IssuanceError::IssuerNotCa)?;
+    // Key usage is required, not only checked when present: a CA whose key
+    // signs certificates MUST carry it (RFC 5280 §4.2.1.3), and every issuer
+    // here is a SID CA of this profile, never a CA from outside the hierarchy.
     let signs_certificates = tbs
         .get_extension::<KeyUsage>()
         .map_err(malformed)?

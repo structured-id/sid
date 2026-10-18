@@ -360,6 +360,103 @@ async fn signer_failure_issues_nothing() {
     ));
 }
 
+// RFC 5280 §4.2: an extension appears at most once. A caller extension that
+// repeats one of the profile's (here basic constraints) or another caller
+// extension is refused before signing.
+#[tokio::test]
+async fn duplicate_extensions_are_refused() {
+    let key = counting();
+    let name = Name::from_str("CN=Root").unwrap();
+    let constraints = BasicConstraints {
+        ca: true,
+        path_len_constraint: None,
+    }
+    .to_extension(&name, &[])
+    .unwrap();
+    let mut repeats_profile = request("CN=Root", &key, 10, None);
+    repeats_profile.extensions.push(constraints);
+    let refused = issue_ca_certificate(Issuer::SelfIssued(&key), repeats_profile).await;
+    assert!(matches!(refused, Err(IssuanceError::DuplicateExtension(_))));
+
+    let custom = Extension {
+        extn_id: x509_cert::der::asn1::ObjectIdentifier::new_unwrap("1.3.6.1.4.1.99999.1"),
+        critical: false,
+        extn_value: x509_cert::der::asn1::OctetString::new(vec![0x05, 0x00]).unwrap(),
+    };
+    let mut repeats_caller = request("CN=Root", &key, 10, None);
+    repeats_caller.extensions.extend([custom.clone(), custom]);
+    let refused = issue_ca_certificate(Issuer::SelfIssued(&key), repeats_caller).await;
+    assert!(matches!(refused, Err(IssuanceError::DuplicateExtension(_))));
+    assert_eq!(key.calls.load(Ordering::SeqCst), 0);
+}
+
+// A validity that ends before it begins is refused, self-issued or not, even
+// when both ends lie inside the issuer's validity.
+#[tokio::test]
+async fn reversed_validity_is_refused() {
+    let key = counting();
+    let mut reversed = request("CN=Root", &key, 10, None);
+    std::mem::swap(
+        &mut reversed.validity.not_before,
+        &mut reversed.validity.not_after,
+    );
+    let refused = issue_ca_certificate(Issuer::SelfIssued(&key), reversed).await;
+    assert!(matches!(refused, Err(IssuanceError::ReversedValidity)));
+
+    let root_key = signer();
+    let root = root(&root_key, Some(1)).await;
+    let sub_key = signer();
+    let mut reversed = request("CN=Intermediate", &sub_key, 5, Some(0));
+    reversed.validity.not_before = Validity::<x509_cert::certificate::Rfc5280>::from_now(YEAR * 2)
+        .unwrap()
+        .not_after;
+    reversed.validity.not_after = Validity::<x509_cert::certificate::Rfc5280>::from_now(YEAR)
+        .unwrap()
+        .not_after;
+    let refused = issue_ca_certificate(
+        Issuer::Ca {
+            certificate: &root,
+            signer: &root_key,
+        },
+        reversed,
+    )
+    .await;
+    assert!(matches!(refused, Err(IssuanceError::ReversedValidity)));
+    assert_eq!(key.calls.load(Ordering::SeqCst), 0);
+}
+
+// RFC 5280 §4.1.2.6: a CA certificate has a non-empty subject.
+#[tokio::test]
+async fn empty_subject_is_refused() {
+    let key = counting();
+    let mut unnamed = request("CN=Root", &key, 10, None);
+    unnamed.subject = Name::default();
+    let refused = issue_ca_certificate(Issuer::SelfIssued(&key), unnamed).await;
+    assert!(matches!(refused, Err(IssuanceError::EmptySubject)));
+    assert_eq!(key.calls.load(Ordering::SeqCst), 0);
+}
+
+// An issuing CA certifying a CA of its own name is a replacement signed by the
+// CA it replaces; SID admits replacements only from the parent, so this is
+// refused (and is not a path-length exemption, RFC 5280 §6.1.4 (l)).
+#[tokio::test]
+async fn same_name_replacement_under_the_old_ca_is_refused() {
+    let root_key = counting();
+    let root = root(&root_key, Some(0)).await;
+    root_key.calls.store(0, Ordering::SeqCst);
+    let replacement = signer();
+    let refused = issue_ca_certificate(
+        Issuer::Ca {
+            certificate: &root,
+            signer: &root_key,
+        },
+        request("CN=Root,O=Example", &replacement, 5, Some(0)),
+    )
+    .await;
+    assert!(matches!(refused, Err(IssuanceError::SameSubjectAsIssuer)));
+    assert_eq!(root_key.calls.load(Ordering::SeqCst), 0);
+}
+
 // The certificate round-trips through DER unchanged.
 #[tokio::test]
 async fn certificate_der_round_trips() {
