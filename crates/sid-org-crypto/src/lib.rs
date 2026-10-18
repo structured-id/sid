@@ -10,7 +10,7 @@
 //!   Org DEK (per-org, random, stored encrypted in DB)
 //!       │ wraps
 //!       ▼
-//!   CA private keys (classical ECDSA + optional ML-DSA-65)
+//!   CA private key (ECDSA P-256)
 //!       │ in-memory only during signing burst
 //!       ▼
 //!   Binding cert leaf signing
@@ -35,9 +35,9 @@
 //! # Ok(()) }
 //! ```
 
-pub mod ca;
 pub mod envelope;
 pub mod error;
+pub mod issuance;
 pub mod kek_cache;
 pub mod kek_source;
 
