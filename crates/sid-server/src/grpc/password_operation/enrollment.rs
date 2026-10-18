@@ -25,7 +25,7 @@ use sid_core::models::{
 use sid_plugin::storage::StorageBackend;
 use tracing::{error, info};
 
-use super::{HistoryEvaluation, RESULT_NAMESPACE};
+use sid_authn::password_operation::{HistoryEvaluation, RESULT_NAMESPACE};
 
 /// The method an aborted operation's completion records; any other method
 /// under the operation's key is its commit.

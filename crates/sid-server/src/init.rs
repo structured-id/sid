@@ -1603,13 +1603,13 @@ async fn password_history_authority<Local>(
     local: impl FnOnce() -> Local,
     master_key_path: &std::path::Path,
     base: &str,
-) -> anyhow::Result<crate::grpc::password_operation::PasswordHistoryAuthority>
+) -> anyhow::Result<sid_authn::password_operation::PasswordHistoryAuthority>
 where
     Local: std::future::Future<
             Output = anyhow::Result<Arc<dyn sid_plugin::history_keys::HistoryKeyStore>>,
         >,
 {
-    use crate::grpc::password_operation::{PasswordHistoryAuthority, RemoteHistoryEvaluator};
+    use sid_authn::password_operation::{PasswordHistoryAuthority, RemoteHistoryEvaluator};
     // A setting that is present but unreadable is refused, never read as
     // unset: that would quietly give this server the history keys.
     let optional = |name: &str| setting(name, var(name));

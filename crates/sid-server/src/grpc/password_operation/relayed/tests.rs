@@ -2,8 +2,11 @@
 use super::super::tests::{change, manager, split, sqlite, zkpp_without_proofs};
 use super::super::*;
 use super::*;
+use sid_authn::password_history::owner_domain;
+use sid_authn::password_operation::{OperationOwner, operation_id};
 use sid_core::models::event::EventFilter;
 use sid_plugin::event_bus::{Delivery, EventBusError};
+use sid_plugin::history_keys::HistoryKeyStore;
 use tokio::sync::mpsc;
 
 /// The credential authority whose cleanup the evaluator serves.
