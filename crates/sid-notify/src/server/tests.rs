@@ -220,14 +220,8 @@ async fn test_every_refusal_carries_error_info() {
         &[sid_proto::FILE_DESCRIPTOR_SET],
         &[sid_core::grpc_error::DOMAIN_SID],
         &[
-            sid_serve::error_contract::Caller {
-                name: "anonymous",
-                token: None,
-            },
-            sid_serve::error_contract::Caller {
-                name: "admin",
-                token: Some(&token),
-            },
+            sid_serve::error_contract::Caller::anonymous("anonymous"),
+            sid_serve::error_contract::Caller::bearer("admin", &token),
         ],
     )
     .await;

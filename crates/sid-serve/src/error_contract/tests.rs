@@ -33,6 +33,25 @@ fn own_domain_is_canonical() {
     assert_eq!(violation(&status, &["structured.id"]), None);
 }
 
+/// A bearer caller sends its token as `authorization: Bearer`, an anonymous
+/// one nothing, and any other caller exactly the metadata it names.
+#[test]
+fn callers_carry_their_metadata() {
+    assert!(Caller::anonymous("a").metadata.is_empty());
+    assert_eq!(
+        Caller::bearer("b", "tok").metadata,
+        vec![("authorization", "Bearer tok".to_string())]
+    );
+    let browser = vec![
+        ("origin", "https://sid.example.com".to_string()),
+        ("cookie", "__Host-s=x".to_string()),
+    ];
+    assert_eq!(
+        Caller::with_metadata("c", browser.clone()).metadata,
+        browser
+    );
+}
+
 /// A tier's service answers in the shared domain and its own: both keep the
 /// contract, a third does not.
 #[test]
