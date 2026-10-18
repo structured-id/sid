@@ -20,11 +20,11 @@ use sid_core::models::{
     AuditEntry, CLEANUP_SETTLED_NAMESPACE, CleanupSettled, EnrollmentAdmission, EnrollmentCleanup,
     MutationContext, OperationCompletion, OwnerPurge, RelayedCleanup,
 };
+use sid_plugin::OperationResultStore;
 use sid_plugin::event_bus::{DurableConsumer, EventBus, EventBusResult, Settlement};
-use sid_plugin::storage::StorageBackend;
 use tracing::{error, info, warn};
 
-use sid_authn::password_operation::HistoryEvaluation;
+use super::HistoryEvaluation;
 
 /// Namespace of the authority tag in durable consumer names.
 const CONSUMER_AUTHORITY_NAMESPACE: uuid::Uuid =
@@ -52,7 +52,7 @@ pub fn settlement_consumer(authority: &str) -> WorkRecipient {
 }
 
 /// The method a recorded settlement carries.
-pub(crate) const SETTLED_METHOD: &str = "settled";
+pub(super) const SETTLED_METHOD: &str = "settled";
 
 /// Who reports a settlement: the separate evaluator.
 const EVALUATOR_SOURCE: &str = "sid-password-history-evaluator";
@@ -62,8 +62,8 @@ const SETTLED_EVENT_NAMESPACE: uuid::Uuid =
     uuid::Uuid::from_u128(0x3f9e_5a21_c847_4d06_a1b3_6e2d_8c90_f475);
 
 /// Whether the evaluator's settlement of `cleanup` is recorded.
-pub(crate) async fn settled(
-    storage: &dyn StorageBackend,
+pub async fn settled(
+    storage: &(impl OperationResultStore + ?Sized),
     cleanup: &RelayedCleanup,
 ) -> sid_core::Result<bool> {
     Ok(storage
@@ -74,8 +74,8 @@ pub(crate) async fn settled(
 
 /// Record the evaluator's settlement of `cleanup`; recording it again is
 /// harmless.
-pub(crate) async fn record_settlement(
-    storage: &dyn StorageBackend,
+pub async fn record_settlement(
+    storage: &(impl OperationResultStore + ?Sized),
     cleanup: &RelayedCleanup,
 ) -> sid_core::Result<()> {
     let completion = OperationCompletion::new(
@@ -99,9 +99,9 @@ pub(crate) async fn record_settlement(
 /// Consume, as the credential authority named `authority`, the settlements
 /// its separate evaluator reports on `bus`, recording each in `storage`,
 /// until the bus ends the consumer.
-pub async fn consume_cleanup_settlements(
+pub async fn consume_cleanup_settlements<S: ?Sized + OperationResultStore>(
     bus: &dyn EventBus,
-    storage: Arc<dyn StorageBackend>,
+    storage: Arc<S>,
     authority: &str,
 ) -> EventBusResult<()> {
     let mut deliveries = bus
