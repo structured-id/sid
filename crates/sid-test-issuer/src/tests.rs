@@ -91,23 +91,6 @@ async fn a_receiver_is_admitted_through_the_test_issuer() {
     std::fs::remove_file(&secret).ok();
 }
 
-/// A secret file removed when dropped.
-struct SecretFile(std::path::PathBuf);
-
-impl SecretFile {
-    fn with(secret: &str) -> Self {
-        let path = std::env::temp_dir().join(format!("sid-test-issuer-{}", uuid::Uuid::now_v7()));
-        std::fs::write(&path, secret).unwrap();
-        Self(path)
-    }
-}
-
-impl Drop for SecretFile {
-    fn drop(&mut self) {
-        std::fs::remove_file(&self.0).ok();
-    }
-}
-
 fn manager(master: u8) -> Arc<dyn sid_keys::KeyManager> {
     Arc::new(
         sid_keys::SoftwareKeyManager::new(
@@ -119,126 +102,26 @@ fn manager(master: u8) -> Arc<dyn sid_keys::KeyManager> {
     )
 }
 
-/// The admission a split deployment's composition gives its evaluator: the
-/// one credential service named by `caller`, by its own access token for the
-/// evaluator's resource.
-struct ServiceCaller {
-    storage: Arc<dyn sid_plugin::StorageBackend>,
-    tokens: Arc<sid_authn::resource_token::ResourceTokenVerifier>,
-    revocation: Arc<RevocationCache>,
-    caller: String,
-}
-
-#[tonic::async_trait]
-impl sid_authn::password_operation::PrepareAdmission for ServiceCaller {
-    async fn admit(
-        &self,
-        request: &tonic::Request<sid_proto::sid::v1::authn::PreparePasswordHistoryRequest>,
-    ) -> Result<(), tonic::Status> {
-        let service = sid_authn::service_auth::authenticate_service(
-            request,
-            self.storage.as_ref(),
-            &self.tokens,
-            &self.revocation,
-        )
-        .await?;
-        if service.subject() != self.caller {
-            return Err(tonic::Status::permission_denied(
-                "preparing password history is reserved to the credential service",
-            ));
-        }
-        Ok(())
-    }
-}
-
-/// A split deployment: the history evaluator is its own gRPC service with its
-/// own history keys, and the credential service prepares through it with its
-/// own client credential. Registration gets the evaluator's domains and the
-/// client's evaluation verifies under them; the credential service serves no
-/// evaluator. Preparation without a token or with another service's token is
-/// refused, and an unreachable evaluator makes history unavailable rather
-/// than letting registration continue without it.
-#[tokio::test]
-async fn a_split_history_evaluator_serves_only_the_credential_service() {
-    use group::{Curve, Group, GroupEncoding};
-    use pasta_curves::pallas;
-    use sid_authn::password_operation::{
-        HistoryEvaluation, PasswordHistoryAuthority, PasswordHistoryEvaluatorImpl,
-        PrepareAdmission, RemoteHistoryEvaluator,
-    };
-    use sid_proto::sid::v1::auth_service_server::AuthService;
-    use sid_proto::sid::v1::authn::password_history_evaluator_service_client::PasswordHistoryEvaluatorServiceClient;
+/// One listener of the separate evaluator, serving `admission`'s routes;
+/// returns its address, the stop signal and the serving task.
+async fn evaluator_listener(
+    evaluation: Arc<sid_authn::password_operation::HistoryEvaluation>,
+    admission: Arc<dyn sid_authn::password_operation::PrepareAdmission>,
+) -> (
+    String,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
+) {
     use sid_proto::sid::v1::authn::password_history_evaluator_service_server::PasswordHistoryEvaluatorServiceServer;
-    use sid_proto::sid::v1::authn::{
-        EvaluatePasswordHistoryRequest, PreparePasswordHistoryRequest,
-    };
-
-    const EVALUATOR: &str = "https://history.sid.example.com/";
-    let issuer = TestIssuer::start(Setup {
-        resources: vec![EVALUATOR.into()],
-        checkers: vec![],
-    })
-    .await;
-    let service = issuer
-        .machine("credential-service", "credential-secret", EVALUATOR)
-        .await;
-    issuer
-        .machine("intruder", "intruder-secret", EVALUATOR)
-        .await;
-    let (service_secret, intruder_secret) = (
-        SecretFile::with("credential-secret"),
-        SecretFile::with("intruder-secret"),
-    );
-    let lazy = |address: &str| {
-        tonic::transport::Channel::from_shared(address.to_owned())
-            .unwrap()
-            .connect_lazy()
-    };
-    let credential = |client_id: &str, secret: &SecretFile| {
-        Arc::new(
-            sid_authn::client_credential::ClientCredential::for_resource(
-                &issuer.client_config(client_id, &secret.0),
-                INSTALLATION,
-                lazy(&issuer.upstream()),
-                EVALUATOR,
-            )
-            .unwrap(),
-        )
-    };
-
-    // The evaluator alone holds the history keys, in its own store, and
-    // seals its own records; it admits preparation from the one credential
-    // service the composition names.
-    let cache: Arc<dyn CacheBackend> = Arc::new(sid_plugin::cache::InMemoryCacheBackend::new());
-    let evaluation = Arc::new(HistoryEvaluation::new(
-        issuer.history_keys.clone(),
-        Arc::new(sid_plugin::cache::InMemoryCacheBackend::new()),
-        manager(0x11),
-    ));
-    let admission: Arc<dyn PrepareAdmission> = Arc::new(ServiceCaller {
-        storage: issuer.storage.clone(),
-        tokens: Arc::new(
-            sid_authn::resource_token::ResourceTokenVerifier::new(
-                issuer.issuers.clone(),
-                issuer.issuer.clone(),
-                issuer.resource(EVALUATOR).indicator.clone(),
-            )
-            .await
-            .unwrap(),
-        ),
-        revocation: Arc::new(RevocationCache::new(
-            std::time::Duration::from_secs(900),
-            cache.clone(),
-        )),
-        caller: format!("machine:{}", service.id),
-    });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let evaluator_url = format!("http://{}", listener.local_addr().unwrap());
+    let url = format!("http://{}", listener.local_addr().unwrap());
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let serving = tokio::spawn(
         tonic::transport::Server::builder()
             .add_service(PasswordHistoryEvaluatorServiceServer::new(
-                PasswordHistoryEvaluatorImpl::new(evaluation, admission),
+                sid_authn::password_operation::PasswordHistoryEvaluatorImpl::new(
+                    evaluation, admission,
+                ),
             ))
             .serve_with_incoming_shutdown(
                 tokio_stream::wrappers::TcpListenerStream::new(listener),
@@ -247,6 +130,54 @@ async fn a_split_history_evaluator_serves_only_the_credential_service() {
                 },
             ),
     );
+    (url, stop, serving)
+}
+
+/// A split deployment: the history evaluator is its own gRPC service with its
+/// own history keys, a component of the same password service. The
+/// credential service prepares on the evaluator's internal listener, which
+/// the deployment keeps internal; clients evaluate on its client listener,
+/// which refuses preparation. Registration gets the evaluator's domains and
+/// the client's evaluation verifies under them; the credential service
+/// serves no evaluator. An unreachable evaluator makes history unavailable
+/// rather than letting registration continue without it.
+#[tokio::test]
+async fn a_split_history_evaluator_takes_preparation_internally_only() {
+    use group::{Curve, Group, GroupEncoding};
+    use pasta_curves::pallas;
+    use sid_authn::password_operation::{
+        ClientListener, HistoryEvaluation, InternalTransport, PasswordHistoryAuthority,
+        RemoteHistoryEvaluator,
+    };
+    use sid_proto::sid::v1::auth_service_server::AuthService;
+    use sid_proto::sid::v1::authn::password_history_evaluator_service_client::PasswordHistoryEvaluatorServiceClient;
+    use sid_proto::sid::v1::authn::{
+        EvaluatePasswordHistoryRequest, PreparePasswordHistoryRequest,
+    };
+
+    let issuer = TestIssuer::start(Setup {
+        resources: vec![],
+        checkers: vec![],
+    })
+    .await;
+    let lazy = |address: &str| {
+        tonic::transport::Channel::from_shared(address.to_owned())
+            .unwrap()
+            .connect_lazy()
+    };
+
+    // The evaluator alone holds the history keys, in its own store, and
+    // seals its own records. Its two listeners serve the same evaluation.
+    let cache: Arc<dyn CacheBackend> = Arc::new(sid_plugin::cache::InMemoryCacheBackend::new());
+    let evaluation = Arc::new(HistoryEvaluation::new(
+        issuer.history_keys.clone(),
+        Arc::new(sid_plugin::cache::InMemoryCacheBackend::new()),
+        manager(0x11),
+    ));
+    let (internal_url, stop_internal, serving_internal) =
+        evaluator_listener(evaluation.clone(), Arc::new(InternalTransport)).await;
+    let (evaluator_url, stop_client, serving_client) =
+        evaluator_listener(evaluation, Arc::new(ClientListener)).await;
 
     let organization = sid_authn::instance_org::ensure(issuer.storage.as_ref(), "sid.example.com")
         .await
@@ -262,10 +193,7 @@ async fn a_split_history_evaluator_serves_only_the_credential_service() {
         issuer.issuers.clone(),
         organization.id,
         manager(0x33),
-        PasswordHistoryAuthority::Remote(RemoteHistoryEvaluator::new(
-            lazy(&evaluator_url),
-            credential("credential-service", &service_secret),
-        )),
+        PasswordHistoryAuthority::Remote(RemoteHistoryEvaluator::new(lazy(&internal_url))),
     );
     assert!(
         auth.history_evaluator().is_none(),
@@ -348,32 +276,23 @@ async fn a_split_history_evaluator_serves_only_the_credential_service() {
         },
     ));
 
-    // Preparation is the credential service's alone.
-    let prepare = || PreparePasswordHistoryRequest {
-        operation_id: Some(sid_ids::PasswordOperationId::generate().into()),
-        ..Default::default()
-    };
-    let anonymous = client
-        .prepare_password_history(prepare())
+    // A client cannot prepare: the client listener refuses it, whatever the
+    // request claims.
+    let refused = client
+        .prepare_password_history(PreparePasswordHistoryRequest {
+            operation_id: Some(sid_ids::PasswordOperationId::generate().into()),
+            ..Default::default()
+        })
         .await
         .unwrap_err();
-    assert_eq!(anonymous.code(), tonic::Code::Unauthenticated);
-    let mut intruder = PasswordHistoryEvaluatorServiceClient::new(
-        sid_authn::client_credential::WithCredential::new(
-            lazy(&evaluator_url),
-            credential("intruder", &intruder_secret),
-        ),
-    );
-    let foreign = intruder
-        .prepare_password_history(prepare())
-        .await
-        .unwrap_err();
-    assert_eq!(foreign.code(), tonic::Code::PermissionDenied);
+    assert_eq!(refused.code(), tonic::Code::PermissionDenied);
 
     // Without its evaluator the credential service cannot start a
     // registration: history is unavailable, never skipped.
-    stop.send(()).unwrap();
-    serving.await.unwrap().unwrap();
+    stop_internal.send(()).unwrap();
+    stop_client.send(()).unwrap();
+    serving_internal.await.unwrap().unwrap();
+    serving_client.await.unwrap().unwrap();
     let unavailable = auth
         .opaque_zkpp_registration_start(claimed("split-admin"))
         .await
