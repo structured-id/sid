@@ -23,6 +23,8 @@ pub mod browser_session;
 #[cfg(feature = "grpc")]
 pub mod caller;
 pub mod captcha;
+#[cfg(feature = "grpc")]
+pub mod ceremony_context;
 pub mod challenge_store;
 pub mod claim_mapping;
 pub mod client_address;

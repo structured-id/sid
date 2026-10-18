@@ -599,6 +599,8 @@ async fn a_registration_cleanup_is_due_after_its_commit_deadline() {
         .unwrap();
     let id = operation_id(prepared.context.operation_id.as_ref()).unwrap();
     let op = ops.take(&id).await.unwrap();
+    // The host learns the same deadline the operation keeps.
+    assert_eq!(prepared.expires_at, op.expires_at);
     let cleanup =
         sid_plugin::WorkStore::get_work(storage.as_ref(), sid_core::models::WorkId(id.into_uuid()))
             .await
@@ -608,6 +610,52 @@ async fn a_registration_cleanup_is_due_after_its_commit_deadline() {
         (commit_deadline(op.expires_at) + sid_core::models::password_history::REPLICA_CLOCK_SKEW)
             .timestamp_micros(),
         cleanup.not_before.timestamp_micros()
+    );
+}
+
+/// A host step keeps what it changed in the operation, a refused step leaves
+/// the operation pending for the next one, and an unknown operation takes
+/// no step.
+#[tokio::test]
+async fn a_host_step_amends_the_pending_operation() {
+    let (ops, _) = split(
+        sqlite().await,
+        sid_core::models::OrgId::generate(),
+        manager(3),
+        manager(3),
+    );
+    let op = pending(change());
+    ops.store(&op).await.unwrap();
+
+    let amended = ops
+        .amend(&op.id, |pending| {
+            pending.registration_request = Some(b"staged".to_vec());
+            Ok(7)
+        })
+        .await
+        .unwrap();
+    assert_eq!(amended, 7);
+
+    let refused = ops
+        .amend(&op.id, |pending| {
+            assert_eq!(
+                pending.registration_request.as_deref(),
+                Some(&b"staged"[..])
+            );
+            Err::<(), _>(Status::permission_denied("not this caller"))
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code(), Code::PermissionDenied);
+
+    let kept = ops.take(&op.id).await.unwrap();
+    assert_eq!(kept.registration_request.as_deref(), Some(&b"staged"[..]));
+    assert_eq!(kept.expires_at, op.expires_at);
+
+    assert!(
+        ops.amend(&PasswordOperationId::generate(), |_| Ok(()))
+            .await
+            .is_err()
     );
 }
 
