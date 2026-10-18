@@ -46,20 +46,12 @@ async fn every_refusal_carries_error_info() {
         &[sid_proto::FILE_DESCRIPTOR_SET],
         &[sid_core::grpc_error::DOMAIN_SID],
         &[
-            Caller {
-                name: "anonymous",
-                token: None,
-            },
-            Caller {
-                name: "malformed",
-                token: Some("not-a-jwt"),
-            },
-            Caller {
-                name: "unknown issuer",
-                token: Some(
-                    "eyJhbGciOiJFZERTQSJ9.eyJpc3MiOiJodHRwczovL290aGVyLmV4YW1wbGUuY29tIn0.c2ln",
-                ),
-            },
+            Caller::anonymous("anonymous"),
+            Caller::bearer("malformed", "not-a-jwt"),
+            Caller::bearer(
+                "unknown issuer",
+                "eyJhbGciOiJFZERTQSJ9.eyJpc3MiOiJodHRwczovL290aGVyLmV4YW1wbGUuY29tIn0.c2ln",
+            ),
         ],
     )
     .await;

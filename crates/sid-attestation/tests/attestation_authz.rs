@@ -135,14 +135,8 @@ async fn test_every_refusal_carries_error_info() {
         &[sid_proto::FILE_DESCRIPTOR_SET],
         &[sid_core::grpc_error::DOMAIN_SID],
         &[
-            Caller {
-                name: "anonymous",
-                token: None,
-            },
-            Caller {
-                name: "owner",
-                token: Some(&token),
-            },
+            Caller::anonymous("anonymous"),
+            Caller::bearer("owner", &token),
         ],
     )
     .await;

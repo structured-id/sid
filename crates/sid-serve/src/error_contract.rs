@@ -32,11 +32,32 @@ pub struct Report {
     pub violations: Vec<String>,
 }
 
-/// A caller of the probe: a name for the report and the bearer token it
-/// presents, if any.
+/// A caller of the probe: a name for the report and the request metadata it
+/// authenticates with (a bearer token, a session cookie with its origin and
+/// CSRF token, or nothing).
 pub struct Caller<'a> {
     pub name: &'a str,
-    pub token: Option<&'a str>,
+    pub metadata: Vec<(&'static str, String)>,
+}
+
+impl<'a> Caller<'a> {
+    /// A caller presenting nothing.
+    pub fn anonymous(name: &'a str) -> Self {
+        Self {
+            name,
+            metadata: Vec::new(),
+        }
+    }
+
+    /// A caller presenting `token` as `authorization: Bearer`.
+    pub fn bearer(name: &'a str, token: &str) -> Self {
+        Self::with_metadata(name, vec![("authorization", format!("Bearer {token}"))])
+    }
+
+    /// A caller sending `metadata` with every call.
+    pub fn with_metadata(name: &'a str, metadata: Vec<(&'static str, String)>) -> Self {
+        Self { name, metadata }
+    }
 }
 
 /// How `status` breaks the contract of a service whose reasons live in
@@ -96,7 +117,7 @@ pub async fn probe(
     };
     for method in &methods {
         for caller in callers {
-            let Err(status) = call(&channel, method, caller.token).await else {
+            let Err(status) = call(&channel, method, &caller.metadata).await else {
                 continue;
             };
             report.refusals += 1;
@@ -142,18 +163,18 @@ fn methods_of(served: &[&str], descriptors: &[&[u8]]) -> Vec<Method> {
 async fn call(
     channel: &tonic::transport::Channel,
     method: &Method,
-    token: Option<&str>,
+    metadata: &[(&'static str, String)],
 ) -> Result<(), Status> {
     let mut grpc = tonic::client::Grpc::new(channel.clone());
     grpc.ready()
         .await
         .map_err(|e| Status::unavailable(e.to_string()))?;
     let mut request = Request::new(Vec::new());
-    if let Some(token) = token {
-        let value = format!("Bearer {token}")
+    for (name, value) in metadata {
+        let value = value
             .parse()
-            .map_err(|_| Status::invalid_argument("token is not a header value"))?;
-        request.metadata_mut().insert("authorization", value);
+            .map_err(|_| Status::invalid_argument("caller metadata is not a header value"))?;
+        request.metadata_mut().append(*name, value);
     }
     let path = http::uri::PathAndQuery::from_maybe_shared(method.path.clone())
         .map_err(|_| Status::invalid_argument("method path"))?;
