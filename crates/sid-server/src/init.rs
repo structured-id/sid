@@ -1654,15 +1654,9 @@ fn history_epoch_cutoff(
     let Some(value) = setting(NAME, input)? else {
         return Ok(None);
     };
-    let cutoff = chrono::DateTime::parse_from_rfc3339(&value)
-        .map_err(|_| anyhow::anyhow!("{NAME} must be an RFC 3339 instant"))?
-        .with_timezone(&chrono::Utc);
-    // A future cutoff would replace every epoch created until then, again
-    // at each operation: it names no compromise that has happened.
-    anyhow::ensure!(
-        cutoff <= chrono::Utc::now(),
-        "{NAME} must not be in the future"
-    );
+    let cutoff =
+        sid_authn::password_operation::parse_history_write_cutoff(&value, chrono::Utc::now())
+            .context(NAME)?;
     Ok(Some(cutoff))
 }
 

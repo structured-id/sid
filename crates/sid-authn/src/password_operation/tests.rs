@@ -1671,3 +1671,34 @@ fn a_step_without_its_operation_reads_as_expired() {
         "OPERATION_EXPIRED"
     );
 }
+
+/// The history write cutoff is a past RFC 3339 instant: an offset names the
+/// same instant, a date or a free form is refused, and so is any instant
+/// after `now`, which would replace every new epoch again and again.
+#[test]
+fn the_history_write_cutoff_is_a_past_instant() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-10-02T00:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let past = parse_history_write_cutoff("2026-10-01T12:00:00Z", now).unwrap();
+    assert_eq!(past.to_rfc3339(), "2026-10-01T12:00:00+00:00");
+    assert_eq!(
+        parse_history_write_cutoff("2026-10-01T15:00:00+03:00", now).unwrap(),
+        past
+    );
+    assert_eq!(
+        parse_history_write_cutoff("2026-10-02T00:00:00Z", now).unwrap(),
+        now
+    );
+    for malformed in ["", "yesterday", "2026-10-01", "2026-10-01 12:00:00"] {
+        assert_eq!(
+            parse_history_write_cutoff(malformed, now),
+            Err(HistoryCutoffError::Malformed),
+            "{malformed:?}"
+        );
+    }
+    assert_eq!(
+        parse_history_write_cutoff("2026-10-02T00:00:01Z", now),
+        Err(HistoryCutoffError::Future)
+    );
+}
