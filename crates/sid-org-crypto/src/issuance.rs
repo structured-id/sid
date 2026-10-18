@@ -81,6 +81,10 @@ pub enum IssuanceError {
     /// (RFC 5280 §4.1.2.4).
     #[error("the subject has an empty relative distinguished name")]
     EmptyRelativeName,
+    /// A naming attribute's value is empty, longer than its upper bound, or
+    /// not of its type's syntax (RFC 5280 Appendix A.1).
+    #[error("the subject's {0} value is not a valid value of that attribute")]
+    InvalidAttributeValue(ObjectIdentifier),
     /// The issuing CA would certify a subject of its own name: a replacement
     /// signed by the CA it replaces, which SID never accepts as delegation.
     #[error("an issuing CA cannot certify a CA of its own name")]
@@ -216,6 +220,7 @@ fn admit_request(request: &CaRequest) -> Result<(), IssuanceError> {
     if request.subject.iter_rdn().any(|rdn| rdn.is_empty()) {
         return Err(IssuanceError::EmptyRelativeName);
     }
+    check_attribute_values(&request.subject)?;
     // RFC 5280 §4.1.2.2: positive, so neither zero nor a negative encoding.
     // `as_bytes` is the signed DER content (a positive value with its high
     // bit set carries the 0x00 sign octet), so a leading 1 bit is negative.
@@ -328,7 +333,9 @@ fn prepared(text: &str) -> Option<String> {
     let mut mapped = String::with_capacity(text.len());
     for c in text.chars() {
         match c {
-            '\u{9}'..='\u{d}' | '\u{85}' => mapped.push(' '),
+            // U+180E was a space separator (Zs) in Unicode 3.2, the version
+            // §2.2 is defined over; later versions class it as Cf.
+            '\u{9}'..='\u{d}' | '\u{85}' | '\u{180e}' => mapped.push(' '),
             '\u{ad}'
             | '\u{1806}'
             | '\u{34f}'
@@ -360,19 +367,11 @@ fn prepared(text: &str) -> Option<String> {
     }
     // RFC 4518 §2.6.1: a space is U+0020 followed by no combining mark; one
     // that carries a mark is part of its word and is kept.
-    let is_mark = |c: char| {
-        matches!(
-            categories.get(c),
-            GeneralCategory::NonspacingMark
-                | GeneralCategory::SpacingMark
-                | GeneralCategory::EnclosingMark
-        )
-    };
     let mut words: Vec<String> = Vec::new();
     let mut word = String::new();
     let mut chars = prepared.chars().peekable();
     while let Some(c) = chars.next() {
-        if c == ' ' && !chars.peek().is_some_and(|&next| is_mark(next)) {
+        if c == ' ' && !chars.peek().is_some_and(|&next| combining_mark(next)) {
             if !word.is_empty() {
                 words.push(std::mem::take(&mut word));
             }
@@ -386,6 +385,212 @@ fn prepared(text: &str) -> Option<String> {
     Some(words.join(" "))
 }
 
+/// RFC 4518 Appendix A, the combining marks (Mn, Mc, Me of Unicode 3.2), which
+/// the RFC makes definitive; later Unicode versions reclassify some of them.
+const COMBINING_MARKS: &[(u32, u32)] = &[
+    (0x0300, 0x034F),
+    (0x0360, 0x036F),
+    (0x0483, 0x0486),
+    (0x0488, 0x0489),
+    (0x0591, 0x05A1),
+    (0x05A3, 0x05B9),
+    (0x05BB, 0x05BC),
+    (0x05BF, 0x05BF),
+    (0x05C1, 0x05C2),
+    (0x05C4, 0x05C4),
+    (0x064B, 0x0655),
+    (0x0670, 0x0670),
+    (0x06D6, 0x06DC),
+    (0x06DE, 0x06E4),
+    (0x06E7, 0x06E8),
+    (0x06EA, 0x06ED),
+    (0x0711, 0x0711),
+    (0x0730, 0x074A),
+    (0x07A6, 0x07B0),
+    (0x0901, 0x0903),
+    (0x093C, 0x093C),
+    (0x093E, 0x094F),
+    (0x0951, 0x0954),
+    (0x0962, 0x0963),
+    (0x0981, 0x0983),
+    (0x09BC, 0x09BC),
+    (0x09BE, 0x09C4),
+    (0x09C7, 0x09C8),
+    (0x09CB, 0x09CD),
+    (0x09D7, 0x09D7),
+    (0x09E2, 0x09E3),
+    (0x0A02, 0x0A02),
+    (0x0A3C, 0x0A3C),
+    (0x0A3E, 0x0A42),
+    (0x0A47, 0x0A48),
+    (0x0A4B, 0x0A4D),
+    (0x0A70, 0x0A71),
+    (0x0A81, 0x0A83),
+    (0x0ABC, 0x0ABC),
+    (0x0ABE, 0x0AC5),
+    (0x0AC7, 0x0AC9),
+    (0x0ACB, 0x0ACD),
+    (0x0B01, 0x0B03),
+    (0x0B3C, 0x0B3C),
+    (0x0B3E, 0x0B43),
+    (0x0B47, 0x0B48),
+    (0x0B4B, 0x0B4D),
+    (0x0B56, 0x0B57),
+    (0x0B82, 0x0B82),
+    (0x0BBE, 0x0BC2),
+    (0x0BC6, 0x0BC8),
+    (0x0BCA, 0x0BCD),
+    (0x0BD7, 0x0BD7),
+    (0x0C01, 0x0C03),
+    (0x0C3E, 0x0C44),
+    (0x0C46, 0x0C48),
+    (0x0C4A, 0x0C4D),
+    (0x0C55, 0x0C56),
+    (0x0C82, 0x0C83),
+    (0x0CBE, 0x0CC4),
+    (0x0CC6, 0x0CC8),
+    (0x0CCA, 0x0CCD),
+    (0x0CD5, 0x0CD6),
+    (0x0D02, 0x0D03),
+    (0x0D3E, 0x0D43),
+    (0x0D46, 0x0D48),
+    (0x0D4A, 0x0D4D),
+    (0x0D57, 0x0D57),
+    (0x0D82, 0x0D83),
+    (0x0DCA, 0x0DCA),
+    (0x0DCF, 0x0DD4),
+    (0x0DD6, 0x0DD6),
+    (0x0DD8, 0x0DDF),
+    (0x0DF2, 0x0DF3),
+    (0x0E31, 0x0E31),
+    (0x0E34, 0x0E3A),
+    (0x0E47, 0x0E4E),
+    (0x0EB1, 0x0EB1),
+    (0x0EB4, 0x0EB9),
+    (0x0EBB, 0x0EBC),
+    (0x0EC8, 0x0ECD),
+    (0x0F18, 0x0F19),
+    (0x0F35, 0x0F35),
+    (0x0F37, 0x0F37),
+    (0x0F39, 0x0F39),
+    (0x0F3E, 0x0F3F),
+    (0x0F71, 0x0F84),
+    (0x0F86, 0x0F87),
+    (0x0F90, 0x0F97),
+    (0x0F99, 0x0FBC),
+    (0x0FC6, 0x0FC6),
+    (0x102C, 0x1032),
+    (0x1036, 0x1039),
+    (0x1056, 0x1059),
+    (0x1712, 0x1714),
+    (0x1732, 0x1734),
+    (0x1752, 0x1753),
+    (0x1772, 0x1773),
+    (0x17B4, 0x17D3),
+    (0x180B, 0x180D),
+    (0x18A9, 0x18A9),
+    (0x20D0, 0x20EA),
+    (0x302A, 0x302F),
+    (0x3099, 0x309A),
+    (0xFB1E, 0xFB1E),
+    (0xFE00, 0xFE0F),
+    (0xFE20, 0xFE23),
+    (0x1D165, 0x1D169),
+    (0x1D16D, 0x1D172),
+    (0x1D17B, 0x1D182),
+    (0x1D185, 0x1D18B),
+    (0x1D1AA, 0x1D1AD),
+];
+
+fn combining_mark(c: char) -> bool {
+    let c = u32::from(c);
+    COMBINING_MARKS
+        .binary_search_by(|&(first, last)| {
+            if last < c {
+                core::cmp::Ordering::Less
+            } else if first > c {
+                core::cmp::Ordering::Greater
+            } else {
+                core::cmp::Ordering::Equal
+            }
+        })
+        .is_ok()
+}
+
+/// Every value of `name` is a valid value of its attribute (RFC 5280
+/// Appendix A.1): a string is never empty, the standard naming attributes stay
+/// within their upper bounds, and a country is two PrintableString letters.
+fn check_attribute_values(name: &Name) -> Result<(), IssuanceError> {
+    for atv in name.iter_rdn().flat_map(|rdn| rdn.iter()) {
+        let invalid = || IssuanceError::InvalidAttributeValue(atv.oid);
+        let tag = atv.value.tag();
+        let string = matches!(
+            tag,
+            Tag::Utf8String
+                | Tag::PrintableString
+                | Tag::Ia5String
+                | Tag::TeletexString
+                | Tag::BmpString
+        );
+        if !string {
+            continue;
+        }
+        let bytes = atv.value.value();
+        if bytes.is_empty() {
+            return Err(invalid());
+        }
+        // RFC 5280 Appendix A.1 / X.680 §41: PrintableString's repertoire.
+        if tag == Tag::PrintableString
+            && !bytes
+                .iter()
+                .all(|b| b.is_ascii_alphanumeric() || b" '()+,-./:=?".contains(b))
+        {
+            return Err(invalid());
+        }
+        // Characters, as SIZE counts them; bytes when the value is not text.
+        let length = string_value(&atv.value).map_or(bytes.len(), |text| text.chars().count());
+        match upper_bound(&atv.oid) {
+            Bound::Exactly(n) if tag != Tag::PrintableString || length != n => {
+                return Err(invalid());
+            }
+            Bound::AtMost(n) if length > n => return Err(invalid()),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+enum Bound {
+    Exactly(usize),
+    AtMost(usize),
+    None,
+}
+
+/// The upper bounds RFC 5280 Appendix A.1 gives the naming attributes.
+fn upper_bound(oid: &ObjectIdentifier) -> Bound {
+    const UB_NAME: usize = 32768;
+    let at = |arc: u32| ObjectIdentifier::new_unwrap("2.5.4").push_arc(arc).ok();
+    let is = |arc: u32| at(arc).as_ref() == Some(oid);
+    if is(6) {
+        // id-at-countryName: PrintableString (SIZE (2)).
+        Bound::Exactly(2)
+    } else if is(3) || is(10) || is(11) || is(12) || is(5) {
+        // common name, organization, organizational unit, title, serial number.
+        Bound::AtMost(64)
+    } else if is(7) || is(8) || is(65) {
+        // locality, state or province, pseudonym.
+        Bound::AtMost(128)
+    } else if is(4) || is(41) || is(42) || is(43) || is(44) {
+        // surname, name, given name, initials, generation qualifier.
+        Bound::AtMost(UB_NAME)
+    } else if *oid == ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.1") {
+        // emailAddress: IA5String (SIZE (1..ub-emailaddress-length)).
+        Bound::AtMost(255)
+    } else {
+        Bound::None
+    }
+}
+
 /// The issuing certificate may sign this CA: it is a CA with `keyCertSign`,
 /// its path length leaves room for the request (RFC 5280 §4.2.1.9), and the
 /// request's validity lies within its own.
@@ -394,7 +599,10 @@ fn admit_issuer(certificate: &Certificate, request: &CaRequest) -> Result<(), Is
     let malformed = |e: x509_cert::der::Error| IssuanceError::MalformedIssuer(e.to_string());
     // Its subject becomes the issuer name of what it signs, which must be a
     // non-empty distinguished name of non-empty RDNs (RFC 5280 §4.1.2.4).
-    if tbs.subject().is_empty() || tbs.subject().iter_rdn().any(|rdn| rdn.is_empty()) {
+    if tbs.subject().is_empty()
+        || tbs.subject().iter_rdn().any(|rdn| rdn.is_empty())
+        || check_attribute_values(tbs.subject()).is_err()
+    {
         return Err(IssuanceError::MalformedIssuer(
             "the issuing certificate's subject is not a distinguished name".into(),
         ));

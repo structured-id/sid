@@ -587,6 +587,12 @@ fn distinct_names_stay_distinct_after_preparation() {
         // RFC 4518 §2.6.1: a SPACE followed by a combining mark is not a
         // space, so it is not compressed with its neighbour.
         ("CN=x \u{301}y", "CN=x  \u{301}y"),
+        // U+06DE is a combining mark in RFC 4518 Appendix A (Unicode 3.2),
+        // though later Unicode versions class it as a symbol.
+        ("CN=x \u{6de}y", "CN=x  \u{6de}y"),
+        // U+180E was a space separator in Unicode 3.2 (now a format
+        // character): it maps to SPACE, so it is not dropped.
+        ("CN=a\u{180e}b", "CN=ab"),
     ] {
         assert!(
             !same_name(&Name::from_str(a).unwrap(), &Name::from_str(b).unwrap()),
@@ -608,6 +614,38 @@ async fn empty_relative_name_is_refused() {
         "{refused:?}"
     );
     assert_eq!(key.calls.load(Ordering::SeqCst), 0);
+}
+
+// RFC 5280 Appendix A.1: a naming attribute's value is never empty, stays
+// within its upper bound, and a country is two PrintableString letters.
+#[tokio::test]
+async fn invalid_attribute_values_are_refused() {
+    let empty_cn = Name::from_der(&[
+        0x30, 0x0b, 0x31, 0x09, 0x30, 0x07, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0c, 0x00,
+    ])
+    .unwrap();
+    let long_cn = Name::from_str(&format!("CN={}", "a".repeat(65))).unwrap();
+    let country = Name::from_str("C=USA,CN=Root").unwrap();
+    for subject in [empty_cn, long_cn, country] {
+        let key = counting();
+        let mut invalid = request("CN=Root", &key, 10, None);
+        invalid.subject = subject.clone();
+        let refused = issue_ca_certificate(Issuer::SelfIssued(&key), invalid).await;
+        assert!(
+            matches!(refused, Err(IssuanceError::InvalidAttributeValue(_))),
+            "{subject}: {refused:?}"
+        );
+        assert_eq!(key.calls.load(Ordering::SeqCst), 0);
+    }
+    // At the bounds: 64 characters of common name, a two-letter country.
+    let key = counting();
+    let mut bounded = request("CN=Root", &key, 10, None);
+    bounded.subject = Name::from_str(&format!("C=US,CN={}", "a".repeat(64))).unwrap();
+    assert!(
+        issue_ca_certificate(Issuer::SelfIssued(&key), bounded)
+            .await
+            .is_ok()
+    );
 }
 
 fn policy_constraints() -> Extension {
