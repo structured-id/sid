@@ -40,6 +40,7 @@ pub mod device_auth;
 pub mod dpop;
 pub mod email;
 pub mod event_relay;
+pub mod field_keys;
 pub mod geoip;
 pub mod grant;
 pub mod instance_org;
