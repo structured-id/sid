@@ -19,6 +19,7 @@ use sid_core::models::{
 use sid_core::{Error, Result};
 use uuid::Uuid;
 
+use super::history_public_key;
 use crate::CredentialStore;
 
 /// What a backend's harness supplies to the scenarios.
@@ -38,16 +39,6 @@ pub trait CredentialHarness: Send + Sync {
 
 fn ctx() -> MutationContext {
     AuditEntry::system("conformance", "credential_store").into()
-}
-
-/// A history epoch's public key: `(n + 1)·G` on Pallas, so each `n` gives a
-/// distinct valid point and none is the identity.
-fn history_public_key(n: u8) -> [u8; 32] {
-    use group::{Curve, Group, GroupEncoding};
-    use pasta_curves::pallas;
-    (pallas::Point::generator() * pallas::Scalar::from(u64::from(n) + 1))
-        .to_affine()
-        .to_bytes()
 }
 
 /// The current time at the microsecond precision every store keeps.
