@@ -10,7 +10,7 @@ use tonic_types::StatusExt;
 
 /// A purpose of the tests' operations: a change, as a host would name it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct Change;
+pub(super) struct Change;
 
 impl OperationPurpose for Change {
     fn method(&self) -> &'static str {
@@ -18,14 +18,14 @@ impl OperationPurpose for Change {
     }
 }
 
-fn change() -> Change {
+pub(super) fn change() -> Change {
     Change
 }
 
-type Operations = PasswordOperations<SqliteBackend, Change>;
+pub(super) type Operations = PasswordOperations<SqliteBackend, Change>;
 
 /// A key manager over its own master secret.
-fn manager(master: u8) -> Arc<dyn sid_keys::KeyManager> {
+pub(super) fn manager(master: u8) -> Arc<dyn sid_keys::KeyManager> {
     Arc::new(
         sid_keys::SoftwareKeyManager::new(
             secrecy::SecretBox::new(Box::new([master; 32])),
@@ -36,7 +36,7 @@ fn manager(master: u8) -> Arc<dyn sid_keys::KeyManager> {
     )
 }
 
-async fn sqlite() -> Arc<SqliteBackend> {
+pub(super) async fn sqlite() -> Arc<SqliteBackend> {
     Arc::new(SqliteBackend::new_in_memory().await.unwrap())
 }
 
@@ -44,7 +44,7 @@ async fn sqlite() -> Arc<SqliteBackend> {
 /// installation runs them: the evaluator over its own store, sealing history
 /// keys and its records with `history_keys`; the credential side sealing its
 /// records with `field_keys`, holding no history key.
-fn split(
+pub(super) fn split(
     storage: Arc<SqliteBackend>,
     installation: sid_core::models::OrgId,
     history_keys: Arc<dyn sid_keys::KeyManager>,
@@ -61,7 +61,7 @@ fn split(
 }
 
 /// A ZKPP server that verifies no proof and accepts unproven passwords.
-fn zkpp_without_proofs() -> ZkppOpaqueServer {
+pub(super) fn zkpp_without_proofs() -> ZkppOpaqueServer {
     use crate::opaque::{OpaqueRouter, PallasOpaque};
     use crate::opaque_zkpp::ZkppConfig;
     use sid_plugin::crypto::OpaqueOperations;

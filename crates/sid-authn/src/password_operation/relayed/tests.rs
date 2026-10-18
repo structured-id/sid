@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-use super::super::tests::{change, manager, split, sqlite, zkpp_without_proofs};
+use super::super::tests::{Operations, change, manager, split, sqlite, zkpp_without_proofs};
 use super::super::*;
 use super::*;
-use sid_authn::password_history::owner_domain;
-use sid_authn::password_operation::{OperationOwner, operation_id};
+use crate::password_history::owner_domain;
+use sid_core::models::ProfileId;
 use sid_core::models::event::EventFilter;
+use sid_plugin::StorageBackend;
 use sid_plugin::event_bus::{Delivery, EventBusError};
 use sid_plugin::history_keys::HistoryKeyStore;
 use tokio::sync::mpsc;
@@ -130,10 +131,7 @@ async fn relay_reporting(
 }
 
 /// A first enrollment prepared for a new owner: its admission.
-async fn enrolled(
-    ops: &PasswordOperations,
-    installation: sid_core::models::OrgId,
-) -> EnrollmentAdmission {
+async fn enrolled(ops: &Operations, installation: sid_core::models::OrgId) -> EnrollmentAdmission {
     let owner = ProfileId::generate();
     let prepared = ops
         .prepare(

@@ -14,18 +14,19 @@
 
 use std::sync::Arc;
 
-use sid_authn::event_relay::RELAY_RETRY;
-use sid_authn::work_runner::{RetrySchedule, WorkHandler, WorkOutcome};
+use async_trait::async_trait;
 use sid_core::models::event::event_types;
 use sid_core::models::{
     AuditEntry, ClaimedWork, ENROLLMENT_ADMISSION_KIND, EnrollmentAdmission, EnrollmentCleanup,
     Event, MutationContext, NewWork, OperationCompletion, OperationKey, RelayedCleanup, WorkId,
     WorkKind, cleanup_successor,
 };
-use sid_plugin::storage::StorageBackend;
+use sid_plugin::{OperationResultStore, WorkStore};
 use tracing::{error, info};
 
-use sid_authn::password_operation::{HistoryEvaluation, RESULT_NAMESPACE};
+use super::{HistoryEvaluation, RESULT_NAMESPACE};
+use crate::event_relay::RELAY_RETRY;
+use crate::work_runner::{RetrySchedule, WorkHandler, WorkOutcome};
 
 /// The method an aborted operation's completion records; any other method
 /// under the operation's key is its commit.
@@ -45,8 +46,8 @@ const ENROLLMENT_RECORD_RETENTION: chrono::Duration = chrono::Duration::days(1);
 /// than a day ago: their ended work, the aborts' completions and, with the
 /// evaluator in this process, its fences. Open work, a commit's completion
 /// and every key are untouched. Returns how many records were dropped.
-pub(crate) async fn compact_enrollments(
-    storage: &dyn StorageBackend,
+pub async fn compact_enrollments(
+    storage: &(impl WorkStore + OperationResultStore + ?Sized),
     evaluation: Option<&HistoryEvaluation>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> sid_core::Result<u64> {
@@ -82,7 +83,7 @@ pub(crate) async fn compact_enrollments(
 /// Where the evaluator is told of what the credential authority settled: an
 /// aborted enrollment, a deleted owner.
 #[derive(Clone)]
-pub(crate) enum EvaluatorDelivery {
+pub enum EvaluatorDelivery {
     /// The evaluator in this process.
     InProcess(Arc<HistoryEvaluation>),
     /// A separate evaluator, through an event relayed in the same
@@ -90,15 +91,16 @@ pub(crate) enum EvaluatorDelivery {
     Relay { source: String },
 }
 
-/// Ends each first enrollment at its expiry.
-pub(crate) struct EnrollmentHandler {
+/// Ends each first enrollment at its expiry, over the credential
+/// authority's store `S`.
+pub struct EnrollmentHandler<S: ?Sized> {
     kind: WorkKind,
-    storage: Arc<dyn StorageBackend>,
+    storage: Arc<S>,
     delivery: EvaluatorDelivery,
 }
 
-impl EnrollmentHandler {
-    pub(crate) fn new(storage: Arc<dyn StorageBackend>, delivery: EvaluatorDelivery) -> Self {
+impl<S: ?Sized + OperationResultStore + 'static> EnrollmentHandler<S> {
+    pub fn new(storage: Arc<S>, delivery: EvaluatorDelivery) -> Self {
         Self {
             kind: WorkKind::new(ENROLLMENT_ADMISSION_KIND).expect("the enrollment kind is valid"),
             storage,
@@ -181,7 +183,7 @@ enum Abort {
 /// waits in its queue, and another per attempt would only pile up beside
 /// it; a successor work (the attempts ran out) relays anew, in case that
 /// one ended without effect.
-pub(crate) fn abort_event_id(operation: uuid::Uuid, relay: Option<WorkId>) -> uuid::Uuid {
+pub fn abort_event_id(operation: uuid::Uuid, relay: Option<WorkId>) -> uuid::Uuid {
     match relay {
         None => uuid::Uuid::new_v5(&ABORT_EVENT_NAMESPACE, operation.as_bytes()),
         Some(work) => uuid::Uuid::new_v5(
@@ -204,8 +206,8 @@ fn abort_event(
     Ok(event.deliver(&super::relayed::cleanup_consumer(source)))
 }
 
-#[tonic::async_trait]
-impl WorkHandler for EnrollmentHandler {
+#[async_trait]
+impl<S: ?Sized + OperationResultStore + 'static> WorkHandler for EnrollmentHandler<S> {
     fn kind(&self) -> &WorkKind {
         &self.kind
     }

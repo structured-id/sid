@@ -2247,8 +2247,8 @@ impl AuthServiceImpl {
 
     /// Where this service's evaluator is told what was settled here: the
     /// in-process evaluator directly, a separate one by relayed events.
-    fn evaluator_delivery(&self) -> super::password_operation::EvaluatorDelivery {
-        use super::password_operation::EvaluatorDelivery;
+    fn evaluator_delivery(&self) -> sid_authn::password_operation::EvaluatorDelivery {
+        use sid_authn::password_operation::EvaluatorDelivery;
         match self.history_evaluation.clone() {
             Some(evaluation) => EvaluatorDelivery::InProcess(evaluation),
             None => EvaluatorDelivery::Relay {
@@ -2269,7 +2269,7 @@ impl AuthServiceImpl {
     /// The handler that ends this service's first enrollments at their
     /// expiry: the evaluator reclaims an aborted one's key.
     pub fn enrollment_handler(&self) -> Arc<dyn sid_authn::work_runner::WorkHandler> {
-        Arc::new(super::password_operation::EnrollmentHandler::new(
+        Arc::new(sid_authn::password_operation::EnrollmentHandler::new(
             self.storage.clone(),
             self.evaluator_delivery(),
         ))
@@ -2277,7 +2277,7 @@ impl AuthServiceImpl {
 
     /// The handler that has the evaluator destroy a deleted owner's keys.
     pub fn owner_purge_handler(&self) -> Arc<dyn sid_authn::work_runner::WorkHandler> {
-        Arc::new(super::password_operation::OwnerPurgeHandler::new(
+        Arc::new(sid_authn::password_operation::OwnerPurgeHandler::new(
             self.storage.clone(),
             self.evaluator_delivery(),
         ))
@@ -2285,9 +2285,9 @@ impl AuthServiceImpl {
 
     /// Drop the records of first enrollments that ended long enough ago that
     /// none of their steps can still arrive (see
-    /// [`compact_enrollments`](super::password_operation::compact_enrollments)).
+    /// [`compact_enrollments`](sid_authn::password_operation::compact_enrollments)).
     pub async fn compact_enrollments(&self) -> sid_core::Result<u64> {
-        super::password_operation::compact_enrollments(
+        sid_authn::password_operation::compact_enrollments(
             self.storage.as_ref(),
             self.history_evaluation.as_deref(),
             chrono::Utc::now(),

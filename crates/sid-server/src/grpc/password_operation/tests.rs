@@ -1,16 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 use std::sync::Arc;
 
-use sid_authn::opaque_zkpp::ZkppOpaqueServer;
-use sid_authn::password_operation::{HistoryEvaluation, OperationPurpose as _};
+use sid_authn::password_operation::OperationPurpose as _;
 use sid_core::models::{CredentialId, ProfileId, ResetSessionId};
-use sid_plugin::cache::CacheBackend;
-use sid_plugin::crypto::CurveId;
 use sid_storage::sqlite::SqliteBackend;
 
-use super::{OperationPurpose, PasswordOperations};
+use super::OperationPurpose;
 
-pub(super) fn change() -> OperationPurpose {
+fn change() -> OperationPurpose {
     OperationPurpose::Change {
         profile_id: ProfileId::generate(),
         credential_id: CredentialId(uuid::Uuid::now_v7()),
@@ -18,64 +15,62 @@ pub(super) fn change() -> OperationPurpose {
     }
 }
 
-/// A key manager over its own master secret.
-pub(super) fn manager(master: u8) -> Arc<dyn sid_keys::KeyManager> {
-    Arc::new(
-        sid_keys::SoftwareKeyManager::new(
-            secrecy::SecretBox::new(Box::new([master; 32])),
-            vec![sid_keys::KeyVersionParams::new(1, vec![1; 32], "test")],
-            Arc::new(sid_keys::RustCryptoPrimitives::new()),
-        )
-        .unwrap(),
-    )
-}
-
-pub(super) async fn sqlite() -> Arc<SqliteBackend> {
+async fn sqlite() -> Arc<SqliteBackend> {
     Arc::new(SqliteBackend::new_in_memory().await.unwrap())
 }
 
-/// The two authorities over one database and cache, as a standalone
-/// installation runs them: the evaluator over its own store, sealing history
-/// keys and its records with `history_keys`; the credential side sealing its
-/// records with `field_keys`, holding no history key.
-pub(super) fn split(
-    storage: Arc<SqliteBackend>,
-    installation: sid_core::models::OrgId,
-    history_keys: Arc<dyn sid_keys::KeyManager>,
-    field_keys: Arc<dyn sid_keys::KeyManager>,
-) -> (PasswordOperations, Arc<HistoryEvaluation>) {
-    let cache: Arc<dyn CacheBackend> = Arc::new(sid_plugin::cache::InMemoryCacheBackend::new());
-    let evaluation = Arc::new(HistoryEvaluation::new(
-        Arc::new(storage.history_keys()),
-        cache.clone(),
-        history_keys,
-    ));
-    let ops = PasswordOperations::new(storage, cache, field_keys, installation, evaluation.clone());
-    (ops, evaluation)
+/// Deleting a profile owes its history keys' purge in the deletion's
+/// transaction, under the profile's domain in this installation.
+#[tokio::test]
+async fn a_profile_deletion_owes_its_purge() {
+    use sid_core::models::{
+        AuditEntry, MutationContext, Organization, OwnerPurge, Profile, WorkState,
+    };
+    use sid_plugin::WorkStore;
+    use sid_plugin::storage::StorageBackend;
+    let storage = sqlite().await;
+    let org = Organization::implicit_community("sid.example.com");
+    storage
+        .insert_instance_organization(&org, AuditEntry::system("test", "org").into())
+        .await
+        .unwrap();
+    let profile = Profile::new(Some("purged-owner"));
+    storage
+        .create_profile(&profile, AuditEntry::system("test", "profile").into())
+        .await
+        .unwrap();
+
+    let purge = super::owner_purge(storage.as_ref(), profile.id)
+        .await
+        .unwrap()
+        .expect("an installation with an authority owes the purge");
+    let expected = OwnerPurge {
+        owner_domain: sid_authn::password_history::owner_domain(org.id.as_bytes(), profile.id),
+    }
+    .work();
+    assert_eq!(purge.id, expected.id);
+    storage
+        .delete_profile(
+            profile.id,
+            MutationContext::from(AuditEntry::system("test", "delete")).with_work(purge.clone()),
+        )
+        .await
+        .unwrap();
+    let owed = storage.get_work(purge.id).await.unwrap().unwrap();
+    assert_eq!(owed.state, WorkState::Pending);
 }
 
-/// A ZKPP server that verifies no proof and accepts unproven passwords.
-pub(super) fn zkpp_without_proofs() -> ZkppOpaqueServer {
-    use sid_authn::opaque::{OpaqueRouter, PallasOpaque};
-    use sid_authn::opaque_zkpp::ZkppConfig;
-    use sid_plugin::crypto::OpaqueOperations;
-    let primary = Box::new(PallasOpaque::new());
-    let setup = primary.create_setup(None).unwrap();
-    let providers = [(
-        CurveId::Pallas,
-        Box::new(PallasOpaque::new()) as Box<dyn OpaqueOperations>,
-    )]
-    .into();
-    let router = OpaqueRouter::new(primary, providers, setup);
-    ZkppOpaqueServer::new(
-        &router,
-        vec![],
-        ZkppConfig {
-            require_proof: false,
-            policy_version: 1,
-        },
-    )
-    .unwrap()
+/// Before the installation has an authority there is no history domain, so
+/// no key, and nothing is owed.
+#[tokio::test]
+async fn nothing_is_owed_without_an_authority() {
+    let storage = sqlite().await;
+    assert!(
+        super::owner_purge(storage.as_ref(), ProfileId::generate())
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 /// Every purpose names the method of its durable result: a registration, a
