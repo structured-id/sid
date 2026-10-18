@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Credential secrets stored through the key manager.
+//! Credential secrets stored through the key manager, and the OPAQUE
+//! password records sign-in opens from their sealed form.
 //!
 //! A secret the server must read back (a TOTP seed) is kept only as an
 //! AES-256-GCM field under a key held outside the database, bound to the
@@ -7,7 +8,8 @@
 
 use sid_core::models::{AuditEntry, Credential, CredentialId, CredentialType};
 use sid_keys::{EncryptedField, KeyManager, KeyManagerError};
-use sid_plugin::StorageBackend;
+use sid_plugin::crypto::{CurveId, StoredCredential};
+use sid_plugin::{CredentialStore, StorageBackend};
 use zeroize::Zeroizing;
 
 /// Leads every sealed value, so a stored value is recognised as sealed
@@ -110,6 +112,68 @@ pub fn inspect(context: &str, stored: &[u8]) -> Result<EncryptedField, SealedSec
         return Err(SealedSecretError::ContextMismatch);
     }
     Ok(field)
+}
+
+/// Why a stored password record could not be opened for a sign-in.
+#[derive(Debug, thiserror::Error)]
+pub enum StoredPasswordError {
+    /// The record names no OPAQUE configuration. Every build that writes
+    /// records names one; a record without it is recreated, never signed in
+    /// under a guessed curve.
+    #[error("credential {0} has no recorded OPAQUE configuration")]
+    NoCurve(uuid::Uuid),
+    /// The record names a curve this build does not implement.
+    #[error("credential {id} has OPAQUE curve {raw}")]
+    UnknownCurve { id: uuid::Uuid, raw: u8 },
+    #[error(transparent)]
+    Sealed(#[from] SealedSecretError),
+    #[error(transparent)]
+    Storage(sid_core::Error),
+}
+
+/// The OPAQUE record of `credential`, opened under its owner's context, with
+/// the curve it records: never the deployment's current primary, so a
+/// setting change cannot alter how an existing password signs in. A record
+/// sealed under an older key version is written back under the current one;
+/// that write is not applied when another reader resealed it first or the
+/// password changed meanwhile.
+pub async fn stored_password<O>(
+    key_manager: &dyn KeyManager,
+    credentials: &dyn CredentialStore<Owner = O>,
+    credential: &Credential<O>,
+) -> Result<StoredCredential, StoredPasswordError>
+where
+    O: Copy + Into<uuid::Uuid> + Send + Sync,
+{
+    let raw = credential
+        .opaque_curve
+        .ok_or(StoredPasswordError::NoCurve(credential.id.0))?;
+    let curve = CurveId::try_from(raw).map_err(|_| StoredPasswordError::UnknownCurve {
+        id: credential.id.0,
+        raw,
+    })?;
+    let opened = open(
+        key_manager,
+        &opaque_context(credential.profile_id),
+        credential.data.expose(),
+    )
+    .await?;
+    if let Some(resealed) = opened.resealed {
+        credentials
+            .reseal_credential_data(
+                credential.id,
+                credential.data.expose(),
+                &resealed,
+                AuditEntry::system("credential.secret_resealed", credential.id.0.to_string())
+                    .into(),
+            )
+            .await
+            .map_err(StoredPasswordError::Storage)?;
+    }
+    Ok(StoredCredential {
+        curve,
+        data: opened.secret.to_vec(),
+    })
 }
 
 /// Seal every credential of `credential_type` still stored in plain form,
