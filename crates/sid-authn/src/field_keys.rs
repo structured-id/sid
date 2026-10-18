@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! The field-encryption key manager of this server.
+//! The field-encryption key manager of an authority.
 //!
 //! The master secret lives in a file outside the database (sealed
 //! configuration); the non-secret parameters of each key version live in the
-//! database, so any replica holding the same master derives the same keys.
+//! authority's store, so any replica holding the same master derives the same
+//! keys.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -80,14 +81,14 @@ pub fn load_or_create_master(path: &Path) -> Result<SecretBox<[u8; 32]>, FieldKe
 }
 
 /// A store recording the key versions of one key custody.
-#[tonic::async_trait]
+#[async_trait::async_trait]
 pub trait KeyVersionStore: Sync {
     async fn versions(&self) -> sid_core::Result<Vec<KeyVersionParams>>;
     async fn insert(&self, params: &KeyVersionParams, audit: AuditEntry) -> sid_core::Result<bool>;
 }
 
 /// The credential service's field keys.
-#[tonic::async_trait]
+#[async_trait::async_trait]
 impl KeyVersionStore for dyn StorageBackend {
     async fn versions(&self) -> sid_core::Result<Vec<KeyVersionParams>> {
         self.list_key_versions().await
@@ -98,7 +99,7 @@ impl KeyVersionStore for dyn StorageBackend {
 }
 
 /// The history evaluator's own key custody.
-#[tonic::async_trait]
+#[async_trait::async_trait]
 impl KeyVersionStore for dyn sid_plugin::history_keys::HistoryKeyStore {
     async fn versions(&self) -> sid_core::Result<Vec<KeyVersionParams>> {
         self.list_key_versions().await
