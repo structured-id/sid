@@ -492,6 +492,139 @@ async fn same_name_differing_only_in_case_or_spaces_is_refused() {
     assert_eq!(root_key.calls.load(Ordering::SeqCst), 0);
 }
 
+// RFC 5280 §7.1 prepares names by RFC 4518 with RFC 3454 B.2 case folding:
+// canonically equivalent, case-folded or ignorable-code-point spellings of the
+// issuer's own name are that name.
+#[tokio::test]
+async fn same_name_after_string_preparation_is_refused() {
+    for (issuer, spelling) in [
+        ("CN=Caf\u{e9},O=Example", "CN=Cafe\u{301},O=Example"),
+        ("CN=Root,O=Stra\u{df}e", "CN=Root,O=STRASSE"),
+        ("CN=Root,O=Example", "CN=Ro\u{ad}ot,O=Example"),
+        ("CN=Root,O=Example", "CN=Root\u{a0},O=Example"),
+        ("CN=\u{2163},O=Example", "CN=iv,O=Example"),
+    ] {
+        let root_key = counting();
+        let root = issue_ca_certificate(
+            Issuer::SelfIssued(&root_key),
+            request(issuer, &root_key, 10, Some(1)),
+        )
+        .await
+        .unwrap();
+        root_key.calls.store(0, Ordering::SeqCst);
+        let refused = issue_ca_certificate(
+            Issuer::Ca {
+                certificate: &root,
+                signer: &root_key,
+            },
+            request(spelling, &signer(), 5, Some(0)),
+        )
+        .await;
+        assert!(
+            matches!(refused, Err(IssuanceError::SameSubjectAsIssuer)),
+            "{issuer} / {spelling}: {refused:?}"
+        );
+        assert_eq!(root_key.calls.load(Ordering::SeqCst), 0);
+    }
+}
+
+// A BMPString value is its UTF-16BE text and compares with the UTF8String of
+// the same name; one of odd length is not text and compares by its DER.
+#[test]
+fn bmp_string_names_compare_as_text() {
+    // Name { RDN { CN = BMPString "ROOT" } }
+    let bmp = Name::from_der(&[
+        0x30, 0x13, 0x31, 0x11, 0x30, 0x0f, 0x06, 0x03, 0x55, 0x04, 0x03, 0x1e, 0x08, 0x00, 0x52,
+        0x00, 0x4f, 0x00, 0x4f, 0x00, 0x54,
+    ])
+    .unwrap();
+    assert!(same_name(&bmp, &Name::from_str("CN=Root").unwrap()));
+    let odd = Any::new(Tag::BmpString, [0x00, 0x52, 0x00].as_slice()).unwrap();
+    assert_eq!(string_value(&odd), None);
+}
+
+// A different name stays different after preparation.
+#[test]
+fn distinct_names_stay_distinct_after_preparation() {
+    for (a, b) in [
+        ("CN=Caf\u{e9}", "CN=Cafe"),
+        ("CN=Root A", "CN=RootA"),
+        ("CN=Root,O=Example", "CN=Root,O=Example2"),
+    ] {
+        assert!(
+            !same_name(&Name::from_str(a).unwrap(), &Name::from_str(b).unwrap()),
+            "{a} / {b}"
+        );
+    }
+}
+
+fn policy_constraints() -> Extension {
+    use x509_cert::ext::pkix::constraints::PolicyConstraints;
+    PolicyConstraints {
+        require_explicit_policy: Some(0),
+        inhibit_policy_mapping: None,
+    }
+    .to_extension(&Name::from_str("CN=Root").unwrap(), &[])
+    .unwrap()
+}
+
+// A CA requested with policy constraints is refused: the profile issues no
+// certificate policies, so the path below it would fail policy processing
+// (RFC 5280 §4.2.1.11, §6.1.4 (i)).
+#[tokio::test]
+async fn policy_constrained_request_is_refused() {
+    let root_key = counting();
+    let mut constrained = request("CN=Root,O=Example", &root_key, 10, Some(1));
+    constrained.extensions.push(policy_constraints());
+    let refused = issue_ca_certificate(Issuer::SelfIssued(&root_key), constrained).await;
+    assert!(matches!(refused, Err(IssuanceError::PolicyConstrained)));
+    assert_eq!(root_key.calls.load(Ordering::SeqCst), 0);
+}
+
+// An issuer carrying policy constraints (one not issued by this profile) is
+// refused before signing.
+#[tokio::test]
+async fn policy_constrained_issuer_is_refused() {
+    let root_key = counting();
+    let mut constrained = request("CN=Root,O=Example", &root_key, 10, Some(1));
+    constrained.extensions.push(policy_constraints());
+    // Built past the request admission, as an issuer from outside it would be.
+    let profile = CaProfile {
+        subject: constrained.subject.clone(),
+        issuer: constrained.subject,
+        path_len: constrained.path_len,
+        issuer_key_id: None,
+        extensions: constrained.extensions,
+    };
+    let mut builder = CertificateBuilder::new(
+        profile,
+        constrained.serial_number,
+        constrained.validity,
+        constrained.public_key,
+    )
+    .unwrap();
+    let tbs = builder.finalize(&SignerKey(&root_key)).unwrap();
+    let root = PreparedCertificate {
+        builder,
+        tbs,
+        signer: &root_key,
+    }
+    .sign()
+    .await
+    .unwrap();
+    root_key.calls.store(0, Ordering::SeqCst);
+    let refused = issue_ca_certificate(
+        Issuer::Ca {
+            certificate: &root,
+            signer: &root_key,
+        },
+        request("CN=Intermediate,O=Example", &signer(), 5, Some(0)),
+    )
+    .await;
+    assert!(matches!(refused, Err(IssuanceError::PolicyConstrained)));
+    assert_eq!(root_key.calls.load(Ordering::SeqCst), 0);
+}
+
 // An issuer with name constraints is refused: issuance would otherwise sign a
 // subordinate outside the constrained subtree.
 #[tokio::test]

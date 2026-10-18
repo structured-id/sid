@@ -16,6 +16,7 @@ use x509_cert::der::asn1::BitString;
 use x509_cert::der::asn1::{Any, ObjectIdentifier};
 use x509_cert::der::oid::AssociatedOid;
 use x509_cert::der::{Encode, Tag, Tagged};
+use x509_cert::ext::pkix::constraints::PolicyConstraints;
 use x509_cert::ext::pkix::{
     AuthorityKeyIdentifier, BasicConstraints, KeyUsage, KeyUsages, SubjectKeyIdentifier,
 };
@@ -90,6 +91,10 @@ pub enum IssuanceError {
     /// name constraints, so it refuses rather than sign outside them.
     #[error("the issuing certificate carries name constraints")]
     NameConstrainedIssuer,
+    /// The request or the issuing certificate carries policy constraints; the
+    /// profile issues no certificate policies, so the path would not validate.
+    #[error("policy constraints are not issued under this profile")]
+    PolicyConstrained,
     /// An extension of the issuing certificate does not decode.
     #[error("malformed issuing certificate: {0}")]
     MalformedIssuer(String),
@@ -227,6 +232,12 @@ fn admit_request(request: &CaRequest) -> Result<(), IssuanceError> {
         AuthorityKeyIdentifier::OID,
     ];
     for extension in &request.extensions {
+        // RFC 5280 §6.1.4 (i): requireExplicitPolicy makes every following
+        // certificate need an acceptable policy, which this profile never
+        // issues (§4.2.1.11).
+        if extension.extn_id == PolicyConstraints::OID {
+            return Err(IssuanceError::PolicyConstrained);
+        }
         if seen.contains(&extension.extn_id) {
             return Err(IssuanceError::DuplicateExtension(extension.extn_id));
         }
@@ -236,8 +247,9 @@ fn admit_request(request: &CaRequest) -> Result<(), IssuanceError> {
 }
 
 /// Two names name the same entity under RFC 5280 §7.1: per RDN, the same
-/// attribute types, string values compared without case and with
-/// insignificant spaces removed (RFC 4518 §2), other values by their DER.
+/// attribute types; string values compared after the LDAP string preparation
+/// of RFC 4518 §2 with the case folding of RFC 3454 B.2, whatever their string
+/// type; other values, and strings preparation prohibits, by their DER.
 fn same_name(a: &Name, b: &Name) -> bool {
     normalized(a) == normalized(b)
 }
@@ -256,29 +268,103 @@ fn normalized(name: &Name) -> Vec<Vec<(ObjectIdentifier, Vec<u8>)>> {
 }
 
 fn normalized_value(value: &Any) -> Vec<u8> {
-    let string = matches!(
-        value.tag(),
-        Tag::Utf8String | Tag::PrintableString | Tag::Ia5String | Tag::TeletexString
-    );
-    match core::str::from_utf8(value.value()) {
-        Ok(text) if string => {
+    match string_value(value).as_deref().and_then(prepared) {
+        Some(text) => {
             let mut out = vec![1];
-            out.extend(
-                text.split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" ")
-                    .to_lowercase()
-                    .into_bytes(),
-            );
+            out.extend(text.into_bytes());
             out
         }
-        // A non-string value, or bytes that are not text, compare exactly.
-        _ => {
+        // A non-string value, bytes that are not text in their string type,
+        // or a string preparation prohibits: compared exactly.
+        None => {
             let mut out = vec![0];
             out.extend(value.to_der().unwrap_or_default());
             out
         }
     }
+}
+
+/// The text of a string value: UTF-8 and the ASCII types as stored, BMPString
+/// as UTF-16BE (X.680 §41). A TeletexString is read as text only when it is
+/// valid UTF-8. A UniversalString never gets here: `der` does not decode it.
+fn string_value(value: &Any) -> Option<String> {
+    let bytes = value.value();
+    match value.tag() {
+        Tag::Utf8String | Tag::PrintableString | Tag::Ia5String | Tag::TeletexString => {
+            core::str::from_utf8(bytes).ok().map(str::to_owned)
+        }
+        Tag::BmpString => {
+            let (units, rest) = bytes.as_chunks::<2>();
+            if !rest.is_empty() {
+                return None;
+            }
+            char::decode_utf16(units.iter().map(|unit| u16::from_be_bytes(*unit)))
+                .collect::<Result<String, _>>()
+                .ok()
+        }
+        _ => None,
+    }
+}
+
+/// RFC 4518 §2 string preparation of a stored value for `caseIgnoreMatch`:
+/// map (§2.2, with RFC 3454 B.2 case folding as RFC 5280 §7.1 requires),
+/// normalize to NFKC (§2.3), prohibit (§2.4; `None` when a prohibited code
+/// point remains), ignore bidi (§2.5), and compress insignificant spaces
+/// (§2.6.1).
+fn prepared(text: &str) -> Option<String> {
+    use icu_properties::props::GeneralCategory;
+    let categories = icu_properties::CodePointMapData::<GeneralCategory>::new();
+    let mut mapped = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\u{9}'..='\u{d}' | '\u{85}' => mapped.push(' '),
+            '\u{ad}'
+            | '\u{1806}'
+            | '\u{34f}'
+            | '\u{180b}'..='\u{180d}'
+            | '\u{fe00}'..='\u{fe0f}'
+            | '\u{fffc}'
+            | '\u{200b}' => {}
+            _ => match categories.get(c) {
+                GeneralCategory::Control | GeneralCategory::Format => {}
+                GeneralCategory::SpaceSeparator
+                | GeneralCategory::LineSeparator
+                | GeneralCategory::ParagraphSeparator => mapped.push(' '),
+                _ => mapped.push(c),
+            },
+        }
+    }
+    // B.2 is full case folding closed under NFKC: folding, normalizing, and
+    // folding the normalized form again reaches the same fixed point.
+    let casemap = icu_casemap::CaseMapper::new();
+    let nfkc = icu_normalizer::ComposingNormalizer::new_nfkc();
+    let folded = casemap.fold_string(&mapped);
+    let normalized = nfkc.normalize(&folded);
+    let refolded = casemap.fold_string(&normalized);
+    let prepared = nfkc.normalize(&refolded);
+    let prohibited = |c: char| {
+        let point = u32::from(c);
+        matches!(
+            categories.get(c),
+            GeneralCategory::Unassigned | GeneralCategory::PrivateUse | GeneralCategory::Surrogate
+        ) || c == '\u{fffd}'
+            // RFC 3454 C.4 non-character code points.
+            || (0xfdd0..=0xfdef).contains(&point)
+            || point & 0xfffe == 0xfffe
+            // RFC 3454 C.8 change display properties or deprecated.
+            || matches!(c, '\u{340}' | '\u{341}' | '\u{200e}' | '\u{200f}'
+                | '\u{202a}'..='\u{202e}' | '\u{206a}'..='\u{206f}')
+    };
+    if prepared.chars().any(prohibited) {
+        return None;
+    }
+    Some(
+        prepared
+            .split(' ')
+            .filter(|word| !word.is_empty())
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
 }
 
 /// The issuing certificate may sign this CA: it is a CA with `keyCertSign`,
@@ -311,6 +397,15 @@ fn admit_issuer(certificate: &Certificate, request: &CaRequest) -> Result<(), Is
         .is_some()
     {
         return Err(IssuanceError::NameConstrainedIssuer);
+    }
+    // The same for policy constraints: the subordinate this profile signs has
+    // no certificate policies (RFC 5280 §4.2.1.11).
+    if tbs
+        .get_extension::<PolicyConstraints>()
+        .map_err(malformed)?
+        .is_some()
+    {
+        return Err(IssuanceError::PolicyConstrained);
     }
     if let Some(issuer_len) = constraints.path_len_constraint {
         // A CA below a CA of path length n has at most n - 1, and is limited.

@@ -18,6 +18,11 @@ hex = "0.4"
 sid-keys = { workspace = true }
 signature = "3"
 x509-cert = { version = "0.3", features = ["builder"] }
+# LDAP string preparation of distinguished names (RFC 4518): case folding,
+# NFKC and general categories.
+icu_casemap = "2.3"
+icu_normalizer = "2.3"
+icu_properties = "2.3"
 base64 = { workspace = true, optional = true }
 kube = { version = "4.2", default-features = false, features = ["client", "rustls-tls"], optional = true }
 k8s-openapi = { version = "0.28", features = ["v1_32"], optional = true }
