@@ -5941,6 +5941,8 @@ dependencies = [
  "async-trait",
  "hkdf 0.13.0",
  "hmac 0.13.0",
+ "p256 0.14.0",
+ "p384 0.14.0",
  "pbkdf2",
  "rand 0.10.3",
  "secrecy",
@@ -5949,6 +5951,7 @@ dependencies = [
  "sha2 0.11.1",
  "thiserror 2.0.21",
  "tokio",
+ "uuid",
  "zeroize",
 ]
 
