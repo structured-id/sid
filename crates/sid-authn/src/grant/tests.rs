@@ -619,3 +619,49 @@ async fn test_refresh_after_session_end_is_refused() {
     assert_eq!(error, TokenError::InvalidGrant);
     assert_eq!(description, "session ended");
 }
+
+// A session past its absolute end whose row is still stored (cleanup has not
+// run yet) ends refresh like a removed one: its refresh token is still valid,
+// but no token is issued and nothing is rotated. Issuing would hand out an
+// access token whose `exp` is the session's past end and keep the refresh
+// family alive past the session.
+#[tokio::test]
+async fn test_refresh_of_an_expired_session_is_refused() {
+    let host = Host::new().await;
+    let code = host.authorize(Account(7));
+    let first = redeem_code(&host, code_grant(&code)).await.unwrap();
+    let presented = first.refresh_token.unwrap();
+    host.grants
+        .with(|g| g.sessions[0].expires_at = Utc::now() - Duration::seconds(1));
+
+    let (error, description) = refused(refresh(&host, Some(&presented)).await.unwrap_err());
+
+    assert_eq!(error, TokenError::InvalidGrant);
+    assert_eq!(description, "session ended");
+    host.grants.with(|g| {
+        assert_eq!(g.refresh.len(), 1, "no token was rotated in");
+        assert!(
+            !g.refresh[0].revoked,
+            "the presented token was not replaced"
+        );
+    });
+}
+
+// A session whose end is exactly now has ended: a token is valid only before
+// its `exp` (RFC 7519 §4.1.4), so one issued now would already be expired.
+#[tokio::test]
+async fn test_refresh_at_the_session_end_is_refused() {
+    let host = Host::new().await;
+    let code = host.authorize(Account(7));
+    let first = redeem_code(&host, code_grant(&code)).await.unwrap();
+    host.grants.with(|g| g.sessions[0].expires_at = Utc::now());
+
+    let (error, description) = refused(
+        refresh(&host, first.refresh_token.as_deref())
+            .await
+            .unwrap_err(),
+    );
+
+    assert_eq!(error, TokenError::InvalidGrant);
+    assert_eq!(description, "session ended");
+}
