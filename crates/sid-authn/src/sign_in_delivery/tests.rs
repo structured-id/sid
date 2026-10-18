@@ -106,8 +106,10 @@ fn cookie_lifetime_is_taken_at_delivery() {
     let credential = BrowserCredential::bind(&mut session);
     // The session being stored.
     std::thread::sleep(std::time::Duration::from_millis(1100));
-    let signed = credential.signed_in(&cookie, &session);
+    // Sampled before delivery: what remains then bounds what delivery takes,
+    // and lies a whole second below a lifetime taken at bind time.
     let remaining = (session.expires_at - Utc::now()).num_seconds();
+    let signed = credential.signed_in(&cookie, &session);
     assert!(
         signed.expires_in <= remaining,
         "the cookie lives {}s, the session {remaining}s",
