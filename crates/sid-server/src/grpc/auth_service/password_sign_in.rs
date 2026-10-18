@@ -6,14 +6,12 @@ use sid_authn::challenge_store::ChallengeStore;
 use sid_authn::opaque::OpaqueRouter;
 use sid_authn::password_sign_in::{PasswordSignInError, PasswordSignInHost, PendingSignIn};
 use sid_core::grpc_error::refuse::storage_failure;
-use sid_core::grpc_error::{ApiError, ErrorReason};
 use sid_core::models::{Credential, Profile, ProfileId};
 use sid_plugin::CredentialStore;
 use sid_plugin::crypto::StoredCredential;
 use tonic::Status;
 
 use super::AuthServiceImpl;
-use super::refusal::{authentication_failed, ceremony_expired};
 
 /// A sign-in refusal or failure as this server answers it.
 pub(super) struct SignInStatus(pub(super) Status);
@@ -26,22 +24,7 @@ impl From<Status> for SignInStatus {
 
 impl From<PasswordSignInError> for SignInStatus {
     fn from(e: PasswordSignInError) -> Self {
-        Self(match e {
-            PasswordSignInError::AuthenticationFailed => authentication_failed(),
-            PasswordSignInError::MigrationRequired => ApiError::new(
-                ErrorReason::LegacyMigrationRequired,
-                "the password must be migrated before signing in",
-            )
-            .with_precondition(
-                "legacy_migration",
-                "credential",
-                "complete the password migration flow",
-            )
-            .into(),
-            PasswordSignInError::Expired => ceremony_expired("sign-in"),
-            PasswordSignInError::Storage(e) => storage_failure(e),
-            PasswordSignInError::State(e) => e.into(),
-        })
+        Self(e.into())
     }
 }
 
