@@ -145,6 +145,15 @@ impl CaGeneration {
             && self.database_recovery.is_some()
             && self.key_recovery.is_some()
     }
+
+    /// SHA-256 of the certificate DER, the fingerprint records bind to;
+    /// derived from the stored certificate, so it cannot disagree with it.
+    pub fn certificate_sha256(&self) -> Option<[u8; 32]> {
+        use sha2::Digest;
+        self.certificate
+            .as_deref()
+            .map(|der| sha2::Sha256::digest(der).into())
+    }
 }
 
 /// A serial number allocated to an issuance, with the generation revision it

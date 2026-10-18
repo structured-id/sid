@@ -81,9 +81,14 @@ pub trait CaRegistry: Send + Sync {
         ctx: MutationContext,
     ) -> Result<CaGeneration>;
 
-    /// The next serial number of a current generation, atomically: distinct
-    /// and increasing under concurrency, never reused. A generation that is
-    /// not current allocates nothing (`Conflict`). The returned revision is
-    /// the one an issuance commit rechecks.
-    async fn allocate_ca_serial(&self, id: CaGenerationId) -> Result<SerialAllocation>;
+    /// The next serial number of a generation that is current at
+    /// `expected_revision`, atomically: distinct and increasing under
+    /// concurrency, never reused. A generation not current, or at another
+    /// revision, allocates nothing (`Conflict`). The issuance commit records
+    /// the generation and revision of the allocation.
+    async fn allocate_ca_serial(
+        &self,
+        id: CaGenerationId,
+        expected_revision: u64,
+    ) -> Result<SerialAllocation>;
 }

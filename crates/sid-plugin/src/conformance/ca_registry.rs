@@ -185,8 +185,9 @@ pub async fn certified_material_and_revisions_are_fixed(store: &dyn CaRegistry) 
             .await,
         Err(Error::Conflict(_))
     ));
+    let db = confirmation("db");
     let g = store
-        .confirm_database_recovery(g.id, g.revision, &confirmation("db"), ctx())
+        .confirm_database_recovery(g.id, g.revision, &db, ctx())
         .await
         .unwrap();
     assert!(matches!(
@@ -195,6 +196,33 @@ pub async fn certified_material_and_revisions_are_fixed(store: &dyn CaRegistry) 
             .await,
         Err(Error::Conflict(_))
     ));
+    // The same confirmation again is a retry, even at the revision it moved
+    // past; another one replaces nothing.
+    assert_eq!(
+        store
+            .confirm_database_recovery(g.id, g.revision - 1, &db, ctx())
+            .await
+            .unwrap(),
+        g
+    );
+    assert!(matches!(
+        store
+            .confirm_database_recovery(g.id, g.revision, &confirmation("other"), ctx())
+            .await,
+        Err(Error::Conflict(_))
+    ));
+    let keys = confirmation("keys");
+    let g = store
+        .confirm_key_recovery(g.id, g.revision, &keys, ctx())
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .confirm_key_recovery(g.id, g.revision - 1, &keys, ctx())
+            .await
+            .unwrap(),
+        g
+    );
 }
 
 /// A newly activated generation retires the scope's previous current one.
@@ -250,15 +278,21 @@ pub async fn serials_are_unique_and_only_current_allocates(store: &dyn CaRegistr
     let scope = scope();
     let g = activatable(store, scope, 1).await;
     assert!(matches!(
-        store.allocate_ca_serial(g.id).await,
+        store.allocate_ca_serial(g.id, g.revision).await,
         Err(Error::Conflict(_))
     ));
+    let prepared_revision = g.revision;
     let g = store
         .activate_ca_generation(g.id, g.revision, ctx())
         .await
         .unwrap();
+    // The revision the caller decided on, not only the state, is checked.
+    assert!(matches!(
+        store.allocate_ca_serial(g.id, prepared_revision).await,
+        Err(Error::Conflict(_))
+    ));
     let allocations =
-        futures::future::join_all((0..8).map(|_| store.allocate_ca_serial(g.id))).await;
+        futures::future::join_all((0..8).map(|_| store.allocate_ca_serial(g.id, g.revision))).await;
     let mut serials: Vec<u64> = allocations
         .into_iter()
         .map(|a| {
@@ -294,7 +328,7 @@ pub async fn revocation_stops_issuance(store: &dyn CaRegistry) {
     assert!(revoked.revision > g.revision);
     assert_eq!(store.current_ca_generation(scope).await.unwrap(), None);
     assert!(matches!(
-        store.allocate_ca_serial(g.id).await,
+        store.allocate_ca_serial(g.id, g.revision).await,
         Err(Error::Conflict(_))
     ));
     assert_eq!(
@@ -328,7 +362,7 @@ pub async fn unknown_generation_is_not_found(store: &dyn CaRegistry) {
         Err(Error::NotFound(_))
     ));
     assert!(matches!(
-        store.allocate_ca_serial(id).await,
+        store.allocate_ca_serial(id, 1).await,
         Err(Error::NotFound(_))
     ));
     assert!(matches!(

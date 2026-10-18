@@ -396,12 +396,21 @@ impl CaRegistry for SqliteBackend {
         Self::commit_transition(tx, id, ctx).await
     }
 
-    async fn allocate_ca_serial(&self, id: CaGenerationId) -> SidResult<SerialAllocation> {
+    async fn allocate_ca_serial(
+        &self,
+        id: CaGenerationId,
+        expected_revision: u64,
+    ) -> SidResult<SerialAllocation> {
+        let Ok(revision) = i64::try_from(expected_revision) else {
+            return Err(conflict(id, "stale revision"));
+        };
         let allocated: Option<(i64, i64)> = sqlx::query_as(
             "UPDATE ca_generations SET last_serial = last_serial + 1 \
-             WHERE id = ? AND state = 'current' RETURNING last_serial, revision",
+             WHERE id = ? AND state = 'current' AND revision = ? \
+             RETURNING last_serial, revision",
         )
         .bind(id.0.to_string())
+        .bind(revision)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("allocate CA serial: {e}")))?;
@@ -413,7 +422,7 @@ impl CaRegistry for SqliteBackend {
             }),
             None => match self.ca_generation(id).await? {
                 None => Err(SidError::NotFound(format!("CA generation {id}"))),
-                Some(_) => Err(conflict(id, "not current")),
+                Some(_) => Err(conflict(id, "not current at the expected revision")),
             },
         }
     }

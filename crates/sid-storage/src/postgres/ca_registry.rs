@@ -431,12 +431,21 @@ impl CaRegistry for PostgresBackend {
         Ok(g)
     }
 
-    async fn allocate_ca_serial(&self, id: CaGenerationId) -> SidResult<SerialAllocation> {
+    async fn allocate_ca_serial(
+        &self,
+        id: CaGenerationId,
+        expected_revision: u64,
+    ) -> SidResult<SerialAllocation> {
+        let Ok(revision) = i64::try_from(expected_revision) else {
+            return Err(conflict(id, "stale revision"));
+        };
         let allocated: Option<(i64, i64)> = sqlx::query_as(
             "UPDATE ca_generations SET last_serial = last_serial + 1 \
-             WHERE id = $1 AND state = 'current' RETURNING last_serial, revision",
+             WHERE id = $1 AND state = 'current' AND revision = $2 \
+             RETURNING last_serial, revision",
         )
         .bind(id.0)
+        .bind(revision)
         .fetch_optional(&self.pool)
         .await
         .map_err(storage("allocate CA serial"))?;
@@ -448,7 +457,7 @@ impl CaRegistry for PostgresBackend {
             }),
             None => match self.read_generation(id).await? {
                 None => Err(SidError::NotFound(format!("CA generation {id}"))),
-                Some(_) => Err(conflict(id, "not current")),
+                Some(_) => Err(conflict(id, "not current at the expected revision")),
             },
         }
     }

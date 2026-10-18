@@ -45,6 +45,18 @@ fn activatable_needs_certificate_and_both_confirmations() {
     }
 }
 
+// The fingerprint is the SHA-256 of the stored DER, absent without one.
+#[test]
+fn certificate_fingerprint_is_its_sha256() {
+    let mut g = prepared();
+    assert_eq!(g.certificate_sha256(), None);
+    g.certificate = Some(b"abc".to_vec());
+    assert_eq!(
+        hex::encode(g.certificate_sha256().unwrap()),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+}
+
 // Storage names round-trip and unknown names are refused.
 #[test]
 fn state_names_round_trip() {
