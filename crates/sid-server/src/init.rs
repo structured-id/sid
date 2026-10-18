@@ -20,9 +20,7 @@ use sid_authn::ip_intelligence::{
 use sid_authn::jwt::JwtService;
 use sid_authn::magic_link::MagicLinkService;
 use sid_authn::oauth2::OAuth2Server;
-use sid_authn::opaque::{
-    OpaqueRouter, P256Opaque, P384Opaque, P521Opaque, PallasOpaque, RistrettoOpaque,
-};
+use sid_authn::opaque::OpaqueRouter;
 use sid_authn::otp::OtpService;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::revocation_cascade::RevocationCascadeService;
@@ -30,7 +28,6 @@ use sid_authn::webauthn::WebAuthnServer;
 use sid_authn::work_runner::{RunnerConfig, WorkHandler, WorkRunner};
 use sid_core::models::AuditEntry;
 use sid_plugin::cache::CacheBackend;
-use sid_plugin::crypto::{CurveId, OpaqueOperations};
 use sid_plugin::event_bus::EventBus;
 use sid_plugin::storage::StorageBackend;
 use tracing::info;
@@ -545,24 +542,11 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
     )?);
 
     // ── OPAQUE ──
-    let opaque_router = {
-        let primary = Box::new(PallasOpaque::new());
-        let setup = sid_authn::opaque::server_setup::load_or_create(
-            storage.as_ref(),
-            key_manager.as_ref(),
-            primary.as_ref(),
-        )
-        .await
-        .unwrap_or_else(|e| panic!("OPAQUE server setup: {e}"));
-        let mut verifiers: std::collections::HashMap<CurveId, Box<dyn OpaqueOperations>> =
-            std::collections::HashMap::new();
-        verifiers.insert(CurveId::Ristretto255, Box::new(RistrettoOpaque::new()));
-        verifiers.insert(CurveId::Pallas, Box::new(PallasOpaque::new()));
-        verifiers.insert(CurveId::P256, Box::new(P256Opaque::new()));
-        verifiers.insert(CurveId::P384, Box::new(P384Opaque::new()));
-        verifiers.insert(CurveId::P521, Box::new(P521Opaque::new()));
-        Arc::new(OpaqueRouter::new(primary, verifiers, setup))
-    };
+    let opaque_router = Arc::new(
+        sid_authn::opaque::server_setup::router(storage.as_ref(), key_manager.as_ref())
+            .await
+            .unwrap_or_else(|e| panic!("OPAQUE server setup: {e}")),
+    );
 
     // ── ZKPP ──
     let zkpp_cache_dir = env_setting("SID_DATA_DIR")?.unwrap_or_else(|| ".sid-data".to_string());
