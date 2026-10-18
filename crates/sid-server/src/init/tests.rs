@@ -161,14 +161,13 @@ fn history_epoch_cutoff_accepts_only_a_past_instant() {
 }
 
 /// Without an evaluator address the evaluator runs in this server over its
-/// local store. A remote evaluator needs its resource, the token issuer and
-/// this server's own client; this server then opens no evaluator store. The
-/// history write cutoff setting is raised into this server's own durable
-/// cutoff in both cases, and into the in-process evaluator's; an earlier
-/// setting lowers neither. A partial configuration stops the start rather
-/// than running history without its evaluator.
+/// local store. With one, this server calls the separate evaluator's
+/// internal listener and opens no evaluator store; a malformed address stops
+/// the start. The history write cutoff setting is raised into this server's
+/// own durable cutoff in both cases, and into the in-process evaluator's; an
+/// earlier setting lowers neither.
 #[tokio::test]
-async fn the_history_evaluator_runs_here_unless_a_remote_one_is_complete() {
+async fn the_history_evaluator_runs_here_unless_a_remote_one_is_named() {
     use sid_authn::password_operation::PasswordHistoryAuthority;
     use std::env::VarError;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -183,38 +182,10 @@ async fn the_history_evaluator_runs_here_unless_a_remote_one_is_complete() {
     };
     let dir = tempfile::tempdir().unwrap();
     let master = dir.path().join("master.key");
-    let secret = dir.path().join("caller.secret");
-    std::fs::write(&secret, "caller-secret").unwrap();
-    let complete = [
-        (
-            "SID_PASSWORD_HISTORY_EVALUATOR",
-            "http://history.sid.example.com:50051".to_owned(),
-        ),
-        (
-            "SID_PASSWORD_HISTORY_EVALUATOR_RESOURCE",
-            "https://history.sid.example.com/".to_owned(),
-        ),
-        (
-            "SID_PASSWORD_HISTORY_TOKEN_UPSTREAM",
-            "http://sid.example.com:50051".to_owned(),
-        ),
-        (
-            "SID_PASSWORD_HISTORY_CALLER_CLIENT_ID",
-            "credential-service".to_owned(),
-        ),
-        (
-            "SID_PASSWORD_HISTORY_CALLER_ISSUER",
-            "https://sid.example.com/i/0123456789abcdef0123456789abcdef".to_owned(),
-        ),
-        (
-            "SID_PASSWORD_HISTORY_CALLER_METHOD",
-            "client_secret_basic".to_owned(),
-        ),
-        (
-            "SID_PASSWORD_HISTORY_CALLER_SECRET_FILE",
-            secret.display().to_string(),
-        ),
-    ];
+    let complete = [(
+        "SID_PASSWORD_HISTORY_EVALUATOR",
+        "http://history.sid.example.com:50051".to_owned(),
+    )];
     let authority = |missing: &str, extra: Option<(&str, &str)>| {
         let vars: Vec<(String, String)> = complete
             .iter()
@@ -235,7 +206,6 @@ async fn the_history_evaluator_runs_here_unless_a_remote_one_is_complete() {
                 storage,
                 local,
                 master,
-                "https://sid.example.com",
             )
             .await
         }
@@ -265,7 +235,6 @@ async fn the_history_evaluator_runs_here_unless_a_remote_one_is_complete() {
         &storage,
         local,
         &master,
-        "https://sid.example.com",
     )
     .await
     .unwrap();
@@ -291,9 +260,6 @@ async fn the_history_evaluator_runs_here_unless_a_remote_one_is_complete() {
         1,
         "a client of a remote evaluator opens no evaluator store"
     );
-    for (name, _) in &complete[1..] {
-        assert!(authority(name, None).await.is_err(), "{name} is required");
-    }
     // A client of a remote evaluator fences its own commits: a later
     // cutoff is raised here too, and an earlier setting lowers nothing.
     assert!(
@@ -325,20 +291,17 @@ async fn the_history_evaluator_runs_here_unless_a_remote_one_is_complete() {
         "an earlier setting lowers nothing"
     );
     assert_eq!(opened.load(Ordering::SeqCst), 1);
-    // The evaluator's resource is an RFC 8707 indicator here as on the
-    // evaluator: an invalid one stops the start instead of failing every
-    // token request later.
-    for invalid in ["", "history", "https://history.sid.example.com/#part"] {
-        assert!(
-            authority(
-                "SID_PASSWORD_HISTORY_EVALUATOR_RESOURCE",
-                Some(("SID_PASSWORD_HISTORY_EVALUATOR_RESOURCE", invalid))
-            )
-            .await
-            .is_err(),
-            "resource {invalid:?} was accepted"
-        );
-    }
+    // An evaluator address that is not a gRPC endpoint stops the start
+    // instead of failing every preparation later.
+    assert!(
+        authority(
+            "SID_PASSWORD_HISTORY_EVALUATOR",
+            Some(("SID_PASSWORD_HISTORY_EVALUATOR", "not an address"))
+        )
+        .await
+        .is_err(),
+        "a malformed evaluator address was accepted"
+    );
 
     // An evaluator address that is set but unreadable is not "unset": the
     // start fails rather than handing this server the history keys.
@@ -350,7 +313,6 @@ async fn the_history_evaluator_runs_here_unless_a_remote_one_is_complete() {
         &storage,
         local,
         &master,
-        "https://sid.example.com",
     )
     .await;
     assert!(unreadable.is_err());
@@ -432,7 +394,6 @@ async fn a_restored_database_gets_the_configured_cutoff_back() {
             async move { Ok(store) }
         },
         &master_dir.path().join("master.key"),
-        "https://sid.example.com",
     )
     .await
     .unwrap();

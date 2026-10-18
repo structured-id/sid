@@ -1788,25 +1788,19 @@ impl HistoryPreparation for HistoryEvaluation {
     }
 }
 
-/// The evaluator as its own service, called by the credential service with
-/// its own token for the evaluator's resource.
+/// The evaluator as its own service: a component of the same password
+/// service, reached over the deployment's protected internal transport. The
+/// evaluator is not a separate resource the credential service needs a grant
+/// for; the deployment keeps its Prepare route internal ([`InternalTransport`]).
 pub struct RemoteHistoryEvaluator {
-    client: PasswordHistoryEvaluatorServiceClient<
-        crate::client_credential::WithCredential<tonic::transport::Channel>,
-    >,
+    client: PasswordHistoryEvaluatorServiceClient<tonic::transport::Channel>,
 }
 
 impl RemoteHistoryEvaluator {
-    /// The evaluator reached over `channel`, authenticated with `credential`
-    /// (a client credential for the evaluator's resource).
-    pub fn new(
-        channel: tonic::transport::Channel,
-        credential: Arc<crate::client_credential::ClientCredential>,
-    ) -> Self {
+    /// The evaluator's internal Prepare listener reached over `channel`.
+    pub fn new(channel: tonic::transport::Channel) -> Self {
         Self {
-            client: PasswordHistoryEvaluatorServiceClient::new(
-                crate::client_credential::WithCredential::new(channel, credential),
-            ),
+            client: PasswordHistoryEvaluatorServiceClient::new(channel),
         }
     }
 }
@@ -1929,27 +1923,41 @@ fn admission_of(req: &PreparePasswordHistoryRequest) -> Result<HistoryAdmission,
     })
 }
 
-/// Who may prepare at the evaluator over the network: the deployment that
-/// serves the evaluator decides, for the one credential service it serves.
+/// Whether the listener serving the evaluator offers Prepare. Prepare is an
+/// internal call of the credential component; which listener carries it is
+/// the deployment's transport boundary, not a SID authorization decision.
 #[tonic::async_trait]
 pub trait PrepareAdmission: Send + Sync {
-    /// Admit `request` as the credential service's, or refuse it without
-    /// saying which check failed.
+    /// Admit `request` on this listener, or refuse it without saying why.
     async fn admit(&self, request: &Request<PreparePasswordHistoryRequest>) -> Result<(), Status>;
 }
 
-/// Nobody prepares over the network: the credential service in this process
-/// prepares in process.
-pub struct InProcessOnly;
+/// A listener clients reach: it serves Evaluate and refuses Prepare. A
+/// standalone installation's co-located credential service prepares in
+/// process; a separate evaluator takes Prepare on its internal listener.
+pub struct ClientListener;
 
 #[tonic::async_trait]
-impl PrepareAdmission for InProcessOnly {
+impl PrepareAdmission for ClientListener {
     async fn admit(&self, _: &Request<PreparePasswordHistoryRequest>) -> Result<(), Status> {
         Err(ApiError::new(
             ErrorReason::InsufficientPermissions,
             "preparing password history is reserved to the credential service",
         )
         .into())
+    }
+}
+
+/// The separate evaluator's internal listener, which the deployment's
+/// protected internal transport (mesh mTLS and network isolation) makes
+/// reachable by the credential service alone and by no ingress route. It
+/// admits every Prepare it receives; no request header establishes origin.
+pub struct InternalTransport;
+
+#[tonic::async_trait]
+impl PrepareAdmission for InternalTransport {
+    async fn admit(&self, _: &Request<PreparePasswordHistoryRequest>) -> Result<(), Status> {
+        Ok(())
     }
 }
 
