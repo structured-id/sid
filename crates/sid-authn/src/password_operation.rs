@@ -283,6 +283,9 @@ pub struct Prepared {
     /// The OPAQUE registration response, when the preparation carried the
     /// request (registration start).
     pub registration_response: Option<Vec<u8>>,
+    /// When the operation ends: whatever the host hands the client for it
+    /// (a ceremony context's cookie) must not outlive it.
+    pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// What a finished operation hands its purpose to commit.
@@ -902,6 +905,7 @@ where
         Ok(Prepared {
             context,
             registration_response,
+            expires_at,
         })
     }
 

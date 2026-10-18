@@ -599,6 +599,8 @@ async fn a_registration_cleanup_is_due_after_its_commit_deadline() {
         .unwrap();
     let id = operation_id(prepared.context.operation_id.as_ref()).unwrap();
     let op = ops.take(&id).await.unwrap();
+    // The host learns the same deadline the operation keeps.
+    assert_eq!(prepared.expires_at, op.expires_at);
     let cleanup =
         sid_plugin::WorkStore::get_work(storage.as_ref(), sid_core::models::WorkId(id.into_uuid()))
             .await
