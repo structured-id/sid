@@ -28,6 +28,7 @@
 pub mod crypto;
 pub mod field;
 pub mod manager;
+pub mod signing;
 
 pub use crypto::{CryptoError, CryptoPrimitives, RustCryptoPrimitives};
 pub use field::{EncryptedField, EncryptedFieldError};
@@ -35,3 +36,4 @@ pub use manager::{
     KeyDerivation, KeyManager, KeyManagerError, KeyManagerResult, KeyVersionParams,
     SoftwareKeyManager,
 };
+pub use signing::{CaSigner, SigningError, SigningKeyId, SoftwareP256Signer};
