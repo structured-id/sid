@@ -31,7 +31,6 @@ pub mod export_job;
 pub mod flow_action;
 pub mod grant_conformance;
 pub mod group;
-pub mod history_keys;
 pub mod issuer_conformance;
 pub mod job_lock;
 pub mod machine;

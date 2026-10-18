@@ -523,14 +523,14 @@ mod credential_store {
 }
 
 #[tokio::test]
-async fn test_write_cutoff_only_rises() {
+async fn write_cutoff_only_rises() {
     let (backend, schema) = isolated("key_cutoff").await;
     let outcome = tokio::spawn({
         let pool = backend.pool().clone();
         async move {
             let keys = sid_storage::PgHistoryKeyStore::new(pool);
             keys.migrate().await.expect("history key migrations");
-            common::history_keys::test_write_cutoff_only_rises(&keys).await
+            sid_plugin::conformance::history_key_store::write_cutoff_only_rises(&keys).await
         }
     })
     .await;
@@ -579,69 +579,43 @@ async fn key_store() -> sid_storage::PgHistoryKeyStore {
     sid_storage::PgHistoryKeyStore::new(backend.pool().clone())
 }
 
-#[tokio::test]
-async fn test_first_epoch_never_resets_a_history() {
-    common::history_keys::test_first_epoch_never_resets_a_history(&key_store().await).await;
+/// Run history key store conformance `scenario` against the shared store.
+macro_rules! history_key_store {
+    ($($scenario:ident),* $(,)?) => {$(
+        #[tokio::test]
+        async fn $scenario() {
+            sid_plugin::conformance::history_key_store::$scenario(&key_store().await).await;
+        }
+    )*};
 }
 
-#[tokio::test]
-async fn test_epoch_is_ensured_once() {
-    common::history_keys::test_epoch_is_ensured_once(&key_store().await).await;
+history_key_store!(
+    first_epoch_never_resets_a_history,
+    epoch_is_ensured_once,
+    owner_domains_are_separate,
+    epoch_rotation,
+    lifecycle_follows_the_live_set,
+    stale_live_set_cannot_retire,
+    key_archive_round_trip,
+    abandoned_enrollment_is_reclaimed,
+    cleanup_races_preparation,
+    key_versions_are_insert_only,
+);
+
+/// Run history key store conformance `scenario` against a store of its own:
+/// it changes store-wide state.
+macro_rules! history_key_store_isolated {
+    ($($scenario:ident),* $(,)?) => {$(
+        #[tokio::test]
+        async fn $scenario() {
+            let (store, schema) = isolated_key_store().await;
+            sid_plugin::conformance::history_key_store::$scenario(&store).await;
+            drop_schema(&schema).await;
+        }
+    )*};
 }
 
-#[tokio::test]
-async fn test_owner_domains_are_separate() {
-    common::history_keys::test_owner_domains_are_separate(&key_store().await).await;
-}
-
-#[tokio::test]
-async fn test_epoch_rotation() {
-    common::history_keys::test_epoch_rotation(&key_store().await).await;
-}
-
-#[tokio::test]
-async fn test_lifecycle_follows_the_live_set() {
-    common::history_keys::test_lifecycle_follows_the_live_set(&key_store().await).await;
-}
-
-#[tokio::test]
-async fn test_stale_live_set_cannot_retire() {
-    common::history_keys::test_stale_live_set_cannot_retire(&key_store().await).await;
-}
-
-#[tokio::test]
-async fn test_key_archive_round_trip() {
-    common::history_keys::test_key_archive_round_trip(&key_store().await).await;
-}
-
-#[tokio::test]
-async fn test_abandoned_enrollment_is_reclaimed() {
-    common::history_keys::test_abandoned_enrollment_is_reclaimed(&key_store().await).await;
-}
-
-#[tokio::test]
-async fn test_cleanup_races_preparation() {
-    common::history_keys::test_cleanup_races_preparation(&key_store().await).await;
-}
-
-#[tokio::test]
-async fn test_abandoned_fences_are_compacted() {
-    let (store, schema) = isolated_key_store().await;
-    common::history_keys::test_abandoned_fences_are_compacted(&store).await;
-    drop_schema(&schema).await;
-}
-
-#[tokio::test]
-async fn test_purged_owner_keeps_nothing() {
-    let (store, schema) = isolated_key_store().await;
-    common::history_keys::test_purged_owner_keeps_nothing(&store).await;
-    drop_schema(&schema).await;
-}
-
-#[tokio::test]
-async fn test_history_key_versions_are_insert_only() {
-    common::history_keys::test_history_key_versions_are_insert_only(&key_store().await).await;
-}
+history_key_store_isolated!(abandoned_fences_are_compacted, purged_owner_keeps_nothing);
 
 #[tokio::test]
 async fn test_end_legacy_migration_is_one_write() {

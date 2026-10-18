@@ -454,75 +454,35 @@ mod credential_store {
     );
 }
 
-#[tokio::test]
-async fn test_write_cutoff_only_rises() {
-    common::history_keys::test_write_cutoff_only_rises(&setup().await.history_keys()).await;
-}
-
 // ─── History evaluator's key store ───
 
-#[tokio::test]
-async fn test_first_epoch_never_resets_a_history() {
-    common::history_keys::test_first_epoch_never_resets_a_history(&setup().await.history_keys())
-        .await;
+/// Run history key store conformance `scenario` against a database of its
+/// own, so store-wide state (the write cutoff, fence compaction) is its own.
+macro_rules! history_key_store {
+    ($($scenario:ident),* $(,)?) => {$(
+        #[tokio::test]
+        async fn $scenario() {
+            sid_plugin::conformance::history_key_store::$scenario(&setup().await.history_keys())
+                .await;
+        }
+    )*};
 }
 
-#[tokio::test]
-async fn test_epoch_is_ensured_once() {
-    common::history_keys::test_epoch_is_ensured_once(&setup().await.history_keys()).await;
-}
-
-#[tokio::test]
-async fn test_owner_domains_are_separate() {
-    common::history_keys::test_owner_domains_are_separate(&setup().await.history_keys()).await;
-}
-
-#[tokio::test]
-async fn test_epoch_rotation() {
-    common::history_keys::test_epoch_rotation(&setup().await.history_keys()).await;
-}
-
-#[tokio::test]
-async fn test_lifecycle_follows_the_live_set() {
-    common::history_keys::test_lifecycle_follows_the_live_set(&setup().await.history_keys()).await;
-}
-
-#[tokio::test]
-async fn test_stale_live_set_cannot_retire() {
-    common::history_keys::test_stale_live_set_cannot_retire(&setup().await.history_keys()).await;
-}
-
-#[tokio::test]
-async fn test_key_archive_round_trip() {
-    common::history_keys::test_key_archive_round_trip(&setup().await.history_keys()).await;
-}
-
-#[tokio::test]
-async fn test_abandoned_enrollment_is_reclaimed() {
-    common::history_keys::test_abandoned_enrollment_is_reclaimed(&setup().await.history_keys())
-        .await;
-}
-
-#[tokio::test]
-async fn test_cleanup_races_preparation() {
-    common::history_keys::test_cleanup_races_preparation(&setup().await.history_keys()).await;
-}
-
-#[tokio::test]
-async fn test_abandoned_fences_are_compacted() {
-    common::history_keys::test_abandoned_fences_are_compacted(&setup().await.history_keys()).await;
-}
-
-#[tokio::test]
-async fn test_purged_owner_keeps_nothing() {
-    common::history_keys::test_purged_owner_keeps_nothing(&setup().await.history_keys()).await;
-}
-
-#[tokio::test]
-async fn test_history_key_versions_are_insert_only() {
-    common::history_keys::test_history_key_versions_are_insert_only(&setup().await.history_keys())
-        .await;
-}
+history_key_store!(
+    write_cutoff_only_rises,
+    first_epoch_never_resets_a_history,
+    epoch_is_ensured_once,
+    owner_domains_are_separate,
+    epoch_rotation,
+    lifecycle_follows_the_live_set,
+    stale_live_set_cannot_retire,
+    key_archive_round_trip,
+    abandoned_enrollment_is_reclaimed,
+    cleanup_races_preparation,
+    abandoned_fences_are_compacted,
+    purged_owner_keeps_nothing,
+    key_versions_are_insert_only,
+);
 
 #[tokio::test]
 async fn test_end_legacy_migration_is_one_write() {
