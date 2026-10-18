@@ -174,7 +174,7 @@ pub fn ca_retirement_entry(
 ) -> super::AuditEntry {
     super::AuditEntry {
         actor_id: activation.actor_id.clone(),
-        actor_type: activation.actor_type.clone(),
+        actor_type: activation.actor_type,
         action: "ca_generation.retired".into(),
         resource: retired.to_string(),
         outcome: super::AuditOutcome::Success,
