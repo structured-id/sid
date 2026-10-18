@@ -392,9 +392,10 @@ impl<O> Session<O> {
         self
     }
 
-    /// Check if session is expired.
+    /// Whether the session has ended: at its `expires_at` and after. A token
+    /// it bounds is valid only before that instant (RFC 7519 §4.1.4).
     pub fn is_expired(&self) -> bool {
-        Utc::now() > self.expires_at
+        Utc::now() >= self.expires_at
     }
 
     /// Update last activity timestamp.
