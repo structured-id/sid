@@ -457,6 +457,77 @@ async fn same_name_replacement_under_the_old_ca_is_refused() {
     assert_eq!(root_key.calls.load(Ordering::SeqCst), 0);
 }
 
+// RFC 5280 §4.1.2.2: serial number zero is not positive and is refused.
+#[tokio::test]
+async fn zero_serial_number_is_refused() {
+    let key = counting();
+    let mut zero = request("CN=Root", &key, 10, None);
+    zero.serial_number = SerialNumber::from(0u32);
+    let refused = issue_ca_certificate(Issuer::SelfIssued(&key), zero).await;
+    assert!(matches!(refused, Err(IssuanceError::NonPositiveSerial)));
+    assert_eq!(key.calls.load(Ordering::SeqCst), 0);
+}
+
+// RFC 5280 §7.1: names differing only in case or insignificant spaces are the
+// same name, so they cannot slip a same-name replacement past the refusal.
+#[tokio::test]
+async fn same_name_differing_only_in_case_or_spaces_is_refused() {
+    let root_key = counting();
+    let root = root(&root_key, Some(1)).await;
+    root_key.calls.store(0, Ordering::SeqCst);
+    for spelling in ["CN=ROOT,O=example", "CN=  Root ,O=Example"] {
+        let refused = issue_ca_certificate(
+            Issuer::Ca {
+                certificate: &root,
+                signer: &root_key,
+            },
+            request(spelling, &signer(), 5, Some(0)),
+        )
+        .await;
+        assert!(
+            matches!(refused, Err(IssuanceError::SameSubjectAsIssuer)),
+            "{spelling}"
+        );
+    }
+    assert_eq!(root_key.calls.load(Ordering::SeqCst), 0);
+}
+
+// An issuer with name constraints is refused: issuance would otherwise sign a
+// subordinate outside the constrained subtree.
+#[tokio::test]
+async fn name_constrained_issuer_is_refused() {
+    use x509_cert::ext::pkix::constraints::name::{GeneralSubtree, NameConstraints};
+    use x509_cert::ext::pkix::name::GeneralName;
+    let root_key = counting();
+    let name = Name::from_str("CN=Root,O=Example").unwrap();
+    let constraints = NameConstraints {
+        permitted_subtrees: Some(vec![GeneralSubtree {
+            base: GeneralName::DirectoryName(Name::from_str("O=Example").unwrap()),
+            minimum: 0,
+            maximum: None,
+        }]),
+        excluded_subtrees: None,
+    }
+    .to_extension(&name, &[])
+    .unwrap();
+    let mut constrained = request("CN=Root,O=Example", &root_key, 10, Some(1));
+    constrained.extensions.push(constraints);
+    let root = issue_ca_certificate(Issuer::SelfIssued(&root_key), constrained)
+        .await
+        .unwrap();
+    root_key.calls.store(0, Ordering::SeqCst);
+    let refused = issue_ca_certificate(
+        Issuer::Ca {
+            certificate: &root,
+            signer: &root_key,
+        },
+        request("CN=Intermediate,O=Other", &signer(), 5, Some(0)),
+    )
+    .await;
+    assert!(matches!(refused, Err(IssuanceError::NameConstrainedIssuer)));
+    assert_eq!(root_key.calls.load(Ordering::SeqCst), 0);
+}
+
 // Preparing fixes the TBS without signing; the signed certificate carries
 // exactly those bytes, so a signature computed from them before signing (an
 // alternative signature) covers the issued certificate's fields.

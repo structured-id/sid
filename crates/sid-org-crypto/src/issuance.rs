@@ -13,7 +13,9 @@ use x509_cert::Certificate;
 use x509_cert::builder::profile::BuilderProfile;
 use x509_cert::builder::{AsyncBuilder, CertificateBuilder};
 use x509_cert::der::asn1::BitString;
+use x509_cert::der::asn1::{Any, ObjectIdentifier};
 use x509_cert::der::oid::AssociatedOid;
+use x509_cert::der::{Encode, Tag, Tagged};
 use x509_cert::ext::pkix::{
     AuthorityKeyIdentifier, BasicConstraints, KeyUsage, KeyUsages, SubjectKeyIdentifier,
 };
@@ -81,6 +83,13 @@ pub enum IssuanceError {
     /// One extension would appear twice (RFC 5280 §4.2).
     #[error("extension {0} would appear more than once")]
     DuplicateExtension(x509_cert::der::asn1::ObjectIdentifier),
+    /// A serial number is a positive integer (RFC 5280 §4.1.2.2).
+    #[error("the serial number is not positive")]
+    NonPositiveSerial,
+    /// The issuing certificate constrains names; issuance does not evaluate
+    /// name constraints, so it refuses rather than sign outside them.
+    #[error("the issuing certificate carries name constraints")]
+    NameConstrainedIssuer,
     /// An extension of the issuing certificate does not decode.
     #[error("malformed issuing certificate: {0}")]
     MalformedIssuer(String),
@@ -108,9 +117,14 @@ pub struct PreparedCertificate<'a> {
 }
 
 impl PreparedCertificate<'_> {
-    /// The exact DER `TBSCertificate` the issuer's signature will cover. An
-    /// additional signature over a projection of it (an alternative signature,
-    /// X.509 §7.2.2) is computed from these bytes before [`Self::sign`].
+    /// The exact DER `TBSCertificate` the issuer's signature will cover.
+    ///
+    /// The fields are final: nothing can be added to a prepared certificate.
+    /// An X.509 alternative signature (X.509 §7.2.2) therefore takes two
+    /// preparations of the same request: the first without `altSignatureValue`,
+    /// whose TBS yields the bytes the alternative signature covers; the second
+    /// with the resulting `altSignatureValue` extension appended, which is the
+    /// one signed.
     pub fn tbs_der(&self) -> &[u8] {
         &self.tbs
     }
@@ -152,7 +166,7 @@ pub fn prepare_ca_certificate<'a>(
             // replacement certified by the key it replaces: SID admits a
             // replacement only from the parent, so this is no rollover path
             // (and RFC 5280 §6.1.4 (l)'s self-issued exemption never applies).
-            if &request.subject == tbs.subject() {
+            if same_name(&request.subject, tbs.subject()) {
                 return Err(IssuanceError::SameSubjectAsIssuer);
             }
             admit_issuer(certificate, &request)?;
@@ -193,8 +207,13 @@ pub fn prepare_ca_certificate<'a>(
 /// §4.1.2.6), a validity that does not end before it begins, and no extension
 /// twice, neither among the caller's nor against the profile's (RFC 5280 §4.2).
 fn admit_request(request: &CaRequest) -> Result<(), IssuanceError> {
-    if request.subject == Name::default() {
+    if request.subject.is_empty() {
         return Err(IssuanceError::EmptySubject);
+    }
+    // RFC 5280 §4.1.2.2: positive, so neither zero nor a negative encoding.
+    let serial = request.serial_number.as_bytes();
+    if serial.iter().all(|b| *b == 0) || serial.first().is_some_and(|b| b & 0x80 != 0) {
+        return Err(IssuanceError::NonPositiveSerial);
     }
     if request.validity.not_after.to_unix_duration()
         < request.validity.not_before.to_unix_duration()
@@ -214,6 +233,52 @@ fn admit_request(request: &CaRequest) -> Result<(), IssuanceError> {
         seen.push(extension.extn_id);
     }
     Ok(())
+}
+
+/// Two names name the same entity under RFC 5280 §7.1: per RDN, the same
+/// attribute types, string values compared without case and with
+/// insignificant spaces removed (RFC 4518 §2), other values by their DER.
+fn same_name(a: &Name, b: &Name) -> bool {
+    normalized(a) == normalized(b)
+}
+
+fn normalized(name: &Name) -> Vec<Vec<(ObjectIdentifier, Vec<u8>)>> {
+    name.iter_rdn()
+        .map(|rdn| {
+            let mut attributes: Vec<_> = rdn
+                .iter()
+                .map(|atv| (atv.oid, normalized_value(&atv.value)))
+                .collect();
+            attributes.sort();
+            attributes
+        })
+        .collect()
+}
+
+fn normalized_value(value: &Any) -> Vec<u8> {
+    let string = matches!(
+        value.tag(),
+        Tag::Utf8String | Tag::PrintableString | Tag::Ia5String | Tag::TeletexString
+    );
+    match core::str::from_utf8(value.value()) {
+        Ok(text) if string => {
+            let mut out = vec![1];
+            out.extend(
+                text.split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .to_lowercase()
+                    .into_bytes(),
+            );
+            out
+        }
+        // A non-string value, or bytes that are not text, compare exactly.
+        _ => {
+            let mut out = vec![0];
+            out.extend(value.to_der().unwrap_or_default());
+            out
+        }
+    }
 }
 
 /// The issuing certificate may sign this CA: it is a CA with `keyCertSign`,
@@ -237,6 +302,15 @@ fn admit_issuer(certificate: &Certificate, request: &CaRequest) -> Result<(), Is
         .is_some_and(|(_, usage)| usage.key_cert_sign());
     if !signs_certificates {
         return Err(IssuanceError::IssuerNotCa);
+    }
+    // Name constraints restrict every subsequent name (RFC 5280 §4.2.1.10);
+    // they are not evaluated here, so a constrained issuer signs nothing.
+    if tbs
+        .get_extension::<x509_cert::ext::pkix::constraints::name::NameConstraints>()
+        .map_err(malformed)?
+        .is_some()
+    {
+        return Err(IssuanceError::NameConstrainedIssuer);
     }
     if let Some(issuer_len) = constraints.path_len_constraint {
         // A CA below a CA of path length n has at most n - 1, and is limited.
