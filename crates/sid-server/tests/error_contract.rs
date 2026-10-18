@@ -234,14 +234,8 @@ async fn every_refusal_carries_error_info() {
         &[sid_proto::FILE_DESCRIPTOR_SET],
         &[DOMAIN_SID],
         &[
-            Caller {
-                name: "anonymous",
-                token: None,
-            },
-            Caller {
-                name: "admin",
-                token: Some(&admin_token),
-            },
+            Caller::anonymous("anonymous"),
+            Caller::bearer("admin", &admin_token),
         ],
     )
     .await;
