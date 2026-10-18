@@ -99,20 +99,18 @@ fn zkpp_settings_refuse_malformed_security_configuration() {
 #[test]
 fn zkpp_settings_require_proofs_unless_explicitly_skipped() {
     use std::env::VarError::NotPresent;
-    let (enabled, config) =
-        zkpp_settings(Err(NotPresent), Err(NotPresent), Err(NotPresent)).unwrap();
-    assert!(enabled);
-    assert!(config.require_proof);
-    assert_eq!(config.policy_version, 1);
+    let settings = zkpp_settings(Err(NotPresent), Err(NotPresent), Err(NotPresent)).unwrap();
+    assert!(settings.enabled());
+    assert!(settings.config().require_proof);
+    assert_eq!(settings.config().policy_version, 1);
     for skip in ["true", "1"] {
-        let (enabled, config) =
-            zkpp_settings(Err(NotPresent), Ok(skip.into()), Err(NotPresent)).unwrap();
-        assert!(enabled);
-        assert!(!config.require_proof);
+        let settings = zkpp_settings(Err(NotPresent), Ok(skip.into()), Err(NotPresent)).unwrap();
+        assert!(settings.enabled());
+        assert!(!settings.config().require_proof);
     }
     for keep in ["false", "0"] {
-        let (_, config) = zkpp_settings(Err(NotPresent), Ok(keep.into()), Err(NotPresent)).unwrap();
-        assert!(config.require_proof);
+        let settings = zkpp_settings(Err(NotPresent), Ok(keep.into()), Err(NotPresent)).unwrap();
+        assert!(settings.config().require_proof);
     }
     for unclear in ["", " ", "yes", "TRUE", "off"] {
         assert!(
@@ -129,9 +127,8 @@ fn disabled_verifiers_need_an_explicit_skip() {
     use std::env::VarError::NotPresent;
     assert!(zkpp_settings(Ok("false".into()), Err(NotPresent), Err(NotPresent)).is_err());
     assert!(zkpp_settings(Ok("false".into()), Ok("false".into()), Err(NotPresent)).is_err());
-    let (enabled, config) =
-        zkpp_settings(Ok("false".into()), Ok("true".into()), Err(NotPresent)).unwrap();
-    assert!(!enabled && !config.require_proof);
+    let settings = zkpp_settings(Ok("false".into()), Ok("true".into()), Err(NotPresent)).unwrap();
+    assert!(!settings.enabled() && !settings.config().require_proof);
 }
 
 /// The history-epoch cutoff is absent unless set; a set value is a past RFC
