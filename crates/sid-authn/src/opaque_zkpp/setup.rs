@@ -17,10 +17,12 @@ use crate::opaque::OpaqueRouter;
 pub type ZkppSlot = Arc<ArcSwap<Option<Arc<ZkppOpaqueServer>>>>;
 
 /// Proof settings: whether proofs are verified at all, and what is required.
+/// Made only by [`ZkppSettings::parse`], so required proofs never come with
+/// verification disabled.
 #[derive(Debug, Clone)]
 pub struct ZkppSettings {
-    pub enabled: bool,
-    pub config: ZkppConfig,
+    enabled: bool,
+    config: ZkppConfig,
 }
 
 /// Why proof settings are refused.
@@ -39,6 +41,16 @@ pub enum ZkppSettingsError {
 }
 
 impl ZkppSettings {
+    /// Whether proofs are verified.
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// What a password installation requires.
+    pub fn config(&self) -> &ZkppConfig {
+        &self.config
+    }
+
     /// The settings `SID_ZKPP_ENABLED`, `SID_ZKPP_SKIP_PROOF` and
     /// `SID_ZKPP_POLICY_VERSION` give, each `None` when unset. An empty or
     /// unknown value is refused, never read as either answer; proofs are

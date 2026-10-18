@@ -1665,13 +1665,12 @@ fn zkpp_settings(
     enabled: Result<String, std::env::VarError>,
     skip: Result<String, std::env::VarError>,
     version: Result<String, std::env::VarError>,
-) -> anyhow::Result<(bool, sid_authn::opaque_zkpp::ZkppConfig)> {
-    let settings = sid_authn::opaque_zkpp::setup::ZkppSettings::parse(
+) -> anyhow::Result<sid_authn::opaque_zkpp::setup::ZkppSettings> {
+    Ok(sid_authn::opaque_zkpp::setup::ZkppSettings::parse(
         setting("SID_ZKPP_ENABLED", enabled)?.as_deref(),
         setting("SID_ZKPP_SKIP_PROOF", skip)?.as_deref(),
         setting("SID_ZKPP_POLICY_VERSION", version)?.as_deref(),
-    )?;
-    Ok((settings.enabled, settings.config))
+    )?)
 }
 
 /// Initialize ZKPP with async keygen on the router's server setup.
@@ -1682,7 +1681,7 @@ fn init_zkpp(
     router: &Arc<OpaqueRouter>,
     cache_dir: &str,
 ) -> Arc<arc_swap::ArcSwap<Option<Arc<ZkppOpaqueServer>>>> {
-    let (enabled, config) = zkpp_settings(
+    let settings = zkpp_settings(
         std::env::var("SID_ZKPP_ENABLED"),
         std::env::var("SID_ZKPP_SKIP_PROOF"),
         std::env::var("SID_ZKPP_POLICY_VERSION"),
@@ -1693,7 +1692,7 @@ fn init_zkpp(
     // deployment error found here at start when proofs are verified.
     sid_authn::opaque_zkpp::setup::spawn_zkpp_server(
         router,
-        &sid_authn::opaque_zkpp::setup::ZkppSettings { enabled, config },
+        &settings,
         std::path::Path::new(cache_dir),
     )
     .unwrap_or_else(|e| panic!("ZKPP: {e}"))
