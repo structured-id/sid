@@ -347,6 +347,31 @@ mod operation_result_store {
 
 // ─── Instance secret conformance ───
 
+/// Run CA registry conformance `scenario` against a fresh database.
+macro_rules! ca_registry {
+    ($($scenario:ident),* $(,)?) => {$(
+        #[tokio::test]
+        async fn $scenario() {
+            sid_plugin::conformance::ca_registry::$scenario(&setup().await).await;
+        }
+    )*};
+}
+
+mod ca_registry {
+    use super::*;
+
+    ca_registry!(
+        prepare_numbers_generations,
+        activation_requires_certificate_and_both_confirmations,
+        certified_material_and_revisions_are_fixed,
+        activation_retires_the_previous_generation,
+        concurrent_activations_leave_one_current,
+        serials_are_unique_and_only_current_allocates,
+        revocation_stops_issuance,
+        unknown_generation_is_not_found,
+    );
+}
+
 /// Run instance secret conformance `scenario` against a fresh database.
 macro_rules! instance_secret_store {
     ($($scenario:ident),* $(,)?) => {$(

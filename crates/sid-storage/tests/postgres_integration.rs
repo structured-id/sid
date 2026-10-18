@@ -432,6 +432,35 @@ mod instance_secret_store {
     );
 }
 
+// ─── CA registry conformance ───
+
+/// Run CA registry conformance `scenario` against this backend; each scenario
+/// works in an organization scope of its own.
+macro_rules! ca_registry {
+    ($($scenario:ident),* $(,)?) => {$(
+        #[tokio::test]
+        async fn $scenario() {
+            let backend = setup().await;
+            sid_plugin::conformance::ca_registry::$scenario(&backend).await;
+        }
+    )*};
+}
+
+mod ca_registry {
+    use super::*;
+
+    ca_registry!(
+        prepare_numbers_generations,
+        activation_requires_certificate_and_both_confirmations,
+        certified_material_and_revisions_are_fixed,
+        activation_retires_the_previous_generation,
+        concurrent_activations_leave_one_current,
+        serials_are_unique_and_only_current_allocates,
+        revocation_stops_issuance,
+        unknown_generation_is_not_found,
+    );
+}
+
 // ─── Sign-in history conformance ───
 
 /// Run sign-in history conformance `scenario` against this backend.

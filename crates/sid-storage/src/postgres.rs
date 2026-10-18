@@ -8443,6 +8443,7 @@ impl AccessRequestRow {
 mod application;
 mod audit_retention;
 mod binding;
+mod ca_registry;
 mod closure;
 mod contact;
 mod credentials;
