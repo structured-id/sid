@@ -41,7 +41,8 @@ const COMPARISON_DOMAIN_PURPOSE: &[u8] = b"SID-HISTORY-TAG-v1";
 /// The owner's history input domain `d`: the installation and the owner, so
 /// the same password gives unrelated inputs for different owners or
 /// installations. Little-endian canonical field element.
-pub fn owner_domain(installation: &[u8; 16], owner: ProfileId) -> [u8; 32] {
+pub fn owner_domain(installation: &[u8; 16], owner: impl Into<uuid::Uuid>) -> [u8; 32] {
+    let owner: uuid::Uuid = owner.into();
     relation::domain_element(OWNER_DOMAIN_PURPOSE, &[installation, owner.as_bytes()]).to_repr()
 }
 
@@ -374,7 +375,7 @@ pub struct RelayedProof {
 /// What the checker compares a proof against: the operation as the server
 /// prepared it, the evaluator's proofs the client relayed, and the history
 /// snapshot the operation was prepared from.
-pub struct CheckRequest<'a> {
+pub struct CheckRequest<'a, O = ProfileId> {
     pub owner_domain: [u8; 32],
     pub domains: &'a [OperationDomain],
     /// The evaluator's descriptor of each domain's epoch, in the same order;
@@ -384,7 +385,7 @@ pub struct CheckRequest<'a> {
     pub proofs: &'a [RelayedProof],
     /// The operation id the evaluator's proofs are bound to.
     pub context: &'a [u8],
-    pub history: &'a PasswordHistory,
+    pub history: &'a PasswordHistory<O>,
 }
 
 /// The checker's verdict on an accepted password: the entry to write under
@@ -449,10 +450,10 @@ impl HistoryChecker {
     /// Check a verified proof's history inputs against the operation and
     /// compare each tag with every entry retained in its domain. The KSF runs
     /// once per domain; no candidate `s` survives a refusal.
-    pub async fn check(
+    pub async fn check<O>(
         &self,
         public: &ZkppPublicInputs,
-        request: CheckRequest<'_>,
+        request: CheckRequest<'_, O>,
     ) -> Result<CheckedPassword, HistoryCheckError> {
         let CheckRequest {
             owner_domain,

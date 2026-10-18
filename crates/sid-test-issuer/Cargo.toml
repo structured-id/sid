@@ -15,7 +15,7 @@ sid-server = { path = "../sid-server", default-features = false, features = ["em
 sid-core = { workspace = true, features = ["grpc"] }
 sid-keys = { workspace = true }
 sid-plugin = { workspace = true }
-sid-authn = { workspace = true, features = ["grpc", "client-credential"] }
+sid-authn = { workspace = true, features = ["grpc", "client-credential", "password-operation"] }
 sid-authz = { workspace = true }
 sid-proto = { workspace = true }
 sid-storage = { workspace = true, default-features = false, features = ["storage-sqlite"] }

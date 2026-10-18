@@ -2,10 +2,21 @@
 use super::super::tests::{change, manager, split, sqlite, zkpp_without_proofs};
 use super::super::*;
 use super::*;
+use sid_authn::password_history::owner_domain;
+use sid_authn::password_operation::{
+    HistoryAdmission, LiveDomains, OperationOwner, OwnerKind, charge_key, operation_id,
+};
 use sid_core::models::{WorkId, WorkState};
+use sid_ids::PasswordOperationId;
 use sid_plugin::OperationResultStore;
+use sid_plugin::history_keys::HistoryKeyStore;
 use sid_plugin::work_store::WorkStore;
 use tonic::Code;
+
+/// The evaluator's audit entry for `action`.
+fn audit(action: &str) -> AuditEntry {
+    AuditEntry::system(action, "password_history")
+}
 
 /// The claimed work of `operation`'s admission, as the runner hands it over
 /// once due.
@@ -460,7 +471,7 @@ async fn first_enrollments_are_refused_at_capacity() {
         .prepare(
             &zkpp_without_proofs(),
             change(),
-            OperationOwner::Decoy,
+            OperationOwner::Decoy(ProfileId::generate()),
             "anonymous".into(),
             None,
         )
