@@ -62,7 +62,9 @@ impl CeremonyContext {
     /// browser the transaction `cookie`, living until the operation's
     /// `expires_at` and no longer, and the CSRF token in [`CSRF_HEADER`] of
     /// this origin-checked response; for a native client the secret as
-    /// `authorization: Bearer`.
+    /// `authorization: Bearer`. An HTTP front serving the page must expose
+    /// [`CSRF_HEADER`] to its script and forward it on the next step, as
+    /// sid-server's transcoder does.
     #[allow(clippy::result_large_err)]
     pub fn deliver(
         self,
