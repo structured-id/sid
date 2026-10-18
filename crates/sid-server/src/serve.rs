@@ -405,12 +405,14 @@ fn transcoded_request<B>(mut request: http::Request<B>) -> http::Request<B> {
 /// Request headers the annotated RPCs read as metadata: credentials, DPoP
 /// proofs, idempotency keys, client address and locale.
 #[cfg(feature = "http")]
-pub const HTTP_FORWARDED_HEADERS: [&str; 11] = [
+pub const HTTP_FORWARDED_HEADERS: [&str; 12] = [
     "authorization",
     // The IdP session cookie, read by the authorization and end-session
     // endpoints, and the origin a ceremony that sets it must come from.
     "cookie",
     "origin",
+    // The CSRF token a browser step echoes with its cookie.
+    sid_authn::browser_session::CSRF_HEADER,
     "dpop",
     "x-request-id",
     "x-forwarded-for",
@@ -450,7 +452,8 @@ pub fn http_transcoder(
     .map(Some)
 }
 
-/// `config` with the sign-in page's `origin` among its CORS origins. The
+/// `config` with the sign-in page's `origin` among its CORS origins and the
+/// CSRF header among the headers its script may read. The
 /// page calls the sign-in ceremonies cross-origin with credentials, which a
 /// browser allows only for an exact allowed origin (Fetch standard §3.2.5):
 /// an explicit list is also what makes the transcoder allow credentials. A
@@ -490,6 +493,21 @@ pub fn allow_sign_in_origin(
         .any(|o| o.as_str() == Some(serialized.as_str()))
     {
         origins.push(serialized.into());
+    }
+    // A ceremony answers the page with its CSRF token in a response header,
+    // which a cross-origin script reads only when it is exposed (Fetch
+    // standard §3.2.6, CORS-exposed header-name list).
+    let exposed = cors
+        .entry("expose_headers")
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| anyhow::anyhow!("cors.expose_headers must be a list"))?;
+    let csrf = sid_authn::browser_session::CSRF_HEADER;
+    if !exposed
+        .iter()
+        .any(|h| h.as_str().is_some_and(|h| h.eq_ignore_ascii_case(csrf)))
+    {
+        exposed.push(csrf.into());
     }
     Ok(())
 }

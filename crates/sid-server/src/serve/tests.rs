@@ -137,3 +137,26 @@ fn test_sign_in_origin_refuses_wildcard_origins() {
         serde_json::json!(["https://login.sid.example.com"])
     );
 }
+
+/// The sign-in page reads a ceremony's CSRF token from the response and
+/// sends it back on the next step: the transcoder forwards the header to the
+/// RPC and lets the page's script read it, keeping headers a configuration
+/// already exposes, without duplicates.
+#[cfg(feature = "http")]
+#[test]
+fn test_sign_in_page_exchanges_the_csrf_header() {
+    use sid_authn::browser_session::CSRF_HEADER;
+
+    assert!(super::HTTP_FORWARDED_HEADERS.contains(&CSRF_HEADER));
+    let origin = url::Url::parse("https://login.sid.example.com/")
+        .unwrap()
+        .origin();
+    let mut config: serde_json::Value =
+        serde_saphyr::from_str("cors: { expose_headers: [\"x-request-id\"] }").unwrap();
+    super::allow_sign_in_origin(&mut config, &origin).unwrap();
+    super::allow_sign_in_origin(&mut config, &origin).unwrap();
+    assert_eq!(
+        config["cors"]["expose_headers"],
+        serde_json::json!(["x-request-id", CSRF_HEADER])
+    );
+}

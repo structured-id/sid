@@ -283,6 +283,9 @@ pub struct Prepared {
     /// The OPAQUE registration response, when the preparation carried the
     /// request (registration start).
     pub registration_response: Option<Vec<u8>>,
+    /// When the operation ends: whatever the host hands the client for it
+    /// (a ceremony context's cookie) must not outlive it.
+    pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// What a finished operation hands its purpose to commit.
@@ -902,6 +905,7 @@ where
         Ok(Prepared {
             context,
             registration_response,
+            expires_at,
         })
     }
 
@@ -932,6 +936,23 @@ where
             })?;
         op.registration_request = Some(request);
         Ok(response)
+    }
+
+    /// A host step of the operation `id` between its preparation and its
+    /// finish: `step` reads and may change the pending operation (its
+    /// purpose's own state, after checking that the caller may take the
+    /// step), which is then kept until its deadline whatever `step` decided.
+    /// Concurrent steps of one operation are serialized by the exclusive
+    /// take: the second one finds the operation taken and is refused.
+    pub async fn amend<T>(
+        &self,
+        id: &PasswordOperationId,
+        step: impl FnOnce(&mut PendingOperation<S::Owner, P>) -> Result<T, Status>,
+    ) -> Result<T, Status> {
+        let mut op = self.take(id).await?;
+        let result = step(&mut op);
+        self.store(&op).await?;
+        result
     }
 
     /// Begin the change `id`'s sign-in with the current password, when
