@@ -26,7 +26,7 @@ use sid_authn::otp::OtpService;
 use sid_authn::password_sign_in::PendingSignIn;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::revocation_cascade::RevocationCascadeService;
-use sid_authn::sign_in_delivery::{CeremonyClient, Delivery, SignedIn, browser_sign_in};
+use sid_authn::sign_in_delivery::{BrowserCredential, CeremonyClient, Delivery, SignedIn};
 use sid_authn::subject::{SubjectRule, resolve_subject};
 use sid_authn::webauthn::{
     AssertionPurpose, AssertionResponse, DiscoverableAssertionResponse, RegistrationResponse,
@@ -2100,9 +2100,9 @@ impl AuthServiceImpl {
     ) -> Result<SignedIn, Status> {
         match client {
             CeremonyClient::Browser => {
-                let signed_in = browser_sign_in(&self.browser_cookie, &mut session);
+                let credential = BrowserCredential::bind(&mut session);
                 self.persist_session(profile, &session).await?;
-                Ok(signed_in)
+                Ok(credential.signed_in(&self.browser_cookie, &session))
             }
             CeremonyClient::Native => {
                 self.persist_session(profile, &session).await?;

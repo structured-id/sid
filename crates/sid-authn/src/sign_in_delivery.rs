@@ -103,17 +103,28 @@ impl SignedIn {
     }
 }
 
-/// The browser sign-in of `session`, before it is stored: the session gets a
-/// fresh secret's hash, and the cookie carrying that secret lives as long as
-/// the session it names.
-pub fn browser_sign_in<O>(cookie: &BrowserCookie, session: &mut Session<O>) -> SignedIn {
-    let secret = BrowserSecret::generate();
-    session.browser_secret_hash = Some(secret.hash());
-    let expires_in = (session.expires_at - Utc::now()).num_seconds();
-    SignedIn {
-        session_id: session.id.to_string(),
-        expires_in,
-        delivery: Delivery::Cookie(cookie.set(&secret, expires_in)),
+/// A browser sign-in's secret, bound to its session before the session is
+/// stored and delivered in the cookie once it is.
+pub struct BrowserCredential(BrowserSecret);
+
+impl BrowserCredential {
+    /// A fresh secret, whose hash `session` now stores.
+    pub fn bind<O>(session: &mut Session<O>) -> Self {
+        let secret = BrowserSecret::generate();
+        session.browser_secret_hash = Some(secret.hash());
+        Self(secret)
+    }
+
+    /// The stored `session`'s sign-in, its secret in `cookie`. The cookie
+    /// lives for what remains of the session now, after storing it took
+    /// its time, so it never outlives the session it names.
+    pub fn signed_in<O>(self, cookie: &BrowserCookie, session: &Session<O>) -> SignedIn {
+        let expires_in = (session.expires_at - Utc::now()).num_seconds();
+        SignedIn {
+            session_id: session.id.to_string(),
+            expires_in,
+            delivery: Delivery::Cookie(cookie.set(&self.0, expires_in)),
+        }
     }
 }
 
