@@ -29,6 +29,7 @@ pub mod backchannel_logout;
 pub mod blob;
 pub mod bootstrap_policy;
 pub mod branding;
+pub mod ca_generation;
 pub mod certificate;
 pub mod claim_mapping;
 pub mod consent;
@@ -112,6 +113,10 @@ pub use bootstrap_policy::{BootstrapPolicy, CentralAdoption};
 pub use branding::{
     BackgroundConfig, BrandingAssets, BrandingConfig, BrandingConfigId, BrandingStatus,
     BrandingText, ButtonStyle, DarkModeConfig, DarkModeTokens, DesignTokens,
+};
+pub use ca_generation::{
+    CaGeneration, CaGenerationId, CaKeys, CaScope, CaState, KeyCustody, NewCaGeneration,
+    RecoveryConfirmation, SerialAllocation,
 };
 pub use certificate::{Certificate, CertificateId, CertificateType};
 pub use claim_mapping::{ClaimMapping, ClaimTransform};
