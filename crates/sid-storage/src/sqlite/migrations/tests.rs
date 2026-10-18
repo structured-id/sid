@@ -5,28 +5,25 @@ use std::time::Duration;
 
 /// Two changes above the baseline: a new table and a column on an existing one.
 const TWO: &[Migration] = &[
-    Migration {
-        version: 2,
-        sql: "CREATE TABLE extra (id INTEGER PRIMARY KEY);
-              ALTER TABLE profiles ADD COLUMN nickname TEXT;",
-    },
-    Migration {
-        version: 3,
-        sql: "CREATE INDEX idx_extra ON extra (id);",
-    },
+    Migration::sql(
+        2,
+        "CREATE TABLE extra (id INTEGER PRIMARY KEY);
+         ALTER TABLE profiles ADD COLUMN nickname TEXT;",
+    ),
+    Migration::sql(3, "CREATE INDEX idx_extra ON extra (id);"),
 ];
 
 /// The same first change, then one that fails half way.
 const BROKEN: &[Migration] = &[
-    Migration {
-        version: 2,
-        sql: "CREATE TABLE extra (id INTEGER PRIMARY KEY);
-              ALTER TABLE profiles ADD COLUMN nickname TEXT;",
-    },
-    Migration {
-        version: 3,
-        sql: "CREATE INDEX idx_extra ON extra (id); CREATE TABLE broken (",
-    },
+    Migration::sql(
+        2,
+        "CREATE TABLE extra (id INTEGER PRIMARY KEY);
+         ALTER TABLE profiles ADD COLUMN nickname TEXT;",
+    ),
+    Migration::sql(
+        3,
+        "CREATE INDEX idx_extra ON extra (id); CREATE TABLE broken (",
+    ),
 ];
 
 /// A pool on the file at `path`, opened as the backend opens it.
@@ -232,6 +229,29 @@ async fn browser_csrf_reaches_released_files_by_migration() {
         "the released baseline has no CSRF column"
     );
     upgrade(&pool, BASELINE, MIGRATIONS).await.unwrap();
+    assert!(
+        session_columns(&pool)
+            .await
+            .contains(&"browser_csrf".to_string())
+    );
+}
+
+/// A file of the build that put the column into the baseline is at version
+/// 10 with the column already there: the migration finds it and the upgrade
+/// completes instead of failing on a duplicate column at every start.
+#[tokio::test]
+async fn browser_csrf_migration_accepts_a_file_that_has_the_column() {
+    let (_dir, path) = scratch();
+    let pool = open(&path).await;
+    upgrade(&pool, BASELINE, &MIGRATIONS[..9]).await.unwrap();
+    sqlx::raw_sql("ALTER TABLE sessions ADD COLUMN browser_csrf BLOB")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(version(&pool).await, 10);
+
+    upgrade(&pool, BASELINE, MIGRATIONS).await.unwrap();
+    assert_eq!(version(&pool).await, MIGRATIONS.last().unwrap().version);
     assert!(
         session_columns(&pool)
             .await

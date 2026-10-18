@@ -22,49 +22,39 @@ pub(crate) const BASELINE_VERSION: i64 = 1;
 pub(crate) struct Migration {
     pub version: i64,
     pub sql: &'static str,
+    /// The column `(table, column)` the change adds, when that is all it
+    /// does: a file that already has it skips the change. SQLite has no
+    /// `ADD COLUMN IF NOT EXISTS`.
+    pub adds_column: Option<(&'static str, &'static str)>,
+}
+
+impl Migration {
+    const fn sql(version: i64, sql: &'static str) -> Self {
+        Self {
+            version,
+            sql,
+            adds_column: None,
+        }
+    }
 }
 
 /// Every migration above the baseline, in ascending version order.
 pub(crate) const MIGRATIONS: &[Migration] = &[
-    Migration {
-        version: 2,
-        sql: EMAIL_POLICY_REVISION,
-    },
-    Migration {
-        version: 3,
-        sql: WEBAUTHN_USER_HANDLES,
-    },
-    Migration {
-        version: 4,
-        sql: CREDENTIAL_POLICY_ARTIFACT,
-    },
-    Migration {
-        version: 5,
-        sql: HISTORY_EVALUATOR_SPLIT,
-    },
-    Migration {
-        version: 6,
-        sql: ENROLLMENT_CLEANUP,
-    },
-    Migration {
-        version: 7,
-        sql: HISTORY_KEY_VERSIONS,
-    },
-    Migration {
-        version: 8,
-        sql: HISTORY_OWNER_PURGE,
-    },
-    Migration {
-        version: 9,
-        sql: BOOTSTRAP_POLICY,
-    },
-    Migration {
-        version: 10,
-        sql: ENROLLMENT_POLICY,
-    },
+    Migration::sql(2, EMAIL_POLICY_REVISION),
+    Migration::sql(3, WEBAUTHN_USER_HANDLES),
+    Migration::sql(4, CREDENTIAL_POLICY_ARTIFACT),
+    Migration::sql(5, HISTORY_EVALUATOR_SPLIT),
+    Migration::sql(6, ENROLLMENT_CLEANUP),
+    Migration::sql(7, HISTORY_KEY_VERSIONS),
+    Migration::sql(8, HISTORY_OWNER_PURGE),
+    Migration::sql(9, BOOTSTRAP_POLICY),
+    Migration::sql(10, ENROLLMENT_POLICY),
+    // A file of one development build has the column already, from its
+    // baseline, at version 10.
     Migration {
         version: 11,
         sql: BROWSER_CSRF,
+        adds_column: Some(("sessions", "browser_csrf")),
     },
 ];
 
@@ -398,6 +388,11 @@ pub(crate) async fn upgrade(
         v => v,
     };
     for migration in migrations.iter().filter(|m| m.version > from) {
+        if let Some((table, column)) = migration.adds_column
+            && has_column(&mut tx, table, column).await?
+        {
+            continue;
+        }
         sqlx::raw_sql(migration.sql)
             .execute(&mut *tx)
             .await
@@ -415,6 +410,17 @@ pub(crate) async fn upgrade(
         .map_err(storage("record schema version"))?;
     }
     tx.commit().await.map_err(storage("commit schema upgrade"))
+}
+
+/// Whether `table` has `column`.
+async fn has_column(conn: &mut SqliteConnection, table: &str, column: &str) -> SidResult<bool> {
+    sqlx::query_scalar::<_, i64>("SELECT count(*) FROM pragma_table_info(?) WHERE name = ?")
+        .bind(table)
+        .bind(column)
+        .fetch_one(conn)
+        .await
+        .map(|n| n == 1)
+        .map_err(storage("read table columns"))
 }
 
 /// The schema objects of a database (tables, indexes, triggers, views) as
