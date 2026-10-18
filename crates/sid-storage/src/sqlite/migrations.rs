@@ -56,7 +56,41 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         sql: BROWSER_CSRF,
         adds_column: Some(("sessions", "browser_csrf")),
     },
+    Migration::sql(12, CA_GENERATIONS),
 ];
+
+/// CA key generations and their lifecycle; the PostgreSQL migration 064
+/// states the contract. A deployment scope stores `scope_org` as the empty
+/// string so the unique indexes see one value per scope.
+const CA_GENERATIONS: &str = "
+CREATE TABLE ca_generations (
+    id                     TEXT PRIMARY KEY,
+    scope_kind             TEXT NOT NULL CHECK (scope_kind IN ('deployment', 'organization')),
+    scope_org              TEXT NOT NULL,
+    generation             INTEGER NOT NULL CHECK (generation > 0),
+    key_sealed             BLOB,
+    key_external           TEXT,
+    certificate            BLOB,
+    database_recovery_ref  TEXT,
+    database_recovery_by   TEXT,
+    database_recovery_at   TEXT,
+    key_recovery_ref       TEXT,
+    key_recovery_by        TEXT,
+    key_recovery_at        TEXT,
+    state                  TEXT NOT NULL CHECK (state IN ('prepared', 'current', 'retired', 'revoked')),
+    revision               INTEGER NOT NULL CHECK (revision > 0),
+    last_serial            INTEGER NOT NULL DEFAULT 0 CHECK (last_serial >= 0),
+    prepared_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    CHECK ((scope_kind = 'deployment') = (scope_org = '')),
+    CHECK ((key_sealed IS NULL) <> (key_external IS NULL))
+);
+
+CREATE UNIQUE INDEX ca_generations_scope_generation
+    ON ca_generations (scope_kind, scope_org, generation);
+
+CREATE UNIQUE INDEX ca_generations_one_current
+    ON ca_generations (scope_kind, scope_org) WHERE state = 'current';
+";
 
 /// The CSRF token a browser session carries; the PostgreSQL migration 063
 /// states the contract.

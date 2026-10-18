@@ -347,6 +347,51 @@ mod operation_result_store {
 
 // ─── Instance secret conformance ───
 
+/// Run CA registry conformance `scenario` against a fresh database.
+macro_rules! ca_registry {
+    ($($scenario:ident),* $(,)?) => {$(
+        #[tokio::test]
+        async fn $scenario() {
+            sid_plugin::conformance::ca_registry::$scenario(&setup().await).await;
+        }
+    )*};
+}
+
+mod ca_registry {
+    use super::*;
+
+    ca_registry!(
+        prepare_numbers_generations,
+        activation_requires_certificate_and_both_confirmations,
+        certified_material_and_revisions_are_fixed,
+        activation_retires_the_previous_generation,
+        concurrent_activations_leave_one_current,
+        serials_are_unique_and_only_current_allocates,
+        revocation_stops_issuance,
+        unknown_generation_is_not_found,
+        concurrent_prepares_of_one_id_conflict,
+    );
+
+    #[tokio::test]
+    async fn retirement_is_audited() {
+        let backend = setup().await;
+        let pool = backend.pool().clone();
+        sid_plugin::conformance::ca_registry::retirement_is_audited(&backend, |chain| {
+            let pool = pool.clone();
+            async move {
+                let count: i64 =
+                    sqlx::query_scalar("SELECT count(*) FROM audit_records WHERE chain_id = ?")
+                        .bind(chain)
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap();
+                u64::try_from(count).unwrap()
+            }
+        })
+        .await;
+    }
+}
+
 /// Run instance secret conformance `scenario` against a fresh database.
 macro_rules! instance_secret_store {
     ($($scenario:ident),* $(,)?) => {$(

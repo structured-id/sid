@@ -21,6 +21,7 @@ mod audit_retention;
 mod auth;
 mod binding;
 mod branding;
+mod ca_registry;
 mod consent;
 mod contact;
 mod device;
