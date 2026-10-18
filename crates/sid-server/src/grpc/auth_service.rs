@@ -2217,17 +2217,18 @@ impl AuthServiceImpl {
     /// service, when the evaluator runs in this process; `None` when it is
     /// its own service. Nobody prepares at it over the network: this
     /// process's credential service prepares in process. An evaluator that
-    /// admits a remote credential service is a separate composition of
+    /// takes Prepare from a remote credential service is a separate
+    /// composition of
     /// [`PasswordHistoryEvaluatorImpl`](sid_authn::password_operation::PasswordHistoryEvaluatorImpl)
-    /// with its own `PrepareAdmission`, with its own database and keys; this
-    /// server never serves one.
+    /// on an internal listener, with its own database and keys; this server
+    /// never serves one.
     pub fn history_evaluator(
         &self,
     ) -> Option<sid_authn::password_operation::PasswordHistoryEvaluatorImpl> {
         self.history_evaluation.clone().map(|evaluation| {
             sid_authn::password_operation::PasswordHistoryEvaluatorImpl::new(
                 evaluation,
-                Arc::new(sid_authn::password_operation::InProcessOnly),
+                Arc::new(sid_authn::password_operation::ClientListener),
             )
         })
     }

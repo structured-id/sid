@@ -1253,18 +1253,18 @@ fn a_selection_the_history_does_not_require_is_refused() {
     assert!(!complete(OwnerKind::New, &[new, d(&old)], &empty));
 }
 
-/// An evaluator co-located with the credential service prepares in process
-/// only: its network interface refuses preparation from anyone, since a
-/// caller could otherwise create keys for operations it names.
+/// The evaluator's client listener refuses preparation from anyone, since a
+/// caller could otherwise create keys for operations it names; Prepare is
+/// served only on the internal listener the deployment keeps internal.
 #[tokio::test]
-async fn an_in_process_evaluator_refuses_preparation_over_the_network() {
+async fn a_client_listener_refuses_preparation() {
     let (_, evaluation) = split(
         sqlite().await,
         sid_core::models::OrgId::generate(),
         manager(3),
         manager(3),
     );
-    let service = PasswordHistoryEvaluatorImpl::new(evaluation, Arc::new(InProcessOnly));
+    let service = PasswordHistoryEvaluatorImpl::new(evaluation, Arc::new(ClientListener));
     let status = service
         .prepare_password_history(Request::new(PreparePasswordHistoryRequest {
             operation_id: Some(PasswordOperationId::generate().into()),
@@ -1273,6 +1273,29 @@ async fn an_in_process_evaluator_refuses_preparation_over_the_network() {
         .await
         .unwrap_err();
     assert_eq!(status.code(), Code::PermissionDenied);
+}
+
+/// The internal listener admits preparation: its protection is the
+/// deployment's transport, so the request reaches the evaluator's own
+/// admission checks (here an empty request is refused as malformed, not as
+/// unauthorized).
+#[tokio::test]
+async fn the_internal_listener_admits_preparation() {
+    let (_, evaluation) = split(
+        sqlite().await,
+        sid_core::models::OrgId::generate(),
+        manager(3),
+        manager(3),
+    );
+    let service = PasswordHistoryEvaluatorImpl::new(evaluation, Arc::new(InternalTransport));
+    let status = service
+        .prepare_password_history(Request::new(PreparePasswordHistoryRequest {
+            operation_id: Some(PasswordOperationId::generate().into()),
+            ..Default::default()
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), Code::InvalidArgument);
 }
 
 /// A registration start for a held identifier must look like any other to

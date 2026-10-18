@@ -904,7 +904,6 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         storage.as_ref(),
         || local_history_keys.open(),
         std::path::Path::new(&master_key_path),
-        &issuer,
     )
     .await
     .context("password history configuration")?;
@@ -1584,11 +1583,9 @@ impl LocalHistoryKeys {
 /// opens, sealing history keys under the installation's master secret
 /// (`master_key_path`) and the key versions that store records: the
 /// evaluator's custody stays its own, so its store moves with its keys. With it, this server
-/// calls that gRPC address with its own client credential
-/// (`SID_PASSWORD_HISTORY_CALLER_*`) for the evaluator's resource
-/// (`SID_PASSWORD_HISTORY_EVALUATOR_RESOURCE`), requested from the issuer at
-/// `SID_PASSWORD_HISTORY_TOKEN_UPSTREAM`; it then opens no evaluator store
-/// and holds no history key.
+/// calls the separate evaluator's internal listener at that gRPC address,
+/// over the deployment's protected internal transport; it then opens no
+/// evaluator store and holds no history key.
 ///
 /// The history write cutoff `SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE` is an
 /// input to the durable cutoff of each store, raised before anything is
@@ -1602,7 +1599,6 @@ async fn password_history_authority<Local>(
     storage: &dyn sid_plugin::StorageBackend,
     local: impl FnOnce() -> Local,
     master_key_path: &std::path::Path,
-    base: &str,
 ) -> anyhow::Result<sid_authn::password_operation::PasswordHistoryAuthority>
 where
     Local: std::future::Future<
@@ -1613,7 +1609,6 @@ where
     // A setting that is present but unreadable is refused, never read as
     // unset: that would quietly give this server the history keys.
     let optional = |name: &str| setting(name, var(name));
-    let required = |name: &str| var(name).map_err(|_| anyhow::anyhow!("{name} is required"));
     let cutoff = history_epoch_cutoff(var("SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE"))?;
     let audit = || AuditEntry::system("password_history.write_cutoff", "password_history");
     if let Some(cutoff) = cutoff {
@@ -1640,32 +1635,13 @@ where
             history_keys,
         });
     };
-    // An invalid RFC 8707 indicator of the evaluator stops the start.
-    let resource = sid_core::models::ResourceIndicator::parse(&required(
-        "SID_PASSWORD_HISTORY_EVALUATOR_RESOURCE",
-    )?)
-    .map_err(|e| anyhow::anyhow!("SID_PASSWORD_HISTORY_EVALUATOR_RESOURCE: {e}"))?;
-    let token_upstream = required("SID_PASSWORD_HISTORY_TOKEN_UPSTREAM")?;
-    let caller = sid_authn::client_credential::ClientCredentialConfig::from_vars(
-        "SID_PASSWORD_HISTORY_CALLER",
-        |name| var(name).ok().filter(|v| !v.is_empty()),
-    )?
-    .ok_or_else(|| anyhow::anyhow!("SID_PASSWORD_HISTORY_CALLER_CLIENT_ID is required"))?;
-    let lazy = |address: &str| -> anyhow::Result<tonic::transport::Channel> {
-        Ok(tonic::transport::Endpoint::from_shared(address.to_owned())
-            .with_context(|| format!("gRPC address {address}"))?
-            .connect_lazy())
-    };
-    let credential = Arc::new(
-        sid_authn::client_credential::ClientCredential::for_resource(
-            &caller,
-            base,
-            lazy(&token_upstream)?,
-            resource.as_str(),
-        )?,
-    );
+    // The evaluator's internal listener, which the deployment keeps reachable
+    // by this server alone over its protected internal transport.
+    let channel = tonic::transport::Endpoint::from_shared(evaluator.clone())
+        .with_context(|| format!("SID_PASSWORD_HISTORY_EVALUATOR: gRPC address {evaluator}"))?
+        .connect_lazy();
     Ok(PasswordHistoryAuthority::Remote(
-        RemoteHistoryEvaluator::new(lazy(&evaluator)?, credential),
+        RemoteHistoryEvaluator::new(channel),
     ))
 }
 

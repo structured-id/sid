@@ -113,7 +113,8 @@ client-credential = ["grpc", "dep:sid-proto", "dep:http"]
 # history checker, and the history evaluator in process or as its own
 # service.
 password-operation = [
-    "client-credential",
+    "grpc",
+    "dep:sid-proto",
     "dep:sid-ids",
     "dep:sid-ids-proto",
     "dep:prost-types",

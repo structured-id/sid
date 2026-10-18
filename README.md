@@ -61,10 +61,7 @@ Environment variables:
 | `SID_ZKPP_SKIP_PROOF` | `false` | Every password setup requires a password-policy proof unless this is `true` or `1`, which explicitly permits policy-unverified setup. An empty or other value stops startup. Required to be `true` when `SID_ZKPP_ENABLED` is `false` |
 | `SID_ZKPP_POLICY_VERSION` | `1` | Accepted compiled password policy; an unknown or malformed version stops startup |
 | `SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE` | - | RFC 3339 instant: no history entry is written under a key created before it (a suspected key compromise), and such keys are replaced at their owner's next password operation. Raised at start into this server's history store and the in-process evaluator's; an older or unset value lowers nothing. A malformed or future value stops startup |
-| `SID_PASSWORD_HISTORY_EVALUATOR` | - | gRPC address of a separately deployed password-history evaluator; unset runs the evaluator in this server (see below) |
-| `SID_PASSWORD_HISTORY_EVALUATOR_RESOURCE` | - | Resource indicator of the evaluator; required with `SID_PASSWORD_HISTORY_EVALUATOR` |
-| `SID_PASSWORD_HISTORY_TOKEN_UPSTREAM` | - | gRPC address of the issuer this server obtains its token for the evaluator from; required with `SID_PASSWORD_HISTORY_EVALUATOR` |
-| `SID_PASSWORD_HISTORY_CALLER_*` | - | This server's client credential at the evaluator: `_CLIENT_ID`, `_ISSUER`, `_METHOD` and the method's `_SECRET_FILE` or `_KEY_FILE`/`_ALGORITHM`/`_KEY_ID`; required with `SID_PASSWORD_HISTORY_EVALUATOR` |
+| `SID_PASSWORD_HISTORY_EVALUATOR` | - | gRPC address of a separately deployed password-history evaluator's internal listener, which the deployment keeps reachable by this server alone over its protected internal transport; unset runs the evaluator in this server (see below) |
 | `RUST_LOG` | `sid=info` | Log level |
 
 Malformed explicit ZKPP settings stop startup. Optional proof setup still verifies
@@ -94,7 +91,10 @@ be guessed without the KSF. A deployment that keeps them apart runs the
 evaluator as its own service, with its own database and keys, and points this
 server's `SID_PASSWORD_HISTORY_EVALUATOR` at it; this server then holds no
 history key, and the evaluator never receives a tag or a retained entry. The
-client relays the evaluator's proofs, which this server verifies itself.
+evaluator takes preparation only on an internal listener that the deployment
+keeps reachable by this server alone (mesh mTLS and network isolation), and
+serves clients' evaluation on a listener that refuses preparation. The client
+relays the evaluator's proofs, which this server verifies itself.
 
 ### Trusted request verifiers
 
