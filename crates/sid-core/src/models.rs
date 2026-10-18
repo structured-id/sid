@@ -116,7 +116,7 @@ pub use branding::{
 };
 pub use ca_generation::{
     CaGeneration, CaGenerationId, CaScope, CaState, KeyCustody, NewCaGeneration,
-    RecoveryConfirmation, SerialAllocation,
+    RecoveryConfirmation, SerialAllocation, ca_generation_chain, ca_retirement_entry,
 };
 pub use certificate::{Certificate, CertificateId, CertificateType};
 pub use claim_mapping::{ClaimMapping, ClaimTransform};

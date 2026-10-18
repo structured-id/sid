@@ -95,6 +95,32 @@ pub async fn prepare_numbers_generations(store: &dyn CaRegistry) {
     assert_eq!(store.current_ca_generation(scope).await.unwrap(), None);
 }
 
+/// One id prepared concurrently in two scopes: one preparation is stored, the
+/// other is a conflict, never a storage failure.
+pub async fn concurrent_prepares_of_one_id_conflict(store: &dyn CaRegistry) {
+    let first = new_generation(scope(), 1);
+    let second = NewCaGeneration {
+        scope: scope(),
+        ..first.clone()
+    };
+    let (a, b) = tokio::join!(
+        store.prepare_generation(&first, ctx()),
+        store.prepare_generation(&second, ctx()),
+    );
+    let outcomes = [&a, &b];
+    assert_eq!(
+        outcomes.iter().filter(|r| r.is_ok()).count(),
+        1,
+        "{a:?} {b:?}"
+    );
+    assert!(
+        outcomes
+            .iter()
+            .any(|r| matches!(r, Err(Error::Conflict(_)))),
+        "{a:?} {b:?}"
+    );
+}
+
 /// Activation needs the certificate and both recovery confirmations; each
 /// missing piece is refused and nothing becomes current.
 pub async fn activation_requires_certificate_and_both_confirmations(store: &dyn CaRegistry) {
@@ -250,6 +276,30 @@ pub async fn activation_retires_the_previous_generation(store: &dyn CaRegistry) 
         store.current_ca_generation(scope).await.unwrap(),
         Some(second)
     );
+}
+
+/// The generation an activation retires has its own audit record of it.
+/// `audited(chain)` is the harness's count of audit records on a chain, named
+/// `ca_generation:{id}`; the trait cannot express it.
+pub async fn retirement_is_audited<F, Fut>(store: &dyn CaRegistry, audited: F)
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = u64>,
+{
+    let scope = scope();
+    let first = activatable(store, scope, 1).await;
+    let first = store
+        .activate_ca_generation(first.id, first.revision, ctx())
+        .await
+        .unwrap();
+    let chain = format!("ca_generation:{}", first.id);
+    let before = audited(chain.clone()).await;
+    let second = activatable(store, scope, 2).await;
+    store
+        .activate_ca_generation(second.id, second.revision, ctx())
+        .await
+        .unwrap();
+    assert_eq!(audited(chain).await, before + 1);
 }
 
 /// Two replicas activating two prepared generations of one scope together

@@ -80,6 +80,27 @@ fn confirmation_identity_ignores_sub_microseconds() {
     assert!(!other.is_same(&given));
 }
 
+// The retirement entry keeps the activation's actor and origin and names the
+// retired generation and its successor.
+#[test]
+fn retirement_entry_names_retired_and_successor() {
+    let activation = crate::models::AuditEntry {
+        ip_address: Some("192.0.2.1".into()),
+        ..crate::models::AuditEntry::system("ca", "ca_generation.activated")
+    };
+    let (retired, by) = (CaGenerationId::new(), CaGenerationId::new());
+    let entry = ca_retirement_entry(&activation, retired, by);
+    assert_eq!(entry.actor_id, activation.actor_id);
+    assert_eq!(entry.ip_address.as_deref(), Some("192.0.2.1"));
+    assert_eq!(entry.action, "ca_generation.retired");
+    assert_eq!(entry.resource, retired.to_string());
+    assert_eq!(entry.metadata["replaced_by"], by.to_string());
+    assert_eq!(
+        ca_generation_chain(retired),
+        format!("ca_generation:{retired}")
+    );
+}
+
 // Storage names round-trip and unknown names are refused.
 #[test]
 fn state_names_round_trip() {

@@ -6,7 +6,7 @@
 use async_trait::async_trait;
 use sid_core::models::{
     CaGeneration, CaGenerationId, CaScope, CaState, KeyCustody, MutationContext, NewCaGeneration,
-    OrgId, RecoveryConfirmation, SerialAllocation,
+    OrgId, RecoveryConfirmation, SerialAllocation, ca_generation_chain, ca_retirement_entry,
 };
 use sid_core::{Error as SidError, Result as SidResult};
 use sid_plugin::CaRegistry;
@@ -144,7 +144,7 @@ impl SqliteBackend {
         ctx: MutationContext,
     ) -> SidResult<CaGeneration> {
         let g = existing(&mut tx, id).await?;
-        Self::commit_mutation(tx, &format!("ca_generation:{id}"), ctx).await?;
+        Self::commit_mutation(tx, &ca_generation_chain(id), ctx).await?;
         Ok(g)
     }
 
@@ -339,15 +339,30 @@ impl CaRegistry for SqliteBackend {
             return Err(conflict(id, "stale revision"));
         }
         let (kind, org) = scope_columns(g.scope);
-        sqlx::query(
+        let retired: Vec<String> = sqlx::query_scalar(
             "UPDATE ca_generations SET state = 'retired', revision = revision + 1 \
-             WHERE scope_kind = ? AND scope_org = ? AND state = 'current'",
+             WHERE scope_kind = ? AND scope_org = ? AND state = 'current' RETURNING id",
         )
         .bind(kind)
         .bind(org)
-        .execute(&mut *tx)
+        .fetch_all(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("retire CA generation: {e}")))?;
+        // The retired generation's own chain records its retirement; the
+        // operation completion and owed work stay with the activation.
+        for retired in retired {
+            let retired = CaGenerationId(
+                uuid::Uuid::parse_str(&retired)
+                    .map_err(|e| SidError::Storage(format!("CA generation id: {e}")))?,
+            );
+            super::SqliteAuditLog::log_in_conn(
+                &mut tx,
+                &ca_generation_chain(retired),
+                ca_retirement_entry(&ctx.audit, retired, id),
+            )
+            .await
+            .map_err(|e| SidError::Storage(format!("Audit log failed: {e}")))?;
+        }
         sqlx::query(
             "UPDATE ca_generations SET state = 'current', revision = revision + 1 WHERE id = ?",
         )

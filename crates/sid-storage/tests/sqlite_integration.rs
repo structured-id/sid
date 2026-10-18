@@ -369,7 +369,27 @@ mod ca_registry {
         serials_are_unique_and_only_current_allocates,
         revocation_stops_issuance,
         unknown_generation_is_not_found,
+        concurrent_prepares_of_one_id_conflict,
     );
+
+    #[tokio::test]
+    async fn retirement_is_audited() {
+        let backend = setup().await;
+        let pool = backend.pool().clone();
+        sid_plugin::conformance::ca_registry::retirement_is_audited(&backend, |chain| {
+            let pool = pool.clone();
+            async move {
+                let count: i64 =
+                    sqlx::query_scalar("SELECT count(*) FROM audit_records WHERE chain_id = ?")
+                        .bind(chain)
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap();
+                u64::try_from(count).unwrap()
+            }
+        })
+        .await;
+    }
 }
 
 /// Run instance secret conformance `scenario` against a fresh database.

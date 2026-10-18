@@ -160,6 +160,30 @@ impl CaGeneration {
     }
 }
 
+/// The audit chain of a generation.
+pub fn ca_generation_chain(id: CaGenerationId) -> String {
+    format!("ca_generation:{id}")
+}
+
+/// The audit entry of `retired`, retired by the activation `activation`
+/// recorded for `by`: the same actor and origin, its own action and resource.
+pub fn ca_retirement_entry(
+    activation: &super::AuditEntry,
+    retired: CaGenerationId,
+    by: CaGenerationId,
+) -> super::AuditEntry {
+    super::AuditEntry {
+        actor_id: activation.actor_id.clone(),
+        actor_type: activation.actor_type.clone(),
+        action: "ca_generation.retired".into(),
+        resource: retired.to_string(),
+        outcome: super::AuditOutcome::Success,
+        metadata: serde_json::json!({ "replaced_by": by.to_string() }),
+        ip_address: activation.ip_address.clone(),
+        device_id: activation.device_id.clone(),
+    }
+}
+
 /// A serial number allocated to an issuance, with the generation revision it
 /// was allocated under: the issuance commit rechecks that revision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

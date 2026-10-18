@@ -7,7 +7,7 @@
 use async_trait::async_trait;
 use sid_core::models::{
     CaGeneration, CaGenerationId, CaScope, CaState, KeyCustody, MutationContext, NewCaGeneration,
-    OrgId, RecoveryConfirmation, SerialAllocation,
+    OrgId, RecoveryConfirmation, SerialAllocation, ca_generation_chain, ca_retirement_entry,
 };
 use sid_core::{Error as SidError, Result as SidResult};
 use sid_plugin::CaRegistry;
@@ -36,6 +36,17 @@ async fn lock_scope(tx: &mut Tx<'_>, scope: CaScope) -> SidResult<()> {
         CaScope::Deployment => "sid.ca:deployment".to_string(),
         CaScope::Organization(org) => format!("sid.ca:org:{}", org.into_uuid()),
     };
+    advisory_lock(tx, key).await
+}
+
+/// Serialize preparations of one id, whatever their scope: one of two is
+/// stored and the other then finds it. Taken before the scope's lock, always
+/// in that order.
+async fn lock_id(tx: &mut Tx<'_>, id: CaGenerationId) -> SidResult<()> {
+    advisory_lock(tx, format!("sid.ca:generation:{id}")).await
+}
+
+async fn advisory_lock(tx: &mut Tx<'_>, key: String) -> SidResult<()> {
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
         .bind(key)
         .execute(&mut **tx)
@@ -211,7 +222,7 @@ impl PostgresBackend {
             .execute(&mut *tx)
             .await
             .map_err(storage("confirm CA recovery"))?;
-        Self::audit_in_tx(&mut tx, &format!("ca_generation:{id}"), ctx).await?;
+        Self::audit_in_tx(&mut tx, &ca_generation_chain(id), ctx).await?;
         let g = locked(&mut tx, id).await?;
         tx.commit().await.map_err(storage("commit"))?;
         Ok(g)
@@ -226,6 +237,7 @@ impl CaRegistry for PostgresBackend {
         ctx: MutationContext,
     ) -> SidResult<CaGeneration> {
         let mut tx = self.pool.begin().await.map_err(storage("begin"))?;
+        lock_id(&mut tx, new.id).await?;
         lock_scope(&mut tx, new.scope).await?;
         if let Some(row) = sqlx::query(select!("WHERE id = $1"))
             .bind(new.id.0)
@@ -265,7 +277,7 @@ impl CaRegistry for PostgresBackend {
         .execute(&mut *tx)
         .await
         .map_err(storage("prepare CA generation"))?;
-        Self::audit_in_tx(&mut tx, &format!("ca_generation:{}", new.id), ctx).await?;
+        Self::audit_in_tx(&mut tx, &ca_generation_chain(new.id), ctx).await?;
         let g = locked(&mut tx, new.id).await?;
         tx.commit().await.map_err(storage("commit"))?;
         Ok(g)
@@ -320,7 +332,7 @@ impl CaRegistry for PostgresBackend {
         .execute(&mut *tx)
         .await
         .map_err(storage("record CA certificate"))?;
-        Self::audit_in_tx(&mut tx, &format!("ca_generation:{id}"), ctx).await?;
+        Self::audit_in_tx(&mut tx, &ca_generation_chain(id), ctx).await?;
         let g = locked(&mut tx, id).await?;
         tx.commit().await.map_err(storage("commit"))?;
         Ok(g)
@@ -372,15 +384,27 @@ impl CaRegistry for PostgresBackend {
             return Err(conflict(id, "stale revision"));
         }
         let (kind, org) = scope_columns(scope);
-        sqlx::query(
+        let retired: Vec<Uuid> = sqlx::query_scalar(
             "UPDATE ca_generations SET state = 'retired', revision = revision + 1 \
-             WHERE scope_kind = $1 AND scope_org IS NOT DISTINCT FROM $2 AND state = 'current'",
+             WHERE scope_kind = $1 AND scope_org IS NOT DISTINCT FROM $2 AND state = 'current' \
+             RETURNING id",
         )
         .bind(kind)
         .bind(org)
-        .execute(&mut *tx)
+        .fetch_all(&mut *tx)
         .await
         .map_err(storage("retire CA generation"))?;
+        // The retired generation's own chain records its retirement; the
+        // operation completion and owed work stay with the activation.
+        for retired in retired.into_iter().map(CaGenerationId) {
+            crate::audit_log::PostgresAuditLog::log_in_conn(
+                &mut tx,
+                &ca_generation_chain(retired),
+                ca_retirement_entry(&ctx.audit, retired, id),
+            )
+            .await
+            .map_err(|e| SidError::Storage(format!("Audit log failed: {e}")))?;
+        }
         sqlx::query(
             "UPDATE ca_generations SET state = 'current', revision = revision + 1 WHERE id = $1",
         )
@@ -388,7 +412,7 @@ impl CaRegistry for PostgresBackend {
         .execute(&mut *tx)
         .await
         .map_err(storage("activate CA generation"))?;
-        Self::audit_in_tx(&mut tx, &format!("ca_generation:{id}"), ctx).await?;
+        Self::audit_in_tx(&mut tx, &ca_generation_chain(id), ctx).await?;
         let g = locked(&mut tx, id).await?;
         tx.commit().await.map_err(storage("commit"))?;
         Ok(g)
@@ -411,7 +435,7 @@ impl CaRegistry for PostgresBackend {
         .execute(&mut *tx)
         .await
         .map_err(storage("revoke CA generation"))?;
-        Self::audit_in_tx(&mut tx, &format!("ca_generation:{id}"), ctx).await?;
+        Self::audit_in_tx(&mut tx, &ca_generation_chain(id), ctx).await?;
         let g = locked(&mut tx, id).await?;
         tx.commit().await.map_err(storage("commit"))?;
         Ok(g)
