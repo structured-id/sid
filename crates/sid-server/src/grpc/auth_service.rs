@@ -1813,10 +1813,19 @@ impl AuthServiceImpl {
 
     /// The OPAQUE password file of `credential`, opened, with its curve.
     async fn stored_password(&self, credential: &Credential) -> Result<StoredCredential, Status> {
-        let curve = super::convert::opaque_curve(credential)?;
-        Ok(StoredCredential {
-            curve,
-            data: self.open_envelope(credential).await?.to_vec(),
+        use sid_authn::sealed_secret::StoredPasswordError;
+        sid_authn::sealed_secret::stored_password(
+            self.key_manager.as_ref(),
+            self.storage.as_ref(),
+            credential,
+        )
+        .await
+        .map_err(|e| match e {
+            StoredPasswordError::Storage(e) => storage_failure(e),
+            e @ (StoredPasswordError::NoCurve(_) | StoredPasswordError::UnknownCurve { .. }) => {
+                internal("read OPAQUE curve", e)
+            }
+            StoredPasswordError::Sealed(e) => internal("open OPAQUE envelope", e),
         })
     }
 
@@ -1996,36 +2005,6 @@ impl AuthServiceImpl {
         )
         .await
         .map_err(|e| internal("seal OPAQUE envelope", e))
-    }
-
-    /// The envelope `credential` holds, stored back under the current key
-    /// version when it was sealed under an older one.
-    async fn open_envelope(
-        &self,
-        credential: &Credential,
-    ) -> Result<zeroize::Zeroizing<Vec<u8>>, Status> {
-        let opened = sid_authn::sealed_secret::open(
-            self.key_manager.as_ref(),
-            &sid_authn::sealed_secret::opaque_context(credential.profile_id),
-            credential.data.expose(),
-        )
-        .await
-        .map_err(|e| internal("open OPAQUE envelope", e))?;
-        if let Some(resealed) = opened.resealed {
-            // Not applied when another reader resealed it first or the
-            // password changed meanwhile.
-            self.storage
-                .reseal_credential_data(
-                    credential.id,
-                    credential.data.expose(),
-                    &resealed,
-                    AuditEntry::system("credential.secret_resealed", credential.id.0.to_string())
-                        .into(),
-                )
-                .await
-                .map_err(storage_failure)?;
-        }
-        Ok(opened.secret)
     }
 
     /// The authenticated caller of `request`.
