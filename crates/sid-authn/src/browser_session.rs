@@ -69,7 +69,7 @@ impl BrowserCookie {
         format!(
             "{}={}; {ATTRIBUTES}; Max-Age={}",
             self.name,
-            URL_SAFE_NO_PAD.encode(secret.0.as_ref()),
+            secret.encode().as_str(),
             max_age_secs.max(0)
         )
     }
@@ -125,7 +125,14 @@ impl BrowserSecret {
         BrowserSecretHash::from_bytes(Sha256::digest(self.0.as_ref()).into())
     }
 
-    fn decode(value: &str) -> Option<Self> {
+    /// The secret as its holder carries it: unpadded base64url.
+    pub(crate) fn encode(&self) -> Zeroizing<String> {
+        Zeroizing::new(URL_SAFE_NO_PAD.encode(self.0.as_ref()))
+    }
+
+    /// The secret `value` carries, when it is exactly 32 bytes of unpadded
+    /// base64url.
+    pub(crate) fn decode(value: &str) -> Option<Self> {
         let decoded = Zeroizing::new(URL_SAFE_NO_PAD.decode(value).ok()?);
         let bytes: [u8; 32] = decoded.as_slice().try_into().ok()?;
         Some(Self(Zeroizing::new(bytes)))
