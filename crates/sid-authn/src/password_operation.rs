@@ -46,9 +46,24 @@
 //! prevents borrowing another operation's OPRF evaluation. Supported clients
 //! derive their final record with the prescribed KSF; this input binding is
 //! not a proof of the final record's client-side derivation.
+//!
+//! What an operation leaves behind is ended by durable work over the
+//! credential authority's store: an abandoned first enrollment
+//! ([`EnrollmentHandler`]), a deleted owner's keys ([`OwnerPurgeHandler`]),
+//! and with a separate evaluator the cleanup relayed to it and the
+//! settlement it reports back ([`relayed`]).
 
 use std::sync::Arc;
 use std::time::Duration;
+
+mod enrollment;
+mod purge;
+pub mod relayed;
+pub use enrollment::{EnrollmentHandler, EvaluatorDelivery, abort_event_id, compact_enrollments};
+pub use purge::{OwnerPurgeHandler, purge_event_id};
+pub use relayed::{
+    cleanup_consumer, consume_cleanup_settlements, consume_relayed_cleanup, settlement_consumer,
+};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};

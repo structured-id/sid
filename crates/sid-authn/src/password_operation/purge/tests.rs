@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-use super::super::tests::{change, manager, split, sqlite, zkpp_without_proofs};
+use super::super::tests::{Operations, change, manager, split, sqlite, zkpp_without_proofs};
 use super::super::*;
 use super::*;
-use sid_authn::password_operation::{HistoryEvaluation, OperationOwner};
-use sid_core::models::{Organization, Profile, WorkId, WorkState};
+use sid_core::models::{Organization, Profile, ProfileId, WorkId};
+use sid_plugin::StorageBackend;
 use sid_plugin::history_keys::HistoryKeyStore;
-use sid_plugin::work_store::WorkStore;
 
 /// The work as the runner hands it over.
 async fn claimed(storage: &dyn StorageBackend, id: WorkId) -> ClaimedWork {
@@ -33,14 +32,14 @@ async fn claimed(storage: &dyn StorageBackend, id: WorkId) -> ClaimedWork {
     }
 }
 
-/// An installation of its own authority with one profile whose first
-/// enrollment made it a history key: the store, the authority, the profile
+/// An installation of its own authority with one owner whose first
+/// enrollment made it a history key: the store, the authority, the owner
 /// and both sides.
 async fn owner_with_a_key() -> (
     Arc<sid_storage::sqlite::SqliteBackend>,
     Organization,
     ProfileId,
-    PasswordOperations,
+    Operations,
     Arc<HistoryEvaluation>,
 ) {
     let storage = sqlite().await;
@@ -67,13 +66,20 @@ async fn owner_with_a_key() -> (
     (storage, org, profile.id, ops, evaluation)
 }
 
-/// Deleting a profile owes its keys' purge in the deletion's transaction;
-/// the purge destroys them, and a preparation of the owner still in flight
-/// makes no key afterwards. A repeated purge is harmless.
+/// The purge a deletion of `owner` owes, as its host commits it.
+fn purge_of(org: &Organization, owner: ProfileId) -> NewWork {
+    OwnerPurge {
+        owner_domain: crate::password_history::owner_domain(org.id.as_bytes(), owner),
+    }
+    .work()
+}
+
+/// The purge destroys an owner's keys, and a preparation of the owner still
+/// in flight makes no key afterwards. A repeated purge is harmless.
 #[tokio::test]
 async fn a_deleted_owners_keys_are_destroyed() {
     let (storage, org, profile, ops, evaluation) = owner_with_a_key().await;
-    let domain = sid_authn::password_history::owner_domain(org.id.as_bytes(), profile);
+    let domain = crate::password_history::owner_domain(org.id.as_bytes(), profile);
     let keys = || async {
         storage
             .history_keys()
@@ -85,19 +91,8 @@ async fn a_deleted_owners_keys_are_destroyed() {
     };
     assert_eq!(keys().await, 1);
 
-    let purge = owner_purge(storage.as_ref(), profile)
-        .await
-        .unwrap()
-        .expect("an installation with an authority owes the purge");
-    storage
-        .delete_profile(
-            profile,
-            MutationContext::from(AuditEntry::system("test", "delete")).with_work(purge.clone()),
-        )
-        .await
-        .unwrap();
-    let owed = storage.get_work(purge.id).await.unwrap().unwrap();
-    assert_eq!(owed.state, WorkState::Pending);
+    let purge = purge_of(&org, profile);
+    storage.enqueue_work(&purge, 10).await.unwrap();
 
     let handler = OwnerPurgeHandler::new(
         storage.clone(),
@@ -156,10 +151,7 @@ async fn deliveries(storage: &dyn StorageBackend) -> usize {
 async fn a_separate_evaluator_is_told_of_the_purge_until_it_settles() {
     const SOURCE: &str = "https://sid.example.com";
     let (storage, org, profile, _, _) = owner_with_a_key().await;
-    let purge = owner_purge(storage.as_ref(), profile)
-        .await
-        .unwrap()
-        .unwrap();
+    let purge = purge_of(&org, profile);
     storage.enqueue_work(&purge, 10).await.unwrap();
     let handler = OwnerPurgeHandler::new(
         storage.clone(),
@@ -169,7 +161,7 @@ async fn a_separate_evaluator_is_told_of_the_purge_until_it_settles() {
     );
     let mut work = claimed(storage.as_ref(), purge.id).await;
     assert!(matches!(handler.handle(&work).await, WorkOutcome::Retry(_)));
-    let domain = sid_authn::password_history::owner_domain(org.id.as_bytes(), profile);
+    let domain = crate::password_history::owner_domain(org.id.as_bytes(), profile);
     let event = handoff(SOURCE, purge_event_id(&domain, work.id));
     let relay = storage.get_work(event).await.unwrap().expect("relay owed");
     assert_eq!(relay.kind.as_str(), sid_core::models::EVENT_DELIVERY_KIND);
@@ -220,18 +212,5 @@ async fn a_separate_evaluator_is_told_of_the_purge_until_it_settles() {
     assert_eq!(
         handler.handle(&work).await,
         WorkOutcome::Done(Some("settled by the evaluator".into()))
-    );
-}
-
-/// Before the installation has an authority there is no history domain, so
-/// no key, and nothing is owed.
-#[tokio::test]
-async fn nothing_is_owed_without_an_authority() {
-    let storage = sqlite().await;
-    assert!(
-        owner_purge(storage.as_ref(), ProfileId::generate())
-            .await
-            .unwrap()
-            .is_none()
     );
 }

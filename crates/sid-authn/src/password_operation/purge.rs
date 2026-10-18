@@ -1,53 +1,41 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! A deleted owner's history keys. The transaction that deletes a profile
-//! owes its purge as durable work; the work runs once and has the evaluator
-//! destroy the owner's keys and lifecycle and fence the owner's domain, so a
-//! preparation still in flight creates nothing afterwards. In a standalone
-//! installation the evaluator runs in this process and is told directly; a
-//! separate evaluator gets the fact as a relayed event.
+//! A deleted owner's history keys. The transaction that deletes an owner
+//! owes its purge ([`OwnerPurge::work`]) as durable work; the work runs once
+//! and has the evaluator destroy the owner's keys and lifecycle and fence
+//! the owner's domain, so a preparation still in flight creates nothing
+//! afterwards. In a standalone installation the evaluator runs in this
+//! process and is told directly; a separate evaluator gets the fact as a
+//! relayed event.
 
 use std::sync::Arc;
 
-use sid_authn::event_relay::RELAY_RETRY;
-use sid_authn::work_runner::{RetrySchedule, WorkHandler, WorkOutcome};
+use async_trait::async_trait;
 use sid_core::models::event::event_types;
 use sid_core::models::{
     AuditEntry, ClaimedWork, Event, MutationContext, NewWork, OWNER_PURGE_KIND, OwnerPurge,
-    ProfileId, RelayedCleanup, WorkId, WorkKind, cleanup_successor,
+    RelayedCleanup, WorkId, WorkKind, cleanup_successor,
 };
-use sid_plugin::storage::StorageBackend;
+use sid_plugin::OperationResultStore;
 use tracing::info;
 
 use super::EvaluatorDelivery;
+use crate::event_relay::RELAY_RETRY;
+use crate::work_runner::{RetrySchedule, WorkHandler, WorkOutcome};
 
 /// Namespace of the relayed purge events' ids, one per owner domain.
 const PURGE_EVENT_NAMESPACE: uuid::Uuid =
     uuid::Uuid::from_u128(0x8b47_0d2e_61f5_4a3c_b9d8_2e7a_5c10_f396);
 
-/// The purge the deletion of `profile` owes the evaluator, to be committed
-/// with the deletion; `None` when the installation has no authority yet, and
-/// so no history domain any key could be under.
-pub(crate) async fn owner_purge(
-    storage: &dyn StorageBackend,
-    profile: ProfileId,
-) -> sid_core::Result<Option<NewWork>> {
-    Ok(storage.instance_organization().await?.map(|org| {
-        OwnerPurge {
-            owner_domain: sid_authn::password_history::owner_domain(org.id.as_bytes(), profile),
-        }
-        .work()
-    }))
-}
-
-/// Has the evaluator destroy each deleted owner's keys.
-pub(crate) struct OwnerPurgeHandler {
+/// Has the evaluator destroy each deleted owner's keys, over the credential
+/// authority's store `S`.
+pub struct OwnerPurgeHandler<S: ?Sized> {
     kind: WorkKind,
     delivery: EvaluatorDelivery,
-    storage: Arc<dyn StorageBackend>,
+    storage: Arc<S>,
 }
 
-impl OwnerPurgeHandler {
-    pub(crate) fn new(storage: Arc<dyn StorageBackend>, delivery: EvaluatorDelivery) -> Self {
+impl<S: ?Sized + OperationResultStore + 'static> OwnerPurgeHandler<S> {
+    pub fn new(storage: Arc<S>, delivery: EvaluatorDelivery) -> Self {
         Self {
             kind: WorkKind::new(OWNER_PURGE_KIND).expect("the owner purge kind is valid"),
             delivery,
@@ -62,7 +50,7 @@ impl OwnerPurgeHandler {
 /// queue, and another per attempt would only pile up beside it; a successor
 /// work (the attempts ran out) relays anew, in case that one ended without
 /// effect.
-pub(crate) fn purge_event_id(owner_domain: &[u8; 32], work: WorkId) -> uuid::Uuid {
+pub fn purge_event_id(owner_domain: &[u8; 32], work: WorkId) -> uuid::Uuid {
     uuid::Uuid::new_v5(
         &PURGE_EVENT_NAMESPACE,
         &[owner_domain.as_slice(), work.0.as_bytes()].concat(),
@@ -78,8 +66,8 @@ fn purge_event(source: &str, purge: &OwnerPurge, work: WorkId) -> Result<NewWork
     Ok(event.deliver(&super::relayed::cleanup_consumer(source)))
 }
 
-#[tonic::async_trait]
-impl WorkHandler for OwnerPurgeHandler {
+#[async_trait]
+impl<S: ?Sized + OperationResultStore + 'static> WorkHandler for OwnerPurgeHandler<S> {
     fn kind(&self) -> &WorkKind {
         &self.kind
     }

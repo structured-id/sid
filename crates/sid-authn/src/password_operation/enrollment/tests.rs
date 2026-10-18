@@ -1,16 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-use super::super::tests::{change, manager, split, sqlite, zkpp_without_proofs};
+use super::super::tests::{Operations, change, manager, split, sqlite, zkpp_without_proofs};
 use super::super::*;
 use super::*;
-use sid_authn::password_history::owner_domain;
-use sid_authn::password_operation::{
-    HistoryAdmission, LiveDomains, OperationOwner, OwnerKind, charge_key, operation_id,
-};
-use sid_core::models::{WorkId, WorkState};
+use crate::password_history::owner_domain;
+use sid_core::models::{ProfileId, WorkId, WorkState};
 use sid_ids::PasswordOperationId;
-use sid_plugin::OperationResultStore;
+use sid_plugin::StorageBackend;
 use sid_plugin::history_keys::HistoryKeyStore;
-use sid_plugin::work_store::WorkStore;
 use tonic::Code;
 
 /// The evaluator's audit entry for `action`.
@@ -49,7 +45,7 @@ async fn claimed(
 /// A first enrollment prepared for a new owner: its operation and the
 /// owner's history input domain.
 async fn enrolled(
-    ops: &PasswordOperations,
+    ops: &Operations,
     installation: sid_core::models::OrgId,
 ) -> (PasswordOperationId, [u8; 32]) {
     let owner = ProfileId::generate();
