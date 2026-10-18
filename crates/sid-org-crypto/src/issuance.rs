@@ -97,6 +97,41 @@ pub async fn issue_ca_certificate(
     issuer: Issuer<'_>,
     request: CaRequest,
 ) -> Result<Certificate, IssuanceError> {
+    prepare_ca_certificate(issuer, request)?.sign().await
+}
+
+/// A CA certificate with every field final and not yet signed.
+pub struct PreparedCertificate<'a> {
+    builder: CertificateBuilder<CaProfile>,
+    tbs: Vec<u8>,
+    signer: &'a dyn CaSigner,
+}
+
+impl PreparedCertificate<'_> {
+    /// The exact DER `TBSCertificate` the issuer's signature will cover. An
+    /// additional signature over a projection of it (an alternative signature,
+    /// X.509 §7.2.2) is computed from these bytes before [`Self::sign`].
+    pub fn tbs_der(&self) -> &[u8] {
+        &self.tbs
+    }
+
+    /// Signs the prepared `TBSCertificate` with the issuer's signer.
+    pub async fn sign(self) -> Result<Certificate, IssuanceError> {
+        let signature = self.signer.sign(&self.tbs).await?;
+        let signature = BitString::from_bytes(&signature)
+            .map_err(|e| IssuanceError::Encoding(e.to_string()))?;
+        self.builder
+            .assemble(signature, &SignerKey(self.signer))
+            .map_err(|e| IssuanceError::Encoding(e.to_string()))
+    }
+}
+
+/// Checks `request` under `issuer` and fixes every field of the certificate;
+/// nothing is signed. The same checks as [`issue_ca_certificate`] apply.
+pub fn prepare_ca_certificate<'a>(
+    issuer: Issuer<'a>,
+    request: CaRequest,
+) -> Result<PreparedCertificate<'a>, IssuanceError> {
     admit_request(&request)?;
     let (signer, issuer_name, issuer_key_id) = match issuer {
         Issuer::SelfIssued(signer) => {
@@ -136,7 +171,6 @@ pub async fn issue_ca_certificate(
         issuer_key_id,
         extensions: request.extensions,
     };
-    let key = SignerKey(signer);
     let mut builder = CertificateBuilder::new(
         profile,
         request.serial_number,
@@ -144,15 +178,15 @@ pub async fn issue_ca_certificate(
         request.public_key,
     )
     .map_err(|e| IssuanceError::Encoding(e.to_string()))?;
+    // Finalized once: the builder appends the profile's extensions here.
     let tbs = builder
-        .finalize(&key)
+        .finalize(&SignerKey(signer))
         .map_err(|e| IssuanceError::Encoding(e.to_string()))?;
-    let signature = signer.sign(&tbs).await?;
-    let signature =
-        BitString::from_bytes(&signature).map_err(|e| IssuanceError::Encoding(e.to_string()))?;
-    builder
-        .assemble(signature, &key)
-        .map_err(|e| IssuanceError::Encoding(e.to_string()))
+    Ok(PreparedCertificate {
+        builder,
+        tbs,
+        signer,
+    })
 }
 
 /// The request itself is a conforming CA certificate: a subject (RFC 5280

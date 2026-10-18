@@ -457,6 +457,23 @@ async fn same_name_replacement_under_the_old_ca_is_refused() {
     assert_eq!(root_key.calls.load(Ordering::SeqCst), 0);
 }
 
+// Preparing fixes the TBS without signing; the signed certificate carries
+// exactly those bytes, so a signature computed from them before signing (an
+// alternative signature) covers the issued certificate's fields.
+#[tokio::test]
+async fn prepared_tbs_is_the_signed_tbs() {
+    let key = counting();
+    let prepared =
+        prepare_ca_certificate(Issuer::SelfIssued(&key), request("CN=Root", &key, 10, None))
+            .unwrap();
+    assert_eq!(key.calls.load(Ordering::SeqCst), 0);
+    let tbs = prepared.tbs_der().to_vec();
+    let certificate = prepared.sign().await.unwrap();
+    assert_eq!(key.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(certificate.tbs_certificate().to_der().unwrap(), tbs);
+    assert!(verifies_under(&certificate, &key.inner));
+}
+
 // The certificate round-trips through DER unchanged.
 #[tokio::test]
 async fn certificate_der_round_trips() {
