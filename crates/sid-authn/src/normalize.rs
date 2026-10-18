@@ -93,11 +93,23 @@ impl LoginPrincipalType {
     }
 }
 
-/// Normalize a login principal to canonical form.
+/// Normalize a login principal of this installation's own namespace to
+/// canonical form ([`normalize_principal_in`] under
+/// [`EmailPolicy::LOCAL`](crate::email::EmailPolicy::LOCAL)).
+pub fn normalize_principal(input: &str) -> Result<NormalizedPrincipal, NormalizeError> {
+    normalize_principal_in(input, &crate::email::EmailPolicy::LOCAL)
+}
+
+/// Normalize a login principal to canonical form, an email handle under the
+/// namespace `email` governs: what it does not admit is refused, and the key
+/// carries its revision.
 ///
 /// Auto-detects type based on format and applies type-specific normalization.
 /// Returns error for invalid usernames (too short/long after normalization).
-pub fn normalize_principal(input: &str) -> Result<NormalizedPrincipal, NormalizeError> {
+pub fn normalize_principal_in(
+    input: &str,
+    email: &crate::email::EmailPolicy,
+) -> Result<NormalizedPrincipal, NormalizeError> {
     let trimmed = input.trim();
 
     if trimmed.is_empty() {
@@ -105,8 +117,7 @@ pub fn normalize_principal(input: &str) -> Result<NormalizedPrincipal, Normalize
     }
 
     if trimmed.contains('@') {
-        // An installation's own login handles: the fixed Personal equality.
-        let handle = crate::email::parse(trimmed, &crate::email::EmailPolicy::LOCAL)?;
+        let handle = crate::email::parse(trimmed, email)?;
         Ok(NormalizedPrincipal {
             principal_type: LoginPrincipalType::Email,
             normalized: handle.key.clone(),
@@ -221,156 +232,4 @@ fn normalize_username_part(input: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    // ── Email normalization ────────────────────────────────────
-
-    #[test]
-    fn test_email_basic() {
-        let result = normalize_principal("Alice@Example.COM").unwrap();
-        assert_eq!(result.principal_type, LoginPrincipalType::Email);
-        assert_eq!(result.normalized, "alice@example.com");
-    }
-
-    #[test]
-    fn test_email_plus_tag_stripped() {
-        let result = normalize_principal("user+tag@example.com").unwrap();
-        assert_eq!(result.normalized, "user@example.com");
-    }
-
-    #[test]
-    fn test_email_unicode_domain_idna() {
-        let result = normalize_principal("user@münchen.de").unwrap();
-        assert_eq!(result.normalized, "user@xn--mnchen-3ya.de");
-    }
-
-    #[test]
-    fn test_email_nfc_normalization() {
-        // é as combining e + acute vs precomposed é
-        let combining = "caf\u{0065}\u{0301}@example.com"; // e + combining acute
-        let precomposed = "caf\u{00e9}@example.com"; // precomposed é
-        let r1 = normalize_principal(combining).unwrap();
-        let r2 = normalize_principal(precomposed).unwrap();
-        assert_eq!(r1.normalized, r2.normalized);
-    }
-
-    // ── Phone normalization ────────────────────────────────────
-
-    #[test]
-    fn test_phone_basic() {
-        let result = normalize_principal("+1 (212) 555-1234").unwrap();
-        assert_eq!(result.principal_type, LoginPrincipalType::Phone);
-        assert_eq!(result.normalized, "+12125551234");
-    }
-
-    #[test]
-    fn test_phone_too_short() {
-        let result = normalize_principal("+123");
-        assert!(matches!(result, Err(NormalizeError::InvalidPhone(_))));
-    }
-
-    #[test]
-    fn test_phone_strips_formatting() {
-        let result = normalize_principal("+380-50-123-4567").unwrap();
-        assert_eq!(result.normalized, "+380501234567");
-    }
-
-    // ── Username normalization ─────────────────────────────────
-
-    #[test]
-    fn test_username_basic() {
-        let result = normalize_principal("Alice_Smith").unwrap();
-        assert_eq!(result.principal_type, LoginPrincipalType::Username);
-        assert_eq!(result.normalized, "alice_smith");
-    }
-
-    #[test]
-    fn test_username_too_short() {
-        let result = normalize_principal("ab");
-        assert!(matches!(result, Err(NormalizeError::UsernameTooShort(2))));
-    }
-
-    #[test]
-    fn test_username_special_chars_stripped() {
-        let result = normalize_principal("alice.smith!").unwrap();
-        assert_eq!(result.normalized, "alicesmith");
-    }
-
-    #[test]
-    fn test_username_federated() {
-        let result = normalize_principal("Alice#Acme.Corp").unwrap();
-        assert_eq!(result.principal_type, LoginPrincipalType::Username);
-        assert_eq!(result.normalized, "alice#acme.corp");
-    }
-
-    #[test]
-    fn test_username_federated_short_login_part_allowed() {
-        // Federated: org admin decides login part length, no min length check
-        let result = normalize_principal("ab#acme.corp").unwrap();
-        assert_eq!(result.normalized, "ab#acme.corp");
-
-        let result = normalize_principal("a#acme.corp").unwrap();
-        assert_eq!(result.normalized, "a#acme.corp");
-    }
-
-    #[test]
-    fn test_username_federated_empty_login_part_rejected() {
-        let result = normalize_principal("#acme.corp");
-        assert!(matches!(result, Err(NormalizeError::UsernameTooShort(0))));
-    }
-
-    #[test]
-    fn test_username_federated_idna_domain() {
-        let result = normalize_principal("alice#münchen.de").unwrap();
-        assert_eq!(result.normalized, "alice#xn--mnchen-3ya.de");
-    }
-
-    // ── Edge cases ─────────────────────────────────────────────
-
-    #[test]
-    fn test_empty_input() {
-        let result = normalize_principal("");
-        assert!(matches!(result, Err(NormalizeError::Empty)));
-    }
-
-    #[test]
-    fn test_whitespace_only() {
-        let result = normalize_principal("   ");
-        assert!(matches!(result, Err(NormalizeError::Empty)));
-    }
-
-    #[test]
-    fn test_leading_trailing_whitespace() {
-        let result = normalize_principal("  alice@example.com  ").unwrap();
-        assert_eq!(result.normalized, "alice@example.com");
-    }
-
-    // ── Confusable skeleton ────────────────────────────────────
-
-    #[test]
-    fn test_confusable_cyrillic_a() {
-        // Cyrillic 'а' (U+0430) vs Latin 'a' (U+0061)
-        let latin = confusable_skeleton("alice");
-        let cyrillic = confusable_skeleton("\u{0430}lice");
-        assert_eq!(latin, cyrillic);
-    }
-
-    // ── LoginPrincipalType → PrincipalType ─────────────────────
-
-    #[test]
-    fn test_login_principal_type_to_principal_type() {
-        assert_eq!(
-            LoginPrincipalType::Email.to_principal_type(),
-            PrincipalType::Email
-        );
-        assert_eq!(
-            LoginPrincipalType::Phone.to_principal_type(),
-            PrincipalType::Phone
-        );
-        assert_eq!(
-            LoginPrincipalType::Username.to_principal_type(),
-            PrincipalType::Username
-        );
-    }
-}
+mod tests;
