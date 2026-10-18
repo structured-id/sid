@@ -543,19 +543,37 @@ fn bmp_string_names_compare_as_text() {
     assert_eq!(string_value(&odd), None);
 }
 
-// A different name stays different after preparation.
+// A different name stays different after preparation. RFC 4518 prepares in
+// the Unicode 3.2 repertoire: a code point assigned later (U+1E9E, which
+// modern data folds to "ss") fails preparation and compares exactly.
 #[test]
 fn distinct_names_stay_distinct_after_preparation() {
     for (a, b) in [
         ("CN=Caf\u{e9}", "CN=Cafe"),
         ("CN=Root A", "CN=RootA"),
         ("CN=Root,O=Example", "CN=Root,O=Example2"),
+        ("CN=\u{1e9e}", "CN=SS"),
     ] {
         assert!(
             !same_name(&Name::from_str(a).unwrap(), &Name::from_str(b).unwrap()),
             "{a} / {b}"
         );
     }
+}
+
+// An empty relative distinguished name is malformed (RFC 5280 §4.1.2.4:
+// `SET SIZE (1..MAX)`) though the name around it is not empty.
+#[tokio::test]
+async fn empty_relative_name_is_refused() {
+    let key = counting();
+    let mut malformed = request("CN=Root", &key, 10, None);
+    malformed.subject = Name::from_der(&[0x30, 0x02, 0x31, 0x00]).unwrap();
+    let refused = issue_ca_certificate(Issuer::SelfIssued(&key), malformed).await;
+    assert!(
+        matches!(refused, Err(IssuanceError::EmptyRelativeName)),
+        "{refused:?}"
+    );
+    assert_eq!(key.calls.load(Ordering::SeqCst), 0);
 }
 
 fn policy_constraints() -> Extension {

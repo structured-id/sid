@@ -77,6 +77,10 @@ pub enum IssuanceError {
     /// A CA certificate needs a subject (RFC 5280 §4.1.2.6).
     #[error("a CA certificate needs a non-empty subject")]
     EmptySubject,
+    /// A relative distinguished name holds at least one attribute
+    /// (RFC 5280 §4.1.2.4).
+    #[error("the subject has an empty relative distinguished name")]
+    EmptyRelativeName,
     /// The issuing CA would certify a subject of its own name: a replacement
     /// signed by the CA it replaces, which SID never accepts as delegation.
     #[error("an issuing CA cannot certify a CA of its own name")]
@@ -209,6 +213,9 @@ fn admit_request(request: &CaRequest) -> Result<(), IssuanceError> {
     if request.subject.is_empty() {
         return Err(IssuanceError::EmptySubject);
     }
+    if request.subject.iter_rdn().any(|rdn| rdn.is_empty()) {
+        return Err(IssuanceError::EmptyRelativeName);
+    }
     // RFC 5280 §4.1.2.2: positive, so neither zero nor a negative encoding.
     let serial = request.serial_number.as_bytes();
     if serial.iter().all(|b| *b == 0) || serial.first().is_some_and(|b| b & 0x80 != 0) {
@@ -304,9 +311,17 @@ fn string_value(value: &Any) -> Option<String> {
 /// map (§2.2, with RFC 3454 B.2 case folding as RFC 5280 §7.1 requires),
 /// normalize to NFKC (§2.3), prohibit (§2.4; `None` when a prohibited code
 /// point remains), ignore bidi (§2.5), and compress insignificant spaces
-/// (§2.6.1).
+/// (§2.6.1). The repertoire is Unicode 3.2 (RFC 4518 §1.2): a code point
+/// unassigned there (RFC 3454 A.1) fails preparation before it is mapped.
+/// The tables RFC 3454 fixes (A.1, B.2, C.3-C.5, C.8) come from `stringprep`;
+/// NFKC of Unicode 3.2 text is the same under later Unicode versions
+/// (Unicode normalization stability).
 fn prepared(text: &str) -> Option<String> {
     use icu_properties::props::GeneralCategory;
+    use stringprep::tables;
+    if text.chars().any(tables::unassigned_code_point) {
+        return None;
+    }
     let categories = icu_properties::CodePointMapData::<GeneralCategory>::new();
     let mut mapped = String::with_capacity(text.len());
     for c in text.chars() {
@@ -324,30 +339,19 @@ fn prepared(text: &str) -> Option<String> {
                 GeneralCategory::SpaceSeparator
                 | GeneralCategory::LineSeparator
                 | GeneralCategory::ParagraphSeparator => mapped.push(' '),
-                _ => mapped.push(c),
+                // RFC 3454 B.2: case folding for use with NFKC.
+                _ => mapped.extend(tables::case_fold_for_nfkc(c)),
             },
         }
     }
-    // B.2 is full case folding closed under NFKC: folding, normalizing, and
-    // folding the normalized form again reaches the same fixed point.
-    let casemap = icu_casemap::CaseMapper::new();
-    let nfkc = icu_normalizer::ComposingNormalizer::new_nfkc();
-    let folded = casemap.fold_string(&mapped);
-    let normalized = nfkc.normalize(&folded);
-    let refolded = casemap.fold_string(&normalized);
-    let prepared = nfkc.normalize(&refolded);
+    let prepared = icu_normalizer::ComposingNormalizer::new_nfkc().normalize(&mapped);
     let prohibited = |c: char| {
-        let point = u32::from(c);
-        matches!(
-            categories.get(c),
-            GeneralCategory::Unassigned | GeneralCategory::PrivateUse | GeneralCategory::Surrogate
-        ) || c == '\u{fffd}'
-            // RFC 3454 C.4 non-character code points.
-            || (0xfdd0..=0xfdef).contains(&point)
-            || point & 0xfffe == 0xfffe
-            // RFC 3454 C.8 change display properties or deprecated.
-            || matches!(c, '\u{340}' | '\u{341}' | '\u{200e}' | '\u{200f}'
-                | '\u{202a}'..='\u{202e}' | '\u{206a}'..='\u{206f}')
+        tables::unassigned_code_point(c)
+            || tables::private_use(c)
+            || tables::non_character_code_point(c)
+            || tables::surrogate_code(c)
+            || tables::change_display_properties_or_deprecated(c)
+            || c == '\u{fffd}'
     };
     if prepared.chars().any(prohibited) {
         return None;
