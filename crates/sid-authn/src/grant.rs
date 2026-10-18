@@ -330,11 +330,15 @@ pub async fn refresh<H: GrantHost>(
         .await
         .map_err(GrantFailure::Host)?
         .ok_or_else(|| GrantFailure::invalid_grant("the token's account no longer exists"))?;
+    // A session past its absolute end has ended even while its row awaits
+    // cleanup: tokens it bounds would be issued already expired, and a
+    // refresh never extends the session's end.
     let session = host
         .store()
         .get_session(validated.session_id())
         .await
         .map_err(GrantFailure::Storage)?
+        .filter(|session| !session.is_expired())
         .ok_or_else(|| GrantFailure::invalid_grant("session ended"))?;
 
     let proof = host.proof().await.map_err(GrantFailure::Host)?;
