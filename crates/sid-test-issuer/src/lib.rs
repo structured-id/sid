@@ -240,7 +240,7 @@ impl TestIssuer {
             issuers.clone(),
             organization.id,
             keys.clone(),
-            sid_server::grpc::password_operation::PasswordHistoryAuthority::InProcess {
+            sid_authn::password_operation::PasswordHistoryAuthority::InProcess {
                 store: history_keys.clone(),
                 history_keys: keys,
             },
@@ -605,7 +605,7 @@ fn auth_service(
     issuers: Arc<sid_authn::issuer::IssuerRegistry>,
     org: sid_core::models::OrgId,
     keys: Arc<dyn sid_keys::KeyManager>,
-    password_history: sid_server::grpc::password_operation::PasswordHistoryAuthority,
+    password_history: sid_authn::password_operation::PasswordHistoryAuthority,
 ) -> Arc<sid_server::grpc::auth_service::AuthServiceImpl> {
     use sid_authn::opaque::{OpaqueRouter, P256Opaque, PallasOpaque, RistrettoOpaque};
     use sid_plugin::crypto::{CurveId, OpaqueOperations};

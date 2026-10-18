@@ -169,7 +169,7 @@ fn history_epoch_cutoff_accepts_only_a_past_instant() {
 /// than running history without its evaluator.
 #[tokio::test]
 async fn the_history_evaluator_runs_here_unless_a_remote_one_is_complete() {
-    use crate::grpc::password_operation::PasswordHistoryAuthority;
+    use sid_authn::password_operation::PasswordHistoryAuthority;
     use std::env::VarError;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -436,7 +436,7 @@ async fn a_restored_database_gets_the_configured_cutoff_back() {
     )
     .await
     .unwrap();
-    let crate::grpc::password_operation::PasswordHistoryAuthority::InProcess { store, .. } =
+    let sid_authn::password_operation::PasswordHistoryAuthority::InProcess { store, .. } =
         authority
     else {
         panic!("the evaluator runs here");

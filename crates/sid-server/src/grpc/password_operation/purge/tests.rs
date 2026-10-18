@@ -2,7 +2,9 @@
 use super::super::tests::{change, manager, split, sqlite, zkpp_without_proofs};
 use super::super::*;
 use super::*;
+use sid_authn::password_operation::{HistoryEvaluation, OperationOwner};
 use sid_core::models::{Organization, Profile, WorkId, WorkState};
+use sid_plugin::history_keys::HistoryKeyStore;
 use sid_plugin::work_store::WorkStore;
 
 /// The work as the runner hands it over.

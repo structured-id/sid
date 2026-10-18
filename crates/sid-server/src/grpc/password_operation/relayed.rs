@@ -24,7 +24,7 @@ use sid_plugin::event_bus::{DurableConsumer, EventBus, EventBusResult, Settlemen
 use sid_plugin::storage::StorageBackend;
 use tracing::{error, info, warn};
 
-use super::HistoryEvaluation;
+use sid_authn::password_operation::HistoryEvaluation;
 
 /// Namespace of the authority tag in durable consumer names.
 const CONSUMER_AUTHORITY_NAMESPACE: uuid::Uuid =

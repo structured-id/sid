@@ -62,6 +62,8 @@ pub mod operation;
 pub mod otp;
 pub mod passkey_prompt;
 pub mod password_history;
+#[cfg(feature = "password-operation")]
+pub mod password_operation;
 pub mod password_sign_in;
 pub mod principal_contest;
 pub(crate) mod recovery;
