@@ -192,6 +192,61 @@ async fn a_call_without_a_token_for_this_resource_is_unauthenticated() {
     }
 }
 
+/// A token of this very issuer for exactly this resource, but of another
+/// kind, is unauthenticated: an ID-token or installation-token form (`typ`
+/// other than `at+jwt`, or none) and an access token naming no requesting
+/// client (RFC 9068 §2.1, §2.2, §4). Each is refused before the
+/// authorization API is asked, which answers nothing here.
+#[tokio::test]
+async fn a_token_of_another_kind_is_unauthenticated() {
+    let f = fixture();
+    let now = chrono::Utc::now().timestamp();
+    let claims = |client: bool| {
+        let mut claims = serde_json::json!({
+            "sub": SUBJECT, "iss": ISSUER, "aud": [ORDERS],
+            "exp": now + 300, "iat": now, "auth_time": now,
+            "acr": "urn:sid:acr:basic", "scope": "", "roles": "",
+            "sid": "sess_ops", "jti": "tok_kind",
+        });
+        if client {
+            claims["client_id"] = "ops-console".into();
+        }
+        claims
+    };
+    let unsigned_typ = {
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
+        header.kid = Some("k1".into());
+        header.typ = None;
+        jsonwebtoken::encode(&header, &claims(true), &f.key).unwrap()
+    };
+    for (kind, token) in [
+        ("ID-token form", sign(&f.key, "JWT", claims(true))),
+        ("no typ", unsigned_typ),
+        (
+            "logout token form",
+            sign(&f.key, "logout+jwt", claims(true)),
+        ),
+        (
+            "no requesting client",
+            sign(&f.key, "at+jwt", claims(false)),
+        ),
+    ] {
+        let status = admit(
+            &f,
+            http::Method::POST,
+            &headers(&[("authorization", &format!("Bearer {token}"))]),
+        )
+        .await
+        .expect_err(kind);
+        assert_eq!(
+            status.code(),
+            tonic::Code::Unauthenticated,
+            "{kind}: {status:?}"
+        );
+        assert_eq!(reason(&status), "TOKEN_INVALID", "{kind}");
+    }
+}
+
 /// gRPC is POST: a call by any other method is no call of this service.
 #[tokio::test]
 async fn a_call_other_than_post_is_unauthenticated() {
