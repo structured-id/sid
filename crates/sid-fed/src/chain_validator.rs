@@ -73,11 +73,11 @@ pub fn verify_chain(chain: &[&[u8]]) -> Result<VerificationResult, PkiError> {
             .verify_signature(Some(issuer.public_key()))
             .map_err(|e| PkiError::SignatureInvalid(format!("cert[{}]: {}", i, e)))?;
 
-        // Check issuer is CA with valid constraints.
-        // remaining_ca_depth = number of CA certs between this issuer and the leaf.
-        // Leaf (i=0) is not a CA, so we count only intermediate CAs.
-        let remaining_ca_depth = if i > 0 { i - 1 } else { 0 };
-        verify_ca_constraints(issuer, i + 1, remaining_ca_depth)?;
+        // Check issuer is CA with valid constraints. RFC 5280 §4.2.1.9: its
+        // pathLenConstraint bounds the intermediate certificates that follow
+        // it, here the certificates at positions 1..=i (the leaf at 0 is not
+        // counted).
+        verify_ca_constraints(issuer, i + 1, i)?;
     }
 
     // Check validity of all certificates.

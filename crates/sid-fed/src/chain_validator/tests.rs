@@ -1,5 +1,41 @@
 use super::*;
-use crate::test_fixtures::{BINDING, INSTANCE_CA, OTHER_ROOT, ROOT, der};
+use crate::test_fixtures::{
+    BINDING, EXPIRED_INSTANCE_CA, INSTANCE_CA, ORG_CA, ORG_LEAF, OTHER_ROOT, ROOT, ROOT_PATHLEN_0,
+    der,
+};
+
+// A leaf under an organization CA under an instance CA under the root
+// verifies as one chain of four.
+#[test]
+fn test_verify_four_level_chain() {
+    let (root, instance, org, leaf) = (der(ROOT), der(INSTANCE_CA), der(ORG_CA), der(ORG_LEAF));
+    let vr = verify_chain(&[&leaf, &org, &instance, &root]).unwrap();
+    assert!(!vr.is_ca);
+    assert_eq!(vr.chain_length, 4);
+}
+
+// RFC 5280 §4.2.1.9: a root with pathLenConstraint 0 admits no intermediate
+// below it; the leaf under its instance CA is refused.
+#[test]
+fn test_root_path_length_zero_admits_no_intermediate() {
+    let (root, instance, binding) = (der(ROOT_PATHLEN_0), der(INSTANCE_CA), der(BINDING));
+    assert!(matches!(
+        verify_chain(&[&binding, &instance, &root]),
+        Err(PkiError::PathLengthExceeded)
+    ));
+    // The same root admits the instance CA itself as the last certificate.
+    assert!(verify_chain(&[&instance, &root]).is_ok());
+}
+
+// An intermediate whose validity ended refuses the chain through it.
+#[test]
+fn test_expired_intermediate_refuses_the_chain() {
+    let (root, expired, binding) = (der(ROOT), der(EXPIRED_INSTANCE_CA), der(BINDING));
+    assert!(matches!(
+        verify_chain(&[&binding, &expired, &root]),
+        Err(PkiError::Expired)
+    ));
+}
 
 // A self-signed root verifies on its own and is a CA.
 #[test]
