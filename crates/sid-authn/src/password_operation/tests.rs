@@ -659,6 +659,37 @@ async fn a_host_step_amends_the_pending_operation() {
     );
 }
 
+/// A finish the host's authorization refuses (another client's ceremony
+/// context) takes nothing from the holder: the refusal is returned and the
+/// operation stays pending, so an operation id alone cannot end someone
+/// else's operation.
+#[tokio::test]
+async fn a_refused_finish_keeps_the_operation() {
+    let (ops, _) = split(
+        sqlite().await,
+        sid_core::models::OrgId::generate(),
+        manager(3),
+        manager(3),
+    );
+    let zkpp = Arc::new(zkpp_without_proofs());
+    let op = pending(change());
+    ops.store(&op).await.unwrap();
+
+    let refused = match ops
+        .finish(zkpp, &op.id, "change", b"", None, |_| {
+            Err(Status::permission_denied("not this caller"))
+        })
+        .await
+    {
+        Err(status) => status,
+        Ok(_) => panic!("a refused caller finishes nothing"),
+    };
+
+    assert_eq!(refused.code(), Code::PermissionDenied);
+    let kept = ops.take(&op.id).await.expect("the operation stays pending");
+    assert_eq!(kept.expires_at, op.expires_at);
+}
+
 /// Replacing the active policy must invalidate a pending operation before
 /// decoding its record or accepting a permitted no-proof replacement. The
 /// operation's former version cannot become the new credential's evidence.

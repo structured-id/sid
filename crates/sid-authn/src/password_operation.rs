@@ -1115,7 +1115,12 @@ where
                 None => Err(expired()),
             };
         };
-        authorized(&op)?;
+        // A caller the host refuses takes nothing from the holder: the
+        // operation goes back pending, as at every other step.
+        if let Err(refused) = authorized(&op) {
+            self.store(&op).await?;
+            return Err(refused);
+        }
         if op.purpose.method() != method {
             return Err(expired());
         }
