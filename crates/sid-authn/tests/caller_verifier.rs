@@ -177,6 +177,92 @@ async fn token_exchanged_from_unbound_pat_is_refused() {
     assert_eq!(err.code(), Code::Unauthenticated);
 }
 
+/// Installation-session claims for a fresh profile, valid for five minutes.
+fn installation_claims() -> sid_authn::jwt::AccessTokenClaims {
+    let profile = Profile::new(Some("alice"));
+    let now = chrono::Utc::now().timestamp();
+    sid_authn::jwt::AccessTokenClaims {
+        sub: profile.id.to_string(),
+        pid: Some(profile.id.to_string()),
+        iss: ISSUER.to_string(),
+        aud: vec![ISSUER.to_string()],
+        client_id: None,
+        exp: now + 300,
+        iat: now,
+        auth_time: now,
+        acr: "urn:sid:acr:standard".to_string(),
+        scope: "openid".to_string(),
+        roles: "admin".to_string(),
+        sid: uuid::Uuid::now_v7().to_string(),
+        amr: vec!["pwd".to_string()],
+        jti: uuid::Uuid::now_v7().to_string(),
+        cnf: None,
+        act: None,
+    }
+}
+
+/// `claims` signed with the installation's own key under JWS `typ` `typ`
+/// (the library's default `JWT` when `None`).
+fn signed(typ: Option<&str>, claims: &sid_authn::jwt::AccessTokenClaims) -> String {
+    let key =
+        jsonwebtoken::EncodingKey::from_ed_pem(include_bytes!("fixtures/test_ed25519_private.pem"))
+            .expect("signing key");
+    let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
+    if let Some(typ) = typ {
+        header.typ = Some(typ.to_string());
+    }
+    jsonwebtoken::encode(&header, claims, &key).expect("sign")
+}
+
+async fn admitted(token: &str) -> bool {
+    authenticate(
+        &request(&format!("Bearer {token}")),
+        jwt().verifier(),
+        &revocation(),
+    )
+    .await
+    .is_ok()
+}
+
+/// The installation's services take only its own session token: signed by
+/// its key, of the session token's kind (JWS `typ` JWT, no requesting
+/// client) and for exactly its own audience, checked by the receiver itself
+/// rather than left to the JWT library's audience setting. An application's
+/// access token (`at+jwt`, RFC 9068 §2.1), a logout token (`logout+jwt`,
+/// OIDC Back-Channel Logout 1.0 §2.4), a token that also names another
+/// audience or one that names a requesting client is refused, even with
+/// every other claim of an administrator's session.
+#[tokio::test]
+async fn only_the_installation_session_kind_is_admitted() {
+    let claims = installation_claims();
+    assert!(admitted(&signed(None, &claims)).await, "the session token");
+    assert!(
+        admitted(&signed(Some("JWT"), &claims)).await,
+        "typ JWT, as issued"
+    );
+    for typ in ["at+jwt", "application/at+jwt", "logout+jwt", "JOSE"] {
+        assert!(!admitted(&signed(Some(typ), &claims)).await, "typ {typ}");
+    }
+    let mut wider = installation_claims();
+    wider.aud.push("https://app.example.com".to_string());
+    assert!(
+        !admitted(&signed(None, &wider)).await,
+        "another audience too"
+    );
+    let mut elsewhere = installation_claims();
+    elsewhere.aud = vec!["https://app.example.com".to_string()];
+    assert!(
+        !admitted(&signed(None, &elsewhere)).await,
+        "another audience"
+    );
+    let mut requested = installation_claims();
+    requested.client_id = Some("app".to_string());
+    assert!(
+        !admitted(&signed(None, &requested)).await,
+        "a requesting client"
+    );
+}
+
 /// A token from another issuer is refused by the verifier.
 #[tokio::test]
 async fn verifier_refuses_another_issuer() {

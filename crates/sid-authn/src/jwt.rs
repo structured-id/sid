@@ -9,7 +9,8 @@ use std::fmt;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{Duration, Utc};
 use jsonwebtoken::{
-    Algorithm, DecodingKey, EncodingKey, Header, TokenData, Validation, decode, encode,
+    Algorithm, DecodingKey, EncodingKey, Header, TokenData, Validation, decode, decode_header,
+    encode,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -106,18 +107,38 @@ impl TokenVerifier {
             .map(VerifiedAccess::Session)
     }
 
-    /// Validate an access token JWT and return its claims.
+    /// Validate the installation's own session token and return its claims:
+    /// its key and exact `iss`, the session token's kind (JWS `typ` JWT and
+    /// no requesting client) and exactly the installation's own audience. The
+    /// kind and audience are checked here, by the receiver, not left to the
+    /// JWT library's audience setting, which admits any token that also names
+    /// the issuer. An application's access token (`at+jwt`, RFC 9068 §2.1) or
+    /// a logout token (`logout+jwt`) of the same key is refused.
     pub fn validate_access_token(&self, token: &str) -> SidResult<AccessTokenClaims> {
+        let refused = |why: &str| SidError::AuthenticationFailed(format!("Invalid token: {why}"));
+        // RFC 7519 §5.1: `typ` JWT (case-insensitive), or absent.
+        let typ = decode_header(token)
+            .map_err(|e| refused(&e.to_string()))?
+            .typ
+            .unwrap_or_default();
+        if !typ.is_empty() && !typ.eq_ignore_ascii_case("JWT") {
+            return Err(refused("not the installation's session token"));
+        }
         let mut validation = Validation::new(Algorithm::EdDSA);
         validation.set_issuer(&[&self.issuer]);
-        validation.set_audience(&[&self.issuer]);
-        validation.set_required_spec_claims(&["sub", "iss", "exp", "iat"]);
+        validation.validate_aud = false;
+        validation.set_required_spec_claims(&["sub", "iss", "exp", "iat", "aud"]);
 
-        let token_data: TokenData<AccessTokenClaims> =
-            decode(token, &self.decoding_key, &validation)
-                .map_err(|e| SidError::AuthenticationFailed(format!("Invalid token: {}", e)))?;
-
-        Ok(token_data.claims)
+        let claims = decode::<AccessTokenClaims>(token, &self.decoding_key, &validation)
+            .map_err(|e| refused(&e.to_string()))?
+            .claims;
+        if claims.aud != [self.issuer.as_str()] {
+            return Err(refused("issued for another audience"));
+        }
+        if claims.client_id.is_some() {
+            return Err(refused("issued to an application"));
+        }
+        Ok(claims)
     }
 
     /// The issuer this verifier accepts.
