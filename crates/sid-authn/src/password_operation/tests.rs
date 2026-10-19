@@ -690,6 +690,39 @@ async fn a_refused_finish_keeps_the_operation() {
     assert_eq!(kept.expires_at, op.expires_at);
 }
 
+/// A finish that the host authorized and that then fails for good (here an
+/// operation of a policy no longer accepted) still ends the operation: only
+/// a caller's refusal puts it back, never a terminal failure of the holder's
+/// own finish, so that failure is not retried forever.
+#[tokio::test]
+async fn an_authorized_terminal_failure_ends_the_operation() {
+    let (ops, _) = split(
+        sqlite().await,
+        sid_core::models::OrgId::generate(),
+        manager(3),
+        manager(3),
+    );
+    let zkpp = Arc::new(zkpp_without_proofs());
+    let mut op = pending(change());
+    op.policy_version += 1;
+    ops.store(&op).await.unwrap();
+
+    let failed = match ops
+        .finish(zkpp, &op.id, "change", b"", None, |_| Ok(()))
+        .await
+    {
+        Err(status) => status,
+        Ok(_) => panic!("a stale policy finishes nothing"),
+    };
+
+    assert_eq!(failed.code(), Code::FailedPrecondition);
+    let gone = ops
+        .take(&op.id)
+        .await
+        .expect_err("a terminal failure leaves nothing to retry");
+    assert_eq!(gone.code(), Code::FailedPrecondition);
+}
+
 /// Replacing the active policy must invalidate a pending operation before
 /// decoding its record or accepting a permitted no-proof replacement. The
 /// operation's former version cannot become the new credential's evidence.
