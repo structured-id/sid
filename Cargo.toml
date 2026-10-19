@@ -224,8 +224,7 @@ aes-gcm = "0.11"
 # Legacy hash verification (migration from competitor IdPs)
 bcrypt = "0.19"
 
-# X.509 PKI (federation certificates)
-rcgen = { version = "0.14", features = ["x509-parser"] }
+# X.509 PKI (federation certificate verification)
 x509-parser = { version = "0.18", features = ["verify"] }
 rustls-pki-types = "1"
 # Named directly so CE can install ring as the process TLS provider: reqwest

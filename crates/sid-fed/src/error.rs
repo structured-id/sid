@@ -5,9 +5,6 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum PkiError {
-    #[error("certificate generation failed: {0}")]
-    Generation(String),
-
     #[error("certificate parsing failed: {0}")]
     Parse(String),
 
@@ -37,7 +34,4 @@ pub enum PkiError {
 
     #[error("path length constraint violated")]
     PathLengthExceeded,
-
-    #[error("enrollment error: {0}")]
-    Enrollment(String),
 }

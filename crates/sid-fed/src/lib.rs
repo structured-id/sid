@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! StructuredID Federation
 //!
-//! X.509 certificate chain management, trust anchors, and instance discovery.
+//! Verification of X.509 certificate chains, trust anchors, and instance
+//! discovery. The certificates verified here are issued elsewhere.
 //!
 //! ## PKI Hierarchy
 //!
@@ -14,23 +15,18 @@
 //!         └── SiteCertificate (federation member, 1y)
 //! ```
 
-pub mod cert_builder;
 pub mod chain_validator;
 pub mod cross_instance_linking;
 pub mod dns_verifier;
-pub mod enrollment;
 pub mod error;
-pub(crate) mod oid;
 pub mod trust_anchor;
 
-pub use cert_builder::GeneratedCert;
+#[cfg(test)]
+mod test_fixtures;
+
 pub use cross_instance_linking::{
     CrossInstanceLinkRevocation, CrossInstanceLinkingProof, LinkId, LinkStatus,
 };
 pub use dns_verifier::{DnsVerifyResult, dns_query_name, parse_dns_txt_token, verify_site_dns};
-pub use enrollment::{
-    EnrollmentResult, issue_binding_for_enterprise, issue_scoped_ca_for_enterprise,
-    revoke_enterprise,
-};
 pub use error::PkiError;
 pub use trust_anchor::{CrlCache, TrustAnchor};

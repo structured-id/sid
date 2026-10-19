@@ -12,6 +12,9 @@ use sid_core::models::Certificate;
 use crate::chain_validator;
 use crate::error::PkiError;
 
+/// The longest chain the anchor follows: leaf, its issuers and the root.
+const MAX_CHAIN_LENGTH: usize = 8;
+
 /// Trust anchor — the set of trusted CAs for chain verification.
 #[derive(Debug, Clone)]
 pub struct TrustAnchor {
@@ -87,77 +90,99 @@ impl TrustAnchor {
         Ok(())
     }
 
-    /// Add an instance CA. Verifies it chains to a known root CA.
+    /// Add an instance CA. Verifies it is a CA directly under a held root,
+    /// on the whole chain (signature, validity, constraints, revocation).
     pub fn add_instance_ca(&mut self, cert: Certificate) -> Result<(), PkiError> {
         let instance_id = cert
             .instance_id
             .as_deref()
             .ok_or_else(|| PkiError::MissingExtension("instance_id".to_string()))?
             .to_string();
-
-        // Find the parent root CA.
         let parent_id = cert.parent_id.ok_or(PkiError::IssuerNotFound)?;
-        let root = self
-            .root_cas
-            .get(&parent_id.0.to_string())
-            .ok_or(PkiError::IssuerNotFound)?;
-
-        // Verify chain.
-        chain_validator::verify_issued_by(&cert.der, &root.der)?;
-
+        if !self.root_cas.contains_key(&parent_id.0.to_string()) {
+            return Err(PkiError::IssuerNotFound);
+        }
+        self.verify_ca(&cert)?;
         self.instance_cas.insert(instance_id, cert);
         Ok(())
     }
 
-    /// Add a scoped CA. Verifies it chains to a known instance CA.
+    /// Add a scoped CA. Verifies it is a CA under a held CA, on the whole
+    /// chain to a held root.
     pub fn add_scoped_ca(&mut self, cert: Certificate) -> Result<(), PkiError> {
         let org_id = cert
             .org_id
             .as_deref()
             .ok_or_else(|| PkiError::MissingExtension("org_id".to_string()))?
             .to_string();
-
-        // Find parent instance CA.
-        let parent_id = cert.parent_id.ok_or(PkiError::IssuerNotFound)?;
-        let issuer = self.find_ca_by_id(parent_id)?;
-
-        chain_validator::verify_issued_by(&cert.der, &issuer.der)?;
-
+        self.verify_ca(&cert)?;
         self.scoped_cas.insert(org_id, cert);
         Ok(())
     }
 
-    /// Verify a leaf certificate against this trust anchor.
-    ///
-    /// Builds the chain from leaf → issuer → root and validates.
+    /// Verify a leaf certificate against this trust anchor: the chain from it
+    /// through every issuer the anchor holds to a held root, verified as a
+    /// whole, with no certificate in it revoked.
     pub fn verify_leaf(&self, cert: &Certificate) -> Result<(), PkiError> {
-        // Check CRL first.
-        if self.crl.is_serial_revoked(&cert.serial_hex) {
-            return Err(PkiError::Revoked);
-        }
-        if let Some(ref bid) = cert.binding_id
-            && self.crl.is_binding_revoked(bid)
-        {
-            return Err(PkiError::Revoked);
-        }
-
-        // Find the issuer CA.
-        let parent_id = cert.parent_id.ok_or(PkiError::IssuerNotFound)?;
-        let issuer = self.find_ca_by_id(parent_id)?;
-
-        // Verify signature.
-        chain_validator::verify_issued_by(&cert.der, &issuer.der)?;
-
-        // If issuer is instance CA, verify it chains to root.
-        if let Some(ref issuer_parent_id) = issuer.parent_id {
-            let root = self
-                .root_cas
-                .get(&issuer_parent_id.0.to_string())
-                .ok_or(PkiError::IssuerNotFound)?;
-            chain_validator::verify_issued_by(&issuer.der, &root.der)?;
-        }
-
+        cert.parent_id.ok_or(PkiError::IssuerNotFound)?;
+        self.verify_path(&self.chain_to_root(cert)?)?;
         Ok(())
+    }
+
+    /// `cert` verifies as a CA on its chain to a held root.
+    fn verify_ca(&self, cert: &Certificate) -> Result<(), PkiError> {
+        cert.parent_id.ok_or(PkiError::IssuerNotFound)?;
+        let verified = self.verify_path(&self.chain_to_root(cert)?)?;
+        if !verified.is_ca {
+            return Err(PkiError::ChainInvalid(
+                "the certificate is not a CA".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// `[cert, issuer, ..., root]`: the issuers of `cert` the anchor holds,
+    /// ending at a held root. A chain that loops or exceeds the anchor's
+    /// depth is refused, as is one that ends anywhere but a root.
+    fn chain_to_root<'a>(
+        &'a self,
+        cert: &'a Certificate,
+    ) -> Result<Vec<&'a Certificate>, PkiError> {
+        let mut chain = vec![cert];
+        let mut current = cert;
+        while let Some(parent) = current.parent_id {
+            if chain.len() >= MAX_CHAIN_LENGTH || chain.iter().any(|c| c.id == parent) {
+                return Err(PkiError::ChainInvalid(
+                    "the issuer chain loops or is too long".to_string(),
+                ));
+            }
+            current = self.find_ca_by_id(parent)?;
+            chain.push(current);
+        }
+        if !self.root_cas.contains_key(&current.id.0.to_string()) {
+            return Err(PkiError::IssuerNotFound);
+        }
+        Ok(chain)
+    }
+
+    /// Verify `chain` as a whole (signatures, validity, basic constraints and
+    /// path length of every issuer), refusing it if any certificate in it is
+    /// revoked.
+    fn verify_path(
+        &self,
+        chain: &[&Certificate],
+    ) -> Result<chain_validator::VerificationResult, PkiError> {
+        let revoked = |c: &Certificate| {
+            self.crl.is_serial_revoked(&c.serial_hex)
+                || c.binding_id
+                    .as_deref()
+                    .is_some_and(|b| self.crl.is_binding_revoked(b))
+        };
+        if chain.iter().any(|c| revoked(c)) {
+            return Err(PkiError::Revoked);
+        }
+        let ders: Vec<&[u8]> = chain.iter().map(|c| c.der.as_slice()).collect();
+        chain_validator::verify_chain(&ders)
     }
 
     /// Get a mutable reference to the CRL cache.
@@ -214,128 +239,4 @@ impl Default for TrustAnchor {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::cert_builder;
-
-    fn setup_pki() -> (cert_builder::GeneratedCert, cert_builder::GeneratedCert) {
-        let root = cert_builder::build_root_ca("Test Root CA", 10).unwrap();
-        let instance = cert_builder::build_instance_ca(
-            "Test Instance CA",
-            "test_instance",
-            3,
-            &root.certificate.der,
-            &root.key_pair,
-            root.certificate.id,
-        )
-        .unwrap();
-        (root, instance)
-    }
-
-    #[test]
-    fn test_add_root_ca() {
-        let root = cert_builder::build_root_ca("Root CA", 10).unwrap();
-        let mut ta = TrustAnchor::new();
-        assert!(ta.add_root_ca(root.certificate).is_ok());
-        assert_eq!(ta.root_ca_count(), 1);
-    }
-
-    #[test]
-    fn test_add_instance_ca() {
-        let (root, instance) = setup_pki();
-        let mut ta = TrustAnchor::new();
-        ta.add_root_ca(root.certificate).unwrap();
-        assert!(ta.add_instance_ca(instance.certificate).is_ok());
-        assert_eq!(ta.instance_ca_count(), 1);
-        assert!(ta.get_instance_ca("test_instance").is_some());
-    }
-
-    #[test]
-    fn test_add_instance_ca_without_root_fails() {
-        let (_, instance) = setup_pki();
-        let mut ta = TrustAnchor::new();
-        // No root CA added.
-        assert!(ta.add_instance_ca(instance.certificate).is_err());
-    }
-
-    #[test]
-    fn test_verify_binding_cert() {
-        let (root, instance) = setup_pki();
-        let binding = cert_builder::build_binding_cert(
-            "bind_xyz",
-            "example.com",
-            "loa1",
-            30,
-            &instance.certificate.der,
-            &instance.key_pair,
-            instance.certificate.id,
-        )
-        .unwrap();
-
-        let mut ta = TrustAnchor::new();
-        ta.add_root_ca(root.certificate).unwrap();
-        ta.add_instance_ca(instance.certificate).unwrap();
-
-        assert!(ta.verify_leaf(&binding.certificate).is_ok());
-    }
-
-    #[test]
-    fn test_verify_revoked_binding() {
-        let (root, instance) = setup_pki();
-        let binding = cert_builder::build_binding_cert(
-            "bind_revoked",
-            "example.com",
-            "loa1",
-            30,
-            &instance.certificate.der,
-            &instance.key_pair,
-            instance.certificate.id,
-        )
-        .unwrap();
-
-        let mut ta = TrustAnchor::new();
-        ta.add_root_ca(root.certificate).unwrap();
-        ta.add_instance_ca(instance.certificate).unwrap();
-
-        // Revoke the binding.
-        ta.crl_mut().revoke_binding("bind_revoked".to_string());
-        let result = ta.verify_leaf(&binding.certificate);
-        assert!(matches!(result, Err(PkiError::Revoked)));
-    }
-
-    #[test]
-    fn test_verify_revoked_serial() {
-        let (root, instance) = setup_pki();
-        let binding = cert_builder::build_binding_cert(
-            "bind_ser",
-            "example.com",
-            "loa1",
-            30,
-            &instance.certificate.der,
-            &instance.key_pair,
-            instance.certificate.id,
-        )
-        .unwrap();
-
-        let mut ta = TrustAnchor::new();
-        ta.add_root_ca(root.certificate).unwrap();
-        ta.add_instance_ca(instance.certificate).unwrap();
-
-        ta.crl_mut()
-            .revoke_serial(binding.certificate.serial_hex.clone());
-        let result = ta.verify_leaf(&binding.certificate);
-        assert!(matches!(result, Err(PkiError::Revoked)));
-    }
-
-    #[test]
-    fn test_crl_cache() {
-        let mut crl = CrlCache::new();
-        assert!(!crl.is_serial_revoked("abc"));
-        crl.revoke_serial("abc".to_string());
-        assert!(crl.is_serial_revoked("abc"));
-
-        assert!(!crl.is_binding_revoked("bind_1"));
-        crl.revoke_binding("bind_1".to_string());
-        assert!(crl.is_binding_revoked("bind_1"));
-    }
-}
+mod tests;

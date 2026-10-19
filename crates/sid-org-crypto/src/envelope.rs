@@ -84,7 +84,7 @@ mod tests {
     #[test]
     fn wrap_unwrap_roundtrip() {
         let kek = random_key();
-        let plaintext = b"super secret CA priv key bytes".to_vec();
+        let plaintext = b"super secret key bytes".to_vec();
         let wrapped = wrap(&kek, &plaintext).unwrap();
         assert_ne!(wrapped, plaintext);
         let unwrapped = unwrap(&kek, &wrapped).unwrap();

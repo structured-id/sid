@@ -73,11 +73,11 @@ pub fn verify_chain(chain: &[&[u8]]) -> Result<VerificationResult, PkiError> {
             .verify_signature(Some(issuer.public_key()))
             .map_err(|e| PkiError::SignatureInvalid(format!("cert[{}]: {}", i, e)))?;
 
-        // Check issuer is CA with valid constraints.
-        // remaining_ca_depth = number of CA certs between this issuer and the leaf.
-        // Leaf (i=0) is not a CA, so we count only intermediate CAs.
-        let remaining_ca_depth = if i > 0 { i - 1 } else { 0 };
-        verify_ca_constraints(issuer, i + 1, remaining_ca_depth)?;
+        // Check issuer is CA with valid constraints. RFC 5280 §4.2.1.9: its
+        // pathLenConstraint bounds the intermediate certificates that follow
+        // it, here the certificates at positions 1..=i (the leaf at 0 is not
+        // counted).
+        verify_ca_constraints(issuer, i + 1, i)?;
     }
 
     // Check validity of all certificates.
@@ -181,137 +181,4 @@ fn verify_validity(cert: &X509Certificate<'_>, _position: usize) -> Result<(), P
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::cert_builder;
-
-    #[test]
-    fn test_verify_root_self_signed() {
-        let root = cert_builder::build_root_ca("Test Root", 10).unwrap();
-        let result = verify_chain(&[&root.certificate.der]);
-        assert!(result.is_ok());
-        let vr = result.unwrap();
-        assert!(vr.is_ca);
-        assert_eq!(vr.chain_length, 1);
-    }
-
-    #[test]
-    fn test_verify_two_level_chain() {
-        let root = cert_builder::build_root_ca("Root CA", 10).unwrap();
-        let instance = cert_builder::build_instance_ca(
-            "Instance CA",
-            "inst_1",
-            3,
-            &root.certificate.der,
-            &root.key_pair,
-            root.certificate.id,
-        )
-        .unwrap();
-
-        let result = verify_chain(&[&instance.certificate.der, &root.certificate.der]);
-        assert!(result.is_ok());
-        let vr = result.unwrap();
-        assert!(vr.is_ca);
-        assert_eq!(vr.chain_length, 2);
-    }
-
-    #[test]
-    fn test_verify_three_level_chain() {
-        let root = cert_builder::build_root_ca("Root CA", 10).unwrap();
-        let instance = cert_builder::build_instance_ca(
-            "Instance CA",
-            "inst_1",
-            3,
-            &root.certificate.der,
-            &root.key_pair,
-            root.certificate.id,
-        )
-        .unwrap();
-        let binding = cert_builder::build_binding_cert(
-            "bind_123",
-            "acme.corp",
-            "loa2",
-            30,
-            &instance.certificate.der,
-            &instance.key_pair,
-            instance.certificate.id,
-        )
-        .unwrap();
-
-        let result = verify_chain(&[
-            &binding.certificate.der,
-            &instance.certificate.der,
-            &root.certificate.der,
-        ]);
-        assert!(result.is_ok());
-        let vr = result.unwrap();
-        assert!(!vr.is_ca);
-        assert_eq!(vr.chain_length, 3);
-    }
-
-    #[test]
-    fn test_verify_wrong_order_fails() {
-        let root = cert_builder::build_root_ca("Root CA", 10).unwrap();
-        let instance = cert_builder::build_instance_ca(
-            "Instance CA",
-            "inst_1",
-            3,
-            &root.certificate.der,
-            &root.key_pair,
-            root.certificate.id,
-        )
-        .unwrap();
-
-        // Wrong order: root first, instance second.
-        let result = verify_chain(&[&root.certificate.der, &instance.certificate.der]);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_verify_issued_by() {
-        let root = cert_builder::build_root_ca("Root CA", 10).unwrap();
-        let instance = cert_builder::build_instance_ca(
-            "Instance CA",
-            "inst_1",
-            3,
-            &root.certificate.der,
-            &root.key_pair,
-            root.certificate.id,
-        )
-        .unwrap();
-
-        assert!(verify_issued_by(&instance.certificate.der, &root.certificate.der).is_ok());
-    }
-
-    #[test]
-    fn test_verify_unrelated_certs_fails() {
-        let root1 = cert_builder::build_root_ca("Root 1", 10).unwrap();
-        let root2 = cert_builder::build_root_ca("Root 2", 10).unwrap();
-        let instance = cert_builder::build_instance_ca(
-            "Instance CA",
-            "inst_1",
-            3,
-            &root1.certificate.der,
-            &root1.key_pair,
-            root1.certificate.id,
-        )
-        .unwrap();
-
-        // Instance was signed by root1, not root2.
-        let result = verify_issued_by(&instance.certificate.der, &root2.certificate.der);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_extract_subject_cn() {
-        let root = cert_builder::build_root_ca("My Root CA", 10).unwrap();
-        let cn = extract_subject_cn(&root.certificate.der).unwrap();
-        assert_eq!(cn, Some("My Root CA".to_string()));
-    }
-
-    #[test]
-    fn test_empty_chain_fails() {
-        let result = verify_chain(&[]);
-        assert!(result.is_err());
-    }
-}
+mod tests;
