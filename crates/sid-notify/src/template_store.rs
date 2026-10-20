@@ -128,7 +128,7 @@ impl TemplateStore {
         let mut contents = HashMap::new();
 
         // Standard variables available in all templates.
-        let standard_vars = vec![
+        let standard_vars = [
             TemplateVar {
                 name: "event_type".into(),
                 description: "Event type identifier".into(),
@@ -156,8 +156,31 @@ impl TemplateStore {
             },
         ];
 
+        // Variables a template reads beyond the standard ones.
+        let reset_vars = [
+            TemplateVar {
+                name: "data.link".into(),
+                description: "Link that continues the password reset".into(),
+                example: "https://sid.example.com/account/reset?session_id=...&token=...".into(),
+            },
+            TemplateVar {
+                name: "data.expires_minutes".into(),
+                description: "Minutes until the link expires".into(),
+                example: "30".into(),
+            },
+        ];
+        let extra_vars: HashMap<&str, &[TemplateVar]> =
+            HashMap::from([("password_reset", reset_vars.as_slice())]);
+
         // Map template names to trigger patterns and descriptions.
         let template_info: HashMap<&str, (&str, &str)> = HashMap::from([
+            (
+                "password_reset",
+                (
+                    sid_core::models::event::event_types::PASSWORD_RESET_REQUESTED,
+                    "Password reset link",
+                ),
+            ),
             (
                 "security_alert",
                 (
@@ -219,7 +242,11 @@ impl TemplateStore {
                     description: description.to_string(),
                     channels: channels.clone(),
                     trigger: trigger.to_string(),
-                    variables: standard_vars.clone(),
+                    variables: standard_vars
+                        .iter()
+                        .chain(extra_vars.get(name).copied().unwrap_or_default())
+                        .cloned()
+                        .collect(),
                 });
 
                 // Store default email content.
@@ -594,442 +621,10 @@ struct OverrideRow {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn test_engine() -> Arc<RwLock<TemplateEngine>> {
-        Arc::new(RwLock::new(TemplateEngine::with_default_ce_templates()))
-    }
-
-    #[tokio::test]
-    async fn test_list_all_defaults() {
-        let engine = test_engine();
-        let routing = RoutingTable::default_ce_rules();
-        let store = TemplateStore::new(&routing, engine, None).await.unwrap();
-        let templates = store.list_templates(None, false).await;
-        assert_eq!(templates.len(), 8);
-        assert!(templates.iter().all(|t| !t.customized));
-    }
-
-    #[tokio::test]
-    async fn test_list_customized_only_empty() {
-        let engine = test_engine();
-        let routing = RoutingTable::default_ce_rules();
-        let store = TemplateStore::new(&routing, engine, None).await.unwrap();
-        let templates = store.list_templates(None, true).await;
-        assert!(templates.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_get_default_template() {
-        let engine = test_engine();
-        let routing = RoutingTable::default_ce_rules();
-        let store = TemplateStore::new(&routing, engine, None).await.unwrap();
-        let result = store
-            .get_template("security_alert", Channel::Email, "en")
-            .await;
-        assert!(result.is_some());
-        let (content, is_customized, meta) = result.unwrap();
-        assert!(!is_customized);
-        assert!(content.subject.contains("Security Alert"));
-        assert_eq!(meta.template_id, "security_alert");
-    }
-
-    #[tokio::test]
-    async fn test_get_nonexistent_template() {
-        let engine = test_engine();
-        let routing = RoutingTable::default_ce_rules();
-        let store = TemplateStore::new(&routing, engine, None).await.unwrap();
-        let result = store
-            .get_template("nonexistent", Channel::Email, "en")
-            .await;
-        assert!(result.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_update_in_memory_only() {
-        let engine = test_engine();
-        let routing = RoutingTable::default_ce_rules();
-        let store = TemplateStore::new(&routing, engine, None).await.unwrap();
-
-        let content = StoredContent {
-            subject: "Custom Subject".into(),
-            html_body: "<p>Custom body</p>".into(),
-            text_body: "Custom body".into(),
-            sms_body: String::new(),
-            push_title: String::new(),
-            push_body: String::new(),
-            push_action_url: String::new(),
-            updated_at: Utc::now(),
-        };
-        store
-            .update_template("security_alert", Channel::Email, "en", content)
-            .await
-            .unwrap();
-
-        let (got, customized, _) = store
-            .get_template("security_alert", Channel::Email, "en")
-            .await
-            .unwrap();
-        assert!(customized);
-        assert_eq!(got.subject, "Custom Subject");
-    }
-
-    #[tokio::test]
-    async fn test_update_nonexistent_fails() {
-        let engine = test_engine();
-        let routing = RoutingTable::default_ce_rules();
-        let store = TemplateStore::new(&routing, engine, None).await.unwrap();
-
-        let content = StoredContent {
-            subject: "X".into(),
-            html_body: String::new(),
-            text_body: String::new(),
-            sms_body: String::new(),
-            push_title: String::new(),
-            push_body: String::new(),
-            push_action_url: String::new(),
-            updated_at: Utc::now(),
-        };
-        let err = store
-            .update_template("nonexistent", Channel::Email, "en", content)
-            .await;
-        assert!(err.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_reset_removes_override() {
-        let engine = test_engine();
-        let routing = RoutingTable::default_ce_rules();
-        let store = TemplateStore::new(&routing, engine, None).await.unwrap();
-
-        // Customize then reset.
-        let content = StoredContent {
-            subject: "Custom".into(),
-            html_body: "<p>Custom</p>".into(),
-            text_body: "Custom".into(),
-            sms_body: String::new(),
-            push_title: String::new(),
-            push_body: String::new(),
-            push_action_url: String::new(),
-            updated_at: Utc::now(),
-        };
-        store
-            .update_template("security_alert", Channel::Email, "en", content)
-            .await
-            .unwrap();
-        store
-            .reset_template("security_alert", Channel::Email, "en")
-            .await
-            .unwrap();
-
-        let (got, customized, _) = store
-            .get_template("security_alert", Channel::Email, "en")
-            .await
-            .unwrap();
-        assert!(!customized);
-        assert!(got.subject.contains("Security Alert"));
-    }
-
-    #[tokio::test]
-    async fn test_render_preview_email() {
-        let content = StoredContent {
-            subject: "Alert: {event_type}".into(),
-            html_body: "<p>Hello {name}</p>".into(),
-            text_body: "Hello {name}".into(),
-            sms_body: String::new(),
-            push_title: String::new(),
-            push_body: String::new(),
-            push_action_url: String::new(),
-            updated_at: Utc::now(),
-        };
-        let mut vars = HashMap::new();
-        vars.insert("event_type".into(), "sid.security.brute_force.v1".into());
-        vars.insert("name".into(), "Alice".into());
-
-        let (subj, body, text) = TemplateStore::render_preview(&content, Channel::Email, &vars);
-        assert_eq!(subj, "Alert: sid.security.brute_force.v1");
-        assert_eq!(body, "<p>Hello Alice</p>");
-        assert_eq!(text, "Hello Alice");
-    }
-
-    #[tokio::test]
-    async fn test_render_preview_sms() {
-        let content = StoredContent {
-            subject: String::new(),
-            html_body: String::new(),
-            text_body: String::new(),
-            sms_body: "Code: {code}".into(),
-            push_title: String::new(),
-            push_body: String::new(),
-            push_action_url: String::new(),
-            updated_at: Utc::now(),
-        };
-        let mut vars = HashMap::new();
-        vars.insert("code".into(), "123456".into());
-
-        let (subj, body, _) = TemplateStore::render_preview(&content, Channel::Sms, &vars);
-        assert!(subj.is_empty());
-        assert_eq!(body, "Code: 123456");
-    }
-
-    #[tokio::test]
-    async fn test_available_locales_default() {
-        let engine = test_engine();
-        let routing = RoutingTable::default_ce_rules();
-        let store = TemplateStore::new(&routing, engine, None).await.unwrap();
-        let locales = store.available_locales("security_alert").await;
-        assert_eq!(locales, vec!["en"]);
-    }
-
-    #[tokio::test]
-    async fn test_list_filter_by_channel() {
-        let engine = test_engine();
-        let routing = RoutingTable::default_ce_rules();
-        let store = TemplateStore::new(&routing, engine, None).await.unwrap();
-
-        // All defaults are email-only, so filtering by SMS should return empty.
-        let sms_templates = store.list_templates(Some(Channel::Sms), false).await;
-        assert!(sms_templates.is_empty());
-
-        // Email filter should return all 7.
-        let email_templates = store.list_templates(Some(Channel::Email), false).await;
-        assert_eq!(email_templates.len(), 8);
-    }
-}
+mod tests;
 
 /// PostgreSQL integration tests.
 /// Require: `cd sid && docker compose -f docker-compose.test.yml up -d` (port 54399).
 /// Each test uses a unique template_id suffix to avoid parallel test interference.
 #[cfg(test)]
-mod pg_tests {
-    use super::*;
-
-    const TEST_DB_URL: &str = "postgres://sid:sid_dev@localhost:54399/sid";
-
-    async fn pg_pool() -> Option<sqlx::PgPool> {
-        sqlx::PgPool::connect(TEST_DB_URL).await.ok()
-    }
-
-    async fn cleanup_prefix(pool: &sqlx::PgPool, prefix: &str) {
-        let _ = sqlx::query("DELETE FROM notification_template_overrides WHERE template_id = $1")
-            .bind(prefix)
-            .execute(pool)
-            .await;
-    }
-
-    fn test_engine() -> Arc<RwLock<TemplateEngine>> {
-        Arc::new(RwLock::new(TemplateEngine::with_default_ce_templates()))
-    }
-
-    #[tokio::test]
-    async fn test_pg_update_persists_and_loads() {
-        let Some(pool) = pg_pool().await else {
-            eprintln!("SKIP: PostgreSQL not available at {TEST_DB_URL}");
-            return;
-        };
-        cleanup_prefix(&pool, "security_alert").await;
-
-        let routing = RoutingTable::default_ce_rules();
-
-        // Create store, update a template.
-        {
-            let store = TemplateStore::new(&routing, test_engine(), Some(pool.clone()))
-                .await
-                .unwrap();
-
-            let content = StoredContent {
-                subject: "PG Custom Subject".into(),
-                html_body: "<p>PG Custom</p>".into(),
-                text_body: "PG Custom".into(),
-                sms_body: String::new(),
-                push_title: String::new(),
-                push_body: String::new(),
-                push_action_url: String::new(),
-                updated_at: Utc::now(),
-            };
-            store
-                .update_template("security_alert", Channel::Email, "en", content)
-                .await
-                .unwrap();
-        }
-
-        // Create a NEW store from the same pool — it should load the override.
-        {
-            let store2 = TemplateStore::new(&routing, test_engine(), Some(pool.clone()))
-                .await
-                .unwrap();
-
-            let (got, customized, _) = store2
-                .get_template("security_alert", Channel::Email, "en")
-                .await
-                .unwrap();
-            assert!(customized, "override should be loaded from DB");
-            assert_eq!(got.subject, "PG Custom Subject");
-        }
-
-        cleanup_prefix(&pool, "security_alert").await;
-    }
-
-    #[tokio::test]
-    async fn test_pg_reset_removes_override() {
-        let Some(pool) = pg_pool().await else {
-            eprintln!("SKIP: PostgreSQL not available at {TEST_DB_URL}");
-            return;
-        };
-        cleanup_prefix(&pool, "new_session").await;
-
-        let routing = RoutingTable::default_ce_rules();
-        let store = TemplateStore::new(&routing, test_engine(), Some(pool.clone()))
-            .await
-            .unwrap();
-
-        // Customize.
-        let content = StoredContent {
-            subject: "Temp".into(),
-            html_body: "<p>Temp</p>".into(),
-            text_body: "Temp".into(),
-            sms_body: String::new(),
-            push_title: String::new(),
-            push_body: String::new(),
-            push_action_url: String::new(),
-            updated_at: Utc::now(),
-        };
-        store
-            .update_template("new_session", Channel::Email, "en", content)
-            .await
-            .unwrap();
-
-        // Reset.
-        store
-            .reset_template("new_session", Channel::Email, "en")
-            .await
-            .unwrap();
-
-        // Verify DB is clean — new store should NOT see override.
-        let store2 = TemplateStore::new(&routing, test_engine(), Some(pool.clone()))
-            .await
-            .unwrap();
-        let (_, customized, _) = store2
-            .get_template("new_session", Channel::Email, "en")
-            .await
-            .unwrap();
-        assert!(!customized, "override should be deleted from DB");
-
-        cleanup_prefix(&pool, "new_session").await;
-    }
-
-    #[tokio::test]
-    async fn test_pg_upsert_idempotent() {
-        let Some(pool) = pg_pool().await else {
-            eprintln!("SKIP: PostgreSQL not available at {TEST_DB_URL}");
-            return;
-        };
-        cleanup_prefix(&pool, "cert_expiry").await;
-
-        let routing = RoutingTable::default_ce_rules();
-        let store = TemplateStore::new(&routing, test_engine(), Some(pool.clone()))
-            .await
-            .unwrap();
-
-        let mk_content = |subject: &str| StoredContent {
-            subject: subject.into(),
-            html_body: String::new(),
-            text_body: String::new(),
-            sms_body: String::new(),
-            push_title: String::new(),
-            push_body: String::new(),
-            push_action_url: String::new(),
-            updated_at: Utc::now(),
-        };
-
-        // Update twice with different content.
-        store
-            .update_template("cert_expiry", Channel::Email, "en", mk_content("v1"))
-            .await
-            .unwrap();
-        store
-            .update_template("cert_expiry", Channel::Email, "en", mk_content("v2"))
-            .await
-            .unwrap();
-
-        // Should see v2.
-        let (got, _, _) = store
-            .get_template("cert_expiry", Channel::Email, "en")
-            .await
-            .unwrap();
-        assert_eq!(got.subject, "v2");
-
-        // DB should have exactly 1 row.
-        let count: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM notification_template_overrides WHERE template_id = 'cert_expiry'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(count.0, 1);
-
-        cleanup_prefix(&pool, "cert_expiry").await;
-    }
-
-    #[tokio::test]
-    async fn test_pg_multi_locale_override() {
-        let Some(pool) = pg_pool().await else {
-            eprintln!("SKIP: PostgreSQL not available at {TEST_DB_URL}");
-            return;
-        };
-        cleanup_prefix(&pool, "mfa_change").await;
-
-        let routing = RoutingTable::default_ce_rules();
-        let store = TemplateStore::new(&routing, test_engine(), Some(pool.clone()))
-            .await
-            .unwrap();
-
-        let mk = |subject: &str| StoredContent {
-            subject: subject.into(),
-            html_body: String::new(),
-            text_body: String::new(),
-            sms_body: String::new(),
-            push_title: String::new(),
-            push_body: String::new(),
-            push_action_url: String::new(),
-            updated_at: Utc::now(),
-        };
-
-        store
-            .update_template("mfa_change", Channel::Email, "en", mk("MFA English"))
-            .await
-            .unwrap();
-        store
-            .update_template("mfa_change", Channel::Email, "fr", mk("MFA French"))
-            .await
-            .unwrap();
-
-        // Verify both locales.
-        let (en, _, _) = store
-            .get_template("mfa_change", Channel::Email, "en")
-            .await
-            .unwrap();
-        assert_eq!(en.subject, "MFA English");
-
-        let (fr, _, _) = store
-            .get_template("mfa_change", Channel::Email, "fr")
-            .await
-            .unwrap();
-        assert_eq!(fr.subject, "MFA French");
-
-        // Available locales should include both.
-        let locales = store.available_locales("mfa_change").await;
-        assert!(locales.contains(&"en".to_string()));
-        assert!(locales.contains(&"fr".to_string()));
-
-        // List should show customized.
-        let list = store.list_templates(None, true).await;
-        assert!(
-            list.iter()
-                .any(|t| t.template_id == "mfa_change" && t.customized)
-        );
-
-        cleanup_prefix(&pool, "mfa_change").await;
-    }
-}
+mod pg_tests;

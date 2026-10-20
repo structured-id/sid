@@ -244,7 +244,7 @@ async fn test_grpc_list_templates_returns_all_defaults() {
     });
     let resp = svc.list_templates(req).await.unwrap();
     let templates = resp.into_inner().templates;
-    assert_eq!(templates.len(), 8);
+    assert_eq!(templates.len(), 9);
     assert!(templates.iter().all(|t| !t.customized));
     assert!(templates.iter().all(|t| !t.template_id.is_empty()));
     assert!(templates.iter().all(|t| !t.trigger.is_empty()));
@@ -258,7 +258,7 @@ async fn test_grpc_list_templates_filter_email() {
         customized_only: false,
     });
     let resp = svc.list_templates(req).await.unwrap();
-    assert_eq!(resp.into_inner().templates.len(), 8);
+    assert_eq!(resp.into_inner().templates.len(), 9);
 }
 
 #[tokio::test]
