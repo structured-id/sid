@@ -164,12 +164,13 @@ async fn stored_enrollment_policy(
 /// policy lock, decide it by the policy stored now and spend its invite
 /// when the mode asks for one, recording that use in the invite's audit
 /// chain as `registration`'s actor; returns the source that same policy
-/// records. A refusal writes nothing.
+/// records and the invite spent, whose redemption the registration writes
+/// once its Profile exists. A refusal writes nothing.
 async fn admit_registration(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     gate: &sid_core::models::EnrollmentGate,
     registration: &sid_core::models::AuditEntry,
-) -> SidResult<Option<sid_core::models::RegistrationSource>> {
+) -> SidResult<(Option<sid_core::models::RegistrationSource>, Option<Uuid>)> {
     use sid_core::enrollment::EnrollmentDenialReason;
     sqlx::query(crate::LOCK_ENROLLMENT_POLICY_FOR_REGISTRATION_SQL)
         .execute(&mut **tx)
@@ -180,7 +181,7 @@ async fn admit_registration(
         .admit(stored)
         .map_err(SidError::RegistrationRestricted)?;
     let Some(code) = admission.invite else {
-        return Ok(admission.source());
+        return Ok((admission.source(), None));
     };
     // One use, only of a live invite: the condition and the increment are
     // one statement, so concurrent registrations never overspend it.
@@ -208,7 +209,7 @@ async fn admit_registration(
     )
     .await
     .map_err(|e| SidError::Storage(format!("Audit log failed: {e}")))?;
-    Ok(admission.source())
+    Ok((admission.source(), Some(invite)))
 }
 
 /// Whether the policy stored now tracks registration sources, read in `tx`
@@ -276,6 +277,14 @@ pub struct PostgresBackend {
     #[allow(dead_code)]
     schema: Option<String>,
     audit_log: Option<Arc<dyn AuditLog>>,
+}
+
+/// The columns an invite row is read with.
+macro_rules! invite_columns {
+    () => {
+        "id, code, created_by, created_by_machine, created_by_name, metadata, max_uses, \
+         use_count, expires_at, active, created_at"
+    };
 }
 
 /// An invite row's status, computed in the order of `Invite::status`.
@@ -1861,9 +1870,12 @@ impl StorageBackend for PostgresBackend {
         // A self-registration records the source its admitting policy
         // decides; one recorded while tracked asks the policy here.
         let decided_source;
+        let mut spent_invite = None;
         let source = match (enrollment, source_recording) {
             (Some(gate), _) => {
-                decided_source = admit_registration(&mut tx, gate, &audit.audit).await?;
+                let (admitted, invite) = admit_registration(&mut tx, gate, &audit.audit).await?;
+                decided_source = admitted;
+                spent_invite = invite;
                 &decided_source
             }
             (None, sid_core::models::SourceRecording::WhilePolicyTracks) => {
@@ -1931,6 +1943,16 @@ impl StorageBackend for PostgresBackend {
         }
 
         directory::insert_profile(&mut tx, profile).await?;
+
+        // The invite this registration spent names the Profile it created.
+        if let Some(invite) = spent_invite {
+            sqlx::query("INSERT INTO invite_redemptions (invite_id, profile_id) VALUES ($1, $2)")
+                .bind(invite)
+                .bind(profile.id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| insert_error("invite redemption", e))?;
+        }
 
         if let Some(email) = email {
             sqlx::query(
@@ -7674,13 +7696,18 @@ impl StorageBackend for PostgresBackend {
             .begin()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
+        let (by_profile, by_machine) = match invite.created_by {
+            sid_core::models::InviteCreator::Profile(id) => (Some(id), None),
+            sid_core::models::InviteCreator::MachineUser(id) => (None, Some(id)),
+        };
         sqlx::query(
-            "INSERT INTO invites (id, code, created_by, created_by_name, metadata, max_uses, use_count, expires_at, active, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+            "INSERT INTO invites (id, code, created_by, created_by_machine, created_by_name, metadata, max_uses, use_count, expires_at, active, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
         )
         .bind(invite.id.0)
         .bind(&invite.code)
-        .bind(invite.created_by)
+        .bind(by_profile)
+        .bind(by_machine)
         .bind(&invite.created_by_name)
         .bind(metadata)
         .bind(count("max uses", invite.max_uses)?)
@@ -7699,9 +7726,11 @@ impl StorageBackend for PostgresBackend {
     }
 
     async fn get_invite(&self, id: InviteId) -> SidResult<Option<Invite>> {
-        let row = sqlx::query_as::<_, crate::pg_row::InviteRow>(
-            "SELECT id, code, created_by, created_by_name, metadata, max_uses, use_count, expires_at, active, created_at FROM invites WHERE id = $1"
-        )
+        let row = sqlx::query_as::<_, crate::pg_row::InviteRow>(concat!(
+            "SELECT ",
+            invite_columns!(),
+            " FROM invites WHERE id = $1"
+        ))
         .bind(id.0)
         .fetch_optional(&self.pool)
         .await
@@ -7711,9 +7740,11 @@ impl StorageBackend for PostgresBackend {
 
     async fn get_invite_by_code(&self, code: &str) -> SidResult<Option<Invite>> {
         let normalized = code.trim().to_uppercase();
-        let row = sqlx::query_as::<_, crate::pg_row::InviteRow>(
-            "SELECT id, code, created_by, created_by_name, metadata, max_uses, use_count, expires_at, active, created_at FROM invites WHERE UPPER(code) = $1"
-        )
+        let row = sqlx::query_as::<_, crate::pg_row::InviteRow>(concat!(
+            "SELECT ",
+            invite_columns!(),
+            " FROM invites WHERE UPPER(code) = $1"
+        ))
         .bind(&normalized)
         .fetch_optional(&self.pool)
         .await
@@ -7730,8 +7761,9 @@ impl StorageBackend for PostgresBackend {
         // The filter applies before paging, so a page holds `limit`
         // matching invites rather than the matching part of `limit` rows.
         let rows = sqlx::query_as::<_, crate::pg_row::InviteRow>(concat!(
-            "SELECT id, code, created_by, created_by_name, metadata, max_uses, use_count, expires_at, active, created_at \
-             FROM invites WHERE ($1::text IS NULL OR ",
+            "SELECT ",
+            invite_columns!(),
+            " FROM invites WHERE ($1::text IS NULL OR ",
             invite_status_sql!(),
             " = $1) AND ($4::text IS NULL OR code ILIKE $4 ESCAPE '\\' \
              OR created_by_name ILIKE $4 ESCAPE '\\') \
@@ -7762,6 +7794,33 @@ impl StorageBackend for PostgresBackend {
         u64::try_from(row.0).map_err(|e| SidError::Storage(e.to_string()))
     }
 
+    async fn list_invite_redemptions(
+        &self,
+        id: InviteId,
+        offset: u64,
+        limit: u64,
+    ) -> SidResult<Vec<sid_core::models::InviteRedemption>> {
+        let rows: Vec<(ProfileId, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+            "SELECT profile_id, redeemed_at FROM invite_redemptions
+             WHERE invite_id = $1 ORDER BY redeemed_at, profile_id LIMIT $2 OFFSET $3",
+        )
+        .bind(id.0)
+        .bind(i64::try_from(limit).map_err(|e| SidError::Storage(e.to_string()))?)
+        .bind(i64::try_from(offset).map_err(|e| SidError::Storage(e.to_string()))?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(format!("list invite redemptions: {e}")))?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(profile_id, redeemed_at)| sid_core::models::InviteRedemption {
+                    profile_id,
+                    redeemed_at,
+                },
+            )
+            .collect())
+    }
+
     async fn try_use_invite(
         &self,
         id: InviteId,
@@ -7772,13 +7831,14 @@ impl StorageBackend for PostgresBackend {
             .begin()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
-        let row = sqlx::query_as::<_, crate::pg_row::InviteRow>(
+        let row = sqlx::query_as::<_, crate::pg_row::InviteRow>(concat!(
             "UPDATE invites SET use_count = use_count + 1
              WHERE id = $1 AND active = true
                AND (max_uses = 0 OR use_count < max_uses)
                AND (expires_at IS NULL OR expires_at > NOW())
-             RETURNING id, code, created_by, created_by_name, metadata, max_uses, use_count, expires_at, active, created_at"
-        )
+             RETURNING ",
+            invite_columns!()
+        ))
         .bind(id.0)
         .fetch_optional(&mut *tx)
         .await

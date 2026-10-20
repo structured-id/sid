@@ -1200,6 +1200,10 @@ impl TestServices {
             storage.as_ref(),
         ))
         .expect("permission checker role");
+        futures::executor::block_on(sid_authz::builtin::ensure_invite_issuer_role(
+            storage.as_ref(),
+        ))
+        .expect("invite issuer role");
         let issuers = Arc::new(sid_authn::issuer::IssuerRegistry::new(
             storage.clone(),
             test_key_manager(),

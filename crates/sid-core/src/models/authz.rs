@@ -136,7 +136,38 @@ impl Role {
         role.permissions = SCIM_ACTIONS.iter().map(|a| a.to_string()).collect();
         role
     }
+
+    /// The built-in role of the system project granting every invite action,
+    /// assigned to a service on the enrollment API resource.
+    pub fn invite_issuer() -> Self {
+        let mut role = Self::new(ProjectId::system(), INVITE_ISSUER_ROLE, "Invite issuer");
+        role.id = RoleId(INVITE_ISSUER_ROLE_ID);
+        role.description = Some("Issues, reads and revokes registration invites".into());
+        role.permissions = INVITE_ACTIONS.iter().map(|a| a.to_string()).collect();
+        role
+    }
 }
+
+/// Invite actions a service can be granted on the enrollment API resource.
+pub const INVITE_CREATE: &str = "enrollment.invite.create";
+/// Reading invites, with the registrations that used them.
+pub const INVITE_READ: &str = "enrollment.invite.read";
+pub const INVITE_REVOKE: &str = "enrollment.invite.revoke";
+
+/// Every invite action.
+pub const INVITE_ACTIONS: [&str; 3] = [INVITE_CREATE, INVITE_READ, INVITE_REVOKE];
+
+/// Whether `action` is an invite action: held by a machine user only, on
+/// one protected resource, since only such a caller can exercise it.
+pub fn is_invite_action(action: &str) -> bool {
+    INVITE_ACTIONS.contains(&action)
+}
+
+/// Key of the built-in role holding every invite action.
+pub const INVITE_ISSUER_ROLE: &str = "invite-issuer";
+
+/// Id of the built-in invite issuer role, fixed like the token inspector's.
+const INVITE_ISSUER_ROLE_ID: Uuid = Uuid::from_u128(0x0000_0000_0000_0000_0000_0000_0000_0004);
 
 /// SCIM directory actions a provisioning connector can be granted on its
 /// organization's directory resource. Every one starts with

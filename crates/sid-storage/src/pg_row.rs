@@ -1735,7 +1735,8 @@ impl ScimOutboundDlqRow {
 pub struct InviteRow {
     pub id: Uuid,
     pub code: String,
-    pub created_by: ProfileId,
+    pub created_by: Option<ProfileId>,
+    pub created_by_machine: Option<models::MachineUserId>,
     pub created_by_name: String,
     pub metadata: serde_json::Value,
     pub max_uses: i32,
@@ -1750,10 +1751,21 @@ impl InviteRow {
         let metadata: std::collections::HashMap<String, String> =
             serde_json::from_value(self.metadata)
                 .map_err(|e| SidError::Storage(format!("invite metadata: {e}")))?;
+        // The table's check names exactly one creator.
+        let created_by = match (self.created_by, self.created_by_machine) {
+            (Some(profile), None) => models::InviteCreator::Profile(profile),
+            (None, Some(machine)) => models::InviteCreator::MachineUser(machine),
+            _ => {
+                return Err(SidError::Storage(format!(
+                    "invite {} names no single creator",
+                    self.id
+                )));
+            }
+        };
         Ok(models::Invite {
             id: InviteId(self.id),
             code: self.code,
-            created_by: self.created_by,
+            created_by,
             created_by_name: self.created_by_name,
             metadata,
             max_uses: self.max_uses as u32,

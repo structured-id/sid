@@ -637,6 +637,12 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         sid_authn::issuer::ensure_authorization_api_resource(storage.as_ref(), &local_issuer)
             .await
             .context("installation authorization API resource")?;
+    // The enrollment API resource: invite-issuing services hold the invite
+    // actions on it and their tokens target it.
+    let enrollment_api =
+        sid_authn::issuer::ensure_enrollment_api_resource(storage.as_ref(), &local_issuer)
+            .await
+            .context("installation enrollment API resource")?;
     // The SCIM directory resource: provisioning connectors hold their roles
     // on it and their tokens target it.
     #[cfg(feature = "scim")]
@@ -686,6 +692,10 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
     sid_authz::builtin::ensure_permission_checker_role(storage.as_ref())
         .await
         .context("permission checker role")?;
+    // The built-in role assigned to services that issue invites.
+    sid_authz::builtin::ensure_invite_issuer_role(storage.as_ref())
+        .await
+        .context("invite issuer role")?;
     let issuers = Arc::new(sid_authn::issuer::IssuerRegistry::new(
         storage.clone(),
         key_manager.clone(),
@@ -1022,13 +1032,29 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         jwt.clone(),
         revocation_cache.clone(),
     ));
+    // Invite-issuing services authenticate with their own tokens for the
+    // enrollment API.
+    let invite_services = crate::grpc::enrollment_service::InviteServices {
+        engine: authz_engine.clone(),
+        tokens: Arc::new(
+            sid_authn::resource_token::ResourceTokenVerifier::new(
+                issuers.clone(),
+                local_issuer.clone(),
+                enrollment_api.indicator.clone(),
+            )
+            .await
+            .context("enrollment API token verifier")?,
+        ),
+        resource: enrollment_api.id,
+    };
     let enrollment_svc = Arc::new(
         crate::grpc::enrollment_service::EnrollmentServiceImpl::new(
             storage.clone(),
             jwt.clone(),
             revocation_cache.clone(),
         )
-        .with_pinned_mode(enrollment_pin),
+        .with_pinned_mode(enrollment_pin)
+        .with_invite_services(invite_services),
     );
     let security_svc = Arc::new(crate::grpc::security_service::SecurityServiceImpl::new(
         storage.clone(),

@@ -543,6 +543,60 @@ async fn test_service_actions_are_held_by_services_only() {
     }
 }
 
+/// The invite actions are held by a machine user only: a Profile, a group
+/// member or an OAuth client given the same role on the enrollment resource
+/// is refused, as the invite RPCs refuse them, so a permission answer never
+/// says Allow for a caller the receiver turns away.
+#[tokio::test]
+async fn test_invite_actions_are_held_by_machine_users_only() {
+    let (engine, storage, project_id) = setup().await;
+    let role = create_test_role(project_id, "invite-like", &INVITE_ACTIONS);
+    storage
+        .create_role(&role, AuditEntry::system("test", "test").into())
+        .await
+        .unwrap();
+    let resource = ResourceId::generate();
+    let profile = ProfileId::generate();
+    let machine = MachineUserId::generate();
+    for principal in [
+        RoleAssignmentPrincipal::Profile(profile),
+        RoleAssignmentPrincipal::MachineUser(machine),
+        RoleAssignmentPrincipal::OAuthClient("onboarding".into()),
+    ] {
+        assign(
+            &storage,
+            &RoleAssignment::new(principal, role.id).on_resource(resource),
+        )
+        .await;
+    }
+    let ask = |subject: String, action: &str| AuthzCheckRequest {
+        subject,
+        action: action.into(),
+        resource: format!("oauth_resource:{resource}"),
+        context: HashMap::new(),
+    };
+    for action in INVITE_ACTIONS {
+        for refused in [format!("user:{profile}"), "oauth_client:onboarding".into()] {
+            assert!(
+                !engine
+                    .check(&ask(refused.clone(), action))
+                    .await
+                    .unwrap()
+                    .is_allowed(),
+                "{refused} was allowed {action}"
+            );
+        }
+        assert!(
+            engine
+                .check(&ask(format!("machine:{machine}"), action))
+                .await
+                .unwrap()
+                .is_allowed(),
+            "machine {action}"
+        );
+    }
+}
+
 // ── Token inspection on a protected resource ─────────────────
 
 fn inspect(subject: String, resource: ResourceId) -> AuthzCheckRequest {

@@ -288,6 +288,20 @@ pub async fn test_invite_spent_once_by_concurrent_registrations(
     );
     let stored = |id| async move { backend.get_profile(id).await.unwrap().is_some() };
     assert_ne!(stored(a.profile.id).await, stored(b.profile.id).await);
+    // The one redemption names the registration that won.
+    let winner = if ra.is_ok() {
+        a.profile.id
+    } else {
+        b.profile.id
+    };
+    let redeemed: Vec<_> = backend
+        .list_invite_redemptions(invite.id, 0, 100)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r.profile_id)
+        .collect();
+    assert_eq!(redeemed, vec![winner]);
     assert_eq!(
         backend
             .get_invite(invite.id)
@@ -311,6 +325,90 @@ pub async fn test_invite_spent_once_by_concurrent_registrations(
         &backend.register_profile(&unknown, test_audit()).await
     ));
     assert!(!stored(unknown.profile.id).await);
+}
+
+/// An invite a machine user created reads back with that creator, and each
+/// registration with it records the Profile it created, oldest first. A
+/// registration refused after the invite was spent (its username is taken)
+/// rolls the use back with it: no redemption, no use counted.
+pub async fn test_invite_creator_and_redemptions(backend: &dyn StorageBackend) {
+    use sid_core::models::InviteCreator;
+    let tag = Uuid::now_v7().simple().to_string();
+    let machine = super::machine::stored_machine_user(backend).await;
+    let mut invite = test_invite(sid_core::models::ProfileId::generate(), 3);
+    invite.created_by = InviteCreator::MachineUser(machine.id);
+    backend.create_invite(&invite, test_audit()).await.unwrap();
+    let read = backend.get_invite(invite.id).await.unwrap().unwrap();
+    assert_eq!(read.created_by, InviteCreator::MachineUser(machine.id));
+    assert!(
+        backend
+            .list_invite_redemptions(invite.id, 0, 100)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    backend
+        .set_enrollment_policy(
+            &policy(EnrollmentMode::InviteOnly, &[]),
+            REPLACE,
+            test_audit(),
+        )
+        .await
+        .unwrap();
+    let first = gated(
+        &format!("red_a_{}", &tag[..12]),
+        plain_gate(Some(&invite.code)),
+    );
+    let second = gated(
+        &format!("red_b_{}", &tag[..12]),
+        plain_gate(Some(&invite.code)),
+    );
+    backend
+        .register_profile(&first, test_audit())
+        .await
+        .unwrap();
+    backend
+        .register_profile(&second, test_audit())
+        .await
+        .unwrap();
+
+    // The first registration's username again: refused after its invite use.
+    let taken = gated(
+        &format!("red_a_{}", &tag[..12]),
+        plain_gate(Some(&invite.code)),
+    );
+    assert!(matches!(
+        backend.register_profile(&taken, test_audit()).await,
+        Err(sid_core::Error::Conflict(_))
+    ));
+
+    let page = |offset, limit| async move {
+        backend
+            .list_invite_redemptions(invite.id, offset, limit)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.profile_id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        page(0, 100).await,
+        vec![first.profile.id, second.profile.id]
+    );
+    // Paged one at a time, each redemption once, in the same order.
+    assert_eq!(page(0, 1).await, vec![first.profile.id]);
+    assert_eq!(page(1, 1).await, vec![second.profile.id]);
+    assert!(page(2, 1).await.is_empty());
+    assert_eq!(
+        backend
+            .get_invite(invite.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .use_count,
+        2
+    );
 }
 
 fn policy(mode: EnrollmentMode, allowed_domains: &[&str]) -> EnrollmentPolicy {

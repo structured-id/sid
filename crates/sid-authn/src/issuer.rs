@@ -183,6 +183,31 @@ pub async fn ensure_authorization_api_resource(
     .await
 }
 
+/// The enrollment API of the issuer at `issuer_url`: the resource indicator
+/// an invite-issuing service's own token targets.
+pub fn enrollment_api_endpoint(issuer_url: &str) -> String {
+    format!("{issuer_url}/enrollment")
+}
+
+/// The registered enrollment API resource of `issuer`, created on first use
+/// in the system project. A service issuing invites authenticates with a
+/// token for it and holds the invite actions on it; its existence grants
+/// nobody anything.
+pub async fn ensure_enrollment_api_resource(
+    storage: &dyn StorageBackend,
+    issuer: &OidcIssuer,
+) -> SidResult<sid_core::models::ProtectedResource> {
+    ensure_issuer_resource(
+        storage,
+        issuer,
+        "Enrollment API",
+        &enrollment_api_endpoint(&issuer.canonical_url),
+        &sid_core::models::INVITE_ACTIONS,
+        "enrollment_api_resource.created",
+    )
+    .await
+}
+
 /// The resource of `issuer` at `endpoint`, registered with `scopes` under a
 /// system application named `name` when it does not exist yet.
 async fn ensure_issuer_resource(

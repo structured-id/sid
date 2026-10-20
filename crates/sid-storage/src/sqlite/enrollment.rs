@@ -5,15 +5,15 @@ use super::{SqliteBackend, col, dt_col, dt_col_opt, fmt_dt, fmt_dt_opt, insert_e
 use sid_core::{
     Error as SidError, Result as SidResult,
     models::{
-        Invite, InviteFilter, InviteId, MutationContext, ProfileId, RegistrationSource,
-        RegistrationSourceType, UtmParams,
+        Invite, InviteCreator, InviteFilter, InviteId, InviteRedemption, MachineUserId,
+        MutationContext, ProfileId, RegistrationSource, RegistrationSourceType, UtmParams,
     },
 };
 
 /// The columns an invite is read from.
 macro_rules! invite_columns {
     () => {
-        "id, code, created_by, created_by_name, metadata, max_uses, use_count, expires_at, active, created_at"
+        "id, code, created_by, created_by_machine, created_by_name, metadata, max_uses, use_count, expires_at, active, created_at"
     };
 }
 
@@ -30,10 +30,25 @@ macro_rules! invite_status_sql {
 
 fn row_to_invite(row: &sqlx::sqlite::SqliteRow) -> SidResult<Invite> {
     let metadata: String = col(row, "metadata")?;
+    let id = InviteId(uuid_col(row, "id")?);
+    // The table's check names exactly one creator.
+    let created_by = match (
+        col::<Option<ProfileId>>(row, "created_by")?,
+        col::<Option<MachineUserId>>(row, "created_by_machine")?,
+    ) {
+        (Some(profile), None) => InviteCreator::Profile(profile),
+        (None, Some(machine)) => InviteCreator::MachineUser(machine),
+        _ => {
+            return Err(SidError::Storage(format!(
+                "invite {} names no single creator",
+                id.0
+            )));
+        }
+    };
     Ok(Invite {
-        id: InviteId(uuid_col(row, "id")?),
+        id,
         code: col(row, "code")?,
-        created_by: col(row, "created_by")?,
+        created_by,
         created_by_name: col(row, "created_by_name")?,
         metadata: serde_json::from_str(&metadata)
             .map_err(|e| SidError::Storage(format!("invite metadata: {e}")))?,
@@ -101,14 +116,19 @@ impl SqliteBackend {
     ) -> SidResult<()> {
         let metadata = serde_json::to_string(&invite.metadata)
             .map_err(|e| SidError::Storage(format!("invite metadata: {e}")))?;
+        let (by_profile, by_machine) = match invite.created_by {
+            InviteCreator::Profile(id) => (Some(id), None),
+            InviteCreator::MachineUser(id) => (None, Some(id)),
+        };
         let mut tx = self.begin_write().await?;
         sqlx::query(
-            "INSERT INTO invites (id, code, created_by, created_by_name, metadata, max_uses, use_count, expires_at, active, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO invites (id, code, created_by, created_by_machine, created_by_name, metadata, max_uses, use_count, expires_at, active, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(invite.id.0.to_string())
         .bind(&invite.code)
-        .bind(invite.created_by)
+        .bind(by_profile)
+        .bind(by_machine)
         .bind(&invite.created_by_name)
         .bind(metadata)
         .bind(i64::from(invite.max_uses))
@@ -191,6 +211,32 @@ impl SqliteBackend {
         .await
         .map_err(|e| SidError::Storage(e.to_string()))?;
         u64::try_from(count).map_err(|e| SidError::Storage(e.to_string()))
+    }
+
+    pub(crate) async fn list_invite_redemptions_impl(
+        &self,
+        id: InviteId,
+        offset: u64,
+        limit: u64,
+    ) -> SidResult<Vec<InviteRedemption>> {
+        let rows = sqlx::query(
+            "SELECT profile_id, redeemed_at FROM invite_redemptions \
+             WHERE invite_id = ? ORDER BY redeemed_at, profile_id LIMIT ? OFFSET ?",
+        )
+        .bind(id.0.to_string())
+        .bind(i64::try_from(limit).map_err(|e| SidError::Storage(e.to_string()))?)
+        .bind(i64::try_from(offset).map_err(|e| SidError::Storage(e.to_string()))?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(format!("list invite redemptions: {e}")))?;
+        rows.iter()
+            .map(|row| {
+                Ok(InviteRedemption {
+                    profile_id: col(row, "profile_id")?,
+                    redeemed_at: dt_col(row, "redeemed_at")?,
+                })
+            })
+            .collect()
     }
 
     pub(crate) async fn try_use_invite_impl(

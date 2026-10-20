@@ -154,6 +154,18 @@ impl<S: StorageBackend + ?Sized + 'static> AuthzEngine for CeAuthzEngine<S> {
                 ),
             });
         }
+        // Invites are managed by a machine user on the enrollment API only:
+        // the invite RPCs admit no other caller, so no other is allowed here.
+        if sid_core::models::is_invite_action(&request.action)
+            && (protected.is_none() || !matches!(principal, AuthzPrincipal::MachineUser(_)))
+        {
+            return Ok(AuthzCheckResponse::Deny {
+                reason: format!(
+                    "'{}' is held by a machine user on a protected resource only",
+                    request.action
+                ),
+            });
+        }
         if let Some(id) = protected {
             let resource = ResourceId::parse(id)
                 .map_err(|e| AuthzError::InvalidResource(format!("{}: {e}", request.resource)))?;

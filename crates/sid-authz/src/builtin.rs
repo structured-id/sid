@@ -20,6 +20,11 @@ pub async fn ensure_permission_checker_role(storage: &dyn StorageBackend) -> Res
     ensure_builtin(storage, Role::permission_checker()).await
 }
 
+/// The built-in invite issuer role of the system project.
+pub async fn ensure_invite_issuer_role(storage: &dyn StorageBackend) -> Result<Role> {
+    ensure_builtin(storage, Role::invite_issuer()).await
+}
+
 /// `role` is created on first start; a replica starting at the same time
 /// reads the one stored.
 async fn ensure_builtin(storage: &dyn StorageBackend, role: Role) -> Result<Role> {

@@ -837,7 +837,7 @@ fn test_invite(created_by: ProfileId, max_uses: u32) -> sid_core::models::Invite
     sid_core::models::Invite {
         id: sid_core::models::InviteId::new(),
         code: sid_core::models::generate_invite_code(),
-        created_by,
+        created_by: sid_core::models::InviteCreator::Profile(created_by),
         created_by_name: String::new(),
         metadata: [("department".to_string(), "qa".to_string())].into(),
         max_uses,

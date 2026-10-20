@@ -1010,6 +1010,11 @@ async fn test_invite_spent_once_by_concurrent_registrations() {
 }
 
 #[tokio::test]
+async fn test_invite_creator_and_redemptions() {
+    common::enrollment_policy::test_invite_creator_and_redemptions(&setup().await).await;
+}
+
+#[tokio::test]
 async fn test_enrollment_policy_keeps_invite_range() {
     common::enrollment_policy::test_enrollment_policy_keeps_invite_range(&setup().await).await;
 }

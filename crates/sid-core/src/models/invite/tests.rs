@@ -33,7 +33,7 @@ fn make_test_invite() -> Invite {
     Invite {
         id: InviteId::new(),
         code: "ABCD1234".to_string(),
-        created_by: ProfileId::generate(),
+        created_by: InviteCreator::Profile(ProfileId::generate()),
         created_by_name: "Admin".to_string(),
         metadata: std::collections::HashMap::new(),
         max_uses: 1,
