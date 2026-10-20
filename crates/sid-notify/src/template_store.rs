@@ -169,8 +169,27 @@ impl TemplateStore {
                 example: "30".into(),
             },
         ];
-        let extra_vars: HashMap<&str, &[TemplateVar]> =
-            HashMap::from([("password_reset", reset_vars.as_slice())]);
+        let otp_vars = [
+            TemplateVar {
+                name: "data.code".into(),
+                description: "The one-time code".into(),
+                example: "04821937".into(),
+            },
+            TemplateVar {
+                name: "data.purpose".into(),
+                description: "What the code does, completing \"Use this code to …\"".into(),
+                example: "confirm your email address".into(),
+            },
+            TemplateVar {
+                name: "data.expires_minutes".into(),
+                description: "Minutes until the code expires".into(),
+                example: "10".into(),
+            },
+        ];
+        let extra_vars: HashMap<&str, &[TemplateVar]> = HashMap::from([
+            ("password_reset", reset_vars.as_slice()),
+            ("otp", otp_vars.as_slice()),
+        ]);
 
         // Map template names to trigger patterns and descriptions.
         let template_info: HashMap<&str, (&str, &str)> = HashMap::from([
@@ -179,6 +198,13 @@ impl TemplateStore {
                 (
                     sid_core::models::event::event_types::PASSWORD_RESET_REQUESTED,
                     "Password reset link",
+                ),
+            ),
+            (
+                "otp",
+                (
+                    sid_core::models::event::event_types::OTP_REQUESTED,
+                    "One-time code",
                 ),
             ),
             (

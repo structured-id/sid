@@ -676,6 +676,10 @@ pub mod event_types {
     pub const PASSWORD_RESET_REQUESTED: &str = "sid.auth.password_reset_requested.v1";
     pub const PASSWORD_RESET_COMPLETED: &str = "sid.auth.password_reset_completed.v1";
 
+    // One-time codes: the event a flow renders its code mail from; no event
+    // carrying a code is published.
+    pub const OTP_REQUESTED: &str = "sid.auth.otp_requested.v1";
+
     // Organization (SaaS)
     pub const ORG_TRIAL_ACTIVATED: &str = "sid.organization.trial_activated.v1";
 
