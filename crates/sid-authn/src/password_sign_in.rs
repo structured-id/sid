@@ -22,7 +22,10 @@ use crate::opaque::OpaqueRouter;
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "O: Serialize + DeserializeOwned")]
 pub enum PendingSignIn<O> {
-    /// A sign-in against the account's password.
+    /// A sign-in against the account's password. Its tag is new so that a
+    /// build which does not fence the session cannot read it and finish it
+    /// unfenced: such a finish fails instead.
+    #[serde(rename = "PasswordFenced")]
     Password {
         state: LoginState,
         // The stored name of the field states in flight already carry.

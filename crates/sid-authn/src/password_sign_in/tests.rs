@@ -491,6 +491,22 @@ async fn account_gone_in_flight_signs_nobody_in() {
     assert!(stored.last_used_at.is_none());
 }
 
+/// A password state is stored under the tag `PasswordFenced`: a build that
+/// does not fence its session (it knows only `Password`) cannot read it and
+/// so cannot finish it unfenced. The owner keeps its field name `profile_id`.
+#[test]
+fn a_fenced_state_is_unreadable_to_an_unfenced_build() {
+    let json = serde_json::to_value(PendingSignIn::Password {
+        state: LoginState(vec![1]),
+        owner: ProfileId::generate(),
+        credential_id: CredentialId::new(),
+        credential_data: sid_core::models::CredentialData::new(vec![2]),
+    })
+    .unwrap();
+    assert!(json.get("Password").is_none(), "{json}");
+    assert!(json["PasswordFenced"].get("credential_data").is_some());
+}
+
 /// The stored state names the owner `profile_id`, the field name its states
 /// have always carried.
 #[test]
@@ -503,5 +519,8 @@ fn stored_state_names_the_owner_profile_id() {
         credential_data: sid_core::models::CredentialData::new(vec![2]),
     })
     .unwrap();
-    assert_eq!(json["Password"]["profile_id"], serde_json::json!(owner));
+    assert_eq!(
+        json["PasswordFenced"]["profile_id"],
+        serde_json::json!(owner)
+    );
 }
