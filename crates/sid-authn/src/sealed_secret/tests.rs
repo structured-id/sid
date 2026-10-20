@@ -144,9 +144,11 @@ async fn stored_record(
 async fn password_record_opens_with_its_curve() {
     let km = manager(7, &[1]);
     let (store, credential) = stored_record(&km, Some(1)).await;
-    let opened = stored_password(&km, &store, &credential).await.unwrap();
+    let (opened, stored) = stored_password(&km, &store, &credential).await.unwrap();
     assert_eq!(opened.curve, sid_plugin::crypto::CurveId::Ristretto255);
     assert_eq!(opened.data, b"password file");
+    // Nothing rewritten: the form it was read in.
+    assert!(stored == credential.data);
 }
 
 /// A record without its curve, or with one this build does not know, is
@@ -192,12 +194,14 @@ async fn password_record_under_old_version_is_resealed_in_store() {
     use sid_plugin::CredentialStore;
     let (store, credential) = stored_record(&manager(7, &[1]), Some(1)).await;
     let current = manager(7, &[1, 2]);
-    let opened = stored_password(&current, &store, &credential)
+    let (opened, stored) = stored_password(&current, &store, &credential)
         .await
         .unwrap();
     assert_eq!(opened.data, b"password file");
 
     let rewritten = store.get_credential(credential.id).await.unwrap().unwrap();
+    // The returned form is the one written back.
+    assert!(stored == rewritten.data);
     let field = inspect(
         &opaque_context(credential.profile_id),
         rewritten.data.expose(),
@@ -212,6 +216,63 @@ async fn password_record_under_old_version_is_resealed_in_store() {
     .await
     .unwrap();
     assert!(again.resealed.is_none());
+}
+
+/// Another reader resealed the record first: the returned form is the
+/// store's, since it seals the same password file.
+#[tokio::test]
+async fn password_record_resealed_by_another_reader_returns_its_form() {
+    use sid_plugin::CredentialStore;
+    let (store, credential) = stored_record(&manager(7, &[1]), Some(1)).await;
+    let current = manager(7, &[1, 2]);
+    let first = stored_password(&current, &store, &credential)
+        .await
+        .unwrap()
+        .1;
+    // This reader read the record before the first one wrote it back.
+    let (opened, stored) = stored_password(&current, &store, &credential)
+        .await
+        .unwrap();
+    assert_eq!(opened.data, b"password file");
+    let now = store.get_credential(credential.id).await.unwrap().unwrap();
+    assert!(stored == now.data);
+    assert!(stored == first);
+}
+
+/// The password changed between the read and the write-back: the returned
+/// form is the one read, which the store no longer holds.
+#[tokio::test]
+async fn password_record_changed_meanwhile_returns_the_form_read() {
+    use sid_plugin::CredentialStore;
+    let (store, credential) = stored_record(&manager(7, &[1]), Some(1)).await;
+    let current = manager(7, &[1, 2]);
+    let other = seal(
+        &current,
+        &opaque_context(credential.profile_id),
+        b"another password file",
+    )
+    .await
+    .unwrap();
+    let mut changed = credential.clone();
+    changed.data = other.into();
+    assert!(
+        store
+            .change_password(
+                credential.id,
+                credential.data.expose(),
+                &changed,
+                None,
+                ctx()
+            )
+            .await
+            .unwrap()
+    );
+    let (_, stored) = stored_password(&current, &store, &credential)
+        .await
+        .unwrap();
+    assert!(stored == credential.data);
+    let now = store.get_credential(credential.id).await.unwrap().unwrap();
+    assert!(stored != now.data);
 }
 
 /// A value under an older key version is returned re-sealed under the current one.

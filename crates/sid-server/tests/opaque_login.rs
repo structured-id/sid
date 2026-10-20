@@ -140,6 +140,50 @@ async fn password_revoked_mid_login_stays_revoked() {
     assert!(stored.iter().all(|c| c.status == CredentialStatus::Revoked));
 }
 
+/// A password replaced in place while its login is in flight (a reset or
+/// change after the login's last check, before its session) signs nobody
+/// in: no session is stored, and the answer is a failed sign-in.
+#[tokio::test]
+async fn password_replaced_mid_login_creates_no_session() {
+    let svc = TestServices::new(MockStorage::new());
+    register(&svc, &svc, "replaced-mid@sid.example.com", PASSWORD).await;
+    let finish = start_login(&svc, "replaced-mid@sid.example.com", PASSWORD).await;
+
+    let profile_id = svc
+        .storage
+        .get_profile_by_email("replaced-mid@sid.example.com")
+        .await
+        .unwrap()
+        .unwrap()
+        .id;
+    let mut credential = svc
+        .storage
+        .get_credentials_by_profile(profile_id, Some(CredentialType::Opaque))
+        .await
+        .unwrap()
+        .remove(0);
+    // Same credential, still active, another password record, sealed as a
+    // reset stores it.
+    credential.data = sid_authn::sealed_secret::seal(
+        common::test_key_manager().as_ref(),
+        &sid_authn::sealed_secret::opaque_context(profile_id),
+        b"the replacement password file",
+    )
+    .await
+    .unwrap()
+    .into();
+    svc.mock_storage.set_credential(&credential);
+
+    let err = svc
+        .auth
+        .opaque_login_finish(Request::new(finish))
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.code(), Code::Unauthenticated);
+    assert_eq!(svc.mock_storage.sessions_of(profile_id), 0);
+}
+
 /// A successful login records when the password was last used.
 #[tokio::test]
 async fn login_records_last_use() {

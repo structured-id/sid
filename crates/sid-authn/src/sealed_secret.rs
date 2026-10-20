@@ -6,7 +6,7 @@
 //! AES-256-GCM field under a key held outside the database, bound to the
 //! record it belongs to, so a database dump alone yields nothing usable.
 
-use sid_core::models::{AuditEntry, Credential, CredentialId, CredentialType};
+use sid_core::models::{AuditEntry, Credential, CredentialData, CredentialId, CredentialType};
 use sid_keys::{EncryptedField, KeyManager, KeyManagerError};
 use sid_plugin::crypto::{CurveId, StoredCredential};
 use sid_plugin::{CredentialStore, StorageBackend};
@@ -137,11 +137,16 @@ pub enum StoredPasswordError {
 /// sealed under an older key version is written back under the current one;
 /// that write is not applied when another reader resealed it first or the
 /// password changed meanwhile.
+///
+/// Also returns the credential's data as the store holds it afterwards: the
+/// write-back's form, or another reader's resealing of the same record. When
+/// the password changed meanwhile it is the form this record was read in,
+/// which no longer matches the store.
 pub async fn stored_password<O>(
     key_manager: &dyn KeyManager,
     credentials: &dyn CredentialStore<Owner = O>,
     credential: &Credential<O>,
-) -> Result<StoredCredential, StoredPasswordError>
+) -> Result<(StoredCredential, CredentialData), StoredPasswordError>
 where
     O: Copy + Into<uuid::Uuid> + Send + Sync,
 {
@@ -152,28 +157,68 @@ where
         id: credential.id.0,
         raw,
     })?;
-    let opened = open(
-        key_manager,
-        &opaque_context(credential.profile_id),
-        credential.data.expose(),
-    )
-    .await?;
-    if let Some(resealed) = opened.resealed {
-        credentials
-            .reseal_credential_data(
-                credential.id,
-                credential.data.expose(),
-                &resealed,
-                AuditEntry::system("credential.secret_resealed", credential.id.0.to_string())
-                    .into(),
-            )
-            .await
-            .map_err(StoredPasswordError::Storage)?;
+    let context = opaque_context(credential.profile_id);
+    let opened = open(key_manager, &context, credential.data.expose()).await?;
+    let stored = match opened.resealed {
+        None => credential.data.clone(),
+        Some(resealed) => {
+            let written = credentials
+                .reseal_credential_data(
+                    credential.id,
+                    credential.data.expose(),
+                    &resealed,
+                    AuditEntry::system("credential.secret_resealed", credential.id.0.to_string())
+                        .into(),
+                )
+                .await
+                .map_err(StoredPasswordError::Storage)?;
+            if written {
+                CredentialData::new(resealed)
+            } else {
+                current_form(
+                    key_manager,
+                    credentials,
+                    credential,
+                    &context,
+                    &opened.secret,
+                )
+                .await?
+            }
+        }
+    };
+    Ok((
+        StoredCredential {
+            curve,
+            data: opened.secret.to_vec(),
+        },
+        stored,
+    ))
+}
+
+/// The store's data for `credential` when it seals the same `secret` (another
+/// reader resealed it), else the form it was read in.
+async fn current_form<O>(
+    key_manager: &dyn KeyManager,
+    credentials: &dyn CredentialStore<Owner = O>,
+    credential: &Credential<O>,
+    context: &str,
+    secret: &[u8],
+) -> Result<CredentialData, StoredPasswordError>
+where
+    O: Copy + Into<uuid::Uuid> + Send + Sync,
+{
+    use subtle::ConstantTimeEq;
+    let Some(now) = credentials
+        .get_credential(credential.id)
+        .await
+        .map_err(StoredPasswordError::Storage)?
+    else {
+        return Ok(credential.data.clone());
+    };
+    match open(key_manager, context, now.data.expose()).await {
+        Ok(reopened) if bool::from(reopened.secret.as_slice().ct_eq(secret)) => Ok(now.data),
+        _ => Ok(credential.data.clone()),
     }
-    Ok(StoredCredential {
-        curve,
-        data: opened.secret.to_vec(),
-    })
 }
 
 /// Seal every credential of `credential_type` still stored in plain form,

@@ -92,13 +92,13 @@ pub async fn test_session_limit_evicts_oldest(backend: &dyn StorageBackend) {
     oldest.client_id = Some(client.client_id.clone());
     oldest.created_at = Utc::now() - Duration::minutes(2);
     backend
-        .create_session_atomic(&oldest, 0, super::test_audit())
+        .create_session_atomic(&oldest, 0, None, super::test_audit())
         .await
         .unwrap();
 
     let newest = super::create_test_session(profile.id);
     let evicted = backend
-        .create_session_atomic(&newest, 1, super::test_audit())
+        .create_session_atomic(&newest, 1, None, super::test_audit())
         .await
         .unwrap();
     assert_eq!(evicted, vec![oldest.id]);

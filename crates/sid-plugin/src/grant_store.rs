@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sid_core::Result;
 use sid_core::models::{
-    AuthCodeRedemption, AuthorizationCode, BrowserSecretHash, MutationContext, RefreshToken,
-    Session, SessionEnd, SessionId,
+    AuthCodeRedemption, AuthorizationCode, BrowserSecretHash, CredentialFence, MutationContext,
+    RefreshToken, Session, SessionEnd, SessionId,
 };
 use uuid::Uuid;
 
@@ -29,11 +29,19 @@ pub trait GrantStore: Send + Sync {
     /// authenticated; each evicted session owes what its end owes, with
     /// reason `SessionLimit`.
     ///
+    /// With `proved_by`, the session commits only while that credential is
+    /// active and holds the fence's data, checked in the same transaction and
+    /// serialized against the credential's change or revocation: a sign-in
+    /// whose credential a reset replaced meanwhile gets `Error::Fenced` and
+    /// stores nothing. A reset committing after the session ends it through
+    /// its own revocation.
+    ///
     /// Returns the list of evicted session IDs (empty if under limit or unlimited).
     async fn create_session_atomic(
         &self,
         session: &Session<Self::Owner>,
         max_sessions: u32,
+        proved_by: Option<&CredentialFence>,
         ctx: MutationContext,
     ) -> Result<Vec<SessionId>>;
 

@@ -4,11 +4,12 @@
 
 use sid_authn::challenge_store::ChallengeStore;
 use sid_authn::opaque::OpaqueRouter;
-use sid_authn::password_sign_in::{PasswordSignInError, PasswordSignInHost, PendingSignIn};
+use sid_authn::password_sign_in::{
+    OpenedPassword, PasswordSignInError, PasswordSignInHost, PendingSignIn,
+};
 use sid_core::grpc_error::refuse::storage_failure;
 use sid_core::models::{Credential, Profile, ProfileId};
 use sid_plugin::CredentialStore;
-use sid_plugin::crypto::StoredCredential;
 use tonic::Status;
 
 use super::AuthServiceImpl;
@@ -74,8 +75,9 @@ impl PasswordSignInHost for ProfileSignIn<'_> {
     async fn stored_password(
         &self,
         credential: &Credential<ProfileId>,
-    ) -> Result<StoredCredential, SignInStatus> {
-        Ok(self.service.stored_password(credential).await?)
+    ) -> Result<OpenedPassword, SignInStatus> {
+        let (record, stored) = self.service.stored_password(credential).await?;
+        Ok(OpenedPassword { record, stored })
     }
 
     fn opaque_credential_identifier(&self, credential: &Credential<ProfileId>) -> [u8; 16] {

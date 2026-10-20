@@ -1811,8 +1811,12 @@ impl AuthServiceImpl {
         .await
     }
 
-    /// The OPAQUE password file of `credential`, opened, with its curve.
-    async fn stored_password(&self, credential: &Credential) -> Result<StoredCredential, Status> {
+    /// The OPAQUE password file of `credential`, opened, with its curve, and
+    /// the credential's data as the store holds it afterwards.
+    async fn stored_password(
+        &self,
+        credential: &Credential,
+    ) -> Result<(StoredCredential, sid_core::models::CredentialData), Status> {
         use sid_authn::sealed_secret::StoredPasswordError;
         sid_authn::sealed_secret::stored_password(
             self.key_manager.as_ref(),
@@ -2026,6 +2030,7 @@ impl AuthServiceImpl {
         device_id: Option<uuid::Uuid>,
         client_ip: Option<std::net::IpAddr>,
         client: CeremonyClient,
+        proved_by: Option<&sid_core::models::CredentialFence>,
     ) -> Result<SignedIn, Status> {
         // The installation's absolute lifetime, when it sets one.
         let lifetime = match self.security_policy.session.max_lifetime_hours {
@@ -2046,7 +2051,7 @@ impl AuthServiceImpl {
         session.assurance_level =
             method.auth_level(self.security_policy.auth.passkey_satisfies_mfa);
         session.amr = method.amr();
-        self.sign_in(profile, session, client).await
+        self.sign_in(profile, session, client, proved_by).await
     }
 
     /// Provisional session for a weak-possession login (email OTP, magic link):
@@ -2064,27 +2069,30 @@ impl AuthServiceImpl {
             sid_core::models::Session::new_provisional(profile.id, session_address(client_ip));
         session.device_id = device_id;
         session.amr = vec![amr.to_string()];
-        self.sign_in(profile, session, client).await
+        // Mailbox possession proves no stored credential.
+        self.sign_in(profile, session, client, None).await
     }
 
     /// Store `session` and deliver its credential to `client`: the browser
     /// sign-in page gets the IdP session cookie, a fresh secret whose hash
     /// the session stores, and no access token; a native client gets the
-    /// session's access token.
+    /// session's access token. `proved_by` is the credential the sign-in
+    /// proved, which must still be current when the session commits.
     async fn sign_in(
         &self,
         profile: &sid_core::models::Profile,
         mut session: sid_core::models::Session,
         client: CeremonyClient,
+        proved_by: Option<&sid_core::models::CredentialFence>,
     ) -> Result<SignedIn, Status> {
         match client {
             CeremonyClient::Browser => {
                 let credential = BrowserCredential::bind(&mut session);
-                self.persist_session(profile, &session).await?;
+                self.persist_session(profile, &session, proved_by).await?;
                 Ok(credential.signed_in(&self.browser_cookie, &session))
             }
             CeremonyClient::Native => {
-                self.persist_session(profile, &session).await?;
+                self.persist_session(profile, &session, proved_by).await?;
                 let sub = profile.id.to_string();
                 let access_token = self
                     .jwt
@@ -2117,6 +2125,7 @@ impl AuthServiceImpl {
         &self,
         profile: &sid_core::models::Profile,
         session: &sid_core::models::Session,
+        proved_by: Option<&sid_core::models::CredentialFence>,
     ) -> Result<(), Status> {
         // The storage counts, evicts and inserts in one serialized step, and
         // owes each evicted session's client a logout; the same commit owes
@@ -2135,11 +2144,16 @@ impl AuthServiceImpl {
             session.id.to_string(),
         ))
         .with_work(created.relay());
-        let evicted = self
+        let evicted = match self
             .storage
-            .create_session_atomic(session, max_sessions, ctx)
+            .create_session_atomic(session, max_sessions, proved_by, ctx)
             .await
-            .map_err(storage_failure)?;
+        {
+            Ok(evicted) => evicted,
+            // The credential changed after its check: a wrong password then.
+            Err(sid_core::Error::Fenced(_)) => return Err(authentication_failed()),
+            Err(e) => return Err(storage_failure(e)),
+        };
         if !evicted.is_empty() {
             info!(
                 profile_id = %profile.id,
@@ -2403,14 +2417,14 @@ impl AuthService for AuthServiceImpl {
             service: self,
             client_ip,
         };
-        let profile = sid_authn::password_sign_in::finish(
+        let verified = sid_authn::password_sign_in::finish(
             &host,
             &req.server_login_state,
             &req.credential_finalization,
         )
         .await
-        .map_err(|e| e.0)?
-        .account;
+        .map_err(|e| e.0)?;
+        let profile = verified.account;
         // Evaluate login security (anomaly detection + policy enforcement).
         self.evaluate_login_security(
             profile.id,
@@ -2431,6 +2445,7 @@ impl AuthService for AuthServiceImpl {
                 user_agent.as_deref().map(compute_device_id),
                 client_ip,
                 client,
+                Some(&verified.proved_by),
             )
             .await?;
 
@@ -2592,7 +2607,7 @@ impl AuthService for AuthServiceImpl {
         // prepared for it, and charges nothing.
         let id = sid_ids::PasswordOperationId::generate();
         let started = if proves {
-            let stored = self.stored_password(&credential).await?;
+            let (stored, _) = self.stored_password(&credential).await?;
             Some(
                 self.opaque_router
                     .login_start(
@@ -3147,6 +3162,7 @@ impl AuthService for AuthServiceImpl {
                 user_agent.as_deref().map(compute_device_id),
                 client_ip,
                 client,
+                None,
             )
             .await?;
 
@@ -4015,6 +4031,10 @@ impl AuthService for AuthServiceImpl {
                 user_agent.as_deref().map(compute_device_id),
                 client_ip,
                 client,
+                Some(&sid_core::models::CredentialFence {
+                    id: new_credential.id,
+                    data: new_credential.data.clone(),
+                }),
             )
             .await?;
 
@@ -5506,6 +5526,11 @@ impl AuthService for AuthServiceImpl {
                 user_agent.as_deref().map(compute_device_id),
                 client_ip,
                 client,
+                // Another reset committed meanwhile signs this one in no more.
+                Some(&sid_core::models::CredentialFence {
+                    id: new_cred.id,
+                    data: new_cred.data.clone(),
+                }),
             )
             .await?;
 

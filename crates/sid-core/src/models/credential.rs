@@ -88,6 +88,15 @@ impl CredentialId {
     }
 }
 
+/// The credential a sign-in proved, as the sign-in read it. A session that
+/// sign-in creates commits only while the credential is active and still
+/// holds `data`: a password reset replaces the data in place.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialFence {
+    pub id: CredentialId,
+    pub data: CredentialData,
+}
+
 impl Default for CredentialId {
     fn default() -> Self {
         Self::new()

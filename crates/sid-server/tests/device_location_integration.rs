@@ -103,6 +103,7 @@ async fn test_pg_has_recent_session_from_device_found() {
         .create_session_atomic(
             &session,
             0,
+            None,
             AuditEntry::system("test", "create_session").into(),
         )
         .await
@@ -132,6 +133,7 @@ async fn test_pg_has_recent_session_from_device_different_profile() {
         .create_session_atomic(
             &session,
             0,
+            None,
             AuditEntry::system("test", "create_session").into(),
         )
         .await

@@ -9,7 +9,9 @@ use std::fmt::Display;
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use sid_core::models::{AuditEntry, Credential, CredentialId, CredentialType};
+use sid_core::models::{
+    AuditEntry, Credential, CredentialData, CredentialFence, CredentialId, CredentialType,
+};
 use sid_plugin::{CredentialStore, LoginState, StoredCredential};
 use tracing::warn;
 
@@ -20,19 +22,27 @@ use crate::opaque::OpaqueRouter;
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "O: Serialize + DeserializeOwned")]
 pub enum PendingSignIn<O> {
-    /// A sign-in against the account's password.
+    /// A sign-in against the account's password. Its tag is new so that a
+    /// build which does not fence the session cannot read it and finish it
+    /// unfenced: such a finish fails instead.
+    #[serde(rename = "PasswordFenced")]
     Password {
         state: LoginState,
         // The stored name of the field states in flight already carry.
         #[serde(rename = "profile_id")]
         owner: O,
         credential_id: CredentialId,
+        /// The stored password as the start read it: the session must still
+        /// find it so (a reset replaces it in place).
+        credential_data: CredentialData,
     },
     /// A sign-in that cannot succeed: no account holds the principal, or its
     /// account has no password. Stored and consumed like a real state and
     /// refused like a wrong password, so neither the timing of either step nor
     /// the answer tells whether the account exists. `identity` is the key its
-    /// failed attempts count against.
+    /// failed attempts count against. Its tag moves with the password state's,
+    /// so across builds the two still answer alike.
+    #[serde(rename = "DecoyFenced")]
     Decoy { identity: String },
 }
 
@@ -80,11 +90,13 @@ pub trait PasswordSignInHost: Send + Sync {
     /// Count a failed attempt against `identity`.
     async fn record_failure(&self, identity: &str) -> Result<(), Self::Error>;
 
-    /// The OPAQUE record of `credential`, opened from its sealed form.
+    /// The OPAQUE record of `credential`, opened from its sealed form, and
+    /// the form the store holds for it now (opening may write it back
+    /// resealed).
     async fn stored_password(
         &self,
         credential: &Credential<Self::Owner>,
-    ) -> Result<StoredCredential, Self::Error>;
+    ) -> Result<OpenedPassword, Self::Error>;
 
     /// The OPAQUE credential identifier sign-ins of `credential` evaluate
     /// under (RFC 9807 §5).
@@ -92,6 +104,15 @@ pub trait PasswordSignInHost: Send + Sync {
 
     /// The account `owner` names; `None` when it can no longer sign in.
     async fn account(&self, owner: &Self::Owner) -> Result<Option<Self::Account>, Self::Error>;
+}
+
+/// A stored password opened for a sign-in.
+pub struct OpenedPassword {
+    /// The OPAQUE record the sign-in runs against.
+    pub record: StoredCredential,
+    /// The credential's data as the store holds it now: the session the
+    /// sign-in creates is fenced on it.
+    pub stored: CredentialData,
 }
 
 /// The answer to a sign-in start.
@@ -104,7 +125,10 @@ pub struct Started {
 /// An account whose password the sign-in verified.
 pub struct Verified<A> {
     pub account: A,
-    pub credential_id: CredentialId,
+    /// The password the sign-in proved, for the session it creates
+    /// (`GrantStore::create_session_atomic`): a reset committed meanwhile
+    /// refuses that session.
+    pub proved_by: CredentialFence,
 }
 
 fn storage<E: From<PasswordSignInError>>(e: sid_core::Error) -> E {
@@ -190,11 +214,11 @@ pub async fn start<H: PasswordSignInHost>(
     };
 
     let credential_id = host.opaque_credential_identifier(password);
-    let stored = host.stored_password(password).await?;
+    let opened = host.stored_password(password).await?;
     let (credential_response, state) = host
         .opaque()
         // An ordinary sign-in has the empty context.
-        .login_start(&stored, credential_request, &credential_id, &[])
+        .login_start(&opened.record, credential_request, &credential_id, &[])
         .map_err(|e| {
             warn!("OPAQUE login start failed for {}: {}", principal, e);
             PasswordSignInError::AuthenticationFailed
@@ -208,6 +232,7 @@ pub async fn start<H: PasswordSignInHost>(
                 state,
                 owner,
                 credential_id: password.id,
+                credential_data: opened.stored,
             },
         )
         .await
@@ -227,18 +252,21 @@ pub async fn finish<H: PasswordSignInHost>(
     state_key: &str,
     finalization: &[u8],
 ) -> Result<Verified<H::Account>, H::Error> {
-    let pending = host
-        .pending()
-        .take(state_key)
-        .await
-        .map_err(PasswordSignInError::from)?
-        .ok_or(PasswordSignInError::Expired)?;
-    let (state, owner, credential_id) = match pending {
+    let pending = match host.pending().take(state_key).await {
+        Ok(pending) => pending.ok_or(PasswordSignInError::Expired)?,
+        // A state this build cannot read (an earlier build's, without the
+        // password's stored form to fence on) is spent: the client starts
+        // again, as after an expiry.
+        Err(ChallengeStoreError::Encoding(_)) => return Err(PasswordSignInError::Expired.into()),
+        Err(e) => return Err(PasswordSignInError::from(e).into()),
+    };
+    let (state, owner, credential_id, credential_data) = match pending {
         PendingSignIn::Password {
             state,
             owner,
             credential_id,
-        } => (state, owner, credential_id),
+            credential_data,
+        } => (state, owner, credential_id, credential_data),
         PendingSignIn::Decoy { identity } => {
             // A lockout reached while this attempt was in flight answers the
             // same here as for a real account.
@@ -275,10 +303,45 @@ pub async fn finish<H: PasswordSignInHost>(
     if !still_active {
         return Err(PasswordSignInError::AuthenticationFailed.into());
     }
+    let data = current_form(host, credential_id, credential_data).await?;
     Ok(Verified {
         account,
-        credential_id,
+        proved_by: CredentialFence {
+            id: credential_id,
+            data,
+        },
     })
+}
+
+/// The stored form to fence on: the store's current one when it holds the
+/// same record as `read` (another reader resealed it after the start), else
+/// `read`, which a changed password no longer matches.
+async fn current_form<H: PasswordSignInHost>(
+    host: &H,
+    id: CredentialId,
+    read: CredentialData,
+) -> Result<CredentialData, H::Error> {
+    use subtle::ConstantTimeEq;
+    let Some(current) = host
+        .credentials()
+        .get_credential(id)
+        .await
+        .map_err(storage)?
+    else {
+        return Ok(read);
+    };
+    if current.data == read {
+        return Ok(read);
+    }
+    let mut as_read = current.clone();
+    as_read.data = read.clone();
+    let then = host.stored_password(&as_read).await?;
+    let now = host.stored_password(&current).await?;
+    if bool::from(then.record.data.ct_eq(&now.record.data)) {
+        Ok(now.stored)
+    } else {
+        Ok(read)
+    }
 }
 
 #[cfg(test)]

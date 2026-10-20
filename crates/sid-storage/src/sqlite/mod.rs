@@ -410,9 +410,10 @@ impl GrantStore for SqliteBackend {
         &self,
         session: &sid_core::models::Session,
         max_sessions: u32,
+        proved_by: Option<&sid_core::models::CredentialFence>,
         ctx: MutationContext,
     ) -> SidResult<Vec<sid_core::models::SessionId>> {
-        self.create_session_atomic_impl(session, max_sessions, ctx)
+        self.create_session_atomic_impl(session, max_sessions, proved_by, ctx)
             .await
     }
 

@@ -34,7 +34,7 @@ impl SignInHistoryHarness for ProfileSignIns<'_> {
         session.ip_address = ip.to_string();
         session.device_id = device;
         self.0
-            .create_session_atomic(&session, 0, test_audit())
+            .create_session_atomic(&session, 0, None, test_audit())
             .await
             .expect("a stored session");
     }
