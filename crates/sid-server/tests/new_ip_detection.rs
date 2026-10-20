@@ -79,7 +79,12 @@ async fn test_has_recent_session_from_ip_found() {
 
     let session = create_test_session(profile_id, "10.0.0.42");
     storage
-        .create_session_atomic(&session, 100, AuditEntry::system("test", "setup").into())
+        .create_session_atomic(
+            &session,
+            100,
+            None,
+            AuditEntry::system("test", "setup").into(),
+        )
         .await
         .unwrap();
 
@@ -115,7 +120,7 @@ async fn test_has_recent_session_different_profiles_independent() {
 
     let sa = create_test_session(profile_a, "10.0.0.1");
     storage
-        .create_session_atomic(&sa, 100, AuditEntry::system("test", "setup").into())
+        .create_session_atomic(&sa, 100, None, AuditEntry::system("test", "setup").into())
         .await
         .unwrap();
 

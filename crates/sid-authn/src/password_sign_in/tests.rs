@@ -190,7 +190,9 @@ async fn right_password_signs_in() {
 
     let verified = sign_in(&h, "alice", PASSWORD).await.unwrap();
     assert_eq!(verified.account, owner);
-    assert_eq!(verified.credential_id, password.id);
+    // The session it creates is fenced on the password exactly as read.
+    assert_eq!(verified.proved_by.id, password.id);
+    assert_eq!(verified.proved_by.data, password.data);
     let stored = h.store.get_credential(password.id).await.unwrap().unwrap();
     assert!(
         stored.last_used_at.is_some(),
@@ -414,6 +416,7 @@ fn stored_state_names_the_owner_profile_id() {
         state: LoginState(vec![1]),
         owner,
         credential_id: CredentialId::new(),
+        credential_data: sid_core::models::CredentialData::new(vec![2]),
     })
     .unwrap();
     assert_eq!(json["Password"]["profile_id"], serde_json::json!(owner));

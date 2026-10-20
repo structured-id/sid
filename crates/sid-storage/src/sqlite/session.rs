@@ -196,10 +196,30 @@ impl SqliteBackend {
         &self,
         session: &Session,
         max_sessions: u32,
+        proved_by: Option<&sid_core::models::CredentialFence>,
         mut ctx: MutationContext,
     ) -> SidResult<Vec<SessionId>> {
         let storage = |e: sqlx::Error| SidError::Storage(e.to_string());
+        // The write transaction excludes every other writer, a reset
+        // included, until it commits: the credential read here stays current.
         let mut tx = self.begin_write().await?;
+        if let Some(fence) = proved_by {
+            let current: Option<i64> = sqlx::query_scalar(
+                "SELECT 1 FROM credentials
+                 WHERE id = ? AND profile_id = ? AND status = 'active' AND data = ?",
+            )
+            .bind(fence.id.0.to_string())
+            .bind(session.profile_id)
+            .bind(fence.data.expose())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(storage)?;
+            if current.is_none() {
+                return Err(SidError::Fenced(
+                    "the credential the sign-in proved changed before its session".into(),
+                ));
+            }
+        }
         let mut evicted = Vec::new();
         if max_sessions > 0 {
             let now = fmt_dt(&chrono::Utc::now());

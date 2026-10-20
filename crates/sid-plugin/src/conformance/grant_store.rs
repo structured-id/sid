@@ -16,7 +16,7 @@ use sid_core::models::{
 };
 use uuid::Uuid;
 
-use crate::GrantStore;
+use crate::{CredentialStore, GrantStore};
 
 /// What a backend's harness supplies to the scenarios.
 #[async_trait]
@@ -25,6 +25,9 @@ pub trait GrantHarness: Send + Sync {
     type Owner: Clone + PartialEq + Debug + Send + Sync + 'static;
 
     fn store(&self) -> &dyn GrantStore<Owner = Self::Owner>;
+
+    /// The same backend's credentials: a session's sign-in proved one.
+    fn credentials(&self) -> &dyn CredentialStore<Owner = Self::Owner>;
 
     /// A new account the store accepts as an owner.
     async fn owner(&self) -> Self::Owner;
@@ -81,7 +84,7 @@ async fn code<H: GrantHarness>(
         until: ms(Utc::now() + Duration::minutes(10)),
     });
     h.store()
-        .create_session_atomic(&authorizing, 0, ctx())
+        .create_session_atomic(&authorizing, 0, None, ctx())
         .await
         .unwrap();
     AuthorizationCode {
@@ -153,12 +156,178 @@ async fn redeemed<H: GrantHarness>(
     );
 }
 
+/// `owner`'s stored password holding `data`.
+async fn stored_password<H: GrantHarness>(
+    h: &H,
+    owner: H::Owner,
+    data: &[u8],
+) -> sid_core::models::Credential<H::Owner> {
+    use sid_core::models::{Credential, CredentialData, CredentialType};
+    let password = Credential::new(
+        owner,
+        CredentialType::Opaque,
+        CredentialData::new(data.to_vec()),
+        None,
+    );
+    h.credentials()
+        .create_credential(&password, ctx())
+        .await
+        .unwrap();
+    password
+}
+
+fn fence(id: sid_core::models::CredentialId, data: &[u8]) -> sid_core::models::CredentialFence {
+    sid_core::models::CredentialFence {
+        id,
+        data: sid_core::models::CredentialData::new(data.to_vec()),
+    }
+}
+
+/// A sign-in proved with a password that a reset replaced before the session
+/// committed creates no session, with or without a session limit: the session
+/// insert requires the exact credential the sign-in used to be current. The
+/// replacement password and an unchanged one still sign in.
+pub async fn session_refused_after_its_password_changed<H: GrantHarness>(h: &H) {
+    use sid_core::models::CredentialData;
+    let owner = h.owner().await;
+    let before = b"record-before-reset";
+    let after = b"record-after-reset";
+    let password = stored_password(h, owner.clone(), before).await;
+    // The sign-in's last credential check passes.
+    assert!(
+        h.credentials()
+            .mark_credential_used(password.id, ctx())
+            .await
+            .unwrap()
+    );
+    // A reset commits before the session does.
+    let mut replaced = password.clone();
+    replaced.data = CredentialData::new(after.to_vec());
+    assert!(
+        h.credentials()
+            .change_password(password.id, before, &replaced, None, ctx())
+            .await
+            .unwrap()
+    );
+
+    for limit in [0, 5] {
+        let late = session(owner.clone());
+        let refused = h
+            .store()
+            .create_session_atomic(&late, limit, Some(&fence(password.id, before)), ctx())
+            .await;
+        assert!(
+            matches!(refused, Err(Error::Fenced(_))),
+            "limit {limit}: {refused:?}"
+        );
+        assert!(!exists(h, late.id).await, "limit {limit}: a session exists");
+
+        // A sign-in with the replacement password commits its session.
+        let current = session(owner.clone());
+        h.store()
+            .create_session_atomic(&current, limit, Some(&fence(password.id, after)), ctx())
+            .await
+            .unwrap();
+        assert!(exists(h, current.id).await, "limit {limit}");
+    }
+
+    // An unchanged password signs in; a revoked one does not.
+    let other = h.owner().await;
+    let kept = stored_password(h, other.clone(), b"kept-record").await;
+    let signed_in = session(other.clone());
+    h.store()
+        .create_session_atomic(&signed_in, 0, Some(&fence(kept.id, b"kept-record")), ctx())
+        .await
+        .unwrap();
+    // A passkey keeps the account usable, so the password can be revoked.
+    let passkey = sid_core::models::Credential::new(
+        other.clone(),
+        sid_core::models::CredentialType::WebAuthn,
+        CredentialData::new(b"passkey".to_vec()),
+        None,
+    );
+    h.credentials()
+        .create_credential(&passkey, ctx())
+        .await
+        .unwrap();
+    assert_eq!(
+        h.credentials()
+            .revoke_credential(kept.id, ctx())
+            .await
+            .unwrap(),
+        sid_core::models::CredentialRevocation::Revoked
+    );
+    let revoked = session(other);
+    assert!(matches!(
+        h.store()
+            .create_session_atomic(&revoked, 0, Some(&fence(kept.id, b"kept-record")), ctx())
+            .await,
+        Err(Error::Fenced(_))
+    ));
+    assert!(!exists(h, revoked.id).await);
+}
+
+/// A fence names a credential of the session's own owner: another owner's
+/// current password admits no session.
+pub async fn session_fence_is_the_owners_credential<H: GrantHarness>(h: &H) {
+    let owner = h.owner().await;
+    let stranger = h.owner().await;
+    let theirs = stored_password(h, stranger, b"their-record").await;
+    let mine = session(owner);
+    assert!(matches!(
+        h.store()
+            .create_session_atomic(&mine, 0, Some(&fence(theirs.id, b"their-record")), ctx())
+            .await,
+        Err(Error::Fenced(_))
+    ));
+    assert!(!exists(h, mine.id).await);
+}
+
+/// A reset racing sign-ins: every session that committed was proved by the
+/// password that was current then, so after the reset none proved by the old
+/// password exists unless it committed before the reset (whose revocation
+/// ends it); none commits after.
+pub async fn session_fence_serializes_with_a_reset<H: GrantHarness>(h: &H) {
+    use sid_core::models::CredentialData;
+    let owner = h.owner().await;
+    let before = b"racing-before";
+    let password = stored_password(h, owner.clone(), before).await;
+    let mut replaced = password.clone();
+    replaced.data = CredentialData::new(b"racing-after".to_vec());
+
+    let stale = fence(password.id, before);
+    let sessions: Vec<_> = (0..6).map(|_| session(owner.clone())).collect();
+    let creates = sessions
+        .iter()
+        .map(|s| h.store().create_session_atomic(s, 0, Some(&stale), ctx()));
+    let reset = h
+        .credentials()
+        .change_password(password.id, before, &replaced, None, ctx());
+    let (created, reset) = tokio::join!(futures::future::join_all(creates), reset);
+    assert!(reset.unwrap(), "the reset applies");
+    for (s, outcome) in sessions.iter().zip(created) {
+        match outcome {
+            Ok(_) => assert!(exists(h, s.id).await),
+            Err(Error::Fenced(_)) => assert!(!exists(h, s.id).await),
+            Err(e) => panic!("{e:?}"),
+        }
+    }
+    // After the reset committed, the old password admits nothing.
+    let late = session(owner);
+    assert!(matches!(
+        h.store()
+            .create_session_atomic(&late, 0, Some(&stale), ctx())
+            .await,
+        Err(Error::Fenced(_))
+    ));
+}
+
 /// Creating a session never replaces one: an existing id is `Conflict` with or
 /// without a session limit, and the stored session keeps its authentication.
 pub async fn session_create_never_replaces<H: GrantHarness>(h: &H) {
     let first = session(h.owner().await);
     h.store()
-        .create_session_atomic(&first, 0, ctx())
+        .create_session_atomic(&first, 0, None, ctx())
         .await
         .unwrap();
     let mut again = first.clone();
@@ -168,7 +337,7 @@ pub async fn session_create_never_replaces<H: GrantHarness>(h: &H) {
     for limit in [0, 5] {
         let err = h
             .store()
-            .create_session_atomic(&again, limit, ctx())
+            .create_session_atomic(&again, limit, None, ctx())
             .await
             .expect_err("a create over an existing session");
         assert!(matches!(err, Error::Conflict(_)), "limit {limit}: {err:?}");
@@ -181,7 +350,10 @@ pub async fn session_create_never_replaces<H: GrantHarness>(h: &H) {
 /// Ending a session removes it; ending it again ends nothing.
 pub async fn session_end<H: GrantHarness>(h: &H) {
     let s = session(h.owner().await);
-    h.store().create_session_atomic(&s, 0, ctx()).await.unwrap();
+    h.store()
+        .create_session_atomic(&s, 0, None, ctx())
+        .await
+        .unwrap();
 
     let ended = h.store().delete_session(s.id, &end(), ctx()).await.unwrap();
 
@@ -209,7 +381,10 @@ pub async fn session_end_ends_what_it_authenticated<H: GrantHarness>(h: &H) {
     let unrelated = session(owner.clone());
     let app = dependent_of(&sso);
     for s in [&sso, &unrelated, &app] {
-        h.store().create_session_atomic(s, 0, ctx()).await.unwrap();
+        h.store()
+            .create_session_atomic(s, 0, None, ctx())
+            .await
+            .unwrap();
     }
     assert_eq!(
         h.store()
@@ -231,7 +406,7 @@ pub async fn session_end_ends_what_it_authenticated<H: GrantHarness>(h: &H) {
 
     let app = dependent_of(&sso);
     h.store()
-        .create_session_atomic(&app, 0, ctx())
+        .create_session_atomic(&app, 0, None, ctx())
         .await
         .unwrap();
     let mut ended = h
@@ -250,19 +425,19 @@ pub async fn session_end_ends_what_it_authenticated<H: GrantHarness>(h: &H) {
     let mut sso = session(owner.clone());
     sso.created_at = Utc::now() - Duration::minutes(1);
     h.store()
-        .create_session_atomic(&sso, 0, ctx())
+        .create_session_atomic(&sso, 0, None, ctx())
         .await
         .unwrap();
     let mut app = session(owner.clone()).with_grant_authentication(&sso.grant_authentication());
     app.created_at = Utc::now() - Duration::seconds(30);
     h.store()
-        .create_session_atomic(&app, 0, ctx())
+        .create_session_atomic(&app, 0, None, ctx())
         .await
         .unwrap();
     let newest = session(owner);
     let evicted = h
         .store()
-        .create_session_atomic(&newest, 2, ctx())
+        .create_session_atomic(&newest, 2, None, ctx())
         .await
         .unwrap();
     assert!(
@@ -312,14 +487,18 @@ pub async fn session_limit_evicts_oldest<H: GrantHarness>(h: &H) {
     let mut middle = session(owner.clone());
     middle.created_at = Utc::now() - Duration::minutes(1);
     for s in [&oldest, &middle] {
-        let evicted = h.store().create_session_atomic(s, 0, ctx()).await.unwrap();
+        let evicted = h
+            .store()
+            .create_session_atomic(s, 0, None, ctx())
+            .await
+            .unwrap();
         assert!(evicted.is_empty(), "a limit of 0 evicted a session");
     }
 
     let newest = session(owner);
     let evicted = h
         .store()
-        .create_session_atomic(&newest, 2, ctx())
+        .create_session_atomic(&newest, 2, None, ctx())
         .await
         .unwrap();
     assert_eq!(
@@ -335,7 +514,7 @@ pub async fn session_limit_evicts_oldest<H: GrantHarness>(h: &H) {
     let under = session(h.owner().await);
     assert!(
         h.store()
-            .create_session_atomic(&under, 5, ctx())
+            .create_session_atomic(&under, 5, None, ctx())
             .await
             .unwrap()
             .is_empty()
@@ -343,7 +522,7 @@ pub async fn session_limit_evicts_oldest<H: GrantHarness>(h: &H) {
 
     let racing = h.owner().await;
     let s: Vec<_> = (0..6).map(|_| session(racing.clone())).collect();
-    let create = |i: usize| h.store().create_session_atomic(&s[i], 2, ctx());
+    let create = |i: usize| h.store().create_session_atomic(&s[i], 2, None, ctx());
     let (a, b, c, d, e, f) = tokio::join!(
         create(0),
         create(1),
@@ -373,12 +552,12 @@ pub async fn session_found_by_browser_secret<H: GrantHarness>(h: &H) {
     signed_in.browser_secret_hash = Some(secret);
     signed_in.browser_csrf = Some(csrf);
     h.store()
-        .create_session_atomic(&signed_in, 0, ctx())
+        .create_session_atomic(&signed_in, 0, None, ctx())
         .await
         .unwrap();
     let native = session(owner.clone());
     h.store()
-        .create_session_atomic(&native, 0, ctx())
+        .create_session_atomic(&native, 0, None, ctx())
         .await
         .unwrap();
 
@@ -415,7 +594,7 @@ pub async fn session_found_by_browser_secret<H: GrantHarness>(h: &H) {
     second.browser_secret_hash = Some(secret);
     assert!(
         h.store()
-            .create_session_atomic(&second, 0, ctx())
+            .create_session_atomic(&second, 0, None, ctx())
             .await
             .is_err(),
         "a second session with one browser secret"
@@ -428,7 +607,10 @@ pub async fn session_found_by_browser_secret<H: GrantHarness>(h: &H) {
 /// creates nothing.
 pub async fn touch_session_keeps_latest_activity<H: GrantHarness>(h: &H) {
     let s = session(h.owner().await);
-    h.store().create_session_atomic(&s, 0, ctx()).await.unwrap();
+    h.store()
+        .create_session_atomic(&s, 0, None, ctx())
+        .await
+        .unwrap();
     let last_activity = || async {
         h.store()
             .get_session(s.id)

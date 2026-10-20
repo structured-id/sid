@@ -1410,9 +1410,10 @@ impl GrantStore for PostgresBackend {
         &self,
         session: &Session,
         max_sessions: u32,
+        proved_by: Option<&sid_core::models::CredentialFence>,
         mut audit: MutationContext,
     ) -> SidResult<Vec<SessionId>> {
-        if max_sessions == 0 {
+        if max_sessions == 0 && proved_by.is_none() {
             self.create_session(session, audit).await?;
             return Ok(vec![]);
         }
@@ -1422,6 +1423,28 @@ impl GrantStore for PostgresBackend {
             .begin()
             .await
             .map_err(|e| SidError::Storage(format!("begin tx: {e}")))?;
+
+        if let Some(fence) = proved_by {
+            // FOR SHARE holds the credential row until this commit: a reset's
+            // update waits for it, and one that committed first is read here
+            // with its new data, so the session is refused.
+            let current: Option<i32> = sqlx::query_scalar(
+                "SELECT 1 FROM credentials
+                 WHERE id = $1 AND profile_id = $2 AND status = 'active' AND data = $3
+                 FOR SHARE",
+            )
+            .bind(fence.id.0)
+            .bind(session.profile_id)
+            .bind(fence.data.expose())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| SidError::Storage(format!("check session credential: {e}")))?;
+            if current.is_none() {
+                return Err(SidError::Fenced(
+                    "the credential the sign-in proved changed before its session".into(),
+                ));
+            }
+        }
 
         // The profile row lock serializes session creation per profile for
         // every replica and version alike, until commit or rollback. It does
@@ -1441,9 +1464,9 @@ impl GrantStore for PostgresBackend {
         .await
         .map_err(|e| SidError::Storage(format!("count sessions: {e}")))?;
 
-        // Evict oldest sessions if at or over limit.
+        // Evict oldest sessions if at or over the limit (0 is no limit).
         let mut evicted = Vec::new();
-        if count >= max_sessions as i64 {
+        if max_sessions > 0 && count >= max_sessions as i64 {
             let to_evict = (count - max_sessions as i64 + 1) as i64; // +1 for the new session
             let rows: Vec<(SessionId, Option<String>)> = sqlx::query_as(
                 "SELECT id, client_id FROM sessions \

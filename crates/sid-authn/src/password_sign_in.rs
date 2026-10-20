@@ -9,7 +9,9 @@ use std::fmt::Display;
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use sid_core::models::{AuditEntry, Credential, CredentialId, CredentialType};
+use sid_core::models::{
+    AuditEntry, Credential, CredentialData, CredentialFence, CredentialId, CredentialType,
+};
 use sid_plugin::{CredentialStore, LoginState, StoredCredential};
 use tracing::warn;
 
@@ -27,6 +29,9 @@ pub enum PendingSignIn<O> {
         #[serde(rename = "profile_id")]
         owner: O,
         credential_id: CredentialId,
+        /// The stored password as the start read it: the session must still
+        /// find it so (a reset replaces it in place).
+        credential_data: CredentialData,
     },
     /// A sign-in that cannot succeed: no account holds the principal, or its
     /// account has no password. Stored and consumed like a real state and
@@ -104,7 +109,10 @@ pub struct Started {
 /// An account whose password the sign-in verified.
 pub struct Verified<A> {
     pub account: A,
-    pub credential_id: CredentialId,
+    /// The password the sign-in proved, for the session it creates
+    /// (`GrantStore::create_session_atomic`): a reset committed meanwhile
+    /// refuses that session.
+    pub proved_by: CredentialFence,
 }
 
 fn storage<E: From<PasswordSignInError>>(e: sid_core::Error) -> E {
@@ -208,6 +216,7 @@ pub async fn start<H: PasswordSignInHost>(
                 state,
                 owner,
                 credential_id: password.id,
+                credential_data: password.data.clone(),
             },
         )
         .await
@@ -233,12 +242,13 @@ pub async fn finish<H: PasswordSignInHost>(
         .await
         .map_err(PasswordSignInError::from)?
         .ok_or(PasswordSignInError::Expired)?;
-    let (state, owner, credential_id) = match pending {
+    let (state, owner, credential_id, credential_data) = match pending {
         PendingSignIn::Password {
             state,
             owner,
             credential_id,
-        } => (state, owner, credential_id),
+            credential_data,
+        } => (state, owner, credential_id, credential_data),
         PendingSignIn::Decoy { identity } => {
             // A lockout reached while this attempt was in flight answers the
             // same here as for a real account.
@@ -277,7 +287,10 @@ pub async fn finish<H: PasswordSignInHost>(
     }
     Ok(Verified {
         account,
-        credential_id,
+        proved_by: CredentialFence {
+            id: credential_id,
+            data: credential_data,
+        },
     })
 }
 

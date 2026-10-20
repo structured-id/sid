@@ -317,6 +317,18 @@ impl MockStorage {
         self.inner.lock().unwrap().reset_sessions.len()
     }
 
+    /// How many sessions `profile` has stored.
+    #[allow(dead_code)]
+    pub fn sessions_of(&self, profile: ProfileId) -> usize {
+        self.inner
+            .lock()
+            .unwrap()
+            .sessions
+            .values()
+            .filter(|s| s.profile_id == profile)
+            .count()
+    }
+
     /// Storage that cannot count a profile's active reset sessions.
     #[allow(dead_code)]
     pub fn with_failing_reset_count(self) -> Self {
@@ -1059,11 +1071,23 @@ impl GrantStore for MockStorage {
         &self,
         session: &Session,
         max_sessions: u32,
+        proved_by: Option<&sid_core::models::CredentialFence>,
         ctx: MutationContext,
     ) -> SidResult<Vec<SessionId>> {
         let mut inner = self.inner.lock().unwrap();
         if inner.sessions.contains_key(&session.id) {
             return Err(sid_core::Error::Conflict("session already exists".into()));
+        }
+        // Under the one lock, as the stores check it in their transaction.
+        if let Some(fence) = proved_by {
+            let current = inner.credentials.get(&fence.id.0).is_some_and(|c| {
+                c.status.is_active() && c.profile_id == session.profile_id && c.data == fence.data
+            });
+            if !current {
+                return Err(sid_core::Error::Fenced(
+                    "the credential the sign-in proved changed before its session".into(),
+                ));
+            }
         }
         let mut evicted = Vec::new();
         if max_sessions > 0 {

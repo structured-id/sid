@@ -5,7 +5,7 @@
 use async_trait::async_trait;
 use sid_core::models::{ProfileId, ResourceId};
 use sid_plugin::conformance::grant_store::GrantHarness;
-use sid_plugin::{GrantStore, StorageBackend};
+use sid_plugin::{CredentialStore, GrantStore, StorageBackend};
 
 use super::{create_test_profile, test_audit};
 
@@ -16,6 +16,10 @@ impl GrantHarness for ProfileGrants<'_> {
     type Owner = ProfileId;
 
     fn store(&self) -> &dyn GrantStore<Owner = ProfileId> {
+        self.0
+    }
+
+    fn credentials(&self) -> &dyn CredentialStore<Owner = ProfileId> {
         self.0
     }
 
