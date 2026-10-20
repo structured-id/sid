@@ -56,7 +56,54 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         sql: BROWSER_CSRF,
         adds_column: Some(("sessions", "browser_csrf")),
     },
+    Migration::sql(12, INVITE_CREATOR_AND_REDEMPTIONS),
 ];
+
+/// Invites name a Profile or a machine user as creator, and record the
+/// registrations that used them; the PostgreSQL migration 064 states the
+/// contract. SQLite cannot relax a column's constraint, so the table is
+/// rebuilt with its rows; nothing references it.
+const INVITE_CREATOR_AND_REDEMPTIONS: &str = "
+CREATE TABLE invites_rebuilt (
+    id                 TEXT PRIMARY KEY,
+    code               TEXT NOT NULL,
+    created_by         TEXT REFERENCES profiles(id),
+    created_by_machine TEXT REFERENCES machine_users(id),
+    created_by_name    TEXT NOT NULL,
+    metadata           TEXT NOT NULL,
+    max_uses           INTEGER NOT NULL CHECK (max_uses >= 0),
+    use_count          INTEGER NOT NULL CHECK (use_count >= 0),
+    expires_at         TEXT,
+    active             INTEGER NOT NULL,
+    created_at         TEXT NOT NULL,
+    CONSTRAINT invites_one_creator
+        CHECK ((created_by IS NULL) <> (created_by_machine IS NULL))
+);
+
+INSERT INTO invites_rebuilt (
+    id, code, created_by, created_by_name, metadata, max_uses, use_count,
+    expires_at, active, created_at
+)
+SELECT id, code, created_by, created_by_name, metadata, max_uses, use_count,
+       expires_at, active, created_at
+FROM invites;
+
+DROP TABLE invites;
+ALTER TABLE invites_rebuilt RENAME TO invites;
+
+CREATE UNIQUE INDEX idx_invites_code ON invites (UPPER(code));
+CREATE INDEX idx_invites_created_id ON invites (created_at DESC, id DESC);
+
+CREATE TABLE invite_redemptions (
+    invite_id   TEXT NOT NULL REFERENCES invites(id) ON DELETE CASCADE,
+    profile_id  TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    redeemed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (invite_id, profile_id)
+);
+
+CREATE INDEX idx_invite_redemptions_order
+    ON invite_redemptions (invite_id, redeemed_at, profile_id);
+";
 
 /// The CSRF token a browser session carries; the PostgreSQL migration 063
 /// states the contract.

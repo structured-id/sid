@@ -1,8 +1,8 @@
 use super::*;
 use crate::test_mock::MockStorage;
 use sid_core::models::{
-    AUTHZ_CHECK, PERMISSION_CHECKER_ROLE, SCIM_ACTIONS, SCIM_PROVISIONER_ROLE,
-    TOKEN_INSPECTOR_ROLE, TOKEN_INTROSPECT,
+    AUTHZ_CHECK, INVITE_ACTIONS, INVITE_ISSUER_ROLE, PERMISSION_CHECKER_ROLE, SCIM_ACTIONS,
+    SCIM_PROVISIONER_ROLE, TOKEN_INSPECTOR_ROLE, TOKEN_INTROSPECT,
 };
 
 fn stored_with_key(roles: &[Role], key: &str) -> usize {
@@ -55,4 +55,22 @@ async fn the_permission_checker_role_is_provisioned_once() {
     let roles = storage.list_roles(ProjectId::system()).await.unwrap();
     assert_eq!(stored_with_key(&roles, PERMISSION_CHECKER_ROLE), 1);
     assert_eq!(stored_with_key(&roles, TOKEN_INSPECTOR_ROLE), 1);
+}
+
+/// The invite issuer role is created once, beside the others, and grants
+/// the invite actions and nothing else: no administration, no SCIM.
+#[tokio::test]
+async fn the_invite_issuer_role_is_provisioned_once() {
+    let storage = MockStorage::new();
+    ensure_scim_provisioner_role(&storage).await.unwrap();
+    let first = ensure_invite_issuer_role(&storage).await.unwrap();
+    assert_eq!(first.project_id, ProjectId::system());
+    assert_eq!(first.permissions, INVITE_ACTIONS.map(String::from).to_vec());
+
+    let again = ensure_invite_issuer_role(&storage).await.unwrap();
+    assert_eq!(again.id, first.id);
+    assert_ne!(first.id, Role::scim_provisioner().id);
+    let roles = storage.list_roles(ProjectId::system()).await.unwrap();
+    assert_eq!(stored_with_key(&roles, INVITE_ISSUER_ROLE), 1);
+    assert_eq!(stored_with_key(&roles, SCIM_PROVISIONER_ROLE), 1);
 }

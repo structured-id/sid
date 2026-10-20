@@ -2077,6 +2077,12 @@ impl sid_plugin::StorageBackend for MockStorage {
     async fn count_invites(&self, _: &sid_core::models::InviteFilter) -> Result<u64> {
         Ok(0)
     }
+    async fn list_invite_redemptions(
+        &self,
+        _: sid_core::models::InviteId,
+    ) -> Result<Vec<sid_core::models::InviteRedemption>> {
+        Ok(vec![])
+    }
     async fn try_use_invite(
         &self,
         _: sid_core::models::InviteId,

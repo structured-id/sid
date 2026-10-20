@@ -99,6 +99,7 @@ pub use auth_flow::{
 pub use authz::{
     AUTHZ_CHECK, AdminEnvelope, AdminOperation, AssignmentFence, AssignmentProvenance,
     AuthzPrincipal, CedarPolicy, CedarPolicyId, EnvelopeError, Group, GroupId, GroupMember,
+    INVITE_ACTIONS, INVITE_CREATE, INVITE_ISSUER_ROLE, INVITE_READ, INVITE_REVOKE,
     PERMISSION_CHECKER_ROLE, PolicyEffect, ProfileGrant, ProfileGrantId, RecipientKind, Role,
     RoleAssignment, RoleAssignmentId, RoleAssignmentPrincipal, RoleEditFence, RoleId,
     SCIM_ACTION_PREFIX, SCIM_ACTIONS, SCIM_GROUP_CREATE, SCIM_GROUP_DELETE, SCIM_GROUP_MEMBERSHIP,
@@ -158,8 +159,8 @@ pub use incident::{
 };
 pub use instance_secret::InstanceSecret;
 pub use invite::{
-    INVITE_CODE_LENGTH, Invite, InviteFilter, InviteId, InviteStatus, generate_invite_code,
-    normalize_invite_code,
+    INVITE_CODE_LENGTH, Invite, InviteCreator, InviteFilter, InviteId, InviteRedemption,
+    InviteStatus, generate_invite_code, normalize_invite_code,
 };
 pub use machine_user::{
     CredentialStatus, ImpersonationGrant, ImpersonationTargetType, MachineCredentialType,

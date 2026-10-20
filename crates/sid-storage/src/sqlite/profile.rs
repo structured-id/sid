@@ -53,19 +53,23 @@ pub(super) async fn stored_enrollment_policy(
 /// the database lock: decide it by the policy stored now and spend its
 /// invite when the mode asks for one, recording that use in the invite's
 /// audit chain as `registration`'s actor; returns the source that same
-/// policy records. The PostgreSQL backend states the contract.
+/// policy records and the invite spent. The PostgreSQL backend states the
+/// contract.
 async fn admit_registration(
     tx: &mut sqlx::SqliteConnection,
     gate: &sid_core::models::EnrollmentGate,
     registration: &sid_core::models::AuditEntry,
-) -> SidResult<Option<sid_core::models::RegistrationSource>> {
+) -> SidResult<(
+    Option<sid_core::models::RegistrationSource>,
+    Option<uuid::Uuid>,
+)> {
     use sid_core::enrollment::EnrollmentDenialReason;
     let stored = stored_enrollment_policy(&mut *tx).await?;
     let admission = gate
         .admit(stored)
         .map_err(SidError::RegistrationRestricted)?;
     let Some(code) = admission.invite else {
-        return Ok(admission.source());
+        return Ok((admission.source(), None));
     };
     let spent = sqlx::query(
         "UPDATE invites SET use_count = use_count + 1 \
@@ -92,7 +96,7 @@ async fn admit_registration(
     )
     .await
     .map_err(|e| SidError::Storage(format!("Audit log failed: {e}")))?;
-    Ok(admission.source())
+    Ok((admission.source(), Some(invite)))
 }
 
 /// Whether the policy stored now tracks registration sources, read in the
@@ -458,9 +462,12 @@ impl SqliteBackend {
         // records the source its admitting policy decides; one recorded while
         // tracked asks the policy here.
         let decided_source;
+        let mut spent_invite = None;
         let source = match (enrollment, source_recording) {
             (Some(gate), _) => {
-                decided_source = admit_registration(&mut tx, gate, &audit.audit).await?;
+                let (admitted, invite) = admit_registration(&mut tx, gate, &audit.audit).await?;
+                decided_source = admitted;
+                spent_invite = invite;
                 &decided_source
             }
             (None, sid_core::models::SourceRecording::WhilePolicyTracks) => {
@@ -523,6 +530,19 @@ impl SqliteBackend {
         }
 
         super::directory::insert_profile(&mut tx, profile).await?;
+
+        // The invite this registration spent names the Profile it created.
+        if let Some(invite) = spent_invite {
+            sqlx::query(
+                "INSERT INTO invite_redemptions (invite_id, profile_id, redeemed_at) VALUES (?, ?, ?)",
+            )
+            .bind(invite.to_string())
+            .bind(profile.id)
+            .bind(fmt_dt(&chrono::Utc::now()))
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| super::insert_error("invite redemption", e))?;
+        }
 
         if let Some(email) = email {
             sqlx::query(

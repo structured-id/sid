@@ -141,6 +141,96 @@ async fn test_pg_enrollment_create_list_revoke_lifecycle() {
     );
 }
 
+/// GetInvite returns the registrations that used the invite, each with the
+/// Profile it created; a listing carries none. The registration pins the
+/// invite-only mode, so the installation's stored policy is left alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_pg_enrollment_get_invite_returns_its_redemptions() {
+    let storage = setup_pg_storage().await;
+    let (svc, bearer) = setup_service_with_auth(storage.clone()).await;
+    let invite = svc
+        .create_invite(authed_request(
+            sid_proto::sid::v1::admin::CreateInviteRequest {
+                max_uses: 2,
+                ..Default::default()
+            },
+            &bearer,
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let name = format!("redeemer-{}", uuid::Uuid::now_v7().simple());
+    let profile = sid_core::models::profile::Profile::new(Some(name.clone()));
+    let registration = sid_core::models::NewRegistration::new(
+        profile.clone(),
+        sid_core::models::SignupIdentifier::Username(&name),
+        None,
+    )
+    .unwrap()
+    .admitted_by(sid_core::models::EnrollmentGate {
+        pinned: Some(sid_core::models::EnrollmentMode::InviteOnly),
+        email: None,
+        invite_code: Some(invite.code.to_lowercase()),
+    });
+    storage
+        .register_profile(
+            &registration,
+            AuditEntry::system("test.register", "invite").into(),
+        )
+        .await
+        .unwrap();
+
+    let read = svc
+        .get_invite(authed_request(
+            sid_proto::sid::v1::admin::GetInviteRequest {
+                invite_id: invite.id.clone(),
+            },
+            &bearer,
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(read.use_count, 1);
+    let redeemed: Vec<_> = read
+        .redemptions
+        .iter()
+        .map(|r| r.profile_id.clone())
+        .collect();
+    assert_eq!(redeemed, vec![profile.id.to_string()]);
+    assert!(read.redemptions[0].redeemed_at.is_some());
+
+    let listed = svc
+        .list_invites(authed_request(
+            sid_proto::sid::v1::admin::ListInvitesRequest {
+                page_size: 500,
+                search: invite.code.clone(),
+                ..Default::default()
+            },
+            &bearer,
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    let entry = listed
+        .invites
+        .iter()
+        .find(|i| i.id == invite.id)
+        .expect("listed");
+    assert!(entry.redemptions.is_empty());
+
+    let unknown = svc
+        .get_invite(authed_request(
+            sid_proto::sid::v1::admin::GetInviteRequest {
+                invite_id: uuid::Uuid::now_v7().to_string(),
+            },
+            &bearer,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(unknown.code(), tonic::Code::NotFound);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_pg_enrollment_bulk_create_persists() {
     let storage = setup_pg_storage().await;
@@ -242,6 +332,14 @@ async fn test_pg_enrollment_rpcs_require_a_token() {
         .get_registration_stats(Request::new(
             sid_proto::sid::v1::admin::GetRegistrationStatsRequest { period_days: 30 },
         ))
+        .await
+        .expect_err("no token");
+    assert_eq!(err.code(), tonic::Code::Unauthenticated);
+
+    let err = svc
+        .get_invite(Request::new(sid_proto::sid::v1::admin::GetInviteRequest {
+            invite_id: invite.id.clone(),
+        }))
         .await
         .expect_err("no token");
     assert_eq!(err.code(), tonic::Code::Unauthenticated);
@@ -484,6 +582,17 @@ async fn test_pg_enrollment_rpcs_refuse_a_non_admin() {
                 page_size: 100,
                 page_token: String::new(),
                 search: String::new(),
+            },
+            &token,
+        ))
+        .await
+        .expect_err("not an administrator");
+    assert_eq!(err.code(), tonic::Code::PermissionDenied);
+
+    let err = svc
+        .get_invite(authed_request(
+            sid_proto::sid::v1::admin::GetInviteRequest {
+                invite_id: uuid::Uuid::now_v7().to_string(),
             },
             &token,
         ))

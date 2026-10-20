@@ -9,6 +9,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::MachineUserId;
 use super::profile::ProfileId;
 
 // ── ID type ─────────────────────────────────────────────────────
@@ -95,6 +96,34 @@ impl InviteFilter {
     }
 }
 
+// ── Creator and redemptions ─────────────────────────────────────
+
+/// Who created an invite: an administrator Profile, or a machine user
+/// holding the invite action on the enrollment API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "id", rename_all = "snake_case")]
+pub enum InviteCreator {
+    Profile(ProfileId),
+    MachineUser(MachineUserId),
+}
+
+impl InviteCreator {
+    /// The creator's id, whatever its kind.
+    pub fn id(&self) -> Uuid {
+        match self {
+            Self::Profile(id) => id.into_uuid(),
+            Self::MachineUser(id) => id.into_uuid(),
+        }
+    }
+}
+
+/// One registration that used an invite: the Profile it created.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InviteRedemption {
+    pub profile_id: ProfileId,
+    pub redeemed_at: DateTime<Utc>,
+}
+
 // ── Invite entity ───────────────────────────────────────────────
 
 /// Invite code for gated registration.
@@ -107,8 +136,8 @@ pub struct Invite {
     /// Cryptographically random, URL-safe, 8-character alphanumeric (case-insensitive).
     pub code: String,
 
-    /// Profile ID of the admin who created this invite.
-    pub created_by: ProfileId,
+    /// Who created this invite.
+    pub created_by: InviteCreator,
 
     /// Display name of the creator (for admin-ui).
     pub created_by_name: String,

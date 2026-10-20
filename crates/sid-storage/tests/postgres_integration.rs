@@ -1410,6 +1410,18 @@ async fn test_invite_spent_once_by_concurrent_registrations() {
     finish_isolated(&backend, &schema, outcome).await;
 }
 
+/// Runs in its own schema: it makes the installation invite-only.
+#[tokio::test]
+async fn test_invite_creator_and_redemptions() {
+    let (backend, schema) = isolated("enrollredeem").await;
+    let outcome = tokio::spawn({
+        let backend = backend.clone();
+        async move { common::enrollment_policy::test_invite_creator_and_redemptions(&backend).await }
+    })
+    .await;
+    finish_isolated(&backend, &schema, outcome).await;
+}
+
 /// A self-registration of a fresh username under the stored policy.
 fn self_registration(name: &str) -> sid_core::models::NewRegistration {
     sid_core::models::NewRegistration::new(
