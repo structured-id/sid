@@ -437,7 +437,7 @@ fn test_principal_lost_template_renders() {
 fn test_password_reset_template_places_the_link() {
     let engine = TemplateEngine::with_default_ce_templates();
     let link = "https://id.sid.example.com/account/reset?session_id=s-1&token=t-2";
-    let event = Event::new("sid-identity", "sid.password_reset.requested.v1")
+    let event = Event::new("sid-identity", event_types::PASSWORD_RESET_REQUESTED)
         .with_data(serde_json::json!({ "link": link, "expires_minutes": 30 }));
 
     let msg = engine
