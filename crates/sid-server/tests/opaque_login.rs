@@ -162,8 +162,16 @@ async fn password_replaced_mid_login_creates_no_session() {
         .await
         .unwrap()
         .remove(0);
-    // Same credential, still active, another password record.
-    credential.data = sid_core::models::CredentialData::new(b"the-replacement-record".to_vec());
+    // Same credential, still active, another password record, sealed as a
+    // reset stores it.
+    credential.data = sid_authn::sealed_secret::seal(
+        common::test_key_manager().as_ref(),
+        &sid_authn::sealed_secret::opaque_context(profile_id),
+        b"the replacement password file",
+    )
+    .await
+    .unwrap()
+    .into();
     svc.mock_storage.set_credential(&credential);
 
     let err = svc

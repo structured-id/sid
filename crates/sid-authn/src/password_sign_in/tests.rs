@@ -82,9 +82,11 @@ impl PasswordSignInHost for Host {
         &self,
         credential: &Credential<ProfileId>,
     ) -> Result<OpenedPassword, HostError> {
+        // A stored password here is a version byte and the record: two forms
+        // of one record differ in that byte only, as two sealings do.
         let record = StoredCredential {
             curve: CurveId::Ristretto255,
-            data: credential.data.expose().to_vec(),
+            data: credential.data.expose()[1..].to_vec(),
         };
         let resealed = self.reseal_to.lock().unwrap().take();
         let stored = match resealed {
@@ -153,6 +155,11 @@ async fn account(h: &Host, principal: &str) -> ProfileId {
     profile.id
 }
 
+/// `record`'s stored form under key `version`.
+fn sealed(version: u8, record: &[u8]) -> Vec<u8> {
+    [&[version][..], record].concat()
+}
+
 /// `owner`'s password, registered through the router as a client would.
 async fn with_password(h: &Host, owner: ProfileId) -> Credential<ProfileId> {
     let identifier = *uuid::Uuid::now_v7().as_bytes();
@@ -175,7 +182,12 @@ async fn with_password(h: &Host, owner: ProfileId) -> Credential<ProfileId> {
         .router
         .registration_finish(&upload.message.serialize())
         .unwrap();
-    let mut password = Credential::new(owner, CredentialType::Opaque, stored.data, None);
+    let mut password = Credential::new(
+        owner,
+        CredentialType::Opaque,
+        CredentialData::new(sealed(1, &stored.data)),
+        None,
+    );
     password.opaque_credential_identifier = Some(identifier);
     h.store.create_credential(&password, ctx()).await.unwrap();
     password
@@ -263,6 +275,61 @@ async fn an_unreadable_state_is_an_expired_sign_in() {
         matches!(e, HostError::SignIn(PasswordSignInError::Expired)),
         "{e:?}"
     );
+}
+
+/// Another reader reseals the password after this sign-in started (the same
+/// record in a new stored form): the sign-in still succeeds and fences its
+/// session on the form the store holds now. A password changed after the
+/// start keeps the form the start read, which the store no longer holds.
+#[tokio::test]
+async fn a_password_resealed_after_the_start_fences_on_the_new_form() {
+    for change in [false, true] {
+        let h = host().await;
+        let principal = format!("resealed-{change}");
+        let owner = account(&h, &principal).await;
+        let password = with_password(&h, owner).await;
+
+        let mut rng = UnwrapErr(SysRng);
+        let client = ClientLogin::<DefaultCipherSuite>::start(&mut rng, PASSWORD).unwrap();
+        let started = start(&h, &principal, &client.message.serialize())
+            .await
+            .unwrap();
+        let finalization = client
+            .state
+            .finish(
+                &mut rng,
+                PASSWORD,
+                sid_opaque_ke::CredentialResponse::deserialize(&started.credential_response)
+                    .unwrap(),
+                ClientLoginFinishParameters::default(),
+            )
+            .unwrap()
+            .message
+            .serialize()
+            .to_vec();
+
+        let record = &password.data.expose()[1..];
+        let rewritten = if change {
+            sealed(2, b"another record")
+        } else {
+            sealed(2, record)
+        };
+        assert!(
+            h.store
+                .reseal_credential_data(password.id, password.data.expose(), &rewritten, ctx())
+                .await
+                .unwrap()
+        );
+
+        let verified = finish(&h, &started.state_key, &finalization).await.unwrap();
+        let stored = h.store.get_credential(password.id).await.unwrap().unwrap();
+        if change {
+            assert!(verified.proved_by.data == password.data, "the form read");
+            assert!(verified.proved_by.data != stored.data);
+        } else {
+            assert!(verified.proved_by.data == stored.data, "the store's form");
+        }
+    }
 }
 
 /// The right password signs its account in and marks the password used.
@@ -505,6 +572,39 @@ fn a_fenced_state_is_unreadable_to_an_unfenced_build() {
     .unwrap();
     assert!(json.get("Password").is_none(), "{json}");
     assert!(json["PasswordFenced"].get("credential_data").is_some());
+    // A decoy moves with it: across builds a real and a decoy state answer
+    // alike, so the answer does not tell whether the account exists.
+    let decoy = serde_json::to_value(PendingSignIn::<ProfileId>::Decoy {
+        identity: "nobody".into(),
+    })
+    .unwrap();
+    assert!(decoy.get("Decoy").is_none(), "{decoy}");
+    assert!(decoy.get("DecoyFenced").is_some(), "{decoy}");
+}
+
+/// A decoy state stored by an earlier build is answered like an earlier
+/// build's password state: an expired sign-in.
+#[tokio::test]
+async fn an_earlier_decoy_state_is_an_expired_sign_in() {
+    let h = host().await;
+    let earlier: ChallengeStore<serde_json::Value> = ChallengeStore::new(
+        h.cache.clone(),
+        key_manager(),
+        "sign-in",
+        Duration::from_secs(60),
+    );
+    earlier
+        .insert(
+            "earlier-decoy",
+            &serde_json::json!({ "Decoy": { "identity": "nobody" } }),
+        )
+        .await
+        .unwrap();
+    let e = refused(finish(&h, "earlier-decoy", &[0u8; 64]).await);
+    assert!(
+        matches!(e, HostError::SignIn(PasswordSignInError::Expired)),
+        "{e:?}"
+    );
 }
 
 /// The stored state names the owner `profile_id`, the field name its states

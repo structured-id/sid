@@ -40,7 +40,9 @@ pub enum PendingSignIn<O> {
     /// account has no password. Stored and consumed like a real state and
     /// refused like a wrong password, so neither the timing of either step nor
     /// the answer tells whether the account exists. `identity` is the key its
-    /// failed attempts count against.
+    /// failed attempts count against. Its tag moves with the password state's,
+    /// so across builds the two still answer alike.
+    #[serde(rename = "DecoyFenced")]
     Decoy { identity: String },
 }
 
@@ -301,13 +303,45 @@ pub async fn finish<H: PasswordSignInHost>(
     if !still_active {
         return Err(PasswordSignInError::AuthenticationFailed.into());
     }
+    let data = current_form(host, credential_id, credential_data).await?;
     Ok(Verified {
         account,
         proved_by: CredentialFence {
             id: credential_id,
-            data: credential_data,
+            data,
         },
     })
+}
+
+/// The stored form to fence on: the store's current one when it holds the
+/// same record as `read` (another reader resealed it after the start), else
+/// `read`, which a changed password no longer matches.
+async fn current_form<H: PasswordSignInHost>(
+    host: &H,
+    id: CredentialId,
+    read: CredentialData,
+) -> Result<CredentialData, H::Error> {
+    use subtle::ConstantTimeEq;
+    let Some(current) = host
+        .credentials()
+        .get_credential(id)
+        .await
+        .map_err(storage)?
+    else {
+        return Ok(read);
+    };
+    if current.data == read {
+        return Ok(read);
+    }
+    let mut as_read = current.clone();
+    as_read.data = read.clone();
+    let then = host.stored_password(&as_read).await?;
+    let now = host.stored_password(&current).await?;
+    if bool::from(then.record.data.ct_eq(&now.record.data)) {
+        Ok(now.stored)
+    } else {
+        Ok(read)
+    }
 }
 
 #[cfg(test)]
