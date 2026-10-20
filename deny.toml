@@ -14,6 +14,11 @@ ignore = [
     # heapless 0.7 "cas" and with it atomic-polyfill. On every target this
     # server builds for, atomic-polyfill re-exports the native core atomics.
     "RUSTSEC-2023-0089",
+    # emSign roots in webpki-roots: 0.26.11 is matched by version only. It
+    # re-exports TLS_SERVER_ROOTS from webpki-roots 1, which the lock keeps at
+    # the fixed 1.0.10; async-nats 0.50 → tokio-websockets 0.10 still asks
+    # for 0.26.
+    "RUSTSEC-2026-0381",
 ]
 
 [licenses]

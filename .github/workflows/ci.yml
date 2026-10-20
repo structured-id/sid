@@ -110,8 +110,12 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-audit,cargo-deny,cargo-cyclonedx
+      # RUSTSEC-2026-0381 names webpki-roots 0.26.11 only by version: that
+      # release re-exports TLS_SERVER_ROOTS from webpki-roots 1, which the lock
+      # keeps at the fixed 1.0.10 (async-nats → tokio-websockets still asks
+      # for 0.26).
       - name: Vulnerability audit
-        run: cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2025-0134
+        run: cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2025-0134 --ignore RUSTSEC-2026-0381
       - name: License and ban check
         run: cargo deny check
       - name: SBOM (CycloneDX)

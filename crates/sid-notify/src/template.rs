@@ -254,6 +254,23 @@ impl TemplateEngine {
             default_priority: NotificationPriority::Transactional,
         });
 
+        // A one-time code the producer generated for the flow that asked for
+        // it; `purpose` names that flow so the recipient knows what the code
+        // does. Rendered by the flow's own delivery work, never by an event
+        // route: no event carries a code.
+        engine.register(NotificationTemplate {
+            name: "otp".into(),
+            subject: Some("Your code: {{data.code}}".into()),
+            body_html: "<h2>Your code</h2>\
+                <p>Use this code to {{data.purpose}}:</p>\
+                <p style=\"font-size:24px;letter-spacing:4px\"><strong>{{data.code}}</strong></p>\
+                <p>It works once and expires in {{data.expires_minutes}} minutes. If you did not ask for it, ignore this message.</p>".into(),
+            body_text: "Your code\n\n\
+                Use this code to {{data.purpose}}: {{data.code}}\n\n\
+                It works once and expires in {{data.expires_minutes}} minutes. If you did not ask for it, ignore this message.".into(),
+            default_priority: NotificationPriority::Transactional,
+        });
+
         engine.register(NotificationTemplate {
             name: "scim_outbound_failure".into(),
             subject: Some("SCIM provisioning failed: {{data.target_name}}".into()),

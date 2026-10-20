@@ -10,8 +10,28 @@ async fn test_list_all_defaults() {
     let routing = RoutingTable::default_ce_rules();
     let store = TemplateStore::new(&routing, engine, None).await.unwrap();
     let templates = store.list_templates(None, false).await;
-    assert_eq!(templates.len(), 9);
+    assert_eq!(templates.len(), 10);
     assert!(templates.iter().all(|t| !t.customized));
+}
+
+// The one-time code default is managed like the others, with the code, its
+// purpose and its lifetime among its variables.
+#[tokio::test]
+async fn test_otp_default_is_managed() {
+    let engine = test_engine();
+    let routing = RoutingTable::default_ce_rules();
+    let store = TemplateStore::new(&routing, engine, None).await.unwrap();
+
+    let (content, customized, meta) = store
+        .get_template("otp", Channel::Email, "en")
+        .await
+        .expect("the code default is managed");
+    assert!(!customized);
+    assert!(content.text_body.contains("{{data.code}}"));
+    let names: Vec<&str> = meta.variables.iter().map(|v| v.name.as_str()).collect();
+    for name in ["data.code", "data.purpose", "data.expires_minutes"] {
+        assert!(names.contains(&name), "{name} in {names:?}");
+    }
 }
 
 // Every template the engine ships is managed like the others: the password
@@ -235,5 +255,5 @@ async fn test_list_filter_by_channel() {
 
     // Email filter should return every default.
     let email_templates = store.list_templates(Some(Channel::Email), false).await;
-    assert_eq!(email_templates.len(), 9);
+    assert_eq!(email_templates.len(), 10);
 }

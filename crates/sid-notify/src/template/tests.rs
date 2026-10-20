@@ -460,3 +460,29 @@ fn test_password_reset_template_places_the_link() {
     assert!(msg.body.contains("30 minutes"), "{}", msg.body);
     assert_eq!(msg.priority, NotificationPriority::Transactional);
 }
+
+// The one-time code mail places the code its producer generated and the
+// code's lifetime, in both bodies, and says what the code is for; it is
+// transactional (notifications.md, template management: otp is a CE default).
+#[test]
+fn test_otp_template_places_the_code() {
+    let engine = TemplateEngine::with_default_ce_templates();
+    let event =
+        Event::new("sid-identity", event_types::OTP_REQUESTED).with_data(serde_json::json!({
+            "code": "04821937",
+            "expires_minutes": 10,
+            "purpose": "confirm your email address",
+        }));
+
+    let msg = engine
+        .render("otp", &event, NotificationPriority::Transactional)
+        .unwrap();
+
+    assert_eq!(msg.subject.as_deref(), Some("Your code: 04821937"));
+    for body in [msg.body.as_str(), msg.body_text.as_deref().unwrap()] {
+        assert!(body.contains("04821937"), "{body}");
+        assert!(body.contains("10 minutes"), "{body}");
+        assert!(body.contains("confirm your email address"), "{body}");
+    }
+    assert_eq!(msg.priority, NotificationPriority::Transactional);
+}
