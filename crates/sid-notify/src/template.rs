@@ -237,7 +237,9 @@ impl TemplateEngine {
         });
 
         // The producer builds the link when it delivers; the template only
-        // places it, so no link is stored with the delivery work.
+        // places it, so no link is stored with the delivery work. No event
+        // route targets it: the reset event carries no token or link, and
+        // the reset's own delivery work renders it.
         engine.register(NotificationTemplate {
             name: "password_reset".into(),
             subject: Some("Reset your password".into()),
