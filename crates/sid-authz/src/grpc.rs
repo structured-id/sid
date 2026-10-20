@@ -734,7 +734,7 @@ impl AuthzServiceImpl {
             match authenticate_service(request, self.storage.as_ref(), tokens, &self.revocation)
                 .await
             {
-                Ok(service) => return Ok(Asker::Service(service.subject())),
+                Ok(service) => return Ok(Asker::Service(service.caller.subject())),
                 Err(status) if status.code() == tonic::Code::Unauthenticated => {}
                 Err(status) => return Err(status),
             }
@@ -1228,6 +1228,32 @@ impl AuthzServiceImpl {
         self.check_live_resource(resource).await
     }
 
+    /// A role granting invite actions goes only to a machine user, on one
+    /// existing, not retired protected resource: the invite RPCs admit no
+    /// other caller.
+    async fn check_invite_assignment(&self, assignment: &RoleAssignment) -> Result<(), Status> {
+        if !matches!(
+            assignment.principal,
+            RoleAssignmentPrincipal::MachineUser(_)
+        ) {
+            return Err(ApiError::new(
+                ErrorReason::InvalidFieldValue,
+                "invite actions are assigned to a machine user",
+            )
+            .with_field_violation("principal", "not a machine user")
+            .into());
+        }
+        let Some(resource) = assignment.resource_scope() else {
+            return Err(ApiError::new(
+                ErrorReason::InvalidFieldValue,
+                "invite actions are assigned on one protected resource",
+            )
+            .with_field_violation("scope", "expected oauth_resource:<resource_id>")
+            .into());
+        };
+        self.check_live_resource(resource).await
+    }
+
     /// A provisioning connector's role is assigned only while the connector
     /// is not retired, and only on one live protected resource: the engine
     /// lets a connector act nowhere else.
@@ -1652,6 +1678,13 @@ impl AuthzService for AuthzServiceImpl {
         assignment.admin = req.admin.map(envelope_from_proto).transpose()?;
         if role.has_permission(TOKEN_INTROSPECT) || role.has_permission(AUTHZ_CHECK) {
             self.check_service_assignment(&assignment).await?;
+        }
+        if role
+            .permissions
+            .iter()
+            .any(|p| sid_core::models::is_invite_action(p))
+        {
+            self.check_invite_assignment(&assignment).await?;
         }
         if let RoleAssignmentPrincipal::ProvisioningConnector(connector) = assignment.principal {
             self.check_connector_assignment(connector, &assignment)

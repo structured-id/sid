@@ -295,7 +295,7 @@ pub async fn test_invite_spent_once_by_concurrent_registrations(
         b.profile.id
     };
     let redeemed: Vec<_> = backend
-        .list_invite_redemptions(invite.id)
+        .list_invite_redemptions(invite.id, 0, 100)
         .await
         .unwrap()
         .into_iter()
@@ -342,7 +342,7 @@ pub async fn test_invite_creator_and_redemptions(backend: &dyn StorageBackend) {
     assert_eq!(read.created_by, InviteCreator::MachineUser(machine.id));
     assert!(
         backend
-            .list_invite_redemptions(invite.id)
+            .list_invite_redemptions(invite.id, 0, 100)
             .await
             .unwrap()
             .is_empty()
@@ -383,14 +383,23 @@ pub async fn test_invite_creator_and_redemptions(backend: &dyn StorageBackend) {
         Err(sid_core::Error::Conflict(_))
     ));
 
-    let redeemed: Vec<_> = backend
-        .list_invite_redemptions(invite.id)
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|r| r.profile_id)
-        .collect();
-    assert_eq!(redeemed, vec![first.profile.id, second.profile.id]);
+    let page = |offset, limit| async move {
+        backend
+            .list_invite_redemptions(invite.id, offset, limit)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.profile_id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        page(0, 100).await,
+        vec![first.profile.id, second.profile.id]
+    );
+    // Paged one at a time, each redemption once, in the same order.
+    assert_eq!(page(0, 1).await, vec![first.profile.id]);
+    assert_eq!(page(1, 1).await, vec![second.profile.id]);
+    assert!(page(2, 1).await.is_empty());
     assert_eq!(
         backend
             .get_invite(invite.id)

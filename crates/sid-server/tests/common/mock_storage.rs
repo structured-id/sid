@@ -5206,6 +5206,8 @@ impl StorageBackend for MockStorage {
     async fn list_invite_redemptions(
         &self,
         _: sid_core::models::InviteId,
+        _: u64,
+        _: u64,
     ) -> SidResult<Vec<sid_core::models::InviteRedemption>> {
         Ok(vec![])
     }

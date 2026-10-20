@@ -157,6 +157,12 @@ pub const INVITE_REVOKE: &str = "enrollment.invite.revoke";
 /// Every invite action.
 pub const INVITE_ACTIONS: [&str; 3] = [INVITE_CREATE, INVITE_READ, INVITE_REVOKE];
 
+/// Whether `action` is an invite action: held by a machine user only, on
+/// one protected resource, since only such a caller can exercise it.
+pub fn is_invite_action(action: &str) -> bool {
+    INVITE_ACTIONS.contains(&action)
+}
+
 /// Key of the built-in role holding every invite action.
 pub const INVITE_ISSUER_ROLE: &str = "invite-issuer";
 

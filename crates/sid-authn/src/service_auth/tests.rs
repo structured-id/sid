@@ -168,6 +168,7 @@ impl Fixture {
             &self.revocation,
         )
         .await
+        .map(|service| service.caller)
     }
 
     async fn refused(&self, token: &str, case: &str) {

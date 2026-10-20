@@ -7797,12 +7797,16 @@ impl StorageBackend for PostgresBackend {
     async fn list_invite_redemptions(
         &self,
         id: InviteId,
+        offset: u64,
+        limit: u64,
     ) -> SidResult<Vec<sid_core::models::InviteRedemption>> {
         let rows: Vec<(ProfileId, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
             "SELECT profile_id, redeemed_at FROM invite_redemptions
-             WHERE invite_id = $1 ORDER BY redeemed_at, profile_id",
+             WHERE invite_id = $1 ORDER BY redeemed_at, profile_id LIMIT $2 OFFSET $3",
         )
         .bind(id.0)
+        .bind(i64::try_from(limit).map_err(|e| SidError::Storage(e.to_string()))?)
+        .bind(i64::try_from(offset).map_err(|e| SidError::Storage(e.to_string()))?)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("list invite redemptions: {e}")))?;

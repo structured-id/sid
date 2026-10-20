@@ -7,7 +7,7 @@ use sid_authn::caller::{Caller, authenticate};
 use sid_authn::jwt::JwtService;
 use sid_authn::resource_token::ResourceTokenVerifier;
 use sid_authn::revocation_cache::RevocationCache;
-use sid_authn::service_auth::{ServiceCaller, authenticate_service};
+use sid_authn::service_auth::{AuthenticatedService, ServiceCaller, authenticate_service};
 use sid_core::grpc_error::refuse::{
     dependency_unavailable, internal, invalid_field, missing_field, not_found, storage_failure,
 };
@@ -257,7 +257,19 @@ impl EnrollmentServiceImpl {
             )
             .await
             {
-                Ok(ServiceCaller::Machine { machine, .. }) => {
+                // The action must be both within the token's scopes and
+                // granted by the service's current role assignments.
+                Ok(service) if !service.may(action) => {
+                    return Err(ApiError::new(
+                        ErrorReason::ScopeNotGranted,
+                        "the access token does not grant this operation",
+                    )
+                    .into());
+                }
+                Ok(AuthenticatedService {
+                    caller: ServiceCaller::Machine { machine, .. },
+                    ..
+                }) => {
                     let decision = services
                         .engine
                         .check(&AuthzCheckRequest {
@@ -276,12 +288,33 @@ impl EnrollmentServiceImpl {
                 }
                 // An invite names a Profile or a machine user as creator; an
                 // OAuth client acting for itself is neither.
-                Ok(ServiceCaller::Client { .. }) => return Err(denied()),
+                Ok(AuthenticatedService {
+                    caller: ServiceCaller::Client { .. },
+                    ..
+                }) => return Err(denied()),
                 Err(status) if status.code() == tonic::Code::Unauthenticated => {}
                 Err(status) => return Err(status),
             }
         }
         Ok(InviteActor::Admin(self.admin(request).await?.profile_id))
+    }
+
+    /// The stored invite `invite_id` names; NOT_FOUND for an unknown one.
+    async fn stored_invite(&self, invite_id: &str) -> Result<Invite, Status> {
+        let invite_id = uuid::Uuid::parse_str(invite_id)
+            .map(InviteId)
+            .map_err(|_| invalid_field("invite_id", "not an invite identifier"))?;
+        self.storage
+            .get_invite(invite_id)
+            .await
+            .map_err(storage_failure)?
+            .ok_or_else(|| {
+                not_found(
+                    ErrorReason::InviteNotFound,
+                    "Invite",
+                    invite_id.0.to_string(),
+                )
+            })
     }
 
     /// The display name of an invite's creator, recorded with the invite for
@@ -454,7 +487,7 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
             .map_err(storage_failure)?;
 
         info!("Created invite {}", invite.id.0);
-        Ok(Response::new(invite_to_proto(&invite, Vec::new())))
+        Ok(Response::new(invite_to_proto(&invite)))
     }
 
     #[tracing::instrument(skip_all, fields(rpc = "get_invite"))]
@@ -463,27 +496,47 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
         request: Request<sid_proto::sid::v1::admin::GetInviteRequest>,
     ) -> Result<Response<ProtoInvite>, Status> {
         self.invite_actor(&request, INVITE_READ).await?;
-        let invite_id = uuid::Uuid::parse_str(&request.into_inner().invite_id)
-            .map(InviteId)
-            .map_err(|_| invalid_field("invite_id", "not an invite identifier"))?;
-        let invite = self
-            .storage
-            .get_invite(invite_id)
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(|| {
-                not_found(
-                    ErrorReason::InviteNotFound,
-                    "Invite",
-                    invite_id.0.to_string(),
-                )
-            })?;
+        let invite = self.stored_invite(&request.into_inner().invite_id).await?;
+        Ok(Response::new(invite_to_proto(&invite)))
+    }
+
+    #[tracing::instrument(skip_all, fields(rpc = "list_invite_redemptions"))]
+    async fn list_invite_redemptions(
+        &self,
+        request: Request<sid_proto::sid::v1::admin::ListInviteRedemptionsRequest>,
+    ) -> Result<Response<sid_proto::sid::v1::admin::ListInviteRedemptionsResponse>, Status> {
+        self.invite_actor(&request, INVITE_READ).await?;
+        let req = request.into_inner();
+        let invite = self.stored_invite(&req.invite_id).await?;
+        // AIP-158: a page size above the maximum is coerced to it.
+        let limit = match u64::from(req.page_size) {
+            0 => DEFAULT_PAGE_SIZE,
+            n => n.min(MAX_PAGE_SIZE),
+        };
+        let offset = page_offset(&req.page_token)?;
         let redemptions = self
             .storage
-            .list_invite_redemptions(invite_id)
+            .list_invite_redemptions(invite.id, offset, limit)
             .await
             .map_err(storage_failure)?;
-        Ok(Response::new(invite_to_proto(&invite, redemptions)))
+        // A full page may have a next one; an offset past BIGINT has none.
+        let next_page_token = offset
+            .checked_add(limit)
+            .filter(|next| redemptions.len() as u64 == limit && i64::try_from(*next).is_ok())
+            .map(|next| next.to_string())
+            .unwrap_or_default();
+        Ok(Response::new(
+            sid_proto::sid::v1::admin::ListInviteRedemptionsResponse {
+                redemptions: redemptions
+                    .into_iter()
+                    .map(|r| sid_proto::sid::v1::admin::InviteRedemption {
+                        profile_id: r.profile_id.to_string(),
+                        redeemed_at: Some(convert::to_timestamp(r.redeemed_at)),
+                    })
+                    .collect(),
+                next_page_token,
+            },
+        ))
     }
 
     #[tracing::instrument(skip_all, fields(rpc = "list_invites"))]
@@ -521,10 +574,7 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
             .unwrap_or_default();
         Ok(Response::new(
             sid_proto::sid::v1::admin::ListInvitesResponse {
-                invites: invites
-                    .iter()
-                    .map(|invite| invite_to_proto(invite, Vec::new()))
-                    .collect(),
+                invites: invites.iter().map(invite_to_proto).collect(),
                 next_page_token,
                 // The field is uint32: a larger count is reported as its
                 // maximum rather than wrapped to a small number.
@@ -630,10 +680,7 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
         info!("Bulk created {} invites", invites.len());
         Ok(Response::new(
             sid_proto::sid::v1::admin::BulkCreateInvitesResponse {
-                invites: invites
-                    .iter()
-                    .map(|invite| invite_to_proto(invite, Vec::new()))
-                    .collect(),
+                invites: invites.iter().map(invite_to_proto).collect(),
             },
         ))
     }
@@ -799,28 +846,18 @@ fn source_type_to_proto(
     }
 }
 
-/// `invite` as the API returns it, with `redemptions` (GetInvite only).
-fn invite_to_proto(
-    invite: &Invite,
-    redemptions: Vec<sid_core::models::InviteRedemption>,
-) -> ProtoInvite {
-    use sid_proto::sid::v1::admin::{InviteCreatorKind, InviteRedemption};
-    let created_by_kind = match invite.created_by {
-        InviteCreator::Profile(_) => InviteCreatorKind::Profile,
-        InviteCreator::MachineUser(_) => InviteCreatorKind::MachineUser,
+/// `invite` as the API returns it: `created_by` names only a Profile
+/// creator, a machine user creator has its own field.
+fn invite_to_proto(invite: &Invite) -> ProtoInvite {
+    let (created_by, created_by_machine_user_id) = match invite.created_by {
+        InviteCreator::Profile(id) => (id.to_string(), String::new()),
+        InviteCreator::MachineUser(id) => (String::new(), id.to_string()),
     };
     ProtoInvite {
         id: invite.id.0.to_string(),
         code: invite.code.clone(),
-        created_by: invite.created_by.id().to_string(),
-        created_by_kind: created_by_kind.into(),
-        redemptions: redemptions
-            .into_iter()
-            .map(|r| InviteRedemption {
-                profile_id: r.profile_id.to_string(),
-                redeemed_at: Some(convert::to_timestamp(r.redeemed_at)),
-            })
-            .collect(),
+        created_by,
+        created_by_machine_user_id,
         created_by_name: invite.created_by_name.clone(),
         metadata: invite.metadata.clone().into_iter().collect(),
         max_uses: invite.max_uses,

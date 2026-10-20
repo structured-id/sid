@@ -216,12 +216,16 @@ impl SqliteBackend {
     pub(crate) async fn list_invite_redemptions_impl(
         &self,
         id: InviteId,
+        offset: u64,
+        limit: u64,
     ) -> SidResult<Vec<InviteRedemption>> {
         let rows = sqlx::query(
             "SELECT profile_id, redeemed_at FROM invite_redemptions \
-             WHERE invite_id = ? ORDER BY redeemed_at, profile_id",
+             WHERE invite_id = ? ORDER BY redeemed_at, profile_id LIMIT ? OFFSET ?",
         )
         .bind(id.0.to_string())
+        .bind(i64::try_from(limit).map_err(|e| SidError::Storage(e.to_string()))?)
+        .bind(i64::try_from(offset).map_err(|e| SidError::Storage(e.to_string()))?)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("list invite redemptions: {e}")))?;

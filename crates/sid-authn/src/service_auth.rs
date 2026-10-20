@@ -44,6 +44,21 @@ impl ServiceCaller {
     }
 }
 
+/// An authenticated service and the scopes its verified token carries.
+#[derive(Debug, Clone)]
+pub struct AuthenticatedService {
+    pub caller: ServiceCaller,
+    scopes: Vec<String>,
+}
+
+impl AuthenticatedService {
+    /// Whether the token was issued for `action`: an action outside its
+    /// scopes is refused whatever the service's roles grant (RFC 6749 §3.3).
+    pub fn may(&self, action: &str) -> bool {
+        self.scopes.iter().any(|s| s == action)
+    }
+}
+
 fn unauthenticated() -> Status {
     ApiError::new(ErrorReason::TokenInvalid, "authentication required").into()
 }
@@ -56,7 +71,7 @@ pub async fn authenticate_service<T>(
     storage: &dyn StorageBackend,
     tokens: &ResourceTokenVerifier,
     revocation: &RevocationCache,
-) -> Result<ServiceCaller, Status> {
+) -> Result<AuthenticatedService, Status> {
     let presented = bearer_token(request)?;
     let claims = match tokens.verify(presented).await {
         Ok(claims) => claims,
@@ -108,7 +123,10 @@ pub async fn authenticate_service<T>(
     {
         return Err(unauthenticated());
     }
-    Ok(caller)
+    Ok(AuthenticatedService {
+        caller,
+        scopes: claims.scope.split_whitespace().map(String::from).collect(),
+    })
 }
 
 #[cfg(test)]

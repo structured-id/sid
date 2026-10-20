@@ -141,11 +141,13 @@ async fn test_pg_enrollment_create_list_revoke_lifecycle() {
     );
 }
 
-/// GetInvite returns the registrations that used the invite, each with the
-/// Profile it created; a listing carries none. The registration pins the
-/// invite-only mode, so the installation's stored policy is left alone.
+/// ListInviteRedemptions pages through the registrations that used the
+/// invite, oldest first, each with the Profile it created; an unknown invite
+/// is NOT_FOUND. The registrations pin the invite-only mode, so the
+/// installation's stored policy is left alone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_pg_enrollment_get_invite_returns_its_redemptions() {
+async fn test_pg_enrollment_lists_an_invites_redemptions() {
+    use sid_proto::sid::v1::admin::{GetInviteRequest, ListInviteRedemptionsRequest};
     let storage = setup_pg_storage().await;
     let (svc, bearer) = setup_service_with_auth(storage.clone()).await;
     let invite = svc
@@ -160,30 +162,34 @@ async fn test_pg_enrollment_get_invite_returns_its_redemptions() {
         .unwrap()
         .into_inner();
 
-    let name = format!("redeemer-{}", uuid::Uuid::now_v7().simple());
-    let profile = sid_core::models::profile::Profile::new(Some(name.clone()));
-    let registration = sid_core::models::NewRegistration::new(
-        profile.clone(),
-        sid_core::models::SignupIdentifier::Username(&name),
-        None,
-    )
-    .unwrap()
-    .admitted_by(sid_core::models::EnrollmentGate {
-        pinned: Some(sid_core::models::EnrollmentMode::InviteOnly),
-        email: None,
-        invite_code: Some(invite.code.to_lowercase()),
-    });
-    storage
-        .register_profile(
-            &registration,
-            AuditEntry::system("test.register", "invite").into(),
+    let mut registered = Vec::new();
+    for _ in 0..2 {
+        let name = format!("redeemer-{}", uuid::Uuid::now_v7().simple());
+        let profile = sid_core::models::profile::Profile::new(Some(name.clone()));
+        let registration = sid_core::models::NewRegistration::new(
+            profile.clone(),
+            sid_core::models::SignupIdentifier::Username(&name),
+            None,
         )
-        .await
-        .unwrap();
+        .unwrap()
+        .admitted_by(sid_core::models::EnrollmentGate {
+            pinned: Some(sid_core::models::EnrollmentMode::InviteOnly),
+            email: None,
+            invite_code: Some(invite.code.to_lowercase()),
+        });
+        storage
+            .register_profile(
+                &registration,
+                AuditEntry::system("test.register", "invite").into(),
+            )
+            .await
+            .unwrap();
+        registered.push(profile.id.to_string());
+    }
 
     let read = svc
         .get_invite(authed_request(
-            sid_proto::sid::v1::admin::GetInviteRequest {
+            GetInviteRequest {
                 invite_id: invite.id.clone(),
             },
             &bearer,
@@ -191,37 +197,53 @@ async fn test_pg_enrollment_get_invite_returns_its_redemptions() {
         .await
         .unwrap()
         .into_inner();
-    assert_eq!(read.use_count, 1);
-    let redeemed: Vec<_> = read
-        .redemptions
-        .iter()
-        .map(|r| r.profile_id.clone())
-        .collect();
-    assert_eq!(redeemed, vec![profile.id.to_string()]);
-    assert!(read.redemptions[0].redeemed_at.is_some());
+    assert_eq!(read.use_count, 2);
 
-    let listed = svc
-        .list_invites(authed_request(
-            sid_proto::sid::v1::admin::ListInvitesRequest {
-                page_size: 500,
-                search: invite.code.clone(),
+    let page = |token: String| {
+        svc.list_invite_redemptions(authed_request(
+            ListInviteRedemptionsRequest {
+                invite_id: invite.id.clone(),
+                page_size: 1,
+                page_token: token,
+            },
+            &bearer,
+        ))
+    };
+    let first = page(String::new()).await.unwrap().into_inner();
+    let second = page(first.next_page_token.clone())
+        .await
+        .unwrap()
+        .into_inner();
+    let after = page(second.next_page_token.clone())
+        .await
+        .unwrap()
+        .into_inner();
+    let ids = |p: &sid_proto::sid::v1::admin::ListInviteRedemptionsResponse| {
+        p.redemptions
+            .iter()
+            .map(|r| r.profile_id.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids(&first), vec![registered[0].clone()]);
+    assert_eq!(ids(&second), vec![registered[1].clone()]);
+    assert!(after.redemptions.is_empty());
+    assert_eq!(after.next_page_token, "");
+    assert!(first.redemptions[0].redeemed_at.is_some());
+
+    let unknown = svc
+        .list_invite_redemptions(authed_request(
+            ListInviteRedemptionsRequest {
+                invite_id: uuid::Uuid::now_v7().to_string(),
                 ..Default::default()
             },
             &bearer,
         ))
         .await
-        .unwrap()
-        .into_inner();
-    let entry = listed
-        .invites
-        .iter()
-        .find(|i| i.id == invite.id)
-        .expect("listed");
-    assert!(entry.redemptions.is_empty());
-
+        .unwrap_err();
+    assert_eq!(unknown.code(), tonic::Code::NotFound);
     let unknown = svc
         .get_invite(authed_request(
-            sid_proto::sid::v1::admin::GetInviteRequest {
+            GetInviteRequest {
                 invite_id: uuid::Uuid::now_v7().to_string(),
             },
             &bearer,

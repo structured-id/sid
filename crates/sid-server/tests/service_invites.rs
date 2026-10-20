@@ -17,7 +17,7 @@ use sid_core::models::{
 };
 use sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService;
 use sid_proto::sid::v1::admin::{
-    CreateInviteRequest, GetInviteRequest, InviteCreatorKind, ListInvitesRequest,
+    CreateInviteRequest, GetInviteRequest, ListInviteRedemptionsRequest, ListInvitesRequest,
     RevokeInviteRequest,
 };
 use sid_server::grpc::enrollment_service::{EnrollmentServiceImpl, InviteServices};
@@ -138,6 +138,11 @@ impl Invites {
 
     /// The machine user's own token for the API at `endpoint`.
     async fn token_for(&self, endpoint: String) -> String {
+        self.token_scoped(endpoint, None).await
+    }
+
+    /// The same, asking for `scope` only when given.
+    async fn token_scoped(&self, endpoint: String, scope: Option<&str>) -> String {
         use sid_proto::sid::v1::OAuth2TokenRequest;
         use sid_proto::sid::v1::auth_service_server::AuthService;
         self.svc
@@ -148,6 +153,7 @@ impl Invites {
                 client_secret: Some(ISSUER_SECRET.into()),
                 issuer_handle: self.svc.issuer.handle.to_string(),
                 resource: vec![endpoint],
+                scope: scope.map(str::to_string),
                 ..Default::default()
             }))
             .await
@@ -201,13 +207,11 @@ async fn a_service_holding_the_invite_issuer_role_manages_invites() {
         .await
         .unwrap()
         .into_inner();
-    assert_eq!(
-        InviteCreatorKind::try_from(invite.created_by_kind).unwrap(),
-        InviteCreatorKind::MachineUser
-    );
-    assert_eq!(invite.created_by, i.machine.id.to_string());
+    // created_by keeps its Profile-only meaning: a machine creator has its
+    // own field, never read as a Profile ID.
+    assert_eq!(invite.created_by, "");
+    assert_eq!(invite.created_by_machine_user_id, i.machine.id.to_string());
     assert_eq!(invite.created_by_name, "Onboarding service");
-    assert!(invite.redemptions.is_empty());
 
     let read = i
         .enrollment
@@ -221,7 +225,25 @@ async fn a_service_holding_the_invite_issuer_role_manages_invites() {
         .unwrap()
         .into_inner();
     assert_eq!(read.code, invite.code);
-    assert_eq!(read.created_by, invite.created_by);
+    assert_eq!(
+        read.created_by_machine_user_id,
+        invite.created_by_machine_user_id
+    );
+
+    let redemptions = i
+        .enrollment
+        .list_invite_redemptions(bearing(
+            &token,
+            ListInviteRedemptionsRequest {
+                invite_id: invite.id.clone(),
+                ..Default::default()
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(redemptions.redemptions.is_empty());
+    assert_eq!(redemptions.next_page_token, "");
 
     i.enrollment
         .list_invites(bearing(&token, listing()))
@@ -271,6 +293,18 @@ async fn a_service_without_the_role_on_the_enrollment_api_is_refused() {
     refused(
         i.enrollment
             .list_invites(bearing(&token, listing()))
+            .await
+            .unwrap_err(),
+    );
+    refused(
+        i.enrollment
+            .list_invite_redemptions(bearing(
+                &token,
+                ListInviteRedemptionsRequest {
+                    invite_id: uuid::Uuid::now_v7().to_string(),
+                    ..Default::default()
+                },
+            ))
             .await
             .unwrap_err(),
     );
@@ -327,11 +361,8 @@ async fn administrators_keep_invites_and_other_users_are_refused() {
         .await
         .unwrap()
         .into_inner();
-    assert_eq!(
-        InviteCreatorKind::try_from(invite.created_by_kind).unwrap(),
-        InviteCreatorKind::Profile
-    );
     assert_eq!(invite.created_by, admin.to_string());
+    assert_eq!(invite.created_by_machine_user_id, "");
     i.enrollment
         .get_invite(bearing(
             &admin_token,
@@ -350,4 +381,123 @@ async fn administrators_keep_invites_and_other_users_are_refused() {
         .await
         .unwrap_err();
     assert_eq!(status.code(), Code::PermissionDenied, "{status:?}");
+}
+
+/// Regression: the service's token scopes were ignored, so a token asked
+/// for `enrollment.invite.create` alone also read and revoked invites. An
+/// action outside the token's scopes is refused even though the role grants
+/// it; within them the role decides.
+#[tokio::test]
+async fn an_action_outside_the_token_scopes_is_refused() {
+    let i = invites().await;
+    i.grant_on(i.resource.id).await;
+    let create_only = i
+        .token_scoped(
+            sid_authn::issuer::enrollment_api_endpoint(&i.svc.issuer.canonical_url),
+            Some(sid_core::models::INVITE_CREATE),
+        )
+        .await;
+    let invite = i
+        .enrollment
+        .create_invite(bearing(&create_only, single_use()))
+        .await
+        .unwrap()
+        .into_inner();
+    let read = i
+        .enrollment
+        .get_invite(bearing(
+            &create_only,
+            GetInviteRequest {
+                invite_id: invite.id.clone(),
+            },
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(read.code(), Code::PermissionDenied, "{read:?}");
+    let revoke = i
+        .enrollment
+        .revoke_invite(bearing(
+            &create_only,
+            RevokeInviteRequest {
+                invite_id: invite.id,
+            },
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(revoke.code(), Code::PermissionDenied, "{revoke:?}");
+}
+
+/// The invite issuer role goes only to a machine user, on one protected
+/// resource: assigning it to a Profile or an OAuth client, or project-wide,
+/// is refused, so no role assignment promises what the invite RPCs refuse.
+#[tokio::test]
+async fn the_invite_issuer_role_is_assigned_to_a_machine_user_on_one_resource() {
+    use sid_proto::sid::v1::authz::AssignRoleRequest;
+    use sid_proto::sid::v1::authz::assign_role_request::Principal;
+    use sid_proto::sid::v1::authz_service_server::AuthzService;
+    let i = invites().await;
+    let authz = sid_authz::grpc::AuthzServiceImpl::new(
+        Arc::new(sid_authz::CeAuthzEngine::new(i.svc.storage.clone())),
+        i.svc.storage.clone(),
+        sid_authz::cedar::CedarService::new(),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        i.svc.jwt.clone(),
+        i.svc.revocation_cache.clone(),
+        common::RecordingAuditLog::shared(),
+    );
+    let role = i
+        .svc
+        .storage
+        .list_roles(ProjectId::system())
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|r| r.key == INVITE_ISSUER_ROLE)
+        .unwrap()
+        .id
+        .0
+        .to_string();
+    let admin = issue_admin_token(&i.svc.jwt, sid_core::models::ProfileId::generate());
+    let on = Some(format!("oauth_resource:{}", i.resource.id));
+    let machine = || Some(Principal::MachineUserId(i.machine.id.to_string()));
+    let cases = [
+        (
+            Some(Principal::ProfileId(test_profile().id.to_string())),
+            on.clone(),
+        ),
+        (
+            Some(Principal::OauthClientId("test-client".into())),
+            on.clone(),
+        ),
+        (machine(), None),
+    ];
+    for (n, (principal, scope)) in cases.into_iter().enumerate() {
+        let status = authz
+            .assign_role(bearing(
+                &admin,
+                AssignRoleRequest {
+                    principal,
+                    role_id: role.clone(),
+                    scope,
+                    expires_at: None,
+                    admin: None,
+                },
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), Code::InvalidArgument, "case {n}: {status:?}");
+    }
+    authz
+        .assign_role(bearing(
+            &admin,
+            AssignRoleRequest {
+                principal: machine(),
+                role_id: role,
+                scope: on,
+                expires_at: None,
+                admin: None,
+            },
+        ))
+        .await
+        .unwrap();
 }

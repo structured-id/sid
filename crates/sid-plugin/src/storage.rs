@@ -1986,11 +1986,15 @@ pub trait StorageBackend:
     /// How many invites `filter` selects.
     async fn count_invites(&self, filter: &InviteFilter) -> Result<u64>;
 
-    /// The registrations that used invite `id`, oldest first; a registration
-    /// that spends an invite records its Profile in its own transaction.
+    /// The registrations that used invite `id`, oldest first in one total
+    /// order (time, then Profile), a page of `limit` from `offset`; a
+    /// registration that spends an invite records its Profile in its own
+    /// transaction.
     async fn list_invite_redemptions(
         &self,
         id: InviteId,
+        offset: u64,
+        limit: u64,
     ) -> Result<Vec<sid_core::models::InviteRedemption>>;
 
     /// Atomically increment invite use_count. Returns updated invite if successful

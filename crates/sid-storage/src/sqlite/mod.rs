@@ -2954,8 +2954,10 @@ impl StorageBackend for SqliteBackend {
     async fn list_invite_redemptions(
         &self,
         id: sid_core::models::InviteId,
+        offset: u64,
+        limit: u64,
     ) -> SidResult<Vec<sid_core::models::InviteRedemption>> {
-        self.list_invite_redemptions_impl(id).await
+        self.list_invite_redemptions_impl(id, offset, limit).await
     }
     async fn try_use_invite(
         &self,
