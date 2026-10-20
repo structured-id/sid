@@ -1424,6 +1424,17 @@ impl GrantStore for PostgresBackend {
             .await
             .map_err(|e| SidError::Storage(format!("begin tx: {e}")))?;
 
+        // The profile row lock serializes session creation per profile for
+        // every replica and version alike, until commit or rollback. It does
+        // not block other rows that merely reference the profile. Taken
+        // before the credential row, the order credential revocation takes
+        // them in, so the two never deadlock.
+        sqlx::query("SELECT 1 FROM profiles WHERE id = $1 FOR NO KEY UPDATE")
+            .bind(session.profile_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| SidError::Storage(format!("lock profile: {e}")))?;
+
         if let Some(fence) = proved_by {
             // FOR SHARE holds the credential row until this commit: a reset's
             // update waits for it, and one that committed first is read here
@@ -1445,15 +1456,6 @@ impl GrantStore for PostgresBackend {
                 ));
             }
         }
-
-        // The profile row lock serializes session creation per profile for
-        // every replica and version alike, until commit or rollback. It does
-        // not block other rows that merely reference the profile.
-        sqlx::query("SELECT 1 FROM profiles WHERE id = $1 FOR NO KEY UPDATE")
-            .bind(session.profile_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| SidError::Storage(format!("lock profile: {e}")))?;
 
         // Count active (non-expired) sessions for this profile.
         let count: i64 = sqlx::query_scalar(

@@ -1811,8 +1811,12 @@ impl AuthServiceImpl {
         .await
     }
 
-    /// The OPAQUE password file of `credential`, opened, with its curve.
-    async fn stored_password(&self, credential: &Credential) -> Result<StoredCredential, Status> {
+    /// The OPAQUE password file of `credential`, opened, with its curve, and
+    /// the credential's data as the store holds it afterwards.
+    async fn stored_password(
+        &self,
+        credential: &Credential,
+    ) -> Result<(StoredCredential, sid_core::models::CredentialData), Status> {
         use sid_authn::sealed_secret::StoredPasswordError;
         sid_authn::sealed_secret::stored_password(
             self.key_manager.as_ref(),
@@ -2603,7 +2607,7 @@ impl AuthService for AuthServiceImpl {
         // prepared for it, and charges nothing.
         let id = sid_ids::PasswordOperationId::generate();
         let started = if proves {
-            let stored = self.stored_password(&credential).await?;
+            let (stored, _) = self.stored_password(&credential).await?;
             Some(
                 self.opaque_router
                     .login_start(

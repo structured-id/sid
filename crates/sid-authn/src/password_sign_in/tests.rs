@@ -43,6 +43,11 @@ struct Host {
     locked: Mutex<HashSet<String>>,
     failures: Mutex<Vec<String>>,
     gone: Mutex<HashSet<ProfileId>>,
+    /// Opening a password writes it back in this new stored form, as a
+    /// reseal under a newer key version does.
+    reseal_to: Mutex<Option<Vec<u8>>>,
+    /// The shared cache the sign-in states live in.
+    cache: Arc<dyn CacheBackend>,
 }
 
 #[async_trait]
@@ -76,11 +81,30 @@ impl PasswordSignInHost for Host {
     async fn stored_password(
         &self,
         credential: &Credential<ProfileId>,
-    ) -> Result<StoredCredential, HostError> {
-        Ok(StoredCredential {
+    ) -> Result<OpenedPassword, HostError> {
+        let record = StoredCredential {
             curve: CurveId::Ristretto255,
             data: credential.data.expose().to_vec(),
-        })
+        };
+        let resealed = self.reseal_to.lock().unwrap().take();
+        let stored = match resealed {
+            Some(resealed) => {
+                assert!(
+                    self.store
+                        .reseal_credential_data(
+                            credential.id,
+                            credential.data.expose(),
+                            &resealed,
+                            ctx()
+                        )
+                        .await
+                        .unwrap()
+                );
+                CredentialData::new(resealed)
+            }
+            None => credential.data.clone(),
+        };
+        Ok(OpenedPassword { record, stored })
     }
     fn opaque_credential_identifier(&self, credential: &Credential<ProfileId>) -> [u8; 16] {
         credential.opaque_credential_identifier()
@@ -99,11 +123,18 @@ async fn host() -> Host {
     Host {
         store: SqliteBackend::new_in_memory().await.unwrap(),
         router: OpaqueRouter::new(primary, verifiers, setup),
-        pending: ChallengeStore::new(cache, key_manager(), "sign-in", Duration::from_secs(60)),
+        pending: ChallengeStore::new(
+            cache.clone(),
+            key_manager(),
+            "sign-in",
+            Duration::from_secs(60),
+        ),
         principals: Mutex::default(),
         locked: Mutex::default(),
         failures: Mutex::default(),
         gone: Mutex::default(),
+        reseal_to: Mutex::default(),
+        cache,
     }
 }
 
@@ -179,6 +210,59 @@ async fn sign_in(
 
 fn refused(r: Result<Verified<ProfileId>, HostError>) -> HostError {
     r.err().expect("the sign-in was refused")
+}
+
+/// A password written back in a new stored form while its sign-in opened it
+/// (a reseal under a newer key version) fences the session on that new form,
+/// the one the store holds: the first sign-in after a key rotation is not
+/// refused.
+#[tokio::test]
+async fn a_resealed_password_fences_on_its_new_form() {
+    let h = host().await;
+    let owner = account(&h, "rotated").await;
+    let password = with_password(&h, owner).await;
+    *h.reseal_to.lock().unwrap() = Some(b"the same record, sealed anew".to_vec());
+
+    let verified = sign_in(&h, "rotated", PASSWORD).await.unwrap();
+    let stored = h.store.get_credential(password.id).await.unwrap().unwrap();
+    assert_eq!(verified.proved_by.id, password.id);
+    assert!(
+        verified.proved_by.data == stored.data,
+        "the fence holds the stored form"
+    );
+}
+
+/// A state this build cannot read (stored by an earlier build, without the
+/// password's stored form) is answered as an expired sign-in, so the client
+/// starts again; no session can be fenced on a form it does not carry.
+#[tokio::test]
+async fn an_unreadable_state_is_an_expired_sign_in() {
+    let h = host().await;
+    let owner = account(&h, "upgraded").await;
+    let password = with_password(&h, owner).await;
+    let earlier: ChallengeStore<serde_json::Value> = ChallengeStore::new(
+        h.cache.clone(),
+        key_manager(),
+        "sign-in",
+        Duration::from_secs(60),
+    );
+    earlier
+        .insert(
+            "earlier-state",
+            &serde_json::json!({ "Password": {
+                "state": LoginState(vec![1]),
+                "profile_id": owner,
+                "credential_id": password.id,
+            }}),
+        )
+        .await
+        .unwrap();
+
+    let e = refused(finish(&h, "earlier-state", &[0u8; 64]).await);
+    assert!(
+        matches!(e, HostError::SignIn(PasswordSignInError::Expired)),
+        "{e:?}"
+    );
 }
 
 /// The right password signs its account in and marks the password used.
@@ -407,8 +491,8 @@ async fn account_gone_in_flight_signs_nobody_in() {
     assert!(stored.last_used_at.is_none());
 }
 
-/// The stored state keeps the field name states in flight carry, so a
-/// sign-in started before an upgrade finishes after it.
+/// The stored state names the owner `profile_id`, the field name its states
+/// have always carried.
 #[test]
 fn stored_state_names_the_owner_profile_id() {
     let owner = ProfileId::generate();

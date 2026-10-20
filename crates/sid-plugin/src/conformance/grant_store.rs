@@ -322,6 +322,49 @@ pub async fn session_fence_serializes_with_a_reset<H: GrantHarness>(h: &H) {
     ));
 }
 
+/// A password's revocation racing sign-ins it proved serializes with them:
+/// each sign-in either commits before the revocation or is fenced, and
+/// neither side fails on storage (no lock-order deadlock).
+pub async fn session_fence_serializes_with_a_revocation<H: GrantHarness>(h: &H) {
+    use sid_core::models::{Credential, CredentialData, CredentialType};
+    for round in 0..10 {
+        let owner = h.owner().await;
+        let record = format!("revoked-{round}");
+        let password = stored_password(h, owner.clone(), record.as_bytes()).await;
+        // A passkey keeps the account usable, so the password can be revoked.
+        h.credentials()
+            .create_credential(
+                &Credential::new(
+                    owner.clone(),
+                    CredentialType::WebAuthn,
+                    CredentialData::new(b"passkey".to_vec()),
+                    None,
+                ),
+                ctx(),
+            )
+            .await
+            .unwrap();
+        let proved = fence(password.id, record.as_bytes());
+        let sessions: Vec<_> = (0..4).map(|_| session(owner.clone())).collect();
+        let creates = sessions
+            .iter()
+            .map(|s| h.store().create_session_atomic(s, 3, Some(&proved), ctx()));
+        let revoke = h.credentials().revoke_credential(password.id, ctx());
+        let (created, revoked) = tokio::join!(futures::future::join_all(creates), revoke);
+        assert_eq!(
+            revoked.unwrap(),
+            sid_core::models::CredentialRevocation::Revoked,
+            "round {round}"
+        );
+        for outcome in created {
+            assert!(
+                matches!(outcome, Ok(_) | Err(Error::Fenced(_))),
+                "round {round}: {outcome:?}"
+            );
+        }
+    }
+}
+
 /// Creating a session never replaces one: an existing id is `Conflict` with or
 /// without a session limit, and the stored session keeps its authentication.
 pub async fn session_create_never_replaces<H: GrantHarness>(h: &H) {

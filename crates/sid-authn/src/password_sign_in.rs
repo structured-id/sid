@@ -85,11 +85,13 @@ pub trait PasswordSignInHost: Send + Sync {
     /// Count a failed attempt against `identity`.
     async fn record_failure(&self, identity: &str) -> Result<(), Self::Error>;
 
-    /// The OPAQUE record of `credential`, opened from its sealed form.
+    /// The OPAQUE record of `credential`, opened from its sealed form, and
+    /// the form the store holds for it now (opening may write it back
+    /// resealed).
     async fn stored_password(
         &self,
         credential: &Credential<Self::Owner>,
-    ) -> Result<StoredCredential, Self::Error>;
+    ) -> Result<OpenedPassword, Self::Error>;
 
     /// The OPAQUE credential identifier sign-ins of `credential` evaluate
     /// under (RFC 9807 §5).
@@ -97,6 +99,15 @@ pub trait PasswordSignInHost: Send + Sync {
 
     /// The account `owner` names; `None` when it can no longer sign in.
     async fn account(&self, owner: &Self::Owner) -> Result<Option<Self::Account>, Self::Error>;
+}
+
+/// A stored password opened for a sign-in.
+pub struct OpenedPassword {
+    /// The OPAQUE record the sign-in runs against.
+    pub record: StoredCredential,
+    /// The credential's data as the store holds it now: the session the
+    /// sign-in creates is fenced on it.
+    pub stored: CredentialData,
 }
 
 /// The answer to a sign-in start.
@@ -198,11 +209,11 @@ pub async fn start<H: PasswordSignInHost>(
     };
 
     let credential_id = host.opaque_credential_identifier(password);
-    let stored = host.stored_password(password).await?;
+    let opened = host.stored_password(password).await?;
     let (credential_response, state) = host
         .opaque()
         // An ordinary sign-in has the empty context.
-        .login_start(&stored, credential_request, &credential_id, &[])
+        .login_start(&opened.record, credential_request, &credential_id, &[])
         .map_err(|e| {
             warn!("OPAQUE login start failed for {}: {}", principal, e);
             PasswordSignInError::AuthenticationFailed
@@ -216,7 +227,7 @@ pub async fn start<H: PasswordSignInHost>(
                 state,
                 owner,
                 credential_id: password.id,
-                credential_data: password.data.clone(),
+                credential_data: opened.stored,
             },
         )
         .await
@@ -236,12 +247,14 @@ pub async fn finish<H: PasswordSignInHost>(
     state_key: &str,
     finalization: &[u8],
 ) -> Result<Verified<H::Account>, H::Error> {
-    let pending = host
-        .pending()
-        .take(state_key)
-        .await
-        .map_err(PasswordSignInError::from)?
-        .ok_or(PasswordSignInError::Expired)?;
+    let pending = match host.pending().take(state_key).await {
+        Ok(pending) => pending.ok_or(PasswordSignInError::Expired)?,
+        // A state this build cannot read (an earlier build's, without the
+        // password's stored form to fence on) is spent: the client starts
+        // again, as after an expiry.
+        Err(ChallengeStoreError::Encoding(_)) => return Err(PasswordSignInError::Expired.into()),
+        Err(e) => return Err(PasswordSignInError::from(e).into()),
+    };
     let (state, owner, credential_id, credential_data) = match pending {
         PendingSignIn::Password {
             state,
