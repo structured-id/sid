@@ -96,6 +96,45 @@ fn a_separate_history_evaluator_needs_a_durable_bus() {
     }
 }
 
+/// The in-process bus reaches the subscribers of one process only. Over
+/// storage several replicas share (PostgreSQL), the replica that claims a
+/// fact's fan-out would publish it to its own subscribers alone and the
+/// others would silently miss it, so that pairing stops startup. A SQLite
+/// file serves one process, and both NATS modes reach every replica.
+#[test]
+fn the_in_process_bus_needs_single_process_storage() {
+    use crate::embedded_nats::EventBusMode;
+    assert!(bus_fits_storage(&EventBusMode::InProcess, false).is_ok());
+    let refused = bus_fits_storage(&EventBusMode::InProcess, true)
+        .expect_err("replicas would miss live events")
+        .to_string();
+    assert!(refused.contains("in-process"), "{refused}");
+    let external = EventBusMode::External("nats://nats.sid.example.com:4222".into());
+    for mode in [EventBusMode::Embedded, external] {
+        assert!(bus_fits_storage(&mode, true).is_ok());
+        assert!(bus_fits_storage(&mode, false).is_ok());
+    }
+}
+
+/// The SQLite file is named by `SID_STORAGE_SQLITE_PATH`. The old name
+/// `SID_SQLITE_PATH` is refused rather than ignored: ignoring it would open
+/// the default file and start a deployment that set it as a new one.
+#[cfg(feature = "embedded-dev")]
+#[test]
+fn sqlite_path_refuses_the_old_setting_name() {
+    assert_eq!(sqlite_path(None, None).unwrap(), "/var/lib/sid/auth.db");
+    assert_eq!(
+        sqlite_path(Some("/data/sid.db".into()), None).unwrap(),
+        "/data/sid.db"
+    );
+    for new in [None, Some("/data/sid.db".to_string())] {
+        let refused = sqlite_path(new, Some("/data/old.db".into()))
+            .expect_err("the old name is not read")
+            .to_string();
+        assert!(refused.contains("SID_STORAGE_SQLITE_PATH"), "{refused}");
+    }
+}
+
 /// Explicit malformed security settings must stop startup, never disable
 /// proof verification or silently select a different policy.
 #[test]

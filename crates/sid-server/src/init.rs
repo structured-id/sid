@@ -374,8 +374,10 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         Arc<dyn sid_plugin::audit::AuditLog>,
         LocalHistoryKeys,
     ) = {
-        let db_path = env_setting("SID_STORAGE_SQLITE_PATH")?
-            .unwrap_or_else(|| "/var/lib/sid/auth.db".to_string());
+        let db_path = sqlite_path(
+            env_setting("SID_STORAGE_SQLITE_PATH")?,
+            env_setting("SID_SQLITE_PATH")?,
+        )?;
         let backend = sid_storage::sqlite::SqliteBackend::new(&db_path)
             .await
             .context("SQLite storage and its migrations")?;
@@ -783,6 +785,8 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         sid_infra::TopologyRole::from_env(sid_infra::TopologyRole::Own)?,
     )
     .await?;
+    // PostgreSQL may be shared by several replicas; a SQLite file is not.
+    bus_fits_storage(&nats_mode, cfg!(feature = "storage-pg"))?;
     let required_receivers =
         required_receivers(&nats_mode, env_setting("SID_EVENT_RECEIVERS")?.as_deref())?;
 
@@ -1507,6 +1511,37 @@ pub(crate) fn required_receivers(
         );
     }
     Ok(receivers)
+}
+
+/// The in-process bus reaches only this process's subscribers. Over storage
+/// several replicas can share (`shared_storage`), the replica that claims a
+/// fact's fan-out would publish it to its own subscribers alone, so others
+/// would silently miss live events: that pairing stops startup.
+pub(crate) fn bus_fits_storage(
+    mode: &crate::embedded_nats::EventBusMode,
+    shared_storage: bool,
+) -> anyhow::Result<()> {
+    if shared_storage && *mode == crate::embedded_nats::EventBusMode::InProcess {
+        anyhow::bail!(
+            "the in-process bus serves one process, but this storage can be shared by \
+             several replicas: set SID_NATS_URL to `embedded` or a NATS URL"
+        );
+    }
+    Ok(())
+}
+
+/// The SQLite file `SID_STORAGE_SQLITE_PATH` names (default
+/// `/var/lib/sid/auth.db`). The old name `SID_SQLITE_PATH` is refused, not
+/// ignored: ignoring it would open the default file instead of the one it
+/// names and start that deployment as a new installation.
+#[cfg(feature = "embedded-dev")]
+pub(crate) fn sqlite_path(setting: Option<String>, old: Option<String>) -> anyhow::Result<String> {
+    if old.is_some() {
+        anyhow::bail!(
+            "SID_SQLITE_PATH is not read: name the SQLite file in SID_STORAGE_SQLITE_PATH"
+        );
+    }
+    Ok(setting.unwrap_or_else(|| "/var/lib/sid/auth.db".to_string()))
 }
 
 /// A separate history evaluator (`remote_evaluator`) reports its cleanup
