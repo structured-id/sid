@@ -52,3 +52,8 @@ sid-storage = { workspace = true, features = ["storage-pg", "storage-sqlite"] }
 [[bench]]
 name = "role_administration"
 harness = false
+
+# P50/P99, allocations and concurrent throughput of permission checks.
+[[bench]]
+name = "check_latency"
+harness = false
