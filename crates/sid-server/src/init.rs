@@ -411,42 +411,12 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
             "JWT keys not found at '{}' — generating Ed25519 key pair for development",
             jwt_private_key_path
         );
-        if let Err(e) = std::fs::create_dir_all(&data_dir) {
-            panic!("Cannot create data directory '{}': {}", data_dir, e);
-        }
-        let output = std::process::Command::new("openssl")
-            .args([
-                "genpkey",
-                "-algorithm",
-                "Ed25519",
-                "-out",
-                &jwt_private_key_path,
-            ])
-            .output()
-            .expect("Failed to run openssl — is it installed?");
-        if !output.status.success() {
-            panic!(
-                "openssl genpkey failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        let output = std::process::Command::new("openssl")
-            .args([
-                "pkey",
-                "-in",
-                &jwt_private_key_path,
-                "-pubout",
-                "-out",
-                &jwt_public_key_path,
-            ])
-            .output()
-            .expect("Failed to extract public key");
-        if !output.status.success() {
-            panic!(
-                "openssl pkey failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
+        std::fs::create_dir_all(&data_dir)
+            .with_context(|| format!("create data directory {data_dir}"))?;
+        let (private_pem, public_pem) =
+            sid_authn::jwt::generate_signing_key_pem().context("generate the JWT key pair")?;
+        write_new_key_file(&jwt_private_key_path, private_pem.as_bytes(), true)?;
+        write_new_key_file(&jwt_public_key_path, public_pem.as_bytes(), false)?;
         info!("Generated JWT key pair at '{}'", data_dir);
         tracing::warn!("Set SID_JWT_PRIVATE_KEY_PATH for production use");
     }
@@ -1128,6 +1098,28 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         security_svc,
         account_svc,
     })
+}
+
+/// Write a generated key to a new file at `path`, never over an existing
+/// one. A private key is readable by its owner only, so another account on
+/// the host cannot read it.
+pub(crate) fn write_new_key_file(path: &str, contents: &[u8], private: bool) -> anyhow::Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    if private {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    #[cfg(not(unix))]
+    let _ = private;
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("create key file {path}"))?;
+    file.write_all(contents)
+        .and_then(|()| file.sync_all())
+        .with_context(|| format!("write key file {path}"))
 }
 
 /// This round's lock of background job `job`: `None` when another instance
