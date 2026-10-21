@@ -222,10 +222,19 @@ impl Default for Retry {
 
 /// Feeds `sink` from `source` until no bundle serves it: subscribes, serves
 /// each projection in revision order, and after a failure or the end of a
-/// stream subscribes again, while the last projection stays served.
-pub async fn follow<S: SettingsSource>(sink: SettingsSink, mut source: S, retry: Retry) {
+/// stream subscribes again, while the last projection stays served. Whatever
+/// it waits for (a subscription, the next projection, a retry), it ends with
+/// the last bundle, so the upstream subscription goes with it.
+pub async fn follow<S: SettingsSource>(sink: SettingsSink, source: S, retry: Retry) {
+    tokio::select! {
+        () = sink.served.closed() => {}
+        () = feed(&sink, source, retry) => {}
+    }
+}
+
+async fn feed<S: SettingsSource>(sink: &SettingsSink, mut source: S, retry: Retry) {
     let mut wait = retry.first;
-    while !sink.is_closed() {
+    loop {
         match source.subscribe().await {
             Ok(mut updates) => {
                 let mut stream = sink.stream();
@@ -247,9 +256,6 @@ pub async fn follow<S: SettingsSource>(sink: SettingsSink, mut source: S, retry:
                 }
             }
             Err(e) => tracing::warn!("public UI settings subscription failed: {e}"),
-        }
-        if sink.is_closed() {
-            break;
         }
         tokio::time::sleep(wait).await;
         wait = (wait * 2).min(retry.longest);

@@ -395,6 +395,32 @@ async fn test_follow_recovers_from_a_lost_stream() {
     );
 }
 
+/// Regression: once the last bundle was dropped, `follow` stayed blocked on
+/// an idle stream, leaking the task and its upstream subscription. It ends
+/// as soon as nothing serves its configuration, idle stream or not.
+#[tokio::test(start_paused = true)]
+async fn test_follow_ends_with_its_last_bundle() {
+    let (bundle, sink) = UiBundle::live(&bundle_dir("followend"), "/account/", CONFIG).unwrap();
+    let (stream_tx, stream_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (subscribed_tx, mut subscribed) = tokio::sync::mpsc::unbounded_channel();
+    let source = ScriptedSource {
+        streams: [stream_rx].into(),
+        subscriptions: subscribed_tx,
+    };
+    let follower = tokio::spawn(follow(sink, source, Retry::default()));
+    subscribed.recv().await.unwrap();
+    stream_tx
+        .send(Ok(projection(1, &[PrincipalType::Email], 0)))
+        .unwrap();
+    // The stream stays open and idle while the bundle goes away.
+    drop(bundle);
+    tokio::time::timeout(std::time::Duration::from_secs(60), follower)
+        .await
+        .expect("follow ends once its bundle is gone")
+        .unwrap();
+    drop(stream_tx);
+}
+
 /// A reader that falls behind sees the latest projection only, never a
 /// queue of every change.
 #[tokio::test]
