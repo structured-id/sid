@@ -1,0 +1,115 @@
+# The embedded sidecar image (Dockerfile.embedded: SQLite, in-process event
+# bus, REST and gRPC). A server release tag `v<version>` publishes one
+# multi-arch manifest as ghcr.io/structured-id/sid:<version>-embedded and
+# :embedded; a pull request that touches the image only builds it. Each
+# architecture builds on its own native runner (emulated arm64 would compile
+# the workspace for hours), pushes by digest, and the manifest joins them.
+name: Image
+
+on:
+  push:
+    tags: ["v[0-9]*"]
+  # Any base: a pull request stacked on another one is checked too.
+  pull_request:
+    paths:
+      - Dockerfile.embedded
+      - .github/workflows/image.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE: ghcr.io/structured-id/sid
+
+jobs:
+  build:
+    name: Build (${{ matrix.platform }})
+    if: github.repository_owner == 'structured-id'
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            release_only: true
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Skip arm64 on pull requests
+        id: scope
+        run: echo "run=${{ github.event_name != 'pull_request' || !matrix.release_only }}" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        if: steps.scope.outputs.run == 'true'
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@v3
+        if: steps.scope.outputs.run == 'true'
+      - uses: docker/login-action@v3
+        if: steps.scope.outputs.run == 'true' && github.event_name != 'pull_request'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build
+        id: build
+        if: steps.scope.outputs.run == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.embedded
+          platforms: ${{ matrix.platform }}
+          # A pull request only proves the image builds; a release pushes it
+          # untagged, by digest, for the manifest job below.
+          outputs: ${{ github.event_name == 'pull_request' && 'type=cacheonly' || format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', env.IMAGE) }}
+      - name: Record the digest
+        if: steps.scope.outputs.run == 'true' && github.event_name != 'pull_request'
+        run: |
+          mkdir -p "${{ runner.temp }}/digests"
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+      - uses: actions/upload-artifact@v4
+        if: steps.scope.outputs.run == 'true' && github.event_name != 'pull_request'
+        with:
+          name: digest-${{ matrix.runner }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish
+    if: github.repository_owner == 'structured-id' && github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digest-*
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Manifest
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          set --
+          for digest in *; do set -- "$@" "${IMAGE}@sha256:${digest}"; done
+          docker buildx imagetools create \
+            -t "${IMAGE}:${GITHUB_REF_NAME#v}-embedded" -t "${IMAGE}:embedded" "$@"
+      - name: Inspect
+        run: docker buildx imagetools inspect "${IMAGE}:embedded"

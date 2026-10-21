@@ -40,15 +40,15 @@ COPY proto/ proto/
 # not load without it, whatever the feature selection.
 COPY zkpp/ zkpp/
 
-# Build embedded mode: SQLite backend, no telemetry. The event bus is the
-# in-process one: required work lives in SQLite and the work runner executes
-# it, so the image carries no broker.
+# Build embedded mode: SQLite backend, REST beside gRPC (`http`), no
+# telemetry. The event bus is the in-process one: required work lives in
+# SQLite and the work runner executes it, so the image carries no broker.
 RUN --mount=type=cache,id=sid-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=sid-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=sid-target-embedded,target=/build/target,sharing=locked \
     cargo build --release -p sid-server \
     --no-default-features \
-    --features embedded-dev \
+    --features embedded-dev,http \
     && strip target/release/sid \
     && install -D target/release/sid /out/sid
 
