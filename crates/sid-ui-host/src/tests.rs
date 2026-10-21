@@ -137,7 +137,310 @@ fn test_config_tag_follows_its_bytes() {
         br#"{"environment":"dev","release":"1.2.4"}"#,
     )
     .unwrap();
-    assert_ne!(one.config_tag, other.config_tag);
+    let tag = |bundle: &UiBundle| bundle.config.borrow().as_ref().unwrap().tag.clone();
+    assert_ne!(tag(&one), tag(&other));
+}
+
+use sid_proto::sid::v1::identity::PrincipalType;
+use sid_proto::sid::v1::ui::PublicUiSettings;
+
+fn projection(revision: u64, registration: &[PrincipalType], minimum: u32) -> PublicUiSettings {
+    PublicUiSettings {
+        revision,
+        registration_principal_types: registration.iter().map(|t| *t as i32).collect(),
+        registration_username_min_length: minimum,
+        sign_in_principal_types: vec![PrincipalType::Email as i32, PrincipalType::Username as i32],
+    }
+}
+
+async fn config_json(app: &Router) -> serde_json::Value {
+    let (status, response) = get_path(app, Method::GET, "/account/config.json").await;
+    assert_eq!(status, StatusCode::OK);
+    serde_json::from_slice(body(response).await.as_bytes()).unwrap()
+}
+
+/// A live bundle serves the deployment's configuration together with the
+/// installation's public settings, only the types a UI field enters, under
+/// the names the UI uses; the base stays as the deployment wrote it.
+#[tokio::test]
+async fn test_live_config_carries_the_settings() {
+    let (bundle, sink) = UiBundle::live(&bundle_dir("liveconfig"), "/account/", CONFIG).unwrap();
+    let app = router(bundle);
+    let mut settings = projection(1, &[PrincipalType::Email, PrincipalType::Username], 6);
+    settings.registration_principal_types.extend([
+        PrincipalType::NfcTag as i32,
+        99,
+        PrincipalType::Email as i32,
+    ]);
+    sink.stream().apply(&settings).unwrap();
+    let config = config_json(&app).await;
+    assert_eq!(config["environment"], "dev");
+    assert_eq!(config["sidUrl"], "https://sid.example.com");
+    assert_eq!(
+        config["settings"],
+        serde_json::json!({
+            "registrationPrincipalTypes": ["email", "username"],
+            "registrationUsernameMinLength": 6,
+            "signInPrincipalTypes": ["email", "username"],
+        })
+    );
+    // Without usernames in registration there is no minimum to state.
+    sink.stream()
+        .apply(&projection(2, &[PrincipalType::Email], 0))
+        .unwrap();
+    let config = config_json(&app).await;
+    assert_eq!(
+        config["settings"]["registrationPrincipalTypes"],
+        serde_json::json!(["email"])
+    );
+    assert!(
+        config["settings"]
+            .get("registrationUsernameMinLength")
+            .is_none()
+    );
+}
+
+/// Before the first projection there is nothing complete to serve: the
+/// configuration and the standalone health answer 503 and nothing is kept,
+/// never the deployment's configuration alone as if it were complete.
+#[tokio::test]
+async fn test_live_config_waits_for_the_first_projection() {
+    let (bundle, sink) = UiBundle::live(&bundle_dir("livewait"), "/account/", CONFIG).unwrap();
+    let app = standalone(bundle).unwrap();
+    let (status, response) = get_path(&app, Method::GET, "/account/config.json").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        header_of(&response, header::CACHE_CONTROL).as_deref(),
+        Some("no-store")
+    );
+    let (status, _) = get_path(&app, Method::GET, "/health").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    // Static assets do not wait for the settings.
+    let (status, _) = get_path(&app, Method::GET, "/account/assets/app-abc123.js").await;
+    assert_eq!(status, StatusCode::OK);
+    sink.stream()
+        .apply(&projection(1, &[PrincipalType::Email], 0))
+        .unwrap();
+    let (status, _) = get_path(&app, Method::GET, "/health").await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+/// Within one stream an older or repeated revision is not served; an
+/// unusable projection is refused and the served one stays.
+#[tokio::test]
+async fn test_stale_and_unusable_projections_are_not_served() {
+    let (bundle, sink) = UiBundle::live(&bundle_dir("livestale"), "/account/", CONFIG).unwrap();
+    let app = router(bundle);
+    let mut stream = sink.stream();
+    stream
+        .apply(&projection(
+            5,
+            &[PrincipalType::Email, PrincipalType::Username],
+            6,
+        ))
+        .unwrap();
+    for revision in [5, 4] {
+        assert_eq!(
+            stream.apply(&projection(revision, &[PrincipalType::Email], 0)),
+            Err(SettingsRejected::Stale {
+                offered: revision,
+                served: 5
+            })
+        );
+    }
+    for minimum in [0, 33] {
+        assert_eq!(
+            stream.apply(&projection(6, &[PrincipalType::Username], minimum)),
+            Err(SettingsRejected::UsernameMinimum(minimum))
+        );
+    }
+    let config = config_json(&app).await;
+    assert_eq!(config["settings"]["registrationUsernameMinLength"], 6);
+    // A new stream starts from the source's current state, whatever its
+    // revision: after a restore it may be lower.
+    sink.stream()
+        .apply(&projection(3, &[PrincipalType::Email], 0))
+        .unwrap();
+    let config = config_json(&app).await;
+    assert_eq!(
+        config["settings"]["registrationPrincipalTypes"],
+        serde_json::json!(["email"])
+    );
+}
+
+/// A settings change is a new entity: the old tag no longer matches, the new
+/// one answers 304.
+#[tokio::test]
+async fn test_live_config_tag_follows_the_settings() {
+    let (bundle, sink) = UiBundle::live(&bundle_dir("livetag"), "/account/", CONFIG).unwrap();
+    let app = router(bundle);
+    let mut stream = sink.stream();
+    stream
+        .apply(&projection(1, &[PrincipalType::Email], 0))
+        .unwrap();
+    let (_, first) = get_path(&app, Method::GET, "/account/config.json").await;
+    let old = header_of(&first, header::ETAG).unwrap();
+    stream
+        .apply(&projection(
+            2,
+            &[PrincipalType::Email, PrincipalType::Username],
+            6,
+        ))
+        .unwrap();
+    let response = get_if_none_match(&app, "/account/config.json", &old).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let new = header_of(&response, header::ETAG).unwrap();
+    assert_ne!(old, new);
+    let response = get_if_none_match(&app, "/account/config.json", &new).await;
+    assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+}
+
+/// The installation's settings are not the deployment's to set.
+#[test]
+fn test_live_base_cannot_hold_settings() {
+    let dir = bundle_dir("livebase");
+    let config = br#"{"environment":"dev","release":"1","settings":{}}"#;
+    assert!(matches!(
+        UiBundle::live(&dir, "/account/", config),
+        Err(BundleError::Config(_))
+    ));
+}
+
+/// A scripted source: each subscription takes the next stream, whose items
+/// the test sends; with none left a subscription never answers.
+struct ScriptedSource {
+    streams: std::collections::VecDeque<
+        tokio::sync::mpsc::UnboundedReceiver<Result<PublicUiSettings, tonic::Status>>,
+    >,
+    subscriptions: tokio::sync::mpsc::UnboundedSender<()>,
+}
+
+struct ScriptedUpdates(
+    tokio::sync::mpsc::UnboundedReceiver<Result<PublicUiSettings, tonic::Status>>,
+);
+
+impl SettingsSource for ScriptedSource {
+    type Updates = ScriptedUpdates;
+
+    async fn subscribe(&mut self) -> Result<ScriptedUpdates, tonic::Status> {
+        let _ = self.subscriptions.send(());
+        match self.streams.pop_front() {
+            Some(stream) => Ok(ScriptedUpdates(stream)),
+            None => std::future::pending().await,
+        }
+    }
+}
+
+impl SettingsUpdates for ScriptedUpdates {
+    async fn next(&mut self) -> Result<Option<PublicUiSettings>, tonic::Status> {
+        match self.0.recv().await {
+            Some(item) => item.map(Some),
+            None => Ok(None),
+        }
+    }
+}
+
+/// `follow` serves the first projection and later ones as they come; when
+/// the stream fails it keeps the served one, subscribes again and serves the
+/// new stream's current state.
+#[tokio::test(start_paused = true)]
+async fn test_follow_recovers_from_a_lost_stream() {
+    let (bundle, sink) = UiBundle::live(&bundle_dir("follow"), "/account/", CONFIG).unwrap();
+    let mut served = bundle.config.clone();
+    let app = router(bundle);
+    let (first_tx, first_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (second_tx, second_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (subscribed_tx, mut subscribed) = tokio::sync::mpsc::unbounded_channel();
+    let source = ScriptedSource {
+        streams: [first_rx, second_rx].into(),
+        subscriptions: subscribed_tx,
+    };
+    tokio::spawn(follow(sink, source, Retry::default()));
+
+    subscribed.recv().await.unwrap();
+    first_tx
+        .send(Ok(projection(1, &[PrincipalType::Email], 0)))
+        .unwrap();
+    served.wait_for(Option::is_some).await.unwrap();
+    first_tx
+        .send(Ok(projection(
+            2,
+            &[PrincipalType::Email, PrincipalType::Username],
+            6,
+        )))
+        .unwrap();
+    served.changed().await.unwrap();
+    assert_eq!(
+        config_json(&app).await["settings"]["registrationUsernameMinLength"],
+        6
+    );
+
+    // The stream fails: the last projection stays served meanwhile.
+    first_tx
+        .send(Err(tonic::Status::unavailable("gone")))
+        .unwrap();
+    subscribed.recv().await.unwrap();
+    assert_eq!(
+        config_json(&app).await["settings"]["registrationUsernameMinLength"],
+        6
+    );
+    // The new stream's current state replaces it, older revision or not.
+    second_tx
+        .send(Ok(projection(1, &[PrincipalType::Email], 0)))
+        .unwrap();
+    served.changed().await.unwrap();
+    assert_eq!(
+        config_json(&app).await["settings"]["registrationPrincipalTypes"],
+        serde_json::json!(["email"])
+    );
+}
+
+/// Regression: once the last bundle was dropped, `follow` stayed blocked on
+/// an idle stream, leaking the task and its upstream subscription. It ends
+/// as soon as nothing serves its configuration, idle stream or not.
+#[tokio::test(start_paused = true)]
+async fn test_follow_ends_with_its_last_bundle() {
+    let (bundle, sink) = UiBundle::live(&bundle_dir("followend"), "/account/", CONFIG).unwrap();
+    let (stream_tx, stream_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (subscribed_tx, mut subscribed) = tokio::sync::mpsc::unbounded_channel();
+    let source = ScriptedSource {
+        streams: [stream_rx].into(),
+        subscriptions: subscribed_tx,
+    };
+    let follower = tokio::spawn(follow(sink, source, Retry::default()));
+    subscribed.recv().await.unwrap();
+    stream_tx
+        .send(Ok(projection(1, &[PrincipalType::Email], 0)))
+        .unwrap();
+    // The stream stays open and idle while the bundle goes away.
+    drop(bundle);
+    tokio::time::timeout(std::time::Duration::from_secs(60), follower)
+        .await
+        .expect("follow ends once its bundle is gone")
+        .unwrap();
+    drop(stream_tx);
+}
+
+/// A reader that falls behind sees the latest projection only, never a
+/// queue of every change.
+#[tokio::test]
+async fn test_slow_readers_see_the_latest_projection() {
+    let (bundle, sink) = UiBundle::live(&bundle_dir("latest"), "/account/", CONFIG).unwrap();
+    let mut reader = bundle.config.clone();
+    let mut stream = sink.stream();
+    for revision in 1..=50 {
+        stream
+            .apply(&projection(revision, &[PrincipalType::Email], 0))
+            .unwrap();
+    }
+    stream
+        .apply(&projection(51, &[PrincipalType::Username], 3))
+        .unwrap();
+    reader.changed().await.unwrap();
+    let latest = reader.borrow_and_update().clone().unwrap();
+    let config: serde_json::Value = serde_json::from_slice(&latest.bytes).unwrap();
+    assert_eq!(config["settings"]["registrationUsernameMinLength"], 3);
+    assert!(!reader.has_changed().unwrap());
 }
 
 /// Pages of the SPA, the mount path with and without its slash included,

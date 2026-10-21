@@ -68,6 +68,12 @@ pub mod sid {
             tonic::include_proto!("sid.v1.test");
         }
 
+        /// Public UI settings a UI host serves with its configuration; kept
+        /// out of the flat re-export below.
+        pub mod ui {
+            tonic::include_proto!("sid.v1.ui");
+        }
+
         // Re-export all domain types at sid::v1::* for ergonomic access.
         // This is the deliberate public API surface — consumers use `sid::v1::Profile`,
         // not `sid::v1::identity::Profile`.
