@@ -5,15 +5,19 @@
 //! - `SID_UI_BUNDLE`: the bundle directory (the SPA build output);
 //! - `SID_UI_MOUNT`: where it is served, such as `/account/` (default `/`);
 //! - `SID_UI_CONFIG`: the deployment's public configuration file (JSON);
+//! - `SID_UI_SETTINGS_SOURCE`: the gRPC address of the installation whose
+//!   public UI settings the configuration carries, followed live; unset, the
+//!   deployment's configuration is served alone;
 //! - `SID_UI_BIND`: listen address (default `0.0.0.0:8080`).
 //!
-//! `GET /health` answers once the bundle and configuration were accepted.
+//! `GET /health` answers once the bundle and configuration were accepted and,
+//! with a settings source, once its first projection arrived.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use anyhow::Context;
-use sid_ui_host::{UiBundle, standalone};
+use sid_ui_host::{GrpcSettingsSource, Retry, UiBundle, follow, standalone};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -29,7 +33,21 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("public configuration {config_path:?} cannot be read"))?;
     // A bundle or configuration that cannot be served stops the service:
     // there is no other environment's configuration to fall back to.
-    let bundle = UiBundle::new(&dir, &mount, &config)?;
+    let bundle = match std::env::var("SID_UI_SETTINGS_SOURCE") {
+        Ok(source) => {
+            let endpoint = tonic::transport::Endpoint::from_shared(source.clone())
+                .with_context(|| format!("SID_UI_SETTINGS_SOURCE {source:?}"))?;
+            let (bundle, sink) = UiBundle::live(&dir, &mount, &config)?;
+            tokio::spawn(follow(
+                sink,
+                GrpcSettingsSource::new(endpoint),
+                Retry::default(),
+            ));
+            tracing::info!(%source, "following the public UI settings");
+            bundle
+        }
+        Err(_) => UiBundle::new(&dir, &mount, &config)?,
+    };
 
     let app = standalone(bundle)?;
 

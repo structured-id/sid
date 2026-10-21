@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Serves one compiled web UI bundle (a Vue/Quasar SPA build) and the public
-//! configuration the deployment generated for it.
+//! Serves one compiled web UI bundle (a Vue/Quasar SPA build) and its public
+//! configuration: the deployment's, and for a bundle that follows its
+//! installation, that installation's public UI settings as well
+//! ([`UiBundle::live`]).
 //!
 //! The same [`router`] runs standalone (`sid-ui-host` binary) or merged into
 //! a host application's listener. It serves assets and configuration only:
 //! authentication, sessions and authorization stay with their own services.
 //!
 //! Under the bundle's mount path, for example `/account/`:
-//! - `config.json`: the public configuration, revalidated by its `ETag` on
-//!   every use;
+//! - `config.json`: the public configuration from memory, revalidated by its
+//!   `ETag` on every use;
 //! - `assets/…`: content-addressed build output, cached for good;
 //! - another path with a file extension: that file of the bundle, or 404;
 //! - any other path: the application shell (`index.html`), never cached, so
@@ -22,14 +24,23 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::Router;
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::{Request, State};
 use axum::http::request::Parts;
 use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
+use serde_json::{Map, Value};
 use tower::ServiceExt;
 use tower_http::services::ServeFile;
+
+mod settings;
+
+pub use settings::{
+    GrpcSettingsSource, Retry, SettingsRejected, SettingsSink, SettingsSource, SettingsStream,
+    SettingsUpdates, follow,
+};
+use settings::{Served, ServedConfig};
 
 /// Why a bundle cannot be served.
 #[derive(Debug, thiserror::Error)]
@@ -48,9 +59,9 @@ pub struct UiBundle {
     /// The bundle directory, canonical: every served file resolves inside it.
     dir: PathBuf,
     mount: String,
-    config: Arc<[u8]>,
-    /// Strong entity tag of `config`, quoted (RFC 9110 §8.8.3).
-    config_tag: HeaderValue,
+    /// The configuration served now; `None` before a live bundle's first
+    /// settings projection.
+    config: ServedConfig,
 }
 
 impl UiBundle {
@@ -62,6 +73,52 @@ impl UiBundle {
     /// must name its `environment` and `release`; it is served as given, so
     /// it must hold only public values.
     pub fn new(dir: &Path, mount: &str, config: &[u8]) -> Result<Self, BundleError> {
+        let (dir, _) = Self::checked(dir, mount, config)?;
+        // The sender goes: the configuration never changes, and a receiver
+        // keeps the last value.
+        let (_, served) = tokio::sync::watch::channel(Some(Served::of(config.to_vec())));
+        Ok(Self {
+            dir,
+            mount: mount.to_owned(),
+            config: served,
+        })
+    }
+
+    /// As [`UiBundle::new`], for a bundle that follows its installation's
+    /// public UI settings: the served configuration is `config` with those
+    /// settings under `settings`, from the first projection the returned sink
+    /// receives. Until then `config.json` answers 503. `config` must not hold
+    /// `settings` itself.
+    pub fn live(
+        dir: &Path,
+        mount: &str,
+        config: &[u8],
+    ) -> Result<(Self, SettingsSink), BundleError> {
+        let (dir, base) = Self::checked(dir, mount, config)?;
+        if base.contains_key(settings::SETTINGS_KEY) {
+            return Err(BundleError::Config(format!(
+                "`{}` is the installation's, not the deployment's",
+                settings::SETTINGS_KEY
+            )));
+        }
+        let (sink, served) = SettingsSink::new(base);
+        Ok((
+            Self {
+                dir,
+                mount: mount.to_owned(),
+                config: served,
+            },
+            sink,
+        ))
+    }
+
+    /// The canonical bundle directory and the configuration object, once
+    /// both can be served.
+    fn checked(
+        dir: &Path,
+        mount: &str,
+        config: &[u8],
+    ) -> Result<(PathBuf, Map<String, Value>), BundleError> {
         let literal = mount
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"-._~/".contains(&b));
@@ -84,26 +141,18 @@ impl UiBundle {
             Ok(shell) if shell.starts_with(&dir) && shell.is_file() => {}
             _ => return Err(BundleError::NoShell(dir)),
         }
-        let value: serde_json::Value = serde_json::from_slice(config)
+        let value: Value = serde_json::from_slice(config)
             .map_err(|e| BundleError::Config(format!("not JSON: {e}")))?;
-        let object = value
-            .as_object()
-            .ok_or_else(|| BundleError::Config("not a JSON object".into()))?;
+        let Value::Object(object) = value else {
+            return Err(BundleError::Config("not a JSON object".into()));
+        };
         for key in ["environment", "release"] {
             match object.get(key).and_then(|v| v.as_str()) {
                 Some(v) if !v.is_empty() => {}
                 _ => return Err(BundleError::Config(format!("{key} is missing"))),
             }
         }
-        let digest = <sha2::Sha256 as sha2::Digest>::digest(config);
-        let config_tag = HeaderValue::from_str(&format!("\"{}\"", hex::encode(digest)))
-            .expect("a quoted hex digest is a valid header value");
-        Ok(Self {
-            dir,
-            mount: mount.to_owned(),
-            config: config.into(),
-            config_tag,
-        })
+        Ok((dir, object))
     }
 }
 
@@ -122,14 +171,29 @@ pub fn router(bundle: UiBundle) -> Router {
         .with_state(Arc::new(bundle))
 }
 
-/// The standalone service's routes: `bundle` beside `GET /health`. A bundle
+/// The standalone service's routes: `bundle` beside `GET /health`, which
+/// answers 503 while the bundle has no configuration to serve. A bundle
 /// mounted at `/health/` would take that route, so it is refused.
 pub fn standalone(bundle: UiBundle) -> Result<Router, BundleError> {
     if bundle.mount == "/health/" {
         return Err(BundleError::Mount(bundle.mount));
     }
+    let config = bundle.config.clone();
+    let health = move || {
+        let ready = config.borrow().is_some();
+        async move {
+            if ready {
+                (StatusCode::OK, "ok")
+            } else {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "waiting for the public UI settings",
+                )
+            }
+        }
+    };
     Ok(Router::new()
-        .route("/health", axum::routing::get(|| async { "ok" }))
+        .route("/health", axum::routing::get(health))
         .merge(router(bundle)))
 }
 
@@ -201,20 +265,32 @@ async fn respond(bundle: &UiBundle, request: Request) -> Response {
     }
 }
 
-/// The configuration, kept by the browser and revalidated on every use: a
-/// matching `If-None-Match` gets 304 with no body (RFC 9110 §13.1.2, §15.4.5).
+/// The configuration from memory, kept by the browser and revalidated on
+/// every use: a matching `If-None-Match` gets 304 with no body (RFC 9110
+/// §13.1.2, §15.4.5). Before a live bundle's first settings projection it is
+/// a 503: the deployment's configuration alone would be served as complete.
 fn config(bundle: &UiBundle, request: &Parts) -> Response {
+    // Cloned out of the channel so the lock is not held while responding.
+    let Some(served) = bundle.config.borrow().clone() else {
+        return no_store(
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the public UI settings have not arrived yet",
+            )
+                .into_response(),
+        );
+    };
     let unchanged = request
         .headers
         .get_all(header::IF_NONE_MATCH)
         .iter()
         .filter_map(|value| value.to_str().ok())
         .flat_map(|list| list.split(','))
-        .any(|tag| tag_matches(tag.trim(), &bundle.config_tag));
+        .any(|tag| tag_matches(tag.trim(), &served.tag));
     let mut response = if unchanged {
         StatusCode::NOT_MODIFIED.into_response()
     } else {
-        let mut response = Response::new(Body::from(bundle.config.to_vec()));
+        let mut response = Response::new(Body::from(Bytes::from_owner(Arc::clone(&served.bytes))));
         response.headers_mut().insert(
             header::CONTENT_TYPE,
             HeaderValue::from_static("application/json"),
@@ -223,7 +299,7 @@ fn config(bundle: &UiBundle, request: &Parts) -> Response {
     };
     response
         .headers_mut()
-        .insert(header::ETAG, bundle.config_tag.clone());
+        .insert(header::ETAG, served.tag.clone());
     with_cache(response, REVALIDATE)
 }
 
