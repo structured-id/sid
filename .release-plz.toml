@@ -16,6 +16,9 @@ release_always = false
 name = "sid-server"
 release = true
 publish = false
+# Its released version comes from its v{{ version }} tags: it is on no
+# registry, and against crates.io every version looks like the first.
+git_only = true
 git_release_enable = true
 git_tag_enable = true
 git_tag_name = "v{{ version }}"
