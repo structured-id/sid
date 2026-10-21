@@ -1023,6 +1023,68 @@ async fn test_list_subjects_not_supported() {
     assert!(matches!(result, Err(AuthzError::NotSupported(_))));
 }
 
+// ── Failure and scope ────────────────────────────────────────
+
+/// A granted role in `project_id` for a fresh Profile, stored in `storage`.
+async fn granted(storage: &MockStorage, project_id: ProjectId, action: &str) -> ProfileId {
+    let profile_id = ProfileId::generate();
+    let role = create_test_role(project_id, "editor", &[action]);
+    storage
+        .create_role(&role, AuditEntry::system("test", "test").into())
+        .await
+        .unwrap();
+    storage
+        .create_role_assignment(
+            &RoleAssignment::new(RoleAssignmentPrincipal::Profile(profile_id), role.id),
+            AuditEntry::system("test", "test").into(),
+        )
+        .await
+        .unwrap();
+    profile_id
+}
+
+// A check whose reads fail answers an error, never an allow: a store that
+// cannot say what is granted grants nothing.
+#[tokio::test]
+async fn test_unreachable_storage_never_allows() {
+    let (engine, storage, project_id) = setup().await;
+    let profile_id = granted(&storage, project_id, "profiles:read").await;
+    let request = AuthzCheckRequest {
+        subject: format!("user:{profile_id}"),
+        action: "profiles:read".into(),
+        resource: format!("project:{}", project_id.0),
+        context: HashMap::new(),
+    };
+    assert!(engine.check(&request).await.unwrap().is_allowed());
+
+    storage
+        .unavailable
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(matches!(
+        engine.check(&request).await,
+        Err(AuthzError::Storage(_))
+    ));
+}
+
+// A role grants only in its own project: the same action on another
+// project is denied.
+#[tokio::test]
+async fn test_a_role_grants_only_in_its_project() {
+    let (engine, storage, project_id) = setup().await;
+    let profile_id = granted(&storage, project_id, "profiles:read").await;
+    let other = ProjectId::new();
+    let resp = engine
+        .check(&AuthzCheckRequest {
+            subject: format!("user:{profile_id}"),
+            action: "profiles:read".into(),
+            resource: format!("project:{}", other.0),
+            context: HashMap::new(),
+        })
+        .await
+        .unwrap();
+    assert!(!resp.is_allowed());
+}
+
 // ── Object safety ────────────────────────────────────────────
 
 #[tokio::test]
