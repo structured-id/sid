@@ -106,7 +106,7 @@ pub struct CeComponents {
     /// The sign-in page the authorization endpoint sends users to.
     pub login_url: Option<url::Url>,
     /// The one authorization evaluator of this process.
-    pub authz_engine: Arc<dyn sid_plugin::AuthzEngine>,
+    pub authz_engine: Arc<sid_authz::CeAuthzEngine<dyn sid_plugin::StorageBackend>>,
     /// The installation's organization.
     pub organization: sid_core::models::Organization,
     /// The directory the SCIM endpoint serves.
@@ -893,8 +893,7 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         .map_err(|e| anyhow::anyhow!("CAPTCHA: {e}"))?;
 
     // One authorization evaluator for every service of this process.
-    let authz_engine: Arc<dyn sid_plugin::AuthzEngine> =
-        Arc::new(sid_authz::CeAuthzEngine::new(storage.clone()));
+    let authz_engine = Arc::new(sid_authz::CeAuthzEngine::new(storage.clone()));
 
     let login_url = login_url(env_setting("SID_LOGIN_URL")?.as_deref(), &issuer)?;
     let browser_cookie = browser_cookie(env_setting("SID_BROWSER_SESSION_COOKIE")?.as_deref())?;

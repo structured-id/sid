@@ -12,12 +12,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::cedar::CedarService;
+use crate::decision::{AuthzCheckRequest, AuthzCheckResponse};
+use crate::engine::CeAuthzEngine;
 use sid_core::models::{CedarPolicy, CedarPolicyId, PolicyEffect, ProjectId};
 use sid_plugin::StorageBackend;
-use sid_plugin::authz::{AuthzCheckRequest, AuthzCheckResponse, AuthzEngine};
-
-use crate::cedar::CedarService;
-use crate::engine::CeAuthzEngine;
 
 /// A proposed Cedar policy change to simulate.
 #[derive(Debug, Clone)]

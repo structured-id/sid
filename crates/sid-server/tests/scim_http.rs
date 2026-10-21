@@ -30,7 +30,6 @@ use sid_core::models::{
     ProvisioningConnector, ProvisioningCredential, ProvisioningDirection, SCIM_PROVISIONER_ROLE,
 };
 use sid_plugin::StorageBackend;
-use sid_plugin::authz::{AuthzCheckRequest, AuthzCheckResponse, AuthzEngine, AuthzError};
 use sid_plugin::cache::CacheBackend;
 use sid_proto::sid::v1::admin as pb;
 use sid_proto::sid::v1::admin::provisioning_service_server::ProvisioningService;
@@ -161,7 +160,10 @@ impl Installation {
     }
 
     /// A replica whose SCIM endpoint decides with `engine`.
-    async fn replica_with(&self, engine: Arc<dyn AuthzEngine>) -> Replica {
+    async fn replica_with(
+        &self,
+        engine: Arc<sid_authz::CeAuthzEngine<dyn sid_plugin::StorageBackend>>,
+    ) -> Replica {
         let storage = self.storage.clone();
         let jwt = common::test_jwt();
         let revocation = Arc::new(RevocationCache::new(
@@ -1254,33 +1256,13 @@ async fn replicas_share_the_directory_and_the_connector_state() {
     assert_eq!(status, 200, "enabled on the other replica");
 }
 
-/// An authorization engine that cannot decide.
-struct Unreachable;
-
-#[async_trait::async_trait]
-impl AuthzEngine for Unreachable {
-    async fn check(&self, _: &AuthzCheckRequest) -> Result<AuthzCheckResponse, AuthzError> {
-        Err(AuthzError::Storage(
-            "authorization store unreachable".into(),
-        ))
-    }
-
-    async fn list_accessible_objects(
-        &self,
-        _: &str,
-        _: &str,
-        _: &str,
-    ) -> Result<Vec<String>, AuthzError> {
-        Err(AuthzError::Storage(
-            "authorization store unreachable".into(),
-        ))
-    }
-
-    async fn list_subjects_with_access(&self, _: &str, _: &str) -> Result<Vec<String>, AuthzError> {
-        Err(AuthzError::Storage(
-            "authorization store unreachable".into(),
-        ))
-    }
+/// An authorization engine that cannot decide: every role assignment read
+/// of its store fails.
+fn unreachable_engine() -> Arc<sid_authz::CeAuthzEngine<dyn sid_plugin::StorageBackend>> {
+    let store = common::mock_storage::MockStorage::new();
+    store.fail_role_reads();
+    let store: Arc<dyn sid_plugin::StorageBackend> = Arc::new(store);
+    Arc::new(sid_authz::CeAuthzEngine::new(store))
 }
 
 /// While the authorization decision is unavailable, a granted connector is
@@ -1291,7 +1273,7 @@ async fn an_authorization_outage_refuses_writes() {
 
     let installation = installation(Engine::Postgres).await;
     let healthy = installation.replica().await;
-    let outage = installation.replica_with(Arc::new(Unreachable)).await;
+    let outage = installation.replica_with(unreachable_engine()).await;
     let connector = healthy.connector().await;
     healthy.grant(&installation, &connector).await;
     let bearer = healthy

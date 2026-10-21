@@ -11,6 +11,7 @@
 
 use std::sync::Arc;
 
+use sid_authz::AuthzCheckRequest;
 use sid_authz::CeAuthzEngine;
 use sid_authz::admin::{Administrator, RoleAdministration};
 use sid_core::models::{
@@ -18,7 +19,6 @@ use sid_core::models::{
     ProjectId, RecipientKind, Role, RoleAssignment, RoleAssignmentPrincipal,
 };
 use sid_plugin::StorageBackend;
-use sid_plugin::authz::{AuthzCheckRequest, AuthzEngine};
 
 fn audit() -> MutationContext {
     AuditEntry::system("example", "role-administration").into()

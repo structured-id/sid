@@ -9,6 +9,7 @@ use std::sync::Arc;
 use sid_authn::connector_auth::{ConnectorCaller, authenticate_connector};
 use sid_authn::resource_token::ResourceTokenVerifier;
 use sid_authn::revocation_cache::RevocationCache;
+use sid_authz::{AuthzCheckRequest, CeAuthzEngine};
 use sid_core::grpc_error::refuse::{dependency_unavailable, storage_failure};
 use sid_core::grpc_error::{ApiError, ErrorReason};
 use sid_core::models::{
@@ -20,7 +21,6 @@ use sid_core::models::{
     event::{Event, event_types},
 };
 use sid_plugin::StorageBackend;
-use sid_plugin::authz::{AuthzCheckRequest, AuthzEngine};
 use sid_proto::sid::v1 as proto;
 use sid_proto::sid::v1::scim_service_server::ScimService;
 use tonic::{Request, Response, Status};
@@ -42,7 +42,7 @@ pub struct ScimServiceImpl {
     org_ctx: ScimOrgContext,
     base_url: String,
     directory: ScimDirectory,
-    engine: Arc<dyn AuthzEngine>,
+    engine: Arc<CeAuthzEngine<dyn StorageBackend>>,
     revocation: Arc<RevocationCache>,
     /// Verifies the directory resource's access tokens (connectors using
     /// OAuth client credentials); without it only SCIM bearers are taken.
@@ -55,7 +55,7 @@ impl ScimServiceImpl {
         org_ctx: ScimOrgContext,
         base_url: String,
         directory: ScimDirectory,
-        engine: Arc<dyn AuthzEngine>,
+        engine: Arc<CeAuthzEngine<dyn StorageBackend>>,
         revocation: Arc<RevocationCache>,
     ) -> Self {
         Self {

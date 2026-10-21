@@ -1,22 +1,20 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! CE Authorization Engine.
+//! CE Authorization Engine: the fixed RBAC + Cedar decision.
 //!
-//! Implements `AuthzEngine` for CE deployments using RBAC + Cedar.
-//! Pipeline: RBAC role check → Cedar policy evaluation.
-//! No graph traversal, no ReBAC — all checks are flat SQL queries.
+//! Pipeline: RBAC role check → Cedar policy evaluation. No graph
+//! traversal, no ReBAC: all checks are flat queries.
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use sid_core::models::{
     AUTHZ_CHECK, AuthzPrincipal, MachineUserId, ProfileId, ProjectId, ProvisioningConnectorId,
     ResourceId, SCIM_ACTION_PREFIX, TOKEN_INTROSPECT,
 };
 use sid_plugin::StorageBackend;
-use sid_plugin::authz::{AuthzCheckRequest, AuthzCheckResponse, AuthzEngine, AuthzError};
 use uuid::Uuid;
 
 use crate::cedar::CedarService;
+use crate::decision::{AuthzCheckRequest, AuthzCheckResponse, AuthzError};
 use crate::rbac::RbacService;
 
 /// Resource prefix naming one registered protected resource.
@@ -35,9 +33,6 @@ const OAUTH_RESOURCE: &str = "oauth_resource:";
 ///    denies whatever role grants; else a role grant allows; else a satisfied
 ///    `permit` allows; a policy set that cannot be evaluated denies
 /// 5. Return Allow/Deny with reason
-///
-/// `list_accessible_objects` and `list_subjects_with_access` require ReBAC
-/// graph traversal — CE returns `NotSupported`.
 pub struct CeAuthzEngine<S: StorageBackend + ?Sized> {
     rbac: RbacService<S>,
     cedar: CedarService,
@@ -122,9 +117,13 @@ impl<S: StorageBackend + ?Sized> CeAuthzEngine<S> {
     }
 }
 
-#[async_trait]
-impl<S: StorageBackend + ?Sized + 'static> AuthzEngine for CeAuthzEngine<S> {
-    async fn check(&self, request: &AuthzCheckRequest) -> Result<AuthzCheckResponse, AuthzError> {
+impl<S: StorageBackend + ?Sized> CeAuthzEngine<S> {
+    /// Decide whether the request's subject may perform its action on its
+    /// resource.
+    pub async fn check(
+        &self,
+        request: &AuthzCheckRequest,
+    ) -> Result<AuthzCheckResponse, AuthzError> {
         let principal = Self::parse_subject(&request.subject)?;
         let protected = request.resource.strip_prefix(OAUTH_RESOURCE);
         // A provisioning connector acts only through SCIM on a protected
@@ -266,25 +265,17 @@ impl<S: StorageBackend + ?Sized + 'static> AuthzEngine for CeAuthzEngine<S> {
         })
     }
 
-    async fn list_accessible_objects(
+    /// One decision per request, in order; the first check that cannot be
+    /// decided fails the batch.
+    pub async fn batch_check(
         &self,
-        _subject: &str,
-        _permission: &str,
-        _object_type: &str,
-    ) -> Result<Vec<String>, AuthzError> {
-        Err(AuthzError::NotSupported(
-            "list_accessible_objects requires relationship graph traversal".into(),
-        ))
-    }
-
-    async fn list_subjects_with_access(
-        &self,
-        _permission: &str,
-        _object: &str,
-    ) -> Result<Vec<String>, AuthzError> {
-        Err(AuthzError::NotSupported(
-            "list_subjects_with_access requires relationship graph traversal".into(),
-        ))
+        requests: &[AuthzCheckRequest],
+    ) -> Result<Vec<AuthzCheckResponse>, AuthzError> {
+        let mut results = Vec::with_capacity(requests.len());
+        for request in requests {
+            results.push(self.check(request).await?);
+        }
+        Ok(results)
     }
 }
 

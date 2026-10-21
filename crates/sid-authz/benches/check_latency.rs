@@ -15,12 +15,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use sid_authz::AuthzCheckRequest;
 use sid_core::models::{
     AuditEntry, MutationContext, Profile, ProfileId, ProjectId, Role, RoleAssignment,
     RoleAssignmentPrincipal,
 };
 use sid_plugin::StorageBackend;
-use sid_plugin::authz::{AuthzCheckRequest, AuthzEngine};
 
 /// Counts heap allocations, so a call's allocations can be read off.
 struct Counting;

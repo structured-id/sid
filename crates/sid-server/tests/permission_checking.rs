@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use common::mock_storage::MockStorage;
 use common::{TestServices, issue_admin_token, test_client, test_profile};
+use sid_authz::AuthzCheckRequest;
 use sid_authz::cedar::CedarService;
 use sid_authz::grpc::AuthzServiceImpl;
 use sid_core::models::audit::{ActorType, AuditOutcome};
@@ -22,7 +23,6 @@ use sid_core::models::{
     AUTHZ_CHECK, PERMISSION_CHECKER_ROLE, ProjectId, ResourceId, ResourceIndicator,
     TOKEN_INTROSPECT,
 };
-use sid_plugin::authz::{AuthzCheckRequest, AuthzEngine};
 use sid_proto::sid::v1::authz::assign_role_request::Principal;
 use sid_proto::sid::v1::authz::check_permission_request::Evaluation;
 use sid_proto::sid::v1::authz::{

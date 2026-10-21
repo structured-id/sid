@@ -90,7 +90,7 @@ fn test_parse_project_invalid() {
     assert!(result.is_err());
 }
 
-// ── RBAC checks via AuthzEngine ──────────────────────────────
+// ── RBAC checks ──────────────────────────────────────────────
 
 #[tokio::test]
 async fn test_check_no_roles_denies() {
@@ -1003,26 +1003,6 @@ async fn test_malformed_protected_resource_is_an_error() {
     ));
 }
 
-// ── Graph listing methods return NotSupported ────────────────
-
-#[tokio::test]
-async fn test_list_accessible_objects_not_supported() {
-    let (engine, _, _) = setup().await;
-    let result = engine
-        .list_accessible_objects("user:abc", "read", "project")
-        .await;
-    assert!(matches!(result, Err(AuthzError::NotSupported(_))));
-}
-
-#[tokio::test]
-async fn test_list_subjects_not_supported() {
-    let (engine, _, _) = setup().await;
-    let result = engine
-        .list_subjects_with_access("read", "project:abc")
-        .await;
-    assert!(matches!(result, Err(AuthzError::NotSupported(_))));
-}
-
 // ── Failure and scope ────────────────────────────────────────
 
 /// A granted role in `project_id` for a fresh Profile, stored in `storage`.
@@ -1085,12 +1065,14 @@ async fn test_a_role_grants_only_in_its_project() {
     assert!(!resp.is_allowed());
 }
 
-// ── Object safety ────────────────────────────────────────────
+// ── Over an erased store ─────────────────────────────────────
 
+// The engine decides the same over a store held as `dyn StorageBackend`, as
+// the services compose it.
 #[tokio::test]
-async fn test_engine_as_trait_object() {
-    let storage = Arc::new(MockStorage::new());
-    let engine: Box<dyn AuthzEngine> = Box::new(CeAuthzEngine::new(storage));
+async fn test_engine_over_a_dyn_store() {
+    let storage: Arc<dyn sid_plugin::StorageBackend> = Arc::new(MockStorage::new());
+    let engine = CeAuthzEngine::new(storage);
     let project_id = ProjectId::new();
     let profile_id = ProfileId::generate();
 

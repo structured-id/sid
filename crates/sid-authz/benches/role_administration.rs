@@ -13,13 +13,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use sid_authz::AuthzCheckRequest;
 use sid_authz::admin::{Administrator, RoleAdministration};
 use sid_core::models::{
     AdminEnvelope, AdminOperation, AuditEntry, AuthzPrincipal, MutationContext, Profile, ProfileId,
     ProjectId, RecipientKind, Role, RoleAssignment, RoleAssignmentPrincipal,
 };
 use sid_plugin::StorageBackend;
-use sid_plugin::authz::{AuthzCheckRequest, AuthzEngine};
 
 const CHECKS: usize = 2_000;
 const ASSIGNS: usize = 500;
