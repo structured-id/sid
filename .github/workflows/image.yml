@@ -1,7 +1,8 @@
 # The embedded sidecar image (Dockerfile.embedded: SQLite, in-process event
 # bus, REST and gRPC). A server release tag `v<version>` publishes one
-# multi-arch manifest as ghcr.io/structured-id/sid:<version>-embedded and
-# :embedded; a pull request that touches the image only builds it. Each
+# multi-arch manifest as ghcr.io/structured-id/sid:<version>-embedded, and
+# moves :embedded to it when it is the latest release; a pull request that
+# touches the image only builds it. Each
 # architecture builds on its own native runner (emulated arm64 would compile
 # the workspace for hours), pushes by digest, and the manifest joins them.
 name: Image
@@ -89,10 +90,26 @@ jobs:
     if: github.repository_owner == 'structured-id' && github.event_name != 'pull_request'
     needs: build
     runs-on: ubuntu-latest
+    # One publication at a time across all tags, none cancelled: with the
+    # latest-release check below, the floating tag ends on the newest
+    # release whatever order the runs finish in.
+    concurrency:
+      group: image-publish
+      cancel-in-progress: false
     permissions:
       contents: read
       packages: write
     steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-tags: true
+          persist-credentials: false
+      - name: Latest server release
+        id: latest
+        run: |
+          latest=$(git tag --list 'v[0-9]*' --sort=-v:refname | head -n 1)
+          echo "tag=${latest}" >> "$GITHUB_OUTPUT"
+          echo "latest server release: ${latest}; this run: ${GITHUB_REF_NAME}"
       - uses: actions/download-artifact@v4
         with:
           path: ${{ runner.temp }}/digests
@@ -106,10 +123,15 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Manifest
         working-directory: ${{ runner.temp }}/digests
+        env:
+          LATEST: ${{ steps.latest.outputs.tag }}
         run: |
-          set --
+          versioned="${IMAGE}:${GITHUB_REF_NAME#v}-embedded"
+          set -- -t "$versioned"
+          # A rerun of an older release republishes its own version only.
+          if [ "$GITHUB_REF_NAME" = "$LATEST" ]; then
+            set -- "$@" -t "${IMAGE}:embedded"
+          fi
           for digest in *; do set -- "$@" "${IMAGE}@sha256:${digest}"; done
-          docker buildx imagetools create \
-            -t "${IMAGE}:${GITHUB_REF_NAME#v}-embedded" -t "${IMAGE}:embedded" "$@"
-      - name: Inspect
-        run: docker buildx imagetools inspect "${IMAGE}:embedded"
+          docker buildx imagetools create "$@"
+          docker buildx imagetools inspect "$versioned"
