@@ -6292,9 +6292,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "hex",
  "http-body-util",
  "percent-encoding",
  "serde_json",
+ "sha2 0.11.1",
  "thiserror 2.0.21",
  "tokio",
  "tower",
