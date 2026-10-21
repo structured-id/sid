@@ -901,6 +901,63 @@ async fn a_revocation_racing_a_grant_leaves_no_orphan(storage: Arc<dyn StorageBa
     }
 }
 
+/// A delegated administrator reads back exactly what it administers: the
+/// Accountant grant it made (so a retry after a lost reply finds it instead
+/// of granting again) and none of the worker's other assignments; a worker
+/// without an envelope sees nothing, the root sees everything.
+async fn a_holder_sees_what_it_administers(storage: Arc<dyn StorageBackend>) {
+    let o = Office::new(storage).await;
+    let worker = profile(&o.storage).await;
+    let granted = o
+        .core
+        .assign(&o.admin(), o.accountant_for(worker, 30), audit())
+        .await
+        .unwrap();
+    let other = o
+        .core
+        .assign(
+            &o.root,
+            RoleAssignment::new(RoleAssignmentPrincipal::Profile(worker), o.auditor.id)
+                .with_expiry(in_days(30)),
+            audit(),
+        )
+        .await
+        .unwrap();
+    let all = o
+        .storage
+        .list_role_assignments_for_profile(worker)
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 2);
+
+    let seen = o.core.administered(&o.admin(), all.clone()).await.unwrap();
+    assert_eq!(
+        seen.iter().map(|a| a.id).collect::<Vec<_>>(),
+        vec![granted.id]
+    );
+    let nobody = o
+        .core
+        .administered(
+            &Administrator::Holder(AuthzPrincipal::Profile(worker)),
+            all.clone(),
+        )
+        .await
+        .unwrap();
+    assert!(nobody.is_empty());
+    let mut everything: Vec<_> = o
+        .core
+        .administered(&o.root, all)
+        .await
+        .unwrap()
+        .iter()
+        .map(|a| a.id)
+        .collect();
+    everything.sort_by_key(|id| id.0);
+    let mut expected = vec![granted.id, other.id];
+    expected.sort_by_key(|id| id.0);
+    assert_eq!(everything, expected);
+}
+
 macro_rules! on_both_engines {
     ($($scenario:ident),* $(,)?) => {
         mod on_postgres {
@@ -938,4 +995,5 @@ on_both_engines!(
     a_role_edit_racing_a_grant_keeps_the_ceiling,
     a_membership_racing_a_grant_never_reaches_the_grantor,
     a_revocation_racing_a_grant_leaves_no_orphan,
+    a_holder_sees_what_it_administers,
 );

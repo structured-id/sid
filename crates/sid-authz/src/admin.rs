@@ -146,6 +146,32 @@ impl RoleAdministration {
     /// Remove assignment `id` on `actor`'s authority; false when it does not
     /// exist. A working assignment needs revocation of its role; an
     /// administrative one is removed only by the assignment it depends on.
+    /// The `assignments` `actor` administers: all of them for the root; for a
+    /// holder, exactly those its current envelopes let it revoke, so a
+    /// delegated administrator can read back what it granted. Assignments it
+    /// does not administer are left out, never an error.
+    pub async fn administered(
+        &self,
+        actor: &Administrator,
+        assignments: Vec<RoleAssignment>,
+    ) -> Result<Vec<RoleAssignment>> {
+        let Administrator::Holder(holder) = actor else {
+            return Ok(assignments);
+        };
+        let mut seen = Vec::with_capacity(assignments.len());
+        for assignment in assignments {
+            let Some(role) = self.storage.get_role(assignment.role_id).await? else {
+                continue;
+            };
+            match self.basis_for_revocation(holder, &role, &assignment).await {
+                Ok(_) => seen.push(assignment),
+                Err(Error::AuthorizationDenied(_)) => {}
+                Err(other) => return Err(other),
+            }
+        }
+        Ok(seen)
+    }
+
     pub async fn revoke(
         &self,
         actor: &Administrator,

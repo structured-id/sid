@@ -647,16 +647,25 @@ async fn the_checker_role_grants_nothing_else() {
     assert_eq!(err.code(), Code::PermissionDenied, "revoke: {err:?}");
     assert_eq!(held().await, before, "no assignment changed");
 
-    let err = a
+    // Listing shows a caller only the assignments it administers: the
+    // checker administers none, its own included.
+    let listed = a
         .authz
-        .list_role_assignments(bearing(&token, ListRoleAssignmentsRequest::default()))
+        .list_role_assignments(bearing(
+            &token,
+            ListRoleAssignmentsRequest {
+                filter: Some(
+                    sid_proto::sid::v1::authz::list_role_assignments_request::Filter::MachineUserId(
+                        a.checker.id.to_string(),
+                    ),
+                ),
+            },
+        ))
         .await
-        .unwrap_err();
-    assert_eq!(
-        err.code(),
-        Code::Unauthenticated,
-        "list assignments: {err:?}"
-    );
+        .expect("list assignments")
+        .into_inner();
+    assert!(!before.is_empty());
+    assert!(listed.assignments.is_empty(), "{listed:?}");
 }
 
 /// Every item of a batch is admitted before any subject is evaluated: one

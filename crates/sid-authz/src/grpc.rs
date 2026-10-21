@@ -1684,7 +1684,9 @@ impl AuthzService for AuthzServiceImpl {
         &self,
         request: Request<ListRoleAssignmentsRequest>,
     ) -> Result<Response<ListRoleAssignmentsResponse>, Status> {
-        self.admin(&request).await?;
+        // A delegated administrator reads what it administers, as the root
+        // reads everything; anyone else is refused.
+        let administrator = self.asker(&request).await?.administrator()?;
         let req = request.into_inner();
 
         let assignments = match req.filter {
@@ -1719,7 +1721,10 @@ impl AuthzService for AuthzServiceImpl {
             None => return Err(missing_field("filter")),
         };
 
-        let assignments = assignments.map_err(storage_failure)?;
+        let assignments = crate::admin::RoleAdministration::new(self.storage.clone())
+            .administered(&administrator, assignments.map_err(storage_failure)?)
+            .await
+            .map_err(administration_refusal)?;
 
         Ok(Response::new(ListRoleAssignmentsResponse {
             assignments: assignments.iter().map(assignment_to_proto).collect(),
