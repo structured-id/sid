@@ -40,8 +40,9 @@ COPY proto/ proto/
 # not load without it, whatever the feature selection.
 COPY zkpp/ zkpp/
 
-# Build embedded mode: SQLite backend, no telemetry; the event bus is the
-# bundled nats-server copied into the runtime stage.
+# Build embedded mode: SQLite backend, no telemetry. The event bus is the
+# in-process one: required work lives in SQLite and the work runner executes
+# it, so the image carries no broker.
 RUN --mount=type=cache,id=sid-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=sid-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=sid-target-embedded,target=/build/target,sharing=locked \
@@ -51,15 +52,9 @@ RUN --mount=type=cache,id=sid-cargo-registry,target=/usr/local/cargo/registry,sh
     && strip target/release/sid \
     && install -D target/release/sid /out/sid
 
-# ── Bundled event bus ───────────────────────────────────────────
-# Static nats-server, run by the server as a child process (JetStream under
-# SID_DATA_DIR/nats) when SID_NATS_URL is unset.
-FROM nats:2.15-alpine AS nats
-
 # ── Stage 2: Runtime ────────────────────────────────────────────
 FROM gcr.io/distroless/cc-debian13:nonroot
 
-COPY --from=nats /usr/local/bin/nats-server /usr/local/bin/nats-server
 COPY --from=builder /out/sid /usr/local/bin/sid
 
 # Data directory for SQLite database and auto-generated keys
@@ -70,6 +65,9 @@ ENV SID_GRPC_BIND=0.0.0.0:50051
 ENV SID_DATA_DIR=/var/lib/sid
 ENV SID_STORAGE_BACKEND=sqlite
 ENV SID_STORAGE_SQLITE_PATH=/var/lib/sid/auth.db
+# No history replay and no addressed work for separate receivers; a
+# deployment that needs them sets a NATS URL.
+ENV SID_NATS_URL=in-process
 
 EXPOSE 8080 50051
 

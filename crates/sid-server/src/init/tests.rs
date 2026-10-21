@@ -53,6 +53,49 @@ fn required_receivers_from_setting() {
     }
 }
 
+/// The in-process bus keeps no addressed work, so a receiver named for it
+/// would be owed facts nothing can ever hand over: naming one stops startup.
+/// Unset and `none` name none, as on the bundled bus.
+#[test]
+fn in_process_bus_takes_no_required_receivers() {
+    use crate::embedded_nats::EventBusMode;
+    let mode = EventBusMode::InProcess;
+    for none in [None, Some(""), Some(" "), Some("none")] {
+        assert!(
+            required_receivers(&mode, none).unwrap().is_empty(),
+            "{none:?}"
+        );
+    }
+    for named in ["sid-notify", " scim-outbound ", "sid-notify, audit-sink"] {
+        let refused = required_receivers(&mode, Some(named))
+            .expect_err("a receiver needs a durable bus")
+            .to_string();
+        assert!(refused.contains("in-process"), "{named}: {refused}");
+    }
+}
+
+/// A separate history evaluator reports its cleanup settlements on the bus
+/// as addressed work; the in-process bus cannot carry them, so that pairing
+/// stops startup instead of retrying the consumer forever. The in-process
+/// evaluator needs no bus, and both NATS modes carry the settlements.
+#[test]
+fn a_separate_history_evaluator_needs_a_durable_bus() {
+    use crate::embedded_nats::EventBusMode;
+    let external = EventBusMode::External("nats://nats.sid.example.com:4222".into());
+    assert!(bus_carries_history_evaluator(&EventBusMode::InProcess, false).is_ok());
+    let refused = bus_carries_history_evaluator(&EventBusMode::InProcess, true)
+        .expect_err("settlements need a durable bus")
+        .to_string();
+    assert!(
+        refused.contains("SID_PASSWORD_HISTORY_EVALUATOR"),
+        "{refused}"
+    );
+    for mode in [EventBusMode::Embedded, external] {
+        assert!(bus_carries_history_evaluator(&mode, true).is_ok());
+        assert!(bus_carries_history_evaluator(&mode, false).is_ok());
+    }
+}
+
 /// Explicit malformed security settings must stop startup, never disable
 /// proof verification or silently select a different policy.
 #[test]

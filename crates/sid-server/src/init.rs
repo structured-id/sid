@@ -374,8 +374,8 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         Arc<dyn sid_plugin::audit::AuditLog>,
         LocalHistoryKeys,
     ) = {
-        let db_path =
-            env_setting("SID_SQLITE_PATH")?.unwrap_or_else(|| "/var/lib/sid/auth.db".to_string());
+        let db_path = env_setting("SID_STORAGE_SQLITE_PATH")?
+            .unwrap_or_else(|| "/var/lib/sid/auth.db".to_string());
         let backend = sid_storage::sqlite::SqliteBackend::new(&db_path)
             .await
             .context("SQLite storage and its migrations")?;
@@ -766,8 +766,9 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
 
     // Event bus: SID_NATS_URL unset / `embedded` bundles nats-server with
     // JetStream under the data directory, a nats:// or tls:// URL connects to
-    // an external cluster. No in-process fallback: a bus that cannot start
-    // stops startup, and committed work waits in the database.
+    // an external cluster, `in-process` runs without a broker. The in-process
+    // bus is never a fallback: a bus that cannot start stops startup, and
+    // committed work waits in the database.
     let nats_setting = env_setting("SID_NATS_URL")?;
     let nats_mode = crate::embedded_nats::EventBusMode::from_setting(nats_setting.as_deref())?;
     // This server is the installation's bootstrap, so it owns the event
@@ -917,6 +918,13 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
     )
     .await
     .context("password history configuration")?;
+    bus_carries_history_evaluator(
+        &nats_mode,
+        matches!(
+            history_authority,
+            sid_authn::password_operation::PasswordHistoryAuthority::Remote(_)
+        ),
+    )?;
     let auth_svc = AuthServiceImpl::new(
         storage.clone(),
         oauth2.clone(),
@@ -1477,19 +1485,45 @@ pub fn spawn_ce_background_tasks(c: &CeComponents) {
 /// what it acts on. On the bundled bus (the single-binary installation, which
 /// runs no separate receiver) unset names none; on an external bus the
 /// deployment must name them, so a missing setting is not read as "none".
+/// The in-process bus keeps no addressed work, so it takes none: a named
+/// receiver would be owed facts nothing could hand over.
 pub(crate) fn required_receivers(
     mode: &crate::embedded_nats::EventBusMode,
     setting: Option<&str>,
 ) -> anyhow::Result<Vec<sid_core::models::RequiredReceiver>> {
     use crate::embedded_nats::EventBusMode;
-    match (setting.map(str::trim), mode) {
-        (None | Some(""), EventBusMode::Embedded) => Ok(Vec::new()),
+    let receivers = match (setting.map(str::trim), mode) {
+        (None | Some(""), EventBusMode::Embedded | EventBusMode::InProcess) => Vec::new(),
         (None | Some(""), EventBusMode::External(_)) => anyhow::bail!(
             "SID_EVENT_RECEIVERS is required with an external bus: name the receivers (e.g. sid-notify) or `none`"
         ),
         (Some(list), _) => sid_core::models::RequiredReceiver::parse_list(list)
-            .map_err(|e| anyhow::anyhow!("SID_EVENT_RECEIVERS: {e}")),
+            .map_err(|e| anyhow::anyhow!("SID_EVENT_RECEIVERS: {e}"))?,
+    };
+    if *mode == EventBusMode::InProcess && !receivers.is_empty() {
+        anyhow::bail!(
+            "SID_EVENT_RECEIVERS names receivers, but the in-process bus keeps no addressed work: \
+             set SID_NATS_URL to `embedded` or a NATS URL, or SID_EVENT_RECEIVERS to `none`"
+        );
     }
+    Ok(receivers)
+}
+
+/// A separate history evaluator (`remote_evaluator`) reports its cleanup
+/// settlements to this server as addressed work, which the in-process bus
+/// cannot keep: that pairing stops startup instead of leaving the consumer
+/// retrying forever and the relayed cleanup owed.
+pub(crate) fn bus_carries_history_evaluator(
+    mode: &crate::embedded_nats::EventBusMode,
+    remote_evaluator: bool,
+) -> anyhow::Result<()> {
+    if remote_evaluator && *mode == crate::embedded_nats::EventBusMode::InProcess {
+        anyhow::bail!(
+            "SID_PASSWORD_HISTORY_EVALUATOR needs a bus that keeps addressed work: \
+             set SID_NATS_URL to `embedded` or a NATS URL, or run the evaluator in this process"
+        );
+    }
+    Ok(())
 }
 
 /// Start the runner for work the storage commits with a mutation (owed

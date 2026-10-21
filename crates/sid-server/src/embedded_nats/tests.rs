@@ -21,10 +21,24 @@ fn test_find_available_port() {
 }
 
 /// Unset, empty and `embedded` select the bundled server (the arch default);
-/// a NATS URL selects an external cluster; anything else is refused instead
-/// of silently running without a bus.
+/// a NATS URL selects an external cluster; `in-process` selects the
+/// broker-free bus by name; anything else is refused instead of silently
+/// running without a bus.
 #[test]
 fn mode_from_setting() {
+    assert_eq!(
+        EventBusMode::from_setting(Some("in-process")).unwrap(),
+        EventBusMode::InProcess
+    );
+    for near_miss in ["inprocess", "in_process", "memory", "none"] {
+        assert!(
+            matches!(
+                EventBusMode::from_setting(Some(near_miss)),
+                Err(EventBusStartError::InvalidSetting(_))
+            ),
+            "{near_miss}"
+        );
+    }
     assert_eq!(
         EventBusMode::from_setting(None).unwrap(),
         EventBusMode::Embedded
@@ -41,10 +55,63 @@ fn mode_from_setting() {
         EventBusMode::from_setting(Some("nats://nats.sid.example.com:4222")).unwrap(),
         EventBusMode::External("nats://nats.sid.example.com:4222".into())
     );
+}
+
+/// The in-process bus starts no server and needs none: live subscribers get
+/// published facts, while what only a durable bus can keep (addressed work,
+/// history) is refused rather than accepted and lost.
+#[tokio::test]
+async fn in_process_bus_publishes_live_and_refuses_durable_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let connected = connect(&EventBusMode::InProcess, dir.path())
+        .await
+        .expect("no server to start");
+    assert!(connected.embedded.is_none());
+    assert!(
+        !dir.path().join("nats").exists(),
+        "no JetStream store is created"
+    );
+
+    let mut rx = connected
+        .bus
+        .subscribe(EventFilter::default())
+        .await
+        .unwrap();
+    let event = Event::new("test", event_types::SESSION_REVOKED);
+    connected.bus.publish(event.clone()).await.unwrap();
+    let received = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        .await
+        .expect("delivered at once")
+        .expect("subscription open");
+    assert_eq!(received.id, event.id);
+
+    let notify = WorkRecipient::new("sid-notify").unwrap();
     assert!(matches!(
-        EventBusMode::from_setting(Some("in-process")),
-        Err(EventBusStartError::InvalidSetting(_))
+        connected
+            .bus
+            .deliver(&notify, event.delivery_id(&notify), &event)
+            .await,
+        Err(sid_plugin::event_bus::EventBusError::DurableUnsupported)
     ));
+    assert!(matches!(
+        connected
+            .bus
+            .consume(DurableConsumer {
+                recipient: notify,
+                event_types: Vec::new(),
+                ordered: false,
+            })
+            .await,
+        Err(sid_plugin::event_bus::EventBusError::DurableUnsupported)
+    ));
+    assert!(matches!(
+        connected
+            .bus
+            .replay(chrono::Utc::now(), None, EventFilter::default())
+            .await,
+        Err(sid_plugin::event_bus::EventBusError::ReplayUnsupported)
+    ));
+    connected.bus.health_check().await.unwrap();
 }
 
 /// A configured external NATS that cannot be reached stops startup: no
