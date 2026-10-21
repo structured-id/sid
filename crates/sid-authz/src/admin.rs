@@ -158,12 +158,37 @@ impl RoleAdministration {
         let Administrator::Holder(holder) = actor else {
             return Ok(assignments);
         };
+        // The holder's authority and each role are read once per listing.
+        let envelopes = self.all_envelopes_of(holder).await?;
+        if envelopes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut roles: std::collections::HashMap<_, Option<Role>> =
+            std::collections::HashMap::new();
         let mut seen = Vec::with_capacity(assignments.len());
         for assignment in assignments {
-            let Some(role) = self.storage.get_role(assignment.role_id).await? else {
+            let candidates: Vec<&RoleAssignment> = envelopes
+                .iter()
+                .filter(|e| e.scope == assignment.scope)
+                .collect();
+            if candidates.is_empty() {
+                continue;
+            }
+            let role = match roles.get(&assignment.role_id) {
+                Some(role) => role.clone(),
+                None => {
+                    let role = self.storage.get_role(assignment.role_id).await?;
+                    roles.insert(assignment.role_id, role.clone());
+                    role
+                }
+            };
+            let Some(role) = role else {
                 continue;
             };
-            match self.basis_for_revocation(holder, &role, &assignment).await {
+            match self
+                .revocation_basis_in(candidates.into_iter(), &role, &assignment)
+                .await
+            {
                 Ok(_) => seen.push(assignment),
                 Err(Error::AuthorizationDenied(_)) => {}
                 Err(other) => return Err(other),
@@ -292,6 +317,14 @@ impl RoleAdministration {
         holder: &AuthzPrincipal,
         scope: &Option<String>,
     ) -> Result<Vec<RoleAssignment>> {
+        let mut held = self.all_envelopes_of(holder).await?;
+        held.retain(|a| &a.scope == scope);
+        Ok(held)
+    }
+
+    /// Every live administrative assignment `holder` holds, directly or
+    /// through its groups, in any scope.
+    async fn all_envelopes_of(&self, holder: &AuthzPrincipal) -> Result<Vec<RoleAssignment>> {
         let mut held = match holder {
             AuthzPrincipal::Profile(profile) => {
                 let mut all = self
@@ -320,7 +353,7 @@ impl RoleAdministration {
             // A connector's purpose limits never include role administration.
             AuthzPrincipal::ProvisioningConnector(_) => Vec::new(),
         };
-        held.retain(|a| a.admin.is_some() && !a.is_expired() && &a.scope == scope);
+        held.retain(|a| a.admin.is_some() && !a.is_expired());
         Ok(held)
     }
 
@@ -446,7 +479,21 @@ impl RoleAdministration {
         role: &Role,
         target: &RoleAssignment,
     ) -> Result<AssignmentFence> {
-        for candidate in self.envelopes_of(holder, &target.scope).await? {
+        let candidates = self.envelopes_of(holder, &target.scope).await?;
+        self.revocation_basis_in(candidates.iter(), role, target)
+            .await
+    }
+
+    /// The fence of revoking `target` under the first of `candidates` (the
+    /// holder's administrative assignments in the target's scope) that
+    /// covers it.
+    async fn revocation_basis_in<'a>(
+        &self,
+        candidates: impl Iterator<Item = &'a RoleAssignment>,
+        role: &Role,
+        target: &RoleAssignment,
+    ) -> Result<AssignmentFence> {
+        for candidate in candidates {
             let envelope = candidate.admin.as_ref().expect("filtered to envelopes");
             let covered = if target.admin.is_some() {
                 // Only its source ends a redelegated administrative assignment.
