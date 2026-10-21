@@ -33,8 +33,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy workspace manifests first for layer caching
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/ crates/
+# The storage crate compiles its schema migrations in from here.
+COPY migrations/ migrations/
 COPY proto/ proto/
 # The ZKPP crate comes from the zkpp submodule by path, so the manifest does
 # not load without it, whatever the feature selection.
