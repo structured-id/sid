@@ -88,7 +88,14 @@ fn report(engine: &str, what: &str, mut samples: Vec<Duration>, allocations: u64
 
 async fn run(engine: &str, storage: Arc<dyn StorageBackend>) {
     storage.ensure_system_project(audit()).await.unwrap();
-    let mut role = Role::new(ProjectId::system(), "reader", "Reader");
+    // A role of this run: the persistent database keeps every earlier run's,
+    // and a role key is unique in its project.
+    let run = uuid::Uuid::now_v7().simple().to_string();
+    let mut role = Role::new(
+        ProjectId::system(),
+        format!("reader_{run}"),
+        format!("Reader {run}"),
+    );
     role.permissions = vec!["ledger.read".into()];
     storage.create_role(&role, audit()).await.unwrap();
     let worker = profile(&storage).await;

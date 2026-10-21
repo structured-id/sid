@@ -1065,6 +1065,90 @@ async fn test_a_role_grants_only_in_its_project() {
     assert!(!resp.is_allowed());
 }
 
+/// Store `text` as an enabled Cedar policy of `project_id`.
+async fn stored_policy(
+    storage: &MockStorage,
+    project_id: ProjectId,
+    text: &str,
+    effect: sid_core::models::PolicyEffect,
+) {
+    storage
+        .create_cedar_policy(
+            &sid_core::models::CedarPolicy::new(project_id, "policy", text, effect),
+            AuditEntry::system("test", "test").into(),
+        )
+        .await
+        .unwrap();
+}
+
+// Regression: a forbid whose condition fails to evaluate at runtime (it
+// reads a context attribute the request lacks) is skipped by Cedar, which
+// answers without an error; the role grant then allowed. A policy set that
+// cannot be evaluated denies, at runtime as at parse time.
+#[tokio::test]
+async fn test_a_forbid_failing_at_runtime_denies_a_role_grant() {
+    let (engine, storage, project_id) = setup().await;
+    let profile_id = granted(&storage, project_id, "profiles:write").await;
+    stored_policy(
+        &storage,
+        project_id,
+        r#"forbid(principal, action, resource) when { context.network == "untrusted" };"#,
+        sid_core::models::PolicyEffect::Forbid,
+    )
+    .await;
+    let resp = engine
+        .check(&AuthzCheckRequest {
+            subject: format!("user:{profile_id}"),
+            action: "profiles:write".into(),
+            resource: format!("project:{}", project_id.0),
+            context: HashMap::new(),
+        })
+        .await
+        .unwrap();
+    assert!(!resp.is_allowed(), "{resp:?}");
+}
+
+// Regression: an OAuth client id or an action holding a quote or a
+// backslash was interpolated into a Cedar entity literal, which then failed
+// to parse, and the fail-closed branch denied the client's role grant. The
+// entities are built from their components, so the grant applies.
+#[tokio::test]
+async fn test_identifiers_with_quotes_reach_the_policies_intact() {
+    let (engine, storage, project_id) = setup().await;
+    let client = r#"orders"pdp\v2"#;
+    let action = r#"orders:"read""#;
+    let role = create_test_role(project_id, "reader", &[action]);
+    storage
+        .create_role(&role, AuditEntry::system("test", "test").into())
+        .await
+        .unwrap();
+    storage
+        .create_role_assignment(
+            &RoleAssignment::new(RoleAssignmentPrincipal::OAuthClient(client.into()), role.id),
+            AuditEntry::system("test", "test").into(),
+        )
+        .await
+        .unwrap();
+    // A project policy, so the decision goes through Cedar.
+    stored_policy(
+        &storage,
+        project_id,
+        r#"forbid(principal, action == Action::"orders:delete", resource);"#,
+        sid_core::models::PolicyEffect::Forbid,
+    )
+    .await;
+    let resp = engine
+        .check(&AuthzCheckRequest {
+            subject: format!("oauth_client:{client}"),
+            action: action.into(),
+            resource: format!("project:{}", project_id.0),
+            context: HashMap::new(),
+        })
+        .await
+        .unwrap();
+    assert!(resp.is_allowed(), "{resp:?}");
+}
+
 // ── Over an erased store ─────────────────────────────────────
 
 // The engine decides the same over a store held as `dyn StorageBackend`, as
