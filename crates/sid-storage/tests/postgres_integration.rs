@@ -909,6 +909,7 @@ mod grant_store {
         session_fence_serializes_with_a_revocation,
         session_create_never_replaces,
         session_end,
+        sessions_listed_per_owner,
         session_end_ends_what_it_authenticated,
         session_end_takes_refresh_tokens,
         session_limit_evicts_oldest,
@@ -927,11 +928,6 @@ mod grant_store {
 #[tokio::test]
 async fn test_session_delete_by_profile() {
     common::test_session_delete_by_profile(&setup().await).await;
-}
-
-#[tokio::test]
-async fn test_session_list_by_profile() {
-    common::test_session_list_by_profile(&setup().await).await;
 }
 
 #[tokio::test]

@@ -220,7 +220,7 @@ impl DataExportService {
             .await?;
 
         // Sessions (sanitized — no tokens).
-        let sessions = self.storage.list_sessions_by_profile(profile_id).await?;
+        let sessions = self.storage.list_sessions(&profile_id).await?;
 
         // Metadata.
         let metadata = self.storage.list_profile_metadata(profile_id).await?;

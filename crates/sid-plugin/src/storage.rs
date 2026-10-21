@@ -704,9 +704,6 @@ pub trait StorageBackend:
     /// profile changed meanwhile: nothing is stored or deleted.
     async fn end_legacy_migration(&self, profile: &Profile, ctx: MutationContext) -> Result<bool>;
 
-    /// List sessions for a profile.
-    async fn list_sessions_by_profile(&self, profile_id: ProfileId) -> Result<Vec<Session>>;
-
     // === REFRESH TOKEN OPERATIONS ===
 
     /// Insert a refresh token; an existing id or token hash is `Conflict`,

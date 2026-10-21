@@ -333,7 +333,7 @@ impl SqliteBackend {
         Ok(sessions)
     }
 
-    pub(crate) async fn list_sessions_by_profile_impl(
+    pub(crate) async fn list_sessions_impl(
         &self,
         profile_id: ProfileId,
     ) -> SidResult<Vec<Session>> {

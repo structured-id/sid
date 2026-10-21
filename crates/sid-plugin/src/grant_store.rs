@@ -55,6 +55,10 @@ pub trait GrantStore: Send + Sync {
         hash: &BrowserSecretHash,
     ) -> Result<Option<Session<Self::Owner>>>;
 
+    /// Every session `owner` holds, expired ones included (what is current
+    /// is the caller's to check), newest first.
+    async fn list_sessions(&self, owner: &Self::Owner) -> Result<Vec<Session<Self::Owner>>>;
+
     /// Record activity on session `id` at `at`; last activity only moves
     /// forward. An unknown session is left alone.
     async fn touch_session(&self, id: SessionId, at: DateTime<Utc>) -> Result<()>;

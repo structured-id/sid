@@ -74,6 +74,17 @@ impl GrantStore for MemoryGrants {
         Ok(None)
     }
 
+    async fn list_sessions(&self, owner: &Account) -> sid_core::Result<Vec<Session<Account>>> {
+        Ok(self.with(|g| {
+            g.sessions
+                .iter()
+                .rev()
+                .filter(|s| &s.profile_id == owner)
+                .cloned()
+                .collect()
+        }))
+    }
+
     async fn touch_session(&self, _id: SessionId, _at: DateTime<Utc>) -> sid_core::Result<()> {
         Ok(())
     }

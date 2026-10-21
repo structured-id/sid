@@ -1136,6 +1136,18 @@ impl GrantStore for MockStorage {
             .cloned())
     }
 
+    async fn list_sessions(&self, owner: &ProfileId) -> SidResult<Vec<Session>> {
+        let inner = self.inner.lock().unwrap();
+        let mut sessions: Vec<Session> = inner
+            .sessions
+            .values()
+            .filter(|s| &s.profile_id == owner)
+            .cloned()
+            .collect();
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.created_at));
+        Ok(sessions)
+    }
+
     async fn touch_session(
         &self,
         id: SessionId,
@@ -3112,17 +3124,6 @@ impl StorageBackend for MockStorage {
             c.profile_id != profile.id || c.credential_type != CredentialType::LegacyHash
         });
         Ok(true)
-    }
-
-    async fn list_sessions_by_profile(&self, profile_id: ProfileId) -> SidResult<Vec<Session>> {
-        let inner = self.inner.lock().unwrap();
-        let sessions: Vec<_> = inner
-            .sessions
-            .values()
-            .filter(|s| s.profile_id == profile_id)
-            .cloned()
-            .collect();
-        Ok(sessions)
     }
 
     async fn create_refresh_token(

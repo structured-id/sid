@@ -2174,29 +2174,7 @@ pub async fn test_session_delete_by_profile(backend: &dyn StorageBackend) {
     let mut expected = vec![s1.id, s2.id];
     expected.sort();
     assert_eq!(deleted, expected, "the deleted sessions are returned");
-    assert!(
-        backend
-            .list_sessions_by_profile(profile.id)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-}
-
-pub async fn test_session_list_by_profile(backend: &dyn StorageBackend) {
-    let profile = create_test_profile("session_list");
-    backend
-        .create_profile(&profile, test_audit())
-        .await
-        .unwrap();
-
-    let s1 = create_test_session(profile.id);
-    let s2 = create_test_session(profile.id);
-    backend.create_session(&s1, test_audit()).await.unwrap();
-    backend.create_session(&s2, test_audit()).await.unwrap();
-
-    let sessions = backend.list_sessions_by_profile(profile.id).await.unwrap();
-    assert_eq!(sessions.len(), 2);
+    assert!(backend.list_sessions(&profile.id).await.unwrap().is_empty());
 }
 
 pub async fn test_session_get_nonexistent(backend: &dyn StorageBackend) {

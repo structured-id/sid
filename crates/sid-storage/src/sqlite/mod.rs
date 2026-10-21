@@ -445,6 +445,13 @@ impl GrantStore for SqliteBackend {
         self.get_session_by_browser_secret_impl(hash).await
     }
 
+    async fn list_sessions(
+        &self,
+        owner: &sid_core::models::ProfileId,
+    ) -> SidResult<Vec<sid_core::models::Session>> {
+        self.list_sessions_impl(*owner).await
+    }
+
     async fn touch_session(
         &self,
         id: sid_core::models::SessionId,
@@ -1461,13 +1468,6 @@ impl StorageBackend for SqliteBackend {
         ctx: MutationContext,
     ) -> SidResult<bool> {
         self.end_legacy_migration_impl(profile, ctx).await
-    }
-
-    async fn list_sessions_by_profile(
-        &self,
-        profile_id: sid_core::models::ProfileId,
-    ) -> SidResult<Vec<sid_core::models::Session>> {
-        self.list_sessions_by_profile_impl(profile_id).await
     }
 
     // Refresh token operations — see auth.rs

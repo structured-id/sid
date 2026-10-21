@@ -1276,7 +1276,7 @@ impl IdentityService for IdentityServiceImpl {
 
         let sessions = self
             .storage
-            .list_sessions_by_profile(pid)
+            .list_sessions(&pid)
             .await
             .map_err(storage_failure)?;
 
