@@ -602,9 +602,7 @@ async fn an_inspector_cannot_ask() {
 /// what; its token for the authorization API is no installation credential.
 #[tokio::test]
 async fn the_checker_role_grants_nothing_else() {
-    use sid_proto::sid::v1::authz::{
-        ListObjectsRequest, ListRoleAssignmentsRequest, ListSubjectsRequest, RevokeRoleRequest,
-    };
+    use sid_proto::sid::v1::authz::{ListRoleAssignmentsRequest, RevokeRoleRequest};
     let a = asking().await;
     a.grant(sid_core::models::Role::permission_checker(), &a.orders)
         .await;
@@ -649,24 +647,6 @@ async fn the_checker_role_grants_nothing_else() {
     assert_eq!(err.code(), Code::PermissionDenied, "revoke: {err:?}");
     assert_eq!(held().await, before, "no assignment changed");
 
-    let err = a
-        .authz
-        .list_objects(bearing(
-            &token,
-            ListObjectsRequest {
-                subject: format!("user:{}", a.profile.id),
-                ..Default::default()
-            },
-        ))
-        .await
-        .unwrap_err();
-    assert_eq!(err.code(), Code::Unauthenticated, "list objects: {err:?}");
-    let err = a
-        .authz
-        .list_subjects(bearing(&token, ListSubjectsRequest::default()))
-        .await
-        .unwrap_err();
-    assert_eq!(err.code(), Code::Unauthenticated, "list subjects: {err:?}");
     let err = a
         .authz
         .list_role_assignments(bearing(&token, ListRoleAssignmentsRequest::default()))

@@ -1160,19 +1160,6 @@ impl AuthzServiceImpl {
         Ok(caller)
     }
 
-    /// Authenticate the caller of `request` and allow it to ask only about its
-    /// own subject; an administrator may ask about any.
-    #[allow(clippy::result_large_err)]
-    async fn subject_caller<'a, T>(
-        &self,
-        request: &Request<T>,
-        subjects: impl IntoIterator<Item = &'a str>,
-    ) -> Result<Caller, Status> {
-        let caller = self.caller(request).await?;
-        caller.require_own_subjects(subjects)?;
-        Ok(caller)
-    }
-
     /// The confidential OAuth client `client_id` names: only a client that
     /// authenticates can act as its own principal.
     async fn confidential_client(&self, client_id: &str) -> Result<(), Status> {
@@ -1367,27 +1354,6 @@ impl AuthzService for AuthzServiceImpl {
             .answer(&asker, questions, "batch_check_permission")
             .await?;
         Ok(Response::new(BatchCheckPermissionResponse { results }))
-    }
-
-    #[instrument(skip_all, fields(method = "list_objects"))]
-    async fn list_objects(
-        &self,
-        request: Request<ListObjectsRequest>,
-    ) -> Result<Response<ListObjectsResponse>, Status> {
-        // Relationship graph listing is not part of the CE engine.
-        self.subject_caller(&request, [request.get_ref().subject.as_str()])
-            .await?;
-        Err(not_in_this_build("list_objects"))
-    }
-
-    #[instrument(skip_all, fields(method = "list_subjects"))]
-    async fn list_subjects(
-        &self,
-        request: Request<ListSubjectsRequest>,
-    ) -> Result<Response<ListSubjectsResponse>, Status> {
-        // Relationship graph listing is not part of the CE engine.
-        self.admin(&request).await?;
-        Err(not_in_this_build("list_subjects"))
     }
 
     // ── Role management ─────────────────────────────────────────────
