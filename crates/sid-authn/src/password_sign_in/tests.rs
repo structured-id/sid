@@ -41,7 +41,8 @@ struct Host {
     pending: ChallengeStore<PendingSignIn<ProfileId>>,
     principals: Mutex<HashMap<String, ProfileId>>,
     locked: Mutex<HashSet<String>>,
-    failures: Mutex<Vec<String>>,
+    /// Each failed attempt: its lockout key and the account it was against.
+    failures: Mutex<Vec<(String, Option<ProfileId>)>>,
     gone: Mutex<HashSet<ProfileId>>,
     /// Opening a password writes it back in this new stored form, as a
     /// reseal under a newer key version does.
@@ -74,8 +75,15 @@ impl PasswordSignInHost for Host {
         }
         Ok(())
     }
-    async fn record_failure(&self, identity: &str) -> Result<(), HostError> {
-        self.failures.lock().unwrap().push(identity.to_string());
+    async fn record_failure(
+        &self,
+        identity: &str,
+        owner: Option<&ProfileId>,
+    ) -> Result<(), HostError> {
+        self.failures
+            .lock()
+            .unwrap()
+            .push((identity.to_string(), owner.copied()));
         Ok(())
     }
     async fn stored_password(
@@ -352,7 +360,8 @@ async fn right_password_signs_in() {
     assert!(h.failures.lock().unwrap().is_empty());
 }
 
-/// A wrong password is refused and counted against the account.
+/// A wrong password is refused, counted against the account and reported as
+/// an attempt against it.
 #[tokio::test]
 async fn wrong_password_counts_against_the_account() {
     let h = host().await;
@@ -367,11 +376,14 @@ async fn wrong_password_counts_against_the_account() {
         ),
         "{e:?}"
     );
-    assert_eq!(*h.failures.lock().unwrap(), vec![owner.to_string()]);
+    assert_eq!(
+        *h.failures.lock().unwrap(),
+        vec![(owner.to_string(), Some(owner))]
+    );
 }
 
 /// An unknown principal gets a decoy answered like a real start; the finish
-/// is refused and counted against the principal.
+/// is refused and counted against the principal, against no account.
 #[tokio::test]
 async fn unknown_principal_gets_a_decoy() {
     let h = host().await;
@@ -383,11 +395,14 @@ async fn unknown_principal_gets_a_decoy() {
         ),
         "{e:?}"
     );
-    assert_eq!(*h.failures.lock().unwrap(), vec!["nobody".to_string()]);
+    assert_eq!(
+        *h.failures.lock().unwrap(),
+        vec![("nobody".to_string(), None)]
+    );
 }
 
 /// An account without a password is answered like an unknown principal,
-/// its failure counted against the account.
+/// its failure counted against the account and reported as against it.
 #[tokio::test]
 async fn account_without_password_gets_a_decoy() {
     let h = host().await;
@@ -403,7 +418,10 @@ async fn account_without_password_gets_a_decoy() {
         ),
         "{e:?}"
     );
-    assert_eq!(*h.failures.lock().unwrap(), vec![owner.to_string()]);
+    assert_eq!(
+        *h.failures.lock().unwrap(),
+        vec![(owner.to_string(), Some(owner))]
+    );
 }
 
 /// An account holding only an imported password hash is sent to migration.
@@ -576,6 +594,7 @@ fn a_fenced_state_is_unreadable_to_an_unfenced_build() {
     // alike, so the answer does not tell whether the account exists.
     let decoy = serde_json::to_value(PendingSignIn::<ProfileId>::Decoy {
         identity: "nobody".into(),
+        owner: None,
     })
     .unwrap();
     assert!(decoy.get("Decoy").is_none(), "{decoy}");
