@@ -25,7 +25,8 @@ pub enum EventBusMode {
     /// An external NATS cluster at this URL.
     External(String),
     /// No broker: facts reach live subscribers of this process only, and the
-    /// bus keeps neither history nor addressed work.
+    /// bus keeps neither history nor addressed work. One process only:
+    /// startup refuses it over storage several replicas can share.
     InProcess,
 }
 
