@@ -65,6 +65,17 @@ pub trait WorkStore: Send + Sync {
         before: chrono::DateTime<chrono::Utc>,
     ) -> Result<u64>;
 
+    /// Whether any work of `kind` is stored, in any state, until it is purged.
+    /// The default reads every item; a backend that can ask for one answers
+    /// with a query instead.
+    async fn has_work_of_kind(&self, kind: &WorkKind) -> Result<bool> {
+        Ok(self
+            .export_work()
+            .await?
+            .iter()
+            .any(|work| &work.record.kind == kind))
+    }
+
     /// Every stored piece of work with its payload, to carry to another store.
     async fn export_work(&self) -> Result<Vec<WorkSnapshot>>;
 

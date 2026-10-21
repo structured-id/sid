@@ -96,86 +96,105 @@ fn a_separate_history_evaluator_needs_a_durable_bus() {
     }
 }
 
-/// Work already addressed to a receiver (a delivery, or a fan-out plan that
-/// names receivers) can only be handed over by a durable bus: switching an
-/// installation holding it to the in-process bus would leave it retrying
-/// forever, so it is counted and startup refuses. Ended work, plans with no
-/// receiver and other kinds are not owed to anyone.
-#[test]
-fn addressed_work_still_owed_is_counted() {
-    use sid_core::models::event::{
-        EVENT_DELIVERY_KIND, EVENT_FANOUT_KIND, EventDelivery, EventFanout, WorkRecipient,
-    };
-    use sid_core::models::{WorkId, WorkKind, WorkRecord, WorkSnapshot, WorkState};
-    let snapshot = |kind: &str, state: WorkState, payload: Vec<u8>| WorkSnapshot {
-        record: WorkRecord {
-            id: WorkId(uuid::Uuid::now_v7()),
-            kind: WorkKind::new(kind).unwrap(),
-            state,
-            attempts: 0,
-            max_attempts: 5,
-            generation: 0,
-            last_error: None,
-            ambiguous: false,
-            result: None,
-            not_before: chrono::Utc::now(),
-            expires_at: None,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        },
-        payload,
-    };
-    let notify = WorkRecipient::new("sid-notify").unwrap();
-    let event = sid_core::models::event::Event::new("test", "sid.session.revoked.v1");
-    let delivery = serde_json::to_vec(&EventDelivery {
-        recipient: notify.clone(),
-        event: event.clone(),
-    })
-    .unwrap();
-    let plan = |receivers: Vec<WorkRecipient>| {
-        serde_json::to_vec(&EventFanout {
-            event: event.clone(),
-            receivers,
-        })
-        .unwrap()
-    };
+/// An installation that ever addressed work to a receiver is refused the
+/// in-process bus, whether that delivery is still open or recorded done (a
+/// done delivery may still wait in the durable bus that accepted it); one
+/// that never did is accepted, whatever other work it holds.
+#[tokio::test]
+async fn an_installation_that_addressed_work_keeps_its_durable_bus() {
+    use sid_core::models::event::{Event, WorkRecipient, event_types};
+    use sid_plugin::WorkStore;
+    let store = sid_storage::sqlite::SqliteBackend::new_in_memory()
+        .await
+        .unwrap();
+    store
+        .enqueue_work(
+            &sid_core::models::NewWork::new(
+                sid_core::models::WorkKind::new("backchannel.logout").unwrap(),
+                b"{}".to_vec(),
+            ),
+            10,
+        )
+        .await
+        .unwrap();
+    refuse_addressed_history(&store)
+        .await
+        .expect("no work was ever addressed to a receiver");
 
-    assert_eq!(owed_addressed_work(&[]), 0);
-    let owed = [
-        snapshot(EVENT_DELIVERY_KIND, WorkState::Pending, delivery.clone()),
-        snapshot(EVENT_DELIVERY_KIND, WorkState::Claimed, delivery.clone()),
-        snapshot(
-            EVENT_FANOUT_KIND,
-            WorkState::Pending,
-            plan(vec![notify.clone()]),
-        ),
-    ];
-    assert_eq!(owed_addressed_work(&owed), 3);
-    let not_owed = [
-        snapshot(EVENT_DELIVERY_KIND, WorkState::Completed, delivery.clone()),
-        snapshot(EVENT_DELIVERY_KIND, WorkState::Failed, delivery),
-        snapshot(EVENT_FANOUT_KIND, WorkState::Pending, plan(Vec::new())),
-        snapshot("backchannel.logout", WorkState::Pending, b"{}".to_vec()),
-    ];
-    assert_eq!(owed_addressed_work(&not_owed), 0);
+    let delivery = Event::new("test", event_types::SESSION_REVOKED)
+        .deliver(&WorkRecipient::new("sid-notify").unwrap());
+    store.enqueue_work(&delivery, 10).await.unwrap();
+    let claimed = store
+        .claim_work(
+            &[
+                sid_core::models::WorkKind::new(sid_core::models::event::EVENT_DELIVERY_KIND)
+                    .unwrap(),
+            ],
+            "w",
+            1,
+            std::time::Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+    assert!(
+        store
+            .complete_work(claimed[0].id, claimed[0].generation, None)
+            .await
+            .unwrap()
+    );
+    let refused = refuse_addressed_history(&store)
+        .await
+        .expect_err("a done delivery may still wait in the old bus")
+        .to_string();
+    assert!(refused.contains("durable bus"), "{refused}");
 }
 
-/// The in-process bus holds an exclusive lock beside its database for the
-/// life of the process: a second process opening the same file with it is
-/// refused, so no two processes publish each other's facts to nobody. The
-/// lock frees when its holder ends.
+/// Every server over one SQLite file holds its bus lock: shared on a durable
+/// bus, so several may run together, exclusive with the in-process bus, so it
+/// runs beside no other process whatever bus that one uses (a rolling switch
+/// included). A lock frees when its holder ends.
 #[test]
 fn the_in_process_bus_holds_its_database_alone() {
     let dir = tempfile::tempdir().unwrap();
     let database = dir.path().join("auth.db");
-    let database = database.to_str().unwrap();
-    let held = hold_single_process(database).expect("first holder");
-    let refused = hold_single_process(database)
-        .expect_err("a second holder")
+    let durable = hold_database(&database, false).expect("a durable server");
+    let second_durable = hold_database(&database, false).expect("durable servers share");
+    let refused = hold_database(&database, true)
+        .expect_err("in-process beside durable servers")
         .to_string();
     assert!(refused.contains("another process"), "{refused}");
-    drop(held);
-    hold_single_process(database).expect("free again after its holder ended");
+    drop((durable, second_durable));
+
+    let in_process = hold_database(&database, true).expect("free once they ended");
+    assert!(
+        hold_database(&database, true).is_err(),
+        "a second in-process server"
+    );
+    let refused = hold_database(&database, false)
+        .expect_err("a durable server beside the in-process one")
+        .to_string();
+    assert!(refused.contains("in-process bus"), "{refused}");
+    drop(in_process);
+    hold_database(&database, false).expect("free again");
+}
+
+/// A `sqlite:` URL and a plain path to one file lock the same file, as the
+/// database the backend opens is the same.
+#[tokio::test]
+async fn every_name_of_one_sqlite_file_locks_the_same_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let plain = dir.path().join("auth.db");
+    sid_storage::sqlite::SqliteBackend::new(plain.to_str().unwrap())
+        .await
+        .unwrap();
+    let url = format!("sqlite://{}", plain.display());
+    let (by_path, by_url) = (
+        sid_storage::sqlite::SqliteBackend::database_file(plain.to_str().unwrap()).unwrap(),
+        sid_storage::sqlite::SqliteBackend::database_file(&url).unwrap(),
+    );
+    assert_eq!(by_path, by_url);
+    let _held = hold_database(&by_path, true).unwrap();
+    assert!(hold_database(&by_url, true).is_err());
 }
 
 /// The in-process bus reaches the subscribers of one process only. Over

@@ -379,6 +379,14 @@ macro_rules! work_store_over_pool {
                 export(&self.pool).await
             }
 
+            async fn has_work_of_kind(&self, kind: &WorkKind) -> SidResult<bool> {
+                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM durable_work WHERE kind = $1)")
+                    .bind(kind.as_str())
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(|e| SidError::Storage(format!("work of a kind: {e}")))
+            }
+
             async fn import_work(&self, work: &WorkSnapshot) -> SidResult<bool> {
                 import(&self.pool, work).await
             }

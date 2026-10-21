@@ -1157,6 +1157,7 @@ mod work_store {
         capacity_is_enforced_per_kind,
         capacity_holds_under_concurrency,
         ended_work_is_purged,
+        work_of_a_kind_is_reported,
         live_lease_is_exclusive,
         lease_fences_stale_worker,
         retries_then_fails,
