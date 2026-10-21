@@ -14,6 +14,9 @@ pub struct MockStorage {
     pub group_members: Mutex<Vec<GroupMember>>,
     pub role_assignments: Mutex<Vec<RoleAssignment>>,
     pub cedar_policies: Mutex<Vec<CedarPolicy>>,
+    /// While set, the reads a permission check makes fail as an
+    /// unreachable store would.
+    pub unavailable: std::sync::atomic::AtomicBool,
 }
 
 impl MockStorage {
@@ -24,7 +27,15 @@ impl MockStorage {
             group_members: Mutex::new(Vec::new()),
             role_assignments: Mutex::new(Vec::new()),
             cedar_policies: Mutex::new(Vec::new()),
+            unavailable: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    fn reachable(&self) -> Result<()> {
+        if self.unavailable.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(sid_core::Error::Storage("store unavailable".into()));
+        }
+        Ok(())
     }
 }
 
@@ -1179,6 +1190,7 @@ impl sid_plugin::StorageBackend for MockStorage {
         &self,
         profile_id: ProfileId,
     ) -> Result<Vec<RoleAssignment>> {
+        self.reachable()?;
         let assignments = self.role_assignments.lock().unwrap();
         Ok(assignments
             .iter()
@@ -1326,6 +1338,7 @@ impl sid_plugin::StorageBackend for MockStorage {
         Ok(())
     }
     async fn list_cedar_policies(&self, project_id: ProjectId) -> Result<Vec<CedarPolicy>> {
+        self.reachable()?;
         Ok(self
             .cedar_policies
             .lock()

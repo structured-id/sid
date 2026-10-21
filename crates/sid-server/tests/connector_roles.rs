@@ -11,13 +11,13 @@ use std::sync::atomic::AtomicBool;
 
 use common::mock_storage::MockStorage;
 use common::{TestServices, issue_admin_token};
+use sid_authz::AuthzCheckRequest;
 use sid_authz::cedar::CedarService;
 use sid_authz::grpc::AuthzServiceImpl;
 use sid_core::models::{
     AuditEntry, ConnectorState, OrgId, ProjectId, ProvisioningConnector, ProvisioningConnectorId,
     ProvisioningDirection, ResourceId, SCIM_PROVISIONER_ROLE, SCIM_USER_CREATE, TOKEN_INTROSPECT,
 };
-use sid_plugin::authz::{AuthzCheckRequest, AuthzEngine};
 use sid_proto::sid::v1::authz::assign_role_request::Principal;
 use sid_proto::sid::v1::authz::list_role_assignments_request::Filter;
 use sid_proto::sid::v1::authz::role_assignment;

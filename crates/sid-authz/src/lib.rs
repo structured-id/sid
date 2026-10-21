@@ -11,6 +11,7 @@ pub mod builtin;
 pub mod cedar;
 pub mod conditional_access;
 pub mod config;
+pub mod decision;
 pub mod engine;
 #[cfg(feature = "grpc")]
 pub mod governance_grpc;
@@ -26,6 +27,7 @@ pub mod sod;
 mod test_mock;
 
 pub use access_request::{AccessRequest, AccessRequestId, AccessRequestStatus};
+pub use decision::{AuthzCheckRequest, AuthzCheckResponse, AuthzError};
 pub use engine::CeAuthzEngine;
 pub use group::GroupService;
 pub use rbac::{AuthzDecision, RbacService};

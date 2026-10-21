@@ -8,6 +8,7 @@ use sid_authn::jwt::JwtService;
 use sid_authn::resource_token::ResourceTokenVerifier;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::service_auth::{AuthenticatedService, ServiceCaller, authenticate_service};
+use sid_authz::{AuthzCheckRequest, CeAuthzEngine};
 use sid_core::grpc_error::refuse::{
     dependency_unavailable, internal, invalid_field, missing_field, not_found, storage_failure,
 };
@@ -16,7 +17,6 @@ use sid_core::models::{
     AuditEntry, INVITE_CREATE, INVITE_READ, INVITE_REVOKE, Invite, InviteCreator, InviteFilter,
     InviteId, InviteStatus, ModeWrite, ProfileId, ResourceId, generate_invite_code,
 };
-use sid_plugin::authz::{AuthzCheckRequest, AuthzEngine};
 use sid_plugin::storage::StorageBackend;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
@@ -86,7 +86,7 @@ type ProtoInvite = sid_proto::sid::v1::admin::Invite;
 /// Services that may manage invites: a machine user with its own token for
 /// the enrollment API, holding the invite action on that resource.
 pub struct InviteServices {
-    pub engine: Arc<dyn AuthzEngine>,
+    pub engine: Arc<CeAuthzEngine<dyn StorageBackend>>,
     pub tokens: Arc<ResourceTokenVerifier>,
     /// The enrollment API resource the actions are held on.
     pub resource: ResourceId,

@@ -55,18 +55,6 @@ impl AuthzService for MockAuthz {
     ) -> Result<TonicResponse<BatchCheckPermissionResponse>, Status> {
         Err(Status::unimplemented(""))
     }
-    async fn list_objects(
-        &self,
-        _r: TonicRequest<ListObjectsRequest>,
-    ) -> Result<TonicResponse<ListObjectsResponse>, Status> {
-        Err(Status::unimplemented(""))
-    }
-    async fn list_subjects(
-        &self,
-        _r: TonicRequest<ListSubjectsRequest>,
-    ) -> Result<TonicResponse<ListSubjectsResponse>, Status> {
-        Err(Status::unimplemented(""))
-    }
     async fn create_role(
         &self,
         _r: TonicRequest<CreateRoleRequest>,

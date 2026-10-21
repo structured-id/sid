@@ -12,12 +12,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::cedar::CedarService;
+use crate::decision::{AuthzCheckRequest, AuthzCheckResponse};
+use crate::engine::CeAuthzEngine;
 use sid_core::models::{CedarPolicy, CedarPolicyId, PolicyEffect, ProjectId};
 use sid_plugin::StorageBackend;
-use sid_plugin::authz::{AuthzCheckRequest, AuthzCheckResponse, AuthzEngine};
-
-use crate::cedar::CedarService;
-use crate::engine::CeAuthzEngine;
 
 /// A proposed Cedar policy change to simulate.
 #[derive(Debug, Clone)]
@@ -152,44 +151,30 @@ impl<S: StorageBackend + ?Sized + 'static> PolicySimulator<S> {
 
         for subject in subjects {
             for action in actions {
-                // Current state: full engine (RBAC + Cedar).
-                let current_result = self
-                    .engine
-                    .check(&AuthzCheckRequest {
-                        subject: subject.clone(),
-                        action: action.clone(),
-                        resource: resource.to_string(),
-                        context: HashMap::new(),
-                    })
-                    .await;
-
-                let (current_allowed, current_reason) = match current_result {
-                    Ok(AuthzCheckResponse::Allow { reason }) => (true, reason),
-                    Ok(AuthzCheckResponse::Deny { reason }) => (false, reason),
-                    Err(e) => {
-                        errors.push(format!("eval error for {subject}: {e}"));
-                        continue;
-                    }
+                let request = AuthzCheckRequest {
+                    subject: subject.clone(),
+                    action: action.clone(),
+                    resource: resource.to_string(),
+                    context: HashMap::new(),
                 };
-
-                // Proposed state: Cedar with modified policy set + RBAC unchanged.
-                // For proposed, we check RBAC first (unchanged), then Cedar with proposed set.
-                let proposed_cedar_allowed =
-                    self.evaluate_cedar(subject, action, resource, &proposed_pairs);
-
-                // RBAC is unchanged in CE simulation, so:
-                // - If current was allowed by RBAC → still allowed (RBAC unchanged).
-                // - If current was denied by RBAC → check proposed Cedar.
-                let rbac_allowed = current_allowed && current_reason.contains("RBAC");
-                let proposed_allowed = rbac_allowed || proposed_cedar_allowed;
-
-                let proposed_reason = if rbac_allowed {
-                    current_reason.clone() // RBAC unchanged
-                } else if proposed_cedar_allowed {
-                    "proposed Cedar policies permit".to_string()
-                } else {
-                    "no RBAC role grants and proposed Cedar policies deny".to_string()
+                // Both states by the engine itself, the proposed one under
+                // the changed policy set: the same roles, the same
+                // precedence of forbid, role grant and permit.
+                let decided = |result: Result<AuthzCheckResponse, _>| match result {
+                    Ok(AuthzCheckResponse::Allow { reason }) => Ok((true, reason)),
+                    Ok(AuthzCheckResponse::Deny { reason }) => Ok((false, reason)),
+                    Err(e) => Err(format!("eval error for {subject}: {e}")),
                 };
+                let current = decided(self.engine.check(&request).await);
+                let proposed = decided(self.engine.check_under(&request, &proposed_pairs).await);
+                let ((current_allowed, current_reason), (proposed_allowed, proposed_reason)) =
+                    match (current, proposed) {
+                        (Ok(current), Ok(proposed)) => (current, proposed),
+                        (Err(e), _) | (_, Err(e)) => {
+                            errors.push(e);
+                            continue;
+                        }
+                    };
 
                 let impact_type = match (current_allowed, proposed_allowed) {
                     (false, true) => {
@@ -313,47 +298,6 @@ impl<S: StorageBackend + ?Sized + 'static> PolicySimulator<S> {
             .filter(|p| p.enabled)
             .map(|p| (p.id.0.to_string(), p.policy_text.clone()))
             .collect()
-    }
-
-    /// Evaluate Cedar policies against a request.
-    fn evaluate_cedar(
-        &self,
-        subject: &str,
-        action: &str,
-        resource: &str,
-        policies: &[(String, String)],
-    ) -> bool {
-        if policies.is_empty() {
-            return false;
-        }
-
-        let cedar_subject = if let Some(id) = subject.strip_prefix("machine:") {
-            format!(r#"MachineUser::"{id}""#)
-        } else {
-            let id = subject.strip_prefix("user:").unwrap_or(subject);
-            format!(r#"User::"{id}""#)
-        };
-
-        let cedar_action = format!(r#"Action::"{action}""#);
-
-        // Extract UUID from resource string for Cedar.
-        let resource_id = if let Some((_type, id)) = resource.split_once(':') {
-            id
-        } else {
-            resource
-        };
-        let cedar_resource = format!(r#"Resource::"{resource_id}""#);
-
-        match self.cedar.evaluate(
-            policies,
-            &cedar_subject,
-            &cedar_action,
-            &cedar_resource,
-            &HashMap::new(),
-        ) {
-            Ok(result) => result.allowed,
-            Err(_) => false,
-        }
     }
 }
 
@@ -627,6 +571,75 @@ mod tests {
             .unwrap();
         assert_eq!(result.total_unchanged, 1);
         assert!(result.impacts.is_empty());
+    }
+
+    /// A Profile holding a role in `pid` that grants `action`.
+    async fn role_holder(storage: &MockStorage, pid: ProjectId, action: &str) -> String {
+        use sid_core::models::{ProfileId, Role, RoleAssignment, RoleAssignmentPrincipal};
+        let profile = ProfileId::generate();
+        let mut role = Role::new(pid, "editor", "editor");
+        role.permissions = vec![action.to_string()];
+        storage
+            .create_role(&role, AuditEntry::system("test", "test").into())
+            .await
+            .unwrap();
+        storage
+            .create_role_assignment(
+                &RoleAssignment::new(RoleAssignmentPrincipal::Profile(profile), role.id),
+                AuditEntry::system("test", "test").into(),
+            )
+            .await
+            .unwrap();
+        format!("user:{profile}")
+    }
+
+    // Regression: the simulator took a role grant as immutable, so a
+    // proposed forbid over a role holder was reported unchanged although the
+    // engine would deny. The proposed decision follows the engine's
+    // precedence.
+    #[tokio::test]
+    async fn test_a_proposed_forbid_takes_a_role_grant() {
+        let (sim, storage, pid) = setup().await;
+        let holder = role_holder(&storage, pid, "write").await;
+        let changes = vec![ProposedChange::CreatePolicy {
+            name: "no_writes".into(),
+            policy_text: r#"forbid(principal, action == Action::"write", resource);"#.into(),
+            effect: PolicyEffect::Forbid,
+        }];
+        let result = sim
+            .simulate(pid, &changes, &[holder], &["write".into()], &resource(pid))
+            .await
+            .unwrap();
+        assert_eq!(result.total_lost, 1, "{result:?}");
+    }
+
+    // Deleting the forbid that denies a role holder gives the grant back.
+    #[tokio::test]
+    async fn test_deleting_a_forbid_restores_a_role_grant() {
+        let (sim, storage, pid) = setup().await;
+        let holder = role_holder(&storage, pid, "write").await;
+        let forbid = CedarPolicy::new(
+            pid,
+            "no_writes",
+            r#"forbid(principal, action == Action::"write", resource);"#,
+            PolicyEffect::Forbid,
+        );
+        let forbid_id = forbid.id;
+        storage
+            .create_cedar_policy(&forbid, AuditEntry::system("test", "test").into())
+            .await
+            .unwrap();
+        let result = sim
+            .simulate(
+                pid,
+                &[ProposedChange::DeletePolicy { id: forbid_id }],
+                &[holder],
+                &["write".into()],
+                &resource(pid),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.total_gained, 1, "{result:?}");
     }
 
     // ── Multiple subjects × actions ──

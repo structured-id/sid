@@ -8,6 +8,8 @@ authors.workspace = true
 
 [dependencies]
 sid-authn = { path = "../sid-authn", features = ["grpc"] }
+# The fixed CE decision on a connector's directory actions.
+sid-authz = { path = "../sid-authz", default-features = false }
 sid-core = { path = "../sid-core", features = ["grpc"] }
 sid-plugin = { path = "../sid-plugin" }
 sid-proto = { path = "../sid-proto" }
@@ -26,7 +28,6 @@ tokio = { workspace = true, features = ["time", "sync"] }
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 sid-storage = { path = "../sid-storage", features = ["storage-sqlite"] }
-sid-authz = { path = "../sid-authz" }
 secrecy = { workspace = true }
 sqlx = { workspace = true }
 tonic-types = { workspace = true }

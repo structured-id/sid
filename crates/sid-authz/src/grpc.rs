@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! gRPC AuthzService implementation.
 //!
-//! CE authorization: RBAC + Cedar ABAC via AuthzEngine trait.
+//! CE authorization: the fixed RBAC + Cedar ABAC engine.
 //! CRUD operations (role/group/policy) go through StorageBackend.
-//! check_permission/batch_check delegate to AuthzEngine.
+//! check_permission/batch_check delegate to `CeAuthzEngine`.
 //! evaluate_policy/validate_policy use CedarService.
 
 use crate::cedar::{CedarError, CedarService};
+use crate::decision::AuthzCheckRequest;
+use crate::engine::CeAuthzEngine;
 use sid_authn::caller::{Caller, authenticate};
 use sid_authn::jwt::JwtService;
 use sid_authn::resource_token::ResourceTokenVerifier;
@@ -26,7 +28,6 @@ use sid_core::models::{
 };
 use sid_plugin::StorageBackend;
 use sid_plugin::audit::AuditLog;
-use sid_plugin::authz::{AuthzCheckRequest, AuthzEngine};
 use sid_proto::sid::v1::authz::*;
 use sid_proto::sid::v1::authz_service_server::AuthzService;
 use std::sync::Arc;
@@ -128,14 +129,14 @@ fn checker_denied() -> Status {
 
 /// A failure evaluating a permission question: a malformed subject or
 /// resource is the caller's mistake, an unreachable store is an outage that
-/// never becomes an answer, anything else as [`engine_refusal`].
-fn query_refusal(operation: &'static str, e: sid_plugin::authz::AuthzError) -> Status {
-    use sid_plugin::authz::AuthzError;
+/// never becomes an answer, anything else is internal.
+fn query_refusal(operation: &'static str, e: crate::decision::AuthzError) -> Status {
+    use crate::decision::AuthzError;
     match e {
         AuthzError::InvalidSubject(_) => invalid_field("evaluation", "not a subject reference"),
         AuthzError::InvalidResource(_) => invalid_field("target", "not a target reference"),
         AuthzError::Storage(why) => dependency_unavailable("permission decision", why),
-        e => engine_refusal(operation, e),
+        other => internal(operation, other),
     }
 }
 
@@ -154,15 +155,6 @@ fn record_query(asker: &Asker, check: &AuthzCheckRequest, outcome: PermissionOut
             outcome = outcome.as_str_name(),
             "permission query answered"
         );
-    }
-}
-
-/// An authorization engine failure: an unsupported operation is not part of
-/// this build's engine, anything else is internal.
-fn engine_refusal(operation: &'static str, e: sid_plugin::authz::AuthzError) -> Status {
-    match e {
-        sid_plugin::authz::AuthzError::NotSupported(_) => not_in_this_build(operation),
-        other => internal(operation, other),
     }
 }
 
@@ -405,7 +397,7 @@ fn policy_to_proto(p: &CedarPolicy) -> Policy {
 // ── Service ─────────────────────────────────────────────────────────
 
 pub struct AuthzServiceImpl {
-    engine: Arc<dyn AuthzEngine>,
+    engine: Arc<CeAuthzEngine<dyn StorageBackend>>,
     storage: Arc<dyn StorageBackend>,
     cedar: CedarService,
     maintenance_mode: Arc<AtomicBool>,
@@ -687,7 +679,7 @@ fn administration_refusal(error: sid_core::Error) -> Status {
 
 impl AuthzServiceImpl {
     pub fn new(
-        engine: Arc<dyn AuthzEngine>,
+        engine: Arc<CeAuthzEngine<dyn StorageBackend>>,
         storage: Arc<dyn StorageBackend>,
         cedar: CedarService,
         maintenance_mode: Arc<AtomicBool>,
@@ -1168,19 +1160,6 @@ impl AuthzServiceImpl {
         Ok(caller)
     }
 
-    /// Authenticate the caller of `request` and allow it to ask only about its
-    /// own subject; an administrator may ask about any.
-    #[allow(clippy::result_large_err)]
-    async fn subject_caller<'a, T>(
-        &self,
-        request: &Request<T>,
-        subjects: impl IntoIterator<Item = &'a str>,
-    ) -> Result<Caller, Status> {
-        let caller = self.caller(request).await?;
-        caller.require_own_subjects(subjects)?;
-        Ok(caller)
-    }
-
     /// The confidential OAuth client `client_id` names: only a client that
     /// authenticates can act as its own principal.
     async fn confidential_client(&self, client_id: &str) -> Result<(), Status> {
@@ -1349,7 +1328,7 @@ impl AuthzServiceImpl {
 
 #[tonic::async_trait]
 impl AuthzService for AuthzServiceImpl {
-    // ── Permission checks (delegated to AuthzEngine) ────────────────
+    // ── Permission checks (delegated to CeAuthzEngine) ──────────────
 
     #[instrument(skip_all, fields(method = "check_permission"))]
     async fn check_permission(
@@ -1375,39 +1354,6 @@ impl AuthzService for AuthzServiceImpl {
             .answer(&asker, questions, "batch_check_permission")
             .await?;
         Ok(Response::new(BatchCheckPermissionResponse { results }))
-    }
-
-    #[instrument(skip_all, fields(method = "list_objects"))]
-    async fn list_objects(
-        &self,
-        request: Request<ListObjectsRequest>,
-    ) -> Result<Response<ListObjectsResponse>, Status> {
-        self.subject_caller(&request, [request.get_ref().subject.as_str()])
-            .await?;
-        let req = request.into_inner();
-        let objects = self
-            .engine
-            .list_accessible_objects(&req.subject, &req.action, &req.resource_type)
-            .await
-            .map_err(|e| engine_refusal("list_objects", e))?;
-
-        Ok(Response::new(ListObjectsResponse { objects }))
-    }
-
-    #[instrument(skip_all, fields(method = "list_subjects"))]
-    async fn list_subjects(
-        &self,
-        request: Request<ListSubjectsRequest>,
-    ) -> Result<Response<ListSubjectsResponse>, Status> {
-        self.admin(&request).await?;
-        let req = request.into_inner();
-        let subjects = self
-            .engine
-            .list_subjects_with_access(&req.action, &req.resource)
-            .await
-            .map_err(|e| engine_refusal("list_subjects", e))?;
-
-        Ok(Response::new(ListSubjectsResponse { subjects }))
     }
 
     // ── Role management ─────────────────────────────────────────────

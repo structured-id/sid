@@ -90,7 +90,7 @@ fn test_parse_project_invalid() {
     assert!(result.is_err());
 }
 
-// ── RBAC checks via AuthzEngine ──────────────────────────────
+// ── RBAC checks ──────────────────────────────────────────────
 
 #[tokio::test]
 async fn test_check_no_roles_denies() {
@@ -353,6 +353,109 @@ async fn test_check_disabled_cedar_policy_ignored() {
 }
 
 // ── Batch check ──────────────────────────────────────────────
+
+/// An explicit Cedar `forbid` applies to a subject whatever role it holds:
+/// a role grant is a permission, not an exemption from the project's
+/// prohibitions. The same role without the forbid still allows, and a
+/// forbid on another action leaves the granted one allowed.
+#[tokio::test]
+async fn test_explicit_forbid_overrides_a_role_grant() {
+    let (engine, storage, project_id) = setup().await;
+    let profile_id = ProfileId::generate();
+    let role = create_test_role(project_id, "editor", &["profiles:read", "profiles:write"]);
+    storage
+        .create_role(&role, AuditEntry::system("test", "test").into())
+        .await
+        .unwrap();
+    storage
+        .create_role_assignment(
+            &RoleAssignment::new(RoleAssignmentPrincipal::Profile(profile_id), role.id),
+            AuditEntry::system("test", "test").into(),
+        )
+        .await
+        .unwrap();
+    let ask = |action: &str| AuthzCheckRequest {
+        subject: format!("user:{profile_id}"),
+        action: action.into(),
+        resource: format!("project:{}", project_id.0),
+        context: HashMap::new(),
+    };
+    assert!(
+        engine
+            .check(&ask("profiles:write"))
+            .await
+            .unwrap()
+            .is_allowed()
+    );
+
+    let forbid = sid_core::models::CedarPolicy::new(
+        project_id,
+        "no_writes",
+        r#"forbid(principal, action == Action::"profiles:write", resource);"#,
+        sid_core::models::PolicyEffect::Forbid,
+    );
+    storage
+        .create_cedar_policy(&forbid, AuditEntry::system("test", "test").into())
+        .await
+        .unwrap();
+
+    let refused = engine.check(&ask("profiles:write")).await.unwrap();
+    assert!(
+        !refused.is_allowed(),
+        "a role grant bypassed a forbid: {refused:?}"
+    );
+    assert!(refused.reason().contains("forbid"), "{refused:?}");
+    assert!(
+        engine
+            .check(&ask("profiles:read"))
+            .await
+            .unwrap()
+            .is_allowed(),
+        "a forbid on another action"
+    );
+}
+
+/// A policy set that cannot be evaluated denies, even where a role grants:
+/// the broken policy might be the prohibition that applies.
+#[tokio::test]
+async fn test_an_unevaluable_policy_set_denies_a_role_grant() {
+    let (engine, storage, project_id) = setup().await;
+    let profile_id = ProfileId::generate();
+    let role = create_test_role(project_id, "editor", &["profiles:write"]);
+    storage
+        .create_role(&role, AuditEntry::system("test", "test").into())
+        .await
+        .unwrap();
+    storage
+        .create_role_assignment(
+            &RoleAssignment::new(RoleAssignmentPrincipal::Profile(profile_id), role.id),
+            AuditEntry::system("test", "test").into(),
+        )
+        .await
+        .unwrap();
+    storage
+        .create_cedar_policy(
+            &sid_core::models::CedarPolicy::new(
+                project_id,
+                "broken",
+                "forbid(principal, action, resource) when { nonsense",
+                sid_core::models::PolicyEffect::Forbid,
+            ),
+            AuditEntry::system("test", "test").into(),
+        )
+        .await
+        .unwrap();
+    let decision = engine
+        .check(&AuthzCheckRequest {
+            subject: format!("user:{profile_id}"),
+            action: "profiles:write".into(),
+            resource: format!("project:{}", project_id.0),
+            context: HashMap::new(),
+        })
+        .await
+        .unwrap();
+    assert!(!decision.is_allowed(), "{decision:?}");
+}
 
 #[tokio::test]
 async fn test_batch_check() {
@@ -900,32 +1003,160 @@ async fn test_malformed_protected_resource_is_an_error() {
     ));
 }
 
-// ── Graph listing methods return NotSupported ────────────────
+// ── Failure and scope ────────────────────────────────────────
 
-#[tokio::test]
-async fn test_list_accessible_objects_not_supported() {
-    let (engine, _, _) = setup().await;
-    let result = engine
-        .list_accessible_objects("user:abc", "read", "project")
-        .await;
-    assert!(matches!(result, Err(AuthzError::NotSupported(_))));
+/// A granted role in `project_id` for a fresh Profile, stored in `storage`.
+async fn granted(storage: &MockStorage, project_id: ProjectId, action: &str) -> ProfileId {
+    let profile_id = ProfileId::generate();
+    let role = create_test_role(project_id, "editor", &[action]);
+    storage
+        .create_role(&role, AuditEntry::system("test", "test").into())
+        .await
+        .unwrap();
+    storage
+        .create_role_assignment(
+            &RoleAssignment::new(RoleAssignmentPrincipal::Profile(profile_id), role.id),
+            AuditEntry::system("test", "test").into(),
+        )
+        .await
+        .unwrap();
+    profile_id
 }
 
+// A check whose reads fail answers an error, never an allow: a store that
+// cannot say what is granted grants nothing.
 #[tokio::test]
-async fn test_list_subjects_not_supported() {
-    let (engine, _, _) = setup().await;
-    let result = engine
-        .list_subjects_with_access("read", "project:abc")
-        .await;
-    assert!(matches!(result, Err(AuthzError::NotSupported(_))));
+async fn test_unreachable_storage_never_allows() {
+    let (engine, storage, project_id) = setup().await;
+    let profile_id = granted(&storage, project_id, "profiles:read").await;
+    let request = AuthzCheckRequest {
+        subject: format!("user:{profile_id}"),
+        action: "profiles:read".into(),
+        resource: format!("project:{}", project_id.0),
+        context: HashMap::new(),
+    };
+    assert!(engine.check(&request).await.unwrap().is_allowed());
+
+    storage
+        .unavailable
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(matches!(
+        engine.check(&request).await,
+        Err(AuthzError::Storage(_))
+    ));
 }
 
-// ── Object safety ────────────────────────────────────────────
-
+// A role grants only in its own project: the same action on another
+// project is denied.
 #[tokio::test]
-async fn test_engine_as_trait_object() {
-    let storage = Arc::new(MockStorage::new());
-    let engine: Box<dyn AuthzEngine> = Box::new(CeAuthzEngine::new(storage));
+async fn test_a_role_grants_only_in_its_project() {
+    let (engine, storage, project_id) = setup().await;
+    let profile_id = granted(&storage, project_id, "profiles:read").await;
+    let other = ProjectId::new();
+    let resp = engine
+        .check(&AuthzCheckRequest {
+            subject: format!("user:{profile_id}"),
+            action: "profiles:read".into(),
+            resource: format!("project:{}", other.0),
+            context: HashMap::new(),
+        })
+        .await
+        .unwrap();
+    assert!(!resp.is_allowed());
+}
+
+/// Store `text` as an enabled Cedar policy of `project_id`.
+async fn stored_policy(
+    storage: &MockStorage,
+    project_id: ProjectId,
+    text: &str,
+    effect: sid_core::models::PolicyEffect,
+) {
+    storage
+        .create_cedar_policy(
+            &sid_core::models::CedarPolicy::new(project_id, "policy", text, effect),
+            AuditEntry::system("test", "test").into(),
+        )
+        .await
+        .unwrap();
+}
+
+// Regression: a forbid whose condition fails to evaluate at runtime (it
+// reads a context attribute the request lacks) is skipped by Cedar, which
+// answers without an error; the role grant then allowed. A policy set that
+// cannot be evaluated denies, at runtime as at parse time.
+#[tokio::test]
+async fn test_a_forbid_failing_at_runtime_denies_a_role_grant() {
+    let (engine, storage, project_id) = setup().await;
+    let profile_id = granted(&storage, project_id, "profiles:write").await;
+    stored_policy(
+        &storage,
+        project_id,
+        r#"forbid(principal, action, resource) when { context.network == "untrusted" };"#,
+        sid_core::models::PolicyEffect::Forbid,
+    )
+    .await;
+    let resp = engine
+        .check(&AuthzCheckRequest {
+            subject: format!("user:{profile_id}"),
+            action: "profiles:write".into(),
+            resource: format!("project:{}", project_id.0),
+            context: HashMap::new(),
+        })
+        .await
+        .unwrap();
+    assert!(!resp.is_allowed(), "{resp:?}");
+}
+
+// Regression: an OAuth client id or an action holding a quote or a
+// backslash was interpolated into a Cedar entity literal, which then failed
+// to parse, and the fail-closed branch denied the client's role grant. The
+// entities are built from their components, so the grant applies.
+#[tokio::test]
+async fn test_identifiers_with_quotes_reach_the_policies_intact() {
+    let (engine, storage, project_id) = setup().await;
+    let client = r#"orders"pdp\v2"#;
+    let action = r#"orders:"read""#;
+    let role = create_test_role(project_id, "reader", &[action]);
+    storage
+        .create_role(&role, AuditEntry::system("test", "test").into())
+        .await
+        .unwrap();
+    storage
+        .create_role_assignment(
+            &RoleAssignment::new(RoleAssignmentPrincipal::OAuthClient(client.into()), role.id),
+            AuditEntry::system("test", "test").into(),
+        )
+        .await
+        .unwrap();
+    // A project policy, so the decision goes through Cedar.
+    stored_policy(
+        &storage,
+        project_id,
+        r#"forbid(principal, action == Action::"orders:delete", resource);"#,
+        sid_core::models::PolicyEffect::Forbid,
+    )
+    .await;
+    let resp = engine
+        .check(&AuthzCheckRequest {
+            subject: format!("oauth_client:{client}"),
+            action: action.into(),
+            resource: format!("project:{}", project_id.0),
+            context: HashMap::new(),
+        })
+        .await
+        .unwrap();
+    assert!(resp.is_allowed(), "{resp:?}");
+}
+
+// ── Over an erased store ─────────────────────────────────────
+
+// The engine decides the same over a store held as `dyn StorageBackend`, as
+// the services compose it.
+#[tokio::test]
+async fn test_engine_over_a_dyn_store() {
+    let storage: Arc<dyn sid_plugin::StorageBackend> = Arc::new(MockStorage::new());
+    let engine = CeAuthzEngine::new(storage);
     let project_id = ProjectId::new();
     let profile_id = ProfileId::generate();
 

@@ -177,19 +177,6 @@ async fn test_authz_management_refuses_a_non_admin() {
         ),
         denied(
             h.svc
-                .list_subjects(authed(
-                    ListSubjectsRequest {
-                        action: "get".to_string(),
-                        resource: "route:/admin".to_string(),
-                        ..Default::default()
-                    },
-                    &token,
-                ))
-                .await
-                .map(|_| ()),
-        ),
-        denied(
-            h.svc
                 .check_permission(authed(about_another(project), &token))
                 .await
                 .map(|_| ()),

@@ -21,6 +21,14 @@ pub struct CedarEvalResult {
     pub errors: Vec<String>,
 }
 
+impl CedarEvalResult {
+    /// Whether an explicit `forbid` decided: a prohibition, as opposed to a
+    /// denial for want of a `permit`.
+    pub fn forbidden(&self) -> bool {
+        self.matches.iter().any(|m| m.effect == CedarEffect::Forbid)
+    }
+}
+
 /// A policy that matched during evaluation.
 #[derive(Debug, Clone)]
 pub struct CedarPolicyMatch {
@@ -110,6 +118,46 @@ impl CedarService {
         resource: &str,
         context: &HashMap<String, String>,
     ) -> Result<CedarEvalResult, CedarError> {
+        let entity = |field: &'static str, uid: &str| {
+            EntityUid::from_str(uid).map_err(|e| CedarError::InvalidEntity {
+                field,
+                error: e.to_string(),
+            })
+        };
+        self.evaluate_entities(
+            policies,
+            entity("subject", subject)?,
+            entity("action", action)?,
+            entity("resource", resource)?,
+            context,
+        )
+    }
+
+    /// The UID of the entity of type `type_name` with the identifier `id`,
+    /// taken as is: quotes and backslashes in it are part of the identifier,
+    /// never Cedar syntax.
+    pub fn entity(type_name: &str, id: &str) -> Result<EntityUid, CedarError> {
+        let name = cedar_policy::EntityTypeName::from_str(type_name).map_err(|e| {
+            CedarError::InvalidEntity {
+                field: "type",
+                error: e.to_string(),
+            }
+        })?;
+        Ok(EntityUid::from_type_name_and_id(
+            name,
+            cedar_policy::EntityId::new(id),
+        ))
+    }
+
+    /// [`Self::evaluate`] over entity UIDs already built.
+    pub fn evaluate_entities(
+        &self,
+        policies: &[(String, String)],
+        principal: EntityUid,
+        action_uid: EntityUid,
+        resource_uid: EntityUid,
+        context: &HashMap<String, String>,
+    ) -> Result<CedarEvalResult, CedarError> {
         // Build PolicySet.
         let mut policy_set = PolicySet::new();
         for (id, text) in policies {
@@ -120,17 +168,6 @@ impl CedarService {
                 .add(policy)
                 .map_err(|e| CedarError::InvalidPolicy(format!("duplicate policy {id}: {e}")))?;
         }
-
-        // Parse entity UIDs.
-        let entity = |field: &'static str, uid: &str| {
-            EntityUid::from_str(uid).map_err(|e| CedarError::InvalidEntity {
-                field,
-                error: e.to_string(),
-            })
-        };
-        let principal = entity("subject", subject)?;
-        let action_uid = entity("action", action)?;
-        let resource_uid = entity("resource", resource)?;
 
         // Build context from key-value pairs.
         let context_pairs: Vec<(String, cedar_policy::RestrictedExpression)> = context
@@ -160,13 +197,19 @@ impl CedarService {
 
         let allowed = response.decision() == Decision::Allow;
 
-        let mut matches = Vec::new();
-        for reason in response.diagnostics().reason() {
-            matches.push(CedarPolicyMatch {
-                policy_id: reason.to_string(),
-                effect: CedarEffect::Permit,
-            });
-        }
+        // The determining policies: the satisfied permits of an allow, the
+        // satisfied forbids of a deny (none when nothing permitted).
+        let matches = response
+            .diagnostics()
+            .reason()
+            .map(|id| CedarPolicyMatch {
+                policy_id: id.to_string(),
+                effect: match policy_set.policy(id).map(Policy::effect) {
+                    Some(cedar_policy::Effect::Forbid) => CedarEffect::Forbid,
+                    _ => CedarEffect::Permit,
+                },
+            })
+            .collect();
 
         let errors: Vec<String> = response
             .diagnostics()

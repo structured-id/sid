@@ -6,25 +6,13 @@ fn test_authz_check_response_is_allowed() {
         reason: "role:admin".into(),
     };
     assert!(allow.is_allowed());
+    assert_eq!(allow.reason(), "role:admin");
 
     let deny = AuthzCheckResponse::Deny {
         reason: "no role".into(),
     };
     assert!(!deny.is_allowed());
-}
-
-#[test]
-fn test_authz_check_request_construction() {
-    let req = AuthzCheckRequest {
-        subject: "user:abc123".into(),
-        action: "profiles:read".into(),
-        resource: "project:def456".into(),
-        context: HashMap::new(),
-    };
-    assert_eq!(req.subject, "user:abc123");
-    assert_eq!(req.action, "profiles:read");
-    assert_eq!(req.resource, "project:def456");
-    assert!(req.context.is_empty());
+    assert_eq!(deny.reason(), "no role");
 }
 
 #[test]
@@ -45,12 +33,6 @@ fn test_authz_check_request_with_context() {
 
 #[test]
 fn test_authz_error_display() {
-    let e = AuthzError::NotSupported("list_objects".into());
-    assert!(e.to_string().contains("not supported in CE"));
-}
-
-// Verify traits are object-safe
-#[test]
-fn test_authz_engine_object_safety() {
-    fn _assert_object_safe(_: &dyn AuthzEngine) {}
+    let e = AuthzError::Storage("unreachable".into());
+    assert_eq!(e.to_string(), "storage error: unreachable");
 }

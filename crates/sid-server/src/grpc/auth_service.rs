@@ -547,7 +547,7 @@ pub struct AuthServiceImpl {
     trusted_proxies: sid_authn::client_address::TrustedProxies,
     /// The shared authorization evaluator: decides who may inspect the
     /// tokens of a protected resource.
-    authz: Arc<dyn sid_plugin::AuthzEngine>,
+    authz: Arc<sid_authz::CeAuthzEngine<dyn StorageBackend>>,
     /// Origin of the browser sign-in page: a ceremony it runs sets the IdP
     /// session cookie. None sets no cookie.
     sign_in_origin: Option<url::Origin>,
@@ -594,7 +594,7 @@ impl AuthServiceImpl {
         geoip: Arc<GeoIpChain>,
         key_manager: Arc<dyn sid_keys::KeyManager>,
         cascade: Arc<RevocationCascadeService>,
-        authz: Arc<dyn sid_plugin::AuthzEngine>,
+        authz: Arc<sid_authz::CeAuthzEngine<dyn StorageBackend>>,
         password_history: sid_authn::password_operation::PasswordHistoryAuthority,
     ) -> Self {
         let ttl = std::time::Duration::from_secs(300); // 5 minutes
@@ -3332,7 +3332,7 @@ impl AuthService for AuthServiceImpl {
         };
         let decision = self
             .authz
-            .check(&sid_plugin::authz::AuthzCheckRequest {
+            .check(&sid_authz::AuthzCheckRequest {
                 subject: inspector,
                 action: sid_core::models::TOKEN_INTROSPECT.to_string(),
                 resource: format!("oauth_resource:{}", target.id),
@@ -5918,7 +5918,7 @@ impl AuthServiceImpl {
             }
             let decision = self
                 .authz
-                .check(&sid_plugin::authz::AuthzCheckRequest {
+                .check(&sid_authz::AuthzCheckRequest {
                     subject: format!("provisioning_connector:{}", caller.connector.id),
                     action: scope.clone(),
                     resource: format!("oauth_resource:{}", resource.id),
