@@ -6,7 +6,7 @@
 #   floating tag latest.
 # A server release tag `v<version>` publishes one multi-arch manifest per
 # image under its versioned tag and keeps the floating tag on the newest
-# final release; a pull request that touches an image only builds it. Each
+# final release; a pull request only builds the images. Each
 # architecture builds on its own native runner (emulated arm64 would compile
 # the workspace for hours), pushes by digest, and the manifest joins them.
 name: Image
@@ -14,13 +14,10 @@ name: Image
 on:
   push:
     tags: ["v[0-9]*"]
-  # Any base: a pull request stacked on another one is checked too.
+  # Every pull request, any base: the image builds from the whole workspace
+  # (sources, manifests, migrations, proto, toolchain) with its own feature
+  # set, which no other check builds, so any change can break it.
   pull_request:
-    paths:
-      - Dockerfile
-      - Dockerfile.embedded
-      - .dockerignore
-      - .github/workflows/image.yml
 
 permissions:
   contents: read
