@@ -40,10 +40,11 @@ pub enum PendingSignIn<O> {
     /// account has no password. Stored and consumed like a real state and
     /// refused like a wrong password, so neither the timing of either step nor
     /// the answer tells whether the account exists. `identity` is the key its
-    /// failed attempts count against. Its tag moves with the password state's,
+    /// failed attempts count against, `owner` the account without a password
+    /// when one holds the principal. Its tag moves with the password state's,
     /// so across builds the two still answer alike.
     #[serde(rename = "DecoyFenced")]
-    Decoy { identity: String },
+    Decoy { identity: String, owner: Option<O> },
 }
 
 /// Why a sign-in step gave no result.
@@ -87,8 +88,13 @@ pub trait PasswordSignInHost: Send + Sync {
     /// Refuse while failed attempts against `identity` hold a lockout.
     async fn refuse_if_locked(&self, identity: &str) -> Result<(), Self::Error>;
 
-    /// Count a failed attempt against `identity`.
-    async fn record_failure(&self, identity: &str) -> Result<(), Self::Error>;
+    /// Count a failed attempt against `identity`; `owner` is the account it
+    /// was against, `None` when no account holds the principal.
+    async fn record_failure(
+        &self,
+        identity: &str,
+        owner: Option<&Self::Owner>,
+    ) -> Result<(), Self::Error>;
 
     /// The OPAQUE record of `credential`, opened from its sealed form, and
     /// the form the store holds for it now (opening may write it back
@@ -153,6 +159,7 @@ async fn decoy_start<H: PasswordSignInHost>(
     principal: &str,
     credential_request: &[u8],
     identity: String,
+    owner: Option<H::Owner>,
 ) -> Result<Started, H::Error> {
     let credential_response = host
         .opaque()
@@ -165,7 +172,7 @@ async fn decoy_start<H: PasswordSignInHost>(
         })?;
     let state_key = uuid::Uuid::now_v7().to_string();
     host.pending()
-        .insert(&state_key, &PendingSignIn::Decoy { identity })
+        .insert(&state_key, &PendingSignIn::Decoy { identity, owner })
         .await
         .map_err(PasswordSignInError::from)?;
     Ok(Started {
@@ -189,7 +196,7 @@ pub async fn start<H: PasswordSignInHost>(
     host.refuse_if_locked(&identity).await?;
 
     let Some(owner) = owner else {
-        return decoy_start(host, principal, credential_request, identity).await;
+        return decoy_start(host, principal, credential_request, identity, None).await;
     };
 
     let passwords = host
@@ -202,7 +209,7 @@ pub async fn start<H: PasswordSignInHost>(
     let Some(password) = passwords.iter().find(|c| c.status.is_active()) else {
         let imported = host
             .credentials()
-            .get_credentials_by_profile(owner, Some(CredentialType::LegacyHash))
+            .get_credentials_by_profile(owner.clone(), Some(CredentialType::LegacyHash))
             .await
             .map_err(storage)?;
         if !imported.is_empty() {
@@ -210,7 +217,7 @@ pub async fn start<H: PasswordSignInHost>(
         }
         // An account without a password (passkey-only, provisioned) is
         // answered like an unknown principal.
-        return decoy_start(host, principal, credential_request, identity).await;
+        return decoy_start(host, principal, credential_request, identity, Some(owner)).await;
     };
 
     let credential_id = host.opaque_credential_identifier(password);
@@ -267,11 +274,11 @@ pub async fn finish<H: PasswordSignInHost>(
             credential_id,
             credential_data,
         } => (state, owner, credential_id, credential_data),
-        PendingSignIn::Decoy { identity } => {
+        PendingSignIn::Decoy { identity, owner } => {
             // A lockout reached while this attempt was in flight answers the
             // same here as for a real account.
             host.refuse_if_locked(&identity).await?;
-            host.record_failure(&identity).await?;
+            host.record_failure(&identity, owner.as_ref()).await?;
             return Err(PasswordSignInError::AuthenticationFailed.into());
         }
     };
@@ -280,7 +287,7 @@ pub async fn finish<H: PasswordSignInHost>(
 
     if let Err(e) = host.opaque().login_finish(&state, finalization, &[]) {
         warn!("OPAQUE login finish failed: {}", e);
-        host.record_failure(&identity).await?;
+        host.record_failure(&identity, Some(&owner)).await?;
         return Err(PasswordSignInError::AuthenticationFailed.into());
     }
 

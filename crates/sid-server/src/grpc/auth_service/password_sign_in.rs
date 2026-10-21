@@ -65,7 +65,13 @@ impl PasswordSignInHost for ProfileSignIn<'_> {
         Ok(self.service.refuse_if_locked(identity).await?)
     }
 
-    async fn record_failure(&self, identity: &str) -> Result<(), SignInStatus> {
+    /// CE counts the attempt for the lockout; it keeps no per-account
+    /// activity, so the account is not needed here.
+    async fn record_failure(
+        &self,
+        identity: &str,
+        _owner: Option<&ProfileId>,
+    ) -> Result<(), SignInStatus> {
         Ok(self
             .service
             .record_failed_login(identity, self.client_ip)
