@@ -330,6 +330,8 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
 
     // ── Storage backend ──
 
+    refuse_renamed_setting(env_setting("SID_SQLITE_PATH")?.as_deref())?;
+
     // The history evaluator's own store over the same database, for a
     // standalone installation that runs the evaluator in process; its tables
     // are created only when it does (`local_history_keys`).
@@ -374,10 +376,8 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         Arc<dyn sid_plugin::audit::AuditLog>,
         LocalHistoryKeys,
     ) = {
-        let db_path = sqlite_path(
-            env_setting("SID_STORAGE_SQLITE_PATH")?,
-            env_setting("SID_SQLITE_PATH")?,
-        )?;
+        let db_path = env_setting("SID_STORAGE_SQLITE_PATH")?
+            .unwrap_or_else(|| "/var/lib/sid/auth.db".to_string());
         let backend = sid_storage::sqlite::SqliteBackend::new(&db_path)
             .await
             .context("SQLite storage and its migrations")?;
@@ -1530,18 +1530,17 @@ pub(crate) fn bus_fits_storage(
     Ok(())
 }
 
-/// The SQLite file `SID_STORAGE_SQLITE_PATH` names (default
-/// `/var/lib/sid/auth.db`). The old name `SID_SQLITE_PATH` is refused, not
-/// ignored: ignoring it would open the default file instead of the one it
-/// names and start that deployment as a new installation.
-#[cfg(feature = "embedded-dev")]
-pub(crate) fn sqlite_path(setting: Option<String>, old: Option<String>) -> anyhow::Result<String> {
-    if old.is_some() {
+/// The SQLite file is named by `SID_STORAGE_SQLITE_PATH`. A set old name
+/// `SID_SQLITE_PATH` stops startup in every build, not ignored: ignoring it
+/// would open the default file instead of the one it names and start that
+/// deployment as a new installation.
+pub(crate) fn refuse_renamed_setting(old_sqlite_path: Option<&str>) -> anyhow::Result<()> {
+    if old_sqlite_path.is_some() {
         anyhow::bail!(
             "SID_SQLITE_PATH is not read: name the SQLite file in SID_STORAGE_SQLITE_PATH"
         );
     }
-    Ok(setting.unwrap_or_else(|| "/var/lib/sid/auth.db".to_string()))
+    Ok(())
 }
 
 /// A separate history evaluator (`remote_evaluator`) reports its cleanup

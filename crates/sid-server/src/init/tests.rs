@@ -119,20 +119,13 @@ fn the_in_process_bus_needs_single_process_storage() {
 /// The SQLite file is named by `SID_STORAGE_SQLITE_PATH`. The old name
 /// `SID_SQLITE_PATH` is refused rather than ignored: ignoring it would open
 /// the default file and start a deployment that set it as a new one.
-#[cfg(feature = "embedded-dev")]
 #[test]
 fn sqlite_path_refuses_the_old_setting_name() {
-    assert_eq!(sqlite_path(None, None).unwrap(), "/var/lib/sid/auth.db");
-    assert_eq!(
-        sqlite_path(Some("/data/sid.db".into()), None).unwrap(),
-        "/data/sid.db"
-    );
-    for new in [None, Some("/data/sid.db".to_string())] {
-        let refused = sqlite_path(new, Some("/data/old.db".into()))
-            .expect_err("the old name is not read")
-            .to_string();
-        assert!(refused.contains("SID_STORAGE_SQLITE_PATH"), "{refused}");
-    }
+    assert!(refuse_renamed_setting(None).is_ok());
+    let refused = refuse_renamed_setting(Some("/data/old.db"))
+        .expect_err("the old name is not read")
+        .to_string();
+    assert!(refused.contains("SID_STORAGE_SQLITE_PATH"), "{refused}");
 }
 
 /// Explicit malformed security settings must stop startup, never disable
