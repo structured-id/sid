@@ -60,21 +60,84 @@ fn app(name: &str) -> Router {
     router(UiBundle::new(&bundle_dir(name), "/account/", CONFIG).unwrap())
 }
 
+/// `path` asked with `If-None-Match: tags`.
+async fn get_if_none_match(app: &Router, path: &str, tags: &str) -> Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .uri(path)
+                .header(header::IF_NONE_MATCH, tags)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
 /// The configuration is what start-up reads before anything else: served
-/// exactly as the deployment generated it, never from a cache.
+/// exactly as the deployment generated it, kept by the browser and
+/// revalidated on every use, so a change is seen at once.
 #[tokio::test]
-async fn test_config_is_served_uncached() {
+async fn test_config_is_served_for_revalidation() {
     let (status, response) = get_path(&app("config"), Method::GET, "/account/config.json").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         header_of(&response, header::CACHE_CONTROL).as_deref(),
-        Some("no-store")
+        Some("no-cache")
     );
     assert_eq!(
         header_of(&response, header::CONTENT_TYPE).as_deref(),
         Some("application/json")
     );
+    let tag = header_of(&response, header::ETAG).expect("an ETag");
+    assert!(tag.starts_with('"') && tag.ends_with('"'), "{tag}");
     assert_eq!(body(response).await.as_bytes(), CONFIG);
+}
+
+/// Regression: the configuration was `no-store`, so every start downloaded
+/// it whole. An unchanged configuration now answers 304 with no body, under
+/// any form of `If-None-Match` that names it (RFC 9110 §13.1.2: a list, `*`,
+/// weak comparison); another tag gets the configuration.
+#[tokio::test]
+async fn test_unchanged_config_is_not_modified() {
+    let app = app("configetag");
+    let (_, first) = get_path(&app, Method::GET, "/account/config.json").await;
+    let tag = header_of(&first, header::ETAG).expect("an ETag");
+    for tags in [
+        tag.clone(),
+        format!("\"other\", {tag}"),
+        format!("W/{tag}"),
+        "*".to_owned(),
+    ] {
+        let response = get_if_none_match(&app, "/account/config.json", &tags).await;
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED, "{tags}");
+        assert_eq!(
+            header_of(&response, header::ETAG).as_deref(),
+            Some(tag.as_str())
+        );
+        assert_eq!(
+            header_of(&response, header::CACHE_CONTROL).as_deref(),
+            Some("no-cache")
+        );
+        assert_eq!(body(response).await, "", "{tags}");
+    }
+    let response = get_if_none_match(&app, "/account/config.json", "\"other\"").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body(response).await.as_bytes(), CONFIG);
+}
+
+/// Another configuration has another tag, so a change is never answered 304.
+#[test]
+fn test_config_tag_follows_its_bytes() {
+    let dir = bundle_dir("configtags");
+    let one = UiBundle::new(&dir, "/account/", CONFIG).unwrap();
+    let other = UiBundle::new(
+        &dir,
+        "/account/",
+        br#"{"environment":"dev","release":"1.2.4"}"#,
+    )
+    .unwrap();
+    assert_ne!(one.config_tag, other.config_tag);
 }
 
 /// Pages of the SPA, the mount path with and without its slash included,

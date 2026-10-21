@@ -22,6 +22,8 @@ tower-http = { workspace = true, features = ["fs"] }
 tokio = { workspace = true }
 serde_json = { workspace = true }
 percent-encoding = "2"
+sha2 = { workspace = true }
+hex = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 thiserror = { workspace = true }
