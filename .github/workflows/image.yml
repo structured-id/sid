@@ -1,8 +1,12 @@
-# The embedded sidecar image (Dockerfile.embedded: SQLite, in-process event
-# bus, REST and gRPC). A server release tag `v<version>` publishes one
-# multi-arch manifest as ghcr.io/structured-id/sid:<version>-embedded and
-# keeps :embedded on the newest final release; a pull request that touches
-# the image only builds it. Each
+# The server images on ghcr.io/structured-id/sid:
+# - embedded (Dockerfile.embedded): SQLite, in-process event bus, REST and
+#   gRPC; tagged <version>-embedded, floating tag embedded;
+# - ce (Dockerfile): PostgreSQL storage, bundled NATS, REST and gRPC, packing
+#   a binary built here with the default features; tagged <version>,
+#   floating tag latest.
+# A server release tag `v<version>` publishes one multi-arch manifest per
+# image under its versioned tag and keeps the floating tag on the newest
+# final release; a pull request only builds the images. Each
 # architecture builds on its own native runner (emulated arm64 would compile
 # the workspace for hours), pushes by digest, and the manifest joins them.
 name: Image
@@ -27,17 +31,24 @@ env:
 
 jobs:
   build:
-    name: Build (${{ matrix.platform }})
+    name: Build ${{ matrix.variant }} (${{ matrix.platform }})
     if: github.repository_owner == 'structured-id'
     strategy:
       fail-fast: true
       matrix:
+        variant: [embedded, ce]
+        platform: [linux/amd64, linux/arm64]
         include:
           - platform: linux/amd64
             runner: ubuntu-latest
           - platform: linux/arm64
             runner: ubuntu-24.04-arm
             release_only: true
+          - variant: embedded
+            file: Dockerfile.embedded
+          - variant: ce
+            file: Dockerfile
+            host_binary: true
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -51,6 +62,19 @@ jobs:
         with:
           submodules: recursive
           persist-credentials: false
+      # The CE image packs a binary built on the runner (Dockerfile copies
+      # target/release/sid); the embedded image compiles inside its build.
+      - name: Toolchain (rust-toolchain.toml)
+        if: steps.scope.outputs.run == 'true' && matrix.host_binary
+        run: rustup show
+      - name: protoc with the well-known types
+        if: steps.scope.outputs.run == 'true' && matrix.host_binary
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler libprotobuf-dev
+      - uses: Swatinem/rust-cache@v2
+        if: steps.scope.outputs.run == 'true' && matrix.host_binary
+      - name: Server binary
+        if: steps.scope.outputs.run == 'true' && matrix.host_binary
+        run: cargo build --locked --release -p sid-server && strip target/release/sid
       - uses: docker/setup-buildx-action@v3
         if: steps.scope.outputs.run == 'true'
       - uses: docker/login-action@v3
@@ -65,7 +89,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: Dockerfile.embedded
+          file: ${{ matrix.file }}
           platforms: ${{ matrix.platform }}
           # A pull request only proves the image builds; a release pushes it
           # untagged, by digest, for the manifest job below.
@@ -79,15 +103,24 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: steps.scope.outputs.run == 'true' && github.event_name != 'pull_request'
         with:
-          name: digest-${{ matrix.runner }}
+          name: digest-${{ matrix.variant }}-${{ matrix.runner }}
           path: ${{ runner.temp }}/digests/*
           if-no-files-found: error
           retention-days: 1
 
   publish:
-    name: Publish
+    name: Publish ${{ matrix.variant }}
     if: github.repository_owner == 'structured-id' && github.event_name != 'pull_request'
     needs: build
+    strategy:
+      matrix:
+        include:
+          - variant: embedded
+            suffix: -embedded
+            floating: embedded
+          - variant: ce
+            suffix: ""
+            floating: latest
     runs-on: ubuntu-latest
     # No concurrency group: GitHub keeps one pending run per group and cancels
     # the rest, which would drop a release's own tag. Every run publishes its
@@ -104,7 +137,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: ${{ runner.temp }}/digests
-          pattern: digest-*
+          pattern: digest-${{ matrix.variant }}-*
           merge-multiple: true
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
@@ -116,27 +149,33 @@ jobs:
       # becomes `_`.
       - name: Manifest
         working-directory: ${{ runner.temp }}/digests
+        env:
+          SUFFIX: ${{ matrix.suffix }}
         run: |
           version="${GITHUB_REF_NAME#v}"
-          versioned="${IMAGE}:${version//+/_}-embedded"
+          versioned="${IMAGE}:${version//+/_}${SUFFIX}"
           set -- -t "$versioned"
           for digest in *; do set -- "$@" "${IMAGE}@sha256:${digest}"; done
           docker buildx imagetools create "$@"
           docker buildx imagetools inspect "$versioned"
       # The floating tag names the newest final release whose image exists:
-      # prereleases (a `-` suffix) never move it, a release whose build has not
-      # published yet is left to its own run, and an older run, a rerun or a
-      # run finishing late points it at the same newest image again.
+      # prereleases (a `-` before any build metadata) never move it, a release
+      # whose build has not published yet is left to its own run, and an older
+      # run, a rerun or a run finishing late points it at the same newest
+      # image again.
       - name: Floating tag
+        env:
+          SUFFIX: ${{ matrix.suffix }}
+          FLOATING: ${{ matrix.floating }}
         run: |
           git fetch --tags --force --quiet origin
           for tag in $(git -c versionsort.suffix=- tag --list 'v[0-9]*' --sort=-v:refname); do
             case "${tag%%+*}" in *-*) continue ;; esac
             version="${tag#v}"
-            source="${IMAGE}:${version//+/_}-embedded"
+            source="${IMAGE}:${version//+/_}${SUFFIX}"
             if docker buildx imagetools inspect "$source" > /dev/null 2>&1; then
-              docker buildx imagetools create -t "${IMAGE}:embedded" "$source"
-              echo "embedded -> ${source}"
+              docker buildx imagetools create -t "${IMAGE}:${FLOATING}" "$source"
+              echo "${FLOATING} -> ${source}"
             else
               echo "newest final release ${tag} has no image yet; its run publishes it"
             fi

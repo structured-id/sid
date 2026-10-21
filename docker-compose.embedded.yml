@@ -15,8 +15,9 @@
 
 services:
   sid:
-    # A StructuredID server image, e.g. one built from this repository's Dockerfile.
-    image: "${SID_IMAGE:?set SID_IMAGE to a StructuredID server image}"
+    # The CE server image of the latest release; pin a version
+    # (ghcr.io/structured-id/sid:<version>) or point SID_IMAGE at your own build.
+    image: "${SID_IMAGE:-ghcr.io/structured-id/sid:latest}"
     environment:
       # Required: PostgreSQL connection (shared with your app)
       SID_DATABASE_URL: "postgres://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-dev}@${POSTGRES_HOST:-postgres}:5432/${POSTGRES_DB:-app}"
