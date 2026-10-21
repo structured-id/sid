@@ -80,6 +80,9 @@ pub struct CeComponents {
     /// The bundled `nats-server` behind `event_bus` in embedded mode; it is
     /// stopped when dropped, so it lives as long as the components.
     pub embedded_nats: Option<Arc<crate::embedded_nats::EmbeddedNats>>,
+    /// With the in-process bus, the lock that keeps its database to this
+    /// process, held as long as the components live.
+    pub single_process: Option<Arc<std::fs::File>>,
     /// The receivers every committed fact of their types is owed to, whether
     /// or not they are running (`SID_EVENT_RECEIVERS`).
     pub required_receivers: Vec<sid_core::models::RequiredReceiver>,
@@ -330,6 +333,8 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
 
     // ── Storage backend ──
 
+    refuse_renamed_setting(env_setting("SID_SQLITE_PATH")?.as_deref())?;
+
     // The history evaluator's own store over the same database, for a
     // standalone installation that runs the evaluator in process; its tables
     // are created only when it does (`local_history_keys`).
@@ -367,18 +372,23 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
             LocalHistoryKeys::Postgres(sid_storage::PgHistoryKeyStore::new(backend.pool().clone()));
         (Arc::new(backend), audit_log, local_history_keys)
     };
+    // The SQLite file this process serves, if any (the in-process bus locks it).
+    #[cfg(feature = "storage-pg")]
+    let sqlite_file: Option<String> = None;
 
+    #[cfg(all(feature = "embedded-dev", not(feature = "storage-pg")))]
+    let sqlite_file = Some(
+        env_setting("SID_STORAGE_SQLITE_PATH")?
+            .unwrap_or_else(|| "/var/lib/sid/auth.db".to_string()),
+    );
     #[cfg(all(feature = "embedded-dev", not(feature = "storage-pg")))]
     let (storage, audit_log, local_history_keys): (
         Arc<dyn StorageBackend>,
         Arc<dyn sid_plugin::audit::AuditLog>,
         LocalHistoryKeys,
     ) = {
-        let db_path = sqlite_path(
-            env_setting("SID_STORAGE_SQLITE_PATH")?,
-            env_setting("SID_SQLITE_PATH")?,
-        )?;
-        let backend = sid_storage::sqlite::SqliteBackend::new(&db_path)
+        let db_path = sqlite_file.as_deref().expect("set just above");
+        let backend = sid_storage::sqlite::SqliteBackend::new(db_path)
             .await
             .context("SQLite storage and its migrations")?;
         let audit_log: Arc<dyn sid_plugin::audit::AuditLog> = Arc::new(
@@ -746,8 +756,29 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         sid_infra::TopologyRole::from_env(sid_infra::TopologyRole::Own)?,
     )
     .await?;
-    // PostgreSQL may be shared by several replicas; a SQLite file is not.
+    // PostgreSQL may be shared by several replicas; a SQLite file may be
+    // opened by several processes, so the in-process bus locks it and takes
+    // over no addressed work it could never hand on.
     bus_fits_storage(&nats_mode, cfg!(feature = "storage-pg"))?;
+    let single_process = match (&nats_mode, sqlite_file.as_deref()) {
+        (crate::embedded_nats::EventBusMode::InProcess, Some(database)) => {
+            let lock = hold_single_process(database)?;
+            let owed = owed_addressed_work(
+                &storage
+                    .export_work()
+                    .await
+                    .context("read the stored work before using the in-process bus")?,
+            );
+            if owed > 0 {
+                anyhow::bail!(
+                    "{owed} pieces of work are still addressed to receivers, which only a durable \
+                     bus hands over: settle them with SID_NATS_URL `embedded` or a NATS URL first"
+                );
+            }
+            Some(Arc::new(lock))
+        }
+        _ => None,
+    };
     let required_receivers =
         required_receivers(&nats_mode, env_setting("SID_EVENT_RECEIVERS")?.as_deref())?;
 
@@ -1073,6 +1104,7 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         feature_flags,
         event_bus,
         embedded_nats: embedded_nats.map(Arc::new),
+        single_process,
         required_receivers,
         cache_backend,
         app_state,
@@ -1540,18 +1572,60 @@ pub(crate) fn bus_fits_storage(
     Ok(())
 }
 
-/// The SQLite file `SID_STORAGE_SQLITE_PATH` names (default
-/// `/var/lib/sid/auth.db`). The old name `SID_SQLITE_PATH` is refused, not
-/// ignored: ignoring it would open the default file instead of the one it
-/// names and start that deployment as a new installation.
-#[cfg(feature = "embedded-dev")]
-pub(crate) fn sqlite_path(setting: Option<String>, old: Option<String>) -> anyhow::Result<String> {
-    if old.is_some() {
+/// Open work addressed to a receiver in `work`: deliveries, and fan-out
+/// plans that name receivers (each becomes deliveries). Only a durable bus
+/// hands these over, so an installation holding any cannot switch to the
+/// in-process bus until they are settled through one.
+pub(crate) fn owed_addressed_work(work: &[sid_core::models::WorkSnapshot]) -> usize {
+    use sid_core::models::WorkState;
+    use sid_core::models::event::{EVENT_DELIVERY_KIND, EVENT_FANOUT_KIND, EventFanout};
+    work.iter()
+        .filter(|w| matches!(w.record.state, WorkState::Pending | WorkState::Claimed))
+        .filter(|w| match w.record.kind.as_str() {
+            EVENT_DELIVERY_KIND => true,
+            // A plan its handler cannot read is failed by it, never delivered.
+            EVENT_FANOUT_KIND => serde_json::from_slice::<EventFanout>(&w.payload)
+                .is_ok_and(|plan| !plan.receivers.is_empty()),
+            _ => false,
+        })
+        .count()
+}
+
+/// Take the in-process bus's exclusive lock beside `database`, held while
+/// the returned file lives: a second process opening the same database with
+/// the in-process bus is refused, because each would publish the facts it
+/// claims to its own subscribers only.
+pub(crate) fn hold_single_process(database: &str) -> anyhow::Result<std::fs::File> {
+    let path = format!("{database}.in-process.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("open {path}"))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => anyhow::bail!(
+            "another process runs the in-process bus over {database}: it serves one process, \
+             so set SID_NATS_URL to `embedded` or a NATS URL to run several"
+        ),
+        Err(std::fs::TryLockError::Error(e)) => {
+            Err(anyhow::Error::new(e).context(format!("lock {path}")))
+        }
+    }
+}
+
+/// The SQLite file is named by `SID_STORAGE_SQLITE_PATH`. A set old name
+/// `SID_SQLITE_PATH` stops startup in every build, not ignored: ignoring it
+/// would open the default file instead of the one it names and start that
+/// deployment as a new installation.
+pub(crate) fn refuse_renamed_setting(old_sqlite_path: Option<&str>) -> anyhow::Result<()> {
+    if old_sqlite_path.is_some() {
         anyhow::bail!(
             "SID_SQLITE_PATH is not read: name the SQLite file in SID_STORAGE_SQLITE_PATH"
         );
     }
-    Ok(setting.unwrap_or_else(|| "/var/lib/sid/auth.db".to_string()))
+    Ok(())
 }
 
 /// A separate history evaluator (`remote_evaluator`) reports its cleanup
