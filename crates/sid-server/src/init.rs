@@ -420,48 +420,7 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         .context("SID_ISSUER is required")?;
     let instance_domain = instance_domain(&issuer)?;
 
-    // Auto-generate JWT keys if not present
-    if !std::path::Path::new(&jwt_private_key_path).exists() {
-        tracing::warn!(
-            "JWT keys not found at '{}' — generating Ed25519 key pair for development",
-            jwt_private_key_path
-        );
-        if let Err(e) = std::fs::create_dir_all(&data_dir) {
-            panic!("Cannot create data directory '{}': {}", data_dir, e);
-        }
-        let output = std::process::Command::new("openssl")
-            .args([
-                "genpkey",
-                "-algorithm",
-                "Ed25519",
-                "-out",
-                &jwt_private_key_path,
-            ])
-            .output()
-            .expect("Failed to run openssl — is it installed?");
-        if !output.status.success() {
-            panic!(
-                "openssl genpkey failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        let output = std::process::Command::new("openssl")
-            .args([
-                "pkey",
-                "-in",
-                &jwt_private_key_path,
-                "-pubout",
-                "-out",
-                &jwt_public_key_path,
-            ])
-            .output()
-            .expect("Failed to extract public key");
-        if !output.status.success() {
-            panic!(
-                "openssl pkey failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
+    if ensure_jwt_key_pair(&jwt_private_key_path, &jwt_public_key_path)? {
         info!("Generated JWT key pair at '{}'", data_dir);
         tracing::warn!("Set SID_JWT_PRIVATE_KEY_PATH for production use");
     }
@@ -1159,6 +1118,61 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         security_svc,
         account_svc,
     })
+}
+
+/// Make the installation's JWT key pair if neither file exists; `true` when
+/// it was made. A pair found whole is kept. Half a pair (one file without
+/// the other) is refused before anything is written: generating the
+/// missing half would pair it with an unrelated key.
+pub(crate) fn ensure_jwt_key_pair(private_path: &str, public_path: &str) -> anyhow::Result<bool> {
+    let private = std::path::Path::new(private_path).exists();
+    let public = std::path::Path::new(public_path).exists();
+    match (private, public) {
+        (true, true) => Ok(false),
+        (false, false) => {
+            tracing::warn!(
+                "JWT keys not found at '{private_path}': generating an Ed25519 key pair for development"
+            );
+            for path in [private_path, public_path] {
+                if let Some(dir) = std::path::Path::new(path).parent() {
+                    std::fs::create_dir_all(dir)
+                        .with_context(|| format!("create key directory {}", dir.display()))?;
+                }
+            }
+            let (private_pem, public_pem) =
+                sid_authn::jwt::generate_signing_key_pem().context("generate the JWT key pair")?;
+            write_new_key_file(private_path, private_pem.as_bytes(), true)?;
+            write_new_key_file(public_path, public_pem.as_bytes(), false)?;
+            Ok(true)
+        }
+        _ => anyhow::bail!(
+            "half a JWT key pair: {private_path} {} but {public_path} {}; restore both files, or remove the remaining one to generate a new pair",
+            if private { "exists" } else { "is missing" },
+            if public { "exists" } else { "is missing" },
+        ),
+    }
+}
+
+/// Write a generated key to a new file at `path`, never over an existing
+/// one. A private key is readable by its owner only, so another account on
+/// the host cannot read it.
+pub(crate) fn write_new_key_file(path: &str, contents: &[u8], private: bool) -> anyhow::Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    if private {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    #[cfg(not(unix))]
+    let _ = private;
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("create key file {path}"))?;
+    file.write_all(contents)
+        .and_then(|()| file.sync_all())
+        .with_context(|| format!("write key file {path}"))
 }
 
 /// This round's lock of background job `job`: `None` when another instance

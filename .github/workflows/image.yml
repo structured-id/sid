@@ -1,0 +1,144 @@
+# The embedded sidecar image (Dockerfile.embedded: SQLite, in-process event
+# bus, REST and gRPC). A server release tag `v<version>` publishes one
+# multi-arch manifest as ghcr.io/structured-id/sid:<version>-embedded and
+# keeps :embedded on the newest final release; a pull request that touches
+# the image only builds it. Each
+# architecture builds on its own native runner (emulated arm64 would compile
+# the workspace for hours), pushes by digest, and the manifest joins them.
+name: Image
+
+on:
+  push:
+    tags: ["v[0-9]*"]
+  # Every pull request, any base: the image builds from the whole workspace
+  # (sources, manifests, migrations, proto, toolchain) with its own feature
+  # set, which no other check builds, so any change can break it.
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE: ghcr.io/structured-id/sid
+
+jobs:
+  build:
+    name: Build (${{ matrix.platform }})
+    if: github.repository_owner == 'structured-id'
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            release_only: true
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Skip arm64 on pull requests
+        id: scope
+        run: echo "run=${{ github.event_name != 'pull_request' || !matrix.release_only }}" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        if: steps.scope.outputs.run == 'true'
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@v3
+        if: steps.scope.outputs.run == 'true'
+      - uses: docker/login-action@v3
+        if: steps.scope.outputs.run == 'true' && github.event_name != 'pull_request'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build
+        id: build
+        if: steps.scope.outputs.run == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.embedded
+          platforms: ${{ matrix.platform }}
+          # A pull request only proves the image builds; a release pushes it
+          # untagged, by digest, for the manifest job below.
+          outputs: ${{ github.event_name == 'pull_request' && 'type=cacheonly' || format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', env.IMAGE) }}
+      - name: Record the digest
+        if: steps.scope.outputs.run == 'true' && github.event_name != 'pull_request'
+        run: |
+          mkdir -p "${{ runner.temp }}/digests"
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+      - uses: actions/upload-artifact@v4
+        if: steps.scope.outputs.run == 'true' && github.event_name != 'pull_request'
+        with:
+          name: digest-${{ matrix.runner }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish
+    if: github.repository_owner == 'structured-id' && github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    # No concurrency group: GitHub keeps one pending run per group and cancels
+    # the rest, which would drop a release's own tag. Every run publishes its
+    # version, then converges the floating tag (see below), so runs finishing
+    # in any order end on the newest release.
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-tags: true
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digest-*
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # An image tag allows [A-Za-z0-9_.-], so SemVer build metadata's `+`
+      # becomes `_`.
+      - name: Manifest
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          versioned="${IMAGE}:${version//+/_}-embedded"
+          set -- -t "$versioned"
+          for digest in *; do set -- "$@" "${IMAGE}@sha256:${digest}"; done
+          docker buildx imagetools create "$@"
+          docker buildx imagetools inspect "$versioned"
+      # The floating tag names the newest final release whose image exists:
+      # prereleases (a `-` suffix) never move it, a release whose build has not
+      # published yet is left to its own run, and an older run, a rerun or a
+      # run finishing late points it at the same newest image again.
+      - name: Floating tag
+        run: |
+          git fetch --tags --force --quiet origin
+          for tag in $(git -c versionsort.suffix=- tag --list 'v[0-9]*' --sort=-v:refname); do
+            case "${tag%%+*}" in *-*) continue ;; esac
+            version="${tag#v}"
+            source="${IMAGE}:${version//+/_}-embedded"
+            if docker buildx imagetools inspect "$source" > /dev/null 2>&1; then
+              docker buildx imagetools create -t "${IMAGE}:embedded" "$source"
+              echo "embedded -> ${source}"
+            else
+              echo "newest final release ${tag} has no image yet; its run publishes it"
+            fi
+            break
+          done

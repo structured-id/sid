@@ -96,6 +96,89 @@ fn a_separate_history_evaluator_needs_a_durable_bus() {
     }
 }
 
+/// A generated key goes to a new file only: an existing key is never
+/// overwritten, and a private key is readable by its owner alone.
+#[test]
+fn a_generated_key_file_is_new_and_private_keys_owner_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let private = dir.path().join("jwt_private.pem");
+    let public = dir.path().join("jwt_public.pem");
+    write_new_key_file(private.to_str().unwrap(), b"private", true).unwrap();
+    write_new_key_file(public.to_str().unwrap(), b"public", false).unwrap();
+    assert_eq!(std::fs::read(&private).unwrap(), b"private");
+    assert!(
+        write_new_key_file(private.to_str().unwrap(), b"other", true).is_err(),
+        "an existing key is kept"
+    );
+    assert_eq!(std::fs::read(&private).unwrap(), b"private");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&private), 0o600);
+        assert_ne!(mode(&public) & 0o044, 0, "the public key stays readable");
+    }
+}
+
+/// Generation creates the directories its key files go to, and nothing else:
+/// a server whose keys are mounted elsewhere never needs a writable default
+/// data directory.
+#[test]
+fn generated_keys_get_their_own_directories() {
+    let dir = tempfile::tempdir().unwrap();
+    let private = dir.path().join("keys/private/jwt_private.pem");
+    let public = dir.path().join("keys/public/jwt_public.pem");
+    assert!(ensure_jwt_key_pair(private.to_str().unwrap(), public.to_str().unwrap()).unwrap());
+    assert!(private.exists() && public.exists());
+}
+
+/// The first start makes a matching pair, a later start keeps the pair it
+/// finds, and a half pair (one file without the other, e.g. after a partial
+/// restore) stops startup without writing anything: generating the missing
+/// half would pair it with an unrelated key, and tokens the server signs
+/// would not verify against the public key it advertises.
+#[test]
+fn the_jwt_key_pair_is_made_whole_or_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let private = dir.path().join("jwt_private.pem");
+    let public = dir.path().join("jwt_public.pem");
+    let (private_path, public_path) = (private.to_str().unwrap(), public.to_str().unwrap());
+
+    assert!(ensure_jwt_key_pair(private_path, public_path).unwrap());
+    let (made_private, made_public) = (
+        std::fs::read(&private).unwrap(),
+        std::fs::read(&public).unwrap(),
+    );
+    sid_authn::jwt::JwtService::new(
+        &made_private,
+        &made_public,
+        "https://sid.example.com".into(),
+    )
+    .expect("the pair matches");
+    assert!(!ensure_jwt_key_pair(private_path, public_path).unwrap());
+    assert_eq!(
+        std::fs::read(&private).unwrap(),
+        made_private,
+        "kept as found"
+    );
+
+    std::fs::remove_file(&private).unwrap();
+    let refused = ensure_jwt_key_pair(private_path, public_path)
+        .expect_err("half a pair")
+        .to_string();
+    assert!(
+        refused.contains(private_path) && refused.contains(public_path),
+        "{refused}"
+    );
+    assert!(!private.exists(), "nothing written");
+    assert_eq!(std::fs::read(&public).unwrap(), made_public);
+
+    std::fs::remove_file(&public).unwrap();
+    std::fs::write(&private, &made_private).unwrap();
+    assert!(ensure_jwt_key_pair(private_path, public_path).is_err());
+    assert!(!public.exists(), "nothing written");
+}
+
 /// An installation that ever addressed work to a receiver is refused the
 /// in-process bus, whether that delivery is still open or recorded done (a
 /// done delivery may still wait in the durable bus that accepted it); one

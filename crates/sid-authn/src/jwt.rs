@@ -445,6 +445,28 @@ impl Default for AccessTokenTtl {
     }
 }
 
+/// A new Ed25519 key for [`JwtService::new`]: the private half as PKCS#8
+/// PEM (RFC 8410 §7), the public half as SPKI PEM (RFC 8410 §4).
+pub fn generate_signing_key_pem() -> SidResult<(zeroize::Zeroizing<String>, String)> {
+    use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
+    use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
+    use rand::TryRng;
+
+    let mut seed = zeroize::Zeroizing::new([0u8; 32]);
+    rand::rngs::SysRng
+        .try_fill_bytes(seed.as_mut())
+        .map_err(|e| SidError::Internal(format!("operating system random source: {e}")))?;
+    let signing = ed25519_dalek::SigningKey::from_bytes(&seed);
+    let private = signing
+        .to_pkcs8_pem(LineEnding::LF)
+        .map_err(|e| SidError::Internal(format!("encoding the signing key: {e}")))?;
+    let public = signing
+        .verifying_key()
+        .to_public_key_pem(LineEnding::LF)
+        .map_err(|e| SidError::Internal(format!("encoding the verifying key: {e}")))?;
+    Ok((private, public))
+}
+
 impl JwtService {
     /// Create a new JWT service from an Ed25519 private key in PEM format.
     ///
