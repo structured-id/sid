@@ -96,6 +96,30 @@ fn a_separate_history_evaluator_needs_a_durable_bus() {
     }
 }
 
+/// A generated key goes to a new file only: an existing key is never
+/// overwritten, and a private key is readable by its owner alone.
+#[test]
+fn a_generated_key_file_is_new_and_private_keys_owner_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let private = dir.path().join("jwt_private.pem");
+    let public = dir.path().join("jwt_public.pem");
+    write_new_key_file(private.to_str().unwrap(), b"private", true).unwrap();
+    write_new_key_file(public.to_str().unwrap(), b"public", false).unwrap();
+    assert_eq!(std::fs::read(&private).unwrap(), b"private");
+    assert!(
+        write_new_key_file(private.to_str().unwrap(), b"other", true).is_err(),
+        "an existing key is kept"
+    );
+    assert_eq!(std::fs::read(&private).unwrap(), b"private");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&private), 0o600);
+        assert_ne!(mode(&public) & 0o044, 0, "the public key stays readable");
+    }
+}
+
 /// Explicit malformed security settings must stop startup, never disable
 /// proof verification or silently select a different policy.
 #[test]

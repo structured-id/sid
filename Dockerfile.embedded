@@ -52,14 +52,18 @@ RUN --mount=type=cache,id=sid-cargo-registry,target=/usr/local/cargo/registry,sh
     --no-default-features \
     --features embedded-dev,http \
     && strip target/release/sid \
-    && install -D target/release/sid /out/sid
+    && install -D target/release/sid /out/sid \
+    && install -d -m 0700 /out/data
 
 # ── Stage 2: Runtime ────────────────────────────────────────────
 FROM gcr.io/distroless/cc-debian13:nonroot
 
 COPY --from=builder /out/sid /usr/local/bin/sid
 
-# Data directory for SQLite database and auto-generated keys
+# Data directory for SQLite database and auto-generated keys, owned by the
+# nonroot user (65532) the server runs as: a new volume mounted here takes
+# its ownership from the image, so the server can write to it.
+COPY --from=builder --chown=65532:65532 /out/data /var/lib/sid
 VOLUME /var/lib/sid
 
 ENV SID_BIND=0.0.0.0:8080

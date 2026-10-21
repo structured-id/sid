@@ -1,15 +1,14 @@
 # The server images on ghcr.io/structured-id/sid:
 # - embedded (Dockerfile.embedded): SQLite, in-process event bus, REST and
-#   gRPC; tagged <version>-embedded and embedded;
+#   gRPC; tagged <version>-embedded, floating tag embedded;
 # - ce (Dockerfile): PostgreSQL storage, bundled NATS, REST and gRPC, packing
-#   a binary built here with the default features; tagged <version> and
-#   latest.
+#   a binary built here with the default features; tagged <version>,
+#   floating tag latest.
 # A server release tag `v<version>` publishes one multi-arch manifest per
-# image under its versioned tag, and moves the floating tag to it when it is
-# the latest release; a pull request that touches an image only builds it.
-# Each architecture builds on its own native runner (emulated arm64 would
-# compile the workspace for hours), pushes by digest, and the manifest joins
-# them.
+# image under its versioned tag and keeps the floating tag on the newest
+# final release; a pull request that touches an image only builds it. Each
+# architecture builds on its own native runner (emulated arm64 would compile
+# the workspace for hours), pushes by digest, and the manifest joins them.
 name: Image
 
 on:
@@ -126,12 +125,10 @@ jobs:
             suffix: ""
             floating: latest
     runs-on: ubuntu-latest
-    # One publication of an image at a time across all tags, none cancelled:
-    # with the latest-release check below, the floating tag ends on the
-    # newest release whatever order the runs finish in.
-    concurrency:
-      group: image-publish-${{ matrix.variant }}
-      cancel-in-progress: false
+    # No concurrency group: GitHub keeps one pending run per group and cancels
+    # the rest, which would drop a release's own tag. Every run publishes its
+    # version, then converges the floating tag (see below), so runs finishing
+    # in any order end on the newest release.
     permissions:
       contents: read
       packages: write
@@ -140,12 +137,6 @@ jobs:
         with:
           fetch-tags: true
           persist-credentials: false
-      - name: Latest server release
-        id: latest
-        run: |
-          latest=$(git tag --list 'v[0-9]*' --sort=-v:refname | head -n 1)
-          echo "tag=${latest}" >> "$GITHUB_OUTPUT"
-          echo "latest server release: ${latest}; this run: ${GITHUB_REF_NAME}"
       - uses: actions/download-artifact@v4
         with:
           path: ${{ runner.temp }}/digests
@@ -157,19 +148,39 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # An image tag allows [A-Za-z0-9_.-], so SemVer build metadata's `+`
+      # becomes `_`.
       - name: Manifest
         working-directory: ${{ runner.temp }}/digests
         env:
-          LATEST: ${{ steps.latest.outputs.tag }}
           SUFFIX: ${{ matrix.suffix }}
-          FLOATING: ${{ matrix.floating }}
         run: |
-          versioned="${IMAGE}:${GITHUB_REF_NAME#v}${SUFFIX}"
+          version="${GITHUB_REF_NAME#v}"
+          versioned="${IMAGE}:${version//+/_}${SUFFIX}"
           set -- -t "$versioned"
-          # A rerun of an older release republishes its own version only.
-          if [ "$GITHUB_REF_NAME" = "$LATEST" ]; then
-            set -- "$@" -t "${IMAGE}:${FLOATING}"
-          fi
           for digest in *; do set -- "$@" "${IMAGE}@sha256:${digest}"; done
           docker buildx imagetools create "$@"
           docker buildx imagetools inspect "$versioned"
+      # The floating tag names the newest final release whose image exists:
+      # prereleases (a `-` before any build metadata) never move it, a release
+      # whose build has not published yet is left to its own run, and an older
+      # run, a rerun or a run finishing late points it at the same newest
+      # image again.
+      - name: Floating tag
+        env:
+          SUFFIX: ${{ matrix.suffix }}
+          FLOATING: ${{ matrix.floating }}
+        run: |
+          git fetch --tags --force --quiet origin
+          for tag in $(git -c versionsort.suffix=- tag --list 'v[0-9]*' --sort=-v:refname); do
+            case "${tag%%+*}" in *-*) continue ;; esac
+            version="${tag#v}"
+            source="${IMAGE}:${version//+/_}${SUFFIX}"
+            if docker buildx imagetools inspect "$source" > /dev/null 2>&1; then
+              docker buildx imagetools create -t "${IMAGE}:${FLOATING}" "$source"
+              echo "${FLOATING} -> ${source}"
+            else
+              echo "newest final release ${tag} has no image yet; its run publishes it"
+            fi
+            break
+          done

@@ -47,8 +47,9 @@ sha1 = { workspace = true }
 
 # JWT (EdDSA / Ed25519)
 jsonwebtoken = { workspace = true }
-# Generates each OIDC issuer's Ed25519 signing key and its PKCS#8 encoding.
-ed25519-dalek = { workspace = true, features = ["pkcs8"] }
+# Generates each OIDC issuer's Ed25519 signing key and its PKCS#8 encoding,
+# and the installation's first-start session key as PEM.
+ed25519-dalek = { workspace = true, features = ["pkcs8", "pem"] }
 base64 = { workspace = true }
 sha2 = { workspace = true }
 chrono = { workspace = true }

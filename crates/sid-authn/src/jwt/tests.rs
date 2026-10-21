@@ -55,6 +55,42 @@ fn issue_test_id_token(
     .expect("ID token issuance failed")
 }
 
+/// The installation's first-start key is made in process (no `openssl`
+/// executable, which a minimal image does not carry): the pair is accepted
+/// by the service, a token it signs verifies, and each call draws a new key.
+#[test]
+fn a_generated_signing_key_signs_verifiable_tokens() {
+    let (private_pem, public_pem) = generate_signing_key_pem().expect("key generation");
+    assert!(private_pem.starts_with("-----BEGIN PRIVATE KEY-----"));
+    assert!(public_pem.starts_with("-----BEGIN PUBLIC KEY-----"));
+    let jwt = JwtService::new(
+        private_pem.as_bytes(),
+        public_pem.as_bytes(),
+        "https://sid.example.com".to_string(),
+    )
+    .expect("the generated pair is a service key");
+
+    let profile = create_test_profile();
+    let session = create_test_session(&profile);
+    let token = jwt
+        .issue_access_token(
+            &profile.id.to_string(),
+            Some(&profile.id.to_string()),
+            &profile,
+            &session,
+            &["openid".to_string()],
+            None,
+            None,
+        )
+        .expect("token issuance");
+    let claims = jwt.validate_access_token(&token).expect("token verifies");
+    assert_eq!(claims.sub, profile.id.to_string());
+
+    let (other_private, other_public) = generate_signing_key_pem().expect("key generation");
+    assert_ne!(*other_private, *private_pem);
+    assert_ne!(other_public, public_pem);
+}
+
 #[test]
 fn test_jwt_roundtrip() {
     let (private_pem, public_pem) = generate_test_keys();
