@@ -7,7 +7,8 @@
 //! authentication, sessions and authorization stay with their own services.
 //!
 //! Under the bundle's mount path, for example `/account/`:
-//! - `config.json`: the public configuration, never cached;
+//! - `config.json`: the public configuration, revalidated by its `ETag` on
+//!   every use;
 //! - `assets/…`: content-addressed build output, cached for good;
 //! - another path with a file extension: that file of the bundle, or 404;
 //! - any other path: the application shell (`index.html`), never cached, so
@@ -48,6 +49,8 @@ pub struct UiBundle {
     dir: PathBuf,
     mount: String,
     config: Arc<[u8]>,
+    /// Strong entity tag of `config`, quoted (RFC 9110 §8.8.3).
+    config_tag: HeaderValue,
 }
 
 impl UiBundle {
@@ -92,10 +95,14 @@ impl UiBundle {
                 _ => return Err(BundleError::Config(format!("{key} is missing"))),
             }
         }
+        let digest = <sha2::Sha256 as sha2::Digest>::digest(config);
+        let config_tag = HeaderValue::from_str(&format!("\"{}\"", hex::encode(digest)))
+            .expect("a quoted hex digest is a valid header value");
         Ok(Self {
             dir,
             mount: mount.to_owned(),
             config: config.into(),
+            config_tag,
         })
     }
 }
@@ -128,9 +135,10 @@ pub fn standalone(bundle: UiBundle) -> Result<Router, BundleError> {
 
 /// A content-addressed asset never changes under its name.
 const IMMUTABLE: &str = "public, max-age=31536000, immutable";
-/// The shell, the configuration and every error must follow each release at
-/// once.
+/// The shell and every error must follow each release at once.
 const NO_STORE: &str = "no-store";
+/// Stored, but asked again before every use (RFC 9111 §5.2.2.4).
+const REVALIDATE: &str = "no-cache";
 
 /// Routed with `any` so other methods get a 405 with `Allow`. A HEAD answer
 /// still has no body: axum's method router drops it for every route, `any`
@@ -163,12 +171,7 @@ async fn respond(bundle: &UiBundle, request: Request) -> Response {
         return not_found();
     }
     if rest == "config.json" {
-        let mut response = Response::new(Body::from(bundle.config.to_vec()));
-        response.headers_mut().insert(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("application/json"),
-        );
-        return no_store(response);
+        return config(bundle, &request);
     }
     if rest.starts_with("assets/") || has_extension(&rest) {
         // Everything under assets/ is build output, extension or not.
@@ -196,6 +199,38 @@ async fn respond(bundle: &UiBundle, request: Request) -> Response {
         Some(response) => no_store(response),
         None => not_found(),
     }
+}
+
+/// The configuration, kept by the browser and revalidated on every use: a
+/// matching `If-None-Match` gets 304 with no body (RFC 9110 §13.1.2, §15.4.5).
+fn config(bundle: &UiBundle, request: &Parts) -> Response {
+    let unchanged = request
+        .headers
+        .get_all(header::IF_NONE_MATCH)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|list| list.split(','))
+        .any(|tag| tag_matches(tag.trim(), &bundle.config_tag));
+    let mut response = if unchanged {
+        StatusCode::NOT_MODIFIED.into_response()
+    } else {
+        let mut response = Response::new(Body::from(bundle.config.to_vec()));
+        response.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        response
+    };
+    response
+        .headers_mut()
+        .insert(header::ETAG, bundle.config_tag.clone());
+    with_cache(response, REVALIDATE)
+}
+
+/// `If-None-Match` uses the weak comparison (RFC 9110 §13.1.2): `*` or the
+/// same opaque tag, with or without `W/`.
+fn tag_matches(tag: &str, ours: &HeaderValue) -> bool {
+    tag == "*" || tag.strip_prefix("W/").unwrap_or(tag).as_bytes() == ours.as_bytes()
 }
 
 /// A 404 nothing keeps: a later release may add the file.
