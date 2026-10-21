@@ -120,6 +120,20 @@ impl SqliteBackend {
         Ok(backend)
     }
 
+    /// The file the database at `path` (a filename or a `sqlite:` URL, as
+    /// [`Self::new`] takes it) lives in, resolved to its canonical path so
+    /// that every alias of one file names the same one. The file must exist.
+    pub fn database_file(path: &str) -> SidResult<std::path::PathBuf> {
+        let options = SqliteConnectOptions::from_str(path)
+            .map_err(|e| SidError::Storage(format!("Invalid SQLite path: {e}")))?;
+        std::fs::canonicalize(options.get_filename()).map_err(|e| {
+            SidError::Storage(format!(
+                "SQLite file {}: {e}",
+                options.get_filename().display()
+            ))
+        })
+    }
+
     async fn open(path: &str) -> SidResult<Self> {
         let options = SqliteConnectOptions::from_str(path)
             .map_err(|e| SidError::Storage(format!("Invalid SQLite path: {e}")))?

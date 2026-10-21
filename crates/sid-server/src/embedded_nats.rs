@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! The event bus of a `sid-server` deployment: bundled or external NATS.
+//! The event bus of a `sid-server` deployment: bundled or external NATS, or
+//! the in-process bus.
 //!
 //! `SID_NATS_URL` unset or `embedded` spawns `nats-server` as a child process
 //! with JetStream stored under the data directory; `nats://…` / `tls://…`
-//! connects to an external cluster. There is no in-process fallback: a
-//! configured bus that cannot start stops the server, and committed work stays
-//! pending in the database until a bus is available.
+//! connects to an external cluster; `in-process` runs the broker-free bus of
+//! the embedded deployment, whose required work lives in the database and is
+//! executed by the work runner. The in-process bus is chosen by name, never a
+//! fallback: a configured NATS that cannot start stops the server, and
+//! committed work stays pending in the database until a bus is available.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -21,6 +24,10 @@ pub enum EventBusMode {
     Embedded,
     /// An external NATS cluster at this URL.
     External(String),
+    /// No broker: facts reach live subscribers of this process only, and the
+    /// bus keeps neither history nor addressed work. One process only:
+    /// startup refuses it over storage several replicas can share.
+    InProcess,
 }
 
 impl EventBusMode {
@@ -28,6 +35,7 @@ impl EventBusMode {
     pub fn from_setting(value: Option<&str>) -> Result<Self, EventBusStartError> {
         match value.map(str::trim) {
             None | Some("") | Some("embedded") => Ok(Self::Embedded),
+            Some("in-process") => Ok(Self::InProcess),
             Some(url) if url.starts_with("nats://") || url.starts_with("tls://") => {
                 Ok(Self::External(url.to_string()))
             }
@@ -71,6 +79,13 @@ pub async fn connect_event_bus(
             info!("Event bus: external NATS at {url}");
             Ok(ConnectedBus {
                 bus: Arc::new(bus),
+                embedded: None,
+            })
+        }
+        EventBusMode::InProcess => {
+            info!("Event bus: in-process (no history replay, no addressed work)");
+            Ok(ConnectedBus {
+                bus: Arc::new(sid_plugin::event_bus::InProcessEventBus::new()),
                 embedded: None,
             })
         }
@@ -196,7 +211,9 @@ fn find_available_port() -> Result<u16, EventBusStartError> {
 /// Why the event bus could not start.
 #[derive(Debug, thiserror::Error)]
 pub enum EventBusStartError {
-    #[error("SID_NATS_URL must be unset, `embedded`, or a nats:// or tls:// URL, got `{0}`")]
+    #[error(
+        "SID_NATS_URL must be unset, `embedded`, `in-process`, or a nats:// or tls:// URL, got `{0}`"
+    )]
     InvalidSetting(String),
     #[error(
         "nats-server not found in PATH. Install: https://github.com/nats-io/nats-server/releases"

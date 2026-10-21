@@ -479,6 +479,20 @@ async fn test_delivery_hands_the_event_under_its_id() {
     assert_eq!(delivered[0].2.id, event.id);
 }
 
+/// A bus that keeps no addressed work (the in-process one) can never hand a
+/// delivery over, however often it is retried: the delivery ends failed and
+/// stays recorded instead of retrying forever.
+#[tokio::test]
+async fn test_delivery_on_a_bus_without_durable_work_ends_failed() {
+    let event = Event::new("src", event_types::USER_CREATED);
+    let outcome = EventDeliveryHandler::new(Arc::new(RecordingBus::refusing(|| {
+        EventBusError::DurableUnsupported
+    })))
+    .handle(&claimed(event.deliver(&recipient("r"))))
+    .await;
+    assert!(matches!(outcome, WorkOutcome::Permanent(_)), "{outcome:?}");
+}
+
 /// A bus outage retries a delivery; a type the bus does not carry, or a
 /// payload that is not a delivery, ends it visibly.
 #[tokio::test]
