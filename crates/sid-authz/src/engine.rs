@@ -31,7 +31,9 @@ const OAUTH_RESOURCE: &str = "oauth_resource:";
 ///    apply to it
 /// 3. Otherwise, resource → ProjectId; RBAC: resolve effective roles, check
 ///    if any grants the permission
-/// 4. If RBAC denies and Cedar policies exist: evaluate Cedar policies
+/// 4. Evaluate the project's enabled Cedar policies: a satisfied `forbid`
+///    denies whatever role grants; else a role grant allows; else a satisfied
+///    `permit` allows; a policy set that cannot be evaluated denies
 /// 5. Return Allow/Deny with reason
 ///
 /// `list_accessible_objects` and `list_subjects_with_access` require ReBAC
@@ -175,24 +177,23 @@ impl<S: StorageBackend + ?Sized + 'static> AuthzEngine for CeAuthzEngine<S> {
         }
         let project_id = Self::parse_project(&request.resource)?;
 
-        // Step 1: RBAC check — the principal's project roles, whatever kind
+        // The principal's project roles that grant the action, whatever kind
         // of principal it is.
         let granting_roles = self
             .rbac
             .project_granting_roles(&principal, project_id, &request.action)
             .await
             .map_err(|e| AuthzError::Storage(e.to_string()))?;
-        if !granting_roles.is_empty() {
-            return Ok(AuthzCheckResponse::Allow {
-                reason: format!(
-                    "RBAC: roles [{}] grant {}",
-                    granting_roles.join(", "),
-                    request.action
-                ),
-            });
-        }
+        let rbac_allow = || AuthzCheckResponse::Allow {
+            reason: format!(
+                "RBAC: roles [{}] grant {}",
+                granting_roles.join(", "),
+                request.action
+            ),
+        };
 
-        // Step 2: Cedar policy evaluation — load project policies, evaluate.
+        // The project's Cedar policies apply to every decision: a `forbid`
+        // prohibits whatever role grants, a `permit` allows without one.
         let cedar_policies = self
             .storage
             .list_cedar_policies(project_id)
@@ -217,6 +218,14 @@ impl<S: StorageBackend + ?Sized + 'static> AuthzEngine for CeAuthzEngine<S> {
             let cedar_action = format!(r#"Action::"{}""#, request.action);
             let cedar_resource = format!(r#"Resource::"{}""#, project_id.0);
 
+            let policy_ids = |result: &crate::cedar::CedarEvalResult| {
+                result
+                    .matches
+                    .iter()
+                    .map(|m| m.policy_id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
             match self.cedar.evaluate(
                 &enabled_policies,
                 &cedar_subject,
@@ -224,21 +233,29 @@ impl<S: StorageBackend + ?Sized + 'static> AuthzEngine for CeAuthzEngine<S> {
                 &cedar_resource,
                 &request.context,
             ) {
-                Ok(result) if result.allowed => {
-                    let policy_ids: Vec<String> =
-                        result.matches.iter().map(|m| m.policy_id.clone()).collect();
-                    return Ok(AuthzCheckResponse::Allow {
-                        reason: format!("Cedar: policies [{}] permit", policy_ids.join(", ")),
+                Ok(result) if result.forbidden() => {
+                    return Ok(AuthzCheckResponse::Deny {
+                        reason: format!("Cedar: policies [{}] forbid", policy_ids(&result)),
                     });
                 }
-                Ok(_) => {
-                    // Cedar evaluated but denied — continue to final deny
+                Ok(_) if !granting_roles.is_empty() => return Ok(rbac_allow()),
+                Ok(result) if result.allowed => {
+                    return Ok(AuthzCheckResponse::Allow {
+                        reason: format!("Cedar: policies [{}] permit", policy_ids(&result)),
+                    });
                 }
+                Ok(_) => {}
+                // A policy set that cannot be evaluated might hold the
+                // prohibition that applies: deny, whatever role grants.
                 Err(e) => {
-                    // Cedar evaluation error — log but don't fail, fall through to deny
                     tracing::warn!("Cedar evaluation error: {e}");
+                    return Ok(AuthzCheckResponse::Deny {
+                        reason: format!("the project's policies cannot be evaluated: {e}"),
+                    });
                 }
             }
+        } else if !granting_roles.is_empty() {
+            return Ok(rbac_allow());
         }
 
         Ok(AuthzCheckResponse::Deny {

@@ -21,6 +21,14 @@ pub struct CedarEvalResult {
     pub errors: Vec<String>,
 }
 
+impl CedarEvalResult {
+    /// Whether an explicit `forbid` decided: a prohibition, as opposed to a
+    /// denial for want of a `permit`.
+    pub fn forbidden(&self) -> bool {
+        self.matches.iter().any(|m| m.effect == CedarEffect::Forbid)
+    }
+}
+
 /// A policy that matched during evaluation.
 #[derive(Debug, Clone)]
 pub struct CedarPolicyMatch {
@@ -160,13 +168,19 @@ impl CedarService {
 
         let allowed = response.decision() == Decision::Allow;
 
-        let mut matches = Vec::new();
-        for reason in response.diagnostics().reason() {
-            matches.push(CedarPolicyMatch {
-                policy_id: reason.to_string(),
-                effect: CedarEffect::Permit,
-            });
-        }
+        // The determining policies: the satisfied permits of an allow, the
+        // satisfied forbids of a deny (none when nothing permitted).
+        let matches = response
+            .diagnostics()
+            .reason()
+            .map(|id| CedarPolicyMatch {
+                policy_id: id.to_string(),
+                effect: match policy_set.policy(id).map(Policy::effect) {
+                    Some(cedar_policy::Effect::Forbid) => CedarEffect::Forbid,
+                    _ => CedarEffect::Permit,
+                },
+            })
+            .collect();
 
         let errors: Vec<String> = response
             .diagnostics()

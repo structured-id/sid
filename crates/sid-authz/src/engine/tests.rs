@@ -354,6 +354,109 @@ async fn test_check_disabled_cedar_policy_ignored() {
 
 // ── Batch check ──────────────────────────────────────────────
 
+/// An explicit Cedar `forbid` applies to a subject whatever role it holds:
+/// a role grant is a permission, not an exemption from the project's
+/// prohibitions. The same role without the forbid still allows, and a
+/// forbid on another action leaves the granted one allowed.
+#[tokio::test]
+async fn test_explicit_forbid_overrides_a_role_grant() {
+    let (engine, storage, project_id) = setup().await;
+    let profile_id = ProfileId::generate();
+    let role = create_test_role(project_id, "editor", &["profiles:read", "profiles:write"]);
+    storage
+        .create_role(&role, AuditEntry::system("test", "test").into())
+        .await
+        .unwrap();
+    storage
+        .create_role_assignment(
+            &RoleAssignment::new(RoleAssignmentPrincipal::Profile(profile_id), role.id),
+            AuditEntry::system("test", "test").into(),
+        )
+        .await
+        .unwrap();
+    let ask = |action: &str| AuthzCheckRequest {
+        subject: format!("user:{profile_id}"),
+        action: action.into(),
+        resource: format!("project:{}", project_id.0),
+        context: HashMap::new(),
+    };
+    assert!(
+        engine
+            .check(&ask("profiles:write"))
+            .await
+            .unwrap()
+            .is_allowed()
+    );
+
+    let forbid = sid_core::models::CedarPolicy::new(
+        project_id,
+        "no_writes",
+        r#"forbid(principal, action == Action::"profiles:write", resource);"#,
+        sid_core::models::PolicyEffect::Forbid,
+    );
+    storage
+        .create_cedar_policy(&forbid, AuditEntry::system("test", "test").into())
+        .await
+        .unwrap();
+
+    let refused = engine.check(&ask("profiles:write")).await.unwrap();
+    assert!(
+        !refused.is_allowed(),
+        "a role grant bypassed a forbid: {refused:?}"
+    );
+    assert!(refused.reason().contains("forbid"), "{refused:?}");
+    assert!(
+        engine
+            .check(&ask("profiles:read"))
+            .await
+            .unwrap()
+            .is_allowed(),
+        "a forbid on another action"
+    );
+}
+
+/// A policy set that cannot be evaluated denies, even where a role grants:
+/// the broken policy might be the prohibition that applies.
+#[tokio::test]
+async fn test_an_unevaluable_policy_set_denies_a_role_grant() {
+    let (engine, storage, project_id) = setup().await;
+    let profile_id = ProfileId::generate();
+    let role = create_test_role(project_id, "editor", &["profiles:write"]);
+    storage
+        .create_role(&role, AuditEntry::system("test", "test").into())
+        .await
+        .unwrap();
+    storage
+        .create_role_assignment(
+            &RoleAssignment::new(RoleAssignmentPrincipal::Profile(profile_id), role.id),
+            AuditEntry::system("test", "test").into(),
+        )
+        .await
+        .unwrap();
+    storage
+        .create_cedar_policy(
+            &sid_core::models::CedarPolicy::new(
+                project_id,
+                "broken",
+                "forbid(principal, action, resource) when { nonsense",
+                sid_core::models::PolicyEffect::Forbid,
+            ),
+            AuditEntry::system("test", "test").into(),
+        )
+        .await
+        .unwrap();
+    let decision = engine
+        .check(&AuthzCheckRequest {
+            subject: format!("user:{profile_id}"),
+            action: "profiles:write".into(),
+            resource: format!("project:{}", project_id.0),
+            context: HashMap::new(),
+        })
+        .await
+        .unwrap();
+    assert!(!decision.is_allowed(), "{decision:?}");
+}
+
 #[tokio::test]
 async fn test_batch_check() {
     let (engine, storage, project_id) = setup().await;
