@@ -165,6 +165,44 @@ pub async fn ended_work_is_purged(store: &dyn WorkStore) {
     assert!(store.get_work(theirs.id).await.unwrap().is_some());
 }
 
+/// A kind is reported as having work once any of it is stored, whatever its
+/// state (open or ended), until it is purged; another kind's work does not
+/// count for it.
+pub async fn work_of_a_kind_is_reported(store: &dyn WorkStore) {
+    let kind = unique_kind("has_kind");
+    assert!(
+        !store.has_work_of_kind(&kind).await.unwrap(),
+        "nothing stored yet"
+    );
+    store
+        .enqueue_work(&work(&unique_kind("has_kind_other")), 10)
+        .await
+        .unwrap();
+    assert!(
+        !store.has_work_of_kind(&kind).await.unwrap(),
+        "another kind's work"
+    );
+
+    store.enqueue_work(&work(&kind), 10).await.unwrap();
+    assert!(store.has_work_of_kind(&kind).await.unwrap(), "pending work");
+    let claimed = store
+        .claim_work(from_ref(&kind), "w", 1, LEASE)
+        .await
+        .unwrap();
+    assert!(store.has_work_of_kind(&kind).await.unwrap(), "claimed work");
+    assert!(
+        store
+            .complete_work(claimed[0].id, claimed[0].generation, None)
+            .await
+            .unwrap()
+    );
+    assert!(store.has_work_of_kind(&kind).await.unwrap(), "ended work");
+
+    let later = Utc::now() + Duration::seconds(5);
+    store.purge_ended_work(&kind, later).await.unwrap();
+    assert!(!store.has_work_of_kind(&kind).await.unwrap(), "purged");
+}
+
 /// Work under a live lease is not handed to another worker, however many
 /// times it asks.
 pub async fn live_lease_is_exclusive(store: &dyn WorkStore) {

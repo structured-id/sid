@@ -318,6 +318,14 @@ impl WorkStore for SqliteBackend {
         Ok(inserted)
     }
 
+    async fn has_work_of_kind(&self, kind: &WorkKind) -> SidResult<bool> {
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM durable_work WHERE kind = ?)")
+            .bind(kind.as_str())
+            .fetch_one(&self.pool)
+            .await
+            .map_err(storage)
+    }
+
     async fn purge_ended_work(
         &self,
         kind: &WorkKind,

@@ -80,9 +80,9 @@ pub struct CeComponents {
     /// The bundled `nats-server` behind `event_bus` in embedded mode; it is
     /// stopped when dropped, so it lives as long as the components.
     pub embedded_nats: Option<Arc<crate::embedded_nats::EmbeddedNats>>,
-    /// With the in-process bus, the lock that keeps its database to this
-    /// process, held as long as the components live.
-    pub single_process: Option<Arc<std::fs::File>>,
+    /// Over SQLite, this process's bus lock on the file (exclusive with the
+    /// in-process bus, shared otherwise), held as long as the components live.
+    pub database_lock: Option<Arc<std::fs::File>>,
     /// The receivers every committed fact of their types is owed to, whether
     /// or not they are running (`SID_EVENT_RECEIVERS`).
     pub required_receivers: Vec<sid_core::models::RequiredReceiver>,
@@ -372,23 +372,21 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
             LocalHistoryKeys::Postgres(sid_storage::PgHistoryKeyStore::new(backend.pool().clone()));
         (Arc::new(backend), audit_log, local_history_keys)
     };
-    // The SQLite file this process serves, if any (the in-process bus locks it).
+    // The SQLite file this process serves, if any: every server on it holds
+    // its bus lock (see `hold_database`).
     #[cfg(feature = "storage-pg")]
-    let sqlite_file: Option<String> = None;
+    let sqlite_file: Option<std::path::PathBuf> = None;
 
     #[cfg(all(feature = "embedded-dev", not(feature = "storage-pg")))]
-    let sqlite_file = Some(
-        env_setting("SID_STORAGE_SQLITE_PATH")?
-            .unwrap_or_else(|| "/var/lib/sid/auth.db".to_string()),
-    );
+    let sqlite_setting = env_setting("SID_STORAGE_SQLITE_PATH")?
+        .unwrap_or_else(|| "/var/lib/sid/auth.db".to_string());
     #[cfg(all(feature = "embedded-dev", not(feature = "storage-pg")))]
     let (storage, audit_log, local_history_keys): (
         Arc<dyn StorageBackend>,
         Arc<dyn sid_plugin::audit::AuditLog>,
         LocalHistoryKeys,
     ) = {
-        let db_path = sqlite_file.as_deref().expect("set just above");
-        let backend = sid_storage::sqlite::SqliteBackend::new(db_path)
+        let backend = sid_storage::sqlite::SqliteBackend::new(&sqlite_setting)
             .await
             .context("SQLite storage and its migrations")?;
         let audit_log: Arc<dyn sid_plugin::audit::AuditLog> = Arc::new(
@@ -397,6 +395,11 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         let local_history_keys = LocalHistoryKeys::Sqlite(backend.history_keys());
         (Arc::new(backend), audit_log, local_history_keys)
     };
+    #[cfg(all(feature = "embedded-dev", not(feature = "storage-pg")))]
+    let sqlite_file = Some(
+        sid_storage::sqlite::SqliteBackend::database_file(&sqlite_setting)
+            .context("the SQLite file")?,
+    );
 
     // Ensure system project exists
     storage
@@ -760,24 +763,16 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
     // opened by several processes, so the in-process bus locks it and takes
     // over no addressed work it could never hand on.
     bus_fits_storage(&nats_mode, cfg!(feature = "storage-pg"))?;
-    let single_process = match (&nats_mode, sqlite_file.as_deref()) {
-        (crate::embedded_nats::EventBusMode::InProcess, Some(database)) => {
-            let lock = hold_single_process(database)?;
-            let owed = owed_addressed_work(
-                &storage
-                    .export_work()
-                    .await
-                    .context("read the stored work before using the in-process bus")?,
-            );
-            if owed > 0 {
-                anyhow::bail!(
-                    "{owed} pieces of work are still addressed to receivers, which only a durable \
-                     bus hands over: settle them with SID_NATS_URL `embedded` or a NATS URL first"
-                );
+    let in_process = nats_mode == crate::embedded_nats::EventBusMode::InProcess;
+    let database_lock = match sqlite_file.as_deref() {
+        Some(database) => {
+            let lock = hold_database(database, in_process)?;
+            if in_process {
+                refuse_addressed_history(storage.as_ref()).await?;
             }
             Some(Arc::new(lock))
         }
-        _ => None,
+        None => None,
     };
     let required_receivers =
         required_receivers(&nats_mode, env_setting("SID_EVENT_RECEIVERS")?.as_deref())?;
@@ -1104,7 +1099,7 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         feature_flags,
         event_bus,
         embedded_nats: embedded_nats.map(Arc::new),
-        single_process,
+        database_lock,
         required_receivers,
         cache_backend,
         app_state,
@@ -1572,45 +1567,63 @@ pub(crate) fn bus_fits_storage(
     Ok(())
 }
 
-/// Open work addressed to a receiver in `work`: deliveries, and fan-out
-/// plans that name receivers (each becomes deliveries). Only a durable bus
-/// hands these over, so an installation holding any cannot switch to the
-/// in-process bus until they are settled through one.
-pub(crate) fn owed_addressed_work(work: &[sid_core::models::WorkSnapshot]) -> usize {
-    use sid_core::models::WorkState;
-    use sid_core::models::event::{EVENT_DELIVERY_KIND, EVENT_FANOUT_KIND, EventFanout};
-    work.iter()
-        .filter(|w| matches!(w.record.state, WorkState::Pending | WorkState::Claimed))
-        .filter(|w| match w.record.kind.as_str() {
-            EVENT_DELIVERY_KIND => true,
-            // A plan its handler cannot read is failed by it, never delivered.
-            EVENT_FANOUT_KIND => serde_json::from_slice::<EventFanout>(&w.payload)
-                .is_ok_and(|plan| !plan.receivers.is_empty()),
-            _ => false,
-        })
-        .count()
+/// An installation that ever addressed work to a receiver cannot move to the
+/// in-process bus: a delivery recorded done may still wait in the durable
+/// bus that accepted it, and the in-process bus never reaches that bus.
+pub(crate) async fn refuse_addressed_history(
+    work: &dyn sid_plugin::WorkStore,
+) -> anyhow::Result<()> {
+    let delivery = sid_core::models::WorkKind::new(sid_core::models::event::EVENT_DELIVERY_KIND)
+        .expect("the delivery kind is valid");
+    if work
+        .has_work_of_kind(&delivery)
+        .await
+        .context("read the stored work before using the in-process bus")?
+    {
+        anyhow::bail!(
+            "this installation has addressed work to receivers, which only a durable bus hands \
+             over (some may still wait there): keep SID_NATS_URL `embedded` or a NATS URL"
+        );
+    }
+    Ok(())
 }
 
-/// Take the in-process bus's exclusive lock beside `database`, held while
-/// the returned file lives: a second process opening the same database with
-/// the in-process bus is refused, because each would publish the facts it
-/// claims to its own subscribers only.
-pub(crate) fn hold_single_process(database: &str) -> anyhow::Result<std::fs::File> {
-    let path = format!("{database}.in-process.lock");
+/// Lock the SQLite file `database` for this process, held while the returned
+/// file lives: shared for a server on a durable bus (several may share the
+/// file), exclusive for the in-process bus, which reaches its own process
+/// only. Either kind excludes the other, so the in-process bus never runs
+/// beside another process on the same file, whatever bus that one uses.
+pub(crate) fn hold_database(
+    database: &std::path::Path,
+    exclusive: bool,
+) -> anyhow::Result<std::fs::File> {
+    let mut path = database.as_os_str().to_owned();
+    path.push(".bus.lock");
+    let path = std::path::PathBuf::from(path);
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
         .open(&path)
-        .with_context(|| format!("open {path}"))?;
-    match file.try_lock() {
+        .with_context(|| format!("open {}", path.display()))?;
+    let locked = if exclusive {
+        file.try_lock()
+    } else {
+        file.try_lock_shared()
+    };
+    match locked {
         Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) if exclusive => anyhow::bail!(
+            "another process serves {}: the in-process bus serves one process, so set \
+             SID_NATS_URL to `embedded` or a NATS URL to run several",
+            database.display()
+        ),
         Err(std::fs::TryLockError::WouldBlock) => anyhow::bail!(
-            "another process runs the in-process bus over {database}: it serves one process, \
-             so set SID_NATS_URL to `embedded` or a NATS URL to run several"
+            "a process with the in-process bus serves {}: it serves that process alone",
+            database.display()
         ),
         Err(std::fs::TryLockError::Error(e)) => {
-            Err(anyhow::Error::new(e).context(format!("lock {path}")))
+            Err(anyhow::Error::new(e).context(format!("lock {}", path.display())))
         }
     }
 }

@@ -57,7 +57,11 @@ pub async fn relay_observed<S: WorkStore + ?Sized>(
 /// anything else may pass later.
 fn refused(what: &str, e: EventBusError) -> WorkOutcome {
     match e {
-        EventBusError::Unroutable(_) => WorkOutcome::Permanent(format!("{what}: {e}")),
+        // Neither changes by retrying: the route is not carried, or this bus
+        // keeps no addressed work at all (the in-process bus).
+        EventBusError::Unroutable(_) | EventBusError::DurableUnsupported => {
+            WorkOutcome::Permanent(format!("{what}: {e}"))
+        }
         e => WorkOutcome::Retry(format!("{what}: {e}")),
     }
 }
