@@ -96,6 +96,88 @@ fn a_separate_history_evaluator_needs_a_durable_bus() {
     }
 }
 
+/// Work already addressed to a receiver (a delivery, or a fan-out plan that
+/// names receivers) can only be handed over by a durable bus: switching an
+/// installation holding it to the in-process bus would leave it retrying
+/// forever, so it is counted and startup refuses. Ended work, plans with no
+/// receiver and other kinds are not owed to anyone.
+#[test]
+fn addressed_work_still_owed_is_counted() {
+    use sid_core::models::event::{
+        EVENT_DELIVERY_KIND, EVENT_FANOUT_KIND, EventDelivery, EventFanout, WorkRecipient,
+    };
+    use sid_core::models::{WorkId, WorkKind, WorkRecord, WorkSnapshot, WorkState};
+    let snapshot = |kind: &str, state: WorkState, payload: Vec<u8>| WorkSnapshot {
+        record: WorkRecord {
+            id: WorkId(uuid::Uuid::now_v7()),
+            kind: WorkKind::new(kind).unwrap(),
+            state,
+            attempts: 0,
+            max_attempts: 5,
+            generation: 0,
+            last_error: None,
+            ambiguous: false,
+            result: None,
+            not_before: chrono::Utc::now(),
+            expires_at: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        },
+        payload,
+    };
+    let notify = WorkRecipient::new("sid-notify").unwrap();
+    let event = sid_core::models::event::Event::new("test", "sid.session.revoked.v1");
+    let delivery = serde_json::to_vec(&EventDelivery {
+        recipient: notify.clone(),
+        event: event.clone(),
+    })
+    .unwrap();
+    let plan = |receivers: Vec<WorkRecipient>| {
+        serde_json::to_vec(&EventFanout {
+            event: event.clone(),
+            receivers,
+        })
+        .unwrap()
+    };
+
+    assert_eq!(owed_addressed_work(&[]), 0);
+    let owed = [
+        snapshot(EVENT_DELIVERY_KIND, WorkState::Pending, delivery.clone()),
+        snapshot(EVENT_DELIVERY_KIND, WorkState::Claimed, delivery.clone()),
+        snapshot(
+            EVENT_FANOUT_KIND,
+            WorkState::Pending,
+            plan(vec![notify.clone()]),
+        ),
+    ];
+    assert_eq!(owed_addressed_work(&owed), 3);
+    let not_owed = [
+        snapshot(EVENT_DELIVERY_KIND, WorkState::Completed, delivery.clone()),
+        snapshot(EVENT_DELIVERY_KIND, WorkState::Failed, delivery),
+        snapshot(EVENT_FANOUT_KIND, WorkState::Pending, plan(Vec::new())),
+        snapshot("backchannel.logout", WorkState::Pending, b"{}".to_vec()),
+    ];
+    assert_eq!(owed_addressed_work(&not_owed), 0);
+}
+
+/// The in-process bus holds an exclusive lock beside its database for the
+/// life of the process: a second process opening the same file with it is
+/// refused, so no two processes publish each other's facts to nobody. The
+/// lock frees when its holder ends.
+#[test]
+fn the_in_process_bus_holds_its_database_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("auth.db");
+    let database = database.to_str().unwrap();
+    let held = hold_single_process(database).expect("first holder");
+    let refused = hold_single_process(database)
+        .expect_err("a second holder")
+        .to_string();
+    assert!(refused.contains("another process"), "{refused}");
+    drop(held);
+    hold_single_process(database).expect("free again after its holder ended");
+}
+
 /// The in-process bus reaches the subscribers of one process only. Over
 /// storage several replicas share (PostgreSQL), the replica that claims a
 /// fact's fan-out would publish it to its own subscribers alone and the
