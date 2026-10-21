@@ -407,18 +407,9 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         .context("SID_ISSUER is required")?;
     let instance_domain = instance_domain(&issuer)?;
 
-    // Auto-generate JWT keys if not present
-    if !std::path::Path::new(&jwt_private_key_path).exists() {
-        tracing::warn!(
-            "JWT keys not found at '{}' — generating Ed25519 key pair for development",
-            jwt_private_key_path
-        );
-        std::fs::create_dir_all(&data_dir)
-            .with_context(|| format!("create data directory {data_dir}"))?;
-        let (private_pem, public_pem) =
-            sid_authn::jwt::generate_signing_key_pem().context("generate the JWT key pair")?;
-        write_new_key_file(&jwt_private_key_path, private_pem.as_bytes(), true)?;
-        write_new_key_file(&jwt_public_key_path, public_pem.as_bytes(), false)?;
+    std::fs::create_dir_all(&data_dir)
+        .with_context(|| format!("create data directory {data_dir}"))?;
+    if ensure_jwt_key_pair(&jwt_private_key_path, &jwt_public_key_path)? {
         info!("Generated JWT key pair at '{}'", data_dir);
         tracing::warn!("Set SID_JWT_PRIVATE_KEY_PATH for production use");
     }
@@ -1102,6 +1093,33 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         security_svc,
         account_svc,
     })
+}
+
+/// Make the installation's JWT key pair if neither file exists; `true` when
+/// it was made. A pair found whole is kept. Half a pair (one file without
+/// the other) is refused before anything is written: generating the
+/// missing half would pair it with an unrelated key.
+pub(crate) fn ensure_jwt_key_pair(private_path: &str, public_path: &str) -> anyhow::Result<bool> {
+    let private = std::path::Path::new(private_path).exists();
+    let public = std::path::Path::new(public_path).exists();
+    match (private, public) {
+        (true, true) => Ok(false),
+        (false, false) => {
+            tracing::warn!(
+                "JWT keys not found at '{private_path}': generating an Ed25519 key pair for development"
+            );
+            let (private_pem, public_pem) =
+                sid_authn::jwt::generate_signing_key_pem().context("generate the JWT key pair")?;
+            write_new_key_file(private_path, private_pem.as_bytes(), true)?;
+            write_new_key_file(public_path, public_pem.as_bytes(), false)?;
+            Ok(true)
+        }
+        _ => anyhow::bail!(
+            "half a JWT key pair: {private_path} {} but {public_path} {}; restore both files, or remove the remaining one to generate a new pair",
+            if private { "exists" } else { "is missing" },
+            if public { "exists" } else { "is missing" },
+        ),
+    }
 }
 
 /// Write a generated key to a new file at `path`, never over an existing
