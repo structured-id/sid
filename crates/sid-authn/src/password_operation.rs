@@ -1168,13 +1168,27 @@ where
             })));
         };
         let domains = op.domains();
-        let (proof_len, instance_count) = zkpp
-            .proof_lengths(domains.len())
-            .map_err(|_| invalid_proof())?;
+        let (proof_len, instance_count) = zkpp.proof_lengths(domains.len()).map_err(|e| {
+            warn!(
+                "password proof refused: no proof shape for {} domains: {e}",
+                domains.len()
+            );
+            invalid_proof()
+        })?;
+        // Only sizes are logged: they tell a client defect (a dropped field,
+        // another circuit) from a proof that does not verify.
         if proof.zkpp_proof.len() != proof_len
             || proof.instances.len() != instance_count
             || proof.evaluation_proofs.len() != domains.len()
         {
+            warn!(
+                "password proof refused by its shape: proof {} bytes (expected {proof_len}), \
+                 {} instances (expected {instance_count}), {} evaluation proofs (expected {})",
+                proof.zkpp_proof.len(),
+                proof.instances.len(),
+                proof.evaluation_proofs.len(),
+                domains.len(),
+            );
             return Err(invalid_proof());
         }
         let relayed = relayed_proofs(&proof.evaluation_proofs)?;
