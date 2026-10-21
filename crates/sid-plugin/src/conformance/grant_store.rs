@@ -412,6 +412,47 @@ pub async fn session_end<H: GrantHarness>(h: &H) {
     );
 }
 
+/// An owner's listing holds exactly its stored sessions, newest first, with
+/// the expired ones (what is current is the caller's to decide); another
+/// owner's sessions and an ended one are not in it.
+pub async fn sessions_listed_per_owner<H: GrantHarness>(h: &H) {
+    let owner = h.owner().await;
+    let other = h.owner().await;
+    let mut oldest = session(owner.clone());
+    oldest.created_at = ms(Utc::now() - Duration::hours(3));
+    oldest.expires_at = ms(Utc::now() - Duration::hours(1));
+    let mut ended = session(owner.clone());
+    ended.created_at = ms(Utc::now() - Duration::hours(2));
+    let mut middle = session(owner.clone());
+    middle.created_at = ms(Utc::now() - Duration::hours(1));
+    let newest = session(owner.clone());
+    let foreign = session(other.clone());
+    for s in [&oldest, &ended, &middle, &newest, &foreign] {
+        h.store()
+            .create_session_atomic(s, 0, None, ctx())
+            .await
+            .unwrap();
+    }
+    h.store()
+        .delete_session(ended.id, &end(), ctx())
+        .await
+        .unwrap();
+
+    let listed: Vec<SessionId> = h
+        .store()
+        .list_sessions(&owner)
+        .await
+        .unwrap()
+        .iter()
+        .map(|s| s.id)
+        .collect();
+    assert_eq!(listed, vec![newest.id, middle.id, oldest.id]);
+    let theirs = h.store().list_sessions(&other).await.unwrap();
+    assert_eq!(theirs.len(), 1);
+    assert_eq!(theirs[0].id, foreign.id);
+    assert_eq!(theirs[0].profile_id, other);
+}
+
 /// A session redeemed from a grant ends with the session it reuses: ending
 /// the redeemed one leaves the other, ending that one (directly or by the
 /// session limit) ends what it authenticated and nothing else.

@@ -157,6 +157,9 @@ impl sid_plugin::GrantStore for MockStorage {
     ) -> Result<Option<Session>> {
         unimplemented!()
     }
+    async fn list_sessions(&self, _: &ProfileId) -> Result<Vec<Session>> {
+        unimplemented!()
+    }
     async fn touch_session(&self, _: SessionId, _: chrono::DateTime<chrono::Utc>) -> Result<()> {
         unimplemented!()
     }
@@ -737,9 +740,6 @@ impl sid_plugin::StorageBackend for MockStorage {
         Ok(vec![])
     }
     async fn end_legacy_migration(&self, _: &Profile, _: MutationContext) -> Result<bool> {
-        unimplemented!()
-    }
-    async fn list_sessions_by_profile(&self, _: ProfileId) -> Result<Vec<Session>> {
         unimplemented!()
     }
     // === REFRESH TOKEN ===

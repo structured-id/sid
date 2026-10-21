@@ -90,7 +90,7 @@ async fn email_code_refuses_a_quarantined_handle() {
     assert_eq!(verified, VerifyOtpResponse::default());
     assert!(
         svc.storage
-            .list_sessions_by_profile(profile)
+            .list_sessions(&profile)
             .await
             .unwrap()
             .is_empty()
@@ -155,7 +155,7 @@ async fn magic_link_refuses_a_quarantined_handle() {
     assert_eq!(err.code(), tonic::Code::Unauthenticated);
     assert!(
         svc.storage
-            .list_sessions_by_profile(corporate.id)
+            .list_sessions(&corporate.id)
             .await
             .unwrap()
             .is_empty()

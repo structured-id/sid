@@ -4235,11 +4235,7 @@ async fn test_admin_revoke_all_sessions() {
     }
 
     // Verify 2 sessions exist
-    let sessions = svc
-        .storage
-        .list_sessions_by_profile(profile.id)
-        .await
-        .unwrap();
+    let sessions = svc.storage.list_sessions(&profile.id).await.unwrap();
     assert_eq!(sessions.len(), 2);
 
     // Revoke all via storage (IdentityService doesn't have a bulk RPC yet)
@@ -4258,11 +4254,7 @@ async fn test_admin_revoke_all_sessions() {
     assert_eq!(ended.len(), 2);
 
     // Verify all deleted
-    let sessions = svc
-        .storage
-        .list_sessions_by_profile(profile.id)
-        .await
-        .unwrap();
+    let sessions = svc.storage.list_sessions(&profile.id).await.unwrap();
     assert!(sessions.is_empty());
 }
 
@@ -5602,7 +5594,7 @@ async fn test_magic_link_verify_rejects_personal_profile() {
     );
     assert!(
         svc.storage
-            .list_sessions_by_profile(profile.id)
+            .list_sessions(&profile.id)
             .await
             .unwrap()
             .is_empty()

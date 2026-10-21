@@ -114,16 +114,8 @@ async fn code_signs_in_the_assigned_holder() {
     let verified = verified.into_inner();
     assert!(verified.verified);
 
-    let holder_sessions = svc
-        .storage
-        .list_sessions_by_profile(holder.id)
-        .await
-        .unwrap();
-    let claimant_sessions = svc
-        .storage
-        .list_sessions_by_profile(claimant.id)
-        .await
-        .unwrap();
+    let holder_sessions = svc.storage.list_sessions(&holder.id).await.unwrap();
+    let claimant_sessions = svc.storage.list_sessions(&claimant.id).await.unwrap();
     assert_eq!(holder_sessions.len(), 1, "the holder was not signed in");
     assert!(claimant_sessions.is_empty(), "the claimant was signed in");
     // An emailed code is confirmation over a second channel: `mca`
@@ -176,7 +168,7 @@ async fn unreadable_sign_in_history_refuses_the_sign_in() {
     assert_eq!(err.code(), tonic::Code::Unavailable);
     assert!(
         svc.storage
-            .list_sessions_by_profile(holder.id)
+            .list_sessions(&holder.id)
             .await
             .unwrap()
             .is_empty()

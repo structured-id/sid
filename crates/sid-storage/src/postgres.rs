@@ -1529,6 +1529,17 @@ impl GrantStore for PostgresBackend {
         row.map(|r| r.into_domain()).transpose()
     }
 
+    async fn list_sessions(&self, owner: &ProfileId) -> SidResult<Vec<Session>> {
+        let rows = sqlx::query_as::<_, crate::pg_row::SessionRow>(
+            "SELECT * FROM sessions WHERE profile_id = $1 ORDER BY created_at DESC",
+        )
+        .bind(*owner)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(format!("list sessions: {e}")))?;
+        rows.into_iter().map(|r| r.into_domain()).collect()
+    }
+
     async fn touch_session(
         &self,
         id: SessionId,
@@ -3184,17 +3195,6 @@ impl StorageBackend for PostgresBackend {
             total: u64::try_from(total).expect("a count is not negative"),
             users: crate::directory_query::assemble(profiles, principals, emails, metadata),
         })
-    }
-
-    async fn list_sessions_by_profile(&self, profile_id: ProfileId) -> SidResult<Vec<Session>> {
-        let rows = sqlx::query_as::<_, crate::pg_row::SessionRow>(
-            "SELECT * FROM sessions WHERE profile_id = $1",
-        )
-        .bind(profile_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| SidError::Storage(format!("Query failed: {}", e)))?;
-        rows.into_iter().map(|r| r.into_domain()).collect()
     }
 
     async fn update_oauth2_client(

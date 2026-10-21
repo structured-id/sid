@@ -174,7 +174,7 @@ pub async fn verify_backends(
         }
 
         // Check sessions reference valid profiles
-        let sessions = target.list_sessions_by_profile(profile.id).await?;
+        let sessions = target.list_sessions(&profile.id).await?;
         for session in &sessions {
             if session.profile_id != profile.id {
                 integrity_issues.push(format!(

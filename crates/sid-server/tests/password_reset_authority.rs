@@ -199,11 +199,7 @@ async fn a_reset_signs_in_with_the_clients_address_and_device() {
     let profile = register_from_device(&svc, principal, OLD_PASSWORD).await;
 
     let done = complete_as(&svc, &profile, true).await.into_inner();
-    let sessions = svc
-        .storage
-        .list_sessions_by_profile(profile.id)
-        .await
-        .unwrap();
+    let sessions = svc.storage.list_sessions(&profile.id).await.unwrap();
     let session = sessions
         .iter()
         .find(|s| Some(s.id.to_string()) == done.session_id)
@@ -248,7 +244,7 @@ async fn reset_of_account_with_second_factor_signs_nobody_in() {
     assert_eq!(done.expires_in, None);
     assert!(
         svc.storage
-            .list_sessions_by_profile(profile.id)
+            .list_sessions(&profile.id)
             .await
             .unwrap()
             .is_empty()

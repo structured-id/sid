@@ -145,11 +145,7 @@ async fn solved_captcha_lets_the_sign_in_through() {
     let signed_in = sign_in(&svc, ip, Some(&pass)).await.unwrap();
 
     assert!(signed_in.verified);
-    let sessions = svc
-        .storage
-        .list_sessions_by_profile(holder.id)
-        .await
-        .unwrap();
+    let sessions = svc.storage.list_sessions(&holder.id).await.unwrap();
     assert_eq!(sessions.len(), 1);
 }
 

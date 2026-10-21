@@ -88,7 +88,7 @@ pub async fn export_snapshot(
         snapshot.credentials.extend(credentials);
 
         // Active sessions only (filter expired after fetching)
-        let sessions = backend.list_sessions_by_profile(pid).await?;
+        let sessions = backend.list_sessions(&pid).await?;
         let now = Utc::now();
         let active_sessions = sessions
             .into_iter()

@@ -134,11 +134,7 @@ async fn test_device_flow_issues_tokens_once() {
         .validate_access_token(&tokens.access_token)
         .expect("the issuer's key signed the device's token");
     assert_eq!(claims.iss, svc.issuer.canonical_url);
-    let sessions = svc
-        .storage
-        .list_sessions_by_profile(profile.id)
-        .await
-        .unwrap();
+    let sessions = svc.storage.list_sessions(&profile.id).await.unwrap();
     assert_eq!(sessions.len(), 1, "one session for the device");
 
     let err = svc
@@ -149,7 +145,7 @@ async fn test_device_flow_issues_tokens_once() {
     assert_refused(err, Code::InvalidArgument, "invalid_grant");
     assert!(
         svc.storage
-            .list_sessions_by_profile(profile.id)
+            .list_sessions(&profile.id)
             .await
             .unwrap()
             .is_empty(),
