@@ -420,8 +420,6 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         .context("SID_ISSUER is required")?;
     let instance_domain = instance_domain(&issuer)?;
 
-    std::fs::create_dir_all(&data_dir)
-        .with_context(|| format!("create data directory {data_dir}"))?;
     if ensure_jwt_key_pair(&jwt_private_key_path, &jwt_public_key_path)? {
         info!("Generated JWT key pair at '{}'", data_dir);
         tracing::warn!("Set SID_JWT_PRIVATE_KEY_PATH for production use");
@@ -1135,6 +1133,12 @@ pub(crate) fn ensure_jwt_key_pair(private_path: &str, public_path: &str) -> anyh
             tracing::warn!(
                 "JWT keys not found at '{private_path}': generating an Ed25519 key pair for development"
             );
+            for path in [private_path, public_path] {
+                if let Some(dir) = std::path::Path::new(path).parent() {
+                    std::fs::create_dir_all(dir)
+                        .with_context(|| format!("create key directory {}", dir.display()))?;
+                }
+            }
             let (private_pem, public_pem) =
                 sid_authn::jwt::generate_signing_key_pem().context("generate the JWT key pair")?;
             write_new_key_file(private_path, private_pem.as_bytes(), true)?;

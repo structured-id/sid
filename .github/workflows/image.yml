@@ -10,11 +10,10 @@ name: Image
 on:
   push:
     tags: ["v[0-9]*"]
-  # Any base: a pull request stacked on another one is checked too.
+  # Every pull request, any base: the image builds from the whole workspace
+  # (sources, manifests, migrations, proto, toolchain) with its own feature
+  # set, which no other check builds, so any change can break it.
   pull_request:
-    paths:
-      - Dockerfile.embedded
-      - .github/workflows/image.yml
 
 permissions:
   contents: read

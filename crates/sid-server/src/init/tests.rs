@@ -120,6 +120,18 @@ fn a_generated_key_file_is_new_and_private_keys_owner_only() {
     }
 }
 
+/// Generation creates the directories its key files go to, and nothing else:
+/// a server whose keys are mounted elsewhere never needs a writable default
+/// data directory.
+#[test]
+fn generated_keys_get_their_own_directories() {
+    let dir = tempfile::tempdir().unwrap();
+    let private = dir.path().join("keys/private/jwt_private.pem");
+    let public = dir.path().join("keys/public/jwt_public.pem");
+    assert!(ensure_jwt_key_pair(private.to_str().unwrap(), public.to_str().unwrap()).unwrap());
+    assert!(private.exists() && public.exists());
+}
+
 /// The first start makes a matching pair, a later start keeps the pair it
 /// finds, and a half pair (one file without the other, e.g. after a partial
 /// restore) stops startup without writing anything: generating the missing
