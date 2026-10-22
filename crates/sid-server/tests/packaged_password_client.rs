@@ -10,7 +10,7 @@ use common::{TestServices, mock_storage::MockStorage, zkpp_client};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sid_authn::opaque_zkpp::ZkppConfig;
-use sid_core::models::{AuditEntry, PasswordResetSession, ProfileId};
+use sid_core::models::{AuditEntry, PasswordResetSession};
 use sid_proto::sid::v1::auth_service_client::AuthServiceClient;
 use sid_proto::sid::v1::auth_service_server::AuthServiceServer;
 use sid_proto::sid::v1::authn::password_history_evaluator_service_client::PasswordHistoryEvaluatorServiceClient;
@@ -330,17 +330,22 @@ async fn password_lifecycle(adapter: &str) {
         .await
         .unwrap()
         .into_inner();
-    assert_eq!(retried.profile_id, installed.profile_id);
-    assert_eq!(retried.credential_id, installed.credential_id);
-    let profile_id = ProfileId::parse(&installed.profile_id).unwrap();
+    // The recorded result is replayed as it was: the same bytes, naming the
+    // credential and no Profile.
+    assert_eq!(
+        prost::Message::encode_to_vec(&retried),
+        prost::Message::encode_to_vec(&installed)
+    );
     let credential_id = installed.credential_id;
-    let original_oprf_id = storage
-        .get_credentials_by_profile(profile_id, Some(sid_core::models::CredentialType::Opaque))
+    let installed_credential = storage
+        .get_credential(sid_core::models::CredentialId(
+            credential_id.parse().unwrap(),
+        ))
         .await
         .unwrap()
-        .into_iter()
-        .find(|c| c.id.0.to_string() == credential_id)
-        .unwrap()
+        .unwrap();
+    let profile_id = installed_credential.profile_id;
+    let original_oprf_id = installed_credential
         .opaque_credential_identifier
         .expect("registration persists its operation-specific OPRF identifier");
     let token = login(&mut kernel, &mut auth, &principal, FIRST)

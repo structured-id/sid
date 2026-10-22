@@ -10,9 +10,7 @@ use common::{TestServices, test_profile, zkpp_client as client};
 use rand::rand_core::UnwrapErr;
 use rand::rngs::SysRng;
 use sha2::{Digest, Sha256};
-use sid_core::models::{
-    AuditEntry, Credential, CredentialType, PasswordResetSession, Profile, ProfileId,
-};
+use sid_core::models::{AuditEntry, Credential, CredentialType, PasswordResetSession, Profile};
 use sid_opaque_ke::{ClientLogin, ClientLoginFinishParameters, CredentialResponse};
 use sid_pake_core::pallas_opaque::PallasCipherSuite;
 use sid_proto::sid::v1::auth_service_server::AuthService;
@@ -149,8 +147,16 @@ async fn register_from_device(svc: &TestServices, principal: &str, password: &[u
         .await
         .expect("registration finish")
         .into_inner();
+    let credential = svc
+        .storage
+        .get_credential(sid_core::models::CredentialId(
+            done.credential_id.parse().unwrap(),
+        ))
+        .await
+        .unwrap()
+        .expect("the registered credential");
     svc.storage
-        .get_profile(ProfileId::parse(&done.profile_id).unwrap())
+        .get_profile(credential.profile_id)
         .await
         .unwrap()
         .expect("the registered profile")

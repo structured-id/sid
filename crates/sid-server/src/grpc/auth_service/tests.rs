@@ -1139,3 +1139,31 @@ async fn test_geoip_no_providers_returns_none_country() {
     let result = geoip.resolve(client_ip).await;
     assert!(result.is_none());
 }
+
+/// A registration result recorded before the result lost its Profile
+/// identifier (field 1) is replayed without it: the recorded bytes are
+/// decoded and answered anew, never passed through.
+#[test]
+fn test_a_recorded_registration_result_replays_no_profile_identifier() {
+    use prost::Message;
+    let profile = "0192f3a4-7c1e-7b2a-9d4e-3f5a6b7c8d9e";
+    let credential = "0192f3a4-7c1e-7b2a-9d4e-3f5a6b7c8d9f";
+    // Field 1 (the former profile_id) and field 2 (credential_id), as an
+    // earlier finish recorded them.
+    let mut recorded = Vec::new();
+    prost::encoding::string::encode(1, &profile.to_string(), &mut recorded);
+    prost::encoding::string::encode(2, &credential.to_string(), &mut recorded);
+
+    let replayed: OpaqueZkppRegistrationFinishResponse =
+        AuthServiceImpl::recorded_response(&recorded).unwrap();
+    assert_eq!(replayed.credential_id, credential);
+    let answered = replayed.encode_to_vec();
+    assert_eq!(
+        answered,
+        OpaqueZkppRegistrationFinishResponse {
+            credential_id: credential.to_string(),
+        }
+        .encode_to_vec()
+    );
+    assert!(!String::from_utf8_lossy(&answered).contains(profile));
+}
