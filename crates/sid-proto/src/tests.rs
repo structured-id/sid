@@ -148,6 +148,29 @@ fn every_rpc_is_annotated_or_deliberately_internal() {
     assert_eq!(unannotated, internal);
 }
 
+/// The registration results name only the installed credential: no Profile
+/// identifier under any name or number, field 1 included, so a client cannot
+/// read one from a result of either registration.
+#[test]
+fn registration_results_name_only_the_credential() {
+    let pool = prost_reflect::DescriptorPool::decode(FILE_DESCRIPTOR_SET).unwrap();
+    for message in [
+        "sid.v1.authn.OpaqueZkppRegistrationFinishResponse",
+        "sid.v1.authn.OpaqueRegistrationFinishResponse",
+    ] {
+        let descriptor = pool.get_message_by_name(message).expect(message);
+        let fields: Vec<(String, u32, prost_reflect::Kind)> = descriptor
+            .fields()
+            .map(|f| (f.name().to_owned(), f.number(), f.kind()))
+            .collect();
+        assert_eq!(
+            fields,
+            vec![("credential_id".to_owned(), 2, prost_reflect::Kind::String)],
+            "{message}"
+        );
+    }
+}
+
 /// Every file comes after the files it imports, so the set loads in order.
 #[test]
 fn files_follow_their_imports() {
