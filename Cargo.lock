@@ -6821,9 +6821,9 @@ dependencies = [
 
 [[package]]
 name = "structured-public-domains"
-version = "0.0.39"
+version = "0.0.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76e77a930ca0ec25331e39fda7bc480daa87f57165525f21e2f241374a58d523"
+checksum = "3c99dffabd80db54de9cbf761bd1a4d39e980f8d5f1d10003511c62436ce2662"
 
 [[package]]
 name = "structured-webauthn"
