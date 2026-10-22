@@ -60,9 +60,12 @@ pub enum ClientAuthentication {
 }
 
 impl ClientCredentialConfig {
-    /// From `{prefix}_CLIENT_ID`, `_ISSUER`, `_METHOD` and the method's
-    /// `_SECRET_FILE` or `_KEY_FILE`/`_ALGORITHM`/`_KEY_ID` in the process
-    /// environment; `None` when no client is named.
+    /// From `{prefix}_CLIENT_ID`, `_ISSUER` or `_ISSUER_FILE`, `_METHOD` and
+    /// the method's `_SECRET_FILE` or `_KEY_FILE`/`_ALGORITHM`/`_KEY_ID` in
+    /// the process environment; `None` when no client is named.
+    /// `_ISSUER_FILE` is a document the installation's preparation delivered
+    /// (references or a connection bundle), whose `issuer` member is the
+    /// issuer it allocated.
     pub fn from_env(prefix: &str) -> Result<Option<Self>, CredentialError> {
         Self::from_vars(prefix, |name| {
             std::env::var(name).ok().filter(|v| !v.is_empty())
@@ -102,12 +105,40 @@ impl ClientCredentialConfig {
                 )));
             }
         };
+        let issuer = match (var(&name("ISSUER")), var(&name("ISSUER_FILE"))) {
+            (Some(issuer), None) => issuer,
+            (None, Some(path)) => issuer_from_document(&name("ISSUER_FILE"), &path)?,
+            (Some(_), Some(_)) => {
+                return Err(CredentialError::Config(format!(
+                    "{prefix}_ISSUER and {prefix}_ISSUER_FILE are both set; name the issuer once"
+                )));
+            }
+            (None, None) => {
+                return Err(CredentialError::Config(format!(
+                    "{prefix}_ISSUER or {prefix}_ISSUER_FILE is required with {prefix}_CLIENT_ID"
+                )));
+            }
+        };
         Ok(Some(Self {
-            issuer: required("ISSUER")?,
+            issuer,
             client_id,
             authentication,
         }))
     }
+}
+
+/// The `issuer` member of the delivered JSON document at `path`, named by
+/// the variable `variable`.
+fn issuer_from_document(variable: &str, path: &str) -> Result<String, CredentialError> {
+    #[derive(Deserialize)]
+    struct Delivered {
+        issuer: String,
+    }
+    let refused =
+        |e: &dyn std::fmt::Display| CredentialError::Config(format!("{variable} {path}: {e}"));
+    let bytes = std::fs::read(path).map_err(|e| refused(&e))?;
+    let delivered: Delivered = serde_json::from_slice(&bytes).map_err(|e| refused(&e))?;
+    Ok(delivered.issuer)
 }
 
 /// Why no token is available.
