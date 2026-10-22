@@ -1049,7 +1049,8 @@ async fn test_registration_cannot_claim_provisioned_account() {
 }
 
 /// A new registration creates the profile, its unverified email principal and
-/// contact row, and exactly one OPAQUE credential, all bound to the returned id.
+/// contact row, and exactly one OPAQUE credential; the result names the
+/// credential and carries no Profile identifier.
 #[tokio::test]
 async fn test_registration_creates_account_with_single_principal() {
     let email = "newcomer@sid.example.com";
@@ -1064,7 +1065,28 @@ async fn test_registration_creates_account_with_single_principal() {
         .await
         .unwrap()
         .expect("profile created");
-    assert_eq!(profile.id.to_string(), resp.profile_id);
+    let credential = svc
+        .storage
+        .get_credential(sid_core::models::CredentialId(
+            resp.credential_id.parse().unwrap(),
+        ))
+        .await
+        .unwrap()
+        .expect("the result names the credential");
+    assert_eq!(credential.profile_id, profile.id);
+    // The serialized result: only field 2 (credential_id), no Profile
+    // identifier under any number.
+    assert_eq!(
+        prost::Message::encode_to_vec(&resp),
+        prost::Message::encode_to_vec(&sid_proto::sid::v1::OpaqueZkppRegistrationFinishResponse {
+            credential_id: resp.credential_id.clone(),
+        }),
+    );
+    assert!(
+        !String::from_utf8_lossy(&prost::Message::encode_to_vec(&resp))
+            .contains(&profile.id.to_string()),
+        "no ProfileId in the serialized result"
+    );
     let principals = svc
         .storage
         .get_principals_by_profile(profile.id)

@@ -142,7 +142,8 @@ async fn test_pg_enrollment_create_list_revoke_lifecycle() {
 }
 
 /// ListInviteRedemptions pages through the registrations that used the
-/// invite, oldest first, each with the Profile it created; an unknown invite
+/// invite, oldest first, each with the Profile it created and the credential
+/// it installed (empty for one that installed none); an unknown invite
 /// is NOT_FOUND. The registrations pin the invite-only mode, so the
 /// installation's stored policy is left alone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -163,13 +164,29 @@ async fn test_pg_enrollment_lists_an_invites_redemptions() {
         .into_inner();
 
     let mut registered = Vec::new();
-    for _ in 0..2 {
+    let mut installed = Vec::new();
+    for with_password in [false, true] {
         let name = format!("redeemer-{}", uuid::Uuid::now_v7().simple());
         let profile = sid_core::models::profile::Profile::new(Some(name.clone()));
+        // The second installs a password; its redemption names it.
+        let credential = with_password.then(|| {
+            sid_core::models::Credential::new(
+                profile.id,
+                sid_core::models::CredentialType::Opaque,
+                vec![7u8; 32],
+                None,
+            )
+        });
+        installed.push(
+            credential
+                .as_ref()
+                .map(|c| c.id.0.to_string())
+                .unwrap_or_default(),
+        );
         let registration = sid_core::models::NewRegistration::new(
             profile.clone(),
             sid_core::models::SignupIdentifier::Username(&name),
-            None,
+            credential,
         )
         .unwrap()
         .admitted_by(sid_core::models::EnrollmentGate {
@@ -226,6 +243,9 @@ async fn test_pg_enrollment_lists_an_invites_redemptions() {
     };
     assert_eq!(ids(&first), vec![registered[0].clone()]);
     assert_eq!(ids(&second), vec![registered[1].clone()]);
+    assert_eq!(first.redemptions[0].credential_id, installed[0]);
+    assert_eq!(second.redemptions[0].credential_id, installed[1]);
+    assert!(!installed[1].is_empty());
     assert!(after.redemptions.is_empty());
     assert_eq!(after.next_page_token, "");
     assert!(first.redemptions[0].redeemed_at.is_some());

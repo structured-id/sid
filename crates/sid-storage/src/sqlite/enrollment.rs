@@ -5,8 +5,9 @@ use super::{SqliteBackend, col, dt_col, dt_col_opt, fmt_dt, fmt_dt_opt, insert_e
 use sid_core::{
     Error as SidError, Result as SidResult,
     models::{
-        Invite, InviteCreator, InviteFilter, InviteId, InviteRedemption, MachineUserId,
-        MutationContext, ProfileId, RegistrationSource, RegistrationSourceType, UtmParams,
+        CredentialId, Invite, InviteCreator, InviteFilter, InviteId, InviteRedemption,
+        MachineUserId, MutationContext, ProfileId, RegistrationSource, RegistrationSourceType,
+        UtmParams,
     },
 };
 
@@ -220,7 +221,7 @@ impl SqliteBackend {
         limit: u64,
     ) -> SidResult<Vec<InviteRedemption>> {
         let rows = sqlx::query(
-            "SELECT profile_id, redeemed_at FROM invite_redemptions \
+            "SELECT profile_id, credential_id, redeemed_at FROM invite_redemptions \
              WHERE invite_id = ? ORDER BY redeemed_at, profile_id LIMIT ? OFFSET ?",
         )
         .bind(id.0.to_string())
@@ -231,8 +232,17 @@ impl SqliteBackend {
         .map_err(|e| SidError::Storage(format!("list invite redemptions: {e}")))?;
         rows.iter()
             .map(|row| {
+                let credential: Option<String> = col(row, "credential_id")?;
+                let credential_id = credential
+                    .map(|raw| {
+                        uuid::Uuid::parse_str(&raw)
+                            .map(CredentialId)
+                            .map_err(|e| SidError::Storage(format!("column credential_id: {e}")))
+                    })
+                    .transpose()?;
                 Ok(InviteRedemption {
                     profile_id: col(row, "profile_id")?,
+                    credential_id,
                     redeemed_at: dt_col(row, "redeemed_at")?,
                 })
             })

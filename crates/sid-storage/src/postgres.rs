@@ -1980,16 +1980,6 @@ impl StorageBackend for PostgresBackend {
 
         directory::insert_profile(&mut tx, profile).await?;
 
-        // The invite this registration spent names the Profile it created.
-        if let Some(invite) = spent_invite {
-            sqlx::query("INSERT INTO invite_redemptions (invite_id, profile_id) VALUES ($1, $2)")
-                .bind(invite)
-                .bind(profile.id)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| insert_error("invite redemption", e))?;
-        }
-
         if let Some(email) = email {
             sqlx::query(
                 "INSERT INTO profile_emails (
@@ -2059,6 +2049,20 @@ impl StorageBackend for PostgresBackend {
 
         if let Some(credential) = credential {
             Self::insert_credential_in_tx(&mut tx, credential).await?;
+        }
+        // The invite this registration spent names the Profile it created and
+        // the credential it installed.
+        if let Some(invite) = spent_invite {
+            sqlx::query(
+                "INSERT INTO invite_redemptions (invite_id, profile_id, credential_id)
+                 VALUES ($1, $2, $3)",
+            )
+            .bind(invite)
+            .bind(profile.id)
+            .bind(credential.as_ref().map(|c| c.id.0))
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| insert_error("invite redemption", e))?;
         }
         // A new owner has no history row: nothing can have moved it, so a
         // refusal here is a caller error, not a lost race.
@@ -7825,8 +7829,8 @@ impl StorageBackend for PostgresBackend {
         offset: u64,
         limit: u64,
     ) -> SidResult<Vec<sid_core::models::InviteRedemption>> {
-        let rows: Vec<(ProfileId, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
-            "SELECT profile_id, redeemed_at FROM invite_redemptions
+        let rows: Vec<(ProfileId, Option<Uuid>, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+            "SELECT profile_id, credential_id, redeemed_at FROM invite_redemptions
              WHERE invite_id = $1 ORDER BY redeemed_at, profile_id LIMIT $2 OFFSET $3",
         )
         .bind(id.0)
@@ -7838,8 +7842,9 @@ impl StorageBackend for PostgresBackend {
         Ok(rows
             .into_iter()
             .map(
-                |(profile_id, redeemed_at)| sid_core::models::InviteRedemption {
+                |(profile_id, credential_id, redeemed_at)| sid_core::models::InviteRedemption {
                     profile_id,
+                    credential_id: credential_id.map(sid_core::models::CredentialId),
                     redeemed_at,
                 },
             )

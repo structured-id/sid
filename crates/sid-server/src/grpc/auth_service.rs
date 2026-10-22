@@ -2551,7 +2551,6 @@ impl AuthService for AuthServiceImpl {
         };
         let credential = done.credential(profile_id, done.password_file.clone());
         let response = OpaqueZkppRegistrationFinishResponse {
-            profile_id: profile_id.to_string(),
             credential_id: credential.id.0.to_string(),
         };
         let completion = done.completion(Self::finish_result(&response));

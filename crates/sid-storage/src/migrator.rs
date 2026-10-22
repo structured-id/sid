@@ -395,6 +395,10 @@ const MIGRATIONS: &[Migration] = &[
         name: "20261020_064_invite_creator_and_redemptions",
         sql: include_str!("../../../migrations/20261020_064_invite_creator_and_redemptions.sql"),
     },
+    Migration {
+        name: "20261022_065_invite_redemption_credential",
+        sql: include_str!("../../../migrations/20261022_065_invite_redemption_credential.sql"),
+    },
 ];
 
 /// The history evaluator's own store, in execution order: applied by the

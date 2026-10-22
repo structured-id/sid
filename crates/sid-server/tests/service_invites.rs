@@ -309,12 +309,16 @@ async fn a_service_without_the_role_on_the_enrollment_api_is_refused() {
             .unwrap_err(),
     );
 
-    // Granted, then revoked: refused again at once.
+    // Granted, then revoked: refused again at once, the redemptions of the
+    // invite it created while granted included (a registration finished
+    // between the grant's use and its revocation is not listed to it).
     let assignment = i.grant_on(i.resource.id).await;
-    i.enrollment
+    let created = i
+        .enrollment
         .create_invite(bearing(&token, single_use()))
         .await
-        .unwrap();
+        .unwrap()
+        .into_inner();
     i.svc
         .storage
         .delete_role_assignment(assignment.id, AuditEntry::system("test", "revoke").into())
@@ -323,6 +327,18 @@ async fn a_service_without_the_role_on_the_enrollment_api_is_refused() {
     refused(
         i.enrollment
             .create_invite(bearing(&token, single_use()))
+            .await
+            .unwrap_err(),
+    );
+    refused(
+        i.enrollment
+            .list_invite_redemptions(bearing(
+                &token,
+                ListInviteRedemptionsRequest {
+                    invite_id: created.id,
+                    ..Default::default()
+                },
+            ))
             .await
             .unwrap_err(),
     );

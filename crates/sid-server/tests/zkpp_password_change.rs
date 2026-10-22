@@ -11,9 +11,7 @@ use common::{TestServices, zkpp_client as client};
 use rand::rand_core::UnwrapErr;
 use rand::rngs::SysRng;
 use sid_authn::opaque_zkpp::ZkppConfig;
-use sid_core::models::{
-    AuthLevel, Credential, CredentialId, CurrentPasswordRule, ProfileId, SecurityPolicy,
-};
+use sid_core::models::{AuthLevel, Credential, CredentialId, CurrentPasswordRule, SecurityPolicy};
 use sid_opaque_ke::{
     ClientLogin, ClientLoginFinishParameters, ClientRegistration,
     ClientRegistrationFinishParameters, CredentialResponse, RegistrationResponse,
@@ -116,7 +114,7 @@ async fn registered_with(
     );
     let profile = svc
         .storage
-        .get_profile(ProfileId::parse(&done.profile_id).unwrap())
+        .get_profile(credential.profile_id)
         .await
         .unwrap()
         .unwrap();

@@ -531,19 +531,6 @@ impl SqliteBackend {
 
         super::directory::insert_profile(&mut tx, profile).await?;
 
-        // The invite this registration spent names the Profile it created.
-        if let Some(invite) = spent_invite {
-            sqlx::query(
-                "INSERT INTO invite_redemptions (invite_id, profile_id, redeemed_at) VALUES (?, ?, ?)",
-            )
-            .bind(invite.to_string())
-            .bind(profile.id)
-            .bind(fmt_dt(&chrono::Utc::now()))
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| super::insert_error("invite redemption", e))?;
-        }
-
         if let Some(email) = email {
             sqlx::query(
                 "INSERT INTO profile_emails (id, profile_id, email, label, custom_label, is_primary, verified, verified_at, created_at, updated_at)
@@ -606,6 +593,21 @@ impl SqliteBackend {
 
         if let Some(credential) = credential {
             insert_credential(&mut *tx, credential).await?;
+        }
+        // The invite this registration spent names the Profile it created and
+        // the credential it installed.
+        if let Some(invite) = spent_invite {
+            sqlx::query(
+                "INSERT INTO invite_redemptions (invite_id, profile_id, credential_id, redeemed_at)
+                 VALUES (?, ?, ?, ?)",
+            )
+            .bind(invite.to_string())
+            .bind(profile.id)
+            .bind(credential.as_ref().map(|c| c.id.0.to_string()))
+            .bind(fmt_dt(&chrono::Utc::now()))
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| super::insert_error("invite redemption", e))?;
         }
         // A new owner has no history row: nothing can have moved it, so a
         // refusal here is a caller error, not a lost race.

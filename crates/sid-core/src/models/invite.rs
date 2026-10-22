@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::MachineUserId;
+use super::credential::CredentialId;
 use super::profile::ProfileId;
 
 // ── ID type ─────────────────────────────────────────────────────
@@ -117,10 +118,13 @@ impl InviteCreator {
     }
 }
 
-/// One registration that used an invite: the Profile it created.
+/// One registration that used an invite: the Profile it created and the
+/// credential it installed, by which the client that ran it recognizes it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InviteRedemption {
     pub profile_id: ProfileId,
+    /// `None` for a registration that installed no credential.
+    pub credential_id: Option<CredentialId>,
     pub redeemed_at: DateTime<Utc>,
 }
 

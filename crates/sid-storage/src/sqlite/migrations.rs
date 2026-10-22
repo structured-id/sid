@@ -57,7 +57,15 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         adds_column: Some(("sessions", "browser_csrf")),
     },
     Migration::sql(12, INVITE_CREATOR_AND_REDEMPTIONS),
+    Migration::sql(13, INVITE_REDEMPTION_CREDENTIAL),
 ];
+
+/// The credential an invite registration installed; the PostgreSQL
+/// migration 065 states the contract.
+const INVITE_REDEMPTION_CREDENTIAL: &str = "
+ALTER TABLE invite_redemptions
+    ADD COLUMN credential_id TEXT REFERENCES credentials(id) ON DELETE SET NULL;
+";
 
 /// Invites name a Profile or a machine user as creator, and record the
 /// registrations that used them; the PostgreSQL migration 064 states the
