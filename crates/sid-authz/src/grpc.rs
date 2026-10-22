@@ -218,6 +218,20 @@ fn group_to_proto(g: &Group) -> sid_proto::sid::v1::Group {
     }
 }
 
+/// The keyed command name of AssignRole.
+const ASSIGN_ROLE: &str = "authz.assign_role";
+
+/// A recorded AssignRole answer, as a retry of its command gets it.
+#[allow(clippy::result_large_err)]
+fn decode_assigned(result: &[u8]) -> Result<Response<AssignRoleResponse>, Status> {
+    <AssignRoleResponse as prost::Message>::decode(result)
+        .map(Response::new)
+        .map_err(|e| {
+            tracing::warn!(error = %e, "recorded AssignRole answer unreadable");
+            Status::from(sid_core::grpc_error::ApiError::internal())
+        })
+}
+
 fn assignment_to_proto(a: &RoleAssignment) -> sid_proto::sid::v1::RoleAssignment {
     let principal = match &a.principal {
         RoleAssignmentPrincipal::Profile(pid) => {
@@ -1559,7 +1573,28 @@ impl AuthzService for AuthzServiceImpl {
         let asker = self.asker(&request).await?;
         let administrator = asker.administrator()?;
         self.check_maintenance()?;
+        // A caller that names its command by an operation key gets the
+        // recorded answer on a retry: the assignment the first call made,
+        // whether or not it is still in force, and never a second one.
+        let key = request
+            .metadata()
+            .contains_key(sid_authn::operation::OPERATION_KEY_HEADER)
+            .then(|| sid_authn::operation::required_key(request.metadata()))
+            .transpose()?;
         let req = request.into_inner();
+        let command = key.map(|key| {
+            sid_authn::operation::KeyedCommand::new(
+                format!("authz:{}", administrator.subject()),
+                key,
+                ASSIGN_ROLE,
+                prost::Message::encode_to_vec(&req),
+            )
+        });
+        if let Some(command) = &command
+            && let Some(result) = command.completed(&*self.storage).await?
+        {
+            return decode_assigned(&result);
+        }
 
         let role_id = parse_role_id(&req.role_id)?;
 
@@ -1640,10 +1675,23 @@ impl AuthzService for AuthzServiceImpl {
         let audit = asker
             .audit("role.assign", assignment.id.0.to_string())
             .into();
-        let assignment = crate::admin::RoleAdministration::new(self.storage.clone())
-            .assign(&administrator, assignment, audit)
-            .await
-            .map_err(administration_refusal)?;
+        let assigned = crate::admin::RoleAdministration::new(self.storage.clone())
+            .assign_recording(&administrator, assignment, audit, |stored| {
+                command.as_ref().map(|command| {
+                    command.completion(prost::Message::encode_to_vec(&AssignRoleResponse {
+                        assignment: Some(assignment_to_proto(stored)),
+                    }))
+                })
+            })
+            .await;
+        let assignment = match (assigned, &command) {
+            (Ok(assignment), _) => assignment,
+            // A concurrent call with the same key committed first.
+            (Err(sid_core::Error::OperationCompleted(_)), Some(command)) => {
+                return decode_assigned(&command.committed_elsewhere(&*self.storage).await?);
+            }
+            (Err(e), _) => return Err(administration_refusal(e)),
+        };
 
         info!(
             "Assigned role {} (assignment {})",

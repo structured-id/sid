@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use sid_core::models::{
     AdminOperation, AssignmentFence, AssignmentProvenance, AuthzPrincipal, GroupId,
-    MutationContext, RecipientKind, Role, RoleAssignment, RoleAssignmentId,
+    MutationContext, OperationCompletion, RecipientKind, Role, RoleAssignment, RoleAssignmentId,
     RoleAssignmentPrincipal, RoleEditFence,
 };
 use sid_core::{Error, Result};
@@ -86,8 +86,20 @@ impl RoleAdministration {
     pub async fn assign(
         &self,
         actor: &Administrator,
+        proposed: RoleAssignment,
+        ctx: MutationContext,
+    ) -> Result<RoleAssignment> {
+        self.assign_recording(actor, proposed, ctx, |_| None).await
+    }
+
+    /// [`Self::assign`], committing with the assignment the operation
+    /// completion `record` makes of the assignment as stored.
+    pub async fn assign_recording(
+        &self,
+        actor: &Administrator,
         mut proposed: RoleAssignment,
         ctx: MutationContext,
+        record: impl FnOnce(&RoleAssignment) -> Option<OperationCompletion>,
     ) -> Result<RoleAssignment> {
         let Some(role) = self.storage.get_role(proposed.role_id).await? else {
             return Err(actor.missing(format!("role {}", proposed.role_id.0)));
@@ -137,6 +149,10 @@ impl RoleAdministration {
             depends_on,
             ceiling,
         });
+        let ctx = match record(&proposed) {
+            Some(completion) => ctx.with_operation(completion),
+            None => ctx,
+        };
         self.storage
             .create_role_assignment_fenced(&proposed, &fence, ctx)
             .await?;
