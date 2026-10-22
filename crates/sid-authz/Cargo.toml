@@ -24,6 +24,7 @@ sid-proto = { workspace = true, optional = true }
 async-trait = { workspace = true }
 cedar-policy = { workspace = true }
 chrono = { workspace = true }
+prost = { workspace = true, optional = true }
 prost-types = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -39,7 +40,7 @@ tracing-subscriber = { workspace = true, optional = true }
 
 [features]
 default = ["grpc"]
-grpc = ["dep:sid-authn", "sid-authn/grpc", "sid-core/grpc", "dep:sid-proto", "dep:tonic", "dep:prost-types"]
+grpc = ["dep:sid-authn", "sid-authn/grpc", "sid-core/grpc", "dep:sid-proto", "dep:tonic", "dep:prost", "dep:prost-types"]
 standalone = ["grpc", "dep:anyhow", "dep:tokio", "dep:tracing-subscriber"]
 
 [dev-dependencies]
