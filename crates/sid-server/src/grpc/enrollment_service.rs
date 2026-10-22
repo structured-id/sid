@@ -531,6 +531,7 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
                     .into_iter()
                     .map(|r| sid_proto::sid::v1::admin::InviteRedemption {
                         profile_id: r.profile_id.to_string(),
+                        credential_id: r.credential_id.map(|c| c.0.to_string()).unwrap_or_default(),
                         redeemed_at: Some(convert::to_timestamp(r.redeemed_at)),
                     })
                     .collect(),

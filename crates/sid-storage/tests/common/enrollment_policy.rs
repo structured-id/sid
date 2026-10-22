@@ -328,7 +328,8 @@ pub async fn test_invite_spent_once_by_concurrent_registrations(
 }
 
 /// An invite a machine user created reads back with that creator, and each
-/// registration with it records the Profile it created, oldest first. A
+/// registration with it records the Profile it created and the credential it
+/// installed (none for one without a password), oldest first. A
 /// registration refused after the invite was spent (its username is taken)
 /// rolls the use back with it: no redemption, no use counted.
 pub async fn test_invite_creator_and_redemptions(backend: &dyn StorageBackend) {
@@ -360,10 +361,20 @@ pub async fn test_invite_creator_and_redemptions(backend: &dyn StorageBackend) {
         &format!("red_a_{}", &tag[..12]),
         plain_gate(Some(&invite.code)),
     );
-    let second = gated(
+    let mut second = gated(
         &format!("red_b_{}", &tag[..12]),
         plain_gate(Some(&invite.code)),
     );
+    // The second installs a password: its redemption names that credential,
+    // by which the client that ran it recognizes its own registration.
+    let installed = sid_core::models::Credential::new(
+        second.profile.id,
+        sid_core::models::CredentialType::Opaque,
+        vec![7u8; 32],
+        None,
+    );
+    let installed_id = installed.id;
+    second.credential = Some(installed);
     backend
         .register_profile(&first, test_audit())
         .await
@@ -396,6 +407,14 @@ pub async fn test_invite_creator_and_redemptions(backend: &dyn StorageBackend) {
         page(0, 100).await,
         vec![first.profile.id, second.profile.id]
     );
+    let credentials: Vec<_> = backend
+        .list_invite_redemptions(invite.id, 0, 100)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r.credential_id)
+        .collect();
+    assert_eq!(credentials, vec![None, Some(installed_id)]);
     // Paged one at a time, each redemption once, in the same order.
     assert_eq!(page(0, 1).await, vec![first.profile.id]);
     assert_eq!(page(1, 1).await, vec![second.profile.id]);
