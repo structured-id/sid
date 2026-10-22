@@ -295,3 +295,74 @@ async fn a_token_past_renewal_is_not_fresh() {
     }));
     assert!(credential.fresh().await.is_none());
 }
+
+/// The variables of a basic client, with `extra` added.
+fn vars<'a>(extra: &'a [(&'a str, String)]) -> impl Fn(&str) -> Option<String> + 'a {
+    move |name| match name {
+        "SID_T_CLIENT_ID" => Some("route-checker".into()),
+        "SID_T_METHOD" => Some("client_secret_basic".into()),
+        "SID_T_SECRET_FILE" => Some("/run/secret".into()),
+        _ => extra
+            .iter()
+            .find(|(k, _)| *k == name)
+            .map(|(_, v)| v.clone()),
+    }
+}
+
+fn from_vars(extra: &[(&str, String)]) -> Result<ClientCredentialConfig, String> {
+    ClientCredentialConfig::from_vars("SID_T", vars(extra))
+        .map(|c| c.expect("a client is named"))
+        .map_err(|e| e.to_string())
+}
+
+/// The issuer may come from the file preparation delivered (a references
+/// or connection document): its `issuer` member, so no deployment repeats
+/// the generated issuer URL.
+#[test]
+fn the_issuer_is_read_from_a_delivered_document() {
+    let delivered =
+        File::with(&serde_json::json!({"issuer": ISSUER, "client_id": "x"}).to_string());
+    let config = from_vars(&[("SID_T_ISSUER_FILE", delivered.path())]).unwrap();
+    assert_eq!(config.issuer, ISSUER);
+    assert_eq!(config.client_id, "route-checker");
+}
+
+/// Two sources of the issuer could disagree: one of them only.
+#[test]
+fn the_issuer_and_its_file_together_are_refused() {
+    let delivered = File::with(&serde_json::json!({"issuer": ISSUER}).to_string());
+    let refused = from_vars(&[
+        ("SID_T_ISSUER", ISSUER.to_owned()),
+        ("SID_T_ISSUER_FILE", delivered.path()),
+    ])
+    .unwrap_err();
+    assert!(refused.contains("SID_T_ISSUER_FILE"), "{refused}");
+}
+
+/// Neither source: the issuer is still required.
+#[test]
+fn no_issuer_is_refused() {
+    let refused = from_vars(&[]).unwrap_err();
+    assert!(refused.contains("SID_T_ISSUER"), "{refused}");
+}
+
+/// A document without a string `issuer`, invalid JSON or an unreadable path
+/// names the variable and is never read as some other issuer.
+#[test]
+fn a_document_without_an_issuer_is_refused() {
+    for content in [
+        serde_json::json!({"client_id": "x"}).to_string(),
+        serde_json::json!({"issuer": 1}).to_string(),
+        "not json".to_owned(),
+    ] {
+        let delivered = File::with(&content);
+        let refused = from_vars(&[("SID_T_ISSUER_FILE", delivered.path())]).unwrap_err();
+        assert!(
+            refused.contains("SID_T_ISSUER_FILE"),
+            "{content}: {refused}"
+        );
+    }
+    let refused =
+        from_vars(&[("SID_T_ISSUER_FILE", "/nonexistent/references.json".into())]).unwrap_err();
+    assert!(refused.contains("SID_T_ISSUER_FILE"), "{refused}");
+}
