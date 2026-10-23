@@ -29,13 +29,23 @@ anyhow = { workspace = true, optional = true }
 # The issuer RPC clients (`issuer-client` feature).
 sid-authn = { workspace = true, optional = true }
 tonic = { workspace = true, optional = true }
+http = { workspace = true, optional = true }
+secrecy = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
 
 [features]
 # Each backend is its own capability: a consumer of one never builds or
 # connects the others.
 nats = ["dep:async-nats", "dep:futures", "dep:chrono"]
 redis = ["dep:fred"]
-issuer-client = ["dep:sid-authn", "dep:sid-proto", "dep:tonic"]
+issuer-client = [
+    "dep:sid-authn",
+    "dep:sid-proto",
+    "dep:tonic",
+    "dep:http",
+    "dep:secrecy",
+    "dep:base64",
+]
 http = [
     "dep:sid-proto",
     "dep:structured-proxy",
@@ -46,6 +56,9 @@ http = [
 [dev-dependencies]
 # The tests exercise every backend.
 sid-infra = { path = ".", features = ["nats", "redis", "http", "issuer-client"] }
+# Client assertions are decoded and credential files written by the tests.
+jsonwebtoken = { workspace = true }
+tempfile = "3"
 # Redis runs the cache conformance scenarios.
 sid-plugin = { workspace = true, features = ["conformance"] }
 # Configurations in the tests are written as YAML, as operators write them.

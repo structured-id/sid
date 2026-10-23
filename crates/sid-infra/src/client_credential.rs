@@ -153,7 +153,7 @@ pub enum CredentialError {
 enum Credential {
     Basic(SecretString),
     Post(SecretString),
-    Assertion(crate::client_key::ClientKey),
+    Assertion(sid_authn::client_key::ClientKey),
 }
 
 /// A token in hand. The header value is the form every call sends, so it is
@@ -201,7 +201,7 @@ impl ClientCredential {
         base: &str,
         channel: tonic::transport::Channel,
     ) -> Result<Self, CredentialError> {
-        let api = crate::issuer::authorization_api_endpoint(&config.issuer);
+        let api = sid_authn::issuer::authorization_api_endpoint(&config.issuer);
         Self::load(
             config,
             base,
@@ -267,8 +267,9 @@ impl ClientCredential {
                 key_id,
             } => {
                 let pem = SecretString::from(read(key_file)?);
-                let key = crate::client_key::ClientKey::from_pem(&pem, algorithm, key_id.clone())
-                    .map_err(|e| invalid(format!("{key_file}: {e}")))?;
+                let key =
+                    sid_authn::client_key::ClientKey::from_pem(&pem, algorithm, key_id.clone())
+                        .map_err(|e| invalid(format!("{key_file}: {e}")))?;
                 Credential::Assertion(key)
             }
         };
@@ -332,7 +333,7 @@ impl ClientCredential {
     /// resource, with the required scope when there is one.
     async fn request(&self) -> Result<Held, CredentialError> {
         use sid_proto::sid::v1::OAuth2TokenRequest;
-        let token_endpoint = crate::issuer::token_endpoint(&self.issuer);
+        let token_endpoint = sid_authn::issuer::token_endpoint(&self.issuer);
         let mut body = OAuth2TokenRequest {
             grant_type: "client_credentials".into(),
             scope: self.scope.map(str::to_owned),
@@ -356,7 +357,7 @@ impl ClientCredential {
                         CredentialError::Config(format!("signing the client assertion: {e}"))
                     })?);
                 body.client_assertion_type =
-                    Some(crate::client_assertion::JWT_BEARER_ASSERTION_TYPE.into());
+                    Some(sid_authn::client_assertion::JWT_BEARER_ASSERTION_TYPE.into());
             }
         }
         let mut request = tonic::Request::new(body);

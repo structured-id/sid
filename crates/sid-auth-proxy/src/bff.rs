@@ -22,7 +22,8 @@ use crate::ProxyState;
 use secrecy::{ExposeSecret, SecretString};
 use sid_authn::bff_session::{BffSession, SessionClaims};
 
-use sid_authn::rp_client::{Connection, RpClient, RpClientError};
+use sid_authn::relying_party::Connection;
+use sid_infra::issuer_client::{RpClient, RpClientError};
 
 /// BFF routes.
 pub fn routes() -> Router<ProxyState> {
@@ -359,7 +360,9 @@ fn revocation_failure(failure: &RpClientError) -> GrantOutcome {
             _ => GrantOutcome::NotRevoked,
         },
         // Nothing was sent.
-        RpClientError::Invalid(_) | RpClientError::Key(_) => GrantOutcome::NotRevoked,
+        RpClientError::Invalid(_) | RpClientError::Connection(_) | RpClientError::Key(_) => {
+            GrantOutcome::NotRevoked
+        }
     }
 }
 

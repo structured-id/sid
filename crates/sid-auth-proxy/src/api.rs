@@ -174,7 +174,7 @@ async fn current_token(
         .await
     {
         Ok(tokens) => tokens,
-        Err(sid_authn::rp_client::RpClientError::Rpc(status)) if !transient(&status) => {
+        Err(sid_infra::issuer_client::RpClientError::Rpc(status)) if !transient(&status) => {
             tracing::info!(error = %status, "BFF API: refresh refused, session ended");
             return Err(end_session(state, session_id).await);
         }

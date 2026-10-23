@@ -6,7 +6,7 @@
 //! decided. Forward auth and protected gRPC services ask through this one
 //! path.
 
-use sid_authn::client_credential::ClientCredential;
+use sid_infra::client_credential::ClientCredential;
 
 use super::jwt::ForwardAuthClaims;
 
