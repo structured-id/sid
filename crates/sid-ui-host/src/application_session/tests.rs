@@ -13,7 +13,7 @@ use super::*;
 
 const INSTALLATION: &str = "https://sid.example.com";
 const ISSUER: &str = "https://sid.example.com/i/0123456789abcdef0123456789abcdef";
-const COOKIE: &str = "__Host-ops-bff";
+pub(crate) const COOKIE: &str = "__Host-ops-bff";
 const LONG: Duration = Duration::from_secs(3600);
 
 /// A directory that knows no issuer: these tests never verify a token.
@@ -89,15 +89,16 @@ fn connection() -> Connection {
     .unwrap()
 }
 
-struct Fixture {
-    adapter: ApplicationSessions,
-    sessions: Arc<BffSessionStore>,
+/// An adapter and the stores behind it; the host's tests build on it too.
+pub(crate) struct Fixture {
+    pub(crate) adapter: ApplicationSessions,
+    pub(crate) sessions: Arc<BffSessionStore>,
     revocation: Arc<RevocationCache>,
 }
 
 /// An adapter over `cache`, with the connection delivered or, when
 /// `delivered` is false, to be asked of an issuer that never answers.
-fn fixture(cache: Arc<dyn CacheBackend>, delivered: bool) -> Fixture {
+pub(crate) fn fixture(cache: Arc<dyn CacheBackend>, delivered: bool) -> Fixture {
     let key = ClientKey::generate_ed25519().unwrap().0;
     let client = if delivered {
         RpClient::delivered(key, INSTALLATION.into(), unreachable(), connection())
@@ -120,7 +121,7 @@ fn fixture(cache: Arc<dyn CacheBackend>, delivered: bool) -> Fixture {
     }
 }
 
-fn memory() -> Arc<dyn CacheBackend> {
+pub(crate) fn memory() -> Arc<dyn CacheBackend> {
     Arc::new(InMemoryCacheBackend::new())
 }
 
@@ -145,7 +146,7 @@ fn claims() -> SessionClaims {
 
 /// A session of the delivered connection, with or without a refresh token:
 /// its id and CSRF token.
-async fn signed_in(f: &Fixture, refresh: bool) -> (String, String) {
+pub(crate) async fn signed_in(f: &Fixture, refresh: bool) -> (String, String) {
     f.sessions
         .create_session(
             "access".into(),

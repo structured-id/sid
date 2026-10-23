@@ -769,4 +769,4 @@ fn append(metadata: &mut MetadataMap, name: &'static str, value: &str) {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
