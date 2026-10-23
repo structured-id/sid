@@ -5,7 +5,7 @@
 //! one, from `SID_*` environment variables.
 
 use serde::Deserialize;
-use sid_authn::client_credential::ClientCredentialConfig;
+use sid_infra::client_credential::ClientCredentialConfig;
 
 /// Top-level configuration.
 #[derive(Debug, Clone, Deserialize)]

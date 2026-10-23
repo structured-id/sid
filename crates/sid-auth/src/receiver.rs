@@ -33,8 +33,8 @@ use tonic::server::NamedService;
 
 use crate::auth::jwt::{ForwardAuthClaims, TargetAccess, TokenRefusal, presented_token};
 use crate::auth::policy::Target;
-use sid_authn::client_credential::ClientCredential;
 use sid_authn::issuer_directory::IssuerDirectory;
+use sid_infra::client_credential::ClientCredential;
 
 /// What a receiver admits calls against.
 pub struct Receiver {
@@ -92,7 +92,7 @@ impl Receiver {
             name,
             Arc::new(IssuerDirectory::new(
                 &config.issuer_url,
-                Arc::new(sid_authn::issuer_directory::GrpcIssuerSource::new(
+                Arc::new(sid_infra::issuer_registry::GrpcIssuerSource::new(
                     upstream.clone(),
                 )),
             )),

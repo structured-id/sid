@@ -24,11 +24,11 @@ prost-types = { workspace = true }
 sid-core = { workspace = true, features = ["grpc"] }
 # The shared cache holding revocations and DPoP proof `jti`s.
 sid-plugin = { workspace = true }
-sid-infra = { workspace = true }
+sid-infra = { workspace = true, features = ["redis", "issuer-client"] }
 # Health on shutdown, bounded drain, the shutdown signal.
 sid-serve = { workspace = true }
 # Issuer directory and verification, revocation view and DPoP proof checks.
-sid-authn = { workspace = true, features = ["client-credential", "issuer-registry"] }
+sid-authn = { workspace = true, features = ["grpc"] }
 
 # gRPC services and the client to the SID server
 tonic = { workspace = true }

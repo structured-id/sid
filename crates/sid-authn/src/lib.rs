@@ -32,8 +32,6 @@ pub mod client_address;
 pub mod client_assertion;
 pub mod client_auth;
 pub mod client_connection;
-#[cfg(feature = "client-credential")]
-pub mod client_credential;
 pub mod client_key;
 #[cfg(feature = "grpc")]
 pub mod connector_auth;
@@ -72,12 +70,11 @@ pub mod password_operation;
 pub mod password_sign_in;
 pub mod principal_contest;
 pub(crate) mod recovery;
+pub mod relying_party;
 pub mod resource;
 pub mod resource_token;
 pub mod revocation_cache;
 pub mod revocation_cascade;
-#[cfg(feature = "client-credential")]
-pub mod rp_client;
 pub mod sealed_secret;
 #[cfg(feature = "grpc")]
 pub mod service_auth;

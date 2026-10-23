@@ -37,3 +37,5 @@ conformance = ["tokio/macros", "tokio/time", "dep:futures", "dep:pasta_curves", 
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
+# The in-memory cache runs the cache conformance scenarios.
+sid-plugin = { path = ".", features = ["conformance"] }

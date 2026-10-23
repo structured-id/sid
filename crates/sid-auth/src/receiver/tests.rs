@@ -55,10 +55,10 @@ fn fixture_with(registered: bool) -> Fixture {
     );
     let secret = Secret::new();
     let checker = ClientCredential::checker(
-        &sid_authn::client_credential::ClientCredentialConfig {
+        &sid_infra::client_credential::ClientCredentialConfig {
             issuer: ISSUER.into(),
             client_id: "ops-receiver".into(),
-            authentication: sid_authn::client_credential::ClientAuthentication::ClientSecretBasic {
+            authentication: sid_infra::client_credential::ClientAuthentication::ClientSecretBasic {
                 secret_file: secret.0.display().to_string(),
             },
         },

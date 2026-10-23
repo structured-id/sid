@@ -62,7 +62,7 @@ async fn a_credential_names_the_resource_its_tokens_are_for() {
     let checker = load(&config(ISSUER, basic(&secret))).unwrap();
     assert_eq!(
         checker.resource,
-        crate::issuer::authorization_api_endpoint(ISSUER)
+        sid_authn::issuer::authorization_api_endpoint(ISSUER)
     );
     assert_eq!(checker.scope, Some(sid_core::models::AUTHZ_CHECK));
     let caller = ClientCredential::for_resource(
@@ -196,7 +196,7 @@ fn basic_credentials_read_back_exactly() {
     let secret = SecretString::from("p@ss: word+%41/é".to_owned());
     let header = basic_authorization("svc:checker 1", &secret).unwrap();
     assert!(header.is_sensitive());
-    let read = crate::client_auth::ClientAuthentication::from_request(
+    let read = sid_authn::client_auth::ClientAuthentication::from_request(
         Some(header.to_str().unwrap()),
         None,
         None,
@@ -225,7 +225,7 @@ async fn the_client_assertion_names_the_client_and_the_token_endpoint() {
     let Credential::Assertion(key) = &credential.credential else {
         panic!("a private_key_jwt credential");
     };
-    let audience = crate::issuer::token_endpoint(ISSUER);
+    let audience = sid_authn::issuer::token_endpoint(ISSUER);
     let first = key.sign("route-checker", &audience).unwrap();
     let second = key.sign("route-checker", &audience).unwrap();
     let header = jsonwebtoken::decode_header(&first).unwrap();
@@ -247,7 +247,7 @@ async fn the_client_assertion_names_the_client_and_the_token_endpoint() {
     assert_eq!(first["aud"], audience.as_str());
     assert_eq!(
         first["exp"].as_i64().unwrap() - first["iat"].as_i64().unwrap(),
-        crate::client_key::ASSERTION_LIFETIME_SECS
+        sid_authn::client_key::ASSERTION_LIFETIME_SECS
     );
     assert_ne!(first["jti"], second["jti"]);
 }

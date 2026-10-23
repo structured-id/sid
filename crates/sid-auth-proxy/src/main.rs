@@ -23,7 +23,7 @@ use sid_auth_proxy::shield::Shield;
 use sid_auth_proxy::{ProxyState, api_client, bff, health, metrics};
 use sid_authn::bff_session::BffSessionStore;
 use sid_authn::client_key::ClientKey;
-use sid_authn::rp_client::{Connection, RpClient};
+use sid_infra::issuer_client::RpClient;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -60,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
 
     let issuers = Arc::new(sid_authn::issuer_directory::IssuerDirectory::new(
         config.issuer_url(),
-        Arc::new(sid_authn::issuer_directory::GrpcIssuerSource::new(
+        Arc::new(sid_infra::issuer_registry::GrpcIssuerSource::new(
             grpc_channel.clone(),
         )),
     ));
@@ -83,8 +83,11 @@ async fn main() -> anyhow::Result<()> {
                         .kid()
                         .ok_or_else(|| anyhow::anyhow!("the BFF client key names no key id"))?
                         .to_owned();
-                    let connection =
-                        Connection::load(std::path::Path::new(path), &installation_url, &kid)?;
+                    let connection = sid_infra::issuer_client::load_connection(
+                        std::path::Path::new(path),
+                        &installation_url,
+                        &kid,
+                    )?;
                     tracing::info!(
                         issuer = %connection.issuer,
                         client_id = %connection.client_id,

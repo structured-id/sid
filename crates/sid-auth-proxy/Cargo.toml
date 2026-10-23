@@ -20,7 +20,9 @@ path = "src/lib.rs"
 sid-auth = { path = "../sid-auth", default-features = false }
 # The installation's issuer directory and the verification of the tokens its
 # issuer returns to the BFF.
-sid-authn = { workspace = true, features = ["issuer-registry", "client-credential"] }
+sid-authn = { workspace = true }
+# The issuer registry and the BFF's client at its issuer, over gRPC.
+sid-infra = { workspace = true, features = ["issuer-client"] }
 sid-core = { workspace = true }
 sid-plugin = { workspace = true }
 sid-proto = { workspace = true }
@@ -71,4 +73,4 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tower = { workspace = true, features = ["util"] }
 http-body-util = "0.1"
 # Replica tests run against the real shared cache.
-sid-infra = { workspace = true }
+sid-infra = { workspace = true, features = ["redis"] }

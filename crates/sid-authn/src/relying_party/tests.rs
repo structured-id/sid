@@ -31,25 +31,6 @@ fn a_provisioned_connection_is_accepted() {
     );
 }
 
-/// The account API's answer is the same representation: converted, it is
-/// accepted as the same connection.
-#[test]
-fn the_account_api_answer_is_the_same_connection() {
-    let b = bundle();
-    let answer = AccountConnection {
-        issuer: b.issuer.clone(),
-        client_id: b.client_id.clone(),
-        resource: b.resource.clone(),
-        scopes: b.scopes.clone(),
-        redirect_uri: b.redirect_uri.clone(),
-        token_endpoint_auth_method: b.token_endpoint_auth_method.clone(),
-    };
-    assert_eq!(
-        Connection::accept(answered(answer, KID), INSTALLATION).unwrap(),
-        Connection::accept(b, INSTALLATION).unwrap()
-    );
-}
-
 /// A connection that would have the BFF sign in at another installation,
 /// under a handle that is not one, as a client it cannot authenticate, or
 /// without its target, is refused, wherever it came from.
@@ -175,13 +156,6 @@ fn the_sign_in_binding_covers_the_callback() {
     assert_ne!(moved.sign_in_binding(), base.sign_in_binding());
 }
 
-/// A bundle file that cannot be read is an error, never a fallback.
-#[test]
-fn a_missing_bundle_file_is_an_error() {
-    let missing = std::env::temp_dir().join("sid-bff-connection-that-does-not-exist.json");
-    assert!(Connection::load(&missing, INSTALLATION, KID).is_err());
-}
-
 /// The authorization request is the code flow with S256 PKCE, for the
 /// connection's API, returning to the registered callback; every value is
 /// encoded, none is taken from the browser's request.
@@ -206,55 +180,4 @@ fn the_authorization_request_asks_for_the_connection_resource() {
     assert_eq!(query["code_challenge_method"], "S256");
     assert_eq!(query["state"], "state-1");
     assert_eq!(query["nonce"], "nonce-1");
-}
-
-/// A lazy channel to nowhere.
-fn unreachable() -> tonic::transport::Channel {
-    tonic::transport::Channel::from_static("http://127.0.0.1:1")
-        .connect_timeout(std::time::Duration::from_millis(100))
-        .connect_lazy()
-}
-
-fn key() -> ClientKey {
-    ClientKey::generate_ed25519().unwrap().0
-}
-
-/// Without the issuer the connection is not learned, and the next call asks
-/// again instead of keeping the failure.
-#[tokio::test]
-async fn an_unreachable_issuer_is_asked_again() {
-    let client = RpClient::new(key(), INSTALLATION.into(), unreachable()).unwrap();
-    assert!(matches!(
-        client.connection().await,
-        Err(RpClientError::Rpc(_))
-    ));
-    assert!(client.connection.get().is_none());
-    assert!(client.connection().await.is_err());
-}
-
-/// A client given its connection by the deployment never asks the issuer for
-/// one: the unreachable channel is not called.
-#[tokio::test]
-async fn a_delivered_connection_needs_no_discovery() {
-    let connection = Connection::accept(bundle(), INSTALLATION).unwrap();
-    let client = RpClient::delivered(
-        key(),
-        INSTALLATION.into(),
-        unreachable(),
-        connection.clone(),
-    )
-    .unwrap();
-    assert_eq!(client.connection().await.unwrap(), &connection);
-}
-
-/// A key that names no key id cannot be this client's: the registration
-/// lists the client's keys by id, and connection proofs are issued by it.
-#[tokio::test]
-async fn a_key_without_an_id_is_refused() {
-    let (_, pem) = ClientKey::generate_ed25519().unwrap();
-    let unnamed = ClientKey::from_pem(&pem, "EdDSA", None).unwrap();
-    assert!(matches!(
-        RpClient::new(unnamed, INSTALLATION.into(), unreachable()),
-        Err(RpClientError::Invalid(_))
-    ));
 }

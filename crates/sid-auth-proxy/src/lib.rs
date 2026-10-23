@@ -33,7 +33,7 @@ pub struct ProxyState {
     pub bff_enabled: bool,
     /// The BFF as the account integration's client; absent without a
     /// configured client key.
-    pub account: Option<Arc<sid_authn::rp_client::RpClient>>,
+    pub account: Option<Arc<sid_infra::issuer_client::RpClient>>,
     /// Where `/api/*` goes: the account API's gRPC-Web endpoint.
     pub api_upstream: Option<url::Url>,
     /// HTTP client for the account API. Follows no redirect: the API's

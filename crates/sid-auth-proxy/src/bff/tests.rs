@@ -4,7 +4,7 @@ use super::*;
 use axum::body::Body;
 use axum::http::{HeaderValue, Request};
 use sid_authn::bff_session::BffSessionStore;
-use sid_authn::rp_client::RpClient;
+use sid_infra::issuer_client::RpClient;
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -663,7 +663,8 @@ fn test_revocation_failure_outcome() {
         Code::Aborted,
         Code::DataLoss,
     ] {
-        let failure = sid_authn::rp_client::RpClientError::Rpc(tonic::Status::new(code, "lost"));
+        let failure =
+            sid_infra::issuer_client::RpClientError::Rpc(tonic::Status::new(code, "lost"));
         assert_eq!(
             revocation_failure(&failure),
             GrantOutcome::Unknown,
@@ -679,14 +680,15 @@ fn test_revocation_failure_outcome() {
         Code::ResourceExhausted,
         Code::Unimplemented,
     ] {
-        let failure = sid_authn::rp_client::RpClientError::Rpc(tonic::Status::new(code, "refused"));
+        let failure =
+            sid_infra::issuer_client::RpClientError::Rpc(tonic::Status::new(code, "refused"));
         assert_eq!(
             revocation_failure(&failure),
             GrantOutcome::NotRevoked,
             "{code:?}"
         );
     }
-    let unsigned = sid_authn::rp_client::RpClientError::Key(
+    let unsigned = sid_infra::issuer_client::RpClientError::Key(
         sid_authn::client_key::ClientKeyError::Unsupported("no key".into()),
     );
     assert_eq!(revocation_failure(&unsigned), GrantOutcome::NotRevoked);

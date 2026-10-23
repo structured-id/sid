@@ -22,12 +22,12 @@ sid-plugin = { workspace = true }
 arc-swap = { workspace = true }
 async-trait = { workspace = true }
 sid-admin = { workspace = true }
-sid-authn = { workspace = true, features = ["grpc", "client-credential", "password-operation"] }
+sid-authn = { workspace = true, features = ["grpc", "password-operation"] }
 sid-authz = { workspace = true }
 sid-fed = { workspace = true }
 sid-proto = { workspace = true }
 sid-storage = { workspace = true, default-features = false }
-sid-infra = { workspace = true }
+sid-infra = { workspace = true, features = ["nats", "redis", "issuer-client"] }
 sid-serve = { workspace = true }
 sid-notify = { workspace = true }
 ipnet = { workspace = true }
@@ -157,6 +157,8 @@ sid-serve = { workspace = true, features = ["error-contract"] }
 sid-auth = { path = "../sid-auth" }
 # The account BFF is checked end to end against this server's services.
 sid-auth-proxy = { path = "../sid-auth-proxy" }
+# The BFF test reads this server's issuer registry over gRPC.
+sid-infra = { workspace = true, features = ["issuer-client"] }
 prost = { workspace = true }
 serde-saphyr = { workspace = true }
 axum = { workspace = true }

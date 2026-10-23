@@ -42,6 +42,10 @@ const SESSION_PREFIX: &str = "bff:sess:3:";
 const PENDING_PREFIX: &str = "bff:pending:4:";
 /// Key prefix for the claim on a session's refresh.
 const REFRESH_PREFIX: &str = "bff:refresh:";
+/// How many times a token replacement is applied again over concurrent idle
+/// pushes before it is reported: each push is one write per half idle window
+/// per replica, so a few attempts outlast any real interleaving.
+const REPLACE_ATTEMPTS: usize = 4;
 
 /// Failures of the session store. Callers decide what an outage means for
 /// their request; the type makes them.
@@ -255,11 +259,25 @@ impl BffSessionStore {
         // refresh enough: a session in use is rewritten long before its TTL
         // runs out, and one that goes quiet still expires on time.
         let now = Utc::now();
-        if age(session.last_access) >= self.idle_timeout / 2 {
-            session.last_access = now;
-            self.write(id, &session).await?;
-        } else {
-            session.last_access = now;
+        let due = age(session.last_access) >= self.idle_timeout / 2;
+        session.last_access = now;
+        // The push replaces exactly what was read: a session another replica
+        // destroyed or refreshed since is never written back over.
+        if due && !self.rewrite(id, &raw, &session).await? {
+            return self.read_current(id).await;
+        }
+        Ok(Some(session))
+    }
+
+    /// The session as it is now, read again after a write lost to another
+    /// replica's, without pushing its window again: that replica just wrote it.
+    async fn read_current(&self, id: &str) -> SessionResult<Option<BffSession>> {
+        let Some(raw) = self.cache.get(&session_key(id)).await? else {
+            return Ok(None);
+        };
+        let session: BffSession = serde_json::from_slice(&raw)?;
+        if age(session.created_at) >= self.max_age {
+            return Ok(None);
         }
         Ok(Some(session))
     }
@@ -292,15 +310,40 @@ impl BffSessionStore {
         refresh_token: Option<SecretString>,
         claims: SessionClaims,
     ) -> SessionResult<bool> {
-        let Some(raw) = self.cache.get(&session_key(id)).await? else {
-            return Ok(false);
-        };
-        let mut session: BffSession = serde_json::from_slice(&raw)?;
-        session.access_token = access_token;
-        session.refresh_token = refresh_token;
-        session.claims = claims;
-        self.write(id, &session).await?;
-        Ok(true)
+        // Applied to the session as it is when written: a concurrent idle push
+        // makes the write miss and it is applied again over that push; a
+        // sign-out ends the attempt. Only the refresh holder replaces tokens,
+        // so other writers only push the idle window and the loop ends.
+        for _ in 0..REPLACE_ATTEMPTS {
+            let Some(raw) = self.cache.get(&session_key(id)).await? else {
+                return Ok(false);
+            };
+            let mut session: BffSession = serde_json::from_slice(&raw)?;
+            session.access_token = access_token.clone();
+            session.refresh_token = refresh_token.clone();
+            session.claims = claims.clone();
+            if self.rewrite(id, &raw, &session).await? {
+                return Ok(true);
+            }
+        }
+        Err(SessionStoreError::Backend(CacheError::Other(format!(
+            "session {id} kept changing while its tokens were replaced"
+        ))))
+    }
+
+    /// Replace the stored form `read` of session `id` with `session`, under
+    /// its current idle window: `false` when it was destroyed or rewritten
+    /// since `read`.
+    async fn rewrite(&self, id: &str, read: &[u8], session: &BffSession) -> SessionResult<bool> {
+        Ok(self
+            .cache
+            .compare_and_set(
+                &session_key(id),
+                read,
+                &serde_json::to_vec(session)?,
+                self.idle_timeout,
+            )
+            .await?)
     }
 
     /// Store a sign-in started under the sign-in binding `connection`;

@@ -95,6 +95,17 @@ impl CacheBackend for CountingCache {
     async fn set_nx(&self, key: &str, value: &[u8], ttl: Duration) -> CacheResult<bool> {
         self.inner.set_nx(key, value, ttl).await
     }
+    async fn compare_and_set(
+        &self,
+        key: &str,
+        expected: &[u8],
+        value: &[u8],
+        ttl: Duration,
+    ) -> CacheResult<bool> {
+        self.writes
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.inner.compare_and_set(key, expected, value, ttl).await
+    }
     async fn publish(&self, channel: &str, message: &[u8]) -> CacheResult<()> {
         self.inner.publish(channel, message).await
     }
@@ -104,6 +115,223 @@ impl CacheBackend for CountingCache {
     async fn health_check(&self) -> CacheResult<()> {
         self.inner.health_check().await
     }
+}
+
+/// What another replica does to a session between this one's read and its
+/// write.
+enum Meanwhile {
+    /// Signs the session out.
+    Destroy,
+    /// Stores its own version of the session (a refresh it completed).
+    Write(Vec<u8>),
+}
+
+/// A working cache that lets another replica act right after the next read
+/// of a key: a deterministic stand-in for the interleaving of two replicas
+/// sharing one store.
+struct InterleavingCache {
+    inner: InMemoryCacheBackend,
+    after_read: std::sync::Mutex<Option<(String, Meanwhile)>>,
+}
+
+impl InterleavingCache {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryCacheBackend::new(),
+            after_read: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// After the next read of `key`, `meanwhile` happens.
+    fn after_next_read(&self, key: String, meanwhile: Meanwhile) {
+        *self.after_read.lock().unwrap() = Some((key, meanwhile));
+    }
+}
+
+#[async_trait]
+impl CacheBackend for InterleavingCache {
+    async fn get(&self, key: &str) -> CacheResult<Option<Vec<u8>>> {
+        let read = self.inner.get(key).await?;
+        let due = {
+            let mut armed = self.after_read.lock().unwrap();
+            match armed.take() {
+                Some((armed_key, meanwhile)) if armed_key == key => Some(meanwhile),
+                other => {
+                    *armed = other;
+                    None
+                }
+            }
+        };
+        match due {
+            Some(Meanwhile::Destroy) => self.inner.delete(key).await?,
+            Some(Meanwhile::Write(value)) => self.inner.set(key, &value, LONG).await?,
+            None => {}
+        }
+        Ok(read)
+    }
+    async fn set(&self, key: &str, value: &[u8], ttl: Duration) -> CacheResult<()> {
+        self.inner.set(key, value, ttl).await
+    }
+    async fn delete(&self, key: &str) -> CacheResult<()> {
+        self.inner.delete(key).await
+    }
+    async fn take(&self, key: &str) -> CacheResult<Option<Vec<u8>>> {
+        self.inner.take(key).await
+    }
+    async fn set_nx(&self, key: &str, value: &[u8], ttl: Duration) -> CacheResult<bool> {
+        self.inner.set_nx(key, value, ttl).await
+    }
+    async fn compare_and_set(
+        &self,
+        key: &str,
+        expected: &[u8],
+        value: &[u8],
+        ttl: Duration,
+    ) -> CacheResult<bool> {
+        self.inner.compare_and_set(key, expected, value, ttl).await
+    }
+    async fn publish(&self, channel: &str, message: &[u8]) -> CacheResult<()> {
+        self.inner.publish(channel, message).await
+    }
+    async fn subscribe(&self, channel: &str) -> CacheResult<mpsc::UnboundedReceiver<Vec<u8>>> {
+        self.inner.subscribe(channel).await
+    }
+    async fn health_check(&self) -> CacheResult<()> {
+        self.inner.health_check().await
+    }
+}
+
+/// A session whose idle window is due to be pushed out on its next read,
+/// stored over `cache`: its id and stored form.
+async fn idle_session(s: &BffSessionStore, cache: &InterleavingCache) -> (String, BffSession) {
+    let (id, _) = s
+        .create_session("access".into(), Some("refresh".into()), test_claims(), CONN)
+        .await
+        .unwrap();
+    let raw = cache.inner.get(&session_key(&id)).await.unwrap().unwrap();
+    let mut session: BffSession = serde_json::from_slice(&raw).unwrap();
+    session.last_access = Utc::now() - chrono::Duration::hours(2);
+    cache
+        .inner
+        .set(
+            &session_key(&id),
+            &serde_json::to_vec(&session).unwrap(),
+            LONG,
+        )
+        .await
+        .unwrap();
+    (id, session)
+}
+
+/// A sign-out on another replica between this replica's read and its push of
+/// the idle window must stay a sign-out: the push must not write the session
+/// back.
+#[tokio::test]
+async fn test_idle_push_does_not_resurrect_a_destroyed_session() {
+    let cache = Arc::new(InterleavingCache::new());
+    let s = build(cache.clone(), LONG, LONG);
+    let (id, _) = idle_session(&s, &cache).await;
+
+    cache.after_next_read(session_key(&id), Meanwhile::Destroy);
+    assert!(s.get_session(&id).await.unwrap().is_none());
+    assert!(cache.inner.get(&session_key(&id)).await.unwrap().is_none());
+}
+
+/// A refresh another replica stored between this replica's read and its push
+/// of the idle window must survive: the push must not restore the refresh
+/// token the issuer already rotated.
+#[tokio::test]
+async fn test_idle_push_does_not_undo_a_refresh() {
+    let cache = Arc::new(InterleavingCache::new());
+    let s = build(cache.clone(), LONG, LONG);
+    let (id, mut refreshed) = idle_session(&s, &cache).await;
+    refreshed.access_token = "access-2".into();
+    refreshed.refresh_token = Some("refresh-2".into());
+
+    cache.after_next_read(
+        session_key(&id),
+        Meanwhile::Write(serde_json::to_vec(&refreshed).unwrap()),
+    );
+    s.get_session(&id).await.unwrap();
+
+    let stored: BffSession =
+        serde_json::from_slice(&cache.inner.get(&session_key(&id)).await.unwrap().unwrap())
+            .unwrap();
+    assert_eq!(
+        stored
+            .refresh_token
+            .as_ref()
+            .map(ExposeSecret::expose_secret),
+        Some("refresh-2")
+    );
+    assert_eq!(stored.bearer(), "access-2");
+}
+
+/// Tokens of a refresh that completes after the session was signed out are
+/// not stored: the session stays gone.
+#[tokio::test]
+async fn test_replace_tokens_does_not_resurrect_a_destroyed_session() {
+    let cache = Arc::new(InterleavingCache::new());
+    let s = build(cache.clone(), LONG, LONG);
+    let (id, _) = s
+        .create_session("access".into(), Some("refresh".into()), test_claims(), CONN)
+        .await
+        .unwrap();
+
+    cache.after_next_read(session_key(&id), Meanwhile::Destroy);
+    let replaced = s
+        .replace_tokens(
+            &id,
+            "access-2".into(),
+            Some("refresh-2".into()),
+            test_claims(),
+        )
+        .await
+        .unwrap();
+    assert!(!replaced);
+    assert!(cache.inner.get(&session_key(&id)).await.unwrap().is_none());
+}
+
+/// Tokens of a refresh are stored even when another write (an idle push)
+/// landed between the read and the write: the refresh is applied to the
+/// current session, not lost.
+#[tokio::test]
+async fn test_replace_tokens_applies_over_a_concurrent_write() {
+    let cache = Arc::new(InterleavingCache::new());
+    let s = build(cache.clone(), LONG, LONG);
+    let (id, mut touched) = idle_session(&s, &cache).await;
+    touched.last_access = Utc::now();
+
+    cache.after_next_read(
+        session_key(&id),
+        Meanwhile::Write(serde_json::to_vec(&touched).unwrap()),
+    );
+    let replaced = s
+        .replace_tokens(
+            &id,
+            "access-2".into(),
+            Some("refresh-2".into()),
+            test_claims(),
+        )
+        .await
+        .unwrap();
+    assert!(replaced);
+    let stored = s.get_session(&id).await.unwrap().unwrap();
+    assert_eq!(stored.bearer(), "access-2");
+}
+
+/// One refresh per session at a time, across replicas: the first claim wins
+/// and the others are refused until it expires.
+#[tokio::test]
+async fn test_claim_refresh_has_one_holder() {
+    let (a, b) = replica_pair();
+    let (id, _) = a
+        .create_session("access".into(), Some("refresh".into()), test_claims(), CONN)
+        .await
+        .unwrap();
+    assert!(a.claim_refresh(&id, LONG).await.unwrap());
+    assert!(!b.claim_refresh(&id, LONG).await.unwrap());
+    assert!(!a.claim_refresh(&id, LONG).await.unwrap());
 }
 
 /// A backend whose every call fails, to prove the store reports the failure

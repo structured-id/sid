@@ -14,7 +14,8 @@ use crate::auth::ext_authz::ExtAuthzImpl;
 use crate::auth::forward_auth_grpc::ForwardAuthServiceImpl;
 use crate::auth::policy::PolicyEngine;
 use crate::config::AuthConfig;
-use sid_authn::issuer_directory::{GrpcIssuerSource, IssuerDirectory};
+use sid_authn::issuer_directory::IssuerDirectory;
+use sid_infra::issuer_registry::GrpcIssuerSource;
 
 /// Request headers the transcoder hands to `Verify` as metadata: the
 /// original request as the reverse proxy forwards it. Forwarding them is
@@ -59,7 +60,7 @@ impl AuthServer {
             .authz_checker
             .as_ref()
             .map(|checker| {
-                sid_authn::client_credential::ClientCredential::checker(
+                sid_infra::client_credential::ClientCredential::checker(
                     checker,
                     &config.issuer_url,
                     upstream.clone(),

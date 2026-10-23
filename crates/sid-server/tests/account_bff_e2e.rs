@@ -20,9 +20,9 @@ use secrecy::ExposeSecret;
 use sid_auth_proxy::ProxyState;
 use sid_authn::bff_session::BffSessionStore;
 use sid_authn::client_key::ClientKey;
-use sid_authn::rp_client::RpClient;
 use sid_authn::system_integration::{AccountSettings, ensure_account_integration};
 use sid_core::models::{ClientKeySet, Profile};
+use sid_infra::issuer_client::RpClient;
 use sid_proto::sid::v1::auth_service_server::{AuthService, AuthServiceServer};
 use sid_proto::sid::v1::identity_service_server::IdentityServiceServer;
 use sid_proto::sid::v1::oidc_issuer_service_server::OidcIssuerServiceServer;
@@ -118,7 +118,7 @@ fn replica(deployment: &Deployment) -> axum::Router {
         issuer_url: installation.clone(),
         issuers: Arc::new(sid_authn::issuer_directory::IssuerDirectory::new(
             &installation,
-            Arc::new(sid_authn::issuer_directory::GrpcIssuerSource::new(
+            Arc::new(sid_infra::issuer_registry::GrpcIssuerSource::new(
                 channel.clone(),
             )),
         )),
