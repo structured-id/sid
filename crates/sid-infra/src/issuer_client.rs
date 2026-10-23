@@ -19,6 +19,8 @@ use sid_proto::sid::v1::{
 };
 use tokio::sync::OnceCell;
 
+use crate::deadline::IssuerChannel;
+
 /// Why the adapter cannot act as its client right now.
 #[derive(Debug, thiserror::Error)]
 pub enum RpClientError {
@@ -72,7 +74,7 @@ pub struct RpClient {
     /// proofs are issued by.
     kid: String,
     installation_url: String,
-    channel: tonic::transport::Channel,
+    channel: IssuerChannel,
     connection: OnceCell<Connection>,
 }
 
@@ -92,7 +94,7 @@ impl RpClient {
     pub fn new(
         key: ClientKey,
         installation_url: String,
-        channel: tonic::transport::Channel,
+        channel: IssuerChannel,
     ) -> Result<Self, RpClientError> {
         Self::with(key, installation_url, channel, OnceCell::new())
     }
@@ -102,7 +104,7 @@ impl RpClient {
     pub fn delivered(
         key: ClientKey,
         installation_url: String,
-        channel: tonic::transport::Channel,
+        channel: IssuerChannel,
         connection: Connection,
     ) -> Result<Self, RpClientError> {
         Self::with(
@@ -116,7 +118,7 @@ impl RpClient {
     fn with(
         key: ClientKey,
         installation_url: String,
-        channel: tonic::transport::Channel,
+        channel: IssuerChannel,
         connection: OnceCell<Connection>,
     ) -> Result<Self, RpClientError> {
         let kid = key

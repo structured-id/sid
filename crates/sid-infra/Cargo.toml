@@ -32,6 +32,10 @@ tonic = { workspace = true, optional = true }
 http = { workspace = true, optional = true }
 secrecy = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
+# The bound on a whole issuer answer, its body included.
+http-body = { version = "1", optional = true }
+bytes = { version = "1", optional = true }
+tower = { workspace = true, optional = true }
 
 [features]
 # Each backend is its own capability: a consumer of one never builds or
@@ -45,6 +49,11 @@ issuer-client = [
     "dep:http",
     "dep:secrecy",
     "dep:base64",
+    "dep:http-body",
+    "dep:bytes",
+    "dep:tower",
+    "tokio/time",
+    "tokio/macros",
 ]
 http = [
     "dep:sid-proto",
@@ -68,3 +77,5 @@ tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"
 uuid = { workspace = true }
 # An empty set of services stands in for the embedder's own.
 tonic = { workspace = true }
+http-body-util = "0.1"
+tower = { workspace = true, features = ["util"] }

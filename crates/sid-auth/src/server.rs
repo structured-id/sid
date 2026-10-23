@@ -56,6 +56,9 @@ impl AuthServer {
             .connect_timeout(std::time::Duration::from_secs(5))
             .timeout(std::time::Duration::from_secs(5))
             .connect_lazy();
+        // Issuer calls end within the same bound, their whole answer included.
+        let issuer =
+            sid_infra::deadline::Deadline::new(upstream.clone(), std::time::Duration::from_secs(5));
         let checker = config
             .authz_checker
             .as_ref()
@@ -63,7 +66,7 @@ impl AuthServer {
                 sid_infra::client_credential::ClientCredential::checker(
                     checker,
                     &config.issuer_url,
-                    upstream.clone(),
+                    issuer.clone(),
                 )
                 .map(Arc::new)
             })
@@ -71,7 +74,7 @@ impl AuthServer {
         let pdp = Arc::new(Pdp {
             issuers: Arc::new(IssuerDirectory::new(
                 &config.issuer_url,
-                Arc::new(GrpcIssuerSource::new(upstream.clone())),
+                Arc::new(GrpcIssuerSource::new(issuer.clone())),
             )),
             applications: Arc::new(applications),
             revocation: crate::revocation_view(cache.clone()),

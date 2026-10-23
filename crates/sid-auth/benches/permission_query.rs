@@ -119,7 +119,7 @@ fn main() {
         let checker = sid_infra::client_credential::ClientCredential::checker(
             &issuer.client_config(CHECKER, &secret),
             INSTALLATION,
-            channel.clone(),
+            sid_infra::deadline::issuer(channel.clone()),
         )
         .expect("checker credential");
         let authorization = checker.authorization().await.expect("checker token");

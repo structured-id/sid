@@ -123,11 +123,12 @@ async fn replica(deployment: &Deployment) -> String {
             .unwrap();
     let revocation = sid_auth::revocation_view(deployment.svc.cache.clone());
     revocation.listen().await.unwrap();
+    let issuer = sid_infra::deadline::issuer(channel.clone());
     let adapter = ApplicationSessions::new(
-        Arc::new(RpClient::new(key, installation.clone(), channel.clone()).unwrap()),
+        Arc::new(RpClient::new(key, installation.clone(), issuer.clone()).unwrap()),
         Arc::new(IssuerDirectory::new(
             &installation,
-            Arc::new(GrpcIssuerSource::new(channel.clone())),
+            Arc::new(GrpcIssuerSource::new(issuer)),
         )),
         Arc::new(sessions(deployment)),
         revocation,
@@ -614,6 +615,104 @@ async fn an_expired_token_is_refreshed_before_the_call() {
     assert!(after.claims.exp > chrono::Utc::now().timestamp());
 }
 
+/// A refresh the issuer committed but whose answer never came back: the
+/// session still holds the replaced refresh token, its access token expired.
+/// `within_grace` says whether the next call comes inside the issuer's grace
+/// window for a replaced token. The session id and the replaced token.
+async fn after_a_lost_refresh(
+    deployment: &Deployment,
+    browser: &Browser,
+    within_grace: bool,
+) -> (String, secrecy::SecretString) {
+    let id = browser.cookie.split_once('=').unwrap().1.to_owned();
+    let store = sessions(deployment);
+    let before = store.get_session(&id).await.unwrap().unwrap();
+    let held = before
+        .refresh_token
+        .clone()
+        .expect("the sign-in granted a refresh token");
+    let mut expired = before.claims.clone();
+    expired.exp = 0;
+    assert!(matches!(
+        store
+            .replace_tokens(
+                &id,
+                &held,
+                before.access_token.clone(),
+                before.refresh_token.clone(),
+                expired,
+            )
+            .await
+            .unwrap(),
+        sid_authn::bff_session::TokenReplacement::Replaced
+    ));
+    // The refresh the issuer commits; its answer is dropped, as one lost on
+    // the way back would be.
+    let link = RpClient::new(
+        ClientKey::ed25519_from_pem(&secrecy::SecretString::from(deployment.key_pem.as_str()))
+            .unwrap(),
+        deployment.installation.clone(),
+        sid_infra::deadline::issuer(
+            tonic::transport::Channel::from_shared(format!("http://{}", deployment.addr))
+                .unwrap()
+                .connect_lazy(),
+        ),
+    )
+    .unwrap();
+    let connection = link.connection().await.unwrap();
+    let _lost = link
+        .refresh(connection, held.expose_secret().to_owned())
+        .await
+        .expect("the issuer commits the refresh");
+    if !within_grace {
+        deployment.svc.mock_storage.end_refresh_grace();
+    }
+    (id, held)
+}
+
+/// Inside the issuer's grace window the replaced token is accepted once
+/// more: the next call refreshes with it and goes through as the same user,
+/// and the session holds the newly rotated token.
+#[tokio::test]
+async fn a_lost_refresh_answer_is_recovered_within_the_grace_window() {
+    let deployment = deploy().await;
+    let replica = replica(&deployment).await;
+    let browser = sign_in(&deployment, &replica).await;
+    let (id, held) = after_a_lost_refresh(&deployment, &browser, true).await;
+
+    let (profile, status) = current_profile(&replica, &browser, true).await;
+    assert_eq!(status, "0");
+    assert_eq!(profile.unwrap(), deployment.profile.id.to_string());
+    let after = sessions(&deployment)
+        .get_session(&id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!after.holds_refresh_token(&held));
+    assert!(after.claims.exp > chrono::Utc::now().timestamp());
+}
+
+/// After the grace window the replaced token reads as theft: the issuer ends
+/// the grant, and the session ends with it (UNAUTHENTICATED) instead of
+/// holding a token the issuer no longer honours.
+#[tokio::test]
+async fn a_lost_refresh_answer_after_the_grace_window_ends_the_session() {
+    let deployment = deploy().await;
+    let replica = replica(&deployment).await;
+    let browser = sign_in(&deployment, &replica).await;
+    let (id, _) = after_a_lost_refresh(&deployment, &browser, false).await;
+
+    let (_, status) = current_profile(&replica, &browser, true).await;
+    assert_eq!(status, "16");
+    assert!(
+        sessions(&deployment)
+            .get_session(&id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
 /// Sign-out ends the application session and revokes its grant at SID: the
 /// cookie no longer opens anything, and the refresh token the session held
 /// is dead.
@@ -650,9 +749,11 @@ async fn sign_out_revokes_the_grant() {
         ClientKey::ed25519_from_pem(&secrecy::SecretString::from(deployment.key_pem.as_str()))
             .unwrap(),
         deployment.installation.clone(),
-        tonic::transport::Channel::from_shared(format!("http://{}", deployment.addr))
-            .unwrap()
-            .connect_lazy(),
+        sid_infra::deadline::issuer(
+            tonic::transport::Channel::from_shared(format!("http://{}", deployment.addr))
+                .unwrap()
+                .connect_lazy(),
+        ),
     )
     .unwrap();
     let connection = link.connection().await.unwrap();

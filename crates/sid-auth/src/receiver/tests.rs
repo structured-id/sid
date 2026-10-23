@@ -63,7 +63,7 @@ fn fixture_with(registered: bool) -> Fixture {
             },
         },
         "https://sid.example.com",
-        crate::test_channel(),
+        sid_infra::deadline::issuer(crate::test_channel()),
     )
     .unwrap();
     let cache: Arc<dyn sid_plugin::cache::CacheBackend> =

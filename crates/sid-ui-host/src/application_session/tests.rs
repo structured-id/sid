@@ -67,10 +67,8 @@ impl CacheBackend for Down {
     }
 }
 
-fn unreachable() -> tonic::transport::Channel {
-    tonic::transport::Channel::from_static("http://127.0.0.1:1")
-        .connect_timeout(Duration::from_millis(100))
-        .connect_lazy()
+fn unreachable() -> sid_infra::deadline::IssuerChannel {
+    sid_infra::deadline::bounded_channel("http://127.0.0.1:1", Duration::from_millis(100)).unwrap()
 }
 
 fn connection() -> Connection {

@@ -235,3 +235,58 @@ async fn without_an_api_other_calls_are_unimplemented() {
     assert_eq!(grpc_status(&answer), "12");
     assert_eq!(reason(&answer), "FEATURE_NOT_AVAILABLE");
 }
+
+/// A unary call's bound covers the whole answer, its message and final
+/// status included, also after the peer sent successful response headers:
+/// an issuer that stops mid-answer fails the call at the bound.
+async fn assert_unary_response_is_bounded(frame: bytes::Bytes) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = format!("http://{}", listener.local_addr().unwrap());
+    let seen = Arc::new(tokio::sync::Notify::new());
+    let called = seen.clone();
+    let router = axum::Router::new().fallback(axum::routing::post(move || {
+        let frame = frame.clone();
+        let called = called.clone();
+        async move {
+            called.notify_one();
+            let body = http_body_util::Full::new(frame).with_trailers(std::future::pending::<
+                Option<Result<http::HeaderMap, Infallible>>,
+            >());
+            http::Response::builder()
+                .header("content-type", "application/grpc")
+                .body(axum::body::Body::new(body))
+                .unwrap()
+        }
+    }));
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let channel = bounded_channel(&address, Duration::from_millis(300)).unwrap();
+    let mut client =
+        sid_proto::sid::v1::oidc_issuer_service_client::OidcIssuerServiceClient::new(channel);
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(2),
+        client.get_oidc_issuer(sid_proto::sid::v1::GetOidcIssuerRequest {
+            handle: "0123456789abcdef0123456789abcdef".into(),
+        }),
+    )
+    .await;
+    // This outer limit bounds the test itself; reaching it is a failure,
+    // never evidence that the call's bound worked.
+    let reached = tokio::time::timeout(Duration::from_millis(100), seen.notified()).await;
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+    assert!(reached.is_ok(), "the request reached the issuer");
+    let refused = outcome.expect("the call's bound covers the body and the trailers");
+    assert_eq!(refused.unwrap_err().code(), tonic::Code::DeadlineExceeded);
+}
+
+/// Headers followed by an unfinished message.
+#[tokio::test]
+async fn the_bound_covers_an_unfinished_message() {
+    assert_unary_response_is_bounded(bytes::Bytes::from_static(&[0, 0, 0, 0, 1])).await;
+}
+
+/// A whole message and no final status.
+#[tokio::test]
+async fn the_bound_covers_missing_trailers() {
+    assert_unary_response_is_bounded(bytes::Bytes::from_static(&[0, 0, 0, 0, 0])).await;
+}
