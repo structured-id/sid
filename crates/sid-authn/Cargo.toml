@@ -112,7 +112,6 @@ grpc = ["dep:tonic", "sid-core/grpc"]
 client-credential = ["grpc", "dep:sid-proto", "dep:http"]
 # The installation's issuer registry over gRPC, the source of the issuer
 # directory in a process that does not hold the registry itself.
-issuer-registry = ["grpc", "dep:sid-proto"]
 # The password-installing operation (registration, change, reset) with its
 # history checker, and the history evaluator in process or as its own
 # service.

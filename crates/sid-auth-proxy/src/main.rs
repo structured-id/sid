@@ -59,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
 
     let issuers = Arc::new(sid_authn::issuer_directory::IssuerDirectory::new(
         config.issuer_url(),
-        Arc::new(sid_authn::issuer_directory::GrpcIssuerSource::new(
+        Arc::new(sid_infra::issuer_registry::GrpcIssuerSource::new(
             grpc_channel.clone(),
         )),
     ));
