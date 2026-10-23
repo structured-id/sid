@@ -206,6 +206,12 @@ impl BffSessionStore {
         }
     }
 
+    /// How long a started sign-in waits for its callback: the lifetime of
+    /// anything a browser holds for it.
+    pub fn pending_ttl(&self) -> Duration {
+        self.pending_ttl
+    }
+
     /// Store a new session issued under `connection`; returns
     /// (session id, CSRF token).
     pub async fn create_session(

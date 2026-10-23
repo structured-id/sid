@@ -214,7 +214,7 @@ async fn sign_in_redirects_to_the_issuer() {
     assert_eq!(query["code_challenge_method"], "S256");
     assert_eq!(query["resource"], "https://ops.sid.example.com/api/");
     assert!(!query["nonce"].is_empty());
-    let browser = response
+    let secret = response
         .metadata()
         .get("set-cookie")
         .unwrap()
@@ -229,7 +229,7 @@ async fn sign_in_redirects_to_the_issuer() {
         .to_owned();
     let pending = f
         .sessions
-        .take_pending(&query["state"], &browser_binding(&connection(), &browser))
+        .take_pending(&query["state"], &browser_binding(&connection(), &secret))
         .await
         .unwrap()
         .expect("the sign-in is recorded under its state");
@@ -269,17 +269,17 @@ async fn sign_in_with_the_store_down_is_unavailable() {
     assert!(response.metadata().get("location").is_none());
 }
 
-/// The sign-in browser cookie's name for the fixture's application.
-const SIGN_IN_COOKIE: &str = "__Host-ops-bff-signin";
+/// The prefix of the fixture application's sign-in correlation cookies.
+const SIGN_IN_COOKIE: &str = "__Host-ops-bff-signin-";
 
-/// A sign-in started by a browser that sends `cookie` (none for a fresh one):
-/// its state and the `cookie` header that browser sends from then on.
-async fn started(f: &Fixture, cookie: Option<&str>) -> (String, String) {
-    let request = match cookie {
-        Some(cookie) => with_cookie(StartSignInRequest { rd: "/".into() }, cookie, None),
-        None => Request::new(StartSignInRequest { rd: "/".into() }),
-    };
-    let response = f.adapter.start_sign_in(request).await.unwrap();
+/// A sign-in started by a browser that sent no cookie: its state and the
+/// `name=value` of the correlation cookie the browser keeps for it.
+async fn started(f: &Fixture) -> (String, String) {
+    let response = f
+        .adapter
+        .start_sign_in(Request::new(StartSignInRequest { rd: "/".into() }))
+        .await
+        .unwrap();
     assert_eq!(status(&response), "302");
     let location: url::Url = response
         .metadata()
@@ -315,9 +315,18 @@ fn callback(state: &str, iss: &str) -> CompleteSignInRequest {
     }
 }
 
-/// A sign-in binds the browser that started it with an HttpOnly, host-only
-/// cookie; a second sign-in in the same browser (another tab) keeps that
-/// binding rather than replacing it.
+/// The cookie that clears `pair`'s cookie, as a response to `response` sets it.
+fn clears(response: &Response<HttpBody>, pair: &str) -> bool {
+    let name = pair.split_once('=').unwrap().0;
+    response.metadata().get_all("set-cookie").iter().any(|set| {
+        let set = set.to_str().unwrap();
+        set.starts_with(&format!("{name}=;")) && set.contains("Max-Age=0")
+    })
+}
+
+/// Each sign-in binds the browser that started it with a correlation cookie
+/// of its own: HttpOnly, host-only, sent on the issuer's redirect back, and
+/// living no longer than the sign-in.
 #[tokio::test]
 async fn a_sign_in_binds_its_browser() {
     let f = fixture(memory(), true);
@@ -332,71 +341,96 @@ async fn a_sign_in_binds_its_browser() {
         .unwrap()
         .to_str()
         .unwrap();
-    assert!(set.starts_with(&format!("{SIGN_IN_COOKIE}=")), "{set}");
+    assert!(set.starts_with(SIGN_IN_COOKIE), "{set}");
     assert!(
-        set.contains("; Path=/; Secure; HttpOnly; SameSite=Lax"),
+        set.contains(&format!(
+            "; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age={}",
+            LONG.as_secs()
+        )),
         "{set}"
     );
-
-    let (_, browser) = started(&f, None).await;
-    let (_, again) = started(&f, Some(&browser)).await;
-    assert_eq!(again, browser, "another tab keeps the browser's binding");
 }
 
 /// A callback is completed only by the browser that started its sign-in
-/// (RFC 6749 §10.12, RFC 9700 §4.7.1): one without the sign-in cookie, or
-/// with another browser's, is refused before any code is redeemed, and the
-/// sign-in stays for its own browser, which completes it once.
+/// (RFC 6749 §10.12, RFC 9700 §4.7.1): one without its correlation cookie,
+/// with another transaction's cookie or with this cookie's name carrying
+/// another transaction's secret is refused before any code is redeemed, and
+/// the sign-in stays for its own browser, which completes it once.
 #[tokio::test]
 async fn only_the_starting_browser_completes_a_sign_in() {
     let f = fixture(memory(), true);
-    let (state, browser) = started(&f, None).await;
-    let (_, other_browser) = started(&f, None).await;
-    assert_ne!(browser, other_browser);
-
+    let (state, own) = started(&f).await;
+    let (_, other) = started(&f).await;
+    let swapped = format!(
+        "{}={}",
+        own.split_once('=').unwrap().0,
+        other.split_once('=').unwrap().1
+    );
     let without = f
         .adapter
         .complete_sign_in(Request::new(callback(&state, ISSUER)))
         .await
         .unwrap();
     assert_eq!(status(&without), "400");
-    assert!(without.metadata().get("set-cookie").is_none());
-    let foreign = f
-        .adapter
-        .complete_sign_in(with_cookie(callback(&state, ISSUER), &other_browser, None))
-        .await
-        .unwrap();
-    assert_eq!(status(&foreign), "400");
+    for wrong in [&other, &swapped] {
+        let refused = f
+            .adapter
+            .complete_sign_in(with_cookie(callback(&state, ISSUER), wrong, None))
+            .await
+            .unwrap();
+        assert_eq!(status(&refused), "400", "{wrong}");
+    }
 
     // The starting browser reaches the code redemption: the issuer is
-    // unreachable here, so 502, not the 400 of an unknown sign-in.
-    let own = f
+    // unreachable here, so 502, not the 400 of an unknown sign-in; the
+    // sign-in is over, so its cookie is cleared.
+    let completed = f
         .adapter
-        .complete_sign_in(with_cookie(callback(&state, ISSUER), &browser, None))
+        .complete_sign_in(with_cookie(callback(&state, ISSUER), &own, None))
         .await
         .unwrap();
-    assert_eq!(status(&own), "502");
+    assert_eq!(status(&completed), "502");
+    assert!(clears(&completed, &own));
     let replay = f
         .adapter
-        .complete_sign_in(with_cookie(callback(&state, ISSUER), &browser, None))
+        .complete_sign_in(with_cookie(callback(&state, ISSUER), &own, None))
         .await
         .unwrap();
     assert_eq!(status(&replay), "400", "the sign-in is taken once");
 }
 
-/// Two tabs of one browser start two sign-ins; each completes.
+/// Two tabs start their first sign-ins at once, neither sending a cookie;
+/// the browser keeps both correlation cookies, in whatever order they come.
+/// Each callback finds its own sign-in and clears only its own cookie.
 #[tokio::test]
-async fn sign_ins_of_two_tabs_both_complete() {
-    let f = fixture(memory(), true);
-    let (first, browser) = started(&f, None).await;
-    let (second, _) = started(&f, Some(&browser)).await;
-    for state in [first, second] {
-        let response = f
+async fn concurrent_first_sign_ins_both_complete() {
+    for a_first in [true, false] {
+        let f = fixture(memory(), true);
+        let ((a, cookie_a), (b, cookie_b)) = tokio::join!(started(&f), started(&f));
+        assert_ne!(
+            cookie_a.split_once('=').unwrap().0,
+            cookie_b.split_once('=').unwrap().0,
+            "each sign-in has a cookie of its own"
+        );
+        let jar = if a_first {
+            format!("{cookie_a}; {cookie_b}")
+        } else {
+            format!("{cookie_b}; {cookie_a}")
+        };
+        let first = f
             .adapter
-            .complete_sign_in(with_cookie(callback(&state, ISSUER), &browser, None))
+            .complete_sign_in(with_cookie(callback(&a, ISSUER), &jar, None))
             .await
             .unwrap();
-        assert_eq!(status(&response), "502", "reaches the code redemption");
+        assert_eq!(status(&first), "502", "reaches the code redemption");
+        assert!(clears(&first, &cookie_a) && !clears(&first, &cookie_b));
+        // A's cookie is gone from the jar; B still completes.
+        let second = f
+            .adapter
+            .complete_sign_in(with_cookie(callback(&b, ISSUER), &cookie_b, None))
+            .await
+            .unwrap();
+        assert_eq!(status(&second), "502", "reaches the code redemption");
     }
 }
 
@@ -406,7 +440,7 @@ async fn sign_ins_of_two_tabs_both_complete() {
 #[tokio::test]
 async fn a_callback_must_name_a_recorded_sign_in_of_the_issuer() {
     let f = fixture(memory(), true);
-    let (state, browser) = started(&f, None).await;
+    let (state, browser) = started(&f).await;
     let unknown = f
         .adapter
         .complete_sign_in(with_cookie(
@@ -441,7 +475,7 @@ async fn a_callback_must_name_a_recorded_sign_in_of_the_issuer() {
 #[tokio::test]
 async fn an_authorization_error_is_refused() {
     let f = fixture(memory(), true);
-    let (state, browser) = started(&f, None).await;
+    let (state, browser) = started(&f).await;
     let response = f
         .adapter
         .complete_sign_in(with_cookie(
@@ -457,7 +491,18 @@ async fn an_authorization_error_is_refused() {
         .await
         .unwrap();
     assert_eq!(status(&response), "403");
-    assert!(response.metadata().get("set-cookie").is_none());
+    // No session is made; the ended sign-in's correlation cookie is cleared.
+    let set: Vec<_> = response
+        .metadata()
+        .get_all("set-cookie")
+        .iter()
+        .map(|v| v.to_str().unwrap().to_owned())
+        .collect();
+    assert!(
+        set.iter().all(|c| !c.starts_with(&format!("{COOKIE}="))),
+        "{set:?}"
+    );
+    assert!(clears(&response, &browser));
 }
 
 /// The session read answers the user and the CSRF token of a live session,

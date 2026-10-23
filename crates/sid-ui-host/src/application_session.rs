@@ -17,7 +17,9 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rand::TryRng;
 use secrecy::{ExposeSecret, SecretString};
 use sha2::{Digest, Sha256};
-use sid_authn::bff_session::{BffSession, BffSessionStore, SessionClaims, TokenReplacement};
+use sid_authn::bff_session::{
+    BffSession, BffSessionStore, PendingSignIn, SessionClaims, TokenReplacement,
+};
 use sid_authn::issuer_directory::IssuerDirectory;
 use sid_authn::relying_party::Connection;
 use sid_authn::revocation_cache::RevocationCache;
@@ -291,10 +293,14 @@ impl ApplicationSessions {
         }
     }
 
-    /// The name of the cookie binding a pending sign-in to its browser,
-    /// beside the session cookie under the same `__Host-` prefix.
-    fn sign_in_cookie(&self) -> String {
-        format!("{}-signin", self.cookie)
+    /// The name of the correlation cookie of the sign-in `state` names, beside
+    /// the session cookie under the same `__Host-` prefix: one name per
+    /// sign-in, so sign-ins started together never replace each other's. The
+    /// name is a digest of the state, a fixed short token whatever the
+    /// callback sent.
+    fn sign_in_cookie(&self, state: &str) -> String {
+        let digest = Sha256::digest(state.as_bytes());
+        format!("{}-signin-{}", self.cookie, hex::encode(&digest[..8]))
     }
 
     /// The `set-cookie` value carrying session `id`: host-only (`__Host-`),
@@ -336,11 +342,10 @@ impl ApplicationSessionService for ApplicationSessions {
         // Same shape and strength as the verifier: 256 random bits.
         let nonce = random_token();
         let return_to = local_path(&request.get_ref().rd);
-        // The browser this sign-in belongs to. Another tab of the same browser
-        // keeps the binding it already has, so its own sign-in stays valid.
-        let browser = cookie_value(request.metadata(), &self.sign_in_cookie())
-            .filter(|value| is_random_token(value))
-            .unwrap_or_else(random_token);
+        // The secret only the browser that started this sign-in holds, in a
+        // correlation cookie of this sign-in alone: sign-ins started at once in
+        // several tabs each keep their own and none replaces another's.
+        let secret = random_token();
         // Without a store there is no sign-in to start: sending the browser on
         // with a state nobody can verify would make the callback unverifiable.
         let state = match self
@@ -349,7 +354,7 @@ impl ApplicationSessionService for ApplicationSessions {
                 SecretString::from(verifier),
                 nonce.clone(),
                 return_to,
-                &browser_binding(connection, &browser),
+                &browser_binding(connection, &secret),
             )
             .await
         {
@@ -368,8 +373,9 @@ impl ApplicationSessionService for ApplicationSessions {
             response.metadata_mut(),
             "set-cookie",
             &format!(
-                "{}={browser}; Path=/; Secure; HttpOnly; SameSite=Lax",
-                self.sign_in_cookie()
+                "{}={secret}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age={}",
+                self.sign_in_cookie(&state),
+                self.sessions.pending_ttl().as_secs()
             ),
         );
         Ok(response)
@@ -383,10 +389,12 @@ impl ApplicationSessionService for ApplicationSessions {
         // (RFC 6749 §10.12, RFC 9700 §4.7.1): otherwise an attacker's own
         // unused code, sent to a victim's browser, would sign the victim in
         // to the attacker's account.
-        let Some(browser) = cookie_value(request.metadata(), &self.sign_in_cookie()) else {
+        let state = &request.get_ref().state;
+        let Some(secret) = cookie_value(request.metadata(), &self.sign_in_cookie(state)) else {
             return Ok(page(400, "This sign-in was started in another browser."));
         };
         let params = request.into_inner();
+        let correlation = self.sign_in_cookie(&params.state);
         let connection = match self.connection().await {
             Ok(connection) => connection,
             Err(e) => {
@@ -399,7 +407,7 @@ impl ApplicationSessionService for ApplicationSessions {
         // its own browser, or a replica that still holds that connection.
         let pending = match self
             .sessions
-            .take_pending(&params.state, &browser_binding(connection, &browser))
+            .take_pending(&params.state, &browser_binding(connection, &secret))
             .await
         {
             Ok(Some(pending)) => pending,
@@ -411,20 +419,52 @@ impl ApplicationSessionService for ApplicationSessions {
                 return Ok(page(503, "The sign-in is not available right now."));
             }
         };
+        // The sign-in is taken, whatever comes of it: its correlation cookie,
+        // and only its own, is cleared.
+        let mut response = self.finish_sign_in(connection, params, pending).await;
+        append(
+            response.metadata_mut(),
+            "set-cookie",
+            &format!("{correlation}=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0"),
+        );
+        Ok(response)
+    }
+
+    async fn get_application_session(
+        &self,
+        request: Request<GetApplicationSessionRequest>,
+    ) -> Result<Response<ApplicationSession>, Status> {
+        self.read_session(request).await
+    }
+
+    async fn end_application_session(
+        &self,
+        request: Request<EndApplicationSessionRequest>,
+    ) -> Result<Response<EndApplicationSessionResponse>, Status> {
+        self.end_session(request).await
+    }
+}
+
+impl ApplicationSessions {
+    /// The rest of a callback whose sign-in was taken: the issuer's answer is
+    /// checked, the code redeemed, its tokens verified and the session made.
+    async fn finish_sign_in(
+        &self,
+        connection: &Connection,
+        params: CompleteSignInRequest,
+        pending: PendingSignIn,
+    ) -> Response<HttpBody> {
         // The answer must come from the application's issuer (RFC 9207 §2.4).
         if params.iss.as_deref() != Some(connection.issuer.as_str()) {
             tracing::warn!("authorization response from another issuer");
-            return Ok(page(
-                400,
-                "The sign-in answer did not come from the issuer.",
-            ));
+            return page(400, "The sign-in answer did not come from the issuer.");
         }
         if let Some(error) = &params.error {
             tracing::warn!(%error, "authorization error");
-            return Ok(page(403, "The sign-in was refused."));
+            return page(403, "The sign-in was refused.");
         }
         let Some(code) = params.code else {
-            return Ok(page(400, "The sign-in answer carries no code."));
+            return page(400, "The sign-in answer carries no code.");
         };
         let tokens = match self
             .client
@@ -438,7 +478,7 @@ impl ApplicationSessionService for ApplicationSessions {
             Ok(tokens) => tokens,
             Err(e) => {
                 tracing::error!(error = %e, "code redemption failed");
-                return Ok(page(502, "The issuer did not complete the sign-in."));
+                return page(502, "The issuer did not complete the sign-in.");
             }
         };
         let mut claims = match self
@@ -453,14 +493,14 @@ impl ApplicationSessionService for ApplicationSessions {
             Ok(claims) => SessionClaims::from(claims),
             Err(e) => {
                 tracing::error!(error = %e, "issued token is not for the application's API");
-                return Ok(page(502, "The issuer did not complete the sign-in."));
+                return page(502, "The issuer did not complete the sign-in.");
             }
         };
         // The ID token is this sign-in's (its nonce) and the user's profile
         // claims come from it; an access token carries none (RFC 9068 §2.2).
         let Some(id_token) = tokens.id_token.as_deref() else {
             tracing::error!("no ID token for an openid sign-in");
-            return Ok(page(502, "The issuer did not complete the sign-in."));
+            return page(502, "The issuer did not complete the sign-in.");
         };
         let identity = match self
             .issuers
@@ -475,12 +515,12 @@ impl ApplicationSessionService for ApplicationSessions {
             Ok(identity) => identity,
             Err(e) => {
                 tracing::error!(error = %e, "the ID token is not this sign-in's");
-                return Ok(page(502, "The issuer did not complete the sign-in."));
+                return page(502, "The issuer did not complete the sign-in.");
             }
         };
         if identity.sub != claims.sub {
             tracing::error!("ID and access tokens name different users");
-            return Ok(page(502, "The issuer did not complete the sign-in."));
+            return page(502, "The issuer did not complete the sign-in.");
         }
         claims.email = identity.email;
         claims.name = identity.name;
@@ -499,7 +539,7 @@ impl ApplicationSessionService for ApplicationSessions {
             Ok(created) => created,
             Err(e) => {
                 tracing::error!(error = %e, "cannot store the session");
-                return Ok(page(503, "The sign-in is not available right now."));
+                return page(503, "The sign-in is not available right now.");
             }
         };
         let mut response = redirect(&pending.redirect_url);
@@ -508,10 +548,10 @@ impl ApplicationSessionService for ApplicationSessions {
             "set-cookie",
             &self.session_cookie(&session_id),
         );
-        Ok(response)
+        response
     }
 
-    async fn get_application_session(
+    async fn read_session(
         &self,
         request: Request<GetApplicationSessionRequest>,
     ) -> Result<Response<ApplicationSession>, Status> {
@@ -529,7 +569,7 @@ impl ApplicationSessionService for ApplicationSessions {
         Ok(response)
     }
 
-    async fn end_application_session(
+    async fn end_session(
         &self,
         request: Request<EndApplicationSessionRequest>,
     ) -> Result<Response<EndApplicationSessionResponse>, Status> {
@@ -669,15 +709,6 @@ fn browser_binding(connection: &Connection, browser: &str) -> String {
     format!("{}\n{browser}", connection.sign_in_binding())
 }
 
-/// Whether `value` has the shape [`random_token`] produces: a browser cookie
-/// of any other shape is not one this adapter set.
-fn is_random_token(value: &str) -> bool {
-    value.len() == 43
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-}
-
 /// 256 random bits, base64url: a PKCE verifier (RFC 7636 §4.1) or a nonce.
 fn random_token() -> String {
     let mut bytes = [0u8; 32];
@@ -721,6 +752,17 @@ fn insert(metadata: &mut MetadataMap, name: &'static str, value: &str) {
     match MetadataValue::try_from(value) {
         Ok(value) => {
             metadata.insert(name, value);
+        }
+        Err(e) => tracing::error!(error = %e, name, "not a header value"),
+    }
+}
+
+/// [`insert`], keeping the values already under `name`: a response sets
+/// several cookies, one `set-cookie` each (RFC 6265bis §3).
+fn append(metadata: &mut MetadataMap, name: &'static str, value: &str) {
+    match MetadataValue::try_from(value) {
+        Ok(value) => {
+            metadata.append(name, value);
         }
         Err(e) => tracing::error!(error = %e, name, "not a header value"),
     }
