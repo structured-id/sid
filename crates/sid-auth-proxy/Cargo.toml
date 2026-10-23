@@ -16,9 +16,11 @@ name = "sid_auth_proxy"
 path = "src/lib.rs"
 
 [dependencies]
-# Token claims, issuer registry and revocation view shared with the decision service.
+# Token claims and revocation view shared with the decision service.
 sid-auth = { path = "../sid-auth", default-features = false }
-sid-authn = { workspace = true }
+# The installation's issuer directory and the verification of the tokens its
+# issuer returns to the BFF.
+sid-authn = { workspace = true, features = ["issuer-registry"] }
 sid-core = { workspace = true }
 sid-plugin = { workspace = true }
 sid-proto = { workspace = true }

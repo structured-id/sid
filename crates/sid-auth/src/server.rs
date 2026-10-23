@@ -14,7 +14,7 @@ use crate::auth::ext_authz::ExtAuthzImpl;
 use crate::auth::forward_auth_grpc::ForwardAuthServiceImpl;
 use crate::auth::policy::PolicyEngine;
 use crate::config::AuthConfig;
-use crate::issuers::{GrpcIssuerSource, IssuerDirectory};
+use sid_authn::issuer_directory::{GrpcIssuerSource, IssuerDirectory};
 
 /// Request headers the transcoder hands to `Verify` as metadata: the
 /// original request as the reverse proxy forwards it. Forwarding them is

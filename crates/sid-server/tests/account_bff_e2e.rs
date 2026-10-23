@@ -112,9 +112,11 @@ fn replica(deployment: &Deployment) -> axum::Router {
     let key = ClientKey::from_pem(deployment.key_pem.as_bytes()).unwrap();
     let state = ProxyState {
         issuer_url: installation.clone(),
-        issuers: Arc::new(sid_auth::issuers::IssuerDirectory::new(
+        issuers: Arc::new(sid_authn::issuer_directory::IssuerDirectory::new(
             &installation,
-            Arc::new(sid_auth::issuers::GrpcIssuerSource::new(channel.clone())),
+            Arc::new(sid_authn::issuer_directory::GrpcIssuerSource::new(
+                channel.clone(),
+            )),
         )),
         grpc_channel: channel.clone(),
         revocation: sid_auth::revocation_view(deployment.svc.cache.clone()),

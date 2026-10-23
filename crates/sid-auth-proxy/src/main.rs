@@ -57,9 +57,9 @@ async fn main() -> anyhow::Result<()> {
     let revocation = sid_auth::revocation_view(cache.clone());
     revocation.listen().await?;
 
-    let issuers = Arc::new(sid_auth::issuers::IssuerDirectory::new(
+    let issuers = Arc::new(sid_authn::issuer_directory::IssuerDirectory::new(
         config.issuer_url(),
-        Arc::new(sid_auth::issuers::GrpcIssuerSource::new(
+        Arc::new(sid_authn::issuer_directory::GrpcIssuerSource::new(
             grpc_channel.clone(),
         )),
     ));
