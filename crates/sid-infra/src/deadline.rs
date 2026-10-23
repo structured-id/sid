@@ -62,7 +62,7 @@ fn exceeded() -> tonic::Status {
 
 impl<S, B> tower::Service<http::Request<Body>> for Deadline<S>
 where
-    S: tower::Service<http::Request<Body>, Response = http::Response<B>> + Send + 'static,
+    S: tower::Service<http::Request<Body>, Response = http::Response<B>> + Clone + Send + 'static,
     S::Future: Send + 'static,
     S::Error: Into<BoxError>,
     B: http_body::Body<Data = Bytes> + Send + 'static,
@@ -72,16 +72,28 @@ where
     type Error = BoxError;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, BoxError>> + Send>>;
 
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.inner.poll_ready(cx).map_err(Into::into)
+    /// Always ready: waiting for the inner channel to take the call (a full
+    /// request queue, no endpoint yet) is part of the call, so it happens in
+    /// [`call`](Self::call), under the call's deadline. A readiness wait here
+    /// would run before the deadline starts.
+    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
     }
 
     fn call(&mut self, request: http::Request<Body>) -> Self::Future {
         let mut deadline = Box::pin(tokio::time::sleep(self.limit));
-        let response = self.inner.call(request);
+        // A clone takes this call and waits for its own readiness, as tower's
+        // buffered services do; the channel's clones share one connection.
+        let mut inner = self.inner.clone();
         Box::pin(async move {
+            let response = async {
+                std::future::poll_fn(|cx| inner.poll_ready(cx))
+                    .await
+                    .map_err(Into::into)?;
+                inner.call(request).await.map_err(Into::into)
+            };
             let response = tokio::select! {
-                response = response => response.map_err(Into::into)?,
+                response = response => response?,
                 () = &mut deadline => return Err(exceeded().into()),
             };
             Ok(response.map(|body| {
