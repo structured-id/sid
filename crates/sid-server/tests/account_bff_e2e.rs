@@ -778,3 +778,79 @@ async fn sign_out_revokes_the_grant() {
             .is_err()
     );
 }
+
+/// Two replicas asked at once for the account with one expired session both
+/// answer it: one refreshes, the other waits for that refresh; neither
+/// replays the rotated token, so the grant lives on.
+#[tokio::test]
+async fn two_replicas_refresh_one_session_at_once() {
+    let deployment = deploy().await;
+    let first = replica(&deployment).await;
+    let second = replica(&deployment).await;
+    let browser = sign_in(&deployment, &first).await;
+    let id = browser.cookie.split_once('=').unwrap().1;
+    let store = sessions(&deployment);
+    let before = store.get_session(id).await.unwrap().unwrap();
+    let held = before.refresh_token.clone().unwrap();
+    let mut expired = before.claims.clone();
+    expired.exp = 0;
+    assert!(matches!(
+        store
+            .replace_tokens(
+                id,
+                &held,
+                before.access_token.clone(),
+                before.refresh_token.clone(),
+                expired
+            )
+            .await
+            .unwrap(),
+        sid_authn::bff_session::TokenReplacement::Replaced
+    ));
+    let (a, b) = tokio::join!(
+        current_profile(&first, &browser, true),
+        current_profile(&second, &browser, true),
+    );
+    for (profile, status) in [a, b] {
+        assert_eq!(status, "0");
+        assert_eq!(profile.unwrap(), deployment.profile.id.to_string());
+    }
+    let after = store.get_session(id).await.unwrap().unwrap();
+    assert!(!after.holds_refresh_token(&held));
+    assert!(after.claims.exp > chrono::Utc::now().timestamp());
+    assert_eq!(current_profile(&second, &browser, true).await.1, "0");
+}
+
+/// A used callback stays used on every replica: replayed through the first
+/// and another replica at once, it is refused with no new cookie, and the
+/// browser's session keeps working.
+#[tokio::test]
+async fn a_replayed_callback_is_refused_on_every_replica() {
+    let deployment = deploy().await;
+    let first = replica(&deployment).await;
+    let second = replica(&deployment).await;
+    let login = start(&first, None).await;
+    let correlation = set_cookie(&login, &format!("{COOKIE}-signin-"));
+    let asked = query(login.headers()["location"].to_str().unwrap());
+    let callback = complete(&deployment, &first, &asked, &correlation).await;
+    let browser = signed_in(&first, &callback).await;
+    let path = format!(
+        "{}?{}",
+        callback.url().path(),
+        callback.url().query().unwrap()
+    );
+    let a = http()
+        .get(format!("{first}{path}"))
+        .header("cookie", &correlation);
+    let b = http()
+        .get(format!("{second}{path}"))
+        .header("cookie", &correlation);
+    let (a, b) = tokio::join!(a.send(), b.send());
+    for answer in [a.unwrap(), b.unwrap()] {
+        assert_eq!(answer.status(), reqwest::StatusCode::BAD_REQUEST);
+        assert!(!answer.headers().contains_key("set-cookie"));
+    }
+    let (profile, status) = current_profile(&second, &browser, true).await;
+    assert_eq!(status, "0");
+    assert_eq!(profile.unwrap(), deployment.profile.id.to_string());
+}
