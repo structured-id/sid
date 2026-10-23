@@ -155,8 +155,9 @@ sid-serve = { workspace = true, features = ["error-contract"] }
 # Forward auth is checked end to end: tokens this server issues, verified by
 # sid-auth against this server's issuer registry over gRPC.
 sid-auth = { path = "../sid-auth" }
-# The account BFF is checked end to end against this server's services.
-sid-auth-proxy = { path = "../sid-auth-proxy" }
+# The account application's UI host and browser adapter are checked end to
+# end against this server's services.
+sid-ui-host = { path = "../sid-ui-host" }
 # The BFF test reads this server's issuer registry over gRPC.
 sid-infra = { workspace = true, features = ["issuer-client"] }
 prost = { workspace = true }
