@@ -16,10 +16,11 @@ use axum::http::{Request, StatusCode};
 use common::TestServices;
 use common::mock_storage::MockStorage;
 use prost::Message;
+use secrecy::ExposeSecret;
 use sid_auth_proxy::ProxyState;
 use sid_auth_proxy::account::AccountLink;
 use sid_auth_proxy::client_key::ClientKey;
-use sid_auth_proxy::session::BffSessionStore;
+use sid_authn::bff_session::BffSessionStore;
 use sid_authn::system_integration::{AccountSettings, ensure_account_integration};
 use sid_core::models::{ClientKeySet, Profile};
 use sid_proto::sid::v1::auth_service_server::{AuthService, AuthServiceServer};
@@ -344,23 +345,38 @@ async fn an_expired_token_is_refreshed_before_the_call() {
     let before = store.get_session(&browser.session).await.unwrap().unwrap();
     let mut expired = before.claims.clone();
     expired.exp = 0;
-    assert!(
+    let held = before
+        .refresh_token
+        .clone()
+        .expect("the sign-in granted a refresh token");
+    assert!(matches!(
         store
             .replace_tokens(
                 &browser.session,
+                &held,
                 before.access_token.clone(),
                 before.refresh_token.clone(),
                 expired,
             )
             .await
-            .unwrap()
-    );
+            .unwrap(),
+        sid_authn::bff_session::TokenReplacement::Replaced
+    ));
 
     let id = answered_profile(send(&router, current_profile(&browser, true)).await).await;
     assert_eq!(id, deployment.profile.id.to_string());
     let after = store.get_session(&browser.session).await.unwrap().unwrap();
-    assert_ne!(after.access_token, before.access_token);
-    assert_ne!(after.refresh_token, before.refresh_token);
+    assert_ne!(after.bearer(), before.bearer());
+    assert_ne!(
+        after
+            .refresh_token
+            .as_ref()
+            .map(ExposeSecret::expose_secret),
+        before
+            .refresh_token
+            .as_ref()
+            .map(ExposeSecret::expose_secret)
+    );
     assert!(after.claims.exp > chrono::Utc::now().timestamp());
 }
 
@@ -409,5 +425,9 @@ async fn sign_out_revokes_the_grant() {
             .connect_lazy(),
     );
     let connection = link.connection().await.unwrap();
-    assert!(link.refresh(connection, held).await.is_err());
+    assert!(
+        link.refresh(connection, held.expose_secret().to_owned())
+            .await
+            .is_err()
+    );
 }

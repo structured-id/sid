@@ -46,6 +46,8 @@ chrono = { workspace = true }
 
 # BFF: PKCE, CSRF comparison
 getrandom = { workspace = true }
+# BFF: session tokens and PKCE verifiers held as secrets.
+secrecy = { workspace = true }
 sha2 = { workspace = true }
 base64 = { workspace = true }
 subtle = { workspace = true }

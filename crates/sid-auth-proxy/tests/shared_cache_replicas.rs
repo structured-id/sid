@@ -17,9 +17,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
-use sid_auth::auth::jwt::ForwardAuthClaims;
-use sid_auth_proxy::session::BffSessionStore;
+use secrecy::ExposeSecret;
 use sid_auth_proxy::shield::{Shield, ShieldConfig};
+use sid_authn::bff_session::{BffSessionStore, SessionClaims};
 use sid_infra::RedisCacheBackend;
 use sid_plugin::cache::{CacheBackend, InMemoryCacheBackend};
 
@@ -90,8 +90,8 @@ fn unique_principal(name: &str) -> String {
     )
 }
 
-fn test_claims() -> ForwardAuthClaims {
-    ForwardAuthClaims {
+fn test_claims() -> SessionClaims {
+    SessionClaims {
         sub: "up_01HY000000000000000000".into(),
         iss: "https://sid.example.com".into(),
         exp: 0,
@@ -106,7 +106,6 @@ fn test_claims() -> ForwardAuthClaims {
         name: None,
         preferred_username: None,
         groups: None,
-        cnf: None,
     }
 }
 
@@ -123,8 +122,11 @@ async fn session_created_on_one_replica_is_served_by_the_other() {
 
     let seen = b.get_session(&id).await.unwrap().expect("B sees it");
     assert_eq!(seen.claims.sub, test_claims().sub);
-    assert_eq!(seen.access_token, "access");
-    assert_eq!(seen.refresh_token.as_deref(), Some("refresh"));
+    assert_eq!(seen.bearer(), "access");
+    assert_eq!(
+        seen.refresh_token.as_ref().map(ExposeSecret::expose_secret),
+        Some("refresh")
+    );
     // The CSRF token travels with the session, or B could not validate a form
     // posted against a session A issued.
     assert_eq!(seen.csrf_token, csrf);
@@ -244,20 +246,40 @@ async fn one_replica_refreshes_a_session() {
     }
     assert_eq!(winners, 1);
 
-    assert!(
+    assert!(matches!(
         stores[3]
             .replace_tokens(
                 &id,
+                &"refresh-1".into(),
                 "access-2".into(),
                 Some("refresh-2".into()),
                 test_claims(),
             )
             .await
-            .unwrap()
-    );
+            .unwrap(),
+        sid_authn::bff_session::TokenReplacement::Replaced
+    ));
+    // A result of the replaced refresh token, from a replica whose claim had
+    // expired, does not overwrite the newer tokens on the shared cache.
+    assert!(matches!(
+        stores[6]
+            .replace_tokens(
+                &id,
+                &"refresh-1".into(),
+                "access-stale".into(),
+                Some("refresh-stale".into()),
+                test_claims(),
+            )
+            .await
+            .unwrap(),
+        sid_authn::bff_session::TokenReplacement::Superseded(_)
+    ));
     let seen = stores[5].get_session(&id).await.unwrap().unwrap();
-    assert_eq!(seen.access_token, "access-2");
-    assert_eq!(seen.refresh_token.as_deref(), Some("refresh-2"));
+    assert_eq!(seen.bearer(), "access-2");
+    assert_eq!(
+        seen.refresh_token.as_ref().map(ExposeSecret::expose_secret),
+        Some("refresh-2")
+    );
 }
 
 // ─── Pending authorizations across replicas ─────────────────────────────
@@ -281,7 +303,7 @@ async fn pending_authorization_stored_on_one_replica_is_taken_on_the_other() {
         .await
         .unwrap()
         .expect("B takes it");
-    assert_eq!(taken.code_verifier, "verifier");
+    assert_eq!(taken.code_verifier.expose_secret(), "verifier");
     assert_eq!(taken.redirect_url, "https://app.sid.example.com/");
 }
 

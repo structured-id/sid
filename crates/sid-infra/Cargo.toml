@@ -46,6 +46,8 @@ http = [
 [dev-dependencies]
 # The tests exercise every backend.
 sid-infra = { path = ".", features = ["nats", "redis", "http", "issuer-client"] }
+# Redis runs the cache conformance scenarios.
+sid-plugin = { workspace = true, features = ["conformance"] }
 # Configurations in the tests are written as YAML, as operators write them.
 serde-saphyr = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }

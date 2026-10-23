@@ -11,13 +11,12 @@ pub mod config;
 pub mod health;
 pub mod metrics;
 pub mod registry;
-pub mod session;
 pub mod shield;
 pub mod translation;
 
 use std::sync::Arc;
 
-use session::BffSessionStore;
+use sid_authn::bff_session::BffSessionStore;
 use sid_authn::issuer_directory::IssuerDirectory;
 
 /// Shared state of the proxy's handlers.

@@ -19,8 +19,10 @@ use axum::{Json, Router};
 use subtle::ConstantTimeEq;
 
 use crate::ProxyState;
+use secrecy::{ExposeSecret, SecretString};
+use sid_authn::bff_session::{BffSession, SessionClaims};
+
 use crate::account::{AccountLink, Connection, LinkError};
-use crate::session::BffSession;
 
 /// BFF routes.
 pub fn routes() -> Router<ProxyState> {
@@ -70,7 +72,7 @@ async fn login_handler(
     let state_param = match state
         .bff_sessions
         .store_pending(
-            code_verifier,
+            SecretString::from(code_verifier),
             nonce.clone(),
             return_to,
             &connection.sign_in_binding(),
@@ -161,7 +163,14 @@ async fn callback_handler(
         return StatusCode::BAD_REQUEST.into_response();
     };
 
-    let tokens = match link.redeem(connection, code, pending.code_verifier).await {
+    let tokens = match link
+        .redeem(
+            connection,
+            code,
+            pending.code_verifier.expose_secret().to_owned(),
+        )
+        .await
+    {
         Ok(tokens) => tokens,
         Err(e) => {
             tracing::error!(error = %e, "BFF callback: code redemption failed");
@@ -207,8 +216,8 @@ async fn callback_handler(
     let (session_id, _csrf_token) = match state
         .bff_sessions
         .create_session(
-            tokens.access_token,
-            tokens.refresh_token,
+            SecretString::from(tokens.access_token),
+            tokens.refresh_token.map(SecretString::from),
             claims,
             &connection.binding(),
         )
@@ -240,12 +249,12 @@ pub(crate) async fn verified_claims(
     state: &ProxyState,
     connection: &Connection,
     token: &str,
-) -> Result<sid_auth::auth::jwt::ForwardAuthClaims, StatusCode> {
+) -> Result<SessionClaims, StatusCode> {
     state
         .issuers
         .issued_access_token(&connection.issuer, &connection.resource, token)
         .await
-        .map(sid_auth::auth::jwt::ForwardAuthClaims::from)
+        .map(SessionClaims::from)
         .map_err(|e| {
             tracing::error!(error = %e, "BFF: issued token is not for the account API");
             StatusCode::BAD_GATEWAY
@@ -379,7 +388,10 @@ async fn revoke_grant(state: &ProxyState, session: BffSession) -> GrantOutcome {
             return GrantOutcome::NotRevoked;
         }
     };
-    match link.revoke(connection, refresh_token).await {
+    match link
+        .revoke(connection, refresh_token.expose_secret().to_owned())
+        .await
+    {
         Ok(()) => GrantOutcome::Revoked,
         Err(e) => {
             let outcome = revocation_failure(&e);
