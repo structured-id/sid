@@ -37,7 +37,16 @@ use tonic::{Code, Request, Response, Status};
 pub const FORWARDED_HEADERS: [&str; 2] = ["cookie", CSRF_HEADER];
 
 /// The header a page echoes its session's CSRF token in.
-const CSRF_HEADER: &str = "x-csrf-token";
+pub(crate) const CSRF_HEADER: &str = "x-csrf-token";
+
+/// An access token this close to expiry is refreshed before use, so it does
+/// not expire between this host and the API.
+const REFRESH_MARGIN_SECS: i64 = 30;
+/// How long one replica holds a session's refresh: longer than a token
+/// endpoint call.
+const REFRESH_HOLD: std::time::Duration = std::time::Duration::from_secs(15);
+/// How often a replica that did not win the refresh looks for its result.
+const REFRESH_POLL: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// The adapter of one application: its client at the issuer, the issuer
 /// directory that verifies what the issuer returns, the shared session store
@@ -144,6 +153,115 @@ impl ApplicationSessions {
                 tracing::warn!(error = %e, ?outcome, "revocation failed");
                 outcome
             }
+        }
+    }
+
+    /// The access token a call to the application's API carries for the
+    /// signed-in user (RFC 6750 §2.1), refreshed first when it is about to
+    /// expire. Every such call reads or changes data on the user's behalf, so
+    /// it must echo the session's CSRF token: a request another site makes the
+    /// browser send carries the cookie but not the token.
+    pub async fn bearer(&self, metadata: &MetadataMap) -> Result<SecretString, Status> {
+        let (id, session) = self.signed_in(metadata).await?;
+        if !csrf_matches(metadata, &session.csrf_token) {
+            return Err(ApiError::new(
+                ErrorReason::CsrfTokenInvalid,
+                "the request does not carry this session's CSRF token",
+            )
+            .into());
+        }
+        self.current_token(&id, session).await
+    }
+
+    /// The session's access token, refreshed when it is about to expire.
+    ///
+    /// One replica refreshes; the others wait for its result in the shared
+    /// store. A refused refresh (the grant was revoked or expired) ends the
+    /// session; a refresh that cannot be done now leaves it for the next call.
+    async fn current_token(&self, id: &str, session: BffSession) -> Result<SecretString, Status> {
+        let now = chrono::Utc::now().timestamp();
+        if session.claims.exp - now > REFRESH_MARGIN_SECS {
+            return Ok(session.access_token);
+        }
+        let Some(refresh_token) = session.refresh_token else {
+            return Err(self.end(id).await);
+        };
+        let claimed = self
+            .sessions
+            .claim_refresh(id, REFRESH_HOLD)
+            .await
+            .map_err(|e| refuse::dependency_unavailable("session store", e))?;
+        if !claimed {
+            return self
+                .refreshed_elsewhere(id, session.access_token.expose_secret())
+                .await;
+        }
+        let connection = self
+            .connection()
+            .await
+            .map_err(|e| refuse::dependency_unavailable("application connection", e))?;
+        let tokens = match self
+            .client
+            .refresh(connection, refresh_token.expose_secret().to_owned())
+            .await
+        {
+            Ok(tokens) => tokens,
+            Err(RpClientError::Rpc(status)) if !transient(&status) => {
+                tracing::info!(error = %status, "refresh refused, session ended");
+                return Err(self.end(id).await);
+            }
+            Err(e) => return Err(refuse::dependency_unavailable("issuer", e)),
+        };
+        let claims = self
+            .issuers
+            .issued_access_token(
+                &connection.issuer,
+                &connection.resource,
+                &tokens.access_token,
+            )
+            .await
+            .map_err(|e| refuse::dependency_unavailable("issuer", e))?;
+        let claims = SessionClaims::from(claims).refreshed(&session.claims);
+        let access_token = SecretString::from(tokens.access_token);
+        match self
+            .sessions
+            .replace_tokens(
+                id,
+                access_token.clone(),
+                tokens.refresh_token.map(SecretString::from),
+                claims,
+            )
+            .await
+        {
+            Ok(true) => Ok(access_token),
+            Ok(false) => Err(unauthenticated()),
+            Err(e) => Err(refuse::dependency_unavailable("session store", e)),
+        }
+    }
+
+    /// The token another replica's refresh stored, once it is there.
+    async fn refreshed_elsewhere(&self, id: &str, stale: &str) -> Result<SecretString, Status> {
+        let deadline = tokio::time::Instant::now() + REFRESH_HOLD;
+        while tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(REFRESH_POLL).await;
+            match self.sessions.get_session(id).await {
+                Ok(Some(session)) if session.bearer() != stale => return Ok(session.access_token),
+                Ok(Some(_)) => {}
+                Ok(None) => return Err(unauthenticated()),
+                Err(e) => return Err(refuse::dependency_unavailable("session store", e)),
+            }
+        }
+        Err(refuse::dependency_unavailable(
+            "session store",
+            "another replica's refresh did not finish",
+        ))
+    }
+
+    /// Destroy an ended session; the user signs in again.
+    async fn end(&self, id: &str) -> Status {
+        match self.sessions.destroy_session(id).await {
+            Ok(()) => unauthenticated(),
+            Err(e) => refuse::dependency_unavailable("session store", e),
         }
     }
 
@@ -416,6 +534,21 @@ fn revocation_failure(failure: &RpClientError) -> GrantOutcome {
         // Nothing was sent.
         RpClientError::Invalid(_) | RpClientError::Key(_) => GrantOutcome::NotRevoked,
     }
+}
+
+/// Whether a failed refresh may succeed if repeated: the issuer or the path
+/// to it failed, not the grant.
+fn transient(status: &Status) -> bool {
+    matches!(
+        status.code(),
+        Code::Unavailable
+            | Code::DeadlineExceeded
+            | Code::Internal
+            | Code::Unknown
+            | Code::ResourceExhausted
+            | Code::Aborted
+            | Code::Cancelled
+    )
 }
 
 fn unauthenticated() -> Status {
