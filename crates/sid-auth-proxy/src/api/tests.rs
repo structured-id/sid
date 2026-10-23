@@ -227,6 +227,33 @@ async fn a_refresh_sid_cannot_answer_keeps_the_session() {
 /// When another replica holds the refresh, this one waits for its result
 /// and calls the API with the new token instead of refreshing again, which
 /// would replay the rotated refresh token and end the grant.
+/// A session read before the refresh claim may predate a refresh another
+/// replica completed under an earlier, expired claim. The claim winner reads
+/// the store again and uses those tokens instead of presenting the rotated
+/// refresh token, which the issuer would treat as theft. The issuer is
+/// unreachable here, so any refresh attempt would answer 503.
+#[tokio::test]
+async fn a_stale_snapshot_is_not_refreshed_after_the_claim() {
+    let (state, id, _) = signed_in_state(None, 0, Some("refresh-0")).await;
+    let stale = state.bff_sessions.get_session(&id).await.unwrap().unwrap();
+    assert!(matches!(
+        state
+            .bff_sessions
+            .replace_tokens(
+                &id,
+                &"refresh-0".into(),
+                "access-1".into(),
+                Some("refresh-1".into()),
+                claims(in_an_hour()),
+            )
+            .await
+            .unwrap(),
+        sid_authn::bff_session::TokenReplacement::Replaced
+    ));
+    let token = current_token(&state, &id, stale).await.unwrap();
+    assert_eq!(token.expose_secret(), "access-1");
+}
+
 #[tokio::test]
 async fn a_refresh_held_elsewhere_is_awaited() {
     let (upstream, seen) = fake_api().await;
@@ -246,6 +273,7 @@ async fn a_refresh_held_elsewhere_is_awaited() {
             sessions
                 .replace_tokens(
                     &id,
+                    &"refresh-1".into(),
                     "access-2".into(),
                     Some("refresh-2".into()),
                     claims(in_an_hour()),
@@ -255,7 +283,10 @@ async fn a_refresh_held_elsewhere_is_awaited() {
         })
     };
     let response = call(state, api_post(&id, Some(&csrf))).await;
-    assert!(other_replica.await.unwrap());
+    assert!(matches!(
+        other_replica.await.unwrap(),
+        sid_authn::bff_session::TokenReplacement::Replaced
+    ));
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         seen.lock().unwrap()[0].headers["authorization"],

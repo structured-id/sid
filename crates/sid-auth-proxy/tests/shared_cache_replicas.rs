@@ -246,17 +246,34 @@ async fn one_replica_refreshes_a_session() {
     }
     assert_eq!(winners, 1);
 
-    assert!(
+    assert!(matches!(
         stores[3]
             .replace_tokens(
                 &id,
+                &"refresh-1".into(),
                 "access-2".into(),
                 Some("refresh-2".into()),
                 test_claims(),
             )
             .await
-            .unwrap()
-    );
+            .unwrap(),
+        sid_authn::bff_session::TokenReplacement::Replaced
+    ));
+    // A result of the replaced refresh token, from a replica whose claim had
+    // expired, does not overwrite the newer tokens on the shared cache.
+    assert!(matches!(
+        stores[6]
+            .replace_tokens(
+                &id,
+                &"refresh-1".into(),
+                "access-stale".into(),
+                Some("refresh-stale".into()),
+                test_claims(),
+            )
+            .await
+            .unwrap(),
+        sid_authn::bff_session::TokenReplacement::Superseded(_)
+    ));
     let seen = stores[5].get_session(&id).await.unwrap().unwrap();
     assert_eq!(seen.bearer(), "access-2");
     assert_eq!(
