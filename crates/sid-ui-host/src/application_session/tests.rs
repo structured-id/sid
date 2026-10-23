@@ -518,6 +518,44 @@ async fn no_live_session_is_unauthenticated() {
     }
 }
 
+/// A session read before the refresh claim may predate a refresh another
+/// replica completed under an earlier, expired claim: after winning the
+/// claim the adapter uses what the store holds instead of presenting the
+/// rotated refresh token. The issuer is unreachable here, so any refresh
+/// attempt would be an outage.
+#[tokio::test]
+async fn a_stale_snapshot_is_not_refreshed_after_the_claim() {
+    let f = fixture(memory(), true);
+    let mut expired = claims();
+    expired.exp = 0;
+    let (id, _) = f
+        .sessions
+        .create_session(
+            "access-0".into(),
+            Some("refresh-0".into()),
+            expired,
+            &connection().binding(),
+        )
+        .await
+        .unwrap();
+    let stale = f.sessions.get_session(&id).await.unwrap().unwrap();
+    assert!(matches!(
+        f.sessions
+            .replace_tokens(
+                &id,
+                &"refresh-0".into(),
+                "access-1".into(),
+                Some("refresh-1".into()),
+                claims(),
+            )
+            .await
+            .unwrap(),
+        sid_authn::bff_session::TokenReplacement::Replaced
+    ));
+    let token = f.adapter.current_token(&id, stale).await.unwrap();
+    assert_eq!(token.expose_secret(), "access-1");
+}
+
 /// An issuer session ended elsewhere ends the application session too: it
 /// is refused and removed.
 #[tokio::test]

@@ -17,7 +17,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rand::TryRng;
 use secrecy::{ExposeSecret, SecretString};
 use sha2::{Digest, Sha256};
-use sid_authn::bff_session::{BffSession, BffSessionStore, SessionClaims};
+use sid_authn::bff_session::{BffSession, BffSessionStore, SessionClaims, TokenReplacement};
 use sid_authn::issuer_directory::IssuerDirectory;
 use sid_authn::relying_party::Connection;
 use sid_authn::revocation_cache::RevocationCache;
@@ -191,9 +191,9 @@ impl ApplicationSessions {
         if session.claims.exp - now > REFRESH_MARGIN_SECS {
             return Ok(session.access_token);
         }
-        let Some(refresh_token) = session.refresh_token else {
+        if session.refresh_token.is_none() {
             return Err(self.end(id).await);
-        };
+        }
         let claimed = self
             .sessions
             .claim_refresh(id, REFRESH_HOLD)
@@ -204,6 +204,21 @@ impl ApplicationSessions {
                 .refreshed_elsewhere(id, session.access_token.expose_secret())
                 .await;
         }
+        // The session read before the claim may predate a refresh another
+        // replica completed under an earlier, now expired claim: refresh only
+        // what the store holds now, never a refresh token already rotated.
+        let session = self
+            .sessions
+            .get_session(id)
+            .await
+            .map_err(|e| refuse::dependency_unavailable("session store", e))?
+            .ok_or_else(unauthenticated)?;
+        if session.claims.exp - now > REFRESH_MARGIN_SECS {
+            return Ok(session.access_token);
+        }
+        let Some(refresh_token) = session.refresh_token.clone() else {
+            return Err(self.end(id).await);
+        };
         let connection = self
             .connection()
             .await
@@ -235,14 +250,17 @@ impl ApplicationSessions {
             .sessions
             .replace_tokens(
                 id,
+                &refresh_token,
                 access_token.clone(),
                 tokens.refresh_token.map(SecretString::from),
                 claims,
             )
             .await
         {
-            Ok(true) => Ok(access_token),
-            Ok(false) => Err(unauthenticated()),
+            Ok(TokenReplacement::Replaced) => Ok(access_token),
+            // A newer refresh landed first; its tokens stand.
+            Ok(TokenReplacement::Superseded(current)) => Ok(current.access_token),
+            Ok(TokenReplacement::Ended) => Err(unauthenticated()),
             Err(e) => Err(refuse::dependency_unavailable("session store", e)),
         }
     }
