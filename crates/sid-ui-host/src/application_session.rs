@@ -37,7 +37,7 @@ use tonic::{Code, Request, Response, Status};
 
 /// The request headers the RPCs read, which the transcoder must hand over
 /// as metadata.
-pub const FORWARDED_HEADERS: [&str; 2] = ["cookie", CSRF_HEADER];
+pub const FORWARDED_HEADERS: [&str; 3] = ["cookie", CSRF_HEADER, "origin"];
 
 /// The header a page echoes its session's CSRF token in.
 pub(crate) const CSRF_HEADER: &str = "x-csrf-token";
@@ -47,7 +47,7 @@ pub(crate) const CSRF_HEADER: &str = "x-csrf-token";
 const REFRESH_MARGIN_SECS: i64 = 30;
 /// How long one replica holds a session's refresh: longer than a token
 /// endpoint call.
-const REFRESH_HOLD: std::time::Duration = std::time::Duration::from_secs(15);
+pub(crate) const REFRESH_HOLD: std::time::Duration = std::time::Duration::from_secs(15);
 /// How often a replica that did not win the refresh looks for its result.
 const REFRESH_POLL: std::time::Duration = std::time::Duration::from_millis(200);
 
@@ -165,6 +165,7 @@ impl ApplicationSessions {
     /// it must echo the session's CSRF token: a request another site makes the
     /// browser send carries the cookie but not the token.
     pub async fn bearer(&self, metadata: &MetadataMap) -> Result<SecretString, Status> {
+        self.require_the_page(metadata).await?;
         let (id, session) = self.signed_in(metadata).await?;
         if !csrf_matches(metadata, &session.csrf_token) {
             return Err(ApiError::new(
@@ -290,6 +291,36 @@ impl ApplicationSessions {
         match self.sessions.destroy_session(id).await {
             Ok(()) => unauthenticated(),
             Err(e) => refuse::dependency_unavailable("session store", e),
+        }
+    }
+
+    /// Refuse a request that is not the application's own page's: a call that
+    /// uses the session cookie must carry exactly one `Origin`, the origin of
+    /// the application's registered callback. Another site's request carries
+    /// the cookie but its own origin, or `null` (Fetch §3.2.5); CORS keeps a
+    /// foreign page from reading the answer, not the request from arriving.
+    /// Sign-in navigations are bound by their correlation cookie instead.
+    async fn require_the_page(&self, metadata: &MetadataMap) -> Result<(), Status> {
+        let connection = self
+            .connection()
+            .await
+            .map_err(|e| refuse::dependency_unavailable("application connection", e))?;
+        let expected = url::Url::parse(&connection.redirect_uri)
+            .map(|callback| callback.origin().ascii_serialization())
+            .map_err(|_| Status::internal("the callback is not a URL"))?;
+        let mut sent = metadata.get_all("origin").iter();
+        let matches = match (sent.next(), sent.next()) {
+            (Some(origin), None) => origin.as_bytes() == expected.as_bytes(),
+            _ => false,
+        };
+        if matches {
+            Ok(())
+        } else {
+            Err(ApiError::new(
+                ErrorReason::CsrfTokenInvalid,
+                "the request does not come from the application's page",
+            )
+            .into())
         }
     }
 
@@ -555,6 +586,7 @@ impl ApplicationSessions {
         &self,
         request: Request<GetApplicationSessionRequest>,
     ) -> Result<Response<ApplicationSession>, Status> {
+        self.require_the_page(request.metadata()).await?;
         let (_, session) = self.signed_in(request.metadata()).await?;
         let claims = session.claims;
         let mut response = Response::new(ApplicationSession {
@@ -574,6 +606,7 @@ impl ApplicationSessions {
         request: Request<EndApplicationSessionRequest>,
     ) -> Result<Response<EndApplicationSessionResponse>, Status> {
         let metadata = request.metadata();
+        self.require_the_page(metadata).await?;
         // Without a cookie there is nothing to end.
         let id = cookie_value(metadata, &self.cookie).ok_or_else(unauthenticated)?;
         let grant = match self.sessions.get_session(&id).await {

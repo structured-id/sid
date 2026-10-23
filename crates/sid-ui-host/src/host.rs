@@ -12,9 +12,11 @@
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use http_body_util::BodyExt;
 use secrecy::ExposeSecret;
+use sid_core::grpc_error::refuse;
 use sid_proto::sid::v1::authn::application_session_service_server::ApplicationSessionServiceServer;
 use structured_proxy::hooks::{ExtraRoute, ExtraRouteHandler, RouteRequest, RouteResponse};
 use tonic::metadata::MetadataMap;
@@ -33,6 +35,35 @@ pub const ADAPTER_PROTO: &str = "sid/v1/authn/application_session.proto";
 /// application's API: the session cookie and CSRF token stay here, and the
 /// API sees only the bearer this host puts in.
 const NOT_FORWARDED: [&str; 3] = ["cookie", CSRF_HEADER, "authorization"];
+
+/// How long a call to the issuer may take: shorter than a refresh claim's
+/// hold, so a refresh never outlives the claim that lets it run.
+pub const ISSUER_CALL_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The channel to the issuer at `address`, every call bounded by
+/// [`ISSUER_CALL_TIMEOUT`]: an issuer that accepts a call and never answers
+/// fails it instead of holding the user's request.
+pub fn issuer_channel(address: &str) -> anyhow::Result<tonic::transport::Channel> {
+    bounded_channel(address, ISSUER_CALL_TIMEOUT)
+}
+
+fn bounded_channel(address: &str, timeout: Duration) -> anyhow::Result<tonic::transport::Channel> {
+    Ok(tonic::transport::Endpoint::from_shared(address.to_owned())?
+        .connect_timeout(timeout)
+        .timeout(timeout)
+        .connect_lazy())
+}
+
+/// The shared cache a host with a browser adapter must name. Sessions,
+/// started sign-ins and revocations are shared state: a host behind a load
+/// balancer completes a sign-in another replica started, and a store of its
+/// own process would answer every other replica "no such sign-in", so there
+/// is no default to fall back to.
+pub fn required_shared_cache(configured: Option<String>) -> anyhow::Result<String> {
+    configured.ok_or_else(|| {
+        anyhow::anyhow!("the browser adapter needs the shared cache: set SID_CACHE_URL")
+    })
+}
 
 /// The gRPC services of one hosted application. `A` is its API: a remote
 /// [`tonic::transport::Channel`] in a deployment.
@@ -90,7 +121,7 @@ where
                 });
             }
             let Some(api) = this.api else {
-                return Ok(tonic::Status::unimplemented("no API is hosted here").into_http());
+                return Ok(refuse::not_in_this_build("hosted API").into_http());
             };
             let metadata = MetadataMap::from_headers(request.headers().clone());
             let bearer = match this.sessions.bearer(&metadata).await {
@@ -106,18 +137,15 @@ where
                     value.set_sensitive(true);
                     headers.insert(http::header::AUTHORIZATION, value);
                 }
-                Err(_) => {
-                    return Ok(
-                        tonic::Status::internal("the access token is not a header value")
-                            .into_http(),
-                    );
+                Err(e) => {
+                    return Ok(refuse::internal("session bearer", e).into_http());
                 }
             }
+            // The API's own answers, refusals included, go back as they are;
+            // only a call that never reached it is this host's to answer.
             Ok(match api.oneshot(request).await {
                 Ok(answer) => answer,
-                Err(e) => {
-                    tonic::Status::unavailable(format!("the API did not answer: {e}")).into_http()
-                }
+                Err(e) => refuse::dependency_unavailable("application API", e).into_http(),
             })
         })
     }

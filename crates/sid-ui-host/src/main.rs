@@ -22,7 +22,9 @@
 //! - `SID_UI_SESSION_COOKIE`: the session cookie's `__Host-` name;
 //! - `SID_UI_API_UPSTREAM`: the gRPC address of the application's API; unset,
 //!   the page calls only the adapter;
-//! - `SID_CACHE_URL`: the cache the replicas share sessions through.
+//! - `SID_CACHE_URL`: the cache the replicas share sessions through;
+//!   required, as a host behind a load balancer completes sign-ins another
+//!   replica started.
 //!
 //! `GET /health` answers once the bundle and configuration were accepted and,
 //! with a settings source, once its first projection arrived.
@@ -41,7 +43,9 @@ use sid_authn::revocation_cache::RevocationCache;
 use sid_infra::issuer_client::{RpClient, load_connection};
 use sid_infra::issuer_registry::GrpcIssuerSource;
 use sid_ui_host::application_session::{ApplicationSessions, FORWARDED_HEADERS};
-use sid_ui_host::host::{ADAPTER_PROTO, HostUpstream, asset_routes};
+use sid_ui_host::host::{
+    ADAPTER_PROTO, HostUpstream, asset_routes, issuer_channel, required_shared_cache,
+};
 use sid_ui_host::{GrpcSettingsSource, Retry, UiBundle, follow, standalone};
 use tracing_subscriber::EnvFilter;
 
@@ -140,9 +144,8 @@ async fn adapter(key_file: &str) -> anyhow::Result<ApplicationSessions> {
             .with_context(|| format!("SID_UI_CLIENT_KEY_FILE {key_file:?} cannot be read"))?,
     );
     let key = ClientKey::ed25519_from_pem(&pem).context("SID_UI_CLIENT_KEY_FILE")?;
-    let channel = tonic::transport::Endpoint::from_shared(issuer_grpc.clone())
-        .with_context(|| format!("SID_UI_ISSUER_GRPC {issuer_grpc:?}"))?
-        .connect_lazy();
+    let channel = issuer_channel(&issuer_grpc)
+        .with_context(|| format!("SID_UI_ISSUER_GRPC {issuer_grpc:?}"))?;
     let client = match std::env::var("SID_UI_CONNECTION_FILE") {
         Ok(path) => {
             let kid = key
@@ -161,7 +164,8 @@ async fn adapter(key_file: &str) -> anyhow::Result<ApplicationSessions> {
         Err(_) => RpClient::new(key, installation.clone(), channel.clone())?,
     };
 
-    let cache = sid_infra::shared_cache(sid_infra::cache_url_from_env().as_deref()).await?;
+    let cache_url = required_shared_cache(sid_infra::cache_url_from_env())?;
+    let cache = sid_infra::shared_cache(Some(&cache_url)).await?;
     let lifetime = sid_authn::jwt::AccessTokenTtl::MAX
         .duration()
         .to_std()

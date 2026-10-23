@@ -3,8 +3,9 @@
 //! and its own client key learns the account integration this server
 //! provisioned, signs a user in with `private_key_jwt`, calls the account API
 //! over gRPC-Web as that user, refreshes and signs out, all against this
-//! server's services, every replica on a local port of its own
-//! (auth/session-management.md, system account integration).
+//! server's services, every replica on a local port of its own. The
+//! account integration this server provisions is the client the host signs
+//! in as.
 
 mod common;
 
@@ -208,13 +209,25 @@ struct Browser {
     csrf: String,
 }
 
-/// One gRPC-Web call of the page to `path` with `message`.
+/// One gRPC-Web call of the application's page to `path` with `message`.
 async fn grpc_web(
     replica: &str,
     path: &str,
     message: Vec<u8>,
     cookie: Option<&str>,
     csrf: Option<&str>,
+) -> (Option<Vec<u8>>, String) {
+    grpc_web_from(replica, path, message, cookie, csrf, Some(ACCOUNT_URL)).await
+}
+
+/// [`grpc_web`] sent by a page of `origin`, or with no `Origin` at all.
+async fn grpc_web_from(
+    replica: &str,
+    path: &str,
+    message: Vec<u8>,
+    cookie: Option<&str>,
+    csrf: Option<&str>,
+    origin: Option<&str>,
 ) -> (Option<Vec<u8>>, String) {
     let mut frame = vec![0u8];
     frame.extend_from_slice(&u32::try_from(message.len()).unwrap().to_be_bytes());
@@ -224,6 +237,9 @@ async fn grpc_web(
         .header("content-type", "application/grpc-web+proto")
         .header("x-grpc-web", "1")
         .body(frame);
+    if let Some(origin) = origin {
+        request = request.header("origin", origin);
+    }
     if let Some(cookie) = cookie {
         request = request.header("cookie", cookie);
     }
@@ -280,14 +296,50 @@ async fn read_session(replica: &str, cookie: &str) -> (Option<ApplicationSession
 /// user's live IdP session (as the sign-in surface completes it), and the
 /// callback the IdP redirects back to, with the sign-in's correlation cookie.
 async fn sign_in(deployment: &Deployment, replica: &str) -> Browser {
-    let login = http()
-        .get(format!("{replica}/auth/login?rd=/security"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(login.status(), reqwest::StatusCode::FOUND);
+    let login = start(replica, None).await;
     let correlation = set_cookie(&login, &format!("{COOKIE}-signin-"));
     let asked = query(login.headers()["location"].to_str().unwrap());
+    let callback = complete(deployment, replica, &asked, &correlation).await;
+    signed_in(replica, &callback).await
+}
+
+/// `/auth/login` of a browser sending `cookie`.
+async fn start(replica: &str, cookie: Option<&str>) -> reqwest::Response {
+    let mut request = http().get(format!("{replica}/auth/login?rd=/security"));
+    if let Some(cookie) = cookie {
+        request = request.header("cookie", cookie);
+    }
+    let login = request.send().await.unwrap();
+    assert_eq!(login.status(), reqwest::StatusCode::FOUND);
+    login
+}
+
+/// The session a successful callback opened, with its CSRF token.
+async fn signed_in(replica: &str, callback: &reqwest::Response) -> Browser {
+    assert_eq!(
+        callback.status(),
+        reqwest::StatusCode::FOUND,
+        "{callback:?}"
+    );
+    assert_eq!(callback.headers()["location"], "/security");
+    let cookie = set_cookie(callback, &format!("{COOKIE}="));
+    // The session's CSRF token comes with the session read, where the page
+    // takes it from; no cookie carries it.
+    let (session, status) = read_session(replica, &cookie).await;
+    assert_eq!(status, "0");
+    let csrf = session.expect("the session").csrf_token;
+    Browser { cookie, csrf }
+}
+
+/// The IdP's authorization of the sign-in `asked` describes, with the user's
+/// live IdP session, and the callback a browser sending `cookie` makes with
+/// its code.
+async fn complete(
+    deployment: &Deployment,
+    replica: &str,
+    asked: &std::collections::HashMap<String, String>,
+    cookie: &str,
+) -> reqwest::Response {
     assert_eq!(
         asked["redirect_uri"],
         format!("{ACCOUNT_URL}/auth/callback")
@@ -333,29 +385,48 @@ async fn sign_in(deployment: &Deployment, replica: &str) -> Browser {
     let issuer: String =
         url::form_urlencoded::byte_serialize(deployment.svc.issuer.canonical_url.as_bytes())
             .collect();
-    let callback = http()
+    http()
         .get(format!(
             "{replica}/auth/callback?code={code}&state={}&iss={issuer}",
             asked["state"]
         ))
-        .header("cookie", &correlation)
+        .header("cookie", cookie)
         .send()
         .await
-        .unwrap();
-    assert_eq!(
-        callback.status(),
-        reqwest::StatusCode::FOUND,
-        "{callback:?}"
-    );
-    assert_eq!(callback.headers()["location"], "/security");
-    let cookie = set_cookie(&callback, &format!("{COOKIE}="));
+        .unwrap()
+}
 
-    // The session's CSRF token comes with the session read, where the page
-    // takes it from; no cookie carries it.
-    let (session, status) = read_session(replica, &cookie).await;
-    assert_eq!(status, "0");
-    let csrf = session.expect("the session").csrf_token;
-    Browser { cookie, csrf }
+/// A browser's cookie jar, as RFC 6265bis §5.7 keeps it: one value per name,
+/// a later `set-cookie` replacing an earlier one, `Max-Age=0` deleting it.
+#[derive(Default)]
+struct Jar(Vec<(String, String)>);
+
+impl Jar {
+    fn apply(&mut self, response: &reqwest::Response) {
+        for set in response.headers().get_all("set-cookie") {
+            let set = set.to_str().unwrap();
+            let (name, value) = set.split(';').next().unwrap().split_once('=').unwrap();
+            self.0.retain(|(held, _)| held != name);
+            if !set.contains("Max-Age=0") {
+                self.0.push((name.to_owned(), value.to_owned()));
+            }
+        }
+    }
+
+    fn holds(&self, prefix: &str) -> usize {
+        self.0
+            .iter()
+            .filter(|(name, _)| name.starts_with(prefix))
+            .count()
+    }
+
+    fn header(&self) -> String {
+        self.0
+            .iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
 }
 
 /// `GetCurrentProfile` as the page's gRPC-Web transport sends it, with or
@@ -415,22 +486,92 @@ async fn a_user_signs_in_and_reads_their_account() {
     assert_eq!(page.text().await.unwrap(), "<!doctype html>");
 }
 
-/// Two first sign-ins of one browser at once each complete with a session of
-/// their own: their correlation cookies never replace each other.
+/// Two first sign-ins of one browser, both started before either answer
+/// arrived: the browser's one jar takes both answers' cookies, in either
+/// order, and sends the whole jar with each callback. Both callbacks open a
+/// session; completing the first clears only its own correlation cookie, so
+/// the second still completes.
 #[tokio::test]
-async fn two_concurrent_sign_ins_both_complete() {
-    let deployment = deploy().await;
-    let replica = replica(&deployment).await;
-    let (a, b) = tokio::join!(
-        sign_in(&deployment, &replica),
-        sign_in(&deployment, &replica)
-    );
-    assert_ne!(a.cookie, b.cookie);
-    for browser in [&a, &b] {
-        let (id, status) = current_profile(&replica, browser, true).await;
+async fn two_concurrent_sign_ins_of_one_browser_both_complete() {
+    for a_first in [true, false] {
+        let deployment = deploy().await;
+        let replica = replica(&deployment).await;
+        let (login_a, login_b) = tokio::join!(start(&replica, None), start(&replica, None));
+        let mut jar = Jar::default();
+        if a_first {
+            jar.apply(&login_a);
+            jar.apply(&login_b);
+        } else {
+            jar.apply(&login_b);
+            jar.apply(&login_a);
+        }
+        let correlation = format!("{COOKIE}-signin-");
+        assert_eq!(
+            jar.holds(&correlation),
+            2,
+            "neither answer replaced the other"
+        );
+        let asked_a = query(login_a.headers()["location"].to_str().unwrap());
+        let asked_b = query(login_b.headers()["location"].to_str().unwrap());
+
+        let callback_a = complete(&deployment, &replica, &asked_a, &jar.header()).await;
+        let session_a = signed_in(&replica, &callback_a).await;
+        jar.apply(&callback_a);
+        assert_eq!(
+            jar.holds(&correlation),
+            1,
+            "only A's correlation is cleared"
+        );
+
+        let callback_b = complete(&deployment, &replica, &asked_b, &jar.header()).await;
+        let session_b = signed_in(&replica, &callback_b).await;
+        jar.apply(&callback_b);
+        assert_eq!(jar.holds(&correlation), 0);
+        assert_ne!(session_a.cookie, session_b.cookie);
+        // The browser keeps the later session; it reads the account.
+        let (id, status) = current_profile(&replica, &session_b, true).await;
         assert_eq!(status, "0");
         assert_eq!(id.unwrap(), deployment.profile.id.to_string());
     }
+}
+
+/// Every call that uses the session cookie answers only the application's
+/// own page, by its exact `Origin`: reading the session (which hands out
+/// the CSRF token), the account API and sign-out refuse a foreign, opaque,
+/// missing or doubled origin with PERMISSION_DENIED, and the session stays.
+#[tokio::test]
+async fn cookie_calls_refuse_another_origin() {
+    let deployment = deploy().await;
+    let replica = replica(&deployment).await;
+    let browser = sign_in(&deployment, &replica).await;
+    let profile = format!(
+        "/{}/GetCurrentProfile",
+        sid_proto::sid::v1::identity_service_server::SERVICE_NAME
+    );
+    let calls = [
+        (format!("/{ADAPTER}/GetApplicationSession"), None),
+        (profile, Some(browser.csrf.as_str())),
+        (
+            format!("/{ADAPTER}/EndApplicationSession"),
+            Some(browser.csrf.as_str()),
+        ),
+    ];
+    for (path, csrf) in &calls {
+        for origin in [Some("https://untrusted.example"), Some("null"), None] {
+            let (_, status) = grpc_web_from(
+                &replica,
+                path,
+                Vec::new(),
+                Some(&browser.cookie),
+                *csrf,
+                origin,
+            )
+            .await;
+            assert_eq!(status, "7", "{path} from {origin:?}");
+        }
+    }
+    let (_, own) = read_session(&replica, &browser.cookie).await;
+    assert_eq!(own, "0", "the session is still there");
 }
 
 /// An expired access token is refreshed with the key's assertion before the

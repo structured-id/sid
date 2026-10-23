@@ -158,8 +158,16 @@ pub(crate) async fn signed_in(f: &Fixture, refresh: bool) -> (String, String) {
         .unwrap()
 }
 
-fn with_cookie<T>(message: T, cookie: &str, csrf: Option<&str>) -> Request<T> {
+/// The application's origin: its registered callback's.
+pub(crate) const ORIGIN: &str = "https://ops.sid.example.com";
+
+/// A call of the application's page: `cookie`, `csrf` and the page's own
+/// `Origin`.
+pub(crate) fn with_cookie<T>(message: T, cookie: &str, csrf: Option<&str>) -> Request<T> {
     let mut request = Request::new(message);
+    request
+        .metadata_mut()
+        .insert("origin", ORIGIN.parse().unwrap());
     request
         .metadata_mut()
         .insert("cookie", cookie.parse().unwrap());
@@ -545,7 +553,10 @@ async fn no_live_session_is_unauthenticated() {
         .0;
     let no_cookie = f
         .adapter
-        .get_application_session(Request::new(GetApplicationSessionRequest {}))
+        .get_application_session(with_origin(
+            Request::new(GetApplicationSessionRequest {}),
+            &[ORIGIN],
+        ))
         .await
         .unwrap_err();
     assert_eq!(no_cookie.code(), Code::Unauthenticated);
@@ -562,6 +573,74 @@ async fn no_live_session_is_unauthenticated() {
         assert_eq!(refused.code(), Code::Unauthenticated, "{cookie}");
         assert_eq!(reason(&refused), "TOKEN_INVALID");
     }
+}
+
+/// `request` with its `Origin` replaced: none, another site's, the opaque
+/// `null` origin, or two values.
+fn with_origin<T>(mut request: Request<T>, origin: &[&str]) -> Request<T> {
+    request.metadata_mut().remove("origin");
+    for value in origin {
+        request
+            .metadata_mut()
+            .append("origin", value.parse().unwrap());
+    }
+    request
+}
+
+/// Origins that are not the application's page.
+const NOT_THE_PAGE: [&[&str]; 4] = [
+    &[],
+    &["https://evil.example.com"],
+    &["null"],
+    &[ORIGIN, ORIGIN],
+];
+
+/// The session read, the session's API calls and the sign-out answer only
+/// the application's own page, by its exact `Origin`: a request another site
+/// makes the browser send carries the cookie, but not this origin (Fetch
+/// §3.2.5). The session stays as it was.
+#[tokio::test]
+async fn only_the_applications_origin_uses_the_session() {
+    let f = fixture(memory(), true);
+    let (id, csrf) = signed_in(&f, false).await;
+    let cookie = format!("{COOKIE}={id}");
+    for origin in NOT_THE_PAGE {
+        let read = f
+            .adapter
+            .get_application_session(with_origin(
+                with_cookie(GetApplicationSessionRequest {}, &cookie, None),
+                origin,
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(read.code(), Code::PermissionDenied, "{origin:?}");
+        assert_eq!(reason(&read), "CSRF_TOKEN_INVALID");
+
+        let api = f
+            .adapter
+            .bearer(with_origin(with_cookie((), &cookie, Some(&csrf)), origin).metadata())
+            .await
+            .unwrap_err();
+        assert_eq!(api.code(), Code::PermissionDenied, "{origin:?}");
+
+        let end = f
+            .adapter
+            .end_application_session(with_origin(
+                with_cookie(EndApplicationSessionRequest {}, &cookie, Some(&csrf)),
+                origin,
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(end.code(), Code::PermissionDenied, "{origin:?}");
+    }
+    assert!(f.sessions.get_session(&id).await.unwrap().is_some());
+    // The page itself is answered.
+    assert!(
+        f.adapter
+            .get_application_session(with_cookie(GetApplicationSessionRequest {}, &cookie, None))
+            .await
+            .is_ok()
+    );
 }
 
 /// A session read before the refresh claim may predate a refresh another
