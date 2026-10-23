@@ -3,10 +3,8 @@
 //! server-side sessions, auth translation for legacy upstreams. Access
 //! decisions come from the decision service (sid-auth).
 
-pub mod account;
 pub mod api;
 pub mod bff;
-pub mod client_key;
 pub mod config;
 pub mod health;
 pub mod metrics;
@@ -35,7 +33,7 @@ pub struct ProxyState {
     pub bff_enabled: bool,
     /// The BFF as the account integration's client; absent without a
     /// configured client key.
-    pub account: Option<Arc<account::AccountLink>>,
+    pub account: Option<Arc<sid_authn::rp_client::RpClient>>,
     /// Where `/api/*` goes: the account API's gRPC-Web endpoint.
     pub api_upstream: Option<url::Url>,
     /// HTTP client for the account API. Follows no redirect: the API's

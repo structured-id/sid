@@ -18,9 +18,9 @@ use common::mock_storage::MockStorage;
 use prost::Message;
 use secrecy::ExposeSecret;
 use sid_auth_proxy::ProxyState;
-use sid_auth_proxy::account::AccountLink;
-use sid_auth_proxy::client_key::ClientKey;
 use sid_authn::bff_session::BffSessionStore;
+use sid_authn::client_key::ClientKey;
+use sid_authn::rp_client::RpClient;
 use sid_authn::system_integration::{AccountSettings, ensure_account_integration};
 use sid_core::models::{ClientKeySet, Profile};
 use sid_proto::sid::v1::auth_service_server::{AuthService, AuthServiceServer};
@@ -62,8 +62,9 @@ async fn deploy() -> Deployment {
         .next()
         .unwrap()
         .to_owned();
-    let (key, key_pem) = ClientKey::generate().unwrap();
-    let keys = ClientKeySet::try_from(key.public_jwks()).unwrap();
+    let (key, key_pem) = ClientKey::generate_ed25519().unwrap();
+    let key_pem = key_pem.expose_secret().to_owned();
+    let keys = ClientKeySet::try_from(key.public_jwks().unwrap()).unwrap();
     let settings = AccountSettings::new(ACCOUNT_URL, keys).unwrap();
     ensure_account_integration(svc.storage.as_ref(), &svc.issuer, &installation, &settings)
         .await
@@ -110,7 +111,9 @@ fn replica(deployment: &Deployment) -> axum::Router {
         .unwrap()
         .connect_lazy();
     let installation = deployment.installation.clone();
-    let key = ClientKey::from_pem(deployment.key_pem.as_bytes()).unwrap();
+    let key =
+        ClientKey::ed25519_from_pem(&secrecy::SecretString::from(deployment.key_pem.as_str()))
+            .unwrap();
     let state = ProxyState {
         issuer_url: installation.clone(),
         issuers: Arc::new(sid_authn::issuer_directory::IssuerDirectory::new(
@@ -122,7 +125,7 @@ fn replica(deployment: &Deployment) -> axum::Router {
         grpc_channel: channel.clone(),
         revocation: sid_auth::revocation_view(deployment.svc.cache.clone()),
         bff_enabled: true,
-        account: Some(Arc::new(AccountLink::new(key, installation, channel))),
+        account: Some(Arc::new(RpClient::new(key, installation, channel).unwrap())),
         api_upstream: Some(url::Url::parse(&format!("http://{}", deployment.addr)).unwrap()),
         http: sid_auth_proxy::api_client(),
         bff_sessions: Arc::new(sessions(deployment)),
@@ -411,13 +414,15 @@ async fn sign_out_revokes_the_grant() {
         StatusCode::UNAUTHORIZED
     );
 
-    let link = AccountLink::new(
-        ClientKey::from_pem(deployment.key_pem.as_bytes()).unwrap(),
+    let link = RpClient::new(
+        ClientKey::ed25519_from_pem(&secrecy::SecretString::from(deployment.key_pem.as_str()))
+            .unwrap(),
         deployment.installation.clone(),
         tonic::transport::Channel::from_shared(format!("http://{}", deployment.addr))
             .unwrap()
             .connect_lazy(),
-    );
+    )
+    .unwrap();
     let connection = link.connection().await.unwrap();
     assert!(
         link.refresh(connection, held.expose_secret().to_owned())

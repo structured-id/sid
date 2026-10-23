@@ -208,28 +208,53 @@ fn the_authorization_request_asks_for_the_connection_resource() {
     assert_eq!(query["nonce"], "nonce-1");
 }
 
-/// Without SID the connection is not learned, and the next call asks again
-/// instead of keeping the failure.
-#[tokio::test]
-async fn an_unreachable_sid_is_asked_again() {
-    let (key, _) = ClientKey::generate().unwrap();
-    let link = AccountLink::new(key, INSTALLATION.into(), crate::test_channel());
-    assert!(link.connection().await.is_err());
-    assert!(link.connection.get().is_none());
-    assert!(link.connection().await.is_err());
+/// A lazy channel to nowhere.
+fn unreachable() -> tonic::transport::Channel {
+    tonic::transport::Channel::from_static("http://127.0.0.1:1")
+        .connect_timeout(std::time::Duration::from_millis(100))
+        .connect_lazy()
 }
 
-/// A link given its connection by the deployment never asks SID for one: the
-/// unreachable test channel is not called.
+fn key() -> ClientKey {
+    ClientKey::generate_ed25519().unwrap().0
+}
+
+/// Without the issuer the connection is not learned, and the next call asks
+/// again instead of keeping the failure.
+#[tokio::test]
+async fn an_unreachable_issuer_is_asked_again() {
+    let client = RpClient::new(key(), INSTALLATION.into(), unreachable()).unwrap();
+    assert!(matches!(
+        client.connection().await,
+        Err(RpClientError::Rpc(_))
+    ));
+    assert!(client.connection.get().is_none());
+    assert!(client.connection().await.is_err());
+}
+
+/// A client given its connection by the deployment never asks the issuer for
+/// one: the unreachable channel is not called.
 #[tokio::test]
 async fn a_delivered_connection_needs_no_discovery() {
-    let (key, _) = ClientKey::generate().unwrap();
     let connection = Connection::accept(bundle(), INSTALLATION).unwrap();
-    let link = AccountLink::delivered(
-        key,
+    let client = RpClient::delivered(
+        key(),
         INSTALLATION.into(),
-        crate::test_channel(),
+        unreachable(),
         connection.clone(),
-    );
-    assert_eq!(link.connection().await.unwrap(), &connection);
+    )
+    .unwrap();
+    assert_eq!(client.connection().await.unwrap(), &connection);
+}
+
+/// A key that names no key id cannot be this client's: the registration
+/// lists the client's keys by id, and connection proofs are issued by it.
+#[tokio::test]
+async fn a_key_without_an_id_is_refused() {
+    let (_, pem) = ClientKey::generate_ed25519().unwrap();
+    let unnamed = ClientKey::from_pem(&pem, "EdDSA", None).unwrap();
+    assert!(matches!(
+        RpClient::new(unnamed, INSTALLATION.into(), unreachable()),
+        Err(RpClientError::Invalid(_))
+    ));
 }

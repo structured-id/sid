@@ -222,21 +222,12 @@ async fn the_client_assertion_names_the_client_and_the_token_endpoint() {
         },
     ))
     .unwrap();
-    let Credential::Assertion {
-        key,
-        algorithm,
-        key_id,
-    } = &credential.credential
-    else {
+    let Credential::Assertion(key) = &credential.credential else {
         panic!("a private_key_jwt credential");
     };
     let audience = crate::issuer::token_endpoint(ISSUER);
-    let first = credential
-        .assertion(&audience, key, *algorithm, key_id.as_deref())
-        .unwrap();
-    let second = credential
-        .assertion(&audience, key, *algorithm, key_id.as_deref())
-        .unwrap();
+    let first = key.sign("route-checker", &audience).unwrap();
+    let second = key.sign("route-checker", &audience).unwrap();
     let header = jsonwebtoken::decode_header(&first).unwrap();
     assert_eq!(header.alg, jsonwebtoken::Algorithm::EdDSA);
     assert_eq!(header.kid.as_deref(), Some("checker-1"));
@@ -256,7 +247,7 @@ async fn the_client_assertion_names_the_client_and_the_token_endpoint() {
     assert_eq!(first["aud"], audience.as_str());
     assert_eq!(
         first["exp"].as_i64().unwrap() - first["iat"].as_i64().unwrap(),
-        ASSERTION_LIFETIME_SECS
+        crate::client_key::ASSERTION_LIFETIME_SECS
     );
     assert_ne!(first["jti"], second["jti"]);
 }

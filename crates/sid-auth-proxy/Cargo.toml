@@ -20,7 +20,7 @@ path = "src/lib.rs"
 sid-auth = { path = "../sid-auth", default-features = false }
 # The installation's issuer directory and the verification of the tokens its
 # issuer returns to the BFF.
-sid-authn = { workspace = true, features = ["issuer-registry"] }
+sid-authn = { workspace = true, features = ["issuer-registry", "client-credential"] }
 sid-core = { workspace = true }
 sid-plugin = { workspace = true }
 sid-proto = { workspace = true }
@@ -49,9 +49,6 @@ secrecy = { workspace = true }
 sha2 = { workspace = true }
 base64 = { workspace = true }
 subtle = { workspace = true }
-# BFF: its client key's assertions (RFC 7523) and connection proofs
-jsonwebtoken = { workspace = true }
-ed25519-dalek = { workspace = true, features = ["pkcs8", "pem"] }
 # BFF: account API proxying, bodies streamed through
 reqwest = { workspace = true, features = ["stream"] }
 url = { workspace = true }

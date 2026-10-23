@@ -22,7 +22,7 @@ use crate::ProxyState;
 use secrecy::{ExposeSecret, SecretString};
 use sid_authn::bff_session::{BffSession, SessionClaims};
 
-use crate::account::{AccountLink, Connection, LinkError};
+use sid_authn::rp_client::{Connection, RpClient, RpClientError};
 
 /// BFF routes.
 pub fn routes() -> Router<ProxyState> {
@@ -36,9 +36,7 @@ pub fn routes() -> Router<ProxyState> {
 
 /// The account link and its connection, or the answer when the BFF is off
 /// (404) or SID has not provisioned the integration yet (503).
-pub(crate) async fn connected(
-    state: &ProxyState,
-) -> Result<(&AccountLink, &Connection), StatusCode> {
+pub(crate) async fn connected(state: &ProxyState) -> Result<(&RpClient, &Connection), StatusCode> {
     let Some(link) = state.bff() else {
         return Err(StatusCode::NOT_FOUND);
     };
@@ -347,10 +345,10 @@ enum GrantOutcome {
 /// The outcome of a revocation call that failed. A refusal SID answered
 /// leaves the grant alive; a call whose answer was lost or broken may have
 /// been committed (gRPC status codes, `Unavailable` to `DataLoss`).
-fn revocation_failure(failure: &LinkError) -> GrantOutcome {
+fn revocation_failure(failure: &RpClientError) -> GrantOutcome {
     use tonic::Code;
     match failure {
-        LinkError::Rpc(status) => match status.code() {
+        RpClientError::Rpc(status) => match status.code() {
             Code::Unavailable
             | Code::Cancelled
             | Code::DeadlineExceeded
@@ -361,7 +359,7 @@ fn revocation_failure(failure: &LinkError) -> GrantOutcome {
             _ => GrantOutcome::NotRevoked,
         },
         // Nothing was sent.
-        LinkError::Invalid(_) | LinkError::Key(_) => GrantOutcome::NotRevoked,
+        RpClientError::Invalid(_) | RpClientError::Key(_) => GrantOutcome::NotRevoked,
     }
 }
 
@@ -533,10 +531,10 @@ fn generate_pkce_challenge(verifier: &str) -> String {
 }
 
 impl ProxyState {
-    /// The account link, when the BFF answers: the configured switch and a
+    /// The BFF's client, when the BFF answers: the configured switch and a
     /// client key together. Inferring the switch from the key alone would
     /// give two answers to one question.
-    pub fn bff(&self) -> Option<&AccountLink> {
+    pub fn bff(&self) -> Option<&RpClient> {
         self.account.as_deref().filter(|_| self.bff_enabled)
     }
 }
