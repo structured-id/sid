@@ -34,6 +34,7 @@ use serde_json::{Map, Value};
 use tower::ServiceExt;
 use tower_http::services::ServeFile;
 
+pub mod application_session;
 mod settings;
 
 pub use settings::{

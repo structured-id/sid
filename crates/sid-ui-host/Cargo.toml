@@ -30,7 +30,19 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 sid-proto = { workspace = true }
 tonic = { workspace = true }
+# The browser adapter of the hosted application: its client at the issuer,
+# the issuer directory, the shared session store and revocations.
+sid-authn = { workspace = true, features = ["client-credential", "issuer-registry"] }
+sid-core = { workspace = true, features = ["grpc"] }
+secrecy = { workspace = true }
+base64 = { workspace = true }
+rand = { workspace = true }
+subtle = { workspace = true }
 
 [dev-dependencies]
 http-body-util = "0.1"
 tokio = { workspace = true, features = ["test-util"] }
+async-trait = { workspace = true }
+sid-plugin = { workspace = true }
+chrono = { workspace = true }
+url = { workspace = true }
