@@ -80,6 +80,27 @@ pub trait CacheBackend: Send + Sync {
         }
     }
 
+    /// Atomically replace the value of `key` with `value` (and its TTL with
+    /// `ttl`) only while it is exactly `expected`: `true` when replaced,
+    /// `false` when the key is absent, expired or holds anything else.
+    ///
+    /// A read-modify-write over this never resurrects a key another caller
+    /// deleted and never overwrites a value another caller wrote since the
+    /// read. Required of every backend that offers it, with no check-then-set
+    /// default: that would be exactly the lost update this exists to prevent,
+    /// so a backend without it refuses the call.
+    async fn compare_and_set(
+        &self,
+        key: &str,
+        _expected: &[u8],
+        _value: &[u8],
+        _ttl: Duration,
+    ) -> CacheResult<bool> {
+        Err(CacheError::Other(format!(
+            "compare-and-set of {key} is not supported by this cache backend"
+        )))
+    }
+
     /// Atomically increment a counter and return the new value.
     ///
     /// If the key does not exist, creates it with value 1 and sets TTL.
@@ -138,6 +159,17 @@ impl CacheBackend for NoCacheBackend {
     }
 
     async fn exists(&self, _key: &str) -> CacheResult<bool> {
+        Ok(false)
+    }
+
+    /// Nothing is ever held, so nothing matches.
+    async fn compare_and_set(
+        &self,
+        _key: &str,
+        _expected: &[u8],
+        _value: &[u8],
+        _ttl: Duration,
+    ) -> CacheResult<bool> {
         Ok(false)
     }
 
@@ -267,6 +299,30 @@ impl CacheBackend for InMemoryCacheBackend {
             return Ok(false); // Key exists and is alive.
         }
 
+        store.insert(key.to_string(), (value.to_vec(), std::time::Instant::now()));
+        ttls.insert(key.to_string(), ttl);
+        Ok(true)
+    }
+
+    async fn compare_and_set(
+        &self,
+        key: &str,
+        expected: &[u8],
+        value: &[u8],
+        ttl: Duration,
+    ) -> CacheResult<bool> {
+        // Atomic: single lock scope.
+        let mut store = self.store.lock().unwrap();
+        let mut ttls = self.ttls.lock().unwrap();
+        let live = store.get(key).is_some_and(|(held, created)| {
+            held == expected
+                && !ttls
+                    .get(key)
+                    .is_some_and(|ttl| Self::is_expired(*created, *ttl))
+        });
+        if !live {
+            return Ok(false);
+        }
         store.insert(key.to_string(), (value.to_vec(), std::time::Instant::now()));
         ttls.insert(key.to_string(), ttl);
         Ok(true)
@@ -651,6 +707,24 @@ mod tests {
         let cache = InMemoryCacheBackend::new();
         // No subscribers — publish should not error.
         cache.publish("nobody", b"msg").await.unwrap();
+    }
+
+    /// The in-memory backend owes compare-and-set what every backend does.
+    #[tokio::test]
+    async fn test_inmem_compare_and_set_conformance() {
+        let cache = InMemoryCacheBackend::new();
+        crate::conformance::cache::run_compare_and_set(&cache, "inmem").await;
+    }
+
+    /// The pass-through backend holds nothing, so nothing ever matches.
+    #[tokio::test]
+    async fn test_no_cache_compare_and_set_never_matches() {
+        assert!(
+            !NoCacheBackend
+                .compare_and_set("k", b"a", b"b", Duration::from_secs(1))
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]

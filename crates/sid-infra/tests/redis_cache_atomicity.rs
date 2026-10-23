@@ -30,6 +30,13 @@ fn key(name: &str) -> String {
     format!("test:{name}:{}", uuid::Uuid::now_v7())
 }
 
+/// Compare-and-set is one script on the server: what every backend owes.
+#[tokio::test]
+async fn test_compare_and_set_conformance() {
+    let c = cache().await;
+    sid_plugin::conformance::cache::run_compare_and_set(&c, &key("cas")).await;
+}
+
 #[tokio::test]
 async fn test_set_get_delete_round_trip() {
     let c = cache().await;

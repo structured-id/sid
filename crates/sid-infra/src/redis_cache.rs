@@ -5,7 +5,7 @@
 //! Compatible with Redis 6+, Valkey, and Dragonfly.
 
 use async_trait::async_trait;
-use fred::interfaces::{ClientLike, EventInterface, KeysInterface, PubsubInterface};
+use fred::interfaces::{ClientLike, EventInterface, KeysInterface, LuaInterface, PubsubInterface};
 use fred::prelude::*;
 use fred::types::ExpireOptions;
 use sid_plugin::cache::{CacheBackend, CacheError, CacheResult};
@@ -129,6 +129,33 @@ impl CacheBackend for RedisCacheBackend {
         // The reply is the string OK when the key was set and nil when NX
         // refused it.
         Ok(!set.is_null())
+    }
+
+    /// One script, so the comparison and the write run as one command:
+    /// scripts execute atomically (Redis "EVAL", "Atomicity of scripts").
+    async fn compare_and_set(
+        &self,
+        key: &str,
+        expected: &[u8],
+        value: &[u8],
+        ttl: Duration,
+    ) -> CacheResult<bool> {
+        const SCRIPT: &str = "if redis.call('GET', KEYS[1]) == ARGV[1] then \
+             redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[3]) return 1 \
+             else return 0 end";
+        let replaced: i64 = LuaInterface::eval(
+            &self.client,
+            SCRIPT,
+            key,
+            vec![
+                Value::Bytes(fred::bytes::Bytes::copy_from_slice(expected)),
+                Value::Bytes(fred::bytes::Bytes::copy_from_slice(value)),
+                Value::from(ttl.as_millis() as i64),
+            ],
+        )
+        .await
+        .map_err(|e| CacheError::Other(format!("compare-and-set {key}: {e}")))?;
+        Ok(replaced == 1)
     }
 
     /// `INCR`, then set the expiry on the increment that created the key.
