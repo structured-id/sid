@@ -157,7 +157,7 @@ cedar-policy = "4"
 async-nats = "0.50"
 futures = "0.3"
 hex = "0.4"
-fred = { version = "10", default-features = false, features = ["enable-rustls-ring", "subscriber-client", "i-keys", "i-pubsub"] }
+fred = { version = "10", default-features = false, features = ["enable-rustls-ring", "subscriber-client", "i-keys", "i-pubsub", "i-scripts"] }
 
 # VOPRF / CipherSuite adapter (Pallas).
 # `danger` exposes `derive_key`, which the key-exchange group needs to derive

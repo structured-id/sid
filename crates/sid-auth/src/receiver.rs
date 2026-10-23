@@ -92,7 +92,7 @@ impl Receiver {
             name,
             Arc::new(IssuerDirectory::new(
                 &config.issuer_url,
-                Arc::new(sid_authn::issuer_directory::GrpcIssuerSource::new(
+                Arc::new(sid_infra::issuer_registry::GrpcIssuerSource::new(
                     upstream.clone(),
                 )),
             )),

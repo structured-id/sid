@@ -1,6 +1,6 @@
 [package]
 name = "sid-infra"
-description = "StructuredID Infrastructure Backends - NATS, Redis implementations"
+description = "StructuredID Infrastructure Backends - NATS, Redis and issuer client implementations"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,10 +11,10 @@ authors.workspace = true
 sid-plugin = { workspace = true }
 sid-core = { workspace = true }
 async-trait = { workspace = true }
-async-nats = { workspace = true }
-chrono = { workspace = true }
-fred = { workspace = true }
-futures = { workspace = true }
+async-nats = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }
+fred = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -26,8 +26,16 @@ sid-proto = { workspace = true, optional = true }
 structured-proxy = { version = "8.1.2", default-features = false, optional = true }
 prost-reflect = { workspace = true, optional = true }
 anyhow = { workspace = true, optional = true }
+# The issuer RPC clients (`issuer-client` feature).
+sid-authn = { workspace = true, optional = true }
+tonic = { workspace = true, optional = true }
 
 [features]
+# Each backend is its own capability: a consumer of one never builds or
+# connects the others.
+nats = ["dep:async-nats", "dep:futures", "dep:chrono"]
+redis = ["dep:fred"]
+issuer-client = ["dep:sid-authn", "dep:sid-proto", "dep:tonic"]
 http = [
     "dep:sid-proto",
     "dep:structured-proxy",
@@ -36,6 +44,10 @@ http = [
 ]
 
 [dev-dependencies]
+# The tests exercise every backend.
+sid-infra = { path = ".", features = ["nats", "redis", "http", "issuer-client"] }
+# Redis runs the cache conformance scenarios.
+sid-plugin = { workspace = true, features = ["conformance"] }
 # Configurations in the tests are written as YAML, as operators write them.
 serde-saphyr = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
