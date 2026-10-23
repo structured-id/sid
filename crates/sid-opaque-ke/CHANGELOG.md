@@ -1,5 +1,11 @@
 # Changelog
 
+## [4.1.1](https://github.com/structured-id/sid/compare/sid-opaque-ke-v4.1.0...sid-opaque-ke-v4.1.1) - 2026-10-23
+
+### Other
+
+- *(deps)* bump the cargo group with 9 updates ([#209](https://github.com/structured-id/sid/pull/209))
+
 ## 4.1.0-pre.2 (March 26, 2026)
 * Upgraded ml-kem from 0.2 to 0.3.0-rc.0
 * Increased MSRV to 1.87
