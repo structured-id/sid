@@ -19,7 +19,7 @@ path = "src/main.rs"
 sid-core = { workspace = true, features = ["grpc"] }
 sid-plugin = { workspace = true }
 sid-authn = { workspace = true, features = ["grpc"] }
-sid-infra = { workspace = true }
+sid-infra = { workspace = true, features = ["nats", "redis"] }
 sid-serve = { workspace = true }
 # Durable job store in this service's own PostgreSQL database.
 sid-storage = { workspace = true, features = ["storage-pg"] }

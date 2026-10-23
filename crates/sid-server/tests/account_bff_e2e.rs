@@ -114,7 +114,7 @@ fn replica(deployment: &Deployment) -> axum::Router {
         issuer_url: installation.clone(),
         issuers: Arc::new(sid_authn::issuer_directory::IssuerDirectory::new(
             &installation,
-            Arc::new(sid_authn::issuer_directory::GrpcIssuerSource::new(
+            Arc::new(sid_infra::issuer_registry::GrpcIssuerSource::new(
                 channel.clone(),
             )),
         )),
