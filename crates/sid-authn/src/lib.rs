@@ -19,6 +19,7 @@ pub mod admin_claim;
 pub mod anomaly;
 pub mod backchannel_logout;
 pub mod bearer_secret;
+pub mod bff_session;
 pub mod browser_session;
 #[cfg(feature = "grpc")]
 pub mod caller;

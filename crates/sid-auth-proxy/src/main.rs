@@ -20,9 +20,9 @@ use tracing_subscriber::EnvFilter;
 use sid_auth_proxy::account::{AccountLink, Connection};
 use sid_auth_proxy::client_key::ClientKey;
 use sid_auth_proxy::config::ProxyConfig;
-use sid_auth_proxy::session::BffSessionStore;
 use sid_auth_proxy::shield::Shield;
 use sid_auth_proxy::{ProxyState, api_client, bff, health, metrics};
+use sid_authn::bff_session::BffSessionStore;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

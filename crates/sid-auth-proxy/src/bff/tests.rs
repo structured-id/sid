@@ -2,9 +2,9 @@
 
 use super::*;
 use crate::account::AccountLink;
-use crate::session::BffSessionStore;
 use axum::body::Body;
 use axum::http::{HeaderValue, Request};
+use sid_authn::bff_session::BffSessionStore;
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -698,7 +698,7 @@ fn test_revocation_failure_outcome() {
 #[tokio::test]
 async fn test_logout_clears_cookie() {
     let state = bff_test_state();
-    let claims = sid_auth::auth::jwt::ForwardAuthClaims {
+    let claims = sid_authn::bff_session::SessionClaims {
         sub: "user1".into(),
         iss: "test".into(),
         exp: 0,
@@ -713,7 +713,6 @@ async fn test_logout_clears_cookie() {
         name: None,
         preferred_username: None,
         groups: None,
-        cnf: None,
     };
     let (session_id, csrf_token) = state
         .bff_sessions
@@ -783,8 +782,8 @@ async fn test_userinfo_invalid_session_returns_401() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
-fn session_claims() -> sid_auth::auth::jwt::ForwardAuthClaims {
-    sid_auth::auth::jwt::ForwardAuthClaims {
+fn session_claims() -> sid_authn::bff_session::SessionClaims {
+    sid_authn::bff_session::SessionClaims {
         sub: "up_01HY000000000000000000".into(),
         iss: "https://sid.example.com".into(),
         exp: 9999999999,
@@ -799,7 +798,6 @@ fn session_claims() -> sid_auth::auth::jwt::ForwardAuthClaims {
         name: Some("Test User".into()),
         preferred_username: Some("testuser".into()),
         groups: None,
-        cnf: None,
     }
 }
 
@@ -945,7 +943,10 @@ async fn test_pending_store_and_take() {
 
     let binding = test_connection().sign_in_binding();
     let pending = store.take_pending(&state, &binding).await.unwrap().unwrap();
-    assert_eq!(pending.code_verifier, "verifier123");
+    assert_eq!(
+        secrecy::ExposeSecret::expose_secret(&pending.code_verifier),
+        "verifier123"
+    );
     assert_eq!(pending.nonce, "nonce123");
     assert_eq!(pending.redirect_url, "/dashboard");
 

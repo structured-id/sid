@@ -46,8 +46,8 @@ async fn fake_api() -> (url::Url, Arc<Mutex<Vec<Seen>>>) {
     (url::Url::parse(&format!("http://{addr}")).unwrap(), seen)
 }
 
-fn claims(exp: i64) -> sid_auth::auth::jwt::ForwardAuthClaims {
-    sid_auth::auth::jwt::ForwardAuthClaims {
+fn claims(exp: i64) -> sid_authn::bff_session::SessionClaims {
+    sid_authn::bff_session::SessionClaims {
         sub: "0190f000-0000-7000-8000-000000000001".into(),
         iss: "https://sid.example.com/i/0123456789abcdef0123456789abcdef".into(),
         exp,
@@ -62,7 +62,6 @@ fn claims(exp: i64) -> sid_auth::auth::jwt::ForwardAuthClaims {
         name: None,
         preferred_username: None,
         groups: None,
-        cnf: None,
     }
 }
 
@@ -83,7 +82,7 @@ async fn signed_in_state(
         .bff_sessions
         .create_session(
             "access-1".into(),
-            refresh_token.map(str::to_owned),
+            refresh_token.map(secrecy::SecretString::from),
             claims(exp),
             &crate::bff::tests::test_connection().binding(),
         )

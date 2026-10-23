@@ -37,8 +37,8 @@ fn replica_pair() -> (BffSessionStore, BffSessionStore) {
     (build(cache.clone(), LONG, LONG), build(cache, LONG, LONG))
 }
 
-fn test_claims() -> ForwardAuthClaims {
-    ForwardAuthClaims {
+fn test_claims() -> SessionClaims {
+    SessionClaims {
         sub: "up_01HY000000000000000000".into(),
         iss: "https://sid.example.com".into(),
         exp: 0,
@@ -53,7 +53,6 @@ fn test_claims() -> ForwardAuthClaims {
         name: None,
         preferred_username: None,
         groups: None,
-        cnf: None,
     }
 }
 
@@ -150,7 +149,7 @@ async fn test_create_and_get_session() {
         .unwrap();
 
     let got = s.get_session(&id).await.unwrap().expect("session exists");
-    assert_eq!(got.access_token, "access");
+    assert_eq!(got.bearer(), "access");
     assert_eq!(got.csrf_token, csrf);
     assert_eq!(got.claims.sub, "up_01HY000000000000000000");
 }
@@ -163,7 +162,10 @@ async fn test_create_session_with_refresh_token() {
         .await
         .unwrap();
     let got = s.get_session(&id).await.unwrap().unwrap();
-    assert_eq!(got.refresh_token.as_deref(), Some("refresh"));
+    assert_eq!(
+        got.refresh_token.as_ref().map(ExposeSecret::expose_secret),
+        Some("refresh")
+    );
 }
 
 #[tokio::test]
@@ -277,8 +279,8 @@ async fn test_create_multiple_sessions_unique_ids() {
         .await
         .unwrap();
     assert_ne!(a, b);
-    assert_eq!(s.get_session(&a).await.unwrap().unwrap().access_token, "a");
-    assert_eq!(s.get_session(&b).await.unwrap().unwrap().access_token, "b");
+    assert_eq!(s.get_session(&a).await.unwrap().unwrap().bearer(), "a");
+    assert_eq!(s.get_session(&b).await.unwrap().unwrap().bearer(), "b");
 }
 
 #[tokio::test]
@@ -451,7 +453,7 @@ async fn test_take_pending_returns_what_was_stored() {
         .await
         .unwrap()
         .expect("pending");
-    assert_eq!(taken.code_verifier, "verifier");
+    assert_eq!(taken.code_verifier.expose_secret(), "verifier");
     assert_eq!(taken.nonce, "nonce");
     assert_eq!(taken.redirect_url, "/after-login");
 }
@@ -536,7 +538,7 @@ async fn test_session_created_on_one_replica_is_readable_on_another() {
         .unwrap();
 
     let got = b.get_session(&id).await.unwrap().expect("visible on B");
-    assert_eq!(got.access_token, "access");
+    assert_eq!(got.bearer(), "access");
     assert_eq!(got.csrf_token, csrf);
 }
 
@@ -552,7 +554,7 @@ async fn test_pending_stored_on_one_replica_is_taken_on_another() {
         .await
         .unwrap()
         .expect("visible on B");
-    assert_eq!(taken.code_verifier, "verifier");
+    assert_eq!(taken.code_verifier.expose_secret(), "verifier");
 }
 
 /// Logout must end the session everywhere, not only where it was called.
@@ -640,10 +642,10 @@ async fn test_unreadable_value_is_an_error_not_a_missing_session() {
     ));
 }
 
-/// Records of the previous shape (before sessions and sign-ins carried their
-/// connection) stay in a shared cache while replicas are replaced. A new
-/// replica must not read them: not as a session (503 for its user), not as
-/// a sign-in to complete. They are someone else's key space and expire there.
+/// Records of earlier shapes stay in a shared cache while replicas are
+/// replaced. A new replica must not read them: not as a session (503 for its
+/// user), not as a sign-in to complete. They are someone else's key space
+/// and expire there.
 #[tokio::test]
 async fn test_records_of_the_previous_shape_are_not_read() {
     let cache: Arc<dyn CacheBackend> = Arc::new(InMemoryCacheBackend::new());
@@ -655,6 +657,7 @@ async fn test_records_of_the_previous_shape_are_not_read() {
         "csrf_token": "c",
         "created_at": Utc::now(),
         "last_access": Utc::now(),
+        "connection": CONN,
     });
     let previous_pending = serde_json::json!({
         "code_verifier": "v",
@@ -662,9 +665,12 @@ async fn test_records_of_the_previous_shape_are_not_read() {
         "redirect_url": "/",
         "created_at": Utc::now(),
     });
+    let previous_pending_key = pending_key(CONN, &id).replace(PENDING_PREFIX, "bff:pending:3:");
     for (key, value) in [
         (format!("bff:sess:{id}"), &previous_session),
+        (format!("bff:sess:2:{id}"), &previous_session),
         (format!("bff:pending:{id}"), &previous_pending),
+        (previous_pending_key, &previous_pending),
     ] {
         cache
             .set(&key, &serde_json::to_vec(value).unwrap(), LONG)
@@ -732,8 +738,8 @@ async fn test_issued_ids_pass_the_shape_check() {
 #[test]
 fn test_debug_hides_the_tokens() {
     let session = BffSession {
-        access_token: "super-secret-access".into(),
-        refresh_token: Some("super-secret-refresh".into()),
+        access_token: SecretString::from("super-secret-access"),
+        refresh_token: Some(SecretString::from("super-secret-refresh")),
         claims: test_claims(),
         csrf_token: "super-secret-csrf".into(),
         created_at: Utc::now(),
@@ -742,9 +748,60 @@ fn test_debug_hides_the_tokens() {
     };
     let rendered = format!("{session:?}");
     assert!(!rendered.contains("super-secret"), "{rendered}");
-    assert!(rendered.contains("[REDACTED]"));
+    assert!(rendered.contains("REDACTED"));
     assert!(
         rendered.contains("up_01HY000000000000000000"),
         "the subject stays, so a log still identifies the session"
     );
+}
+
+/// The tokens and the PKCE verifier survive the shared store as their
+/// values: another replica reads back exactly what was written.
+#[tokio::test]
+async fn test_secrets_round_trip_through_the_store() {
+    let (a, b) = replica_pair();
+    let (id, _) = a
+        .create_session(
+            "access-value".into(),
+            Some("refresh-value".into()),
+            test_claims(),
+            CONN,
+        )
+        .await
+        .unwrap();
+    let got = b.get_session(&id).await.unwrap().unwrap();
+    assert_eq!(got.bearer(), "access-value");
+    assert_eq!(
+        got.refresh_token.as_ref().map(ExposeSecret::expose_secret),
+        Some("refresh-value")
+    );
+    let state = a
+        .store_pending("verifier-value".into(), "n".into(), "/".into(), CONN)
+        .await
+        .unwrap();
+    let taken = b.take_pending(&state, CONN).await.unwrap().unwrap();
+    assert_eq!(taken.code_verifier.expose_secret(), "verifier-value");
+}
+
+/// A refreshed access token carries no profile claims: the session keeps the
+/// ones the sign-in's ID token gave, and takes everything else anew.
+#[test]
+fn test_refreshed_claims_keep_the_profile() {
+    let previous = SessionClaims {
+        name: Some("Ada".into()),
+        groups: Some(vec!["ops".into()]),
+        ..test_claims()
+    };
+    let fresh = SessionClaims {
+        email: None,
+        jti: "tok_new".into(),
+        exp: 42,
+        ..test_claims()
+    };
+    let refreshed = fresh.refreshed(&previous);
+    assert_eq!(refreshed.jti, "tok_new");
+    assert_eq!(refreshed.exp, 42);
+    assert_eq!(refreshed.email, previous.email);
+    assert_eq!(refreshed.name.as_deref(), Some("Ada"));
+    assert_eq!(refreshed.groups, Some(vec!["ops".to_owned()]));
 }
