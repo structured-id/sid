@@ -345,17 +345,23 @@ async fn an_expired_token_is_refreshed_before_the_call() {
     let before = store.get_session(&browser.session).await.unwrap().unwrap();
     let mut expired = before.claims.clone();
     expired.exp = 0;
-    assert!(
+    let held = before
+        .refresh_token
+        .clone()
+        .expect("the sign-in granted a refresh token");
+    assert!(matches!(
         store
             .replace_tokens(
                 &browser.session,
+                &held,
                 before.access_token.clone(),
                 before.refresh_token.clone(),
                 expired,
             )
             .await
-            .unwrap()
-    );
+            .unwrap(),
+        sid_authn::bff_session::TokenReplacement::Replaced
+    ));
 
     let id = answered_profile(send(&router, current_profile(&browser, true)).await).await;
     assert_eq!(id, deployment.profile.id.to_string());

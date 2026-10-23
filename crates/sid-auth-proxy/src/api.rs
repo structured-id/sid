@@ -16,7 +16,7 @@ use axum::response::{IntoResponse, Response};
 
 use crate::ProxyState;
 use secrecy::{ExposeSecret, SecretString};
-use sid_authn::bff_session::BffSession;
+use sid_authn::bff_session::{BffSession, TokenReplacement};
 
 use crate::bff::{connected, csrf_matches, signed_in, verified_claims};
 
@@ -153,9 +153,9 @@ async fn current_token(
     if session.claims.exp - now > REFRESH_MARGIN_SECS {
         return Ok(session.access_token);
     }
-    let Some(refresh_token) = session.refresh_token else {
+    if session.refresh_token.is_none() {
         return Err(end_session(state, session_id).await);
-    };
+    }
     let claimed = state
         .bff_sessions
         .claim_refresh(session_id, REFRESH_HOLD)
@@ -167,6 +167,23 @@ async fn current_token(
     if !claimed {
         return refreshed_elsewhere(state, session_id, session.access_token.expose_secret()).await;
     }
+    // The session read before the claim may be older than a refresh another
+    // replica completed under an earlier, now expired claim: refresh only what
+    // the store holds now, never a refresh token that was already rotated.
+    let session = match state.bff_sessions.get_session(session_id).await {
+        Ok(Some(current)) => current,
+        Ok(None) => return Err(StatusCode::UNAUTHORIZED),
+        Err(e) => {
+            tracing::error!(error = %e, "BFF API: cannot read the session");
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+    };
+    if session.claims.exp - now > REFRESH_MARGIN_SECS {
+        return Ok(session.access_token);
+    }
+    let Some(refresh_token) = session.refresh_token.clone() else {
+        return Err(end_session(state, session_id).await);
+    };
 
     let (link, connection) = connected(state).await?;
     let tokens = match link
@@ -191,14 +208,17 @@ async fn current_token(
         .bff_sessions
         .replace_tokens(
             session_id,
+            &refresh_token,
             access_token.clone(),
             tokens.refresh_token.map(SecretString::from),
             claims,
         )
         .await
     {
-        Ok(true) => Ok(access_token),
-        Ok(false) => Err(StatusCode::UNAUTHORIZED),
+        Ok(TokenReplacement::Replaced) => Ok(access_token),
+        // A newer refresh landed first; its tokens stand.
+        Ok(TokenReplacement::Superseded(current)) => Ok(current.access_token),
+        Ok(TokenReplacement::Ended) => Err(StatusCode::UNAUTHORIZED),
         Err(e) => {
             tracing::error!(error = %e, "BFF API: cannot store the refreshed tokens");
             Err(StatusCode::SERVICE_UNAVAILABLE)

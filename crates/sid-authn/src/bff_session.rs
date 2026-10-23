@@ -301,29 +301,37 @@ impl BffSessionStore {
         Ok(self.cache.set_nx(&refresh_key(id), b"1", hold).await?)
     }
 
-    /// Replace the tokens of session `id` after a refresh, keeping its CSRF
-    /// token and lifetimes. `false` when the session ended meanwhile.
+    /// Replace the tokens of session `id` with those a refresh of
+    /// `refreshed_from` returned, keeping its CSRF token and lifetimes.
+    ///
+    /// The result is stored only while the session still holds
+    /// `refreshed_from`: a refresh claim is a lease that can expire, so
+    /// another replica may have refreshed since, and its newer tokens must
+    /// not be overwritten with this older result.
     pub async fn replace_tokens(
         &self,
         id: &str,
+        refreshed_from: &SecretString,
         access_token: SecretString,
         refresh_token: Option<SecretString>,
         claims: SessionClaims,
-    ) -> SessionResult<bool> {
+    ) -> SessionResult<TokenReplacement> {
         // Applied to the session as it is when written: a concurrent idle push
         // makes the write miss and it is applied again over that push; a
-        // sign-out ends the attempt. Only the refresh holder replaces tokens,
-        // so other writers only push the idle window and the loop ends.
+        // sign-out or a newer refresh ends the attempt.
         for _ in 0..REPLACE_ATTEMPTS {
             let Some(raw) = self.cache.get(&session_key(id)).await? else {
-                return Ok(false);
+                return Ok(TokenReplacement::Ended);
             };
             let mut session: BffSession = serde_json::from_slice(&raw)?;
+            if !session.holds_refresh_token(refreshed_from) {
+                return Ok(TokenReplacement::Superseded(Box::new(session)));
+            }
             session.access_token = access_token.clone();
             session.refresh_token = refresh_token.clone();
             session.claims = claims.clone();
             if self.rewrite(id, &raw, &session).await? {
-                return Ok(true);
+                return Ok(TokenReplacement::Replaced);
             }
         }
         Err(SessionStoreError::Backend(CacheError::Other(format!(
@@ -498,6 +506,33 @@ impl BffSession {
     pub fn bearer(&self) -> &str {
         self.access_token.expose_secret()
     }
+
+    /// Whether this session's refresh token is `token`: the version of the
+    /// tokens a refresh started from. Compared in constant time, as every
+    /// comparison of a secret.
+    pub fn holds_refresh_token(&self, token: &SecretString) -> bool {
+        use subtle::ConstantTimeEq;
+        self.refresh_token.as_ref().is_some_and(|held| {
+            bool::from(
+                held.expose_secret()
+                    .as_bytes()
+                    .ct_eq(token.expose_secret().as_bytes()),
+            )
+        })
+    }
+}
+
+/// What became of a refresh result handed to
+/// [`BffSessionStore::replace_tokens`].
+#[derive(Debug)]
+pub enum TokenReplacement {
+    /// Stored: the session now holds the refreshed tokens.
+    Replaced,
+    /// Not stored: the session already holds newer tokens, here as they are.
+    /// Boxed: the rare outcome should not size every answer.
+    Superseded(Box<BffSession>),
+    /// Not stored: the session ended meanwhile.
+    Ended,
 }
 
 #[cfg(test)]
