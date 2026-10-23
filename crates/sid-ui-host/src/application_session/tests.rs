@@ -214,9 +214,22 @@ async fn sign_in_redirects_to_the_issuer() {
     assert_eq!(query["code_challenge_method"], "S256");
     assert_eq!(query["resource"], "https://ops.sid.example.com/api/");
     assert!(!query["nonce"].is_empty());
+    let browser = response
+        .metadata()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .split_once('=')
+        .unwrap()
+        .1
+        .to_owned();
     let pending = f
         .sessions
-        .take_pending(&query["state"], &connection().sign_in_binding())
+        .take_pending(&query["state"], &browser_binding(&connection(), &browser))
         .await
         .unwrap()
         .expect("the sign-in is recorded under its state");
@@ -256,47 +269,168 @@ async fn sign_in_with_the_store_down_is_unavailable() {
     assert!(response.metadata().get("location").is_none());
 }
 
-/// A callback whose state names no recorded sign-in, or one used already,
-/// is refused; one from another issuer is refused before its code is used,
-/// and the sign-in it took is not left for a replay.
-#[tokio::test]
-async fn a_callback_must_name_a_recorded_sign_in_of_the_issuer() {
-    let f = fixture(memory(), true);
-    let callback = |state: &str, iss: &str| CompleteSignInRequest {
+/// The sign-in browser cookie's name for the fixture's application.
+const SIGN_IN_COOKIE: &str = "__Host-ops-bff-signin";
+
+/// A sign-in started by a browser that sends `cookie` (none for a fresh one):
+/// its state and the `cookie` header that browser sends from then on.
+async fn started(f: &Fixture, cookie: Option<&str>) -> (String, String) {
+    let request = match cookie {
+        Some(cookie) => with_cookie(StartSignInRequest { rd: "/".into() }, cookie, None),
+        None => Request::new(StartSignInRequest { rd: "/".into() }),
+    };
+    let response = f.adapter.start_sign_in(request).await.unwrap();
+    assert_eq!(status(&response), "302");
+    let location: url::Url = response
+        .metadata()
+        .get("location")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let state = location
+        .query_pairs()
+        .find(|(name, _)| name == "state")
+        .unwrap()
+        .1
+        .into_owned();
+    let set = response
+        .metadata()
+        .get("set-cookie")
+        .expect("the sign-in binds its browser")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let pair = set.split(';').next().unwrap().to_owned();
+    (state, pair)
+}
+
+fn callback(state: &str, iss: &str) -> CompleteSignInRequest {
+    CompleteSignInRequest {
         state: state.into(),
         code: Some("code".into()),
         error: None,
         iss: Some(iss.into()),
-    };
+    }
+}
+
+/// A sign-in binds the browser that started it with an HttpOnly, host-only
+/// cookie; a second sign-in in the same browser (another tab) keeps that
+/// binding rather than replacing it.
+#[tokio::test]
+async fn a_sign_in_binds_its_browser() {
+    let f = fixture(memory(), true);
+    let response = f
+        .adapter
+        .start_sign_in(Request::new(StartSignInRequest { rd: "/".into() }))
+        .await
+        .unwrap();
+    let set = response
+        .metadata()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(set.starts_with(&format!("{SIGN_IN_COOKIE}=")), "{set}");
+    assert!(
+        set.contains("; Path=/; Secure; HttpOnly; SameSite=Lax"),
+        "{set}"
+    );
+
+    let (_, browser) = started(&f, None).await;
+    let (_, again) = started(&f, Some(&browser)).await;
+    assert_eq!(again, browser, "another tab keeps the browser's binding");
+}
+
+/// A callback is completed only by the browser that started its sign-in
+/// (RFC 6749 §10.12, RFC 9700 §4.7.1): one without the sign-in cookie, or
+/// with another browser's, is refused before any code is redeemed, and the
+/// sign-in stays for its own browser, which completes it once.
+#[tokio::test]
+async fn only_the_starting_browser_completes_a_sign_in() {
+    let f = fixture(memory(), true);
+    let (state, browser) = started(&f, None).await;
+    let (_, other_browser) = started(&f, None).await;
+    assert_ne!(browser, other_browser);
+
+    let without = f
+        .adapter
+        .complete_sign_in(Request::new(callback(&state, ISSUER)))
+        .await
+        .unwrap();
+    assert_eq!(status(&without), "400");
+    assert!(without.metadata().get("set-cookie").is_none());
+    let foreign = f
+        .adapter
+        .complete_sign_in(with_cookie(callback(&state, ISSUER), &other_browser, None))
+        .await
+        .unwrap();
+    assert_eq!(status(&foreign), "400");
+
+    // The starting browser reaches the code redemption: the issuer is
+    // unreachable here, so 502, not the 400 of an unknown sign-in.
+    let own = f
+        .adapter
+        .complete_sign_in(with_cookie(callback(&state, ISSUER), &browser, None))
+        .await
+        .unwrap();
+    assert_eq!(status(&own), "502");
+    let replay = f
+        .adapter
+        .complete_sign_in(with_cookie(callback(&state, ISSUER), &browser, None))
+        .await
+        .unwrap();
+    assert_eq!(status(&replay), "400", "the sign-in is taken once");
+}
+
+/// Two tabs of one browser start two sign-ins; each completes.
+#[tokio::test]
+async fn sign_ins_of_two_tabs_both_complete() {
+    let f = fixture(memory(), true);
+    let (first, browser) = started(&f, None).await;
+    let (second, _) = started(&f, Some(&browser)).await;
+    for state in [first, second] {
+        let response = f
+            .adapter
+            .complete_sign_in(with_cookie(callback(&state, ISSUER), &browser, None))
+            .await
+            .unwrap();
+        assert_eq!(status(&response), "502", "reaches the code redemption");
+    }
+}
+
+/// A callback whose state names no recorded sign-in is refused; one from
+/// another issuer is refused before its code is used, and the sign-in it
+/// took is not left for a replay.
+#[tokio::test]
+async fn a_callback_must_name_a_recorded_sign_in_of_the_issuer() {
+    let f = fixture(memory(), true);
+    let (state, browser) = started(&f, None).await;
     let unknown = f
         .adapter
-        .complete_sign_in(Request::new(callback(&"a".repeat(64), ISSUER)))
+        .complete_sign_in(with_cookie(
+            callback(&"a".repeat(64), ISSUER),
+            &browser,
+            None,
+        ))
         .await
         .unwrap();
     assert_eq!(status(&unknown), "400");
 
-    let state = f
-        .sessions
-        .store_pending(
-            "v".into(),
-            "n".into(),
-            "/".into(),
-            &connection().sign_in_binding(),
-        )
-        .await
-        .unwrap();
     let foreign = f
         .adapter
-        .complete_sign_in(Request::new(callback(
-            &state,
-            "https://evil.example.com/i/x",
-        )))
+        .complete_sign_in(with_cookie(
+            callback(&state, "https://evil.example.com/i/x"),
+            &browser,
+            None,
+        ))
         .await
         .unwrap();
     assert_eq!(status(&foreign), "400");
     let replay = f
         .adapter
-        .complete_sign_in(Request::new(callback(&state, ISSUER)))
+        .complete_sign_in(with_cookie(callback(&state, ISSUER), &browser, None))
         .await
         .unwrap();
     assert_eq!(status(&replay), "400", "the sign-in is taken once");
@@ -307,24 +441,19 @@ async fn a_callback_must_name_a_recorded_sign_in_of_the_issuer() {
 #[tokio::test]
 async fn an_authorization_error_is_refused() {
     let f = fixture(memory(), true);
-    let state = f
-        .sessions
-        .store_pending(
-            "v".into(),
-            "n".into(),
-            "/".into(),
-            &connection().sign_in_binding(),
-        )
-        .await
-        .unwrap();
+    let (state, browser) = started(&f, None).await;
     let response = f
         .adapter
-        .complete_sign_in(Request::new(CompleteSignInRequest {
-            state,
-            code: None,
-            error: Some("access_denied".into()),
-            iss: Some(ISSUER.into()),
-        }))
+        .complete_sign_in(with_cookie(
+            CompleteSignInRequest {
+                state,
+                code: None,
+                error: Some("access_denied".into()),
+                iss: Some(ISSUER.into()),
+            },
+            &browser,
+            None,
+        ))
         .await
         .unwrap();
     assert_eq!(status(&response), "403");

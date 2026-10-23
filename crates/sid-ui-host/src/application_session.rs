@@ -19,9 +19,10 @@ use secrecy::{ExposeSecret, SecretString};
 use sha2::{Digest, Sha256};
 use sid_authn::bff_session::{BffSession, BffSessionStore, SessionClaims};
 use sid_authn::issuer_directory::IssuerDirectory;
+use sid_authn::relying_party::Connection;
 use sid_authn::revocation_cache::RevocationCache;
-use sid_authn::rp_client::{Connection, RpClient, RpClientError};
 use sid_core::grpc_error::{ApiError, ErrorReason, refuse};
+use sid_infra::issuer_client::{RpClient, RpClientError};
 use sid_proto::google::api::HttpBody;
 use sid_proto::sid::v1::authn::application_session_service_server::ApplicationSessionService;
 use sid_proto::sid::v1::authn::{
@@ -178,6 +179,13 @@ impl ApplicationSessions {
     /// One replica refreshes; the others wait for its result in the shared
     /// store. A refused refresh (the grant was revoked or expired) ends the
     /// session; a refresh that cannot be done now leaves it for the next call.
+    ///
+    /// A refresh whose answer was lost may still have rotated the token, so
+    /// the next call presents the replaced one. The issuer accepts a replaced
+    /// token for a grace window after its rotation and rotates again; after
+    /// that window it reads the replay as theft, revokes the family and the
+    /// refusal ends this session: the user signs in again, nothing is left
+    /// holding a token the issuer no longer honours.
     async fn current_token(&self, id: &str, session: BffSession) -> Result<SecretString, Status> {
         let now = chrono::Utc::now().timestamp();
         if session.claims.exp - now > REFRESH_MARGIN_SECS {
@@ -265,6 +273,12 @@ impl ApplicationSessions {
         }
     }
 
+    /// The name of the cookie binding a pending sign-in to its browser,
+    /// beside the session cookie under the same `__Host-` prefix.
+    fn sign_in_cookie(&self) -> String {
+        format!("{}-signin", self.cookie)
+    }
+
     /// The `set-cookie` value carrying session `id`: host-only (`__Host-`),
     /// TLS only, out of reach of scripts, sent on top-level navigations from
     /// other sites but not on their subrequests (RFC 6265bis §4.1.3.2,
@@ -304,6 +318,11 @@ impl ApplicationSessionService for ApplicationSessions {
         // Same shape and strength as the verifier: 256 random bits.
         let nonce = random_token();
         let return_to = local_path(&request.get_ref().rd);
+        // The browser this sign-in belongs to. Another tab of the same browser
+        // keeps the binding it already has, so its own sign-in stays valid.
+        let browser = cookie_value(request.metadata(), &self.sign_in_cookie())
+            .filter(|value| is_random_token(value))
+            .unwrap_or_else(random_token);
         // Without a store there is no sign-in to start: sending the browser on
         // with a state nobody can verify would make the callback unverifiable.
         let state = match self
@@ -312,7 +331,7 @@ impl ApplicationSessionService for ApplicationSessions {
                 SecretString::from(verifier),
                 nonce.clone(),
                 return_to,
-                &connection.sign_in_binding(),
+                &browser_binding(connection, &browser),
             )
             .await
         {
@@ -322,17 +341,33 @@ impl ApplicationSessionService for ApplicationSessions {
                 return Ok(page(503, "The sign-in is not available right now."));
             }
         };
-        Ok(redirect(
+        let mut response = redirect(
             connection
                 .authorize_url(&challenge, &state, &nonce)
                 .as_str(),
-        ))
+        );
+        insert(
+            response.metadata_mut(),
+            "set-cookie",
+            &format!(
+                "{}={browser}; Path=/; Secure; HttpOnly; SameSite=Lax",
+                self.sign_in_cookie()
+            ),
+        );
+        Ok(response)
     }
 
     async fn complete_sign_in(
         &self,
         request: Request<CompleteSignInRequest>,
     ) -> Result<Response<HttpBody>, Status> {
+        // A callback completes only the sign-in of the browser that started it
+        // (RFC 6749 §10.12, RFC 9700 §4.7.1): otherwise an attacker's own
+        // unused code, sent to a victim's browser, would sign the victim in
+        // to the attacker's account.
+        let Some(browser) = cookie_value(request.metadata(), &self.sign_in_cookie()) else {
+            return Ok(page(400, "This sign-in was started in another browser."));
+        };
         let params = request.into_inner();
         let connection = match self.connection().await {
             Ok(connection) => connection,
@@ -341,11 +376,12 @@ impl ApplicationSessionService for ApplicationSessions {
                 return Ok(page(503, "The sign-in is not available yet."));
             }
         };
-        // A sign-in started under another connection or callback is not
-        // found under this one, and stays for a replica that still holds it.
+        // A sign-in started in another browser, or under another connection or
+        // callback, is not found under this binding and stays where it is: for
+        // its own browser, or a replica that still holds that connection.
         let pending = match self
             .sessions
-            .take_pending(&params.state, &connection.sign_in_binding())
+            .take_pending(&params.state, &browser_binding(connection, &browser))
             .await
         {
             Ok(Some(pending)) => pending,
@@ -532,7 +568,9 @@ fn revocation_failure(failure: &RpClientError) -> GrantOutcome {
             _ => GrantOutcome::NotRevoked,
         },
         // Nothing was sent.
-        RpClientError::Invalid(_) | RpClientError::Key(_) => GrantOutcome::NotRevoked,
+        RpClientError::Invalid(_) | RpClientError::Connection(_) | RpClientError::Key(_) => {
+            GrantOutcome::NotRevoked
+        }
     }
 }
 
@@ -605,6 +643,21 @@ fn local_path(requested: &str) -> String {
     } else {
         "/".to_owned()
     }
+}
+
+/// What a pending sign-in is bound to: the connection's sign-in binding and
+/// the browser that started it.
+fn browser_binding(connection: &Connection, browser: &str) -> String {
+    format!("{}\n{browser}", connection.sign_in_binding())
+}
+
+/// Whether `value` has the shape [`random_token`] produces: a browser cookie
+/// of any other shape is not one this adapter set.
+fn is_random_token(value: &str) -> bool {
+    value.len() == 43
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 /// 256 random bits, base64url: a PKCE verifier (RFC 7636 §4.1) or a nonce.
