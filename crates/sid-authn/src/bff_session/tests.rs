@@ -279,16 +279,17 @@ async fn test_replace_tokens_does_not_resurrect_a_destroyed_session() {
         .unwrap();
 
     cache.after_next_read(session_key(&id), Meanwhile::Destroy);
-    let replaced = s
+    let outcome = s
         .replace_tokens(
             &id,
+            &"refresh".into(),
             "access-2".into(),
             Some("refresh-2".into()),
             test_claims(),
         )
         .await
         .unwrap();
-    assert!(!replaced);
+    assert!(matches!(outcome, TokenReplacement::Ended), "{outcome:?}");
     assert!(cache.inner.get(&session_key(&id)).await.unwrap().is_none());
 }
 
@@ -306,18 +307,89 @@ async fn test_replace_tokens_applies_over_a_concurrent_write() {
         session_key(&id),
         Meanwhile::Write(serde_json::to_vec(&touched).unwrap()),
     );
-    let replaced = s
+    let outcome = s
         .replace_tokens(
             &id,
+            &"refresh".into(),
             "access-2".into(),
             Some("refresh-2".into()),
             test_claims(),
         )
         .await
         .unwrap();
-    assert!(replaced);
+    assert!(matches!(outcome, TokenReplacement::Replaced), "{outcome:?}");
     let stored = s.get_session(&id).await.unwrap().unwrap();
     assert_eq!(stored.bearer(), "access-2");
+}
+
+/// A refresh result for a refresh token the session no longer holds (another
+/// replica refreshed after this one's claim expired) is not stored over the
+/// newer tokens; the caller gets the session as it is.
+#[tokio::test]
+async fn test_replace_tokens_refuses_a_superseded_refresh() {
+    let s = store();
+    let (id, _) = s
+        .create_session(
+            "access-1".into(),
+            Some("refresh-1".into()),
+            test_claims(),
+            CONN,
+        )
+        .await
+        .unwrap();
+    let outcome = s
+        .replace_tokens(
+            &id,
+            &"refresh-0".into(),
+            "access-stale".into(),
+            Some("refresh-stale".into()),
+            test_claims(),
+        )
+        .await
+        .unwrap();
+    let TokenReplacement::Superseded(current) = outcome else {
+        panic!("a superseded refresh is refused, got {outcome:?}");
+    };
+    assert_eq!(current.bearer(), "access-1");
+    let stored = s.get_session(&id).await.unwrap().unwrap();
+    assert_eq!(stored.bearer(), "access-1");
+    assert_eq!(
+        stored
+            .refresh_token
+            .as_ref()
+            .map(ExposeSecret::expose_secret),
+        Some("refresh-1")
+    );
+}
+
+/// A refresh of the token the session holds replaces it.
+#[tokio::test]
+async fn test_replace_tokens_applies_a_current_refresh() {
+    let s = store();
+    let (id, _) = s
+        .create_session(
+            "access-1".into(),
+            Some("refresh-1".into()),
+            test_claims(),
+            CONN,
+        )
+        .await
+        .unwrap();
+    let outcome = s
+        .replace_tokens(
+            &id,
+            &"refresh-1".into(),
+            "access-2".into(),
+            Some("refresh-2".into()),
+            test_claims(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(outcome, TokenReplacement::Replaced), "{outcome:?}");
+    assert_eq!(
+        s.get_session(&id).await.unwrap().unwrap().bearer(),
+        "access-2"
+    );
 }
 
 /// One refresh per session at a time, across replicas: the first claim wins
