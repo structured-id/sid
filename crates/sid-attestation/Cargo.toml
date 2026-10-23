@@ -17,7 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 sid-authn = { workspace = true, features = ["grpc"] }
-sid-infra = { workspace = true }
+sid-infra = { workspace = true, features = ["redis"] }
 sid-serve = { workspace = true }
 sid-core = { workspace = true, features = ["grpc"] }
 sid-plugin = { workspace = true }

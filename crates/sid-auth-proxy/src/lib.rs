@@ -18,7 +18,7 @@ pub mod translation;
 use std::sync::Arc;
 
 use session::BffSessionStore;
-use sid_auth::issuers::IssuerDirectory;
+use sid_authn::issuer_directory::IssuerDirectory;
 
 /// Shared state of the proxy's handlers.
 #[derive(Clone, Debug)]
@@ -70,20 +70,20 @@ pub(crate) fn test_channel() -> tonic::transport::Channel {
 /// An issuer directory under `https://sid.example.com` that knows no issuer.
 #[cfg(test)]
 pub(crate) fn test_issuers() -> Arc<IssuerDirectory> {
+    use sid_authn::issuer_directory::{
+        IssuerRecord, IssuerSource, RegistryUnavailable, ResourceRecord,
+    };
     struct NoIssuers;
     #[async_trait::async_trait]
-    impl sid_auth::issuers::IssuerSource for NoIssuers {
-        async fn issuer(
-            &self,
-            _handle: &str,
-        ) -> Result<Option<sid_auth::issuers::IssuerRecord>, tonic::Status> {
+    impl IssuerSource for NoIssuers {
+        async fn issuer(&self, _handle: &str) -> Result<Option<IssuerRecord>, RegistryUnavailable> {
             Ok(None)
         }
         async fn resource(
             &self,
             _handle: &str,
             _resource: &str,
-        ) -> Result<Option<sid_auth::issuers::ResourceRecord>, tonic::Status> {
+        ) -> Result<Option<ResourceRecord>, RegistryUnavailable> {
             Ok(None)
         }
     }

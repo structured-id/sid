@@ -132,7 +132,7 @@ impl ShieldConfig {
     /// handle, so every issuer's token endpoint gets the token endpoint's
     /// limit.
     fn classify_path(&self, path: &str) -> EndpointClass {
-        let path = sid_auth::issuers::issuer_endpoint(path).unwrap_or(path);
+        let path = sid_authn::issuer_directory::issuer_endpoint(path).unwrap_or(path);
         for (prefix, class) in &self.endpoint_classes {
             if path.starts_with(prefix.as_str()) {
                 return *class;

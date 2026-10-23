@@ -26,7 +26,7 @@ use super::jwt::{
 };
 use super::policy::{AuthRequirement, PolicyEngine};
 use super::sender::check_sender;
-use crate::issuers::IssuerDirectory;
+use sid_authn::issuer_directory::IssuerDirectory;
 
 /// What forward auth needs to decide.
 pub struct Pdp {

@@ -178,14 +178,15 @@ async fn callback_handler(
         tracing::error!("BFF callback: no ID token for an openid sign-in");
         return StatusCode::BAD_GATEWAY.into_response();
     };
-    let identity = match sid_auth::auth::jwt::validate_issued_id_token(
-        &state.issuers,
-        &connection.issuer,
-        &connection.client_id,
-        &pending.nonce,
-        id_token,
-    )
-    .await
+    let identity = match state
+        .issuers
+        .issued_id_token(
+            &connection.issuer,
+            &connection.client_id,
+            &pending.nonce,
+            id_token,
+        )
+        .await
     {
         Ok(identity) => identity,
         Err(e) => {
@@ -240,17 +241,15 @@ pub(crate) async fn verified_claims(
     connection: &Connection,
     token: &str,
 ) -> Result<sid_auth::auth::jwt::ForwardAuthClaims, StatusCode> {
-    sid_auth::auth::jwt::validate_issued(
-        &state.issuers,
-        &connection.issuer,
-        &connection.resource,
-        token,
-    )
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "BFF: issued token is not for the account API");
-        StatusCode::BAD_GATEWAY
-    })
+    state
+        .issuers
+        .issued_access_token(&connection.issuer, &connection.resource, token)
+        .await
+        .map(sid_auth::auth::jwt::ForwardAuthClaims::from)
+        .map_err(|e| {
+            tracing::error!(error = %e, "BFF: issued token is not for the account API");
+            StatusCode::BAD_GATEWAY
+        })
 }
 
 /// Query parameters for callback.

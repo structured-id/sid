@@ -1,17 +1,21 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! The installation's OIDC issuers as the protocol edge knows them.
+//! The installation's OIDC issuers as a receiver or a relying party knows
+//! them: their exact identifiers, public keys and registered resources, read
+//! from the installation's registry and cached per replica.
 //!
-//! A request path or a token names an issuer by its handle; the edge asks the
-//! installation's registry for that issuer's exact URL and public keys and
-//! verifies its tokens from the answer. Only issuers of this installation are
-//! known: a token naming any other `iss` is refused without fetching anything
-//! for it.
+//! A request path or a token names an issuer by its handle; the directory
+//! asks the registry for that issuer's exact URL and public keys and verifies
+//! its tokens from the answer. Only issuers of this installation are known: a
+//! token naming any other `iss` is refused without fetching anything for it
+//! (oidc-issuer-model: never fetch keys for an arbitrary `iss`).
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
-use sid_authn::issuer::IssuerVerifier;
+
+use crate::issuer::IssuerVerifier;
+use crate::jwt::{AccessTokenClaims, IdTokenClaims};
 
 /// How long an answer from the registry is reused. Keys rotate rarely and a
 /// new key is found sooner through the unknown-`kid` refresh.
@@ -32,6 +36,11 @@ pub fn issuer_endpoint(path: &str) -> Option<&str> {
     let rest = path.strip_prefix("/i/")?;
     rest.find('/').map(|slash| &rest[slash..])
 }
+
+/// The registry could not answer; what was asked may still exist.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("issuer registry unavailable: {0}")]
+pub struct RegistryUnavailable(pub String);
 
 /// An issuer as the registry describes it: its exact identifier and its
 /// public keys as (`kid`, Ed25519 key), newest first.
@@ -59,7 +68,7 @@ pub struct ResourceRecord {
 #[async_trait::async_trait]
 pub trait IssuerSource: Send + Sync {
     /// The issuer named by `handle`, or `None` when there is none.
-    async fn issuer(&self, handle: &str) -> Result<Option<IssuerRecord>, tonic::Status>;
+    async fn issuer(&self, handle: &str) -> Result<Option<IssuerRecord>, RegistryUnavailable>;
 
     /// The resource `resource` names under the issuer `handle`, or `None`
     /// when that issuer registered none under it.
@@ -67,100 +76,10 @@ pub trait IssuerSource: Send + Sync {
         &self,
         handle: &str,
         resource: &str,
-    ) -> Result<Option<ResourceRecord>, tonic::Status>;
+    ) -> Result<Option<ResourceRecord>, RegistryUnavailable>;
 }
 
-/// The registry of the SID server, over gRPC.
-pub struct GrpcIssuerSource {
-    channel: tonic::transport::Channel,
-}
-
-impl GrpcIssuerSource {
-    pub fn new(channel: tonic::transport::Channel) -> Self {
-        Self { channel }
-    }
-}
-
-#[async_trait::async_trait]
-impl IssuerSource for GrpcIssuerSource {
-    async fn issuer(&self, handle: &str) -> Result<Option<IssuerRecord>, tonic::Status> {
-        let mut client =
-            sid_proto::sid::v1::oidc_issuer_service_client::OidcIssuerServiceClient::new(
-                self.channel.clone(),
-            );
-        let answer = match client
-            .get_oidc_issuer(sid_proto::sid::v1::GetOidcIssuerRequest {
-                handle: handle.to_owned(),
-            })
-            .await
-        {
-            Ok(answer) => answer.into_inner(),
-            Err(status) if status.code() == tonic::Code::NotFound => return Ok(None),
-            Err(status) => return Err(status),
-        };
-        let keys = answer
-            .keys
-            .into_iter()
-            .map(|key| {
-                let public_key: [u8; 32] = key.public_key.as_slice().try_into().map_err(|_| {
-                    sid_core::grpc_error::refuse::internal(
-                        "read issuer key",
-                        "not an Ed25519 public key",
-                    )
-                })?;
-                Ok((key.key_id, public_key))
-            })
-            .collect::<Result<_, tonic::Status>>()?;
-        Ok(Some(IssuerRecord {
-            issuer: answer.issuer,
-            keys,
-        }))
-    }
-
-    async fn resource(
-        &self,
-        handle: &str,
-        resource: &str,
-    ) -> Result<Option<ResourceRecord>, tonic::Status> {
-        let mut client =
-            sid_proto::sid::v1::oidc_issuer_service_client::OidcIssuerServiceClient::new(
-                self.channel.clone(),
-            );
-        match client
-            .get_protected_resource(sid_proto::sid::v1::GetProtectedResourceRequest {
-                issuer_handle: handle.to_owned(),
-                resource: resource.to_owned(),
-            })
-            .await
-        {
-            Ok(answer) => {
-                let answer = answer.into_inner();
-                // A registry answer names its resource; one that does not is
-                // no answer.
-                let id = answer
-                    .id
-                    .as_ref()
-                    .and_then(|id| sid_core::models::ResourceId::try_from(id).ok())
-                    .ok_or_else(|| {
-                        sid_core::grpc_error::refuse::internal(
-                            "read protected resource",
-                            "the answer names no resource",
-                        )
-                    })?;
-                Ok(Some(ResourceRecord {
-                    issuer: answer.issuer,
-                    resource: answer.resource,
-                    active: answer.active,
-                    id,
-                }))
-            }
-            Err(status) if status.code() == tonic::Code::NotFound => Ok(None),
-            Err(status) => Err(status),
-        }
-    }
-}
-
-/// A known issuer with what the edge checks for it.
+/// A known issuer with what is checked for it.
 pub struct KnownIssuer {
     /// The exact issuer identifier.
     pub issuer: String,
@@ -185,12 +104,29 @@ impl KnownIssuer {
     }
 }
 
+/// Why a token is not accepted as one a named issuer signed.
+#[derive(Debug, thiserror::Error)]
+pub enum IssuedTokenRefusal {
+    /// Not a valid token of that issuer for this use.
+    #[error("invalid token: {0}")]
+    Invalid(String),
+    /// The registry could not be asked; the token may be valid.
+    #[error(transparent)]
+    Unavailable(#[from] RegistryUnavailable),
+}
+
 /// A known issuer and when the registry described it. Only known issuers are
 /// kept: an unknown handle is asked about again, so handles a client makes up
 /// cannot grow the cache.
 struct Cached {
     fetched: Instant,
     issuer: Arc<KnownIssuer>,
+}
+
+/// A registered resource and when the registry described it.
+struct CachedResource {
+    fetched: Instant,
+    record: ResourceRecord,
 }
 
 /// The installation's issuers, looked up by handle and cached per replica.
@@ -203,14 +139,8 @@ pub struct IssuerDirectory {
     source: Arc<dyn IssuerSource>,
     cache: DashMap<String, Cached>,
     /// Registered resources by (issuer handle, indicator). Only resources the
-    /// route configuration names are asked about, so the map stays bounded.
+    /// caller's configuration names are asked about, so the map stays bounded.
     resources: DashMap<(String, String), CachedResource>,
-}
-
-/// A registered resource and when the registry described it.
-struct CachedResource {
-    fetched: Instant,
-    record: ResourceRecord,
 }
 
 impl std::fmt::Debug for IssuerDirectory {
@@ -240,7 +170,7 @@ impl IssuerDirectory {
         &self,
         issuer: &str,
         resource: &str,
-    ) -> Result<Option<ResourceRecord>, tonic::Status> {
+    ) -> Result<Option<ResourceRecord>, RegistryUnavailable> {
         let Some(handle) = issuer.strip_prefix(&self.prefix) else {
             return Ok(None);
         };
@@ -278,7 +208,10 @@ impl IssuerDirectory {
     /// The issuer a request path names by `handle`. The answer must name an
     /// issuer under this installation's base and end in this handle, or the
     /// handle names no issuer here.
-    pub async fn by_handle(&self, handle: &str) -> Result<Option<Arc<KnownIssuer>>, tonic::Status> {
+    pub async fn by_handle(
+        &self,
+        handle: &str,
+    ) -> Result<Option<Arc<KnownIssuer>>, RegistryUnavailable> {
         // Text that cannot be a handle is not asked about.
         if sid_core::models::IssuerHandle::parse(handle).is_err() {
             return Ok(None);
@@ -298,7 +231,7 @@ impl IssuerDirectory {
         &self,
         iss: &str,
         kid: &str,
-    ) -> Result<Option<Arc<KnownIssuer>>, tonic::Status> {
+    ) -> Result<Option<Arc<KnownIssuer>>, RegistryUnavailable> {
         let Some(handle) = iss.strip_prefix(&self.prefix) else {
             return Ok(None);
         };
@@ -324,7 +257,59 @@ impl IssuerDirectory {
             .filter(|issuer| issuer.issuer == iss))
     }
 
-    async fn fetch(&self, handle: &str) -> Result<Option<Arc<KnownIssuer>>, tonic::Status> {
+    /// The issuer that must have signed `token`: exactly `issuer`, whose keys
+    /// alone are looked up, never those of whatever `iss` the token claims.
+    pub async fn signer_of(
+        &self,
+        issuer: &str,
+        token: &str,
+    ) -> Result<Arc<KnownIssuer>, IssuedTokenRefusal> {
+        let (iss, kid) = unverified_iss_and_kid(token)
+            .ok_or_else(|| IssuedTokenRefusal::Invalid("malformed".into()))?;
+        if iss != issuer {
+            return Err(IssuedTokenRefusal::Invalid(
+                "issued by another issuer".into(),
+            ));
+        }
+        self.for_token(&iss, &kid)
+            .await?
+            .ok_or_else(|| IssuedTokenRefusal::Invalid("unknown issuer".into()))
+    }
+
+    /// An access token `issuer` issued for the resource `audience`: that
+    /// issuer's exact `iss` and keys only, typed `at+jwt`, `aud` naming the
+    /// resource (RFC 9068 §4).
+    pub async fn issued_access_token(
+        &self,
+        issuer: &str,
+        audience: &str,
+        token: &str,
+    ) -> Result<AccessTokenClaims, IssuedTokenRefusal> {
+        self.signer_of(issuer, token)
+            .await?
+            .verifier
+            .validate_access_token_for(token, audience)
+            .map_err(|e| IssuedTokenRefusal::Invalid(e.to_string()))
+    }
+
+    /// The ID token `issuer` returned with a code redemption of `client_id`
+    /// (OIDC Core 1.0 §3.1.3.7): that issuer's exact `iss` and keys only, for
+    /// that client, carrying the `nonce` its sign-in sent.
+    pub async fn issued_id_token(
+        &self,
+        issuer: &str,
+        client_id: &str,
+        nonce: &str,
+        token: &str,
+    ) -> Result<IdTokenClaims, IssuedTokenRefusal> {
+        self.signer_of(issuer, token)
+            .await?
+            .verifier
+            .validate_id_token(token, client_id, nonce)
+            .map_err(|e| IssuedTokenRefusal::Invalid(e.to_string()))
+    }
+
+    async fn fetch(&self, handle: &str) -> Result<Option<Arc<KnownIssuer>>, RegistryUnavailable> {
         let issuer = self
             .source
             .issuer(handle)
@@ -347,6 +332,22 @@ impl IssuerDirectory {
         }
         Ok(issuer)
     }
+}
+
+/// The `iss` a token claims and the `kid` its header names, read before the
+/// signature is checked, only to choose who checks it.
+fn unverified_iss_and_kid(token: &str) -> Option<(String, String)> {
+    use base64::Engine;
+    let kid = jsonwebtoken::decode_header(token)
+        .ok()?
+        .kid
+        .unwrap_or_default();
+    let payload = token.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    Some((claims.get("iss")?.as_str()?.to_owned(), kid))
 }
 
 #[cfg(test)]

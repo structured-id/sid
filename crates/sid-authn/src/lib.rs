@@ -49,6 +49,7 @@ pub mod instance_org;
 pub mod instance_secret;
 pub mod ip_intelligence;
 pub mod issuer;
+pub mod issuer_directory;
 pub mod jwt;
 pub mod legacy_hash;
 #[cfg(feature = "grpc")]

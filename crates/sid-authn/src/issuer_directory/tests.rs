@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::*;
+use ed25519_dalek::pkcs8::EncodePrivateKey;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 const BASE: &str = "https://sid.example.com";
 const HANDLE: &str = "0123456789abcdef0123456789abcdef";
+const OTHER_HANDLE: &str = "fedcba9876543210fedcba9876543210";
 
 fn issuer_url(handle: &str) -> String {
     format!("{BASE}/i/{handle}")
@@ -17,6 +19,8 @@ struct Registry {
     /// Resources as (issuer handle, record).
     resources: Mutex<Vec<(String, ResourceRecord)>>,
     asked: AtomicUsize,
+    /// When set, every question fails as an unreachable registry would.
+    down: std::sync::atomic::AtomicBool,
 }
 
 impl Registry {
@@ -30,6 +34,7 @@ impl Registry {
             ),
             resources: Mutex::new(Vec::new()),
             asked: AtomicUsize::new(0),
+            down: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -48,12 +53,20 @@ impl Registry {
         records.retain(|(h, _)| h != handle);
         records.push((handle.to_owned(), record));
     }
+
+    fn fail(&self) -> Result<(), RegistryUnavailable> {
+        self.asked.fetch_add(1, Ordering::SeqCst);
+        if self.down.load(Ordering::SeqCst) {
+            return Err(RegistryUnavailable("registry down".into()));
+        }
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
 impl IssuerSource for Registry {
-    async fn issuer(&self, handle: &str) -> Result<Option<IssuerRecord>, tonic::Status> {
-        self.asked.fetch_add(1, Ordering::SeqCst);
+    async fn issuer(&self, handle: &str) -> Result<Option<IssuerRecord>, RegistryUnavailable> {
+        self.fail()?;
         Ok(self
             .records
             .lock()
@@ -67,8 +80,8 @@ impl IssuerSource for Registry {
         &self,
         handle: &str,
         resource: &str,
-    ) -> Result<Option<ResourceRecord>, tonic::Status> {
-        self.asked.fetch_add(1, Ordering::SeqCst);
+    ) -> Result<Option<ResourceRecord>, RegistryUnavailable> {
+        self.fail()?;
         Ok(self
             .resources
             .lock()
@@ -194,9 +207,8 @@ async fn unknown_and_malformed_handles_resolve_to_nothing() {
 
     assert!(directory.by_handle("../etc").await.unwrap().is_none());
     assert_eq!(registry.asked(), 0);
-    let unknown = "fedcba9876543210fedcba9876543210";
-    assert!(directory.by_handle(unknown).await.unwrap().is_none());
-    assert!(directory.by_handle(unknown).await.unwrap().is_none());
+    assert!(directory.by_handle(OTHER_HANDLE).await.unwrap().is_none());
+    assert!(directory.by_handle(OTHER_HANDLE).await.unwrap().is_none());
     assert_eq!(registry.asked(), 2);
     assert!(directory.cache.is_empty());
 }
@@ -266,4 +278,179 @@ async fn an_unknown_key_refreshes_the_issuer_once() {
             .unwrap();
     }
     assert_eq!(registry.asked(), 2, "unknown keys drove lookups");
+}
+
+/// One issuer's Ed25519 signing key, its `kid` and public half.
+struct Key {
+    kid: &'static str,
+    encoding: jsonwebtoken::EncodingKey,
+    public: [u8; 32],
+}
+
+fn key(kid: &'static str, seed: u8) -> Key {
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
+    Key {
+        kid,
+        encoding: jsonwebtoken::EncodingKey::from_ed_der(
+            signing.to_pkcs8_der().unwrap().as_bytes(),
+        ),
+        public: signing.verifying_key().to_bytes(),
+    }
+}
+
+fn signed(key: &Key, typ: &str, claims: &impl serde::Serialize) -> String {
+    let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
+    header.kid = Some(key.kid.into());
+    header.typ = Some(typ.into());
+    jsonwebtoken::encode(&header, claims, &key.encoding).unwrap()
+}
+
+fn access_claims(iss: &str, aud: &str) -> AccessTokenClaims {
+    let now = chrono::Utc::now().timestamp();
+    AccessTokenClaims {
+        sub: "subject".into(),
+        pid: None,
+        iss: iss.into(),
+        aud: vec![aud.into()],
+        client_id: Some("ops-web".into()),
+        exp: now + 60,
+        iat: now,
+        auth_time: now,
+        acr: "urn:sid:acr:basic".into(),
+        scope: "openid".into(),
+        roles: String::new(),
+        sid: "session".into(),
+        amr: vec![],
+        jti: "jti".into(),
+        cnf: None,
+        act: None,
+    }
+}
+
+/// A directory knowing two issuers of this installation, each with its own
+/// key.
+fn two_issuers() -> (IssuerDirectory, Key, Key) {
+    let own = key("k1", 1);
+    let other = key("k2", 2);
+    let registry = Registry::with(vec![
+        (
+            HANDLE,
+            IssuerRecord {
+                issuer: issuer_url(HANDLE),
+                keys: vec![(own.kid.into(), own.public)],
+            },
+        ),
+        (
+            OTHER_HANDLE,
+            IssuerRecord {
+                issuer: issuer_url(OTHER_HANDLE),
+                keys: vec![(other.kid.into(), other.public)],
+            },
+        ),
+    ]);
+    (IssuerDirectory::new(BASE, registry), own, other)
+}
+
+/// The access token a named issuer issued for a resource is accepted with
+/// its claims; one for another resource, one another issuer of the same
+/// installation signed (naming itself or claiming the expected issuer) and
+/// one that is not an access token are refused as invalid.
+#[tokio::test]
+async fn an_issued_access_token_must_be_the_named_issuers_for_the_resource() {
+    let (directory, own, other) = two_issuers();
+    let iss = issuer_url(HANDLE);
+
+    let token = signed(&own, "at+jwt", &access_claims(&iss, ORDERS));
+    let claims = directory
+        .issued_access_token(&iss, ORDERS, &token)
+        .await
+        .unwrap();
+    assert_eq!(claims.client_id.as_deref(), Some("ops-web"));
+
+    let elsewhere = signed(
+        &own,
+        "at+jwt",
+        &access_claims(&iss, "https://api.example.com/billing"),
+    );
+    let by_other = signed(
+        &other,
+        "at+jwt",
+        &access_claims(&issuer_url(OTHER_HANDLE), ORDERS),
+    );
+    let forged = signed(&other, "at+jwt", &access_claims(&iss, ORDERS));
+    let untyped = signed(&own, "JWT", &access_claims(&iss, ORDERS));
+    for (case, token) in [
+        ("another resource", elsewhere),
+        ("another issuer", by_other),
+        ("another issuer's key", forged),
+        ("not an access token", untyped),
+        ("malformed", "not.a.token".to_owned()),
+    ] {
+        assert!(
+            matches!(
+                directory.issued_access_token(&iss, ORDERS, &token).await,
+                Err(IssuedTokenRefusal::Invalid(_))
+            ),
+            "{case}"
+        );
+    }
+}
+
+/// The ID token of a code redemption is accepted only for its client and the
+/// nonce its sign-in sent.
+#[tokio::test]
+async fn an_issued_id_token_must_match_client_and_nonce() {
+    let (directory, own, _) = two_issuers();
+    let iss = issuer_url(HANDLE);
+    let now = chrono::Utc::now().timestamp();
+    let id: IdTokenClaims = serde_json::from_value(serde_json::json!({
+        "iss": iss, "sub": "subject", "aud": "ops-web",
+        "exp": now + 60, "iat": now, "auth_time": now,
+        "acr": "urn:sid:acr:basic", "nonce": "n-1",
+    }))
+    .unwrap();
+    let token = signed(&own, "JWT", &id);
+
+    let claims = directory
+        .issued_id_token(&iss, "ops-web", "n-1", &token)
+        .await
+        .unwrap();
+    assert_eq!(claims.sub, "subject");
+    for (client, nonce) in [("other-web", "n-1"), ("ops-web", "n-2")] {
+        assert!(
+            matches!(
+                directory.issued_id_token(&iss, client, nonce, &token).await,
+                Err(IssuedTokenRefusal::Invalid(_))
+            ),
+            "{client} {nonce}"
+        );
+    }
+}
+
+/// A registry that cannot answer leaves the token undecided: unavailable,
+/// not invalid, so a caller does not sign a user out over an outage.
+#[tokio::test]
+async fn an_unreachable_registry_is_unavailable_not_invalid() {
+    let own = key("k1", 1);
+    let registry = Registry::with(vec![]);
+    registry.down.store(true, Ordering::SeqCst);
+    let directory = IssuerDirectory::new(BASE, registry);
+    let iss = issuer_url(HANDLE);
+    let token = signed(&own, "at+jwt", &access_claims(&iss, ORDERS));
+
+    assert!(matches!(
+        directory.issued_access_token(&iss, ORDERS, &token).await,
+        Err(IssuedTokenRefusal::Unavailable(_))
+    ));
+}
+
+/// The path of an issuer-scoped endpoint is what follows the handle.
+#[test]
+fn the_endpoint_of_an_issuer_path() {
+    assert_eq!(
+        issuer_endpoint(&format!("/i/{HANDLE}/oauth2/token")),
+        Some("/oauth2/token")
+    );
+    assert_eq!(issuer_endpoint("/oauth2/token"), None);
+    assert_eq!(issuer_endpoint(&format!("/i/{HANDLE}")), None);
 }

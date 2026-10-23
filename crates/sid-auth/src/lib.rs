@@ -13,11 +13,13 @@
 
 pub mod auth;
 pub mod config;
-pub mod issuers;
 pub mod receiver;
 pub mod server;
 
 use std::sync::Arc;
+
+#[cfg(test)]
+use sid_authn::issuer_directory as issuers;
 
 /// The shared cache at `url`, or one kept in this process when unset.
 pub async fn shared_cache(
@@ -50,7 +52,10 @@ pub(crate) struct TestIssuers {
 #[cfg(test)]
 #[async_trait::async_trait]
 impl issuers::IssuerSource for TestIssuers {
-    async fn issuer(&self, handle: &str) -> Result<Option<issuers::IssuerRecord>, tonic::Status> {
+    async fn issuer(
+        &self,
+        handle: &str,
+    ) -> Result<Option<issuers::IssuerRecord>, issuers::RegistryUnavailable> {
         Ok(self
             .issuers
             .iter()
@@ -62,7 +67,7 @@ impl issuers::IssuerSource for TestIssuers {
         &self,
         handle: &str,
         resource: &str,
-    ) -> Result<Option<issuers::ResourceRecord>, tonic::Status> {
+    ) -> Result<Option<issuers::ResourceRecord>, issuers::RegistryUnavailable> {
         Ok(self
             .resources
             .iter()

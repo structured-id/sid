@@ -5,6 +5,7 @@
 
 use http::HeaderMap;
 use serde::{Deserialize, Serialize};
+use sid_authn::issuer_directory::{IssuedTokenRefusal, IssuerDirectory};
 
 /// Claims extracted from JWT for forward auth decisions.
 ///
@@ -130,35 +131,26 @@ pub enum TokenRefusal {
 /// and nothing is looked up for an `iss` other than the target's
 /// (oidc-issuer-model: never fetch keys for an arbitrary `iss`).
 pub async fn validate_for_target(
-    issuers: &crate::issuers::IssuerDirectory,
+    issuers: &IssuerDirectory,
     target: &super::policy::Target,
     token: &str,
 ) -> Result<TargetAccess, TokenRefusal> {
-    let unavailable =
-        |status: tonic::Status| TokenRefusal::Unavailable(status.message().to_owned());
     let resource = issuers
         .resource(&target.issuer, &target.resource)
         .await
-        .map_err(unavailable)?
+        .map_err(|e| TokenRefusal::Unavailable(e.0))?
         .ok_or(TokenRefusal::NoTarget("resource not registered"))?;
     if !resource.active {
         return Err(TokenRefusal::NoTarget("resource not active"));
     }
-    let (iss, kid) =
-        unverified_iss_and_kid(token).ok_or_else(|| TokenRefusal::Invalid("malformed".into()))?;
-    if iss != target.issuer {
-        return Err(TokenRefusal::Invalid("issued by another issuer".into()));
-    }
-    let issuer = issuers
-        .for_token(&iss, &kid)
+    let claims = issuers
+        .issued_access_token(&target.issuer, &target.resource, token)
         .await
-        .map_err(unavailable)?
-        .ok_or_else(|| TokenRefusal::Invalid("unknown issuer".into()))?;
-    let claims = issuer
-        .verifier
-        .validate_access_token_for(token, &target.resource)
         .map(ForwardAuthClaims::from)
-        .map_err(|e| TokenRefusal::Invalid(e.to_string()))?;
+        .map_err(|refusal| match refusal {
+            IssuedTokenRefusal::Invalid(why) => TokenRefusal::Invalid(why),
+            IssuedTokenRefusal::Unavailable(e) => TokenRefusal::Unavailable(e.0),
+        })?;
     Ok(TargetAccess {
         claims,
         resource: resource.id,
@@ -172,75 +164,6 @@ pub struct TargetAccess {
     /// The target's registered resource: what permission questions about
     /// this request name.
     pub resource: sid_core::models::ResourceId,
-}
-
-/// Validate an access token the BFF's issuer returned to the BFF itself:
-/// `issuer`'s exact `iss` and keys only, typed `at+jwt`, for the resource
-/// `audience` the BFF asked for (RFC 9068 §4).
-pub async fn validate_issued(
-    issuers: &crate::issuers::IssuerDirectory,
-    issuer: &str,
-    audience: &str,
-    token: &str,
-) -> Result<ForwardAuthClaims, TokenRefusal> {
-    issuer_of(issuers, issuer, token)
-        .await?
-        .verifier
-        .validate_access_token_for(token, audience)
-        .map(ForwardAuthClaims::from)
-        .map_err(|e| TokenRefusal::Invalid(e.to_string()))
-}
-
-/// Validate the ID token the BFF's issuer returned with its code redemption
-/// (OIDC Core 1.0 §3.1.3.7): `issuer`'s exact `iss` and keys only, for the
-/// BFF's `client_id`, carrying the `nonce` its sign-in sent.
-pub async fn validate_issued_id_token(
-    issuers: &crate::issuers::IssuerDirectory,
-    issuer: &str,
-    client_id: &str,
-    nonce: &str,
-    token: &str,
-) -> Result<sid_authn::jwt::IdTokenClaims, TokenRefusal> {
-    issuer_of(issuers, issuer, token)
-        .await?
-        .verifier
-        .validate_id_token(token, client_id, nonce)
-        .map_err(|e| TokenRefusal::Invalid(e.to_string()))
-}
-
-/// The issuer that must have signed `token`: exactly `issuer`, whose keys
-/// alone are looked up, never those of whatever `iss` the token claims.
-async fn issuer_of(
-    issuers: &crate::issuers::IssuerDirectory,
-    issuer: &str,
-    token: &str,
-) -> Result<std::sync::Arc<crate::issuers::KnownIssuer>, TokenRefusal> {
-    let (iss, kid) =
-        unverified_iss_and_kid(token).ok_or_else(|| TokenRefusal::Invalid("malformed".into()))?;
-    if iss != issuer {
-        return Err(TokenRefusal::Invalid("issued by another issuer".into()));
-    }
-    issuers
-        .for_token(&iss, &kid)
-        .await
-        .map_err(|status| TokenRefusal::Unavailable(status.message().to_owned()))?
-        .ok_or_else(|| TokenRefusal::Invalid("unknown issuer".into()))
-}
-
-/// The `iss` a token claims and the `kid` its header names, read before the
-/// signature is checked, only to choose who checks it.
-fn unverified_iss_and_kid(token: &str) -> Option<(String, String)> {
-    use base64::Engine;
-    let kid = jsonwebtoken::decode_header(token)
-        .ok()?
-        .kid
-        .unwrap_or_default();
-    let payload = token.split('.').nth(1)?;
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload)
-        .ok()?;
-    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    Some((claims.get("iss")?.as_str()?.to_owned(), kid))
 }
 
 /// The access token of a request and how it is presented: the

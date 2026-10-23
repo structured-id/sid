@@ -24,10 +24,10 @@ prost-types = { workspace = true }
 sid-core = { workspace = true, features = ["grpc"] }
 # The shared cache holding revocations and DPoP proof `jti`s.
 sid-plugin = { workspace = true }
-sid-infra = { workspace = true }
+sid-infra = { workspace = true, features = ["redis", "issuer-client"] }
 # Health on shutdown, bounded drain, the shutdown signal.
 sid-serve = { workspace = true }
-# Issuer verification, revocation view and DPoP proof checks.
+# Issuer directory and verification, revocation view and DPoP proof checks.
 sid-authn = { workspace = true, features = ["client-credential"] }
 
 # gRPC services and the client to the SID server
@@ -63,19 +63,9 @@ anyhow = { workspace = true }
 url = { workspace = true }
 globset = { workspace = true }
 
-# Reading a token's `iss` before choosing its verifier; this service's own
-# client assertion and Basic credentials for its authorization-API token
-base64 = { workspace = true }
-jsonwebtoken = { workspace = true }
 secrecy = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
-
-# Issuer and resource caches
-dashmap = { workspace = true }
-# The issuer source is a trait object: the gRPC registry in service, a fixed
-# set in tests.
-async-trait = { workspace = true }
 
 [[test]]
 name = "forward_auth_integration"
@@ -100,6 +90,10 @@ http-body-util = "0.1"
 # rather than by a hand-written DER literal.
 ed25519-dalek = { workspace = true, features = ["pkcs8"] }
 rand = { workspace = true }
+# Test tokens are signed with the library the verifier reads them with.
+jsonwebtoken = { workspace = true }
+# The tests' fixed issuer source implements the directory's source trait.
+async-trait = { workspace = true }
 # The permission-query benchmark asks a real issuer served over gRPC.
 sid-test-issuer = { path = "../sid-test-issuer" }
 

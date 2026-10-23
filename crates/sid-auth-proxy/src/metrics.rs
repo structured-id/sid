@@ -44,7 +44,7 @@ static HTTP_REQUEST_DURATION_SECONDS: LazyLock<HistogramVec> = LazyLock::new(|| 
 /// issuer's endpoint is classified by what follows its handle, so handles
 /// never become label values.
 fn path_class(path: &str) -> &'static str {
-    if let Some(endpoint) = sid_auth::issuers::issuer_endpoint(path) {
+    if let Some(endpoint) = sid_authn::issuer_directory::issuer_endpoint(path) {
         return if endpoint.starts_with("/.well-known") || endpoint == "/jwks" {
             "discovery"
         } else if endpoint == "/userinfo" {
