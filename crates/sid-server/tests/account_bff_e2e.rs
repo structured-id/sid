@@ -49,6 +49,20 @@ struct Deployment {
     key_pem: String,
     /// The account application's compiled bundle.
     bundle: tempfile::TempDir,
+    /// The cache the host's replicas share sessions and started sign-ins
+    /// through: a real Redis, whose atomic operations those depend on.
+    shared: Arc<dyn sid_plugin::cache::CacheBackend>,
+}
+
+/// The test Redis (docker-compose.test.yml).
+async fn shared_cache() -> Arc<dyn sid_plugin::cache::CacheBackend> {
+    let url = std::env::var("SID_TEST_REDIS_URL")
+        .unwrap_or_else(|_| "redis://localhost:63799".to_owned());
+    Arc::new(
+        sid_infra::RedisCacheBackend::connect(&url)
+            .await
+            .expect("the test Redis is running"),
+    )
 }
 
 /// Provision the account integration for a freshly generated client key and
@@ -107,6 +121,7 @@ async fn deploy() -> Deployment {
         addr,
         key_pem,
         bundle,
+        shared: shared_cache().await,
     }
 }
 
@@ -168,7 +183,7 @@ async fn replica(deployment: &Deployment) -> String {
 /// The shared session store as any replica sees it.
 fn sessions(deployment: &Deployment) -> BffSessionStore {
     BffSessionStore::new(
-        deployment.svc.cache.clone(),
+        deployment.shared.clone(),
         std::time::Duration::from_secs(86400),
         std::time::Duration::from_secs(3600),
         std::time::Duration::from_secs(300),
