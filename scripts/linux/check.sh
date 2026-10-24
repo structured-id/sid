@@ -7,6 +7,7 @@
 #   SID_LINUX=<ssh destination> scripts/linux/check.sh musl
 #   SID_LINUX=<ssh destination> scripts/linux/check.sh musl aarch64-unknown-linux-musl
 #   SID_LINUX=<ssh destination> scripts/linux/check.sh history-checker '--domains 2 --entries 24'
+#   SID_LINUX=<ssh destination> SID_LINUX_RUNTIME=host scripts/linux/check.sh workspace
 #
 # `musl` builds the server for the given musl targets (by default x86_64 and
 # aarch64), which exercises every native dependency the server links.
@@ -25,7 +26,7 @@
 set -euo pipefail
 
 destination="${SID_LINUX:?set SID_LINUX to the SSH destination of the Linux machine}"
-task="${1:?task: musl [target...] | history-checker ['<options>'...]}"
+task="${1:?task: musl [target...] | history-checker ['<options>'...] | workspace}"
 shift
 # The version rust-toolchain.toml pins.
 image="rust:1.99.0"

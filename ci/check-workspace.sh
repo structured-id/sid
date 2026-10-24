@@ -5,6 +5,7 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 [[ $(uname -s) == Linux ]] || { echo 'Native Linux is required' >&2; exit 1; }
+docker info >/dev/null
 compose=(docker compose --project-name sid-workspace-qualification -f docker-compose.test.yml)
 for name in sid-test-postgres sid-test-redis sid-test-nats; do
     if docker container inspect "$name" >/dev/null 2>&1; then
