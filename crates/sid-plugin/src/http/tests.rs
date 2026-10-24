@@ -1,6 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 use super::*;
 
+/// Constructing an outbound client must leave backend selection to its host.
+#[test]
+fn client_construction_does_not_install_a_provider() {
+    assert!(rustls::crypto::CryptoProvider::get_default().is_none());
+    drop(client_builder());
+    assert!(
+        rustls::crypto::CryptoProvider::get_default().is_none(),
+        "the HTTP library selected a TLS backend for its embedding host"
+    );
+}
+
 /// The panic this helper exists to prevent: building a client with no process
 /// provider set. A plain `reqwest::Client::builder().build()` aborts here.
 #[test]
