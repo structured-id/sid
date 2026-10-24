@@ -306,6 +306,11 @@ async fn test_a_missing_tls_selection_spends_no_target_attempts() {
         );
     }
     assert_eq!(dead_letters(&storage, &a).await, 0, "moved to the DLQ");
+    assert_eq!(
+        worker.count_failure(&event, &a).await.unwrap(),
+        1,
+        "the target's attempts were spent"
+    );
 }
 
 /// A failure of SID's own storage is no failure of the target: the event is
