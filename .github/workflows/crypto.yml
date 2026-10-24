@@ -10,6 +10,18 @@ permissions:
   contents: read
 
 jobs:
+  archive:
+    name: Crypto (fresh archive consumers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - run: rustup show
+      - name: Packaged external consumers
+        run: python3 ci/check-crypto-package.py
+
   profiles:
     name: Crypto (${{ matrix.profile }})
     runs-on: ubuntu-latest
@@ -70,6 +82,10 @@ jobs:
         env:
           RUSTFLAGS: --cfg getrandom_backend="custom"
         run: cargo +1.92.0 check --locked -p sid-crypto --no-default-features --features alloc,tls-rustcrypto --target thumbv7em-none-eabihf
+      - name: RustCrypto primitives alloc contract
+        env:
+          RUSTFLAGS: --cfg getrandom_backend="custom"
+        run: cargo +1.92.0 check --locked -p sid-crypto --no-default-features --features alloc,primitives --target thumbv7em-none-eabihf
       - name: Remove package outputs
         if: success()
         run: cargo clean -p sid-crypto --target thumbv7em-none-eabihf

@@ -17,6 +17,7 @@ semver_check = true
 changelog_update = true
 changelog_path = "crates/sid-crypto/CHANGELOG.md"
 git_release_enable = true
+git_release_latest = false
 git_tag_enable = true
 git_tag_name = "{{ package }}-v{{ version }}"
 git_release_name = "{{ package }} v{{ version }}"
