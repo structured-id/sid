@@ -3,7 +3,7 @@
 //! RFC 7523 §2.2): the private key the host reads, the public JWK Set the
 //! installation registers.
 
-use std::io::Write as _;
+use std::io::Write;
 use std::path::Path;
 
 use anyhow::Context as _;
@@ -60,11 +60,27 @@ fn write_new(path: &Path, contents: &[u8], mode: u32) -> anyhow::Result<()> {
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, mode);
     #[cfg(not(unix))]
     let _ = mode;
-    let mut file = options
+    let file = options
         .open(path)
         .with_context(|| format!("{path:?} cannot be created (it must not exist yet)"))?;
-    file.write_all(contents)
-        .with_context(|| format!("writing {path:?}"))
+    fill(path, file, contents)
+}
+
+/// Write `contents` into `file`, just created at `path`. A file that could not
+/// be written is removed: this call created it, and an empty or truncated one
+/// left behind would refuse the rerun.
+fn fill(path: &Path, mut file: impl Write, contents: &[u8]) -> anyhow::Result<()> {
+    let Err(e) = file.write_all(contents).and_then(|()| file.flush()) else {
+        return Ok(());
+    };
+    drop(file);
+    let e = anyhow::Error::new(e).context(format!("writing {path:?}"));
+    match std::fs::remove_file(path) {
+        Ok(()) => Err(e),
+        Err(removal) => Err(e.context(format!(
+            "and the partial {path:?} could not be removed: {removal}"
+        ))),
+    }
 }
 
 #[cfg(test)]

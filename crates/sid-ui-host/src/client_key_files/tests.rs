@@ -91,6 +91,30 @@ fn an_unwritable_public_set_leaves_no_private_key() {
     }
 }
 
+/// A writer that fails as a full disk or an exhausted quota does.
+struct Full;
+
+impl std::io::Write for Full {
+    fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other("no space left on device"))
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A file whose contents could not be written is removed, not left empty or
+/// truncated: once the storage is fixed the same command runs again instead
+/// of refusing its own leftover.
+#[test]
+fn a_file_that_could_not_be_written_is_removed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("key.pem");
+    std::fs::File::create(&path).unwrap();
+    assert!(fill(&path, Full, b"contents").is_err());
+    assert!(!path.exists(), "a partial file was left behind");
+}
+
 /// The command takes exactly the two paths.
 #[test]
 fn keygen_wants_two_paths() {
