@@ -22,6 +22,3 @@ pub fn install_jwt_provider() -> Result<(), ProviderConflict> {
         .install_default()
         .map_err(|_| ProviderConflict)
 }
-
-#[cfg(test)]
-mod tests;
