@@ -55,3 +55,5 @@ url = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 bytes = "1"
 sid-plugin = { workspace = true }
+# The codec of the stand-in issuer the refresh tests talk to.
+tonic-prost = "0.14"
