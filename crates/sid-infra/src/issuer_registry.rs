@@ -8,13 +8,15 @@ use sid_authn::issuer_directory::{
 use sid_proto::sid::v1::oidc_issuer_service_client::OidcIssuerServiceClient;
 use sid_proto::sid::v1::{GetOidcIssuerRequest, GetProtectedResourceRequest};
 
+use crate::deadline::IssuerChannel;
+
 /// The registry of the SID server, over gRPC.
 pub struct GrpcIssuerSource {
-    channel: tonic::transport::Channel,
+    channel: IssuerChannel,
 }
 
 impl GrpcIssuerSource {
-    pub fn new(channel: tonic::transport::Channel) -> Self {
+    pub fn new(channel: IssuerChannel) -> Self {
         Self { channel }
     }
 }

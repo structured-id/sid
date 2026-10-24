@@ -54,10 +54,9 @@ fn a_delivered_bundle_file_is_loaded() {
 }
 
 /// A lazy channel to nowhere.
-fn unreachable() -> tonic::transport::Channel {
-    tonic::transport::Channel::from_static("http://127.0.0.1:1")
-        .connect_timeout(std::time::Duration::from_millis(100))
-        .connect_lazy()
+fn unreachable() -> crate::deadline::IssuerChannel {
+    crate::deadline::bounded_channel("http://127.0.0.1:1", std::time::Duration::from_millis(100))
+        .unwrap()
 }
 
 fn key() -> ClientKey {

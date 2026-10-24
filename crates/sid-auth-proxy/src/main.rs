@@ -59,10 +59,12 @@ async fn main() -> anyhow::Result<()> {
     let revocation = sid_auth::revocation_view(cache.clone());
     revocation.listen().await?;
 
+    // Issuer calls end within a bound, their whole answer included.
+    let issuer_channel = sid_infra::deadline::issuer(grpc_channel.clone());
     let issuers = Arc::new(sid_authn::issuer_directory::IssuerDirectory::new(
         config.issuer_url(),
         Arc::new(sid_infra::issuer_registry::GrpcIssuerSource::new(
-            grpc_channel.clone(),
+            issuer_channel.clone(),
         )),
     ));
     // A configured key that cannot be read is a broken deployment, not a
@@ -95,9 +97,9 @@ async fn main() -> anyhow::Result<()> {
                         resource = %connection.resource,
                         "BFF connection delivered"
                     );
-                    RpClient::delivered(key, installation_url, grpc_channel.clone(), connection)?
+                    RpClient::delivered(key, installation_url, issuer_channel.clone(), connection)?
                 }
-                None => RpClient::new(key, installation_url, grpc_channel.clone())?,
+                None => RpClient::new(key, installation_url, issuer_channel.clone())?,
             };
             tracing::info!(kid = %link.kid(), "BFF client key loaded");
             Some(Arc::new(link))

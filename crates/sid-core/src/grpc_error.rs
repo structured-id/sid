@@ -79,6 +79,7 @@ pub enum ErrorReason {
     ScopeNotGranted,
     SignInRefused,
     RegistrationRestricted,
+    CsrfTokenInvalid,
 
     // ALREADY_EXISTS
     ProfileAlreadyExists,
@@ -145,7 +146,8 @@ pub enum ErrorReason {
 
 impl ErrorReason {
     /// Every reason, for exhaustive checks against the proto enum.
-    pub const ALL: [ErrorReason; 82] = [
+    pub const ALL: [ErrorReason; 83] = [
+        Self::CsrfTokenInvalid,
         Self::InviteNotFound,
         Self::OrganizationNotFound,
         Self::ProvisioningConnectorNotFound,
@@ -255,6 +257,7 @@ impl ErrorReason {
             Self::ScopeNotGranted => "SCOPE_NOT_GRANTED",
             Self::SignInRefused => "SIGN_IN_REFUSED",
             Self::RegistrationRestricted => "REGISTRATION_RESTRICTED",
+            Self::CsrfTokenInvalid => "CSRF_TOKEN_INVALID",
             Self::ProfileAlreadyExists => "PROFILE_ALREADY_EXISTS",
             Self::EmailAlreadyRegistered => "EMAIL_ALREADY_REGISTERED",
             Self::UsernameAlreadyTaken => "USERNAME_ALREADY_TAKEN",
@@ -360,7 +363,8 @@ impl ErrorReason {
             Self::InsufficientPermissions
             | Self::ScopeNotGranted
             | Self::SignInRefused
-            | Self::RegistrationRestricted => Code::PermissionDenied,
+            | Self::RegistrationRestricted
+            | Self::CsrfTokenInvalid => Code::PermissionDenied,
 
             Self::ProfileAlreadyExists
             | Self::EmailAlreadyRegistered

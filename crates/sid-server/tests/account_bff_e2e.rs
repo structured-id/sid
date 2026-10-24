@@ -1,53 +1,72 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! The account BFF end to end: sid-auth-proxy with its own client key learns
-//! the account integration this server provisioned, signs a user in with
-//! `private_key_jwt`, calls the account API over gRPC-Web as that user,
-//! refreshes and signs out, all against this server's services on a local
-//! port (auth/session-management.md, system account integration).
+//! The account application end to end: the UI host with its browser adapter
+//! and its own client key learns the account integration this server
+//! provisioned, signs a user in with `private_key_jwt`, calls the account API
+//! over gRPC-Web as that user, refreshes and signs out, all against this
+//! server's services, every replica on a local port of its own. The
+//! account integration this server provisions is the client the host signs
+//! in as.
 
 mod common;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::body::Body;
-use axum::extract::connect_info::MockConnectInfo;
-use axum::http::{Request, StatusCode};
 use common::TestServices;
 use common::mock_storage::MockStorage;
 use prost::Message;
 use secrecy::ExposeSecret;
-use sid_auth_proxy::ProxyState;
 use sid_authn::bff_session::BffSessionStore;
 use sid_authn::client_key::ClientKey;
+use sid_authn::issuer_directory::IssuerDirectory;
 use sid_authn::system_integration::{AccountSettings, ensure_account_integration};
 use sid_core::models::{ClientKeySet, Profile};
 use sid_infra::issuer_client::RpClient;
+use sid_infra::issuer_registry::GrpcIssuerSource;
 use sid_proto::sid::v1::auth_service_server::{AuthService, AuthServiceServer};
+use sid_proto::sid::v1::authn::{ApplicationSession, EndApplicationSessionResponse, GrantOutcome};
 use sid_proto::sid::v1::identity_service_server::IdentityServiceServer;
 use sid_proto::sid::v1::oidc_issuer_service_server::OidcIssuerServiceServer;
 use sid_proto::sid::v1::system_integration_service_server::SystemIntegrationServiceServer;
 use sid_proto::sid::v1::{GetProfileResponse, OAuth2AuthorizeRequest};
 use sid_server::grpc::system_integration_service::SystemIntegrationServiceImpl;
-use tower::ServiceExt;
+use sid_ui_host::application_session::{ApplicationSessions, FORWARDED_HEADERS};
+use sid_ui_host::host::{ADAPTER_PROTO, HostUpstream, asset_routes};
 
 const ACCOUNT_URL: &str = "https://account.sid.example.com";
 const COOKIE: &str = "__Host-sid-bff";
+const ADAPTER: &str = "sid.v1.authn.ApplicationSessionService";
 
-/// This server's services, and the BFF's view of them.
+/// This server's services, and the adapter's view of them.
 struct Deployment {
     svc: TestServices,
     profile: Profile,
     /// The installation URL, the base of its issuers.
     installation: String,
-    /// Where this server's gRPC and gRPC-Web answer.
+    /// Where this server's gRPC answers.
     addr: SocketAddr,
-    /// The BFF's private key, PKCS#8 PEM.
+    /// The adapter's private key, PKCS#8 PEM.
     key_pem: String,
+    /// The account application's compiled bundle.
+    bundle: tempfile::TempDir,
+    /// The cache the host's replicas share sessions and started sign-ins
+    /// through: a real Redis, whose atomic operations those depend on.
+    shared: Arc<dyn sid_plugin::cache::CacheBackend>,
 }
 
-/// Provision the account integration for a freshly generated BFF key and
-/// serve the services the BFF talks to on a local port, gRPC-Web included.
+/// The test Redis (docker-compose.test.yml).
+async fn shared_cache() -> Arc<dyn sid_plugin::cache::CacheBackend> {
+    let url = std::env::var("SID_TEST_REDIS_URL")
+        .unwrap_or_else(|_| "redis://localhost:63799".to_owned());
+    Arc::new(
+        sid_infra::RedisCacheBackend::connect(&url)
+            .await
+            .expect("the test Redis is running"),
+    )
+}
+
+/// Provision the account integration for a freshly generated client key and
+/// serve the services the adapter talks to on a local port.
 async fn deploy() -> Deployment {
     let profile = common::test_profile();
     let svc = TestServices::new(
@@ -85,8 +104,6 @@ async fn deploy() -> Deployment {
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         tonic::transport::Server::builder()
-            .accept_http1(true)
-            .layer(tonic_web::GrpcWebLayer::new())
             .add_service(AuthServiceServer::from_arc(auth))
             .add_service(SystemIntegrationServiceServer::new(integrations))
             .add_service(OidcIssuerServiceServer::new(registry))
@@ -95,18 +112,23 @@ async fn deploy() -> Deployment {
             .await
             .unwrap();
     });
+    let bundle = tempfile::tempdir().unwrap();
+    std::fs::write(bundle.path().join("index.html"), "<!doctype html>").unwrap();
     Deployment {
         svc,
         profile,
         installation,
         addr,
         key_pem,
+        bundle,
+        shared: shared_cache().await,
     }
 }
 
-/// A BFF replica of `deployment`: its own process state, the deployment's
-/// shared cache for sessions and revocations.
-fn replica(deployment: &Deployment) -> axum::Router {
+/// A replica of the account application's UI host, serving on a local port
+/// of its own: its own process state, the deployment's shared cache for
+/// sessions and revocations. Its URL.
+async fn replica(deployment: &Deployment) -> String {
     let channel = tonic::transport::Channel::from_shared(format!("http://{}", deployment.addr))
         .unwrap()
         .connect_lazy();
@@ -114,41 +136,66 @@ fn replica(deployment: &Deployment) -> axum::Router {
     let key =
         ClientKey::ed25519_from_pem(&secrecy::SecretString::from(deployment.key_pem.as_str()))
             .unwrap();
-    let state = ProxyState {
-        issuer_url: installation.clone(),
-        issuers: Arc::new(sid_authn::issuer_directory::IssuerDirectory::new(
+    let revocation = sid_auth::revocation_view(deployment.svc.cache.clone());
+    revocation.listen().await.unwrap();
+    let issuer = sid_infra::deadline::issuer(channel.clone());
+    let adapter = ApplicationSessions::new(
+        Arc::new(RpClient::new(key, installation.clone(), issuer.clone()).unwrap()),
+        Arc::new(IssuerDirectory::new(
             &installation,
-            Arc::new(sid_infra::issuer_registry::GrpcIssuerSource::new(
-                channel.clone(),
-            )),
+            Arc::new(GrpcIssuerSource::new(issuer)),
         )),
-        grpc_channel: channel.clone(),
-        revocation: sid_auth::revocation_view(deployment.svc.cache.clone()),
-        bff_enabled: true,
-        account: Some(Arc::new(RpClient::new(key, installation, channel).unwrap())),
-        api_upstream: Some(url::Url::parse(&format!("http://{}", deployment.addr)).unwrap()),
-        http: sid_auth_proxy::api_client(),
-        bff_sessions: Arc::new(sessions(deployment)),
-        bff_cookie_name: COOKIE.into(),
-        bff_dev_mode: false,
-    };
-    sid_auth_proxy::bff::routes()
-        .layer(MockConnectInfo(SocketAddr::from(([192, 0, 2, 9], 50000))))
-        .with_state(state)
+        Arc::new(sessions(deployment)),
+        revocation,
+        COOKIE.into(),
+    );
+    let bundle = sid_ui_host::UiBundle::new(
+        deployment.bundle.path(),
+        "/",
+        br#"{"environment":"test","release":"e2e"}"#,
+    )
+    .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let proxy = sid_infra::http::embedded_transcoder(
+        &serde_json::json!({ "health": { "enabled": false } }),
+        &FORWARDED_HEADERS,
+        |file| file == ADAPTER_PROTO,
+    )
+    .unwrap()
+    .with_grpc_web_translation(true)
+    .with_extra_routes(asset_routes(sid_ui_host::standalone(bundle).unwrap()));
+    let upstream = HostUpstream::new(Arc::new(adapter), Some(channel));
+    tokio::spawn(async move {
+        sid_infra::http::serve_on(
+            &proxy,
+            upstream,
+            listener,
+            std::future::pending(),
+            std::time::Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+    });
+    url
 }
 
 /// The shared session store as any replica sees it.
 fn sessions(deployment: &Deployment) -> BffSessionStore {
     BffSessionStore::new(
-        deployment.svc.cache.clone(),
+        deployment.shared.clone(),
         std::time::Duration::from_secs(86400),
         std::time::Duration::from_secs(3600),
         std::time::Duration::from_secs(300),
     )
 }
 
-async fn send(router: &axum::Router, request: Request<Body>) -> axum::response::Response {
-    router.clone().oneshot(request).await.unwrap()
+/// An HTTP client that follows no redirect: the test reads each one.
+fn http() -> reqwest::Client {
+    sid_plugin::http::client_builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap()
 }
 
 fn query(url: &str) -> std::collections::HashMap<String, String> {
@@ -159,38 +206,156 @@ fn query(url: &str) -> std::collections::HashMap<String, String> {
         .collect()
 }
 
-/// The cookie `name` among a response's `set-cookie` headers.
-fn cookie(response: &axum::response::Response, name: &str) -> String {
+/// The `name=value` of the cookie set under a name starting with `prefix`.
+fn set_cookie(response: &reqwest::Response, prefix: &str) -> String {
     response
         .headers()
         .get_all("set-cookie")
         .iter()
         .filter_map(|v| v.to_str().ok())
-        .find_map(|v| v.strip_prefix(&format!("{name}=")))
-        .and_then(|v| v.split(';').next())
-        .unwrap_or_else(|| panic!("no {name} cookie"))
+        .filter(|v| v.starts_with(prefix) && !v.contains("Max-Age=0"))
+        .find_map(|v| v.split(';').next())
+        .unwrap_or_else(|| panic!("no {prefix} cookie"))
         .to_owned()
 }
 
 /// A signed-in browser: its session cookie and CSRF token.
 struct Browser {
-    session: String,
+    cookie: String,
     csrf: String,
 }
 
-/// The browser's sign-in through the BFF: `/auth/login`, the IdP's
-/// authorization with the user's live IdP session (as the sign-in surface
-/// completes it), and the callback the IdP redirects back to.
-async fn sign_in(deployment: &Deployment, router: &axum::Router) -> Browser {
-    let login = send(
-        router,
-        Request::get("/auth/login?rd=/security")
-            .body(Body::empty())
-            .unwrap(),
+/// One gRPC-Web call of the application's page to `path` with `message`.
+async fn grpc_web(
+    replica: &str,
+    path: &str,
+    message: Vec<u8>,
+    cookie: Option<&str>,
+    csrf: Option<&str>,
+) -> (Option<Vec<u8>>, String) {
+    grpc_web_from(replica, path, message, cookie, csrf, Some(ACCOUNT_URL)).await
+}
+
+/// [`grpc_web`] sent by a page of `origin`, or with no `Origin` at all.
+async fn grpc_web_from(
+    replica: &str,
+    path: &str,
+    message: Vec<u8>,
+    cookie: Option<&str>,
+    csrf: Option<&str>,
+    origin: Option<&str>,
+) -> (Option<Vec<u8>>, String) {
+    let mut frame = vec![0u8];
+    frame.extend_from_slice(&u32::try_from(message.len()).unwrap().to_be_bytes());
+    frame.extend_from_slice(&message);
+    let mut request = http()
+        .post(format!("{replica}{path}"))
+        .header("content-type", "application/grpc-web+proto")
+        .header("x-grpc-web", "1")
+        .body(frame);
+    if let Some(origin) = origin {
+        request = request.header("origin", origin);
+    }
+    if let Some(cookie) = cookie {
+        request = request.header("cookie", cookie);
+    }
+    if let Some(csrf) = csrf {
+        request = request.header("x-csrf-token", csrf);
+    }
+    let response = request.send().await.unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    // A trailers-only answer carries its status in the headers.
+    let header_status = response
+        .headers()
+        .get("grpc-status")
+        .map(|v| v.to_str().unwrap().to_owned());
+    let body = response.bytes().await.unwrap();
+    let mut message = None;
+    let mut rest = &body[..];
+    let mut status = header_status.unwrap_or_default();
+    while rest.len() >= 5 {
+        let len = u32::from_be_bytes(rest[1..5].try_into().unwrap()) as usize;
+        let payload = &rest[5..5 + len];
+        if rest[0] & 0x80 == 0 {
+            message = Some(payload.to_vec());
+        } else {
+            let trailers = String::from_utf8_lossy(payload);
+            if let Some(code) = trailers
+                .lines()
+                .find_map(|line| line.trim().strip_prefix("grpc-status:"))
+            {
+                status = code.trim().to_owned();
+            }
+        }
+        rest = &rest[5 + len..];
+    }
+    (message, status)
+}
+
+/// The session the browser's cookie names, as the page reads it.
+async fn read_session(replica: &str, cookie: &str) -> (Option<ApplicationSession>, String) {
+    let (message, status) = grpc_web(
+        replica,
+        &format!("/{ADAPTER}/GetApplicationSession"),
+        Vec::new(),
+        Some(cookie),
+        None,
     )
     .await;
-    assert_eq!(login.status(), StatusCode::FOUND);
+    (
+        message.map(|m| ApplicationSession::decode(&m[..]).unwrap()),
+        status,
+    )
+}
+
+/// The browser's sign-in: `/auth/login`, the IdP's authorization with the
+/// user's live IdP session (as the sign-in surface completes it), and the
+/// callback the IdP redirects back to, with the sign-in's correlation cookie.
+async fn sign_in(deployment: &Deployment, replica: &str) -> Browser {
+    let login = start(replica, None).await;
+    let correlation = set_cookie(&login, &format!("{COOKIE}-signin-"));
     let asked = query(login.headers()["location"].to_str().unwrap());
+    let callback = complete(deployment, replica, &asked, &correlation).await;
+    signed_in(replica, &callback).await
+}
+
+/// `/auth/login` of a browser sending `cookie`.
+async fn start(replica: &str, cookie: Option<&str>) -> reqwest::Response {
+    let mut request = http().get(format!("{replica}/auth/login?rd=/security"));
+    if let Some(cookie) = cookie {
+        request = request.header("cookie", cookie);
+    }
+    let login = request.send().await.unwrap();
+    assert_eq!(login.status(), reqwest::StatusCode::FOUND);
+    login
+}
+
+/// The session a successful callback opened, with its CSRF token.
+async fn signed_in(replica: &str, callback: &reqwest::Response) -> Browser {
+    assert_eq!(
+        callback.status(),
+        reqwest::StatusCode::FOUND,
+        "{callback:?}"
+    );
+    assert_eq!(callback.headers()["location"], "/security");
+    let cookie = set_cookie(callback, &format!("{COOKIE}="));
+    // The session's CSRF token comes with the session read, where the page
+    // takes it from; no cookie carries it.
+    let (session, status) = read_session(replica, &cookie).await;
+    assert_eq!(status, "0");
+    let csrf = session.expect("the session").csrf_token;
+    Browser { cookie, csrf }
+}
+
+/// The IdP's authorization of the sign-in `asked` describes, with the user's
+/// live IdP session, and the callback a browser sending `cookie` makes with
+/// its code.
+async fn complete(
+    deployment: &Deployment,
+    replica: &str,
+    asked: &std::collections::HashMap<String, String>,
+    cookie: &str,
+) -> reqwest::Response {
     assert_eq!(
         asked["redirect_uri"],
         format!("{ACCOUNT_URL}/auth/callback")
@@ -236,104 +401,193 @@ async fn sign_in(deployment: &Deployment, router: &axum::Router) -> Browser {
     let issuer: String =
         url::form_urlencoded::byte_serialize(deployment.svc.issuer.canonical_url.as_bytes())
             .collect();
-    let callback = send(
-        router,
-        Request::get(format!(
-            "/auth/callback?code={code}&state={}&iss={issuer}",
+    http()
+        .get(format!(
+            "{replica}/auth/callback?code={code}&state={}&iss={issuer}",
             asked["state"]
         ))
-        .body(Body::empty())
-        .unwrap(),
-    )
-    .await;
-    assert_eq!(callback.status(), StatusCode::FOUND, "{callback:?}");
-    assert_eq!(callback.headers()["location"], "/security");
-    let session = cookie(&callback, COOKIE);
-
-    // The session's CSRF token comes with the session check, where the page
-    // takes it from; no cookie carries it.
-    let userinfo = send(
-        router,
-        Request::get("/auth/userinfo")
-            .header("cookie", format!("{COOKIE}={session}"))
-            .body(Body::empty())
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(userinfo.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(userinfo.into_body(), 4096)
+        .header("cookie", cookie)
+        .send()
         .await
-        .unwrap();
-    let user: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let csrf = user["csrf_token"]
-        .as_str()
-        .expect("the session's CSRF token")
-        .to_owned();
-    Browser { session, csrf }
+        .unwrap()
 }
 
-/// `GetCurrentProfile` as the page's gRPC-Web transport sends it through
-/// `/api`, with or without the CSRF header.
-fn current_profile(browser: &Browser, csrf: bool) -> Request<Body> {
-    let path = format!(
-        "/api/{}/GetCurrentProfile",
-        sid_proto::sid::v1::identity_service_server::SERVICE_NAME
-    );
-    // An empty message in one gRPC-Web data frame: flag 0, length 0.
-    let mut request = Request::post(path)
-        .header("content-type", "application/grpc-web+proto")
-        .header("x-grpc-web", "1")
-        .header("cookie", format!("{COOKIE}={}", browser.session));
-    if csrf {
-        request = request.header("x-csrf-token", &browser.csrf);
+/// A browser's cookie jar, as RFC 6265bis §5.7 keeps it: one value per name,
+/// a later `set-cookie` replacing an earlier one, `Max-Age=0` deleting it.
+#[derive(Default)]
+struct Jar(Vec<(String, String)>);
+
+impl Jar {
+    fn apply(&mut self, response: &reqwest::Response) {
+        for set in response.headers().get_all("set-cookie") {
+            let set = set.to_str().unwrap();
+            let (name, value) = set.split(';').next().unwrap().split_once('=').unwrap();
+            self.0.retain(|(held, _)| held != name);
+            if !set.contains("Max-Age=0") {
+                self.0.push((name.to_owned(), value.to_owned()));
+            }
+        }
     }
-    request.body(Body::from(vec![0u8, 0, 0, 0, 0])).unwrap()
+
+    fn holds(&self, prefix: &str) -> usize {
+        self.0
+            .iter()
+            .filter(|(name, _)| name.starts_with(prefix))
+            .count()
+    }
+
+    fn header(&self) -> String {
+        self.0
+            .iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
 }
 
-/// The profile in a gRPC-Web answer's first data frame.
-async fn answered_profile(response: axum::response::Response) -> String {
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), 1 << 20)
-        .await
-        .unwrap();
-    assert_eq!(body[0], 0, "a data frame first: {body:?}");
-    let len = u32::from_be_bytes(body[1..5].try_into().unwrap()) as usize;
-    let message = GetProfileResponse::decode(&body[5..5 + len]).unwrap();
-    let trailers = String::from_utf8_lossy(&body[5 + len..]);
-    assert!(trailers.contains("grpc-status:0"), "{trailers}");
-    message.profile.unwrap().id
+/// `GetCurrentProfile` as the page's gRPC-Web transport sends it, with or
+/// without the CSRF token: the profile id, and the gRPC status.
+async fn current_profile(replica: &str, browser: &Browser, csrf: bool) -> (Option<String>, String) {
+    let (message, status) = grpc_web(
+        replica,
+        &format!(
+            "/{}/GetCurrentProfile",
+            sid_proto::sid::v1::identity_service_server::SERVICE_NAME
+        ),
+        Vec::new(),
+        Some(&browser.cookie),
+        csrf.then_some(browser.csrf.as_str()),
+    )
+    .await;
+    (
+        message.map(|m| {
+            GetProfileResponse::decode(&m[..])
+                .unwrap()
+                .profile
+                .unwrap()
+                .id
+        }),
+        status,
+    )
 }
 
 /// Sign-in through one replica, the account API through another: the user
 /// sees their own profile, the page's request without the CSRF token is
-/// refused, and the IdP session never reaches the account API.
+/// refused, and the bundle is served on the same listener.
 #[tokio::test]
 async fn a_user_signs_in_and_reads_their_account() {
     let deployment = deploy().await;
-    let first = replica(&deployment);
-    let second = replica(&deployment);
+    let first = replica(&deployment).await;
+    let second = replica(&deployment).await;
     let browser = sign_in(&deployment, &first).await;
 
-    let userinfo = send(
-        &second,
-        Request::get("/auth/userinfo")
-            .header("cookie", format!("{COOKIE}={}", browser.session))
-            .body(Body::empty())
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(userinfo.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(userinfo.into_body(), 4096)
+    let (session, status) = read_session(&second, &browser.cookie).await;
+    assert_eq!(status, "0");
+    assert_eq!(session.unwrap().sub, deployment.profile.id.to_string());
+
+    let (id, status) = current_profile(&second, &browser, true).await;
+    assert_eq!(status, "0");
+    assert_eq!(id.unwrap(), deployment.profile.id.to_string());
+
+    // PERMISSION_DENIED: the CSRF token is missing.
+    let (_, refused) = current_profile(&second, &browser, false).await;
+    assert_eq!(refused, "7");
+
+    let page = http()
+        .get(format!("{second}/security"))
+        .send()
         .await
         .unwrap();
-    let user: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(user["sub"], deployment.profile.id.to_string());
+    assert_eq!(page.status(), reqwest::StatusCode::OK);
+    assert_eq!(page.text().await.unwrap(), "<!doctype html>");
+}
 
-    let id = answered_profile(send(&second, current_profile(&browser, true)).await).await;
-    assert_eq!(id, deployment.profile.id.to_string());
+/// Two first sign-ins of one browser, both started before either answer
+/// arrived: the browser's one jar takes both answers' cookies, in either
+/// order, and sends the whole jar with each callback. Both callbacks open a
+/// session; completing the first clears only its own correlation cookie, so
+/// the second still completes.
+#[tokio::test]
+async fn two_concurrent_sign_ins_of_one_browser_both_complete() {
+    for a_first in [true, false] {
+        let deployment = deploy().await;
+        let replica = replica(&deployment).await;
+        let (login_a, login_b) = tokio::join!(start(&replica, None), start(&replica, None));
+        let mut jar = Jar::default();
+        if a_first {
+            jar.apply(&login_a);
+            jar.apply(&login_b);
+        } else {
+            jar.apply(&login_b);
+            jar.apply(&login_a);
+        }
+        let correlation = format!("{COOKIE}-signin-");
+        assert_eq!(
+            jar.holds(&correlation),
+            2,
+            "neither answer replaced the other"
+        );
+        let asked_a = query(login_a.headers()["location"].to_str().unwrap());
+        let asked_b = query(login_b.headers()["location"].to_str().unwrap());
 
-    let refused = send(&second, current_profile(&browser, false)).await;
-    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+        let callback_a = complete(&deployment, &replica, &asked_a, &jar.header()).await;
+        let session_a = signed_in(&replica, &callback_a).await;
+        jar.apply(&callback_a);
+        assert_eq!(
+            jar.holds(&correlation),
+            1,
+            "only A's correlation is cleared"
+        );
+
+        let callback_b = complete(&deployment, &replica, &asked_b, &jar.header()).await;
+        let session_b = signed_in(&replica, &callback_b).await;
+        jar.apply(&callback_b);
+        assert_eq!(jar.holds(&correlation), 0);
+        assert_ne!(session_a.cookie, session_b.cookie);
+        // The browser keeps the later session; it reads the account.
+        let (id, status) = current_profile(&replica, &session_b, true).await;
+        assert_eq!(status, "0");
+        assert_eq!(id.unwrap(), deployment.profile.id.to_string());
+    }
+}
+
+/// Every call that uses the session cookie answers only the application's
+/// own page, by its exact `Origin`: reading the session (which hands out
+/// the CSRF token), the account API and sign-out refuse a foreign, opaque,
+/// missing or doubled origin with PERMISSION_DENIED, and the session stays.
+#[tokio::test]
+async fn cookie_calls_refuse_another_origin() {
+    let deployment = deploy().await;
+    let replica = replica(&deployment).await;
+    let browser = sign_in(&deployment, &replica).await;
+    let profile = format!(
+        "/{}/GetCurrentProfile",
+        sid_proto::sid::v1::identity_service_server::SERVICE_NAME
+    );
+    let calls = [
+        (format!("/{ADAPTER}/GetApplicationSession"), None),
+        (profile, Some(browser.csrf.as_str())),
+        (
+            format!("/{ADAPTER}/EndApplicationSession"),
+            Some(browser.csrf.as_str()),
+        ),
+    ];
+    for (path, csrf) in &calls {
+        for origin in [Some("https://untrusted.example"), Some("null"), None] {
+            let (_, status) = grpc_web_from(
+                &replica,
+                path,
+                Vec::new(),
+                Some(&browser.cookie),
+                *csrf,
+                origin,
+            )
+            .await;
+            assert_eq!(status, "7", "{path} from {origin:?}");
+        }
+    }
+    let (_, own) = read_session(&replica, &browser.cookie).await;
+    assert_eq!(own, "0", "the session is still there");
 }
 
 /// An expired access token is refreshed with the key's assertion before the
@@ -342,10 +596,11 @@ async fn a_user_signs_in_and_reads_their_account() {
 #[tokio::test]
 async fn an_expired_token_is_refreshed_before_the_call() {
     let deployment = deploy().await;
-    let router = replica(&deployment);
-    let browser = sign_in(&deployment, &router).await;
+    let replica = replica(&deployment).await;
+    let browser = sign_in(&deployment, &replica).await;
+    let id = browser.cookie.split_once('=').unwrap().1.to_owned();
     let store = sessions(&deployment);
-    let before = store.get_session(&browser.session).await.unwrap().unwrap();
+    let before = store.get_session(&id).await.unwrap().unwrap();
     let mut expired = before.claims.clone();
     expired.exp = 0;
     let held = before
@@ -355,7 +610,7 @@ async fn an_expired_token_is_refreshed_before_the_call() {
     assert!(matches!(
         store
             .replace_tokens(
-                &browser.session,
+                &id,
                 &held,
                 before.access_token.clone(),
                 before.refresh_token.clone(),
@@ -366,67 +621,154 @@ async fn an_expired_token_is_refreshed_before_the_call() {
         sid_authn::bff_session::TokenReplacement::Replaced
     ));
 
-    let id = answered_profile(send(&router, current_profile(&browser, true)).await).await;
-    assert_eq!(id, deployment.profile.id.to_string());
-    let after = store.get_session(&browser.session).await.unwrap().unwrap();
+    let (profile, status) = current_profile(&replica, &browser, true).await;
+    assert_eq!(status, "0");
+    assert_eq!(profile.unwrap(), deployment.profile.id.to_string());
+    let after = store.get_session(&id).await.unwrap().unwrap();
     assert_ne!(after.bearer(), before.bearer());
-    assert_ne!(
-        after
-            .refresh_token
-            .as_ref()
-            .map(ExposeSecret::expose_secret),
-        before
-            .refresh_token
-            .as_ref()
-            .map(ExposeSecret::expose_secret)
-    );
+    assert!(!after.holds_refresh_token(&held));
     assert!(after.claims.exp > chrono::Utc::now().timestamp());
 }
 
-/// Sign-out ends the BFF session and revokes its grant at SID: the cookie no
-/// longer opens anything, and the refresh token the session held is dead.
+/// A refresh the issuer committed but whose answer never came back: the
+/// session still holds the replaced refresh token, its access token expired.
+/// `within_grace` says whether the next call comes inside the issuer's grace
+/// window for a replaced token. The session id and the replaced token.
+async fn after_a_lost_refresh(
+    deployment: &Deployment,
+    browser: &Browser,
+    within_grace: bool,
+) -> (String, secrecy::SecretString) {
+    let id = browser.cookie.split_once('=').unwrap().1.to_owned();
+    let store = sessions(deployment);
+    let before = store.get_session(&id).await.unwrap().unwrap();
+    let held = before
+        .refresh_token
+        .clone()
+        .expect("the sign-in granted a refresh token");
+    let mut expired = before.claims.clone();
+    expired.exp = 0;
+    assert!(matches!(
+        store
+            .replace_tokens(
+                &id,
+                &held,
+                before.access_token.clone(),
+                before.refresh_token.clone(),
+                expired,
+            )
+            .await
+            .unwrap(),
+        sid_authn::bff_session::TokenReplacement::Replaced
+    ));
+    // The refresh the issuer commits; its answer is dropped, as one lost on
+    // the way back would be.
+    let link = RpClient::new(
+        ClientKey::ed25519_from_pem(&secrecy::SecretString::from(deployment.key_pem.as_str()))
+            .unwrap(),
+        deployment.installation.clone(),
+        sid_infra::deadline::issuer(
+            tonic::transport::Channel::from_shared(format!("http://{}", deployment.addr))
+                .unwrap()
+                .connect_lazy(),
+        ),
+    )
+    .unwrap();
+    let connection = link.connection().await.unwrap();
+    let _lost = link
+        .refresh(connection, held.expose_secret().to_owned())
+        .await
+        .expect("the issuer commits the refresh");
+    if !within_grace {
+        deployment.svc.mock_storage.end_refresh_grace();
+    }
+    (id, held)
+}
+
+/// Inside the issuer's grace window the replaced token is accepted once
+/// more: the next call refreshes with it and goes through as the same user,
+/// and the session holds the newly rotated token.
+#[tokio::test]
+async fn a_lost_refresh_answer_is_recovered_within_the_grace_window() {
+    let deployment = deploy().await;
+    let replica = replica(&deployment).await;
+    let browser = sign_in(&deployment, &replica).await;
+    let (id, held) = after_a_lost_refresh(&deployment, &browser, true).await;
+
+    let (profile, status) = current_profile(&replica, &browser, true).await;
+    assert_eq!(status, "0");
+    assert_eq!(profile.unwrap(), deployment.profile.id.to_string());
+    let after = sessions(&deployment)
+        .get_session(&id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!after.holds_refresh_token(&held));
+    assert!(after.claims.exp > chrono::Utc::now().timestamp());
+}
+
+/// After the grace window the replaced token reads as theft: the issuer ends
+/// the grant, and the session ends with it (UNAUTHENTICATED) instead of
+/// holding a token the issuer no longer honours.
+#[tokio::test]
+async fn a_lost_refresh_answer_after_the_grace_window_ends_the_session() {
+    let deployment = deploy().await;
+    let replica = replica(&deployment).await;
+    let browser = sign_in(&deployment, &replica).await;
+    let (id, _) = after_a_lost_refresh(&deployment, &browser, false).await;
+
+    let (_, status) = current_profile(&replica, &browser, true).await;
+    assert_eq!(status, "16");
+    assert!(
+        sessions(&deployment)
+            .get_session(&id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// Sign-out ends the application session and revokes its grant at SID: the
+/// cookie no longer opens anything, and the refresh token the session held
+/// is dead.
 #[tokio::test]
 async fn sign_out_revokes_the_grant() {
     let deployment = deploy().await;
-    let router = replica(&deployment);
-    let browser = sign_in(&deployment, &router).await;
+    let replica = replica(&deployment).await;
+    let browser = sign_in(&deployment, &replica).await;
+    let id = browser.cookie.split_once('=').unwrap().1.to_owned();
     let held = sessions(&deployment)
-        .get_session(&browser.session)
+        .get_session(&id)
         .await
         .unwrap()
         .unwrap()
         .refresh_token
         .expect("the code flow grants a refresh token");
 
-    let logout = send(
-        &router,
-        Request::post("/auth/logout")
-            .header("cookie", format!("{COOKIE}={}", browser.session))
-            .header("x-csrf-token", &browser.csrf)
-            .body(Body::empty())
-            .unwrap(),
+    let (answer, status) = grpc_web(
+        &replica,
+        &format!("/{ADAPTER}/EndApplicationSession"),
+        Vec::new(),
+        Some(&browser.cookie),
+        Some(&browser.csrf),
     )
     .await;
-    assert_eq!(logout.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(logout.into_body(), 4096)
-        .await
-        .unwrap();
-    let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(result["grant"], "revoked");
-    assert_eq!(
-        send(&router, current_profile(&browser, true))
-            .await
-            .status(),
-        StatusCode::UNAUTHORIZED
-    );
+    assert_eq!(status, "0");
+    let ended = EndApplicationSessionResponse::decode(&answer.unwrap()[..]).unwrap();
+    assert_eq!(ended.grant, GrantOutcome::Revoked as i32);
+    // UNAUTHENTICATED: the session is gone.
+    let (_, after) = current_profile(&replica, &browser, true).await;
+    assert_eq!(after, "16");
 
     let link = RpClient::new(
         ClientKey::ed25519_from_pem(&secrecy::SecretString::from(deployment.key_pem.as_str()))
             .unwrap(),
         deployment.installation.clone(),
-        tonic::transport::Channel::from_shared(format!("http://{}", deployment.addr))
-            .unwrap()
-            .connect_lazy(),
+        sid_infra::deadline::issuer(
+            tonic::transport::Channel::from_shared(format!("http://{}", deployment.addr))
+                .unwrap()
+                .connect_lazy(),
+        ),
     )
     .unwrap();
     let connection = link.connection().await.unwrap();
@@ -435,4 +777,80 @@ async fn sign_out_revokes_the_grant() {
             .await
             .is_err()
     );
+}
+
+/// Two replicas asked at once for the account with one expired session both
+/// answer it: one refreshes, the other waits for that refresh; neither
+/// replays the rotated token, so the grant lives on.
+#[tokio::test]
+async fn two_replicas_refresh_one_session_at_once() {
+    let deployment = deploy().await;
+    let first = replica(&deployment).await;
+    let second = replica(&deployment).await;
+    let browser = sign_in(&deployment, &first).await;
+    let id = browser.cookie.split_once('=').unwrap().1;
+    let store = sessions(&deployment);
+    let before = store.get_session(id).await.unwrap().unwrap();
+    let held = before.refresh_token.clone().unwrap();
+    let mut expired = before.claims.clone();
+    expired.exp = 0;
+    assert!(matches!(
+        store
+            .replace_tokens(
+                id,
+                &held,
+                before.access_token.clone(),
+                before.refresh_token.clone(),
+                expired
+            )
+            .await
+            .unwrap(),
+        sid_authn::bff_session::TokenReplacement::Replaced
+    ));
+    let (a, b) = tokio::join!(
+        current_profile(&first, &browser, true),
+        current_profile(&second, &browser, true),
+    );
+    for (profile, status) in [a, b] {
+        assert_eq!(status, "0");
+        assert_eq!(profile.unwrap(), deployment.profile.id.to_string());
+    }
+    let after = store.get_session(id).await.unwrap().unwrap();
+    assert!(!after.holds_refresh_token(&held));
+    assert!(after.claims.exp > chrono::Utc::now().timestamp());
+    assert_eq!(current_profile(&second, &browser, true).await.1, "0");
+}
+
+/// A used callback stays used on every replica: replayed through the first
+/// and another replica at once, it is refused with no new cookie, and the
+/// browser's session keeps working.
+#[tokio::test]
+async fn a_replayed_callback_is_refused_on_every_replica() {
+    let deployment = deploy().await;
+    let first = replica(&deployment).await;
+    let second = replica(&deployment).await;
+    let login = start(&first, None).await;
+    let correlation = set_cookie(&login, &format!("{COOKIE}-signin-"));
+    let asked = query(login.headers()["location"].to_str().unwrap());
+    let callback = complete(&deployment, &first, &asked, &correlation).await;
+    let browser = signed_in(&first, &callback).await;
+    let path = format!(
+        "{}?{}",
+        callback.url().path(),
+        callback.url().query().unwrap()
+    );
+    let a = http()
+        .get(format!("{first}{path}"))
+        .header("cookie", &correlation);
+    let b = http()
+        .get(format!("{second}{path}"))
+        .header("cookie", &correlation);
+    let (a, b) = tokio::join!(a.send(), b.send());
+    for answer in [a.unwrap(), b.unwrap()] {
+        assert_eq!(answer.status(), reqwest::StatusCode::BAD_REQUEST);
+        assert!(!answer.headers().contains_key("set-cookie"));
+    }
+    let (profile, status) = current_profile(&second, &browser, true).await;
+    assert_eq!(status, "0");
+    assert_eq!(profile.unwrap(), deployment.profile.id.to_string());
 }

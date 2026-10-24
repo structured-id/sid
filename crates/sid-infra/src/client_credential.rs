@@ -175,7 +175,7 @@ pub struct ClientCredential {
     resource: String,
     /// The scope every token must carry, when one is required.
     scope: Option<&'static str>,
-    channel: tonic::transport::Channel,
+    channel: crate::deadline::IssuerChannel,
     held: RwLock<Option<std::sync::Arc<Held>>>,
     /// One token request at a time: concurrent calls wait for it rather
     /// than each requesting a token.
@@ -199,7 +199,7 @@ impl ClientCredential {
     pub fn checker(
         config: &ClientCredentialConfig,
         base: &str,
-        channel: tonic::transport::Channel,
+        channel: crate::deadline::IssuerChannel,
     ) -> Result<Self, CredentialError> {
         let api = sid_authn::issuer::authorization_api_endpoint(&config.issuer);
         Self::load(
@@ -216,7 +216,7 @@ impl ClientCredential {
     pub fn for_resource(
         config: &ClientCredentialConfig,
         base: &str,
-        channel: tonic::transport::Channel,
+        channel: crate::deadline::IssuerChannel,
         resource: &str,
     ) -> Result<Self, CredentialError> {
         Self::load(config, base, channel, resource.to_owned(), None)
@@ -229,7 +229,7 @@ impl ClientCredential {
     fn load(
         config: &ClientCredentialConfig,
         base: &str,
-        channel: tonic::transport::Channel,
+        channel: crate::deadline::IssuerChannel,
         resource: String,
         scope: Option<&'static str>,
     ) -> Result<Self, CredentialError> {

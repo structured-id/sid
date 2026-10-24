@@ -8,10 +8,9 @@ const ED_PRIVATE_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEI
 
 /// A channel that is never connected: loading a credential does not call
 /// its issuer.
-fn test_channel() -> tonic::transport::Channel {
-    tonic::transport::Channel::from_static("http://127.0.0.1:1")
-        .connect_timeout(std::time::Duration::from_millis(100))
-        .connect_lazy()
+fn test_channel() -> crate::deadline::IssuerChannel {
+    crate::deadline::bounded_channel("http://127.0.0.1:1", std::time::Duration::from_millis(100))
+        .unwrap()
 }
 
 /// A file holding `content`, removed when dropped.

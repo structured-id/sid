@@ -54,8 +54,15 @@ async fn test_set_honours_its_ttl() {
     let c = cache().await;
     let k = key("ttl");
 
-    c.set(&k, b"v", Duration::from_millis(100)).await.unwrap();
-    assert!(c.get(&k).await.unwrap().is_some());
+    let ttl = Duration::from_millis(100);
+    // Taken before the write, so the elapsed time bounds the value's age from
+    // above: a loaded machine can skip the "still there" check, never fail it.
+    let start = std::time::Instant::now();
+    c.set(&k, b"v", ttl).await.unwrap();
+    let read = c.get(&k).await.unwrap();
+    if start.elapsed() < ttl {
+        assert!(read.is_some());
+    }
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(c.get(&k).await.unwrap().is_none());
 }

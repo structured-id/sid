@@ -62,9 +62,11 @@ async fn a_receiver_is_admitted_through_the_test_issuer() {
     let credential = sid_infra::client_credential::ClientCredential::for_resource(
         &issuer.client_config("ops-caller", &caller_secret),
         INSTALLATION,
-        tonic::transport::Channel::from_shared(issuer.upstream())
-            .unwrap()
-            .connect_lazy(),
+        sid_infra::deadline::issuer(
+            tonic::transport::Channel::from_shared(issuer.upstream())
+                .unwrap()
+                .connect_lazy(),
+        ),
         RESOURCE,
     )
     .unwrap();
