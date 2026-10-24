@@ -75,6 +75,10 @@ fn files_keep_their_options() {
 /// `google.api.http` rule is unreachable through the transcoder, so each
 /// one here is a choice, not an oversight.
 const INTERNAL_RPCS: &[&str] = &[
+    // The application's page calls these over gRPC-Web on its own origin,
+    // with the session cookie in the request metadata; no REST form exists.
+    "sid.v1.authn.ApplicationSessionService/EndApplicationSession",
+    "sid.v1.authn.ApplicationSessionService/GetApplicationSession",
     // The RFC 6749 / 8628 / 7009 / 7662 HTTP forms are OidcProviderService's
     // issuer endpoints over the same logic; these are the typed gRPC form.
     "sid.v1.authn.AuthService/OAuth2Authorize",
