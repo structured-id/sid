@@ -1,8 +1,83 @@
 use super::*;
-use crate::crypto::RustCryptoPrimitives;
+use sid_crypto::RustCryptoPrimitives;
 
 fn crypto() -> Arc<dyn CryptoPrimitives> {
     Arc::new(RustCryptoPrimitives::new())
+}
+
+struct FailedEntropy;
+
+impl CryptoPrimitives for FailedEntropy {
+    fn aes_256_gcm_encrypt(
+        &self,
+        _key: &[u8; 32],
+        _nonce: &[u8; 12],
+        _plaintext: &[u8],
+        _aad: &[u8],
+    ) -> Result<Vec<u8>, CryptoError> {
+        panic!("encryption must not run after nonce entropy fails");
+    }
+
+    fn aes_256_gcm_decrypt(
+        &self,
+        key: &[u8; 32],
+        nonce: &[u8; 12],
+        ciphertext: &[u8],
+        aad: &[u8],
+    ) -> Result<Vec<u8>, CryptoError> {
+        RustCryptoPrimitives::new().aes_256_gcm_decrypt(key, nonce, ciphertext, aad)
+    }
+
+    fn hmac_sha256(&self, key: &[u8], data: &[u8]) -> [u8; 32] {
+        RustCryptoPrimitives::new().hmac_sha256(key, data)
+    }
+
+    fn hkdf_sha256(
+        &self,
+        ikm: &[u8],
+        salt: &[u8],
+        info: &[u8],
+        length: usize,
+    ) -> Result<Vec<u8>, CryptoError> {
+        RustCryptoPrimitives::new().hkdf_sha256(ikm, salt, info, length)
+    }
+
+    fn pbkdf2_sha256(
+        &self,
+        password: &[u8],
+        salt: &[u8],
+        iterations: u32,
+        output: &mut [u8],
+    ) -> Result<(), CryptoError> {
+        RustCryptoPrimitives::new().pbkdf2_sha256(password, salt, iterations, output)
+    }
+
+    fn sha256(&self, data: &[u8]) -> [u8; 32] {
+        RustCryptoPrimitives::new().sha256(data)
+    }
+
+    fn random_bytes(&self, _bytes: &mut [u8]) -> Result<(), CryptoError> {
+        Err(CryptoError::Entropy)
+    }
+
+    fn provider_id(&self) -> &'static str {
+        "failing-entropy"
+    }
+
+    fn is_fips(&self) -> bool {
+        false
+    }
+}
+
+// Nonce failure must retain its typed cause and stop before any ciphertext is produced.
+#[tokio::test]
+async fn entropy_failure_stops_before_encryption() {
+    let manager =
+        SoftwareKeyManager::new(master(), vec![params_v1()], Arc::new(FailedEntropy)).unwrap();
+    assert!(matches!(
+        manager.encrypt(b"secret", "context").await,
+        Err(KeyManagerError::Crypto(CryptoError::Entropy))
+    ));
 }
 
 fn master() -> SecretBox<[u8; 32]> {

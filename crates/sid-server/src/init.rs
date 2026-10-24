@@ -456,6 +456,7 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
     let key_manager = sid_authn::field_keys::field_key_manager(
         storage.as_ref(),
         std::path::Path::new(&master_key_path),
+        Arc::new(sid_crypto::AwsLcPrimitives::new()),
     )
     .await
     .unwrap_or_else(|e| panic!("Field-encryption key manager: {e}"));
@@ -1821,10 +1822,13 @@ where
                 .await
                 .context("SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE: evaluator cutoff")?;
         }
-        let history_keys =
-            sid_authn::field_keys::field_key_manager(store.as_ref(), master_key_path)
-                .await
-                .context("password history evaluator keys")?;
+        let history_keys = sid_authn::field_keys::field_key_manager(
+            store.as_ref(),
+            master_key_path,
+            Arc::new(sid_crypto::AwsLcPrimitives::new()),
+        )
+        .await
+        .context("password history evaluator keys")?;
         return Ok(PasswordHistoryAuthority::InProcess {
             store,
             history_keys,

@@ -15,7 +15,7 @@
 #                                run with its defaults), one JSON line each
 set -euo pipefail
 
-task="${1:?task: musl [target...] | history-checker ['<options>'...]}"
+task="${1:?task: musl [target...] | history-checker ['<options>'...] | workspace}"
 shift
 export CARGO_TERM_COLOR=never DEBIAN_FRONTEND=noninteractive
 
@@ -63,6 +63,13 @@ cd "$repo"
 echo "snapshot $(as_builder git -C "$repo" rev-parse --short HEAD) as $(as_builder id -un)"
 
 case "$task" in
+    workspace)
+        if [[ -z "${SID_CHECK_UPLOAD:-}" ]]; then
+            echo 'workspace requires SID_LINUX_RUNTIME=host on a native Linux test host' >&2
+            exit 2
+        fi
+        as_builder bash ci/check-workspace.sh
+        ;;
     musl)
         targets=("$@")
         [[ ${#targets[@]} -gt 0 ]] || targets=(x86_64-unknown-linux-musl aarch64-unknown-linux-musl)

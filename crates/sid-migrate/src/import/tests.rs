@@ -207,7 +207,8 @@ async fn opaque_login_survives_serialized_transfer_and_restart() {
     use rand::{rand_core::UnwrapErr, rngs::SysRng};
     use sid_authn::opaque::{OpaqueRouter, PallasOpaque, server_setup};
     use sid_core::models::{Credential, CredentialType};
-    use sid_keys::{KeyVersionParams, RustCryptoPrimitives, SoftwareKeyManager};
+    use sid_crypto::RustCryptoPrimitives;
+    use sid_keys::{KeyVersionParams, SoftwareKeyManager};
     use sid_opaque_ke::{
         ClientLogin, ClientLoginFinishParameters, ClientRegistration,
         ClientRegistrationFinishParameters, CredentialResponse, RegistrationResponse,
@@ -662,7 +663,8 @@ async fn restored_history_refuses_passwords_from_active_and_rotated_epochs() {
     use pasta_curves::pallas;
     use sid_authn::password_history::*;
     use sid_core::models::*;
-    use sid_keys::{KeyVersionParams, RustCryptoPrimitives, SoftwareKeyManager};
+    use sid_crypto::RustCryptoPrimitives;
+    use sid_keys::{KeyVersionParams, SoftwareKeyManager};
     use sid_pake_core::{
         history as relation,
         types::{DomainPublicInputs, HistoryTag, ZkppPublicInputs},
@@ -1137,7 +1139,7 @@ async fn password_history_survives_migration() {
     let keys = sid_keys::SoftwareKeyManager::new(
         secrecy::SecretBox::new(Box::new([9; 32])),
         source.list_key_versions().await.unwrap(),
-        std::sync::Arc::new(sid_keys::RustCryptoPrimitives::new()),
+        std::sync::Arc::new(sid_crypto::RustCryptoPrimitives::new()),
     )
     .unwrap();
     sid_authn::opaque::server_setup::load_or_create(
@@ -1278,7 +1280,8 @@ async fn history_transfer_refuses_a_different_authority() {
 #[tokio::test]
 async fn history_key_restore_requires_the_original_external_key() {
     use sid_core::models::*;
-    use sid_keys::{KeyManager, KeyVersionParams, RustCryptoPrimitives, SoftwareKeyManager};
+    use sid_crypto::RustCryptoPrimitives;
+    use sid_keys::{KeyManager, KeyVersionParams, SoftwareKeyManager};
     use std::sync::Arc;
     let params = KeyVersionParams::new(1, vec![7; 16], "restore-key-v1");
     let manager = |master| {
@@ -1366,7 +1369,8 @@ async fn history_key_restore_requires_the_original_external_key() {
 #[tokio::test]
 async fn history_keys_move_with_the_evaluators_own_key_versions() {
     use sid_core::models::*;
-    use sid_keys::{KeyManager, KeyVersionParams, RustCryptoPrimitives, SoftwareKeyManager};
+    use sid_crypto::RustCryptoPrimitives;
+    use sid_keys::{KeyManager, KeyVersionParams, SoftwareKeyManager};
     use sid_plugin::history_keys::HistoryKeyStore;
     use std::sync::Arc;
     let field_version = KeyVersionParams::new(1, vec![1; 16], "field-v1");

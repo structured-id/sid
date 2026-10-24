@@ -13,10 +13,8 @@ use std::sync::Arc;
 
 use secrecy::SecretBox;
 use sid_core::models::{AuditEntry, UpstreamProtocol, UpstreamProvider};
-use sid_keys::{
-    EncryptedField, KeyManager, KeyManagerError, KeyVersionParams, RustCryptoPrimitives,
-    SoftwareKeyManager,
-};
+use sid_crypto::RustCryptoPrimitives;
+use sid_keys::{EncryptedField, KeyManager, KeyManagerError, KeyVersionParams, SoftwareKeyManager};
 use sid_plugin::storage::StorageBackend;
 use sid_storage::PostgresBackend;
 

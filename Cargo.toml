@@ -247,7 +247,7 @@ sid-authz = { path = "crates/sid-authz" }
 sid-fed = { path = "crates/sid-fed" }
 sid-storage = { path = "crates/sid-storage", default-features = false }
 sid-pake-core = { path = "zkpp/crates/sid-pake-core" }
-sid-crypto = { path = "crates/sid-crypto", default-features = false }
+sid-crypto = { path = "crates/sid-crypto", version = "0.1", default-features = false }
 sid-notify = { path = "crates/sid-notify" }
 sid-auth = { path = "crates/sid-auth" }
 sid-auth-proxy = { path = "crates/sid-auth-proxy" }

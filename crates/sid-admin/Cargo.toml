@@ -10,6 +10,7 @@ authors.workspace = true
 [dependencies]
 sid-core = { workspace = true }
 sid-keys = { workspace = true }
+sid-crypto = { workspace = true, features = ["std"] }
 sid-plugin = { workspace = true }
 sid-authn = { workspace = true }
 serde = { workspace = true }
@@ -24,8 +25,4 @@ thiserror = { workspace = true }
 # Import is checked against a real in-memory store.
 sid-storage = { workspace = true, features = ["storage-sqlite"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-aes-gcm = { workspace = true }
-pbkdf2 = { workspace = true }
-hmac = { workspace = true }
-sha2 = { workspace = true }
-rand = { workspace = true }
+sid-crypto = { workspace = true, features = ["primitives"] }

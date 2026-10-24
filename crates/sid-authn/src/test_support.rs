@@ -4,7 +4,8 @@
 use std::sync::Arc;
 
 use secrecy::SecretBox;
-use sid_keys::{KeyManager, KeyVersionParams, RustCryptoPrimitives, SoftwareKeyManager};
+use sid_crypto::RustCryptoPrimitives;
+use sid_keys::{KeyManager, KeyVersionParams, SoftwareKeyManager};
 
 /// A key manager over a fixed test master secret.
 pub(crate) fn key_manager() -> Arc<dyn KeyManager> {
