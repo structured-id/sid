@@ -294,9 +294,7 @@ fn test_channel_from_email_config_non_xoauth2_none() {
 
 #[tokio::test]
 async fn test_google_invalid_key_json_error() {
-    sid_crypto::tls::aws_lc::provider()
-        .install_default()
-        .unwrap();
+    crate::test_crypto::install_tls();
     let provider = GoogleTokenProvider {
         user_email: "smtp@sid.example.com".into(),
         service_account_key: secrecy::SecretBox::new(Box::new("not valid json".into())),

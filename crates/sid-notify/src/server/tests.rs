@@ -1,7 +1,10 @@
 use super::*;
 use crate::channels::smtp::SmtpConfig;
 
+/// The configuration of a test server, built after the test application has
+/// selected its TLS backend, as the binary does before building its server.
 fn test_config() -> NotifyConfig {
+    crate::test_crypto::install_tls();
     NotifyConfig {
         nats_url: "nats://127.0.0.1:4222".into(),
         grpc_bind: "127.0.0.1:0".parse().unwrap(),
