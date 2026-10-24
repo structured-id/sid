@@ -17,12 +17,13 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
-use sid_auth_proxy::account::{AccountLink, Connection};
-use sid_auth_proxy::client_key::ClientKey;
+use secrecy::SecretString;
 use sid_auth_proxy::config::ProxyConfig;
 use sid_auth_proxy::shield::Shield;
 use sid_auth_proxy::{ProxyState, api_client, bff, health, metrics};
 use sid_authn::bff_session::BffSessionStore;
+use sid_authn::client_key::ClientKey;
+use sid_infra::issuer_client::RpClient;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -67,28 +68,37 @@ async fn main() -> anyhow::Result<()> {
     // BFF quietly switched off.
     let account = match config.bff_client_key() {
         Some(path) => {
-            let pem = std::fs::read(path)
-                .with_context(|| format!("BFF client key {path:?} cannot be read"))?;
-            let key =
-                ClientKey::from_pem(&pem).with_context(|| format!("BFF client key {path:?}"))?;
-            tracing::info!(kid = %key.kid(), "BFF client key loaded");
+            let pem = SecretString::from(
+                std::fs::read_to_string(path)
+                    .with_context(|| format!("BFF client key {path:?} cannot be read"))?,
+            );
+            let key = ClientKey::ed25519_from_pem(&pem)
+                .with_context(|| format!("BFF client key {path:?}"))?;
             let installation_url = config.issuer_url().to_string();
             // A delivered bundle that cannot be read or validated stops the
             // BFF here, never falls back to discovering another connection.
             let link = match config.bff_connection() {
                 Some(path) => {
-                    let connection =
-                        Connection::load(std::path::Path::new(path), &installation_url, key.kid())?;
+                    let kid = key
+                        .kid()
+                        .ok_or_else(|| anyhow::anyhow!("the BFF client key names no key id"))?
+                        .to_owned();
+                    let connection = sid_infra::issuer_client::load_connection(
+                        std::path::Path::new(path),
+                        &installation_url,
+                        &kid,
+                    )?;
                     tracing::info!(
                         issuer = %connection.issuer,
                         client_id = %connection.client_id,
                         resource = %connection.resource,
                         "BFF connection delivered"
                     );
-                    AccountLink::delivered(key, installation_url, grpc_channel.clone(), connection)
+                    RpClient::delivered(key, installation_url, grpc_channel.clone(), connection)?
                 }
-                None => AccountLink::new(key, installation_url, grpc_channel.clone()),
+                None => RpClient::new(key, installation_url, grpc_channel.clone())?,
             };
+            tracing::info!(kid = %link.kid(), "BFF client key loaded");
             Some(Arc::new(link))
         }
         None => None,
@@ -184,13 +194,17 @@ fn keygen(args: &[String]) -> anyhow::Result<()> {
     let [private_path, public_path] = args else {
         anyhow::bail!("usage: sid-auth-proxy keygen <private-key.pem> <public-jwks.json>");
     };
-    let (key, pem) = ClientKey::generate()?;
-    write_new(private_path, pem.as_bytes(), 0o600)?;
+    let (key, pem) = ClientKey::generate_ed25519()?;
+    write_new(
+        private_path,
+        secrecy::ExposeSecret::expose_secret(&pem).as_bytes(),
+        0o600,
+    )?;
     let jwks = serde_json::to_vec_pretty(&key.public_jwks())?;
     write_new(public_path, &jwks, 0o644)?;
     println!(
         "client key {} written: private {private_path}, public {public_path}",
-        key.kid()
+        key.kid().unwrap_or("?")
     );
     Ok(())
 }

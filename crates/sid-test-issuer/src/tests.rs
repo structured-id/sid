@@ -59,7 +59,7 @@ async fn a_receiver_is_admitted_through_the_test_issuer() {
     let caller_secret =
         std::env::temp_dir().join(format!("sid-test-issuer-caller-{}", uuid::Uuid::now_v7()));
     std::fs::write(&caller_secret, "ops-caller-secret").unwrap();
-    let credential = sid_authn::client_credential::ClientCredential::for_resource(
+    let credential = sid_infra::client_credential::ClientCredential::for_resource(
         &issuer.client_config("ops-caller", &caller_secret),
         INSTALLATION,
         tonic::transport::Channel::from_shared(issuer.upstream())

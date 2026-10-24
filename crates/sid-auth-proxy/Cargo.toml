@@ -21,7 +21,7 @@ sid-auth = { path = "../sid-auth", default-features = false }
 # The installation's issuer directory and the verification of the tokens its
 # issuer returns to the BFF.
 sid-authn = { workspace = true }
-# The issuer registry over gRPC, the directory's source.
+# The issuer registry and the BFF's client at its issuer, over gRPC.
 sid-infra = { workspace = true, features = ["issuer-client"] }
 sid-core = { workspace = true }
 sid-plugin = { workspace = true }
@@ -51,9 +51,6 @@ secrecy = { workspace = true }
 sha2 = { workspace = true }
 base64 = { workspace = true }
 subtle = { workspace = true }
-# BFF: its client key's assertions (RFC 7523) and connection proofs
-jsonwebtoken = { workspace = true }
-ed25519-dalek = { workspace = true, features = ["pkcs8", "pem"] }
 # BFF: account API proxying, bodies streamed through
 reqwest = { workspace = true, features = ["stream"] }
 url = { workspace = true }

@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::*;
-use crate::account::AccountLink;
 use axum::body::Body;
 use axum::http::{HeaderValue, Request};
 use sid_authn::bff_session::BffSessionStore;
+use sid_infra::issuer_client::RpClient;
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -122,12 +122,10 @@ async fn test_enabled_bff_without_a_key_serves_nothing() {
 #[tokio::test]
 async fn test_login_without_a_connection_is_unavailable() {
     let mut state = bff_test_state();
-    let (key, _) = crate::client_key::ClientKey::generate().unwrap();
-    state.account = Some(Arc::new(AccountLink::new(
-        key,
-        "https://sid.example.com".into(),
-        crate::test_channel(),
-    )));
+    let (key, _) = sid_authn::client_key::ClientKey::generate_ed25519().unwrap();
+    state.account = Some(Arc::new(
+        RpClient::new(key, "https://sid.example.com".into(), crate::test_channel()).unwrap(),
+    ));
     let response = routes()
         .with_state(state)
         .oneshot(Request::get("/auth/login").body(Body::empty()).unwrap())
@@ -142,12 +140,10 @@ async fn test_login_without_a_connection_is_unavailable() {
 #[tokio::test]
 async fn test_no_cookie_is_unauthenticated_without_a_connection() {
     let mut state = bff_test_state();
-    let (key, _) = crate::client_key::ClientKey::generate().unwrap();
-    state.account = Some(Arc::new(AccountLink::new(
-        key,
-        "https://sid.example.com".into(),
-        crate::test_channel(),
-    )));
+    let (key, _) = sid_authn::client_key::ClientKey::generate_ed25519().unwrap();
+    state.account = Some(Arc::new(
+        RpClient::new(key, "https://sid.example.com".into(), crate::test_channel()).unwrap(),
+    ));
     for request in [
         Request::get("/auth/userinfo").body(Body::empty()).unwrap(),
         Request::post("/api/x").body(Body::empty()).unwrap(),
@@ -172,12 +168,10 @@ async fn test_no_cookie_is_unauthenticated_without_a_connection() {
 #[tokio::test]
 async fn test_a_cookie_without_a_session_needs_no_connection() {
     let mut state = bff_test_state();
-    let (key, _) = crate::client_key::ClientKey::generate().unwrap();
-    state.account = Some(Arc::new(AccountLink::new(
-        key,
-        "https://sid.example.com".into(),
-        crate::test_channel(),
-    )));
+    let (key, _) = sid_authn::client_key::ClientKey::generate_ed25519().unwrap();
+    state.account = Some(Arc::new(
+        RpClient::new(key, "https://sid.example.com".into(), crate::test_channel()).unwrap(),
+    ));
     let cookie = format!("{}={}", state.bff_cookie_name, plausible_session_id());
     for (request, expected) in [
         (Request::get("/auth/userinfo"), StatusCode::UNAUTHORIZED),
@@ -303,14 +297,17 @@ pub(crate) fn test_connection() -> Connection {
 }
 
 pub(crate) fn bff_test_state() -> ProxyState {
-    let (key, _) = crate::client_key::ClientKey::generate().unwrap();
+    let (key, _) = sid_authn::client_key::ClientKey::generate_ed25519().unwrap();
     let mut state = crate::test_state();
-    state.account = Some(Arc::new(AccountLink::delivered(
-        key,
-        "https://sid.example.com".into(),
-        crate::test_channel(),
-        test_connection(),
-    )));
+    state.account = Some(Arc::new(
+        RpClient::delivered(
+            key,
+            "https://sid.example.com".into(),
+            crate::test_channel(),
+            test_connection(),
+        )
+        .unwrap(),
+    ));
     state
 }
 
@@ -421,12 +418,10 @@ async fn test_a_pending_sign_in_under_another_callback_is_refused() {
 #[tokio::test]
 async fn test_logout_ends_the_session_without_a_connection() {
     let mut state = bff_test_state();
-    let (key, _) = crate::client_key::ClientKey::generate().unwrap();
-    state.account = Some(Arc::new(AccountLink::new(
-        key,
-        "https://sid.example.com".into(),
-        crate::test_channel(),
-    )));
+    let (key, _) = sid_authn::client_key::ClientKey::generate_ed25519().unwrap();
+    state.account = Some(Arc::new(
+        RpClient::new(key, "https://sid.example.com".into(), crate::test_channel()).unwrap(),
+    ));
     let sessions = state.bff_sessions.clone();
     let (session_id, csrf) = sessions
         .create_session(
@@ -668,7 +663,8 @@ fn test_revocation_failure_outcome() {
         Code::Aborted,
         Code::DataLoss,
     ] {
-        let failure = crate::account::LinkError::Rpc(tonic::Status::new(code, "lost"));
+        let failure =
+            sid_infra::issuer_client::RpClientError::Rpc(tonic::Status::new(code, "lost"));
         assert_eq!(
             revocation_failure(&failure),
             GrantOutcome::Unknown,
@@ -684,14 +680,17 @@ fn test_revocation_failure_outcome() {
         Code::ResourceExhausted,
         Code::Unimplemented,
     ] {
-        let failure = crate::account::LinkError::Rpc(tonic::Status::new(code, "refused"));
+        let failure =
+            sid_infra::issuer_client::RpClientError::Rpc(tonic::Status::new(code, "refused"));
         assert_eq!(
             revocation_failure(&failure),
             GrantOutcome::NotRevoked,
             "{code:?}"
         );
     }
-    let unsigned = crate::account::LinkError::Key(anyhow::anyhow!("no key"));
+    let unsigned = sid_infra::issuer_client::RpClientError::Key(
+        sid_authn::client_key::ClientKeyError::Unsupported("no key".into()),
+    );
     assert_eq!(revocation_failure(&unsigned), GrantOutcome::NotRevoked);
 }
 

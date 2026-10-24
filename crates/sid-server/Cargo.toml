@@ -22,12 +22,12 @@ sid-plugin = { workspace = true }
 arc-swap = { workspace = true }
 async-trait = { workspace = true }
 sid-admin = { workspace = true }
-sid-authn = { workspace = true, features = ["grpc", "client-credential", "password-operation"] }
+sid-authn = { workspace = true, features = ["grpc", "password-operation"] }
 sid-authz = { workspace = true }
 sid-fed = { workspace = true }
 sid-proto = { workspace = true }
 sid-storage = { workspace = true, default-features = false }
-sid-infra = { workspace = true, features = ["nats", "redis"] }
+sid-infra = { workspace = true, features = ["nats", "redis", "issuer-client"] }
 sid-serve = { workspace = true }
 sid-notify = { workspace = true }
 ipnet = { workspace = true }

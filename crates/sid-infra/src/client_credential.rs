@@ -12,10 +12,6 @@ use serde::Deserialize;
 use tokio::sync::{Mutex, RwLock};
 use tonic::metadata::{AsciiMetadataValue, MetadataValue};
 
-/// How long a client assertion is valid (RFC 7523 §3 item 4): long enough to
-/// reach the token endpoint, far below the server's accepted lifetime.
-const ASSERTION_LIFETIME_SECS: i64 = 60;
-
 /// A registered client (a confidential OAuth client or a machine user) this
 /// service authenticates as at its issuer: to ask sid-authz, holding the
 /// permission-checker role on the resources it asks about, or to call
@@ -157,11 +153,7 @@ pub enum CredentialError {
 enum Credential {
     Basic(SecretString),
     Post(SecretString),
-    Assertion {
-        key: jsonwebtoken::EncodingKey,
-        algorithm: jsonwebtoken::Algorithm,
-        key_id: Option<String>,
-    },
+    Assertion(sid_authn::client_key::ClientKey),
 }
 
 /// A token in hand. The header value is the form every call sends, so it is
@@ -209,7 +201,7 @@ impl ClientCredential {
         base: &str,
         channel: tonic::transport::Channel,
     ) -> Result<Self, CredentialError> {
-        let api = crate::issuer::authorization_api_endpoint(&config.issuer);
+        let api = sid_authn::issuer::authorization_api_endpoint(&config.issuer);
         Self::load(
             config,
             base,
@@ -275,30 +267,10 @@ impl ClientCredential {
                 key_id,
             } => {
                 let pem = SecretString::from(read(key_file)?);
-                let pem = pem.expose_secret().as_bytes();
-                let unusable = |e: jsonwebtoken::errors::Error| {
-                    invalid(format!("{key_file} is not a {algorithm} private key: {e}"))
-                };
-                let (key, algorithm) = match algorithm.as_str() {
-                    "EdDSA" => (
-                        jsonwebtoken::EncodingKey::from_ed_pem(pem).map_err(unusable)?,
-                        jsonwebtoken::Algorithm::EdDSA,
-                    ),
-                    "ES256" => (
-                        jsonwebtoken::EncodingKey::from_ec_pem(pem).map_err(unusable)?,
-                        jsonwebtoken::Algorithm::ES256,
-                    ),
-                    "RS256" => (
-                        jsonwebtoken::EncodingKey::from_rsa_pem(pem).map_err(unusable)?,
-                        jsonwebtoken::Algorithm::RS256,
-                    ),
-                    other => return Err(invalid(format!("unsupported algorithm {other}"))),
-                };
-                Credential::Assertion {
-                    key,
-                    algorithm,
-                    key_id: key_id.clone(),
-                }
+                let key =
+                    sid_authn::client_key::ClientKey::from_pem(&pem, algorithm, key_id.clone())
+                        .map_err(|e| invalid(format!("{key_file}: {e}")))?;
+                Credential::Assertion(key)
             }
         };
         Ok(Self {
@@ -361,7 +333,7 @@ impl ClientCredential {
     /// resource, with the required scope when there is one.
     async fn request(&self) -> Result<Held, CredentialError> {
         use sid_proto::sid::v1::OAuth2TokenRequest;
-        let token_endpoint = crate::issuer::token_endpoint(&self.issuer);
+        let token_endpoint = sid_authn::issuer::token_endpoint(&self.issuer);
         let mut body = OAuth2TokenRequest {
             grant_type: "client_credentials".into(),
             scope: self.scope.map(str::to_owned),
@@ -378,16 +350,14 @@ impl ClientCredential {
                 body.client_id = Some(self.client_id.clone());
                 body.client_secret = Some(secret.expose_secret().to_owned());
             }
-            Credential::Assertion {
-                key,
-                algorithm,
-                key_id,
-            } => {
+            Credential::Assertion(key) => {
                 body.client_id = Some(self.client_id.clone());
                 body.client_assertion =
-                    Some(self.assertion(&token_endpoint, key, *algorithm, key_id.as_deref())?);
+                    Some(key.sign(&self.client_id, &token_endpoint).map_err(|e| {
+                        CredentialError::Config(format!("signing the client assertion: {e}"))
+                    })?);
                 body.client_assertion_type =
-                    Some(crate::client_assertion::JWT_BEARER_ASSERTION_TYPE.into());
+                    Some(sid_authn::client_assertion::JWT_BEARER_ASSERTION_TYPE.into());
             }
         }
         let mut request = tonic::Request::new(body);
@@ -439,29 +409,6 @@ impl ClientCredential {
             authorization,
             refresh_at,
         })
-    }
-
-    /// A client assertion (RFC 7523 §3) for `audience`, the token endpoint.
-    fn assertion(
-        &self,
-        audience: &str,
-        key: &jsonwebtoken::EncodingKey,
-        algorithm: jsonwebtoken::Algorithm,
-        key_id: Option<&str>,
-    ) -> Result<String, CredentialError> {
-        let now = chrono::Utc::now().timestamp();
-        let claims = serde_json::json!({
-            "iss": self.client_id,
-            "sub": self.client_id,
-            "aud": audience,
-            "iat": now,
-            "exp": now + ASSERTION_LIFETIME_SECS,
-            "jti": uuid::Uuid::now_v7().to_string(),
-        });
-        let mut header = jsonwebtoken::Header::new(algorithm);
-        header.kid = key_id.map(str::to_owned);
-        jsonwebtoken::encode(&header, &claims, key)
-            .map_err(|e| CredentialError::Config(format!("signing the client assertion: {e}")))
     }
 }
 

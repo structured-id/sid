@@ -60,7 +60,7 @@ impl AuthServer {
             .authz_checker
             .as_ref()
             .map(|checker| {
-                sid_authn::client_credential::ClientCredential::checker(
+                sid_infra::client_credential::ClientCredential::checker(
                     checker,
                     &config.issuer_url,
                     upstream.clone(),

@@ -327,11 +327,11 @@ impl TestIssuer {
         &self,
         client_id: &str,
         secret_file: &std::path::Path,
-    ) -> sid_authn::client_credential::ClientCredentialConfig {
-        sid_authn::client_credential::ClientCredentialConfig {
+    ) -> sid_infra::client_credential::ClientCredentialConfig {
+        sid_infra::client_credential::ClientCredentialConfig {
             issuer: self.issuer.canonical_url.clone(),
             client_id: client_id.into(),
-            authentication: sid_authn::client_credential::ClientAuthentication::ClientSecretBasic {
+            authentication: sid_infra::client_credential::ClientAuthentication::ClientSecretBasic {
                 secret_file: secret_file.display().to_string(),
             },
         }
