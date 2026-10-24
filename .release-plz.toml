@@ -2,13 +2,15 @@
 # The server binary (sid-server) is tagged `v<version>` and not published.
 # The vendored protocol crates (sid-voprf, sid-opaque-ke) are released and
 # published to crates.io, tagged `<crate>-v<version>`. Every other library
-# crate is neither tagged nor published.
+# crate is neither tagged nor published by this configuration. sid-crypto
+# has an independent release configuration in .release-plz.crypto.toml.
 [workspace]
 publish = false
 release = false
 semver_check = false
 changelog_update = false
 pr_name = "chore: release"
+pr_branch_prefix = "release-plz-"
 # Publish only when the release PR is merged, not on every push.
 release_always = false
 

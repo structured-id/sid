@@ -28,7 +28,8 @@ use sid_core::models::{
     HistoryEntry, HistoryEpoch, HistoryEpochDescriptor, HistoryEvidence, HistoryKsf, NewKeyEpoch,
     PasswordHistory, ProfileId,
 };
-use sid_keys::{KeyManager, KeyVersionParams, RustCryptoPrimitives, SoftwareKeyManager};
+use sid_crypto::RustCryptoPrimitives;
+use sid_keys::{KeyManager, KeyVersionParams, SoftwareKeyManager};
 use sid_opaque_ke::{ClientRegistration, ClientRegistrationStartResult};
 use sid_pake_core::{
     binding::operation_context,

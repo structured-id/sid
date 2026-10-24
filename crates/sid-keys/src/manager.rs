@@ -17,15 +17,19 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use secrecy::{ExposeSecret, SecretBox};
 use serde::{Deserialize, Serialize};
+use sid_crypto::{CryptoError, CryptoPrimitives};
 use thiserror::Error;
 use zeroize::Zeroize;
 
-use crate::crypto::CryptoPrimitives;
 use crate::field::EncryptedField;
 
 /// Errors from key management operations.
 #[derive(Debug, Error)]
 pub enum KeyManagerError {
+    /// A provider refusal, including unavailable nonce entropy.
+    #[error(transparent)]
+    Crypto(#[from] CryptoError),
+
     #[error("encryption failed: {0}")]
     Encryption(String),
 
@@ -218,7 +222,7 @@ impl KeyManager for SoftwareKeyManager {
     async fn encrypt(&self, plaintext: &[u8], context: &str) -> KeyManagerResult<EncryptedField> {
         let version = self.current;
         let key = self.get_key(version)?;
-        let nonce = self.crypto.random_nonce();
+        let nonce = self.crypto.random_nonce()?;
 
         let ciphertext = self
             .crypto

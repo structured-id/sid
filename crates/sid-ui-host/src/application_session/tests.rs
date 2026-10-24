@@ -701,12 +701,13 @@ async fn a_completed_refresh_inside_the_margin_does_not_stall_the_next_call() {
         .await
         .unwrap();
     // The earlier refresh: claimed, completed, its new token near its end too.
-    assert!(
+    assert!(matches!(
         f.sessions
-            .claim_refresh(&id, &"refresh-1".into(), REFRESH_HOLD)
+            .claim_refresh(&id, &"refresh-1".into(), REFRESH_HOLD, |_| true)
             .await
-            .unwrap()
-    );
+            .unwrap(),
+        RefreshClaim::Claimed(_)
+    ));
     f.sessions
         .replace_tokens(
             &id,
@@ -725,6 +726,231 @@ async fn a_completed_refresh_inside_the_margin_does_not_stall_the_next_call() {
         refused.message().contains("issuer"),
         "the call refreshed instead of waiting: {refused:?}"
     );
+}
+
+/// A refresh started from a snapshot older than the session claims the version
+/// it actually presents: a caller holding that version then sees the refresh
+/// in flight and waits, instead of taking the claim over as a finished one and
+/// presenting the same refresh token a second time. The issuer is unreachable
+/// here, so the first refresh fails and keeps its claim for its hold.
+#[tokio::test(start_paused = true)]
+async fn the_claim_names_the_version_actually_refreshed() {
+    let f = fixture(memory(), true);
+    let mut near_end = claims();
+    near_end.exp = chrono::Utc::now().timestamp() + 10;
+    let (id, _) = f
+        .sessions
+        .create_session(
+            "access-1".into(),
+            Some("refresh-1".into()),
+            near_end.clone(),
+            &connection().binding(),
+        )
+        .await
+        .unwrap();
+    let stale = f.sessions.get_session(&id).await.unwrap().unwrap();
+    // Another replica rotated `refresh-1` under a claim that has since expired.
+    f.sessions
+        .replace_tokens(
+            &id,
+            &"refresh-1".into(),
+            "access-2".into(),
+            Some("refresh-2".into()),
+            near_end,
+        )
+        .await
+        .unwrap();
+
+    let first = f.adapter.current_token(&id, stale).await.unwrap_err();
+    assert!(first.message().contains("issuer"), "{first:?}");
+
+    let session = f.sessions.get_session(&id).await.unwrap().unwrap();
+    let second = f.adapter.current_token(&id, session).await.unwrap_err();
+    assert_eq!(second.code(), Code::Unavailable);
+    assert!(
+        !second.message().contains("issuer"),
+        "refresh-2 was presented twice: {second:?}"
+    );
+}
+
+/// A stale read whose session another replica already refreshed to a token
+/// that is still usable answers with that token and claims nothing: the next
+/// call, once that token nears its end, refreshes it at once instead of
+/// waiting out a claim no refresh is behind. The issuer is unreachable here,
+/// so the second call answers as the issuer, not as a wait.
+#[tokio::test(start_paused = true)]
+async fn a_usable_token_found_after_a_stale_read_is_not_claimed() {
+    let f = fixture(memory(), true);
+    let mut expired = claims();
+    expired.exp = 0;
+    let (id, _) = f
+        .sessions
+        .create_session(
+            "access-1".into(),
+            Some("refresh-1".into()),
+            expired,
+            &connection().binding(),
+        )
+        .await
+        .unwrap();
+    let stale = f.sessions.get_session(&id).await.unwrap().unwrap();
+    let mut usable = claims();
+    // Usable for two more seconds, then inside the refresh margin.
+    usable.exp = chrono::Utc::now().timestamp() + REFRESH_MARGIN_SECS + 2;
+    f.sessions
+        .replace_tokens(
+            &id,
+            &"refresh-1".into(),
+            "access-2".into(),
+            Some("refresh-2".into()),
+            usable,
+        )
+        .await
+        .unwrap();
+
+    let token = f.adapter.current_token(&id, stale).await.unwrap();
+    assert_eq!(token.expose_secret(), "access-2");
+
+    // Token lifetimes run on the wall clock, which a paused runtime does not
+    // advance.
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let near_end = f.sessions.get_session(&id).await.unwrap().unwrap();
+    let refused = f.adapter.current_token(&id, near_end).await.unwrap_err();
+    assert!(
+        refused.message().contains("issuer"),
+        "the call waited for a refresh nobody was making: {refused:?}"
+    );
+}
+
+/// A directory whose every lookup outlasts a refresh claim, as a cold cache
+/// in front of a slow registry does.
+struct SlowIssuers;
+
+/// Longer than [`REFRESH_HOLD`].
+const SLOW_LOOKUP: Duration = Duration::from_secs(20);
+
+#[async_trait::async_trait]
+impl IssuerSource for SlowIssuers {
+    async fn issuer(&self, _: &str) -> Result<Option<IssuerRecord>, RegistryUnavailable> {
+        tokio::time::sleep(SLOW_LOOKUP).await;
+        Ok(None)
+    }
+    async fn resource(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> Result<Option<ResourceRecord>, RegistryUnavailable> {
+        Ok(None)
+    }
+}
+
+/// A token endpoint that answers every refresh at once with a rotated pair,
+/// whose access token names [`ISSUER`] so that verifying it asks the
+/// directory.
+#[derive(Clone)]
+struct RotatingIssuer;
+
+impl tonic::server::NamedService for RotatingIssuer {
+    const NAME: &'static str = "sid.v1.authn.AuthService";
+}
+
+struct Rotate;
+
+impl tonic::server::UnaryService<sid_proto::sid::v1::OAuth2TokenRequest> for Rotate {
+    type Response = sid_proto::sid::v1::OAuth2TokenResponse;
+    type Future = std::future::Ready<Result<tonic::Response<Self::Response>, Status>>;
+
+    fn call(&mut self, _: Request<sid_proto::sid::v1::OAuth2TokenRequest>) -> Self::Future {
+        let part = |json: &str| URL_SAFE_NO_PAD.encode(json);
+        let access_token = format!(
+            "{}.{}.c2ln",
+            part(r#"{"alg":"EdDSA","kid":"k1"}"#),
+            part(&format!(r#"{{"iss":"{ISSUER}"}}"#)),
+        );
+        std::future::ready(Ok(tonic::Response::new(
+            sid_proto::sid::v1::OAuth2TokenResponse {
+                access_token,
+                refresh_token: Some("refresh-2".into()),
+                ..Default::default()
+            },
+        )))
+    }
+}
+
+impl tower::Service<http::Request<tonic::body::Body>> for RotatingIssuer {
+    type Response = http::Response<tonic::body::Body>;
+    type Error = std::convert::Infallible;
+    type Future = std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
+    >;
+
+    fn poll_ready(
+        &mut self,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, request: http::Request<tonic::body::Body>) -> Self::Future {
+        Box::pin(async move {
+            assert_eq!(
+                request.uri().path(),
+                "/sid.v1.authn.AuthService/OAuth2Token"
+            );
+            let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
+            Ok(grpc.unary(Rotate, request).await)
+        })
+    }
+}
+
+/// Everything a refresh claim covers ends within it: the token endpoint call,
+/// verifying the returned token and storing it. Past the claim another replica
+/// may present the same refresh token, so a verification that is still
+/// waiting on a slow directory then is abandoned, not completed late.
+#[tokio::test]
+async fn a_refresh_ends_within_its_claim() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(
+        tonic::transport::Server::builder()
+            .add_service(RotatingIssuer)
+            .serve_with_incoming(tonic::transport::server::TcpIncoming::from(listener)),
+    );
+    let channel =
+        sid_infra::deadline::bounded_channel(&format!("http://{address}"), Duration::from_secs(10))
+            .unwrap();
+    let key = ClientKey::generate_ed25519().unwrap().0;
+    let client = RpClient::delivered(key, INSTALLATION.into(), channel, connection()).unwrap();
+    let cache = memory();
+    let sessions = Arc::new(BffSessionStore::new(cache.clone(), LONG, LONG, LONG));
+    let adapter = ApplicationSessions::new(
+        Arc::new(client),
+        Arc::new(IssuerDirectory::new(INSTALLATION, Arc::new(SlowIssuers))),
+        sessions.clone(),
+        Arc::new(RevocationCache::new(LONG, cache)),
+        COOKIE.into(),
+    );
+    let mut expired = claims();
+    expired.exp = 0;
+    let (id, _) = sessions
+        .create_session(
+            "access-1".into(),
+            Some("refresh-1".into()),
+            expired,
+            &connection().binding(),
+        )
+        .await
+        .unwrap();
+    let session = sessions.get_session(&id).await.unwrap().unwrap();
+
+    let started = tokio::time::Instant::now();
+    let refused = adapter.current_token(&id, session).await.unwrap_err();
+    assert!(
+        started.elapsed() < REFRESH_HOLD,
+        "the refresh outlived its claim: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(refused.code(), Code::Unavailable, "{refused:?}");
 }
 
 /// An issuer session ended elsewhere ends the application session too: it

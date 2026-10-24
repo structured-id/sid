@@ -821,3 +821,189 @@ async fn a_key_proof_proves_the_named_key() {
         "a proof must name its key"
     );
 }
+
+// ── Not-before (RFC 7523 §3 items 5 and 10, RFC 7519 §4.1.5) ──
+
+/// The claims of a valid assertion issued at `now`, with `nbf` set to
+/// `nbf` when given (any JSON value, so malformed ones can be sent too).
+fn claims_with_nbf(jti: &str, now: u64, nbf: Option<serde_json::Value>) -> serde_json::Value {
+    let mut claims = serde_json::json!({
+        "iss": TEST_CLIENT_ID,
+        "sub": TEST_CLIENT_ID,
+        "aud": TEST_TOKEN_ENDPOINT,
+        "exp": now + 240,
+        "jti": jti,
+        "iat": now,
+    });
+    if let Some(nbf) = nbf {
+        claims["nbf"] = nbf;
+    }
+    claims
+}
+
+/// `claims` signed with the test EdDSA key, its header naming `kid`.
+fn sign_value(claims: &serde_json::Value, kid: Option<&str>) -> String {
+    let header = Header {
+        kid: kid.map(str::to_owned),
+        ..Header::new(Algorithm::EdDSA)
+    };
+    let key = EncodingKey::from_ed_pem(ED_PRIVATE_PEM.as_bytes()).unwrap();
+    encode(&header, claims, &key).unwrap()
+}
+
+/// Verify an assertion through the PEM entry point.
+async fn verify_pem(jwt: &str, cache: &AssertionJtiCache) -> SidResult<AssertionClaims> {
+    validate_client_assertion(
+        jwt,
+        TEST_CLIENT_ID,
+        TEST_TOKEN_ENDPOINT,
+        ED_PUBLIC_PEM,
+        "EdDSA",
+        cache,
+    )
+    .await
+}
+
+/// An assertion that is not yet valid by far is refused: the regression a
+/// verifier with `nbf` checking off lets through.
+#[tokio::test]
+async fn an_assertion_not_yet_valid_is_refused() {
+    let cache = AssertionJtiCache::new(test_cache());
+    let now = now_secs();
+    let jwt = sign_value(
+        &claims_with_nbf("nbf-future", now, Some((now + 180).into())),
+        None,
+    );
+    assert!(verify_pem(&jwt, &cache).await.is_err());
+}
+
+/// The outcome for `nbf = now + offset`, checked within the second the
+/// assertion was made in: the library reads the clock itself, so a run that
+/// crosses a second boundary is repeated rather than judged. Crossing it
+/// changes the expected answer (the same `nbf` is one second nearer), which
+/// is why the check is not simply retried until it passes.
+async fn pinned_outcome(offset: u64) -> bool {
+    for attempt in 0..3 {
+        let cache = AssertionJtiCache::new(test_cache());
+        let before = now_secs();
+        let jwt = sign_value(
+            &claims_with_nbf(
+                &format!("nbf-{offset}-{attempt}"),
+                before,
+                Some((before + offset).into()),
+            ),
+            None,
+        );
+        let accepted = verify_pem(&jwt, &cache).await.is_ok();
+        if now_secs() == before {
+            return accepted;
+        }
+    }
+    panic!("the check could not be kept within one second");
+}
+
+/// The clock allowance is exactly 60 seconds: up to it an early `nbf` is
+/// accepted, one second beyond it is not.
+#[tokio::test]
+async fn the_not_before_allowance_is_sixty_seconds() {
+    assert!(pinned_outcome(30).await, "+30 is within the allowance");
+    assert!(pinned_outcome(60).await, "+60 is the allowance itself");
+    assert!(!pinned_outcome(61).await, "+61 is beyond it");
+    assert!(!pinned_outcome(180).await, "+180 is far beyond it");
+}
+
+/// `nbf` is optional: absent or already passed, the assertion is valid.
+#[tokio::test]
+async fn an_absent_or_past_not_before_is_accepted() {
+    let cache = AssertionJtiCache::new(test_cache());
+    let now = now_secs();
+    let absent = sign_value(&claims_with_nbf("nbf-absent", now, None), None);
+    verify_pem(&absent, &cache).await.unwrap();
+    let past = sign_value(
+        &claims_with_nbf("nbf-past", now, Some((now - 120).into())),
+        None,
+    );
+    verify_pem(&past, &cache).await.unwrap();
+    // A NumericDate may be non-integer (RFC 7519 §2).
+    let fractional = sign_value(
+        &claims_with_nbf(
+            "nbf-fractional",
+            now,
+            Some(serde_json::json!(now as f64 - 120.5)),
+        ),
+        None,
+    );
+    verify_pem(&fractional, &cache).await.unwrap();
+}
+
+/// A present `nbf` that is not a NumericDate is refused, `null` included: it
+/// is a malformed claim, not an absent one.
+#[tokio::test]
+async fn a_malformed_not_before_is_refused() {
+    let cache = AssertionJtiCache::new(test_cache());
+    let now = now_secs();
+    for (name, nbf) in [
+        ("null", serde_json::Value::Null),
+        ("string", serde_json::json!(now.to_string())),
+        ("object", serde_json::json!({ "at": now })),
+    ] {
+        let jwt = sign_value(
+            &claims_with_nbf(&format!("nbf-{name}"), now, Some(nbf)),
+            None,
+        );
+        assert!(verify_pem(&jwt, &cache).await.is_err(), "nbf {name}");
+    }
+}
+
+/// A premature assertion is refused before its `jti` is recorded: the same
+/// `jti` in a time-valid assertion is then admitted, on any replica sharing
+/// the cache, exactly once.
+#[tokio::test]
+async fn a_premature_assertion_leaves_its_jti_unused() {
+    let shared = test_cache();
+    let a = AssertionJtiCache::new(shared.clone());
+    let b = AssertionJtiCache::new(shared);
+    let now = now_secs();
+    let early = sign_value(
+        &claims_with_nbf("nbf-shared", now, Some((now + 180).into())),
+        None,
+    );
+    assert!(verify_pem(&early, &a).await.is_err());
+
+    let valid = sign_value(&claims_with_nbf("nbf-shared", now, None), None);
+    verify_pem(&valid, &b).await.unwrap();
+    assert!(verify_pem(&valid, &a).await.is_err(), "used once");
+}
+
+/// The registered-key and key-proof entry points run the same check.
+#[tokio::test]
+async fn every_entry_point_refuses_a_premature_assertion() {
+    let cache = AssertionJtiCache::new(test_cache());
+    let keys = key_set(&[ed_jwk("k1")]);
+    let now = now_secs();
+    let early = sign_value(
+        &claims_with_nbf("nbf-jwk", now, Some((now + 180).into())),
+        Some("k1"),
+    );
+    assert!(
+        validate_client_assertion_with_keys(
+            &early,
+            TEST_CLIENT_ID,
+            TEST_TOKEN_ENDPOINT,
+            &keys,
+            &cache
+        )
+        .await
+        .is_err()
+    );
+
+    let mut proof = claims_with_nbf("nbf-proof", now, Some((now + 180).into()));
+    proof["iss"] = "k1".into();
+    proof["sub"] = "k1".into();
+    let proof = sign_value(&proof, Some("k1"));
+    assert!(
+        validate_key_proof(&proof, TEST_TOKEN_ENDPOINT, &keys, &cache)
+            .await
+            .is_err()
+    );
+}

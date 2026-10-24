@@ -59,3 +59,5 @@ sid-plugin = { workspace = true }
 # signs is verified with its JWK Set.
 tempfile = "3"
 jsonwebtoken = { workspace = true }
+# The codec of the stand-in issuer the refresh tests talk to.
+tonic-prost = "0.14"

@@ -3,7 +3,8 @@
 use super::*;
 use secrecy::SecretBox;
 use sid_core::models::ProfileId;
-use sid_keys::{KeyVersionParams, RustCryptoPrimitives, SoftwareKeyManager};
+use sid_crypto::RustCryptoPrimitives;
+use sid_keys::{KeyVersionParams, SoftwareKeyManager};
 use std::sync::Arc;
 
 fn manager(master: u8, versions: &[u32]) -> SoftwareKeyManager {

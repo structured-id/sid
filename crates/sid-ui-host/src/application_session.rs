@@ -18,7 +18,7 @@ use rand::TryRng;
 use secrecy::{ExposeSecret, SecretString};
 use sha2::{Digest, Sha256};
 use sid_authn::bff_session::{
-    BffSession, BffSessionStore, PendingSignIn, SessionClaims, TokenReplacement,
+    BffSession, BffSessionStore, PendingSignIn, RefreshClaim, SessionClaims, TokenReplacement,
 };
 use sid_authn::issuer_directory::IssuerDirectory;
 use sid_authn::relying_party::Connection;
@@ -48,6 +48,11 @@ const REFRESH_MARGIN_SECS: i64 = 30;
 /// How long one replica holds a session's refresh: longer than a token
 /// endpoint call.
 pub(crate) const REFRESH_HOLD: std::time::Duration = std::time::Duration::from_secs(15);
+/// How long the holder of a refresh claim may take from claiming it to
+/// storing the result: inside the hold, with room for the shared store's
+/// clock and the last write.
+const REFRESH_WORK: std::time::Duration = std::time::Duration::from_secs(12);
+const _: () = assert!(REFRESH_WORK.as_secs() < REFRESH_HOLD.as_secs());
 /// How often a replica that did not win the refresh looks for its result.
 const REFRESH_POLL: std::time::Duration = std::time::Duration::from_millis(200);
 
@@ -197,25 +202,51 @@ impl ApplicationSessions {
         let Some(from) = session.refresh_token.clone() else {
             return Err(self.end(id).await);
         };
-        let claimed = self
-            .sessions
-            .claim_refresh(id, &from, REFRESH_HOLD)
-            .await
-            .map_err(|e| refuse::dependency_unavailable("session store", e))?;
-        if !claimed {
-            return self
-                .refreshed_elsewhere(id, session.access_token.expose_secret())
-                .await;
-        }
+        // The claim lapses after its hold whatever happens here, and another
+        // replica may then present the same refresh token: everything up to
+        // storing the result ends before, or is abandoned. Counted from before
+        // the claim is made, so it never outlasts the claim.
+        let deadline = tokio::time::Instant::now() + REFRESH_WORK;
         // The session read before the claim may predate a refresh another
-        // replica completed under an earlier, now expired claim: refresh only
-        // what the store holds now, never a refresh token already rotated.
-        let session = self
+        // replica completed under an earlier, now expired claim: the claim
+        // hands back what the store holds now, so a refresh token already
+        // rotated is never presented.
+        let session = match self
             .sessions
-            .get_session(id)
+            .claim_refresh(id, &from, REFRESH_HOLD, |current| {
+                current.claims.exp - now <= REFRESH_MARGIN_SECS
+            })
             .await
             .map_err(|e| refuse::dependency_unavailable("session store", e))?
-            .ok_or_else(unauthenticated)?;
+        {
+            RefreshClaim::Claimed(current) => *current,
+            RefreshClaim::Current(current) => return Ok(current.access_token),
+            RefreshClaim::HeldElsewhere => {
+                return self
+                    .refreshed_elsewhere(id, session.access_token.expose_secret())
+                    .await;
+            }
+            RefreshClaim::Ended => return Err(unauthenticated()),
+        };
+        // An answer lost here is the case above: the next call presents the
+        // replaced token inside the issuer's grace window.
+        tokio::time::timeout_at(deadline, self.refresh_claimed(id, session, now))
+            .await
+            .unwrap_or_else(|_| {
+                Err(refuse::dependency_unavailable(
+                    "issuer",
+                    "the refresh did not finish within its claim",
+                ))
+            })
+    }
+
+    /// The refresh of `session`, whose claim this caller holds.
+    async fn refresh_claimed(
+        &self,
+        id: &str,
+        session: BffSession,
+        now: i64,
+    ) -> Result<SecretString, Status> {
         if session.claims.exp - now > REFRESH_MARGIN_SECS {
             return Ok(session.access_token);
         }

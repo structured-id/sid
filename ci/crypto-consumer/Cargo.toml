@@ -1,0 +1,16 @@
+[package]
+name = "crypto-package-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[features]
+tls = ["sid-crypto/tls-rustcrypto", "sid-crypto/tls12"]
+jwt = ["sid-crypto/jwt-rustcrypto", "dep:jsonwebtoken"]
+primitives = ["sid-crypto/primitives"]
+
+[dependencies]
+sid-crypto = { path = "@PACKAGE@", default-features = false, features = ["std"] }
+jsonwebtoken = { version = "11", default-features = false, optional = true }
