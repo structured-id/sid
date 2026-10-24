@@ -158,6 +158,9 @@ async fn main() -> Result<()> {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&cli.log_level));
     tracing_subscriber::fmt().with_env_filter(filter).init();
+    sid_crypto::tls::aws_lc::provider()
+        .install_default()
+        .map_err(|_| anyhow::anyhow!("another TLS crypto provider is already installed"))?;
     sid_crypto::jwt::install_jwt_provider()?;
 
     match cli.command {

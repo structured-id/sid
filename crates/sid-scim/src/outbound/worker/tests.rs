@@ -166,6 +166,7 @@ fn unreachable_target(name: &str, enabled: bool) -> ScimOutboundTarget {
 
 /// A worker over `targets`, each stored as configured.
 async fn worker(targets: Vec<ScimOutboundTarget>) -> (Arc<SqliteBackend>, ScimOutboundWorker) {
+    crate::test_crypto::install_tls();
     let storage = Arc::new(SqliteBackend::new_in_memory().await.unwrap());
     for target in &targets {
         storage
@@ -274,6 +275,41 @@ async fn test_an_unrecorded_failure_retries_only_its_target() {
         dead_letters(&storage, &a).await,
         1,
         "a failure recorded twice"
+    );
+}
+
+/// A host that selected no TLS backend has no client to deliver with: that is
+/// no failure of the target. The event stays with the bus for every target,
+/// none of their attempts are used up and nothing reaches a dead-letter store,
+/// although the same event fails for good once a client exists.
+#[tokio::test]
+async fn test_a_missing_tls_selection_spends_no_target_attempts() {
+    let a = unreachable_target("a", true);
+    // Built without the test host's selection, unlike `worker`.
+    let storage = Arc::new(SqliteBackend::new_in_memory().await.unwrap());
+    storage
+        .create_scim_outbound_target(&a, AuditEntry::system("test", "target").into())
+        .await
+        .unwrap();
+    let worker = ScimOutboundWorker::new(
+        storage.clone(),
+        Arc::new(InProcessEventBus::new()),
+        vec![a.clone()],
+    );
+    let event = undeliverable();
+
+    for attempt in 1..=u64::from(a.sync_config.max_retry_attempts) + 2 {
+        assert_eq!(
+            worker.process(&event, attempt, &Hold::unbounded()).await,
+            Settlement::Retry(UNRECORDED_RETRY),
+            "attempt {attempt}"
+        );
+    }
+    assert_eq!(dead_letters(&storage, &a).await, 0, "moved to the DLQ");
+    assert_eq!(
+        worker.count_failure(&event, &a).await.unwrap(),
+        1,
+        "the target's attempts were spent"
     );
 }
 

@@ -25,6 +25,10 @@ pub mod server;
 pub mod template;
 pub(crate) mod template_store;
 
+#[cfg(test)]
+#[path = "../../../tests/support/crypto.rs"]
+mod test_crypto;
+
 pub use config::NotifyConfig;
 pub use dispatcher::NotificationDispatcher;
 pub use routing::{RoutingRule, RoutingTable};

@@ -30,7 +30,7 @@ sid-serve = { workspace = true }
 # Issuer directory and verification, revocation view and DPoP proof checks.
 sid-authn = { workspace = true, features = ["grpc"] }
 # The process's JWT signature provider, installed at startup.
-sid-crypto = { workspace = true, features = ["jwt"] }
+sid-crypto = { workspace = true, features = ["jwt", "tls-aws-lc"] }
 
 # gRPC services and the client to the SID server
 tonic = { workspace = true }

@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::TestServices;
+use common::crypto::with_tls;
 use common::mock_storage::MockStorage;
 use serde_json::{Value, json};
 use sid_proto::sid::v1::oidc_provider_service_server::{
@@ -197,7 +198,7 @@ async fn unknown_handle_is_not_found() {
 
 /// GET `url` with a client carrying this build's TLS provider.
 async fn get(url: String) -> reqwest::Response {
-    sid_plugin::client_builder()
+    with_tls(sid_plugin::client_builder)
         .build()
         .unwrap()
         .get(url)
@@ -753,7 +754,7 @@ async fn user_info_key_binding_over_http() {
         over_http(provider_of(&user.svc)).await,
         user.svc.issuer.handle
     );
-    let client = sid_plugin::client_builder().build().unwrap();
+    let client = with_tls(sid_plugin::client_builder).build().unwrap();
     let call = |method: &str, proof: &str| {
         let request = match method {
             "GET" => client.get(&url),
@@ -805,7 +806,7 @@ async fn user_info_over_http() {
         over_http(provider_of(&user.svc)).await,
         user.svc.issuer.handle
     );
-    let client = sid_plugin::client_builder().build().unwrap();
+    let client = with_tls(sid_plugin::client_builder).build().unwrap();
 
     for request in [client.get(&url), client.post(&url).body("")] {
         let response = request.bearer_auth(&token).send().await.unwrap();
@@ -881,7 +882,7 @@ async fn post_form(
     let body = url::form_urlencoded::Serializer::new(String::new())
         .extend_pairs(pairs)
         .finish();
-    let mut request = sid_plugin::client_builder()
+    let mut request = with_tls(sid_plugin::client_builder)
         .build()
         .unwrap()
         .post(url)
@@ -971,7 +972,7 @@ async fn token_endpoint_refuses_two_dpop_headers_over_http() {
     let body = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("grant_type", "client_credentials")
         .finish();
-    let response = sid_plugin::client_builder()
+    let response = with_tls(sid_plugin::client_builder)
         .build()
         .unwrap()
         .post(format!("{endpoints}/token"))
@@ -993,7 +994,7 @@ async fn token_endpoint_reads_only_its_form() {
     let (_svc, endpoints) = oauth_endpoints().await;
     let token_url = format!("{endpoints}/token");
 
-    let json_body = sid_plugin::client_builder()
+    let json_body = with_tls(sid_plugin::client_builder)
         .build()
         .unwrap()
         .post(&token_url)
@@ -1335,7 +1336,7 @@ async fn json_request(
     body: Option<Value>,
     token: Option<&str>,
 ) -> reqwest::Response {
-    let mut request = sid_plugin::client_builder()
+    let mut request = with_tls(sid_plugin::client_builder)
         .build()
         .unwrap()
         .request(method, url);
@@ -1578,7 +1579,7 @@ const VERIFIER: &str = "a-verifier-long-enough-for-pkce-a-verifier-long-enough";
 
 /// An HTTP client that shows redirects instead of following them.
 fn no_redirects() -> reqwest::Client {
-    sid_plugin::client_builder()
+    with_tls(sid_plugin::client_builder)
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .unwrap()

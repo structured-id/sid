@@ -15,6 +15,9 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[path = "../../../tests/support/crypto.rs"]
+mod test_crypto;
+
 fn no_cache() -> Arc<dyn sid_plugin::cache::CacheBackend> {
     Arc::new(NoCacheBackend)
 }
@@ -191,7 +194,7 @@ async fn test_pg_allowlist_overrides_tor_in_pipeline() {
     let storage = create_storage().await;
 
     // IP is both a Tor exit AND allowlisted.
-    let tor = Arc::new(TorExitProvider::new(no_cache()));
+    let tor = Arc::new(test_crypto::with_tls(|| TorExitProvider::new(no_cache())));
     tor.load_from_text("10.0.0.1\n");
 
     storage

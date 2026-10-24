@@ -803,7 +803,7 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
     let mut ip_intel_providers: Vec<Arc<dyn IpIntelligenceProvider>> = Vec::new();
 
     if enabled_providers.iter().any(|p| p == "tor") {
-        let tor_provider = Arc::new(TorExitProvider::new(cache_backend.clone()));
+        let tor_provider = Arc::new(TorExitProvider::new(cache_backend.clone())?);
         ip_intel_providers.push(tor_provider);
         info!("IP intelligence: Tor exit provider enabled");
     }
@@ -814,16 +814,16 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
             Arc::new(CloudRangeProvider::with_azure(
                 cache_backend.clone(),
                 azure_url,
-            ))
+            )?)
         } else {
-            Arc::new(CloudRangeProvider::new(cache_backend.clone()))
+            Arc::new(CloudRangeProvider::new(cache_backend.clone())?)
         };
         ip_intel_providers.push(cloud_provider);
         info!("IP intelligence: Cloud range provider enabled");
     }
 
     if enabled_providers.iter().any(|p| p == "firehol") {
-        let firehol_provider = Arc::new(FireholProvider::new(cache_backend.clone()));
+        let firehol_provider = Arc::new(FireholProvider::new(cache_backend.clone())?);
         ip_intel_providers.push(firehol_provider);
         info!("IP intelligence: FireHOL provider enabled");
     }
@@ -880,7 +880,7 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
     }
 
     // ── GeoIP resolution: priority chain with cache ──
-    let geoip = Arc::new(build_geoip_chain_from_env(cache_backend.clone()));
+    let geoip = Arc::new(build_geoip_chain_from_env(cache_backend.clone())?);
 
     // Proxies in front of this server whose X-Forwarded-For names the client;
     // unset means clients connect directly and headers are ignored.
@@ -1683,7 +1683,7 @@ pub fn spawn_work_runner(
         Arc::new(BackChannelLogoutHandler::new(
             c.issuers.clone(),
             c.storage.clone(),
-        )),
+        )?),
         Arc::new(EventRelayHandler::new(
             c.storage.clone(),
             receivers,
@@ -1920,7 +1920,7 @@ fn init_feature_flags() -> anyhow::Result<FeatureFlagService> {
             config.api_url, config.poll_interval_secs
         );
         let svc = FeatureFlagService::new(config);
-        svc.start_polling();
+        svc.start_polling()?;
         Ok(svc)
     } else {
         Ok(FeatureFlagService::disabled())

@@ -21,6 +21,9 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
+    sid_crypto::tls::aws_lc::provider()
+        .install_default()
+        .map_err(|_| anyhow::anyhow!("another TLS crypto provider is already installed"))?;
     sid_crypto::jwt::install_jwt_provider()?;
 
     let config = sid_authz::config::AuthzConfig::from_env();

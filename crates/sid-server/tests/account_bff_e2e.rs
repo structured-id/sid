@@ -192,10 +192,13 @@ fn sessions(deployment: &Deployment) -> BffSessionStore {
 
 /// An HTTP client that follows no redirect: the test reads each one.
 fn http() -> reqwest::Client {
-    sid_plugin::http::client_builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .unwrap()
+    common::crypto::with_tls(|| {
+        Ok::<_, sid_plugin::http::HttpClientError>(
+            sid_plugin::http::client_builder()?
+                .redirect(reqwest::redirect::Policy::none())
+                .build()?,
+        )
+    })
 }
 
 fn query(url: &str) -> std::collections::HashMap<String, String> {

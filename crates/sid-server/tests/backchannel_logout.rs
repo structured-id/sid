@@ -102,7 +102,10 @@ async fn handler(storage: Arc<MockStorage>) -> (BackChannelLogoutHandler, Issuer
     .unwrap();
     let issuers = Arc::new(IssuerRegistry::new(storage.clone(), keys));
     let verifier = issuers.verifier(&issuer).await.unwrap();
-    (BackChannelLogoutHandler::new(issuers, storage), verifier)
+    (
+        common::crypto::with_tls(|| BackChannelLogoutHandler::new(issuers, storage)),
+        verifier,
+    )
 }
 
 /// The logout owed for a session of `profile_id()` at client-456, as claimed.

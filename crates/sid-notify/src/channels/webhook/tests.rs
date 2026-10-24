@@ -96,7 +96,22 @@ async fn endpoint_answering(status: u16) -> (String, tokio::task::JoinHandle<Rec
 }
 
 fn channel(endpoints: Vec<WebhookEndpoint>) -> WebhookChannel {
-    WebhookChannel::new(endpoints).unwrap()
+    crate::test_crypto::with_tls(|| WebhookChannel::new(endpoints))
+}
+
+/// Without the host's TLS selection the channel is refused when it is
+/// built, not when it first delivers.
+#[test]
+fn test_webhook_channel_requires_host_tls_selection() {
+    let Err(refused) = WebhookChannel::new(vec![test_endpoint()]) else {
+        panic!("a channel was built without a TLS selection");
+    };
+    assert!(
+        refused
+            .to_string()
+            .contains("the host has not selected a TLS crypto provider"),
+        "{refused}"
+    );
 }
 
 fn endpoint_at(url: String) -> WebhookEndpoint {

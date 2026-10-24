@@ -227,9 +227,8 @@ bcrypt = "0.19"
 # X.509 PKI (federation certificate verification)
 x509-parser = { version = "0.18", features = ["verify"] }
 rustls-pki-types = "1"
-# Named directly so CE can install ring as the process TLS provider: reqwest
-# 0.13 ships no pure-Rust provider of its own and would otherwise pull aws-lc-rs.
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# Provider-neutral TLS types; applications explicitly select their backend.
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
 time = "0.3"
 
 # Identifier packages of the StructuredID SDK.

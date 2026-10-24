@@ -17,6 +17,10 @@ use std::sync::Arc;
 use sid_authn::bff_session::BffSessionStore;
 use sid_authn::issuer_directory::IssuerDirectory;
 
+#[cfg(test)]
+#[path = "../../../tests/support/crypto.rs"]
+mod test_crypto;
+
 /// Shared state of the proxy's handlers.
 #[derive(Clone, Debug)]
 pub struct ProxyState {
@@ -48,12 +52,11 @@ pub struct ProxyState {
 }
 
 /// The HTTP client the BFF forwards API calls with.
-pub fn api_client() -> reqwest::Client {
-    sid_plugin::http::client_builder()
+pub fn api_client() -> Result<reqwest::Client, sid_plugin::http::HttpClientError> {
+    Ok(sid_plugin::http::client_builder()?
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(std::time::Duration::from_secs(5))
-        .build()
-        .expect("an HTTP client with default TLS roots")
+        .build()?)
 }
 
 /// A lazy channel to nowhere, for tests.
@@ -104,7 +107,7 @@ pub(crate) fn test_state() -> ProxyState {
         bff_enabled: true,
         account: None,
         api_upstream: None,
-        http: api_client(),
+        http: test_crypto::with_tls(api_client),
         bff_sessions: Arc::new(BffSessionStore::new(
             cache,
             std::time::Duration::from_secs(86400),

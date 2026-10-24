@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_crypto::with_tls;
 use chrono::Utc;
 use sid_core::models::{
     AttributeMapping, GroupPushConfig, OutboundSyncConfig, ProjectId, ScimOutboundTarget,
@@ -27,10 +28,19 @@ fn test_target() -> ScimOutboundTarget {
     }
 }
 
+/// Missing host configuration cannot panic or masquerade as a target failure.
+#[test]
+fn client_requires_host_tls_selection() {
+    assert!(matches!(
+        ScimHttpClient::new(&test_target(), Hold::unbounded()),
+        Err(sid_plugin::http::HttpClientError::ProviderNotSelected)
+    ));
+}
+
 #[test]
 fn test_client_construction() {
     let target = test_target();
-    let client = ScimHttpClient::new(&target, Hold::unbounded());
+    let client = with_tls(|| ScimHttpClient::new(&target, Hold::unbounded()));
     assert_eq!(client.endpoint_url, "https://scim.example.com/v2");
 }
 
@@ -38,7 +48,7 @@ fn test_client_construction() {
 fn test_client_strips_trailing_slash() {
     let mut target = test_target();
     target.endpoint_url = "https://scim.example.com/v2/".into();
-    let client = ScimHttpClient::new(&target, Hold::unbounded());
+    let client = with_tls(|| ScimHttpClient::new(&target, Hold::unbounded()));
     assert_eq!(client.endpoint_url, "https://scim.example.com/v2");
 }
 
@@ -65,7 +75,7 @@ async fn test_an_unheld_delivery_sends_no_request() {
         tokio::sync::watch::channel(tokio::time::Instant::now() + REQUEST_SPAN / 2);
     let mut target = test_target();
     target.endpoint_url = "http://127.0.0.1:1/scim/v2".into();
-    let client = ScimHttpClient::new(&target, Hold::until(hold));
+    let client = with_tls(|| ScimHttpClient::new(&target, Hold::until(hold)));
     let refused = client.find_user("alice").await.unwrap_err();
     assert!(matches!(refused, ScimClientError::NotHeld), "{refused}");
 }

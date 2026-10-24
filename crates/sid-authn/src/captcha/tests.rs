@@ -4,6 +4,19 @@ fn test_secret() -> [u8; 32] {
     [42u8; 32]
 }
 
+/// Third-party CAPTCHA construction returns missing host TLS configuration.
+#[test]
+fn http_captcha_requires_host_selection() {
+    assert!(matches!(
+        HcaptchaProvider::new("site".into(), "secret".into()),
+        Err(sid_plugin::http::HttpClientError::ProviderNotSelected)
+    ));
+    assert!(matches!(
+        TurnstileProvider::new("site".into(), "secret".into()),
+        Err(sid_plugin::http::HttpClientError::ProviderNotSelected)
+    ));
+}
+
 // ── SID PoW tests ──
 
 #[test]
@@ -295,6 +308,7 @@ fn factory_unknown_provider_is_an_error() {
 /// A configured provider with its keys is the one built.
 #[test]
 fn factory_builds_configured_provider() {
+    crate::test_crypto::install_tls();
     let provider = captcha_provider_from(
         settings(&[
             ("SID_CAPTCHA_PROVIDER", "turnstile"),

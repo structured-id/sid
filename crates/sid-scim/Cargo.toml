@@ -26,6 +26,7 @@ reqwest = { workspace = true }
 tokio = { workspace = true, features = ["time", "sync"] }
 
 [dev-dependencies]
+sid-crypto = { workspace = true, features = ["tls-aws-lc"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 sid-storage = { path = "../sid-storage", features = ["storage-sqlite"] }
 secrecy = { workspace = true }

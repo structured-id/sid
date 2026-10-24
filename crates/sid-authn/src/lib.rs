@@ -97,6 +97,10 @@ pub mod upstream;
 pub mod webauthn;
 pub mod work_runner;
 
+#[cfg(test)]
+#[path = "../../../tests/support/crypto.rs"]
+mod test_crypto;
+
 // TOTP seed import/migration utilities + verification + enrollment helpers
 pub use totp::{
     TOTP_DIGITS, TOTP_PERIOD, TotpImportError, TotpReplayGuard, base32_decode, base32_encode,

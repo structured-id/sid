@@ -209,7 +209,14 @@ impl ScimOutboundWorker {
                     continue;
                 }
             }
-            let client = ScimHttpClient::new(target, hold.clone());
+            let client = match ScimHttpClient::new(target, hold.clone()) {
+                Ok(client) => client,
+                Err(error) => {
+                    warn!(target = %target.display_name, %error, "SCIM client initialization refused");
+                    retry = later(retry, UNRECORDED_RETRY);
+                    continue;
+                }
+            };
             let recorded = match self.dispatch(target, &client, event).await {
                 Ok(()) => self.record_taken(target, event).await,
                 // A lost hold is no failure of the target: it is not counted.

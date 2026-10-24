@@ -36,7 +36,7 @@ uuid = { workspace = true }
 # Standalone binary deps
 anyhow = { workspace = true, optional = true }
 # The process's JWT signature provider, installed at startup.
-sid-crypto = { workspace = true, features = ["jwt"], optional = true }
+sid-crypto = { workspace = true, features = ["jwt", "tls-aws-lc"], optional = true }
 tokio = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 

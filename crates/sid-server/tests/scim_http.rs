@@ -466,7 +466,9 @@ impl Replica {
 }
 
 fn http() -> reqwest::Client {
-    sid_plugin::client_builder().build().unwrap()
+    common::crypto::with_tls(sid_plugin::client_builder)
+        .build()
+        .unwrap()
 }
 
 /// A user as an HR system sends it (RFC 7643 §4.1, RFC 7644 §3.3).
