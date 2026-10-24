@@ -6,14 +6,14 @@
 //! holds the router that dispatches by curve.
 //!
 //! The low-level primitives are not here: `CryptoPrimitives` and its errors
-//! belong to `sid-keys`, which an application can link for field encryption
-//! without taking any of the identity engine with it.
+//! belong to `sid-crypto`, independently of field-key management and the
+//! identity engine.
 
 use std::fmt;
 
 use secrecy::{ExposeSecret, SecretBox};
 use serde::{Deserialize, Serialize};
-use sid_keys::CryptoError;
+use sid_crypto::CryptoError;
 use thiserror::Error;
 
 // ---------------------------------------------------------------------------

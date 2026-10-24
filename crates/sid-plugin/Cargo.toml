@@ -9,6 +9,7 @@ authors.workspace = true
 
 [dependencies]
 sid-core = { workspace = true }
+sid-crypto = { workspace = true, features = ["std"] }
 sid-keys = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }

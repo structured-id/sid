@@ -164,7 +164,7 @@ async fn different_master_secret_fails_to_start() {
         sid_keys::SoftwareKeyManager::new(
             secrecy::SecretBox::new(Box::new([9u8; 32])),
             vec![sid_keys::KeyVersionParams::new(1, vec![1u8; 16], "key-v1")],
-            std::sync::Arc::new(sid_keys::RustCryptoPrimitives::new()),
+            std::sync::Arc::new(sid_crypto::RustCryptoPrimitives::new()),
         )
         .unwrap(),
     );

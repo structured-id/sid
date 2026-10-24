@@ -19,7 +19,7 @@ path = "src/main.rs"
 sid-core = { workspace = true, features = ["grpc"] }
 sid-keys = { workspace = true }
 # The process's JWT signature provider, installed at startup.
-sid-crypto = { workspace = true, features = ["jwt"] }
+sid-crypto = { workspace = true, features = ["jwt", "aws-lc"] }
 sid-plugin = { workspace = true }
 arc-swap = { workspace = true }
 async-trait = { workspace = true }
@@ -124,6 +124,7 @@ dev-perf-test = []
 client-conformance = []
 
 [dev-dependencies]
+sid-crypto = { workspace = true, features = ["primitives"] }
 tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 sid-opaque-ke = { workspace = true }

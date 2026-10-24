@@ -54,6 +54,7 @@ chrono = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
+sid-crypto = { workspace = true, features = ["primitives"] }
 sid-opaque-ke = { workspace = true }
 sid-pake-core = { workspace = true }
 ff = { workspace = true }
