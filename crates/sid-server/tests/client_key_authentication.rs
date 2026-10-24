@@ -200,6 +200,50 @@ async fn a_misdirected_unknown_or_replayed_assertion_is_refused() {
     assert_eq!(err.code(), tonic::Code::Unauthenticated, "{err:?}");
 }
 
+/// An assertion that is not valid yet (`nbf` beyond the 60-second clock
+/// allowance, RFC 7523 §3 item 5) is `invalid_client` (RFC 7523 §3.2) and
+/// gets no token; its `jti` stays unused, so the time-valid assertion with
+/// that `jti` is served.
+#[tokio::test]
+async fn a_premature_assertion_is_invalid_client() {
+    let svc = key_client(Some(key_set())).await;
+    let now = chrono::Utc::now().timestamp();
+    let claims = serde_json::json!({
+        "iss": "key-client", "sub": "key-client", "aud": token_endpoint(&svc),
+        "iat": now, "nbf": now + 180, "exp": now + 240, "jti": "jti-early",
+    });
+    let header = Header {
+        kid: Some(KID.to_owned()),
+        ..Header::new(Algorithm::EdDSA)
+    };
+    let early = encode(
+        &header,
+        &claims,
+        &EncodingKey::from_ed_pem(ED_PRIVATE_PEM.as_bytes()).unwrap(),
+    )
+    .unwrap();
+    let err = svc
+        .auth
+        .o_auth2_token(token_request(&svc, Some(early)))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::Unauthenticated, "{err:?}");
+    assert_eq!(
+        common::oauth_error(&err).as_deref(),
+        Some("invalid_client"),
+        "{err:?}"
+    );
+
+    let valid = assertion(&token_endpoint(&svc), "jti-early", KID);
+    let body = svc
+        .auth
+        .o_auth2_token(token_request(&svc, Some(valid)))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!body.access_token.is_empty());
+}
+
 /// The key client's access token, obtained with its assertion.
 async fn issued_token(svc: &TestServices) -> String {
     let signed = assertion(&token_endpoint(svc), "jti-issue", KID);
