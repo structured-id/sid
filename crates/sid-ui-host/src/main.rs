@@ -26,6 +26,9 @@
 //!   required, as a host behind a load balancer completes sign-ins another
 //!   replica started.
 //!
+//! `sid-ui-host keygen <private-key.pem> <public-jwks.json>` writes a new
+//! client key and the JWK Set the installation registers for it.
+//!
 //! `GET /health` answers once the bundle and configuration were accepted and,
 //! with a settings source, once its first projection arrived.
 
@@ -60,6 +63,11 @@ const DRAIN: Duration = Duration::from_secs(20);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("keygen") {
+        println!("{}", sid_ui_host::client_key_files::keygen(&args[2..])?);
+        return Ok(());
+    }
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();

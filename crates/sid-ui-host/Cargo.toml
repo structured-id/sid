@@ -55,3 +55,7 @@ url = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 bytes = "1"
 sid-plugin = { workspace = true }
+# Key files are written into a scratch directory; an assertion the new key
+# signs is verified with its JWK Set.
+tempfile = "3"
+jsonwebtoken = { workspace = true }
