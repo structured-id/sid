@@ -8,14 +8,22 @@ fn crypto() -> RustCryptoPrimitives {
 #[test]
 fn pbkdf2_rejects_zero_iterations_before_writing() {
     let mut output = [0xa5; 32];
-    assert!(crypto().pbkdf2_sha256(b"password", b"salt", 0, &mut output).is_err());
+    assert!(
+        crypto()
+            .pbkdf2_sha256(b"password", b"salt", 0, &mut output)
+            .is_err()
+    );
     assert_eq!(output, [0xa5; 32]);
 }
 
 // RFC 5869 section 2.3 bounds output before any attacker-sized allocation.
 #[test]
 fn hkdf_rejects_impossible_length_before_allocation() {
-    assert!(crypto().hkdf_sha256(b"key", b"salt", b"info", usize::MAX).is_err());
+    assert!(
+        crypto()
+            .hkdf_sha256(b"key", b"salt", b"info", usize::MAX)
+            .is_err()
+    );
 }
 
 // -- AES-256-GCM --
