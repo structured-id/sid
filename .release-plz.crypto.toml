@@ -1,0 +1,23 @@
+# Independent crypto releases cannot publish server or protocol packages.
+[workspace]
+release = false
+publish = false
+changelog_update = false
+semver_check = false
+release_always = false
+pr_name = "chore: release sid-crypto"
+# Neither release configuration's prefix contains the other.
+pr_branch_prefix = "sid-crypto-release-"
+
+[[package]]
+name = "sid-crypto"
+release = true
+publish = true
+semver_check = true
+changelog_update = true
+changelog_path = "crates/sid-crypto/CHANGELOG.md"
+git_release_enable = true
+git_release_latest = false
+git_tag_enable = true
+git_tag_name = "{{ package }}-v{{ version }}"
+git_release_name = "{{ package }} v{{ version }}"

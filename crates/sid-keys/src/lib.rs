@@ -12,7 +12,8 @@
 //! ```
 //! use std::sync::Arc;
 //! use secrecy::SecretBox;
-//! use sid_keys::{KeyManager, KeyVersionParams, RustCryptoPrimitives, SoftwareKeyManager};
+//! use sid_crypto::RustCryptoPrimitives;
+//! use sid_keys::{KeyManager, KeyVersionParams, SoftwareKeyManager};
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let master = SecretBox::new(Box::new([7u8; 32]));
@@ -25,11 +26,9 @@
 //! # }
 //! ```
 
-pub mod crypto;
 pub mod field;
 pub mod manager;
 
-pub use crypto::{CryptoError, CryptoPrimitives, RustCryptoPrimitives};
 pub use field::{EncryptedField, EncryptedFieldError};
 pub use manager::{
     KeyDerivation, KeyManager, KeyManagerError, KeyManagerResult, KeyVersionParams,

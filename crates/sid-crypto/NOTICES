@@ -1,0 +1,14 @@
+The TLS RustCrypto adapter includes code adapted from rustls-rustcrypto:
+https://github.com/RustCrypto/rustls-rustcrypto at revision
+70f76c039e587192688af18a80d5d6435dedaf22.
+
+Copyright (c) 2023 Steve Fan, ctz.
+Modifications copyright (c) 2026 Dmitry Prudnikov.
+
+That implementation is licensed under MIT OR Apache-2.0. The Apache-2.0
+license is retained in LICENSE; the original MIT notice is in LICENSE-MIT.
+Modifications include dependency updates, bounded public RSA decoding,
+supported identity checks, fallible entropy, contributory X25519 checks,
+strict SEC1 wire encoding, AEAD usage bounds and record-length validation.
+
+Independent TLS implementations are development test oracles only.

@@ -10,6 +10,7 @@ authors.workspace = true
 [dependencies]
 sid-core = { workspace = true }
 sid-keys = { workspace = true }
+sid-crypto = { workspace = true, features = ["std"] }
 sid-plugin = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
@@ -122,6 +123,7 @@ password-operation = [
 soft-authenticator = ["p256/ecdsa"]
 
 [dev-dependencies]
+sid-crypto = { workspace = true, features = ["primitives"] }
 sid-storage = { path = "../sid-storage", features = ["storage-sqlite"] }
 sid-pake-core = { workspace = true }
 sid-opaque-ke = { workspace = true }

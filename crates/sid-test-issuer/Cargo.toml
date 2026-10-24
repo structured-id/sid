@@ -14,6 +14,7 @@ publish = false
 sid-server = { path = "../sid-server", default-features = false, features = ["embedded-dev"] }
 sid-core = { workspace = true, features = ["grpc"] }
 sid-keys = { workspace = true }
+sid-crypto = { workspace = true, features = ["std", "primitives"] }
 sid-plugin = { workspace = true }
 sid-authn = { workspace = true, features = ["grpc", "password-operation"] }
 # A test client's own credential at the issuer.

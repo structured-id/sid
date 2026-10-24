@@ -757,7 +757,7 @@ fn keys() -> sid_keys::SoftwareKeyManager {
     sid_keys::SoftwareKeyManager::new(
         secrecy::SecretBox::new(Box::new([0x5Au8; 32])),
         vec![sid_keys::KeyVersionParams::new(1, vec![0x01; 32], "key-v1")],
-        Arc::new(sid_keys::RustCryptoPrimitives::new()),
+        Arc::new(sid_crypto::RustCryptoPrimitives::new()),
     )
     .expect("test key manager")
 }
