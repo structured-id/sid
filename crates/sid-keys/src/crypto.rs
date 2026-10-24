@@ -167,6 +167,12 @@ impl CryptoPrimitives for RustCryptoPrimitives {
         info: &[u8],
         output_len: usize,
     ) -> Result<Vec<u8>, CryptoError> {
+        // RFC 5869 section 2.3 bounds expansion before allocating the output.
+        if output_len > 255 * 32 {
+            return Err(CryptoError::KeyDerivation(
+                "HKDF-SHA256 output exceeds 8160 bytes".into(),
+            ));
+        }
         let hk = hkdf::Hkdf::<Sha256>::new(Some(salt), ikm);
         let mut okm = vec![0u8; output_len];
         hk.expand(info, &mut okm)
@@ -181,6 +187,12 @@ impl CryptoPrimitives for RustCryptoPrimitives {
         iterations: u32,
         output: &mut [u8],
     ) -> Result<(), CryptoError> {
+        // RFC 8018 section 5.2 requires a positive iteration count.
+        if iterations == 0 {
+            return Err(CryptoError::KeyDerivation(
+                "PBKDF2 iteration count must be positive".into(),
+            ));
+        }
         pbkdf2::pbkdf2::<Hmac<Sha256>>(password, salt, iterations, output)
             .map_err(|e| CryptoError::KeyDerivation(format!("PBKDF2-SHA256: {e}")))
     }
