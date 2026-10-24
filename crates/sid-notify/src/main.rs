@@ -26,6 +26,7 @@ async fn main() -> anyhow::Result<()> {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
+    sid_crypto::jwt::install_jwt_provider()?;
 
     tracing::info!("Starting sid-notify v{}", env!("CARGO_PKG_VERSION"));
 
