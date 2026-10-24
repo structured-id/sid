@@ -642,19 +642,26 @@ async fn test_use_pushes_the_idle_window_out() {
 /// ends. Without this the idle refresh would keep a session alive forever.
 #[tokio::test]
 async fn test_session_expires_at_max_age_despite_use() {
-    let s = build(
-        Arc::new(InMemoryCacheBackend::new()),
-        Duration::from_millis(60),
-        LONG,
-    );
+    let max_age = Duration::from_millis(200);
+    let s = build(Arc::new(InMemoryCacheBackend::new()), max_age, LONG);
+    // Taken before the session exists, so the elapsed time bounds its age
+    // from above: a slow machine can skip a "still young" check, never fail it.
+    let start = std::time::Instant::now();
     let (id, _) = s
         .create_session("access".into(), None, test_claims(), CONN)
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(30)).await;
-    assert!(s.get_session(&id).await.unwrap().is_some(), "still young");
+    for _ in 0..3 {
+        let read = s.get_session(&id).await.unwrap();
+        if start.elapsed() < max_age {
+            assert!(read.is_some(), "still young");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Already past max_age: no further wait is needed.
+    let left = max_age.checked_sub(start.elapsed()).unwrap_or_default();
+    tokio::time::sleep(left + Duration::from_millis(50)).await;
     assert!(s.get_session(&id).await.unwrap().is_none(), "past max_age");
 }
 
