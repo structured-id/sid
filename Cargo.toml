@@ -193,9 +193,9 @@ maxminddb = "0.32"
 ipnet = "2"
 
 # JWT / OAuth2 / WebAuthn
-# The backend is named because neither is default. CE is pure Rust; a
-# validated-module build is a different binary in a different workspace.
-jsonwebtoken = { version = "11", features = ["rust_crypto"] }
+# aws-lc is the JWT provider in every edition; each binary installs it at
+# startup through sid-crypto (`jwt`). The RustCrypto backend is not linked.
+jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }
 globset = "0.4"
 base64 = "0.23"
 # WebAuthn relying party, pure Rust. `serde` parses client responses as the
