@@ -112,3 +112,6 @@ impl CryptoPrimitives for RustCryptoPrimitives {
         false
     }
 }
+
+#[cfg(test)]
+mod tests;

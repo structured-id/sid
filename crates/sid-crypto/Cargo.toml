@@ -10,6 +10,9 @@ description = "Independently selectable cryptographic primitives and TLS/JWT pro
 readme = "README.md"
 publish = true
 
+[package.metadata.docs.rs]
+features = ["primitives", "tls-rustcrypto", "jwt-rustcrypto", "tls12"]
+
 [features]
 default = ["std", "aws-lc", "tls-aws-lc", "jwt"]
 alloc = ["pki-types?/alloc", "aead?/alloc", "ed25519-dalek?/alloc"]
@@ -57,6 +60,10 @@ x25519-dalek = { version = "3", default-features = false, features = ["static_se
 zeroize = { version = "1", default-features = false, optional = true }
 
 [dev-dependencies]
+base64.workspace = true
+rand.workspace = true
+# End-to-end JWT test hosts parse PEM fixtures; provider adapters do not choose input formats.
+jsonwebtoken = { version = "11", default-features = false, features = ["use_pem"] }
 criterion = { version = "0.8", features = ["html_reports"] }
 rcgen = "0.14"
 # An independent TLS implementation is an oracle, never a product dependency.

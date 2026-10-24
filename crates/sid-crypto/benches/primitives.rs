@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Criterion benchmarks for CryptoPrimitives backends.
 //!
 //! Side-by-side comparison: RustCrypto vs aws-lc-rs (BoringSSL).
@@ -6,7 +6,7 @@
 //! Payload sizes: 64B, 1KB, 4KB, 64KB for AEAD operations.
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use sid_keys::{CryptoPrimitives, RustCryptoPrimitives};
+use sid_crypto::{CryptoPrimitives, RustCryptoPrimitives};
 
 #[cfg(feature = "aws-lc")]
 use sid_crypto::AwsLcPrimitives;
@@ -25,7 +25,7 @@ fn bench_aes_gcm_encrypt(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("rustcrypto", size), &size, |b, _| {
             b.iter(|| {
-                let nonce = rc.random_nonce();
+                let nonce = rc.random_nonce().unwrap();
                 rc.aes_256_gcm_encrypt(&key, &nonce, &plaintext, aad)
                     .unwrap()
             })
@@ -36,7 +36,7 @@ fn bench_aes_gcm_encrypt(c: &mut Criterion) {
             let alc = AwsLcPrimitives;
             group.bench_with_input(BenchmarkId::new("aws-lc", size), &size, |b, _| {
                 b.iter(|| {
-                    let nonce = alc.random_nonce();
+                    let nonce = alc.random_nonce().unwrap();
                     alc.aes_256_gcm_encrypt(&key, &nonce, &plaintext, aad)
                         .unwrap()
                 })
@@ -56,7 +56,7 @@ fn bench_aes_gcm_decrypt(c: &mut Criterion) {
     let mut group = c.benchmark_group("aes_256_gcm_decrypt");
     for size in [64, 1024, 4096, 65536] {
         let plaintext = vec![0xABu8; size];
-        let nonce = rc.random_nonce();
+        let nonce = rc.random_nonce().unwrap();
         let ciphertext = rc
             .aes_256_gcm_encrypt(&key, &nonce, &plaintext, aad)
             .unwrap();
@@ -160,7 +160,7 @@ fn bench_random_bytes(c: &mut Criterion) {
     group.bench_function("rustcrypto", |b| {
         b.iter(|| {
             let mut buf = [0u8; 32];
-            rc.random_bytes(&mut buf);
+            rc.random_bytes(&mut buf).unwrap();
             buf
         })
     });
@@ -171,7 +171,7 @@ fn bench_random_bytes(c: &mut Criterion) {
         group.bench_function("aws-lc", |b| {
             b.iter(|| {
                 let mut buf = [0u8; 32];
-                alc.random_bytes(&mut buf);
+                alc.random_bytes(&mut buf).unwrap();
                 buf
             })
         });
