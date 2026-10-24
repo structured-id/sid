@@ -35,13 +35,15 @@ uuid = { workspace = true }
 
 # Standalone binary deps
 anyhow = { workspace = true, optional = true }
+# The process's JWT signature provider, installed at startup.
+sid-crypto = { workspace = true, features = ["jwt"], optional = true }
 tokio = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 
 [features]
 default = ["grpc"]
 grpc = ["dep:sid-authn", "sid-authn/grpc", "sid-core/grpc", "dep:sid-proto", "dep:tonic", "dep:prost", "dep:prost-types"]
-standalone = ["grpc", "dep:anyhow", "dep:tokio", "dep:tracing-subscriber"]
+standalone = ["grpc", "dep:anyhow", "dep:sid-crypto", "dep:tokio", "dep:tracing-subscriber"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

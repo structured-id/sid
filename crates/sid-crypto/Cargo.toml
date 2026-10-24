@@ -13,6 +13,8 @@ default = ["primitives", "aws-lc"]
 primitives = ["dep:sid-keys", "dep:aes-gcm", "dep:hmac", "dep:hkdf", "dep:pbkdf2", "dep:pasta_curves", "dep:ff", "dep:group", "dep:rand"]
 aws-lc = ["primitives", "dep:aws-lc-rs"]
 fips = ["aws-lc", "aws-lc-rs/fips"]
+# The process's JWT signature provider, which a host installs at startup.
+jwt = ["dep:jsonwebtoken"]
 
 [dependencies]
 # Primitive trait implemented by the aws-lc-rs backend below
@@ -23,6 +25,10 @@ aes-gcm = { workspace = true, optional = true }
 
 # BoringSSL-based crypto (default backend)
 aws-lc-rs = { workspace = true, optional = true }
+
+# JWT signing and verification run in jsonwebtoken on its aws-lc provider
+# (`jwt` feature).
+jsonwebtoken = { workspace = true, optional = true }
 
 # Curve implementations (server-side, behind `primitives` feature)
 pasta_curves = { workspace = true, optional = true }
@@ -54,6 +60,7 @@ subtle.workspace = true
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
+sid-crypto = { path = ".", features = ["jwt"] }
 sid-keys = { workspace = true }
 
 [[bench]]

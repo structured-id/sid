@@ -21,6 +21,8 @@ sid-core = { workspace = true }
 sid-plugin = { workspace = true }
 sid-keys = { workspace = true }
 sid-authn = { workspace = true }
+# The process's JWT signature provider, installed at startup.
+sid-crypto = { workspace = true, features = ["jwt"] }
 sid-storage = { path = "../sid-storage", default-features = false }
 
 # CLI
