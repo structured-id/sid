@@ -85,16 +85,17 @@ impl Receiver {
             .connect_timeout(std::time::Duration::from_secs(5))
             .timeout(std::time::Duration::from_secs(5))
             .connect_lazy();
+        // Issuer calls end within the same bound, their whole answer included.
+        let issuer =
+            sid_infra::deadline::Deadline::new(upstream.clone(), std::time::Duration::from_secs(5));
         let checker =
-            ClientCredential::checker(&config.checker, &config.issuer_url, upstream.clone())?;
+            ClientCredential::checker(&config.checker, &config.issuer_url, issuer.clone())?;
         let cache = crate::shared_cache(config.cache_url.as_deref()).await?;
         Ok(Self::new(
             name,
             Arc::new(IssuerDirectory::new(
                 &config.issuer_url,
-                Arc::new(sid_infra::issuer_registry::GrpcIssuerSource::new(
-                    upstream.clone(),
-                )),
+                Arc::new(sid_infra::issuer_registry::GrpcIssuerSource::new(issuer)),
             )),
             Target {
                 issuer: config.checker.issuer.clone(),

@@ -124,7 +124,12 @@ async fn test_login_without_a_connection_is_unavailable() {
     let mut state = bff_test_state();
     let (key, _) = sid_authn::client_key::ClientKey::generate_ed25519().unwrap();
     state.account = Some(Arc::new(
-        RpClient::new(key, "https://sid.example.com".into(), crate::test_channel()).unwrap(),
+        RpClient::new(
+            key,
+            "https://sid.example.com".into(),
+            sid_infra::deadline::issuer(crate::test_channel()),
+        )
+        .unwrap(),
     ));
     let response = routes()
         .with_state(state)
@@ -142,7 +147,12 @@ async fn test_no_cookie_is_unauthenticated_without_a_connection() {
     let mut state = bff_test_state();
     let (key, _) = sid_authn::client_key::ClientKey::generate_ed25519().unwrap();
     state.account = Some(Arc::new(
-        RpClient::new(key, "https://sid.example.com".into(), crate::test_channel()).unwrap(),
+        RpClient::new(
+            key,
+            "https://sid.example.com".into(),
+            sid_infra::deadline::issuer(crate::test_channel()),
+        )
+        .unwrap(),
     ));
     for request in [
         Request::get("/auth/userinfo").body(Body::empty()).unwrap(),
@@ -170,7 +180,12 @@ async fn test_a_cookie_without_a_session_needs_no_connection() {
     let mut state = bff_test_state();
     let (key, _) = sid_authn::client_key::ClientKey::generate_ed25519().unwrap();
     state.account = Some(Arc::new(
-        RpClient::new(key, "https://sid.example.com".into(), crate::test_channel()).unwrap(),
+        RpClient::new(
+            key,
+            "https://sid.example.com".into(),
+            sid_infra::deadline::issuer(crate::test_channel()),
+        )
+        .unwrap(),
     ));
     let cookie = format!("{}={}", state.bff_cookie_name, plausible_session_id());
     for (request, expected) in [
@@ -303,7 +318,7 @@ pub(crate) fn bff_test_state() -> ProxyState {
         RpClient::delivered(
             key,
             "https://sid.example.com".into(),
-            crate::test_channel(),
+            sid_infra::deadline::issuer(crate::test_channel()),
             test_connection(),
         )
         .unwrap(),
@@ -420,7 +435,12 @@ async fn test_logout_ends_the_session_without_a_connection() {
     let mut state = bff_test_state();
     let (key, _) = sid_authn::client_key::ClientKey::generate_ed25519().unwrap();
     state.account = Some(Arc::new(
-        RpClient::new(key, "https://sid.example.com".into(), crate::test_channel()).unwrap(),
+        RpClient::new(
+            key,
+            "https://sid.example.com".into(),
+            sid_infra::deadline::issuer(crate::test_channel()),
+        )
+        .unwrap(),
     ));
     let sessions = state.bff_sessions.clone();
     let (session_id, csrf) = sessions

@@ -30,7 +30,30 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 sid-proto = { workspace = true }
 tonic = { workspace = true }
+# The browser adapter of the hosted application: its client at the issuer,
+# the issuer directory, the shared session store and revocations.
+sid-authn = { workspace = true }
+sid-infra = { workspace = true, features = ["issuer-client", "redis", "http"] }
+# The process's JWT signature provider, installed at startup.
+sid-crypto = { workspace = true, features = ["jwt"] }
+chrono = { workspace = true }
+# The listener: the adapter's annotated RPCs, gRPC and gRPC-Web to the hosted
+# API and the bundle's routes, through the embedded transcoder.
+structured-proxy = { version = "8.1.2", default-features = false }
+http = { workspace = true }
+http-body-util = "0.1"
+async-trait = { workspace = true }
+sid-core = { workspace = true, features = ["grpc"] }
+secrecy = { workspace = true }
+base64 = { workspace = true }
+rand = { workspace = true }
+subtle = { workspace = true }
+# The application's origin, from its registered callback.
+url = { workspace = true }
 
 [dev-dependencies]
-http-body-util = "0.1"
 tokio = { workspace = true, features = ["test-util"] }
+bytes = "1"
+sid-plugin = { workspace = true }
+# The codec of the stand-in issuer the refresh tests talk to.
+tonic-prost = "0.14"

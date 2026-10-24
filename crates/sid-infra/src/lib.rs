@@ -11,6 +11,8 @@
 
 #[cfg(feature = "issuer-client")]
 pub mod client_credential;
+#[cfg(feature = "issuer-client")]
+pub mod deadline;
 #[cfg(feature = "http")]
 pub mod http;
 #[cfg(feature = "issuer-client")]

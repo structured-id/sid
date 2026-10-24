@@ -255,6 +255,24 @@ pub struct MockStorage {
 }
 
 impl MockStorage {
+    /// Close the grace window of every rotated refresh token, as the passing
+    /// of that window would: a replay of one then reads as theft.
+    #[allow(dead_code)]
+    pub fn end_refresh_grace(&self) {
+        let past = chrono::Utc::now() - chrono::Duration::seconds(1);
+        for token in self
+            .inner
+            .lock()
+            .unwrap()
+            .refresh_tokens_by_hash
+            .values_mut()
+        {
+            if token.grace_expires_at.is_some() {
+                token.grace_expires_at = Some(past);
+            }
+        }
+    }
+
     /// An installation already claimed by its first administrator (a profile
     /// no test signs in as), the state every installation serves users in.
     pub fn new() -> Self {

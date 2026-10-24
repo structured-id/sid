@@ -206,6 +206,12 @@ impl BffSessionStore {
         }
     }
 
+    /// How long a started sign-in waits for its callback: the lifetime of
+    /// anything a browser holds for it.
+    pub fn pending_ttl(&self) -> Duration {
+        self.pending_ttl
+    }
+
     /// Store a new session issued under `connection`; returns
     /// (session id, CSRF token).
     pub async fn create_session(
@@ -288,17 +294,92 @@ impl BffSessionStore {
         Ok(())
     }
 
-    /// Claim the refresh of session `id` for `hold`, across every replica:
-    /// `true` for exactly one caller. The issuer rotates refresh tokens and
-    /// treats a replayed one as theft, ending the grant, so two replicas
-    /// refreshing one session at once would sign its user out.
+    /// Claim the refresh of session `id`, read holding refresh token `read`,
+    /// for `hold`, across every replica: [`RefreshClaim::Claimed`] for exactly
+    /// one caller, with the session as it is now. The issuer rotates refresh
+    /// tokens and treats a replayed one as theft, ending the grant, so two
+    /// replicas refreshing one version at once would sign its user out.
     ///
-    /// The claim is never released, only outlived: a release could delete a
-    /// later holder's claim after this one expired. `hold` outlasts a token
-    /// endpoint call, and the session's next refresh comes when its new token
-    /// nears expiry, long after.
-    pub async fn claim_refresh(&self, id: &str, hold: Duration) -> SessionResult<bool> {
-        Ok(self.cache.set_nx(&refresh_key(id), b"1", hold).await?)
+    /// `read` may be older than the session: another replica may have
+    /// refreshed since. The claim then moves to the version the session holds,
+    /// so the claim always names the token the winner presents; a caller
+    /// holding that version sees the refresh in flight instead of a finished
+    /// one it may take over. A newer version `needs_refresh` declines is not
+    /// claimed at all: it comes back as [`RefreshClaim::Current`], and no
+    /// claim is left that a later caller would wait on with no refresh behind
+    /// it.
+    pub async fn claim_refresh(
+        &self,
+        id: &str,
+        read: &SecretString,
+        hold: Duration,
+        needs_refresh: impl Fn(&BffSession) -> bool,
+    ) -> SessionResult<RefreshClaim> {
+        let mut from = read.clone();
+        for _ in 0..REPLACE_ATTEMPTS {
+            if !self.claim_version(id, &from, hold).await? {
+                return Ok(RefreshClaim::HeldElsewhere);
+            }
+            let Some(session) = self.get_session(id).await? else {
+                return Ok(RefreshClaim::Ended);
+            };
+            match &session.refresh_token {
+                Some(current) if !session.holds_refresh_token(&from) => {
+                    if !needs_refresh(&session) {
+                        return Ok(RefreshClaim::Current(Box::new(session)));
+                    }
+                    from = current.clone();
+                }
+                _ => return Ok(RefreshClaim::Claimed(Box::new(session))),
+            }
+        }
+        Err(SessionStoreError::Backend(CacheError::Other(format!(
+            "session {id} kept changing while its refresh was claimed"
+        ))))
+    }
+
+    /// Claim the refresh of version `from` of session `id`: `true` for exactly
+    /// one caller.
+    ///
+    /// The claim names the version it refreshes. A claim left by the refresh
+    /// of an earlier version, which completed since (the session holds `from`
+    /// now), does not hold this one: a returned token may itself be near its
+    /// end, capped by an approaching step-up or issuer-session expiry. It is
+    /// taken over atomically, so one caller wins. A claim of the version the
+    /// session holds is in flight and is never taken over, whatever version
+    /// the caller read.
+    ///
+    /// The claim is never released, only outlived or taken over by the next
+    /// version: a release could delete a later holder's claim after this one
+    /// expired. `hold` outlasts a token endpoint call.
+    async fn claim_version(
+        &self,
+        id: &str,
+        from: &SecretString,
+        hold: Duration,
+    ) -> SessionResult<bool> {
+        let key = refresh_key(id);
+        let mine = refresh_version(from);
+        if self.cache.set_nx(&key, mine.as_bytes(), hold).await? {
+            return Ok(true);
+        }
+        let Some(held) = self.cache.get(&key).await? else {
+            // The claim expired between the two calls.
+            return Ok(self.cache.set_nx(&key, mine.as_bytes(), hold).await?);
+        };
+        if held == mine.as_bytes() {
+            return Ok(false);
+        }
+        // Another version's claim: only a completed refresh's, when the
+        // session already holds the version this caller refreshes.
+        let current = self.read_current(id).await?;
+        if !current.is_some_and(|session| session.holds_refresh_token(from)) {
+            return Ok(false);
+        }
+        Ok(self
+            .cache
+            .compare_and_set(&key, &held, mine.as_bytes(), hold)
+            .await?)
     }
 
     /// Replace the tokens of session `id` with those a refresh of
@@ -478,6 +559,15 @@ fn refresh_key(id: &str) -> String {
     format!("{REFRESH_PREFIX}{id}")
 }
 
+/// The version of a refresh token a refresh claim names: a digest, so the
+/// claim key never holds the token itself.
+fn refresh_version(token: &SecretString) -> String {
+    use base64::Engine as _;
+    use sha2::Digest as _;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(sha2::Sha256::digest(token.expose_secret().as_bytes()))
+}
+
 /// Elapsed time since `then`, zero for a clock that moved back: a timestamp
 /// in the future has no age yet.
 fn age(then: DateTime<Utc>) -> Duration {
@@ -532,6 +622,21 @@ pub enum TokenReplacement {
     /// Boxed: the rare outcome should not size every answer.
     Superseded(Box<BffSession>),
     /// Not stored: the session ended meanwhile.
+    Ended,
+}
+
+/// The outcome of [`BffSessionStore::claim_refresh`].
+#[derive(Debug)]
+pub enum RefreshClaim {
+    /// This caller refreshes, from the session as it is now; the claim names
+    /// its refresh token. Boxed: a session should not size every answer.
+    Claimed(Box<BffSession>),
+    /// Nothing to refresh: the session holds a newer version that needs no
+    /// refresh yet, here as it is. Nothing was claimed for it.
+    Current(Box<BffSession>),
+    /// Another caller is refreshing the version the session holds.
+    HeldElsewhere,
+    /// The session ended meanwhile.
     Ended,
 }
 
