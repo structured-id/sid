@@ -235,7 +235,7 @@ async fn one_replica_refreshes_a_session() {
         let (store, id) = (store.clone(), id.clone());
         tasks.push(tokio::spawn(async move {
             store
-                .claim_refresh(&id, &"refresh-1".into(), Duration::from_secs(15))
+                .claim_refresh(&id, &"refresh-1".into(), Duration::from_secs(15), |_| true)
                 .await
                 .unwrap()
         }));

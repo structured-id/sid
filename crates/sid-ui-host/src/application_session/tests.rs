@@ -703,7 +703,7 @@ async fn a_completed_refresh_inside_the_margin_does_not_stall_the_next_call() {
     // The earlier refresh: claimed, completed, its new token near its end too.
     assert!(matches!(
         f.sessions
-            .claim_refresh(&id, &"refresh-1".into(), REFRESH_HOLD)
+            .claim_refresh(&id, &"refresh-1".into(), REFRESH_HOLD, |_| true)
             .await
             .unwrap(),
         RefreshClaim::Claimed(_)
@@ -770,6 +770,55 @@ async fn the_claim_names_the_version_actually_refreshed() {
     assert!(
         !second.message().contains("issuer"),
         "refresh-2 was presented twice: {second:?}"
+    );
+}
+
+/// A stale read whose session another replica already refreshed to a token
+/// that is still usable answers with that token and claims nothing: the next
+/// call, once that token nears its end, refreshes it at once instead of
+/// waiting out a claim no refresh is behind. The issuer is unreachable here,
+/// so the second call answers as the issuer, not as a wait.
+#[tokio::test(start_paused = true)]
+async fn a_usable_token_found_after_a_stale_read_is_not_claimed() {
+    let f = fixture(memory(), true);
+    let mut expired = claims();
+    expired.exp = 0;
+    let (id, _) = f
+        .sessions
+        .create_session(
+            "access-1".into(),
+            Some("refresh-1".into()),
+            expired,
+            &connection().binding(),
+        )
+        .await
+        .unwrap();
+    let stale = f.sessions.get_session(&id).await.unwrap().unwrap();
+    let mut usable = claims();
+    // Usable for two more seconds, then inside the refresh margin.
+    usable.exp = chrono::Utc::now().timestamp() + REFRESH_MARGIN_SECS + 2;
+    f.sessions
+        .replace_tokens(
+            &id,
+            &"refresh-1".into(),
+            "access-2".into(),
+            Some("refresh-2".into()),
+            usable,
+        )
+        .await
+        .unwrap();
+
+    let token = f.adapter.current_token(&id, stale).await.unwrap();
+    assert_eq!(token.expose_secret(), "access-2");
+
+    // Token lifetimes run on the wall clock, which a paused runtime does not
+    // advance.
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let near_end = f.sessions.get_session(&id).await.unwrap().unwrap();
+    let refused = f.adapter.current_token(&id, near_end).await.unwrap_err();
+    assert!(
+        refused.message().contains("issuer"),
+        "the call waited for a refresh nobody was making: {refused:?}"
     );
 }
 

@@ -304,12 +304,16 @@ impl BffSessionStore {
     /// refreshed since. The claim then moves to the version the session holds,
     /// so the claim always names the token the winner presents; a caller
     /// holding that version sees the refresh in flight instead of a finished
-    /// one it may take over.
+    /// one it may take over. A newer version `needs_refresh` declines is not
+    /// claimed at all: it comes back as [`RefreshClaim::Current`], and no
+    /// claim is left that a later caller would wait on with no refresh behind
+    /// it.
     pub async fn claim_refresh(
         &self,
         id: &str,
         read: &SecretString,
         hold: Duration,
+        needs_refresh: impl Fn(&BffSession) -> bool,
     ) -> SessionResult<RefreshClaim> {
         let mut from = read.clone();
         for _ in 0..REPLACE_ATTEMPTS {
@@ -320,7 +324,12 @@ impl BffSessionStore {
                 return Ok(RefreshClaim::Ended);
             };
             match &session.refresh_token {
-                Some(current) if !session.holds_refresh_token(&from) => from = current.clone(),
+                Some(current) if !session.holds_refresh_token(&from) => {
+                    if !needs_refresh(&session) {
+                        return Ok(RefreshClaim::Current(Box::new(session)));
+                    }
+                    from = current.clone();
+                }
                 _ => return Ok(RefreshClaim::Claimed(Box::new(session))),
             }
         }
@@ -622,6 +631,9 @@ pub enum RefreshClaim {
     /// This caller refreshes, from the session as it is now; the claim names
     /// its refresh token. Boxed: a session should not size every answer.
     Claimed(Box<BffSession>),
+    /// Nothing to refresh: the session holds a newer version that needs no
+    /// refresh yet, here as it is. Nothing was claimed for it.
+    Current(Box<BffSession>),
     /// Another caller is refreshing the version the session holds.
     HeldElsewhere,
     /// The session ended meanwhile.

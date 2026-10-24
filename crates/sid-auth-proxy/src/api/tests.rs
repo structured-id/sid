@@ -261,7 +261,7 @@ async fn a_refresh_held_elsewhere_is_awaited() {
     let sessions = state.bff_sessions.clone();
     assert!(matches!(
         sessions
-            .claim_refresh(&id, &"refresh-1".into(), Duration::from_secs(15))
+            .claim_refresh(&id, &"refresh-1".into(), Duration::from_secs(15), |_| true)
             .await
             .unwrap(),
         RefreshClaim::Claimed(_)
@@ -322,7 +322,7 @@ async fn futures_claims(state: &ProxyState, id: &str, n: usize) -> Vec<RefreshCl
         let id = id.to_owned();
         tasks.push(tokio::spawn(async move {
             sessions
-                .claim_refresh(&id, &"refresh".into(), Duration::from_secs(15))
+                .claim_refresh(&id, &"refresh".into(), Duration::from_secs(15), |_| true)
                 .await
                 .unwrap()
         }));

@@ -392,12 +392,21 @@ async fn test_replace_tokens_applies_a_current_refresh() {
     );
 }
 
+/// Every version these tests hold needs its refresh.
+fn always(_: &BffSession) -> bool {
+    true
+}
+
 /// Whether `s` wins the refresh of session `id`, read holding `from`.
 async fn wins(s: &BffSessionStore, id: &str, from: &str) -> bool {
-    match s.claim_refresh(id, &from.into(), LONG).await.unwrap() {
+    match s
+        .claim_refresh(id, &from.into(), LONG, always)
+        .await
+        .unwrap()
+    {
         RefreshClaim::Claimed(_) => true,
         RefreshClaim::HeldElsewhere => false,
-        RefreshClaim::Ended => panic!("the session ended"),
+        other => panic!("not a claim outcome: {other:?}"),
     }
 }
 
@@ -442,7 +451,7 @@ async fn test_a_stale_claim_names_the_version_it_refreshes() {
     .unwrap();
 
     match a
-        .claim_refresh(&id, &"refresh-1".into(), LONG)
+        .claim_refresh(&id, &"refresh-1".into(), LONG, always)
         .await
         .unwrap()
     {
@@ -457,6 +466,45 @@ async fn test_a_stale_claim_names_the_version_it_refreshes() {
     );
 }
 
+/// A stale read whose session holds a newer version that needs no refresh
+/// gets that session back and claims nothing for it: the next caller holding
+/// that version wins its refresh at once.
+#[tokio::test]
+async fn test_a_stale_claim_does_not_claim_a_usable_version() {
+    let (a, b) = replica_pair();
+    let (id, _) = a
+        .create_session(
+            "access-1".into(),
+            Some("refresh-1".into()),
+            test_claims(),
+            CONN,
+        )
+        .await
+        .unwrap();
+    a.replace_tokens(
+        &id,
+        &"refresh-1".into(),
+        "access-2".into(),
+        Some("refresh-2".into()),
+        test_claims(),
+    )
+    .await
+    .unwrap();
+
+    match a
+        .claim_refresh(&id, &"refresh-1".into(), LONG, |_| false)
+        .await
+        .unwrap()
+    {
+        RefreshClaim::Current(session) => assert_eq!(session.bearer(), "access-2"),
+        other => panic!("a usable version was claimed: {other:?}"),
+    }
+    assert!(
+        wins(&b, &id, "refresh-2").await,
+        "refresh-2 was left claimed"
+    );
+}
+
 /// A claim for a session that ended reports it, not a refresh to make.
 #[tokio::test]
 async fn test_a_claim_on_an_ended_session_reports_it() {
@@ -467,7 +515,9 @@ async fn test_a_claim_on_an_ended_session_reports_it() {
         .unwrap();
     s.destroy_session(&id).await.unwrap();
     assert!(matches!(
-        s.claim_refresh(&id, &"refresh".into(), LONG).await.unwrap(),
+        s.claim_refresh(&id, &"refresh".into(), LONG, always)
+            .await
+            .unwrap(),
         RefreshClaim::Ended
     ));
 }

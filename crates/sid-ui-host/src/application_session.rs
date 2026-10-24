@@ -213,11 +213,14 @@ impl ApplicationSessions {
         // rotated is never presented.
         let session = match self
             .sessions
-            .claim_refresh(id, &from, REFRESH_HOLD)
+            .claim_refresh(id, &from, REFRESH_HOLD, |current| {
+                current.claims.exp - now <= REFRESH_MARGIN_SECS
+            })
             .await
             .map_err(|e| refuse::dependency_unavailable("session store", e))?
         {
             RefreshClaim::Claimed(current) => *current,
+            RefreshClaim::Current(current) => return Ok(current.access_token),
             RefreshClaim::HeldElsewhere => {
                 return self
                     .refreshed_elsewhere(id, session.access_token.expose_secret())

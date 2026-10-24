@@ -172,10 +172,13 @@ async fn current_token(
     // rotated is never presented.
     let session = match state
         .bff_sessions
-        .claim_refresh(session_id, &from, REFRESH_HOLD)
+        .claim_refresh(session_id, &from, REFRESH_HOLD, |current| {
+            current.claims.exp - now <= REFRESH_MARGIN_SECS
+        })
         .await
     {
         Ok(RefreshClaim::Claimed(current)) => *current,
+        Ok(RefreshClaim::Current(current)) => return Ok(current.access_token),
         Ok(RefreshClaim::HeldElsewhere) => {
             return refreshed_elsewhere(state, session_id, session.access_token.expose_secret())
                 .await;
