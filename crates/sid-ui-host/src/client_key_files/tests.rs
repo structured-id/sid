@@ -67,6 +67,30 @@ fn a_taken_public_path_writes_no_private_key() {
     assert!(!private.exists());
 }
 
+/// A public set that cannot be written takes back the private key this call
+/// wrote, so the same command succeeds once the cause is fixed; a dangling
+/// link at the public path is a taken path too.
+#[test]
+fn an_unwritable_public_set_leaves_no_private_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let private = dir.path().join("key.pem");
+    let missing = dir.path().join("absent").join("jwks.json");
+    assert!(generate(&private, &missing).is_err());
+    assert!(!private.exists(), "the private key was taken back");
+
+    std::fs::create_dir(dir.path().join("absent")).unwrap();
+    generate(&private, &missing).unwrap();
+
+    #[cfg(unix)]
+    {
+        let other = dir.path().join("other.pem");
+        let dangling = dir.path().join("dangling.json");
+        std::os::unix::fs::symlink(dir.path().join("nowhere"), &dangling).unwrap();
+        assert!(generate(&other, &dangling).is_err());
+        assert!(!other.exists());
+    }
+}
+
 /// The command takes exactly the two paths.
 #[test]
 fn keygen_wants_two_paths() {

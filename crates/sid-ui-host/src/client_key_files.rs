@@ -15,10 +15,11 @@ use sid_authn::client_key::ClientKey;
 /// `public`. An existing file is never overwritten: replacing a registered
 /// key would lock the client out. Returns the key's id.
 pub fn generate(private: &Path, public: &Path) -> anyhow::Result<String> {
-    // Checked first so a taken public path leaves no private key without its
-    // set; the creation itself still refuses a file that appeared since.
+    // Checked first so a taken public path (a dangling link included) writes
+    // no private key at all; the creation itself still refuses a file that
+    // appeared since.
     anyhow::ensure!(
-        !public.exists(),
+        std::fs::symlink_metadata(public).is_err(),
         "{public:?} cannot be created (it must not exist yet)"
     );
     let (key, pem) = ClientKey::generate_ed25519()?;
@@ -26,7 +27,16 @@ pub fn generate(private: &Path, public: &Path) -> anyhow::Result<String> {
         .public_jwks()
         .context("a generated key derives its public half")?;
     write_new(private, pem.expose_secret().as_bytes(), 0o600)?;
-    write_new(public, &serde_json::to_vec_pretty(&jwks)?, 0o644)?;
+    if let Err(e) = write_new(public, &serde_json::to_vec_pretty(&jwks)?, 0o644) {
+        // This call created the private key, so taking it back removes
+        // nothing that was there before, and the command can be run again.
+        if let Err(removal) = std::fs::remove_file(private) {
+            return Err(e.context(format!(
+                "and the new private key {private:?} could not be removed: {removal}"
+            )));
+        }
+        return Err(e);
+    }
     Ok(key.kid().unwrap_or_default().to_owned())
 }
 
