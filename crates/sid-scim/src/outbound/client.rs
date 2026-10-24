@@ -78,18 +78,20 @@ pub struct ScimHttpClient {
 }
 
 impl ScimHttpClient {
-    pub fn new(target: &ScimOutboundTarget, hold: Hold) -> Self {
-        let http = sid_plugin::client_builder()
+    pub fn new(
+        target: &ScimOutboundTarget,
+        hold: Hold,
+    ) -> Result<Self, sid_plugin::http::HttpClientError> {
+        let http = sid_plugin::client_builder()?
             .timeout(REQUEST_TIMEOUT)
-            .build()
-            .expect("failed to create HTTP client");
+            .build()?;
 
-        Self {
+        Ok(Self {
             http,
             endpoint_url: target.endpoint_url.trim_end_matches('/').to_string(),
             auth: target.auth.clone(),
             hold,
-        }
+        })
     }
 
     /// POST /Users: the id the downstream app assigned, when it returned one.

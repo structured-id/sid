@@ -18,7 +18,7 @@ path = "src/main.rs"
 [dependencies]
 sid-authn = { workspace = true, features = ["grpc"] }
 # The process's JWT signature provider, installed at startup.
-sid-crypto = { workspace = true, features = ["jwt"] }
+sid-crypto = { workspace = true, features = ["jwt", "tls-aws-lc"] }
 sid-infra = { workspace = true, features = ["redis"] }
 sid-serve = { workspace = true }
 sid-core = { workspace = true, features = ["grpc"] }

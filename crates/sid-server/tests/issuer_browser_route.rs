@@ -271,7 +271,9 @@ async fn grpc_web_through_the_transcoder() {
         .await
         .unwrap()
     });
-    let client = sid_plugin::client_builder().build().unwrap();
+    let client = common::crypto::with_tls(sid_plugin::client_builder)
+        .build()
+        .unwrap();
     // An empty request message, framed.
     let call = |path: String| {
         client

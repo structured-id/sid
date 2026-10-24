@@ -123,7 +123,7 @@ password-operation = [
 soft-authenticator = ["p256/ecdsa"]
 
 [dev-dependencies]
-sid-crypto = { workspace = true, features = ["primitives"] }
+sid-crypto = { workspace = true, features = ["primitives", "tls-aws-lc"] }
 sid-storage = { path = "../sid-storage", features = ["storage-sqlite"] }
 sid-pake-core = { workspace = true }
 sid-opaque-ke = { workspace = true }

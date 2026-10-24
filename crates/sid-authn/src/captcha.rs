@@ -243,14 +243,15 @@ pub struct HcaptchaProvider {
 }
 
 impl HcaptchaProvider {
-    pub fn new(site_key: String, secret_key: String) -> Self {
-        Self {
+    pub fn new(
+        site_key: String,
+        secret_key: String,
+    ) -> Result<Self, sid_plugin::http::HttpClientError> {
+        Ok(Self {
             site_key,
             secret_key,
-            http: sid_plugin::client_builder()
-                .build()
-                .expect("HTTP client build"),
-        }
+            http: sid_plugin::client_builder()?.build()?,
+        })
     }
 }
 
@@ -323,14 +324,15 @@ pub struct TurnstileProvider {
 }
 
 impl TurnstileProvider {
-    pub fn new(site_key: String, secret_key: String) -> Self {
-        Self {
+    pub fn new(
+        site_key: String,
+        secret_key: String,
+    ) -> Result<Self, sid_plugin::http::HttpClientError> {
+        Ok(Self {
             site_key,
             secret_key,
-            http: sid_plugin::client_builder()
-                .build()
-                .expect("HTTP client build"),
-        }
+            http: sid_plugin::client_builder()?.build()?,
+        })
     }
 }
 
@@ -429,6 +431,8 @@ pub async fn load_or_create_pow_key(
 /// asked for and cannot run stops startup instead of being replaced.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CaptchaConfigError {
+    #[error("CAPTCHA HTTP client initialization: {0}")]
+    HttpClient(String),
     #[error("SID_CAPTCHA_PROVIDER {0:?} names no provider (sid_pow, hcaptcha, turnstile)")]
     UnknownProvider(String),
     #[error("{0} needs SID_CAPTCHA_SITE_KEY and SID_CAPTCHA_SECRET_KEY")]
@@ -467,12 +471,16 @@ pub fn captcha_provider_from(
         Some("hcaptcha") => {
             let (site, secret) = keys("hcaptcha")?;
             tracing::info!("CAPTCHA provider: hCaptcha");
-            Ok(Arc::new(HcaptchaProvider::new(site, secret)))
+            Ok(Arc::new(HcaptchaProvider::new(site, secret).map_err(
+                |e| CaptchaConfigError::HttpClient(e.to_string()),
+            )?))
         }
         Some("turnstile") => {
             let (site, secret) = keys("turnstile")?;
             tracing::info!("CAPTCHA provider: Cloudflare Turnstile");
-            Ok(Arc::new(TurnstileProvider::new(site, secret)))
+            Ok(Arc::new(TurnstileProvider::new(site, secret).map_err(
+                |e| CaptchaConfigError::HttpClient(e.to_string()),
+            )?))
         }
         Some(other) => Err(CaptchaConfigError::UnknownProvider(other.to_owned())),
     }

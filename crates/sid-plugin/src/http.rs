@@ -1,20 +1,24 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Outbound HTTP client construction.
 
-/// A `reqwest` builder with this build's TLS provider already in place.
-///
-/// reqwest carries no pure-Rust provider of its own: it reads the process
-/// default and panics when none is set, and its built-in choice is aws-lc-rs,
-/// which a CE build does not link. The provider is therefore installed here,
-/// before any client can exist. The engine is embedded by hosts that never
-/// call our startup code, so a library that dials out installs it itself
-/// rather than trusting a binary to have done it.
-///
-/// Installing twice is not a failure: the first call wins and every caller
-/// here asks for the same provider.
-pub fn client_builder() -> reqwest::ClientBuilder {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    reqwest::Client::builder()
+/// Failure to construct an outbound client using the host's TLS selection.
+#[derive(Debug, thiserror::Error)]
+pub enum HttpClientError {
+    /// The host must select its process provider before constructing clients.
+    #[error("the host has not selected a TLS crypto provider")]
+    ProviderNotSelected,
+    /// Client configuration, trust roots or resolver initialization failed.
+    #[error("HTTP client configuration: {0}")]
+    Configuration(#[from] reqwest::Error),
+}
+
+/// Construct a builder using the provider explicitly installed by the host.
+/// Refuse an absent selection before reqwest can choose its own backend.
+pub fn client_builder() -> Result<reqwest::ClientBuilder, HttpClientError> {
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        return Err(HttpClientError::ProviderNotSelected);
+    }
+    Ok(reqwest::Client::builder())
 }
 
 #[cfg(test)]

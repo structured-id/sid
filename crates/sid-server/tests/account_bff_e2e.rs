@@ -127,7 +127,7 @@ fn replica(deployment: &Deployment) -> axum::Router {
         bff_enabled: true,
         account: Some(Arc::new(RpClient::new(key, installation, channel).unwrap())),
         api_upstream: Some(url::Url::parse(&format!("http://{}", deployment.addr)).unwrap()),
-        http: sid_auth_proxy::api_client(),
+        http: common::crypto::with_tls(sid_auth_proxy::api_client),
         bff_sessions: Arc::new(sessions(deployment)),
         bff_cookie_name: COOKIE.into(),
         bff_dev_mode: false,

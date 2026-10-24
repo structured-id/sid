@@ -150,7 +150,9 @@ async fn only_the_session_token_is_admitted_over_http() {
         .await
         .unwrap()
     });
-    let http = sid_plugin::client_builder().build().unwrap();
+    let http = common::crypto::with_tls(sid_plugin::client_builder)
+        .build()
+        .unwrap();
     let get = |token: String| {
         http.get(format!("http://{addr}/v1/admin/security/ip-allowlist"))
             .bearer_auth(token)

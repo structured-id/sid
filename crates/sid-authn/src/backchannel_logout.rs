@@ -40,17 +40,19 @@ pub struct BackChannelLogoutHandler {
 impl BackChannelLogoutHandler {
     /// A handler issuing each logout token as the client's issuer, naming the
     /// subject as the client's ID tokens did.
-    pub fn new(issuers: Arc<IssuerRegistry>, storage: Arc<dyn StorageBackend>) -> Self {
-        let http = sid_plugin::client_builder()
+    pub fn new(
+        issuers: Arc<IssuerRegistry>,
+        storage: Arc<dyn StorageBackend>,
+    ) -> Result<Self, sid_plugin::http::HttpClientError> {
+        let http = sid_plugin::client_builder()?
             .timeout(DELIVERY_TIMEOUT)
-            .build()
-            .expect("HTTP client creation should not fail");
-        Self {
+            .build()?;
+        Ok(Self {
             kind: WorkKind::new(LOGOUT_DELIVERY_KIND).expect("the logout kind is valid"),
             issuers,
             storage,
             http,
-        }
+        })
     }
 }
 

@@ -20,6 +20,10 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::time::Duration;
 
+#[path = "../../../tests/support/crypto.rs"]
+mod test_crypto;
+use test_crypto::with_tls;
+
 fn no_cache() -> Arc<dyn sid_plugin::cache::CacheBackend> {
     Arc::new(NoCacheBackend)
 }
@@ -31,7 +35,7 @@ fn no_cache() -> Arc<dyn sid_plugin::cache::CacheBackend> {
 #[tokio::test]
 async fn test_e2e_tor_exit_ip_triggers_block() {
     // Setup: TorExitProvider with known exit nodes.
-    let tor = Arc::new(TorExitProvider::new(no_cache()));
+    let tor = Arc::new(with_tls(|| TorExitProvider::new(no_cache())));
     tor.load_from_text("198.51.100.1\n198.51.100.2\n203.0.113.5\n");
 
     let aggregator = Arc::new(IpIntelligenceAggregator::new(
@@ -90,7 +94,7 @@ async fn test_e2e_tor_exit_ip_triggers_block() {
 
 #[tokio::test]
 async fn test_e2e_normal_ip_allows() {
-    let tor = Arc::new(TorExitProvider::new(no_cache()));
+    let tor = Arc::new(with_tls(|| TorExitProvider::new(no_cache())));
     tor.load_from_text("198.51.100.1\n");
 
     let aggregator = Arc::new(IpIntelligenceAggregator::new(
@@ -137,7 +141,7 @@ async fn test_e2e_normal_ip_allows() {
 
 #[tokio::test]
 async fn test_e2e_tor_exit_allows_when_policy_disabled() {
-    let tor = Arc::new(TorExitProvider::new(no_cache()));
+    let tor = Arc::new(with_tls(|| TorExitProvider::new(no_cache())));
     tor.load_from_text("198.51.100.1\n");
 
     let aggregator = Arc::new(IpIntelligenceAggregator::new(
@@ -208,7 +212,7 @@ impl IpIntelligenceProvider for BlocklistStubProvider {
 #[tokio::test]
 async fn test_e2e_blocklisted_ip_hard_no_overrides_all() {
     // Blocklisted IP should get HardNo even with brute force lockout active.
-    let tor = Arc::new(TorExitProvider::new(no_cache()));
+    let tor = Arc::new(with_tls(|| TorExitProvider::new(no_cache())));
     tor.load_from_text("198.51.100.1\n");
 
     let aggregator = Arc::new(IpIntelligenceAggregator::new(
@@ -312,7 +316,7 @@ impl IpIntelligenceProvider for DatacenterStubProvider {
 #[tokio::test]
 async fn test_e2e_multi_provider_label_merge() {
     // IP is classified as Tor by one provider and Datacenter by another.
-    let tor = Arc::new(TorExitProvider::new(no_cache()));
+    let tor = Arc::new(with_tls(|| TorExitProvider::new(no_cache())));
     tor.load_from_text("198.51.100.1\n");
 
     let aggregator = Arc::new(IpIntelligenceAggregator::new(
@@ -339,7 +343,7 @@ async fn test_e2e_multi_provider_label_merge() {
 #[tokio::test]
 async fn test_e2e_tor_higher_priority_than_datacenter_in_anomaly() {
     // When IP is both Tor and Datacenter, Tor rule fires first (higher priority).
-    let tor = Arc::new(TorExitProvider::new(no_cache()));
+    let tor = Arc::new(with_tls(|| TorExitProvider::new(no_cache())));
     tor.load_from_text("198.51.100.1\n");
 
     let aggregator = Arc::new(IpIntelligenceAggregator::new(
@@ -392,7 +396,7 @@ async fn test_e2e_tor_higher_priority_than_datacenter_in_anomaly() {
 
 #[tokio::test]
 async fn test_tor_provider_load_from_text_updates_classify() {
-    let provider = TorExitProvider::new(no_cache());
+    let provider = with_tls(|| TorExitProvider::new(no_cache()));
 
     // Initially empty.
     let ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1));
@@ -423,10 +427,12 @@ async fn test_tor_provider_load_from_text_updates_classify() {
 #[tokio::test]
 async fn test_aggregator_refresh_all_reports_results() {
     // Use an unreachable URL to ensure refresh fails predictably.
-    let tor = Arc::new(TorExitProvider::with_url(
-        no_cache(),
-        "http://192.0.2.1:1/nonexistent".to_string(), // TEST-NET, unreachable
-    ));
+    let tor = Arc::new(with_tls(|| {
+        TorExitProvider::with_url(
+            no_cache(),
+            "http://192.0.2.1:1/nonexistent".to_string(), // TEST-NET, unreachable
+        )
+    }));
 
     let aggregator = IpIntelligenceAggregator::new(
         vec![tor as Arc<dyn IpIntelligenceProvider>],
@@ -447,7 +453,7 @@ async fn test_aggregator_refresh_all_reports_results() {
 
 #[tokio::test]
 async fn test_e2e_ipv6_tor_exit() {
-    let tor = Arc::new(TorExitProvider::new(no_cache()));
+    let tor = Arc::new(with_tls(|| TorExitProvider::new(no_cache())));
     tor.load_from_text("2001:db8::dead:beef\n198.51.100.1\n");
 
     let aggregator = Arc::new(IpIntelligenceAggregator::new(
@@ -494,7 +500,7 @@ impl IpIntelligenceProvider for AllowlistStubProvider {
 async fn test_e2e_allowlist_overrides_tor_and_blocklist() {
     // IP is Tor exit + Blocklisted + Allowlisted.
     // Allowlist must win → all negative labels cleared → anomaly allows.
-    let tor = Arc::new(TorExitProvider::new(no_cache()));
+    let tor = Arc::new(with_tls(|| TorExitProvider::new(no_cache())));
     tor.load_from_text("198.51.100.1\n");
 
     let aggregator = Arc::new(IpIntelligenceAggregator::new(
@@ -560,7 +566,7 @@ async fn test_e2e_allowlist_overrides_tor_and_blocklist() {
 #[tokio::test]
 async fn test_e2e_cloud_range_ip_triggers_step_up() {
     // AWS IP range.
-    let cloud = Arc::new(CloudRangeProvider::new(no_cache()));
+    let cloud = Arc::new(with_tls(|| CloudRangeProvider::new(no_cache())));
     cloud.load_from_text("3.5.0.0/15\n52.0.0.0/11\n");
 
     let aggregator = Arc::new(IpIntelligenceAggregator::new(
@@ -615,7 +621,7 @@ async fn test_e2e_cloud_range_ip_triggers_step_up() {
 
 #[tokio::test]
 async fn test_e2e_cloud_range_allows_when_policy_disabled() {
-    let cloud = Arc::new(CloudRangeProvider::new(no_cache()));
+    let cloud = Arc::new(with_tls(|| CloudRangeProvider::new(no_cache())));
     cloud.load_from_text("3.5.0.0/15\n");
 
     let aggregator = Arc::new(IpIntelligenceAggregator::new(
@@ -661,7 +667,7 @@ async fn test_e2e_cloud_range_allows_when_policy_disabled() {
 
 #[tokio::test]
 async fn test_e2e_firehol_blocklisted_ip_hard_no() {
-    let firehol = Arc::new(FireholProvider::new(no_cache()));
+    let firehol = Arc::new(with_tls(|| FireholProvider::new(no_cache())));
     firehol.load_from_text("# FireHOL Level 1\n45.95.147.0/24\n185.220.100.0/24\n");
 
     let aggregator = Arc::new(IpIntelligenceAggregator::new(
@@ -710,13 +716,13 @@ async fn test_e2e_firehol_blocklisted_ip_hard_no() {
 
 #[tokio::test]
 async fn test_e2e_full_pipeline_all_three_providers() {
-    let tor = Arc::new(TorExitProvider::new(no_cache()));
+    let tor = Arc::new(with_tls(|| TorExitProvider::new(no_cache())));
     tor.load_from_text("198.51.100.1\n");
 
-    let cloud = Arc::new(CloudRangeProvider::new(no_cache()));
+    let cloud = Arc::new(with_tls(|| CloudRangeProvider::new(no_cache())));
     cloud.load_from_text("3.5.0.0/15\n");
 
-    let firehol = Arc::new(FireholProvider::new(no_cache()));
+    let firehol = Arc::new(with_tls(|| FireholProvider::new(no_cache())));
     firehol.load_from_text("45.95.147.0/24\n");
 
     let aggregator = Arc::new(IpIntelligenceAggregator::new(
@@ -844,7 +850,7 @@ async fn test_e2e_full_pipeline_all_three_providers() {
 
 #[tokio::test]
 async fn test_e2e_cloud_range_ipv6_triggers_step_up() {
-    let cloud = Arc::new(CloudRangeProvider::new(no_cache()));
+    let cloud = Arc::new(with_tls(|| CloudRangeProvider::new(no_cache())));
     // GCP IPv6 range.
     cloud.load_from_text("2600:1900::/32\n");
 
@@ -905,10 +911,10 @@ async fn test_e2e_cloud_range_ipv6_triggers_step_up() {
 #[tokio::test]
 async fn test_e2e_blocklist_beats_datacenter_priority() {
     // Same CIDR in both cloud and firehol → IP is both Datacenter AND Blocklisted.
-    let cloud = Arc::new(CloudRangeProvider::new(no_cache()));
+    let cloud = Arc::new(with_tls(|| CloudRangeProvider::new(no_cache())));
     cloud.load_from_text("45.95.147.0/24\n");
 
-    let firehol = Arc::new(FireholProvider::new(no_cache()));
+    let firehol = Arc::new(with_tls(|| FireholProvider::new(no_cache())));
     firehol.load_from_text("45.95.147.0/24\n");
 
     let aggregator = Arc::new(IpIntelligenceAggregator::new(
@@ -966,9 +972,9 @@ async fn test_e2e_blocklist_beats_datacenter_priority() {
 #[tokio::test]
 async fn test_e2e_empty_providers_allow_all() {
     // Providers registered but no data loaded (first start, no cache, no internet).
-    let cloud = Arc::new(CloudRangeProvider::new(no_cache()));
-    let firehol = Arc::new(FireholProvider::new(no_cache()));
-    let tor = Arc::new(TorExitProvider::new(no_cache()));
+    let cloud = Arc::new(with_tls(|| CloudRangeProvider::new(no_cache())));
+    let firehol = Arc::new(with_tls(|| FireholProvider::new(no_cache())));
+    let tor = Arc::new(with_tls(|| TorExitProvider::new(no_cache())));
 
     assert_eq!(cloud.range_count(), 0);
     assert_eq!(firehol.range_count(), 0);
@@ -1041,10 +1047,12 @@ async fn test_e2e_empty_providers_allow_all() {
 
 #[tokio::test]
 async fn test_firehol_refresh_failure_reports_error() {
-    let firehol = Arc::new(FireholProvider::with_url(
-        no_cache(),
-        "http://192.0.2.1:1/nonexistent".to_string(), // TEST-NET, unreachable
-    ));
+    let firehol = Arc::new(with_tls(|| {
+        FireholProvider::with_url(
+            no_cache(),
+            "http://192.0.2.1:1/nonexistent".to_string(), // TEST-NET, unreachable
+        )
+    }));
 
     let aggregator = IpIntelligenceAggregator::new(
         vec![firehol as Arc<dyn IpIntelligenceProvider>],

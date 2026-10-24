@@ -63,7 +63,7 @@ reqwest = { workspace = true }
 # JWT (Google service account JWT-bearer token exchange)
 jsonwebtoken = { workspace = true }
 # The process's JWT signature provider, installed at startup.
-sid-crypto = { workspace = true, features = ["jwt"] }
+sid-crypto = { workspace = true, features = ["jwt", "tls-aws-lc"] }
 
 # Secrets
 secrecy = { workspace = true }

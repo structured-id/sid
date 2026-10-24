@@ -11,3 +11,7 @@ pub mod outbound;
 pub mod patch;
 pub mod protocol;
 mod refusal;
+
+#[cfg(test)]
+#[path = "../../../tests/support/crypto.rs"]
+mod test_crypto;

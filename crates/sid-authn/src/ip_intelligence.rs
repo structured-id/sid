@@ -292,25 +292,27 @@ pub struct TorExitProvider {
 
 impl TorExitProvider {
     /// Create a new Tor exit provider.
-    pub fn new(cache: Arc<dyn CacheBackend>) -> Self {
-        Self {
+    pub fn new(cache: Arc<dyn CacheBackend>) -> Result<Self, sid_plugin::http::HttpClientError> {
+        Ok(Self {
             nodes: ArcSwap::new(Arc::new(HashSet::new())),
-            http: sid_plugin::client_builder()
+            http: sid_plugin::client_builder()?
                 .timeout(Duration::from_secs(30))
-                .build()
-                .expect("HTTP client build"),
+                .build()?,
             cache,
             url: TOR_EXIT_LIST_URL.to_string(),
             refresh_lock: Mutex::new(()),
-        }
+        })
     }
 
     /// Create with custom URL (for testing).
-    pub fn with_url(cache: Arc<dyn CacheBackend>, url: String) -> Self {
-        Self {
+    pub fn with_url(
+        cache: Arc<dyn CacheBackend>,
+        url: String,
+    ) -> Result<Self, sid_plugin::http::HttpClientError> {
+        Ok(Self {
             url,
-            ..Self::new(cache)
-        }
+            ..Self::new(cache)?
+        })
     }
 
     /// Load the list the refreshing replica stored in the shared cache. None
@@ -570,28 +572,30 @@ pub struct CloudRangeProvider {
 
 impl CloudRangeProvider {
     /// Create a new cloud range provider.
-    pub fn new(cache: Arc<dyn CacheBackend>) -> Self {
-        Self {
+    pub fn new(cache: Arc<dyn CacheBackend>) -> Result<Self, sid_plugin::http::HttpClientError> {
+        Ok(Self {
             cidrs: ArcSwap::new(Arc::new(CidrSet::default())),
-            http: sid_plugin::client_builder()
+            http: sid_plugin::client_builder()?
                 .timeout(Duration::from_secs(30))
-                .build()
-                .expect("HTTP client build"),
+                .build()?,
             cache,
             azure_url: None,
             refresh_lock: Mutex::new(()),
-        }
+        })
     }
 
     /// Create with Azure ServiceTags URL.
     ///
     /// Azure IP range download URLs change weekly. Set via `SID_IPINTEL_AZURE_URL` env var.
     /// Get the current URL from: https://www.microsoft.com/en-us/download/details.aspx?id=56519
-    pub fn with_azure(cache: Arc<dyn CacheBackend>, azure_url: String) -> Self {
-        Self {
+    pub fn with_azure(
+        cache: Arc<dyn CacheBackend>,
+        azure_url: String,
+    ) -> Result<Self, sid_plugin::http::HttpClientError> {
+        Ok(Self {
             azure_url: Some(azure_url),
-            ..Self::new(cache)
-        }
+            ..Self::new(cache)?
+        })
     }
 
     /// Load the ranges the refreshing replica stored in the shared cache.
@@ -845,25 +849,27 @@ pub struct FireholProvider {
 
 impl FireholProvider {
     /// Create a new FireHOL Level 1 provider.
-    pub fn new(cache: Arc<dyn CacheBackend>) -> Self {
-        Self {
+    pub fn new(cache: Arc<dyn CacheBackend>) -> Result<Self, sid_plugin::http::HttpClientError> {
+        Ok(Self {
             cidrs: ArcSwap::new(Arc::new(CidrSet::default())),
-            http: sid_plugin::client_builder()
+            http: sid_plugin::client_builder()?
                 .timeout(Duration::from_secs(30))
-                .build()
-                .expect("HTTP client build"),
+                .build()?,
             cache,
             url: FIREHOL_LEVEL1_URL.to_string(),
             refresh_lock: Mutex::new(()),
-        }
+        })
     }
 
     /// Create with custom URL (for testing).
-    pub fn with_url(cache: Arc<dyn CacheBackend>, url: String) -> Self {
-        Self {
+    pub fn with_url(
+        cache: Arc<dyn CacheBackend>,
+        url: String,
+    ) -> Result<Self, sid_plugin::http::HttpClientError> {
+        Ok(Self {
             url,
-            ..Self::new(cache)
-        }
+            ..Self::new(cache)?
+        })
     }
 
     /// Load the blocklist the refreshing replica stored in the shared cache.

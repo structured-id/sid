@@ -24,7 +24,7 @@ sid-authn = { workspace = true }
 # The issuer registry and the BFF's client at its issuer, over gRPC.
 sid-infra = { workspace = true, features = ["issuer-client"] }
 # The process's JWT signature provider, installed at startup.
-sid-crypto = { workspace = true, features = ["jwt"] }
+sid-crypto = { workspace = true, features = ["jwt", "tls-aws-lc"] }
 sid-core = { workspace = true }
 sid-plugin = { workspace = true }
 sid-proto = { workspace = true }

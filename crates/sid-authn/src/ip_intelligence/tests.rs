@@ -1,11 +1,30 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::*;
+use crate::test_crypto::with_tls;
 use sid_plugin::cache::NoCacheBackend;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 fn no_cache() -> Arc<dyn CacheBackend> {
     Arc::new(NoCacheBackend)
+}
+
+/// Every HTTP-backed constructor refuses missing host selection without panic.
+#[test]
+fn http_providers_require_host_selection() {
+    for result in [
+        TorExitProvider::new(no_cache()).map(|_| ()),
+        CloudRangeProvider::new(no_cache()).map(|_| ()),
+        FireholProvider::new(no_cache()).map(|_| ()),
+        TorExitProvider::with_url(no_cache(), "http://127.0.0.1:1".into()).map(|_| ()),
+        CloudRangeProvider::with_azure(no_cache(), "http://127.0.0.1:1".into()).map(|_| ()),
+        FireholProvider::with_url(no_cache(), "http://127.0.0.1:1".into()).map(|_| ()),
+    ] {
+        assert!(matches!(
+            result,
+            Err(sid_plugin::http::HttpClientError::ProviderNotSelected)
+        ));
+    }
 }
 
 // ── IpLabel ──
@@ -101,14 +120,14 @@ fn test_parse_tor_exit_list_dedup() {
 
 #[tokio::test]
 async fn test_tor_provider_classify_empty() {
-    let provider = TorExitProvider::new(no_cache());
+    let provider = with_tls(|| TorExitProvider::new(no_cache()));
     let ip = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
     assert!(provider.classify(ip).await.unwrap().is_none());
 }
 
 #[tokio::test]
 async fn test_tor_provider_classify_after_load() {
-    let provider = TorExitProvider::new(no_cache());
+    let provider = with_tls(|| TorExitProvider::new(no_cache()));
     provider.load_from_text("1.2.3.4\n5.6.7.8\n");
 
     let tor_ip = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
@@ -123,7 +142,7 @@ async fn test_tor_provider_classify_after_load() {
 
 #[tokio::test]
 async fn test_tor_provider_node_count() {
-    let provider = TorExitProvider::new(no_cache());
+    let provider = with_tls(|| TorExitProvider::new(no_cache()));
     assert_eq!(provider.node_count(), 0);
 
     provider.load_from_text("1.2.3.4\n5.6.7.8\n9.10.11.12\n");
@@ -132,7 +151,7 @@ async fn test_tor_provider_node_count() {
 
 #[test]
 fn test_tor_provider_source_name() {
-    let provider = TorExitProvider::new(no_cache());
+    let provider = with_tls(|| TorExitProvider::new(no_cache()));
     assert_eq!(provider.source_name(), "tor_exit");
 }
 
@@ -151,7 +170,7 @@ async fn test_aggregator_no_providers() {
 
 #[tokio::test]
 async fn test_aggregator_single_provider() {
-    let tor = Arc::new(TorExitProvider::new(no_cache()));
+    let tor = Arc::new(with_tls(|| TorExitProvider::new(no_cache())));
     tor.load_from_text("1.2.3.4\n");
 
     let agg = IpIntelligenceAggregator::new(
@@ -181,7 +200,7 @@ async fn test_aggregator_single_provider() {
 #[tokio::test]
 async fn test_aggregator_merges_labels() {
     // Two providers both classify the same IP differently.
-    let tor = Arc::new(TorExitProvider::new(no_cache()));
+    let tor = Arc::new(with_tls(|| TorExitProvider::new(no_cache())));
     tor.load_from_text("1.2.3.4\n");
 
     // Stub provider that marks everything as blocklisted.
@@ -283,7 +302,7 @@ async fn test_aggregator_provider_error_fails_classification() {
         }
     }
 
-    let tor = Arc::new(TorExitProvider::new(no_cache()));
+    let tor = Arc::new(with_tls(|| TorExitProvider::new(no_cache())));
     tor.load_from_text("1.2.3.4\n");
     let agg = IpIntelligenceAggregator::new(
         vec![tor as Arc<dyn IpIntelligenceProvider>, Arc::new(Down)],
@@ -317,7 +336,7 @@ async fn follower_replica_loads_the_leaders_feed() {
         .await
         .unwrap();
 
-    let tor = Arc::new(TorExitProvider::new(cache.clone()));
+    let tor = Arc::new(with_tls(|| TorExitProvider::new(cache.clone())));
     let follower = IpIntelligenceAggregator::new(
         vec![tor as Arc<dyn IpIntelligenceProvider>],
         no_cache(),
@@ -389,7 +408,7 @@ impl CacheBackend for ReadOnlyCache {
 #[tokio::test]
 async fn unpublished_refresh_is_an_error() {
     let url = serve_once("203.0.113.9\n").await;
-    let provider = TorExitProvider::with_url(Arc::new(ReadOnlyCache), url);
+    let provider = with_tls(|| TorExitProvider::with_url(Arc::new(ReadOnlyCache), url));
     assert!(matches!(
         provider.refresh().await,
         Err(IpIntelError::Cache(_))
@@ -407,7 +426,8 @@ async fn unpublished_refresh_is_an_error() {
 #[test]
 fn test_aggregator_provider_count() {
     let agg = IpIntelligenceAggregator::new(
-        vec![Arc::new(TorExitProvider::new(no_cache())) as Arc<dyn IpIntelligenceProvider>],
+        vec![Arc::new(with_tls(|| TorExitProvider::new(no_cache())))
+            as Arc<dyn IpIntelligenceProvider>],
         no_cache(),
         Duration::from_secs(60),
     );
@@ -452,7 +472,7 @@ fn test_deserialization_invalid_data() {
 #[tokio::test]
 async fn test_aggregator_allowlist_clears_negative_labels() {
     // Tor provider marks IP as tor_exit.
-    let tor = Arc::new(TorExitProvider::new(no_cache()));
+    let tor = Arc::new(with_tls(|| TorExitProvider::new(no_cache())));
     tor.load_from_text("1.2.3.4\n");
 
     // Allowlist provider marks ALL IPs as allowed.
@@ -495,7 +515,7 @@ async fn test_aggregator_allowlist_clears_negative_labels() {
 
 #[tokio::test]
 async fn test_aggregator_no_allowlist_keeps_labels() {
-    let tor = Arc::new(TorExitProvider::new(no_cache()));
+    let tor = Arc::new(with_tls(|| TorExitProvider::new(no_cache())));
     tor.load_from_text("1.2.3.4\n");
 
     let agg = IpIntelligenceAggregator::new(
@@ -758,14 +778,14 @@ fn test_parse_azure_ranges_invalid_json() {
 
 #[tokio::test]
 async fn test_cloud_provider_classify_empty() {
-    let provider = CloudRangeProvider::new(no_cache());
+    let provider = with_tls(|| CloudRangeProvider::new(no_cache()));
     let ip = IpAddr::V4(Ipv4Addr::new(3, 5, 1, 1));
     assert!(provider.classify(ip).await.unwrap().is_none());
 }
 
 #[tokio::test]
 async fn test_cloud_provider_classify_after_load() {
-    let provider = CloudRangeProvider::new(no_cache());
+    let provider = with_tls(|| CloudRangeProvider::new(no_cache()));
     provider.load_from_text("3.5.0.0/15\n35.190.0.0/17\n");
 
     // AWS range.
@@ -786,13 +806,13 @@ async fn test_cloud_provider_classify_after_load() {
 
 #[test]
 fn test_cloud_provider_source_name() {
-    let provider = CloudRangeProvider::new(no_cache());
+    let provider = with_tls(|| CloudRangeProvider::new(no_cache()));
     assert_eq!(provider.source_name(), "cloud_ranges");
 }
 
 #[tokio::test]
 async fn test_cloud_provider_range_count() {
-    let provider = CloudRangeProvider::new(no_cache());
+    let provider = with_tls(|| CloudRangeProvider::new(no_cache()));
     assert_eq!(provider.range_count(), 0);
 
     provider.load_from_text("10.0.0.0/8\n172.16.0.0/12\n");
@@ -803,14 +823,14 @@ async fn test_cloud_provider_range_count() {
 
 #[tokio::test]
 async fn test_firehol_provider_classify_empty() {
-    let provider = FireholProvider::new(no_cache());
+    let provider = with_tls(|| FireholProvider::new(no_cache()));
     let ip = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
     assert!(provider.classify(ip).await.unwrap().is_none());
 }
 
 #[tokio::test]
 async fn test_firehol_provider_classify_after_load() {
-    let provider = FireholProvider::new(no_cache());
+    let provider = with_tls(|| FireholProvider::new(no_cache()));
     provider.load_from_text("# FireHOL Level 1\n\n45.95.147.0/24\n185.220.100.0/24\n");
 
     // Blocklisted IP.
@@ -831,7 +851,7 @@ async fn test_firehol_provider_classify_after_load() {
 // denied for them; a public entry still counts.
 #[tokio::test]
 async fn test_firehol_provider_ignores_bogon_hits() {
-    let provider = FireholProvider::new(no_cache());
+    let provider = with_tls(|| FireholProvider::new(no_cache()));
     provider.load_from_text(
         "0.0.0.0/8\n10.0.0.0/8\n100.64.0.0/10\n127.0.0.0/8\n169.254.0.0/16\n\
          172.16.0.0/12\n192.168.0.0/16\n::1/128\nfc00::/7\nfe80::/10\n\
@@ -861,13 +881,13 @@ async fn test_firehol_provider_ignores_bogon_hits() {
 
 #[test]
 fn test_firehol_provider_source_name() {
-    let provider = FireholProvider::new(no_cache());
+    let provider = with_tls(|| FireholProvider::new(no_cache()));
     assert_eq!(provider.source_name(), "firehol_level1");
 }
 
 #[tokio::test]
 async fn test_firehol_provider_range_count() {
-    let provider = FireholProvider::new(no_cache());
+    let provider = with_tls(|| FireholProvider::new(no_cache()));
     assert_eq!(provider.range_count(), 0);
 
     provider.load_from_text("45.95.147.0/24\n185.220.100.0/24\n");
@@ -878,10 +898,10 @@ async fn test_firehol_provider_range_count() {
 
 #[tokio::test]
 async fn test_aggregator_cloud_and_firehol_together() {
-    let cloud = Arc::new(CloudRangeProvider::new(no_cache()));
+    let cloud = Arc::new(with_tls(|| CloudRangeProvider::new(no_cache())));
     cloud.load_from_text("3.5.0.0/15\n");
 
-    let firehol = Arc::new(FireholProvider::new(no_cache()));
+    let firehol = Arc::new(with_tls(|| FireholProvider::new(no_cache())));
     firehol.load_from_text("45.95.147.0/24\n");
 
     let agg = IpIntelligenceAggregator::new(
@@ -921,10 +941,10 @@ async fn test_aggregator_cloud_and_firehol_together() {
 #[tokio::test]
 async fn test_aggregator_ip_in_both_cloud_and_firehol() {
     // IP is in a cloud range AND a firehol blocklist → both labels.
-    let cloud = Arc::new(CloudRangeProvider::new(no_cache()));
+    let cloud = Arc::new(with_tls(|| CloudRangeProvider::new(no_cache())));
     cloud.load_from_text("45.95.147.0/24\n"); // Same range as firehol
 
-    let firehol = Arc::new(FireholProvider::new(no_cache()));
+    let firehol = Arc::new(with_tls(|| FireholProvider::new(no_cache())));
     firehol.load_from_text("45.95.147.0/24\n");
 
     let agg = IpIntelligenceAggregator::new(
@@ -1073,7 +1093,7 @@ async fn test_self_learned_in_aggregator() {
 #[tokio::test]
 async fn test_self_learned_combined_with_other_providers() {
     // Self-learned + Tor: IP flagged by self-learned but also Tor exit.
-    let tor = Arc::new(TorExitProvider::new(no_cache()));
+    let tor = Arc::new(with_tls(|| TorExitProvider::new(no_cache())));
     tor.load_from_text("45.95.147.10\n");
 
     let mut map = std::collections::HashMap::new();
@@ -1169,7 +1189,7 @@ async fn test_allowlist_classify_matching_cidr() {
 
 #[tokio::test]
 async fn test_allowlist_overrides_blocklist_in_aggregator() {
-    let tor = Arc::new(TorExitProvider::new(no_cache()));
+    let tor = Arc::new(with_tls(|| TorExitProvider::new(no_cache())));
     tor.load_from_text("10.0.0.1\n");
 
     let stub = Arc::new(AllowlistStub {

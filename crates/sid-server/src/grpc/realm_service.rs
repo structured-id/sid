@@ -446,6 +446,7 @@ impl RealmService for RealmServiceImpl {
         // The XOAUTH2 channel when configured, plain SMTP otherwise.
         let health = if cfg.auth_type == SmtpAuthMethod::XOAuth2 {
             channel_from_email_config(&cfg)
+                .map_err(|e| internal("initialize XOAUTH2 HTTP client", e))?
                 .ok_or_else(|| unusable_provider("the XOAUTH2 configuration is incomplete"))?
                 .health()
                 .await

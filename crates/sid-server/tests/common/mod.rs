@@ -11,6 +11,9 @@ pub mod oauth_client;
 pub mod opaque_client;
 pub mod zkpp_client;
 
+#[path = "../../../../tests/support/crypto.rs"]
+pub mod crypto;
+
 use sid_authn::account_closure::AccountClosureService;
 use sid_authn::data_export::DataExportService;
 use sid_authn::jwt::JwtService;

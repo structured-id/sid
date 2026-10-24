@@ -11,6 +11,9 @@ use sid_server::init::{init_ce, spawn_ce_background_tasks};
 use sid_server::serve::{CeServices, serve};
 
 fn main() -> anyhow::Result<()> {
+    sid_crypto::tls::aws_lc::provider()
+        .install_default()
+        .map_err(|_| anyhow::anyhow!("another TLS crypto provider is already installed"))?;
     sid_crypto::jwt::install_jwt_provider()?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

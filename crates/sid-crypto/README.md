@@ -37,6 +37,14 @@ installing it. Pass the selected provider to rustls configuration builders.
 The host selects trust anchors, peer identities, protocol versions and any
 process-global installation.
 
+Consumers that use rustls' process default require explicit host initialization
+before their clients are constructed. Treat an already selected provider as a
+startup conflict, rather than ignoring the error or trying another backend.
+The TLS module's executable example demonstrates this initialization with the
+existing rustls API. A library constructor or HTTP builder does not install a
+provider on behalf of its embedding host. TLS and JWT initialization are
+independent; selecting either one does not initialize the other.
+
 The RustCrypto adapter supports X25519, P-256 and P-384 key exchange, AES-GCM
 and ChaCha20-Poly1305 suites, and P-256/P-384 ECDSA or Ed25519 local identities.
 RSA public verification remains available; RSA private operations are refused.

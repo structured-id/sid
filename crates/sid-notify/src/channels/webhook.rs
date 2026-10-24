@@ -80,6 +80,7 @@ impl WebhookChannel {
     /// Redirects are not followed: an endpoint answers for itself.
     pub fn new(endpoints: Vec<WebhookEndpoint>) -> Result<Self, DeliveryError> {
         let http = sid_plugin::http::client_builder()
+            .map_err(|e| DeliveryError::Internal(format!("webhook HTTP client: {e}")))?
             .timeout(DELIVERY_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
             .build()

@@ -30,6 +30,9 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
+    sid_crypto::tls::aws_lc::provider()
+        .install_default()
+        .map_err(|_| anyhow::anyhow!("another TLS crypto provider is already installed"))?;
     sid_crypto::jwt::install_jwt_provider()?;
 
     let args: Vec<String> = std::env::args().collect();
@@ -123,7 +126,7 @@ async fn main() -> anyhow::Result<()> {
         bff_enabled: config.bff_enabled(),
         account,
         api_upstream,
-        http: api_client(),
+        http: api_client()?,
         bff_sessions: Arc::new(BffSessionStore::new(
             cache.clone(),
             std::time::Duration::from_secs(config.bff_max_age()),

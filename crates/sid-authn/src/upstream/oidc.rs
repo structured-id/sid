@@ -82,6 +82,7 @@ impl OidcProviderClient {
         decrypted_secret: String,
     ) -> SidResult<Self> {
         let http = sid_plugin::client_builder()
+            .map_err(|e| SidError::Internal(format!("HTTP client error: {e}")))?
             .timeout(std::time::Duration::from_secs(10))
             .build()
             .map_err(|e| SidError::Internal(format!("HTTP client error: {e}")))?;
