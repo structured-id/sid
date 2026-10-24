@@ -34,6 +34,8 @@ tonic = { workspace = true }
 # the issuer directory, the shared session store and revocations.
 sid-authn = { workspace = true }
 sid-infra = { workspace = true, features = ["issuer-client", "redis", "http"] }
+# The process's JWT signature provider, installed at startup.
+sid-crypto = { workspace = true, features = ["jwt"] }
 chrono = { workspace = true }
 # The listener: the adapter's annotated RPCs, gRPC and gRPC-Web to the hosted
 # API and the bundle's routes, through the embedded transcoder.
