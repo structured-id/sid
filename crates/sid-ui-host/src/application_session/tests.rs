@@ -679,6 +679,54 @@ async fn a_stale_snapshot_is_not_refreshed_after_the_claim() {
     assert_eq!(token.expose_secret(), "access-1");
 }
 
+/// A refresh that completed with a token still inside the refresh margin (its
+/// lifetime capped by an approaching step-up or issuer-session expiry) does
+/// not hold the next request: that request refreshes the new version at once
+/// instead of waiting for a change no replica is making. The issuer is
+/// unreachable here, so the refresh attempt answers as the issuer, not as a
+/// wait for another replica.
+#[tokio::test(start_paused = true)]
+async fn a_completed_refresh_inside_the_margin_does_not_stall_the_next_call() {
+    let f = fixture(memory(), true);
+    let mut near_end = claims();
+    near_end.exp = chrono::Utc::now().timestamp() + 10;
+    let (id, _) = f
+        .sessions
+        .create_session(
+            "access-1".into(),
+            Some("refresh-1".into()),
+            near_end.clone(),
+            &connection().binding(),
+        )
+        .await
+        .unwrap();
+    // The earlier refresh: claimed, completed, its new token near its end too.
+    assert!(
+        f.sessions
+            .claim_refresh(&id, &"refresh-1".into(), REFRESH_HOLD)
+            .await
+            .unwrap()
+    );
+    f.sessions
+        .replace_tokens(
+            &id,
+            &"refresh-1".into(),
+            "access-2".into(),
+            Some("refresh-2".into()),
+            near_end,
+        )
+        .await
+        .unwrap();
+
+    let session = f.sessions.get_session(&id).await.unwrap().unwrap();
+    let refused = f.adapter.current_token(&id, session).await.unwrap_err();
+    assert_eq!(refused.code(), Code::Unavailable);
+    assert!(
+        refused.message().contains("issuer"),
+        "the call refreshed instead of waiting: {refused:?}"
+    );
+}
+
 /// An issuer session ended elsewhere ends the application session too: it
 /// is refused and removed.
 #[tokio::test]

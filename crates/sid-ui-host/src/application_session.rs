@@ -194,12 +194,12 @@ impl ApplicationSessions {
         if session.claims.exp - now > REFRESH_MARGIN_SECS {
             return Ok(session.access_token);
         }
-        if session.refresh_token.is_none() {
+        let Some(from) = session.refresh_token.clone() else {
             return Err(self.end(id).await);
-        }
+        };
         let claimed = self
             .sessions
-            .claim_refresh(id, REFRESH_HOLD)
+            .claim_refresh(id, &from, REFRESH_HOLD)
             .await
             .map_err(|e| refuse::dependency_unavailable("session store", e))?;
         if !claimed {

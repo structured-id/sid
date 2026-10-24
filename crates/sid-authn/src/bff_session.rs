@@ -294,17 +294,51 @@ impl BffSessionStore {
         Ok(())
     }
 
-    /// Claim the refresh of session `id` for `hold`, across every replica:
-    /// `true` for exactly one caller. The issuer rotates refresh tokens and
-    /// treats a replayed one as theft, ending the grant, so two replicas
-    /// refreshing one session at once would sign its user out.
+    /// Claim the refresh of session `id` from its refresh token `from` for
+    /// `hold`, across every replica: `true` for exactly one caller. The issuer
+    /// rotates refresh tokens and treats a replayed one as theft, ending the
+    /// grant, so two replicas refreshing one version at once would sign its
+    /// user out.
     ///
-    /// The claim is never released, only outlived: a release could delete a
-    /// later holder's claim after this one expired. `hold` outlasts a token
-    /// endpoint call, and the session's next refresh comes when its new token
-    /// nears expiry, long after.
-    pub async fn claim_refresh(&self, id: &str, hold: Duration) -> SessionResult<bool> {
-        Ok(self.cache.set_nx(&refresh_key(id), b"1", hold).await?)
+    /// The claim names the version it refreshes. A claim left by the refresh
+    /// of an earlier version, which completed since (the session holds `from`
+    /// now), does not hold this one: a returned token may itself be near its
+    /// end, capped by an approaching step-up or issuer-session expiry. It is
+    /// taken over atomically, so one caller wins. A claim of the version the
+    /// session holds is in flight and is never taken over, whatever version
+    /// the caller read.
+    ///
+    /// The claim is never released, only outlived or taken over by the next
+    /// version: a release could delete a later holder's claim after this one
+    /// expired. `hold` outlasts a token endpoint call.
+    pub async fn claim_refresh(
+        &self,
+        id: &str,
+        from: &SecretString,
+        hold: Duration,
+    ) -> SessionResult<bool> {
+        let key = refresh_key(id);
+        let mine = refresh_version(from);
+        if self.cache.set_nx(&key, mine.as_bytes(), hold).await? {
+            return Ok(true);
+        }
+        let Some(held) = self.cache.get(&key).await? else {
+            // The claim expired between the two calls.
+            return Ok(self.cache.set_nx(&key, mine.as_bytes(), hold).await?);
+        };
+        if held == mine.as_bytes() {
+            return Ok(false);
+        }
+        // Another version's claim: only a completed refresh's, when the
+        // session already holds the version this caller refreshes.
+        let current = self.read_current(id).await?;
+        if !current.is_some_and(|session| session.holds_refresh_token(from)) {
+            return Ok(false);
+        }
+        Ok(self
+            .cache
+            .compare_and_set(&key, &held, mine.as_bytes(), hold)
+            .await?)
     }
 
     /// Replace the tokens of session `id` with those a refresh of
@@ -482,6 +516,15 @@ fn pending_key(connection: &str, state: &str) -> String {
 
 fn refresh_key(id: &str) -> String {
     format!("{REFRESH_PREFIX}{id}")
+}
+
+/// The version of a refresh token a refresh claim names: a digest, so the
+/// claim key never holds the token itself.
+fn refresh_version(token: &SecretString) -> String {
+    use base64::Engine as _;
+    use sha2::Digest as _;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(sha2::Sha256::digest(token.expose_secret().as_bytes()))
 }
 
 /// Elapsed time since `then`, zero for a clock that moved back: a timestamp

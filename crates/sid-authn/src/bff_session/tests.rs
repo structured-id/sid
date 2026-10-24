@@ -401,9 +401,93 @@ async fn test_claim_refresh_has_one_holder() {
         .create_session("access".into(), Some("refresh".into()), test_claims(), CONN)
         .await
         .unwrap();
-    assert!(a.claim_refresh(&id, LONG).await.unwrap());
-    assert!(!b.claim_refresh(&id, LONG).await.unwrap());
-    assert!(!a.claim_refresh(&id, LONG).await.unwrap());
+    let from = "refresh".into();
+    assert!(a.claim_refresh(&id, &from, LONG).await.unwrap());
+    assert!(!b.claim_refresh(&id, &from, LONG).await.unwrap());
+    assert!(!a.claim_refresh(&id, &from, LONG).await.unwrap());
+}
+
+/// A completed refresh does not hold the next one: a token it returned can
+/// itself be near its end (capped by an approaching step-up or issuer-session
+/// expiry), and the refresh of that new version is claimed at once rather
+/// than waiting out the earlier claim.
+#[tokio::test]
+async fn test_a_completed_refresh_does_not_hold_the_next() {
+    let (a, b) = replica_pair();
+    let (id, _) = a
+        .create_session(
+            "access-1".into(),
+            Some("refresh-1".into()),
+            test_claims(),
+            CONN,
+        )
+        .await
+        .unwrap();
+    assert!(
+        a.claim_refresh(&id, &"refresh-1".into(), LONG)
+            .await
+            .unwrap()
+    );
+    a.replace_tokens(
+        &id,
+        &"refresh-1".into(),
+        "access-2".into(),
+        Some("refresh-2".into()),
+        test_claims(),
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        b.claim_refresh(&id, &"refresh-2".into(), LONG)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !a.claim_refresh(&id, &"refresh-2".into(), LONG)
+            .await
+            .unwrap(),
+        "the new claim has one holder too"
+    );
+}
+
+/// A refresh in flight keeps its claim: neither a replica reading the same
+/// version nor one holding an older, stale read takes it over, so the
+/// version being rotated is never presented twice.
+#[tokio::test]
+async fn test_a_refresh_in_flight_is_not_taken_over() {
+    let (a, b) = replica_pair();
+    let (id, _) = a
+        .create_session(
+            "access-1".into(),
+            Some("refresh-1".into()),
+            test_claims(),
+            CONN,
+        )
+        .await
+        .unwrap();
+    assert!(
+        a.claim_refresh(&id, &"refresh-1".into(), LONG)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !b.claim_refresh(&id, &"refresh-1".into(), LONG)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !b.claim_refresh(&id, &"refresh-0".into(), LONG)
+            .await
+            .unwrap(),
+        "a stale read does not take over"
+    );
+    assert!(
+        !b.claim_refresh(&id, &"refresh-1".into(), LONG)
+            .await
+            .unwrap(),
+        "the in-flight claim survived the stale attempt"
+    );
 }
 
 /// A backend whose every call fails, to prove the store reports the failure

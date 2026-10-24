@@ -153,12 +153,12 @@ async fn current_token(
     if session.claims.exp - now > REFRESH_MARGIN_SECS {
         return Ok(session.access_token);
     }
-    if session.refresh_token.is_none() {
+    let Some(from) = session.refresh_token.clone() else {
         return Err(end_session(state, session_id).await);
-    }
+    };
     let claimed = state
         .bff_sessions
-        .claim_refresh(session_id, REFRESH_HOLD)
+        .claim_refresh(session_id, &from, REFRESH_HOLD)
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "BFF API: cannot claim the refresh");
