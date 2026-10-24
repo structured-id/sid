@@ -82,7 +82,8 @@ fn test_profile_to_proto_phone_absent() {
 /// The record of a passkey registered by `key` through a real ceremony.
 async fn passkey_record(key: &mut SoftAuthenticator) -> Vec<u8> {
     use secrecy::SecretBox;
-    use sid_keys::{KeyVersionParams, RustCryptoPrimitives, SoftwareKeyManager};
+    use sid_crypto::RustCryptoPrimitives;
+    use sid_keys::{KeyVersionParams, SoftwareKeyManager};
     let keys = std::sync::Arc::new(
         SoftwareKeyManager::new(
             SecretBox::new(Box::new([3u8; 32])),

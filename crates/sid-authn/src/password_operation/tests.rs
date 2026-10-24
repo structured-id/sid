@@ -30,7 +30,7 @@ pub(super) fn manager(master: u8) -> Arc<dyn sid_keys::KeyManager> {
         sid_keys::SoftwareKeyManager::new(
             secrecy::SecretBox::new(Box::new([master; 32])),
             vec![sid_keys::KeyVersionParams::new(1, vec![1; 32], "test")],
-            Arc::new(sid_keys::RustCryptoPrimitives::new()),
+            Arc::new(sid_crypto::RustCryptoPrimitives::new()),
         )
         .unwrap(),
     )

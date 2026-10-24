@@ -1,15 +1,24 @@
-// SPDX-License-Identifier: AGPL-3.0-only
-//! sid-crypto: server-side cryptographic primitives (authenticated encryption,
-//! key derivation, curve operations) behind the `CryptoPrimitives` trait of
-//! `sid-keys`, with an aws-lc-rs backend, and the process's JWT signature
-//! provider (`jwt`).
-//!
-//! The ZKPP policy and proof types live with the circuit in `sid-pake-core`.
+// SPDX-License-Identifier: Apache-2.0
+#![cfg_attr(not(feature = "std"), no_std)]
+#![forbid(unsafe_code)]
+#![doc = include_str!("../README.md")]
 
-#[cfg(feature = "jwt")]
-pub mod jwt;
+extern crate alloc;
+
+mod operations;
+pub use operations::{CryptoError, CryptoPrimitives};
+
+#[cfg(any(feature = "tls-rustcrypto", feature = "jwt-rustcrypto"))]
+mod public_key;
+#[cfg(any(feature = "tls-rustcrypto", feature = "tls-aws-lc"))]
+pub mod tls;
+
+#[cfg(any(feature = "primitives", feature = "aws-lc"))]
+mod symmetric;
 #[cfg(feature = "primitives")]
-pub mod primitives;
+pub use symmetric::rustcrypto::RustCryptoPrimitives;
 
+#[cfg(any(feature = "jwt", feature = "jwt-rustcrypto"))]
+pub mod jwt;
 #[cfg(feature = "aws-lc")]
-pub use primitives::AwsLcPrimitives;
+pub use symmetric::aws_lc::AwsLcPrimitives;

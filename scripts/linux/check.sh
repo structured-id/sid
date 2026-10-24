@@ -7,6 +7,7 @@
 #   SID_LINUX=<ssh destination> scripts/linux/check.sh musl
 #   SID_LINUX=<ssh destination> scripts/linux/check.sh musl aarch64-unknown-linux-musl
 #   SID_LINUX=<ssh destination> scripts/linux/check.sh history-checker '--domains 2 --entries 24'
+#   SID_LINUX=<ssh destination> SID_LINUX_RUNTIME=host scripts/linux/check.sh workspace
 #
 # `musl` builds the server for the given musl targets (by default x86_64 and
 # aarch64), which exercises every native dependency the server links.
@@ -19,20 +20,19 @@
 # Everything they build lives in the container and goes with it, and the
 # upload goes too, whatever the outcome: the machine is shared with other work.
 #
-# SID_LINUX_RUNTIME=host runs on a machine without a container runtime: the
-# host's rustup with the pinned toolchain, building inside the upload, which
-# is removed with everything built there.
+# SID_LINUX_RUNTIME=host builds through the host's rustup inside the upload,
+# which is removed with everything built there. The workspace task uses
+# Docker only for its isolated PostgreSQL, Redis and NATS test services.
+main() {
 set -euo pipefail
 
 destination="${SID_LINUX:?set SID_LINUX to the SSH destination of the Linux machine}"
-task="${1:?task: musl [target...] | history-checker ['<options>'...]}"
+task="${1:?task: musl [target...] | history-checker ['<options>'...] | workspace}"
 shift
-# The version rust-toolchain.toml pins.
-image="rust:1.99.0"
+root=$(git rev-parse --show-toplevel)
 
 ssh_options=(-o BatchMode=yes -o LogLevel=ERROR)
 
-root=$(git rev-parse --show-toplevel)
 work=$(mktemp -d)
 snapshot_ref=refs/remote-check/snapshot
 remote=""
@@ -59,6 +59,9 @@ else
     tree=$(GIT_INDEX_FILE="$work/index" git -C "$root" write-tree)
     commit=$(git -C "$root" commit-tree "$tree" -p HEAD -m "working tree snapshot")
 fi
+toolchain=$(git -C "$root" show "$commit:rust-toolchain.toml" \
+    | python3 -c 'import sys, tomllib; print(tomllib.load(sys.stdin.buffer)["toolchain"]["channel"])')
+image="rust:$toolchain"
 git -C "$root" update-ref "$snapshot_ref" "$commit"
 git -C "$root" bundle create --quiet "$work/snapshot.bundle" "$snapshot_ref"
 git -C "$root" update-ref -d "$snapshot_ref"
@@ -98,3 +101,7 @@ else
         || status=$?
 fi
 exit "$status"
+}
+
+# Parse the complete launcher before a long remote call can outlive source edits.
+main "$@"

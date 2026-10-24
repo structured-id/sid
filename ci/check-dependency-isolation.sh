@@ -194,13 +194,38 @@ check_consumers() {
   done
 }
 
+check_crypto_closures() {
+  local features forbidden graph found
+  local native='aws-lc-rs|aws-lc-sys|aws-lc-fips-sys|ring|cc|cmake|bindgen|openssl|openssl-sys'
+  for features in std,primitives std,tls-rustcrypto,tls12 std,jwt-rustcrypto; do
+    case "$features" in
+      std,primitives) forbidden="$native|rustls|rustls-pki-types|rustls-webpki|jsonwebtoken" ;;
+      std,tls-rustcrypto,tls12) forbidden="$native|jsonwebtoken" ;;
+      std,jwt-rustcrypto) forbidden="$native|rustls|rustls-pki-types|rustls-webpki" ;;
+    esac
+    # Excluding dev edges keeps independent TLS test oracles out of this
+    # product-closure check; build edges still expose native compilation.
+    graph=$(cargo tree --locked -p sid-crypto --no-default-features \
+      --features "$features" -e normal,build --prefix none -f '{p}')
+    found=$(printf '%s\n' "$graph" | grep -E "^($forbidden) |$SERVER_ONLY" || true)
+    if [[ -n "$found" ]]; then
+      echo "FAIL crypto closure [$features]:"
+      printf '%s\n' "$found"
+      fail=1
+    else
+      echo "ok   crypto closure [$features]"
+    fi
+  done
+}
+
 case "${1:-all}" in
   closure) check_closure ;;
   combos) check_combos ;;
   each) check_each ;;
   consumers) check_consumers ;;
-  all) check_closure; check_combos; check_each; check_consumers ;;
-  *) echo "usage: $0 [closure|combos|each|consumers|all]"; exit 2 ;;
+  crypto) check_crypto_closures ;;
+  all) check_closure; check_combos; check_each; check_consumers; check_crypto_closures ;;
+  *) echo "usage: $0 [closure|combos|each|consumers|crypto|all]"; exit 2 ;;
 esac
 
 exit "$fail"

@@ -11,7 +11,8 @@ use std::sync::Arc;
 
 use secrecy::SecretBox;
 use sid_core::models::AuditEntry;
-use sid_keys::{KeyManager, KeyVersionParams, RustCryptoPrimitives, SoftwareKeyManager};
+use sid_crypto::CryptoPrimitives;
+use sid_keys::{KeyManager, KeyVersionParams, SoftwareKeyManager};
 use sid_plugin::StorageBackend;
 
 /// Length of the master secret file, in bytes.
@@ -32,22 +33,24 @@ pub enum FieldKeyError {
     Storage(#[from] sid_core::Error),
     #[error("key manager: {0}")]
     KeyManager(#[from] sid_keys::KeyManagerError),
+    #[error("key entropy: {0}")]
+    Crypto(#[from] sid_crypto::CryptoError),
 }
 
 /// Read the master secret from `path`, creating it with fresh random bytes
 /// (owner-only permissions) when it does not exist yet.
-pub fn load_or_create_master(path: &Path) -> Result<SecretBox<[u8; 32]>, FieldKeyError> {
+pub fn load_or_create_master(
+    path: &Path,
+    crypto: &dyn CryptoPrimitives,
+) -> Result<SecretBox<[u8; 32]>, FieldKeyError> {
     let io = |source| FieldKeyError::Io {
         path: path.display().to_string(),
         source,
     };
     if !path.exists() {
-        use rand::TryRng;
         use std::io::Write;
         let mut bytes = zeroize::Zeroizing::new([0u8; MASTER_LEN]);
-        rand::rngs::SysRng
-            .try_fill_bytes(bytes.as_mut())
-            .expect("the operating system random source is available");
+        crypto.random_bytes(bytes.as_mut())?;
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(io)?;
         }
@@ -113,16 +116,14 @@ impl KeyVersionStore for dyn sid_plugin::history_keys::HistoryKeyStore {
 /// starters agree: only one insert of a version succeeds and all re-read it.
 pub async fn load_or_create_versions(
     store: &(impl KeyVersionStore + ?Sized),
+    crypto: &dyn CryptoPrimitives,
 ) -> Result<Vec<KeyVersionParams>, FieldKeyError> {
     let versions = store.versions().await?;
     if !versions.is_empty() {
         return Ok(versions);
     }
-    use rand::TryRng;
     let mut salt = vec![0u8; 32];
-    rand::rngs::SysRng
-        .try_fill_bytes(&mut salt)
-        .expect("the operating system random source is available");
+    crypto.random_bytes(&mut salt)?;
     store
         .insert(
             &KeyVersionParams::new(1, salt, "key-v1"),
@@ -137,10 +138,11 @@ pub async fn load_or_create_versions(
 pub async fn field_key_manager(
     store: &(impl KeyVersionStore + ?Sized),
     master_path: &Path,
+    crypto: Arc<dyn CryptoPrimitives>,
 ) -> Result<Arc<dyn KeyManager>, FieldKeyError> {
-    let master = load_or_create_master(master_path)?;
-    let versions = load_or_create_versions(store).await?;
-    let manager = SoftwareKeyManager::new(master, versions, Arc::new(RustCryptoPrimitives::new()))?;
+    let master = load_or_create_master(master_path, crypto.as_ref())?;
+    let versions = load_or_create_versions(store, crypto.as_ref()).await?;
+    let manager = SoftwareKeyManager::new(master, versions, crypto)?;
     Ok(Arc::new(manager))
 }
 

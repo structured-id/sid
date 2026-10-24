@@ -1,68 +1,93 @@
 [package]
 name = "sid-crypto"
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
-license.workspace = true
+rust-version = "1.92"
+license = "Apache-2.0"
 repository.workspace = true
 authors.workspace = true
-# Part of the server workspace, not published as a crate.
-publish = false
+description = "Independently selectable cryptographic primitives and TLS/JWT provider adapters"
+readme = "README.md"
+publish = true
+
+[package.metadata.docs.rs]
+features = ["primitives", "tls-rustcrypto", "jwt-rustcrypto", "tls12"]
 
 [features]
-default = ["primitives", "aws-lc"]
-primitives = ["dep:sid-keys", "dep:aes-gcm", "dep:hmac", "dep:hkdf", "dep:pbkdf2", "dep:pasta_curves", "dep:ff", "dep:group", "dep:rand"]
-aws-lc = ["primitives", "dep:aws-lc-rs"]
-fips = ["aws-lc", "aws-lc-rs/fips"]
-# The process's JWT signature provider, which a host installs at startup.
-jwt = ["dep:jsonwebtoken"]
+default = ["std", "aws-lc", "tls-aws-lc", "jwt"]
+alloc = ["pki-types?/alloc", "aead?/alloc", "ed25519-dalek?/alloc"]
+std = ["alloc", "thiserror/std", "pki-types?/std", "rustls?/std"]
+# Explicit RustCrypto symmetric alternative to the default aws-lc adapter.
+primitives = ["alloc", "dep:aes-gcm", "dep:hmac", "dep:hkdf", "dep:pbkdf2", "dep:sha2", "dep:getrandom"]
+aws-lc = ["std", "dep:aws-lc-rs"]
+fips = ["aws-lc", "aws-lc-rs/fips", "rustls?/fips"]
+# The host explicitly installs the aws-lc JWT provider through this capability.
+jwt = ["std", "dep:jsonwebtoken", "jsonwebtoken/aws_lc_rs"]
+jwt-rustcrypto = ["std", "dep:jsonwebtoken", "dep:hmac", "dep:sha2", "dep:p256", "dep:p384", "dep:ed25519-dalek", "dep:rsa", "dep:der", "dep:crypto-bigint", "dep:signature-v2", "dep:signature", "dep:pkcs8"]
+tls-aws-lc = ["std", "dep:rustls", "rustls/aws_lc_rs"]
+tls-rustcrypto = ["alloc", "dep:rustls", "dep:pki-types", "dep:aead", "dep:aes-gcm", "dep:chacha20poly1305", "dep:crypto-common", "dep:crypto-bigint", "dep:der", "dep:digest", "dep:ed25519-dalek", "dep:getrandom", "dep:hmac", "dep:p256", "dep:p384", "dep:pkcs8", "dep:rsa", "dep:sec1", "dep:sha2", "dep:signature", "dep:x25519-dalek", "dep:zeroize"]
+tls12 = ["rustls?/tls12"]
+logging = ["rustls?/logging"]
 
 [dependencies]
-# Primitive trait implemented by the aws-lc-rs backend below
-sid-keys = { workspace = true, optional = true }
-
-# Authenticated encryption (server-side, behind `primitives` feature)
-aes-gcm = { workspace = true, optional = true }
-
-# BoringSSL-based crypto (default backend)
-aws-lc-rs = { workspace = true, optional = true }
-
-# JWT signing and verification run in jsonwebtoken on its aws-lc provider
-# (`jwt` feature).
-jsonwebtoken = { workspace = true, optional = true }
-
-# Curve implementations (server-side, behind `primitives` feature)
-pasta_curves = { workspace = true, optional = true }
-ff = { workspace = true, optional = true }
-group = { workspace = true, optional = true }
-
-# Cryptographic primitives
-sha2.workspace = true
-sha1.workspace = true
-hmac = { workspace = true, optional = true }
-digest.workspace = true
-hkdf = { workspace = true, optional = true }
-pbkdf2 = { workspace = true, optional = true }
-zeroize.workspace = true
-
-# Serialization & types
-serde = { workspace = true }
-serde_json.workspace = true
-
-# Error handling
-thiserror.workspace = true
-anyhow.workspace = true
-
-# Random (server-side)
-rand = { workspace = true, optional = true }
-
-# Testing utilities
-subtle.workspace = true
+thiserror = { version = "2", default-features = false }
+aws-lc-rs = { version = "1", optional = true }
+jsonwebtoken = { version = "11", default-features = false, optional = true }
+aead = { version = "0.6", default-features = false, optional = true }
+aes-gcm = { version = "0.11", default-features = false, features = ["aes", "alloc", "zeroize"], optional = true }
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["zeroize"], optional = true }
+crypto-common = { version = "0.2", default-features = false, optional = true }
+crypto-bigint = { version = "0.7.6", default-features = false, optional = true }
+der = { version = "0.8", default-features = false, optional = true }
+digest = { version = "0.11", default-features = false, optional = true }
+ed25519-dalek = { version = "3", default-features = false, features = ["pkcs8", "zeroize"], optional = true }
+getrandom = { version = "0.4", default-features = false, features = ["sys_rng"], optional = true }
+hmac = { version = "0.13", default-features = false, features = ["zeroize"], optional = true }
+hkdf = { version = "0.13", default-features = false, optional = true }
+pbkdf2 = { version = "0.13", default-features = false, features = ["hmac"], optional = true }
+p256 = { version = "0.14", default-features = false, features = ["alloc", "pkcs8", "ecdsa", "ecdh"], optional = true }
+p384 = { version = "0.14", default-features = false, features = ["alloc", "pkcs8", "ecdsa", "ecdh"], optional = true }
+pkcs8 = { version = "0.11", default-features = false, optional = true }
+pki-types = { package = "rustls-pki-types", version = "1", default-features = false, optional = true }
+rsa = { version = "0.10.0-rc.19", default-features = false, features = ["sha2", "encoding"], optional = true }
+rustls = { version = "0.23", default-features = false, optional = true }
+sec1 = { version = "0.8", default-features = false, optional = true }
+sha2 = { version = "0.11", default-features = false, features = ["zeroize"], optional = true }
+signature = { version = "3", default-features = false, optional = true }
+# jsonwebtoken's extension traits use signature 2; primitive backends use 3.
+signature-v2 = { package = "signature", version = "2", default-features = false, optional = true }
+x25519-dalek = { version = "3", default-features = false, features = ["static_secrets", "zeroize"], optional = true }
+zeroize = { version = "1", default-features = false, optional = true }
 
 [dev-dependencies]
+base64.workspace = true
+rand.workspace = true
+# End-to-end JWT test hosts parse PEM fixtures; provider adapters do not choose input formats.
+jsonwebtoken = { version = "11", default-features = false, features = ["use_pem"] }
 criterion = { version = "0.8", features = ["html_reports"] }
-sid-crypto = { path = ".", features = ["jwt"] }
-sid-keys = { workspace = true }
+rcgen = "0.14"
+# An independent TLS implementation is an oracle, never a product dependency.
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[[test]]
+name = "jwt_installed"
+required-features = ["jwt"]
+
+[[test]]
+name = "jwt_operation_first"
+required-features = ["jwt"]
+
+[[test]]
+name = "jwt_other_provider"
+required-features = ["jwt"]
+
+[[test]]
+name = "jwt_second_installation"
+required-features = ["jwt"]
 
 [[bench]]
 name = "primitives"
 harness = false
+required-features = ["primitives", "aws-lc"]

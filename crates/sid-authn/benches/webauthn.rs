@@ -17,7 +17,8 @@ use sid_authn::webauthn::{
     AssertionPurpose, AssertionResponse, RegistrationResponse, WebAuthnServer,
 };
 use sid_core::models::{Credential, CredentialType, ProfileId, WebAuthnUserHandle};
-use sid_keys::{KeyVersionParams, RustCryptoPrimitives, SoftwareKeyManager};
+use sid_crypto::RustCryptoPrimitives;
+use sid_keys::{KeyVersionParams, SoftwareKeyManager};
 use sid_plugin::cache::InMemoryCacheBackend;
 
 /// Counts allocations so a ceremony's allocation total can be reported.
