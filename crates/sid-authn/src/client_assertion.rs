@@ -19,6 +19,9 @@ pub const JWT_BEARER_ASSERTION_TYPE: &str =
 /// Maximum assertion lifetime (5 minutes).
 const MAX_ASSERTION_LIFETIME_SECS: u64 = 300;
 
+/// Clock skew allowed on `exp` and `nbf` (RFC 7519 §4.1.4, §4.1.5).
+const ASSERTION_CLOCK_ALLOWANCE_SECS: u64 = 60;
+
 /// RFC 7523 JWT assertion claims.
 #[derive(Debug, Deserialize)]
 pub struct AssertionClaims {
@@ -255,6 +258,10 @@ async fn verify(
     validation.set_required_spec_claims(&["iss", "sub", "aud", "exp", "jti"]);
     // We validate iss/sub/aud manually for better error messages.
     validation.validate_aud = false;
+    // RFC 7523 §3 items 5 and 10: a present `nbf` bounds when the assertion
+    // may be used, within the clock allowance; it is not a required claim.
+    validation.validate_nbf = true;
+    validation.leeway = ASSERTION_CLOCK_ALLOWANCE_SECS;
 
     let token_data =
         decode::<AssertionClaims>(assertion, decoding_key, &validation).map_err(|e| {
