@@ -35,6 +35,7 @@ use tower::ServiceExt;
 use tower_http::services::ServeFile;
 
 pub mod application_session;
+pub mod client_key_files;
 pub mod host;
 mod settings;
 
