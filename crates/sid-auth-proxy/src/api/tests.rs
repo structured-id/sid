@@ -259,12 +259,13 @@ async fn a_refresh_held_elsewhere_is_awaited() {
     let (upstream, seen) = fake_api().await;
     let (state, id, csrf) = signed_in_state(Some(upstream), 0, Some("refresh-1")).await;
     let sessions = state.bff_sessions.clone();
-    assert!(
+    assert!(matches!(
         sessions
             .claim_refresh(&id, &"refresh-1".into(), Duration::from_secs(15))
             .await
-            .unwrap()
-    );
+            .unwrap(),
+        RefreshClaim::Claimed(_)
+    ));
     let other_replica = {
         let sessions = sessions.clone();
         let id = id.clone();
@@ -297,18 +298,31 @@ async fn a_refresh_held_elsewhere_is_awaited() {
 /// The refresh claim goes to exactly one of many concurrent claimants.
 #[tokio::test]
 async fn one_claimant_refreshes() {
-    let state = bff_test_state();
-    let claims: Vec<_> = futures_claims(&state, 8).await;
-    assert_eq!(claims.iter().filter(|won| **won).count(), 1);
+    let (state, id, _) = signed_in_state(None, 0, Some("refresh")).await;
+    let claims: Vec<_> = futures_claims(&state, &id, 8).await;
+    assert_eq!(
+        claims
+            .iter()
+            .filter(|claim| matches!(claim, RefreshClaim::Claimed(_)))
+            .count(),
+        1
+    );
+    assert!(
+        claims
+            .iter()
+            .all(|claim| !matches!(claim, RefreshClaim::Ended)),
+        "{claims:?}"
+    );
 }
 
-async fn futures_claims(state: &ProxyState, n: usize) -> Vec<bool> {
+async fn futures_claims(state: &ProxyState, id: &str, n: usize) -> Vec<RefreshClaim> {
     let mut tasks = Vec::new();
     for _ in 0..n {
         let sessions = state.bff_sessions.clone();
+        let id = id.to_owned();
         tasks.push(tokio::spawn(async move {
             sessions
-                .claim_refresh(&"c".repeat(64), &"refresh".into(), Duration::from_secs(15))
+                .claim_refresh(&id, &"refresh".into(), Duration::from_secs(15))
                 .await
                 .unwrap()
         }));

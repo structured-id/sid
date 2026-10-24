@@ -701,12 +701,13 @@ async fn a_completed_refresh_inside_the_margin_does_not_stall_the_next_call() {
         .await
         .unwrap();
     // The earlier refresh: claimed, completed, its new token near its end too.
-    assert!(
+    assert!(matches!(
         f.sessions
             .claim_refresh(&id, &"refresh-1".into(), REFRESH_HOLD)
             .await
-            .unwrap()
-    );
+            .unwrap(),
+        RefreshClaim::Claimed(_)
+    ));
     f.sessions
         .replace_tokens(
             &id,
@@ -724,6 +725,51 @@ async fn a_completed_refresh_inside_the_margin_does_not_stall_the_next_call() {
     assert!(
         refused.message().contains("issuer"),
         "the call refreshed instead of waiting: {refused:?}"
+    );
+}
+
+/// A refresh started from a snapshot older than the session claims the version
+/// it actually presents: a caller holding that version then sees the refresh
+/// in flight and waits, instead of taking the claim over as a finished one and
+/// presenting the same refresh token a second time. The issuer is unreachable
+/// here, so the first refresh fails and keeps its claim for its hold.
+#[tokio::test(start_paused = true)]
+async fn the_claim_names_the_version_actually_refreshed() {
+    let f = fixture(memory(), true);
+    let mut near_end = claims();
+    near_end.exp = chrono::Utc::now().timestamp() + 10;
+    let (id, _) = f
+        .sessions
+        .create_session(
+            "access-1".into(),
+            Some("refresh-1".into()),
+            near_end.clone(),
+            &connection().binding(),
+        )
+        .await
+        .unwrap();
+    let stale = f.sessions.get_session(&id).await.unwrap().unwrap();
+    // Another replica rotated `refresh-1` under a claim that has since expired.
+    f.sessions
+        .replace_tokens(
+            &id,
+            &"refresh-1".into(),
+            "access-2".into(),
+            Some("refresh-2".into()),
+            near_end,
+        )
+        .await
+        .unwrap();
+
+    let first = f.adapter.current_token(&id, stale).await.unwrap_err();
+    assert!(first.message().contains("issuer"), "{first:?}");
+
+    let session = f.sessions.get_session(&id).await.unwrap().unwrap();
+    let second = f.adapter.current_token(&id, session).await.unwrap_err();
+    assert_eq!(second.code(), Code::Unavailable);
+    assert!(
+        !second.message().contains("issuer"),
+        "refresh-2 was presented twice: {second:?}"
     );
 }
 

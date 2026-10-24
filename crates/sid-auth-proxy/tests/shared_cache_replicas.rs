@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use secrecy::ExposeSecret;
 use sid_auth_proxy::shield::{Shield, ShieldConfig};
-use sid_authn::bff_session::{BffSessionStore, SessionClaims};
+use sid_authn::bff_session::{BffSessionStore, RefreshClaim, SessionClaims};
 use sid_infra::RedisCacheBackend;
 use sid_plugin::cache::{CacheBackend, InMemoryCacheBackend};
 
@@ -242,7 +242,7 @@ async fn one_replica_refreshes_a_session() {
     }
     let mut winners = 0;
     for task in tasks {
-        winners += usize::from(task.await.unwrap());
+        winners += usize::from(matches!(task.await.unwrap(), RefreshClaim::Claimed(_)));
     }
     assert_eq!(winners, 1);
 

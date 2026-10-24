@@ -392,6 +392,15 @@ async fn test_replace_tokens_applies_a_current_refresh() {
     );
 }
 
+/// Whether `s` wins the refresh of session `id`, read holding `from`.
+async fn wins(s: &BffSessionStore, id: &str, from: &str) -> bool {
+    match s.claim_refresh(id, &from.into(), LONG).await.unwrap() {
+        RefreshClaim::Claimed(_) => true,
+        RefreshClaim::HeldElsewhere => false,
+        RefreshClaim::Ended => panic!("the session ended"),
+    }
+}
+
 /// One refresh per session at a time, across replicas: the first claim wins
 /// and the others are refused until it expires.
 #[tokio::test]
@@ -401,10 +410,66 @@ async fn test_claim_refresh_has_one_holder() {
         .create_session("access".into(), Some("refresh".into()), test_claims(), CONN)
         .await
         .unwrap();
-    let from = "refresh".into();
-    assert!(a.claim_refresh(&id, &from, LONG).await.unwrap());
-    assert!(!b.claim_refresh(&id, &from, LONG).await.unwrap());
-    assert!(!a.claim_refresh(&id, &from, LONG).await.unwrap());
+    assert!(wins(&a, &id, "refresh").await);
+    assert!(!wins(&b, &id, "refresh").await);
+    assert!(!wins(&a, &id, "refresh").await);
+}
+
+/// A claim made from a read older than the session moves to the version the
+/// session holds and hands that session back, so the claim names the token
+/// the winner presents: a replica reading that version then sees the refresh
+/// in flight instead of a finished one it may take over.
+#[tokio::test]
+async fn test_a_stale_claim_names_the_version_it_refreshes() {
+    let (a, b) = replica_pair();
+    let (id, _) = a
+        .create_session(
+            "access-1".into(),
+            Some("refresh-1".into()),
+            test_claims(),
+            CONN,
+        )
+        .await
+        .unwrap();
+    a.replace_tokens(
+        &id,
+        &"refresh-1".into(),
+        "access-2".into(),
+        Some("refresh-2".into()),
+        test_claims(),
+    )
+    .await
+    .unwrap();
+
+    match a
+        .claim_refresh(&id, &"refresh-1".into(), LONG)
+        .await
+        .unwrap()
+    {
+        RefreshClaim::Claimed(session) => {
+            assert!(session.holds_refresh_token(&"refresh-2".into()));
+        }
+        other => panic!("the stale read did not win: {other:?}"),
+    }
+    assert!(
+        !wins(&b, &id, "refresh-2").await,
+        "the refresh of refresh-2 is in flight"
+    );
+}
+
+/// A claim for a session that ended reports it, not a refresh to make.
+#[tokio::test]
+async fn test_a_claim_on_an_ended_session_reports_it() {
+    let s = store();
+    let (id, _) = s
+        .create_session("access".into(), Some("refresh".into()), test_claims(), CONN)
+        .await
+        .unwrap();
+    s.destroy_session(&id).await.unwrap();
+    assert!(matches!(
+        s.claim_refresh(&id, &"refresh".into(), LONG).await.unwrap(),
+        RefreshClaim::Ended
+    ));
 }
 
 /// A completed refresh does not hold the next one: a token it returned can
@@ -423,11 +488,7 @@ async fn test_a_completed_refresh_does_not_hold_the_next() {
         )
         .await
         .unwrap();
-    assert!(
-        a.claim_refresh(&id, &"refresh-1".into(), LONG)
-            .await
-            .unwrap()
-    );
+    assert!(wins(&a, &id, "refresh-1").await);
     a.replace_tokens(
         &id,
         &"refresh-1".into(),
@@ -438,15 +499,9 @@ async fn test_a_completed_refresh_does_not_hold_the_next() {
     .await
     .unwrap();
 
+    assert!(wins(&b, &id, "refresh-2").await);
     assert!(
-        b.claim_refresh(&id, &"refresh-2".into(), LONG)
-            .await
-            .unwrap()
-    );
-    assert!(
-        !a.claim_refresh(&id, &"refresh-2".into(), LONG)
-            .await
-            .unwrap(),
+        !wins(&a, &id, "refresh-2").await,
         "the new claim has one holder too"
     );
 }
@@ -466,26 +521,14 @@ async fn test_a_refresh_in_flight_is_not_taken_over() {
         )
         .await
         .unwrap();
+    assert!(wins(&a, &id, "refresh-1").await);
+    assert!(!wins(&b, &id, "refresh-1").await);
     assert!(
-        a.claim_refresh(&id, &"refresh-1".into(), LONG)
-            .await
-            .unwrap()
-    );
-    assert!(
-        !b.claim_refresh(&id, &"refresh-1".into(), LONG)
-            .await
-            .unwrap()
-    );
-    assert!(
-        !b.claim_refresh(&id, &"refresh-0".into(), LONG)
-            .await
-            .unwrap(),
+        !wins(&b, &id, "refresh-0").await,
         "a stale read does not take over"
     );
     assert!(
-        !b.claim_refresh(&id, &"refresh-1".into(), LONG)
-            .await
-            .unwrap(),
+        !wins(&b, &id, "refresh-1").await,
         "the in-flight claim survived the stale attempt"
     );
 }

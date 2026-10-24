@@ -18,7 +18,7 @@ use rand::TryRng;
 use secrecy::{ExposeSecret, SecretString};
 use sha2::{Digest, Sha256};
 use sid_authn::bff_session::{
-    BffSession, BffSessionStore, PendingSignIn, SessionClaims, TokenReplacement,
+    BffSession, BffSessionStore, PendingSignIn, RefreshClaim, SessionClaims, TokenReplacement,
 };
 use sid_authn::issuer_directory::IssuerDirectory;
 use sid_authn::relying_party::Connection;
@@ -197,25 +197,24 @@ impl ApplicationSessions {
         let Some(from) = session.refresh_token.clone() else {
             return Err(self.end(id).await);
         };
-        let claimed = self
+        // The session read before the claim may predate a refresh another
+        // replica completed under an earlier, now expired claim: the claim
+        // hands back what the store holds now, so a refresh token already
+        // rotated is never presented.
+        let session = match self
             .sessions
             .claim_refresh(id, &from, REFRESH_HOLD)
             .await
-            .map_err(|e| refuse::dependency_unavailable("session store", e))?;
-        if !claimed {
-            return self
-                .refreshed_elsewhere(id, session.access_token.expose_secret())
-                .await;
-        }
-        // The session read before the claim may predate a refresh another
-        // replica completed under an earlier, now expired claim: refresh only
-        // what the store holds now, never a refresh token already rotated.
-        let session = self
-            .sessions
-            .get_session(id)
-            .await
             .map_err(|e| refuse::dependency_unavailable("session store", e))?
-            .ok_or_else(unauthenticated)?;
+        {
+            RefreshClaim::Claimed(current) => *current,
+            RefreshClaim::HeldElsewhere => {
+                return self
+                    .refreshed_elsewhere(id, session.access_token.expose_secret())
+                    .await;
+            }
+            RefreshClaim::Ended => return Err(unauthenticated()),
+        };
         if session.claims.exp - now > REFRESH_MARGIN_SECS {
             return Ok(session.access_token);
         }
