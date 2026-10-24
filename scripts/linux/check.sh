@@ -28,12 +28,10 @@ set -euo pipefail
 destination="${SID_LINUX:?set SID_LINUX to the SSH destination of the Linux machine}"
 task="${1:?task: musl [target...] | history-checker ['<options>'...] | workspace}"
 shift
-# The version rust-toolchain.toml pins.
-image="rust:1.99.0"
+root=$(git rev-parse --show-toplevel)
 
 ssh_options=(-o BatchMode=yes -o LogLevel=ERROR)
 
-root=$(git rev-parse --show-toplevel)
 work=$(mktemp -d)
 snapshot_ref=refs/remote-check/snapshot
 remote=""
@@ -60,6 +58,9 @@ else
     tree=$(GIT_INDEX_FILE="$work/index" git -C "$root" write-tree)
     commit=$(git -C "$root" commit-tree "$tree" -p HEAD -m "working tree snapshot")
 fi
+toolchain=$(git -C "$root" show "$commit:rust-toolchain.toml" \
+    | python3 -c 'import sys, tomllib; print(tomllib.load(sys.stdin.buffer)["toolchain"]["channel"])')
+image="rust:$toolchain"
 git -C "$root" update-ref "$snapshot_ref" "$commit"
 git -C "$root" bundle create --quiet "$work/snapshot.bundle" "$snapshot_ref"
 git -C "$root" update-ref -d "$snapshot_ref"
