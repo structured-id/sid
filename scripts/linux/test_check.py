@@ -15,6 +15,11 @@ import unittest
 class LauncherTests(unittest.TestCase):
     def test_editing_launcher_during_remote_work_preserves_result(self):
         """A saved remote result must survive edits to the launcher's source."""
+        for expected in (0, 23):
+            with self.subTest(remote_status=expected):
+                self.assert_launcher_result(expected)
+
+    def assert_launcher_result(self, expected):
         source = Path(__file__).with_name("check.sh")
         with tempfile.TemporaryDirectory(prefix="sid-launcher-test-") as directory:
             root = Path(directory)
@@ -52,6 +57,7 @@ elif "SID_CHECK_UPLOAD=" in command:
         if time.monotonic() > deadline:
             sys.exit(98)
         time.sleep(0.01)
+    sys.exit(int(os.environ["TEST_REMOTE_STATUS"]))
 ''',
             }
             for name, body in fixtures.items():
@@ -67,6 +73,7 @@ elif "SID_CHECK_UPLOAD=" in command:
                 "TEST_ROOT": str(root),
                 "TEST_READY": str(ready),
                 "TEST_RELEASE": str(release),
+                "TEST_REMOTE_STATUS": str(expected),
             })
             child = subprocess.Popen(
                 ["bash", str(launcher), "workspace"], env=env,
@@ -82,7 +89,7 @@ elif "SID_CHECK_UPLOAD=" in command:
                 launcher.write_text("#!/bin/bash\n" + "exit 97\n" * 2000)
                 release.touch()
                 output, error = child.communicate(timeout=10)
-                self.assertEqual(child.returncode, 0, output + error)
+                self.assertEqual(child.returncode, expected, output + error)
             finally:
                 if child.poll() is None:
                     release.touch()

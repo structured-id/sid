@@ -19,6 +19,8 @@ jobs:
           submodules: recursive
           persist-credentials: false
       - run: rustup show
+      - name: Native launcher regression
+        run: python3 -B -m unittest discover -s scripts/linux -p 'test_check.py' -v
       - name: Packaged external consumers
         run: python3 ci/check-crypto-package.py
 

@@ -20,9 +20,10 @@
 # Everything they build lives in the container and goes with it, and the
 # upload goes too, whatever the outcome: the machine is shared with other work.
 #
-# SID_LINUX_RUNTIME=host runs on a machine without a container runtime: the
-# host's rustup with the pinned toolchain, building inside the upload, which
-# is removed with everything built there.
+# SID_LINUX_RUNTIME=host builds through the host's rustup inside the upload,
+# which is removed with everything built there. The workspace task uses
+# Docker only for its isolated PostgreSQL, Redis and NATS test services.
+main() {
 set -euo pipefail
 
 destination="${SID_LINUX:?set SID_LINUX to the SSH destination of the Linux machine}"
@@ -100,3 +101,7 @@ else
         || status=$?
 fi
 exit "$status"
+}
+
+# Parse the complete launcher before a long remote call can outlive source edits.
+main "$@"
