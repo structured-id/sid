@@ -1851,6 +1851,143 @@ async fn authorize_sends_an_anonymous_user_to_sign_in() {
     assert!(!query.contains_key("code"));
 }
 
+/// The sign-in context of `authorization_request`, read as the sign-in page
+/// reads it: through the issuer path the request names, when `addressed`.
+async fn sign_in_context(
+    svc: &TestServices,
+    authorization_request: &str,
+    addressed: Option<&sid_core::models::OidcIssuer>,
+) -> Result<sid_proto::sid::v1::SignInContext, tonic::Status> {
+    use sid_proto::sid::v1::auth_service_server::AuthService;
+    let mut request = tonic::Request::new(sid_proto::sid::v1::GetSignInContextRequest {
+        authorization_request: authorization_request.to_owned(),
+    });
+    if let Some(issuer) = addressed {
+        request
+            .extensions_mut()
+            .insert(sid_authn::issuer::AddressedIssuer(issuer.clone()));
+    }
+    svc.auth
+        .get_sign_in_context(request)
+        .await
+        .map(tonic::Response::into_inner)
+}
+
+/// The sign-in page reads the context of the request it was sent to
+/// complete: the issuer the request addressed and the client's name. Reading
+/// consumes nothing: twice gives the same answer, and the kept request still
+/// continues to its code after the user signs in.
+#[tokio::test]
+async fn the_sign_in_page_reads_the_kept_requests_context() {
+    let mut browser = browser(Some(LOGIN_URL)).await;
+    let response = no_redirects()
+        .get(with_query(
+            &browser.authorize,
+            &authorize_query(REDIRECT_URI),
+        ))
+        .send()
+        .await
+        .unwrap();
+    let rd = redirect_query(&response, LOGIN_URL)["rd"].clone();
+    let svc = &browser.user.svc;
+    for _ in 0..2 {
+        let context = sign_in_context(svc, &rd, Some(&svc.issuer)).await.unwrap();
+        assert_eq!(context.issuer, svc.issuer.canonical_url);
+        assert_eq!(context.client_name, common::test_client().client_name);
+    }
+
+    let back = browser.continuation(&rd);
+    sign_in_again(&mut browser).await;
+    let query = redirect_query(&browser.get(&back).await, REDIRECT_URI);
+    assert!(query.contains_key("code"), "{query:?}");
+}
+
+/// A request that does not match what the issuer kept is refused before the
+/// page asks for anything, as an invalid `authorization_request`: a forged or
+/// missing reference, another client, another issuer's handle or host, a call
+/// addressed to another issuer, and no URL at all.
+#[tokio::test]
+async fn a_sign_in_context_must_match_the_kept_request() {
+    use tonic_types::StatusExt;
+
+    let browser = browser(Some(LOGIN_URL)).await;
+    let response = no_redirects()
+        .get(with_query(
+            &browser.authorize,
+            &authorize_query(REDIRECT_URI),
+        ))
+        .send()
+        .await
+        .unwrap();
+    let rd = redirect_query(&response, LOGIN_URL)["rd"].clone();
+    let svc = &browser.user.svc;
+    let issuer = svc.issuer.canonical_url.clone();
+    let reference = url::Url::parse(&rd)
+        .unwrap()
+        .query_pairs()
+        .find(|(k, _)| k == "request_uri")
+        .unwrap()
+        .1
+        .into_owned();
+    let other_handle = sid_core::models::IssuerHandle::generate();
+    let authorize_at = |base: &str, client: &str, request_uri: &str| {
+        with_query(
+            &format!("{base}/oauth2/authorize"),
+            &[("client_id", client), ("request_uri", request_uri)],
+        )
+    };
+    let mut other_issuer = svc.issuer.clone();
+    other_issuer.handle = other_handle.clone();
+
+    let cases = [
+        (
+            authorize_at(
+                &issuer,
+                "test-client",
+                "urn:ietf:params:oauth:request_uri:forged",
+            ),
+            None,
+        ),
+        (
+            with_query(
+                &format!("{issuer}/oauth2/authorize"),
+                &[("client_id", "test-client")],
+            ),
+            None,
+        ),
+        (authorize_at(&issuer, "another-client", &reference), None),
+        (
+            authorize_at(
+                &issuer.replace(&svc.issuer.handle.to_string(), &other_handle.to_string()),
+                "test-client",
+                &reference,
+            ),
+            None,
+        ),
+        (
+            authorize_at(
+                &issuer.replacen("://", "://elsewhere.", 1),
+                "test-client",
+                &reference,
+            ),
+            None,
+        ),
+        (rd.clone(), Some(&other_issuer)),
+        ("not a url".to_owned(), None),
+    ];
+    for (request, addressed) in cases {
+        let refused = sign_in_context(svc, &request, addressed).await.unwrap_err();
+        assert_eq!(refused.code(), tonic::Code::InvalidArgument, "{request}");
+        let field = refused
+            .get_details_bad_request()
+            .and_then(|bad| bad.field_violations.first().map(|v| v.field.clone()));
+        assert_eq!(field.as_deref(), Some("authorization_request"), "{request}");
+    }
+
+    // The refused reads took nothing: the genuine request is still there.
+    assert!(sign_in_context(svc, &rd, None).await.is_ok());
+}
+
 async fn browser_without_login() -> Browser {
     browser(None).await
 }

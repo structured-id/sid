@@ -20,6 +20,10 @@ fn asks_step_up(status: &Status) -> bool {
         .is_some_and(|(reason, _, _)| reason == ErrorReason::StepUpRequired.as_str())
 }
 
+/// Prefix of the `request_uri` that continues a kept request, the form of
+/// RFC 9126 §2.2.
+pub(crate) const REQUEST_URI_PREFIX: &str = "urn:ietf:params:oauth:request_uri:";
+
 /// How long a kept authorization request waits for the user to sign in.
 pub(super) const CONTINUATION_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 
@@ -392,6 +396,61 @@ impl AuthServiceImpl {
         let reference = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
         self.continuations.insert(&reference, pending).await?;
         Ok(reference)
+    }
+
+    /// The context of the kept request `authorization_request` continues
+    /// (`<issuer>/oauth2/authorize?client_id=..&request_uri=..`): its issuer
+    /// and its client's name. The kept request is read, not taken, and must
+    /// belong to that issuer, at its canonical URL, and to that client, which
+    /// must be active with the request's redirect URI registered; a call
+    /// `addressed` to an issuer by its path must name the same one. Anything
+    /// else is an invalid `authorization_request`, the same for every cause.
+    pub(crate) async fn sign_in_context(
+        &self,
+        authorization_request: &str,
+        addressed: Option<&sid_authn::issuer::AddressedIssuer>,
+    ) -> Result<SignInContext, Status> {
+        let refused = || {
+            sid_core::grpc_error::refuse::invalid_field(
+                "authorization_request",
+                "not an authorization request this issuer is waiting to complete",
+            )
+        };
+        let url = url::Url::parse(authorization_request).map_err(|_| refused())?;
+        let handle = url
+            .path()
+            .strip_prefix("/i/")
+            .and_then(|rest| rest.strip_suffix("/oauth2/authorize"))
+            .ok_or_else(refused)?;
+        let query: std::collections::HashMap<_, _> = url.query_pairs().collect();
+        let (Some(client_id), Some(request_uri)) =
+            (query.get("client_id"), query.get("request_uri"))
+        else {
+            return Err(refused());
+        };
+        let reference = request_uri
+            .strip_prefix(REQUEST_URI_PREFIX)
+            .ok_or_else(refused)?;
+        let kept = self
+            .continuations
+            .read(reference)
+            .await?
+            .filter(|kept| kept.client_id() == client_id && kept.issuer_handle() == handle)
+            .ok_or_else(refused)?;
+        let (client, issuer) = self
+            .authorize_client(&kept.request(), addressed)
+            .await
+            .map_err(|_| refused())?;
+        // The request must be at the issuer's own canonical URL, not the same
+        // path on another host.
+        let at = format!("{}/oauth2/authorize", issuer.canonical_url);
+        if authorization_request.split('?').next() != Some(at.as_str()) {
+            return Err(refused());
+        }
+        Ok(SignInContext {
+            issuer: issuer.canonical_url,
+            client_name: client.client_name,
+        })
     }
 
     /// The request kept under `reference`, taken: a reference continues once.
