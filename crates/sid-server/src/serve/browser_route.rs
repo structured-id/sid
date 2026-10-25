@@ -47,6 +47,7 @@ pub const BROWSER_METHODS: &[&str] = &[
     "/sid.v1.authn.AuthService/ResendPhoneVerification",
     "/sid.v1.authn.AuthService/SubmitDeviceUserCode",
     "/sid.v1.authn.AuthService/OAuth2Authorize",
+    "/sid.v1.authn.AuthService/GetSignInContext",
     "/sid.v1.authn.AuthService/RequestMagicLink",
     "/sid.v1.authn.AuthService/VerifyMagicLink",
     "/sid.v1.authn.AuthService/ConfirmIdpLink",

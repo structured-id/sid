@@ -115,6 +115,17 @@ impl<V: Serialize + DeserializeOwned> ChallengeStore<V> {
         Ok(Some(serde_json::from_slice(&opened.secret)?))
     }
 
+    /// The value under `key`, left in place for its taker: for a page showing
+    /// state it must not consume. Absent or expired state is `None`.
+    pub async fn read(&self, key: &str) -> Result<Option<V>, ChallengeStoreError> {
+        let context = self.context(key);
+        let Some(sealed) = self.cache.get(&context).await? else {
+            return Ok(None);
+        };
+        let opened = sealed_secret::open(self.keys.as_ref(), &context, &sealed).await?;
+        Ok(Some(serde_json::from_slice(&opened.secret)?))
+    }
+
     /// The cache key and sealing context of `key`: binds a sealed value to the
     /// ceremony kind and state key it was stored under.
     fn context(&self, key: &str) -> String {

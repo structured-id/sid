@@ -72,7 +72,7 @@ mod password_sign_in;
 mod refusal;
 mod sign_in_security;
 mod token_grant;
-pub(crate) use authorize::{BrowserAuthorization, PendingAuthorization};
+pub(crate) use authorize::{BrowserAuthorization, PendingAuthorization, REQUEST_URI_PREFIX};
 pub(crate) use end_session::{EndSession, LogoutRequest};
 use password_sign_in::ProfileSignIn;
 use refusal::{
@@ -3176,6 +3176,21 @@ impl AuthService for AuthServiceImpl {
     }
 
     // ── OAuth2 ──
+
+    #[instrument(skip_all, fields(method = "get_sign_in_context"))]
+    async fn get_sign_in_context(
+        &self,
+        request: Request<GetSignInContextRequest>,
+    ) -> Result<Response<SignInContext>, Status> {
+        let addressed = request
+            .extensions()
+            .get::<sid_authn::issuer::AddressedIssuer>()
+            .cloned();
+        let context = self
+            .sign_in_context(&request.get_ref().authorization_request, addressed.as_ref())
+            .await?;
+        Ok(Response::new(context))
+    }
 
     #[tracing::instrument(skip_all, fields(rpc = "o_auth2_authorize"))]
     #[instrument(skip_all, fields(method = "o_auth2_authorize"))]

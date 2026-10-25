@@ -34,6 +34,7 @@ use tonic::{Request, Response, Status};
 
 use super::auth_service::{
     AuthServiceImpl, BrowserAuthorization, EndSession, LogoutRequest, PendingAuthorization,
+    REQUEST_URI_PREFIX,
 };
 use super::client_metadata;
 use super::oauth_http::{self, Form};
@@ -262,10 +263,6 @@ enum Method {
     Get,
     Post,
 }
-
-/// Prefix of the `request_uri` that continues a kept request, the form of
-/// RFC 9126 §2.2.
-const REQUEST_URI_PREFIX: &str = "urn:ietf:params:oauth:request_uri:";
 
 /// The GET of this issuer's authorization endpoint that continues the request
 /// kept under `reference` for `client_id`: what a cross-site POST redirects

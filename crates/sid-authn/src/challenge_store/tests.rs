@@ -44,6 +44,20 @@ async fn concurrent_takes_have_one_winner() {
     assert_eq!(winners, 1);
 }
 
+/// Reading state leaves it in place: any replica reads it any number of
+/// times, and the one taker still gets it afterwards. Absent state reads as
+/// `None`.
+#[tokio::test]
+async fn a_read_leaves_the_state_for_its_taker() {
+    let (a, b) = replicas(Duration::from_secs(60));
+    a.insert("k1", &"state".to_string()).await.unwrap();
+
+    assert_eq!(b.read("k1").await.unwrap().as_deref(), Some("state"));
+    assert_eq!(a.read("k1").await.unwrap().as_deref(), Some("state"));
+    assert_eq!(b.take("k1").await.unwrap().as_deref(), Some("state"));
+    assert_eq!(a.read("k1").await.unwrap(), None);
+}
+
 /// Expired state is gone, not taken.
 #[tokio::test]
 async fn expired_state_is_not_taken() {
@@ -141,4 +155,5 @@ async fn unreachable_cache_is_an_error() {
 
     assert!(store.insert("k1", &"s".to_string()).await.is_err());
     assert!(store.take("k1").await.is_err());
+    assert!(store.read("k1").await.is_err());
 }
