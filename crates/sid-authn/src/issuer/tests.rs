@@ -194,6 +194,53 @@ async fn the_scim_resource_is_provisioned_once() {
     );
 }
 
+/// Another API of the issuer is registered the same way as the built-in
+/// ones: once, at its endpoint, with its scopes, under one system
+/// application; replicas registering it together agree on one, and a later
+/// call reads it back.
+#[tokio::test]
+async fn a_further_issuer_api_is_provisioned_once() {
+    let (storage, org) = installation().await;
+    let keys = key_manager();
+    let issuer = ensure_local_issuer(&storage, keys.as_ref(), &base(), org)
+        .await
+        .unwrap();
+    let endpoint = format!("{}/ee/organization-ca", issuer.canonical_url);
+    let register = || {
+        ensure_issuer_resource(
+            &storage,
+            &issuer,
+            "Organization CA API",
+            &endpoint,
+            &["organization_ca.read", "organization_ca.prepare"],
+            "organization_ca_api_resource.created",
+        )
+    };
+    let (a, b) = tokio::join!(register(), register());
+    let (a, b) = (a.unwrap(), b.unwrap());
+    assert_eq!(a.id, b.id);
+    assert_eq!(a.indicator.as_str(), endpoint);
+    assert_eq!(a.issuer_id, issuer.id);
+    assert_eq!(
+        a.scopes,
+        vec!["organization_ca.read", "organization_ca.prepare"]
+    );
+    assert_eq!(register().await.unwrap().id, a.id);
+    assert!(
+        storage
+            .list_resource_access_by_resource(a.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    // An endpoint that is no resource indicator is refused, not stored.
+    assert!(
+        ensure_issuer_resource(&storage, &issuer, "Bad", "not a url", &[], "bad.created")
+            .await
+            .is_err()
+    );
+}
+
 /// OIDC Discovery 1.0 §3: an issuer is https without query or fragment;
 /// plain http only on a loopback host (local development).
 #[test]
