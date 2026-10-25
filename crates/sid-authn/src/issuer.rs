@@ -209,8 +209,11 @@ pub async fn ensure_enrollment_api_resource(
 }
 
 /// The resource of `issuer` at `endpoint`, registered with `scopes` under a
-/// system application named `name` when it does not exist yet.
-async fn ensure_issuer_resource(
+/// system application named `name` when it does not exist yet, the
+/// registration audited as `audit_action`; the stored one otherwise,
+/// including when another replica registered it first. Its existence grants
+/// nobody anything.
+pub async fn ensure_issuer_resource(
     storage: &dyn StorageBackend,
     issuer: &OidcIssuer,
     name: &str,
