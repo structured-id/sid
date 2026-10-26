@@ -572,6 +572,15 @@ struct LoginSecurityExtras<'a> {
     user_agent: Option<&'a str>,
 }
 
+/// What an upstream sign-in request tells about who completes it, read
+/// before its state is consumed.
+pub(crate) struct UpstreamCeremony {
+    client: CeremonyClient,
+    client_ip: Option<std::net::IpAddr>,
+    user_agent: Option<String>,
+    captcha_pass: Option<String>,
+}
+
 impl AuthServiceImpl {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -2095,6 +2104,64 @@ impl AuthServiceImpl {
         }
         .sign_in(profile, session, client, proved_by)
         .await
+    }
+
+    /// Who completes the upstream sign-in `request`: its client (a browser
+    /// off the sign-in page completes nothing), address and device.
+    #[allow(clippy::result_large_err)]
+    pub(crate) fn upstream_ceremony<T>(
+        &self,
+        request: &Request<T>,
+    ) -> Result<UpstreamCeremony, Status> {
+        Ok(UpstreamCeremony {
+            client: self.ceremony_client(request.metadata())?,
+            client_ip: self.client_ip(request),
+            user_agent: extract_user_agent(request.metadata()),
+            captcha_pass: extract_captcha_pass(request.metadata()),
+        })
+    }
+
+    /// Sign `profile` in after an upstream identity provider verified the
+    /// user, as every other sign-in completes: only an active Profile, after
+    /// the sign-in security rules for this client, with a session of this
+    /// authority's lifetime and limit. The provider, not SID, verified the
+    /// user: the session names no `amr` method (RFC 8176 §1) and has basic
+    /// assurance.
+    pub(crate) async fn complete_upstream_sign_in(
+        &self,
+        profile: &sid_core::models::Profile,
+        ceremony: &UpstreamCeremony,
+    ) -> Result<SignedIn, Status> {
+        if !profile.status.can_authenticate() {
+            return Err(authentication_failed());
+        }
+        self.evaluate_login_security(
+            profile.id,
+            ceremony.client_ip,
+            "upstream",
+            false,
+            LoginSecurityExtras {
+                captcha_pass: ceremony.captcha_pass.as_deref(),
+                user_agent: ceremony.user_agent.as_deref(),
+            },
+        )
+        .await?;
+        let lifetime = match self.security_policy.session.max_lifetime_hours {
+            0 => Duration::hours(24),
+            hours => Duration::hours(i64::from(hours)),
+        };
+        let mut session = sid_core::models::Session::new(
+            profile.id,
+            session_address(ceremony.client_ip),
+            Utc::now() + lifetime,
+        );
+        session.device_id = ceremony.user_agent.as_deref().map(compute_device_id);
+        session.scopes = vec![
+            "openid".to_string(),
+            "profile".to_string(),
+            "email".to_string(),
+        ];
+        self.sign_in(profile, session, ceremony.client, None).await
     }
 
     /// SERVICE_MAINTENANCE while the installation is in maintenance mode.

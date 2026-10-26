@@ -3,7 +3,8 @@
 //! on PostgreSQL (54399, `DATABASE_URL`), against a provider served in this
 //! process. The sign-in page gets the IdP session cookie and no token, a
 //! native client a token of the signed-in Profile; a browser off the
-//! sign-in page signs nobody in.
+//! sign-in page signs nobody in. The sign-in completes as every sign-in of
+//! the authority does: only an active Profile, under its security policy.
 
 mod common;
 #[path = "../../../tests/support/oidc_provider.rs"]
@@ -13,7 +14,7 @@ use std::sync::Arc;
 
 use oidc_provider::{CLIENT, Provider};
 use serde_json::json;
-use sid_core::models::{AuditEntry, UpstreamProtocol, UpstreamProvider};
+use sid_core::models::{AuditEntry, SecurityPolicy, UpstreamProtocol, UpstreamProvider};
 use sid_plugin::storage::StorageBackend;
 use sid_proto::sid::v1::upstream_service_server::UpstreamService;
 use sid_proto::sid::v1::{
@@ -22,7 +23,6 @@ use sid_proto::sid::v1::{
 use sid_server::grpc::upstream_service::UpstreamServiceImpl;
 use tonic::Request;
 
-const SIGN_IN_PAGE: &str = "https://sid.example.com/account/login";
 const REDIRECT: &str = "https://sid.example.com/account/login/upstream";
 
 async fn storage() -> Arc<dyn StorageBackend> {
@@ -44,8 +44,14 @@ struct Setup {
     service: UpstreamServiceImpl,
 }
 
-/// A provider registered at the installation, and its upstream service.
+/// A provider registered at the installation, and its upstream service
+/// completing sign-ins under the CE security policy.
 async fn setup() -> Setup {
+    setup_under(None).await
+}
+
+/// The same, under `policy`.
+async fn setup_under(policy: Option<SecurityPolicy>) -> Setup {
     common::crypto::install_tls();
     let storage = storage().await;
     let provider = Provider::start(None).await;
@@ -70,15 +76,17 @@ async fn setup() -> Setup {
         )
         .await
         .unwrap();
+    let cache: Arc<dyn sid_plugin::cache::CacheBackend> =
+        Arc::new(sid_plugin::cache::InMemoryCacheBackend::new());
+    let auth = common::auth_service_over(storage.clone(), cache.clone(), policy);
     let service = UpstreamServiceImpl::new(
         storage.clone(),
         keys,
-        Arc::new(sid_plugin::cache::InMemoryCacheBackend::new()),
+        cache,
         common::test_jwt(),
         common::test_revocation(),
-        "https://sid.example.com".to_string(),
-    )
-    .with_sign_in_page(&url::Url::parse(SIGN_IN_PAGE).unwrap());
+        auth,
+    );
     Setup {
         storage,
         provider,
@@ -131,6 +139,34 @@ impl Setup {
         }
         request
     }
+
+    /// Sign `sub` in from a native client; returns the Profile it names.
+    async fn signed_in_profile(&self, sub: &str) -> sid_core::models::Profile {
+        let state = self.started(sub).await;
+        let native = self
+            .service
+            .handle_upstream_callback(self.callback(state, None))
+            .await
+            .unwrap();
+        let bearer = native
+            .metadata()
+            .get("authorization")
+            .expect("the native client gets its token")
+            .to_str()
+            .unwrap()
+            .strip_prefix("Bearer ")
+            .unwrap()
+            .to_owned();
+        let sid_authn::jwt::VerifiedAccess::Session(claims) =
+            common::test_jwt().verifier().verify(&bearer).await.unwrap()
+        else {
+            panic!("a sign-in session's token");
+        };
+        let id =
+            sid_core::models::ProfileId::from_uuid(uuid::Uuid::parse_str(&claims.sub).unwrap())
+                .unwrap();
+        self.storage.get_profile(id).await.unwrap().unwrap()
+    }
 }
 
 // A first sign-in provisions the Profile and gives the sign-in page the
@@ -145,7 +181,7 @@ async fn an_upstream_sign_in_creates_a_session() {
     let state = s.started(&sub).await;
     let browser = s
         .service
-        .handle_upstream_callback(s.callback(state, Some("https://sid.example.com")))
+        .handle_upstream_callback(s.callback(state, Some(common::SIGN_IN_ORIGIN)))
         .await
         .unwrap();
     let cookie = browser
@@ -221,7 +257,64 @@ async fn a_foreign_origin_signs_nobody_in() {
     );
     assert!(s.provider.token_requests().is_empty(), "no code exchanged");
     s.service
-        .handle_upstream_callback(s.callback(state, Some("https://sid.example.com")))
+        .handle_upstream_callback(s.callback(state, Some(common::SIGN_IN_ORIGIN)))
         .await
         .expect("the sign-in page still completes it");
+}
+
+// Regression: a suspended Profile does not regain access through its
+// upstream link; the sign-in is refused and no session is created.
+#[tokio::test]
+async fn a_suspended_profile_is_not_signed_in() {
+    let s = setup().await;
+    let sub = format!("user-{}", uuid::Uuid::now_v7());
+    let mut profile = s.signed_in_profile(&sub).await;
+    profile.status = sid_core::models::ProfileStatus::Suspended;
+    assert!(
+        s.storage
+            .update_profile(
+                &profile,
+                AuditEntry::system("profile.suspend", profile.id.to_string()).into(),
+            )
+            .await
+            .unwrap()
+    );
+    let before = s.storage.list_sessions(&profile.id).await.unwrap().len();
+
+    let state = s.started(&sub).await;
+    let refused = s
+        .service
+        .handle_upstream_callback(s.callback(state, None))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        common::error_reason(&refused).as_deref(),
+        Some("AUTHENTICATION_FAILED")
+    );
+    assert_eq!(
+        s.storage.list_sessions(&profile.id).await.unwrap().len(),
+        before,
+        "no session"
+    );
+}
+
+// Regression: the sign-in security rules apply to an upstream sign-in. A
+// policy requiring more than basic assurance refuses it: SID verified no
+// method of its own.
+#[tokio::test]
+async fn the_security_policy_applies_to_an_upstream_sign_in() {
+    let mut policy = SecurityPolicy::ce_default();
+    policy.auth.min_acr = sid_core::models::session::AuthLevel::Standard;
+    let s = setup_under(Some(policy)).await;
+    let sub = format!("user-{}", uuid::Uuid::now_v7());
+    let state = s.started(&sub).await;
+    let refused = s
+        .service
+        .handle_upstream_callback(s.callback(state, None))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        common::error_reason(&refused).as_deref(),
+        Some("STEP_UP_REQUIRED")
+    );
 }

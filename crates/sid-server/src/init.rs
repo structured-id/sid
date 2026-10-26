@@ -940,26 +940,21 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
     )
     .with_trusted_proxies(trusted_proxies)
     .with_enrollment_pin(enrollment_pin)
-    .with_browser_cookie(browser_cookie.clone());
+    .with_browser_cookie(browser_cookie);
     let auth_svc = Arc::new(match &login_url {
         Some(page) => auth_svc.with_sign_in_page(page),
         None => auth_svc,
     });
     // Sign-in through upstream providers completes as the other ceremonies
-    // do: the same sign-in page, cookie and session rules.
-    let upstream_svc = crate::grpc::upstream_service::UpstreamServiceImpl::new(
+    // do: the same sign-in page, cookie, security rules and session policy.
+    let upstream_svc = Arc::new(crate::grpc::upstream_service::UpstreamServiceImpl::new(
         storage.clone(),
         key_manager.clone(),
         cache_backend.clone(),
         jwt.clone(),
         revocation_cache.clone(),
-        issuer.clone(),
-    )
-    .with_browser_cookie(browser_cookie);
-    let upstream_svc = Arc::new(match &login_url {
-        Some(page) => upstream_svc.with_sign_in_page(page),
-        None => upstream_svc,
-    });
+        auth_svc.clone(),
+    ));
 
     let project_svc = Arc::new(ProjectServiceImpl::new(
         storage.clone(),
