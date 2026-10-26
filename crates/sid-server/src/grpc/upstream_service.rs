@@ -505,6 +505,8 @@ impl UpstreamService for UpstreamServiceImpl {
         &self,
         request: Request<InitiateUpstreamAuthRequest>,
     ) -> Result<Response<InitiateUpstreamAuthResponse>, Status> {
+        // No sign-in starts during maintenance, as no local one does.
+        self.auth.check_maintenance().await?;
         let req = request.into_inner();
         let provider_id = Self::parse_provider_id(&req.provider_id)?;
 
@@ -549,6 +551,9 @@ impl UpstreamService for UpstreamServiceImpl {
         &self,
         request: Request<HandleUpstreamCallbackRequest>,
     ) -> Result<Response<HandleUpstreamCallbackResponse>, Status> {
+        // Refused before the pending sign-in is consumed: it completes once
+        // maintenance ends.
+        self.auth.check_maintenance().await?;
         // Who completes the sign-in decides how its credential is delivered;
         // a browser off the sign-in page completes nothing.
         let ceremony = self.auth.upstream_ceremony(&request)?;

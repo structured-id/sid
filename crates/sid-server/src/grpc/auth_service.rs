@@ -2192,7 +2192,7 @@ impl AuthServiceImpl {
     }
 
     /// SERVICE_MAINTENANCE while the installation is in maintenance mode.
-    async fn check_maintenance(&self) -> Result<(), Status> {
+    pub(crate) async fn check_maintenance(&self) -> Result<(), Status> {
         if self.feature_flags.is_maintenance_mode().await {
             Err(maintenance())
         } else {

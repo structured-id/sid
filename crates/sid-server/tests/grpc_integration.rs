@@ -4894,6 +4894,39 @@ async fn test_maintenance_mode_blocks_auth_service() {
     assert!(status.message().contains("maintenance"));
 }
 
+// Regression: an upstream sign-in, as every local one, is refused while the
+// installation is in maintenance, at its start and before its callback
+// consumes the pending sign-in.
+#[tokio::test]
+async fn test_maintenance_mode_blocks_upstream_sign_in() {
+    use sid_proto::sid::v1::upstream_service_server::UpstreamService;
+    use sid_proto::sid::v1::{HandleUpstreamCallbackRequest, InitiateUpstreamAuthRequest};
+    let svc = maintenance_mode_services().await;
+    let provider = uuid::Uuid::now_v7().to_string();
+    let started = svc
+        .upstream
+        .initiate_upstream_auth(Request::new(InitiateUpstreamAuthRequest {
+            provider_id: provider.clone(),
+            redirect_uri: "https://sid.example.com/account/login/upstream".into(),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(started.code(), tonic::Code::Unavailable);
+    assert!(started.message().contains("maintenance"));
+    let callback = svc
+        .upstream
+        .handle_upstream_callback(Request::new(HandleUpstreamCallbackRequest {
+            provider_id: provider,
+            code: "the-code".into(),
+            state: "the-state".into(),
+            redirect_uri: "https://sid.example.com/account/login/upstream".into(),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(callback.code(), tonic::Code::Unavailable);
+    assert!(callback.message().contains("maintenance"));
+}
+
 #[tokio::test]
 async fn test_maintenance_mode_blocks_identity_service() {
     let svc = maintenance_mode_services().await;
