@@ -26,7 +26,7 @@ use sid_core::models::{
     NewKeyEpoch, PasswordHistory, ProfileId, WrappedHistoryKey, history_key_context,
 };
 use sid_core::{Error as SidError, Result as SidResult};
-use sid_keys::{EncryptedField, KeyManager};
+use sid_keys::{EncryptedField, KeyManager, KeyManagerError};
 use sid_pake_core::history::{self as relation, EvaluationProof, KsfParams};
 use sid_pake_core::types::ZkppPublicInputs;
 use subtle::ConstantTimeEq;
@@ -205,16 +205,16 @@ impl HistoryEvaluator {
     ) -> SidResult<pallas::Scalar> {
         let field = EncryptedField::from_bytes(&key.0)
             .map_err(|e| SidError::Internal(format!("history key format: {e}")))?;
-        if field.context != history_key_context(epoch, owner_domain) {
-            return Err(SidError::Internal(
-                "history key sealed for another epoch or owner".into(),
-            ));
-        }
         let bytes = Zeroizing::new(
             self.keys
-                .decrypt(&field)
+                .decrypt(&field, &history_key_context(epoch, owner_domain))
                 .await
-                .map_err(|e| SidError::Internal(format!("unseal history key: {e}")))?,
+                .map_err(|e| match e {
+                    KeyManagerError::ContextMismatch => {
+                        SidError::Internal("history key sealed for another epoch or owner".into())
+                    }
+                    e => SidError::Internal(format!("unseal history key: {e}")),
+                })?,
         );
         let repr: [u8; 32] = bytes
             .as_slice()

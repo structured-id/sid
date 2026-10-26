@@ -80,17 +80,13 @@ pub async fn seal(
 }
 
 /// Decrypt a stored secret that must belong to `context`.
-///
-/// The context is checked before decryption: the AAD binds a ciphertext to
-/// the context stored beside it, so a whole sealed value copied from another
-/// record would otherwise decrypt as that record's secret.
 pub async fn open(
     key_manager: &dyn KeyManager,
     context: &str,
     stored: &[u8],
 ) -> Result<Opened, SealedSecretError> {
     let field = inspect(context, stored)?;
-    let secret = Zeroizing::new(key_manager.decrypt(&field).await?);
+    let secret = Zeroizing::new(key_manager.decrypt(&field, context).await?);
     let resealed = if key_manager.needs_rotation(&field) {
         Some(seal(key_manager, context, &secret).await?)
     } else {

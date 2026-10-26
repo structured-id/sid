@@ -1022,8 +1022,9 @@ async fn the_sides_share_no_secret_record() {
         .unwrap()
         .expect("stored before its first evaluation");
     let sealed = sid_keys::EncryptedField::from_bytes(&key.0).unwrap();
-    assert!(field_keys.decrypt(&sealed).await.is_err());
-    assert!(history_keys.decrypt(&sealed).await.is_ok());
+    let context = sid_core::models::history_key_context(op.epochs[0].id, &op.owner_domain);
+    assert!(field_keys.decrypt(&sealed, &context).await.is_err());
+    assert!(history_keys.decrypt(&sealed, &context).await.is_ok());
 
     ops.store(&op).await.unwrap();
     let evaluator_view = ChallengeStore::<PendingOperation<ProfileId, Change>>::new(

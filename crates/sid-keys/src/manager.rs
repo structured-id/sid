@@ -36,6 +36,10 @@ pub enum KeyManagerError {
     #[error("decryption failed: {0}")]
     Decryption(String),
 
+    /// The field was sealed for another record than the one asked about.
+    #[error("field is bound to another record")]
+    ContextMismatch,
+
     #[error("key not found for version {0}")]
     KeyNotFound(u32),
 
@@ -98,8 +102,9 @@ impl KeyVersionParams {
 /// Encrypts and decrypts stored fields under a versioned key.
 ///
 /// Context binding prevents ciphertext swap attacks between records: the
-/// context is the AAD, so a ciphertext moved to another record fails to
-/// decrypt rather than yielding another record's secret.
+/// context is the AAD, and the reader names the record it expects, so a field
+/// moved to another record fails to decrypt rather than yielding another
+/// record's secret.
 #[async_trait]
 pub trait KeyManager: Send + Sync {
     /// Encrypt a plaintext value with context binding.
@@ -107,18 +112,25 @@ pub trait KeyManager: Send + Sync {
     /// Context should uniquely identify the field and record, e.g. "totp:{profile_id}".
     async fn encrypt(&self, plaintext: &[u8], context: &str) -> KeyManagerResult<EncryptedField>;
 
-    /// Decrypt a previously encrypted field.
+    /// Decrypt a field that must belong to `context`, the record the caller
+    /// derives it from (never the context stored in the field).
     ///
     /// Uses the key version recorded in the field to find the correct key.
-    async fn decrypt(&self, field: &EncryptedField) -> KeyManagerResult<Vec<u8>>;
+    async fn decrypt(&self, field: &EncryptedField, context: &str) -> KeyManagerResult<Vec<u8>>;
 
-    /// Re-encrypt a field with the current key version.
+    /// Re-encrypt a field of `context` with the current key version.
     ///
     /// Called during lazy rotation: if `field.key_version < current_key_version()`,
     /// the caller should call `rotate()` and persist the result.
-    async fn rotate(&self, field: &EncryptedField) -> KeyManagerResult<EncryptedField> {
-        let plaintext = self.decrypt(field).await?;
-        self.encrypt(&plaintext, &field.context).await
+    async fn rotate(
+        &self,
+        field: &EncryptedField,
+        context: &str,
+    ) -> KeyManagerResult<EncryptedField> {
+        let mut plaintext = self.decrypt(field, context).await?;
+        let rotated = self.encrypt(&plaintext, context).await;
+        plaintext.zeroize();
+        rotated
     }
 
     /// Current key version. Fields encrypted with older versions need rotation.
@@ -237,16 +249,15 @@ impl KeyManager for SoftwareKeyManager {
         })
     }
 
-    async fn decrypt(&self, field: &EncryptedField) -> KeyManagerResult<Vec<u8>> {
+    async fn decrypt(&self, field: &EncryptedField, context: &str) -> KeyManagerResult<Vec<u8>> {
+        // The context names a record, not a secret: a plain comparison.
+        if field.context != context {
+            return Err(KeyManagerError::ContextMismatch);
+        }
         let key = self.get_key(field.key_version)?;
 
         self.crypto
-            .aes_256_gcm_decrypt(
-                key,
-                &field.nonce,
-                &field.ciphertext,
-                field.context.as_bytes(),
-            )
+            .aes_256_gcm_decrypt(key, &field.nonce, &field.ciphertext, context.as_bytes())
             .map_err(|e| KeyManagerError::Decryption(e.to_string()))
     }
 

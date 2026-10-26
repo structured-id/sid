@@ -205,7 +205,10 @@ impl UpstreamServiceImpl {
 
         let secret_bytes = self
             .key_manager
-            .decrypt(&provider.client_secret)
+            .decrypt(
+                &provider.client_secret,
+                &provider_id.client_secret_context(),
+            )
             .await
             .map_err(|e| internal("decrypt upstream client secret", e))?;
 
@@ -268,7 +271,7 @@ impl UpstreamService for UpstreamServiceImpl {
             .key_manager
             .encrypt(
                 req.client_secret.as_bytes(),
-                &format!("upstream:{}", provider_id.0),
+                &provider_id.client_secret_context(),
             )
             .await
             .map_err(|e| internal("encrypt upstream client secret", e))?;
@@ -375,7 +378,7 @@ impl UpstreamService for UpstreamServiceImpl {
         if let Some(ref secret) = req.client_secret {
             provider.client_secret = self
                 .key_manager
-                .encrypt(secret.as_bytes(), &format!("upstream:{}", provider_id.0))
+                .encrypt(secret.as_bytes(), &provider_id.client_secret_context())
                 .await
                 .map_err(|e| internal("encrypt upstream client secret", e))?;
         }

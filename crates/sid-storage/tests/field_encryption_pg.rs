@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use secrecy::SecretBox;
-use sid_core::models::{AuditEntry, UpstreamProtocol, UpstreamProvider};
+use sid_core::models::{AuditEntry, UpstreamProtocol, UpstreamProvider, UpstreamProviderId};
 use sid_crypto::RustCryptoPrimitives;
 use sid_keys::{EncryptedField, KeyManager, KeyManagerError, KeyVersionParams, SoftwareKeyManager};
 use sid_plugin::storage::StorageBackend;
@@ -65,14 +65,19 @@ async fn stored_provider(
     km: &SoftwareKeyManager,
     secret: &[u8],
 ) -> UpstreamProvider {
-    let name = format!("test-{}", uuid::Uuid::now_v7());
-    let context = format!("upstream:{name}");
+    let id = UpstreamProviderId::new();
     let encrypted = km
-        .encrypt(secret, &context)
+        .encrypt(secret, &id.client_secret_context())
         .await
         .expect("encryption succeeds");
 
-    let provider = UpstreamProvider::new(name, UpstreamProtocol::Oidc, "client-id", encrypted);
+    let mut provider = UpstreamProvider::new(
+        format!("test-{}", id.0),
+        UpstreamProtocol::Oidc,
+        "client-id",
+        encrypted,
+    );
+    provider.id = id;
     backend
         .create_upstream_provider(&provider, AuditEntry::system("test", "setup").into())
         .await
@@ -87,6 +92,18 @@ async fn load(backend: &PostgresBackend, provider: &UpstreamProvider) -> Upstrea
         .await
         .expect("storage read succeeds")
         .expect("provider exists")
+}
+
+/// The client secret of `provider`, read for that provider.
+async fn secret_of(
+    km: &SoftwareKeyManager,
+    provider: &UpstreamProvider,
+) -> Result<Vec<u8>, KeyManagerError> {
+    km.decrypt(
+        &provider.client_secret,
+        &provider.id.client_secret_context(),
+    )
+    .await
 }
 
 /// The ordinary path: what one process encrypts and stores, a process that
@@ -107,8 +124,7 @@ async fn test_secret_survives_the_database_round_trip() {
     assert_eq!(loaded.client_secret.key_version, 1);
 
     let reader = manager(vec![params_v1()]);
-    let plaintext = reader
-        .decrypt(&loaded.client_secret)
+    let plaintext = secret_of(&reader, &loaded)
         .await
         .expect("the same master re-derives the key");
     assert_eq!(plaintext, b"upstream-client-secret");
@@ -130,7 +146,7 @@ async fn test_another_master_cannot_read_a_stored_secret() {
     )
     .expect("versions are valid");
 
-    let result = intruder.decrypt(&loaded.client_secret).await;
+    let result = secret_of(&intruder, &loaded).await;
     assert!(matches!(result, Err(KeyManagerError::Decryption(_))));
 }
 
@@ -144,7 +160,7 @@ async fn test_a_replaced_salt_cannot_read_a_stored_secret() {
     let loaded = load(&backend, &provider).await;
 
     let wrong_salt = manager(vec![KeyVersionParams::new(1, vec![0xEE; 16], "key-v1")]);
-    let result = wrong_salt.decrypt(&loaded.client_secret).await;
+    let result = secret_of(&wrong_salt, &loaded).await;
     assert!(matches!(result, Err(KeyManagerError::Decryption(_))));
 }
 
@@ -164,7 +180,7 @@ async fn test_lazy_rotation_through_storage() {
     assert!(current.needs_rotation(&loaded.client_secret));
 
     let rotated = current
-        .rotate(&loaded.client_secret)
+        .rotate(&loaded.client_secret, &loaded.id.client_secret_context())
         .await
         .expect("rotation succeeds");
     assert_eq!(rotated.key_version, 2);
@@ -182,8 +198,7 @@ async fn test_lazy_rotation_through_storage() {
     assert_eq!(after.client_secret.key_version, 2);
     assert!(!current.needs_rotation(&after.client_secret));
     assert_eq!(
-        current
-            .decrypt(&after.client_secret)
+        secret_of(&current, &after)
             .await
             .expect("current version reads it"),
         b"rotating-secret"
@@ -193,7 +208,7 @@ async fn test_lazy_rotation_through_storage() {
     // what makes destroying an old version meaningful.
     let stale = manager(vec![params_v1()]);
     assert!(matches!(
-        stale.decrypt(&after.client_secret).await,
+        secret_of(&stale, &after).await,
         Err(KeyManagerError::KeyNotFound(2))
     ));
 }
@@ -224,17 +239,48 @@ async fn test_a_secret_moved_to_another_row_is_refused() {
     );
 
     let tampered = load(&backend, &bob).await;
-    let result = km.decrypt(&tampered.client_secret).await;
+    let result = secret_of(&km, &tampered).await;
     assert!(matches!(result, Err(KeyManagerError::Decryption(_))));
 
     // Alice's own row is untouched by the attempt.
     let alice_after = load(&backend, &alice).await;
     assert_eq!(
-        km.decrypt(&alice_after.client_secret)
+        secret_of(&km, &alice_after)
             .await
             .expect("alice still reads her own secret"),
         b"alice-secret"
     );
+}
+
+/// A whole field copied to another row, its own context included, is refused
+/// when that row is read: the reader names the row, not the field.
+#[tokio::test]
+async fn test_a_whole_field_copied_to_another_row_is_refused() {
+    let backend = setup().await;
+    let km = manager(vec![params_v1()]);
+
+    let alice = load(
+        &backend,
+        &stored_provider(&backend, &km, b"alice-secret").await,
+    )
+    .await;
+    let mut bob = load(
+        &backend,
+        &stored_provider(&backend, &km, b"bob-secret").await,
+    )
+    .await;
+
+    bob.client_secret = alice.client_secret.clone();
+    assert!(
+        backend
+            .update_upstream_provider(&bob, AuditEntry::system("test", "copy").into())
+            .await
+            .expect("row is stored")
+    );
+
+    let copied = load(&backend, &bob).await;
+    let result = secret_of(&km, &copied).await;
+    assert!(matches!(result, Err(KeyManagerError::ContextMismatch)));
 }
 
 /// A row whose ciphertext was altered in the database fails to decrypt rather
@@ -255,6 +301,6 @@ async fn test_a_tampered_ciphertext_is_refused() {
     );
 
     let loaded = load(&backend, &provider).await;
-    let result = km.decrypt(&loaded.client_secret).await;
+    let result = secret_of(&km, &loaded).await;
     assert!(matches!(result, Err(KeyManagerError::Decryption(_))));
 }
