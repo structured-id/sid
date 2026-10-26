@@ -240,13 +240,14 @@ impl OidcProviderClient {
     }
 
     /// Fetch the discovery document at `discovery_url`. Its issuer must be
-    /// the URL the discovery URL names (OpenID Connect Discovery 1.0 §4.3).
+    /// the one whose discovery URL that is (OpenID Connect Discovery 1.0
+    /// §4.1, §4.3).
     async fn fetch_discovery(http: &Client, discovery_url: &str) -> SidResult<OidcDiscovery> {
-        let named = discovery_url
-            .strip_suffix(DISCOVERY_SUFFIX)
-            .ok_or_else(|| {
-                SidError::Validation(format!("a discovery_url ends with {DISCOVERY_SUFFIX}"))
-            })?;
+        if !discovery_url.ends_with(DISCOVERY_SUFFIX) {
+            return Err(SidError::Validation(format!(
+                "a discovery_url ends with {DISCOVERY_SUFFIX}"
+            )));
+        }
         let resp = http
             .get(discovery_url)
             .send()
@@ -264,7 +265,7 @@ impl OidcProviderClient {
             .json::<OidcDiscovery>()
             .await
             .map_err(|e| SidError::Internal(format!("OIDC discovery parse failed: {e}")))?;
-        check_discovered_issuer(named, &discovery.issuer)?;
+        check_discovered_issuer(discovery_url, &discovery.issuer)?;
         Ok(discovery)
     }
 
@@ -324,14 +325,17 @@ impl OidcProviderClient {
     }
 }
 
-/// A discovery document's `issuer` must be exactly the issuer its URL names
-/// (OpenID Connect Discovery 1.0 §4.3).
-fn check_discovered_issuer(named: &str, discovered: &str) -> SidResult<()> {
-    if named == discovered {
+/// A discovery document at `discovery_url` must name the issuer whose
+/// discovery URL that is: the issuer, without one terminating slash, with
+/// the well-known suffix (OpenID Connect Discovery 1.0 §4.1); the issuer
+/// itself stays exact (§4.3).
+fn check_discovered_issuer(discovery_url: &str, discovered: &str) -> SidResult<()> {
+    let base = discovered.strip_suffix('/').unwrap_or(discovered);
+    if format!("{base}{DISCOVERY_SUFFIX}") == discovery_url {
         Ok(())
     } else {
         Err(SidError::Validation(format!(
-            "the discovery document names issuer {discovered}, not {named}"
+            "the discovery document at {discovery_url} names issuer {discovered}"
         )))
     }
 }
@@ -363,7 +367,17 @@ fn merge_userinfo(
             "the UserInfo subject is not the ID Token's".into(),
         ));
     }
+    // An address and its verification come from the same source: the ID
+    // Token's when it names one, else UserInfo's.
+    let token_email = id_token.contains_key("email");
+    if !token_email {
+        // A verification flag without its address vouches for nothing.
+        id_token.remove("email_verified");
+    }
     for (name, value) in userinfo {
+        if token_email && (name == "email" || name == "email_verified") {
+            continue;
+        }
         id_token.entry(name).or_insert(value);
     }
     Ok(id_token)

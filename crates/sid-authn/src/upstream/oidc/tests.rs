@@ -261,12 +261,40 @@ fn userinfo_must_be_about_the_same_subject() {
     assert_eq!(merged["email"], "a@sid.example.com");
 }
 
-// The discovery document must name the issuer its URL names.
+// The email and its verification come from one source: a UserInfo
+// verification never vouches for the ID Token's address, and an address
+// only UserInfo names comes with UserInfo's own verification.
+#[test]
+fn an_email_keeps_its_own_verification() {
+    let id_token: HashMap<String, serde_json::Value> =
+        serde_json::from_value(json!({"sub": "user-1", "email": "old@sid.example.com"})).unwrap();
+    let userinfo: HashMap<String, serde_json::Value> = serde_json::from_value(
+        json!({"sub": "user-1", "email": "new@sid.example.com", "email_verified": true}),
+    )
+    .unwrap();
+    let merged = merge_userinfo(id_token, userinfo.clone()).unwrap();
+    assert_eq!(merged["email"], "old@sid.example.com");
+    assert!(!merged.contains_key("email_verified"), "{merged:?}");
+
+    let without: HashMap<String, serde_json::Value> =
+        serde_json::from_value(json!({"sub": "user-1"})).unwrap();
+    let merged = merge_userinfo(without, userinfo).unwrap();
+    assert_eq!(merged["email"], "new@sid.example.com");
+    assert_eq!(merged["email_verified"], true);
+}
+
+// The discovery URL is the issuer, without one terminating slash, with the
+// well-known suffix (OpenID Connect Discovery 1.0 §4.1); the document must
+// name that issuer (§4.3).
 #[test]
 fn the_discovered_issuer_is_the_named_one() {
-    check_discovered_issuer(ISSUER, ISSUER).unwrap();
-    assert!(check_discovered_issuer(ISSUER, "https://other.sid.example.com").is_err());
-    assert!(check_discovered_issuer(ISSUER, &format!("{ISSUER}/")).is_err());
+    let url = |issuer: &str| format!("{issuer}{DISCOVERY_SUFFIX}");
+    check_discovered_issuer(&url(ISSUER), ISSUER).unwrap();
+    let tenant = "https://idp.sid.example.com/tenant/";
+    check_discovered_issuer(&url("https://idp.sid.example.com/tenant"), tenant).unwrap();
+    assert!(check_discovered_issuer(&url(ISSUER), "https://other.sid.example.com").is_err());
+    assert!(check_discovered_issuer(&url(&format!("{ISSUER}/")), ISSUER).is_err());
+    assert!(check_discovered_issuer(ISSUER, ISSUER).is_err());
 }
 
 // RFC 7636 Appendix B: the S256 challenge of the specification's verifier.
