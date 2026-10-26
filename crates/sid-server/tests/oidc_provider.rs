@@ -114,23 +114,30 @@ async fn metadata_is_the_issuers_own() {
         format!("{issuer}/oauth2/authorize")
     );
     assert_eq!(metadata.token_endpoint, format!("{issuer}/oauth2/token"));
-    assert_eq!(metadata.userinfo_endpoint, format!("{issuer}/userinfo"));
+    assert_eq!(
+        metadata.userinfo_endpoint,
+        Some(format!("{issuer}/userinfo"))
+    );
     assert_eq!(metadata.jwks_uri, format!("{issuer}/jwks"));
     assert_eq!(
         metadata.end_session_endpoint,
-        format!("{issuer}/oauth2/end-session")
+        Some(format!("{issuer}/oauth2/end-session"))
     );
     assert_eq!(
         metadata.introspection_endpoint,
-        format!("{issuer}/oauth2/introspect")
+        Some(format!("{issuer}/oauth2/introspect"))
     );
     assert_eq!(
         metadata.revocation_endpoint,
-        format!("{issuer}/oauth2/revoke")
+        Some(format!("{issuer}/oauth2/revoke"))
     );
     assert_eq!(
         metadata.device_authorization_endpoint,
-        format!("{issuer}/oauth2/device")
+        Some(format!("{issuer}/oauth2/device"))
+    );
+    assert_eq!(
+        metadata.registration_endpoint,
+        Some(format!("{issuer}/oauth2/register"))
     );
     assert_eq!(metadata.subject_types_supported, ["public"]);
     assert_eq!(metadata.id_token_signing_alg_values_supported, ["EdDSA"]);
