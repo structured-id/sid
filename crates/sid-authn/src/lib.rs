@@ -58,6 +58,8 @@ pub mod magic_link;
 pub mod migration;
 pub mod normalize;
 pub mod oauth2;
+#[cfg(feature = "oauth-http")]
+pub mod oauth_http;
 pub mod opaque;
 pub mod opaque_zkpp;
 #[cfg(feature = "grpc")]

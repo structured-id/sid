@@ -270,6 +270,65 @@ fn test_authorization_response() {
     assert!(response.metadata().get("location").is_none());
 }
 
+/// The response URL alone, for a front end that sends the browser there
+/// itself: the same query as the redirect, and no URL for a redirect URI
+/// that is not one.
+#[test]
+fn test_authorization_response_url() {
+    let url = authorization_response_url(
+        "https://app.example.com/cb?tenant=a",
+        "https://sid.example.com/i/abc",
+        &[("error", "access_denied")],
+        Some("s"),
+    )
+    .unwrap();
+    assert_eq!(
+        url.as_str(),
+        "https://app.example.com/cb?tenant=a&error=access_denied&state=s&iss=https%3A%2F%2Fsid.example.com%2Fi%2Fabc"
+    );
+    assert!(authorization_response_url("not a url", "iss", &[], None).is_none());
+}
+
+/// A refused grant reaches the HTTP form as its RFC error: a missing
+/// parameter `invalid_request`, a refusal its own code, a key mismatch
+/// `invalid_dpop_proof`; a host's own refusal passes through unchanged.
+#[test]
+fn test_grant_refusal() {
+    let error = |status: Status| json_body(&refusal(&status, false, "r"))["error"].clone();
+    assert_eq!(
+        error(grant_refusal(GrantFailure::MissingParameter("code"))),
+        "invalid_request"
+    );
+    assert_eq!(
+        error(grant_refusal(GrantFailure::Refused(
+            TokenError::InvalidGrant,
+            "used".into()
+        ))),
+        "invalid_grant"
+    );
+    assert_eq!(
+        error(grant_refusal(GrantFailure::ProofMismatch)),
+        "invalid_dpop_proof"
+    );
+    let host = grant_refusal(GrantFailure::Host(client_refused()));
+    assert_eq!(error(host.clone()), "invalid_client");
+    assert_eq!(
+        status_code(&refusal(&host, true, "r")),
+        "401",
+        "a Basic client is challenged"
+    );
+    assert_eq!(
+        status_code(&refusal(
+            &grant_refusal(GrantFailure::Storage(sid_core::Error::Storage(
+                "down".into()
+            ))),
+            false,
+            "r"
+        )),
+        "500"
+    );
+}
+
 /// The sign-in redirect keeps the page's own query and carries the request
 /// to return to.
 #[test]

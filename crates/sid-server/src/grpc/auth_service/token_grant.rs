@@ -3,7 +3,8 @@
 //! engine with this server's storage and its Profile accounts.
 
 use sid_authn::client_auth::ClientAuthentication;
-use sid_authn::grant::{AccountClaims, CodeGrant, GrantFailure, GrantHost, IdTokenAccount};
+use sid_authn::grant::{AccountClaims, CodeGrant, GrantHost, IdTokenAccount};
+use sid_authn::oauth_http::grant_refusal;
 use sid_authn::oauth2::{OAuth2Server, TokenResponse};
 use sid_authn::target::Target;
 use sid_core::grpc_error::refuse::{internal, storage_failure};
@@ -16,10 +17,7 @@ use sid_proto::sid::v1::{OAuth2TokenRequest, OAuth2TokenResponse};
 use std::sync::Arc;
 use tonic::{Response, Status};
 
-use super::{
-    AuthServiceImpl, claims_unavailable, dpop_refusal, missing_parameter, resolve_claims,
-    token_refusal,
-};
+use super::{AuthServiceImpl, claims_unavailable, resolve_claims};
 
 /// One token request of a local Profile's grant, as the grant engine sees it.
 struct ProfileGrant<'a> {
@@ -137,18 +135,6 @@ impl GrantHost for ProfileGrant<'_> {
     }
 }
 
-/// The token endpoint's answer to a refused or failed grant.
-fn grant_status(failure: GrantFailure<Status>) -> Status {
-    match failure {
-        GrantFailure::MissingParameter(field) => missing_parameter(field),
-        GrantFailure::Refused(error, description) => token_refusal(error, description),
-        GrantFailure::ProofMismatch => dpop_refusal("refresh token is bound to another key"),
-        GrantFailure::Storage(e) => storage_failure(e),
-        GrantFailure::Issuance(e) => internal("issue tokens", e),
-        GrantFailure::Host(status) => status,
-    }
-}
-
 fn token_response(response: TokenResponse) -> Response<OAuth2TokenResponse> {
     Response::new(OAuth2TokenResponse {
         access_token: response.access_token,
@@ -182,7 +168,7 @@ impl AuthServiceImpl {
         sid_authn::grant::redeem_code(&host, request)
             .await
             .map(token_response)
-            .map_err(grant_status)
+            .map_err(grant_refusal)
     }
 
     pub(super) async fn handle_refresh_token_grant(
@@ -200,7 +186,7 @@ impl AuthServiceImpl {
         sid_authn::grant::refresh(&host, req.refresh_token.as_deref())
             .await
             .map(token_response)
-            .map_err(grant_status)
+            .map_err(grant_refusal)
     }
 
     /// End a session whose credential was replayed (a reused authorization

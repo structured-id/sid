@@ -19,6 +19,10 @@ use sid_authn::jwt::JwtService;
 use sid_authn::legacy_hash::BuiltinLegacyVerifier;
 use sid_authn::magic_link::MagicLinkService;
 use sid_authn::normalize::{NormalizedPrincipal, normalize_principal};
+use sid_authn::oauth_http::{
+    client_authentication, client_refused, dpop_refusal, missing_parameter, target_refused,
+    token_error, token_refusal,
+};
 use sid_authn::oauth2::{IdTokenSource, OAuth2Server, TokenError};
 use sid_authn::opaque::OpaqueRouter;
 use sid_authn::opaque_zkpp::ZkppOpaqueServer;
@@ -6259,18 +6263,6 @@ fn token_endpoint(issuer: &OidcIssuer) -> String {
     sid_authn::issuer::token_endpoint(&issuer.canonical_url)
 }
 
-/// A refused DPoP proof, with the `invalid_dpop_proof` error code
-/// (RFC 9449 §7.1) for the token endpoint's error response.
-fn dpop_refusal(detail: impl std::fmt::Display) -> Status {
-    ApiError::new(
-        ErrorReason::InvalidFieldValue,
-        format!("invalid DPoP proof: {detail}"),
-    )
-    .with_metadata("field", "DPoP")
-    .with_metadata("oauthError", TokenError::InvalidDpopProof.code())
-    .into()
-}
-
 /// The grant type a device polls the token endpoint with (RFC 8628 §3.4).
 const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 
@@ -6279,41 +6271,6 @@ const OAUTH2_TOKEN_RPC: &str = "/sid.v1.authn.AuthService/OAuth2Token";
 
 /// The token type identifier of an access token (RFC 8693 §3).
 const ACCESS_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:access_token";
-
-/// The client authentication a request presents: HTTP Basic in its
-/// `authorization` metadata, or the given body parameters (RFC 6749 §2.3).
-/// An `authorization` value that is not ASCII is no credential.
-fn client_authentication(
-    metadata: &tonic::metadata::MetadataMap,
-    client_id: Option<&str>,
-    client_secret: Option<&str>,
-    client_assertion: Option<&str>,
-    client_assertion_type: Option<&str>,
-) -> Result<ClientAuthentication, Status> {
-    let authorization = metadata
-        .get("authorization")
-        .and_then(|value| value.to_str().ok());
-    ClientAuthentication::from_request(
-        authorization,
-        client_id,
-        client_secret,
-        client_assertion,
-        client_assertion_type,
-    )
-    .map_err(|error| match error {
-        TokenError::InvalidRequest => token_refusal(
-            error,
-            "the client must name itself and use one authentication method",
-        ),
-        _ => client_refused(),
-    })
-}
-
-/// A token endpoint refusal; `ErrorInfo.metadata["oauthError"]` carries the
-/// RFC 6749 §5.2 `error` code the endpoint's HTTP form answers with.
-fn token_refusal(error: TokenError, message: impl Into<std::borrow::Cow<'static, str>>) -> Status {
-    token_error(error, message).into()
-}
 
 /// A device polling faster than its `interval` seconds (RFC 8628 §3.5
 /// `slow_down`): the interval grows by five seconds, which RetryInfo tells
@@ -6324,54 +6281,6 @@ fn slow_down(interval: i32) -> Status {
     token_error(TokenError::SlowDown, "poll less often")
         .with_retry_after(std::time::Duration::from_secs(wait))
         .into()
-}
-
-fn token_error(error: TokenError, message: impl Into<std::borrow::Cow<'static, str>>) -> ApiError {
-    let reason = match error {
-        TokenError::InvalidClient => ErrorReason::AuthenticationFailed,
-        TokenError::UnauthorizedClient | TokenError::AccessDenied => {
-            ErrorReason::InsufficientPermissions
-        }
-        TokenError::InvalidScope => ErrorReason::ScopeNotGranted,
-        // The user has not yet consented to the device request.
-        TokenError::AuthorizationPending => ErrorReason::ConsentRequired,
-        TokenError::SlowDown => ErrorReason::RateLimitExceeded,
-        TokenError::ExpiredToken => ErrorReason::OperationExpired,
-        TokenError::InvalidRequest
-        | TokenError::InvalidGrant
-        | TokenError::UnsupportedGrantType
-        | TokenError::InvalidDpopProof
-        | TokenError::InvalidTarget => ErrorReason::InvalidFieldValue,
-    };
-    ApiError::new(reason, message).with_metadata("oauthError", error.code())
-}
-
-/// A request whose target resource is refused (RFC 8707 §2
-/// `invalid_target`), naming the `resource` parameter.
-fn target_refused(refusal: sid_authn::target::TargetRefusal) -> Status {
-    token_error(TokenError::InvalidTarget, refusal.to_string())
-        .with_field_violation("resource", refusal.to_string())
-        .with_metadata("field", "resource")
-        .into()
-}
-
-/// A required token request parameter is missing (RFC 6749 §5.2
-/// `invalid_request`).
-fn missing_parameter(field: &'static str) -> Status {
-    ApiError::new(
-        ErrorReason::RequiredFieldMissing,
-        format!("{field} is required"),
-    )
-    .with_field_violation(field, "required")
-    .with_metadata("field", field)
-    .with_metadata("oauthError", TokenError::InvalidRequest.code())
-    .into()
-}
-
-/// The client failed to authenticate (RFC 6749 §5.2 `invalid_client`); what
-/// failed goes to the log, never to the client.
-fn client_refused() -> Status {
-    token_refusal(TokenError::InvalidClient, "client authentication failed")
 }
 
 /// The scopes a machine user's token carries: the requested ones it may
