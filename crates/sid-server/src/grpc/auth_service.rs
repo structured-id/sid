@@ -69,7 +69,7 @@ use sid_core::grpc_error::refuse::{
 mod authorize;
 mod end_session;
 mod password_sign_in;
-mod refusal;
+pub(crate) mod refusal;
 mod sign_in_security;
 mod token_grant;
 pub(crate) use authorize::{BrowserAuthorization, PendingAuthorization, REQUEST_URI_PREFIX};

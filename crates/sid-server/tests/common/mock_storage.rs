@@ -502,6 +502,12 @@ impl MockStorage {
         self.with_project(Project::system())
     }
 
+    /// How many profiles the store holds.
+    #[allow(dead_code)]
+    pub fn profile_count(&self) -> usize {
+        self.inner.lock().unwrap().profiles.len()
+    }
+
     pub fn with_profile(self, profile: Profile) -> Self {
         let mut inner = self.inner.lock().unwrap();
         if let Some(ref username) = profile.username {
@@ -1859,6 +1865,9 @@ impl StorageBackend for MockStorage {
 
     async fn get_profile_by_email(&self, email: &str) -> SidResult<Option<Profile>> {
         let inner = self.inner.lock().unwrap();
+        if inner.profile_reads_fail {
+            return Err(sid_core::Error::Storage("read profile".into()));
+        }
         let profile = inner
             .profiles_by_email
             .get(email)
@@ -4208,12 +4217,19 @@ impl StorageBackend for MockStorage {
         Ok(0)
     }
 
-    // === UPSTREAM PROVIDER — stubs ===
+    // === UPSTREAM PROVIDER — the created ones are read back ===
     async fn get_upstream_provider(
         &self,
-        _id: UpstreamProviderId,
+        id: UpstreamProviderId,
     ) -> SidResult<Option<UpstreamProvider>> {
-        Ok(None)
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .upstream_creations
+            .iter()
+            .find(|(p, _)| p.id == id)
+            .map(|(p, _)| p.clone()))
     }
     async fn create_upstream_provider(
         &self,

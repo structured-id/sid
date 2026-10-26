@@ -6,12 +6,14 @@
 //! Supports provider CRUD, upstream auth initiation, and callback handling
 //! with account resolution (returning user, linking, JIT provisioning).
 
+use crate::feature_flags::FeatureFlagService;
 use sid_authn::caller::{Caller, authenticate};
 use sid_authn::challenge_store::ChallengeStore;
 use sid_authn::jwt::JwtService;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::sign_in_delivery::{CeremonyClient, SignedIn, ceremony_client};
 use sid_authn::upstream::oidc::OidcProviderClient;
+use sid_core::models::MappedClaims;
 use sid_core::models::Session;
 use sid_core::models::security_policy::SecurityPolicy;
 use sid_core::models::upstream_provider::ProviderTrustCategory;
@@ -45,7 +47,7 @@ use sid_core::grpc_error::{ApiError, ErrorReason};
 use super::convert;
 use sid_core::grpc_error::refuse::{
     changed_concurrently, dependency_unavailable, internal, invalid_field, missing_field,
-    not_found, storage_failure,
+    not_configured, not_found, storage_failure,
 };
 
 /// Proto enum types aliased to avoid collision with domain types.
@@ -69,6 +71,10 @@ pub struct UpstreamServiceImpl {
     browser_cookie: sid_authn::browser_session::BrowserCookie,
     /// The session lifetime and limit every sign-in of this authority keeps.
     security_policy: SecurityPolicy,
+    /// The registration switch a new account is admitted under.
+    feature_flags: FeatureFlagService,
+    /// The enrollment mode the deployment pins over the stored one.
+    enrollment_pin: Option<sid_core::models::EnrollmentMode>,
 }
 
 impl UpstreamServiceImpl {
@@ -81,6 +87,7 @@ impl UpstreamServiceImpl {
         jwt: Arc<JwtService>,
         revocation: Arc<RevocationCache>,
         issuer: String,
+        feature_flags: FeatureFlagService,
     ) -> Self {
         Self {
             jwt,
@@ -97,6 +104,40 @@ impl UpstreamServiceImpl {
             sign_in_origin: None,
             browser_cookie: Default::default(),
             security_policy: SecurityPolicy::ce_default(),
+            feature_flags,
+            enrollment_pin: None,
+        }
+    }
+
+    /// This service admitting new accounts under `pin` instead of the stored
+    /// enrollment mode.
+    pub fn with_enrollment_pin(mut self, pin: Option<sid_core::models::EnrollmentMode>) -> Self {
+        self.enrollment_pin = pin;
+        self
+    }
+
+    /// Refuse to create an account for an upstream sign-in the installation
+    /// does not admit, as it refuses a self-registration: the registration
+    /// switch, then the effective enrollment policy, the provider's verified
+    /// email as the address a domain policy checks. An upstream sign-in
+    /// carries no invite.
+    async fn admit_new_account(&self, claims: &MappedClaims) -> Result<(), Status> {
+        use super::auth_service::refusal::{enrollment_requirement, registration_restricted};
+        if !self.feature_flags.is_registration_enabled().await {
+            return Err(not_configured("registration"));
+        }
+        let policy = crate::enrollment::effective(self.storage.as_ref(), self.enrollment_pin)
+            .await
+            .map_err(storage_failure)?;
+        let email = claims
+            .has_verified_email()
+            .then_some(claims.email.as_deref())
+            .flatten();
+        match sid_core::enrollment::evaluate_enrollment(&policy, email, None) {
+            sid_core::enrollment::EnrollmentDecision::Allow => Ok(()),
+            sid_core::enrollment::EnrollmentDecision::Deny(reason) => {
+                Err(registration_restricted(enrollment_requirement(&reason)))
+            }
         }
     }
 
@@ -712,9 +753,18 @@ impl UpstreamService for UpstreamServiceImpl {
         }
 
         // Path B: No subject match — check for verified email match.
-        if claims.has_verified_email()
+        // A failed lookup fails the sign-in: it never falls through to
+        // provisioning a second account for a user who has one.
+        let existing = match (&claims.email, claims.has_verified_email()) {
+            (Some(email), true) => self
+                .storage
+                .get_profile_by_email(email)
+                .await
+                .map_err(storage_failure)?,
+            _ => None,
+        };
+        if existing.is_some()
             && let Some(email) = &claims.email
-            && let Ok(Some(_existing_profile)) = self.storage.get_profile_by_email(email).await
         {
             // Profile exists with this email but no upstream identity linked.
             // Return linking_required so the user can confirm account linking.
@@ -735,8 +785,10 @@ impl UpstreamService for UpstreamServiceImpl {
             }));
         }
 
-        // Path C: No match at all — JIT provisioning.
+        // Path C: No match at all — JIT provisioning, only when the
+        // installation admits a new account.
         // Create a new profile and link the upstream identity.
+        self.admit_new_account(&claims).await?;
         let username = claims
             .email
             .as_deref()

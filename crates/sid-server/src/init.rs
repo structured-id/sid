@@ -954,8 +954,10 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         jwt.clone(),
         revocation_cache.clone(),
         issuer.clone(),
+        feature_flags.clone(),
     )
-    .with_browser_cookie(browser_cookie);
+    .with_browser_cookie(browser_cookie)
+    .with_enrollment_pin(enrollment_pin);
     let upstream_svc = Arc::new(match &login_url {
         Some(page) => upstream_svc.with_sign_in_page(page),
         None => upstream_svc,

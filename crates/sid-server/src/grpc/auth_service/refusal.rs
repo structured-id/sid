@@ -104,7 +104,7 @@ pub(super) fn mfa_not_enrolled(kind: &'static str) -> tonic::Status {
 
 /// REGISTRATION_RESTRICTED: self-registration needs `requirement` first
 /// (`instance_claim`, `admin_only`, `invite`, `email`, `email_domain`).
-pub(super) fn registration_restricted(requirement: &'static str) -> tonic::Status {
+pub(crate) fn registration_restricted(requirement: &'static str) -> tonic::Status {
     ApiError::new(
         ErrorReason::RegistrationRestricted,
         "self-registration is restricted on this installation",
@@ -115,7 +115,7 @@ pub(super) fn registration_restricted(requirement: &'static str) -> tonic::Statu
 
 /// The requirement a REGISTRATION_RESTRICTED refusal names for `reason`; an
 /// invalid invite asks for a (valid) invite, as a missing one does.
-pub(super) fn enrollment_requirement(
+pub(crate) fn enrollment_requirement(
     reason: &sid_core::enrollment::EnrollmentDenialReason,
 ) -> &'static str {
     use sid_core::enrollment::EnrollmentDenialReason as R;

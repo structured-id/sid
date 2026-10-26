@@ -1328,6 +1328,7 @@ impl TestServices {
             jwt.clone(),
             revocation_cache.clone(),
             "https://sid.example.com".to_string(),
+            sid_server::feature_flags::FeatureFlagService::disabled(),
         )
         .with_sign_in_page(&url::Url::parse(SIGN_IN_PAGE).unwrap());
 

@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use oidc_provider::{CLIENT, Provider};
 use serde_json::json;
+use sid_core::models::EnrollmentMode;
 use sid_core::models::{AuditEntry, UpstreamProtocol, UpstreamProvider};
 use sid_plugin::storage::StorageBackend;
 use sid_proto::sid::v1::upstream_service_server::UpstreamService;
@@ -44,10 +45,36 @@ struct Setup {
     service: UpstreamServiceImpl,
 }
 
-/// A provider registered at the installation, and its upstream service.
-async fn setup() -> Setup {
+/// The upstream service over `storage` admitting new accounts under the
+/// enrollment mode `pin`.
+fn service(
+    storage: Arc<dyn StorageBackend>,
+    pin: sid_core::models::EnrollmentMode,
+) -> UpstreamServiceImpl {
+    UpstreamServiceImpl::new(
+        storage,
+        common::test_key_manager(),
+        Arc::new(sid_plugin::cache::InMemoryCacheBackend::new()),
+        common::test_jwt(),
+        common::test_revocation(),
+        "https://sid.example.com".to_string(),
+        sid_server::feature_flags::FeatureFlagService::disabled(),
+    )
+    .with_sign_in_page(&url::Url::parse(SIGN_IN_PAGE).unwrap())
+    .with_enrollment_pin(Some(pin))
+}
+
+/// A provider registered on PostgreSQL, and its upstream service admitting
+/// new accounts under `pin`.
+async fn setup(pin: sid_core::models::EnrollmentMode) -> Setup {
+    setup_on(storage().await, pin).await
+}
+
+async fn setup_on(
+    storage: Arc<dyn StorageBackend>,
+    pin: sid_core::models::EnrollmentMode,
+) -> Setup {
     common::crypto::install_tls();
-    let storage = storage().await;
     let provider = Provider::start(None).await;
     let keys = common::test_key_manager();
     let id = sid_core::models::UpstreamProviderId::new();
@@ -70,27 +97,30 @@ async fn setup() -> Setup {
         )
         .await
         .unwrap();
-    let service = UpstreamServiceImpl::new(
-        storage.clone(),
-        keys,
-        Arc::new(sid_plugin::cache::InMemoryCacheBackend::new()),
-        common::test_jwt(),
-        common::test_revocation(),
-        "https://sid.example.com".to_string(),
-    )
-    .with_sign_in_page(&url::Url::parse(SIGN_IN_PAGE).unwrap());
     Setup {
+        service: service(storage.clone(), pin),
         storage,
         provider,
         provider_id: id.0.to_string(),
-        service,
     }
 }
 
 impl Setup {
+    /// The same installation, admitting new accounts under `pin` now.
+    fn reopened(mut self, pin: sid_core::models::EnrollmentMode) -> Self {
+        self.service = service(self.storage.clone(), pin);
+        self
+    }
+
     /// Start a sign-in and have the provider answer it for `sub`; returns
     /// the callback's state.
     async fn started(&self, sub: &str) -> String {
+        self.started_as(sub, json!({ "sub": sub })).await
+    }
+
+    /// Start a sign-in and have the provider answer it for `sub`, its
+    /// UserInfo answering `userinfo`; returns the callback's state.
+    async fn started_as(&self, sub: &str, userinfo: serde_json::Value) -> String {
         let started = self
             .service
             .initiate_upstream_auth(Request::new(InitiateUpstreamAuthRequest {
@@ -108,9 +138,19 @@ impl Setup {
             .unwrap();
         self.provider.answer(
             json!({ "access_token": "at", "id_token": self.provider.id_token(&nonce, sub) }),
-            json!({ "sub": sub }),
+            userinfo,
         );
         started.state_token
+    }
+
+    async fn linked(&self, sub: &str) -> bool {
+        let provider =
+            sid_core::models::UpstreamProviderId(uuid::Uuid::parse_str(&self.provider_id).unwrap());
+        self.storage
+            .get_upstream_identity_by_provider_subject(provider, sub)
+            .await
+            .unwrap()
+            .is_some()
     }
 
     fn callback(
@@ -139,7 +179,7 @@ impl Setup {
 // sessions are stored for it.
 #[tokio::test]
 async fn an_upstream_sign_in_creates_a_session() {
-    let s = setup().await;
+    let s = setup(EnrollmentMode::Open).await;
     let sub = format!("user-{}", uuid::Uuid::now_v7());
 
     let state = s.started(&sub).await;
@@ -207,7 +247,7 @@ async fn an_upstream_sign_in_creates_a_session() {
 // for its own page.
 #[tokio::test]
 async fn a_foreign_origin_signs_nobody_in() {
-    let s = setup().await;
+    let s = setup(EnrollmentMode::Open).await;
     let sub = format!("user-{}", uuid::Uuid::now_v7());
     let state = s.started(&sub).await;
     let refused = s
@@ -224,4 +264,75 @@ async fn a_foreign_origin_signs_nobody_in() {
         .handle_upstream_callback(s.callback(state, Some("https://sid.example.com")))
         .await
         .expect("the sign-in page still completes it");
+}
+
+// Regression (#242): an installation that admits no self-registration
+// creates no account for an unknown upstream subject. Invite-only and
+// admin-only refuse with REGISTRATION_RESTRICTED naming what is required,
+// and no Profile or link is created.
+#[tokio::test]
+async fn a_closed_installation_provisions_nobody() {
+    use tonic_types::StatusExt as _;
+    for (mode, requirement) in [
+        (EnrollmentMode::InviteOnly, "invite"),
+        (EnrollmentMode::AdminOnly, "admin_only"),
+    ] {
+        let s = setup(mode).await;
+        let sub = format!("user-{}", uuid::Uuid::now_v7());
+        let state = s.started(&sub).await;
+        let refused = s
+            .service
+            .handle_upstream_callback(s.callback(state, Some("https://sid.example.com")))
+            .await
+            .unwrap_err();
+        let info = refused.get_details_error_info().expect("ErrorInfo");
+        assert_eq!(info.reason, "REGISTRATION_RESTRICTED", "{mode:?}");
+        assert_eq!(info.metadata["requirement"], requirement, "{mode:?}");
+        assert!(!s.linked(&sub).await, "{mode:?}: nothing linked");
+    }
+}
+
+// An upstream subject already linked to a Profile still signs in when the
+// installation stops admitting new accounts.
+#[tokio::test]
+async fn a_linked_subject_signs_in_on_a_closed_installation() {
+    let s = setup(EnrollmentMode::Open).await;
+    let sub = format!("user-{}", uuid::Uuid::now_v7());
+    let state = s.started(&sub).await;
+    s.service
+        .handle_upstream_callback(s.callback(state, None))
+        .await
+        .unwrap();
+    let s = s.reopened(EnrollmentMode::InviteOnly);
+    let state = s.started(&sub).await;
+    let signed_in = s
+        .service
+        .handle_upstream_callback(s.callback(state, None))
+        .await
+        .expect("the linked subject signs in");
+    assert!(signed_in.metadata().get("authorization").is_some());
+}
+
+// Regression (#242): a failed lookup of the verified email fails the
+// sign-in instead of provisioning a second account.
+#[tokio::test]
+async fn a_failed_email_lookup_provisions_nobody() {
+    let mock = Arc::new(common::mock_storage::MockStorage::new());
+    let s = setup_on(mock.clone(), EnrollmentMode::Open).await;
+    let sub = format!("user-{}", uuid::Uuid::now_v7());
+    let state = s
+        .started_as(
+            &sub,
+            json!({ "sub": sub, "email": "alice@sid.example.com", "email_verified": true }),
+        )
+        .await;
+    let before = mock.profile_count();
+    mock.fail_profile_reads();
+    let refused = s
+        .service
+        .handle_upstream_callback(s.callback(state, None))
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code(), tonic::Code::Internal, "{refused:?}");
+    assert_eq!(mock.profile_count(), before, "no account provisioned");
 }
