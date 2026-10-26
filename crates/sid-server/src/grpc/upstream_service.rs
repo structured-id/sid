@@ -515,35 +515,26 @@ impl UpstreamService for UpstreamServiceImpl {
             .await
             .map_err(|e| dependency_unavailable("upstream provider", e))?;
 
-        let (authorization_url, state_with_verifier) = oidc_client
-            .authorization_url(&req.redirect_uri, &provider.scopes)
+        let request = oidc_client
+            .authorization_request(&req.redirect_uri, &provider.scopes)
             .await
             .map_err(|e| internal("build upstream authorization URL", e))?;
 
-        // Parse state_with_verifier: "{state_token}\0{code_verifier}"
-        let (state_token, code_verifier) = if let Some(idx) = state_with_verifier.find('\0') {
-            (
-                state_with_verifier[..idx].to_string(),
-                Some(state_with_verifier[idx + 1..].to_string()),
-            )
-        } else {
-            (state_with_verifier, None)
-        };
-
-        // Store auth state for CSRF validation on callback.
+        // The callback continues only this request: its state, verifier and
+        // nonce are kept until then.
         let auth_state = UpstreamAuthState {
             provider_id,
-            state_token: state_token.clone(),
+            state_token: request.state.clone(),
             redirect_uri: req.redirect_uri,
-            code_verifier,
-            nonce: None,
+            code_verifier: request.code_verifier,
+            nonce: request.nonce,
         };
 
-        self.auth_state.insert(&state_token, &auth_state).await?;
+        self.auth_state.insert(&request.state, &auth_state).await?;
 
         Ok(Response::new(InitiateUpstreamAuthResponse {
-            authorization_url,
-            state_token,
+            authorization_url: request.url,
+            state_token: request.state,
         }))
     }
 
@@ -588,16 +579,10 @@ impl UpstreamService for UpstreamServiceImpl {
             .await
             .map_err(|e| dependency_unavailable("upstream provider", e))?;
 
-        // Build redirect_uri with code_verifier for PKCE (convention: "{uri}\0{verifier}").
-        let exchange_redirect = if let Some(ref verifier) = auth_state.code_verifier {
-            format!("{}\0{}", req.redirect_uri, verifier)
-        } else {
-            req.redirect_uri.clone()
-        };
-
-        // Exchange authorization code for user claims.
+        // Exchange the code for the user's claims: for OIDC, the validated
+        // ID Token's identity.
         let claims = oidc_client
-            .exchange_code(&req.code, &exchange_redirect)
+            .exchange_code(&req.code, &auth_state.pending())
             .await
             .map_err(|e| {
                 warn!("Token exchange failed for provider {}: {}", provider_id, e);

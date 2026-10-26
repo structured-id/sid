@@ -26,24 +26,46 @@ pub trait UpstreamIdpProvider: Send + Sync + 'static {
     /// Provider ID (matches the stored `UpstreamProvider.id`).
     fn provider_id(&self) -> UpstreamProviderId;
 
-    /// Generate authorization URL for redirecting the user to the upstream IdP.
-    ///
-    /// Returns `(authorization_url, state_token)`.
-    /// The `state_token` must be stored in `ChallengeStore` for CSRF validation.
-    /// PKCE (S256) is always used — the code_verifier is stored in `UpstreamAuthState`.
-    async fn authorization_url(
+    /// A new authorization request redirecting the user to the upstream IdP
+    /// for `redirect_uri`, with PKCE (S256) and, for OIDC, a nonce. Its
+    /// state, verifier and nonce are stored as an `UpstreamAuthState` until
+    /// the callback.
+    async fn authorization_request(
         &self,
         redirect_uri: &str,
         scopes: &[String],
-    ) -> Result<(String, String)>;
+    ) -> Result<AuthorizationRequest>;
 
-    /// Exchange authorization code for normalized user claims.
-    ///
-    /// Performs:
-    /// 1. Token exchange (code → access_token + id_token)
-    /// 2. Optional UserInfo request
-    /// 3. Claim normalization → `MappedClaims`
-    async fn exchange_code(&self, code: &str, redirect_uri: &str) -> Result<MappedClaims>;
+    /// Exchange the authorization `code` of the `pending` request for the
+    /// user's claims. For OIDC the identity is the validated ID Token's
+    /// issuer and subject (OpenID Connect Core 1.0 §3.1.3.7); UserInfo adds
+    /// claims only for that same subject (§5.3.2).
+    async fn exchange_code(
+        &self,
+        code: &str,
+        pending: &PendingAuthorization<'_>,
+    ) -> Result<MappedClaims>;
+}
+
+/// An authorization request to an upstream IdP.
+#[derive(Debug, Clone)]
+pub struct AuthorizationRequest {
+    /// Where the user is redirected.
+    pub url: String,
+    /// The `state` parameter: CSRF protection and the pending request's key.
+    pub state: String,
+    /// The PKCE code verifier (RFC 7636), sent only on the token exchange.
+    pub code_verifier: String,
+    /// The OIDC nonce the ID Token must carry; none for plain OAuth2.
+    pub nonce: Option<String>,
+}
+
+/// What the callback of an authorization request was started with.
+#[derive(Debug, Clone, Copy)]
+pub struct PendingAuthorization<'a> {
+    pub redirect_uri: &'a str,
+    pub code_verifier: &'a str,
+    pub nonce: Option<&'a str>,
 }
 
 /// Ephemeral state stored during upstream OAuth2 flow.
@@ -63,51 +85,22 @@ pub struct UpstreamAuthState {
     pub redirect_uri: String,
 
     /// PKCE code verifier (sent on token exchange, not in authorization URL).
-    pub code_verifier: Option<String>,
+    pub code_verifier: String,
 
-    /// OIDC nonce (validated in id_token if present).
+    /// OIDC nonce the ID Token must carry; none for plain OAuth2.
     pub nonce: Option<String>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use uuid::Uuid;
-
-    #[test]
-    fn test_upstream_auth_state_serde_roundtrip() {
-        let state = UpstreamAuthState {
-            provider_id: UpstreamProviderId(Uuid::now_v7()),
-            state_token: "abc123state".into(),
-            redirect_uri: "https://sid.example.com/callback".into(),
-            code_verifier: Some("pkce-verifier-xyz".into()),
-            nonce: Some("nonce-456".into()),
-        };
-
-        let json = serde_json::to_string(&state).unwrap();
-        let parsed: UpstreamAuthState = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(parsed.state_token, "abc123state");
-        assert_eq!(parsed.redirect_uri, "https://sid.example.com/callback");
-        assert_eq!(parsed.code_verifier.as_deref(), Some("pkce-verifier-xyz"));
-        assert_eq!(parsed.nonce.as_deref(), Some("nonce-456"));
-    }
-
-    #[test]
-    fn test_upstream_auth_state_without_optionals() {
-        let state = UpstreamAuthState {
-            provider_id: UpstreamProviderId(Uuid::now_v7()),
-            state_token: "state-only".into(),
-            redirect_uri: "https://sid.example.com/cb".into(),
-            code_verifier: None,
-            nonce: None,
-        };
-
-        let json = serde_json::to_string(&state).unwrap();
-        let parsed: UpstreamAuthState = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(parsed.state_token, "state-only");
-        assert!(parsed.code_verifier.is_none());
-        assert!(parsed.nonce.is_none());
+impl UpstreamAuthState {
+    /// The pending request this state stores.
+    pub fn pending(&self) -> PendingAuthorization<'_> {
+        PendingAuthorization {
+            redirect_uri: &self.redirect_uri,
+            code_verifier: &self.code_verifier,
+            nonce: self.nonce.as_deref(),
+        }
     }
 }
+
+#[cfg(test)]
+mod tests;
