@@ -3,14 +3,21 @@
 //! in (RFC 6749 §3.2), the RFC's JSON, status and headers out. The body
 //! travels as `google.api.HttpBody`, the status as `x-http-code` response
 //! metadata and the headers as response metadata, which the transcoder turns
-//! into the HTTP answer.
+//! into the HTTP answer. The token endpoint's refusals are typed statuses
+//! whose ErrorInfo names the RFC error code [`refusal`] answers with.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
-use sid_core::grpc_error::{extract_error_info, extract_retry_delay};
+use sid_core::grpc_error::refuse::{internal, storage_failure};
+use sid_core::grpc_error::{ApiError, ErrorReason, extract_error_info, extract_retry_delay};
 use sid_proto::google::api::HttpBody;
 use tonic::metadata::{MetadataMap, MetadataValue};
 use tonic::{Code, Response, Status};
+
+use crate::client_auth::ClientAuthentication;
+use crate::grant::GrantFailure;
+use crate::oauth2::TokenError;
 
 /// Parameters a request may repeat: `resource` (RFC 8707 §2, RFC 8693
 /// §2.1) and the token exchange `audience` (RFC 8693 §2.1).
@@ -339,9 +346,21 @@ pub fn authorization_response(
     params: &[(&str, &str)],
     state: Option<&str>,
 ) -> Response<HttpBody> {
-    let Ok(mut url) = url::Url::parse(redirect_uri) else {
-        return page(400, "Authorization request refused: invalid_request");
-    };
+    match authorization_response_url(redirect_uri, issuer, params, state) {
+        Some(url) => redirect(&url),
+        None => page(400, "Authorization request refused: invalid_request"),
+    }
+}
+
+/// The URL [`authorization_response`] redirects to, for a front end that
+/// sends the browser there itself; `None` when `redirect_uri` is not a URL.
+pub fn authorization_response_url(
+    redirect_uri: &str,
+    issuer: &str,
+    params: &[(&str, &str)],
+    state: Option<&str>,
+) -> Option<url::Url> {
+    let mut url = url::Url::parse(redirect_uri).ok()?;
     {
         let mut query = url.query_pairs_mut();
         for (key, value) in params {
@@ -352,7 +371,7 @@ pub fn authorization_response(
         }
         query.append_pair("iss", issuer);
     }
-    redirect(&url)
+    Some(url)
 }
 
 /// The sign-in page `login`, told to return to `authorize_url` (`rd`).
@@ -361,6 +380,114 @@ pub fn sign_in(login: &url::Url, authorize_url: &url::Url) -> Response<HttpBody>
     url.query_pairs_mut()
         .append_pair("rd", authorize_url.as_str());
     redirect(&url)
+}
+
+/// A token endpoint refusal as an [`ApiError`]: `ErrorInfo.metadata["oauthError"]`
+/// carries the RFC 6749 §5.2 `error` code [`refusal`] answers with.
+pub fn token_error(error: TokenError, message: impl Into<Cow<'static, str>>) -> ApiError {
+    let reason = match error {
+        TokenError::InvalidClient => ErrorReason::AuthenticationFailed,
+        TokenError::UnauthorizedClient | TokenError::AccessDenied => {
+            ErrorReason::InsufficientPermissions
+        }
+        TokenError::InvalidScope => ErrorReason::ScopeNotGranted,
+        // The user has not yet consented to the device request.
+        TokenError::AuthorizationPending => ErrorReason::ConsentRequired,
+        TokenError::SlowDown => ErrorReason::RateLimitExceeded,
+        TokenError::ExpiredToken => ErrorReason::OperationExpired,
+        TokenError::InvalidRequest
+        | TokenError::InvalidGrant
+        | TokenError::UnsupportedGrantType
+        | TokenError::InvalidDpopProof
+        | TokenError::InvalidTarget => ErrorReason::InvalidFieldValue,
+    };
+    ApiError::new(reason, message).with_metadata("oauthError", error.code())
+}
+
+/// A token endpoint refusal with `error` (RFC 6749 §5.2).
+pub fn token_refusal(error: TokenError, message: impl Into<Cow<'static, str>>) -> Status {
+    token_error(error, message).into()
+}
+
+/// The client failed to authenticate (RFC 6749 §5.2 `invalid_client`); what
+/// failed goes to the log, never to the client.
+pub fn client_refused() -> Status {
+    token_refusal(TokenError::InvalidClient, "client authentication failed")
+}
+
+/// A request whose target resource is refused (RFC 8707 §2
+/// `invalid_target`), naming the `resource` parameter.
+pub fn target_refused(refusal: crate::target::TargetRefusal) -> Status {
+    token_error(TokenError::InvalidTarget, refusal.to_string())
+        .with_field_violation("resource", refusal.to_string())
+        .with_metadata("field", "resource")
+        .into()
+}
+
+/// A required token request parameter is missing (RFC 6749 §5.2
+/// `invalid_request`).
+pub fn missing_parameter(field: &'static str) -> Status {
+    ApiError::new(
+        ErrorReason::RequiredFieldMissing,
+        format!("{field} is required"),
+    )
+    .with_field_violation(field, "required")
+    .with_metadata("field", field)
+    .with_metadata("oauthError", TokenError::InvalidRequest.code())
+    .into()
+}
+
+/// A DPoP proof that is not valid for the request (RFC 9449 §7.1
+/// `invalid_dpop_proof`).
+pub fn dpop_refusal(detail: impl std::fmt::Display) -> Status {
+    ApiError::new(
+        ErrorReason::InvalidFieldValue,
+        format!("invalid DPoP proof: {detail}"),
+    )
+    .with_metadata("field", "DPoP")
+    .with_metadata("oauthError", TokenError::InvalidDpopProof.code())
+    .into()
+}
+
+/// The client authentication a request presents: HTTP Basic in its
+/// `authorization` metadata, or the given body parameters (RFC 6749 §2.3).
+/// An `authorization` value that is not ASCII is no credential.
+pub fn client_authentication(
+    metadata: &MetadataMap,
+    client_id: Option<&str>,
+    client_secret: Option<&str>,
+    client_assertion: Option<&str>,
+    client_assertion_type: Option<&str>,
+) -> Result<ClientAuthentication, Status> {
+    let authorization = metadata
+        .get("authorization")
+        .and_then(|value| value.to_str().ok());
+    ClientAuthentication::from_request(
+        authorization,
+        client_id,
+        client_secret,
+        client_assertion,
+        client_assertion_type,
+    )
+    .map_err(|error| match error {
+        TokenError::InvalidRequest => token_refusal(
+            error,
+            "the client must name itself and use one authentication method",
+        ),
+        _ => client_refused(),
+    })
+}
+
+/// The token endpoint's answer to a refused or failed grant.
+pub fn grant_refusal(failure: GrantFailure<Status>) -> Status {
+    match failure {
+        GrantFailure::MissingParameter(field) => missing_parameter(field),
+        GrantFailure::Refused(error, description) => token_refusal(error, description),
+        GrantFailure::ProofMismatch => dpop_refusal("refresh token is bound to another key"),
+        GrantFailure::Storage(e) => storage_failure(e),
+        GrantFailure::Issuance(e) => internal("issue tokens", e),
+        GrantFailure::Host(status) => status,
+    }
 }
 
 /// Carry the retry delay of `status` (RetryInfo) into `to` as `Retry-After`
