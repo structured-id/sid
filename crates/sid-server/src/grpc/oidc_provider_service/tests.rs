@@ -1,22 +1,30 @@
 use super::*;
 
-/// Every endpoint is under the issuer URL, whatever its path depth, and the
-/// issuer is copied byte for byte (no trailing slash added or removed).
+/// Every endpoint this server serves is advertised, under the issuer URL
+/// whatever its path depth, and the issuer is copied byte for byte (no
+/// trailing slash added or removed).
 #[test]
 fn test_metadata_endpoints_are_under_the_issuer() {
     let issuer = "https://sid.example.com/auth/i/0123456789abcdef0123456789abcdef";
     let m = metadata(issuer);
     assert_eq!(m.issuer, issuer);
-    for endpoint in [
-        &m.authorization_endpoint,
-        &m.token_endpoint,
-        &m.userinfo_endpoint,
-        &m.jwks_uri,
-        &m.end_session_endpoint,
-        &m.introspection_endpoint,
-        &m.revocation_endpoint,
-        &m.device_authorization_endpoint,
-    ] {
+    let optional = [
+        ("userinfo", &m.userinfo_endpoint),
+        ("end_session", &m.end_session_endpoint),
+        ("introspection", &m.introspection_endpoint),
+        ("revocation", &m.revocation_endpoint),
+        ("device_authorization", &m.device_authorization_endpoint),
+        ("registration", &m.registration_endpoint),
+    ]
+    .map(|(name, endpoint)| {
+        endpoint
+            .as_ref()
+            .unwrap_or_else(|| panic!("the served {name} endpoint is advertised"))
+    });
+    for endpoint in [&m.authorization_endpoint, &m.token_endpoint, &m.jwks_uri]
+        .into_iter()
+        .chain(optional)
+    {
         assert!(
             endpoint.starts_with(&format!("{issuer}/")),
             "{endpoint} is not under {issuer}"

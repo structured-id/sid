@@ -563,12 +563,12 @@ fn metadata(issuer: &str) -> ProviderMetadata {
         issuer: issuer.to_string(),
         authorization_endpoint: format!("{issuer}/oauth2/authorize"),
         token_endpoint: format!("{issuer}/oauth2/token"),
-        userinfo_endpoint: sid_authn::issuer::userinfo_endpoint(issuer),
+        userinfo_endpoint: Some(sid_authn::issuer::userinfo_endpoint(issuer)),
         jwks_uri: format!("{issuer}/jwks"),
-        end_session_endpoint: format!("{issuer}/oauth2/end-session"),
-        introspection_endpoint: format!("{issuer}/oauth2/introspect"),
-        revocation_endpoint: format!("{issuer}/oauth2/revoke"),
-        device_authorization_endpoint: format!("{issuer}/oauth2/device"),
+        end_session_endpoint: Some(format!("{issuer}/oauth2/end-session")),
+        introspection_endpoint: Some(format!("{issuer}/oauth2/introspect")),
+        revocation_endpoint: Some(format!("{issuer}/oauth2/revoke")),
+        device_authorization_endpoint: Some(format!("{issuer}/oauth2/device")),
         response_types_supported: strings(&["code"]),
         grant_types_supported: strings(&[
             "authorization_code",
@@ -617,7 +617,7 @@ fn metadata(issuer: &str) -> ProviderMetadata {
         backchannel_logout_session_supported: true,
         // RFC 9207 §3: every authorization response names its issuer.
         authorization_response_iss_parameter_supported: true,
-        registration_endpoint: format!("{issuer}/oauth2/register"),
+        registration_endpoint: Some(format!("{issuer}/oauth2/register")),
     }
 }
 
