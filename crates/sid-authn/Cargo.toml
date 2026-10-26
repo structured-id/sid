@@ -108,6 +108,8 @@ prost-types = { workspace = true, optional = true }
 
 [features]
 grpc = ["dep:tonic", "sid-core/grpc"]
+# The HTTP form of an issuer's OAuth endpoints over `google.api.HttpBody`.
+oauth-http = ["grpc", "dep:sid-proto"]
 # The password-installing operation (registration, change, reset) with its
 # history checker, and the history evaluator in process or as its own
 # service.

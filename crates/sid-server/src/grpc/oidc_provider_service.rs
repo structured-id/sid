@@ -37,8 +37,8 @@ use super::auth_service::{
     REQUEST_URI_PREFIX,
 };
 use super::client_metadata;
-use super::oauth_http::{self, Form};
 use super::project_service::ProjectServiceImpl;
+use sid_authn::oauth_http::{self, Form};
 
 /// How long HTTP caches may keep a key set, and serve a stale one while
 /// fetching the next: a new signing generation is published well before it
