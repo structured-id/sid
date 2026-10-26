@@ -6,16 +6,11 @@
 //! Supports provider CRUD, upstream auth initiation, and callback handling
 //! with account resolution (returning user, linking, JIT provisioning).
 
-use crate::feature_flags::FeatureFlagService;
 use sid_authn::caller::{Caller, authenticate};
 use sid_authn::challenge_store::ChallengeStore;
 use sid_authn::jwt::JwtService;
 use sid_authn::revocation_cache::RevocationCache;
-use sid_authn::sign_in_delivery::{CeremonyClient, SignedIn, ceremony_client};
 use sid_authn::upstream::oidc::OidcProviderClient;
-use sid_core::models::MappedClaims;
-use sid_core::models::Session;
-use sid_core::models::security_policy::SecurityPolicy;
 use sid_core::models::upstream_provider::ProviderTrustCategory;
 use sid_core::models::{
     AuditEntry, Profile, UpstreamIdentity, UpstreamLogin,
@@ -44,10 +39,11 @@ use uuid::Uuid;
 
 use sid_core::grpc_error::{ApiError, ErrorReason};
 
+use super::auth_service::AuthServiceImpl;
 use super::convert;
 use sid_core::grpc_error::refuse::{
     changed_concurrently, dependency_unavailable, internal, invalid_field, missing_field,
-    not_configured, not_found, storage_failure,
+    not_found, storage_failure,
 };
 
 /// Proto enum types aliased to avoid collision with domain types.
@@ -62,32 +58,22 @@ pub struct UpstreamServiceImpl {
     auth_state: ChallengeStore<UpstreamAuthState>,
     jwt: Arc<JwtService>,
     revocation: Arc<RevocationCache>,
-    /// The issuer whose events announce a session.
-    issuer: String,
-    /// Origin of the browser sign-in page: a callback it completes gets the
-    /// IdP session cookie. None completes only native clients.
-    sign_in_origin: Option<url::Origin>,
-    /// This authority's IdP session cookie.
-    browser_cookie: sid_authn::browser_session::BrowserCookie,
-    /// The session lifetime and limit every sign-in of this authority keeps.
-    security_policy: SecurityPolicy,
-    /// The registration switch a new account is admitted under.
-    feature_flags: FeatureFlagService,
-    /// The enrollment mode the deployment pins over the stored one.
-    enrollment_pin: Option<sid_core::models::EnrollmentMode>,
+    /// Admits and completes a verified upstream sign-in as this authority
+    /// admits and completes every sign-in: its enrollment policy, sign-in
+    /// page, cookie, security rules and session policy.
+    auth: Arc<AuthServiceImpl>,
 }
 
 impl UpstreamServiceImpl {
-    /// Create a new upstream service instance of `issuer`; pending upstream
-    /// logins live in the shared `cache` for 10 minutes.
+    /// Create a new upstream service whose sign-ins `auth` completes;
+    /// pending upstream logins live in the shared `cache` for 10 minutes.
     pub fn new(
         storage: Arc<dyn StorageBackend>,
         key_manager: Arc<dyn KeyManager>,
         cache: Arc<dyn sid_plugin::cache::CacheBackend>,
         jwt: Arc<JwtService>,
         revocation: Arc<RevocationCache>,
-        issuer: String,
-        feature_flags: FeatureFlagService,
+        auth: Arc<AuthServiceImpl>,
     ) -> Self {
         Self {
             jwt,
@@ -100,87 +86,8 @@ impl UpstreamServiceImpl {
                 Duration::from_secs(600),
             ),
             key_manager,
-            issuer,
-            sign_in_origin: None,
-            browser_cookie: Default::default(),
-            security_policy: SecurityPolicy::ce_default(),
-            feature_flags,
-            enrollment_pin: None,
+            auth,
         }
-    }
-
-    /// This service admitting new accounts under `pin` instead of the stored
-    /// enrollment mode.
-    pub fn with_enrollment_pin(mut self, pin: Option<sid_core::models::EnrollmentMode>) -> Self {
-        self.enrollment_pin = pin;
-        self
-    }
-
-    /// Refuse to create an account for an upstream sign-in the installation
-    /// does not admit, as it refuses a self-registration: the registration
-    /// switch, then the effective enrollment policy, the provider's verified
-    /// email as the address a domain policy checks. An upstream sign-in
-    /// carries no invite.
-    async fn admit_new_account(&self, claims: &MappedClaims) -> Result<(), Status> {
-        use super::auth_service::refusal::{enrollment_requirement, registration_restricted};
-        if !self.feature_flags.is_registration_enabled().await {
-            return Err(not_configured("registration"));
-        }
-        let policy = crate::enrollment::effective(self.storage.as_ref(), self.enrollment_pin)
-            .await
-            .map_err(storage_failure)?;
-        let email = claims
-            .has_verified_email()
-            .then_some(claims.email.as_deref())
-            .flatten();
-        match sid_core::enrollment::evaluate_enrollment(&policy, email, None) {
-            sid_core::enrollment::EnrollmentDecision::Allow => Ok(()),
-            sid_core::enrollment::EnrollmentDecision::Deny(reason) => {
-                Err(registration_restricted(enrollment_requirement(&reason)))
-            }
-        }
-    }
-
-    /// This service completing browser sign-ins of the page at `sign_in`.
-    pub fn with_sign_in_page(mut self, sign_in: &url::Url) -> Self {
-        self.sign_in_origin = Some(sign_in.origin());
-        self
-    }
-
-    /// This service setting `cookie` as the IdP session cookie.
-    pub fn with_browser_cookie(
-        mut self,
-        cookie: sid_authn::browser_session::BrowserCookie,
-    ) -> Self {
-        self.browser_cookie = cookie;
-        self
-    }
-
-    /// A session of `profile` for this upstream sign-in, its credential
-    /// delivered to `client`. The provider, not SID, verified the user: the
-    /// session names no `amr` method SID verified (RFC 8176) and has basic
-    /// assurance.
-    async fn sign_in(&self, profile: &Profile, client: CeremonyClient) -> Result<SignedIn, Status> {
-        let lifetime = match self.security_policy.session.max_lifetime_hours {
-            0 => chrono::Duration::hours(24),
-            hours => chrono::Duration::hours(i64::from(hours)),
-        };
-        let mut session = Session::new(profile.id, String::new(), chrono::Utc::now() + lifetime);
-        session.scopes = vec![
-            "openid".to_string(),
-            "profile".to_string(),
-            "email".to_string(),
-        ];
-        super::sign_in_session::SignInSessions {
-            storage: self.storage.as_ref(),
-            jwt: &self.jwt,
-            revocation: &self.revocation,
-            issuer: &self.issuer,
-            cookie: &self.browser_cookie,
-            max_concurrent_sessions: self.security_policy.session.max_concurrent_sessions,
-        }
-        .sign_in(profile, session, client, None)
-        .await
     }
 
     /// Convert proto `UpstreamProtocol` enum to domain `UpstreamProtocol`.
@@ -644,7 +551,7 @@ impl UpstreamService for UpstreamServiceImpl {
     ) -> Result<Response<HandleUpstreamCallbackResponse>, Status> {
         // Who completes the sign-in decides how its credential is delivered;
         // a browser off the sign-in page completes nothing.
-        let client = ceremony_client(request.metadata(), self.sign_in_origin.as_ref())?;
+        let ceremony = self.auth.upstream_ceremony(&request)?;
         let req = request.into_inner();
 
         if req.code.is_empty() {
@@ -741,7 +648,10 @@ impl UpstreamService for UpstreamServiceImpl {
                 .map_err(storage_failure)?
                 // The linked Profile is gone: nobody is signed in.
                 .ok_or_else(changed_concurrently)?;
-            let signed_in = self.sign_in(&profile, client).await?;
+            let signed_in = self
+                .auth
+                .complete_upstream_sign_in(&profile, &ceremony)
+                .await?;
 
             info!(
                 "Upstream login: profile {} via provider {} (returning user)",
@@ -788,7 +698,7 @@ impl UpstreamService for UpstreamServiceImpl {
         // Path C: No match at all — JIT provisioning, only when the
         // installation admits a new account.
         // Create a new profile and link the upstream identity.
-        self.admit_new_account(&claims).await?;
+        self.auth.admit_upstream_account(&claims).await?;
         let username = claims
             .email
             .as_deref()
@@ -835,7 +745,10 @@ impl UpstreamService for UpstreamServiceImpl {
             .await
             .map_err(storage_failure)?;
 
-        let signed_in = self.sign_in(&profile, client).await?;
+        let signed_in = self
+            .auth
+            .complete_upstream_sign_in(&profile, &ceremony)
+            .await?;
 
         info!(
             "JIT provisioned profile {} via upstream provider {} (subject: {})",

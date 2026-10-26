@@ -69,7 +69,7 @@ use sid_core::grpc_error::refuse::{
 mod authorize;
 mod end_session;
 mod password_sign_in;
-pub(crate) mod refusal;
+mod refusal;
 mod sign_in_security;
 mod token_grant;
 pub(crate) use authorize::{BrowserAuthorization, PendingAuthorization, REQUEST_URI_PREFIX};
@@ -570,6 +570,15 @@ struct LoginSecurityExtras<'a> {
     /// Pass earned by solving the CAPTCHA this sign-in was asked for.
     captcha_pass: Option<&'a str>,
     user_agent: Option<&'a str>,
+}
+
+/// What an upstream sign-in request tells about who completes it, read
+/// before its state is consumed.
+pub(crate) struct UpstreamCeremony {
+    client: CeremonyClient,
+    client_ip: Option<std::net::IpAddr>,
+    user_agent: Option<String>,
+    captcha_pass: Option<String>,
 }
 
 impl AuthServiceImpl {
@@ -2095,6 +2104,91 @@ impl AuthServiceImpl {
         }
         .sign_in(profile, session, client, proved_by)
         .await
+    }
+
+    /// Who completes the upstream sign-in `request`: its client (a browser
+    /// off the sign-in page completes nothing), address and device.
+    #[allow(clippy::result_large_err)]
+    pub(crate) fn upstream_ceremony<T>(
+        &self,
+        request: &Request<T>,
+    ) -> Result<UpstreamCeremony, Status> {
+        Ok(UpstreamCeremony {
+            client: self.ceremony_client(request.metadata())?,
+            client_ip: self.client_ip(request),
+            user_agent: extract_user_agent(request.metadata()),
+            captcha_pass: extract_captcha_pass(request.metadata()),
+        })
+    }
+
+    /// Sign `profile` in after an upstream identity provider verified the
+    /// user, as every other sign-in completes: only an active Profile, after
+    /// the sign-in security rules for this client, with a session of this
+    /// authority's lifetime and limit. The provider, not SID, verified the
+    /// user: the session names no `amr` method (RFC 8176 §1) and has basic
+    /// assurance.
+    pub(crate) async fn complete_upstream_sign_in(
+        &self,
+        profile: &sid_core::models::Profile,
+        ceremony: &UpstreamCeremony,
+    ) -> Result<SignedIn, Status> {
+        if !profile.status.can_authenticate() {
+            return Err(authentication_failed());
+        }
+        self.evaluate_login_security(
+            profile.id,
+            ceremony.client_ip,
+            "upstream",
+            false,
+            LoginSecurityExtras {
+                captcha_pass: ceremony.captcha_pass.as_deref(),
+                user_agent: ceremony.user_agent.as_deref(),
+            },
+        )
+        .await?;
+        let lifetime = match self.security_policy.session.max_lifetime_hours {
+            0 => Duration::hours(24),
+            hours => Duration::hours(i64::from(hours)),
+        };
+        let mut session = sid_core::models::Session::new(
+            profile.id,
+            session_address(ceremony.client_ip),
+            Utc::now() + lifetime,
+        );
+        session.device_id = ceremony.user_agent.as_deref().map(compute_device_id);
+        session.scopes = vec![
+            "openid".to_string(),
+            "profile".to_string(),
+            "email".to_string(),
+        ];
+        self.sign_in(profile, session, ceremony.client, None).await
+    }
+
+    /// Refuse to create an account for an upstream sign-in this authority
+    /// does not admit, as it refuses a self-registration: the registration
+    /// switch, then the effective enrollment policy, the provider's verified
+    /// email as the address a domain policy checks. An upstream sign-in
+    /// carries no invite.
+    pub(crate) async fn admit_upstream_account(
+        &self,
+        claims: &sid_core::models::MappedClaims,
+    ) -> Result<(), Status> {
+        if !self.feature_flags.is_registration_enabled().await {
+            return Err(not_configured("registration"));
+        }
+        let policy = crate::enrollment::effective(self.storage.as_ref(), self.enrollment_pin)
+            .await
+            .map_err(storage_failure)?;
+        let email = claims
+            .has_verified_email()
+            .then_some(claims.email.as_deref())
+            .flatten();
+        match sid_core::enrollment::evaluate_enrollment(&policy, email, None) {
+            sid_core::enrollment::EnrollmentDecision::Allow => Ok(()),
+            sid_core::enrollment::EnrollmentDecision::Deny(reason) => {
+                Err(registration_restricted(enrollment_requirement(&reason)))
+            }
+        }
     }
 
     /// SERVICE_MAINTENANCE while the installation is in maintenance mode.

@@ -4801,11 +4801,9 @@ async fn test_session_evicted_at_limit_stops_its_tokens() {
     use sid_pake_core::pallas_opaque::PallasCipherSuite;
 
     let email = "limit_evict@sid.example.com";
-    let mut svc = TestServices::new(MockStorage::new());
     let mut policy = sid_core::models::SecurityPolicy::ce_default();
     policy.session.max_concurrent_sessions = 1;
-    let auth = std::sync::Arc::into_inner(svc.auth).expect("no other handle yet");
-    svc.auth = std::sync::Arc::new(auth.with_security_policy(policy));
+    let svc = TestServices::with_security_policy(MockStorage::new(), policy);
 
     let password = b"limit-evict-password";
     let mut rng = rand::rand_core::UnwrapErr(rand::rngs::SysRng);

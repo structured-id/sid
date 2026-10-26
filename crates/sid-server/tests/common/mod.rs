@@ -858,6 +858,46 @@ pub fn auth_service(
     })
 }
 
+/// The authentication service over `storage` and `cache` with the test
+/// sign-in page, under `security_policy` (the CE default when None) and the
+/// enrollment mode `enrollment_pin` pins (the stored one when None).
+#[allow(dead_code)]
+pub fn auth_service_over(
+    storage: Arc<dyn StorageBackend>,
+    cache: Arc<dyn sid_plugin::cache::CacheBackend>,
+    security_policy: Option<sid_core::models::SecurityPolicy>,
+    enrollment_pin: Option<sid_core::models::EnrollmentMode>,
+) -> Arc<AuthServiceImpl> {
+    let jwt = test_jwt();
+    let revocation_cache = test_revocation();
+    auth_service(
+        storage.clone(),
+        cache.clone(),
+        AuthOptions {
+            opaque_router: test_opaque_router(),
+            oauth2: Arc::new(OAuth2Server::new(jwt.clone())),
+            jwt,
+            webauthn: test_webauthn(cache),
+            revocation_cache: revocation_cache.clone(),
+            feature_flags: FeatureFlagService::disabled(),
+            magic_link: None,
+            zkpp: None,
+            issuers: Arc::new(sid_authn::issuer::IssuerRegistry::new(
+                storage.clone(),
+                test_key_manager(),
+            )),
+            org: test_org(),
+            cascade: Arc::new(RevocationCascadeService::new(storage, revocation_cache)),
+            security_policy,
+            // Passwords are not set by these tests.
+            history_keys: Arc::new(mock_storage::MockStorage::new()),
+            enrollment_pin,
+            browser_cookie: None,
+            without_sign_in_page: false,
+        },
+    )
+}
+
 /// The browser sign-in page of every test server, on the issuer's site.
 #[allow(dead_code)]
 pub const SIGN_IN_PAGE: &str = "https://login.sid.example.com/sign-in";
@@ -1037,6 +1077,26 @@ impl TestServices {
                 enrollment_pin: None,
                 browser_cookie: None,
                 without_sign_in_page: true,
+            },
+        )
+    }
+
+    /// TestServices under the security policy `policy`.
+    #[allow(dead_code)]
+    pub fn with_security_policy(
+        storage: MockStorage,
+        policy: sid_core::models::SecurityPolicy,
+    ) -> Self {
+        Self::with_options(
+            storage,
+            FeatureFlagService::disabled(),
+            Options {
+                zkpp: None,
+                magic_links: false,
+                security_policy: Some(policy),
+                enrollment_pin: None,
+                browser_cookie: None,
+                without_sign_in_page: false,
             },
         )
     }
@@ -1327,10 +1387,8 @@ impl TestServices {
             cache_backend.clone(),
             jwt.clone(),
             revocation_cache.clone(),
-            "https://sid.example.com".to_string(),
-            sid_server::feature_flags::FeatureFlagService::disabled(),
-        )
-        .with_sign_in_page(&url::Url::parse(SIGN_IN_PAGE).unwrap());
+            auth.clone(),
+        );
 
         Self {
             admin,
