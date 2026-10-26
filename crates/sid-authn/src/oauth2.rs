@@ -17,8 +17,8 @@ use sid_core::models::dpop::DPopBinding;
 use sid_core::{
     Error as SidError, Result as SidResult,
     models::{
-        AuthorizationCode, ExchangedCode, OAuth2Client, Profile, ProfileEmail, ProfileId,
-        ProfilePhone, RefreshToken, RefreshTokenError, Session, ValidatedRefreshToken,
+        AuthorizationCode, ExchangedCode, OAuth2Client, Profile, ProfileEmail, ProfilePhone,
+        RefreshToken, RefreshTokenError, Session, ValidatedRefreshToken,
     },
 };
 use std::fmt;
@@ -364,25 +364,25 @@ impl OAuth2Server {
         })
     }
 
-    /// Generate an authorization code for `resource`, the target resolved
-    /// for the request (RFC 8707); its redemption issues a token for it only.
-    /// `authentication` is the authorizing session's evidence, which the
-    /// redeemed session carries as its `auth_time`, `amr` and `acr`.
-    /// Returns (raw_code, AuthorizationCode model to persist).
-    pub fn generate_auth_code(
+    /// Generate an authorization code of the account `owner` for `resource`,
+    /// the target resolved for the request (RFC 8707); its redemption issues
+    /// a token for it only. `authentication` is the authorizing session's
+    /// evidence, which the redeemed session carries as its `auth_time`, `amr`
+    /// and `acr`. Returns (raw_code, AuthorizationCode model to persist).
+    pub fn generate_auth_code<O>(
         &self,
-        profile_id: ProfileId,
+        owner: O,
         req: &ValidatedAuthorizeRequest,
         resource: sid_core::models::ResourceId,
         authentication: sid_core::models::GrantAuthentication,
-    ) -> SidResult<(String, AuthorizationCode)> {
+    ) -> SidResult<(String, AuthorizationCode<O>)> {
         let raw_code = generate_random_token(32);
         let code_hash = sha256_hash(raw_code.as_bytes());
         let now = Utc::now();
 
         let code = AuthorizationCode {
             code_hash,
-            profile_id,
+            profile_id: owner,
             client_id: req.client_id.clone(),
             redirect_uri: req.redirect_uri.clone(),
             scopes: req.scopes.clone(),
