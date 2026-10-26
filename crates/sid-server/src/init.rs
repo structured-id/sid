@@ -131,6 +131,7 @@ pub struct CeComponents {
     pub enrollment_svc: Arc<crate::grpc::enrollment_service::EnrollmentServiceImpl>,
     pub security_svc: Arc<crate::grpc::security_service::SecurityServiceImpl>,
     pub account_svc: Arc<crate::grpc::account_service::AccountServiceImpl>,
+    pub upstream_svc: Arc<crate::grpc::upstream_service::UpstreamServiceImpl>,
 }
 
 /// Whether magic links are enabled, from the `SID_MAGIC_LINKS_ENABLED` value.
@@ -944,6 +945,16 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         Some(page) => auth_svc.with_sign_in_page(page),
         None => auth_svc,
     });
+    // Sign-in through upstream providers completes as the other ceremonies
+    // do: the same sign-in page, cookie, security rules and session policy.
+    let upstream_svc = Arc::new(crate::grpc::upstream_service::UpstreamServiceImpl::new(
+        storage.clone(),
+        key_manager.clone(),
+        cache_backend.clone(),
+        jwt.clone(),
+        revocation_cache.clone(),
+        auth_svc.clone(),
+    ));
 
     let project_svc = Arc::new(ProjectServiceImpl::new(
         storage.clone(),
@@ -1117,6 +1128,7 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
         enrollment_svc,
         security_svc,
         account_svc,
+        upstream_svc,
     })
 }
 

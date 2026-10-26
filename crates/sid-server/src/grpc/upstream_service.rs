@@ -39,6 +39,7 @@ use uuid::Uuid;
 
 use sid_core::grpc_error::{ApiError, ErrorReason};
 
+use super::auth_service::AuthServiceImpl;
 use super::convert;
 use sid_core::grpc_error::refuse::{
     changed_concurrently, dependency_unavailable, internal, invalid_field, missing_field,
@@ -57,17 +58,22 @@ pub struct UpstreamServiceImpl {
     auth_state: ChallengeStore<UpstreamAuthState>,
     jwt: Arc<JwtService>,
     revocation: Arc<RevocationCache>,
+    /// Admits and completes a verified upstream sign-in as this authority
+    /// admits and completes every sign-in: its enrollment policy, sign-in
+    /// page, cookie, security rules and session policy.
+    auth: Arc<AuthServiceImpl>,
 }
 
 impl UpstreamServiceImpl {
-    /// Create a new upstream service instance; pending upstream logins live
-    /// in the shared `cache` for 10 minutes.
+    /// Create a new upstream service whose sign-ins `auth` completes;
+    /// pending upstream logins live in the shared `cache` for 10 minutes.
     pub fn new(
         storage: Arc<dyn StorageBackend>,
         key_manager: Arc<dyn KeyManager>,
         cache: Arc<dyn sid_plugin::cache::CacheBackend>,
         jwt: Arc<JwtService>,
         revocation: Arc<RevocationCache>,
+        auth: Arc<AuthServiceImpl>,
     ) -> Self {
         Self {
             jwt,
@@ -80,6 +86,7 @@ impl UpstreamServiceImpl {
                 Duration::from_secs(600),
             ),
             key_manager,
+            auth,
         }
     }
 
@@ -498,6 +505,8 @@ impl UpstreamService for UpstreamServiceImpl {
         &self,
         request: Request<InitiateUpstreamAuthRequest>,
     ) -> Result<Response<InitiateUpstreamAuthResponse>, Status> {
+        // No sign-in starts during maintenance, as no local one does.
+        self.auth.check_maintenance().await?;
         let req = request.into_inner();
         let provider_id = Self::parse_provider_id(&req.provider_id)?;
 
@@ -542,6 +551,12 @@ impl UpstreamService for UpstreamServiceImpl {
         &self,
         request: Request<HandleUpstreamCallbackRequest>,
     ) -> Result<Response<HandleUpstreamCallbackResponse>, Status> {
+        // Refused before the pending sign-in is consumed: it completes once
+        // maintenance ends.
+        self.auth.check_maintenance().await?;
+        // Who completes the sign-in decides how its credential is delivered;
+        // a browser off the sign-in page completes nothing.
+        let ceremony = self.auth.upstream_ceremony(&request)?;
         let req = request.into_inner();
 
         if req.code.is_empty() {
@@ -631,30 +646,40 @@ impl UpstreamService for UpstreamServiceImpl {
                 // The link was removed meanwhile: it does not log anyone in.
                 return Err(changed_concurrently());
             }
-
-            // TODO: Create a full session via SessionService instead of placeholder UUID.
-            let session_id = Uuid::now_v7().to_string();
+            let profile = self
+                .storage
+                .get_profile(upstream_identity.profile_id)
+                .await
+                .map_err(storage_failure)?
+                // The linked Profile is gone: nobody is signed in.
+                .ok_or_else(changed_concurrently)?;
+            let signed_in = self
+                .auth
+                .complete_upstream_sign_in(&profile, &ceremony)
+                .await?;
 
             info!(
                 "Upstream login: profile {} via provider {} (returning user)",
                 upstream_identity.profile_id, provider_id
             );
 
-            return Ok(Response::new(HandleUpstreamCallbackResponse {
-                result: Some(handle_upstream_callback_response::Result::Success(
-                    UpstreamAuthSuccess {
-                        session_id,
-                        expires_in: 3600,
-                        new_profile_created: false,
-                    },
-                )),
-            }));
+            return signed_in
+                .respond(|session_id, expires_in| success(session_id, expires_in, false));
         }
 
         // Path B: No subject match — check for verified email match.
-        if claims.has_verified_email()
+        // A failed lookup fails the sign-in: it never falls through to
+        // provisioning a second account for a user who has one.
+        let existing = match (&claims.email, claims.has_verified_email()) {
+            (Some(email), true) => self
+                .storage
+                .get_profile_by_email(email)
+                .await
+                .map_err(storage_failure)?,
+            _ => None,
+        };
+        if existing.is_some()
             && let Some(email) = &claims.email
-            && let Ok(Some(_existing_profile)) = self.storage.get_profile_by_email(email).await
         {
             // Profile exists with this email but no upstream identity linked.
             // Return linking_required so the user can confirm account linking.
@@ -675,8 +700,10 @@ impl UpstreamService for UpstreamServiceImpl {
             }));
         }
 
-        // Path C: No match at all — JIT provisioning.
+        // Path C: No match at all — JIT provisioning, only when the
+        // installation admits a new account.
         // Create a new profile and link the upstream identity.
+        self.auth.admit_upstream_account(&claims).await?;
         let username = claims
             .email
             .as_deref()
@@ -723,22 +750,34 @@ impl UpstreamService for UpstreamServiceImpl {
             .await
             .map_err(storage_failure)?;
 
-        // TODO: Create a full session via SessionService instead of placeholder UUID.
-        let session_id = Uuid::now_v7().to_string();
+        let signed_in = self
+            .auth
+            .complete_upstream_sign_in(&profile, &ceremony)
+            .await?;
 
         info!(
             "JIT provisioned profile {} via upstream provider {} (subject: {})",
             profile.id, provider_id, claims.upstream_subject
         );
 
-        Ok(Response::new(HandleUpstreamCallbackResponse {
-            result: Some(handle_upstream_callback_response::Result::Success(
-                UpstreamAuthSuccess {
-                    session_id,
-                    expires_in: 3600,
-                    new_profile_created: true,
-                },
-            )),
-        }))
+        signed_in.respond(|session_id, expires_in| success(session_id, expires_in, true))
+    }
+}
+
+/// The callback's answer for a session `session_id` whose credential lives
+/// `expires_in` seconds.
+fn success(
+    session_id: String,
+    expires_in: i64,
+    new_profile_created: bool,
+) -> HandleUpstreamCallbackResponse {
+    HandleUpstreamCallbackResponse {
+        result: Some(handle_upstream_callback_response::Result::Success(
+            UpstreamAuthSuccess {
+                session_id,
+                expires_in,
+                new_profile_created,
+            },
+        )),
     }
 }

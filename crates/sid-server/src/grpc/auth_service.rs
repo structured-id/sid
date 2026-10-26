@@ -26,7 +26,7 @@ use sid_authn::otp::OtpService;
 use sid_authn::password_sign_in::PendingSignIn;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::revocation_cascade::RevocationCascadeService;
-use sid_authn::sign_in_delivery::{BrowserCredential, CeremonyClient, Delivery, SignedIn};
+use sid_authn::sign_in_delivery::{CeremonyClient, Delivery, SignedIn};
 use sid_authn::subject::{SubjectRule, resolve_subject};
 use sid_authn::webauthn::{
     AssertionPurpose, AssertionResponse, DiscoverableAssertionResponse, RegistrationResponse,
@@ -570,6 +570,15 @@ struct LoginSecurityExtras<'a> {
     /// Pass earned by solving the CAPTCHA this sign-in was asked for.
     captcha_pass: Option<&'a str>,
     user_agent: Option<&'a str>,
+}
+
+/// What an upstream sign-in request tells about who completes it, read
+/// before its state is consumed.
+pub(crate) struct UpstreamCeremony {
+    client: CeremonyClient,
+    client_ip: Option<std::net::IpAddr>,
+    user_agent: Option<String>,
+    captcha_pass: Option<String>,
 }
 
 impl AuthServiceImpl {
@@ -2081,111 +2090,109 @@ impl AuthServiceImpl {
     async fn sign_in(
         &self,
         profile: &sid_core::models::Profile,
-        mut session: sid_core::models::Session,
+        session: sid_core::models::Session,
         client: CeremonyClient,
         proved_by: Option<&sid_core::models::CredentialFence>,
     ) -> Result<SignedIn, Status> {
-        match client {
-            CeremonyClient::Browser => {
-                let credential = BrowserCredential::bind(&mut session);
-                self.persist_session(profile, &session, proved_by).await?;
-                Ok(credential.signed_in(&self.browser_cookie, &session))
-            }
-            CeremonyClient::Native => {
-                self.persist_session(profile, &session, proved_by).await?;
-                let sub = profile.id.to_string();
-                let access_token = self
-                    .jwt
-                    .issue_access_token(
-                        &sub,
-                        Some(&sub),
-                        profile,
-                        &session,
-                        &session.scopes,
-                        None,
-                        None,
-                    )
-                    .map_err(|e| internal("issue access token", e))?;
-                // The token expires with the session when the session is shorter.
-                let expires_in = self
-                    .jwt
-                    .access_token_ttl_secs()
-                    .min((session.expires_at - Utc::now()).num_seconds());
-                Ok(SignedIn {
-                    session_id: session.id.to_string(),
-                    expires_in,
-                    delivery: Delivery::Bearer(access_token.into()),
-                })
-            }
+        super::sign_in_session::SignInSessions {
+            storage: self.storage.as_ref(),
+            jwt: &self.jwt,
+            revocation: &self.revocation_cache,
+            issuer: &self.issuer,
+            cookie: &self.browser_cookie,
+            max_concurrent_sessions: self.security_policy.session.max_concurrent_sessions,
         }
+        .sign_in(profile, session, client, proved_by)
+        .await
     }
 
-    /// Store `session` under the concurrent-session limit and announce it.
-    async fn persist_session(
+    /// Who completes the upstream sign-in `request`: its client (a browser
+    /// off the sign-in page completes nothing), address and device.
+    #[allow(clippy::result_large_err)]
+    pub(crate) fn upstream_ceremony<T>(
+        &self,
+        request: &Request<T>,
+    ) -> Result<UpstreamCeremony, Status> {
+        Ok(UpstreamCeremony {
+            client: self.ceremony_client(request.metadata())?,
+            client_ip: self.client_ip(request),
+            user_agent: extract_user_agent(request.metadata()),
+            captcha_pass: extract_captcha_pass(request.metadata()),
+        })
+    }
+
+    /// Sign `profile` in after an upstream identity provider verified the
+    /// user, as every other sign-in completes: only an active Profile, after
+    /// the sign-in security rules for this client, with a session of this
+    /// authority's lifetime and limit. The provider, not SID, verified the
+    /// user: the session names no `amr` method (RFC 8176 §1) and has basic
+    /// assurance.
+    pub(crate) async fn complete_upstream_sign_in(
         &self,
         profile: &sid_core::models::Profile,
-        session: &sid_core::models::Session,
-        proved_by: Option<&sid_core::models::CredentialFence>,
-    ) -> Result<(), Status> {
-        // The storage counts, evicts and inserts in one serialized step, and
-        // owes each evicted session's client a logout; the same commit owes
-        // the session.created event.
-        let max_sessions = self.security_policy.session.max_concurrent_sessions;
-        let _audit_start = std::time::Instant::now();
-        let created = Event::new(&self.issuer, event_types::SESSION_CREATED)
-            .with_subject(format!("session/{}", session.id))
-            .with_data(serde_json::json!({
-                "profile_id": profile.id.to_string(),
-                "session_id": session.id.to_string(),
-            }));
-        let ctx = MutationContext::from(AuditEntry::user(
-            profile.id.to_string(),
-            "session.create",
-            session.id.to_string(),
-        ))
-        .with_work(created.relay());
-        let evicted = match self
-            .storage
-            .create_session_atomic(session, max_sessions, proved_by, ctx)
-            .await
-        {
-            Ok(evicted) => evicted,
-            // The credential changed after its check: a wrong password then.
-            Err(sid_core::Error::Fenced(_)) => return Err(authentication_failed()),
-            Err(e) => return Err(storage_failure(e)),
+        ceremony: &UpstreamCeremony,
+    ) -> Result<SignedIn, Status> {
+        if !profile.status.can_authenticate() {
+            return Err(authentication_failed());
+        }
+        self.evaluate_login_security(
+            profile.id,
+            ceremony.client_ip,
+            "upstream",
+            false,
+            LoginSecurityExtras {
+                captcha_pass: ceremony.captcha_pass.as_deref(),
+                user_agent: ceremony.user_agent.as_deref(),
+            },
+        )
+        .await?;
+        let lifetime = match self.security_policy.session.max_lifetime_hours {
+            0 => Duration::hours(24),
+            hours => Duration::hours(i64::from(hours)),
         };
-        if !evicted.is_empty() {
-            info!(
-                profile_id = %profile.id,
-                evicted_count = evicted.len(),
-                "Session limit enforced: evicted oldest sessions"
-            );
+        let mut session = sid_core::models::Session::new(
+            profile.id,
+            session_address(ceremony.client_ip),
+            Utc::now() + lifetime,
+        );
+        session.device_id = ceremony.user_agent.as_deref().map(compute_device_id);
+        session.scopes = vec![
+            "openid".to_string(),
+            "profile".to_string(),
+            "email".to_string(),
+        ];
+        self.sign_in(profile, session, ceremony.client, None).await
+    }
+
+    /// Refuse to create an account for an upstream sign-in this authority
+    /// does not admit, as it refuses a self-registration: the registration
+    /// switch, then the effective enrollment policy, the provider's verified
+    /// email as the address a domain policy checks. An upstream sign-in
+    /// carries no invite.
+    pub(crate) async fn admit_upstream_account(
+        &self,
+        claims: &sid_core::models::MappedClaims,
+    ) -> Result<(), Status> {
+        if !self.feature_flags.is_registration_enabled().await {
+            return Err(not_configured("registration"));
         }
-        // An evicted session's access tokens stop at once in every process;
-        // when that cannot be propagated the sign-in fails rather than leave
-        // them live elsewhere.
-        for ended in &evicted {
-            self.revocation_cache
-                .revoke_session(ended.to_string())
-                .await
-                .map_err(|e| dependency_unavailable("session revocation", e))?;
+        let policy = crate::enrollment::effective(self.storage.as_ref(), self.enrollment_pin)
+            .await
+            .map_err(storage_failure)?;
+        let email = claims
+            .has_verified_email()
+            .then_some(claims.email.as_deref())
+            .flatten();
+        match sid_core::enrollment::evaluate_enrollment(&policy, email, None) {
+            sid_core::enrollment::EnrollmentDecision::Allow => Ok(()),
+            sid_core::enrollment::EnrollmentDecision::Deny(reason) => {
+                Err(registration_restricted(enrollment_requirement(&reason)))
+            }
         }
-        #[cfg(feature = "telemetry")]
-        {
-            use opentelemetry::{KeyValue, global};
-            global::meter("sid")
-                .f64_histogram("sid_audit_write_seconds")
-                .build()
-                .record(
-                    _audit_start.elapsed().as_secs_f64(),
-                    &[KeyValue::new("chain_scope", "session")],
-                );
-        }
-        Ok(())
     }
 
     /// SERVICE_MAINTENANCE while the installation is in maintenance mode.
-    async fn check_maintenance(&self) -> Result<(), Status> {
+    pub(crate) async fn check_maintenance(&self) -> Result<(), Status> {
         if self.feature_flags.is_maintenance_mode().await {
             Err(maintenance())
         } else {
