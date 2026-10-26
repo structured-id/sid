@@ -320,32 +320,41 @@ impl Host {
         }
     }
 
-    /// A code `account` authorized for the cabinet; returns the raw code.
+    /// A code `account` authorized for the cabinet, issued as an
+    /// authorization endpoint issues it; returns the raw code.
     fn authorize(&self, account: Account) -> String {
-        let raw = format!("code-{}", Uuid::now_v7());
-        self.grants.with(|g| {
-            g.codes.push(AuthorizationCode {
-                code_hash: OAuth2Server::hash_token(&raw),
-                profile_id: account,
-                client_id: self.client.client_id.clone(),
-                redirect_uri: REDIRECT.into(),
-                scopes: vec!["account".into()],
-                resource: self.target.resource_id(),
-                code_challenge: Some(compute_s256_challenge(VERIFIER)),
-                nonce: None,
-                expires_at: Utc::now() + Duration::minutes(5),
-                created_at: Utc::now(),
-                used: false,
-                session_id: None,
-                authentication: GrantAuthentication {
+        let request = self
+            .oauth2
+            .validate_authorize_request(
+                &self.client,
+                &crate::oauth2::AuthorizeRequest {
+                    client_id: self.client.client_id.clone(),
+                    redirect_uri: REDIRECT.into(),
+                    response_type: "code".into(),
+                    scope: Some("account".into()),
+                    state: Some("state".into()),
+                    code_challenge: Some(compute_s256_challenge(VERIFIER)),
+                    code_challenge_method: Some("S256".into()),
+                    nonce: None,
+                },
+            )
+            .expect("a valid authorization request");
+        let (raw, code) = self
+            .oauth2
+            .generate_auth_code(
+                account,
+                &request,
+                self.target.resource_id(),
+                GrantAuthentication {
                     session: SessionId::generate(),
                     authenticated_at: Utc::now(),
                     amr: vec!["pwd".into()],
                     assurance_level: sid_core::models::AuthLevel::Basic,
                     elevation: None,
                 },
-            })
-        });
+            )
+            .expect("a code");
+        self.grants.with(|g| g.codes.push(code));
         raw
     }
 
