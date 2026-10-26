@@ -40,6 +40,7 @@ use sid_proto::sid::v1::{
     oidc_provider_service_server::OidcProviderServiceServer,
     project_service_server::ProjectServiceServer,
     system_integration_service_server::SystemIntegrationServiceServer,
+    upstream_service_server::UpstreamServiceServer,
 };
 
 use crate::init::{CeComponents, spawn_work_runner};
@@ -130,6 +131,8 @@ impl CeServices {
             ))
             .await
             .add(AccountServiceServer::from_arc(c.account_svc.clone()))
+            .await
+            .add(UpstreamServiceServer::from_arc(c.upstream_svc.clone()))
             .await
             .add(SystemIntegrationServiceServer::new(
                 crate::grpc::system_integration_service::SystemIntegrationServiceImpl::new(

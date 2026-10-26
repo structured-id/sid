@@ -6028,6 +6028,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry-prometheus",
  "opentelemetry_sdk",
+ "p256",
  "pasta_curves",
  "prometheus",
  "prost",

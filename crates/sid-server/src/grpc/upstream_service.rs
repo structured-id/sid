@@ -10,7 +10,10 @@ use sid_authn::caller::{Caller, authenticate};
 use sid_authn::challenge_store::ChallengeStore;
 use sid_authn::jwt::JwtService;
 use sid_authn::revocation_cache::RevocationCache;
+use sid_authn::sign_in_delivery::{CeremonyClient, SignedIn, ceremony_client};
 use sid_authn::upstream::oidc::OidcProviderClient;
+use sid_core::models::Session;
+use sid_core::models::security_policy::SecurityPolicy;
 use sid_core::models::upstream_provider::ProviderTrustCategory;
 use sid_core::models::{
     AuditEntry, Profile, UpstreamIdentity, UpstreamLogin,
@@ -57,17 +60,27 @@ pub struct UpstreamServiceImpl {
     auth_state: ChallengeStore<UpstreamAuthState>,
     jwt: Arc<JwtService>,
     revocation: Arc<RevocationCache>,
+    /// The issuer whose events announce a session.
+    issuer: String,
+    /// Origin of the browser sign-in page: a callback it completes gets the
+    /// IdP session cookie. None completes only native clients.
+    sign_in_origin: Option<url::Origin>,
+    /// This authority's IdP session cookie.
+    browser_cookie: sid_authn::browser_session::BrowserCookie,
+    /// The session lifetime and limit every sign-in of this authority keeps.
+    security_policy: SecurityPolicy,
 }
 
 impl UpstreamServiceImpl {
-    /// Create a new upstream service instance; pending upstream logins live
-    /// in the shared `cache` for 10 minutes.
+    /// Create a new upstream service instance of `issuer`; pending upstream
+    /// logins live in the shared `cache` for 10 minutes.
     pub fn new(
         storage: Arc<dyn StorageBackend>,
         key_manager: Arc<dyn KeyManager>,
         cache: Arc<dyn sid_plugin::cache::CacheBackend>,
         jwt: Arc<JwtService>,
         revocation: Arc<RevocationCache>,
+        issuer: String,
     ) -> Self {
         Self {
             jwt,
@@ -80,7 +93,53 @@ impl UpstreamServiceImpl {
                 Duration::from_secs(600),
             ),
             key_manager,
+            issuer,
+            sign_in_origin: None,
+            browser_cookie: Default::default(),
+            security_policy: SecurityPolicy::ce_default(),
         }
+    }
+
+    /// This service completing browser sign-ins of the page at `sign_in`.
+    pub fn with_sign_in_page(mut self, sign_in: &url::Url) -> Self {
+        self.sign_in_origin = Some(sign_in.origin());
+        self
+    }
+
+    /// This service setting `cookie` as the IdP session cookie.
+    pub fn with_browser_cookie(
+        mut self,
+        cookie: sid_authn::browser_session::BrowserCookie,
+    ) -> Self {
+        self.browser_cookie = cookie;
+        self
+    }
+
+    /// A session of `profile` for this upstream sign-in, its credential
+    /// delivered to `client`. The provider, not SID, verified the user: the
+    /// session names no `amr` method SID verified (RFC 8176) and has basic
+    /// assurance.
+    async fn sign_in(&self, profile: &Profile, client: CeremonyClient) -> Result<SignedIn, Status> {
+        let lifetime = match self.security_policy.session.max_lifetime_hours {
+            0 => chrono::Duration::hours(24),
+            hours => chrono::Duration::hours(i64::from(hours)),
+        };
+        let mut session = Session::new(profile.id, String::new(), chrono::Utc::now() + lifetime);
+        session.scopes = vec![
+            "openid".to_string(),
+            "profile".to_string(),
+            "email".to_string(),
+        ];
+        super::sign_in_session::SignInSessions {
+            storage: self.storage.as_ref(),
+            jwt: &self.jwt,
+            revocation: &self.revocation,
+            issuer: &self.issuer,
+            cookie: &self.browser_cookie,
+            max_concurrent_sessions: self.security_policy.session.max_concurrent_sessions,
+        }
+        .sign_in(profile, session, client, None)
+        .await
     }
 
     /// Convert proto `UpstreamProtocol` enum to domain `UpstreamProtocol`.
@@ -542,6 +601,9 @@ impl UpstreamService for UpstreamServiceImpl {
         &self,
         request: Request<HandleUpstreamCallbackRequest>,
     ) -> Result<Response<HandleUpstreamCallbackResponse>, Status> {
+        // Who completes the sign-in decides how its credential is delivered;
+        // a browser off the sign-in page completes nothing.
+        let client = ceremony_client(request.metadata(), self.sign_in_origin.as_ref())?;
         let req = request.into_inner();
 
         if req.code.is_empty() {
@@ -631,24 +693,22 @@ impl UpstreamService for UpstreamServiceImpl {
                 // The link was removed meanwhile: it does not log anyone in.
                 return Err(changed_concurrently());
             }
-
-            // TODO: Create a full session via SessionService instead of placeholder UUID.
-            let session_id = Uuid::now_v7().to_string();
+            let profile = self
+                .storage
+                .get_profile(upstream_identity.profile_id)
+                .await
+                .map_err(storage_failure)?
+                // The linked Profile is gone: nobody is signed in.
+                .ok_or_else(changed_concurrently)?;
+            let signed_in = self.sign_in(&profile, client).await?;
 
             info!(
                 "Upstream login: profile {} via provider {} (returning user)",
                 upstream_identity.profile_id, provider_id
             );
 
-            return Ok(Response::new(HandleUpstreamCallbackResponse {
-                result: Some(handle_upstream_callback_response::Result::Success(
-                    UpstreamAuthSuccess {
-                        session_id,
-                        expires_in: 3600,
-                        new_profile_created: false,
-                    },
-                )),
-            }));
+            return signed_in
+                .respond(|session_id, expires_in| success(session_id, expires_in, false));
         }
 
         // Path B: No subject match — check for verified email match.
@@ -723,22 +783,31 @@ impl UpstreamService for UpstreamServiceImpl {
             .await
             .map_err(storage_failure)?;
 
-        // TODO: Create a full session via SessionService instead of placeholder UUID.
-        let session_id = Uuid::now_v7().to_string();
+        let signed_in = self.sign_in(&profile, client).await?;
 
         info!(
             "JIT provisioned profile {} via upstream provider {} (subject: {})",
             profile.id, provider_id, claims.upstream_subject
         );
 
-        Ok(Response::new(HandleUpstreamCallbackResponse {
-            result: Some(handle_upstream_callback_response::Result::Success(
-                UpstreamAuthSuccess {
-                    session_id,
-                    expires_in: 3600,
-                    new_profile_created: true,
-                },
-            )),
-        }))
+        signed_in.respond(|session_id, expires_in| success(session_id, expires_in, true))
+    }
+}
+
+/// The callback's answer for a session `session_id` whose credential lives
+/// `expires_in` seconds.
+fn success(
+    session_id: String,
+    expires_in: i64,
+    new_profile_created: bool,
+) -> HandleUpstreamCallbackResponse {
+    HandleUpstreamCallbackResponse {
+        result: Some(handle_upstream_callback_response::Result::Success(
+            UpstreamAuthSuccess {
+                session_id,
+                expires_in,
+                new_profile_created,
+            },
+        )),
     }
 }

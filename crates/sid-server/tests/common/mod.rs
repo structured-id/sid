@@ -1327,7 +1327,9 @@ impl TestServices {
             cache_backend.clone(),
             jwt.clone(),
             revocation_cache.clone(),
-        );
+            "https://sid.example.com".to_string(),
+        )
+        .with_sign_in_page(&url::Url::parse(SIGN_IN_PAGE).unwrap());
 
         Self {
             admin,

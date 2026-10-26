@@ -26,7 +26,7 @@ use sid_authn::otp::OtpService;
 use sid_authn::password_sign_in::PendingSignIn;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::revocation_cascade::RevocationCascadeService;
-use sid_authn::sign_in_delivery::{BrowserCredential, CeremonyClient, Delivery, SignedIn};
+use sid_authn::sign_in_delivery::{CeremonyClient, Delivery, SignedIn};
 use sid_authn::subject::{SubjectRule, resolve_subject};
 use sid_authn::webauthn::{
     AssertionPurpose, AssertionResponse, DiscoverableAssertionResponse, RegistrationResponse,
@@ -2081,107 +2081,20 @@ impl AuthServiceImpl {
     async fn sign_in(
         &self,
         profile: &sid_core::models::Profile,
-        mut session: sid_core::models::Session,
+        session: sid_core::models::Session,
         client: CeremonyClient,
         proved_by: Option<&sid_core::models::CredentialFence>,
     ) -> Result<SignedIn, Status> {
-        match client {
-            CeremonyClient::Browser => {
-                let credential = BrowserCredential::bind(&mut session);
-                self.persist_session(profile, &session, proved_by).await?;
-                Ok(credential.signed_in(&self.browser_cookie, &session))
-            }
-            CeremonyClient::Native => {
-                self.persist_session(profile, &session, proved_by).await?;
-                let sub = profile.id.to_string();
-                let access_token = self
-                    .jwt
-                    .issue_access_token(
-                        &sub,
-                        Some(&sub),
-                        profile,
-                        &session,
-                        &session.scopes,
-                        None,
-                        None,
-                    )
-                    .map_err(|e| internal("issue access token", e))?;
-                // The token expires with the session when the session is shorter.
-                let expires_in = self
-                    .jwt
-                    .access_token_ttl_secs()
-                    .min((session.expires_at - Utc::now()).num_seconds());
-                Ok(SignedIn {
-                    session_id: session.id.to_string(),
-                    expires_in,
-                    delivery: Delivery::Bearer(access_token.into()),
-                })
-            }
+        super::sign_in_session::SignInSessions {
+            storage: self.storage.as_ref(),
+            jwt: &self.jwt,
+            revocation: &self.revocation_cache,
+            issuer: &self.issuer,
+            cookie: &self.browser_cookie,
+            max_concurrent_sessions: self.security_policy.session.max_concurrent_sessions,
         }
-    }
-
-    /// Store `session` under the concurrent-session limit and announce it.
-    async fn persist_session(
-        &self,
-        profile: &sid_core::models::Profile,
-        session: &sid_core::models::Session,
-        proved_by: Option<&sid_core::models::CredentialFence>,
-    ) -> Result<(), Status> {
-        // The storage counts, evicts and inserts in one serialized step, and
-        // owes each evicted session's client a logout; the same commit owes
-        // the session.created event.
-        let max_sessions = self.security_policy.session.max_concurrent_sessions;
-        let _audit_start = std::time::Instant::now();
-        let created = Event::new(&self.issuer, event_types::SESSION_CREATED)
-            .with_subject(format!("session/{}", session.id))
-            .with_data(serde_json::json!({
-                "profile_id": profile.id.to_string(),
-                "session_id": session.id.to_string(),
-            }));
-        let ctx = MutationContext::from(AuditEntry::user(
-            profile.id.to_string(),
-            "session.create",
-            session.id.to_string(),
-        ))
-        .with_work(created.relay());
-        let evicted = match self
-            .storage
-            .create_session_atomic(session, max_sessions, proved_by, ctx)
-            .await
-        {
-            Ok(evicted) => evicted,
-            // The credential changed after its check: a wrong password then.
-            Err(sid_core::Error::Fenced(_)) => return Err(authentication_failed()),
-            Err(e) => return Err(storage_failure(e)),
-        };
-        if !evicted.is_empty() {
-            info!(
-                profile_id = %profile.id,
-                evicted_count = evicted.len(),
-                "Session limit enforced: evicted oldest sessions"
-            );
-        }
-        // An evicted session's access tokens stop at once in every process;
-        // when that cannot be propagated the sign-in fails rather than leave
-        // them live elsewhere.
-        for ended in &evicted {
-            self.revocation_cache
-                .revoke_session(ended.to_string())
-                .await
-                .map_err(|e| dependency_unavailable("session revocation", e))?;
-        }
-        #[cfg(feature = "telemetry")]
-        {
-            use opentelemetry::{KeyValue, global};
-            global::meter("sid")
-                .f64_histogram("sid_audit_write_seconds")
-                .build()
-                .record(
-                    _audit_start.elapsed().as_secs_f64(),
-                    &[KeyValue::new("chain_scope", "session")],
-                );
-        }
-        Ok(())
+        .sign_in(profile, session, client, proved_by)
+        .await
     }
 
     /// SERVICE_MAINTENANCE while the installation is in maintenance mode.

@@ -145,6 +145,8 @@ tonic-types = { workspace = true }
 futures = { workspace = true }
 # DPoP proofs are signed by the tests acting as the client.
 jsonwebtoken = { workspace = true }
+# The upstream provider the sign-in tests run signs its ID Tokens with ES256.
+p256 = { workspace = true, features = ["pkcs8"] }
 # Harnesses set state no operation writes (a grace period end in the past).
 sqlx = { workspace = true }
 # Startup steps are tested against a real in-memory engine.
