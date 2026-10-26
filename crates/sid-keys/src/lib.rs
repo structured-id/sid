@@ -21,7 +21,8 @@
 //! let manager = SoftwareKeyManager::new(master, versions, Arc::new(RustCryptoPrimitives::new()))?;
 //!
 //! let field = manager.encrypt(b"secret value", "totp:alice").await?;
-//! assert_eq!(manager.decrypt(&field).await?, b"secret value");
+//! // The reader names the record it expects the field to belong to.
+//! assert_eq!(manager.decrypt(&field, "totp:alice").await?, b"secret value");
 //! # Ok(())
 //! # }
 //! ```

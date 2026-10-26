@@ -1340,8 +1340,12 @@ async fn history_key_restore_requires_the_original_external_key() {
     assert_eq!(wrapped, epoch.key);
     let field = sid_keys::EncryptedField::from_bytes(&wrapped.0).unwrap();
     let recovered_keys = manager([9u8; 32]);
-    assert_eq!(recovered_keys.decrypt(&field).await.unwrap(), secret);
-    assert!(manager([10u8; 32]).decrypt(&field).await.is_err());
+    let context = history_key_context(id, &epoch.epoch.owner_domain);
+    assert_eq!(
+        recovered_keys.decrypt(&field, &context).await.unwrap(),
+        secret
+    );
+    assert!(manager([10u8; 32]).decrypt(&field, &context).await.is_err());
     let mut missing_version = restored.clone();
     missing_version.history_key_versions.clear();
     let blank = installation(&org).await;
@@ -1447,7 +1451,10 @@ async fn history_keys_move_with_the_evaluators_own_key_versions() {
         .unwrap();
     let field = sid_keys::EncryptedField::from_bytes(&wrapped.0).unwrap();
     assert_eq!(
-        evaluator_keys(restored).decrypt(&field).await.unwrap(),
+        evaluator_keys(restored)
+            .decrypt(&field, &history_key_context(id, &epoch.epoch.owner_domain))
+            .await
+            .unwrap(),
         secret
     );
     assert!(verify(&source, &target).await.unwrap().passed);

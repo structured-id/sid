@@ -83,7 +83,7 @@ async fn setup_on(
     let keys = common::test_key_manager();
     let id = sid_core::models::UpstreamProviderId::new();
     let secret = keys
-        .encrypt(b"provider-secret", &format!("upstream:{}", id.0))
+        .encrypt(b"provider-secret", &id.client_secret_context())
         .await
         .unwrap();
     let mut registered = UpstreamProvider::new(

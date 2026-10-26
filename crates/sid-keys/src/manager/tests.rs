@@ -158,7 +158,7 @@ async fn test_encrypt_decrypt_roundtrip() {
     assert_eq!(field.context, "totp:alice");
     assert_ne!(field.ciphertext.as_slice(), b"totp-secret");
 
-    let plaintext = km.decrypt(&field).await.unwrap();
+    let plaintext = km.decrypt(&field, "totp:alice").await.unwrap();
     assert_eq!(plaintext, b"totp-secret");
 }
 
@@ -166,7 +166,7 @@ async fn test_encrypt_decrypt_roundtrip() {
 async fn test_encrypt_empty_plaintext() {
     let km = manager_v1();
     let field = km.encrypt(b"", "empty").await.unwrap();
-    assert!(km.decrypt(&field).await.unwrap().is_empty());
+    assert!(km.decrypt(&field, "empty").await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -189,8 +189,32 @@ async fn test_context_swap_is_rejected() {
     // Move the ciphertext onto another record by relabelling it.
     field.context = "totp:bob".into();
 
-    let result = km.decrypt(&field).await;
+    let result = km.decrypt(&field, "totp:bob").await;
     assert!(matches!(result, Err(KeyManagerError::Decryption(_))));
+}
+
+// A whole field copied onto another record keeps its own context; reading it
+// for that record must refuse it, not return the first record's secret.
+#[tokio::test]
+async fn test_a_whole_field_of_another_record_is_refused() {
+    let km = manager_v1();
+    let alices = km.encrypt(b"alice-secret", "totp:alice").await.unwrap();
+
+    let result = km.decrypt(&alices, "totp:bob").await;
+    assert!(matches!(result, Err(KeyManagerError::ContextMismatch)));
+}
+
+// Rotation re-encrypts only a field of the record it is asked about.
+#[tokio::test]
+async fn test_rotate_refuses_a_field_of_another_record() {
+    let km = manager_v1_v2();
+    let alices = manager_v1()
+        .encrypt(b"alice-secret", "totp:alice")
+        .await
+        .unwrap();
+
+    let result = km.rotate(&alices, "totp:bob").await;
+    assert!(matches!(result, Err(KeyManagerError::ContextMismatch)));
 }
 
 #[tokio::test]
@@ -199,7 +223,7 @@ async fn test_ciphertext_tamper_is_rejected() {
     let mut field = km.encrypt(b"secret", "ctx").await.unwrap();
     field.ciphertext[0] ^= 0x01;
 
-    let result = km.decrypt(&field).await;
+    let result = km.decrypt(&field, "ctx").await;
     assert!(matches!(result, Err(KeyManagerError::Decryption(_))));
 }
 
@@ -209,7 +233,7 @@ async fn test_nonce_tamper_is_rejected() {
     let mut field = km.encrypt(b"secret", "ctx").await.unwrap();
     field.nonce[0] ^= 0x01;
 
-    let result = km.decrypt(&field).await;
+    let result = km.decrypt(&field, "ctx").await;
     assert!(matches!(result, Err(KeyManagerError::Decryption(_))));
 }
 
@@ -219,7 +243,7 @@ async fn test_unknown_version_is_named_in_the_error() {
     let mut field = km.encrypt(b"secret", "ctx").await.unwrap();
     field.key_version = 9;
 
-    let result = km.decrypt(&field).await;
+    let result = km.decrypt(&field, "ctx").await;
     assert!(matches!(result, Err(KeyManagerError::KeyNotFound(9))));
 }
 
@@ -229,7 +253,7 @@ async fn test_version_zero_is_not_a_key() {
     let mut field = km.encrypt(b"secret", "ctx").await.unwrap();
     field.key_version = 0;
 
-    let result = km.decrypt(&field).await;
+    let result = km.decrypt(&field, "ctx").await;
     assert!(matches!(result, Err(KeyManagerError::KeyNotFound(0))));
 }
 
@@ -241,7 +265,7 @@ async fn test_another_master_cannot_decrypt() {
     let field = km.encrypt(b"secret", "ctx").await.unwrap();
 
     let other = SoftwareKeyManager::new(other_master(), vec![params_v1()], crypto()).unwrap();
-    let result = other.decrypt(&field).await;
+    let result = other.decrypt(&field, "ctx").await;
     assert!(matches!(result, Err(KeyManagerError::Decryption(_))));
 }
 
@@ -253,7 +277,7 @@ async fn test_a_different_salt_yields_a_different_key() {
     // Same master, same version number, salt lost and replaced: the key is gone.
     let wrong_salt = KeyVersionParams::new(1, vec![0xFF; 16], "key-v1");
     let other = SoftwareKeyManager::new(master(), vec![wrong_salt], crypto()).unwrap();
-    let result = other.decrypt(&field).await;
+    let result = other.decrypt(&field, "ctx").await;
     assert!(matches!(result, Err(KeyManagerError::Decryption(_))));
 }
 
@@ -264,7 +288,7 @@ async fn test_a_different_context_yields_a_different_key() {
 
     let wrong_context = KeyVersionParams::new(1, vec![0xA1; 16], "key-v1-other");
     let other = SoftwareKeyManager::new(master(), vec![wrong_context], crypto()).unwrap();
-    let result = other.decrypt(&field).await;
+    let result = other.decrypt(&field, "ctx").await;
     assert!(matches!(result, Err(KeyManagerError::Decryption(_))));
 }
 
@@ -287,8 +311,14 @@ async fn test_every_retained_version_re_derives_from_the_same_master() {
     };
 
     let second = manager_v1_v2();
-    assert_eq!(second.decrypt(&under_v2).await.unwrap(), b"current");
-    assert_eq!(second.decrypt(&under_v1).await.unwrap(), b"older");
+    assert_eq!(
+        second.decrypt(&under_v2, "ctx:current").await.unwrap(),
+        b"current"
+    );
+    assert_eq!(
+        second.decrypt(&under_v1, "ctx:older").await.unwrap(),
+        b"older"
+    );
 }
 
 // -- Lazy rotation --
@@ -310,12 +340,12 @@ async fn test_rotate_moves_a_field_to_the_current_version() {
     let stale = manager_v1().encrypt(b"payload", "ctx:rot").await.unwrap();
     assert_eq!(stale.key_version, 1);
 
-    let rotated = km.rotate(&stale).await.unwrap();
+    let rotated = km.rotate(&stale, "ctx:rot").await.unwrap();
 
     assert_eq!(rotated.key_version, 2);
     assert_eq!(rotated.context, "ctx:rot");
     assert_ne!(rotated.ciphertext, stale.ciphertext);
-    assert_eq!(km.decrypt(&rotated).await.unwrap(), b"payload");
+    assert_eq!(km.decrypt(&rotated, "ctx:rot").await.unwrap(), b"payload");
     assert!(!km.needs_rotation(&rotated));
 }
 
@@ -327,10 +357,10 @@ async fn test_rotate_preserves_context_binding() {
         .await
         .unwrap();
 
-    let mut rotated = km.rotate(&stale).await.unwrap();
+    let mut rotated = km.rotate(&stale, "totp:alice").await.unwrap();
     rotated.context = "totp:bob".into();
 
-    let result = km.decrypt(&rotated).await;
+    let result = km.decrypt(&rotated, "totp:bob").await;
     assert!(matches!(result, Err(KeyManagerError::Decryption(_))));
 }
 
@@ -340,7 +370,7 @@ async fn test_rotate_fails_on_a_field_whose_version_is_unknown() {
     let mut field = km.encrypt(b"payload", "ctx").await.unwrap();
     field.key_version = 42;
 
-    let result = km.rotate(&field).await;
+    let result = km.rotate(&field, "ctx").await;
     assert!(matches!(result, Err(KeyManagerError::KeyNotFound(42))));
 }
 
@@ -349,11 +379,11 @@ async fn test_rotate_on_a_current_field_is_a_fresh_encryption() {
     let km = manager_v1_v2();
     let field = km.encrypt(b"payload", "ctx").await.unwrap();
 
-    let again = km.rotate(&field).await.unwrap();
+    let again = km.rotate(&field, "ctx").await.unwrap();
 
     assert_eq!(again.key_version, field.key_version);
     assert_ne!(again.nonce, field.nonce);
-    assert_eq!(km.decrypt(&again).await.unwrap(), b"payload");
+    assert_eq!(km.decrypt(&again, "ctx").await.unwrap(), b"payload");
 }
 
 // -- Stored parameters --
@@ -384,7 +414,10 @@ fn test_key_derivation_is_named_in_the_stored_form() {
 async fn test_key_manager_is_object_safe() {
     let km: Box<dyn KeyManager> = Box::new(manager_v1());
     let field = km.encrypt(b"through-the-trait", "ctx").await.unwrap();
-    assert_eq!(km.decrypt(&field).await.unwrap(), b"through-the-trait");
+    assert_eq!(
+        km.decrypt(&field, "ctx").await.unwrap(),
+        b"through-the-trait"
+    );
 }
 
 #[test]
