@@ -2,25 +2,26 @@
 
 use super::*;
 
-/// The handle and the gRPC path are split off `/i/{handle}/grpc/...`.
+/// The handle and the gRPC path are split off `/i/{handle}/api/...`.
 #[test]
 fn addressed_path_names_handle_and_method() {
     assert_eq!(
-        addressed("/i/0123abcd/grpc/sid.v1.authn.AuthService/OpaqueLoginStart"),
+        addressed("/i/0123abcd/api/sid.v1.authn.AuthService/OpaqueLoginStart"),
         Some(("0123abcd", "/sid.v1.authn.AuthService/OpaqueLoginStart"))
     );
 }
 
-/// Anything else is no addressed call: no handle, no `grpc` segment, a
-/// longer segment that only starts with it, another issuer endpoint, a root
-/// gRPC path.
+/// Anything else is no addressed call: no handle, no `api` segment, a longer
+/// segment that only starts with it, the transport-named mount the API path
+/// replaced, another issuer endpoint, a root gRPC path.
 #[test]
 fn other_paths_are_not_addressed() {
     for path in [
         "/i/",
         "/i/0123abcd",
-        "/i/0123abcd/grpc",
-        "/i/0123abcd/grpcx/sid.v1.authn.AuthService/OpaqueLoginStart",
+        "/i/0123abcd/api",
+        "/i/0123abcd/apix/sid.v1.authn.AuthService/OpaqueLoginStart",
+        "/i/0123abcd/grpc/sid.v1.authn.AuthService/OpaqueLoginStart",
         "/i/0123abcd/oauth2/token",
         "/sid.v1.authn.AuthService/OpaqueLoginStart",
     ] {

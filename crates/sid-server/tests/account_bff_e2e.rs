@@ -251,8 +251,9 @@ async fn grpc_web_from(
     let mut frame = vec![0u8];
     frame.extend_from_slice(&u32::try_from(message.len()).unwrap().to_be_bytes());
     frame.extend_from_slice(&message);
+    // The page calls the gRPC path under the API mount.
     let mut request = http()
-        .post(format!("{replica}{path}"))
+        .post(format!("{replica}/api{path}"))
         .header("content-type", "application/grpc-web+proto")
         .header("x-grpc-web", "1")
         .body(frame);

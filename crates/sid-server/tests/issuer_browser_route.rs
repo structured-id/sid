@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Browser sign-in calls addressed to an issuer on a shared origin
-//! (`/i/{handle}/grpc/{package.Service}/{Method}`): a stored handle and a
+//! (`/i/{handle}/api/{package.Service}/{Method}`): a stored handle and a
 //! sign-in method reach the same service as the root path, with the issuer
 //! and the received path attached; anything else under the prefix is
 //! refused there, and nothing falls back to another issuer.
@@ -17,7 +17,7 @@ use common::mock_storage::MockStorage;
 use sid_authn::issuer::AddressedIssuer;
 use sid_authn::resource::TranscodedRequest;
 use sid_proto::sid::v1::auth_service_server::AuthServiceServer;
-use sid_server::serve::browser_route::{BROWSER_METHODS, IssuerRoute};
+use sid_server::serve::browser_route::{BROWSER_METHODS, BrowserRoute, mark_browser_call};
 use tonic::body::Body;
 use tonic::codegen::{Service, http};
 
@@ -56,15 +56,30 @@ impl Service<http::Request<Body>> for Recording {
     }
 }
 
-/// `path` POSTed through the route over `seen`; the answer's gRPC status
-/// when the route refused it.
+/// `path` POSTed as native gRPC through the route over `seen`; the answer's
+/// gRPC status when the route refused it.
 async fn through_route(svc: &TestServices, seen: &Seen, path: &str) -> Option<String> {
-    let mut route = IssuerRoute::new(Recording(seen.clone()), svc.issuers.clone());
+    through_route_as(svc, seen, path, "application/grpc").await
+}
+
+/// `path` POSTed with `content_type` through the route over `seen`, marked
+/// the way the transcoder's upstream marks it; the answer's gRPC status when
+/// the route refused it.
+async fn through_route_as(
+    svc: &TestServices,
+    seen: &Seen,
+    path: &str,
+    content_type: &str,
+) -> Option<String> {
+    let mut route = BrowserRoute::new(Recording(seen.clone()), svc.issuers.clone());
     std::future::poll_fn(|cx| route.poll_ready(cx))
         .await
         .unwrap();
-    let request = http::Request::post(path).body(Body::empty()).unwrap();
-    let answer = route.call(request).await.unwrap();
+    let request = http::Request::post(path)
+        .header("content-type", content_type)
+        .body(Body::empty())
+        .unwrap();
+    let answer = route.call(mark_browser_call(request)).await.unwrap();
     answer
         .headers()
         .get("grpc-status")
@@ -78,7 +93,7 @@ async fn sign_in_call_reaches_its_service_with_the_issuer() {
     let svc = TestServices::new(MockStorage::new());
     let seen = Seen::default();
     let handle = svc.issuer.handle.to_string();
-    let received = format!("/i/{handle}/grpc{LOGIN_START}");
+    let received = format!("/i/{handle}/api{LOGIN_START}");
 
     assert_eq!(through_route(&svc, &seen, &received).await, None);
 
@@ -103,7 +118,7 @@ async fn unknown_handle_is_not_found() {
         sid_core::models::IssuerHandle::generate().to_string(),
         "not-a-handle".to_owned(),
     ] {
-        let path = format!("/i/{handle}/grpc{LOGIN_START}");
+        let path = format!("/i/{handle}/api{LOGIN_START}");
         assert_eq!(
             through_route(&svc, &seen, &path).await.as_deref(),
             Some("5"),
@@ -114,17 +129,19 @@ async fn unknown_handle_is_not_found() {
 }
 
 /// Under the prefix only the sign-in surface exists: another method of the
-/// same service, a management service and a path that is no addressed call
-/// are UNIMPLEMENTED there, even under a stored handle, and reach nothing.
+/// same service, a management service, the transport-named mount the API
+/// path replaced and a path that is no addressed call are UNIMPLEMENTED
+/// there, even under a stored handle, and reach nothing.
 #[tokio::test]
 async fn only_the_sign_in_surface_is_published() {
     let svc = TestServices::new(MockStorage::new());
     let seen = Seen::default();
     let handle = svc.issuer.handle.to_string();
     for path in [
-        format!("/i/{handle}/grpc/sid.v1.authn.AuthService/OAuth2Token"),
-        format!("/i/{handle}/grpc/sid.v1.admin.AdminService/ListProfiles"),
-        format!("/i/{handle}/grpcx{LOGIN_START}"),
+        format!("/i/{handle}/api/sid.v1.authn.AuthService/OAuth2Token"),
+        format!("/i/{handle}/api/sid.v1.admin.AdminService/ListProfiles"),
+        format!("/i/{handle}/grpc{LOGIN_START}"),
+        format!("/i/{handle}/apix{LOGIN_START}"),
         format!("/i/{handle}{LOGIN_START}"),
         format!("/i/{handle}"),
     ] {
@@ -137,8 +154,8 @@ async fn only_the_sign_in_surface_is_published() {
     assert!(seen.lock().unwrap().is_empty());
 }
 
-/// A call outside `/i/` reaches the service as it came, with no issuer
-/// attached.
+/// A native gRPC call outside `/i/` reaches the service as it came, with no
+/// issuer attached.
 #[tokio::test]
 async fn root_calls_pass_unchanged() {
     let svc = TestServices::new(MockStorage::new());
@@ -150,6 +167,61 @@ async fn root_calls_pass_unchanged() {
         *seen.lock().unwrap(),
         [(LOGIN_START.to_owned(), None, None)]
     );
+}
+
+/// A browser call under the API mount reaches the service at its gRPC path,
+/// carrying the path it was received on and no issuer; every gRPC-Web form
+/// is a browser's.
+#[tokio::test]
+async fn browser_call_under_the_api_mount_reaches_its_service() {
+    let svc = TestServices::new(MockStorage::new());
+    let received = format!("/api{LOGIN_START}");
+    for content_type in [
+        "application/grpc-web",
+        "application/grpc-web+proto",
+        "application/grpc-web-text",
+        "application/grpc-web-text+proto; charset=utf-8",
+    ] {
+        let seen = Seen::default();
+        assert_eq!(
+            through_route_as(&svc, &seen, &received, content_type).await,
+            None,
+            "{content_type}"
+        );
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [(
+                LOGIN_START.to_owned(),
+                None,
+                Some(TranscodedRequest::new("POST", received.clone())),
+            )],
+            "{content_type}"
+        );
+    }
+}
+
+/// A browser call outside the API mount is UNIMPLEMENTED and reaches
+/// nothing: the root path, the transport-named mount the API path replaced,
+/// a longer segment that only starts with `api`, the bare mount.
+#[tokio::test]
+async fn browser_call_outside_the_api_mount_is_refused() {
+    let svc = TestServices::new(MockStorage::new());
+    let seen = Seen::default();
+    for path in [
+        LOGIN_START.to_owned(),
+        format!("/grpc{LOGIN_START}"),
+        format!("/apix{LOGIN_START}"),
+        "/api".to_owned(),
+    ] {
+        assert_eq!(
+            through_route_as(&svc, &seen, &path, "application/grpc-web+proto")
+                .await
+                .as_deref(),
+            Some("12"),
+            "{path}"
+        );
+    }
+    assert!(seen.lock().unwrap().is_empty());
 }
 
 /// An authorization addressed to one issuer by its path completes only that
@@ -245,12 +317,9 @@ async fn grpc_web_status(response: reqwest::Response) -> String {
     panic!("no grpc-status in {body:?}");
 }
 
-/// Over the transcoder, as a browser calls it with gRPC-Web: the sign-in
-/// call under the issuer path gets the answer the same call gets at the
-/// root path, while an unknown handle and a management method are refused.
-#[tokio::test]
-async fn grpc_web_through_the_transcoder() {
-    let svc = TestServices::new(MockStorage::new());
+/// The transcoder serving the AuthService of `svc` on an ephemeral port: its
+/// address.
+async fn transcoder(svc: &TestServices) -> SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr: SocketAddr = listener.local_addr().unwrap();
     let proxy = sid_server::serve::http_transcoder(Some("127.0.0.1:0"), None, None)
@@ -271,6 +340,18 @@ async fn grpc_web_through_the_transcoder() {
         .await
         .unwrap()
     });
+    addr
+}
+
+/// Over the transcoder, as a browser calls it with gRPC-Web: the sign-in call
+/// under the issuer's API path gets the answer the same call gets under the
+/// single-authority API path, while an unknown handle and a management method
+/// are refused. gRPC-Web outside the API path, at the root or under the
+/// transport-named mount it replaced, is refused too.
+#[tokio::test]
+async fn grpc_web_through_the_transcoder() {
+    let svc = TestServices::new(MockStorage::new());
+    let addr = transcoder(&svc).await;
     let client = common::crypto::with_tls(sid_plugin::client_builder)
         .build()
         .unwrap();
@@ -285,31 +366,48 @@ async fn grpc_web_through_the_transcoder() {
     };
     let handle = svc.issuer.handle.to_string();
 
-    let at_root = grpc_web_status(call(LOGIN_START.to_owned()).await.unwrap()).await;
-    let addressed = grpc_web_status(
-        call(format!("/i/{handle}/grpc{LOGIN_START}"))
-            .await
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(addressed, at_root);
-    assert!(!["5", "12"].contains(&at_root.as_str()), "{at_root}");
+    let at_api = grpc_web_status(call(format!("/api{LOGIN_START}")).await.unwrap()).await;
+    let addressed =
+        grpc_web_status(call(format!("/i/{handle}/api{LOGIN_START}")).await.unwrap()).await;
+    assert_eq!(addressed, at_api);
+    assert!(!["5", "12"].contains(&at_api.as_str()), "{at_api}");
 
     let unknown = sid_core::models::IssuerHandle::generate();
     let refused = grpc_web_status(
-        call(format!("/i/{unknown}/grpc{LOGIN_START}"))
+        call(format!("/i/{unknown}/api{LOGIN_START}"))
             .await
             .unwrap(),
     )
     .await;
     assert_eq!(refused, "5");
-    let management = grpc_web_status(
-        call(format!(
-            "/i/{handle}/grpc/sid.v1.authn.AuthService/OAuth2Token"
-        ))
+    for path in [
+        format!("/i/{handle}/api/sid.v1.authn.AuthService/OAuth2Token"),
+        LOGIN_START.to_owned(),
+        format!("/grpc{LOGIN_START}"),
+        format!("/i/{handle}/grpc{LOGIN_START}"),
+    ] {
+        let status = grpc_web_status(call(path.clone()).await.unwrap()).await;
+        assert_eq!(status, "12", "{path}");
+    }
+}
+
+/// Native gRPC keeps its own paths on the transcoder's port: the API path is
+/// the browser's mount, not a rename of the services.
+#[tokio::test]
+async fn native_grpc_keeps_its_paths_on_the_transcoder() {
+    use sid_proto::sid::v1::auth_service_client::AuthServiceClient;
+
+    let svc = TestServices::new(MockStorage::new());
+    let addr = transcoder(&svc).await;
+    let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+        .unwrap()
+        .connect()
         .await
-        .unwrap(),
-    )
-    .await;
-    assert_eq!(management, "12");
+        .unwrap();
+    let answered = AuthServiceClient::new(channel)
+        .opaque_login_start(sid_proto::sid::v1::OpaqueLoginStartRequest::default())
+        .await;
+    if let Err(status) = answered {
+        assert_ne!(status.code(), tonic::Code::Unimplemented, "{status:?}");
+    }
 }

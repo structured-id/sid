@@ -369,18 +369,19 @@ pub async fn serve(
 }
 
 /// The services the embedded transcoder calls in process: gRPC-Web answered
-/// here, browser sign-in calls addressed to an issuer of `issuers` (see
-/// [`browser_route`]), and every transcoded call carrying the HTTP request
-/// it was made from (see [`transcoded_request`]).
+/// here under the API mount, browser sign-in calls addressed to an issuer of
+/// `issuers` (see [`browser_route`]), and every transcoded call carrying the
+/// HTTP request it was made from (see [`transcoded_request`]).
 #[cfg(feature = "http")]
 pub fn transcoder_upstream(
     routes: tonic::service::Routes,
     issuers: std::sync::Arc<sid_authn::issuer::IssuerRegistry>,
 ) -> impl structured_proxy::upstream::Upstream {
     tower::ServiceBuilder::new()
+        .map_request(browser_route::mark_browser_call)
         .layer(tonic_web::GrpcWebLayer::new())
         .layer(tower::layer::layer_fn(move |inner| {
-            browser_route::IssuerRoute::new(inner, issuers.clone())
+            browser_route::BrowserRoute::new(inner, issuers.clone())
         }))
         .map_request(transcoded_request)
         .service(routes)

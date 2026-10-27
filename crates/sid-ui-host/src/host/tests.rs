@@ -6,10 +6,10 @@ use crate::application_session::tests::{COOKIE, ORIGIN, fixture, memory, signed_
 
 use super::*;
 
-/// What a fake API saw of each call.
-type Seen = Arc<Mutex<Vec<http::HeaderMap>>>;
+/// What a fake API saw of each call: its path and headers.
+type Seen = Arc<Mutex<Vec<(String, http::HeaderMap)>>>;
 
-/// An API that records the headers of every call and answers OK.
+/// An API that records the path and headers of every call and answers OK.
 fn recording_api() -> (
     impl tower::Service<
         http::Request<tonic::body::Body>,
@@ -25,7 +25,10 @@ fn recording_api() -> (
     let seen: Seen = Arc::default();
     let record = seen.clone();
     let api = tower::service_fn(move |request: http::Request<tonic::body::Body>| {
-        record.lock().unwrap().push(request.headers().clone());
+        record
+            .lock()
+            .unwrap()
+            .push((request.uri().path().to_owned(), request.headers().clone()));
         async move {
             let mut answer = http::Response::new(tonic::body::Body::empty());
             answer
@@ -72,13 +75,18 @@ fn grpc_status(answer: &Answer) -> String {
         .to_owned()
 }
 
-/// A method of the hosted application's API; any path that is not the
-/// adapter's goes there.
+/// A method of the hosted application's API; any path under the API mount
+/// that is not the adapter's goes there.
 const API_METHOD: &str = "/example.v1.OrderService/ListOrders";
 
-/// A call of the signed-in page reaches the API as the user: with the
-/// session's access token and neither the session cookie, the CSRF token nor
-/// an `authorization` the page sent.
+/// [`API_METHOD`] as the page calls it, under the API mount.
+fn api_path() -> String {
+    format!("/api{API_METHOD}")
+}
+
+/// A call of the signed-in page reaches the API as the user, at its gRPC
+/// path: with the session's access token and neither the session cookie, the
+/// CSRF token nor an `authorization` the page sent.
 #[tokio::test]
 async fn a_signed_in_call_reaches_the_api_with_the_session_token() {
     let f = fixture(memory(), true);
@@ -87,7 +95,7 @@ async fn a_signed_in_call_reaches_the_api_with_the_session_token() {
     let host = HostUpstream::new(Arc::new(f.adapter), Some(api));
     let answer = host
         .oneshot(call(
-            API_METHOD,
+            &api_path(),
             Some(&format!("{COOKIE}={id}")),
             Some(&csrf),
         ))
@@ -96,9 +104,39 @@ async fn a_signed_in_call_reaches_the_api_with_the_session_token() {
     assert_eq!(grpc_status(&answer), "0");
     let seen = seen.lock().unwrap();
     assert_eq!(seen.len(), 1);
-    assert_eq!(seen[0]["authorization"], "Bearer access");
-    assert!(seen[0].get("cookie").is_none());
-    assert!(seen[0].get(CSRF_HEADER).is_none());
+    let (path, headers) = &seen[0];
+    assert_eq!(path, API_METHOD);
+    assert_eq!(headers["authorization"], "Bearer access");
+    assert!(headers.get("cookie").is_none());
+    assert!(headers.get(CSRF_HEADER).is_none());
+}
+
+/// A call outside the API mount is UNIMPLEMENTED and reaches neither the
+/// adapter nor the API, even signed in: the root path, the transport-named
+/// mount the API path replaced, a longer segment that only starts with
+/// `api`, the bare mount.
+#[tokio::test]
+async fn a_call_outside_the_api_mount_is_refused() {
+    let f = fixture(memory(), true);
+    let (id, csrf) = signed_in(&f, false).await;
+    let (api, seen) = recording_api();
+    let host = HostUpstream::new(Arc::new(f.adapter), Some(api));
+    let cookie = format!("{COOKIE}={id}");
+    for path in [
+        API_METHOD.to_owned(),
+        "/sid.v1.authn.ApplicationSessionService/GetApplicationSession".to_owned(),
+        format!("/grpc{API_METHOD}"),
+        format!("/apix{API_METHOD}"),
+        "/api".to_owned(),
+    ] {
+        let answer = host
+            .clone()
+            .oneshot(call(&path, Some(&cookie), Some(&csrf)))
+            .await
+            .unwrap();
+        assert_eq!(grpc_status(&answer), "12", "{path}");
+    }
+    assert!(seen.lock().unwrap().is_empty());
 }
 
 /// Without a session, or without its CSRF token, nothing reaches the API.
@@ -109,15 +147,16 @@ async fn a_call_without_a_session_or_its_csrf_token_stays_here() {
     let (api, seen) = recording_api();
     let host = HostUpstream::new(Arc::new(f.adapter), Some(api));
     let cookie = format!("{COOKIE}={id}");
-    let mut foreign = call(API_METHOD, Some(&cookie), Some(&csrf));
+    let path = api_path();
+    let mut foreign = call(&path, Some(&cookie), Some(&csrf));
     foreign.headers_mut().insert(
         "origin",
         http::HeaderValue::from_static("https://evil.example.com"),
     );
     for (request, code) in [
-        (call(API_METHOD, None, None), "16"),
-        (call(API_METHOD, Some(&cookie), None), "7"),
-        (call(API_METHOD, Some(&cookie), Some("not-the-token")), "7"),
+        (call(&path, None, None), "16"),
+        (call(&path, Some(&cookie), None), "7"),
+        (call(&path, Some(&cookie), Some("not-the-token")), "7"),
         (foreign, "7"),
     ] {
         let answer = host.clone().oneshot(request).await.unwrap();
@@ -134,7 +173,7 @@ async fn the_adapter_service_is_answered_in_process() {
     let host = HostUpstream::new(Arc::new(f.adapter), Some(api));
     let answer = host
         .oneshot(call(
-            "/sid.v1.authn.ApplicationSessionService/GetApplicationSession",
+            "/api/sid.v1.authn.ApplicationSessionService/GetApplicationSession",
             None,
             None,
         ))
@@ -142,6 +181,43 @@ async fn the_adapter_service_is_answered_in_process() {
         .unwrap();
     // No session: the adapter's own refusal, UNAUTHENTICATED.
     assert_eq!(grpc_status(&answer), "16");
+    assert!(seen.lock().unwrap().is_empty());
+}
+
+/// An annotated route of the adapter reaches it transcoded at its RPC's gRPC
+/// path; that path is no way around the mount for the page's own calls,
+/// whose received request names another RPC or none.
+#[tokio::test]
+async fn a_transcoded_adapter_route_is_answered_at_its_rpc_path() {
+    const ADAPTER_METHOD: &str = "/sid.v1.authn.ApplicationSessionService/GetApplicationSession";
+    let f = fixture(memory(), true);
+    let (api, seen) = recording_api();
+    let host = HostUpstream::new(Arc::new(f.adapter), Some(api));
+    let transcoded = |rpc: &'static str, path: &str| {
+        let mut request = call(path, None, None);
+        request
+            .extensions_mut()
+            .insert(structured_proxy::ReceivedRequest::new(
+                http::Method::GET,
+                http::uri::PathAndQuery::from_static("/auth/session"),
+                http::uri::PathAndQuery::from_static(rpc),
+            ));
+        request
+    };
+    // No session: the adapter's own refusal, UNAUTHENTICATED.
+    let answer = host
+        .clone()
+        .oneshot(transcoded(ADAPTER_METHOD, ADAPTER_METHOD))
+        .await
+        .unwrap();
+    assert_eq!(grpc_status(&answer), "16");
+    for request in [
+        transcoded(API_METHOD, API_METHOD),
+        transcoded(API_METHOD, ADAPTER_METHOD),
+    ] {
+        let answer = host.clone().oneshot(request).await.unwrap();
+        assert_eq!(grpc_status(&answer), "12");
+    }
     assert!(seen.lock().unwrap().is_empty());
 }
 
@@ -214,7 +290,7 @@ async fn an_unreachable_api_is_a_typed_outage() {
     let host = HostUpstream::new(Arc::new(f.adapter), Some(api));
     let answer = host
         .oneshot(call(
-            API_METHOD,
+            &api_path(),
             Some(&format!("{COOKIE}={id}")),
             Some(&csrf),
         ))
@@ -231,7 +307,7 @@ async fn an_unreachable_api_is_a_typed_outage() {
 async fn without_an_api_other_calls_are_unimplemented() {
     let f = fixture(memory(), true);
     let host: HostUpstream = HostUpstream::new(Arc::new(f.adapter), None);
-    let answer = host.oneshot(call(API_METHOD, None, None)).await.unwrap();
+    let answer = host.oneshot(call(&api_path(), None, None)).await.unwrap();
     assert_eq!(grpc_status(&answer), "12");
     assert_eq!(reason(&answer), "FEATURE_NOT_AVAILABLE");
 }
