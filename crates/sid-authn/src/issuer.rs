@@ -211,8 +211,8 @@ pub async fn ensure_enrollment_api_resource(
 /// The resource of `issuer` at `endpoint`, registered with `scopes` under a
 /// system application named `name` when it does not exist yet, the
 /// registration audited as `audit_action`; the stored one otherwise,
-/// including when another replica registered it first. Its existence grants
-/// nobody anything.
+/// including when another replica registered it first, holding every one of
+/// `scopes`. Its existence grants nobody anything.
 pub async fn ensure_issuer_resource(
     storage: &dyn StorageBackend,
     issuer: &OidcIssuer,
@@ -232,7 +232,7 @@ pub async fn ensure_issuer_resource(
         .protected_resource_by_indicator(issuer.id, &indicator)
         .await?
     {
-        return Ok(stored);
+        return with_actions(storage, issuer, &indicator, stored, scopes, name).await;
     }
     let now = chrono::Utc::now();
     let app = Application {
@@ -278,6 +278,51 @@ pub async fn ensure_issuer_resource(
         .ok_or_else(|| {
             SidError::Storage(format!("{name} resource missing right after it was stored"))
         })
+}
+
+/// `stored`, the registered resource of an issuer API, holding every action
+/// of this release (`scopes`): a token for it carries only the scopes the
+/// resource grants, so an action a release adds must reach the resource an
+/// earlier release registered. Actions it holds already are kept: a replica
+/// of an older release in a rolling update or a rollback must not strip an
+/// action newer replicas serve, and one no handler checks is inert. The
+/// update applies only at the stored revision, so replicas starting together
+/// agree; a retired resource is left as it is.
+async fn with_actions(
+    storage: &dyn StorageBackend,
+    issuer: &OidcIssuer,
+    indicator: &sid_core::models::ResourceIndicator,
+    mut stored: sid_core::models::ProtectedResource,
+    scopes: &[&str],
+    name: &str,
+) -> SidResult<sid_core::models::ProtectedResource> {
+    use sid_core::models::ResourceState;
+    // Each failed attempt means another replica moved the revision on; the
+    // re-read then holds its update, which contains these actions too.
+    for _ in 0..4 {
+        let missing: Vec<String> = scopes
+            .iter()
+            .filter(|s| !stored.scopes.iter().any(|held| held == *s))
+            .map(|s| (*s).to_owned())
+            .collect();
+        if missing.is_empty() || stored.state == ResourceState::Retired {
+            return Ok(stored);
+        }
+        let mut updated = stored.clone();
+        updated.scopes.extend(missing);
+        updated.updated_at = chrono::Utc::now();
+        let audit = AuditEntry::system("issuer_resource.actions_added", issuer.id.to_string());
+        storage
+            .update_protected_resource(&updated, audit.into())
+            .await?;
+        stored = storage
+            .protected_resource_by_indicator(issuer.id, indicator)
+            .await?
+            .ok_or_else(|| SidError::Storage(format!("{name} resource missing while updated")))?;
+    }
+    Err(SidError::Conflict(format!(
+        "{name} resource kept changing while its actions were added"
+    )))
 }
 
 /// A fresh Ed25519 key for `issuer`, generation `generation`, its private
