@@ -44,6 +44,18 @@ updates:
       docker-compose-security:
         applies-to: security-updates
         patterns: ["*"]
+  # The published-client conformance harness: the public client it installs
+  # stays the current release.
+  - package-ecosystem: npm
+    directory: /ci/password-clients
+    schedule:
+      interval: weekly
+    groups:
+      npm:
+        patterns: ["*"]
+      npm-security:
+        applies-to: security-updates
+        patterns: ["*"]
   - package-ecosystem: gitsubmodule
     directory: /
     schedule:
