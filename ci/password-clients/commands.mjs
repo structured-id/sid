@@ -36,19 +36,24 @@ export function commands(client) {
         if (proof === null) throw new Error("test password must be provable");
         return proof;
       }
+      // Only the bytes the test sends over gRPC leave the client; the export
+      // key both finishes return stays here.
       case "record":
-        return client.registrationFinish(v.password, start.state, bytes(v.response));
+        return (await client.registrationFinish(v.password, start.state, bytes(v.response)))
+          .record;
       case "loginStart":
         login = await client.loginStart(v.password);
         return login.request;
       case "loginFinish":
         // An ordinary sign-in has the empty context; a change sends its own.
-        return client.loginFinish(
-          v.password,
-          login.state,
-          bytes(v.response),
-          bytes(v.context ?? []),
-        );
+        return (
+          await client.loginFinish(
+            v.password,
+            login.state,
+            bytes(v.response),
+            bytes(v.context ?? []),
+          )
+        ).finalization;
       default:
         throw new Error("unknown test command");
     }
