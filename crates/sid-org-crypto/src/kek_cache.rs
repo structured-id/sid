@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! In-memory TTL cache for fetched KEK.
 //!
-//! Used by `K8sSecretKekSource` and similar lazy sources. The cached value
+//! Used by `FileKekSource` and similar lazy sources. The cached value
 //! lives in a `SecretBox` that zeroizes on drop. After TTL expiry, the value
 //! is wiped on next access and re-fetched.
 //!

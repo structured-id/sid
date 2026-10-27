@@ -74,7 +74,6 @@ COMBOS=(
   "sid-infra|--features issuer-client"
   "sid-infra|--features http"
   "sid-org-crypto|"
-  "sid-org-crypto|--features k8s"
   "sid-scim|"
   "sid-notify|"
   "sid-attestation|"
