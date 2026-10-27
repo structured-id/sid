@@ -20,7 +20,7 @@ shift
 export CARGO_TERM_COLOR=never DEBIAN_FRONTEND=noninteractive
 
 if [[ -n "${SID_CHECK_UPLOAD:-}" ]]; then
-    # On the host itself (no container): the host's rustup with the pinned
+    # On the host itself (no container): the host's rustup with its stable
     # toolchain, building inside the upload, which check.sh removes.
     # The build tools go into the upload too: the check runs as the SSH
     # account, which cannot write /opt or the system rustup.

@@ -40,8 +40,6 @@ if "--show-toplevel" in args:
     print(os.environ["TEST_ROOT"])
 elif "--verify" in args:
     print("f" * 40)
-elif "show" in args:
-    print('[toolchain]\\nchannel = "1.99.1"')
 ''',
                 "scp": "pass\n",
                 "ssh": '''
