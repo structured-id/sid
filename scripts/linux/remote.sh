@@ -20,16 +20,19 @@ shift
 export CARGO_TERM_COLOR=never DEBIAN_FRONTEND=noninteractive
 
 if [[ -n "${SID_CHECK_UPLOAD:-}" ]]; then
-    # On the host itself (no container): the host's rustup with its stable
-    # toolchain, building inside the upload, which check.sh removes.
-    # The build tools go into the upload too: the check runs as the SSH
-    # account, which cannot write /opt or the system rustup.
+    # On the host itself (no container), building inside the upload, which
+    # check.sh removes. The build tools go into the upload too: the check
+    # runs as the SSH account, which cannot write /opt or the system rustup.
+    # So does the toolchain: the latest stable, installed for this run, since
+    # the host's own stable may be older.
     upload="$SID_CHECK_UPLOAD"
     repo="$upload/sid"
     tools="$upload/tools"
     mkdir -p "$tools"
+    export RUSTUP_HOME="$upload/rustup"
+    rustup toolchain install stable --profile minimal --component clippy,rustfmt
     as_builder() {
-        RUSTUP_TOOLCHAIN="$SID_CHECK_TOOLCHAIN" CARGO_TARGET_DIR="$upload/target" \
+        RUSTUP_TOOLCHAIN=stable CARGO_TARGET_DIR="$upload/target" \
             PATH="$tools/bin:$tools/zig:$PATH" "$@"
     }
 else
