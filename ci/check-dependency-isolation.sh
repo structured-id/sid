@@ -139,6 +139,10 @@ check_each() {
   (
     cd "$copy"
     export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}/isolation-each"
+    # Without dev-dependencies no crate here chooses a Kubernetes version for
+    # k8s-openapi (its binary does); its build reads the one to check against
+    # from this variable.
+    export K8S_OPENAPI_ENABLED_VERSION=1.36
     # Dropping dev-dependencies rewrites the copy's lockfile, so no --locked;
     # --offline keeps the versions the checkout already locked.
     cargo hack check --offline --workspace --each-feature --no-dev-deps \

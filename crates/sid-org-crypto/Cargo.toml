@@ -17,7 +17,9 @@ tracing = "0.1"
 hex = "0.4"
 base64 = { workspace = true, optional = true }
 kube = { version = "4.2", default-features = false, features = ["client", "rustls-tls"], optional = true }
-k8s-openapi = { version = "0.28", features = ["v1_32"], optional = true }
+# No Kubernetes version feature here: the binary enabling `k8s` chooses the
+# version of the cluster it runs on, once per dependency graph.
+k8s-openapi = { version = "0.28", optional = true }
 
 [features]
 default = []
@@ -25,3 +27,5 @@ k8s = ["dep:kube", "dep:k8s-openapi", "dep:base64"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
+# The version this crate's own checks and tests build against.
+k8s-openapi = { version = "0.28", features = ["v1_36"] }
