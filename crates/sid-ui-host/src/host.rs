@@ -5,9 +5,10 @@
 //!
 //! The embedded transcoder serves the listener. Navigations to the adapter's
 //! sign-in routes are its annotated RPCs; every gRPC or gRPC-Web call goes to
-//! [`HostUpstream`], which answers the adapter's own service and forwards any
-//! other call to the application's API with the session's access token as
-//! `authorization`; any other request is the bundle's.
+//! [`HostUpstream`], which serves the page's calls under the API mount
+//! (`/api/{package.Service}/{Method}`): it answers the adapter's own service
+//! and forwards any other call to the application's API with the session's
+//! access token as `authorization`. Any other request is the bundle's.
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -113,6 +114,35 @@ where
     fn call(&mut self, mut request: http::Request<tonic::body::Body>) -> Self::Future {
         let this = self.clone();
         Box::pin(async move {
+            // The adapter's annotated routes reach it transcoded, at the gRPC
+            // path of their RPC.
+            let transcoded = request
+                .extensions()
+                .get::<structured_proxy::ReceivedRequest>()
+                .is_some_and(|received| received.rpc() == request.uri().path());
+            if transcoded && request.uri().path().starts_with(ADAPTER_SERVICE) {
+                return Ok(match this.adapter.oneshot(request).await {
+                    Ok(answer) => answer,
+                    Err(never) => match never {},
+                });
+            }
+            // The page's own calls are served under the API mount only; the
+            // services see their gRPC paths.
+            let Some(method) = sid_infra::http::api_method(request.uri().path()) else {
+                return Ok(tonic::Status::unimplemented(
+                    "the page's calls are served under /api only",
+                )
+                .into_http());
+            };
+            let mut uri = request.uri().clone().into_parts();
+            uri.path_and_query = match http::uri::PathAndQuery::try_from(method) {
+                Ok(method) => Some(method),
+                Err(e) => return Ok(refuse::internal("route the mounted call", e).into_http()),
+            };
+            match http::Uri::from_parts(uri) {
+                Ok(uri) => *request.uri_mut() = uri,
+                Err(e) => return Ok(refuse::internal("route the mounted call", e).into_http()),
+            }
             if request.uri().path().starts_with(ADAPTER_SERVICE) {
                 return Ok(match this.adapter.oneshot(request).await {
                     Ok(answer) => answer,

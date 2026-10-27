@@ -676,7 +676,7 @@ impl IssuerVerifier {
     }
 }
 
-/// The issuer a browser call addressed by its path (`/i/{handle}/grpc/...`),
+/// The issuer a browser call addressed by its path (`/i/{handle}/api/...`),
 /// resolved from the registry before the call reached its service. Only the
 /// server's issuer route puts it in a call's extensions; a client cannot
 /// send it.

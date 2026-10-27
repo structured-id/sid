@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Browser sign-in calls addressed to one issuer on a shared origin:
-//! `/i/{handle}/grpc/{package.Service}/{Method}`. Several issuers share the
-//! host there, and the sign-in RPCs carry no issuer of their own, so the path
-//! names it. The handle must name an issuer of this installation, and only
-//! the sign-in surface is published under it; the call then reaches the same
-//! service as at its root path, carrying the issuer it addressed and the path
-//! it was received on.
+//! Browser calls on the HTTP port, mounted under the public API path.
+//!
+//! A browser speaks gRPC-Web, and reaches the services only under `/api/`:
+//! `/api/{package.Service}/{Method}` on this single-authority surface, or
+//! `/i/{handle}/api/{package.Service}/{Method}` addressed to one issuer on a
+//! shared origin. Several issuers share the host there, and the sign-in RPCs
+//! carry no issuer of their own, so the path names it. The handle must name an
+//! issuer of this installation, and only the sign-in surface is published
+//! under it. Either way the call reaches the service at its gRPC path,
+//! carrying the path it was received on (and the issuer it addressed). Native
+//! gRPC keeps its own paths.
 
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -13,6 +17,7 @@ use std::task::{Context, Poll};
 use sid_authn::issuer::{AddressedIssuer, IssuerRegistry};
 use sid_authn::resource::TranscodedRequest;
 use sid_core::grpc_error::{ApiError, ErrorReason, refuse};
+use sid_infra::http::api_method;
 use tonic::Status;
 use tonic::body::Body;
 use tonic::codegen::{BoxFuture, Service, http};
@@ -72,29 +77,74 @@ pub const BROWSER_METHODS: &[&str] = &[
     "/sid.v1.admin.EnrollmentService/GetEnrollmentPolicy",
 ];
 
-/// The handle and the gRPC path of a call to `/i/{handle}/grpc/...`; `None`
+/// The handle and the gRPC path of a call to `/i/{handle}/api/...`; `None`
 /// for any other path.
 pub(crate) fn addressed(path: &str) -> Option<(&str, &str)> {
-    let (handle, rest) = path.strip_prefix("/i/")?.split_once('/')?;
-    let method = rest.strip_prefix("grpc")?;
-    method.starts_with('/').then_some((handle, method))
+    let addressed = path.strip_prefix("/i/")?;
+    let (handle, _) = addressed.split_once('/')?;
+    // What follows the handle, its leading `/` included.
+    Some((handle, api_method(&addressed[handle.len()..])?))
 }
 
-/// Serves issuer-addressed browser calls through `inner`; every call outside
-/// `/i/` goes to it unchanged.
+/// Marks a call that arrived as gRPC-Web, before its translation to gRPC.
+#[derive(Clone, Copy)]
+struct BrowserCall;
+
+/// `request`, marked as a browser's when it is gRPC-Web (gRPC-Web protocol:
+/// `application/grpc-web[-text][+proto]`, the forms the translation reads).
+pub fn mark_browser_call<B>(mut request: http::Request<B>) -> http::Request<B> {
+    let grpc_web = request
+        .headers()
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|media| {
+            matches!(
+                media.trim(),
+                "application/grpc-web"
+                    | "application/grpc-web+proto"
+                    | "application/grpc-web-text"
+                    | "application/grpc-web-text+proto"
+            )
+        });
+    if grpc_web {
+        request.extensions_mut().insert(BrowserCall);
+    }
+    request
+}
+
+/// `request` routed to `method`, carrying the path it was received on.
+fn route_to(request: &mut http::Request<Body>, method: &str) -> Result<(), Status> {
+    let received = TranscodedRequest::new(request.method().as_str(), request.uri().path());
+    let mut uri = request.uri().clone().into_parts();
+    uri.path_and_query = Some(
+        http::uri::PathAndQuery::try_from(method)
+            .map_err(|e| refuse::internal("route the mounted call", e))?,
+    );
+    let uri =
+        http::Uri::from_parts(uri).map_err(|e| refuse::internal("route the mounted call", e))?;
+    *request.uri_mut() = uri;
+    request.extensions_mut().insert(received);
+    Ok(())
+}
+
+/// Serves browser calls under the API mount and issuer-addressed calls
+/// through `inner`. Native gRPC outside `/i/` goes to it unchanged; a
+/// browser call outside the mount is refused. Behind the gRPC-Web
+/// translation, with [`mark_browser_call`] in front of it.
 #[derive(Clone)]
-pub struct IssuerRoute<S> {
+pub struct BrowserRoute<S> {
     inner: S,
     issuers: Arc<IssuerRegistry>,
 }
 
-impl<S> IssuerRoute<S> {
+impl<S> BrowserRoute<S> {
     pub fn new(inner: S, issuers: Arc<IssuerRegistry>) -> Self {
         Self { inner, issuers }
     }
 }
 
-impl<S> Service<http::Request<Body>> for IssuerRoute<S>
+impl<S> Service<http::Request<Body>> for BrowserRoute<S>
 where
     S: Service<http::Request<Body>, Response = http::Response<Body>> + Clone + Send + 'static,
     S::Future: Send + 'static,
@@ -112,7 +162,19 @@ where
         let ready = self.inner.clone();
         let mut inner = std::mem::replace(&mut self.inner, ready);
         if !request.uri().path().starts_with("/i/") {
-            return Box::pin(inner.call(request));
+            if request.extensions().get::<BrowserCall>().is_none() {
+                return Box::pin(inner.call(request));
+            }
+            let routed = match api_method(request.uri().path()).map(str::to_owned) {
+                Some(method) => route_to(&mut request, &method),
+                None => Err(Status::unimplemented(
+                    "a browser call is served under /api only",
+                )),
+            };
+            return match routed {
+                Ok(()) => Box::pin(inner.call(request)),
+                Err(refused) => Box::pin(async move { Ok(refused.into_http()) }),
+            };
         }
         let issuers = self.issuers.clone();
         Box::pin(async move {
@@ -140,16 +202,10 @@ where
                     return Ok(refuse::internal("resolve the addressed issuer", e).into_http());
                 }
             };
-            let mut uri = request.uri().clone().into_parts();
-            uri.path_and_query = Some(http::uri::PathAndQuery::from_static(method));
-            match http::Uri::from_parts(uri) {
-                Ok(uri) => *request.uri_mut() = uri,
-                Err(e) => return Ok(refuse::internal("route the addressed call", e).into_http()),
+            if let Err(refused) = route_to(&mut request, method) {
+                return Ok(refused.into_http());
             }
-            let transcoded = TranscodedRequest::new(request.method().as_str(), received.as_str());
-            let extensions = request.extensions_mut();
-            extensions.insert(transcoded);
-            extensions.insert(AddressedIssuer(issuer));
+            request.extensions_mut().insert(AddressedIssuer(issuer));
             inner.call(request).await
         })
     }

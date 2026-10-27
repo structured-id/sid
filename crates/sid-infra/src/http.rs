@@ -85,6 +85,16 @@ pub async fn serve_on<U: Upstream>(
     Ok(())
 }
 
+/// The public mount of a browser's RPCs on a single-authority surface:
+/// `/api/{package.Service}/{Method}`, the gRPC path under it unchanged.
+pub const API_MOUNT: &str = "/api";
+
+/// The gRPC path of a call under [`API_MOUNT`]; `None` for any other path.
+pub fn api_method(path: &str) -> Option<&str> {
+    let method = path.strip_prefix(API_MOUNT)?;
+    method.starts_with('/').then_some(method)
+}
+
 /// A structured-proxy configuration listening on `bind` and nothing else.
 pub fn listening_on(bind: &str) -> serde_json::Value {
     serde_json::json!({ "listen": { "http": bind } })
