@@ -50,8 +50,8 @@ jobs:
           fetch-depth: 0
           submodules: recursive
           token: ${{ steps.app-token.outputs.token }}
-      - name: Toolchain (rust-toolchain.toml)
-        run: rustup show
+      - name: Latest stable toolchain
+        run: rustup update stable --no-self-update
       - name: Release PR
         uses: release-plz/action@v0.5
         with:

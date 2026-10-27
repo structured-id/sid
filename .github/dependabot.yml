@@ -63,8 +63,3 @@ updates:
     groups:
       submodules:
         patterns: ["*"]
-  # The exact compiler version in rust-toolchain.toml.
-  - package-ecosystem: rust-toolchain
-    directory: /
-    schedule:
-      interval: weekly

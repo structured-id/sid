@@ -16,12 +16,14 @@
 #
 # SID_REV names a commit or branch to check instead of the working tree.
 #
-# The checks run in the pinned toolchain image as an ordinary account.
+# The checks run in the latest stable Rust image, pulled for every run, as an
+# ordinary account.
 # Everything they build lives in the container and goes with it, and the
 # upload goes too, whatever the outcome: the machine is shared with other work.
 #
-# SID_LINUX_RUNTIME=host builds through the host's rustup inside the upload,
-# which is removed with everything built there. The workspace task uses
+# SID_LINUX_RUNTIME=host builds through the host's rustup with the latest
+# stable installed inside the upload, which is removed with everything built
+# there. The workspace task uses
 # Docker only for its isolated PostgreSQL, Redis and NATS test services.
 main() {
 set -euo pipefail
@@ -59,9 +61,6 @@ else
     tree=$(GIT_INDEX_FILE="$work/index" git -C "$root" write-tree)
     commit=$(git -C "$root" commit-tree "$tree" -p HEAD -m "working tree snapshot")
 fi
-toolchain=$(git -C "$root" show "$commit:rust-toolchain.toml" \
-    | python3 -c 'import sys, tomllib; print(tomllib.load(sys.stdin.buffer)["toolchain"]["channel"])')
-image="rust:$toolchain"
 git -C "$root" update-ref "$snapshot_ref" "$commit"
 git -C "$root" bundle create --quiet "$work/snapshot.bundle" "$snapshot_ref"
 git -C "$root" update-ref -d "$snapshot_ref"
@@ -90,12 +89,12 @@ status=0
 if [[ "${SID_LINUX_RUNTIME:-container}" == host ]]; then
     # shellcheck disable=SC2029
     ssh "${ssh_options[@]}" "$destination" \
-        "SID_CHECK_UPLOAD='$remote' SID_CHECK_TOOLCHAIN='${image#rust:}' bash '$remote/remote.sh'$arguments" \
+        "SID_CHECK_UPLOAD='$remote' bash '$remote/remote.sh'$arguments" \
         || status=$?
 else
     # shellcheck disable=SC2029
     ssh "${ssh_options[@]}" "$destination" \
-        "docker run -d --name $container -v '$remote':/check:ro $image tail -f /dev/null >/dev/null"
+        "docker run -d --pull always --name $container -v '$remote':/check:ro rust:latest tail -f /dev/null >/dev/null"
     # shellcheck disable=SC2029
     ssh "${ssh_options[@]}" "$destination" "docker exec $container bash /check/remote.sh$arguments" \
         || status=$?

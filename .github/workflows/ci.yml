@@ -26,8 +26,9 @@ jobs:
         with:
           submodules: recursive
           persist-credentials: false
-      - name: Toolchain (rust-toolchain.toml)
-        run: rustup show
+      # The runner image's stable may lag; `rustup update` brings the latest.
+      - name: Latest stable toolchain
+        run: rustup update stable --no-self-update
       - name: protoc with the well-known types
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler libprotobuf-dev
       - uses: Swatinem/rust-cache@v2
@@ -42,8 +43,8 @@ jobs:
         with:
           submodules: recursive
           persist-credentials: false
-      - name: Toolchain (rust-toolchain.toml)
-        run: rustup show
+      - name: Latest stable toolchain
+        run: rustup update stable --no-self-update
       - name: protoc with the well-known types
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler libprotobuf-dev
       - uses: taiki-e/install-action@v2
@@ -84,8 +85,8 @@ jobs:
         with:
           submodules: recursive
           persist-credentials: false
-      - name: Toolchain (rust-toolchain.toml)
-        run: rustup show
+      - name: Latest stable toolchain
+        run: rustup update stable --no-self-update
       - name: protoc with the well-known types
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler libprotobuf-dev
       - uses: taiki-e/install-action@v2
@@ -105,8 +106,8 @@ jobs:
         with:
           submodules: recursive
           persist-credentials: false
-      - name: Toolchain (rust-toolchain.toml)
-        run: rustup show
+      - name: Latest stable toolchain
+        run: rustup update stable --no-self-update
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-audit,cargo-deny,cargo-cyclonedx
@@ -134,8 +135,8 @@ jobs:
         with:
           submodules: recursive
           persist-credentials: false
-      - name: Toolchain (rust-toolchain.toml) and the musl target
-        run: rustup show && rustup target add x86_64-unknown-linux-musl
+      - name: Latest stable toolchain and the musl target
+        run: rustup update stable --no-self-update && rustup target add x86_64-unknown-linux-musl
       - name: protoc with the well-known types
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler libprotobuf-dev
       # zig compiles the C of ring and SQLite for musl without a cross GCC.

@@ -18,7 +18,7 @@ jobs:
         with:
           submodules: recursive
           persist-credentials: false
-      - run: rustup show
+      - run: rustup update stable --no-self-update
       - name: Native launcher regression
         run: python3 -B -m unittest discover -s scripts/linux -p 'test_check.py' -v
       - name: Packaged external consumers
@@ -48,7 +48,7 @@ jobs:
         with:
           submodules: recursive
           persist-credentials: false
-      - run: rustup show
+      - run: rustup update stable --no-self-update
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
@@ -66,28 +66,28 @@ jobs:
         run: cargo clean -p sid-crypto
 
   alloc:
-    name: Crypto (Rust 1.92 bare metal)
+    name: Crypto (bare metal)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
           persist-credentials: false
-      - name: Supported compiler and target
-        run: rustup toolchain install 1.92.0 --profile minimal --target thumbv7em-none-eabihf
+      - name: Latest stable compiler and the bare-metal target
+        run: rustup update stable --no-self-update && rustup target add thumbv7em-none-eabihf
       - uses: Swatinem/rust-cache@v2
         with:
-          key: crypto-alloc-1.92
+          key: crypto-alloc
       - name: Base alloc contract
-        run: cargo +1.92.0 check --locked -p sid-crypto --no-default-features --features alloc --target thumbv7em-none-eabihf
+        run: cargo check --locked -p sid-crypto --no-default-features --features alloc --target thumbv7em-none-eabihf
       - name: RustCrypto TLS alloc contract
         env:
           RUSTFLAGS: --cfg getrandom_backend="custom"
-        run: cargo +1.92.0 check --locked -p sid-crypto --no-default-features --features alloc,tls-rustcrypto --target thumbv7em-none-eabihf
+        run: cargo check --locked -p sid-crypto --no-default-features --features alloc,tls-rustcrypto --target thumbv7em-none-eabihf
       - name: RustCrypto primitives alloc contract
         env:
           RUSTFLAGS: --cfg getrandom_backend="custom"
-        run: cargo +1.92.0 check --locked -p sid-crypto --no-default-features --features alloc,primitives --target thumbv7em-none-eabihf
+        run: cargo check --locked -p sid-crypto --no-default-features --features alloc,primitives --target thumbv7em-none-eabihf
       - name: Remove package outputs
         if: success()
         run: cargo clean -p sid-crypto --target thumbv7em-none-eabihf
