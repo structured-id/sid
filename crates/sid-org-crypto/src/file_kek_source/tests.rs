@@ -93,6 +93,29 @@ async fn unusable_mounts_are_refused() {
     ));
 }
 
+// After a rotation every retained version stays readable from its own file,
+// so ciphertext and restored backups under an older version unwrap; the
+// current version is read from its versioned file too, and a version no
+// longer retained is refused.
+#[tokio::test]
+async fn retained_versions_stay_readable() {
+    let dir = mounted(&[0xEE; 32], Some("3"));
+    std::fs::write(dir.path().join("kek.1"), [1; 32]).unwrap();
+    std::fs::write(dir.path().join("kek.3"), [3; 32]).unwrap();
+    let source = FileKekSource::new(dir.path());
+    assert_eq!(source.current_version().await.unwrap(), 3);
+    assert_eq!(source.fetch_kek(1).await.unwrap().expose_secret(), &[1; 32]);
+    assert_eq!(
+        source.fetch_kek(3).await.unwrap().expose_secret(),
+        &[3; 32],
+        "the versioned file, not `kek`"
+    );
+    assert!(matches!(
+        source.fetch_kek(2).await.unwrap_err(),
+        OrgCryptoError::KekVersionMismatch { have: 3, need: 2 }
+    ));
+}
+
 // Every fetch reads the mount again: a rotated KEK is seen without a restart.
 #[tokio::test]
 async fn a_rotated_mount_is_read_again() {

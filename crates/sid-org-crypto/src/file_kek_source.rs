@@ -1,12 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! KEK from a directory the deployment mounts (a Kubernetes Secret volume, a
-//! tmpfs on a host): the file `kek` holds the KEK (32 raw bytes or 64 hex
-//! characters), the optional file `kek_version` its version (decimal, 1 when
-//! absent). The service reads the files and never the orchestrator's API.
+//! tmpfs on a host). The service reads the files and never the
+//! orchestrator's API:
+//! - `kek_version`: the current version, decimal (1 when absent);
+//! - `kek.<n>`: version `n`'s KEK (32 raw bytes or 64 hex characters), one
+//!   file per retained version, never changed once written, so ciphertext
+//!   and restored backups under an older version stay readable;
+//! - `kek`: the current version's KEK where its `kek.<n>` is absent.
+//!
+//! Rotation delivers `kek.<n+1>` to every replica before `kek_version`
+//! names it, so no replica wraps under a version another cannot read.
 //!
 //! Every fetch reads the mount again, so a rotated KEK is seen without a
 //! restart. Pair with [`KekCache`](crate::kek_cache::KekCache) to hold it
-//! only within the cache's TTL.
+//! only within the cache's TTL; the mounted copy is outside that TTL.
 
 use std::path::{Path, PathBuf};
 
@@ -17,7 +24,8 @@ use zeroize::Zeroizing;
 use crate::error::OrgCryptoError;
 use crate::kek_source::KekSource;
 
-/// The file holding the KEK in the mounted directory.
+/// The file holding the current version's KEK where its versioned file is
+/// absent; version `n`'s own file is `kek.<n>`.
 pub const KEK_FILE: &str = "kek";
 /// The file holding the KEK's version in the mounted directory.
 pub const VERSION_FILE: &str = "kek_version";
@@ -80,10 +88,15 @@ fn decode_kek(value: &[u8]) -> Result<[u8; 32], OrgCryptoError> {
 #[async_trait]
 impl KekSource for FileKekSource {
     async fn fetch_kek(&self, version: u32) -> Result<SecretBox<[u8; 32]>, OrgCryptoError> {
-        let have = self.version().await?;
-        if have != version {
+        // A versioned file holds one version for good: no other file needs
+        // to agree with it.
+        if let Some(bytes) = self.read(&format!("{KEK_FILE}.{version}")).await? {
+            return Ok(SecretBox::new(Box::new(decode_kek(&bytes)?)));
+        }
+        let current = self.version().await?;
+        if current != version {
             return Err(OrgCryptoError::KekVersionMismatch {
-                have,
+                have: current,
                 need: version,
             });
         }
@@ -93,6 +106,14 @@ impl KekSource for FileKekSource {
                 std::io::ErrorKind::NotFound.into(),
             )
         })?;
+        // `kek` follows the current version: a version changed while it was
+        // read leaves the bytes of an unknown version, refused, not used.
+        if self.version().await? != current {
+            return Err(OrgCryptoError::KekUnavailable(format!(
+                "{}: the version changed while the KEK was read; retry",
+                self.dir.display()
+            )));
+        }
         Ok(SecretBox::new(Box::new(decode_kek(&bytes)?)))
     }
 

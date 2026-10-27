@@ -12,8 +12,8 @@ zeroize = { workspace = true, features = ["derive"] }
 aes-gcm.workspace = true
 rand = { workspace = true }
 thiserror = { workspace = true }
-# `fs`: the mounted KEK is read from its files.
-tokio = { workspace = true, features = ["sync", "time", "fs"] }
+# `fs`: the mounted KEK is read from its files; `rt`: the cache's eraser task.
+tokio = { workspace = true, features = ["sync", "time", "fs", "rt"] }
 tracing = "0.1"
 hex = "0.4"
 
