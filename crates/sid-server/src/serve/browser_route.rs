@@ -68,6 +68,11 @@ pub const BROWSER_METHODS: &[&str] = &[
     "/sid.v1.authn.AuthService/ExecutePasswordReset",
     "/sid.v1.authn.AuthService/CompletePasswordReset",
     "/sid.v1.authn.PasswordHistoryEvaluatorService/EvaluatePasswordHistory",
+    // Upstream sign-in: the providers offered, leaving for one, its return.
+    // The providers' administration is not published here.
+    "/sid.v1.federation.UpstreamService/ListEnabledProviders",
+    "/sid.v1.federation.UpstreamService/InitiateUpstreamAuth",
+    "/sid.v1.federation.UpstreamService/HandleUpstreamCallback",
     "/sid.v1.admin.EnrollmentService/GetInstanceStatus",
     "/sid.v1.admin.EnrollmentService/GetEnrollmentPolicy",
 ];

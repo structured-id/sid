@@ -137,6 +137,53 @@ async fn only_the_sign_in_surface_is_published() {
     assert!(seen.lock().unwrap().is_empty());
 }
 
+/// The upstream sign-in steps a sign-in page runs before it holds a session
+/// (the providers it offers, leaving for one, its return) reach the service
+/// under a stored handle with that issuer; the providers' administration
+/// stays off the issuer path.
+#[tokio::test]
+async fn upstream_sign_in_is_published_but_not_its_administration() {
+    let svc = TestServices::new(MockStorage::new());
+    let seen = Seen::default();
+    let handle = svc.issuer.handle.to_string();
+    let steps = [
+        "/sid.v1.federation.UpstreamService/ListEnabledProviders",
+        "/sid.v1.federation.UpstreamService/InitiateUpstreamAuth",
+        "/sid.v1.federation.UpstreamService/HandleUpstreamCallback",
+    ];
+    for step in steps {
+        let path = format!("/i/{handle}/grpc{step}");
+        assert_eq!(through_route(&svc, &seen, &path).await, None, "{step}");
+    }
+    let reached: Vec<_> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(path, issuer, _)| (path.clone(), issuer.clone()))
+        .collect();
+    assert_eq!(
+        reached,
+        steps.map(|step| (step.to_owned(), Some(handle.clone())))
+    );
+
+    let administration = Seen::default();
+    for method in [
+        "CreateUpstreamProvider",
+        "GetUpstreamProvider",
+        "UpdateUpstreamProvider",
+        "DeleteUpstreamProvider",
+        "ListUpstreamProviders",
+    ] {
+        let path = format!("/i/{handle}/grpc/sid.v1.federation.UpstreamService/{method}");
+        assert_eq!(
+            through_route(&svc, &administration, &path).await.as_deref(),
+            Some("12"),
+            "{method}"
+        );
+    }
+    assert!(administration.lock().unwrap().is_empty());
+}
+
 /// A call outside `/i/` reaches the service as it came, with no issuer
 /// attached.
 #[tokio::test]
