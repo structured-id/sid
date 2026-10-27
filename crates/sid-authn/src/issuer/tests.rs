@@ -3,6 +3,7 @@
 use super::*;
 use crate::test_support::{foreign_key_manager, key_manager};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
+use sid_plugin::ClientResourceRegistry as _;
 use sid_storage::sqlite::SqliteBackend;
 
 /// An installation: storage with its organization.
@@ -238,6 +239,60 @@ async fn a_further_issuer_api_is_provisioned_once() {
         ensure_issuer_resource(&storage, &issuer, "Bad", "not a url", &[], "bad.created")
             .await
             .is_err()
+    );
+}
+
+/// An API registered by an earlier release takes the actions this release
+/// adds, once, so a token for it can carry them; replicas doing it together
+/// agree. An ensure with fewer actions keeps the stored ones: a replica of an
+/// older release in a rolling update never strips what newer ones serve.
+#[tokio::test]
+async fn a_registered_api_takes_the_actions_a_release_adds() {
+    let (storage, org) = installation().await;
+    let keys = key_manager();
+    let issuer = ensure_local_issuer(&storage, keys.as_ref(), &base(), org)
+        .await
+        .unwrap();
+    let endpoint = format!("{}/ee/corporate-profiles", issuer.canonical_url);
+    let ensure = |actions: &'static [&'static str]| {
+        ensure_issuer_resource(
+            &storage,
+            &issuer,
+            "Corporate Profile API",
+            &endpoint,
+            actions,
+            "corporate_profile_api_resource.created",
+        )
+    };
+    let earlier = ensure(&["profile.provision", "profile.propose"])
+        .await
+        .unwrap();
+
+    const LATER: &[&str] = &["profile.provision", "profile.propose", "profile.confirm"];
+    let (a, b) = tokio::join!(ensure(LATER), ensure(LATER));
+    let (a, b) = (a.unwrap(), b.unwrap());
+    assert_eq!(a.id, earlier.id, "the same resource, not a second one");
+    assert_eq!(b.id, earlier.id);
+    assert_eq!(a.scopes, LATER);
+    assert_eq!(b.scopes, LATER);
+    let stored = storage
+        .get_protected_resource(earlier.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.scopes, LATER);
+    assert_eq!(stored.revision, earlier.revision + 1, "updated once");
+
+    let older = ensure(&["profile.provision"]).await.unwrap();
+    assert_eq!(older.scopes, LATER, "an older release strips nothing");
+    assert_eq!(
+        storage
+            .get_protected_resource(earlier.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .revision,
+        stored.revision
     );
 }
 
