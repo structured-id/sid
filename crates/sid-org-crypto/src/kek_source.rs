@@ -3,7 +3,7 @@
 //!
 //! Server reads Cluster KEK from this source on demand. Implementations:
 //!   - `EnvVarKekSource` — for self-hosted installations (env var, always-in-memory).
-//!   - `K8sSecretKekSource` — for SaaS multi-tenant (lazy fetch + TTL cache + audit).
+//!   - `FileKekSource` — a mounted file, read on every cache miss.
 //!   - `HsmKekSource` (future) — KMS/HSM Decrypt operations, KEK never in memory.
 //!
 //! The trait yields `SecretBox<[u8; 32]>` which zeroizes on drop. Callers must

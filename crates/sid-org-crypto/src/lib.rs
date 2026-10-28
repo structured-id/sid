@@ -4,7 +4,7 @@
 //! ## Layers
 //!
 //! ```text
-//!   Cluster KEK (KekSource — env / K8s Secret / HSM)
+//!   Cluster KEK (KekSource — env / mounted file / HSM)
 //!       │ wraps
 //!       ▼
 //!   Org DEK (per-org, random, stored encrypted in DB)
@@ -34,11 +34,9 @@
 
 pub mod envelope;
 pub mod error;
+pub mod file_kek_source;
 pub mod kek_cache;
 pub mod kek_source;
-
-#[cfg(feature = "k8s")]
-pub mod k8s_kek_source;
 
 pub use error::OrgCryptoError;
 pub use kek_source::KekSource;
