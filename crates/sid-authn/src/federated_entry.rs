@@ -57,7 +57,9 @@ pub struct EntryRequest {
     pub max_age: Option<Duration>,
 }
 
-/// A started entry, kept until its return.
+/// A started entry, kept until its return. Only this shape is read: an entry
+/// stored in another one fails to decode and completes nothing, and lives no
+/// longer than [`PENDING_TTL`].
 #[derive(Serialize, Deserialize)]
 struct Pending {
     /// The issuer and client the entry was started for: another relying
