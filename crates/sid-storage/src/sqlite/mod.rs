@@ -61,7 +61,8 @@ use std::str::FromStr;
 use std::time::Duration;
 
 /// A mutation's write transaction.
-type WriteTx = sqlx::Transaction<'static, sqlx::Sqlite>;
+/// A mutation's transaction, holding the database write lock.
+pub type WriteTx = sqlx::Transaction<'static, sqlx::Sqlite>;
 
 /// The message the email policy fence aborts with (schema migration 2).
 const EMAIL_POLICY_FENCE: &str = "email policy fence";
@@ -195,15 +196,21 @@ impl SqliteBackend {
     /// write lock first, so reads inside it (an audit chain head, a count
     /// checked against a limit) cannot be overtaken by another writer.
     async fn begin_write(&self) -> SidResult<WriteTx> {
-        self.pool
-            .begin_with("BEGIN IMMEDIATE")
+        Self::begin_write_on(&self.pool).await
+    }
+
+    /// Start a mutation's transaction on `pool`, as [`Self::begin_write`]: a
+    /// host whose own tables share this database starts its mutation of them
+    /// with this and finalizes it with [`Self::commit_mutation`].
+    pub async fn begin_write_on(pool: &SqlitePool) -> SidResult<WriteTx> {
+        pool.begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|e| SidError::Storage(format!("begin transaction: {e}")))
     }
 
     /// Commit a mutation's transaction together with its audit entry, on
     /// `chain_id`, and the work it owes: all of it or none.
-    async fn commit_mutation(
+    pub async fn commit_mutation(
         mut tx: WriteTx,
         chain_id: &str,
         ctx: MutationContext,
