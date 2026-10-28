@@ -16,9 +16,13 @@ impl SignInHistoryStore for PostgresBackend {
         &self,
         profile_id: ProfileId,
     ) -> SidResult<Option<(String, chrono::DateTime<chrono::Utc>)>> {
+        // A sign-in still owing its second factor is no history.
         let row: Option<(String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
-            "SELECT ip_address, created_at FROM sessions WHERE profile_id = $1 ORDER BY created_at DESC LIMIT 1",
-        ).bind(profile_id)
+            "SELECT ip_address, created_at FROM sessions WHERE profile_id = $1 \
+             AND NOT (is_provisional AND scopes = $2) ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(profile_id)
+        .bind(sid_core::models::session::SECOND_FACTOR_SCOPE)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("Query failed: {}", e)))?;
@@ -33,10 +37,12 @@ impl SignInHistoryStore for PostgresBackend {
     ) -> SidResult<bool> {
         let cutoff = chrono::Utc::now() - chrono::Duration::seconds(window.as_secs() as i64);
         let row: (bool,) = sqlx::query_as(
-            "SELECT EXISTS(SELECT 1 FROM sessions WHERE profile_id = $1 AND ip_address = $2 AND created_at > $3)",
+            "SELECT EXISTS(SELECT 1 FROM sessions WHERE profile_id = $1 AND ip_address = $2 AND created_at > $3 \
+             AND NOT (is_provisional AND scopes = $4))",
         ).bind(profile_id)
         .bind(ip)
         .bind(cutoff)
+        .bind(sid_core::models::session::SECOND_FACTOR_SCOPE)
         .fetch_one(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("Query failed: {}", e)))?;
@@ -51,10 +57,12 @@ impl SignInHistoryStore for PostgresBackend {
     ) -> SidResult<bool> {
         let cutoff = chrono::Utc::now() - chrono::Duration::seconds(window.as_secs() as i64);
         let row: (bool,) = sqlx::query_as(
-            "SELECT EXISTS(SELECT 1 FROM sessions WHERE profile_id = $1 AND device_id = $2 AND created_at > $3)",
+            "SELECT EXISTS(SELECT 1 FROM sessions WHERE profile_id = $1 AND device_id = $2 AND created_at > $3 \
+             AND NOT (is_provisional AND scopes = $4))",
         ).bind(profile_id)
         .bind(device_id)
         .bind(cutoff)
+        .bind(sid_core::models::session::SECOND_FACTOR_SCOPE)
         .fetch_one(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("Query failed: {}", e)))?;

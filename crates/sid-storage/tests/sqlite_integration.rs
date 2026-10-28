@@ -390,6 +390,7 @@ mod sign_in_history {
         most_recent_session_is_the_latest,
         seen_address_and_device_are_per_account,
         location_is_designated_at_threshold,
+        an_unfinished_sign_in_is_no_history,
     );
 }
 

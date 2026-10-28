@@ -19,11 +19,14 @@ impl SqliteBackend {
         &self,
         profile_id: ProfileId,
     ) -> SidResult<Option<(String, chrono::DateTime<chrono::Utc>)>> {
+        // A sign-in still owing its second factor is no history.
         let row = sqlx::query(
             "SELECT ip_address, created_at FROM sessions WHERE profile_id = ? \
+             AND NOT (is_provisional AND scopes = ?) \
              ORDER BY created_at DESC LIMIT 1",
         )
         .bind(profile_id)
+        .bind(sid_core::models::session::SECOND_FACTOR_SCOPE)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -44,11 +47,13 @@ impl SqliteBackend {
     ) -> SidResult<bool> {
         sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM sessions \
-             WHERE profile_id = ? AND ip_address = ? AND created_at > ?)",
+             WHERE profile_id = ? AND ip_address = ? AND created_at > ? \
+             AND NOT (is_provisional AND scopes = ?))",
         )
         .bind(profile_id)
         .bind(ip)
         .bind(since(window)?)
+        .bind(sid_core::models::session::SECOND_FACTOR_SCOPE)
         .fetch_one(&self.pool)
         .await
         .map_err(|e| SidError::Storage(e.to_string()))
@@ -62,11 +67,13 @@ impl SqliteBackend {
     ) -> SidResult<bool> {
         sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM sessions \
-             WHERE profile_id = ? AND device_id = ? AND created_at > ?)",
+             WHERE profile_id = ? AND device_id = ? AND created_at > ? \
+             AND NOT (is_provisional AND scopes = ?))",
         )
         .bind(profile_id)
         .bind(device_id.to_string())
         .bind(since(window)?)
+        .bind(sid_core::models::session::SECOND_FACTOR_SCOPE)
         .fetch_one(&self.pool)
         .await
         .map_err(|e| SidError::Storage(e.to_string()))

@@ -2134,6 +2134,25 @@ impl AuthServiceImpl {
         }
     }
 
+    /// The fence of the passkey that made `verified`, holding what its
+    /// recorded use stored: what proved this sign-in's first factor.
+    fn passkey_fence(
+        passkeys: &[Credential],
+        verified: &VerifiedAssertion,
+    ) -> Result<sid_core::models::CredentialFence, Status> {
+        let credential = passkeys
+            .iter()
+            .find(|c| c.id == verified.credential)
+            .ok_or_else(authentication_failed)?;
+        Ok(sid_core::models::CredentialFence {
+            id: credential.id,
+            data: match &verified.updated_data {
+                Some(updated) => CredentialData::new(updated.clone()),
+                None => credential.data.clone(),
+            },
+        })
+    }
+
     /// The result of a passkey assertion finish: a refused assertion counts
     /// as a failed sign-in of `profile_id`; any other failure is internal.
     async fn passkey_outcome(
@@ -3622,6 +3641,7 @@ impl AuthService for AuthServiceImpl {
 
         let user_verified;
         let key_amr;
+        let proved_by;
         let profile = if let Some(identifier) = &req.principal {
             // ── Identifier-based flow ──
             let credential =
@@ -3648,6 +3668,7 @@ impl AuthService for AuthServiceImpl {
             let verified = self.passkey_outcome(finished, p.id, client_ip).await?;
             user_verified = verified.user_verified;
             key_amr = self.record_passkey_use(&passkeys, &verified).await?;
+            proved_by = Self::passkey_fence(&passkeys, &verified)?;
 
             p
         } else {
@@ -3683,6 +3704,7 @@ impl AuthService for AuthServiceImpl {
             let verified = self.passkey_outcome(finished, p.id, client_ip).await?;
             user_verified = verified.user_verified;
             key_amr = self.record_passkey_use(&passkeys, &verified).await?;
+            proved_by = Self::passkey_fence(&passkeys, &verified)?;
 
             p
         };
@@ -3719,7 +3741,9 @@ impl AuthService for AuthServiceImpl {
                 user_agent.as_deref().map(compute_device_id),
                 client_ip,
                 client,
-                None,
+                // The asserting passkey, as it holds after this use, fences
+                // the session's commit (or the pending context's completion).
+                Some(&proved_by),
                 admission,
             )
             .await?;

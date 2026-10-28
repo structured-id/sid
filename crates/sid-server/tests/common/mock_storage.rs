@@ -1486,7 +1486,7 @@ impl sid_plugin::SignInHistoryStore for MockStorage {
         let most_recent = inner
             .sessions
             .values()
-            .filter(|s| s.profile_id == profile_id)
+            .filter(|s| s.profile_id == profile_id && !s.awaits_second_factor())
             .max_by_key(|s| s.created_at)
             .map(|s| (s.ip_address.clone(), s.created_at));
         Ok(most_recent)
@@ -1503,10 +1503,12 @@ impl sid_plugin::SignInHistoryStore for MockStorage {
             return Err(sid_core::Error::Storage("read sessions by ip".into()));
         }
         let cutoff = chrono::Utc::now() - chrono::Duration::seconds(window.as_secs() as i64);
-        let found = inner
-            .sessions
-            .values()
-            .any(|s| s.profile_id == profile_id && s.ip_address == ip && s.created_at > cutoff);
+        let found = inner.sessions.values().any(|s| {
+            s.profile_id == profile_id
+                && s.ip_address == ip
+                && s.created_at > cutoff
+                && !s.awaits_second_factor()
+        });
         Ok(found)
     }
 
@@ -1522,7 +1524,10 @@ impl sid_plugin::SignInHistoryStore for MockStorage {
         }
         let cutoff = chrono::Utc::now() - chrono::Duration::seconds(window.as_secs() as i64);
         let found = inner.sessions.values().any(|s| {
-            s.profile_id == profile_id && s.device_id == Some(device_id) && s.created_at > cutoff
+            s.profile_id == profile_id
+                && s.device_id == Some(device_id)
+                && s.created_at > cutoff
+                && !s.awaits_second_factor()
         });
         Ok(found)
     }
