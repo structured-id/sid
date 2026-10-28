@@ -2824,7 +2824,7 @@ impl AuthServiceImpl {
         // of its own request but records no further sign-in; the admission
         // it repeats answers a CAPTCHA from the address it was made from.
         if let Some(completion) = &completion
-            && let Some((delivery, session)) = self.admitted_session(completion, profile.id).await?
+            && let Some((delivery, session)) = self.admitted_session(completion, assignment).await?
         {
             self.check_sign_in(
                 profile.id,
@@ -2880,6 +2880,7 @@ impl AuthServiceImpl {
             completion_key: completion.key()?,
             context: self.admitted_context(&completion),
             deadline: completion.deadline.min(session.expires_at),
+            inputs: super::sign_in_session::admitted_inputs(assignment),
         };
         match self
             .sign_in(
@@ -2923,10 +2924,7 @@ impl AuthServiceImpl {
         client_id: &str,
         assignment: sid_core::models::PrincipalAssignmentFence,
     ) -> Result<Option<SignedIn>, Status> {
-        match self
-            .admitted_session(completion, assignment.profile)
-            .await?
-        {
+        match self.admitted_session(completion, assignment).await? {
             Some((delivery, session)) => self
                 .deliver_admitted(delivery, &session, client_id, assignment)
                 .await
@@ -2935,14 +2933,14 @@ impl AuthServiceImpl {
         }
     }
 
-    /// The live session `completion` committed for `expected` and its
-    /// retained delivery; None when the operation
-    /// has not committed; a refusal when it has but may not be delivered
-    /// again (see [`Self::redeliver_admitted`]).
+    /// The live session `completion` committed under `assignment` and its
+    /// retained delivery; None when the operation has not committed; a
+    /// refusal when it has but under another assignment, or may not be
+    /// delivered again (see [`Self::redeliver_admitted`]).
     async fn admitted_session(
         &self,
         completion: &AdmittedCompletion<'_>,
-        expected: ProfileId,
+        assignment: sid_core::models::PrincipalAssignmentFence,
     ) -> Result<
         Option<(
             sid_authn::sign_in_delivery::RetainedDelivery,
@@ -2961,6 +2959,12 @@ impl AuthServiceImpl {
         else {
             return Ok(None);
         };
+        if !record.matches(
+            super::sign_in_session::ADMITTED_METHOD,
+            &super::sign_in_session::admitted_inputs(assignment),
+        ) {
+            return Err(authentication_failed());
+        }
         let delivery = sid_authn::sign_in_delivery::RetainedDelivery::open(
             self.key_manager.as_ref(),
             &self.admitted_context(completion),
@@ -2984,7 +2988,7 @@ impl AuthServiceImpl {
             .get_session(session_id)
             .await
             .map_err(storage_failure)?
-            .filter(|session| !session.is_expired() && session.profile_id == expected)
+            .filter(|session| !session.is_expired() && session.profile_id == assignment.profile)
             .ok_or_else(authentication_failed)?;
         self.storage
             .get_profile(session.profile_id)

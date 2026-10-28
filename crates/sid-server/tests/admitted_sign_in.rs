@@ -473,6 +473,76 @@ async fn a_repeat_after_the_assignment_was_retired_is_refused() {
     );
 }
 
+// Regression guard: an operation is delivered again only under the
+// assignment it committed under. The subject retired and linked to the same
+// Profile again is a new assignment: a repeat resolving it is refused, and no
+// session of the retired assignment is handed out again.
+#[tokio::test]
+async fn a_repeat_under_a_relinked_assignment_is_refused() {
+    let storage = storage().await;
+    let auth = authority(storage.clone(), AuthLevel::Basic);
+    let profile = profile(storage.as_ref()).await;
+    let op = operation();
+    let deadline = Utc::now() + Duration::minutes(10);
+    let read = assigned(storage.as_ref(), &profile).await;
+    let principal = storage
+        .get_principals_by_profile(profile.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|p| p.principal_type == sid_core::models::PrincipalType::FederatedSubject)
+        .expect("the Profile's federated subject");
+    auth.complete_admitted_sign_in(
+        &tonic::Request::new(()),
+        &profile,
+        read,
+        &basic(),
+        CLIENT,
+        Some(completion(&op, deadline)),
+    )
+    .await
+    .unwrap();
+    assert!(
+        storage
+            .unbind_principal(
+                read.principal,
+                profile.id,
+                AuditEntry::system("principal.release", "test").into()
+            )
+            .await
+            .unwrap()
+    );
+    // Linked again as a confirmation links it: the same value, a new
+    // principal.
+    let linked = sid_core::models::Principal {
+        id: sid_core::models::PrincipalId::new(),
+        ..principal
+    };
+    storage
+        .save_principal(&linked, AuditEntry::system("principal.link", "test").into())
+        .await
+        .unwrap();
+    let relinked = assigned(storage.as_ref(), &profile).await;
+    assert_ne!(relinked, read, "linking again is a new assignment");
+
+    let refused = auth
+        .complete_admitted_sign_in(
+            &tonic::Request::new(()),
+            &profile,
+            relinked,
+            &basic(),
+            CLIENT,
+            Some(completion(&op, deadline)),
+        )
+        .await
+        .err()
+        .expect("the operation of the retired assignment is not delivered again");
+    assert_eq!(
+        common::error_reason(&refused).as_deref(),
+        Some("AUTHENTICATION_FAILED")
+    );
+}
+
 // Concurrent repeats of one operation commit one session; every answer that
 // succeeds names it.
 #[tokio::test]

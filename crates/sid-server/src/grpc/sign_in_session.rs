@@ -31,13 +31,27 @@ pub(crate) struct RetainedSignIn<'a> {
     pub context: String,
     /// The end of the operation; the delivery is never redelivered after.
     pub deadline: chrono::DateTime<Utc>,
+    /// The operation's significant inputs: a repeat must present them again.
+    pub inputs: Vec<u8>,
+}
+
+/// The significant inputs of an admitted sign-in committed under
+/// `assignment`: a repeat is the same operation only under the same
+/// assignment, so one retired and linked again never receives the earlier
+/// session.
+pub(crate) fn admitted_inputs(assignment: sid_core::models::PrincipalAssignmentFence) -> Vec<u8> {
+    format!(
+        "{}:{}:{}",
+        assignment.profile, assignment.principal.0, assignment.revision
+    )
+    .into_bytes()
 }
 
 /// The namespace of admitted sign-ins' completions.
 pub(crate) const ADMITTED_NAMESPACE: &str = "admitted-sign-in";
 
 /// The method name an admitted sign-in's completion records.
-const ADMITTED_METHOD: &str = "admitted_sign_in";
+pub(crate) const ADMITTED_METHOD: &str = "admitted_sign_in";
 
 /// What completing a sign-in uses, borrowed from the service that ran the
 /// ceremony.
@@ -169,7 +183,7 @@ impl SignInSessions<'_> {
                                 ADMITTED_NAMESPACE,
                                 retained.completion_key,
                                 ADMITTED_METHOD,
-                                profile.id.to_string().as_bytes(),
+                                &retained.inputs,
                                 sealed,
                             )
                             .retained_until(retained.deadline),
