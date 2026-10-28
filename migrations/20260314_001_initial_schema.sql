@@ -818,6 +818,17 @@ CREATE INDEX IF NOT EXISTS idx_security_policies_enrollment_mode
     ON security_policies (enrollment_mode);
 
 --------------------------------------------------------------------------------
+-- login_policy_epoch: advanced by every login-policy write of the host; a
+-- session or authorization code decided under a policy commits only while
+-- the epoch it read is current. No row until the host's first policy write.
+--------------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS login_policy_epoch (
+    id    SMALLINT PRIMARY KEY CHECK (id = 1),
+    epoch BIGINT NOT NULL
+);
+
+--------------------------------------------------------------------------------
 -- invites
 --------------------------------------------------------------------------------
 

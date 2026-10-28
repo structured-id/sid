@@ -81,8 +81,8 @@ pub(crate) use end_session::{EndSession, LogoutRequest};
 use password_sign_in::ProfileSignIn;
 use refusal::{
     anomaly_unavailable, authentication_failed, ceremony_expired, enrollment_requirement,
-    mfa_not_enrolled, registration_restricted, session_ended, session_provisional, sign_in_refused,
-    step_up_to_acr, step_up_to_amr, too_many_attempts,
+    mfa_not_enrolled, registration_restricted, session_ended, session_provisional,
+    step_up_required, too_many_attempts,
 };
 use sid_authn::sign_in_security::{device_id as compute_device_id, implied_auth_level};
 use sign_in_security::{ProfileSecurity, SecurityStatus};
@@ -537,6 +537,9 @@ pub struct AuthServiceImpl {
     geoip: Arc<GeoIpChain>,
     /// CE hardcoded security policy (not configurable via UI in CE).
     security_policy: SecurityPolicy,
+    /// Where the login requirements come from: the host's policy source, or
+    /// none for `security_policy`'s fixed ones.
+    login_policy: Option<Arc<dyn sid_authn::login_policy::LoginPolicySource>>,
     /// CAPTCHA provider for RequireCaptcha anomaly reaction.
     captcha_provider: Arc<dyn sid_authn::captcha::CaptchaProvider>,
     /// Which sign-in each CAPTCHA was asked of, and the single-use passes earned.
@@ -697,6 +700,7 @@ impl AuthServiceImpl {
             ip_intelligence,
             geoip,
             security_policy: SecurityPolicy::ce_default(),
+            login_policy: None,
             captcha_provider,
             captcha_gate,
             key_manager,
@@ -821,6 +825,37 @@ impl AuthServiceImpl {
         self
     }
 
+    /// Read the login requirements from `source`, the host's policy, instead
+    /// of this installation's fixed ones: every sign-in and authorization
+    /// asks it, and commits only under the fence it states.
+    pub fn with_login_policy(
+        mut self,
+        source: Arc<dyn sid_authn::login_policy::LoginPolicySource>,
+    ) -> Self {
+        self.login_policy = Some(source);
+        self
+    }
+
+    /// The login requirements of an authentication for `client_id` (none:
+    /// the organization's). A source that cannot state them refuses rather
+    /// than leaving the fixed baseline in their place.
+    async fn login_requirements(
+        &self,
+        client_id: Option<&str>,
+    ) -> Result<sid_authn::login_policy::LoginRequirements, Status> {
+        use sid_authn::login_policy::LoginPolicySource as _;
+        match &self.login_policy {
+            Some(source) => source
+                .requirements(client_id)
+                .await
+                .map_err(|e| dependency_unavailable("login policy", e)),
+            None => sid_authn::login_policy::FixedLoginPolicy::of(&self.security_policy)
+                .requirements(client_id)
+                .await
+                .map_err(|e| dependency_unavailable("login policy", e)),
+        }
+    }
+
     /// The magic-link service, or FEATURE_NOT_CONFIGURED when the instance has
     /// not enabled magic links. The answer does not depend on the address asked
     /// about.
@@ -849,40 +884,71 @@ impl AuthServiceImpl {
         Ok((email, phone))
     }
 
-    /// Evaluate login security: anomaly detection + conditional access policy.
+    /// Evaluate login security: anomaly detection, then the organization's
+    /// login requirements, on the level and `amr` methods the session being
+    /// created records.
     ///
     /// Called AFTER credential verification, BEFORE session creation.
-    /// Pipeline: anomaly rules (first match wins) → policy enforcement.
-    ///
-    /// Returns `Ok(())` if login is allowed, or an appropriate gRPC error.
+    /// Returns the policy fence the session commits under, or the refusal.
     async fn evaluate_login_security(
         &self,
         profile_id: ProfileId,
         client_ip: Option<std::net::IpAddr>,
         auth_method: &str,
-        user_verified: bool,
+        (assurance, amr): (sid_core::models::session::AuthLevel, &[String]),
         extras: LoginSecurityExtras<'_>,
-    ) -> Result<(), Status> {
+    ) -> Result<Option<sid_core::models::ActorFence>, Status> {
         self.evaluate_sign_in(
             profile_id,
             client_ip,
             sid_authn::sign_in_security::AttemptAuthentication::Local {
                 method: auth_method,
-                user_verified,
+                assurance,
+                amr,
             },
             extras,
+            None,
         )
         .await
     }
 
-    /// The same rules and policy for a sign-in verified as `authentication`.
+    /// The organization's login requirements alone, on a session of
+    /// `profile_id` at `assurance` with `amr`: the policy fence it commits
+    /// under, or the step-up the requirements ask for.
+    async fn admit_by_requirements(
+        &self,
+        profile_id: ProfileId,
+        assurance: sid_core::models::session::AuthLevel,
+        amr: &[String],
+    ) -> Result<Option<sid_core::models::ActorFence>, Status> {
+        use sid_authn::login_policy::LoginDecision;
+        let requirements = self.login_requirements(None).await?;
+        let now = Utc::now();
+        let mut probe = sid_core::models::Session::new(
+            profile_id,
+            "probe".to_string(),
+            now + Duration::hours(1),
+        );
+        probe.assurance_level = assurance;
+        probe.amr = amr.to_vec();
+        match requirements.decide(&probe, now) {
+            LoginDecision::Allow { .. } => Ok(requirements.fence),
+            LoginDecision::StepUp(unmet) => Err(step_up_required(&unmet).into()),
+        }
+    }
+
+    /// The same rules for a sign-in verified as `authentication`, under the
+    /// login requirements of `client_id` (none: the organization's). Returns
+    /// the policy fence the session commits under.
     async fn evaluate_sign_in(
         &self,
         profile_id: ProfileId,
         client_ip: Option<std::net::IpAddr>,
         authentication: sid_authn::sign_in_security::AttemptAuthentication<'_>,
         extras: LoginSecurityExtras<'_>,
-    ) -> Result<(), Status> {
+        client_id: Option<&str>,
+    ) -> Result<Option<sid_core::models::ActorFence>, Status> {
+        let requirements = self.login_requirements(client_id).await?;
         let attempt = sid_authn::sign_in_security::SignInAttempt {
             client_ip,
             authentication,
@@ -893,9 +959,11 @@ impl AuthServiceImpl {
             &ProfileSecurity { service: self },
             &profile_id,
             attempt,
+            &requirements,
         )
         .await
-        .map_err(|e: SecurityStatus| e.0)
+        .map_err(|e: SecurityStatus| e.0)?;
+        Ok(requirements.fence)
     }
 
     /// Record an authentication on the active session `id`: `authenticate`
@@ -2055,6 +2123,7 @@ impl AuthServiceImpl {
     /// The session records the client's address and device: the sign-in
     /// history the new-device rule compares later sign-ins with.
     /// Its credential goes to `client` as [`Self::sign_in`] delivers it.
+    #[allow(clippy::too_many_arguments)]
     async fn create_session_and_issue_tokens(
         &self,
         profile: &sid_core::models::Profile,
@@ -2063,6 +2132,7 @@ impl AuthServiceImpl {
         client_ip: Option<std::net::IpAddr>,
         client: CeremonyClient,
         proved_by: Option<&sid_core::models::CredentialFence>,
+        policy: Option<sid_core::models::ActorFence>,
     ) -> Result<SignedIn, Status> {
         // The installation's absolute lifetime, when it sets one.
         let lifetime = match self.security_policy.session.max_lifetime_hours {
@@ -2083,7 +2153,8 @@ impl AuthServiceImpl {
         session.assurance_level =
             method.auth_level(self.security_policy.auth.passkey_satisfies_mfa);
         session.amr = method.amr();
-        self.sign_in(profile, session, client, proved_by).await
+        self.sign_in(profile, session, client, proved_by, policy)
+            .await
     }
 
     /// Provisional session for a weak-possession login (email OTP, magic link):
@@ -2096,26 +2167,29 @@ impl AuthServiceImpl {
         device_id: Option<uuid::Uuid>,
         client_ip: Option<std::net::IpAddr>,
         client: CeremonyClient,
+        policy: Option<sid_core::models::ActorFence>,
     ) -> Result<SignedIn, Status> {
         let mut session =
             sid_core::models::Session::new_provisional(profile.id, session_address(client_ip));
         session.device_id = device_id;
         session.amr = vec![amr.to_string()];
         // Mailbox possession proves no stored credential.
-        self.sign_in(profile, session, client, None).await
+        self.sign_in(profile, session, client, None, policy).await
     }
 
     /// Store `session` and deliver its credential to `client`: the browser
     /// sign-in page gets the IdP session cookie, a fresh secret whose hash
     /// the session stores, and no access token; a native client gets the
     /// session's access token. `proved_by` is the credential the sign-in
-    /// proved, which must still be current when the session commits.
+    /// proved and `policy` the login policy it was admitted under; both must
+    /// still be current when the session commits.
     async fn sign_in(
         &self,
         profile: &sid_core::models::Profile,
         session: sid_core::models::Session,
         client: CeremonyClient,
         proved_by: Option<&sid_core::models::CredentialFence>,
+        policy: Option<sid_core::models::ActorFence>,
     ) -> Result<SignedIn, Status> {
         super::sign_in_session::SignInSessions {
             storage: self.storage.as_ref(),
@@ -2125,7 +2199,7 @@ impl AuthServiceImpl {
             cookie: &self.browser_cookie,
             max_concurrent_sessions: self.security_policy.session.max_concurrent_sessions,
         }
-        .sign_in(profile, session, client, proved_by)
+        .sign_in(profile, session, client, proved_by, policy)
         .await
     }
 
@@ -2158,17 +2232,18 @@ impl AuthServiceImpl {
         if !profile.status.can_authenticate() {
             return Err(authentication_failed());
         }
-        self.evaluate_login_security(
-            profile.id,
-            ceremony.client_ip,
-            "upstream",
-            false,
-            LoginSecurityExtras {
-                captcha_pass: ceremony.captcha_pass.as_deref(),
-                user_agent: ceremony.user_agent.as_deref(),
-            },
-        )
-        .await?;
+        let policy = self
+            .evaluate_login_security(
+                profile.id,
+                ceremony.client_ip,
+                "upstream",
+                (sid_core::models::session::AuthLevel::Basic, &[]),
+                LoginSecurityExtras {
+                    captcha_pass: ceremony.captcha_pass.as_deref(),
+                    user_agent: ceremony.user_agent.as_deref(),
+                },
+            )
+            .await?;
         let lifetime = match self.security_policy.session.max_lifetime_hours {
             0 => Duration::hours(24),
             hours => Duration::hours(i64::from(hours)),
@@ -2184,7 +2259,8 @@ impl AuthServiceImpl {
             "profile".to_string(),
             "email".to_string(),
         ];
-        self.sign_in(profile, session, ceremony.client, None).await
+        self.sign_in(profile, session, ceremony.client, None, policy)
+            .await
     }
 
     /// Sign `profile` in on the accepted evidence of an explicitly trusted
@@ -2196,12 +2272,14 @@ impl AuthServiceImpl {
     /// of this authority's lifetime and limit recording it. `request` is the
     /// browser's return the host checked by its state: its client address
     /// and device are the sign-in's, and the browser gets the IdP session
-    /// cookie.
+    /// cookie. `client_id` is the application the sign-in continues to: its
+    /// login requirements are the ones weighed.
     pub async fn complete_admitted_sign_in<T>(
         &self,
         request: &Request<T>,
         profile: &sid_core::models::Profile,
         authentication: &sid_core::models::session::SessionAuthentication,
+        client_id: &str,
     ) -> Result<SignedIn, Status> {
         if !profile.status.can_authenticate() {
             return Err(authentication_failed());
@@ -2210,16 +2288,18 @@ impl AuthServiceImpl {
         let user_agent = extract_user_agent(request.metadata());
         let user_agent = user_agent.as_deref();
         let captcha_pass = extract_captcha_pass(request.metadata());
-        self.evaluate_sign_in(
-            profile.id,
-            client_ip,
-            sid_authn::sign_in_security::AttemptAuthentication::Accepted(authentication),
-            LoginSecurityExtras {
-                captcha_pass: captcha_pass.as_deref(),
-                user_agent,
-            },
-        )
-        .await?;
+        let policy = self
+            .evaluate_sign_in(
+                profile.id,
+                client_ip,
+                sid_authn::sign_in_security::AttemptAuthentication::Accepted(authentication),
+                LoginSecurityExtras {
+                    captcha_pass: captcha_pass.as_deref(),
+                    user_agent,
+                },
+                Some(client_id),
+            )
+            .await?;
         let lifetime = match self.security_policy.session.max_lifetime_hours {
             0 => Duration::hours(24),
             hours => Duration::hours(i64::from(hours)),
@@ -2239,7 +2319,7 @@ impl AuthServiceImpl {
             "profile".to_string(),
             "email".to_string(),
         ];
-        self.sign_in(profile, session, CeremonyClient::Browser, None)
+        self.sign_in(profile, session, CeremonyClient::Browser, None, policy)
             .await
     }
 
@@ -2512,26 +2592,32 @@ impl AuthService for AuthServiceImpl {
         .map_err(|e| e.0)?;
         let profile = verified.account;
         // Evaluate login security (anomaly detection + policy enforcement).
-        self.evaluate_login_security(
-            profile.id,
-            client_ip,
-            "opaque",
-            false,
-            LoginSecurityExtras {
-                captcha_pass: captcha_pass.as_deref(),
-                user_agent: user_agent.as_deref(),
-            },
-        )
-        .await?;
+        let method = LoginMethod::Password;
+        let policy = self
+            .evaluate_login_security(
+                profile.id,
+                client_ip,
+                "opaque",
+                (
+                    method.auth_level(self.security_policy.auth.passkey_satisfies_mfa),
+                    &method.amr(),
+                ),
+                LoginSecurityExtras {
+                    captcha_pass: captcha_pass.as_deref(),
+                    user_agent: user_agent.as_deref(),
+                },
+            )
+            .await?;
 
         let signed_in = self
             .create_session_and_issue_tokens(
                 &profile,
-                LoginMethod::Password,
+                method,
                 user_agent.as_deref().map(compute_device_id),
                 client_ip,
                 client,
                 Some(&verified.proved_by),
+                policy,
             )
             .await?;
 
@@ -3225,29 +3311,35 @@ impl AuthService for AuthServiceImpl {
         };
 
         // Evaluate login security (anomaly detection + policy enforcement).
-        self.evaluate_login_security(
-            profile.id,
-            client_ip,
-            "webauthn",
+        let method = LoginMethod::Passkey {
             user_verified,
-            LoginSecurityExtras {
-                captcha_pass: captcha_pass.as_deref(),
-                user_agent: user_agent.as_deref(),
-            },
-        )
-        .await?;
+            key_amr,
+        };
+        let policy = self
+            .evaluate_login_security(
+                profile.id,
+                client_ip,
+                "webauthn",
+                (
+                    method.auth_level(self.security_policy.auth.passkey_satisfies_mfa),
+                    &method.amr(),
+                ),
+                LoginSecurityExtras {
+                    captcha_pass: captcha_pass.as_deref(),
+                    user_agent: user_agent.as_deref(),
+                },
+            )
+            .await?;
 
         let signed_in = self
             .create_session_and_issue_tokens(
                 &profile,
-                LoginMethod::Passkey {
-                    user_verified,
-                    key_amr,
-                },
+                method,
                 user_agent.as_deref().map(compute_device_id),
                 client_ip,
                 client,
                 None,
+                policy,
             )
             .await?;
 
@@ -3637,20 +3729,24 @@ impl AuthService for AuthServiceImpl {
                     .ok_or_else(authentication_failed)?;
 
                 // Evaluate login security (anomaly detection + policy enforcement).
-                self.evaluate_login_security(
-                    profile.id,
-                    client_ip,
-                    "magic_link",
-                    false,
-                    LoginSecurityExtras {
-                        captcha_pass: captcha_pass.as_deref(),
-                        user_agent: user_agent.as_deref(),
-                    },
-                )
-                .await?;
-
                 // A mailed link, like a mailed code, is mailbox possession over
                 // a second channel: `mca` (RFC 8176 §2).
+                let policy = self
+                    .evaluate_login_security(
+                        profile.id,
+                        client_ip,
+                        "magic_link",
+                        (
+                            sid_core::models::session::AuthLevel::Basic,
+                            &["mca".to_string()],
+                        ),
+                        LoginSecurityExtras {
+                            captcha_pass: captcha_pass.as_deref(),
+                            user_agent: user_agent.as_deref(),
+                        },
+                    )
+                    .await?;
+
                 let signed_in = self
                     .create_provisional_session_and_issue_tokens(
                         &profile,
@@ -3658,6 +3754,7 @@ impl AuthService for AuthServiceImpl {
                         user_agent.as_deref().map(compute_device_id),
                         client_ip,
                         client,
+                        policy,
                     )
                     .await?;
 
@@ -4112,22 +4209,27 @@ impl AuthService for AuthServiceImpl {
         }
 
         // Evaluate login security (anomaly detection + policy enforcement).
-        self.evaluate_login_security(
-            profile.id,
-            client_ip,
-            "opaque",
-            false,
-            LoginSecurityExtras {
-                captcha_pass: captcha_pass.as_deref(),
-                user_agent: user_agent.as_deref(),
-            },
-        )
-        .await?;
+        let method = LoginMethod::Password;
+        let policy = self
+            .evaluate_login_security(
+                profile.id,
+                client_ip,
+                "opaque",
+                (
+                    method.auth_level(self.security_policy.auth.passkey_satisfies_mfa),
+                    &method.amr(),
+                ),
+                LoginSecurityExtras {
+                    captcha_pass: captcha_pass.as_deref(),
+                    user_agent: user_agent.as_deref(),
+                },
+            )
+            .await?;
 
         let signed_in = self
             .create_session_and_issue_tokens(
                 &profile,
-                LoginMethod::Password,
+                method,
                 user_agent.as_deref().map(compute_device_id),
                 client_ip,
                 client,
@@ -4135,6 +4237,7 @@ impl AuthService for AuthServiceImpl {
                     id: new_credential.id,
                     data: new_credential.data.clone(),
                 }),
+                policy,
             )
             .await?;
 
@@ -4641,20 +4744,24 @@ impl AuthService for AuthServiceImpl {
                 };
 
                 // Evaluate login security (anomaly detection + policy enforcement).
-                self.evaluate_login_security(
-                    profile.id,
-                    client_ip,
-                    "otp",
-                    false,
-                    LoginSecurityExtras {
-                        captcha_pass: captcha_pass.as_deref(),
-                        user_agent: user_agent.as_deref(),
-                    },
-                )
-                .await?;
-
                 // An emailed code confirms the address over a second channel:
                 // `mca` (RFC 8176 §2), not `otp`, which names a code generator.
+                let policy = self
+                    .evaluate_login_security(
+                        profile.id,
+                        client_ip,
+                        "otp",
+                        (
+                            sid_core::models::session::AuthLevel::Basic,
+                            &["mca".to_string()],
+                        ),
+                        LoginSecurityExtras {
+                            captcha_pass: captcha_pass.as_deref(),
+                            user_agent: user_agent.as_deref(),
+                        },
+                    )
+                    .await?;
+
                 let signed_in = self
                     .create_provisional_session_and_issue_tokens(
                         &profile,
@@ -4662,6 +4769,7 @@ impl AuthService for AuthServiceImpl {
                         user_agent.as_deref().map(compute_device_id),
                         client_ip,
                         client,
+                        policy,
                     )
                     .await?;
 
@@ -5204,9 +5312,11 @@ impl AuthService for AuthServiceImpl {
 
         // Require elevated session (step-up auth completed).
         if !claims.acr.contains("elevated") && !claims.acr.contains("critical") {
-            return Err(
-                step_up_to_acr(sid_core::models::session::AuthLevel::Elevated.acr_value()).into(),
-            );
+            return Err(step_up_required(&sid_authn::login_policy::Unmet {
+                acr: Some(sid_core::models::session::AuthLevel::Elevated),
+                ..Default::default()
+            })
+            .into());
         }
 
         let profile_id = verified.caller.profile_id;
@@ -5612,7 +5722,16 @@ impl AuthService for AuthServiceImpl {
         }
 
         // 5. The reset's sign-in is a sign-in like any other: its session
-        //    records the client's device and address.
+        //    records the client's device and address, and the organization's
+        //    login requirements admit it.
+        let method = LoginMethod::Password;
+        let policy = self
+            .admit_by_requirements(
+                profile_id,
+                method.auth_level(self.security_policy.auth.passkey_satisfies_mfa),
+                &method.amr(),
+            )
+            .await?;
         let signed_in = self
             .create_session_and_issue_tokens(
                 &self
@@ -5622,7 +5741,7 @@ impl AuthService for AuthServiceImpl {
                     .map_err(storage_failure)?
                     // Deleted meanwhile: the password is replaced, no one signs in.
                     .ok_or_else(authentication_failed)?,
-                LoginMethod::Password,
+                method,
                 user_agent.as_deref().map(compute_device_id),
                 client_ip,
                 client,
@@ -5631,6 +5750,7 @@ impl AuthService for AuthServiceImpl {
                     id: new_cred.id,
                     data: new_cred.data.clone(),
                 }),
+                policy,
             )
             .await?;
 

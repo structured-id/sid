@@ -5,9 +5,9 @@ use chrono::{DateTime, Utc};
 use sid_core::models::machine_user::CredentialStatus;
 use sid_core::models::provisioning_connector::MAX_USABLE_CONNECTOR_CREDENTIALS;
 use sid_core::models::{
-    ActorFence, ConnectorCredentialKind, ConnectorState, MutationContext, OrgId,
-    ProvisioningConnector, ProvisioningConnectorId, ProvisioningCredential,
-    ProvisioningCredentialId, ProvisioningDirection,
+    ConnectorCredentialKind, ConnectorState, MutationContext, OrgId, ProvisioningConnector,
+    ProvisioningConnectorId, ProvisioningCredential, ProvisioningCredentialId,
+    ProvisioningDirection,
 };
 use sid_core::{Error as SidError, Result as SidResult};
 use uuid::Uuid;
@@ -80,16 +80,17 @@ impl CredentialRow {
 }
 
 impl PostgresBackend {
-    /// Fail with `Fenced` unless `fence` still holds in this transaction. The
-    /// connector and credential rows are share-locked until the transaction
-    /// ends, so a concurrent disable, grant change or revocation either waits
-    /// for this write or is seen by it.
-    pub(super) async fn check_fence(tx: &mut Tx<'_>, fence: &ActorFence) -> SidResult<()> {
-        let ActorFence::Connector {
-            connector,
-            revision,
-            credential,
-        } = *fence;
+    /// Fail with `Fenced` unless `connector` is still active at `revision`
+    /// with `credential` usable, in this transaction. The connector and
+    /// credential rows are share-locked until the transaction ends, so a
+    /// concurrent disable, grant change or revocation either waits for this
+    /// write or is seen by it.
+    pub(super) async fn check_connector_fence(
+        tx: &mut Tx<'_>,
+        connector: ProvisioningConnectorId,
+        revision: i64,
+        credential: ProvisioningCredentialId,
+    ) -> SidResult<()> {
         let held = sqlx::query(
             "SELECT 1 FROM provisioning_connectors c
              JOIN provisioning_credentials k ON k.connector_id = c.id

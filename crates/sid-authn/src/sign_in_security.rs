@@ -1,18 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! The fixed sign-in rules a verified credential passes before a session is
 //! created, for any authenticated account type: anomaly detection over the
-//! account's sign-in history and the client address, then the security
-//! policy's required assurance. The host supplies the history store, where
-//! security events go and the address reputation record.
+//! account's sign-in history and the client address, then the login
+//! requirements the host's policy states. The host supplies the history
+//! store, where security events go and the address reputation record.
 
 use std::fmt::Display;
 use std::net::IpAddr;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use sid_core::models::Session;
-use sid_core::models::enforcement::{EnforcementAction, EnforcementDecision};
-use sid_core::models::security_policy::SecurityPolicy;
 use sid_core::models::session::AuthLevel;
 use sid_core::models::session::SessionAuthentication;
 use sid_plugin::SignInHistoryStore;
@@ -22,6 +19,7 @@ use crate::anomaly::{AnomalyDetector, LoginContext, RuleReaction};
 use crate::captcha::{CaptchaChallenge, CaptchaGate, CaptchaProvider, CaptchaSubject};
 use crate::geoip::GeoIpChain;
 use crate::ip_intelligence::IpIntelligenceAggregator;
+use crate::login_policy::{LoginDecision, LoginRequirements, Unmet};
 
 /// How far back a sign-in from the same address or device counts as seen.
 const SEEN_WINDOW: Duration = Duration::from_secs(90 * 24 * 3600);
@@ -51,11 +49,12 @@ pub fn implied_auth_level(
 /// How a sign-in's credential was verified, as the rules weigh it.
 #[derive(Debug, Clone, Copy)]
 pub enum AttemptAuthentication<'a> {
-    /// By this authority: the method (`opaque`, `webauthn`, ...) and whether
-    /// the authenticator verified the user (passkeys).
+    /// By this authority: the method's name (`opaque`, `webauthn`, ...) and
+    /// the level and `amr` methods (RFC 8176) the session it creates records.
     Local {
         method: &'a str,
-        user_verified: bool,
+        assurance: AuthLevel,
+        amr: &'a [String],
     },
     /// By an explicitly trusted issuer, as the authentication its accepted
     /// evidence attests: the policy weighs that level, step-up and methods,
@@ -94,8 +93,8 @@ pub enum SignInRefusal {
     CaptchaRequired(CaptchaChallenge),
     /// An anomaly rule asks for a stronger sign-in.
     StepUpAfterAnomaly(&'static str),
-    /// The policy requires this acr value.
-    StepUpToAcr(&'static str),
+    /// The login requirements are unmet: each unmet one is named.
+    StepUp(Unmet),
     /// The state the rules read could not be read: refused rather than
     /// passing with a rule switched off.
     Unavailable(String),
@@ -114,11 +113,6 @@ pub trait SignInSecurityHost: Send + Sync {
     fn geoip(&self) -> &GeoIpChain;
     fn captcha_gate(&self) -> &CaptchaGate;
     fn captcha_provider(&self) -> &dyn CaptchaProvider;
-    fn policy(&self) -> &SecurityPolicy;
-
-    /// The policy's decision on `probe`, the session the sign-in would
-    /// create.
-    fn policy_decision(&self, probe: &Session<Self::Owner>) -> EnforcementDecision;
 
     /// Record a rule's reaction for `account` (best effort).
     async fn security_event(
@@ -150,11 +144,13 @@ fn unavailable<E: From<SignInRefusal>>(e: impl Display) -> E {
     SignInRefusal::Unavailable(e.to_string()).into()
 }
 
-/// Run the rules for `owner`'s verified sign-in.
+/// Run the rules for `owner`'s verified sign-in under `requirements`, the
+/// login requirements the host's policy states for it.
 pub async fn evaluate<H: SignInSecurityHost>(
     host: &H,
     owner: &H::Owner,
     attempt: SignInAttempt<'_>,
+    requirements: &LoginRequirements,
 ) -> Result<(), H::Error> {
     let identity = owner.to_string();
     let client_ip = attempt.client_ip;
@@ -312,21 +308,18 @@ pub async fn evaluate<H: SignInSecurityHost>(
         }
     }
 
-    // The policy's required assurance, checked on a probe of the session the
-    // sign-in would create: the real one does not exist yet.
-    let policy = host.policy();
+    // The login requirements, checked on a probe of the session the sign-in
+    // would create: the real one does not exist yet.
+    let now = chrono::Utc::now();
     let mut probe = sid_core::models::Session::new(
         owner.clone(),
         "probe".to_string(),
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        now + chrono::Duration::hours(1),
     );
     match attempt.authentication {
-        AttemptAuthentication::Local {
-            method,
-            user_verified,
-        } => {
-            probe.assurance_level =
-                implied_auth_level(method, policy.auth.passkey_satisfies_mfa, user_verified);
+        AttemptAuthentication::Local { assurance, amr, .. } => {
+            probe.assurance_level = assurance;
+            probe.amr = amr.to_vec();
         }
         AttemptAuthentication::Accepted(accepted) => {
             probe.assurance_level = accepted.assurance_level;
@@ -336,19 +329,15 @@ pub async fn evaluate<H: SignInSecurityHost>(
         }
     }
     let method = attempt.authentication.method();
-    let decision = host.policy_decision(&probe);
-    match decision.action {
-        EnforcementAction::Allow => {}
-        EnforcementAction::StepUp => {
-            info!(account = %identity, method, violations = ?decision.violations, "Policy enforcement: step-up required");
-            return Err(SignInRefusal::StepUpToAcr(policy.auth.min_acr.acr_value()).into());
+    match requirements.decide(&probe, now) {
+        LoginDecision::Allow { audited } if !audited.is_empty() => {
+            info!(account = %identity, method, unmet = ?audited, "Login requirements unmet, allowed by audit enforcement");
         }
-        EnforcementAction::Block => {
-            warn!(account = %identity, method, violations = ?decision.violations, "Policy enforcement: access denied");
-            return Err(SignInRefusal::Refused.into());
+        LoginDecision::Allow { .. } => {}
+        LoginDecision::StepUp(unmet) => {
+            info!(account = %identity, method, ?unmet, "Login requirements: step-up required");
+            return Err(SignInRefusal::StepUp(unmet).into());
         }
-        // No grace periods are configured, so this does not occur.
-        EnforcementAction::Grace => {}
     }
 
     // Evidence for later sign-ins, not limits on this one: a failed write is

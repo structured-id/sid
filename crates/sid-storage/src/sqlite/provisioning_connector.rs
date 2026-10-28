@@ -6,8 +6,8 @@
 use chrono::{DateTime, Utc};
 use sid_core::models::provisioning_connector::MAX_USABLE_CONNECTOR_CREDENTIALS;
 use sid_core::models::{
-    ActorFence, ConnectorState, MutationContext, OrgId, ProvisioningConnector,
-    ProvisioningConnectorId, ProvisioningCredential, ProvisioningCredentialId,
+    ConnectorState, MutationContext, OrgId, ProvisioningConnector, ProvisioningConnectorId,
+    ProvisioningCredential, ProvisioningCredentialId,
 };
 use sid_core::{Error as SidError, Result as SidResult};
 
@@ -78,15 +78,16 @@ async fn is_active(tx: &mut Tx<'_>, id: ProvisioningConnectorId) -> SidResult<bo
     )
 }
 
-/// Fail with `Fenced` unless `fence` still holds, read in the write
-/// transaction (which holds the database write lock, so nothing changes the
-/// connector before this write commits).
-pub(super) async fn check_fence(tx: &mut Tx<'_>, fence: &ActorFence) -> SidResult<()> {
-    let ActorFence::Connector {
-        connector,
-        revision,
-        credential,
-    } = *fence;
+/// Fail with `Fenced` unless `connector` is still active at `revision` with
+/// `credential` usable, read in the write transaction (which holds the
+/// database write lock, so nothing changes the connector before this write
+/// commits).
+pub(super) async fn check_connector_fence(
+    tx: &mut Tx<'_>,
+    connector: ProvisioningConnectorId,
+    revision: i64,
+    credential: ProvisioningCredentialId,
+) -> SidResult<()> {
     let fenced = || {
         SidError::Fenced(format!(
             "connector {connector} changed since it was authorized"

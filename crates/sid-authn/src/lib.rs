@@ -53,6 +53,7 @@ pub mod issuer;
 pub mod issuer_directory;
 pub mod jwt;
 pub mod legacy_hash;
+pub mod login_policy;
 #[cfg(feature = "grpc")]
 pub mod machine_auth;
 pub mod magic_link;

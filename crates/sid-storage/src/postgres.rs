@@ -429,9 +429,18 @@ impl PostgresBackend {
         chain_id: &str,
         ctx: MutationContext,
     ) -> SidResult<()> {
-        // The authority first: a write whose actor changed commits nothing.
-        if let Some(fence) = &ctx.fence {
-            Self::check_fence(tx, fence).await?;
+        // The authority first: a write whose actor or policy changed
+        // commits nothing.
+        match ctx.fence {
+            Some(sid_core::models::ActorFence::Connector {
+                connector,
+                revision,
+                credential,
+            }) => Self::check_connector_fence(tx, connector, revision, credential).await?,
+            Some(sid_core::models::ActorFence::LoginPolicy { epoch }) => {
+                Self::check_login_policy_fence(tx, epoch).await?
+            }
+            None => {}
         }
         // Then the completion: a keyed command another commit already
         // completed commits nothing, not even its audit or work.
@@ -8544,6 +8553,7 @@ mod history_keys;
 pub use history_keys::PgHistoryKeyStore;
 mod instance_secret;
 mod job_lock;
+mod login_policy;
 mod machine_credential;
 mod operation;
 mod password_history;

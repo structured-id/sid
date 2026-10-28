@@ -34,6 +34,11 @@ pub trait GrantHarness: Send + Sync {
 
     /// A resource grants may be bound to.
     async fn resource(&self) -> ResourceId;
+
+    /// Advance the installation's login-policy epoch, as a host's policy
+    /// write does, and return the new epoch. The scenarios that call it
+    /// expect a store of their own: no other scenario advances it meanwhile.
+    async fn advance_login_policy(&self) -> i64;
 }
 
 fn ctx() -> MutationContext {
@@ -363,6 +368,118 @@ pub async fn session_fence_serializes_with_a_revocation<H: GrantHarness>(h: &H) 
             );
         }
     }
+}
+
+fn under_policy(epoch: i64) -> MutationContext {
+    ctx().fenced_by(sid_core::models::ActorFence::LoginPolicy { epoch })
+}
+
+/// A session decided under a login policy commits only while that policy is
+/// current: under the current epoch it commits, with or without a session
+/// limit; once a policy write advanced the epoch, the earlier one admits
+/// nothing. Before any policy write no epoch holds.
+pub async fn session_commits_only_under_the_current_login_policy<H: GrantHarness>(h: &H) {
+    let owner = h.owner().await;
+    let unwritten = session(owner.clone());
+    assert!(matches!(
+        h.store()
+            .create_session_atomic(&unwritten, 0, None, under_policy(1))
+            .await,
+        Err(Error::Fenced(_))
+    ));
+    assert!(!exists(h, unwritten.id).await);
+
+    let first = h.advance_login_policy().await;
+    for limit in [0, 5] {
+        let current = session(owner.clone());
+        h.store()
+            .create_session_atomic(&current, limit, None, under_policy(first))
+            .await
+            .unwrap();
+        assert!(exists(h, current.id).await, "limit {limit}");
+    }
+
+    let second = h.advance_login_policy().await;
+    assert!(second > first);
+    for limit in [0, 5] {
+        let stale = session(owner.clone());
+        let refused = h
+            .store()
+            .create_session_atomic(&stale, limit, None, under_policy(first))
+            .await;
+        assert!(
+            matches!(refused, Err(Error::Fenced(_))),
+            "limit {limit}: {refused:?}"
+        );
+        assert!(!exists(h, stale.id).await, "limit {limit}");
+    }
+}
+
+/// An authorization code decided under a login policy commits only while it
+/// is current: a policy write between the decision and the commit refuses
+/// the code and stores nothing.
+pub async fn auth_code_commits_only_under_the_current_login_policy<H: GrantHarness>(h: &H) {
+    let owner = h.owner().await;
+    let resource = h.resource().await;
+    let epoch = h.advance_login_policy().await;
+    let current = code(h, owner.clone(), resource).await;
+    h.store()
+        .create_auth_code(&current, under_policy(epoch))
+        .await
+        .unwrap();
+    assert!(
+        h.store()
+            .get_auth_code_by_hash(&current.code_hash)
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    h.advance_login_policy().await;
+    let stale = code(h, owner, resource).await;
+    assert!(matches!(
+        h.store()
+            .create_auth_code(&stale, under_policy(epoch))
+            .await,
+        Err(Error::Fenced(_))
+    ));
+    assert!(
+        h.store()
+            .get_auth_code_by_hash(&stale.code_hash)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// A policy write racing sessions decided under the policy before it
+/// serializes with them: each either commits before the write or is fenced,
+/// and none commits under the earlier policy after the write.
+pub async fn a_policy_write_serializes_with_its_sessions<H: GrantHarness>(h: &H) {
+    let owner = h.owner().await;
+    let epoch = h.advance_login_policy().await;
+    let sessions: Vec<_> = (0..6).map(|_| session(owner.clone())).collect();
+    let creates = sessions.iter().map(|s| {
+        h.store()
+            .create_session_atomic(s, 10, None, under_policy(epoch))
+    });
+    let (created, advanced) =
+        tokio::join!(futures::future::join_all(creates), h.advance_login_policy());
+    assert!(advanced > epoch);
+    for (s, outcome) in sessions.iter().zip(created) {
+        match outcome {
+            Ok(_) => assert!(exists(h, s.id).await),
+            Err(Error::Fenced(_)) => assert!(!exists(h, s.id).await),
+            Err(e) => panic!("{e:?}"),
+        }
+    }
+    let late = session(owner);
+    assert!(matches!(
+        h.store()
+            .create_session_atomic(&late, 3, None, under_policy(epoch))
+            .await,
+        Err(Error::Fenced(_))
+    ));
 }
 
 /// Creating a session never replaces one: an existing id is `Conflict` with or

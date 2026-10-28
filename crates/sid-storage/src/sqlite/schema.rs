@@ -1445,4 +1445,9 @@ CREATE TABLE IF NOT EXISTS provisioning_credentials (
 
 CREATE INDEX IF NOT EXISTS idx_provisioning_credentials_connector
     ON provisioning_credentials (connector_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS login_policy_epoch (
+    id              INTEGER PRIMARY KEY CHECK (id = 1),
+    epoch           INTEGER NOT NULL
+);
 "#;

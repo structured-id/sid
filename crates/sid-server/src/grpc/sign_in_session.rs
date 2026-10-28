@@ -10,7 +10,9 @@ use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::sign_in_delivery::{BrowserCredential, CeremonyClient, Delivery, SignedIn};
 use sid_authn::sign_in_refusal::authentication_failed;
 use sid_core::models::event::{Event, event_types};
-use sid_core::models::{AuditEntry, CredentialFence, MutationContext, Profile, Session};
+use sid_core::models::{
+    ActorFence, AuditEntry, CredentialFence, MutationContext, Profile, Session,
+};
 use sid_plugin::storage::StorageBackend;
 use tonic::Status;
 use tracing::info;
@@ -36,22 +38,24 @@ impl SignInSessions<'_> {
     /// sign-in page gets the IdP session cookie, a fresh secret whose hash
     /// the session stores, and no access token; a native client gets the
     /// session's access token. `proved_by` is the credential the sign-in
-    /// proved, which must still be current when the session commits.
+    /// proved, which must still be current when the session commits, and
+    /// `policy` the login policy it was admitted under, which must be too.
     pub async fn sign_in(
         &self,
         profile: &Profile,
         mut session: Session,
         client: CeremonyClient,
         proved_by: Option<&CredentialFence>,
+        policy: Option<ActorFence>,
     ) -> Result<SignedIn, Status> {
         match client {
             CeremonyClient::Browser => {
                 let credential = BrowserCredential::bind(&mut session);
-                self.persist(profile, &session, proved_by).await?;
+                self.persist(profile, &session, proved_by, policy).await?;
                 Ok(credential.signed_in(self.cookie, &session))
             }
             CeremonyClient::Native => {
-                self.persist(profile, &session, proved_by).await?;
+                self.persist(profile, &session, proved_by, policy).await?;
                 let sub = profile.id.to_string();
                 let access_token = self
                     .jwt
@@ -79,12 +83,14 @@ impl SignInSessions<'_> {
         }
     }
 
-    /// Store `session` under the concurrent-session limit and announce it.
+    /// Store `session` under the concurrent-session limit and announce it,
+    /// while `policy` still holds.
     async fn persist(
         &self,
         profile: &Profile,
         session: &Session,
         proved_by: Option<&CredentialFence>,
+        policy: Option<ActorFence>,
     ) -> Result<(), Status> {
         // The storage counts, evicts and inserts in one serialized step, and
         // owes each evicted session's client a logout; the same commit owes
@@ -96,19 +102,23 @@ impl SignInSessions<'_> {
                 "profile_id": profile.id.to_string(),
                 "session_id": session.id.to_string(),
             }));
-        let ctx = MutationContext::from(AuditEntry::user(
+        let mut ctx = MutationContext::from(AuditEntry::user(
             profile.id.to_string(),
             "session.create",
             session.id.to_string(),
         ))
         .with_work(created.relay());
+        if let Some(fence) = policy {
+            ctx = ctx.fenced_by(fence);
+        }
         let evicted = match self
             .storage
             .create_session_atomic(session, self.max_concurrent_sessions, proved_by, ctx)
             .await
         {
             Ok(evicted) => evicted,
-            // The credential changed after its check: a wrong password then.
+            // The credential or the login policy changed after its check: the
+            // sign-in completes nothing and is started again.
             Err(sid_core::Error::Fenced(_)) => return Err(authentication_failed()),
             Err(e) => return Err(storage_failure(e)),
         };
