@@ -36,6 +36,41 @@ pub trait GrantHarness: Send + Sync {
     async fn resource(&self) -> ResourceId;
 }
 
+/// A backend that holds its owners' status beside their sessions, so a
+/// session commits only while its owner can authenticate.
+#[async_trait]
+pub trait OwnerStatusHarness: GrantHarness {
+    /// Suspend `owner` as an administrator does: it can no longer sign in.
+    async fn suspend(&self, owner: &Self::Owner);
+}
+
+/// An owner suspended after the sign-in's last check and before its session
+/// commits gets no session, with or without a session limit or the
+/// credential the sign-in proved: the commit itself requires an owner that
+/// can authenticate. Nothing is stored for the refused session.
+pub async fn session_refused_once_its_owner_is_suspended<H: OwnerStatusHarness>(h: &H) {
+    let owner = h.owner().await;
+    let admitted = session(owner.clone());
+    h.store()
+        .create_session_atomic(&admitted, 0, None, ctx())
+        .await
+        .expect("an active owner signs in");
+
+    h.suspend(&owner).await;
+    for limit in [0, 3] {
+        let late = session(owner.clone());
+        let refused = h
+            .store()
+            .create_session_atomic(&late, limit, None, ctx())
+            .await;
+        assert!(
+            matches!(refused, Err(Error::Fenced(_))),
+            "limit {limit}: {refused:?}"
+        );
+        assert!(h.store().get_session(late.id).await.unwrap().is_none());
+    }
+}
+
 fn ctx() -> MutationContext {
     AuditEntry::system("conformance", "grant_store").into()
 }

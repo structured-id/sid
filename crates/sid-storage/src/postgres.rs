@@ -1415,11 +1415,6 @@ impl GrantStore for PostgresBackend {
         proved_by: Option<&sid_core::models::CredentialFence>,
         mut audit: MutationContext,
     ) -> SidResult<Vec<SessionId>> {
-        if max_sessions == 0 && proved_by.is_none() {
-            self.create_session(session, audit).await?;
-            return Ok(vec![]);
-        }
-
         let mut tx = self
             .pool
             .begin()
@@ -1430,12 +1425,20 @@ impl GrantStore for PostgresBackend {
         // every replica and version alike, until commit or rollback. It does
         // not block other rows that merely reference the profile. Taken
         // before the credential row, the order credential revocation takes
-        // them in, so the two never deadlock.
-        sqlx::query("SELECT 1 FROM profiles WHERE id = $1 FOR NO KEY UPDATE")
-            .bind(session.profile_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| SidError::Storage(format!("lock profile: {e}")))?;
+        // them in, so the two never deadlock. A status change takes the same
+        // lock, so a profile that can no longer authenticate is read here
+        // and gets no session.
+        let status: Option<String> =
+            sqlx::query_scalar("SELECT status FROM profiles WHERE id = $1 FOR NO KEY UPDATE")
+                .bind(session.profile_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| SidError::Storage(format!("lock profile: {e}")))?;
+        if status.as_deref() != Some(sid_core::models::ProfileStatus::Active.as_str()) {
+            return Err(SidError::Fenced(
+                "the profile can no longer authenticate".into(),
+            ));
+        }
 
         if let Some(fence) = proved_by {
             // FOR SHARE holds the credential row until this commit: a reset's

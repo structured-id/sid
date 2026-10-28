@@ -903,6 +903,7 @@ mod grant_store {
     use super::*;
 
     grant_store!(
+        session_refused_once_its_owner_is_suspended,
         session_refused_after_its_password_changed,
         session_fence_is_the_owners_credential,
         session_fence_serializes_with_a_reset,

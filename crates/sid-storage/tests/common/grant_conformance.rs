@@ -4,7 +4,7 @@
 
 use async_trait::async_trait;
 use sid_core::models::{ProfileId, ResourceId};
-use sid_plugin::conformance::grant_store::GrantHarness;
+use sid_plugin::conformance::grant_store::{GrantHarness, OwnerStatusHarness};
 use sid_plugin::{CredentialStore, GrantStore, StorageBackend};
 
 use super::{create_test_profile, test_audit};
@@ -34,5 +34,22 @@ impl GrantHarness for ProfileGrants<'_> {
 
     async fn resource(&self) -> ResourceId {
         super::application::grant_resource(self.0).await
+    }
+}
+
+#[async_trait]
+impl OwnerStatusHarness for ProfileGrants<'_> {
+    async fn suspend(&self, owner: &ProfileId) {
+        let mut profile = self
+            .0
+            .get_profile(*owner)
+            .await
+            .unwrap()
+            .expect("the owner's profile");
+        profile.status = sid_core::models::ProfileStatus::Suspended;
+        assert!(
+            self.0.update_profile(&profile, test_audit()).await.unwrap(),
+            "the suspension applies"
+        );
     }
 }
