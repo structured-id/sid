@@ -23,6 +23,18 @@ pub fn embedded_transcoder(
     forwarded_headers: &[&str],
     files: impl Fn(&str) -> bool,
 ) -> anyhow::Result<ProxyServer> {
+    embedded_transcoder_with_sets(config, forwarded_headers, files, &[])
+}
+
+/// [`embedded_transcoder`] also serving the annotated RPCs of `added`, the
+/// encoded file descriptor sets of services a host adds beside SID's. A
+/// file present in several sets is taken once.
+pub fn embedded_transcoder_with_sets(
+    config: &serde_json::Value,
+    forwarded_headers: &[&str],
+    files: impl Fn(&str) -> bool,
+    added: &[&[u8]],
+) -> anyhow::Result<ProxyServer> {
     let mut config = config.clone();
     let map = config
         .as_object_mut()
@@ -44,8 +56,11 @@ pub fn embedded_transcoder(
     }
     map.insert("forwarded_headers".into(), forwarded.into());
 
-    let pool =
+    let mut pool =
         prost_reflect::DescriptorPool::decode(sid_proto::descriptor_set_of(files).as_slice())?;
+    for set in added {
+        pool.decode_file_descriptor_set(*set)?;
+    }
     // JSON text is YAML (YAML 1.2 §1.3), so the transcoder reads the
     // configuration as it reads its own file.
     Ok(ProxyServer::from_yaml_str(&serde_json::to_string(&config)?)?.with_descriptors(pool))

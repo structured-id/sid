@@ -72,6 +72,8 @@ tempfile = "3"
 sid-plugin = { workspace = true, features = ["conformance"] }
 # Configurations in the tests are written as YAML, as operators write them.
 serde-saphyr = { workspace = true }
+# The transcoder's request body type, for calls made in the tests.
+axum = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
 # The Redis tests share one server, so each takes a key of its own.
 uuid = { workspace = true }
