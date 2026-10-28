@@ -343,3 +343,116 @@ fn test_token_response_deserialize() {
     let minimal: TokenResponse = serde_json::from_str(r#"{"access_token": "t"}"#).unwrap();
     assert!(minimal.id_token.is_none());
 }
+
+/// A local HTTP server answering each request whose path is a key of the
+/// routes `routes` builds from the server's own base URL with that JSON
+/// body, any other with 404. Returns that base URL.
+async fn serve(routes: impl FnOnce(&str) -> Vec<(String, serde_json::Value)>) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let routes = routes(&base);
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = vec![0u8; 4096];
+            let read = socket.read(&mut buf).await.unwrap_or(0);
+            let request = String::from_utf8_lossy(&buf[..read]);
+            let path = request.split_whitespace().nth(1).unwrap_or("").to_owned();
+            let answer = match routes.iter().find(|(p, _)| *p == path) {
+                Some((_, body)) => {
+                    let body = body.to_string();
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                }
+                None => "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                    .to_owned(),
+            };
+            let _ = socket.write_all(answer.as_bytes()).await;
+        }
+    });
+    base
+}
+
+fn document(issuer: &str, jwks_uri: Option<&str>) -> serde_json::Value {
+    json!({
+        "issuer": issuer,
+        "authorization_endpoint": format!("{issuer}/oauth2/authorize"),
+        "token_endpoint": format!("{issuer}/oauth2/token"),
+        "jwks_uri": jwks_uri,
+    })
+}
+
+/// A client under the host's TLS selection, as the server builds one; the
+/// first test to run selects it for the process.
+fn http() -> Client {
+    let _ = sid_crypto::tls::aws_lc::provider().install_default();
+    sid_plugin::client_builder().unwrap().build().unwrap()
+}
+
+// The discovery of an exact issuer identifier is the document at that
+// issuer's well-known path, naming that issuer and its key set.
+#[tokio::test]
+async fn an_issuer_is_discovered_at_its_own_path() {
+    let base = serve(|base| {
+        vec![(
+            "/i/central/.well-known/openid-configuration".into(),
+            document(&format!("{base}/i/central"), Some("https://k.example/jwks")),
+        )]
+    })
+    .await;
+    let issuer = format!("{base}/i/central");
+    let discovery = discover(&http(), &issuer).await.unwrap();
+    assert_eq!(discovery.issuer, issuer);
+    assert_eq!(
+        discovery.jwks_uri.as_deref(),
+        Some("https://k.example/jwks")
+    );
+}
+
+// Regression guard: a document naming another issuer, or no key set, is
+// refused (OpenID Connect Discovery 1.0 §4.3); a missing document fails.
+#[tokio::test]
+async fn a_document_of_another_issuer_or_without_keys_is_refused() {
+    let base = serve(|base| {
+        vec![
+            (
+                "/other/.well-known/openid-configuration".into(),
+                document("https://elsewhere.example/other", Some("https://k.example")),
+            ),
+            (
+                "/keyless/.well-known/openid-configuration".into(),
+                document(&format!("{base}/keyless"), None),
+            ),
+        ]
+    })
+    .await;
+    for path in ["other", "keyless", "missing"] {
+        assert!(
+            discover(&http(), &format!("{base}/{path}")).await.is_err(),
+            "{path}"
+        );
+    }
+}
+
+// An issuer's key set is read from its JWK Set document; a failing one is
+// an error, never an empty set.
+#[tokio::test]
+async fn a_key_set_is_fetched_or_fails() {
+    let signer = signer("k1");
+    let set = json!({ "keys": [signer.jwk] });
+    let base = serve(|_| vec![("/jwks".into(), set)]).await;
+    let keys = fetch_key_set(&http(), &format!("{base}/jwks"))
+        .await
+        .unwrap();
+    assert!(keys.find("k1").is_some());
+    assert!(
+        fetch_key_set(&http(), &format!("{base}/missing"))
+            .await
+            .is_err()
+    );
+}
