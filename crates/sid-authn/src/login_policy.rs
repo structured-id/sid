@@ -148,6 +148,24 @@ impl LoginRequirements {
         }
     }
 
+    /// Whether `session`'s authentication, completed by a further factor
+    /// that reaches `level` and uses `method` (RFC 8176), meets every
+    /// requirement at `now`.
+    pub fn met_with<O: Clone>(
+        &self,
+        session: &Session<O>,
+        level: AuthLevel,
+        method: &str,
+        now: DateTime<Utc>,
+    ) -> bool {
+        let mut completed = session.clone();
+        completed.assurance_level = completed.assurance_level.max(level);
+        if !completed.amr.iter().any(|m| m == method) {
+            completed.amr.push(method.to_string());
+        }
+        self.unmet(&completed, now).is_empty()
+    }
+
     /// The decision on `session` at `now`: met is allowed; unmet is a step-up
     /// under soft or hard enforcement and is allowed, but reported, under
     /// audit.

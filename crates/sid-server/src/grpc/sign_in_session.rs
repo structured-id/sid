@@ -5,6 +5,7 @@
 //! (password, passkey, upstream provider) completes through this one path.
 
 use chrono::Utc;
+use sid_authn::browser_session::BrowserCsrf;
 use sid_authn::jwt::JwtService;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::sign_in_delivery::{BrowserCredential, CeremonyClient, Delivery, SignedIn};
@@ -43,19 +44,55 @@ impl SignInSessions<'_> {
     pub async fn sign_in(
         &self,
         profile: &Profile,
-        mut session: Session,
+        session: Session,
         client: CeremonyClient,
         proved_by: Option<&CredentialFence>,
         policy: Option<ActorFence>,
     ) -> Result<SignedIn, Status> {
+        let limit = self.max_concurrent_sessions;
+        self.deliver(profile, session, client, proved_by, policy, limit)
+            .await
+            .map(|(signed_in, _)| signed_in)
+    }
+
+    /// Store a sign-in's pending second-factor context and deliver its
+    /// credential as [`Self::sign_in`] does, with the CSRF token a browser
+    /// completes it with. It takes no place under the session limit: the
+    /// session it completes into does.
+    pub async fn sign_in_pending(
+        &self,
+        profile: &Profile,
+        session: Session,
+        client: CeremonyClient,
+        proved_by: Option<&CredentialFence>,
+        policy: Option<ActorFence>,
+    ) -> Result<(SignedIn, Option<String>), Status> {
+        self.deliver(profile, session, client, proved_by, policy, 0)
+            .await
+    }
+
+    /// Store `session` under `limit` and deliver its credential, with the
+    /// browser's encoded CSRF token for a browser.
+    async fn deliver(
+        &self,
+        profile: &Profile,
+        mut session: Session,
+        client: CeremonyClient,
+        proved_by: Option<&CredentialFence>,
+        policy: Option<ActorFence>,
+        limit: u32,
+    ) -> Result<(SignedIn, Option<String>), Status> {
         match client {
             CeremonyClient::Browser => {
                 let credential = BrowserCredential::bind(&mut session);
-                self.persist(profile, &session, proved_by, policy).await?;
-                Ok(credential.signed_in(self.cookie, &session))
+                let csrf = session.browser_csrf.as_ref().map(BrowserCsrf::encode);
+                self.persist(profile, &session, proved_by, policy, limit)
+                    .await?;
+                Ok((credential.signed_in(self.cookie, &session), csrf))
             }
             CeremonyClient::Native => {
-                self.persist(profile, &session, proved_by, policy).await?;
+                self.persist(profile, &session, proved_by, policy, limit)
+                    .await?;
                 let sub = profile.id.to_string();
                 let access_token = self
                     .jwt
@@ -74,23 +111,27 @@ impl SignInSessions<'_> {
                     .jwt
                     .access_token_ttl_secs()
                     .min((session.expires_at - Utc::now()).num_seconds());
-                Ok(SignedIn {
-                    session_id: session.id.to_string(),
-                    expires_in,
-                    delivery: Delivery::Bearer(access_token.into()),
-                })
+                Ok((
+                    SignedIn {
+                        session_id: session.id.to_string(),
+                        expires_in,
+                        delivery: Delivery::Bearer(access_token.into()),
+                    },
+                    None,
+                ))
             }
         }
     }
 
-    /// Store `session` under the concurrent-session limit and announce it,
-    /// while `policy` still holds.
+    /// Store `session` under the concurrent-session `limit` (0: none) and
+    /// announce it, while `policy` still holds.
     async fn persist(
         &self,
         profile: &Profile,
         session: &Session,
         proved_by: Option<&CredentialFence>,
         policy: Option<ActorFence>,
+        limit: u32,
     ) -> Result<(), Status> {
         // The storage counts, evicts and inserts in one serialized step, and
         // owes each evicted session's client a logout; the same commit owes
@@ -113,7 +154,7 @@ impl SignInSessions<'_> {
         }
         let evicted = match self
             .storage
-            .create_session_atomic(session, self.max_concurrent_sessions, proved_by, ctx)
+            .create_session_atomic(session, limit, proved_by, ctx)
             .await
         {
             Ok(evicted) => evicted,

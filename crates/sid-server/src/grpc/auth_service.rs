@@ -87,6 +87,35 @@ use refusal::{
 use sid_authn::sign_in_security::{device_id as compute_device_id, implied_auth_level};
 use sign_in_security::{ProfileSecurity, SecurityStatus};
 
+/// What the sign-in rules decide about a local first-factor sign-in.
+enum FirstFactor {
+    /// Admitted: the session commits under this policy fence.
+    Admitted(Option<sid_core::models::ActorFence>),
+    /// The requirements need a second factor, one of `factors` the account
+    /// has enrolled: the sign-in gets its pending context, under this fence.
+    AwaitsSecondFactor {
+        factors: Vec<StepUpMethod>,
+        fence: Option<sid_core::models::ActorFence>,
+    },
+}
+
+/// A completed first-factor sign-in: its credential, and when it is a
+/// pending context the second factors that complete it (`StepUpMethod`
+/// values) with a browser's CSRF token.
+struct FirstFactorSignedIn {
+    signed_in: SignedIn,
+    second_factors: Vec<i32>,
+    browser_csrf: Option<String>,
+}
+
+/// Who verifies a second factor.
+enum FactorCaller {
+    /// A sign-in's pending context, completed into its session for `client`.
+    Pending(Session, CeremonyClient),
+    /// An installation session stepping up.
+    StepUp(Session),
+}
+
 /// How a full sign-in authenticated.
 #[derive(Clone, Copy)]
 enum LoginMethod {
@@ -943,6 +972,91 @@ impl AuthServiceImpl {
         client_id: Option<&str>,
     ) -> Result<Option<sid_core::models::ActorFence>, Status> {
         let requirements = self.login_requirements(client_id).await?;
+        self.sign_in_rules(profile_id, client_ip, authentication, extras, &requirements)
+            .await
+            .map_err(SecurityStatus::into_status)?;
+        Ok(requirements.fence)
+    }
+
+    /// The same rules for a local sign-in that proved its first factor at
+    /// `assurance` with `amr`, under the organization's requirements: admitted,
+    /// or, when the requirements are all it left unmet and a second factor the
+    /// account has enrolled meets them, awaiting that factor.
+    async fn evaluate_first_factor(
+        &self,
+        profile_id: ProfileId,
+        client_ip: Option<std::net::IpAddr>,
+        auth_method: &str,
+        (assurance, amr): (sid_core::models::session::AuthLevel, &[String]),
+        extras: LoginSecurityExtras<'_>,
+    ) -> Result<FirstFactor, Status> {
+        let requirements = self.login_requirements(None).await?;
+        let authentication = sid_authn::sign_in_security::AttemptAuthentication::Local {
+            method: auth_method,
+            assurance,
+            amr,
+        };
+        match self
+            .sign_in_rules(profile_id, client_ip, authentication, extras, &requirements)
+            .await
+        {
+            Ok(()) => Ok(FirstFactor::Admitted(requirements.fence)),
+            Err(SecurityStatus::StepUp(unmet)) => {
+                let now = Utc::now();
+                let first =
+                    sid_authn::login_policy::local_authentication(profile_id, assurance, amr, now);
+                let factors = self
+                    .second_factors(profile_id, &requirements, &first, now)
+                    .await?;
+                if factors.is_empty() {
+                    return Err(step_up_required(&unmet).into());
+                }
+                Ok(FirstFactor::AwaitsSecondFactor {
+                    factors,
+                    fence: requirements.fence,
+                })
+            }
+            Err(SecurityStatus::Refused(status)) => Err(status),
+        }
+    }
+
+    /// The second factors `profile_id` has enrolled that complete `first`
+    /// under `requirements`.
+    async fn second_factors(
+        &self,
+        profile_id: ProfileId,
+        requirements: &sid_authn::login_policy::LoginRequirements,
+        first: &Session,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<Vec<StepUpMethod>, Status> {
+        let mut factors = Vec::new();
+        if requirements.met_with(
+            first,
+            sid_core::models::session::AuthLevel::Standard,
+            "otp",
+            now,
+        ) && self
+            .storage
+            .get_credentials_by_profile(profile_id, Some(CredentialType::Totp))
+            .await
+            .map_err(storage_failure)?
+            .iter()
+            .any(|c| c.status.is_active())
+        {
+            factors.push(StepUpMethod::Totp);
+        }
+        Ok(factors)
+    }
+
+    /// The anomaly rules and the login `requirements` for one sign-in.
+    async fn sign_in_rules(
+        &self,
+        profile_id: ProfileId,
+        client_ip: Option<std::net::IpAddr>,
+        authentication: sid_authn::sign_in_security::AttemptAuthentication<'_>,
+        extras: LoginSecurityExtras<'_>,
+        requirements: &sid_authn::login_policy::LoginRequirements,
+    ) -> Result<(), SecurityStatus> {
         let attempt = sid_authn::sign_in_security::SignInAttempt {
             client_ip,
             authentication,
@@ -953,11 +1067,9 @@ impl AuthServiceImpl {
             &ProfileSecurity { service: self },
             &profile_id,
             attempt,
-            &requirements,
+            requirements,
         )
         .await
-        .map_err(|e: SecurityStatus| e.0)?;
-        Ok(requirements.fence)
     }
 
     /// Record an authentication on the active session `id`: `authenticate`
@@ -2128,27 +2240,193 @@ impl AuthServiceImpl {
         proved_by: Option<&sid_core::models::CredentialFence>,
         policy: Option<sid_core::models::ActorFence>,
     ) -> Result<SignedIn, Status> {
-        // The installation's absolute lifetime, when it sets one.
-        let lifetime = match self.security_policy.session.max_lifetime_hours {
-            0 => Duration::hours(24),
-            hours => Duration::hours(i64::from(hours)),
-        };
-        let mut session = sid_core::models::Session::new(
-            profile.id,
-            session_address(client_ip),
-            Utc::now() + lifetime,
-        );
+        let mut session = self.new_session(profile.id, session_address(client_ip));
         session.device_id = device_id;
-        session.scopes = vec![
-            "openid".to_string(),
-            "profile".to_string(),
-            "email".to_string(),
-        ];
         session.assurance_level =
             method.auth_level(self.security_policy.auth.passkey_satisfies_mfa);
         session.amr = method.amr();
         self.sign_in(profile, session, client, proved_by, policy)
             .await
+    }
+
+    /// A full session of `profile_id` from `ip_address`, for the
+    /// installation's absolute lifetime when it sets one, with the sign-in
+    /// scopes; its authentication is the caller's to set.
+    fn new_session(&self, profile_id: ProfileId, ip_address: String) -> Session {
+        let lifetime = match self.security_policy.session.max_lifetime_hours {
+            0 => Duration::hours(24),
+            hours => Duration::hours(i64::from(hours)),
+        };
+        let mut session = Session::new(profile_id, ip_address, Utc::now() + lifetime);
+        session.scopes = vec![
+            "openid".to_string(),
+            "profile".to_string(),
+            "email".to_string(),
+        ];
+        session
+    }
+
+    /// Who verifies a second factor in `request`: a sign-in's pending
+    /// context, named by its token or, from the browser sign-in page, by its
+    /// cookie with the CSRF token it was given; or an installation session
+    /// stepping up, by its token.
+    async fn factor_caller<T>(&self, request: &Request<T>) -> Result<FactorCaller, Status> {
+        let metadata = request.metadata();
+        if metadata.get("authorization").is_none() {
+            // Only the exact sign-in page completes a pending sign-in with its
+            // cookie; a native client presents its token.
+            if self.ceremony_client(metadata)? != CeremonyClient::Browser {
+                return Err(session_ended());
+            }
+            let pending = self
+                .browser_session(metadata)
+                .await?
+                .filter(|s| s.awaits_second_factor() && !s.is_expired())
+                .ok_or_else(session_ended)?;
+            let sent = metadata
+                .get_all("x-csrf-token")
+                .iter()
+                .filter_map(|value| value.to_str().ok());
+            let csrf = pending.browser_csrf.as_ref().ok_or_else(session_ended)?;
+            if !sid_authn::browser_session::BrowserCsrf::matches(sent, csrf) {
+                return Err(ApiError::new(
+                    ErrorReason::CsrfTokenInvalid,
+                    "the sign-in's CSRF token is missing or wrong",
+                )
+                .into());
+            }
+            return Ok(FactorCaller::Pending(pending, CeremonyClient::Browser));
+        }
+        let verified = self.caller_claims(request).await?;
+        verified.require_installation()?;
+        let profile_id = verified.caller.profile_id;
+        let session_id = SessionId::parse(&verified.claims.sid)
+            .map_err(|e| internal("read session id of a verified token", e))?;
+        let session = self
+            .storage
+            .get_session(session_id)
+            .await
+            .map_err(storage_failure)?
+            .filter(|session| session.profile_id == profile_id)
+            .ok_or_else(session_ended)?;
+        Ok(if session.awaits_second_factor() {
+            FactorCaller::Pending(session, CeremonyClient::Native)
+        } else {
+            FactorCaller::StepUp(session)
+        })
+    }
+
+    /// Complete `pending` with the verified second factor `method` (RFC 8176):
+    /// the current login requirements are met by the completed
+    /// authentication, the pending context ends exactly once and the account
+    /// gets its session with a new credential, delivered to `client`.
+    async fn complete_pending_sign_in(
+        &self,
+        pending: Session,
+        method: &str,
+        client: CeremonyClient,
+    ) -> Result<SignedIn, Status> {
+        use sid_core::models::session::AuthLevel;
+        let profile = self
+            .storage
+            .get_profile(pending.profile_id)
+            .await
+            .map_err(storage_failure)?
+            .filter(|p| p.status == sid_core::models::ProfileStatus::Active)
+            .ok_or_else(authentication_failed)?;
+        let now = Utc::now();
+        let requirements = self.login_requirements(None).await?;
+        if !requirements.met_with(&pending, AuthLevel::Standard, method, now) {
+            let mut completed = pending.clone();
+            completed.assurance_level = completed.assurance_level.max(AuthLevel::Standard);
+            completed.amr.push(method.to_string());
+            return Err(step_up_required(&requirements.unmet(&completed, now)).into());
+        }
+
+        // Of concurrent completions only the one that ends it goes on.
+        let ended = self
+            .storage
+            .delete_session(
+                pending.id,
+                &sid_core::models::SessionEnd::new(
+                    sid_core::models::RevocationReason::SignInCompleted,
+                    pending.profile_id.to_string(),
+                ),
+                AuditEntry::user(
+                    pending.profile_id.to_string(),
+                    "session.sign_in_completed",
+                    pending.id.to_string(),
+                )
+                .into(),
+            )
+            .await
+            .map_err(storage_failure)?;
+        if !ended.contains(&pending.id) {
+            return Err(session_ended());
+        }
+        self.revocation_cache
+            .revoke_session(pending.id.to_string())
+            .await
+            .map_err(|e| dependency_unavailable("session revocation", e))?;
+
+        let mut session = self.new_session(profile.id, pending.ip_address.clone());
+        session.device_id = pending.device_id;
+        session.user_agent = pending.user_agent.clone();
+        session.assurance_level = pending.assurance_level.max(AuthLevel::Standard);
+        session.amr = pending.amr.clone();
+        if !session.amr.iter().any(|m| m == method) {
+            session.amr.push(method.to_string());
+        }
+        // The authentication began with the first factor.
+        session.authenticated_at = pending.authenticated_at;
+        self.sign_in(&profile, session, client, None, requirements.fence)
+            .await
+    }
+
+    /// Complete a local first-factor sign-in as `admission` decided: the
+    /// session, or its pending context with the second factors that complete
+    /// it and, for a browser, the CSRF token the completion sends.
+    #[allow(clippy::too_many_arguments)]
+    async fn complete_first_factor(
+        &self,
+        profile: &sid_core::models::Profile,
+        method: LoginMethod,
+        device_id: Option<uuid::Uuid>,
+        client_ip: Option<std::net::IpAddr>,
+        client: CeremonyClient,
+        proved_by: Option<&sid_core::models::CredentialFence>,
+        admission: FirstFactor,
+    ) -> Result<FirstFactorSignedIn, Status> {
+        match admission {
+            FirstFactor::Admitted(policy) => Ok(FirstFactorSignedIn {
+                signed_in: self
+                    .create_session_and_issue_tokens(
+                        profile, method, device_id, client_ip, client, proved_by, policy,
+                    )
+                    .await?,
+                second_factors: Vec::new(),
+                browser_csrf: None,
+            }),
+            FirstFactor::AwaitsSecondFactor { factors, fence } => {
+                let mut session = Session::new_awaiting_second_factor(
+                    profile.id,
+                    session_address(client_ip),
+                    method.auth_level(self.security_policy.auth.passkey_satisfies_mfa),
+                    method.amr(),
+                );
+                session.device_id = device_id;
+                let (signed_in, browser_csrf) = self
+                    .sign_in_sessions()
+                    .sign_in_pending(profile, session, client, proved_by, fence)
+                    .await?;
+                info!(profile = %profile.id, ?factors, "Sign-in awaits its second factor");
+                Ok(FirstFactorSignedIn {
+                    signed_in,
+                    second_factors: factors.into_iter().map(i32::from).collect(),
+                    browser_csrf,
+                })
+            }
+        }
     }
 
     /// Provisional session for a weak-possession login (email OTP, magic link):
@@ -2185,6 +2463,13 @@ impl AuthServiceImpl {
         proved_by: Option<&sid_core::models::CredentialFence>,
         policy: Option<sid_core::models::ActorFence>,
     ) -> Result<SignedIn, Status> {
+        self.sign_in_sessions()
+            .sign_in(profile, session, client, proved_by, policy)
+            .await
+    }
+
+    /// Where this service's sign-ins complete.
+    fn sign_in_sessions(&self) -> super::sign_in_session::SignInSessions<'_> {
         super::sign_in_session::SignInSessions {
             storage: self.storage.as_ref(),
             jwt: &self.jwt,
@@ -2193,8 +2478,6 @@ impl AuthServiceImpl {
             cookie: &self.browser_cookie,
             max_concurrent_sessions: self.security_policy.session.max_concurrent_sessions,
         }
-        .sign_in(profile, session, client, proved_by, policy)
-        .await
     }
 
     /// Who completes the upstream sign-in `request`: its client (a browser
@@ -2587,8 +2870,8 @@ impl AuthService for AuthServiceImpl {
         let profile = verified.account;
         // Evaluate login security (anomaly detection + policy enforcement).
         let method = LoginMethod::Password;
-        let policy = self
-            .evaluate_login_security(
+        let admission = self
+            .evaluate_first_factor(
                 profile.id,
                 client_ip,
                 "opaque",
@@ -2603,15 +2886,19 @@ impl AuthService for AuthServiceImpl {
             )
             .await?;
 
-        let signed_in = self
-            .create_session_and_issue_tokens(
+        let FirstFactorSignedIn {
+            signed_in,
+            second_factors,
+            browser_csrf,
+        } = self
+            .complete_first_factor(
                 &profile,
                 method,
                 user_agent.as_deref().map(compute_device_id),
                 client_ip,
                 client,
                 Some(&verified.proved_by),
-                policy,
+                admission,
             )
             .await?;
 
@@ -2620,6 +2907,8 @@ impl AuthService for AuthServiceImpl {
         signed_in.respond(|session_id, expires_in| OpaqueLoginFinishResponse {
             session_id,
             expires_in,
+            second_factors,
+            browser_csrf,
         })
     }
 
@@ -3309,8 +3598,8 @@ impl AuthService for AuthServiceImpl {
             user_verified,
             key_amr,
         };
-        let policy = self
-            .evaluate_login_security(
+        let admission = self
+            .evaluate_first_factor(
                 profile.id,
                 client_ip,
                 "webauthn",
@@ -3325,15 +3614,19 @@ impl AuthService for AuthServiceImpl {
             )
             .await?;
 
-        let signed_in = self
-            .create_session_and_issue_tokens(
+        let FirstFactorSignedIn {
+            signed_in,
+            second_factors,
+            browser_csrf,
+        } = self
+            .complete_first_factor(
                 &profile,
                 method,
                 user_agent.as_deref().map(compute_device_id),
                 client_ip,
                 client,
                 None,
-                policy,
+                admission,
             )
             .await?;
 
@@ -3343,6 +3636,8 @@ impl AuthService for AuthServiceImpl {
             |session_id, expires_in| WebAuthnAuthenticationFinishResponse {
                 session_id,
                 expires_in,
+                second_factors,
+                browser_csrf,
             },
         )
     }
@@ -4256,8 +4551,8 @@ impl AuthService for AuthServiceImpl {
 
         // Evaluate login security (anomaly detection + policy enforcement).
         let method = LoginMethod::Password;
-        let policy = self
-            .evaluate_login_security(
+        let admission = self
+            .evaluate_first_factor(
                 profile.id,
                 client_ip,
                 "opaque",
@@ -4272,8 +4567,12 @@ impl AuthService for AuthServiceImpl {
             )
             .await?;
 
-        let signed_in = self
-            .create_session_and_issue_tokens(
+        let FirstFactorSignedIn {
+            signed_in,
+            second_factors,
+            browser_csrf,
+        } = self
+            .complete_first_factor(
                 &profile,
                 method,
                 user_agent.as_deref().map(compute_device_id),
@@ -4283,7 +4582,7 @@ impl AuthService for AuthServiceImpl {
                     id: new_credential.id,
                     data: new_credential.data.clone(),
                 }),
-                policy,
+                admission,
             )
             .await?;
 
@@ -4295,6 +4594,8 @@ impl AuthService for AuthServiceImpl {
         signed_in.respond(|session_id, expires_in| LegacyMigrateFinishResponse {
             session_id,
             expires_in,
+            second_factors,
+            browser_csrf,
         })
     }
 
@@ -4500,11 +4801,12 @@ impl AuthService for AuthServiceImpl {
     ) -> Result<Response<MfaVerifyResponse>, Status> {
         self.check_maintenance().await?;
         // Step-up elevates the IdP session and answers with its new token: an
-        // application's token never turns into one.
-        let verified = self.caller_claims(&request).await?;
-        verified.require_installation()?;
-        let claims = verified.claims;
-        let profile_id = verified.caller.profile_id;
+        // application's token never turns into one. A sign-in's pending
+        // context is completed into its session instead.
+        let caller = self.factor_caller(&request).await?;
+        let profile_id = match &caller {
+            FactorCaller::Pending(session, _) | FactorCaller::StepUp(session) => session.profile_id,
+        };
 
         let req = request.into_inner();
         require_totp_code_format(&req.code)?;
@@ -4535,9 +4837,24 @@ impl AuthService for AuthServiceImpl {
             return Err(authentication_failed());
         }
 
+        let session_id = match caller {
+            FactorCaller::Pending(pending, client) => {
+                let signed_in = self
+                    .complete_pending_sign_in(pending, "otp", client)
+                    .await?;
+                info!("TOTP completed the sign-in of profile {}", profile_id);
+                return signed_in.respond(|session_id, expires_in| MfaVerifyResponse {
+                    verified: true,
+                    session_id: Some(session_id),
+                    expires_in: Some(expires_in),
+                    redirect_to: None,
+                    remaining_codes: None,
+                });
+            }
+            FactorCaller::StepUp(session) => session.id,
+        };
+
         // Elevate the session; a token must not claim an elevation that was not stored.
-        let session_id = SessionId::parse(&claims.sid)
-            .map_err(|e| internal("read session id of a verified token", e))?;
         let session = self
             .authenticate_session(
                 session_id,

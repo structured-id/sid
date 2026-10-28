@@ -96,6 +96,9 @@ pub enum RevocationReason {
     /// A newer session of the profile took its place under the
     /// concurrent-session limit.
     SessionLimit,
+    /// A sign-in's pending second-factor context, ended by the completion
+    /// of that sign-in into its session.
+    SignInCompleted,
 }
 
 impl RevocationReason {
@@ -110,6 +113,7 @@ impl RevocationReason {
             Self::GdprErasure => "gdpr_erasure",
             Self::RegulatoryOrder => "regulatory_order",
             Self::SessionLimit => "session_limit",
+            Self::SignInCompleted => "sign_in_completed",
         }
     }
 
