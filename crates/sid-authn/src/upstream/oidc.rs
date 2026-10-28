@@ -364,7 +364,7 @@ fn check_discovered_issuer(discovery_url: &str, discovered: &str) -> SidResult<(
 }
 
 /// 32 random bytes, base64url without padding.
-fn random_token() -> String {
+pub(crate) fn random_token() -> String {
     use rand::TryRng;
     let mut bytes = [0u8; 32];
     rand::rngs::SysRng
@@ -374,7 +374,7 @@ fn random_token() -> String {
 }
 
 /// The S256 challenge of `verifier` (RFC 7636 §4.2).
-fn pkce_challenge(verifier: &str) -> String {
+pub(crate) fn pkce_challenge(verifier: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
 }
 
