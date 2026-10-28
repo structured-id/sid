@@ -34,7 +34,13 @@ pub trait GrantHarness: Send + Sync {
 
     /// A resource grants may be bound to.
     async fn resource(&self) -> ResourceId;
+}
 
+/// A backend that commits grants under the installation's login-policy
+/// epoch. Not every grant store can: one that cannot refuses every
+/// login-policy fence, and a host that fences its policy runs on one that can.
+#[async_trait]
+pub trait LoginPolicyHarness: GrantHarness {
     /// Advance the installation's login-policy epoch, as a host's policy
     /// write does, and return the new epoch. The scenarios that call it
     /// expect a store of their own: no other scenario advances it meanwhile.
@@ -374,11 +380,42 @@ fn under_policy(epoch: i64) -> MutationContext {
     ctx().fenced_by(sid_core::models::ActorFence::LoginPolicy { epoch })
 }
 
+/// Every store, whether or not it keeps the login-policy epoch, refuses a
+/// session or code fenced by an epoch that does not hold and stores nothing:
+/// a fence is checked or refused, never ignored. No policy write produces a
+/// negative epoch.
+pub async fn a_login_policy_fence_is_never_ignored<H: GrantHarness>(h: &H) {
+    fn refused<T>(outcome: &sid_core::Result<T>) -> bool {
+        matches!(outcome, Err(Error::Fenced(_) | Error::Validation(_)))
+    }
+    let owner = h.owner().await;
+    let resource = h.resource().await;
+
+    let session = session(owner.clone());
+    let created = h
+        .store()
+        .create_session_atomic(&session, 0, None, under_policy(-1))
+        .await;
+    assert!(refused(&created), "{created:?}");
+    assert!(h.store().get_session(session.id).await.unwrap().is_none());
+
+    let code = code(h, owner, resource).await;
+    let created = h.store().create_auth_code(&code, under_policy(-1)).await;
+    assert!(refused(&created), "{created:?}");
+    assert!(
+        h.store()
+            .get_auth_code_by_hash(&code.code_hash)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
 /// A session decided under a login policy commits only while that policy is
 /// current: under the current epoch it commits, with or without a session
 /// limit; once a policy write advanced the epoch, the earlier one admits
 /// nothing. Before any policy write no epoch holds.
-pub async fn session_commits_only_under_the_current_login_policy<H: GrantHarness>(h: &H) {
+pub async fn session_commits_only_under_the_current_login_policy<H: LoginPolicyHarness>(h: &H) {
     let owner = h.owner().await;
     let unwritten = session(owner.clone());
     assert!(matches!(
@@ -418,7 +455,7 @@ pub async fn session_commits_only_under_the_current_login_policy<H: GrantHarness
 /// An authorization code decided under a login policy commits only while it
 /// is current: a policy write between the decision and the commit refuses
 /// the code and stores nothing.
-pub async fn auth_code_commits_only_under_the_current_login_policy<H: GrantHarness>(h: &H) {
+pub async fn auth_code_commits_only_under_the_current_login_policy<H: LoginPolicyHarness>(h: &H) {
     let owner = h.owner().await;
     let resource = h.resource().await;
     let epoch = h.advance_login_policy().await;
@@ -455,7 +492,7 @@ pub async fn auth_code_commits_only_under_the_current_login_policy<H: GrantHarne
 /// A policy write racing sessions decided under the policy before it
 /// serializes with them: each either commits before the write or is fenced,
 /// and none commits under the earlier policy after the write.
-pub async fn a_policy_write_serializes_with_its_sessions<H: GrantHarness>(h: &H) {
+pub async fn a_policy_write_serializes_with_its_sessions<H: LoginPolicyHarness>(h: &H) {
     let owner = h.owner().await;
     let epoch = h.advance_login_policy().await;
     let sessions: Vec<_> = (0..6).map(|_| session(owner.clone())).collect();

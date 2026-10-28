@@ -937,6 +937,7 @@ mod grant_store {
     );
 
     grant_store!(
+        a_login_policy_fence_is_never_ignored,
         session_refused_after_its_password_changed,
         session_fence_is_the_owners_credential,
         session_fence_serializes_with_a_reset,
