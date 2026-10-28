@@ -311,18 +311,32 @@ impl FederatedEntry {
                 .read_versioned(&key)
                 .await?
                 .ok_or(EntryError::Unknown)?;
+            // Every step is bound to the entry's issuer, client and redirect
+            // URI, a resumed one too: kept progress does not lift the binding.
+            let bound = match &read.value {
+                Progress::Pending(pending)
+                | Progress::Exchanging(pending)
+                | Progress::Received { pending, .. }
+                | Progress::Exchanged { pending, .. } => Some(pending),
+                Progress::Ambiguous { .. } => None,
+            };
+            if let Some(pending) = bound {
+                if pending.issuer != self.trusted.issuer
+                    || pending.client_id != self.trusted.client_id
+                {
+                    return Err(EntryError::Unknown);
+                }
+                if pending.redirect_uri != redirect_uri {
+                    // A return to another redirect URI ends an unexchanged
+                    // entry; an exchanged one keeps what its own return needs.
+                    if matches!(read.value, Progress::Pending(_)) {
+                        self.pending.take(&key).await?;
+                    }
+                    return Err(EntryError::RedirectMismatch);
+                }
+            }
             match &read.value {
                 Progress::Pending(pending) => {
-                    if pending.issuer != self.trusted.issuer
-                        || pending.client_id != self.trusted.client_id
-                    {
-                        return Err(EntryError::Unknown);
-                    }
-                    if pending.redirect_uri != redirect_uri {
-                        // A return to another redirect URI ends the entry.
-                        self.pending.take(&key).await?;
-                        return Err(EntryError::RedirectMismatch);
-                    }
                     let discovery = discover(&self.http, &self.trusted.issuer)
                         .await
                         .map_err(|e| EntryError::Issuer(e.to_string()))?;

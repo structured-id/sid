@@ -322,6 +322,110 @@ async fn concurrent_repeats_commit_one_session() {
     }
 }
 
+// An operation repeated for another Profile than the one it signed in gets
+// nothing: never the first Profile's session, and no session of its own.
+// Before, the retained cookie of the first Profile was delivered.
+#[tokio::test]
+async fn a_repeat_for_another_profile_gets_nothing() {
+    let storage = storage().await;
+    let auth = authority(storage.clone(), AuthLevel::Basic);
+    let first = profile(storage.as_ref()).await;
+    let other = profile(storage.as_ref()).await;
+    let op = operation();
+    let deadline = Utc::now() + Duration::minutes(10);
+    let request = tonic::Request::new(());
+    auth.complete_admitted_sign_in(
+        &request,
+        &first,
+        &basic(),
+        CLIENT,
+        Some(completion(&op, deadline)),
+    )
+    .await
+    .unwrap();
+
+    let refused = auth
+        .complete_admitted_sign_in(
+            &request,
+            &other,
+            &basic(),
+            CLIENT,
+            Some(completion(&op, deadline)),
+        )
+        .await
+        .err()
+        .expect("another Profile's repeat is refused");
+    assert_eq!(
+        common::error_reason(&refused).as_deref(),
+        Some("AUTHENTICATION_FAILED")
+    );
+    assert!(storage.list_sessions(&other.id).await.unwrap().is_empty());
+}
+
+// A sign-in whose evicted sessions could not be revoked everywhere is not
+// delivered, on its own answer or on a repeat: the evicted sessions' tokens
+// would stay usable on other replicas. Before, the failure became a delivered
+// sign-in through the repeat path.
+#[tokio::test]
+async fn a_sign_in_whose_evictions_did_not_propagate_is_not_delivered() {
+    let storage = storage().await;
+    let mut policy = SecurityPolicy::ce_default();
+    policy.session.max_concurrent_sessions = 1;
+    let outage = Arc::new(common::RevocationOutage {
+        inner: Arc::new(sid_plugin::cache::InMemoryCacheBackend::new()),
+        down: std::sync::atomic::AtomicBool::new(false),
+    });
+    let revocation = Arc::new(sid_authn::revocation_cache::RevocationCache::new(
+        std::time::Duration::from_secs(900),
+        outage.clone(),
+    ));
+    let auth = common::auth_service_revoking(
+        storage.clone(),
+        Arc::new(sid_plugin::cache::InMemoryCacheBackend::new()),
+        Some(policy),
+        Some(EnrollmentMode::Open),
+        None,
+        revocation,
+    );
+    let profile = profile(storage.as_ref()).await;
+    let request = tonic::Request::new(());
+    auth.complete_admitted_sign_in(&request, &profile, &basic(), CLIENT, None)
+        .await
+        .expect("the session to evict");
+
+    outage.down.store(true, std::sync::atomic::Ordering::SeqCst);
+    let op = operation();
+    let deadline = Utc::now() + Duration::minutes(10);
+    let refused = auth
+        .complete_admitted_sign_in(
+            &request,
+            &profile,
+            &basic(),
+            CLIENT,
+            Some(completion(&op, deadline)),
+        )
+        .await
+        .err()
+        .expect("the eviction could not be revoked");
+    assert_eq!(refused.code(), tonic::Code::Unavailable, "{refused:?}");
+
+    outage
+        .down
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        auth.complete_admitted_sign_in(
+            &request,
+            &profile,
+            &basic(),
+            CLIENT,
+            Some(completion(&op, deadline)),
+        )
+        .await
+        .is_err(),
+        "a repeat delivers nothing whose evictions were not revoked"
+    );
+}
+
 // Nothing is delivered again for a session that ended, a Profile suspended
 // since, or after the operation's deadline; no replacement session appears.
 #[tokio::test]

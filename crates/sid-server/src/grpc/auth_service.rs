@@ -505,6 +505,9 @@ pub struct AuthServiceImpl {
     migration_state: ChallengeStore<MigrationState>,
     /// Ephemeral TOTP enrollment state: enrollment_id → (profile_id, secret_bytes).
     totp_enrollment: ChallengeStore<(ProfileId, Vec<u8>)>,
+    /// Admitted sign-ins that finished (committed, their evictions revoked
+    /// everywhere), keyed by operation: only these are delivered again.
+    admitted_ready: ChallengeStore<()>,
     /// Magic links for Corporate Profiles; `None` when the instance has not enabled
     /// them, which is the default.
     pub(crate) magic_link: Option<Arc<MagicLinkService>>,
@@ -682,6 +685,12 @@ impl AuthServiceImpl {
                 cache_backend.clone(),
                 key_manager.clone(),
                 "totp-enrollment",
+                ttl,
+            ),
+            admitted_ready: ChallengeStore::new(
+                cache_backend.clone(),
+                key_manager.clone(),
+                "admitted-sign-in-ready",
                 ttl,
             ),
             continuations: ChallengeStore::new(
@@ -2306,7 +2315,9 @@ impl AuthServiceImpl {
             return Err(authentication_failed());
         }
         if let Some(completion) = &completion
-            && let Some(signed_in) = self.redeliver_admitted(completion, client_id).await?
+            && let Some(signed_in) = self
+                .redeliver_admitted(completion, client_id, profile.id)
+                .await?
         {
             return Ok(signed_in);
         }
@@ -2365,6 +2376,7 @@ impl AuthServiceImpl {
             context: self.admitted_context(&completion),
             deadline: completion.deadline.min(session.expires_at),
         };
+        let deadline = retained.deadline;
         match self
             .sign_in(
                 profile,
@@ -2376,12 +2388,24 @@ impl AuthServiceImpl {
             )
             .await
         {
-            // A concurrent repeat committed first: its session is this one.
-            Err(refused) => match self.redeliver_admitted(&completion, client_id).await? {
-                Some(signed_in) => Ok(signed_in),
-                None => Err(refused),
+            // A concurrent repeat committed first: its session is this one,
+            // once that repeat finished. Anything else keeps its refusal,
+            // its own commit's unpropagated evictions included.
+            Err(refused) => match self
+                .redeliver_admitted(&completion, client_id, profile.id)
+                .await
+            {
+                Ok(Some(signed_in)) => Ok(signed_in),
+                Ok(None) | Err(_) => Err(refused),
             },
-            signed_in => signed_in,
+            Ok(signed_in) => {
+                // The session and its evictions are in force everywhere: only
+                // now may a repeat deliver it again.
+                self.admitted_ready
+                    .insert_until(completion.operation, &(), deadline)
+                    .await?;
+                Ok(signed_in)
+            }
         }
     }
 
@@ -2391,15 +2415,17 @@ impl AuthServiceImpl {
         format!("admitted-sign-in:{}:{}", self.issuer, completion.operation)
     }
 
-    /// The sign-in `completion` already committed, delivered again: only
-    /// before the operation's deadline, while its session lives, its Profile
-    /// can sign in and its authentication meets `client_id`'s current
-    /// requirements. None when the operation has not committed; a refusal
-    /// when it has but may not be delivered again.
+    /// The sign-in `completion` already committed for `expected`, delivered
+    /// again: only once that sign-in finished (its evictions revoked
+    /// everywhere), before the operation's deadline, while its session lives,
+    /// its Profile can sign in and its authentication meets `client_id`'s
+    /// current requirements. None when the operation has not committed; a
+    /// refusal when it has but may not be delivered again.
     async fn redeliver_admitted(
         &self,
         completion: &AdmittedCompletion<'_>,
         client_id: &str,
+        expected: ProfileId,
     ) -> Result<Option<SignedIn>, Status> {
         let Some(record) = self
             .storage
@@ -2423,6 +2449,19 @@ impl AuthServiceImpl {
         if delivery.deadline <= now {
             return Err(authentication_failed());
         }
+        // Committed, but not (yet) finished: nothing is delivered until it is.
+        if self
+            .admitted_ready
+            .read(completion.operation)
+            .await?
+            .is_none()
+        {
+            return Err(sid_core::grpc_error::ApiError::new(
+                ErrorReason::ConcurrentModification,
+                "the sign-in has not finished; start it again",
+            )
+            .into());
+        }
         let session_id = delivery
             .session_id
             .parse()
@@ -2432,7 +2471,7 @@ impl AuthServiceImpl {
             .get_session(session_id)
             .await
             .map_err(storage_failure)?
-            .filter(|session| !session.is_expired())
+            .filter(|session| !session.is_expired() && session.profile_id == expected)
             .ok_or_else(authentication_failed)?;
         self.storage
             .get_profile(session.profile_id)

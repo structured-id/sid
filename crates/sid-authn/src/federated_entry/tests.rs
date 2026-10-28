@@ -542,6 +542,27 @@ async fn a_kept_answer_is_validated_on_retry_without_another_exchange() {
     assert_eq!(issuer.exchanges(), 1);
 }
 
+// A return resumed after its exchange keeps the entry's redirect binding: a
+// repeat to another redirect URI gets no subject or evidence, and the
+// bound return still completes. Before, only an unexchanged entry checked it.
+#[tokio::test]
+async fn a_resumed_return_keeps_its_redirect_binding() {
+    let issuer = TestIssuer::start().await;
+    let entry = entry(&issuer);
+    let browser = begin(&entry, &EntryRequest::default()).await;
+    issuer.issue_for(&browser.url, json!({}));
+    browser.complete(&entry, "c", REDIRECT).await.unwrap();
+
+    assert!(matches!(
+        browser
+            .complete(&entry, "c", "https://other.sid.example.com/callback")
+            .await,
+        Err(EntryError::RedirectMismatch)
+    ));
+    browser.complete(&entry, "c", REDIRECT).await.unwrap();
+    assert_eq!(issuer.exchanges(), 1);
+}
+
 // Returns racing on several replicas exchange the code at most once; any
 // return that did not own the exchange is ambiguous or sees the same entry.
 #[tokio::test]
