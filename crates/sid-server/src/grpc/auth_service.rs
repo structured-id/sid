@@ -4901,16 +4901,25 @@ impl AuthService for AuthServiceImpl {
         let profile_id = match &caller {
             FactorCaller::Pending(session, _) | FactorCaller::StepUp(session) => session.profile_id,
         };
+        let client_ip = self.client_ip(&request);
 
         let req = request.into_inner();
         require_totp_code_format(&req.code)?;
+
+        // A code guess spends the account's sign-in budget, shared by every
+        // context and replica: once it is spent, no code is checked.
+        let identity = profile_id.to_string();
+        self.refuse_if_locked(&identity).await?;
 
         // The active TOTP credential only; a revoked one never verifies.
         let (totp_cred, secret) = self
             .active_totp_seed(profile_id)
             .await?
             .ok_or_else(|| mfa_not_enrolled("TOTP authenticator"))?;
-        self.accept_totp(profile_id, &secret, &req.code).await?;
+        if let Err(refused) = self.accept_totp(profile_id, &secret, &req.code).await {
+            self.record_failed_login(&identity, client_ip).await?;
+            return Err(refused);
+        }
 
         // The use is recorded only on a credential still active: one revoked
         // since it was read neither verifies nor comes back.

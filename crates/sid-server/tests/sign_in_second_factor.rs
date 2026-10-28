@@ -246,6 +246,34 @@ async fn a_password_replaced_before_completion_signs_nobody_in() {
     );
 }
 
+/// Wrong second-factor codes count against the account's sign-in budget:
+/// past it the sign-in is locked out, the right code included, in every
+/// pending context of the account. Before, a password holder could guess
+/// codes without limit.
+#[tokio::test]
+async fn wrong_codes_lock_the_account_out() {
+    let seed = sid_authn::generate_secret();
+    let (svc, _policy, _) = services(Some(&seed)).await;
+    let pending_token = bearer(&native_sign_in(&svc).await.unwrap());
+    let right = sid_authn::generate_current_totp(&seed);
+    let wrong = if right == "000000" {
+        "111111"
+    } else {
+        "000000"
+    };
+
+    for _ in 0..5 {
+        let refused = verify_with_token(&svc, &pending_token, wrong.to_string())
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code(), Code::Unauthenticated, "{refused:?}");
+    }
+    let locked = verify_with_token(&svc, &pending_token, right)
+        .await
+        .unwrap_err();
+    assert_eq!(locked.code(), Code::ResourceExhausted, "{locked:?}");
+}
+
 /// The pending context authorizes no application grant and no account
 /// operation, and completes once only.
 #[tokio::test]
