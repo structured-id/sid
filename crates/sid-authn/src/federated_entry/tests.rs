@@ -210,7 +210,45 @@ fn entry_on(issuer: &TestIssuer, cache: Arc<dyn CacheBackend>) -> FederatedEntry
         http(),
         cache,
         crate::test_support::key_manager(),
+        BrowserCookie::new("__Host-sid_platform").unwrap(),
     )
+}
+
+/// An entry started in one browser: the authorization URL it goes to and
+/// the `Cookie` header that browser then sends back.
+struct Browser {
+    url: String,
+    cookie: String,
+}
+
+impl Browser {
+    fn of(started: Started) -> Self {
+        let cookie = started.set_cookie.split(';').next().unwrap().to_owned();
+        Self {
+            url: started.authorization_url,
+            cookie,
+        }
+    }
+
+    fn state(&self) -> String {
+        state_of(&self.url)
+    }
+
+    /// Complete the entry this browser started with `code` at `redirect`.
+    async fn complete(
+        &self,
+        entry: &FederatedEntry,
+        code: &str,
+        redirect: &str,
+    ) -> Result<Returned, EntryError> {
+        entry
+            .complete(&self.state(), [self.cookie.as_str()], code, redirect)
+            .await
+    }
+}
+
+async fn begin(entry: &FederatedEntry, request: &EntryRequest) -> Browser {
+    Browser::of(entry.start(REDIRECT, CONTINUATION, request).await.unwrap())
 }
 
 fn state_of(url: &str) -> String {
@@ -234,7 +272,8 @@ async fn an_entry_returns_the_subject_and_its_evidence() {
         acr: Some(AuthLevel::Elevated),
         max_age: Some(Duration::from_secs(300)),
     };
-    let url = entry.start(REDIRECT, CONTINUATION, &request).await.unwrap();
+    let browser = begin(&entry, &request).await;
+    let url = browser.url.clone();
     let parsed = reqwest::Url::parse(&url).unwrap();
     let params: std::collections::HashMap<_, _> = parsed.query_pairs().into_owned().collect();
     assert!(url.starts_with(&format!("{}/oauth2/authorize?", issuer.issuer)));
@@ -251,8 +290,8 @@ async fn an_entry_returns_the_subject_and_its_evidence() {
         &url,
         json!({ "acr": "urn:sid:acr:elevated", "amr": ["hwk", "user"], "auth_time": auth_time }),
     );
-    let returned = entry
-        .complete(&state_of(&url), "the-code", REDIRECT)
+    let returned = browser
+        .complete(&entry, "the-code", REDIRECT)
         .await
         .unwrap();
     assert_eq!(returned.subject, "0192f3a4-7c1e-7b2a-9d4e-3f5a6b7c8d9e");
@@ -285,12 +324,9 @@ async fn a_return_names_what_its_entry_requested() {
             max_age: Some(Duration::from_secs(0)),
         },
     ] {
-        let url = entry.start(REDIRECT, CONTINUATION, &request).await.unwrap();
-        issuer.issue_for(&url, json!({}));
-        let returned = entry
-            .complete(&state_of(&url), "c", REDIRECT)
-            .await
-            .unwrap();
+        let browser = begin(&entry, &request).await;
+        issuer.issue_for(&browser.url, json!({}));
+        let returned = browser.complete(&entry, "c", REDIRECT).await.unwrap();
         assert_eq!(returned.requested, request);
     }
 }
@@ -302,37 +338,32 @@ async fn a_return_names_what_its_entry_requested() {
 async fn a_return_completes_once_and_only_at_its_redirect() {
     let issuer = TestIssuer::start().await;
     let entry = entry(&issuer);
-    let url = entry
-        .start(REDIRECT, CONTINUATION, &EntryRequest::default())
-        .await
-        .unwrap();
-    issuer.issue_for(&url, json!({}));
-    let state = state_of(&url);
-    entry.complete(&state, "c", REDIRECT).await.unwrap();
+    let browser = begin(&entry, &EntryRequest::default()).await;
+    issuer.issue_for(&browser.url, json!({}));
+    browser.complete(&entry, "c", REDIRECT).await.unwrap();
     assert!(matches!(
-        entry.complete(&state, "c", REDIRECT).await,
+        browser.complete(&entry, "c", REDIRECT).await,
         Err(EntryError::Unknown)
     ));
-    assert!(matches!(
-        entry.complete("unknown", "c", REDIRECT).await,
-        Err(EntryError::Unknown)
-    ));
-
-    let other = entry
-        .start(REDIRECT, CONTINUATION, &EntryRequest::default())
-        .await
-        .unwrap();
-    let before = issuer.exchanges();
     assert!(matches!(
         entry
-            .complete(&state_of(&other), "c", "https://elsewhere.example/callback")
+            .complete("unknown", [browser.cookie.as_str()], "c", REDIRECT)
+            .await,
+        Err(EntryError::OtherBrowser)
+    ));
+
+    let other = begin(&entry, &EntryRequest::default()).await;
+    let before = issuer.exchanges();
+    assert!(matches!(
+        other
+            .complete(&entry, "c", "https://elsewhere.example/callback")
             .await,
         Err(EntryError::RedirectMismatch)
     ));
     assert_eq!(issuer.exchanges(), before);
     // The mismatched return consumed its state: the entry is over.
     assert!(matches!(
-        entry.complete(&state_of(&other), "c", REDIRECT).await,
+        other.complete(&entry, "c", REDIRECT).await,
         Err(EntryError::Unknown)
     ));
 }
@@ -348,16 +379,13 @@ async fn an_entry_completes_only_at_the_issuer_it_was_started_for() {
     let cache: Arc<dyn CacheBackend> = Arc::new(InMemoryCacheBackend::new());
     let at_a = entry_on(&a, cache.clone());
     let at_b = entry_on(&b, cache);
-    let url = at_a
-        .start(REDIRECT, CONTINUATION, &EntryRequest::default())
-        .await
-        .unwrap();
-    a.issue_for(&url, json!({}));
-    b.issue_for(&url, json!({}));
-    let refused = at_b.complete(&state_of(&url), "c", REDIRECT).await;
+    let browser = begin(&at_a, &EntryRequest::default()).await;
+    a.issue_for(&browser.url, json!({}));
+    b.issue_for(&browser.url, json!({}));
+    let refused = browser.complete(&at_b, "c", REDIRECT).await;
     assert!(matches!(refused, Err(EntryError::Unknown)), "{refused:?}");
     assert_eq!(b.exchanges(), 0, "B's token endpoint saw A's entry");
-    let returned = at_a.complete(&state_of(&url), "c", REDIRECT).await.unwrap();
+    let returned = browser.complete(&at_a, "c", REDIRECT).await.unwrap();
     assert_eq!(returned.continuation, CONTINUATION);
 }
 
@@ -375,12 +403,9 @@ async fn a_token_not_for_this_entry_is_refused() {
         ("audience", json!({ "aud": "another-client" })),
         ("nonce", json!({ "nonce": "another-nonce" })),
     ] {
-        let url = entry
-            .start(REDIRECT, CONTINUATION, &EntryRequest::default())
-            .await
-            .unwrap();
-        issuer.issue_for(&url, claims);
-        let refused = entry.complete(&state_of(&url), "c", REDIRECT).await;
+        let browser = begin(&entry, &EntryRequest::default()).await;
+        issuer.issue_for(&browser.url, claims);
+        let refused = browser.complete(&entry, "c", REDIRECT).await;
         assert!(
             matches!(refused, Err(EntryError::Token(_))),
             "{case}: {refused:?}"
@@ -402,9 +427,9 @@ async fn auth_time_is_required() {
         },
         EntryRequest::default(),
     ] {
-        let url = entry.start(REDIRECT, CONTINUATION, &request).await.unwrap();
-        issuer.issue_for(&url, json!({ "auth_time": null }));
-        let refused = entry.complete(&state_of(&url), "c", REDIRECT).await;
+        let browser = begin(&entry, &request).await;
+        issuer.issue_for(&browser.url, json!({ "auth_time": null }));
+        let refused = browser.complete(&entry, "c", REDIRECT).await;
         assert!(
             matches!(refused, Err(EntryError::Token(_))),
             "{request:?}: {refused:?}"
@@ -419,18 +444,89 @@ async fn only_a_sid_acr_urn_is_a_level() {
     let issuer = TestIssuer::start().await;
     let entry = entry(&issuer);
     for acr in [json!("standard"), json!("urn:other:acr:gold"), json!(null)] {
-        let url = entry
-            .start(REDIRECT, CONTINUATION, &EntryRequest::default())
-            .await
-            .unwrap();
-        issuer.issue_for(&url, json!({ "acr": acr }));
-        let returned = entry
-            .complete(&state_of(&url), "c", REDIRECT)
-            .await
-            .unwrap();
+        let browser = begin(&entry, &EntryRequest::default()).await;
+        issuer.issue_for(&browser.url, json!({ "acr": acr }));
+        let returned = browser.complete(&entry, "c", REDIRECT).await.unwrap();
         assert_eq!(returned.evidence.acr, None, "{acr}");
         assert_eq!(returned.evidence.authentication(Utc::now()), None, "{acr}");
     }
+}
+
+// A return completes only in the browser that started its entry (RFC 9700
+// §4.7.1): the callback URL moved to a browser without the entry's cookie,
+// or carrying another entry's, completes nothing, exchanges no code and
+// leaves the entry to its own browser, which then completes it.
+#[tokio::test]
+async fn a_return_completes_only_in_the_browser_that_started_it() {
+    let issuer = TestIssuer::start().await;
+    let entry = entry(&issuer);
+    let victim = begin(&entry, &EntryRequest::default()).await;
+    let attacker = begin(&entry, &EntryRequest::default()).await;
+    issuer.issue_for(&attacker.url, json!({}));
+
+    let state = attacker.state();
+    let foreign = format!(
+        "{}={}",
+        attacker.cookie.split('=').next().unwrap(),
+        victim.cookie.split_once('=').unwrap().1
+    );
+    for cookies in [vec![], vec![victim.cookie.as_str()], vec![foreign.as_str()]] {
+        let refused = entry.complete(&state, cookies.clone(), "c", REDIRECT).await;
+        assert!(
+            matches!(refused, Err(EntryError::OtherBrowser | EntryError::Unknown)),
+            "{cookies:?}: {refused:?}"
+        );
+    }
+    assert_eq!(
+        issuer.exchanges(),
+        0,
+        "a code was exchanged in another browser"
+    );
+
+    let returned = attacker.complete(&entry, "c", REDIRECT).await.unwrap();
+    assert_eq!(returned.continuation, CONTINUATION);
+}
+
+// Entries started together in two tabs each keep their own correlation
+// cookie, named after the authority's cookie and bound to the browser.
+#[tokio::test]
+async fn entries_started_together_keep_their_own_cookies() {
+    let issuer = TestIssuer::start().await;
+    let entry = entry(&issuer);
+    let first = entry
+        .start(REDIRECT, CONTINUATION, &EntryRequest::default())
+        .await
+        .unwrap();
+    let second = entry
+        .start(REDIRECT, CONTINUATION, &EntryRequest::default())
+        .await
+        .unwrap();
+    let name = |started: &Started| started.set_cookie.split('=').next().unwrap().to_owned();
+    assert_ne!(name(&first), name(&second));
+    assert!(name(&first).starts_with("__Host-sid_platform-entry-"));
+    assert!(
+        first
+            .set_cookie
+            .contains("Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=600"),
+        "{}",
+        first.set_cookie
+    );
+    let (first, second) = (Browser::of(first), Browser::of(second));
+    issuer.issue_for(&second.url, json!({}));
+    second.complete(&entry, "c", REDIRECT).await.unwrap();
+    issuer.issue_for(&first.url, json!({}));
+    first.complete(&entry, "c", REDIRECT).await.unwrap();
+    assert_eq!(
+        entry.clear_cookie(&first.state()),
+        format!(
+            "{}=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0",
+            name_of(&first)
+        )
+    );
+}
+
+fn name_of(browser: &Browser) -> &str {
+    browser.cookie.split('=').next().unwrap()
 }
 
 // The client id and secret are form-urlencoded before Basic encoding

@@ -732,7 +732,7 @@ impl AuthServiceImpl {
     }
 
     /// This authority's IdP session cookie.
-    pub(crate) fn browser_cookie(&self) -> &sid_authn::browser_session::BrowserCookie {
+    pub fn browser_cookie(&self) -> &sid_authn::browser_session::BrowserCookie {
         &self.browser_cookie
     }
 
