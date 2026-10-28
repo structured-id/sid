@@ -40,6 +40,8 @@ enum Fault {
     TokenUnreachable,
     /// The key set answers 500.
     KeysDown,
+    /// The token endpoint answers correctly, but only after a while.
+    TokenSlow,
 }
 
 /// A local trusted issuer: discovery, key set and token endpoint, signing
@@ -96,7 +98,12 @@ impl TestIssuer {
                         state.lock().unwrap().exchanges += 1;
                         (500, json!({}))
                     }
-                    "/i/central/oauth2/token" => token(&state, &head, &body),
+                    "/i/central/oauth2/token" => {
+                        if fault == Fault::TokenSlow {
+                            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                        }
+                        token(&state, &head, &body)
+                    }
                     _ => (404, json!({})),
                 };
                 let text = answer.to_string();
@@ -563,8 +570,11 @@ async fn a_resumed_return_keeps_its_redirect_binding() {
     assert_eq!(issuer.exchanges(), 1);
 }
 
-// Returns racing on several replicas exchange the code at most once; any
-// return that did not own the exchange is ambiguous or sees the same entry.
+// Returns racing on several replicas exchange the code at most once and stay
+// one entry: a return meeting a live exchange is told to retry, never that
+// the outcome is lost, and its retry gets what the owning return got.
+// Before, it was ambiguous, and the caller started a second sign-in while the
+// first one completed.
 #[tokio::test]
 async fn racing_returns_exchange_at_most_once() {
     let issuer = TestIssuer::start().await;
@@ -577,16 +587,79 @@ async fn racing_returns_exchange_at_most_once() {
         browser.complete(&replicas[1], "c", REDIRECT)
     );
     assert_eq!(issuer.exchanges(), 1);
-    let completed: Vec<_> = [a, b]
-        .into_iter()
-        .filter_map(|r| match r {
-            Ok(returned) => Some(returned),
-            Err(EntryError::Ambiguous { .. }) => None,
+    let mut completed = Vec::new();
+    for (replica, result) in replicas.iter().zip([a, b]) {
+        match result {
+            Ok(returned) => completed.push(returned),
+            Err(EntryError::InProgress) => {
+                completed.push(browser.complete(replica, "c", REDIRECT).await.unwrap())
+            }
             Err(e) => panic!("{e}"),
-        })
-        .collect();
-    assert!(!completed.is_empty());
-    assert!(completed.windows(2).all(|w| w[0] == w[1]));
+        }
+    }
+    assert_eq!(completed[0], completed[1]);
+    assert_eq!(issuer.exchanges(), 1);
+}
+
+// A return reaching another replica while the first return's exchange is
+// still running is told the exchange is in progress, not that its outcome is
+// lost; once the exchange answered, the retry completes the same entry.
+#[tokio::test]
+async fn a_return_during_a_live_exchange_is_told_to_retry() {
+    let issuer = TestIssuer::start().await;
+    let cache: Arc<dyn CacheBackend> = Arc::new(InMemoryCacheBackend::new());
+    let replicas = [entry_on(&issuer, cache.clone()), entry_on(&issuer, cache)];
+    let browser = begin(&replicas[0], &EntryRequest::default()).await;
+    issuer.issue_for(&browser.url, json!({}));
+    issuer.fail(Fault::TokenSlow);
+    let (owner, other) = tokio::join!(browser.complete(&replicas[0], "c", REDIRECT), async {
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        browser.complete(&replicas[1], "c", REDIRECT).await
+    });
+    assert!(matches!(other, Err(EntryError::InProgress)), "{other:?}");
+    let owner = owner.unwrap();
+    let retried = browser.complete(&replicas[1], "c", REDIRECT).await.unwrap();
+    assert_eq!(owner, retried);
+    assert_eq!(issuer.exchanges(), 1);
+}
+
+// An exchange whose owner stopped (its process died mid-request) is known
+// lost once its lease has run out: the next return records it ambiguous and
+// never redeems the code again.
+#[tokio::test]
+async fn an_exchange_whose_owner_stopped_is_ambiguous_after_its_lease() {
+    let issuer = TestIssuer::start().await;
+    let entry = entry(&issuer);
+    let browser = begin(&entry, &EntryRequest::default()).await;
+    issuer.issue_for(&browser.url, json!({}));
+    let secret = entry
+        .correlation(&browser.state())
+        .secret([browser.cookie.as_str()])
+        .unwrap();
+    let key = entry.key(&browser.state(), &secret);
+    let read = entry.pending.read_versioned(&key).await.unwrap().unwrap();
+    let Progress::Pending(pending) = &read.value else {
+        panic!("a started entry is pending");
+    };
+    let stopped = Progress::Exchanging {
+        pending: pending.clone(),
+        owned_until: Utc::now() - chrono::Duration::seconds(1),
+    };
+    assert!(
+        entry
+            .pending
+            .replace(&key, &read, &stopped, pending.deadline)
+            .await
+            .unwrap()
+    );
+
+    for _ in 0..2 {
+        match browser.complete(&entry, "c", REDIRECT).await {
+            Err(EntryError::Ambiguous { continuation }) => assert_eq!(continuation, CONTINUATION),
+            other => panic!("{other:?}"),
+        }
+    }
+    assert_eq!(issuer.exchanges(), 0);
 }
 
 // A return's operation reference is stable for its entry and browser and

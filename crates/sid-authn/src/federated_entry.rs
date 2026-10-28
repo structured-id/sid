@@ -35,6 +35,14 @@ pub const PENDING_TTL: Duration = Duration::from_secs(600);
 /// The cache namespace of pending entries.
 const NAMESPACE: &str = "federated-entry";
 
+/// The longest one code exchange may take: past it the token request is
+/// abandoned as of unknown outcome.
+const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long an exchange's owner holds it: its timeout and the steps around
+/// it, with margin for replicas' clock skew. A holder past it has stopped.
+const EXCHANGE_LEASE: Duration = Duration::from_secs(40);
+
 /// The issuer this installation receives issuance from, and its registered
 /// client there.
 #[derive(Debug, Clone)]
@@ -85,8 +93,13 @@ struct Pending {
 enum Progress {
     /// Started; its return has not been exchanged.
     Pending(Pending),
-    /// One attempt owns the exchange; the code may be spent.
-    Exchanging(Pending),
+    /// One attempt owns the exchange until `owned_until`; the code may be
+    /// spent. Its exchange is bounded by [`EXCHANGE_TIMEOUT`], so an owner
+    /// still holding it past the lease has stopped.
+    Exchanging {
+        pending: Pending,
+        owned_until: DateTime<Utc>,
+    },
     /// The token response arrived and is kept for validation.
     Received { pending: Pending, id_token: String },
     /// The ID Token was validated; admission resumes from here.
@@ -152,6 +165,10 @@ pub enum EntryError {
     /// the entry's continuation.
     #[error("the entry's exchange outcome is unknown")]
     Ambiguous { continuation: String },
+    /// Another return of this entry is exchanging its code right now: this
+    /// return is retried, and then completes the same entry.
+    #[error("the entry's exchange is in progress")]
+    InProgress,
     #[error(transparent)]
     Store(#[from] ChallengeStoreError),
 }
@@ -285,7 +302,8 @@ impl FederatedEntry {
     /// kept it continues from that without another exchange; after an
     /// attempt that may have spent the code without a kept answer it is
     /// [`EntryError::Ambiguous`], never a second redemption. Concurrent
-    /// returns exchange at most once.
+    /// returns exchange at most once: one meeting a live exchange is
+    /// [`EntryError::InProgress`] and its retry completes the same entry.
     pub async fn complete<'a>(
         &self,
         state: &str,
@@ -315,7 +333,7 @@ impl FederatedEntry {
             // URI, a resumed one too: kept progress does not lift the binding.
             let bound = match &read.value {
                 Progress::Pending(pending)
-                | Progress::Exchanging(pending)
+                | Progress::Exchanging { pending, .. }
                 | Progress::Received { pending, .. }
                 | Progress::Exchanged { pending, .. } => Some(pending),
                 Progress::Ambiguous { .. } => None,
@@ -341,7 +359,12 @@ impl FederatedEntry {
                         .await
                         .map_err(|e| EntryError::Issuer(e.to_string()))?;
                     let pending = pending.clone();
-                    let owned = Progress::Exchanging(pending.clone());
+                    let owned = Progress::Exchanging {
+                        pending: pending.clone(),
+                        owned_until: Utc::now()
+                            + chrono::Duration::from_std(EXCHANGE_LEASE)
+                                .expect("the exchange lease fits"),
+                    };
                     if !self
                         .pending
                         .replace(&key, &read, &owned, pending.deadline)
@@ -402,10 +425,27 @@ impl FederatedEntry {
                         });
                     }
                 }
-                Progress::Exchanging(pending) => {
-                    return Err(EntryError::Ambiguous {
-                        continuation: pending.continuation.clone(),
-                    });
+                // Another return owns the exchange: while its lease runs it
+                // is live and this return retries; past it, it stopped with
+                // the code possibly spent, which is recorded once.
+                Progress::Exchanging {
+                    pending,
+                    owned_until,
+                } => {
+                    if *owned_until > Utc::now() {
+                        return Err(EntryError::InProgress);
+                    }
+                    let continuation = pending.continuation.clone();
+                    let lost = Progress::Ambiguous {
+                        continuation: continuation.clone(),
+                    };
+                    if self
+                        .pending
+                        .replace(&key, &read, &lost, pending.deadline)
+                        .await?
+                    {
+                        return Err(EntryError::Ambiguous { continuation });
+                    }
                 }
                 Progress::Ambiguous { continuation } => {
                     return Err(EntryError::Ambiguous {
@@ -552,6 +592,7 @@ impl FederatedEntry {
                 ("redirect_uri", pending.redirect_uri.as_str()),
                 ("code_verifier", pending.code_verifier.as_str()),
             ])
+            .timeout(EXCHANGE_TIMEOUT)
             .send()
             .await;
         let response = match sent {
