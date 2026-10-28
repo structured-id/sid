@@ -232,3 +232,30 @@ async fn the_fixed_source_states_its_policy() {
         assert_eq!(r.fence, None);
     }
 }
+
+// A TOTP code completes a password sign-in that the requirements ask an
+// `otp` method and the Standard level of; it does not meet a requirement of
+// another method or of a higher level, which the sign-in then cannot
+// complete with it.
+#[test]
+fn a_further_factor_meets_only_what_it_provides() {
+    let password = session(AuthLevel::Basic, &["pwd"], ChronoDuration::zero());
+    let now = Utc::now();
+
+    let mut otp = requirements(AuthLevel::Standard, EnforcementMode::Hard);
+    otp.required_amr.insert("otp".into());
+    assert!(otp.met_with(&password, AuthLevel::Standard, "otp", now));
+
+    let mut key = requirements(AuthLevel::Basic, EnforcementMode::Hard);
+    key.required_amr.insert("hwk".into());
+    assert!(!key.met_with(&password, AuthLevel::Standard, "otp", now));
+
+    let elevated = requirements(AuthLevel::Elevated, EnforcementMode::Hard);
+    assert!(!elevated.met_with(&password, AuthLevel::Standard, "otp", now));
+
+    // An authentication too old stays too old after another factor.
+    let mut fresh = otp.clone();
+    fresh.max_authentication_age = Some(std::time::Duration::from_secs(60));
+    let old = session(AuthLevel::Basic, &["pwd"], ChronoDuration::minutes(5));
+    assert!(!fresh.met_with(&old, AuthLevel::Standard, "otp", now));
+}

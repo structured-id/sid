@@ -63,6 +63,28 @@ impl GrantStore for MemoryGrants {
         Ok(vec![])
     }
 
+    async fn complete_pending_session(
+        &self,
+        pending: SessionId,
+        _end: &sid_core::models::SessionEnd,
+        session: &Session<Account>,
+        _max_sessions: u32,
+        _proved_by: Option<&sid_core::models::CredentialFence>,
+        _ctx: MutationContext,
+    ) -> sid_core::Result<Vec<SessionId>> {
+        self.with(|g| {
+            let before = g.sessions.len();
+            g.sessions.retain(|s| s.id != pending);
+            if g.sessions.len() == before {
+                return Err(sid_core::Error::Fenced(
+                    "the pending sign-in has ended".into(),
+                ));
+            }
+            g.sessions.push(session.clone());
+            Ok(vec![pending])
+        })
+    }
+
     async fn get_session(&self, id: SessionId) -> sid_core::Result<Option<Session<Account>>> {
         Ok(self.with(|g| g.sessions.iter().find(|s| s.id == id).cloned()))
     }

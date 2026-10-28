@@ -148,6 +148,17 @@ impl sid_plugin::GrantStore for MockStorage {
     ) -> Result<Vec<SessionId>> {
         unimplemented!()
     }
+    async fn complete_pending_session(
+        &self,
+        _: SessionId,
+        _: &sid_core::models::SessionEnd,
+        _: &Session,
+        _: u32,
+        _: Option<&sid_core::models::CredentialFence>,
+        _: MutationContext,
+    ) -> Result<Vec<SessionId>> {
+        unimplemented!()
+    }
     async fn get_session(&self, _: SessionId) -> Result<Option<Session>> {
         unimplemented!()
     }

@@ -455,6 +455,7 @@ mod sign_in_history {
         most_recent_session_is_the_latest,
         seen_address_and_device_are_per_account,
         location_is_designated_at_threshold,
+        an_unfinished_sign_in_is_no_history,
     );
 }
 
@@ -938,6 +939,8 @@ mod grant_store {
 
     grant_store!(
         session_refused_once_its_owner_is_suspended,
+        a_pending_context_takes_no_session_slot,
+        a_pending_context_completes_once,
         a_login_policy_fence_is_never_ignored,
         session_refused_after_its_password_changed,
         session_fence_is_the_owners_credential,

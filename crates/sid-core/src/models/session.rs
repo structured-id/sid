@@ -421,7 +421,43 @@ impl Session {
             authenticated_by: None,
         }
     }
+
+    /// The pending context of a sign-in that proved its first factor (at
+    /// `assurance`, with `amr`) while the login requirements still need a
+    /// second: provisional, for [`PENDING_SECOND_FACTOR_TTL_MINUTES`], its
+    /// only scope [`SECOND_FACTOR_SCOPE`]. It authorizes nothing but
+    /// completing that sign-in.
+    pub fn new_awaiting_second_factor(
+        profile_id: ProfileId,
+        ip_address: String,
+        assurance: AuthLevel,
+        amr: Vec<String>,
+    ) -> Self {
+        let mut session = Self::new(
+            profile_id,
+            ip_address,
+            Utc::now() + chrono::Duration::minutes(PENDING_SECOND_FACTOR_TTL_MINUTES),
+        );
+        session.scopes = vec![SECOND_FACTOR_SCOPE.to_string()];
+        session.assurance_level = assurance;
+        session.amr = amr;
+        session.is_provisional = true;
+        session
+    }
+
+    /// Whether this is the pending context of a sign-in owing its second
+    /// factor, as opposed to a channel-proof provisional session, which no
+    /// factor ever completes into a full one.
+    pub fn awaits_second_factor(&self) -> bool {
+        self.is_provisional && self.scopes == [SECOND_FACTOR_SCOPE]
+    }
 }
+
+/// The only scope of a sign-in's pending second-factor context.
+pub const SECOND_FACTOR_SCOPE: &str = "sign_in:second_factor";
+
+/// How long a sign-in waits for its second factor.
+pub const PENDING_SECOND_FACTOR_TTL_MINUTES: i64 = 5;
 
 impl<O> Session<O> {
     /// When and how this session authenticated, as a grant made from it

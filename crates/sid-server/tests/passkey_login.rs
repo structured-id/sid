@@ -282,6 +282,105 @@ async fn test_revoked_passkey_cannot_sign_in() {
     );
 }
 
+/// The host's login requirements: `otp` on top of whatever the first factor
+/// gives.
+struct RequiresOtp;
+
+#[async_trait::async_trait]
+impl sid_authn::login_policy::LoginPolicySource for RequiresOtp {
+    async fn requirements(
+        &self,
+        _client_id: Option<&str>,
+    ) -> Result<
+        sid_authn::login_policy::LoginRequirements,
+        sid_authn::login_policy::LoginPolicyUnavailable,
+    > {
+        Ok(sid_authn::login_policy::LoginRequirements {
+            min_acr: sid_core::models::AuthLevel::Basic,
+            required_amr: ["otp".to_string()].into(),
+            max_authentication_age: None,
+            enforcement: sid_core::models::security_policy::EnforcementMode::Hard,
+            fence: None,
+        })
+    }
+}
+
+/// A passkey sign-in owing its second factor completes nothing once that
+/// passkey is revoked: the completion is fenced by the asserting key, as the
+/// password's is by the password. Before, no proof of the passkey was kept and
+/// the revoked first factor still signed in.
+#[tokio::test]
+async fn a_passkey_revoked_before_the_second_factor_signs_nobody_in() {
+    let profile = Profile::new(Some("passkey_user"));
+    let svc = TestServices::with_login_policy(
+        MockStorage::new().with_profile(profile.clone()),
+        std::sync::Arc::new(RequiresOtp),
+    );
+    svc.storage
+        .save_principal(
+            &Principal::new(profile.id, PrincipalType::Email, EMAIL),
+            AuditEntry::system("test", "principal").into(),
+        )
+        .await
+        .unwrap();
+    let mut key = SoftAuthenticator::new(ORIGIN, RP);
+    register(&svc, &profile, &mut key).await;
+    let seed = sid_authn::generate_secret();
+    svc.storage
+        .create_credential(
+            &Credential::new(
+                profile.id,
+                CredentialType::Totp,
+                sid_core::models::CredentialData::new(
+                    common::sealed_totp_seed(profile.id, &seed).await,
+                ),
+                None,
+            ),
+            AuditEntry::system("test", "totp").into(),
+        )
+        .await
+        .unwrap();
+
+    let start = svc
+        .auth
+        .web_authn_authentication_start(Request::new(WebAuthnAuthenticationStartRequest {
+            principal: Some(EMAIL.to_string()),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    let first = svc
+        .auth
+        .web_authn_authentication_finish(Request::new(WebAuthnAuthenticationFinishRequest {
+            credential: key.assert(&start.options),
+            principal: Some(EMAIL.to_string()),
+            ..Default::default()
+        }))
+        .await
+        .expect("the pending context");
+    let pending_token = common::opaque_client::bearer(&first);
+    assert_eq!(
+        first.into_inner().second_factors,
+        [StepUpMethod::Totp as i32]
+    );
+
+    let mut stored = passkey(&svc, &profile).await;
+    stored.status = sid_core::models::credential::CredentialStatus::Revoked;
+    svc.mock_storage.set_credential(&stored);
+
+    let refused = svc
+        .auth
+        .verify_totp(authed(
+            VerifyTotpRequest {
+                code: sid_authn::generate_current_totp(&seed),
+            },
+            &pending_token,
+        ))
+        .await
+        .expect_err("a revoked first factor completes nothing");
+    assert_eq!(refused.code(), tonic::Code::Unauthenticated, "{refused:?}");
+}
+
 /// A discoverable passkey signs in its own profile, found through the user
 /// handle association at this RP.
 #[tokio::test]

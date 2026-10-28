@@ -155,27 +155,7 @@ pub async fn evaluate<H: SignInSecurityHost>(
 ) -> Result<(), H::Error> {
     let client_ip = attempt.client_ip;
     let geo_location = judge(host, owner, attempt, requirements).await?;
-    // Evidence for later sign-ins, not limits on this one: a failed write is
-    // reported and the sign-in proceeds.
-    if let Some(ip) = client_ip
-        && let Err(e) = host.record_ip_reputation(&ip.to_string()).await
-    {
-        warn!(error = %e, "failed to record IP reputation event");
-    }
-    if let Some(geo) = &geo_location
-        && let Err(e) = host
-            .history()
-            .record_login_location(
-                owner.clone(),
-                &geo.country,
-                geo.latitude,
-                geo.longitude,
-                DESIGNATED_THRESHOLD,
-            )
-            .await
-    {
-        warn!(error = %e, "failed to record login location");
-    }
+    record_evidence(host, owner, client_ip, geo_location.as_ref()).await;
     Ok(())
 }
 
@@ -387,4 +367,49 @@ async fn judge<H: SignInSecurityHost>(
         }
     }
     Ok(geo_location)
+}
+
+/// Record `owner`'s sign-in from `client_ip` that the rules admitted and a
+/// further factor then completed: the evidence [`evaluate`] records for a
+/// sign-in it admits outright.
+pub async fn record_completed_sign_in<H: SignInSecurityHost>(
+    host: &H,
+    owner: &H::Owner,
+    client_ip: Option<IpAddr>,
+) {
+    let geo_location = match client_ip {
+        Some(ip) => host.geoip().resolve(ip).await,
+        None => None,
+    };
+    record_evidence(host, owner, client_ip, geo_location.as_ref()).await;
+}
+
+/// Evidence for later sign-ins, not limits on this one: the address's
+/// reputation and the login location. A failed write is reported and the
+/// sign-in proceeds.
+async fn record_evidence<H: SignInSecurityHost>(
+    host: &H,
+    owner: &H::Owner,
+    client_ip: Option<IpAddr>,
+    geo_location: Option<&sid_plugin::geoip::GeoLocation>,
+) {
+    if let Some(ip) = client_ip
+        && let Err(e) = host.record_ip_reputation(&ip.to_string()).await
+    {
+        warn!(error = %e, "failed to record IP reputation event");
+    }
+    if let Some(geo) = geo_location
+        && let Err(e) = host
+            .history()
+            .record_login_location(
+                owner.clone(),
+                &geo.country,
+                geo.latitude,
+                geo.longitude,
+                DESIGNATED_THRESHOLD,
+            )
+            .await
+    {
+        warn!(error = %e, "failed to record login location");
+    }
 }

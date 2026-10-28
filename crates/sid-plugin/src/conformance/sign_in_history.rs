@@ -25,6 +25,10 @@ pub trait SignInHistoryHarness: Send + Sync {
 
     /// A session of `owner` established now from `ip` and `device`.
     async fn sign_in(&self, owner: &Self::Owner, ip: &str, device: Option<Uuid>);
+
+    /// A sign-in of `owner` from `ip` and `device` that proved its first
+    /// factor and still owes its second: its pending context stored now.
+    async fn begin_sign_in(&self, owner: &Self::Owner, ip: &str, device: Option<Uuid>);
 }
 
 const DAY: Duration = Duration::from_secs(24 * 3600);
@@ -112,6 +116,38 @@ pub async fn seen_address_and_device_are_per_account<H: SignInHistoryHarness>(h:
     assert!(
         !store
             .has_recent_session_from_device(owner, device, Duration::ZERO)
+            .await
+            .unwrap()
+    );
+}
+
+/// A sign-in that has not finished is no history: its address is not the
+/// latest session's and neither its address nor its device counts as seen.
+/// Counting it let an unfinished attempt from one place refuse a real
+/// sign-in from another as impossible travel.
+pub async fn an_unfinished_sign_in_is_no_history<H: SignInHistoryHarness>(h: &H) {
+    let store = h.store();
+    let owner = h.owner().await;
+    let device = Uuid::now_v7();
+    h.sign_in(&owner, "192.0.2.10", None).await;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    h.begin_sign_in(&owner, "198.51.100.20", Some(device)).await;
+
+    let (ip, _) = store
+        .get_most_recent_session_ip(owner.clone())
+        .await
+        .unwrap()
+        .expect("the completed session");
+    assert_eq!(ip, "192.0.2.10");
+    assert!(
+        !store
+            .has_recent_session_from_ip(owner.clone(), "198.51.100.20", DAY)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .has_recent_session_from_device(owner, device, DAY)
             .await
             .unwrap()
     );
