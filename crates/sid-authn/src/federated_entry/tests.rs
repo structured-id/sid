@@ -111,10 +111,16 @@ impl TestIssuer {
             "aud": CLIENT,
             "exp": now + 300,
             "iat": now,
+            "auth_time": now - 60,
             "nonce": param("nonce").unwrap(),
         });
+        // A null override leaves the claim out of the token.
         for (k, v) in claims.as_object().unwrap() {
-            all[k] = v.clone();
+            if v.is_null() {
+                all.as_object_mut().unwrap().remove(k);
+            } else {
+                all[k] = v.clone();
+            }
         }
         let mut header = Header::new(Algorithm::ES256);
         header.kid = Some("k1".into());
@@ -253,10 +259,10 @@ async fn an_entry_returns_the_subject_and_its_evidence() {
     assert_eq!(returned.continuation, CONTINUATION);
     assert_eq!(
         returned.evidence,
-        Evidence {
+        AcceptedEvidence {
             acr: Some(AuthLevel::Elevated),
             amr: vec!["hwk".into(), "user".into()],
-            auth_time: Utc.timestamp_opt(auth_time as i64, 0).single(),
+            auth_time: Utc.timestamp_opt(auth_time as i64, 0).single().unwrap(),
         }
     );
 }
@@ -354,34 +360,49 @@ async fn a_token_not_for_this_entry_is_refused() {
     }
 }
 
-// Regression guard: an entry that asked for max_age needs auth_time in the
-// ID Token (OpenID Connect Core 1.0 §2); one that did not may go without.
+// Regression guard: every return needs the real authentication time: an ID
+// Token without auth_time is refused, with or without a max_age request,
+// since the session it admits would otherwise record an invented one.
 #[tokio::test]
-async fn auth_time_is_required_after_a_max_age_request() {
+async fn auth_time_is_required() {
     let issuer = TestIssuer::start().await;
     let entry = entry(&issuer);
-    let aged = EntryRequest {
-        acr: None,
-        max_age: Some(Duration::from_secs(60)),
-    };
-    let url = entry.start(REDIRECT, CONTINUATION, &aged).await.unwrap();
-    issuer.issue_for(&url, json!({}));
-    assert!(matches!(
-        entry.complete(&state_of(&url), "c", REDIRECT).await,
-        Err(EntryError::Token(_))
-    ));
+    for request in [
+        EntryRequest {
+            acr: None,
+            max_age: Some(Duration::from_secs(60)),
+        },
+        EntryRequest::default(),
+    ] {
+        let url = entry.start(REDIRECT, CONTINUATION, &request).await.unwrap();
+        issuer.issue_for(&url, json!({ "auth_time": null }));
+        let refused = entry.complete(&state_of(&url), "c", REDIRECT).await;
+        assert!(
+            matches!(refused, Err(EntryError::Token(_))),
+            "{request:?}: {refused:?}"
+        );
+    }
+}
 
-    let url = entry
-        .start(REDIRECT, CONTINUATION, &EntryRequest::default())
-        .await
-        .unwrap();
-    issuer.issue_for(&url, json!({}));
-    let returned = entry
-        .complete(&state_of(&url), "c", REDIRECT)
-        .await
-        .unwrap();
-    assert_eq!(returned.evidence.auth_time, None);
-    assert_eq!(returned.evidence.acr, None);
+// Regression guard: only a shared SID ACR URN is a level. A plain level name,
+// another issuer's ACR and a missing ACR return evidence attesting none.
+#[tokio::test]
+async fn only_a_sid_acr_urn_is_a_level() {
+    let issuer = TestIssuer::start().await;
+    let entry = entry(&issuer);
+    for acr in [json!("standard"), json!("urn:other:acr:gold"), json!(null)] {
+        let url = entry
+            .start(REDIRECT, CONTINUATION, &EntryRequest::default())
+            .await
+            .unwrap();
+        issuer.issue_for(&url, json!({ "acr": acr }));
+        let returned = entry
+            .complete(&state_of(&url), "c", REDIRECT)
+            .await
+            .unwrap();
+        assert_eq!(returned.evidence.acr, None, "{acr}");
+        assert_eq!(returned.evidence.authentication(Utc::now()), None, "{acr}");
+    }
 }
 
 // The client id and secret are form-urlencoded before Basic encoding
