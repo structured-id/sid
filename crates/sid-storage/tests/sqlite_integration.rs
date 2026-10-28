@@ -777,6 +777,7 @@ mod grant_store {
     use super::*;
 
     grant_store!(
+        session_refused_once_its_owner_is_suspended,
         session_commits_only_under_the_current_login_policy,
         auth_code_commits_only_under_the_current_login_policy,
         a_policy_write_serializes_with_its_sessions,

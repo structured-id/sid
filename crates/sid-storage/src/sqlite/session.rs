@@ -203,6 +203,19 @@ impl SqliteBackend {
         // The write transaction excludes every other writer, a reset
         // included, until it commits: the credential read here stays current.
         let mut tx = self.begin_write().await?;
+        // Under the same lock a status change is either committed and read
+        // here, or waits: a profile that can no longer authenticate gets no
+        // session.
+        let status: Option<String> = sqlx::query_scalar("SELECT status FROM profiles WHERE id = ?")
+            .bind(session.profile_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(storage)?;
+        if status.as_deref() != Some(sid_core::models::ProfileStatus::Active.as_str()) {
+            return Err(SidError::Fenced(
+                "the profile can no longer authenticate".into(),
+            ));
+        }
         if let Some(fence) = proved_by {
             let current: Option<i64> = sqlx::query_scalar(
                 "SELECT 1 FROM credentials
