@@ -980,6 +980,51 @@ impl AuthServiceImpl {
         extras: LoginSecurityExtras<'_>,
         client_id: Option<&str>,
     ) -> Result<Option<sid_core::models::ActorFence>, Status> {
+        self.sign_in_rules(
+            profile_id,
+            client_ip,
+            authentication,
+            extras,
+            client_id,
+            true,
+        )
+        .await
+    }
+
+    /// The same rules as [`Self::evaluate_sign_in`] for a repeat of a sign-in
+    /// already admitted and recorded: judged on its own request, recorded as
+    /// no further sign-in.
+    async fn check_sign_in(
+        &self,
+        profile_id: ProfileId,
+        client_ip: Option<std::net::IpAddr>,
+        authentication: sid_authn::sign_in_security::AttemptAuthentication<'_>,
+        extras: LoginSecurityExtras<'_>,
+        client_id: Option<&str>,
+    ) -> Result<(), Status> {
+        self.sign_in_rules(
+            profile_id,
+            client_ip,
+            authentication,
+            extras,
+            client_id,
+            false,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// The sign-in rules under `client_id`'s requirements, recording the
+    /// admitted sign-in as evidence when `record`.
+    async fn sign_in_rules(
+        &self,
+        profile_id: ProfileId,
+        client_ip: Option<std::net::IpAddr>,
+        authentication: sid_authn::sign_in_security::AttemptAuthentication<'_>,
+        extras: LoginSecurityExtras<'_>,
+        client_id: Option<&str>,
+        record: bool,
+    ) -> Result<Option<sid_core::models::ActorFence>, Status> {
         let requirements = self.login_requirements(client_id).await?;
         let attempt = sid_authn::sign_in_security::SignInAttempt {
             client_ip,
@@ -987,13 +1032,12 @@ impl AuthServiceImpl {
             captcha_pass: extras.captcha_pass,
             user_agent: extras.user_agent,
         };
-        sid_authn::sign_in_security::evaluate(
-            &ProfileSecurity { service: self },
-            &profile_id,
-            attempt,
-            &requirements,
-        )
-        .await
+        let host = ProfileSecurity { service: self };
+        if record {
+            sid_authn::sign_in_security::evaluate(&host, &profile_id, attempt, &requirements).await
+        } else {
+            sid_authn::sign_in_security::check(&host, &profile_id, attempt, &requirements).await
+        }
         .map_err(|e: SecurityStatus| e.0)?;
         Ok(requirements.fence)
     }
@@ -2333,25 +2377,35 @@ impl AuthServiceImpl {
         let user_agent = extract_user_agent(request.metadata());
         let user_agent = user_agent.as_deref();
         let captcha_pass = extract_captcha_pass(request.metadata());
-        let policy = self
-            .evaluate_sign_in(
-                profile.id,
-                client_ip,
-                sid_authn::sign_in_security::AttemptAuthentication::Accepted(authentication),
-                LoginSecurityExtras {
-                    captcha_pass: captcha_pass.as_deref(),
-                    user_agent,
-                },
-                Some(client_id),
-            )
-            .await?;
+        let attempt =
+            || sid_authn::sign_in_security::AttemptAuthentication::Accepted(authentication);
+        let extras = || LoginSecurityExtras {
+            captcha_pass: captcha_pass.as_deref(),
+            user_agent,
+        };
+        // A repeat of an operation already committed is judged by the rules
+        // of its own request but records no further sign-in.
         if let Some(completion) = &completion
-            && let Some(signed_in) = self
+            && self
+                .storage
+                .get_operation_result(
+                    super::sign_in_session::ADMITTED_NAMESPACE,
+                    &completion.key()?,
+                )
+                .await
+                .map_err(storage_failure)?
+                .is_some()
+        {
+            self.check_sign_in(profile.id, client_ip, attempt(), extras(), Some(client_id))
+                .await?;
+            return self
                 .redeliver_admitted(completion, client_id, profile.id)
                 .await?
-        {
-            return Ok(signed_in);
+                .ok_or_else(unfinished_sign_in);
         }
+        let policy = self
+            .evaluate_sign_in(profile.id, client_ip, attempt(), extras(), Some(client_id))
+            .await?;
         let lifetime = match self.security_policy.session.max_lifetime_hours {
             0 => Duration::hours(24),
             hours => Duration::hours(i64::from(hours)),
@@ -2500,30 +2554,30 @@ impl AuthServiceImpl {
                     )
                     .await?
                 {
-                    self.storage
-                        .delete_session(
-                            session_id,
-                            &sid_core::models::SessionEnd::new(
-                                sid_core::models::RevocationReason::Cascade,
-                                "system",
-                            ),
-                            AuditEntry::system(
-                                "session.unfinished_sign_in",
-                                session_id.to_string(),
-                            )
-                            .into(),
-                        )
-                        .await
-                        .map_err(storage_failure)?;
-                    return Err(unfinished_sign_in());
+                    AdmittedFinish::Abandoned
+                } else {
+                    self.admitted_ready
+                        .read(completion.operation)
+                        .await?
+                        .ok_or_else(unfinished_sign_in)?
                 }
-                self.admitted_ready
-                    .read(completion.operation)
-                    .await?
-                    .ok_or_else(unfinished_sign_in)?
             }
         };
         if settled == AdmittedFinish::Abandoned {
+            // Every repeat ends the undelivered session again: one whose
+            // ending failed or was cut short is not left holding a slot.
+            // Ending a session already gone ends nothing.
+            self.storage
+                .delete_session(
+                    session_id,
+                    &sid_core::models::SessionEnd::new(
+                        sid_core::models::RevocationReason::Cascade,
+                        "system",
+                    ),
+                    AuditEntry::system("session.unfinished_sign_in", session_id.to_string()).into(),
+                )
+                .await
+                .map_err(storage_failure)?;
             return Err(unfinished_sign_in());
         }
         let session = self

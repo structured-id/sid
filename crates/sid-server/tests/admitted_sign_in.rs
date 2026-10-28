@@ -487,22 +487,44 @@ async fn an_unfinished_sign_in_leaves_no_live_session_behind() {
     outage
         .down
         .store(false, std::sync::atomic::Ordering::SeqCst);
-    assert_eq!(storage.list_sessions(&profile.id).await.unwrap().len(), 1);
-
-    later
-        .complete_admitted_sign_in(
+    let undelivered = storage.list_sessions(&profile.id).await.unwrap();
+    assert_eq!(undelivered.len(), 1);
+    let authentication = basic();
+    let repeat = || {
+        later.complete_admitted_sign_in(
             &request,
             &profile,
-            &basic(),
+            &authentication,
             CLIENT,
             Some(completion(&op, deadline)),
         )
+    };
+
+    repeat()
         .await
         .err()
         .expect("an unfinished sign-in is not delivered");
     assert!(
         storage.list_sessions(&profile.id).await.unwrap().is_empty(),
         "the undelivered session is ended"
+    );
+
+    // An ending that never committed (a failure or a cut-short request after
+    // the operation was settled abandoned) is done again by the next repeat.
+    storage
+        .create_session(
+            &undelivered[0],
+            AuditEntry::system("test", "restore").into(),
+        )
+        .await
+        .unwrap();
+    repeat()
+        .await
+        .err()
+        .expect("an abandoned sign-in is not delivered");
+    assert!(
+        storage.list_sessions(&profile.id).await.unwrap().is_empty(),
+        "the undelivered session is ended on a later repeat"
     );
 }
 

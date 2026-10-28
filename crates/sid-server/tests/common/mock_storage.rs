@@ -80,6 +80,9 @@ pub struct MockStorageInner {
     /// Reading a profile's sign-in history (recent sessions, designated
     /// countries) fails as a storage fault would.
     login_history_fails: bool,
+    /// The IP reputation events recorded: the address and whether the
+    /// sign-in succeeded.
+    ip_reputation_events: Vec<(String, bool)>,
     /// Reading a profile's primary contacts and metadata fails as a storage
     /// fault would.
     contact_reads_fail: bool,
@@ -345,6 +348,12 @@ impl MockStorage {
             .values()
             .filter(|s| s.profile_id == profile)
             .count()
+    }
+
+    /// The IP reputation events recorded, in order.
+    #[allow(dead_code)]
+    pub fn ip_reputation_events(&self) -> Vec<(String, bool)> {
+        self.inner.lock().unwrap().ip_reputation_events.clone()
     }
 
     /// Storage that cannot count a profile's active reset sessions.
@@ -2571,7 +2580,12 @@ impl StorageBackend for MockStorage {
         Ok(filtered)
     }
 
-    async fn record_ip_reputation_event(&self, _ip: &str, _success: bool) -> SidResult<()> {
+    async fn record_ip_reputation_event(&self, ip: &str, success: bool) -> SidResult<()> {
+        self.inner
+            .lock()
+            .unwrap()
+            .ip_reputation_events
+            .push((ip.to_string(), success));
         Ok(())
     }
 

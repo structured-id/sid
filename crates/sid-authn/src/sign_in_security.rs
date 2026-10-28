@@ -145,13 +145,59 @@ fn unavailable<E: From<SignInRefusal>>(e: impl Display) -> E {
 }
 
 /// Run the rules for `owner`'s verified sign-in under `requirements`, the
-/// login requirements the host's policy states for it.
+/// login requirements the host's policy states for it, and record the
+/// admitted sign-in as evidence for later ones.
 pub async fn evaluate<H: SignInSecurityHost>(
     host: &H,
     owner: &H::Owner,
     attempt: SignInAttempt<'_>,
     requirements: &LoginRequirements,
 ) -> Result<(), H::Error> {
+    let client_ip = attempt.client_ip;
+    let geo_location = judge(host, owner, attempt, requirements).await?;
+    // Evidence for later sign-ins, not limits on this one: a failed write is
+    // reported and the sign-in proceeds.
+    if let Some(ip) = client_ip
+        && let Err(e) = host.record_ip_reputation(&ip.to_string()).await
+    {
+        warn!(error = %e, "failed to record IP reputation event");
+    }
+    if let Some(geo) = &geo_location
+        && let Err(e) = host
+            .history()
+            .record_login_location(
+                owner.clone(),
+                &geo.country,
+                geo.latitude,
+                geo.longitude,
+                DESIGNATED_THRESHOLD,
+            )
+            .await
+    {
+        warn!(error = %e, "failed to record login location");
+    }
+    Ok(())
+}
+
+/// Run the same rules as [`evaluate`] without recording anything: for a
+/// repeat of a sign-in already admitted and recorded, which must still meet
+/// the rules of its own request but is no further sign-in.
+pub async fn check<H: SignInSecurityHost>(
+    host: &H,
+    owner: &H::Owner,
+    attempt: SignInAttempt<'_>,
+    requirements: &LoginRequirements,
+) -> Result<(), H::Error> {
+    judge(host, owner, attempt, requirements).await.map(|_| ())
+}
+
+/// The rules themselves; the client's location when it was resolved.
+async fn judge<H: SignInSecurityHost>(
+    host: &H,
+    owner: &H::Owner,
+    attempt: SignInAttempt<'_>,
+    requirements: &LoginRequirements,
+) -> Result<Option<sid_plugin::geoip::GeoLocation>, H::Error> {
     let identity = owner.to_string();
     let client_ip = attempt.client_ip;
 
@@ -340,26 +386,5 @@ pub async fn evaluate<H: SignInSecurityHost>(
             return Err(SignInRefusal::StepUp(unmet).into());
         }
     }
-
-    // Evidence for later sign-ins, not limits on this one: a failed write is
-    // reported and the sign-in proceeds.
-    if let Some(ip) = client_ip
-        && let Err(e) = host.record_ip_reputation(&ip.to_string()).await
-    {
-        warn!(error = %e, "failed to record IP reputation event");
-    }
-    if let Some(geo) = &geo_location
-        && let Err(e) = history
-            .record_login_location(
-                owner.clone(),
-                &geo.country,
-                geo.latitude,
-                geo.longitude,
-                DESIGNATED_THRESHOLD,
-            )
-            .await
-    {
-        warn!(error = %e, "failed to record login location");
-    }
-    Ok(())
+    Ok(geo_location)
 }
