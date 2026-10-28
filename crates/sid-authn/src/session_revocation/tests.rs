@@ -39,6 +39,32 @@ async fn owed_revocation_revokes_the_session_tokens() {
     assert!(matches!(handler.handle(&work).await, WorkOutcome::Done(_)));
 }
 
+/// An owed revocation is retried for as long as any access token of the
+/// ended session can still be valid (the longest lifetime a deployment may
+/// configure), so a revocation cache that recovers within that time still
+/// publishes it; past it the revocation is moot and expires. Before, the
+/// default five attempts gave up within half a minute.
+#[test]
+fn a_revocation_is_retried_while_a_token_can_live() {
+    let ended_at = chrono::Utc::now();
+    let work = sid_core::models::SessionRevocation {
+        session_id: SessionId::generate().to_string(),
+    }
+    .work();
+    let handler_schedule = SessionRevocationHandler::new(Arc::new(RevocationCache::new(
+        Duration::from_secs(900),
+        Arc::new(InMemoryCacheBackend::new()),
+    )))
+    .retry_schedule();
+    let longest = crate::jwt::AccessTokenTtl::MAX.duration().to_std().unwrap();
+    let retried: Duration = (1..work.max_attempts)
+        .map(|attempt| handler_schedule.after(attempt))
+        .sum();
+    assert!(retried >= longest, "{retried:?} < {longest:?}");
+    let expires = work.expires_at.expect("a moot revocation expires");
+    assert!(expires >= ended_at + crate::jwt::AccessTokenTtl::MAX.duration());
+}
+
 /// A payload that is not a session revocation can never succeed.
 #[tokio::test]
 async fn malformed_revocation_fails_permanently() {

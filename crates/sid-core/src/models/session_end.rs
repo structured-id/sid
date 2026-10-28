@@ -13,6 +13,15 @@ use uuid::Uuid;
 /// Work kind revoking one ended session's access tokens in every process.
 pub const SESSION_REVOCATION_KIND: &str = "session.revocation";
 
+/// How long an ended session's access tokens can still be valid: the longest
+/// access token lifetime a deployment may configure (sixty minutes). Its
+/// revocation is retried that long, then is moot and expires.
+pub const SESSION_REVOCATION_WINDOW: chrono::Duration = chrono::Duration::minutes(60);
+
+/// Attempts of one revocation: enough that its handler's schedule, repeating
+/// its last delay, keeps retrying through [`SESSION_REVOCATION_WINDOW`].
+pub const SESSION_REVOCATION_ATTEMPTS: u32 = 130;
+
 /// Namespace of session revocation work ids.
 const SESSION_REVOCATION_NAMESPACE: Uuid =
     Uuid::from_u128(0x5b2d_8e17_c643_4a09_b1f8_6e3a_d2c4_7f15);
@@ -25,8 +34,9 @@ pub struct SessionRevocation {
 }
 
 impl SessionRevocation {
-    /// The durable work that publishes it. Its id follows from the session,
-    /// so ending the same session again owes nothing new.
+    /// The durable work that publishes it, retried while a token of the
+    /// session can live. Its id follows from the session, so ending the same
+    /// session again owes nothing new.
     pub fn work(&self) -> NewWork {
         let kind = WorkKind::new(SESSION_REVOCATION_KIND).expect("the revocation kind is valid");
         let payload = serde_json::to_vec(self).expect("a session revocation serializes");
@@ -35,6 +45,8 @@ impl SessionRevocation {
             &SESSION_REVOCATION_NAMESPACE,
             self.session_id.as_bytes(),
         ));
+        work.max_attempts = SESSION_REVOCATION_ATTEMPTS;
+        work.expires_at = Some(chrono::Utc::now() + SESSION_REVOCATION_WINDOW);
         work
     }
 }

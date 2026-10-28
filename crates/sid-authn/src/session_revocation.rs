@@ -13,13 +13,15 @@ use sid_core::models::{
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Delays between attempts: soon, as a live token waits on it.
+/// Delays between attempts: soon, as a live token waits on it, then every
+/// half minute for the work's attempts (`SESSION_REVOCATION_ATTEMPTS`).
 const REVOCATION_RETRY: RetrySchedule = RetrySchedule::new(&[
     Duration::from_secs(1),
     Duration::from_secs(2),
     Duration::from_secs(4),
     Duration::from_secs(8),
     Duration::from_secs(16),
+    Duration::from_secs(30),
 ]);
 
 /// Publishes owed session revocations.
