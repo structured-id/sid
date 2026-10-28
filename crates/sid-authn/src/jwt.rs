@@ -114,7 +114,35 @@ impl TokenVerifier {
     /// JWT library's audience setting, which admits any token that also names
     /// the issuer. An application's access token (`at+jwt`, RFC 9068 §2.1) or
     /// a logout token (`logout+jwt`) of the same key is refused.
+    ///
+    /// The token of a sign-in still owing its second factor is refused: it
+    /// authenticates only that sign-in's completion
+    /// ([`Self::validate_pending_access_token`]).
     pub fn validate_access_token(&self, token: &str) -> SidResult<AccessTokenClaims> {
+        let claims = self.validate_session_token(token)?;
+        if awaits_second_factor(&claims) {
+            return Err(SidError::AuthenticationFailed(
+                "Invalid token: the sign-in still owes its second factor".into(),
+            ));
+        }
+        Ok(claims)
+    }
+
+    /// Validate, as [`Self::validate_access_token`] does, the token of a
+    /// sign-in that still owes its second factor, and nothing else: what
+    /// completes that sign-in accepts it.
+    pub fn validate_pending_access_token(&self, token: &str) -> SidResult<AccessTokenClaims> {
+        let claims = self.validate_session_token(token)?;
+        if !awaits_second_factor(&claims) {
+            return Err(SidError::AuthenticationFailed(
+                "Invalid token: not a sign-in owing its second factor".into(),
+            ));
+        }
+        Ok(claims)
+    }
+
+    /// The checks every installation session token passes.
+    fn validate_session_token(&self, token: &str) -> SidResult<AccessTokenClaims> {
         let refused = |why: &str| SidError::AuthenticationFailed(format!("Invalid token: {why}"));
         // RFC 7519 §5.1: `typ` JWT (case-insensitive), or absent.
         let typ = decode_header(token)
@@ -145,6 +173,12 @@ impl TokenVerifier {
     pub fn issuer(&self) -> &str {
         &self.issuer
     }
+}
+
+/// Whether `claims` are of a sign-in's pending second-factor context: its
+/// token carries that context's only scope.
+fn awaits_second_factor(claims: &AccessTokenClaims) -> bool {
+    claims.scope == sid_core::models::session::SECOND_FACTOR_SCOPE
 }
 
 /// JWT Service for issuing and validating tokens.

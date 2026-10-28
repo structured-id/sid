@@ -1163,3 +1163,59 @@ fn test_id_token_email_verified_absent_when_no_email() {
     assert!(token_data.claims.email.is_none());
     assert!(token_data.claims.email_verified.is_none());
 }
+
+/// The token of a sign-in still owing its second factor authenticates
+/// nothing a session token does: every service's verification refuses it,
+/// and only the explicit second-factor check accepts it. An ordinary session
+/// token is not taken for one. Before, any service accepted it as a
+/// signed-in caller, its roles included.
+#[test]
+fn a_pending_second_factor_token_is_accepted_only_where_asked_for() {
+    let (private_pem, public_pem) = generate_test_keys();
+    let jwt = JwtService::new(&private_pem, &public_pem, "https://sid.example.com".into()).unwrap();
+    let profile = create_test_profile();
+    let pending = Session::new_awaiting_second_factor(
+        profile.id,
+        "127.0.0.1".to_string(),
+        sid_core::models::session::AuthLevel::Basic,
+        vec!["pwd".into()],
+    );
+    let token = jwt
+        .issue_access_token(
+            &profile.id.to_string(),
+            Some(&profile.id.to_string()),
+            &profile,
+            &pending,
+            &pending.scopes,
+            None,
+            None,
+        )
+        .unwrap();
+
+    assert!(jwt.validate_access_token(&token).is_err());
+    assert!(jwt.verifier().validate_access_token(&token).is_err());
+    let claims = jwt
+        .verifier()
+        .validate_pending_access_token(&token)
+        .expect("the second-factor check accepts it");
+    assert_eq!(claims.sid, pending.id.to_string());
+
+    let session = create_test_session(&profile);
+    let ordinary = jwt
+        .issue_access_token(
+            &profile.id.to_string(),
+            Some(&profile.id.to_string()),
+            &profile,
+            &session,
+            &["openid".to_string()],
+            None,
+            None,
+        )
+        .unwrap();
+    assert!(
+        jwt.verifier()
+            .validate_pending_access_token(&ordinary)
+            .is_err()
+    );
+    assert!(jwt.validate_access_token(&ordinary).is_ok());
+}

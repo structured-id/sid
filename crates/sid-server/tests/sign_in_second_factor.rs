@@ -161,6 +161,50 @@ async fn a_password_sign_in_owing_otp_is_completed_by_totp() {
     assert_eq!(svc.mock_storage.sessions_of(profile), 1);
 }
 
+/// `message` arriving over a connection from `ip`.
+fn from_ip<T>(ip: std::net::IpAddr, message: T) -> Request<T> {
+    let mut request = Request::new(message);
+    request
+        .extensions_mut()
+        .insert(tonic::transport::server::TcpConnectInfo {
+            local_addr: None,
+            remote_addr: Some(std::net::SocketAddr::new(ip, 40000)),
+        });
+    request
+}
+
+/// A sign-in counts as successful evidence for later ones (the address's
+/// reputation) only once its second factor completed it, never while it
+/// waits. Before, a sign-in completed this way recorded none.
+#[tokio::test]
+async fn the_completed_sign_in_is_recorded_as_a_success() {
+    let seed = sid_authn::generate_secret();
+    let (svc, _policy, _) = services(Some(&seed)).await;
+    let ip: std::net::IpAddr = "198.51.100.23".parse().unwrap();
+    let finish = start_login(&svc, PRINCIPAL, PASSWORD).await;
+    let first = svc
+        .auth
+        .opaque_login_finish(from_ip(ip, finish))
+        .await
+        .expect("pending context");
+    let success = (ip.to_string(), true);
+    assert!(!svc.mock_storage.ip_reputation_events().contains(&success));
+
+    let mut verify = from_ip(
+        ip,
+        VerifyTotpRequest {
+            code: sid_authn::generate_current_totp(&seed),
+        },
+    );
+    verify.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {}", bearer(&first)).parse().unwrap(),
+    );
+    svc.auth.verify_totp(verify).await.expect("completed");
+
+    assert!(svc.mock_storage.ip_reputation_events().contains(&success));
+}
+
 /// The pending context authorizes no application grant and no account
 /// operation, and completes once only.
 #[tokio::test]

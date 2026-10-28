@@ -2297,10 +2297,24 @@ impl AuthServiceImpl {
             }
             return Ok(FactorCaller::Pending(pending, CeremonyClient::Browser));
         }
-        let verified = self.caller_claims(request).await?;
-        verified.require_installation()?;
-        let profile_id = verified.caller.profile_id;
-        let session_id = SessionId::parse(&verified.claims.sid)
+        // The pending context's token is accepted here and nowhere else.
+        let (claims, profile_id, pending) = match sid_authn::caller::verify_factor_request(
+            request,
+            self.jwt.verifier(),
+            &self.revocation_cache,
+        )
+        .await?
+        {
+            sid_authn::caller::FactorToken::Pending(claims) => {
+                let caller = sid_authn::caller::Caller::from_claims(&claims)?;
+                (claims, caller.profile_id, true)
+            }
+            sid_authn::caller::FactorToken::Session(verified) => {
+                verified.require_installation()?;
+                (verified.claims, verified.caller.profile_id, false)
+            }
+        };
+        let session_id = SessionId::parse(&claims.sid)
             .map_err(|e| internal("read session id of a verified token", e))?;
         let session = self
             .storage
@@ -2308,8 +2322,9 @@ impl AuthServiceImpl {
             .await
             .map_err(storage_failure)?
             .filter(|session| session.profile_id == profile_id)
+            .filter(|session| session.awaits_second_factor() == pending)
             .ok_or_else(session_ended)?;
-        Ok(if session.awaits_second_factor() {
+        Ok(if pending {
             FactorCaller::Pending(session, CeremonyClient::Native)
         } else {
             FactorCaller::StepUp(session)
@@ -2379,8 +2394,17 @@ impl AuthServiceImpl {
         }
         // The authentication began with the first factor.
         session.authenticated_at = pending.authenticated_at;
-        self.sign_in(&profile, session, client, None, requirements.fence)
-            .await
+        let signed_in = self
+            .sign_in(&profile, session, client, None, requirements.fence)
+            .await?;
+        // Recorded from the address the rules judged at the first factor.
+        sid_authn::sign_in_security::record_completed_sign_in(
+            &ProfileSecurity { service: self },
+            &profile.id,
+            pending.ip_address.parse().ok(),
+        )
+        .await;
+        Ok(signed_in)
     }
 
     /// Complete a local first-factor sign-in as `admission` decided: the
