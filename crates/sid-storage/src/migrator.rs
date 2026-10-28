@@ -6,6 +6,11 @@
 //!
 //! Supports schema isolation: when `schema` is provided, all tables are created
 //! within that PostgreSQL schema (for shared-database embedded deployments).
+//!
+//! Until the first stable release a schema change edits the migration that
+//! created the table, as the SQLite baseline is edited: a database created
+//! from an earlier set of files is recreated, not migrated, and the runner
+//! keeps no forward migration for it.
 
 use sid_core::{Error as SidError, Result as SidResult};
 use sqlx::{AssertSqlSafe, PgPool};
