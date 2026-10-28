@@ -89,7 +89,7 @@ struct Pending {
 /// How far a returned entry has come, kept under the browser's binding so a
 /// retry of its return resumes where the last one stopped and never redeems
 /// its code twice (RFC 6749 §4.1.2).
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 enum Progress {
     /// Started; its return has not been exchanged.
     Pending(Pending),
@@ -365,15 +365,14 @@ impl FederatedEntry {
                             + chrono::Duration::from_std(EXCHANGE_LEASE)
                                 .expect("the exchange lease fits"),
                     };
-                    if !self
+                    // The version this return stored is the one it owns:
+                    // a state another return stores later is never adopted.
+                    let Some(owned) = self
                         .pending
                         .replace(&key, &read, &owned, pending.deadline)
                         .await?
-                    {
+                    else {
                         continue;
-                    }
-                    let Some(owned) = self.pending.read_versioned(&key).await? else {
-                        return Err(EntryError::Unknown);
                     };
                     let next = match self
                         .exchange(&discovery.token_endpoint, code, &pending)
@@ -414,10 +413,11 @@ impl FederatedEntry {
                             return Err(EntryError::Ambiguous { continuation });
                         }
                     };
-                    if !self
+                    if self
                         .pending
                         .replace(&key, &owned, &next, pending.deadline)
                         .await?
+                        .is_none()
                     {
                         // Only the owning attempt moves an exchanging entry.
                         return Err(EntryError::Ambiguous {
@@ -443,6 +443,7 @@ impl FederatedEntry {
                         .pending
                         .replace(&key, &read, &lost, pending.deadline)
                         .await?
+                        .is_some()
                     {
                         return Err(EntryError::Ambiguous { continuation });
                     }
