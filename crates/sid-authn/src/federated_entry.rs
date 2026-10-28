@@ -60,6 +60,10 @@ pub struct EntryRequest {
 /// A started entry, kept until its return.
 #[derive(Serialize, Deserialize)]
 struct Pending {
+    /// The issuer and client the entry was started for: another relying
+    /// party sharing the store never completes it.
+    issuer: String,
+    client_id: String,
     nonce: String,
     code_verifier: String,
     redirect_uri: String,
@@ -172,8 +176,10 @@ impl FederatedEntry {
             .map_err(|e| EntryError::Issuer(format!("authorization endpoint: {e}")))?;
         self.pending
             .insert(
-                &state,
+                &self.key(&state),
                 &Pending {
+                    issuer: self.trusted.issuer.clone(),
+                    client_id: self.trusted.client_id.clone(),
                     nonce,
                     code_verifier,
                     redirect_uri: redirect_uri.to_owned(),
@@ -193,7 +199,14 @@ impl FederatedEntry {
         code: &str,
         redirect_uri: &str,
     ) -> Result<Returned, EntryError> {
-        let pending = self.pending.take(state).await?.ok_or(EntryError::Unknown)?;
+        let pending = self
+            .pending
+            .take(&self.key(state))
+            .await?
+            .ok_or(EntryError::Unknown)?;
+        if pending.issuer != self.trusted.issuer || pending.client_id != self.trusted.client_id {
+            return Err(EntryError::Unknown);
+        }
         if pending.redirect_uri != redirect_uri {
             return Err(EntryError::RedirectMismatch);
         }
@@ -265,6 +278,19 @@ impl FederatedEntry {
             evidence,
             continuation: pending.continuation,
         })
+    }
+
+    /// The store key of `state`: partitioned by this relying party's issuer
+    /// and client, so relying parties of other issuers sharing the store
+    /// neither find nor consume its entries (the mix-up attack class, RFC
+    /// 9207 §1).
+    fn key(&self, state: &str) -> String {
+        use sha2::{Digest, Sha256};
+        let mut partition = Sha256::new();
+        partition.update(self.trusted.issuer.as_bytes());
+        partition.update([0]);
+        partition.update(self.trusted.client_id.as_bytes());
+        format!("{}:{state}", hex::encode(partition.finalize()))
     }
 
     /// Exchange `code` at `token_endpoint` (RFC 6749 §4.1.3, RFC 7636 §4.5):

@@ -193,10 +193,16 @@ fn http() -> Client {
 }
 
 fn entry(issuer: &TestIssuer) -> FederatedEntry {
+    entry_on(issuer, Arc::new(InMemoryCacheBackend::new()))
+}
+
+/// The relying party of `issuer` over `cache`, which other relying parties
+/// may share.
+fn entry_on(issuer: &TestIssuer, cache: Arc<dyn CacheBackend>) -> FederatedEntry {
     FederatedEntry::new(
         issuer.trusted(),
         http(),
-        Arc::new(InMemoryCacheBackend::new()),
+        cache,
         crate::test_support::key_manager(),
     )
 }
@@ -295,6 +301,30 @@ async fn a_return_completes_once_and_only_at_its_redirect() {
         entry.complete(&state_of(&other), "c", REDIRECT).await,
         Err(EntryError::Unknown)
     ));
+}
+
+// Regression guard: relying parties of two issuers sharing one cache and one
+// sealing key never complete each other's entries. An entry started for
+// issuer A and returned to B's relying party is refused before B's token
+// endpoint sees A's code verifier, and stays A's to complete.
+#[tokio::test]
+async fn an_entry_completes_only_at_the_issuer_it_was_started_for() {
+    let a = TestIssuer::start().await;
+    let b = TestIssuer::start().await;
+    let cache: Arc<dyn CacheBackend> = Arc::new(InMemoryCacheBackend::new());
+    let at_a = entry_on(&a, cache.clone());
+    let at_b = entry_on(&b, cache);
+    let url = at_a
+        .start(REDIRECT, CONTINUATION, &EntryRequest::default())
+        .await
+        .unwrap();
+    a.issue_for(&url, json!({}));
+    b.issue_for(&url, json!({}));
+    let refused = at_b.complete(&state_of(&url), "c", REDIRECT).await;
+    assert!(matches!(refused, Err(EntryError::Unknown)), "{refused:?}");
+    assert_eq!(b.exchanges(), 0, "B's token endpoint saw A's entry");
+    let returned = at_a.complete(&state_of(&url), "c", REDIRECT).await.unwrap();
+    assert_eq!(returned.continuation, CONTINUATION);
 }
 
 // Regression guard: an ID Token of another issuer, for another audience or
