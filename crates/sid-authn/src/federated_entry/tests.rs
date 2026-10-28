@@ -623,6 +623,121 @@ async fn a_return_during_a_live_exchange_is_told_to_retry() {
     assert_eq!(issuer.exchanges(), 1);
 }
 
+/// A shared cache over which another return fences an entry off as soon as
+/// one return took its exchange: the first successful compare-and-set is
+/// followed, before anything else reaches the cache, by `interfere`.
+struct FencedOff {
+    inner: Arc<dyn CacheBackend>,
+    interfere: Mutex<Option<Box<dyn FnOnce(Arc<dyn CacheBackend>, String) -> Fence + Send>>>,
+}
+
+type Fence = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
+#[async_trait::async_trait]
+impl CacheBackend for FencedOff {
+    async fn get(&self, key: &str) -> sid_plugin::cache::CacheResult<Option<Vec<u8>>> {
+        self.inner.get(key).await
+    }
+    async fn set(
+        &self,
+        key: &str,
+        value: &[u8],
+        ttl: std::time::Duration,
+    ) -> sid_plugin::cache::CacheResult<()> {
+        self.inner.set(key, value, ttl).await
+    }
+    async fn delete(&self, key: &str) -> sid_plugin::cache::CacheResult<()> {
+        self.inner.delete(key).await
+    }
+    async fn take(&self, key: &str) -> sid_plugin::cache::CacheResult<Option<Vec<u8>>> {
+        self.inner.take(key).await
+    }
+    async fn compare_and_set(
+        &self,
+        key: &str,
+        expected: &[u8],
+        value: &[u8],
+        ttl: std::time::Duration,
+    ) -> sid_plugin::cache::CacheResult<bool> {
+        let swapped = self
+            .inner
+            .compare_and_set(key, expected, value, ttl)
+            .await?;
+        let interfere = if swapped {
+            self.interfere.lock().unwrap().take()
+        } else {
+            None
+        };
+        if let Some(interfere) = interfere {
+            interfere(self.inner.clone(), key.to_owned()).await;
+        }
+        Ok(swapped)
+    }
+    async fn publish(&self, channel: &str, message: &[u8]) -> sid_plugin::cache::CacheResult<()> {
+        self.inner.publish(channel, message).await
+    }
+    async fn subscribe(
+        &self,
+        channel: &str,
+    ) -> sid_plugin::cache::CacheResult<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>> {
+        self.inner.subscribe(channel).await
+    }
+    async fn health_check(&self) -> sid_plugin::cache::CacheResult<()> {
+        self.inner.health_check().await
+    }
+}
+
+// A return that took the exchange but stalled before using it, while another
+// return fenced the entry off as lost, never brings the entry back: the
+// exchange it then makes is answered ambiguous like every other return, not
+// completed. Before, it adopted the later state as its own and completed the
+// abandoned entry while the browser was told to start again.
+#[tokio::test]
+async fn a_fenced_off_exchange_completes_nothing() {
+    let issuer = TestIssuer::start().await;
+    let inner: Arc<dyn CacheBackend> = Arc::new(InMemoryCacheBackend::new());
+    let keys = crate::test_support::key_manager();
+    let fenced = Arc::new(FencedOff {
+        inner: inner.clone(),
+        interfere: Mutex::new(None),
+    });
+    let entry = FederatedEntry::new(
+        issuer.trusted(),
+        http(),
+        fenced.clone(),
+        keys.clone(),
+        BrowserCookie::new("__Host-sid_platform").unwrap(),
+    );
+    let browser = begin(&entry, &EntryRequest::default()).await;
+    issuer.issue_for(&browser.url, json!({}));
+    *fenced.interfere.lock().unwrap() = Some(Box::new(move |cache, context| {
+        Box::pin(async move {
+            let store: ChallengeStore<Progress> =
+                ChallengeStore::new(cache, keys, NAMESPACE, PENDING_TTL);
+            let key = context
+                .strip_prefix(&format!("ceremony:{NAMESPACE}:"))
+                .unwrap()
+                .to_owned();
+            store
+                .insert(
+                    &key,
+                    &Progress::Ambiguous {
+                        continuation: CONTINUATION.into(),
+                    },
+                )
+                .await
+                .unwrap();
+        })
+    }));
+
+    for _ in 0..2 {
+        match browser.complete(&entry, "c", REDIRECT).await {
+            Err(EntryError::Ambiguous { continuation }) => assert_eq!(continuation, CONTINUATION),
+            other => panic!("the fenced-off entry completed: {other:?}"),
+        }
+    }
+}
+
 // An exchange whose owner stopped (its process died mid-request) is known
 // lost once its lease has run out: the next return records it ambiguous and
 // never redeems the code again.
@@ -651,6 +766,7 @@ async fn an_exchange_whose_owner_stopped_is_ambiguous_after_its_lease() {
             .replace(&key, &read, &stopped, pending.deadline)
             .await
             .unwrap()
+            .is_some()
     );
 
     for _ in 0..2 {

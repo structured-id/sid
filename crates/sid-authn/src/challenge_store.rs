@@ -151,29 +151,41 @@ impl<V: Serialize + DeserializeOwned> ChallengeStore<V> {
     }
 
     /// Replace the value under `key` with `value` until `deadline`, only while
-    /// it is still `read` (atomic across replicas). Returns `false`, changing
-    /// nothing, when another writer changed or removed it first, or once the
-    /// deadline has passed.
+    /// it is still `read` (atomic across replicas). Returns the replacement as
+    /// read, for the writer's next replacement, so the writer never adopts a
+    /// state another writer stored after it; `None`, changing nothing, when
+    /// another writer changed or removed it first, or once the deadline has
+    /// passed.
     pub async fn replace(
         &self,
         key: &str,
         read: &Versioned<V>,
         value: &V,
         deadline: chrono::DateTime<chrono::Utc>,
-    ) -> Result<bool, ChallengeStoreError> {
+    ) -> Result<Option<Versioned<V>>, ChallengeStoreError>
+    where
+        V: Clone,
+    {
         let Ok(left) = (deadline - chrono::Utc::now()).to_std() else {
-            return Ok(false);
+            return Ok(None);
         };
         if left.is_zero() {
-            return Ok(false);
+            return Ok(None);
         }
         let context = self.context(key);
         let plain = zeroize::Zeroizing::new(serde_json::to_vec(value)?);
         let sealed = sealed_secret::seal(self.keys.as_ref(), &context, &plain).await?;
-        Ok(self
+        if !self
             .cache
             .compare_and_set(&context, &read.stored, &sealed, left)
-            .await?)
+            .await?
+        {
+            return Ok(None);
+        }
+        Ok(Some(Versioned {
+            value: value.clone(),
+            stored: sealed,
+        }))
     }
 
     /// The cache key and sealing context of `key`: binds a sealed value to the
