@@ -3,7 +3,7 @@
 //! the configured browser sign-in page gets the HttpOnly session cookie, a
 //! native client the access token in response metadata, never the message.
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use secrecy::ExposeSecret;
 use sid_core::grpc_error::refuse::internal;
 use sid_core::grpc_error::{ApiError, ErrorReason};
@@ -12,6 +12,7 @@ use tonic::metadata::{MetadataMap, MetadataValue};
 use tonic::{Response, Status};
 
 use crate::browser_session::{BrowserCookie, BrowserCsrf, BrowserSecret, origin_is};
+use crate::sealed_secret::{self, SealedSecretError};
 
 /// Who completes a sign-in ceremony: the browser sign-in page or a native
 /// client. It decides how the session's credential is delivered.
@@ -127,6 +128,72 @@ impl BrowserCredential {
             expires_in,
             delivery: Delivery::Cookie(cookie.set(&self.0, expires_in)),
         }
+    }
+
+    /// This credential of `session`, sealed under `keys` to `context` (one
+    /// operation of one issuer) until `deadline`: what a lost response is
+    /// answered with again. The session itself stores only the hash.
+    pub async fn retain<O>(
+        &self,
+        keys: &dyn sid_keys::KeyManager,
+        context: &str,
+        session: &Session<O>,
+        deadline: DateTime<Utc>,
+    ) -> Result<Vec<u8>, SealedSecretError> {
+        let retained = Retained {
+            session: session.id.to_string(),
+            secret: self.0.encode().to_string(),
+            deadline,
+        };
+        let plain = zeroize::Zeroizing::new(
+            serde_json::to_vec(&retained).expect("a retained delivery encodes"),
+        );
+        sealed_secret::seal(keys, context, &plain).await
+    }
+}
+
+/// A browser sign-in's delivery kept for a lost response, as sealed.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Retained {
+    session: String,
+    secret: String,
+    deadline: DateTime<Utc>,
+}
+
+/// A retained browser delivery opened again: the session it names, until
+/// when it may be redelivered, and its credential.
+pub struct RetainedDelivery {
+    pub session_id: String,
+    pub deadline: DateTime<Utc>,
+    credential: BrowserCredential,
+}
+
+impl RetainedDelivery {
+    /// The delivery `sealed` under `keys` for `context`; a value sealed for
+    /// another context or malformed is an error.
+    pub async fn open(
+        keys: &dyn sid_keys::KeyManager,
+        context: &str,
+        sealed: &[u8],
+    ) -> Result<Self, SealedSecretError> {
+        let opened = sealed_secret::open(keys, context, sealed).await?;
+        let retained: Retained =
+            serde_json::from_slice(&opened.secret).map_err(|_| SealedSecretError::NotSealed)?;
+        let secret = BrowserSecret::decode(&retained.secret).ok_or(SealedSecretError::NotSealed)?;
+        Ok(Self {
+            session_id: retained.session,
+            deadline: retained.deadline,
+            credential: BrowserCredential(secret),
+        })
+    }
+
+    /// The same sign-in delivered again for the stored `session` it names,
+    /// only while that session still stores this credential's hash: none for
+    /// any other session.
+    pub fn signed_in<O>(self, cookie: &BrowserCookie, session: &Session<O>) -> Option<SignedIn> {
+        let matches = session.id.to_string() == self.session_id
+            && session.browser_secret_hash == Some(self.credential.0.hash());
+        matches.then(|| self.credential.signed_in(cookie, session))
     }
 }
 

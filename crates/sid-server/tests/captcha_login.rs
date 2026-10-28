@@ -167,7 +167,7 @@ async fn solved_captcha_lets_an_admitted_sign_in_through() {
 
     let refusal = svc
         .auth
-        .complete_admitted_sign_in(&from(ip, ()), &holder, &authentication, "ops-bff")
+        .complete_admitted_sign_in(&from(ip, ()), &holder, &authentication, "ops-bff", None)
         .await
         .err()
         .expect("asked for a CAPTCHA");
@@ -178,7 +178,7 @@ async fn solved_captcha_lets_an_admitted_sign_in_through() {
         .metadata_mut()
         .insert("captcha-pass", pass.parse().unwrap());
     svc.auth
-        .complete_admitted_sign_in(&retry, &holder, &authentication, "ops-bff")
+        .complete_admitted_sign_in(&retry, &holder, &authentication, "ops-bff", None)
         .await
         .expect("the solved challenge lets it through");
     assert_eq!(

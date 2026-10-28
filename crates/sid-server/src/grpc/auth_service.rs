@@ -579,6 +579,24 @@ struct LoginSecurityExtras<'a> {
     user_agent: Option<&'a str>,
 }
 
+/// The host's keyed operation an admitted sign-in completes: a repeat of it
+/// is answered with the same session (see
+/// [`AuthServiceImpl::complete_admitted_sign_in`]).
+pub struct AdmittedCompletion<'a> {
+    /// The operation's stable reference, its key.
+    pub operation: &'a str,
+    /// When the operation ends; nothing is delivered again after.
+    pub deadline: chrono::DateTime<Utc>,
+}
+
+impl AdmittedCompletion<'_> {
+    #[allow(clippy::result_large_err)]
+    fn key(&self) -> Result<sid_core::models::OperationKey, Status> {
+        sid_core::models::OperationKey::parse(self.operation)
+            .map_err(|e| internal("the admitted sign-in's operation reference", e))
+    }
+}
+
 /// What an upstream sign-in request tells about who completes it, read
 /// before its state is consumed.
 pub(crate) struct UpstreamCeremony {
@@ -2147,7 +2165,7 @@ impl AuthServiceImpl {
         session.assurance_level =
             method.auth_level(self.security_policy.auth.passkey_satisfies_mfa);
         session.amr = method.amr();
-        self.sign_in(profile, session, client, proved_by, policy)
+        self.sign_in(profile, session, client, proved_by, policy, None)
             .await
     }
 
@@ -2168,7 +2186,8 @@ impl AuthServiceImpl {
         session.device_id = device_id;
         session.amr = vec![amr.to_string()];
         // Mailbox possession proves no stored credential.
-        self.sign_in(profile, session, client, None, policy).await
+        self.sign_in(profile, session, client, None, policy, None)
+            .await
     }
 
     /// Store `session` and deliver its credential to `client`: the browser
@@ -2184,6 +2203,7 @@ impl AuthServiceImpl {
         client: CeremonyClient,
         proved_by: Option<&sid_core::models::CredentialFence>,
         policy: Option<sid_core::models::ActorFence>,
+        retained: Option<super::sign_in_session::RetainedSignIn<'_>>,
     ) -> Result<SignedIn, Status> {
         super::sign_in_session::SignInSessions {
             storage: self.storage.as_ref(),
@@ -2193,7 +2213,7 @@ impl AuthServiceImpl {
             cookie: &self.browser_cookie,
             max_concurrent_sessions: self.security_policy.session.max_concurrent_sessions,
         }
-        .sign_in(profile, session, client, proved_by, policy)
+        .sign_in(profile, session, client, proved_by, policy, retained)
         .await
     }
 
@@ -2253,7 +2273,7 @@ impl AuthServiceImpl {
             "profile".to_string(),
             "email".to_string(),
         ];
-        self.sign_in(profile, session, ceremony.client, None, policy)
+        self.sign_in(profile, session, ceremony.client, None, policy, None)
             .await
     }
 
@@ -2268,15 +2288,27 @@ impl AuthServiceImpl {
     /// and device are the sign-in's, and the browser gets the IdP session
     /// cookie. `client_id` is the application the sign-in continues to: its
     /// login requirements are the ones weighed.
+    ///
+    /// With `completion`, the host's keyed operation (a federated entry's
+    /// return), the session commits with that operation's completion and
+    /// its delivery sealed for a lost response: a repeat of the operation
+    /// gets the same live session again, after the current checks, never a
+    /// second one (the recoverable federation callback completion contract).
     pub async fn complete_admitted_sign_in<T>(
         &self,
         request: &Request<T>,
         profile: &sid_core::models::Profile,
         authentication: &sid_core::models::session::SessionAuthentication,
         client_id: &str,
+        completion: Option<AdmittedCompletion<'_>>,
     ) -> Result<SignedIn, Status> {
         if !profile.status.can_authenticate() {
             return Err(authentication_failed());
+        }
+        if let Some(completion) = &completion
+            && let Some(signed_in) = self.redeliver_admitted(completion, client_id).await?
+        {
+            return Ok(signed_in);
         }
         let client_ip = self.client_ip(request);
         let user_agent = extract_user_agent(request.metadata());
@@ -2313,8 +2345,113 @@ impl AuthServiceImpl {
             "profile".to_string(),
             "email".to_string(),
         ];
-        self.sign_in(profile, session, CeremonyClient::Browser, None, policy)
+        let Some(completion) = completion else {
+            return self
+                .sign_in(
+                    profile,
+                    session,
+                    CeremonyClient::Browser,
+                    None,
+                    policy,
+                    None,
+                )
+                .await;
+        };
+        // The delivery lives no longer than the operation, nor than the
+        // session it delivers.
+        let retained = super::sign_in_session::RetainedSignIn {
+            keys: self.key_manager.as_ref(),
+            completion_key: completion.key()?,
+            context: self.admitted_context(&completion),
+            deadline: completion.deadline.min(session.expires_at),
+        };
+        match self
+            .sign_in(
+                profile,
+                session,
+                CeremonyClient::Browser,
+                None,
+                policy,
+                Some(retained),
+            )
             .await
+        {
+            // A concurrent repeat committed first: its session is this one.
+            Err(refused) => match self.redeliver_admitted(&completion, client_id).await? {
+                Some(signed_in) => Ok(signed_in),
+                None => Err(refused),
+            },
+            signed_in => signed_in,
+        }
+    }
+
+    /// The sealing context of an admitted sign-in's delivery: its operation
+    /// at this issuer.
+    fn admitted_context(&self, completion: &AdmittedCompletion<'_>) -> String {
+        format!("admitted-sign-in:{}:{}", self.issuer, completion.operation)
+    }
+
+    /// The sign-in `completion` already committed, delivered again: only
+    /// before the operation's deadline, while its session lives, its Profile
+    /// can sign in and its authentication meets `client_id`'s current
+    /// requirements. None when the operation has not committed; a refusal
+    /// when it has but may not be delivered again.
+    async fn redeliver_admitted(
+        &self,
+        completion: &AdmittedCompletion<'_>,
+        client_id: &str,
+    ) -> Result<Option<SignedIn>, Status> {
+        let Some(record) = self
+            .storage
+            .get_operation_result(
+                super::sign_in_session::ADMITTED_NAMESPACE,
+                &completion.key()?,
+            )
+            .await
+            .map_err(storage_failure)?
+        else {
+            return Ok(None);
+        };
+        let delivery = sid_authn::sign_in_delivery::RetainedDelivery::open(
+            self.key_manager.as_ref(),
+            &self.admitted_context(completion),
+            &record.completion.result,
+        )
+        .await
+        .map_err(|e| internal("open the retained sign-in delivery", e))?;
+        let now = Utc::now();
+        if delivery.deadline <= now {
+            return Err(authentication_failed());
+        }
+        let session_id = delivery
+            .session_id
+            .parse()
+            .map_err(|e| internal("the retained session reference", e))?;
+        let session = self
+            .storage
+            .get_session(session_id)
+            .await
+            .map_err(storage_failure)?
+            .filter(|session| !session.is_expired())
+            .ok_or_else(authentication_failed)?;
+        self.storage
+            .get_profile(session.profile_id)
+            .await
+            .map_err(storage_failure)?
+            .filter(|profile| profile.status.can_authenticate())
+            .ok_or_else(authentication_failed)?;
+        // The requirements the sign-in itself was weighed under, read now;
+        // the client's own are applied where the sign-in continues.
+        let requirements = self.login_requirements(Some(client_id)).await?;
+        if let sid_authn::login_policy::LoginDecision::StepUp(unmet) =
+            requirements.decide(&session, now)
+        {
+            return Err(step_up_required(&unmet).into());
+        }
+        delivery
+            .signed_in(&self.browser_cookie, &session)
+            .map(Some)
+            .ok_or_else(authentication_failed)
     }
 
     /// Refuse to create an account for an upstream sign-in this authority

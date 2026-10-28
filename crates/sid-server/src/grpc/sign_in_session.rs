@@ -19,6 +19,25 @@ use tracing::info;
 
 use sid_core::grpc_error::refuse::{dependency_unavailable, internal, storage_failure};
 
+/// The keyed operation a browser sign-in completes, whose result is its
+/// delivery sealed for a lost response: the session commits with that
+/// completion, and a repeat of the operation finds it instead of a second
+/// session.
+pub(crate) struct RetainedSignIn<'a> {
+    pub keys: &'a dyn sid_keys::KeyManager,
+    pub completion_key: sid_core::models::OperationKey,
+    /// The sealing context: this operation of this issuer.
+    pub context: String,
+    /// The end of the operation; the delivery is never redelivered after.
+    pub deadline: chrono::DateTime<Utc>,
+}
+
+/// The namespace of admitted sign-ins' completions.
+pub(crate) const ADMITTED_NAMESPACE: &str = "admitted-sign-in";
+
+/// The method name an admitted sign-in's completion records.
+const ADMITTED_METHOD: &str = "admitted_sign_in";
+
 /// What completing a sign-in uses, borrowed from the service that ran the
 /// ceremony.
 pub(crate) struct SignInSessions<'a> {
@@ -33,6 +52,15 @@ pub(crate) struct SignInSessions<'a> {
     pub max_concurrent_sessions: u32,
 }
 
+/// The refusal of a sign-in whose keyed operation already completed.
+fn operation_completed() -> Status {
+    sid_core::grpc_error::ApiError::new(
+        sid_core::grpc_error::ErrorReason::ConcurrentModification,
+        "the sign-in already completed",
+    )
+    .into()
+}
+
 impl SignInSessions<'_> {
     /// Store `session` and deliver its credential to `client`: the browser
     /// sign-in page gets the IdP session cookie, a fresh secret whose hash
@@ -40,6 +68,8 @@ impl SignInSessions<'_> {
     /// session's access token. `proved_by` is the credential the sign-in
     /// proved, which must still be current when the session commits, and
     /// `policy` the login policy it was admitted under, which must be too.
+    /// A browser sign-in completing `retained` commits with that operation's
+    /// completion, its sealed delivery.
     pub async fn sign_in(
         &self,
         profile: &Profile,
@@ -47,15 +77,39 @@ impl SignInSessions<'_> {
         client: CeremonyClient,
         proved_by: Option<&CredentialFence>,
         policy: Option<ActorFence>,
+        retained: Option<RetainedSignIn<'_>>,
     ) -> Result<SignedIn, Status> {
         match client {
             CeremonyClient::Browser => {
                 let credential = BrowserCredential::bind(&mut session);
-                self.persist(profile, &session, proved_by, policy).await?;
+                let completion = match retained {
+                    Some(retained) => {
+                        let sealed = credential
+                            .retain(
+                                retained.keys,
+                                &retained.context,
+                                &session,
+                                retained.deadline,
+                            )
+                            .await
+                            .map_err(|e| internal("seal the sign-in delivery", e))?;
+                        Some(sid_core::models::OperationCompletion::new(
+                            ADMITTED_NAMESPACE,
+                            retained.completion_key,
+                            ADMITTED_METHOD,
+                            profile.id.to_string().as_bytes(),
+                            sealed,
+                        ))
+                    }
+                    None => None,
+                };
+                self.persist(profile, &session, proved_by, policy, completion)
+                    .await?;
                 Ok(credential.signed_in(self.cookie, &session))
             }
             CeremonyClient::Native => {
-                self.persist(profile, &session, proved_by, policy).await?;
+                self.persist(profile, &session, proved_by, policy, None)
+                    .await?;
                 let sub = profile.id.to_string();
                 let access_token = self
                     .jwt
@@ -91,6 +145,7 @@ impl SignInSessions<'_> {
         session: &Session,
         proved_by: Option<&CredentialFence>,
         policy: Option<ActorFence>,
+        completion: Option<sid_core::models::OperationCompletion>,
     ) -> Result<(), Status> {
         // The storage counts, evicts and inserts in one serialized step, and
         // owes each evicted session's client a logout; the same commit owes
@@ -111,6 +166,9 @@ impl SignInSessions<'_> {
         if let Some(fence) = policy {
             ctx = ctx.fenced_by(fence);
         }
+        if let Some(completion) = completion {
+            ctx = ctx.with_operation(completion);
+        }
         let evicted = match self
             .storage
             .create_session_atomic(session, self.max_concurrent_sessions, proved_by, ctx)
@@ -120,6 +178,9 @@ impl SignInSessions<'_> {
             // The credential or the login policy changed after its check: the
             // sign-in completes nothing and is started again.
             Err(sid_core::Error::Fenced(_)) => return Err(authentication_failed()),
+            // The keyed operation already committed its session: the caller
+            // redelivers that one.
+            Err(sid_core::Error::OperationCompleted(_)) => return Err(operation_completed()),
             Err(e) => return Err(storage_failure(e)),
         };
         if !evicted.is_empty() {

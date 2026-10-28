@@ -84,7 +84,7 @@ async fn sufficient_evidence_signs_in_with_the_cookie() {
         .metadata_mut()
         .insert("user-agent", "test-agent".parse().unwrap());
     let signed_in = auth
-        .complete_admitted_sign_in(&request, &profile, &authentication, CLIENT)
+        .complete_admitted_sign_in(&request, &profile, &authentication, CLIENT, None)
         .await
         .unwrap();
     let sid_authn::sign_in_delivery::Delivery::Cookie(cookie) = &signed_in.delivery else {
@@ -117,7 +117,13 @@ async fn insufficient_evidence_is_refused() {
         .authentication(Utc::now())
         .unwrap();
     let refused = auth
-        .complete_admitted_sign_in(&tonic::Request::new(()), &profile, &authentication, CLIENT)
+        .complete_admitted_sign_in(
+            &tonic::Request::new(()),
+            &profile,
+            &authentication,
+            CLIENT,
+            None,
+        )
         .await
         .err()
         .expect("refused");
@@ -145,7 +151,7 @@ async fn an_elevated_policy_needs_the_window_of_the_real_authentication() {
     .authentication(Utc::now())
     .unwrap();
     let signed_in = auth
-        .complete_admitted_sign_in(&tonic::Request::new(()), &profile, &fresh, CLIENT)
+        .complete_admitted_sign_in(&tonic::Request::new(()), &profile, &fresh, CLIENT, None)
         .await
         .unwrap();
     let sessions = storage.list_sessions(&profile.id).await.unwrap();
@@ -165,7 +171,7 @@ async fn an_elevated_policy_needs_the_window_of_the_real_authentication() {
     .authentication(Utc::now())
     .unwrap();
     let refused = auth
-        .complete_admitted_sign_in(&tonic::Request::new(()), &profile, &stale, CLIENT)
+        .complete_admitted_sign_in(&tonic::Request::new(()), &profile, &stale, CLIENT, None)
         .await
         .err()
         .expect("refused past the window");
@@ -199,7 +205,13 @@ async fn a_suspended_profile_is_not_signed_in() {
     .authentication(Utc::now())
     .unwrap();
     let refused = auth
-        .complete_admitted_sign_in(&tonic::Request::new(()), &profile, &authentication, CLIENT)
+        .complete_admitted_sign_in(
+            &tonic::Request::new(()),
+            &profile,
+            &authentication,
+            CLIENT,
+            None,
+        )
         .await
         .err()
         .expect("refused");
@@ -208,4 +220,232 @@ async fn a_suspended_profile_is_not_signed_in() {
         Some("AUTHENTICATION_FAILED")
     );
     assert!(storage.list_sessions(&profile.id).await.unwrap().is_empty());
+}
+
+/// A host operation's reference, unique per test.
+fn operation() -> String {
+    format!("entry-{}", uuid::Uuid::now_v7().simple())
+}
+
+fn completion(
+    operation: &str,
+    deadline: chrono::DateTime<Utc>,
+) -> sid_server::grpc::auth_service::AdmittedCompletion<'_> {
+    sid_server::grpc::auth_service::AdmittedCompletion {
+        operation,
+        deadline,
+    }
+}
+
+fn cookie(signed_in: &sid_authn::sign_in_delivery::SignedIn) -> String {
+    let sid_authn::sign_in_delivery::Delivery::Cookie(cookie) = &signed_in.delivery else {
+        panic!("the browser gets its cookie");
+    };
+    cookie.split(';').next().unwrap().to_owned()
+}
+
+fn basic() -> sid_core::models::session::SessionAuthentication {
+    evidence("urn:sid:acr:basic", &["pwd"], Duration::minutes(1))
+        .authentication(Utc::now())
+        .unwrap()
+}
+
+// A repeat of the operation an admitted sign-in completed (its response was
+// lost) gets the same live session and the same cookie again; no second
+// session is created, its authentication time is unchanged.
+#[tokio::test]
+async fn a_repeated_operation_gets_the_same_session_again() {
+    let storage = storage().await;
+    let auth = authority(storage.clone(), AuthLevel::Basic);
+    let profile = profile(storage.as_ref()).await;
+    let op = operation();
+    let deadline = Utc::now() + Duration::minutes(10);
+    let request = tonic::Request::new(());
+
+    let first = auth
+        .complete_admitted_sign_in(
+            &request,
+            &profile,
+            &basic(),
+            CLIENT,
+            Some(completion(&op, deadline)),
+        )
+        .await
+        .unwrap();
+    let again = auth
+        .complete_admitted_sign_in(
+            &request,
+            &profile,
+            &basic(),
+            CLIENT,
+            Some(completion(&op, deadline)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(again.session_id, first.session_id);
+    assert_eq!(cookie(&again), cookie(&first));
+    let sessions = storage.list_sessions(&profile.id).await.unwrap();
+    assert_eq!(sessions.len(), 1);
+}
+
+// Concurrent repeats of one operation commit one session; every answer that
+// succeeds names it.
+#[tokio::test]
+async fn concurrent_repeats_commit_one_session() {
+    let storage = storage().await;
+    let auth = authority(storage.clone(), AuthLevel::Basic);
+    let profile = profile(storage.as_ref()).await;
+    let op = operation();
+    let deadline = Utc::now() + Duration::minutes(10);
+    let request = tonic::Request::new(());
+    let authentication = basic();
+    let (a, b) = tokio::join!(
+        auth.complete_admitted_sign_in(
+            &request,
+            &profile,
+            &authentication,
+            CLIENT,
+            Some(completion(&op, deadline))
+        ),
+        auth.complete_admitted_sign_in(
+            &request,
+            &profile,
+            &authentication,
+            CLIENT,
+            Some(completion(&op, deadline))
+        )
+    );
+    let sessions = storage.list_sessions(&profile.id).await.unwrap();
+    assert_eq!(sessions.len(), 1);
+    for answer in [a, b].into_iter().flatten() {
+        assert_eq!(answer.session_id, sessions[0].id.to_string());
+    }
+}
+
+// Nothing is delivered again for a session that ended, a Profile suspended
+// since, or after the operation's deadline; no replacement session appears.
+#[tokio::test]
+async fn an_ended_suspended_or_late_operation_is_not_delivered_again() {
+    let storage = storage().await;
+    let auth = authority(storage.clone(), AuthLevel::Basic);
+    let request = tonic::Request::new(());
+
+    // Ended.
+    let profile_a = profile(storage.as_ref()).await;
+    let op = operation();
+    let deadline = Utc::now() + Duration::minutes(10);
+    let first = auth
+        .complete_admitted_sign_in(
+            &request,
+            &profile_a,
+            &basic(),
+            CLIENT,
+            Some(completion(&op, deadline)),
+        )
+        .await
+        .unwrap();
+    storage
+        .delete_session(
+            first.session_id.parse().unwrap(),
+            &sid_core::models::SessionEnd::new(
+                sid_core::models::RevocationReason::UserRequested,
+                "test",
+            ),
+            AuditEntry::system("session.end", "test").into(),
+        )
+        .await
+        .unwrap();
+    let refused = auth
+        .complete_admitted_sign_in(
+            &request,
+            &profile_a,
+            &basic(),
+            CLIENT,
+            Some(completion(&op, deadline)),
+        )
+        .await
+        .err()
+        .expect("an ended session is not delivered again");
+    assert_eq!(
+        common::error_reason(&refused).as_deref(),
+        Some("AUTHENTICATION_FAILED")
+    );
+    assert!(
+        storage
+            .list_sessions(&profile_a.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // Suspended after the commit; the host still holds the active copy it
+    // looked up before.
+    let profile_b = profile(storage.as_ref()).await;
+    let op = operation();
+    auth.complete_admitted_sign_in(
+        &request,
+        &profile_b,
+        &basic(),
+        CLIENT,
+        Some(completion(&op, deadline)),
+    )
+    .await
+    .unwrap();
+    let mut suspended = storage.get_profile(profile_b.id).await.unwrap().unwrap();
+    suspended.status = sid_core::models::ProfileStatus::Suspended;
+    assert!(
+        storage
+            .update_profile(
+                &suspended,
+                AuditEntry::system("profile.suspend", "test").into()
+            )
+            .await
+            .unwrap()
+    );
+    let refused = auth
+        .complete_admitted_sign_in(
+            &request,
+            &profile_b,
+            &basic(),
+            CLIENT,
+            Some(completion(&op, deadline)),
+        )
+        .await
+        .err()
+        .expect("a suspended Profile's session is not delivered again");
+    assert_eq!(
+        common::error_reason(&refused).as_deref(),
+        Some("AUTHENTICATION_FAILED")
+    );
+    assert_eq!(storage.list_sessions(&profile_b.id).await.unwrap().len(), 1);
+
+    // Late.
+    let profile_c = profile(storage.as_ref()).await;
+    let op = operation();
+    let past = Utc::now() - Duration::seconds(1);
+    auth.complete_admitted_sign_in(
+        &request,
+        &profile_c,
+        &basic(),
+        CLIENT,
+        Some(completion(&op, past)),
+    )
+    .await
+    .unwrap();
+    let refused = auth
+        .complete_admitted_sign_in(
+            &request,
+            &profile_c,
+            &basic(),
+            CLIENT,
+            Some(completion(&op, past)),
+        )
+        .await
+        .err()
+        .expect("past its deadline nothing is delivered again");
+    assert_eq!(
+        common::error_reason(&refused).as_deref(),
+        Some("AUTHENTICATION_FAILED")
+    );
+    assert_eq!(storage.list_sessions(&profile_c.id).await.unwrap().len(), 1);
 }
