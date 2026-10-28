@@ -14,11 +14,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{TimeZone, Utc};
 use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use sid_core::models::AuthLevel;
+use sid_core::models::session::AcceptedEvidence;
 use sid_keys::KeyManager;
 use sid_plugin::cache::CacheBackend;
 
@@ -52,8 +53,7 @@ pub struct EntryRequest {
     /// Connect Core 1.0 §3.1.2.1).
     pub acr: Option<AuthLevel>,
     /// The longest time since the holder's authentication at the issuer
-    /// (`max_age`, §3.1.2.1); when asked, the ID Token must state
-    /// `auth_time` (§2).
+    /// (`max_age`, §3.1.2.1). Every returned ID Token must state `auth_time`.
     pub max_age: Option<Duration>,
 }
 
@@ -69,28 +69,15 @@ struct Pending {
     redirect_uri: String,
     /// Where the caller continues once the entry is admitted.
     continuation: String,
-    /// Whether `max_age` was asked for: then `auth_time` is required.
-    max_age_requested: bool,
-}
-
-/// How the issuer authenticated the subject, as its validated ID Token
-/// states it. The issuer's statement, not this installation's.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Evidence {
-    /// The `acr` claim, when it names a level this installation knows.
-    pub acr: Option<AuthLevel>,
-    /// The `amr` claim (RFC 8176).
-    pub amr: Vec<String>,
-    /// The `auth_time` claim.
-    pub auth_time: Option<DateTime<Utc>>,
 }
 
 /// A returned entry: the subject the issuer signed in for this recipient,
-/// its evidence and where the caller continues.
+/// how it authenticated (the issuer's statement, not this installation's)
+/// and where the caller continues.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Returned {
     pub subject: String,
-    pub evidence: Evidence,
+    pub evidence: AcceptedEvidence,
     pub continuation: String,
 }
 
@@ -184,7 +171,6 @@ impl FederatedEntry {
                     code_verifier,
                     redirect_uri: redirect_uri.to_owned(),
                     continuation: continuation.to_owned(),
-                    max_age_requested: request.max_age.is_some(),
                 },
             )
             .await?;
@@ -240,39 +226,30 @@ impl FederatedEntry {
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| EntryError::Token("no subject".into()))?
             .to_owned();
-        let auth_time = match claims.get("auth_time") {
-            None => None,
-            Some(value) => Some(
-                value
-                    .as_i64()
-                    .and_then(|t| Utc.timestamp_opt(t, 0).single())
-                    .ok_or_else(|| EntryError::Token("a malformed auth_time".into()))?,
-            ),
-        };
-        // OpenID Connect Core 1.0 §2: a request with max_age makes auth_time
-        // required.
-        if pending.max_age_requested && auth_time.is_none() {
-            return Err(EntryError::Token(
-                "no auth_time for a max_age request".into(),
-            ));
-        }
-        let evidence = Evidence {
-            acr: claims
-                .get("acr")
-                .and_then(serde_json::Value::as_str)
-                .and_then(AuthLevel::from_acr_value),
-            amr: claims
-                .get("amr")
-                .and_then(serde_json::Value::as_array)
-                .map(|methods| {
-                    methods
-                        .iter()
-                        .filter_map(|m| m.as_str().map(str::to_owned))
-                        .collect()
-                })
-                .unwrap_or_default(),
+        // The accepted authentication is bounded from when it happened, so an
+        // ID Token that does not say when is refused, with or without max_age
+        // (OpenID Connect Core 1.0 §2 makes it optional only for the issuer).
+        let auth_time = claims
+            .get("auth_time")
+            .ok_or_else(|| EntryError::Token("no auth_time".into()))?
+            .as_i64()
+            .and_then(|t| Utc.timestamp_opt(t, 0).single())
+            .ok_or_else(|| EntryError::Token("a malformed auth_time".into()))?;
+        let amr = claims
+            .get("amr")
+            .and_then(serde_json::Value::as_array)
+            .map(|methods| {
+                methods
+                    .iter()
+                    .filter_map(|m| m.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let evidence = AcceptedEvidence::new(
+            claims.get("acr").and_then(serde_json::Value::as_str),
+            amr,
             auth_time,
-        };
+        );
         Ok(Returned {
             subject,
             evidence,
