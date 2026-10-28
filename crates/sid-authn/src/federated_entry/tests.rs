@@ -267,6 +267,34 @@ async fn an_entry_returns_the_subject_and_its_evidence() {
     );
 }
 
+// A return names what its entry asked the issuer for, so the caller can tell
+// a return to its own stronger request from the first one and never asks
+// again in a loop.
+#[tokio::test]
+async fn a_return_names_what_its_entry_requested() {
+    let issuer = TestIssuer::start().await;
+    let entry = entry(&issuer);
+    for request in [
+        EntryRequest::default(),
+        EntryRequest {
+            acr: Some(AuthLevel::Standard),
+            max_age: None,
+        },
+        EntryRequest {
+            acr: Some(AuthLevel::Elevated),
+            max_age: Some(Duration::from_secs(0)),
+        },
+    ] {
+        let url = entry.start(REDIRECT, CONTINUATION, &request).await.unwrap();
+        issuer.issue_for(&url, json!({}));
+        let returned = entry
+            .complete(&state_of(&url), "c", REDIRECT)
+            .await
+            .unwrap();
+        assert_eq!(returned.requested, request);
+    }
+}
+
 // Regression guard: a return completes once. A replayed state, an unknown
 // one and one returning to another redirect URI complete nothing, and the
 // last never reaches the token endpoint.
