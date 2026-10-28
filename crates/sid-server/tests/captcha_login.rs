@@ -149,6 +149,44 @@ async fn solved_captcha_lets_the_sign_in_through() {
     assert_eq!(sessions.len(), 1);
 }
 
+/// A sign-in admitted on a trusted issuer's evidence goes through the same
+/// CAPTCHA: asked for one, the retry carrying the solved challenge's pass
+/// signs the Profile in. Without reading the pass, the retry was asked again.
+#[tokio::test]
+async fn solved_captcha_lets_an_admitted_sign_in_through() {
+    let (svc, holder) = services().await;
+    let ip: IpAddr = "198.51.100.7".parse().unwrap();
+    crowd(&svc, ip).await;
+    let authentication = sid_core::models::session::AcceptedEvidence::new(
+        Some("urn:sid:acr:basic"),
+        vec!["pwd".into()],
+        chrono::Utc::now(),
+    )
+    .authentication(chrono::Utc::now())
+    .unwrap();
+
+    let refusal = svc
+        .auth
+        .complete_admitted_sign_in(&from(ip, ()), &holder, &authentication)
+        .await
+        .err()
+        .expect("asked for a CAPTCHA");
+    let challenge = challenge_of(&refusal);
+    let pass = earn_pass(&svc, ip, &challenge).await.unwrap();
+    let mut retry = from(ip, ());
+    retry
+        .metadata_mut()
+        .insert("captcha-pass", pass.parse().unwrap());
+    svc.auth
+        .complete_admitted_sign_in(&retry, &holder, &authentication)
+        .await
+        .expect("the solved challenge lets it through");
+    assert_eq!(
+        svc.storage.list_sessions(&holder.id).await.unwrap().len(),
+        1
+    );
+}
+
 /// A pass answers one sign-in: the next one needs a new CAPTCHA.
 #[tokio::test]
 async fn pass_is_single_use() {

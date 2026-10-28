@@ -76,8 +76,12 @@ async fn sufficient_evidence_signs_in_with_the_cookie() {
     );
     let authentication = accepted.authentication(Utc::now()).unwrap();
 
+    let mut request = tonic::Request::new(());
+    request
+        .metadata_mut()
+        .insert("user-agent", "test-agent".parse().unwrap());
     let signed_in = auth
-        .complete_admitted_sign_in(&profile, None, Some("test-agent"), &authentication)
+        .complete_admitted_sign_in(&request, &profile, &authentication)
         .await
         .unwrap();
     let sid_authn::sign_in_delivery::Delivery::Cookie(cookie) = &signed_in.delivery else {
@@ -110,7 +114,7 @@ async fn insufficient_evidence_is_refused() {
         .authentication(Utc::now())
         .unwrap();
     let refused = auth
-        .complete_admitted_sign_in(&profile, None, None, &authentication)
+        .complete_admitted_sign_in(&tonic::Request::new(()), &profile, &authentication)
         .await
         .err()
         .expect("refused");
@@ -138,7 +142,7 @@ async fn an_elevated_policy_needs_the_window_of_the_real_authentication() {
     .authentication(Utc::now())
     .unwrap();
     let signed_in = auth
-        .complete_admitted_sign_in(&profile, None, None, &fresh)
+        .complete_admitted_sign_in(&tonic::Request::new(()), &profile, &fresh)
         .await
         .unwrap();
     let sessions = storage.list_sessions(&profile.id).await.unwrap();
@@ -158,7 +162,7 @@ async fn an_elevated_policy_needs_the_window_of_the_real_authentication() {
     .authentication(Utc::now())
     .unwrap();
     let refused = auth
-        .complete_admitted_sign_in(&profile, None, None, &stale)
+        .complete_admitted_sign_in(&tonic::Request::new(()), &profile, &stale)
         .await
         .err()
         .expect("refused past the window");
@@ -192,7 +196,7 @@ async fn a_suspended_profile_is_not_signed_in() {
     .authentication(Utc::now())
     .unwrap();
     let refused = auth
-        .complete_admitted_sign_in(&profile, None, None, &authentication)
+        .complete_admitted_sign_in(&tonic::Request::new(()), &profile, &authentication)
         .await
         .err()
         .expect("refused");

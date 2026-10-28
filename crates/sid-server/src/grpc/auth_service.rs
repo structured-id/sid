@@ -2193,25 +2193,29 @@ impl AuthServiceImpl {
     /// attests (see `AcceptedEvidence::authentication`). It completes as
     /// every sign-in does: only an active Profile, after the sign-in rules
     /// and this authority's policy weigh that authentication, with a session
-    /// of this authority's lifetime and limit recording it. The return is a
-    /// browser navigation the host checked by its state, so the browser gets
-    /// the IdP session cookie.
-    pub async fn complete_admitted_sign_in(
+    /// of this authority's lifetime and limit recording it. `request` is the
+    /// browser's return the host checked by its state: its client address
+    /// and device are the sign-in's, and the browser gets the IdP session
+    /// cookie.
+    pub async fn complete_admitted_sign_in<T>(
         &self,
+        request: &Request<T>,
         profile: &sid_core::models::Profile,
-        client_ip: Option<std::net::IpAddr>,
-        user_agent: Option<&str>,
         authentication: &sid_core::models::session::SessionAuthentication,
     ) -> Result<SignedIn, Status> {
         if !profile.status.can_authenticate() {
             return Err(authentication_failed());
         }
+        let client_ip = self.client_ip(request);
+        let user_agent = extract_user_agent(request.metadata());
+        let user_agent = user_agent.as_deref();
+        let captcha_pass = extract_captcha_pass(request.metadata());
         self.evaluate_sign_in(
             profile.id,
             client_ip,
             sid_authn::sign_in_security::AttemptAuthentication::Accepted(authentication),
             LoginSecurityExtras {
-                captcha_pass: None,
+                captcha_pass: captcha_pass.as_deref(),
                 user_agent,
             },
         )
