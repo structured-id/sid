@@ -40,6 +40,26 @@ async fn reads_the_mounted_versions() {
     assert_eq!(source.kind(), "file");
 }
 
+// A raw KEK written with a trailing newline is the 32 bytes before it; a raw
+// KEK whose own last byte is whitespace keeps it.
+#[tokio::test]
+async fn a_raw_kek_with_a_trailing_newline_is_read() {
+    let mut with_newline = vec![0xCD; 32];
+    with_newline.push(b'\n');
+    let mut ends_in_space = [0x11; 32];
+    ends_in_space[31] = b' ';
+    let dir = mounted(Some("1"), &[(1, &with_newline), (2, &ends_in_space)]);
+    let source = FileKekSource::new(dir.path());
+    assert_eq!(
+        source.fetch_kek(1).await.unwrap().expose_secret(),
+        &[0xCD; 32]
+    );
+    assert_eq!(
+        source.fetch_kek(2).await.unwrap().expose_secret(),
+        &ends_in_space
+    );
+}
+
 // Without the selector there is no current version: refused, never taken
 // as version 1.
 #[tokio::test]

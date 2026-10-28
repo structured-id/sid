@@ -49,10 +49,16 @@ impl FileKekSource {
     }
 }
 
-/// The KEK in `value`: 32 raw bytes, or 64 hex characters; trailing ASCII
-/// whitespace (a newline the file was written with) is not part of it.
+/// The KEK in `value`: 32 raw bytes, optionally followed by one newline the
+/// file was written with (33 bytes are never a raw key, so the newline is
+/// unambiguous, while a raw key's own trailing whitespace stays), or 64 hex
+/// characters followed by any trailing ASCII whitespace.
 fn decode_kek(value: &[u8]) -> Result<[u8; 32], OrgCryptoError> {
-    if let Ok(raw) = <[u8; 32]>::try_from(value) {
+    let raw = match value {
+        [key @ .., b'\n'] if key.len() == 32 => key,
+        key => key,
+    };
+    if let Ok(raw) = <[u8; 32]>::try_from(raw) {
         return Ok(raw);
     }
     let trimmed = value.trim_ascii_end();
