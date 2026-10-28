@@ -14,6 +14,7 @@ use sid_core::models::Session;
 use sid_core::models::enforcement::{EnforcementAction, EnforcementDecision};
 use sid_core::models::security_policy::SecurityPolicy;
 use sid_core::models::session::AuthLevel;
+use sid_core::models::session::SessionAuthentication;
 use sid_plugin::SignInHistoryStore;
 use tracing::{info, warn};
 
@@ -47,13 +48,36 @@ pub fn implied_auth_level(
     }
 }
 
+/// How a sign-in's credential was verified, as the rules weigh it.
+#[derive(Debug, Clone, Copy)]
+pub enum AttemptAuthentication<'a> {
+    /// By this authority: the method (`opaque`, `webauthn`, ...) and whether
+    /// the authenticator verified the user (passkeys).
+    Local {
+        method: &'a str,
+        user_verified: bool,
+    },
+    /// By an explicitly trusted issuer, as the authentication its accepted
+    /// evidence attests: the policy weighs that level, step-up and methods,
+    /// never a local method it was not.
+    Accepted(&'a SessionAuthentication),
+}
+
+impl AttemptAuthentication<'_> {
+    /// The name the rules' log and security events give the method.
+    fn method(&self) -> &str {
+        match self {
+            Self::Local { method, .. } => method,
+            Self::Accepted(_) => "federated",
+        }
+    }
+}
+
 /// One verified sign-in as the rules see it.
 pub struct SignInAttempt<'a> {
     pub client_ip: Option<IpAddr>,
-    /// The method that verified the credential (`opaque`, `webauthn`, ...).
-    pub method: &'a str,
-    /// Whether the authenticator verified the user (passkeys).
-    pub user_verified: bool,
+    /// How the credential was verified.
+    pub authentication: AttemptAuthentication<'a>,
     /// Pass earned by solving the CAPTCHA this sign-in was asked for.
     pub captcha_pass: Option<&'a str>,
     pub user_agent: Option<&'a str>,
@@ -296,20 +320,31 @@ pub async fn evaluate<H: SignInSecurityHost>(
         "probe".to_string(),
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
-    probe.assurance_level = implied_auth_level(
-        attempt.method,
-        policy.auth.passkey_satisfies_mfa,
-        attempt.user_verified,
-    );
+    match attempt.authentication {
+        AttemptAuthentication::Local {
+            method,
+            user_verified,
+        } => {
+            probe.assurance_level =
+                implied_auth_level(method, policy.auth.passkey_satisfies_mfa, user_verified);
+        }
+        AttemptAuthentication::Accepted(accepted) => {
+            probe.assurance_level = accepted.assurance_level;
+            probe.elevation = accepted.elevation;
+            probe.authenticated_at = accepted.authenticated_at;
+            probe.amr = accepted.amr.clone();
+        }
+    }
+    let method = attempt.authentication.method();
     let decision = host.policy_decision(&probe);
     match decision.action {
         EnforcementAction::Allow => {}
         EnforcementAction::StepUp => {
-            info!(account = %identity, method = attempt.method, violations = ?decision.violations, "Policy enforcement: step-up required");
+            info!(account = %identity, method, violations = ?decision.violations, "Policy enforcement: step-up required");
             return Err(SignInRefusal::StepUpToAcr(policy.auth.min_acr.acr_value()).into());
         }
         EnforcementAction::Block => {
-            warn!(account = %identity, method = attempt.method, violations = ?decision.violations, "Policy enforcement: access denied");
+            warn!(account = %identity, method, violations = ?decision.violations, "Policy enforcement: access denied");
             return Err(SignInRefusal::Refused.into());
         }
         // No grace periods are configured, so this does not occur.

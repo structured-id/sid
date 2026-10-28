@@ -501,3 +501,70 @@ fn test_expired_session_expired_since() {
     // Should be roughly 2 hours.
     assert!(expired.expired_since().num_minutes() >= 119);
 }
+
+// Accepted evidence keeps the issuer's methods and its real authentication
+// time; a level up to Standard is the session's own and grants no step-up.
+#[test]
+fn accepted_evidence_keeps_methods_and_authentication_time() {
+    let at = Utc::now() - Duration::minutes(3);
+    let evidence = AcceptedEvidence::new(
+        Some("urn:sid:acr:standard"),
+        vec!["pwd".into(), "otp".into()],
+        at,
+    );
+    let auth = evidence.authentication(Utc::now()).unwrap();
+    assert_eq!(auth.assurance_level, AuthLevel::Standard);
+    assert_eq!(auth.elevation, None);
+    assert_eq!(auth.authenticated_at, at);
+    assert_eq!(auth.amr, ["pwd", "otp"]);
+}
+
+// Regression guard: an ACR that is no shared SID URN, a plain level name and
+// a missing ACR attest no level, so they satisfy no requirement, Basic
+// included.
+#[test]
+fn an_unknown_or_missing_acr_attests_no_level() {
+    for acr in [
+        Some("urn:other:acr:gold"),
+        Some("standard"),
+        Some("urn:sid:acr:platinum"),
+        None,
+    ] {
+        let evidence = AcceptedEvidence::new(acr, vec!["pwd".into()], Utc::now());
+        assert_eq!(evidence.acr, None, "{acr:?}");
+        assert_eq!(evidence.authentication(Utc::now()), None, "{acr:?}");
+    }
+}
+
+// An Elevated or Critical attestation is a step-up bounded from the real
+// authentication time, over the session's own Standard: admitting it later
+// shortens what is left, and once the window has passed it grants nothing.
+#[test]
+fn an_elevated_attestation_is_bounded_from_its_authentication_time() {
+    let at = Utc::now() - Duration::minutes(5);
+    let evidence = AcceptedEvidence::new(Some("urn:sid:acr:elevated"), vec!["hwk".into()], at);
+    let auth = evidence.authentication(Utc::now()).unwrap();
+    assert_eq!(auth.assurance_level, AuthLevel::Standard);
+    let elevation = auth.elevation.expect("within the window");
+    assert_eq!(elevation.level, AuthLevel::Elevated);
+    assert_eq!(
+        elevation.until,
+        at + Duration::minutes(ELEVATION_TTL_MINUTES)
+    );
+
+    // A later admission of the same evidence keeps the same end.
+    let later = evidence
+        .authentication(Utc::now() + Duration::minutes(2))
+        .unwrap();
+    assert_eq!(later.elevation, auth.elevation);
+
+    // Past the window: the session keeps Standard, with no step-up.
+    let old = AcceptedEvidence::new(
+        Some("urn:sid:acr:critical"),
+        vec!["hwk".into()],
+        Utc::now() - Duration::minutes(ELEVATION_TTL_MINUTES + 1),
+    );
+    let auth = old.authentication(Utc::now()).unwrap();
+    assert_eq!(auth.assurance_level, AuthLevel::Standard);
+    assert_eq!(auth.elevation, None);
+}
