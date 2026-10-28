@@ -5718,14 +5718,28 @@ impl AuthService for AuthServiceImpl {
         // 5. The reset's sign-in is a sign-in like any other: its session
         //    records the client's device and address, and the organization's
         //    login requirements admit it.
+        //    The password is already replaced: a sign-in the requirements do
+        //    not admit (or cannot state) leaves the reset successful, with no
+        //    session, as an account with a second factor is left.
         let method = LoginMethod::Password;
-        let policy = self
+        let policy = match self
             .admit_by_requirements(
                 profile_id,
                 method.auth_level(self.security_policy.auth.passkey_satisfies_mfa),
                 &method.amr(),
             )
-            .await?;
+            .await
+        {
+            Ok(policy) => policy,
+            Err(status) => {
+                info!(
+                    "Password reset completed for profile {}; sign-in not admitted: {}",
+                    profile_id,
+                    status.message()
+                );
+                return Ok(Response::new(CompletePasswordResetResponse::default()));
+            }
+        };
         let signed_in = self
             .create_session_and_issue_tokens(
                 &self
