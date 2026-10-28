@@ -44,26 +44,29 @@ pub(super) fn captcha_required(challenge: &IssuedChallenge) -> Result<ApiError, 
     .with_detail(CAPTCHA_CHALLENGE_TYPE_URL, &detail))
 }
 
-/// STEP_UP_REQUIRED: the sign-in needs a stronger authentication, named by
-/// its acr value.
-pub(super) fn step_up_to_acr(acr: &str) -> ApiError {
-    ApiError::new(
+/// STEP_UP_REQUIRED naming every requirement `unmet` leaves: the level by
+/// its acr value, each missing method by its `amr` value (RFC 8176), and an
+/// authentication too old by the age in seconds it must not exceed (the
+/// `max_age` of OpenID Connect Core 1.0 §3.1.2.1).
+pub(super) fn step_up_required(unmet: &sid_authn::login_policy::Unmet) -> ApiError {
+    let mut err = ApiError::new(
         ErrorReason::StepUpRequired,
-        "a stronger sign-in is required",
-    )
-    .with_precondition("acr", acr, "authenticate at this level")
-}
-
-/// STEP_UP_REQUIRED: the session lacks the given authentication methods
-/// (`amr` values), every one of which is required.
-pub(super) fn step_up_to_amr<'a>(methods: impl IntoIterator<Item = &'a str>) -> ApiError {
-    methods.into_iter().fold(
-        ApiError::new(
-            ErrorReason::StepUpRequired,
-            "another authentication method is required",
-        ),
-        |err, method| err.with_precondition("amr", method, "authenticate with this method"),
-    )
+        "a stronger or more recent sign-in is required",
+    );
+    if let Some(level) = unmet.acr {
+        err = err.with_precondition("acr", level.acr_value(), "authenticate at this level");
+    }
+    for method in &unmet.amr {
+        err = err.with_precondition("amr", method, "authenticate with this method");
+    }
+    if let Some(age) = unmet.max_authentication_age {
+        err = err.with_precondition(
+            "max_age",
+            age.as_secs().to_string(),
+            "authenticate again, no longer ago than this many seconds",
+        );
+    }
+    err
 }
 
 /// STEP_UP_REQUIRED raised by an anomaly rule: a second factor is needed. The

@@ -469,40 +469,46 @@ fn test_extract_user_agent_none_when_missing() {
     assert_eq!(result, None);
 }
 
-// ── Conditional access wiring integration tests ──────────
+// ── Login requirements wiring ──────────
 //
-// These tests verify the WIRING of ConditionalAccessEngine into the auth flow.
-// They replicate the exact logic from evaluate_login_security_inner (Stage 2):
-//   implied_auth_level → probe_session → ConditionalAccessEngine::check → routing
-//
-// Unlike conditional_access.rs unit tests (which test the engine in isolation),
-// these tests prove the auth flow constructs inputs correctly and routes outputs.
+// The level and methods a sign-in's session records, judged by the login
+// requirements the installation's fixed policy states, with a client's own
+// as authorization adds them: what the auth flow decides for each method.
 
-use sid_authz::conditional_access::ConditionalAccessEngine;
-use sid_core::models::enforcement::EnforcementAction;
+use sid_authn::login_policy::{FixedLoginPolicy, LoginDecision, LoginPolicySource as _};
 use sid_core::models::security_policy::EnforcementMode;
 
-/// Helper: replicate evaluate_login_security_inner Stage 2 logic exactly.
-/// Returns the EnforcementDecision that the auth flow would produce.
-fn auth_flow_conditional_access_decision(
+/// The decision on a session signed in by `method` under `policy`, for
+/// `client` when given.
+async fn sign_in_decision(
     policy: &SecurityPolicy,
     client: Option<&sid_core::models::OAuth2Client>,
-    auth_method: &str,
-    user_verified: bool,
-) -> sid_core::models::enforcement::EnforcementDecision {
-    let implied = super::implied_auth_level(
-        auth_method,
-        policy.auth.passkey_satisfies_mfa,
-        user_verified,
-    );
-    let mut probe_session = sid_core::models::Session::new(
+    method: super::LoginMethod,
+) -> LoginDecision {
+    let now = chrono::Utc::now();
+    let probe = sid_authn::login_policy::local_authentication(
         sid_core::models::ProfileId::generate(),
-        "probe".to_string(),
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        method.auth_level(policy.auth.passkey_satisfies_mfa),
+        &method.amr(),
+        now,
     );
-    probe_session.assurance_level = implied;
+    let mut requirements = FixedLoginPolicy::of(policy)
+        .requirements(None)
+        .await
+        .unwrap();
+    if let Some(client) = client {
+        requirements = requirements.with_client(client, None);
+    }
+    requirements.decide(&probe, now)
+}
 
-    ConditionalAccessEngine::check(policy, client, None, &probe_session)
+const PASSWORD: super::LoginMethod = super::LoginMethod::Password;
+
+fn passkey(user_verified: bool) -> super::LoginMethod {
+    super::LoginMethod::Passkey {
+        user_verified,
+        key_amr: "hwk",
+    }
 }
 
 /// Helper: construct a test OAuth2Client with specific overrides.
@@ -554,129 +560,88 @@ fn test_client_with_acr(
     }
 }
 
-#[test]
-fn test_conditional_access_wiring_opaque_basic_passes_ce_default() {
-    // CE default min_acr = Basic. OPAQUE login → Basic. Basic ≥ Basic → Allow.
-    let policy = SecurityPolicy::ce_default();
-    let decision = auth_flow_conditional_access_decision(&policy, None, "opaque", false);
-    assert_eq!(decision.action, EnforcementAction::Allow);
-    assert!(decision.violations.is_empty());
-}
-
-#[test]
-fn test_conditional_access_wiring_step_up_when_policy_requires_standard() {
-    // Modified policy: min_acr = Standard, Hard enforcement.
-    // OPAQUE login → Basic. Basic < Standard → StepUp.
+fn standard(mode: EnforcementMode) -> SecurityPolicy {
     let mut policy = SecurityPolicy::ce_default();
     policy.auth.min_acr = sid_core::models::session::AuthLevel::Standard;
-    let decision = auth_flow_conditional_access_decision(&policy, None, "opaque", false);
+    policy.enforcement.mode = mode;
+    policy
+}
+
+// The CE baseline (Basic) admits a password sign-in.
+#[tokio::test]
+async fn a_password_sign_in_passes_the_baseline() {
+    let decision = sign_in_decision(&SecurityPolicy::ce_default(), None, PASSWORD).await;
+    assert!(matches!(decision, LoginDecision::Allow { audited } if audited.is_empty()));
+}
+
+// A Standard requirement asks a password sign-in (Basic) to step up to
+// Standard, naming the level.
+#[tokio::test]
+async fn a_password_sign_in_steps_up_to_a_standard_requirement() {
+    let decision = sign_in_decision(&standard(EnforcementMode::Hard), None, PASSWORD).await;
+    let LoginDecision::StepUp(unmet) = decision else {
+        panic!("a Basic sign-in passed a Standard requirement");
+    };
     assert_eq!(
-        decision.action,
-        EnforcementAction::StepUp,
-        "OPAQUE (Basic) should trigger StepUp when policy requires Standard"
-    );
-    assert!(!decision.violations.is_empty());
-    assert!(
-        decision
-            .violations
-            .iter()
-            .any(|v| v.requirement == "min_acr"),
-        "Violation should identify min_acr requirement"
+        unmet.acr,
+        Some(sid_core::models::session::AuthLevel::Standard)
     );
 }
 
-#[test]
-fn test_conditional_access_wiring_webauthn_uv_meets_standard_policy() {
-    // Policy requires Standard. WebAuthn + user_verified + passkey_satisfies_mfa → Standard.
-    // Standard ≥ Standard → Allow.
-    let mut policy = SecurityPolicy::ce_default();
-    policy.auth.min_acr = sid_core::models::session::AuthLevel::Standard;
-    let decision = auth_flow_conditional_access_decision(&policy, None, "webauthn", true);
-    assert_eq!(
-        decision.action,
-        EnforcementAction::Allow,
-        "WebAuthn+UV (Standard) should pass Standard policy"
-    );
-    assert!(decision.violations.is_empty());
+// A passkey that verified the user is Standard and meets it; one that did not
+// is a single factor and steps up.
+#[tokio::test]
+async fn a_passkey_meets_standard_only_with_user_verification() {
+    let policy = standard(EnforcementMode::Hard);
+    assert!(matches!(
+        sign_in_decision(&policy, None, passkey(true)).await,
+        LoginDecision::Allow { .. }
+    ));
+    assert!(matches!(
+        sign_in_decision(&policy, None, passkey(false)).await,
+        LoginDecision::StepUp(_)
+    ));
 }
 
-#[test]
-fn test_conditional_access_wiring_webauthn_no_uv_fails_standard_policy() {
-    // Policy requires Standard. WebAuthn WITHOUT user_verified → Basic (single factor).
-    // Basic < Standard → StepUp.
-    let mut policy = SecurityPolicy::ce_default();
-    policy.auth.min_acr = sid_core::models::session::AuthLevel::Standard;
-    let decision = auth_flow_conditional_access_decision(&policy, None, "webauthn", false);
-    assert_eq!(
-        decision.action,
-        EnforcementAction::StepUp,
-        "WebAuthn without UV (Basic) should trigger StepUp for Standard policy"
-    );
+// Audit enforcement allows the unmet requirement and still reports it.
+#[tokio::test]
+async fn audit_enforcement_allows_and_reports() {
+    let decision = sign_in_decision(&standard(EnforcementMode::Audit), None, PASSWORD).await;
+    let LoginDecision::Allow { audited } = decision else {
+        panic!("audit enforcement refused");
+    };
+    assert!(!audited.is_empty());
 }
 
-#[test]
-fn test_conditional_access_wiring_audit_mode_allows_despite_violation() {
-    // Audit mode: violations are logged but access is allowed.
-    let mut policy = SecurityPolicy::ce_default();
-    policy.auth.min_acr = sid_core::models::session::AuthLevel::Standard;
-    policy.enforcement.mode = EnforcementMode::Audit;
-    let decision = auth_flow_conditional_access_decision(&policy, None, "opaque", false);
-    assert_eq!(
-        decision.action,
-        EnforcementAction::Allow,
-        "Audit mode should Allow even with violations"
-    );
-    assert!(
-        !decision.violations.is_empty(),
-        "Violations should still be recorded in Audit mode"
-    );
-}
-
-#[test]
-fn test_conditional_access_wiring_client_override_stricter_wins() {
-    // Org policy: min_acr = Basic. Client override: required_acr = Standard.
-    // Effective policy = Standard (stricter wins). OPAQUE (Basic) → StepUp.
-    let policy = SecurityPolicy::ce_default(); // min_acr = Basic
-    let client = test_client_with_acr(
+// A client requiring Standard makes a password sign-in step up while a
+// verified passkey passes; a client asking less than the organization changes
+// nothing.
+#[tokio::test]
+async fn a_client_only_strengthens_the_requirement() {
+    let strict = test_client_with_acr(
         "strict-app",
         Some(sid_core::models::session::AuthLevel::Standard),
         EnforcementMode::Hard,
     );
-    let decision = auth_flow_conditional_access_decision(&policy, Some(&client), "opaque", false);
-    assert_eq!(
-        decision.action,
-        EnforcementAction::StepUp,
-        "Client override (Standard) should make OPAQUE (Basic) trigger StepUp"
-    );
+    let baseline = SecurityPolicy::ce_default();
+    assert!(matches!(
+        sign_in_decision(&baseline, Some(&strict), PASSWORD).await,
+        LoginDecision::StepUp(_)
+    ));
+    assert!(matches!(
+        sign_in_decision(&baseline, Some(&strict), passkey(true)).await,
+        LoginDecision::Allow { .. }
+    ));
 
-    // Same client, but WebAuthn+UV → Standard → Allow.
-    let decision_webauthn =
-        auth_flow_conditional_access_decision(&policy, Some(&client), "webauthn", true);
-    assert_eq!(
-        decision_webauthn.action,
-        EnforcementAction::Allow,
-        "WebAuthn+UV (Standard) should satisfy client's Standard requirement"
-    );
-}
-
-#[test]
-fn test_conditional_access_wiring_client_weaker_org_wins() {
-    // Org policy: min_acr = Standard. Client override: required_acr = Basic.
-    // Effective policy = Standard (org is stricter). OPAQUE (Basic) → StepUp.
-    let mut policy = SecurityPolicy::ce_default();
-    policy.auth.min_acr = sid_core::models::session::AuthLevel::Standard;
-    let client = test_client_with_acr(
+    let lenient = test_client_with_acr(
         "lenient-app",
         Some(sid_core::models::session::AuthLevel::Basic),
         EnforcementMode::Audit,
     );
-    let decision = auth_flow_conditional_access_decision(&policy, Some(&client), "opaque", false);
-    // Org is stricter (Standard, Hard) — effective policy uses org's values.
-    assert_eq!(
-        decision.action,
-        EnforcementAction::StepUp,
-        "Org policy (Standard) should override weaker client (Basic)"
-    );
+    assert!(matches!(
+        sign_in_decision(&standard(EnforcementMode::Hard), Some(&lenient), PASSWORD).await,
+        LoginDecision::StepUp(_)
+    ));
 }
 
 // ── Step-up evaluation tests ──────────────────────────────────
@@ -779,19 +744,35 @@ fn step_up_after_anomaly_names_the_need_not_the_rule() {
     assert!(!status.message().contains("new_device_ip"));
 }
 
-/// Every missing method is its own violation, so a client can list them.
+/// Every unmet requirement is its own violation by kind (the level, each
+/// missing method, the authentication age), so a client can act on each.
 #[test]
-fn step_up_to_amr_lists_every_missing_method() {
+fn a_step_up_names_every_unmet_requirement() {
     use tonic_types::StatusExt;
-    let status: Status = super::refusal::step_up_to_amr(["hwk", "mfa"]).into();
-    let subjects: Vec<String> = status
-        .get_details_precondition_failure()
+    let status: Status = super::refusal::step_up_required(&sid_authn::login_policy::Unmet {
+        acr: Some(sid_core::models::session::AuthLevel::Standard),
+        amr: vec!["hwk".into(), "mfa".into()],
+        max_authentication_age: Some(std::time::Duration::from_secs(300)),
+    })
+    .into();
+    let details = status.get_error_details();
+    assert_eq!(details.error_info().unwrap().reason, "STEP_UP_REQUIRED");
+    let violations: Vec<(String, String)> = details
+        .precondition_failure()
         .unwrap()
         .violations
-        .into_iter()
-        .map(|v| v.subject)
+        .iter()
+        .map(|v| (v.r#type.clone(), v.subject.clone()))
         .collect();
-    assert_eq!(subjects, ["hwk", "mfa"]);
+    assert_eq!(
+        violations,
+        [
+            ("acr".to_string(), "urn:sid:acr:standard".to_string()),
+            ("amr".to_string(), "hwk".to_string()),
+            ("amr".to_string(), "mfa".to_string()),
+            ("max_age".to_string(), "300".to_string()),
+        ]
+    );
 }
 
 /// A provider the proto has no kind for is an internal error, not a

@@ -1,9 +1,10 @@
-# release-plz configuration for the sid workspace.
+# release-plz configuration for the sid workspace: one release PR for every
+# released package, each with its own version, changelog and tag, selected by
+# its own changes since that tag.
 # The server binary (sid-server) is tagged `v<version>` and not published.
-# The vendored protocol crates (sid-voprf, sid-opaque-ke) are released and
+# sid-crypto and the vendored protocol crates (sid-voprf, sid-opaque-ke) are
 # published to crates.io, tagged `<crate>-v<version>`. Every other library
-# crate is neither tagged nor published by this configuration. sid-crypto
-# has an independent release configuration in .release-plz.crypto.toml.
+# crate is neither tagged nor published by this configuration.
 [workspace]
 publish = false
 release = false
@@ -26,6 +27,20 @@ git_tag_enable = true
 git_tag_name = "v{{ version }}"
 git_release_name = "v{{ version }}"
 changelog_update = false
+
+[[package]]
+name = "sid-crypto"
+release = true
+publish = true
+semver_check = true
+changelog_update = true
+changelog_path = "crates/sid-crypto/CHANGELOG.md"
+git_release_enable = true
+# The server's release stays the repository's latest.
+git_release_latest = false
+git_tag_enable = true
+git_tag_name = "{{ package }}-v{{ version }}"
+git_release_name = "{{ package }} v{{ version }}"
 
 [[package]]
 name = "sid-voprf"

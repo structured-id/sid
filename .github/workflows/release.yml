@@ -1,8 +1,7 @@
-# release-plz keeps a release PR with the next versions and changelogs from
-# conventional commits; merging it tags the released packages, creates the
-# GitHub releases and publishes sid-voprf and sid-opaque-ke to crates.io
-# (see .release-plz.toml).
-# sid-crypto has its own release PR prefix, version and tag namespace.
+# release-plz keeps one release PR with the next version and changelog of
+# every package that changed since its own tag; merging it tags the released
+# packages, creates the GitHub releases and publishes sid-crypto, sid-voprf
+# and sid-opaque-ke to crates.io (see .release-plz.toml).
 name: Release
 
 on:
@@ -19,18 +18,10 @@ concurrency:
 
 jobs:
   release-plz:
-    name: Release (${{ matrix.family }})
+    name: Release
     if: github.repository_owner == 'structured-id'
     runs-on: ubuntu-latest
     environment: release
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - family: runtime
-            config: .release-plz.toml
-          - family: crypto
-            config: .release-plz.crypto.toml
     permissions:
       contents: write
       pull-requests: write
@@ -56,13 +47,11 @@ jobs:
         uses: release-plz/action@v0.5
         with:
           command: release-pr
-          config: ${{ matrix.config }}
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
       - name: Release
         uses: release-plz/action@v0.5
         with:
           command: release
-          config: ${{ matrix.config }}
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}

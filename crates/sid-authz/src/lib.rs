@@ -9,7 +9,6 @@ pub mod admin;
 pub mod approval;
 pub mod builtin;
 pub mod cedar;
-pub mod conditional_access;
 pub mod config;
 pub mod decision;
 pub mod engine;

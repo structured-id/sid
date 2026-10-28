@@ -13,6 +13,15 @@ use tonic::metadata::MetadataMap;
 
 use super::*;
 
+/// ABORTED: the login policy changed while the grant was being committed; the
+/// authorization is asked again and judged under the current one.
+pub(super) fn policy_changed() -> Status {
+    Status::from(ApiError::new(
+        ErrorReason::ConcurrentModification,
+        "the login policy changed; authorize again",
+    ))
+}
+
 /// Whether `status` asks the user to authenticate further (STEP_UP_REQUIRED),
 /// as opposed to any other refusal of the request.
 fn asks_step_up(status: &Status) -> bool {
@@ -194,71 +203,35 @@ impl AuthServiceImpl {
     ) -> Result<OAuth2AuthorizeResponse, Status> {
         let profile_id = session.profile_id;
 
-        // ── Per-app policy enforcement ──
-        // The org policy, the client's override and the level the relying
-        // party asks for (OpenID Connect Core 1.0 §3.1.2.1 `acr_values`) are
-        // merged and judged by the one enforcement engine, which honours the
-        // client's enforcement mode. The engine judges the level; the
-        // client's required methods are checked after it.
+        // ── Login requirements of this application ──
+        // Every authorization is judged, over an existing session too: the
+        // requirements the policy states for this client now, with the
+        // client's own and the level the relying party asks for (OpenID
+        // Connect Core 1.0 §3.1.2.1 `acr_values`), each only strengthening.
         let requested_acr = req.acr_values.as_deref().and_then(parse_acr_values);
-        let policy =
-            sid_authz::conditional_access::ConditionalAccessEngine::resolve_effective_policy(
-                &self.security_policy,
-                Some(client),
-                requested_acr,
-            );
-        // Every session meets the lowest level, so only a higher level or a
-        // method requirement is judged.
-        if policy.min_acr > sid_core::models::session::AuthLevel::Basic
-            || !client.required_amr.is_empty()
-        {
-            use sid_core::models::enforcement::EnforcementAction;
-            let decision =
-                sid_authz::conditional_access::ConditionalAccessEngine::evaluate(&policy, session);
-            match decision.action {
-                EnforcementAction::Allow | EnforcementAction::Grace => {
-                    if decision.has_violations() {
-                        info!(
-                            client = %req.client_id,
-                            violations = ?decision.violations,
-                            "Policy not met, allowed by enforcement mode"
-                        );
-                    }
-                }
-                EnforcementAction::StepUp => {
+        let requirements = self
+            .login_requirements(Some(&req.client_id))
+            .await?
+            .with_client(client, requested_acr);
+        match requirements.decide(session, Utc::now()) {
+            sid_authn::login_policy::LoginDecision::Allow { audited } => {
+                if !audited.is_empty() {
                     info!(
                         client = %req.client_id,
-                        session_acr = ?session.assurance_at(Utc::now()),
-                        required = ?policy.min_acr,
-                        "Authorize: step-up required"
+                        unmet = ?audited,
+                        "Login requirements unmet, allowed by audit enforcement"
                     );
-                    return Err(super::step_up_to_acr(policy.min_acr.acr_value()).into());
-                }
-                EnforcementAction::Block => {
-                    warn!(
-                        client = %req.client_id,
-                        violations = ?decision.violations,
-                        "Authorize: denied by policy"
-                    );
-                    return Err(super::sign_in_refused());
                 }
             }
-
-            // Every method the client requires must be among the session's.
-            let missing: Vec<&str> = client
-                .required_amr
-                .iter()
-                .filter(|r| !session.amr.contains(r))
-                .map(String::as_str)
-                .collect();
-            if !missing.is_empty() {
+            sid_authn::login_policy::LoginDecision::StepUp(unmet) => {
                 info!(
                     client = %req.client_id,
+                    session_acr = ?session.assurance_at(Utc::now()),
                     session_amr = ?session.amr,
-                    ?missing,
-                    "Authorize: required methods missing"
+                    ?unmet,
+                    "Authorize: step-up required"
                 );
-                return Err(super::step_up_to_amr(missing).into());
+                return Err(super::step_up_required(&unmet).into());
             }
         }
 
@@ -289,18 +262,22 @@ impl AuthServiceImpl {
             )
             .map_err(|e| internal("generate authorization code", e))?;
 
-        self.storage
-            .create_auth_code(
-                &auth_code,
-                AuditEntry::user(
-                    profile_id.to_string(),
-                    "auth_code.create",
-                    auth_code.client_id.clone(),
-                )
-                .into(),
-            )
-            .await
-            .map_err(storage_failure)?;
+        // The code commits only while the policy it was judged under holds:
+        // a change since asks for the authorization again.
+        let mut ctx: sid_core::models::MutationContext = AuditEntry::user(
+            profile_id.to_string(),
+            "auth_code.create",
+            auth_code.client_id.clone(),
+        )
+        .into();
+        if let Some(fence) = requirements.fence {
+            ctx = ctx.fenced_by(fence);
+        }
+        match self.storage.create_auth_code(&auth_code, ctx).await {
+            Ok(()) => {}
+            Err(sid_core::Error::Fenced(_)) => return Err(policy_changed()),
+            Err(e) => return Err(storage_failure(e)),
+        }
 
         info!(
             "Issued auth code for profile {} → client {}",

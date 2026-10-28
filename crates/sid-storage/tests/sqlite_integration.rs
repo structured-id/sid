@@ -766,7 +766,7 @@ macro_rules! grant_store {
         async fn $scenario() {
             let backend = setup().await;
             sid_plugin::conformance::grant_store::$scenario(
-                &common::grant_conformance::ProfileGrants(&backend),
+                &common::grant_conformance::ProfileGrants::sqlite(&backend),
             )
             .await;
         }
@@ -778,6 +778,10 @@ mod grant_store {
 
     grant_store!(
         session_refused_once_its_owner_is_suspended,
+        session_commits_only_under_the_current_login_policy,
+        auth_code_commits_only_under_the_current_login_policy,
+        a_policy_write_serializes_with_its_sessions,
+        a_login_policy_fence_is_never_ignored,
         session_refused_after_its_password_changed,
         session_fence_is_the_owners_credential,
         session_fence_serializes_with_a_reset,

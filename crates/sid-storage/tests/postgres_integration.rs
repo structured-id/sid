@@ -892,7 +892,35 @@ macro_rules! grant_store {
         async fn $scenario() {
             let backend = setup().await;
             sid_plugin::conformance::grant_store::$scenario(
-                &common::grant_conformance::ProfileGrants(&backend),
+                &common::grant_conformance::ProfileGrants::postgres(&backend),
+            )
+            .await;
+        }
+    )*};
+}
+
+/// A backend over a schema of its own: the installation's login-policy epoch
+/// is one per database, and no other scenario advances it.
+async fn setup_isolated() -> PostgresBackend {
+    let schema = format!("grants_{}", uuid::Uuid::now_v7().simple());
+    let backend = PostgresBackend::new(&database_url(), Some(schema.clone()))
+        .await
+        .expect("Failed to connect to PostgreSQL. Is the database running?");
+    sid_storage::migrator::run_migrations(backend.pool(), Some(&schema))
+        .await
+        .expect("Failed to run migrations");
+    backend
+}
+
+/// Run grant store conformance `scenario` against this backend in a schema
+/// of its own.
+macro_rules! grant_store_isolated {
+    ($($scenario:ident),* $(,)?) => {$(
+        #[tokio::test]
+        async fn $scenario() {
+            let backend = setup_isolated().await;
+            sid_plugin::conformance::grant_store::$scenario(
+                &common::grant_conformance::ProfileGrants::postgres(&backend),
             )
             .await;
         }
@@ -902,8 +930,15 @@ macro_rules! grant_store {
 mod grant_store {
     use super::*;
 
+    grant_store_isolated!(
+        session_commits_only_under_the_current_login_policy,
+        auth_code_commits_only_under_the_current_login_policy,
+        a_policy_write_serializes_with_its_sessions,
+    );
+
     grant_store!(
         session_refused_once_its_owner_is_suspended,
+        a_login_policy_fence_is_never_ignored,
         session_refused_after_its_password_changed,
         session_fence_is_the_owners_credential,
         session_fence_serializes_with_a_reset,

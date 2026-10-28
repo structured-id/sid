@@ -201,6 +201,7 @@ impl Installation {
                 enrollment_pin: None,
                 browser_cookie: None,
                 without_sign_in_page: false,
+                login_policy: None,
             },
         );
         let project = Arc::new(ProjectServiceImpl::new(
