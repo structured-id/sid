@@ -507,7 +507,7 @@ pub struct AuthServiceImpl {
     totp_enrollment: ChallengeStore<(ProfileId, Vec<u8>)>,
     /// Admitted sign-ins that finished (committed, their evictions revoked
     /// everywhere), keyed by operation: only these are delivered again.
-    admitted_ready: ChallengeStore<()>,
+    admitted_ready: ChallengeStore<AdmittedFinish>,
     /// How long after its commit an admitted sign-in may still be finishing;
     /// one committed longer ago and not finished never will.
     admitted_finish_bound: std::time::Duration,
@@ -2325,13 +2325,10 @@ impl AuthServiceImpl {
         if !profile.status.can_authenticate() {
             return Err(authentication_failed());
         }
-        if let Some(completion) = &completion
-            && let Some(signed_in) = self
-                .redeliver_admitted(completion, client_id, profile.id)
-                .await?
-        {
-            return Ok(signed_in);
-        }
+        // The rules this request meets now (address, lockout, anomalies and
+        // requirements), a repeat of a completed operation included: a
+        // retained credential is never delivered where the sign-in itself
+        // would be refused.
         let client_ip = self.client_ip(request);
         let user_agent = extract_user_agent(request.metadata());
         let user_agent = user_agent.as_deref();
@@ -2348,6 +2345,13 @@ impl AuthServiceImpl {
                 Some(client_id),
             )
             .await?;
+        if let Some(completion) = &completion
+            && let Some(signed_in) = self
+                .redeliver_admitted(completion, client_id, profile.id)
+                .await?
+        {
+            return Ok(signed_in);
+        }
         let lifetime = match self.security_policy.session.max_lifetime_hours {
             0 => Duration::hours(24),
             hours => Duration::hours(i64::from(hours)),
@@ -2411,10 +2415,16 @@ impl AuthServiceImpl {
             },
             Ok(signed_in) => {
                 // The session and its evictions are in force everywhere: only
-                // now may a repeat deliver it again.
-                self.admitted_ready
-                    .insert_until(completion.operation, &(), deadline)
-                    .await?;
+                // now may a repeat deliver it again. A repeat that already
+                // settled the operation as abandoned ended its session.
+                if deadline > Utc::now()
+                    && !self
+                        .admitted_ready
+                        .insert_new_until(completion.operation, &AdmittedFinish::Ready, deadline)
+                        .await?
+                {
+                    return Err(unfinished_sign_in());
+                }
                 Ok(signed_in)
             }
         }
@@ -2466,42 +2476,56 @@ impl AuthServiceImpl {
         // session is ended instead of holding a session slot until it
         // expires, and the entry starts again (a lost response may, not must,
         // be delivered again).
-        if self
-            .admitted_ready
-            .read(completion.operation)
-            .await?
-            .is_none()
-        {
-            let unfinished = chrono::Duration::from_std(self.admitted_finish_bound)
-                .map_err(|e| internal("the admitted sign-in's finish bound", e))?;
-            if now - record.completed_at >= unfinished {
-                let session_id = delivery
-                    .session_id
-                    .parse()
-                    .map_err(|e| internal("the retained session reference", e))?;
-                self.storage
-                    .delete_session(
-                        session_id,
-                        &sid_core::models::SessionEnd::new(
-                            sid_core::models::RevocationReason::Cascade,
-                            "system",
-                        ),
-                        AuditEntry::system("session.unfinished_sign_in", session_id.to_string())
-                            .into(),
-                    )
-                    .await
-                    .map_err(storage_failure)?;
-            }
-            return Err(sid_core::grpc_error::ApiError::new(
-                ErrorReason::ConcurrentModification,
-                "the sign-in has not finished; start it again",
-            )
-            .into());
-        }
+        // The operation settles once, Ready by its own attempt after the
+        // finish, Abandoned by a repeat after the bound: whichever is first
+        // decides, so a cleanup never races a delivery.
         let session_id = delivery
             .session_id
             .parse()
             .map_err(|e| internal("the retained session reference", e))?;
+        let settled = match self.admitted_ready.read(completion.operation).await? {
+            Some(settled) => settled,
+            None => {
+                let unfinished = chrono::Duration::from_std(self.admitted_finish_bound)
+                    .map_err(|e| internal("the admitted sign-in's finish bound", e))?;
+                if now - record.completed_at < unfinished {
+                    return Err(unfinished_sign_in());
+                }
+                if self
+                    .admitted_ready
+                    .insert_new_until(
+                        completion.operation,
+                        &AdmittedFinish::Abandoned,
+                        delivery.deadline,
+                    )
+                    .await?
+                {
+                    self.storage
+                        .delete_session(
+                            session_id,
+                            &sid_core::models::SessionEnd::new(
+                                sid_core::models::RevocationReason::Cascade,
+                                "system",
+                            ),
+                            AuditEntry::system(
+                                "session.unfinished_sign_in",
+                                session_id.to_string(),
+                            )
+                            .into(),
+                        )
+                        .await
+                        .map_err(storage_failure)?;
+                    return Err(unfinished_sign_in());
+                }
+                self.admitted_ready
+                    .read(completion.operation)
+                    .await?
+                    .ok_or_else(unfinished_sign_in)?
+            }
+        };
+        if settled == AdmittedFinish::Abandoned {
+            return Err(unfinished_sign_in());
+        }
         let session = self
             .storage
             .get_session(session_id)
@@ -6743,6 +6767,24 @@ fn token_endpoint(issuer: &OidcIssuer) -> String {
 
 /// The grant type a device polls the token endpoint with (RFC 8628 §3.4).
 const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
+
+/// How an admitted sign-in's operation settled after its commit: finished by
+/// its own attempt, or abandoned by a repeat once it could no longer finish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum AdmittedFinish {
+    Ready,
+    Abandoned,
+}
+
+/// A committed admitted sign-in that has not finished, or never will: the
+/// entry starts again.
+fn unfinished_sign_in() -> Status {
+    ApiError::new(
+        ErrorReason::ConcurrentModification,
+        "the sign-in has not finished; start it again",
+    )
+    .into()
+}
 
 /// How long an admitted sign-in may still be finishing after its commit: the
 /// revocation of its evictions and its ready mark, a few shared-cache writes.

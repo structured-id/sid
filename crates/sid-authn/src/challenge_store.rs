@@ -111,6 +111,27 @@ impl<V: Serialize + DeserializeOwned> ChallengeStore<V> {
         Ok(true)
     }
 
+    /// Store `value` under `key` until `deadline` only if nothing is stored
+    /// there: of concurrent callers on any replica, one stores and gets
+    /// `true`. `false` when another value is held or the deadline has passed.
+    pub async fn insert_new_until(
+        &self,
+        key: &str,
+        value: &V,
+        deadline: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, ChallengeStoreError> {
+        let Ok(left) = (deadline - chrono::Utc::now()).to_std() else {
+            return Ok(false);
+        };
+        if left.is_zero() {
+            return Ok(false);
+        }
+        let context = self.context(key);
+        let plain = zeroize::Zeroizing::new(serde_json::to_vec(value)?);
+        let sealed = sealed_secret::seal(self.keys.as_ref(), &context, &plain).await?;
+        Ok(self.cache.set_nx(&context, &sealed, left).await?)
+    }
+
     /// Take the value under `key`: of any number of concurrent callers on any
     /// replica, one gets it; absent or expired state is `None`.
     pub async fn take(&self, key: &str) -> Result<Option<V>, ChallengeStoreError> {

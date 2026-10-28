@@ -44,6 +44,31 @@ async fn concurrent_takes_have_one_winner() {
     assert_eq!(winners, 1);
 }
 
+/// Of replicas racing to settle one key, exactly one stores its value and the
+/// others see it; a past deadline stores nothing.
+#[tokio::test]
+async fn the_first_settlement_wins() {
+    let (a, b) = replicas(Duration::from_secs(60));
+    let deadline = chrono::Utc::now() + chrono::Duration::seconds(60);
+    let (ready, abandoned) = ("ready".to_string(), "abandoned".to_string());
+    let (first, second) = tokio::join!(
+        a.insert_new_until("k1", &ready, deadline),
+        b.insert_new_until("k1", &abandoned, deadline),
+    );
+    let (first, second) = (first.unwrap(), second.unwrap());
+    assert!(first != second, "one settlement wins");
+    let settled = a.read("k1").await.unwrap().unwrap();
+    assert_eq!(settled, if first { "ready" } else { "abandoned" });
+
+    let past = chrono::Utc::now() - chrono::Duration::seconds(1);
+    assert!(
+        !a.insert_new_until("k2", &"late".to_string(), past)
+            .await
+            .unwrap()
+    );
+    assert!(a.read("k2").await.unwrap().is_none());
+}
+
 /// A replacement applies only to exactly what was read: of two replicas that
 /// read the same state, the first replaces it and the second, now stale,
 /// changes nothing; a past deadline replaces nothing either.

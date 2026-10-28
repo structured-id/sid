@@ -506,6 +506,61 @@ async fn an_unfinished_sign_in_leaves_no_live_session_behind() {
     );
 }
 
+// A repeat is judged by the rules in force now: once the account is locked
+// out the retained session is not delivered again. Before, a repeat skipped
+// the sign-in rules and got the cookie.
+#[tokio::test]
+async fn a_repeat_after_a_lockout_is_refused() {
+    let storage = storage().await;
+    let cache: Arc<dyn sid_plugin::cache::CacheBackend> =
+        Arc::new(sid_plugin::cache::InMemoryCacheBackend::new());
+    let mut policy = SecurityPolicy::ce_default();
+    policy.auth.min_acr = AuthLevel::Basic;
+    let auth = common::auth_service_over(
+        storage.clone(),
+        cache.clone(),
+        Some(policy),
+        Some(EnrollmentMode::Open),
+    );
+    let profile = profile(storage.as_ref()).await;
+    let op = operation();
+    let deadline = Utc::now() + Duration::minutes(10);
+    let request = tonic::Request::new(());
+    auth.complete_admitted_sign_in(
+        &request,
+        &profile,
+        &basic(),
+        CLIENT,
+        Some(completion(&op, deadline)),
+    )
+    .await
+    .unwrap();
+
+    let detector = sid_authn::anomaly::AnomalyDetector::ce_default(cache);
+    for _ in 0..5 {
+        detector
+            .record_failed_attempt(&profile.id.to_string())
+            .await
+            .unwrap();
+    }
+    let refused = auth
+        .complete_admitted_sign_in(
+            &request,
+            &profile,
+            &basic(),
+            CLIENT,
+            Some(completion(&op, deadline)),
+        )
+        .await
+        .err()
+        .expect("a locked-out account gets nothing again");
+    assert_eq!(
+        refused.code(),
+        tonic::Code::ResourceExhausted,
+        "{refused:?}"
+    );
+}
+
 // Nothing is delivered again for a session that ended, a Profile suspended
 // since, or after the operation's deadline; no replacement session appears.
 #[tokio::test]
