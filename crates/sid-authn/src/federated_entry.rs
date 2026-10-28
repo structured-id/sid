@@ -47,7 +47,7 @@ pub struct TrustedIssuer {
 }
 
 /// What the request asks the issuer for, beyond the subject.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EntryRequest {
     /// The assurance the issuer is asked to establish (`acr_values`, OpenID
     /// Connect Core 1.0 §3.1.2.1).
@@ -57,7 +57,9 @@ pub struct EntryRequest {
     pub max_age: Option<Duration>,
 }
 
-/// A started entry, kept until its return.
+/// A started entry, kept until its return. Only this shape is read: an entry
+/// stored in another one fails to decode and completes nothing, and lives no
+/// longer than [`PENDING_TTL`].
 #[derive(Serialize, Deserialize)]
 struct Pending {
     /// The issuer and client the entry was started for: another relying
@@ -69,16 +71,19 @@ struct Pending {
     redirect_uri: String,
     /// Where the caller continues once the entry is admitted.
     continuation: String,
+    /// What the entry asked the issuer for.
+    request: EntryRequest,
 }
 
 /// A returned entry: the subject the issuer signed in for this recipient,
-/// how it authenticated (the issuer's statement, not this installation's)
-/// and where the caller continues.
+/// how it authenticated (the issuer's statement, not this installation's),
+/// where the caller continues and what the entry asked the issuer for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Returned {
     pub subject: String,
     pub evidence: AcceptedEvidence,
     pub continuation: String,
+    pub requested: EntryRequest,
 }
 
 /// Why an entry did not complete. Every case completes nothing.
@@ -171,6 +176,7 @@ impl FederatedEntry {
                     code_verifier,
                     redirect_uri: redirect_uri.to_owned(),
                     continuation: continuation.to_owned(),
+                    request: request.clone(),
                 },
             )
             .await?;
@@ -254,6 +260,7 @@ impl FederatedEntry {
             subject,
             evidence,
             continuation: pending.continuation,
+            requested: pending.request,
         })
     }
 
