@@ -25,6 +25,21 @@ struct Issued {
     challenge: Option<String>,
     /// Exchanges the token endpoint served.
     exchanges: usize,
+    /// The failure the issuer answers with, if any.
+    fault: Fault,
+}
+
+/// A failure of the test issuer.
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum Fault {
+    #[default]
+    None,
+    /// The token endpoint takes the code and answers 500.
+    TokenServerError,
+    /// Discovery names a token endpoint nobody listens on.
+    TokenUnreachable,
+    /// The key set answers 500.
+    KeysDown,
 }
 
 /// A local trusted issuer: discovery, key set and token endpoint, signing
@@ -65,9 +80,22 @@ impl TestIssuer {
                 };
                 let (head, body) = read_request(&mut socket).await;
                 let path = head.split_whitespace().nth(1).unwrap_or("").to_owned();
+                let fault = state.lock().unwrap().fault;
                 let (status, answer) = match path.as_str() {
-                    "/i/central/.well-known/openid-configuration" => (200, discovery.clone()),
+                    "/i/central/.well-known/openid-configuration" => {
+                        let mut discovery = discovery.clone();
+                        if fault == Fault::TokenUnreachable {
+                            // The discard port: no listener, connection refused.
+                            discovery["token_endpoint"] = json!("http://127.0.0.1:9/token");
+                        }
+                        (200, discovery)
+                    }
+                    "/i/central/jwks" if fault == Fault::KeysDown => (500, json!({})),
                     "/i/central/jwks" => (200, keys.clone()),
+                    "/i/central/oauth2/token" if fault == Fault::TokenServerError => {
+                        state.lock().unwrap().exchanges += 1;
+                        (500, json!({}))
+                    }
                     "/i/central/oauth2/token" => token(&state, &head, &body),
                     _ => (404, json!({})),
                 };
@@ -131,6 +159,10 @@ impl TestIssuer {
 
     fn exchanges(&self) -> usize {
         self.issued.lock().unwrap().exchanges
+    }
+
+    fn fail(&self, fault: Fault) {
+        self.issued.lock().unwrap().fault = fault;
     }
 }
 
@@ -331,20 +363,20 @@ async fn a_return_names_what_its_entry_requested() {
     }
 }
 
-// Regression guard: a return completes once. A replayed state, an unknown
-// one and one returning to another redirect URI complete nothing, and the
-// last never reaches the token endpoint.
+// Regression guard: a return exchanges its code once. Repeating it in the
+// same browser (its response was lost) returns the same entry without a
+// second exchange; an unknown state and a return to another redirect URI
+// complete nothing, and the last never reaches the token endpoint.
 #[tokio::test]
 async fn a_return_completes_once_and_only_at_its_redirect() {
     let issuer = TestIssuer::start().await;
     let entry = entry(&issuer);
     let browser = begin(&entry, &EntryRequest::default()).await;
     issuer.issue_for(&browser.url, json!({}));
-    browser.complete(&entry, "c", REDIRECT).await.unwrap();
-    assert!(matches!(
-        browser.complete(&entry, "c", REDIRECT).await,
-        Err(EntryError::Unknown)
-    ));
+    let first = browser.complete(&entry, "c", REDIRECT).await.unwrap();
+    let again = browser.complete(&entry, "c", REDIRECT).await.unwrap();
+    assert_eq!(again, first);
+    assert_eq!(issuer.exchanges(), 1, "the code was redeemed twice");
     assert!(matches!(
         entry
             .complete("unknown", [browser.cookie.as_str()], "c", REDIRECT)
@@ -450,6 +482,124 @@ async fn only_a_sid_acr_urn_is_a_level() {
         assert_eq!(returned.evidence.acr, None, "{acr}");
         assert_eq!(returned.evidence.authentication(Utc::now()), None, "{acr}");
     }
+}
+
+// An exchange whose outcome is unknown (the issuer took the code and answered
+// a server error) is never repeated: the return and every retry of it are
+// ambiguous, and the issuer sees one exchange.
+#[tokio::test]
+async fn an_exchange_of_unknown_outcome_is_never_repeated() {
+    let issuer = TestIssuer::start().await;
+    let entry = entry(&issuer);
+    let browser = begin(&entry, &EntryRequest::default()).await;
+    issuer.issue_for(&browser.url, json!({}));
+    issuer.fail(Fault::TokenServerError);
+    assert!(matches!(
+        browser.complete(&entry, "c", REDIRECT).await,
+        Err(EntryError::Ambiguous)
+    ));
+    issuer.fail(Fault::None);
+    assert!(matches!(
+        browser.complete(&entry, "c", REDIRECT).await,
+        Err(EntryError::Ambiguous)
+    ));
+    assert_eq!(issuer.exchanges(), 1);
+}
+
+// A token request that never reached the issuer leaves the code unspent: the
+// return is retried and completes with one exchange.
+#[tokio::test]
+async fn an_unsent_exchange_is_retried() {
+    let issuer = TestIssuer::start().await;
+    let entry = entry(&issuer);
+    let browser = begin(&entry, &EntryRequest::default()).await;
+    issuer.issue_for(&browser.url, json!({}));
+    issuer.fail(Fault::TokenUnreachable);
+    assert!(matches!(
+        browser.complete(&entry, "c", REDIRECT).await,
+        Err(EntryError::Issuer(_))
+    ));
+    issuer.fail(Fault::None);
+    browser.complete(&entry, "c", REDIRECT).await.unwrap();
+    assert_eq!(issuer.exchanges(), 1);
+}
+
+// A token answer kept before its validation failed for want of keys is
+// validated on retry without another exchange.
+#[tokio::test]
+async fn a_kept_answer_is_validated_on_retry_without_another_exchange() {
+    let issuer = TestIssuer::start().await;
+    let entry = entry(&issuer);
+    let browser = begin(&entry, &EntryRequest::default()).await;
+    issuer.issue_for(&browser.url, json!({}));
+    issuer.fail(Fault::KeysDown);
+    assert!(matches!(
+        browser.complete(&entry, "c", REDIRECT).await,
+        Err(EntryError::Issuer(_))
+    ));
+    issuer.fail(Fault::None);
+    let returned = browser.complete(&entry, "c", REDIRECT).await.unwrap();
+    assert_eq!(returned.continuation, CONTINUATION);
+    assert_eq!(issuer.exchanges(), 1);
+}
+
+// Returns racing on several replicas exchange the code at most once; any
+// return that did not own the exchange is ambiguous or sees the same entry.
+#[tokio::test]
+async fn racing_returns_exchange_at_most_once() {
+    let issuer = TestIssuer::start().await;
+    let cache: Arc<dyn CacheBackend> = Arc::new(InMemoryCacheBackend::new());
+    let replicas = [entry_on(&issuer, cache.clone()), entry_on(&issuer, cache)];
+    let browser = begin(&replicas[0], &EntryRequest::default()).await;
+    issuer.issue_for(&browser.url, json!({}));
+    let (a, b) = tokio::join!(
+        browser.complete(&replicas[0], "c", REDIRECT),
+        browser.complete(&replicas[1], "c", REDIRECT)
+    );
+    assert_eq!(issuer.exchanges(), 1);
+    let completed: Vec<_> = [a, b]
+        .into_iter()
+        .filter_map(|r| match r {
+            Ok(returned) => Some(returned),
+            Err(EntryError::Ambiguous) => None,
+            Err(e) => panic!("{e}"),
+        })
+        .collect();
+    assert!(!completed.is_empty());
+    assert!(completed.windows(2).all(|w| w[0] == w[1]));
+}
+
+// A return's operation reference is stable for its entry and browser and
+// differs between entries; its deadline is the one the entry started with.
+#[tokio::test]
+async fn a_return_names_its_operation_and_deadline() {
+    let issuer = TestIssuer::start().await;
+    let entry = entry(&issuer);
+    let before = Utc::now();
+    let first = begin(&entry, &EntryRequest::default()).await;
+    issuer.issue_for(&first.url, json!({}));
+    let returned = first.complete(&entry, "c", REDIRECT).await.unwrap();
+    assert_eq!(
+        first
+            .complete(&entry, "c", REDIRECT)
+            .await
+            .unwrap()
+            .operation,
+        returned.operation
+    );
+    let ttl = chrono::Duration::from_std(PENDING_TTL).unwrap();
+    assert!(returned.deadline >= before + ttl && returned.deadline <= Utc::now() + ttl);
+
+    let second = begin(&entry, &EntryRequest::default()).await;
+    issuer.issue_for(&second.url, json!({}));
+    assert_ne!(
+        second
+            .complete(&entry, "c", REDIRECT)
+            .await
+            .unwrap()
+            .operation,
+        returned.operation
+    );
 }
 
 // A return completes only in the browser that started its entry (RFC 9700
