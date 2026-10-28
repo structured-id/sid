@@ -863,10 +863,29 @@ impl AuthServiceImpl {
         user_verified: bool,
         extras: LoginSecurityExtras<'_>,
     ) -> Result<(), Status> {
+        self.evaluate_sign_in(
+            profile_id,
+            client_ip,
+            sid_authn::sign_in_security::AttemptAuthentication::Local {
+                method: auth_method,
+                user_verified,
+            },
+            extras,
+        )
+        .await
+    }
+
+    /// The same rules and policy for a sign-in verified as `authentication`.
+    async fn evaluate_sign_in(
+        &self,
+        profile_id: ProfileId,
+        client_ip: Option<std::net::IpAddr>,
+        authentication: sid_authn::sign_in_security::AttemptAuthentication<'_>,
+        extras: LoginSecurityExtras<'_>,
+    ) -> Result<(), Status> {
         let attempt = sid_authn::sign_in_security::SignInAttempt {
             client_ip,
-            method: auth_method,
-            user_verified,
+            authentication,
             captcha_pass: extras.captcha_pass,
             user_agent: extras.user_agent,
         };
@@ -2166,6 +2185,62 @@ impl AuthServiceImpl {
             "email".to_string(),
         ];
         self.sign_in(profile, session, ceremony.client, None).await
+    }
+
+    /// Sign `profile` in on the accepted evidence of an explicitly trusted
+    /// issuer: a host admitted a federated entry (its exact issuer, client,
+    /// subject and association) and `authentication` is what that evidence
+    /// attests (see `AcceptedEvidence::authentication`). It completes as
+    /// every sign-in does: only an active Profile, after the sign-in rules
+    /// and this authority's policy weigh that authentication, with a session
+    /// of this authority's lifetime and limit recording it. `request` is the
+    /// browser's return the host checked by its state: its client address
+    /// and device are the sign-in's, and the browser gets the IdP session
+    /// cookie.
+    pub async fn complete_admitted_sign_in<T>(
+        &self,
+        request: &Request<T>,
+        profile: &sid_core::models::Profile,
+        authentication: &sid_core::models::session::SessionAuthentication,
+    ) -> Result<SignedIn, Status> {
+        if !profile.status.can_authenticate() {
+            return Err(authentication_failed());
+        }
+        let client_ip = self.client_ip(request);
+        let user_agent = extract_user_agent(request.metadata());
+        let user_agent = user_agent.as_deref();
+        let captcha_pass = extract_captcha_pass(request.metadata());
+        self.evaluate_sign_in(
+            profile.id,
+            client_ip,
+            sid_authn::sign_in_security::AttemptAuthentication::Accepted(authentication),
+            LoginSecurityExtras {
+                captcha_pass: captcha_pass.as_deref(),
+                user_agent,
+            },
+        )
+        .await?;
+        let lifetime = match self.security_policy.session.max_lifetime_hours {
+            0 => Duration::hours(24),
+            hours => Duration::hours(i64::from(hours)),
+        };
+        let mut session = sid_core::models::Session::new(
+            profile.id,
+            session_address(client_ip),
+            Utc::now() + lifetime,
+        );
+        session.device_id = user_agent.map(compute_device_id);
+        session.assurance_level = authentication.assurance_level;
+        session.elevation = authentication.elevation;
+        session.authenticated_at = authentication.authenticated_at;
+        session.amr = authentication.amr.clone();
+        session.scopes = vec![
+            "openid".to_string(),
+            "profile".to_string(),
+            "email".to_string(),
+        ];
+        self.sign_in(profile, session, CeremonyClient::Browser, None)
+            .await
     }
 
     /// Refuse to create an account for an upstream sign-in this authority

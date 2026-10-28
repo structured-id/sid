@@ -134,6 +134,61 @@ pub struct SessionAuthentication {
     pub amr: Vec<String>,
 }
 
+/// What an explicitly trusted issuer's validated ID Token attests about its
+/// holder's authentication, as the receiving authority accepts it: the shared
+/// SID ACR, the methods and the real authentication time (OpenID Connect Core
+/// 1.0 §2: `acr`, `amr`, `auth_time`). An ACR that is no shared SID URN is no
+/// level: it is never ordered or read as `Basic`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptedEvidence {
+    /// The attested level, `None` when the token named none or one SID does
+    /// not define.
+    pub acr: Option<AuthLevel>,
+    /// The attested methods (RFC 8176), kept as the issuer stated them.
+    pub amr: Vec<String>,
+    /// When the holder actually authenticated at the issuer.
+    pub auth_time: DateTime<Utc>,
+}
+
+impl AcceptedEvidence {
+    /// The evidence with the ACR the token names: a shared SID URN, or no
+    /// level for any other string.
+    pub fn new(acr: Option<&str>, amr: Vec<String>, auth_time: DateTime<Utc>) -> Self {
+        Self {
+            acr: acr.and_then(|value| {
+                value
+                    .starts_with("urn:sid:acr:")
+                    .then(|| AuthLevel::from_acr_value(value))
+                    .flatten()
+            }),
+            amr,
+            auth_time,
+        }
+    }
+
+    /// The authentication a session admitted on this evidence holds at
+    /// `now`, or `None` when it attests no level. Up to `Standard` the level
+    /// is the session's own. `Elevated` and `Critical` are a step-up bounded
+    /// as every step-up is, counted from `auth_time`: admitting the evidence
+    /// later, again or on a refresh never restarts the window, and a window
+    /// that already ended grants nothing.
+    pub fn authentication(&self, now: DateTime<Utc>) -> Option<SessionAuthentication> {
+        let level = self.acr?;
+        let elevation = (level >= AuthLevel::Elevated)
+            .then(|| Elevation {
+                level,
+                until: self.auth_time + chrono::Duration::minutes(ELEVATION_TTL_MINUTES),
+            })
+            .filter(|e| e.until > now);
+        Some(SessionAuthentication {
+            assurance_level: level.min(AuthLevel::Standard),
+            elevation,
+            authenticated_at: self.auth_time,
+            amr: self.amr.clone(),
+        })
+    }
+}
+
 /// When and how the user behind a grant authenticated: an authorization
 /// code carries it from the session that authorized it to the tokens it
 /// redeems into (`auth_time`, `amr`, `acr`).
