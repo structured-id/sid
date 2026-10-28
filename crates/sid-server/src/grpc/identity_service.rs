@@ -80,7 +80,9 @@ fn contact_taken(principal_type: sid_core::models::PrincipalType) -> Status {
         PrincipalType::Username => ErrorReason::UsernameAlreadyTaken,
         PrincipalType::Email => ErrorReason::EmailAlreadyRegistered,
         PrincipalType::Phone => ErrorReason::PhoneAlreadyRegistered,
-        PrincipalType::FaceEmbedding | PrincipalType::NfcTag => ErrorReason::PrincipalAlreadyHeld,
+        PrincipalType::FaceEmbedding | PrincipalType::NfcTag | PrincipalType::FederatedSubject => {
+            ErrorReason::PrincipalAlreadyHeld
+        }
     };
     let field = principal_type.as_str();
     ApiError::new(
@@ -1113,7 +1115,7 @@ impl IdentityService for IdentityServiceImpl {
                 .await?
             {
                 return Ok(Response::new(AddPrincipalResponse {
-                    principal: Some(convert::principal_to_proto(&repaired)),
+                    principal: convert::principal_to_proto(&repaired),
                 }));
             }
             // The handle's delivery address: the profile's contact with this
@@ -1162,7 +1164,7 @@ impl IdentityService for IdentityServiceImpl {
         info!("Added {} principal for profile {}", principal_type, pid);
 
         Ok(Response::new(AddPrincipalResponse {
-            principal: Some(convert::principal_to_proto(&stored)),
+            principal: convert::principal_to_proto(&stored),
         }))
     }
 
@@ -1184,7 +1186,10 @@ impl IdentityService for IdentityServiceImpl {
             .map_err(storage_failure)?;
 
         Ok(Response::new(ListPrincipalsResponse {
-            principals: principals.iter().map(convert::principal_to_proto).collect(),
+            principals: principals
+                .iter()
+                .filter_map(convert::principal_to_proto)
+                .collect(),
         }))
     }
 
@@ -1907,6 +1912,11 @@ pub(crate) fn stored_principal_value(
             }
             Ok((value.to_owned(), None))
         }
+        // Only a confirmed federation association records one, never a caller.
+        PrincipalType::FederatedSubject => Err(invalid_field(
+            "type",
+            "a federated subject is recorded by its association, not added",
+        )),
     }
 }
 

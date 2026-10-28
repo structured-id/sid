@@ -493,29 +493,53 @@ impl PostgresBackend {
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         session: &Session,
         max_sessions: u32,
-        proved_by: Option<&sid_core::models::CredentialFence>,
+        proved_by: Option<sid_core::models::SignInProof<'_>>,
         audit: &mut MutationContext,
     ) -> SidResult<Vec<SessionId>> {
-        if let Some(fence) = proved_by {
-            // FOR SHARE holds the credential row until this commit: a reset's
-            // update waits for it, and one that committed first is read here
-            // with its new data, so the session is refused.
-            let current: Option<i32> = sqlx::query_scalar(
-                "SELECT 1 FROM credentials
-                 WHERE id = $1 AND profile_id = $2 AND status = 'active' AND data = $3
-                 FOR SHARE",
-            )
-            .bind(fence.id.0)
-            .bind(session.profile_id)
-            .bind(fence.data.expose())
-            .fetch_optional(&mut **tx)
-            .await
-            .map_err(|e| SidError::Storage(format!("check session credential: {e}")))?;
-            if current.is_none() {
-                return Err(SidError::Fenced(
-                    "the credential the sign-in proved changed before its session".into(),
-                ));
+        use sid_core::models::SignInProof;
+        match proved_by {
+            Some(SignInProof::Credential(fence)) => {
+                // FOR SHARE holds the credential row until this commit: a
+                // reset's update waits for it, and one that committed first
+                // is read here with its new data, so the session is refused.
+                let current: Option<i32> = sqlx::query_scalar(
+                    "SELECT 1 FROM credentials
+                     WHERE id = $1 AND profile_id = $2 AND status = 'active' AND data = $3
+                     FOR SHARE",
+                )
+                .bind(fence.id.0)
+                .bind(session.profile_id)
+                .bind(fence.data.expose())
+                .fetch_optional(&mut **tx)
+                .await
+                .map_err(|e| SidError::Storage(format!("check session credential: {e}")))?;
+                if current.is_none() {
+                    return Err(SidError::Fenced(
+                        "the credential the sign-in proved changed before its session".into(),
+                    ));
+                }
             }
+            Some(SignInProof::Assignment(fence)) => {
+                // The same row lock orders the assignment's release or move
+                // with this commit.
+                let current: Option<i32> = sqlx::query_scalar(
+                    "SELECT 1 FROM principals
+                     WHERE id = $1 AND assigned_profile_id = $2 AND assignment_revision = $3
+                     FOR SHARE",
+                )
+                .bind(fence.principal.0)
+                .bind(session.profile_id)
+                .bind(fence.revision)
+                .fetch_optional(&mut **tx)
+                .await
+                .map_err(|e| SidError::Storage(format!("check session assignment: {e}")))?;
+                if fence.profile != session.profile_id || current.is_none() {
+                    return Err(SidError::Fenced(
+                        "the assignment the sign-in resolved changed before its session".into(),
+                    ));
+                }
+            }
+            None => {}
         }
 
         // Count the active (non-expired) sessions that take a place.
@@ -1528,7 +1552,7 @@ impl GrantStore for PostgresBackend {
         &self,
         session: &Session,
         max_sessions: u32,
-        proved_by: Option<&sid_core::models::CredentialFence>,
+        proved_by: Option<sid_core::models::SignInProof<'_>>,
         mut audit: MutationContext,
     ) -> SidResult<Vec<SessionId>> {
         let mut tx = self
@@ -1553,7 +1577,7 @@ impl GrantStore for PostgresBackend {
         end: &SessionEnd,
         session: &Session,
         max_sessions: u32,
-        proved_by: Option<&sid_core::models::CredentialFence>,
+        proved_by: Option<sid_core::models::SignInProof<'_>>,
         mut audit: MutationContext,
     ) -> SidResult<Vec<SessionId>> {
         let mut tx = self

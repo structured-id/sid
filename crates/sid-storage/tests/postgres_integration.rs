@@ -943,6 +943,8 @@ mod grant_store {
         a_pending_context_takes_no_session_slot,
         a_pending_context_completes_once,
         a_login_policy_fence_is_never_ignored,
+        an_assignment_proof_is_never_ignored,
+        a_session_commits_only_under_its_current_assignment,
         session_refused_after_its_password_changed,
         session_fence_is_the_owners_credential,
         session_fence_serializes_with_a_reset,

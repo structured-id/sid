@@ -164,10 +164,18 @@ async fn solved_captcha_lets_an_admitted_sign_in_through() {
     )
     .authentication(chrono::Utc::now())
     .unwrap();
+    let assignment = common::federated_assignment(svc.storage.as_ref(), holder.id).await;
 
     let refusal = svc
         .auth
-        .complete_admitted_sign_in(&from(ip, ()), &holder, &authentication, "ops-bff", None)
+        .complete_admitted_sign_in(
+            &from(ip, ()),
+            &holder,
+            assignment,
+            &authentication,
+            "ops-bff",
+            None,
+        )
         .await
         .err()
         .expect("asked for a CAPTCHA");
@@ -178,7 +186,14 @@ async fn solved_captcha_lets_an_admitted_sign_in_through() {
         .metadata_mut()
         .insert("captcha-pass", pass.parse().unwrap());
     svc.auth
-        .complete_admitted_sign_in(&retry, &holder, &authentication, "ops-bff", None)
+        .complete_admitted_sign_in(
+            &retry,
+            &holder,
+            assignment,
+            &authentication,
+            "ops-bff",
+            None,
+        )
         .await
         .expect("the solved challenge lets it through");
     assert_eq!(
@@ -187,18 +202,18 @@ async fn solved_captcha_lets_an_admitted_sign_in_through() {
     );
 }
 
+/// An admitted sign-in that solved its CAPTCHA.
+struct Admitted {
+    svc: TestServices,
+    holder: Profile,
+    assignment: sid_core::models::PrincipalAssignmentFence,
+    authentication: sid_core::models::session::SessionAuthentication,
+    pass: String,
+}
+
 /// An admitted sign-in that solved its CAPTCHA, signed in through
-/// `operation` from `ip`: returns the services, the Profile and its
-/// authentication.
-async fn admitted_with_captcha(
-    ip: IpAddr,
-    operation: &'static str,
-) -> (
-    TestServices,
-    Profile,
-    sid_core::models::session::SessionAuthentication,
-    String,
-) {
+/// `operation` from `ip`.
+async fn admitted_with_captcha(ip: IpAddr, operation: &'static str) -> Admitted {
     let (svc, holder) = services().await;
     crowd(&svc, ip).await;
     let authentication = sid_core::models::session::AcceptedEvidence::new(
@@ -208,11 +223,13 @@ async fn admitted_with_captcha(
     )
     .authentication(chrono::Utc::now())
     .unwrap();
+    let assignment = common::federated_assignment(svc.storage.as_ref(), holder.id).await;
     let refusal = svc
         .auth
         .complete_admitted_sign_in(
             &from(ip, ()),
             &holder,
+            assignment,
             &authentication,
             "ops-bff",
             Some(completion(operation)),
@@ -225,13 +242,20 @@ async fn admitted_with_captcha(
         .complete_admitted_sign_in(
             &with_pass(ip, &pass),
             &holder,
+            assignment,
             &authentication,
             "ops-bff",
             Some(completion(operation)),
         )
         .await
         .expect("the solved challenge lets it through");
-    (svc, holder, authentication, pass)
+    Admitted {
+        svc,
+        holder,
+        assignment,
+        authentication,
+        pass,
+    }
 }
 
 fn completion(operation: &str) -> sid_server::grpc::auth_service::AdmittedCompletion<'_> {
@@ -256,20 +280,27 @@ fn with_pass(ip: IpAddr, pass: &str) -> Request<()> {
 #[tokio::test]
 async fn a_lost_admitted_response_needs_no_second_captcha() {
     let ip: IpAddr = "198.51.100.7".parse().unwrap();
-    let (svc, holder, authentication, pass) = admitted_with_captcha(ip, "entry-captcha").await;
+    let a = admitted_with_captcha(ip, "entry-captcha").await;
 
-    svc.auth
+    a.svc
+        .auth
         .complete_admitted_sign_in(
-            &with_pass(ip, &pass),
-            &holder,
-            &authentication,
+            &with_pass(ip, &a.pass),
+            &a.holder,
+            a.assignment,
+            &a.authentication,
             "ops-bff",
             Some(completion("entry-captcha")),
         )
         .await
         .expect("delivered again without another challenge");
     assert_eq!(
-        svc.storage.list_sessions(&holder.id).await.unwrap().len(),
+        a.svc
+            .storage
+            .list_sessions(&a.holder.id)
+            .await
+            .unwrap()
+            .len(),
         1
     );
 }
@@ -280,15 +311,17 @@ async fn a_lost_admitted_response_needs_no_second_captcha() {
 async fn an_admitted_repeat_from_elsewhere_still_needs_a_captcha() {
     let ip: IpAddr = "198.51.100.7".parse().unwrap();
     let elsewhere: IpAddr = "203.0.113.9".parse().unwrap();
-    let (svc, holder, authentication, _) = admitted_with_captcha(ip, "entry-elsewhere").await;
-    crowd(&svc, elsewhere).await;
+    let a = admitted_with_captcha(ip, "entry-elsewhere").await;
+    crowd(&a.svc, elsewhere).await;
 
-    let refusal = svc
+    let refusal = a
+        .svc
         .auth
         .complete_admitted_sign_in(
             &from(elsewhere, ()),
-            &holder,
-            &authentication,
+            &a.holder,
+            a.assignment,
+            &a.authentication,
             "ops-bff",
             Some(completion("entry-elsewhere")),
         )

@@ -53,7 +53,25 @@ async fn profile(storage: &dyn StorageBackend) -> Profile {
         )
         .await
         .unwrap();
+    common::federated_assignment(storage, profile.id).await;
     profile
+}
+
+/// The current assignment of `profile`'s trusted issuer subject, as a host
+/// resolves it on each return.
+async fn assigned(
+    storage: &dyn StorageBackend,
+    profile: &Profile,
+) -> sid_core::models::PrincipalAssignmentFence {
+    let principal = storage
+        .get_principals_by_profile(profile.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|p| p.principal_type == sid_core::models::PrincipalType::FederatedSubject)
+        .expect("the Profile's federated subject");
+    sid_core::models::PrincipalAssignmentFence::of(&principal.entity())
+        .expect("assigned to the Profile")
 }
 
 fn evidence(acr: &str, amr: &[&str], age: Duration) -> AcceptedEvidence {
@@ -84,7 +102,14 @@ async fn sufficient_evidence_signs_in_with_the_cookie() {
         .metadata_mut()
         .insert("user-agent", "test-agent".parse().unwrap());
     let signed_in = auth
-        .complete_admitted_sign_in(&request, &profile, &authentication, CLIENT, None)
+        .complete_admitted_sign_in(
+            &request,
+            &profile,
+            assigned(storage.as_ref(), &profile).await,
+            &authentication,
+            CLIENT,
+            None,
+        )
         .await
         .unwrap();
     let sid_authn::sign_in_delivery::Delivery::Cookie(cookie) = &signed_in.delivery else {
@@ -120,6 +145,7 @@ async fn insufficient_evidence_is_refused() {
         .complete_admitted_sign_in(
             &tonic::Request::new(()),
             &profile,
+            assigned(storage.as_ref(), &profile).await,
             &authentication,
             CLIENT,
             None,
@@ -151,7 +177,14 @@ async fn an_elevated_policy_needs_the_window_of_the_real_authentication() {
     .authentication(Utc::now())
     .unwrap();
     let signed_in = auth
-        .complete_admitted_sign_in(&tonic::Request::new(()), &profile, &fresh, CLIENT, None)
+        .complete_admitted_sign_in(
+            &tonic::Request::new(()),
+            &profile,
+            assigned(storage.as_ref(), &profile).await,
+            &fresh,
+            CLIENT,
+            None,
+        )
         .await
         .unwrap();
     let sessions = storage.list_sessions(&profile.id).await.unwrap();
@@ -171,7 +204,14 @@ async fn an_elevated_policy_needs_the_window_of_the_real_authentication() {
     .authentication(Utc::now())
     .unwrap();
     let refused = auth
-        .complete_admitted_sign_in(&tonic::Request::new(()), &profile, &stale, CLIENT, None)
+        .complete_admitted_sign_in(
+            &tonic::Request::new(()),
+            &profile,
+            assigned(storage.as_ref(), &profile).await,
+            &stale,
+            CLIENT,
+            None,
+        )
         .await
         .err()
         .expect("refused past the window");
@@ -208,6 +248,7 @@ async fn a_suspended_profile_is_not_signed_in() {
         .complete_admitted_sign_in(
             &tonic::Request::new(()),
             &profile,
+            assigned(storage.as_ref(), &profile).await,
             &authentication,
             CLIENT,
             None,
@@ -266,6 +307,7 @@ async fn a_repeated_operation_gets_the_same_session_again() {
         .complete_admitted_sign_in(
             &request,
             &profile,
+            assigned(storage.as_ref(), &profile).await,
             &basic(),
             CLIENT,
             Some(completion(&op, deadline)),
@@ -276,6 +318,7 @@ async fn a_repeated_operation_gets_the_same_session_again() {
         .complete_admitted_sign_in(
             &request,
             &profile,
+            assigned(storage.as_ref(), &profile).await,
             &basic(),
             CLIENT,
             Some(completion(&op, deadline)),
@@ -302,6 +345,7 @@ async fn the_retained_delivery_ends_with_its_operation() {
     auth.complete_admitted_sign_in(
         &tonic::Request::new(()),
         &profile,
+        assigned(storage.as_ref(), &profile).await,
         &basic(),
         CLIENT,
         Some(completion(&op, deadline)),
@@ -322,6 +366,113 @@ async fn the_retained_delivery_ends_with_its_operation() {
     );
 }
 
+// A federated sign-in commits only under the assignment its host resolved:
+// one retired between the lookup and the commit, or another Profile's, admits
+// nothing and stores no session. Before, the host's lookup alone decided and
+// nothing held at the commit.
+#[tokio::test]
+async fn a_retired_or_foreign_assignment_admits_nothing() {
+    let storage = storage().await;
+    let auth = authority(storage.clone(), AuthLevel::Basic);
+    let other = profile(storage.as_ref()).await;
+    let profile = profile(storage.as_ref()).await;
+
+    let foreign = assigned(storage.as_ref(), &other).await;
+    let refused = auth
+        .complete_admitted_sign_in(
+            &tonic::Request::new(()),
+            &profile,
+            foreign,
+            &basic(),
+            CLIENT,
+            None,
+        )
+        .await
+        .err()
+        .expect("another Profile's assignment admits nothing");
+    assert_eq!(
+        common::error_reason(&refused).as_deref(),
+        Some("AUTHENTICATION_FAILED")
+    );
+
+    let read = assigned(storage.as_ref(), &profile).await;
+    assert!(
+        storage
+            .unbind_principal(
+                read.principal,
+                profile.id,
+                AuditEntry::system("principal.release", "test").into()
+            )
+            .await
+            .unwrap()
+    );
+    let refused = auth
+        .complete_admitted_sign_in(
+            &tonic::Request::new(()),
+            &profile,
+            read,
+            &basic(),
+            CLIENT,
+            None,
+        )
+        .await
+        .err()
+        .expect("a retired assignment admits nothing");
+    assert_eq!(
+        common::error_reason(&refused).as_deref(),
+        Some("AUTHENTICATION_FAILED")
+    );
+    assert!(storage.list_sessions(&profile.id).await.unwrap().is_empty());
+}
+
+// A lost response is delivered again only while the association it was
+// admitted under still holds: once retired, the repeat gets nothing.
+#[tokio::test]
+async fn a_repeat_after_the_assignment_was_retired_is_refused() {
+    let storage = storage().await;
+    let auth = authority(storage.clone(), AuthLevel::Basic);
+    let profile = profile(storage.as_ref()).await;
+    let op = operation();
+    let deadline = Utc::now() + Duration::minutes(10);
+    let read = assigned(storage.as_ref(), &profile).await;
+    auth.complete_admitted_sign_in(
+        &tonic::Request::new(()),
+        &profile,
+        read,
+        &basic(),
+        CLIENT,
+        Some(completion(&op, deadline)),
+    )
+    .await
+    .unwrap();
+    assert!(
+        storage
+            .unbind_principal(
+                read.principal,
+                profile.id,
+                AuditEntry::system("principal.release", "test").into()
+            )
+            .await
+            .unwrap()
+    );
+    let refused = auth
+        .complete_admitted_sign_in(
+            &tonic::Request::new(()),
+            &profile,
+            read,
+            &basic(),
+            CLIENT,
+            Some(completion(&op, deadline)),
+        )
+        .await
+        .err()
+        .expect("a retired association is not delivered again");
+    assert_eq!(
+        common::error_reason(&refused).as_deref(),
+        Some("AUTHENTICATION_FAILED")
+    );
+}
+
 // Concurrent repeats of one operation commit one session; every answer that
 // succeeds names it.
 #[tokio::test]
@@ -333,10 +484,12 @@ async fn concurrent_repeats_commit_one_session() {
     let deadline = Utc::now() + Duration::minutes(10);
     let request = tonic::Request::new(());
     let authentication = basic();
+    let assignment = assigned(storage.as_ref(), &profile).await;
     let (a, b) = tokio::join!(
         auth.complete_admitted_sign_in(
             &request,
             &profile,
+            assignment,
             &authentication,
             CLIENT,
             Some(completion(&op, deadline))
@@ -344,6 +497,7 @@ async fn concurrent_repeats_commit_one_session() {
         auth.complete_admitted_sign_in(
             &request,
             &profile,
+            assignment,
             &authentication,
             CLIENT,
             Some(completion(&op, deadline))
@@ -371,6 +525,7 @@ async fn a_repeat_for_another_profile_gets_nothing() {
     auth.complete_admitted_sign_in(
         &request,
         &first,
+        assigned(storage.as_ref(), &first).await,
         &basic(),
         CLIENT,
         Some(completion(&op, deadline)),
@@ -382,6 +537,7 @@ async fn a_repeat_for_another_profile_gets_nothing() {
         .complete_admitted_sign_in(
             &request,
             &other,
+            assigned(storage.as_ref(), &other).await,
             &basic(),
             CLIENT,
             Some(completion(&op, deadline)),
@@ -427,7 +583,14 @@ async fn a_sign_in_owes_the_revocation_of_what_it_evicted() {
     let profile = profile(storage.as_ref()).await;
     let request = tonic::Request::new(());
     let evicted = auth
-        .complete_admitted_sign_in(&request, &profile, &basic(), CLIENT, None)
+        .complete_admitted_sign_in(
+            &request,
+            &profile,
+            assigned(storage.as_ref(), &profile).await,
+            &basic(),
+            CLIENT,
+            None,
+        )
         .await
         .expect("the session to evict")
         .session_id;
@@ -439,6 +602,7 @@ async fn a_sign_in_owes_the_revocation_of_what_it_evicted() {
         .complete_admitted_sign_in(
             &request,
             &profile,
+            assigned(storage.as_ref(), &profile).await,
             &basic(),
             CLIENT,
             Some(completion(&op, deadline)),
@@ -466,6 +630,7 @@ async fn a_sign_in_owes_the_revocation_of_what_it_evicted() {
             .complete_admitted_sign_in(
                 &request,
                 &profile,
+                assigned(storage.as_ref(), &profile).await,
                 &basic(),
                 CLIENT,
                 Some(completion(&op, deadline)),
@@ -500,6 +665,7 @@ async fn a_repeat_after_a_lockout_is_refused() {
     auth.complete_admitted_sign_in(
         &request,
         &profile,
+        assigned(storage.as_ref(), &profile).await,
         &basic(),
         CLIENT,
         Some(completion(&op, deadline)),
@@ -518,6 +684,7 @@ async fn a_repeat_after_a_lockout_is_refused() {
         .complete_admitted_sign_in(
             &request,
             &profile,
+            assigned(storage.as_ref(), &profile).await,
             &basic(),
             CLIENT,
             Some(completion(&op, deadline)),
@@ -548,6 +715,7 @@ async fn an_ended_suspended_or_late_operation_is_not_delivered_again() {
         .complete_admitted_sign_in(
             &request,
             &profile_a,
+            assigned(storage.as_ref(), &profile_a).await,
             &basic(),
             CLIENT,
             Some(completion(&op, deadline)),
@@ -569,6 +737,7 @@ async fn an_ended_suspended_or_late_operation_is_not_delivered_again() {
         .complete_admitted_sign_in(
             &request,
             &profile_a,
+            assigned(storage.as_ref(), &profile_a).await,
             &basic(),
             CLIENT,
             Some(completion(&op, deadline)),
@@ -595,6 +764,7 @@ async fn an_ended_suspended_or_late_operation_is_not_delivered_again() {
     auth.complete_admitted_sign_in(
         &request,
         &profile_b,
+        assigned(storage.as_ref(), &profile_b).await,
         &basic(),
         CLIENT,
         Some(completion(&op, deadline)),
@@ -616,6 +786,7 @@ async fn an_ended_suspended_or_late_operation_is_not_delivered_again() {
         .complete_admitted_sign_in(
             &request,
             &profile_b,
+            assigned(storage.as_ref(), &profile_b).await,
             &basic(),
             CLIENT,
             Some(completion(&op, deadline)),
@@ -637,6 +808,7 @@ async fn an_ended_suspended_or_late_operation_is_not_delivered_again() {
     auth.complete_admitted_sign_in(
         &request,
         &profile_c,
+        assigned(storage.as_ref(), &profile_c).await,
         &basic(),
         CLIENT,
         Some(completion(&op, soon)),
@@ -648,6 +820,7 @@ async fn an_ended_suspended_or_late_operation_is_not_delivered_again() {
         .complete_admitted_sign_in(
             &request,
             &profile_c,
+            assigned(storage.as_ref(), &profile_c).await,
             &basic(),
             CLIENT,
             Some(completion(&op, soon)),

@@ -1105,21 +1105,38 @@ impl MockStorageInner {
         &mut self,
         session: &Session,
         max_sessions: u32,
-        proved_by: Option<&sid_core::models::CredentialFence>,
+        proved_by: Option<sid_core::models::SignInProof<'_>>,
         ctx: MutationContext,
     ) -> SidResult<Vec<SessionId>> {
         if self.sessions.contains_key(&session.id) {
             return Err(sid_core::Error::Conflict("session already exists".into()));
         }
-        if let Some(fence) = proved_by {
-            let current = self.credentials.get(&fence.id.0).is_some_and(|c| {
-                c.status.is_active() && c.profile_id == session.profile_id && c.data == fence.data
-            });
-            if !current {
-                return Err(sid_core::Error::Fenced(
-                    "the credential the sign-in proved changed before its session".into(),
-                ));
+        match proved_by {
+            Some(sid_core::models::SignInProof::Credential(fence)) => {
+                let current = self.credentials.get(&fence.id.0).is_some_and(|c| {
+                    c.status.is_active()
+                        && c.profile_id == session.profile_id
+                        && c.data == fence.data
+                });
+                if !current {
+                    return Err(sid_core::Error::Fenced(
+                        "the credential the sign-in proved changed before its session".into(),
+                    ));
+                }
             }
+            Some(sid_core::models::SignInProof::Assignment(fence)) => {
+                let current = fence.profile == session.profile_id
+                    && self.claims(fence.principal).any(|p| {
+                        p.assigned_profile_id == Some(session.profile_id)
+                            && p.assignment_revision == fence.revision
+                    });
+                if !current {
+                    return Err(sid_core::Error::Fenced(
+                        "the assignment the sign-in resolved changed before its session".into(),
+                    ));
+                }
+            }
+            None => {}
         }
         let mut evicted = Vec::new();
         if max_sessions > 0 {
@@ -1161,7 +1178,7 @@ impl GrantStore for MockStorage {
         &self,
         session: &Session,
         max_sessions: u32,
-        proved_by: Option<&sid_core::models::CredentialFence>,
+        proved_by: Option<sid_core::models::SignInProof<'_>>,
         ctx: MutationContext,
     ) -> SidResult<Vec<SessionId>> {
         self.inner
@@ -1176,7 +1193,7 @@ impl GrantStore for MockStorage {
         end: &SessionEnd,
         session: &Session,
         max_sessions: u32,
-        proved_by: Option<&sid_core::models::CredentialFence>,
+        proved_by: Option<sid_core::models::SignInProof<'_>>,
         ctx: MutationContext,
     ) -> SidResult<Vec<SessionId>> {
         let mut inner = self.inner.lock().unwrap();

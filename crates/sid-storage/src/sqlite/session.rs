@@ -199,7 +199,7 @@ impl SqliteBackend {
         &self,
         session: &Session,
         max_sessions: u32,
-        proved_by: Option<&sid_core::models::CredentialFence>,
+        proved_by: Option<sid_core::models::SignInProof<'_>>,
         pending: Option<(SessionId, &SessionEnd)>,
         mut ctx: MutationContext,
     ) -> SidResult<Vec<SessionId>> {
@@ -220,22 +220,42 @@ impl SqliteBackend {
                 "the profile can no longer authenticate".into(),
             ));
         }
-        if let Some(fence) = proved_by {
-            let current: Option<i64> = sqlx::query_scalar(
-                "SELECT 1 FROM credentials
-                 WHERE id = ? AND profile_id = ? AND status = 'active' AND data = ?",
-            )
-            .bind(fence.id.0.to_string())
-            .bind(session.profile_id)
-            .bind(fence.data.expose())
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(storage)?;
-            if current.is_none() {
-                return Err(SidError::Fenced(
-                    "the credential the sign-in proved changed before its session".into(),
-                ));
+        match proved_by {
+            Some(sid_core::models::SignInProof::Credential(fence)) => {
+                let current: Option<i64> = sqlx::query_scalar(
+                    "SELECT 1 FROM credentials
+                     WHERE id = ? AND profile_id = ? AND status = 'active' AND data = ?",
+                )
+                .bind(fence.id.0.to_string())
+                .bind(session.profile_id)
+                .bind(fence.data.expose())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(storage)?;
+                if current.is_none() {
+                    return Err(SidError::Fenced(
+                        "the credential the sign-in proved changed before its session".into(),
+                    ));
+                }
             }
+            Some(sid_core::models::SignInProof::Assignment(fence)) => {
+                let current: Option<i64> = sqlx::query_scalar(
+                    "SELECT 1 FROM principals
+                     WHERE id = ? AND assigned_profile_id = ? AND assignment_revision = ?",
+                )
+                .bind(fence.principal.0.to_string())
+                .bind(session.profile_id)
+                .bind(fence.revision)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(storage)?;
+                if fence.profile != session.profile_id || current.is_none() {
+                    return Err(SidError::Fenced(
+                        "the assignment the sign-in resolved changed before its session".into(),
+                    ));
+                }
+            }
+            None => {}
         }
         if let Some((pending, end)) = pending {
             let ended = end_with_dependents(&mut tx, pending).await?;

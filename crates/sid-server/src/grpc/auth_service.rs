@@ -357,7 +357,9 @@ fn already_registered(principal_type: PrincipalType) -> tonic::Status {
         PrincipalType::Email => ErrorReason::EmailAlreadyRegistered,
         PrincipalType::Username => ErrorReason::UsernameAlreadyTaken,
         PrincipalType::Phone => ErrorReason::PhoneAlreadyRegistered,
-        PrincipalType::FaceEmbedding | PrincipalType::NfcTag => ErrorReason::PrincipalAlreadyHeld,
+        PrincipalType::FaceEmbedding | PrincipalType::NfcTag | PrincipalType::FederatedSubject => {
+            ErrorReason::PrincipalAlreadyHeld
+        }
     };
     ApiError::new(reason, "identifier is already registered")
         .with_resource("Principal", principal_type.as_str())
@@ -454,10 +456,12 @@ pub(crate) fn signup_identifier<'a>(
         }
         PrincipalType::Phone => Ok(SignupIdentifier::Phone(value)),
         PrincipalType::Username => Ok(SignupIdentifier::Username(value)),
-        PrincipalType::FaceEmbedding | PrincipalType::NfcTag => Err(invalid_field(
-            "identifier",
-            "a new account starts from an email, phone or username",
-        )),
+        PrincipalType::FaceEmbedding | PrincipalType::NfcTag | PrincipalType::FederatedSubject => {
+            Err(invalid_field(
+                "identifier",
+                "a new account starts from an email, phone or username",
+            ))
+        }
     }
 }
 
@@ -2397,6 +2401,7 @@ impl AuthServiceImpl {
         session.assurance_level =
             method.auth_level(self.security_policy.auth.passkey_satisfies_mfa);
         session.amr = method.amr();
+        let proved_by = proved_by.map(sid_core::models::SignInProof::Credential);
         self.sign_in(profile, session, client, proved_by, policy, None)
             .await
     }
@@ -2562,7 +2567,9 @@ impl AuthServiceImpl {
                 ),
                 session,
                 client,
-                proved_by.as_ref(),
+                proved_by
+                    .as_ref()
+                    .map(sid_core::models::SignInProof::Credential),
                 requirements.fence,
             )
             .await?;
@@ -2628,7 +2635,13 @@ impl AuthServiceImpl {
                 }
                 let (signed_in, browser_csrf) = self
                     .sign_in_sessions()
-                    .sign_in_pending(profile, session, client, proved_by, fence)
+                    .sign_in_pending(
+                        profile,
+                        session,
+                        client,
+                        proved_by.map(sid_core::models::SignInProof::Credential),
+                        fence,
+                    )
                     .await?;
                 info!(profile = %profile.id, ?factors, "Sign-in awaits its second factor");
                 Ok(FirstFactorSignedIn {
@@ -2664,15 +2677,15 @@ impl AuthServiceImpl {
     /// Store `session` and deliver its credential to `client`: the browser
     /// sign-in page gets the IdP session cookie, a fresh secret whose hash
     /// the session stores, and no access token; a native client gets the
-    /// session's access token. `proved_by` is the credential the sign-in
-    /// proved and `policy` the login policy it was admitted under; both must
-    /// still be current when the session commits.
+    /// session's access token. `proved_by` is what the sign-in proved and
+    /// `policy` the login policy it was admitted under; both must still hold
+    /// when the session commits.
     async fn sign_in(
         &self,
         profile: &sid_core::models::Profile,
         session: sid_core::models::Session,
         client: CeremonyClient,
-        proved_by: Option<&sid_core::models::CredentialFence>,
+        proved_by: Option<sid_core::models::SignInProof<'_>>,
         policy: Option<sid_core::models::ActorFence>,
         retained: Option<super::sign_in_session::RetainedSignIn<'_>>,
     ) -> Result<SignedIn, Status> {
@@ -2754,9 +2767,12 @@ impl AuthServiceImpl {
     }
 
     /// Sign `profile` in on the accepted evidence of an explicitly trusted
-    /// issuer: a host admitted a federated entry (its exact issuer, client,
-    /// subject and association) and `authentication` is what that evidence
-    /// attests (see `AcceptedEvidence::authentication`). It completes as
+    /// issuer: a host admitted a federated entry (its exact issuer, client
+    /// and subject), resolved its Profile through `assignment` (the current
+    /// assignment of that issuer's subject), and `authentication` is what the
+    /// evidence attests (see `AcceptedEvidence::authentication`). The session
+    /// commits only while `assignment` still holds, and a repeat is delivered
+    /// only while it does: a retired association admits nothing. It completes as
     /// every sign-in does: only an active Profile, after the sign-in rules
     /// and this authority's policy weigh that authentication, with a session
     /// of this authority's lifetime and limit recording it. `request` is the
@@ -2774,11 +2790,12 @@ impl AuthServiceImpl {
         &self,
         request: &Request<T>,
         profile: &sid_core::models::Profile,
+        assignment: sid_core::models::PrincipalAssignmentFence,
         authentication: &sid_core::models::session::SessionAuthentication,
         client_id: &str,
         completion: Option<AdmittedCompletion<'_>>,
     ) -> Result<SignedIn, Status> {
-        if !profile.status.can_authenticate() {
+        if !profile.status.can_authenticate() || assignment.profile != profile.id {
             return Err(authentication_failed());
         }
         // An operation past its end admits nothing, neither a repeat nor a
@@ -2817,8 +2834,11 @@ impl AuthServiceImpl {
                 session.ip_address.parse().ok(),
             )
             .await?;
-            return self.deliver_admitted(delivery, &session, client_id).await;
+            return self
+                .deliver_admitted(delivery, &session, client_id, assignment)
+                .await;
         }
+        let proved_by = Some(sid_core::models::SignInProof::Assignment(assignment));
         let policy = self
             .evaluate_sign_in(profile.id, client_ip, attempt(), extras(), Some(client_id))
             .await?;
@@ -2847,7 +2867,7 @@ impl AuthServiceImpl {
                     profile,
                     session,
                     CeremonyClient::Browser,
-                    None,
+                    proved_by,
                     policy,
                     None,
                 )
@@ -2866,7 +2886,7 @@ impl AuthServiceImpl {
                 profile,
                 session,
                 CeremonyClient::Browser,
-                None,
+                proved_by,
                 policy,
                 Some(retained),
             )
@@ -2875,7 +2895,7 @@ impl AuthServiceImpl {
             // A concurrent repeat committed first: its session is this one.
             // Anything else keeps its refusal.
             Err(refused) => match self
-                .redeliver_admitted(&completion, client_id, profile.id)
+                .redeliver_admitted(&completion, client_id, assignment)
                 .await
             {
                 Ok(Some(signed_in)) => Ok(signed_in),
@@ -2891,20 +2911,24 @@ impl AuthServiceImpl {
         format!("admitted-sign-in:{}:{}", self.issuer, completion.operation)
     }
 
-    /// The sign-in `completion` already committed for `expected`, delivered
-    /// again: before the operation's deadline, while its session lives,
-    /// its Profile can sign in and its authentication meets `client_id`'s
-    /// current requirements. None when the operation has not committed; a
-    /// refusal when it has but may not be delivered again.
+    /// The sign-in `completion` already committed for `assignment`'s Profile,
+    /// delivered again: before the operation's deadline, while its session
+    /// lives, its Profile can sign in, `assignment` still holds and its
+    /// authentication meets `client_id`'s current requirements. None when
+    /// the operation has not committed; a refusal when it has but may not be
+    /// delivered again.
     async fn redeliver_admitted(
         &self,
         completion: &AdmittedCompletion<'_>,
         client_id: &str,
-        expected: ProfileId,
+        assignment: sid_core::models::PrincipalAssignmentFence,
     ) -> Result<Option<SignedIn>, Status> {
-        match self.admitted_session(completion, expected).await? {
+        match self
+            .admitted_session(completion, assignment.profile)
+            .await?
+        {
             Some((delivery, session)) => self
-                .deliver_admitted(delivery, &session, client_id)
+                .deliver_admitted(delivery, &session, client_id, assignment)
                 .await
                 .map(Some),
             None => Ok(None),
@@ -2971,14 +2995,28 @@ impl AuthServiceImpl {
         Ok(Some((delivery, session)))
     }
 
-    /// `session`'s retained `delivery`, while its authentication meets
-    /// `client_id`'s current requirements.
+    /// `session`'s retained `delivery`, while `assignment` still assigns the
+    /// session's Profile and its authentication meets `client_id`'s current
+    /// requirements: a retired or moved association delivers nothing again.
     async fn deliver_admitted(
         &self,
         delivery: sid_authn::sign_in_delivery::RetainedDelivery,
         session: &sid_core::models::Session,
         client_id: &str,
+        assignment: sid_core::models::PrincipalAssignmentFence,
     ) -> Result<SignedIn, Status> {
+        let current = self
+            .storage
+            .get_principal(assignment.principal)
+            .await
+            .map_err(storage_failure)?
+            .is_some_and(|p| {
+                p.assigned_profile_id == Some(session.profile_id)
+                    && p.assignment_revision == assignment.revision
+            });
+        if !current || assignment.profile != session.profile_id {
+            return Err(authentication_failed());
+        }
         // The requirements the sign-in itself was weighed under, read now;
         // the client's own are applied where the sign-in continues.
         let requirements = self.login_requirements(Some(client_id)).await?;
