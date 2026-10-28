@@ -422,7 +422,9 @@ impl PostgresBackend {
     /// Owed work beyond its kind's capacity refuses the whole mutation.
     ///
     /// `chain_id` is derived from the operation context (e.g., "profile:{id}").
-    async fn audit_in_tx(
+    /// A host whose own tables share this database finalizes its mutation of
+    /// them with this, in the same transaction, before committing it.
+    pub async fn audit_in_tx(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         chain_id: &str,
         ctx: MutationContext,
