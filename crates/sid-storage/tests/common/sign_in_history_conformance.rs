@@ -38,4 +38,18 @@ impl SignInHistoryHarness for ProfileSignIns<'_> {
             .await
             .expect("a stored session");
     }
+
+    async fn begin_sign_in(&self, owner: &ProfileId, ip: &str, device: Option<Uuid>) {
+        let mut pending = sid_core::models::Session::new_awaiting_second_factor(
+            *owner,
+            ip.to_string(),
+            sid_core::models::AuthLevel::Basic,
+            vec!["pwd".into()],
+        );
+        pending.device_id = device;
+        self.0
+            .create_session_atomic(&pending, 0, None, test_audit())
+            .await
+            .expect("a stored pending context");
+    }
 }

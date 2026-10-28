@@ -1201,3 +1201,91 @@ pub async fn concurrent_rotation<H: GrantHarness>(h: &H) {
         );
     }
 }
+
+/// A sign-in's pending second-factor context of `owner`, as its first factor
+/// stores it.
+fn pending_context<O>(owner: O) -> Session<O> {
+    let mut pending = session(owner);
+    pending.is_provisional = true;
+    pending.scopes = vec![sid_core::models::session::SECOND_FACTOR_SCOPE.to_string()];
+    pending
+}
+
+/// Pending sign-ins take no session slot: under a limit of two, one full
+/// session and two pending contexts, completing one keeps the full session
+/// and the other pending one. Counting them evicted a full session for a
+/// sign-in that had not finished.
+pub async fn a_pending_context_takes_no_session_slot<H: GrantHarness>(h: &H) {
+    let owner = h.owner().await;
+    let full = session(owner.clone());
+    h.store()
+        .create_session_atomic(&full, 2, None, ctx())
+        .await
+        .unwrap();
+    let first = pending_context(owner.clone());
+    let second = pending_context(owner.clone());
+    for pending in [&first, &second] {
+        h.store()
+            .create_session_atomic(pending, 2, None, ctx())
+            .await
+            .unwrap();
+    }
+    assert!(h.store().get_session(full.id).await.unwrap().is_some());
+
+    let completed = session(owner);
+    let evicted = h
+        .store()
+        .complete_pending_session(first.id, &end(), &completed, 2, None, ctx())
+        .await
+        .unwrap();
+
+    assert!(evicted.is_empty(), "{evicted:?}");
+    assert!(h.store().get_session(full.id).await.unwrap().is_some());
+    assert!(h.store().get_session(second.id).await.unwrap().is_some());
+    assert!(h.store().get_session(completed.id).await.unwrap().is_some());
+    assert!(h.store().get_session(first.id).await.unwrap().is_none());
+}
+
+/// A pending context completes once: concurrent completions store one
+/// session, and one ended before (completed, or ended with its owner's
+/// sessions) completes nothing.
+pub async fn a_pending_context_completes_once<H: GrantHarness>(h: &H) {
+    let owner = h.owner().await;
+    let pending = pending_context(owner.clone());
+    h.store()
+        .create_session_atomic(&pending, 0, None, ctx())
+        .await
+        .unwrap();
+    let (a, b) = (session(owner.clone()), session(owner.clone()));
+    let completion = end();
+    let (first, second) = tokio::join!(
+        h.store()
+            .complete_pending_session(pending.id, &completion, &a, 0, None, ctx()),
+        h.store()
+            .complete_pending_session(pending.id, &completion, &b, 0, None, ctx()),
+    );
+    let stored = [
+        h.store().get_session(a.id).await.unwrap().is_some(),
+        h.store().get_session(b.id).await.unwrap().is_some(),
+    ];
+    assert_eq!(stored.iter().filter(|s| **s).count(), 1, "{stored:?}");
+    let refused = if stored[0] { second } else { first };
+    assert!(matches!(refused, Err(Error::Fenced(_))), "{refused:?}");
+
+    let ended = pending_context(owner.clone());
+    h.store()
+        .create_session_atomic(&ended, 0, None, ctx())
+        .await
+        .unwrap();
+    h.store()
+        .delete_session(ended.id, &end(), ctx())
+        .await
+        .unwrap();
+    let late = session(owner);
+    let refused = h
+        .store()
+        .complete_pending_session(ended.id, &end(), &late, 0, None, ctx())
+        .await;
+    assert!(matches!(refused, Err(Error::Fenced(_))), "{refused:?}");
+    assert!(h.store().get_session(late.id).await.unwrap().is_none());
+}

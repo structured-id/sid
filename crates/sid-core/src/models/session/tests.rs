@@ -568,3 +568,27 @@ fn an_elevated_attestation_is_bounded_from_its_authentication_time() {
     assert_eq!(auth.assurance_level, AuthLevel::Standard);
     assert_eq!(auth.elevation, None);
 }
+
+/// A sign-in's pending second-factor context is provisional, short-lived,
+/// keeps its first factor's authentication and authorizes only its own
+/// completion; a channel-proof provisional session is never taken for one.
+#[test]
+fn a_pending_second_factor_context_is_told_from_channel_proof() {
+    let pending = Session::new_awaiting_second_factor(
+        ProfileId::generate(),
+        "127.0.0.1".to_string(),
+        AuthLevel::Basic,
+        vec!["pwd".into()],
+    );
+    assert!(pending.awaits_second_factor());
+    assert!(pending.is_provisional);
+    assert_eq!(pending.scopes, [SECOND_FACTOR_SCOPE]);
+    assert_eq!(pending.amr, ["pwd"]);
+    assert!(
+        pending.expires_at <= Utc::now() + Duration::minutes(PENDING_SECOND_FACTOR_TTL_MINUTES)
+    );
+
+    let channel = Session::new_provisional(ProfileId::generate(), "127.0.0.1".to_string());
+    assert!(!channel.awaits_second_factor());
+    assert!(!make_session(Duration::hours(1)).awaits_second_factor());
+}

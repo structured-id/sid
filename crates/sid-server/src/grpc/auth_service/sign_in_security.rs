@@ -6,6 +6,7 @@ use sid_authn::anomaly::AnomalyDetector;
 use sid_authn::captcha::{CaptchaGate, CaptchaProvider};
 use sid_authn::geoip::GeoIpChain;
 use sid_authn::ip_intelligence::IpIntelligenceAggregator;
+use sid_authn::login_policy::Unmet;
 use sid_authn::sign_in_security::{SignInRefusal, SignInSecurityHost};
 use sid_core::models::ProfileId;
 use sid_plugin::SignInHistoryStore;
@@ -17,19 +18,33 @@ use super::refusal::{
     step_up_required, too_many_attempts,
 };
 
-/// A refusal of the rules as this server answers it.
-pub(super) struct SecurityStatus(pub(super) Status);
+/// A refusal of the rules as this server answers it: the login requirements
+/// left unmet, which a further factor may still meet, or any other refusal.
+pub(super) enum SecurityStatus {
+    StepUp(Unmet),
+    Refused(Status),
+}
+
+impl SecurityStatus {
+    /// The refusal as the client gets it.
+    pub(super) fn into_status(self) -> Status {
+        match self {
+            Self::StepUp(unmet) => step_up_required(&unmet).into(),
+            Self::Refused(status) => status,
+        }
+    }
+}
 
 impl From<SignInRefusal> for SecurityStatus {
     fn from(r: SignInRefusal) -> Self {
-        Self(match r {
+        Self::Refused(match r {
+            SignInRefusal::StepUp(unmet) => return Self::StepUp(unmet),
             SignInRefusal::Refused => sign_in_refused(),
             SignInRefusal::TooManyAttempts(retry_after) => too_many_attempts(retry_after),
             SignInRefusal::CaptchaRequired(challenge) => match captcha_required(&challenge) {
                 Ok(refusal) | Err(refusal) => refusal.into(),
             },
             SignInRefusal::StepUpAfterAnomaly(rule) => step_up_after_anomaly(rule).into(),
-            SignInRefusal::StepUp(unmet) => step_up_required(&unmet).into(),
             SignInRefusal::Unavailable(cause) => anomaly_unavailable(cause),
         })
     }

@@ -390,6 +390,7 @@ mod sign_in_history {
         most_recent_session_is_the_latest,
         seen_address_and_device_are_per_account,
         location_is_designated_at_threshold,
+        an_unfinished_sign_in_is_no_history,
     );
 }
 
@@ -778,6 +779,8 @@ mod grant_store {
 
     grant_store!(
         session_refused_once_its_owner_is_suspended,
+        a_pending_context_takes_no_session_slot,
+        a_pending_context_completes_once,
         session_commits_only_under_the_current_login_policy,
         auth_code_commits_only_under_the_current_login_policy,
         a_policy_write_serializes_with_its_sessions,

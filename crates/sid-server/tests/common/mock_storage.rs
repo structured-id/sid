@@ -80,6 +80,9 @@ pub struct MockStorageInner {
     /// Reading a profile's sign-in history (recent sessions, designated
     /// countries) fails as a storage fault would.
     login_history_fails: bool,
+    /// The IP reputation events recorded: the address and whether the
+    /// sign-in succeeded.
+    ip_reputation_events: Vec<(String, bool)>,
     /// Reading a profile's primary contacts and metadata fails as a storage
     /// fault would.
     contact_reads_fail: bool,
@@ -345,6 +348,12 @@ impl MockStorage {
             .values()
             .filter(|s| s.profile_id == profile)
             .count()
+    }
+
+    /// The IP reputation events recorded, in order.
+    #[allow(dead_code)]
+    pub fn ip_reputation_events(&self) -> Vec<(String, bool)> {
+        self.inner.lock().unwrap().ip_reputation_events.clone()
     }
 
     /// Storage that cannot count a profile's active reset sessions.
@@ -1087,24 +1096,23 @@ impl sid_plugin::IssuerStore for MockStorage {
     }
 }
 
-#[async_trait]
-impl GrantStore for MockStorage {
-    type Owner = ProfileId;
-
-    async fn create_session_atomic(
-        &self,
+impl MockStorageInner {
+    /// Store `session` as the stores' `create_session_atomic` does, under
+    /// the one lock: while `proved_by` is current, evicting the oldest
+    /// sessions beyond `max_sessions` (0: none), a sign-in's pending
+    /// second-factor context neither counted nor evicted.
+    fn create_session(
+        &mut self,
         session: &Session,
         max_sessions: u32,
         proved_by: Option<&sid_core::models::CredentialFence>,
         ctx: MutationContext,
     ) -> SidResult<Vec<SessionId>> {
-        let mut inner = self.inner.lock().unwrap();
-        if inner.sessions.contains_key(&session.id) {
+        if self.sessions.contains_key(&session.id) {
             return Err(sid_core::Error::Conflict("session already exists".into()));
         }
-        // Under the one lock, as the stores check it in their transaction.
         if let Some(fence) = proved_by {
-            let current = inner.credentials.get(&fence.id.0).is_some_and(|c| {
+            let current = self.credentials.get(&fence.id.0).is_some_and(|c| {
                 c.status.is_active() && c.profile_id == session.profile_id && c.data == fence.data
             });
             if !current {
@@ -1116,10 +1124,14 @@ impl GrantStore for MockStorage {
         let mut evicted = Vec::new();
         if max_sessions > 0 {
             let now = chrono::Utc::now();
-            let mut active: Vec<Session> = inner
+            let mut active: Vec<Session> = self
                 .sessions
                 .values()
-                .filter(|s| s.profile_id == session.profile_id && s.expires_at > now)
+                .filter(|s| {
+                    s.profile_id == session.profile_id
+                        && s.expires_at > now
+                        && !s.awaits_second_factor()
+                })
                 .cloned()
                 .collect();
             active.sort_by_key(|s| s.created_at);
@@ -1127,17 +1139,62 @@ impl GrantStore for MockStorage {
             let excess = (active.len() + 1).saturating_sub(max_sessions as usize);
             let end = SessionEnd::new(RevocationReason::SessionLimit, "system");
             for oldest in active.into_iter().take(excess) {
-                for ended in inner.end_with_dependents(oldest.id) {
+                for ended in self.end_with_dependents(oldest.id) {
                     for owed in end.owed_by(&ended) {
-                        inner.enqueue(&owed, u64::MAX)?;
+                        self.enqueue(&owed, u64::MAX)?;
                     }
                     evicted.push(ended.id);
                 }
             }
         }
-        inner.owe(&ctx)?;
-        inner.sessions.insert(session.id, session.clone());
+        self.owe(&ctx)?;
+        self.sessions.insert(session.id, session.clone());
         Ok(evicted)
+    }
+}
+
+#[async_trait]
+impl GrantStore for MockStorage {
+    type Owner = ProfileId;
+
+    async fn create_session_atomic(
+        &self,
+        session: &Session,
+        max_sessions: u32,
+        proved_by: Option<&sid_core::models::CredentialFence>,
+        ctx: MutationContext,
+    ) -> SidResult<Vec<SessionId>> {
+        self.inner
+            .lock()
+            .unwrap()
+            .create_session(session, max_sessions, proved_by, ctx)
+    }
+
+    async fn complete_pending_session(
+        &self,
+        pending: SessionId,
+        end: &SessionEnd,
+        session: &Session,
+        max_sessions: u32,
+        proved_by: Option<&sid_core::models::CredentialFence>,
+        ctx: MutationContext,
+    ) -> SidResult<Vec<SessionId>> {
+        let mut inner = self.inner.lock().unwrap();
+        if !inner
+            .sessions
+            .get(&pending)
+            .is_some_and(|s| s.profile_id == session.profile_id)
+        {
+            return Err(sid_core::Error::Fenced(
+                "the pending sign-in has ended".into(),
+            ));
+        }
+        for ended in inner.end_with_dependents(pending) {
+            for owed in end.owed_by(&ended) {
+                inner.enqueue(&owed, u64::MAX)?;
+            }
+        }
+        inner.create_session(session, max_sessions, proved_by, ctx)
     }
 
     async fn get_session(&self, id: SessionId) -> SidResult<Option<Session>> {
@@ -1429,7 +1486,7 @@ impl sid_plugin::SignInHistoryStore for MockStorage {
         let most_recent = inner
             .sessions
             .values()
-            .filter(|s| s.profile_id == profile_id)
+            .filter(|s| s.profile_id == profile_id && !s.awaits_second_factor())
             .max_by_key(|s| s.created_at)
             .map(|s| (s.ip_address.clone(), s.created_at));
         Ok(most_recent)
@@ -1446,10 +1503,12 @@ impl sid_plugin::SignInHistoryStore for MockStorage {
             return Err(sid_core::Error::Storage("read sessions by ip".into()));
         }
         let cutoff = chrono::Utc::now() - chrono::Duration::seconds(window.as_secs() as i64);
-        let found = inner
-            .sessions
-            .values()
-            .any(|s| s.profile_id == profile_id && s.ip_address == ip && s.created_at > cutoff);
+        let found = inner.sessions.values().any(|s| {
+            s.profile_id == profile_id
+                && s.ip_address == ip
+                && s.created_at > cutoff
+                && !s.awaits_second_factor()
+        });
         Ok(found)
     }
 
@@ -1465,7 +1524,10 @@ impl sid_plugin::SignInHistoryStore for MockStorage {
         }
         let cutoff = chrono::Utc::now() - chrono::Duration::seconds(window.as_secs() as i64);
         let found = inner.sessions.values().any(|s| {
-            s.profile_id == profile_id && s.device_id == Some(device_id) && s.created_at > cutoff
+            s.profile_id == profile_id
+                && s.device_id == Some(device_id)
+                && s.created_at > cutoff
+                && !s.awaits_second_factor()
         });
         Ok(found)
     }
@@ -2571,7 +2633,12 @@ impl StorageBackend for MockStorage {
         Ok(filtered)
     }
 
-    async fn record_ip_reputation_event(&self, _ip: &str, _success: bool) -> SidResult<()> {
+    async fn record_ip_reputation_event(&self, ip: &str, success: bool) -> SidResult<()> {
+        self.inner
+            .lock()
+            .unwrap()
+            .ip_reputation_events
+            .push((ip.to_string(), success));
         Ok(())
     }
 

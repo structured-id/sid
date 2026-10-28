@@ -198,6 +198,36 @@ pub async fn verify_request<T>(
     })
 }
 
+/// The token a second-factor verification is presented with.
+#[derive(Debug)]
+pub enum FactorToken {
+    /// The token of a sign-in owing this factor: its claims, verified.
+    Pending(AccessTokenClaims),
+    /// A caller's ordinary token, as [`verify_request`] verifies it.
+    Session(Verified),
+}
+
+/// Verify the bearer token of a second-factor verification: the token of a
+/// sign-in owing its second factor, which nothing else accepts, or any token
+/// [`verify_request`] accepts.
+#[allow(clippy::result_large_err)]
+pub async fn verify_factor_request<T>(
+    request: &Request<T>,
+    verifier: &TokenVerifier,
+    revocation: &RevocationCache,
+) -> Result<FactorToken, Status> {
+    let token = bearer_token(request)?;
+    if let Ok(claims) = verifier.validate_pending_access_token(token) {
+        if claims.cnf.is_some() || check_revocation(revocation, &claims).await? {
+            return Err(unauthenticated());
+        }
+        return Ok(FactorToken::Pending(claims));
+    }
+    verify_request(request, verifier, revocation)
+        .await
+        .map(FactorToken::Session)
+}
+
 /// Verify an access token presented anywhere else than the authorization
 /// header (a token-exchange `subject_token`), with the same checks as
 /// [`verified_claims`].
