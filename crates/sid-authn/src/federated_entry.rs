@@ -96,8 +96,8 @@ enum Progress {
         evidence: AcceptedEvidence,
     },
     /// An exchange may have spent the code without a retained answer: the
-    /// entry can only be started again.
-    Ambiguous,
+    /// entry can only be started again, continuing where it would have.
+    Ambiguous { continuation: String },
 }
 
 /// A started entry as the browser receives it.
@@ -148,9 +148,10 @@ pub enum EntryError {
     #[error("the ID Token: {0}")]
     Token(String),
     /// An exchange of this entry's code may have happened without a kept
-    /// answer: its code is never redeemed again, and sign-in starts anew.
+    /// answer: its code is never redeemed again, and sign-in starts anew at
+    /// the entry's continuation.
     #[error("the entry's exchange outcome is unknown")]
-    Ambiguous,
+    Ambiguous { continuation: String },
     #[error(transparent)]
     Store(#[from] ChallengeStoreError),
 }
@@ -362,10 +363,18 @@ impl FederatedEntry {
                             return Err(e);
                         }
                         Exchange::Unknown => {
+                            let continuation = pending.continuation.clone();
                             self.pending
-                                .replace(&key, &owned, &Progress::Ambiguous, pending.deadline)
+                                .replace(
+                                    &key,
+                                    &owned,
+                                    &Progress::Ambiguous {
+                                        continuation: continuation.clone(),
+                                    },
+                                    pending.deadline,
+                                )
                                 .await?;
-                            return Err(EntryError::Ambiguous);
+                            return Err(EntryError::Ambiguous { continuation });
                         }
                     };
                     if !self
@@ -374,11 +383,20 @@ impl FederatedEntry {
                         .await?
                     {
                         // Only the owning attempt moves an exchanging entry.
-                        return Err(EntryError::Ambiguous);
+                        return Err(EntryError::Ambiguous {
+                            continuation: pending.continuation,
+                        });
                     }
                 }
-                Progress::Exchanging(_) | Progress::Ambiguous => {
-                    return Err(EntryError::Ambiguous);
+                Progress::Exchanging(pending) => {
+                    return Err(EntryError::Ambiguous {
+                        continuation: pending.continuation.clone(),
+                    });
+                }
+                Progress::Ambiguous { continuation } => {
+                    return Err(EntryError::Ambiguous {
+                        continuation: continuation.clone(),
+                    });
                 }
                 Progress::Received { pending, id_token } => {
                     let pending = pending.clone();
@@ -415,7 +433,8 @@ impl FederatedEntry {
                 }
             }
         }
-        Err(EntryError::Ambiguous)
+        // Every step lost to another return: that return owns the entry.
+        Err(EntryError::Unknown)
     }
 
     /// The subject and evidence of `token`, the ID Token answered for

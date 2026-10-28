@@ -494,15 +494,14 @@ async fn an_exchange_of_unknown_outcome_is_never_repeated() {
     let browser = begin(&entry, &EntryRequest::default()).await;
     issuer.issue_for(&browser.url, json!({}));
     issuer.fail(Fault::TokenServerError);
-    assert!(matches!(
-        browser.complete(&entry, "c", REDIRECT).await,
-        Err(EntryError::Ambiguous)
-    ));
-    issuer.fail(Fault::None);
-    assert!(matches!(
-        browser.complete(&entry, "c", REDIRECT).await,
-        Err(EntryError::Ambiguous)
-    ));
+    for _ in 0..2 {
+        match browser.complete(&entry, "c", REDIRECT).await {
+            // Sign-in starts anew where the entry would have continued.
+            Err(EntryError::Ambiguous { continuation }) => assert_eq!(continuation, CONTINUATION),
+            other => panic!("{other:?}"),
+        }
+        issuer.fail(Fault::None);
+    }
     assert_eq!(issuer.exchanges(), 1);
 }
 
@@ -561,7 +560,7 @@ async fn racing_returns_exchange_at_most_once() {
         .into_iter()
         .filter_map(|r| match r {
             Ok(returned) => Some(returned),
-            Err(EntryError::Ambiguous) => None,
+            Err(EntryError::Ambiguous { .. }) => None,
             Err(e) => panic!("{e}"),
         })
         .collect();
