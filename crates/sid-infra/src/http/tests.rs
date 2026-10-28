@@ -61,6 +61,60 @@ fn an_upstream_in_the_configuration_is_refused() {
     assert!(error.to_string().contains("names no upstream"), "{error}");
 }
 
+/// The annotated RPCs of an added descriptor set are mounted beside the
+/// selected ones: a route only the added set holds is answered by the
+/// process (UNIMPLEMENTED with no service registered, 501), and is not
+/// found without it. The added set repeats files the selected ones hold
+/// (`google/api/http.proto` and the like), which load once.
+#[tokio::test]
+async fn an_added_set_mounts_its_annotated_rpcs() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    const ADDED: &str = "sid/v1/authn/issuer.proto";
+    let discovery = || {
+        Request::get("/i/0123456789abcdef0123456789abcdef/.well-known/openid-configuration")
+            .body(Body::empty())
+            .unwrap()
+    };
+    let selected = |name: &str| name == sid_proto::FORWARD_AUTH_PROTO;
+    let added = sid_proto::descriptor_set_of(|name| name == ADDED);
+
+    let with =
+        embedded_transcoder_with_sets(&listening_on("127.0.0.1:0"), &[], selected, &[&added])
+            .unwrap()
+            .service(tonic::service::Routes::default())
+            .unwrap();
+    assert_eq!(
+        with.oneshot(discovery()).await.unwrap().status(),
+        StatusCode::NOT_IMPLEMENTED
+    );
+    let without = embedded_transcoder(&listening_on("127.0.0.1:0"), &[], selected)
+        .unwrap()
+        .service(tonic::service::Routes::default())
+        .unwrap();
+    assert_eq!(
+        without.oneshot(discovery()).await.unwrap().status(),
+        StatusCode::NOT_FOUND
+    );
+}
+
+/// An added set that is not a file descriptor set stops the transcoder from
+/// being built.
+#[test]
+fn an_undecodable_added_set_is_refused() {
+    assert!(
+        embedded_transcoder_with_sets(
+            &listening_on("127.0.0.1:0"),
+            &[],
+            |_| true,
+            &[&[0xff, 0x01]]
+        )
+        .is_err()
+    );
+}
+
 /// Configuration that is not a mapping is refused.
 #[test]
 fn non_mapping_config_is_refused() {

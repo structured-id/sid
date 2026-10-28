@@ -55,6 +55,10 @@ pub struct CeServices {
     /// Receivers this server runs that facts are owed to (SCIM outbound
     /// provisioning while targets are configured).
     receivers: Vec<sid_core::models::RequiredReceiver>,
+    /// The encoded file descriptor sets of added services whose annotated
+    /// RPCs the HTTP form serves beside SID's.
+    #[cfg(feature = "http")]
+    transcoded: Vec<&'static [u8]>,
 }
 
 impl CeServices {
@@ -73,6 +77,8 @@ impl CeServices {
         let mut services = Self {
             services: served,
             receivers: Vec::new(),
+            #[cfg(feature = "http")]
+            transcoded: Vec::new(),
         };
         services
             .add(IdentityServiceServer::from_arc(c.identity_svc.clone()))
@@ -207,6 +213,27 @@ impl CeServices {
         self.services.add(svc).await;
         self
     }
+
+    /// Serves `svc` as [`Self::add`] does, and its annotated RPCs over the
+    /// HTTP form: `descriptors` is the encoded file descriptor set its
+    /// `google.api.http` annotations live in. A build without the HTTP form
+    /// serves it over gRPC alone.
+    pub async fn add_transcoded<S>(&mut self, svc: S, descriptors: &'static [u8]) -> &mut Self
+    where
+        S: Service<http::Request<Body>, Response = http::Response<Body>, Error = Infallible>
+            + NamedService
+            + Clone
+            + Send
+            + Sync
+            + 'static,
+        S::Future: Send + 'static,
+    {
+        #[cfg(feature = "http")]
+        self.transcoded.push(descriptors);
+        #[cfg(not(feature = "http"))]
+        let _ = descriptors;
+        self.add(svc).await
+    }
 }
 
 /// The URL the SCIM endpoint is served under (its `/scim/v2` paths follow).
@@ -293,10 +320,11 @@ pub async fn serve(
     // The HTTP form of the annotated RPCs; a configured one that cannot be
     // built stops startup.
     #[cfg(feature = "http")]
-    let http_proxy = http_transcoder(
+    let http_proxy = http_transcoder_with(
         crate::init::env_setting("SID_BIND")?.as_deref(),
         crate::init::env_setting("SID_HTTP_CONFIG")?.as_deref(),
         c.login_url.as_ref(),
+        &services.transcoded,
     )?;
 
     let work_runner = spawn_work_runner(&c, &services.receivers, stopped.clone().wait())?;
@@ -438,6 +466,18 @@ pub fn http_transcoder(
     config_file: Option<&str>,
     sign_in: Option<&url::Url>,
 ) -> anyhow::Result<Option<structured_proxy::ProxyServer>> {
+    http_transcoder_with(bind, config_file, sign_in, &[])
+}
+
+/// [`http_transcoder`] also serving the annotated RPCs of the added services
+/// whose encoded file descriptor sets `added` holds.
+#[cfg(feature = "http")]
+pub fn http_transcoder_with(
+    bind: Option<&str>,
+    config_file: Option<&str>,
+    sign_in: Option<&url::Url>,
+    added: &[&[u8]],
+) -> anyhow::Result<Option<structured_proxy::ProxyServer>> {
     let mut config = match (config_file, bind) {
         (Some(path), _) => serde_saphyr::from_str(
             &std::fs::read_to_string(path)
@@ -450,9 +490,12 @@ pub fn http_transcoder(
     if let Some(sign_in) = sign_in {
         allow_sign_in_origin(&mut config, &sign_in.origin())?;
     }
-    sid_infra::http::embedded_transcoder(&config, &HTTP_FORWARDED_HEADERS, |name| {
-        name != sid_proto::FORWARD_AUTH_PROTO
-    })
+    sid_infra::http::embedded_transcoder_with_sets(
+        &config,
+        &HTTP_FORWARDED_HEADERS,
+        |name| name != sid_proto::FORWARD_AUTH_PROTO,
+        added,
+    )
     .map(Some)
 }
 
