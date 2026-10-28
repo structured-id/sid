@@ -2,7 +2,8 @@
 --
 -- Squashed from 18 migrations (001 through 017, including 013b) into a single
 -- initial schema. All tables represent the final state with complete column
--- definitions.
+-- definitions. A schema change edits this file in place; a database created
+-- from an earlier version of it is recreated, not migrated.
 
 --------------------------------------------------------------------------------
 -- Enum types

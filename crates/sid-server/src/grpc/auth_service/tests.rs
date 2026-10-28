@@ -485,13 +485,13 @@ async fn sign_in_decision(
     client: Option<&sid_core::models::OAuth2Client>,
     method: super::LoginMethod,
 ) -> LoginDecision {
-    let mut probe = sid_core::models::Session::new(
+    let now = chrono::Utc::now();
+    let probe = sid_authn::login_policy::local_authentication(
         sid_core::models::ProfileId::generate(),
-        "probe".to_string(),
-        chrono::Utc::now() + chrono::Duration::hours(1),
+        method.auth_level(policy.auth.passkey_satisfies_mfa),
+        &method.amr(),
+        now,
     );
-    probe.assurance_level = method.auth_level(policy.auth.passkey_satisfies_mfa);
-    probe.amr = method.amr();
     let mut requirements = FixedLoginPolicy::of(policy)
         .requirements(None)
         .await
@@ -499,7 +499,7 @@ async fn sign_in_decision(
     if let Some(client) = client {
         requirements = requirements.with_client(client, None);
     }
-    requirements.decide(&probe, chrono::Utc::now())
+    requirements.decide(&probe, now)
 }
 
 const PASSWORD: super::LoginMethod = super::LoginMethod::Password;

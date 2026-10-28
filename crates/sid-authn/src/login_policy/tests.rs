@@ -189,6 +189,31 @@ fn the_client_and_request_only_strengthen() {
     assert!(stricter.required_amr.contains("hwk"));
 }
 
+// A local authentication completing now meets any authentication-age bound,
+// however short: it is dated at the decision's own instant, not at a later
+// one that would read as an authentication from the future.
+#[test]
+fn a_local_authentication_completing_now_meets_an_age_bound() {
+    let r = LoginRequirements {
+        max_authentication_age: Some(Duration::from_secs(1)),
+        ..requirements(AuthLevel::Basic, EnforcementMode::Hard)
+    };
+    let now = Utc::now();
+    let probe = local_authentication(
+        ProfileId::generate(),
+        AuthLevel::Basic,
+        &["pwd".to_string()],
+        now,
+    );
+    assert_eq!(probe.authenticated_at, now);
+    assert_eq!(
+        r.decide(&probe, now),
+        LoginDecision::Allow {
+            audited: Unmet::default()
+        }
+    );
+}
+
 // The fixed source states the baseline policy's requirements for every
 // application, with no fence.
 #[tokio::test]

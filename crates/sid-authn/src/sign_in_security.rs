@@ -311,23 +311,24 @@ pub async fn evaluate<H: SignInSecurityHost>(
     // The login requirements, checked on a probe of the session the sign-in
     // would create: the real one does not exist yet.
     let now = chrono::Utc::now();
-    let mut probe = sid_core::models::Session::new(
-        owner.clone(),
-        "probe".to_string(),
-        now + chrono::Duration::hours(1),
-    );
-    match attempt.authentication {
+    let probe = match attempt.authentication {
         AttemptAuthentication::Local { assurance, amr, .. } => {
-            probe.assurance_level = assurance;
-            probe.amr = amr.to_vec();
+            crate::login_policy::local_authentication(owner.clone(), assurance, amr, now)
         }
+        // An accepted authentication keeps the time and elevation its issuer
+        // stated.
         AttemptAuthentication::Accepted(accepted) => {
-            probe.assurance_level = accepted.assurance_level;
+            let mut probe = crate::login_policy::local_authentication(
+                owner.clone(),
+                accepted.assurance_level,
+                &accepted.amr,
+                now,
+            );
             probe.elevation = accepted.elevation;
             probe.authenticated_at = accepted.authenticated_at;
-            probe.amr = accepted.amr.clone();
+            probe
         }
-    }
+    };
     let method = attempt.authentication.method();
     match requirements.decide(&probe, now) {
         LoginDecision::Allow { audited } if !audited.is_empty() => {

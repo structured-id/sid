@@ -161,6 +161,22 @@ impl LoginRequirements {
     }
 }
 
+/// The session a local authentication of `owner` completing at `now` would
+/// create, as the requirements see it before it exists: authenticated at
+/// `now` itself, at `assurance` with `amr`.
+pub fn local_authentication<O>(
+    owner: O,
+    assurance: AuthLevel,
+    amr: &[String],
+    now: DateTime<Utc>,
+) -> Session<O> {
+    let mut probe = Session::new(owner, "probe".to_string(), now + chrono::Duration::hours(1));
+    probe.assurance_level = assurance;
+    probe.amr = amr.to_vec();
+    probe.authenticated_at = now;
+    probe
+}
+
 /// How long ago `at` was at `now`; none when `at` is in the future, which no
 /// authentication age can be trusted from.
 fn authentication_age(at: DateTime<Utc>, now: DateTime<Utc>) -> Option<Duration> {

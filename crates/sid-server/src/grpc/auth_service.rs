@@ -924,13 +924,7 @@ impl AuthServiceImpl {
         use sid_authn::login_policy::LoginDecision;
         let requirements = self.login_requirements(None).await?;
         let now = Utc::now();
-        let mut probe = sid_core::models::Session::new(
-            profile_id,
-            "probe".to_string(),
-            now + Duration::hours(1),
-        );
-        probe.assurance_level = assurance;
-        probe.amr = amr.to_vec();
+        let probe = sid_authn::login_policy::local_authentication(profile_id, assurance, amr, now);
         match requirements.decide(&probe, now) {
             LoginDecision::Allow { .. } => Ok(requirements.fence),
             LoginDecision::StepUp(unmet) => Err(step_up_required(&unmet).into()),
