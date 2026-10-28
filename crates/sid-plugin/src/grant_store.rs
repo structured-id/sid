@@ -45,6 +45,26 @@ pub trait GrantStore: Send + Sync {
         ctx: MutationContext,
     ) -> Result<Vec<SessionId>>;
 
+    /// Complete a sign-in's pending second-factor context `pending` into
+    /// `session`, stored as [`Self::create_session_atomic`] stores one, in
+    /// the same transaction that ends `pending` (owing what `end` names):
+    /// the session commits only while `pending` exists. Of concurrent
+    /// completions one commits; when something ended `pending` first (its
+    /// completion, a reset ending the owner's sessions), `Error::Fenced` and
+    /// nothing is stored.
+    ///
+    /// A pending context takes no place under the limit, here or in
+    /// [`Self::create_session_atomic`]: it is neither counted nor evicted.
+    async fn complete_pending_session(
+        &self,
+        pending: SessionId,
+        end: &SessionEnd,
+        session: &Session<Self::Owner>,
+        max_sessions: u32,
+        proved_by: Option<&CredentialFence>,
+        ctx: MutationContext,
+    ) -> Result<Vec<SessionId>>;
+
     /// Get a session by ID.
     async fn get_session(&self, id: SessionId) -> Result<Option<Session<Self::Owner>>>;
 

@@ -108,6 +108,31 @@ struct FirstFactorSignedIn {
     browser_csrf: Option<String>,
 }
 
+/// The credential a pending second-factor context's first factor proved: its
+/// id and the SHA-256 of the data it held then.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct FirstFactorProof {
+    credential: uuid::Uuid,
+    digest: [u8; 32],
+}
+
+impl FirstFactorProof {
+    fn of(fence: &sid_core::models::CredentialFence) -> Self {
+        use sha2::Digest;
+        Self {
+            credential: fence.id.0,
+            digest: sha2::Sha256::digest(fence.data.expose()).into(),
+        }
+    }
+
+    /// Whether `credential` is the one proved, holding the same data.
+    fn proves(&self, credential: &Credential) -> bool {
+        use sha2::Digest;
+        let digest: [u8; 32] = sha2::Sha256::digest(credential.data.expose()).into();
+        credential.id.0 == self.credential && digest == self.digest
+    }
+}
+
 /// Who verifies a second factor.
 enum FactorCaller {
     /// A sign-in's pending context, completed into its session for `client`.
@@ -534,6 +559,10 @@ pub struct AuthServiceImpl {
     migration_state: ChallengeStore<MigrationState>,
     /// Ephemeral TOTP enrollment state: enrollment_id → (profile_id, secret_bytes).
     totp_enrollment: ChallengeStore<(ProfileId, Vec<u8>)>,
+    /// The credential each pending second-factor context's first factor
+    /// proved, keyed by the context: its completion commits only while that
+    /// credential is unchanged.
+    first_factor_proofs: ChallengeStore<Option<FirstFactorProof>>,
     /// Magic links for Corporate Profiles; `None` when the instance has not enabled
     /// them, which is the default.
     pub(crate) magic_link: Option<Arc<MagicLinkService>>,
@@ -693,6 +722,12 @@ impl AuthServiceImpl {
                 cache_backend.clone(),
                 key_manager.clone(),
                 "totp-enrollment",
+                ttl,
+            ),
+            first_factor_proofs: ChallengeStore::new(
+                cache_backend.clone(),
+                key_manager.clone(),
+                "first-factor-proof",
                 ttl,
             ),
             continuations: ChallengeStore::new(
@@ -2358,31 +2393,32 @@ impl AuthServiceImpl {
             return Err(step_up_required(&requirements.unmet(&completed, now)).into());
         }
 
-        // Of concurrent completions only the one that ends it goes on.
-        let ended = self
-            .storage
-            .delete_session(
-                pending.id,
-                &sid_core::models::SessionEnd::new(
-                    sid_core::models::RevocationReason::SignInCompleted,
-                    pending.profile_id.to_string(),
-                ),
-                AuditEntry::user(
-                    pending.profile_id.to_string(),
-                    "session.sign_in_completed",
-                    pending.id.to_string(),
-                )
-                .into(),
-            )
-            .await
-            .map_err(storage_failure)?;
-        if !ended.contains(&pending.id) {
-            return Err(session_ended());
-        }
-        self.revocation_cache
-            .revoke_session(pending.id.to_string())
-            .await
-            .map_err(|e| dependency_unavailable("session revocation", e))?;
+        // The credential the first factor proved commits with the session, as
+        // in a sign-in that needs no second factor: one replaced or revoked
+        // since completes nothing, and a reset after waits for the session
+        // and ends it.
+        let proof = self
+            .first_factor_proofs
+            .read(&pending.id.to_string())
+            .await?
+            .ok_or_else(session_ended)?;
+        let proved_by = match proof {
+            Some(proof) => {
+                let credential = self
+                    .storage
+                    .get_credentials_by_profile(profile.id, None)
+                    .await
+                    .map_err(storage_failure)?
+                    .into_iter()
+                    .find(|c| c.status.is_active() && proof.proves(c))
+                    .ok_or_else(authentication_failed)?;
+                Some(sid_core::models::CredentialFence {
+                    id: credential.id,
+                    data: credential.data,
+                })
+            }
+            None => None,
+        };
 
         let mut session = self.new_session(profile.id, pending.ip_address.clone());
         session.device_id = pending.device_id;
@@ -2394,9 +2430,30 @@ impl AuthServiceImpl {
         }
         // The authentication began with the first factor.
         session.authenticated_at = pending.authenticated_at;
+        // The pending context ends in the session's own commit: of concurrent
+        // completions one signs in, and one ended meanwhile completes nothing.
         let signed_in = self
-            .sign_in(&profile, session, client, None, requirements.fence)
+            .sign_in_sessions()
+            .complete_pending(
+                &profile,
+                (
+                    pending.id,
+                    &sid_core::models::SessionEnd::new(
+                        sid_core::models::RevocationReason::SignInCompleted,
+                        pending.profile_id.to_string(),
+                    ),
+                ),
+                session,
+                client,
+                proved_by.as_ref(),
+                requirements.fence,
+            )
             .await?;
+        // Its access tokens stop at once in every process.
+        self.revocation_cache
+            .revoke_session(pending.id.to_string())
+            .await
+            .map_err(|e| dependency_unavailable("session revocation", e))?;
         // Recorded from the address the rules judged at the first factor.
         sid_authn::sign_in_security::record_completed_sign_in(
             &ProfileSecurity { service: self },
@@ -2439,6 +2496,19 @@ impl AuthServiceImpl {
                     method.amr(),
                 );
                 session.device_id = device_id;
+                // Kept for as long as the context lives; a completion that
+                // finds none completes nothing.
+                let kept = self
+                    .first_factor_proofs
+                    .insert_until(
+                        &session.id.to_string(),
+                        &proved_by.map(FirstFactorProof::of),
+                        session.expires_at,
+                    )
+                    .await?;
+                if !kept {
+                    return Err(ceremony_expired("sign-in"));
+                }
                 let (signed_in, browser_csrf) = self
                     .sign_in_sessions()
                     .sign_in_pending(profile, session, client, proved_by, fence)

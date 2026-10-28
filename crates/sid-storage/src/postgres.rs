@@ -456,6 +456,113 @@ impl PostgresBackend {
         Ok(())
     }
 
+    /// Lock `profile_id`'s row for a session commit and refuse an owner that
+    /// can no longer authenticate.
+    ///
+    /// The profile row lock serializes session creation per profile for
+    /// every replica and version alike, until commit or rollback. It does
+    /// not block other rows that merely reference the profile. Taken before
+    /// the credential row, the order credential revocation takes them in, so
+    /// the two never deadlock. A status change takes the same lock, so a
+    /// profile that can no longer authenticate is read here and gets no
+    /// session.
+    async fn lock_session_owner(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        profile_id: ProfileId,
+    ) -> SidResult<()> {
+        let status: Option<String> =
+            sqlx::query_scalar("SELECT status FROM profiles WHERE id = $1 FOR NO KEY UPDATE")
+                .bind(profile_id)
+                .fetch_optional(&mut **tx)
+                .await
+                .map_err(|e| SidError::Storage(format!("lock profile: {e}")))?;
+        if status.as_deref() != Some(sid_core::models::ProfileStatus::Active.as_str()) {
+            return Err(SidError::Fenced(
+                "the profile can no longer authenticate".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Store `session` in `tx`, its owner locked: while the credential
+    /// `proved_by` is current, evicting the oldest sessions beyond
+    /// `max_sessions` (0: no limit) with what each owes added to `audit`.
+    /// A sign-in's pending second-factor context is neither counted nor
+    /// evicted. Returns the ids of the sessions ended.
+    async fn store_session_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        session: &Session,
+        max_sessions: u32,
+        proved_by: Option<&sid_core::models::CredentialFence>,
+        audit: &mut MutationContext,
+    ) -> SidResult<Vec<SessionId>> {
+        if let Some(fence) = proved_by {
+            // FOR SHARE holds the credential row until this commit: a reset's
+            // update waits for it, and one that committed first is read here
+            // with its new data, so the session is refused.
+            let current: Option<i32> = sqlx::query_scalar(
+                "SELECT 1 FROM credentials
+                 WHERE id = $1 AND profile_id = $2 AND status = 'active' AND data = $3
+                 FOR SHARE",
+            )
+            .bind(fence.id.0)
+            .bind(session.profile_id)
+            .bind(fence.data.expose())
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(|e| SidError::Storage(format!("check session credential: {e}")))?;
+            if current.is_none() {
+                return Err(SidError::Fenced(
+                    "the credential the sign-in proved changed before its session".into(),
+                ));
+            }
+        }
+
+        // Count the active (non-expired) sessions that take a place.
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sessions WHERE profile_id = $1 AND expires_at > NOW() \
+             AND NOT (is_provisional AND scopes = $2)",
+        )
+        .bind(session.profile_id)
+        .bind(sid_core::models::session::SECOND_FACTOR_SCOPE)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("count sessions: {e}")))?;
+
+        // Evict oldest sessions if at or over the limit (0 is no limit).
+        let mut evicted = Vec::new();
+        if max_sessions > 0 && count >= max_sessions as i64 {
+            let to_evict = (count - max_sessions as i64 + 1) as i64; // +1 for the new session
+            let rows: Vec<(SessionId, Option<String>)> = sqlx::query_as(
+                "SELECT id, client_id FROM sessions \
+                 WHERE profile_id = $1 AND expires_at > NOW() \
+                 AND NOT (is_provisional AND scopes = $3) \
+                 ORDER BY created_at ASC \
+                 LIMIT $2",
+            )
+            .bind(session.profile_id)
+            .bind(to_evict)
+            .bind(sid_core::models::session::SECOND_FACTOR_SCOPE)
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(|e| SidError::Storage(format!("list evictable: {e}")))?;
+
+            let end = SessionEnd::new(RevocationReason::SessionLimit, "system");
+            for (sid, _) in &rows {
+                // An evicted session ends like any other and owes the same,
+                // and so do the sessions it authenticated.
+                for ended in session::end_with_dependents(tx, *sid).await? {
+                    audit.work.extend(end.owed_by(&ended));
+                    evicted.push(ended.id);
+                }
+            }
+        }
+
+        // Insert the new session within the same transaction.
+        session::write(tx, session).await?;
+        Ok(evicted)
+    }
+
     /// Store `r`'s editable fields in `tx` while the stored role is still at
     /// `r.revision`, moving the revision on; false when it is not.
     async fn update_role_in_tx(
@@ -1429,93 +1536,52 @@ impl GrantStore for PostgresBackend {
             .begin()
             .await
             .map_err(|e| SidError::Storage(format!("begin tx: {e}")))?;
-
-        // The profile row lock serializes session creation per profile for
-        // every replica and version alike, until commit or rollback. It does
-        // not block other rows that merely reference the profile. Taken
-        // before the credential row, the order credential revocation takes
-        // them in, so the two never deadlock. A status change takes the same
-        // lock, so a profile that can no longer authenticate is read here
-        // and gets no session.
-        let status: Option<String> =
-            sqlx::query_scalar("SELECT status FROM profiles WHERE id = $1 FOR NO KEY UPDATE")
-                .bind(session.profile_id)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(|e| SidError::Storage(format!("lock profile: {e}")))?;
-        if status.as_deref() != Some(sid_core::models::ProfileStatus::Active.as_str()) {
-            return Err(SidError::Fenced(
-                "the profile can no longer authenticate".into(),
-            ));
-        }
-
-        if let Some(fence) = proved_by {
-            // FOR SHARE holds the credential row until this commit: a reset's
-            // update waits for it, and one that committed first is read here
-            // with its new data, so the session is refused.
-            let current: Option<i32> = sqlx::query_scalar(
-                "SELECT 1 FROM credentials
-                 WHERE id = $1 AND profile_id = $2 AND status = 'active' AND data = $3
-                 FOR SHARE",
-            )
-            .bind(fence.id.0)
-            .bind(session.profile_id)
-            .bind(fence.data.expose())
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|e| SidError::Storage(format!("check session credential: {e}")))?;
-            if current.is_none() {
-                return Err(SidError::Fenced(
-                    "the credential the sign-in proved changed before its session".into(),
-                ));
-            }
-        }
-
-        // Count active (non-expired) sessions for this profile.
-        let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM sessions WHERE profile_id = $1 AND expires_at > NOW()",
-        )
-        .bind(session.profile_id)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|e| SidError::Storage(format!("count sessions: {e}")))?;
-
-        // Evict oldest sessions if at or over the limit (0 is no limit).
-        let mut evicted = Vec::new();
-        if max_sessions > 0 && count >= max_sessions as i64 {
-            let to_evict = (count - max_sessions as i64 + 1) as i64; // +1 for the new session
-            let rows: Vec<(SessionId, Option<String>)> = sqlx::query_as(
-                "SELECT id, client_id FROM sessions \
-                 WHERE profile_id = $1 AND expires_at > NOW() \
-                 ORDER BY created_at ASC \
-                 LIMIT $2",
-            )
-            .bind(session.profile_id)
-            .bind(to_evict)
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(|e| SidError::Storage(format!("list evictable: {e}")))?;
-
-            let end = SessionEnd::new(RevocationReason::SessionLimit, "system");
-            for (sid, _) in &rows {
-                // An evicted session ends like any other and owes the same,
-                // and so do the sessions it authenticated.
-                for ended in session::end_with_dependents(&mut tx, *sid).await? {
-                    audit.work.extend(end.owed_by(&ended));
-                    evicted.push(ended.id);
-                }
-            }
-        }
-
-        // Insert the new session within the same transaction.
-        session::write(&mut tx, session).await?;
-
+        Self::lock_session_owner(&mut tx, session.profile_id).await?;
+        let evicted =
+            Self::store_session_in_tx(&mut tx, session, max_sessions, proved_by, &mut audit)
+                .await?;
         Self::audit_in_tx(&mut tx, &format!("profile:{}", session.profile_id), audit).await?;
-
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(format!("commit tx: {e}")))?;
+        Ok(evicted)
+    }
 
+    async fn complete_pending_session(
+        &self,
+        pending: SessionId,
+        end: &SessionEnd,
+        session: &Session,
+        max_sessions: u32,
+        proved_by: Option<&sid_core::models::CredentialFence>,
+        mut audit: MutationContext,
+    ) -> SidResult<Vec<SessionId>> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| SidError::Storage(format!("begin tx: {e}")))?;
+        Self::lock_session_owner(&mut tx, session.profile_id).await?;
+        // The pending row's deletion is the claim: a concurrent completion or
+        // an end of the owner's sessions waits on it, and one that committed
+        // first left nothing to delete.
+        let ended = session::end_with_dependents(&mut tx, pending).await?;
+        if !ended
+            .iter()
+            .any(|s| s.id == pending && s.profile_id == session.profile_id)
+        {
+            return Err(SidError::Fenced("the pending sign-in has ended".into()));
+        }
+        for ended in &ended {
+            audit.work.extend(end.owed_by(ended));
+        }
+        let evicted =
+            Self::store_session_in_tx(&mut tx, session, max_sessions, proved_by, &mut audit)
+                .await?;
+        Self::audit_in_tx(&mut tx, &format!("profile:{}", session.profile_id), audit).await?;
+        tx.commit()
+            .await
+            .map_err(|e| SidError::Storage(format!("commit tx: {e}")))?;
         Ok(evicted)
     }
 

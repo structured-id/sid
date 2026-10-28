@@ -12,7 +12,8 @@ use sid_authn::sign_in_delivery::{BrowserCredential, CeremonyClient, Delivery, S
 use sid_authn::sign_in_refusal::authentication_failed;
 use sid_core::models::event::{Event, event_types};
 use sid_core::models::{
-    ActorFence, AuditEntry, CredentialFence, MutationContext, Profile, Session,
+    ActorFence, AuditEntry, CredentialFence, MutationContext, Profile, Session, SessionEnd,
+    SessionId,
 };
 use sid_plugin::storage::StorageBackend;
 use tonic::Status;
@@ -50,9 +51,36 @@ impl SignInSessions<'_> {
         policy: Option<ActorFence>,
     ) -> Result<SignedIn, Status> {
         let limit = self.max_concurrent_sessions;
-        self.deliver(profile, session, client, proved_by, policy, limit)
+        self.deliver(profile, session, client, proved_by, policy, limit, None)
             .await
             .map(|(signed_in, _)| signed_in)
+    }
+
+    /// Sign `profile` in as [`Self::sign_in`] does with `session`, the
+    /// completion of the pending second-factor context `pending`: the
+    /// context ends (owing what its end names) in the session's own commit,
+    /// which applies only while the context exists.
+    pub async fn complete_pending(
+        &self,
+        profile: &Profile,
+        pending: (SessionId, &SessionEnd),
+        session: Session,
+        client: CeremonyClient,
+        proved_by: Option<&CredentialFence>,
+        policy: Option<ActorFence>,
+    ) -> Result<SignedIn, Status> {
+        let limit = self.max_concurrent_sessions;
+        self.deliver(
+            profile,
+            session,
+            client,
+            proved_by,
+            policy,
+            limit,
+            Some(pending),
+        )
+        .await
+        .map(|(signed_in, _)| signed_in)
     }
 
     /// Store a sign-in's pending second-factor context and deliver its
@@ -67,12 +95,14 @@ impl SignInSessions<'_> {
         proved_by: Option<&CredentialFence>,
         policy: Option<ActorFence>,
     ) -> Result<(SignedIn, Option<String>), Status> {
-        self.deliver(profile, session, client, proved_by, policy, 0)
+        self.deliver(profile, session, client, proved_by, policy, 0, None)
             .await
     }
 
-    /// Store `session` under `limit` and deliver its credential, with the
-    /// browser's encoded CSRF token for a browser.
+    /// Store `session` under `limit` (completing `pending` when given) and
+    /// deliver its credential, with the browser's encoded CSRF token for a
+    /// browser.
+    #[allow(clippy::too_many_arguments)]
     async fn deliver(
         &self,
         profile: &Profile,
@@ -81,17 +111,18 @@ impl SignInSessions<'_> {
         proved_by: Option<&CredentialFence>,
         policy: Option<ActorFence>,
         limit: u32,
+        pending: Option<(SessionId, &SessionEnd)>,
     ) -> Result<(SignedIn, Option<String>), Status> {
         match client {
             CeremonyClient::Browser => {
                 let credential = BrowserCredential::bind(&mut session);
                 let csrf = session.browser_csrf.as_ref().map(BrowserCsrf::encode);
-                self.persist(profile, &session, proved_by, policy, limit)
+                self.persist(profile, &session, proved_by, policy, limit, pending)
                     .await?;
                 Ok((credential.signed_in(self.cookie, &session), csrf))
             }
             CeremonyClient::Native => {
-                self.persist(profile, &session, proved_by, policy, limit)
+                self.persist(profile, &session, proved_by, policy, limit, pending)
                     .await?;
                 let sub = profile.id.to_string();
                 let access_token = self
@@ -124,7 +155,8 @@ impl SignInSessions<'_> {
     }
 
     /// Store `session` under the concurrent-session `limit` (0: none) and
-    /// announce it, while `policy` still holds.
+    /// announce it, while `policy` still holds; with `pending`, as the
+    /// completion of that pending context, which ends in the same commit.
     async fn persist(
         &self,
         profile: &Profile,
@@ -132,6 +164,7 @@ impl SignInSessions<'_> {
         proved_by: Option<&CredentialFence>,
         policy: Option<ActorFence>,
         limit: u32,
+        pending: Option<(SessionId, &SessionEnd)>,
     ) -> Result<(), Status> {
         // The storage counts, evicts and inserts in one serialized step, and
         // owes each evicted session's client a logout; the same commit owes
@@ -152,14 +185,23 @@ impl SignInSessions<'_> {
         if let Some(fence) = policy {
             ctx = ctx.fenced_by(fence);
         }
-        let evicted = match self
-            .storage
-            .create_session_atomic(session, limit, proved_by, ctx)
-            .await
-        {
+        let stored = match pending {
+            Some((pending, end)) => {
+                self.storage
+                    .complete_pending_session(pending, end, session, limit, proved_by, ctx)
+                    .await
+            }
+            None => {
+                self.storage
+                    .create_session_atomic(session, limit, proved_by, ctx)
+                    .await
+            }
+        };
+        let evicted = match stored {
             Ok(evicted) => evicted,
-            // The credential or the login policy changed after its check: the
-            // sign-in completes nothing and is started again.
+            // The credential or the login policy changed after its check, or
+            // the pending context ended: the sign-in completes nothing and is
+            // started again.
             Err(sid_core::Error::Fenced(_)) => return Err(authentication_failed()),
             Err(e) => return Err(storage_failure(e)),
         };

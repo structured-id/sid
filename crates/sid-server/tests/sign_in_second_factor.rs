@@ -205,6 +205,47 @@ async fn the_completed_sign_in_is_recorded_as_a_success() {
     assert!(svc.mock_storage.ip_reputation_events().contains(&success));
 }
 
+/// A password replaced after the first factor and before the second (a
+/// reset of the account) leaves the sign-in nothing to complete: no session
+/// is stored. Before, the completion committed without the password's fence
+/// and the stale first factor signed in.
+#[tokio::test]
+async fn a_password_replaced_before_completion_signs_nobody_in() {
+    let seed = sid_authn::generate_secret();
+    let (svc, _policy, profile) = services(Some(&seed)).await;
+    let pending_token = bearer(&native_sign_in(&svc).await.unwrap());
+
+    let mut credential = svc
+        .storage
+        .get_credentials_by_profile(profile, Some(CredentialType::Opaque))
+        .await
+        .unwrap()
+        .remove(0);
+    credential.data = sid_authn::sealed_secret::seal(
+        common::test_key_manager().as_ref(),
+        &sid_authn::sealed_secret::opaque_context(profile),
+        b"the replacement password file",
+    )
+    .await
+    .unwrap()
+    .into();
+    svc.mock_storage.set_credential(&credential);
+
+    let refused = verify_with_token(
+        &svc,
+        &pending_token,
+        sid_authn::generate_current_totp(&seed),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(refused.code(), Code::Unauthenticated, "{refused:?}");
+    let sessions = svc.storage.list_sessions(&profile).await.unwrap();
+    assert!(
+        sessions.iter().all(|s| s.awaits_second_factor()),
+        "{sessions:?}"
+    );
+}
+
 /// The pending context authorizes no application grant and no account
 /// operation, and completes once only.
 #[tokio::test]

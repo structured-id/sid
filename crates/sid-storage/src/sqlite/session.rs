@@ -191,12 +191,16 @@ impl SqliteBackend {
     /// so that at most `max_sessions` remain (0 is unlimited). The write lock
     /// taken by `BEGIN IMMEDIATE` makes the count and the insert one step for
     /// concurrent sign-ins; each evicted session owes its client a logout,
-    /// committed with the eviction.
+    /// committed with the eviction. With `pending`, the sign-in's pending
+    /// second-factor context it completes ends in the same step, owing what
+    /// its end names, and must still exist. A pending context is neither
+    /// counted nor evicted.
     pub(crate) async fn create_session_atomic_impl(
         &self,
         session: &Session,
         max_sessions: u32,
         proved_by: Option<&sid_core::models::CredentialFence>,
+        pending: Option<(SessionId, &SessionEnd)>,
         mut ctx: MutationContext,
     ) -> SidResult<Vec<SessionId>> {
         let storage = |e: sqlx::Error| SidError::Storage(e.to_string());
@@ -233,14 +237,28 @@ impl SqliteBackend {
                 ));
             }
         }
+        if let Some((pending, end)) = pending {
+            let ended = end_with_dependents(&mut tx, pending).await?;
+            if !ended
+                .iter()
+                .any(|s| s.id == pending && s.profile_id == session.profile_id)
+            {
+                return Err(SidError::Fenced("the pending sign-in has ended".into()));
+            }
+            for ended in &ended {
+                ctx.work.extend(end.owed_by(ended));
+            }
+        }
         let mut evicted = Vec::new();
         if max_sessions > 0 {
             let now = fmt_dt(&chrono::Utc::now());
             let active: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM sessions WHERE profile_id = ? AND expires_at > ?",
+                "SELECT COUNT(*) FROM sessions WHERE profile_id = ? AND expires_at > ?
+                 AND NOT (is_provisional AND scopes = ?)",
             )
             .bind(session.profile_id)
             .bind(&now)
+            .bind(sid_core::models::session::SECOND_FACTOR_SCOPE)
             .fetch_one(&mut *tx)
             .await
             .map_err(storage)?;
@@ -249,10 +267,12 @@ impl SqliteBackend {
             if excess > 0 {
                 let oldest: Vec<SessionId> = sqlx::query_scalar(
                     "SELECT id FROM sessions WHERE profile_id = ? AND expires_at > ?
+                     AND NOT (is_provisional AND scopes = ?)
                      ORDER BY created_at ASC LIMIT ?",
                 )
                 .bind(session.profile_id)
                 .bind(&now)
+                .bind(sid_core::models::session::SECOND_FACTOR_SCOPE)
                 .bind(excess)
                 .fetch_all(&mut *tx)
                 .await

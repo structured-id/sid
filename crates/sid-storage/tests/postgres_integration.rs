@@ -938,6 +938,8 @@ mod grant_store {
 
     grant_store!(
         session_refused_once_its_owner_is_suspended,
+        a_pending_context_takes_no_session_slot,
+        a_pending_context_completes_once,
         a_login_policy_fence_is_never_ignored,
         session_refused_after_its_password_changed,
         session_fence_is_the_owners_credential,
