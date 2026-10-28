@@ -13,6 +13,8 @@ CREATE TABLE IF NOT EXISTS operation_results (
     completed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     -- Past this the completion is not kept: its key resolves to nothing and
     -- the expired purge drops it. NULL keeps it until its owner purges it.
+    -- Added in place, as every schema change before the first stable
+    -- release: an existing database is recreated, not migrated.
     retain_until TIMESTAMPTZ,
     PRIMARY KEY (namespace, op_key)
 );
