@@ -7,7 +7,7 @@
 mod common;
 
 use common::mock_storage::MockStorage;
-use common::{TestServices, issue_token, oauth_error, test_client, test_profile};
+use common::{TestServices, oauth_error, test_client, test_profile};
 use sid_proto::sid::v1::auth_service_server::AuthService;
 use sid_proto::sid::v1::{
     DeviceAuthorizationRequest, DeviceAuthorizationResponse, OAuth2TokenRequest,
@@ -73,6 +73,13 @@ fn poll(svc: &TestServices, device_code: &str, client_id: &str) -> Request<OAuth
     })
 }
 
+/// The bearer token of a stored IdP session of `profile`: an approval is an
+/// authorization decision of a live session.
+async fn signed_in(svc: &TestServices, profile: &sid_core::models::Profile) -> String {
+    let session = common::authenticated_session(profile, sid_core::models::AuthLevel::Basic, 0);
+    common::stored_session_token(svc, profile, session).await
+}
+
 fn approve(user_code: &str, approve: bool, bearer: &str) -> Request<SubmitDeviceUserCodeRequest> {
     authed(
         SubmitDeviceUserCodeRequest {
@@ -100,7 +107,7 @@ async fn test_device_flow_issues_tokens_once() {
         .expect_err("pending before approval");
     assert_refused(err, Code::FailedPrecondition, "authorization_pending");
 
-    let bearer = issue_token(&svc.jwt, &profile, &["openid".to_string()]);
+    let bearer = signed_in(&svc, &profile).await;
     svc.auth
         .submit_device_user_code(approve(&started.user_code, true, &bearer))
         .await
@@ -134,8 +141,17 @@ async fn test_device_flow_issues_tokens_once() {
         .validate_access_token(&tokens.access_token)
         .expect("the issuer's key signed the device's token");
     assert_eq!(claims.iss, svc.issuer.canonical_url);
-    let sessions = svc.storage.list_sessions(&profile.id).await.unwrap();
-    assert_eq!(sessions.len(), 1, "one session for the device");
+    // Besides the approving IdP session, one session for the device.
+    let device_sessions = || async {
+        svc.storage
+            .list_sessions(&profile.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|s| s.client_id.as_deref() == Some(client.client_id.as_str()))
+            .count()
+    };
+    assert_eq!(device_sessions().await, 1, "one session for the device");
 
     let err = svc
         .auth
@@ -143,12 +159,9 @@ async fn test_device_flow_issues_tokens_once() {
         .await
         .expect_err("a redeemed device code issues nothing");
     assert_refused(err, Code::InvalidArgument, "invalid_grant");
-    assert!(
-        svc.storage
-            .list_sessions(&profile.id)
-            .await
-            .unwrap()
-            .is_empty(),
+    assert_eq!(
+        device_sessions().await,
+        0,
         "the reused code's session was not ended"
     );
 }
@@ -160,7 +173,7 @@ async fn test_denied_device_code_stays_denied() {
     let client = device_client();
     let (svc, profile) = services(&client);
     let started = start(&svc, &client.client_id).await;
-    let bearer = issue_token(&svc.jwt, &profile, &["openid".to_string()]);
+    let bearer = signed_in(&svc, &profile).await;
 
     svc.auth
         .submit_device_user_code(approve(&started.user_code, false, &bearer))
@@ -292,7 +305,7 @@ async fn test_device_gets_only_the_clients_scopes() {
         .await
         .unwrap()
         .into_inner();
-    let bearer = issue_token(&svc.jwt, &profile, &["openid".to_string()]);
+    let bearer = signed_in(&svc, &profile).await;
     svc.auth
         .submit_device_user_code(approve(&started.user_code, true, &bearer))
         .await

@@ -13,9 +13,9 @@ use tonic::metadata::MetadataMap;
 
 use super::*;
 
-/// ABORTED: the login policy changed while the code was being issued; the
+/// ABORTED: the login policy changed while the grant was being committed; the
 /// authorization is asked again and judged under the current one.
-fn policy_changed() -> Status {
+pub(super) fn policy_changed() -> Status {
     Status::from(ApiError::new(
         ErrorReason::ConcurrentModification,
         "the login policy changed; authorize again",

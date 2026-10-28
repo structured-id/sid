@@ -3974,6 +3974,50 @@ impl AuthService for AuthServiceImpl {
             .filter(|auth| !auth.is_expired())
             .ok_or_else(|| invalid_field("user_code", "not a current device code"))?;
 
+        // An approval grants the application access as an authorization does:
+        // the approving session is judged against the application's login
+        // requirements now, and the decision commits only under their fence.
+        // A denial grants nothing and needs no judgement.
+        let mut fence = None;
+        if req.approve {
+            let session_id = SessionId::parse(&verified.claims.sid)
+                .map_err(|e| internal("read session id of a verified token", e))?;
+            let now = Utc::now();
+            let session = self
+                .storage
+                .get_session(session_id)
+                .await
+                .map_err(storage_failure)?
+                .filter(|session| session.profile_id == profile_id)
+                .filter(|session| self.authorizes(session, now))
+                .ok_or_else(session_ended)?;
+            let client = self
+                .storage
+                .get_oauth2_client(&auth.client_id)
+                .await
+                .map_err(storage_failure)?
+                .ok_or_else(|| invalid_field("user_code", "not a current device code"))?;
+            let requirements = self
+                .login_requirements(Some(&auth.client_id))
+                .await?
+                .with_client(&client, None);
+            match requirements.decide(&session, now) {
+                sid_authn::login_policy::LoginDecision::Allow { audited } => {
+                    if !audited.is_empty() {
+                        info!(
+                            client = %auth.client_id,
+                            unmet = ?audited,
+                            "Login requirements unmet, device approval allowed by audit enforcement"
+                        );
+                    }
+                }
+                sid_authn::login_policy::LoginDecision::StepUp(unmet) => {
+                    return Err(step_up_required(&unmet).into());
+                }
+            }
+            fence = requirements.fence;
+        }
+
         let decision = if req.approve {
             sid_core::models::DeviceAuthDecision::Authorize(profile_id)
         } else {
@@ -3989,11 +4033,19 @@ impl AuthService for AuthServiceImpl {
         );
         // Only a pending request takes a decision, once: a concurrent approval
         // and denial cannot both apply, and a resolved one is not changed.
-        let decided = self
+        let mut ctx: sid_core::models::MutationContext = audit.into();
+        if let Some(fence) = fence {
+            ctx = ctx.fenced_by(fence);
+        }
+        let decided = match self
             .storage
-            .decide_device_auth(auth.id, decision, audit.into())
+            .decide_device_auth(auth.id, decision, ctx)
             .await
-            .map_err(storage_failure)?;
+        {
+            Ok(decided) => decided,
+            Err(sid_core::Error::Fenced(_)) => return Err(authorize::policy_changed()),
+            Err(e) => return Err(storage_failure(e)),
+        };
         if !decided {
             return Err(ApiError::new(
                 ErrorReason::InvalidState,
@@ -5885,6 +5937,14 @@ impl AuthServiceImpl {
                 )
             })?;
 
+        // The approval was judged under the application's requirements; the
+        // tokens are issued only while those can still be read, and commit
+        // under their fence.
+        let fence = self
+            .login_requirements(Some(&client.client_id))
+            .await?
+            .fence;
+
         let mut session = sid_core::models::Session::new(
             profile.id,
             "device".to_string(),
@@ -5925,21 +5985,24 @@ impl AuthServiceImpl {
 
         // The code, the session and the refresh token are committed together:
         // of concurrent polls exactly one gets tokens.
-        let redemption = self
+        let mut ctx: sid_core::models::MutationContext = AuditEntry::user(
+            profile.id.to_string(),
+            "device_code.exchange",
+            session.id.to_string(),
+        )
+        .into();
+        if let Some(fence) = fence {
+            ctx = ctx.fenced_by(fence);
+        }
+        let redemption = match self
             .storage
-            .redeem_device_code(
-                &code_hash,
-                &session,
-                &refresh_model,
-                AuditEntry::user(
-                    profile.id.to_string(),
-                    "device_code.exchange",
-                    session.id.to_string(),
-                )
-                .into(),
-            )
+            .redeem_device_code(&code_hash, &session, &refresh_model, ctx)
             .await
-            .map_err(storage_failure)?;
+        {
+            Ok(redemption) => redemption,
+            Err(sid_core::Error::Fenced(_)) => return Err(authorize::policy_changed()),
+            Err(e) => return Err(storage_failure(e)),
+        };
         match redemption {
             sid_core::models::DeviceCodeRedemption::Redeemed => {}
             sid_core::models::DeviceCodeRedemption::AlreadyRedeemed { session_id } => {
