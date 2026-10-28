@@ -68,6 +68,20 @@ fn test_revoked_event_id_follows_session() {
     assert_ne!(first.id, other.id);
 }
 
+/// A session whose owner is not a local Profile owes its lifecycle fact and
+/// the revocation of its tokens, the same work items a Profile's session
+/// owes for them.
+#[test]
+fn test_lifecycle_owed_work_includes_the_revocation() {
+    let (sid, pid) = (SessionId::generate(), ProfileId::generate());
+    let owed = end().owed_by_lifecycle(sid);
+    let kinds: Vec<&str> = owed.iter().map(|w| w.kind.as_str()).collect();
+    assert_eq!(kinds, [EVENT_RELAY_KIND, SESSION_REVOCATION_KIND]);
+    let profile = end().owed(sid, pid, None);
+    assert_eq!(owed[0].id, profile[0].id);
+    assert_eq!(owed[1].id, profile[1].id);
+}
+
 /// The lifecycle fact of a session whose owner is not a local Profile names
 /// the session, the reason and the actor category, and carries no owner: the
 /// same event id as the Profile-enriched form, without its `profile_id`.

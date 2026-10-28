@@ -96,13 +96,18 @@ impl SessionEnd {
             );
         }
         owed.push(self.revoked_event(session_id, profile_id).relay());
-        owed.push(
-            SessionRevocation {
-                session_id: session_id.to_string(),
-            }
-            .work(),
-        );
+        owed.push(revocation(session_id));
         owed
+    }
+
+    /// The work one ended session owes when its owner is not a local
+    /// Profile: its lifecycle fact, which names no owner, and the revocation
+    /// of its access tokens.
+    pub fn owed_by_lifecycle(&self, session_id: SessionId) -> Vec<NewWork> {
+        vec![
+            self.lifecycle_event(session_id).relay(),
+            revocation(session_id),
+        ]
     }
 
     /// The `sid.session.revoked.v1` event of one ended session: the lifecycle
@@ -132,6 +137,14 @@ impl SessionEnd {
         event.data["profile_id"] = serde_json::Value::String(profile_id.to_string());
         event
     }
+}
+
+/// The revocation of `session_id`'s access tokens.
+fn revocation(session_id: SessionId) -> NewWork {
+    SessionRevocation {
+        session_id: session_id.to_string(),
+    }
+    .work()
 }
 
 /// Namespace of session-revoked event ids.
