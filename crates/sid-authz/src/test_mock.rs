@@ -256,6 +256,12 @@ impl sid_plugin::OperationResultStore for MockStorage {
     ) -> Result<u64> {
         unimplemented!()
     }
+    async fn purge_expired_operation_results(
+        &self,
+        _: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64> {
+        unimplemented!()
+    }
     async fn get_operation_result(
         &self,
         _: &str,

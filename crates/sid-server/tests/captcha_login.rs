@@ -167,7 +167,7 @@ async fn solved_captcha_lets_an_admitted_sign_in_through() {
 
     let refusal = svc
         .auth
-        .complete_admitted_sign_in(&from(ip, ()), &holder, &authentication, "ops-bff")
+        .complete_admitted_sign_in(&from(ip, ()), &holder, &authentication, "ops-bff", None)
         .await
         .err()
         .expect("asked for a CAPTCHA");
@@ -178,13 +178,124 @@ async fn solved_captcha_lets_an_admitted_sign_in_through() {
         .metadata_mut()
         .insert("captcha-pass", pass.parse().unwrap());
     svc.auth
-        .complete_admitted_sign_in(&retry, &holder, &authentication, "ops-bff")
+        .complete_admitted_sign_in(&retry, &holder, &authentication, "ops-bff", None)
         .await
         .expect("the solved challenge lets it through");
     assert_eq!(
         svc.storage.list_sessions(&holder.id).await.unwrap().len(),
         1
     );
+}
+
+/// An admitted sign-in that solved its CAPTCHA, signed in through
+/// `operation` from `ip`: returns the services, the Profile and its
+/// authentication.
+async fn admitted_with_captcha(
+    ip: IpAddr,
+    operation: &'static str,
+) -> (
+    TestServices,
+    Profile,
+    sid_core::models::session::SessionAuthentication,
+    String,
+) {
+    let (svc, holder) = services().await;
+    crowd(&svc, ip).await;
+    let authentication = sid_core::models::session::AcceptedEvidence::new(
+        Some("urn:sid:acr:basic"),
+        vec!["pwd".into()],
+        chrono::Utc::now(),
+    )
+    .authentication(chrono::Utc::now())
+    .unwrap();
+    let refusal = svc
+        .auth
+        .complete_admitted_sign_in(
+            &from(ip, ()),
+            &holder,
+            &authentication,
+            "ops-bff",
+            Some(completion(operation)),
+        )
+        .await
+        .err()
+        .expect("asked for a CAPTCHA");
+    let pass = earn_pass(&svc, ip, &challenge_of(&refusal)).await.unwrap();
+    svc.auth
+        .complete_admitted_sign_in(
+            &with_pass(ip, &pass),
+            &holder,
+            &authentication,
+            "ops-bff",
+            Some(completion(operation)),
+        )
+        .await
+        .expect("the solved challenge lets it through");
+    (svc, holder, authentication, pass)
+}
+
+fn completion(operation: &str) -> sid_server::grpc::auth_service::AdmittedCompletion<'_> {
+    sid_server::grpc::auth_service::AdmittedCompletion {
+        operation,
+        deadline: chrono::Utc::now() + chrono::Duration::minutes(10),
+    }
+}
+
+fn with_pass(ip: IpAddr, pass: &str) -> Request<()> {
+    let mut request = from(ip, ());
+    request
+        .metadata_mut()
+        .insert("captcha-pass", pass.parse().unwrap());
+    request
+}
+
+/// The response of an admitted sign-in that solved its CAPTCHA is lost: the
+/// repeat of its operation from the same client gets the same session,
+/// without another challenge. Before, the spent pass answered nothing and
+/// the repeat was asked for a CAPTCHA while the address stayed crowded.
+#[tokio::test]
+async fn a_lost_admitted_response_needs_no_second_captcha() {
+    let ip: IpAddr = "198.51.100.7".parse().unwrap();
+    let (svc, holder, authentication, pass) = admitted_with_captcha(ip, "entry-captcha").await;
+
+    svc.auth
+        .complete_admitted_sign_in(
+            &with_pass(ip, &pass),
+            &holder,
+            &authentication,
+            "ops-bff",
+            Some(completion("entry-captcha")),
+        )
+        .await
+        .expect("delivered again without another challenge");
+    assert_eq!(
+        svc.storage.list_sessions(&holder.id).await.unwrap().len(),
+        1
+    );
+}
+
+/// The admission answers a CAPTCHA only for the client it was solved from:
+/// a repeat of the operation from another crowded address is asked for one.
+#[tokio::test]
+async fn an_admitted_repeat_from_elsewhere_still_needs_a_captcha() {
+    let ip: IpAddr = "198.51.100.7".parse().unwrap();
+    let elsewhere: IpAddr = "203.0.113.9".parse().unwrap();
+    let (svc, holder, authentication, _) = admitted_with_captcha(ip, "entry-elsewhere").await;
+    crowd(&svc, elsewhere).await;
+
+    let refusal = svc
+        .auth
+        .complete_admitted_sign_in(
+            &from(elsewhere, ()),
+            &holder,
+            &authentication,
+            "ops-bff",
+            Some(completion("entry-elsewhere")),
+        )
+        .await
+        .err()
+        .expect("asked for a CAPTCHA");
+    challenge_of(&refusal);
 }
 
 /// A pass answers one sign-in: the next one needs a new CAPTCHA.

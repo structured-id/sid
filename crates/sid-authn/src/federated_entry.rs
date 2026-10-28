@@ -14,7 +14,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
@@ -34,6 +34,14 @@ pub const PENDING_TTL: Duration = Duration::from_secs(600);
 
 /// The cache namespace of pending entries.
 const NAMESPACE: &str = "federated-entry";
+
+/// The longest one code exchange may take: past it the token request is
+/// abandoned as of unknown outcome.
+const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long an exchange's owner holds it: its timeout and the steps around
+/// it, with margin for replicas' clock skew. A holder past it has stopped.
+const EXCHANGE_LEASE: Duration = Duration::from_secs(40);
 
 /// The issuer this installation receives issuance from, and its registered
 /// client there.
@@ -61,7 +69,7 @@ pub struct EntryRequest {
 /// A started entry, kept until its return. Only this shape is read: an entry
 /// stored in another one fails to decode and completes nothing, and lives no
 /// longer than [`PENDING_TTL`].
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Pending {
     /// The issuer and client the entry was started for: another relying
     /// party sharing the store never completes it.
@@ -74,6 +82,35 @@ struct Pending {
     continuation: String,
     /// What the entry asked the issuer for.
     request: EntryRequest,
+    /// The entry's end, fixed when it started; no later step extends it.
+    deadline: DateTime<Utc>,
+}
+
+/// How far a returned entry has come, kept under the browser's binding so a
+/// retry of its return resumes where the last one stopped and never redeems
+/// its code twice (RFC 6749 §4.1.2).
+#[derive(Clone, Serialize, Deserialize)]
+enum Progress {
+    /// Started; its return has not been exchanged.
+    Pending(Pending),
+    /// One attempt owns the exchange until `owned_until`; the code may be
+    /// spent. Its exchange is bounded by [`EXCHANGE_TIMEOUT`], so an owner
+    /// still holding it past the lease has stopped.
+    Exchanging {
+        pending: Pending,
+        owned_until: DateTime<Utc>,
+    },
+    /// The token response arrived and is kept for validation.
+    Received { pending: Pending, id_token: String },
+    /// The ID Token was validated; admission resumes from here.
+    Exchanged {
+        pending: Pending,
+        subject: String,
+        evidence: AcceptedEvidence,
+    },
+    /// An exchange may have spent the code without a retained answer: the
+    /// entry can only be started again, continuing where it would have.
+    Ambiguous { continuation: String },
 }
 
 /// A started entry as the browser receives it.
@@ -87,13 +124,21 @@ pub struct Started {
 
 /// A returned entry: the subject the issuer signed in for this recipient,
 /// how it authenticated (the issuer's statement, not this installation's),
-/// where the caller continues and what the entry asked the issuer for.
+/// where the caller continues and what the entry asked the issuer for. The
+/// same entry returns the same value to every retry of its return.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Returned {
     pub subject: String,
     pub evidence: AcceptedEvidence,
     pub continuation: String,
     pub requested: EntryRequest,
+    /// The entry's stable reference in this browser: the caller keys the
+    /// session it admits by it, so a retry finds that session's result
+    /// instead of admitting again.
+    pub operation: String,
+    /// The entry's end: whatever the caller keeps for its retries lives no
+    /// longer.
+    pub deadline: DateTime<Utc>,
 }
 
 /// Why an entry did not complete. Every case completes nothing.
@@ -115,6 +160,15 @@ pub enum EntryError {
     /// The ID Token is not this issuer's valid token for this entry.
     #[error("the ID Token: {0}")]
     Token(String),
+    /// An exchange of this entry's code may have happened without a kept
+    /// answer: its code is never redeemed again, and sign-in starts anew at
+    /// the entry's continuation.
+    #[error("the entry's exchange outcome is unknown")]
+    Ambiguous { continuation: String },
+    /// Another return of this entry is exchanging its code right now: this
+    /// return is retried, and then completes the same entry.
+    #[error("the entry's exchange is in progress")]
+    InProgress,
     #[error(transparent)]
     Store(#[from] ChallengeStoreError),
 }
@@ -123,7 +177,7 @@ pub enum EntryError {
 pub struct FederatedEntry {
     trusted: TrustedIssuer,
     http: Client,
-    pending: ChallengeStore<Pending>,
+    pending: ChallengeStore<Progress>,
     /// The authority's browser-session cookie; an entry's correlation cookie
     /// is named after it, so authorities sharing a host never read each
     /// other's.
@@ -210,10 +264,12 @@ impl FederatedEntry {
         let url = reqwest::Url::parse_with_params(&discovery.authorization_endpoint, &params)
             .map_err(|e| EntryError::Issuer(format!("authorization endpoint: {e}")))?;
         let browser = BrowserSecret::generate();
+        let deadline = Utc::now()
+            + chrono::Duration::from_std(PENDING_TTL).expect("the pending lifetime fits");
         self.pending
-            .insert(
+            .insert_until(
                 &self.key(&state, &browser),
-                &Pending {
+                &Progress::Pending(Pending {
                     issuer: self.trusted.issuer.clone(),
                     client_id: self.trusted.client_id.clone(),
                     nonce,
@@ -221,7 +277,9 @@ impl FederatedEntry {
                     redirect_uri: redirect_uri.to_owned(),
                     continuation: continuation.to_owned(),
                     request: request.clone(),
-                },
+                    deadline,
+                }),
+                deadline,
             )
             .await?;
         let lifetime = i64::try_from(PENDING_TTL.as_secs()).expect("the pending lifetime fits");
@@ -235,8 +293,17 @@ impl FederatedEntry {
     /// the browser whose `Cookie` header values are `cookies`. The entry is
     /// found only with the correlation cookie of the browser that started it
     /// (RFC 6749 §10.12, RFC 9700 §4.7.1): a return reaching another browser
-    /// finds nothing and leaves the entry for its own. The state is taken
-    /// first, so a replayed return completes nothing.
+    /// finds nothing and leaves the entry for its own.
+    ///
+    /// The entry's progress is kept until its deadline, so a retry of the
+    /// same return resumes where the last attempt stopped (the recoverable
+    /// federation callback completion contract): before the code is sent it
+    /// exchanges again; once the token response or the validated evidence is
+    /// kept it continues from that without another exchange; after an
+    /// attempt that may have spent the code without a kept answer it is
+    /// [`EntryError::Ambiguous`], never a second redemption. Concurrent
+    /// returns exchange at most once: one meeting a live exchange is
+    /// [`EntryError::InProgress`] and its retry completes the same entry.
     pub async fn complete<'a>(
         &self,
         state: &str,
@@ -248,23 +315,194 @@ impl FederatedEntry {
             .correlation(state)
             .secret(cookies)
             .ok_or(EntryError::OtherBrowser)?;
-        let pending = self
-            .pending
-            .take(&self.key(state, &browser))
-            .await?
-            .ok_or(EntryError::Unknown)?;
-        if pending.issuer != self.trusted.issuer || pending.client_id != self.trusted.client_id {
-            return Err(EntryError::Unknown);
+        let key = self.key(state, &browser);
+        let operation = {
+            use sha2::{Digest, Sha256};
+            hex::encode(Sha256::digest(key.as_bytes()))
+        };
+        // Every step moves the progress forward by one compare-and-set; a
+        // step lost to a concurrent return reads the progress again. The
+        // bound is the longest chain of steps, so a lost race never loops.
+        for _ in 0..5 {
+            let read = self
+                .pending
+                .read_versioned(&key)
+                .await?
+                .ok_or(EntryError::Unknown)?;
+            // Every step is bound to the entry's issuer, client and redirect
+            // URI, a resumed one too: kept progress does not lift the binding.
+            let bound = match &read.value {
+                Progress::Pending(pending)
+                | Progress::Exchanging { pending, .. }
+                | Progress::Received { pending, .. }
+                | Progress::Exchanged { pending, .. } => Some(pending),
+                Progress::Ambiguous { .. } => None,
+            };
+            if let Some(pending) = bound {
+                if pending.issuer != self.trusted.issuer
+                    || pending.client_id != self.trusted.client_id
+                {
+                    return Err(EntryError::Unknown);
+                }
+                if pending.redirect_uri != redirect_uri {
+                    // A return to another redirect URI ends an unexchanged
+                    // entry; an exchanged one keeps what its own return needs.
+                    if matches!(read.value, Progress::Pending(_)) {
+                        self.pending.take(&key).await?;
+                    }
+                    return Err(EntryError::RedirectMismatch);
+                }
+            }
+            match &read.value {
+                Progress::Pending(pending) => {
+                    let discovery = discover(&self.http, &self.trusted.issuer)
+                        .await
+                        .map_err(|e| EntryError::Issuer(e.to_string()))?;
+                    let pending = pending.clone();
+                    let owned = Progress::Exchanging {
+                        pending: pending.clone(),
+                        owned_until: Utc::now()
+                            + chrono::Duration::from_std(EXCHANGE_LEASE)
+                                .expect("the exchange lease fits"),
+                    };
+                    // The version this return stored is the one it owns:
+                    // a state another return stores later is never adopted.
+                    let Some(owned) = self
+                        .pending
+                        .replace(&key, &read, &owned, pending.deadline)
+                        .await?
+                    else {
+                        continue;
+                    };
+                    let next = match self
+                        .exchange(&discovery.token_endpoint, code, &pending)
+                        .await
+                    {
+                        Exchange::Answered(id_token) => Progress::Received {
+                            pending: pending.clone(),
+                            id_token,
+                        },
+                        // The request never left: the code is unspent.
+                        Exchange::NotSent(reason) => {
+                            self.pending
+                                .replace(
+                                    &key,
+                                    &owned,
+                                    &Progress::Pending(pending.clone()),
+                                    pending.deadline,
+                                )
+                                .await?;
+                            return Err(EntryError::Issuer(reason));
+                        }
+                        Exchange::Refused(e) => {
+                            self.pending.take(&key).await?;
+                            return Err(e);
+                        }
+                        Exchange::Unknown => {
+                            let continuation = pending.continuation.clone();
+                            self.pending
+                                .replace(
+                                    &key,
+                                    &owned,
+                                    &Progress::Ambiguous {
+                                        continuation: continuation.clone(),
+                                    },
+                                    pending.deadline,
+                                )
+                                .await?;
+                            return Err(EntryError::Ambiguous { continuation });
+                        }
+                    };
+                    if self
+                        .pending
+                        .replace(&key, &owned, &next, pending.deadline)
+                        .await?
+                        .is_none()
+                    {
+                        // Only the owning attempt moves an exchanging entry.
+                        return Err(EntryError::Ambiguous {
+                            continuation: pending.continuation,
+                        });
+                    }
+                }
+                // Another return owns the exchange: while its lease runs it
+                // is live and this return retries; past it, it stopped with
+                // the code possibly spent, which is recorded once.
+                Progress::Exchanging {
+                    pending,
+                    owned_until,
+                } => {
+                    if *owned_until > Utc::now() {
+                        return Err(EntryError::InProgress);
+                    }
+                    let continuation = pending.continuation.clone();
+                    let lost = Progress::Ambiguous {
+                        continuation: continuation.clone(),
+                    };
+                    if self
+                        .pending
+                        .replace(&key, &read, &lost, pending.deadline)
+                        .await?
+                        .is_some()
+                    {
+                        return Err(EntryError::Ambiguous { continuation });
+                    }
+                }
+                Progress::Ambiguous { continuation } => {
+                    return Err(EntryError::Ambiguous {
+                        continuation: continuation.clone(),
+                    });
+                }
+                Progress::Received { pending, id_token } => {
+                    let pending = pending.clone();
+                    let (subject, evidence) = match self.validate(id_token, &pending).await {
+                        Ok(validated) => validated,
+                        Err(e @ EntryError::Token(_)) => {
+                            self.pending.take(&key).await?;
+                            return Err(e);
+                        }
+                        Err(e) => return Err(e),
+                    };
+                    let next = Progress::Exchanged {
+                        pending: pending.clone(),
+                        subject,
+                        evidence,
+                    };
+                    self.pending
+                        .replace(&key, &read, &next, pending.deadline)
+                        .await?;
+                }
+                Progress::Exchanged {
+                    pending,
+                    subject,
+                    evidence,
+                } => {
+                    return Ok(Returned {
+                        subject: subject.clone(),
+                        evidence: evidence.clone(),
+                        continuation: pending.continuation.clone(),
+                        requested: pending.request.clone(),
+                        operation,
+                        deadline: pending.deadline,
+                    });
+                }
+            }
         }
-        if pending.redirect_uri != redirect_uri {
-            return Err(EntryError::RedirectMismatch);
-        }
+        // Every step lost to another return: that return owns the entry.
+        Err(EntryError::Unknown)
+    }
+
+    /// The subject and evidence of `token`, the ID Token answered for
+    /// `pending`, validated against the trusted issuer (OpenID Connect Core
+    /// 1.0 §3.1.3.7).
+    async fn validate(
+        &self,
+        token: &str,
+        pending: &Pending,
+    ) -> Result<(String, AcceptedEvidence), EntryError> {
         let discovery = discover(&self.http, &self.trusted.issuer)
             .await
             .map_err(|e| EntryError::Issuer(e.to_string()))?;
-        let token = self
-            .exchange(&discovery.token_endpoint, code, &pending)
-            .await?;
         let jwks_uri = discovery
             .jwks_uri
             .as_deref()
@@ -273,7 +511,7 @@ impl FederatedEntry {
             .await
             .map_err(|e| EntryError::Issuer(e.to_string()))?;
         let claims = validate_id_token(
-            &token,
+            token,
             &keys,
             &IdTokenExpectation {
                 issuer: &self.trusted.issuer,
@@ -313,12 +551,7 @@ impl FederatedEntry {
             amr,
             auth_time,
         );
-        Ok(Returned {
-            subject,
-            evidence,
-            continuation: pending.continuation,
-            requested: pending.request,
-        })
+        Ok((subject, evidence))
     }
 
     /// The store key of `state` started in the browser holding `browser`:
@@ -339,19 +572,15 @@ impl FederatedEntry {
         )
     }
 
-    /// Exchange `code` at `token_endpoint` (RFC 6749 §4.1.3, RFC 7636 §4.5):
-    /// the ID Token of the response.
-    async fn exchange(
-        &self,
-        token_endpoint: &str,
-        code: &str,
-        pending: &Pending,
-    ) -> Result<String, EntryError> {
+    /// Exchange `code` at `token_endpoint` (RFC 6749 §4.1.3, RFC 7636 §4.5),
+    /// telling apart a request that never left, a refusal the issuer stated,
+    /// an answer, and anything after which the code may be spent unseen.
+    async fn exchange(&self, token_endpoint: &str, code: &str, pending: &Pending) -> Exchange {
         #[derive(Deserialize)]
         struct TokenResponse {
             id_token: Option<String>,
         }
-        let response = self
+        let sent = self
             .http
             .post(token_endpoint)
             .basic_auth(
@@ -364,22 +593,48 @@ impl FederatedEntry {
                 ("redirect_uri", pending.redirect_uri.as_str()),
                 ("code_verifier", pending.code_verifier.as_str()),
             ])
+            .timeout(EXCHANGE_TIMEOUT)
             .send()
-            .await
-            .map_err(|e| EntryError::Issuer(format!("token request: {e}")))?;
-        if !response.status().is_success() {
-            return Err(EntryError::Issuer(format!(
-                "the token endpoint answered {}",
-                response.status()
+            .await;
+        let response = match sent {
+            Ok(response) => response,
+            // No connection was made: nothing reached the issuer.
+            Err(e) if e.is_connect() => return Exchange::NotSent(format!("token request: {e}")),
+            Err(_) => return Exchange::Unknown,
+        };
+        let status = response.status();
+        // A client error is the issuer's statement that it took nothing for
+        // this code (RFC 6749 §5.2); a server error says nothing about it.
+        if status.is_client_error() {
+            return Exchange::Refused(EntryError::Issuer(format!(
+                "the token endpoint answered {status}"
             )));
         }
-        response
-            .json::<TokenResponse>()
-            .await
-            .map_err(|e| EntryError::Issuer(format!("token response: {e}")))?
-            .id_token
-            .ok_or_else(|| EntryError::Token("the token response carries no ID Token".into()))
+        if !status.is_success() {
+            return Exchange::Unknown;
+        }
+        match response.json::<TokenResponse>().await {
+            Ok(TokenResponse {
+                id_token: Some(id_token),
+            }) => Exchange::Answered(id_token),
+            Ok(TokenResponse { id_token: None }) => Exchange::Refused(EntryError::Token(
+                "the token response carries no ID Token".into(),
+            )),
+            Err(_) => Exchange::Unknown,
+        }
     }
+}
+
+/// What came of one exchange attempt.
+enum Exchange {
+    /// The token response's ID Token.
+    Answered(String),
+    /// The request never reached the issuer; the code is unspent.
+    NotSent(String),
+    /// The issuer refused the code; the entry is over.
+    Refused(EntryError),
+    /// The code may have been spent without a usable answer.
+    Unknown,
 }
 
 /// `value` form-urlencoded, as `client_secret_basic` encodes the client id

@@ -891,8 +891,91 @@ pub fn auth_service_under(
     enrollment_pin: Option<sid_core::models::EnrollmentMode>,
     login_policy: Option<Arc<dyn sid_authn::login_policy::LoginPolicySource>>,
 ) -> Arc<AuthServiceImpl> {
+    auth_service_revoking(
+        storage,
+        cache,
+        security_policy,
+        enrollment_pin,
+        login_policy,
+        test_revocation(),
+    )
+}
+
+/// A shared cache whose session revocations fail while `down` is set, every
+/// other key served by the cache it wraps.
+#[allow(dead_code)]
+pub struct RevocationOutage {
+    pub inner: Arc<dyn sid_plugin::cache::CacheBackend>,
+    pub down: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl sid_plugin::cache::CacheBackend for RevocationOutage {
+    async fn get(&self, key: &str) -> sid_plugin::cache::CacheResult<Option<Vec<u8>>> {
+        self.inner.get(key).await
+    }
+    async fn set(
+        &self,
+        key: &str,
+        value: &[u8],
+        ttl: std::time::Duration,
+    ) -> sid_plugin::cache::CacheResult<()> {
+        if key.starts_with("sid:revoked:session:")
+            && self.down.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(sid_plugin::cache::CacheError::Connection("down".into()));
+        }
+        self.inner.set(key, value, ttl).await
+    }
+    async fn delete(&self, key: &str) -> sid_plugin::cache::CacheResult<()> {
+        self.inner.delete(key).await
+    }
+    async fn take(&self, key: &str) -> sid_plugin::cache::CacheResult<Option<Vec<u8>>> {
+        self.inner.take(key).await
+    }
+    async fn exists(&self, key: &str) -> sid_plugin::cache::CacheResult<bool> {
+        self.inner.exists(key).await
+    }
+    async fn set_nx(
+        &self,
+        key: &str,
+        value: &[u8],
+        ttl: std::time::Duration,
+    ) -> sid_plugin::cache::CacheResult<bool> {
+        self.inner.set_nx(key, value, ttl).await
+    }
+    async fn incr(
+        &self,
+        key: &str,
+        ttl: std::time::Duration,
+    ) -> sid_plugin::cache::CacheResult<u64> {
+        self.inner.incr(key, ttl).await
+    }
+    async fn publish(&self, channel: &str, message: &[u8]) -> sid_plugin::cache::CacheResult<()> {
+        self.inner.publish(channel, message).await
+    }
+    async fn subscribe(
+        &self,
+        channel: &str,
+    ) -> sid_plugin::cache::CacheResult<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>> {
+        self.inner.subscribe(channel).await
+    }
+    async fn health_check(&self) -> sid_plugin::cache::CacheResult<()> {
+        self.inner.health_check().await
+    }
+}
+
+/// As [`auth_service_under`], revoking sessions through `revocation_cache`.
+#[allow(dead_code)]
+pub fn auth_service_revoking(
+    storage: Arc<dyn StorageBackend>,
+    cache: Arc<dyn sid_plugin::cache::CacheBackend>,
+    security_policy: Option<sid_core::models::SecurityPolicy>,
+    enrollment_pin: Option<sid_core::models::EnrollmentMode>,
+    login_policy: Option<Arc<dyn sid_authn::login_policy::LoginPolicySource>>,
+    revocation_cache: Arc<RevocationCache>,
+) -> Arc<AuthServiceImpl> {
     let jwt = test_jwt();
-    let revocation_cache = test_revocation();
     auth_service(
         storage.clone(),
         cache.clone(),

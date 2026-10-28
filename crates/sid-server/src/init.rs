@@ -1257,6 +1257,27 @@ pub fn spawn_ce_background_tasks(c: &CeComponents) {
         });
     }
 
+    // Operation results past their retention (every minute): a retained
+    // sign-in delivery is dropped within a minute of its operation's end.
+    // The purge is idempotent, so replicas running it at once only repeat
+    // it and no job lock holds a connection for it.
+    {
+        let storage = c.storage.clone();
+        tokio::spawn(async move {
+            let every = std::time::Duration::from_secs(60);
+            let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+            loop {
+                interval.tick().await;
+                if let Err(e) = storage
+                    .purge_expired_operation_results(chrono::Utc::now())
+                    .await
+                {
+                    tracing::warn!("operation result expiry failed: {}", e);
+                }
+            }
+        });
+    }
+
     // PAT auto-revoke (hourly)
     {
         let storage = c.storage.clone();
@@ -1692,8 +1713,8 @@ pub(crate) fn bus_carries_history_evaluator(
 }
 
 /// Start the runner for work the storage commits with a mutation (owed
-/// back-channel logouts, relayed events and their deliveries, contestation
-/// checks). Every replica runs one; leases keep an attempt on a single
+/// back-channel logouts and session revocations, relayed events and their
+/// deliveries, contestation checks). Every replica runs one; leases keep an attempt on a single
 /// replica. Facts are owed to the deployment's required receivers and to
 /// `also_required` (receivers this server runs). Runs until `shutdown`
 /// resolves, then lets attempts in flight record their outcome.
@@ -1729,6 +1750,11 @@ pub fn spawn_work_runner(
         Arc::new(sid_authn::principal_contest::PrincipalContestHandler::new(
             c.storage.clone(),
         )),
+        Arc::new(
+            sid_authn::session_revocation::SessionRevocationHandler::new(
+                c.revocation_cache.clone(),
+            ),
+        ),
         c.auth_svc.enrollment_handler(),
         c.auth_svc.owner_purge_handler(),
     ];

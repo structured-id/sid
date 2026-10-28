@@ -245,7 +245,10 @@ pub use session::{
     AuthLevel, BrowserCsrfToken, BrowserSecretHash, GrantAuthentication, Session,
     SessionAuthentication, SessionDecayLevel, SessionId,
 };
-pub use session_end::SessionEnd;
+pub use session_end::{
+    SESSION_REVOCATION_ATTEMPTS, SESSION_REVOCATION_KIND, SESSION_REVOCATION_WINDOW, SessionEnd,
+    SessionRevocation,
+};
 pub use site_registration::{SiteId, SiteRegistration, VerificationStatus};
 pub use upstream_identity::{UpstreamIdentity, UpstreamIdentityId, UpstreamLogin};
 pub use upstream_provider::{

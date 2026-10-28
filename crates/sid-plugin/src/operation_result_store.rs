@@ -26,8 +26,15 @@ pub trait OperationResultStore: Send + Sync {
         before: DateTime<Utc>,
     ) -> Result<u64>;
 
+    /// Drop every completion whose retention ended by `now`
+    /// ([`OperationCompletion::retain_until`]). Returns how many were dropped.
+    ///
+    /// [`OperationCompletion::retain_until`]: sid_core::models::OperationCompletion::retain_until
+    async fn purge_expired_operation_results(&self, now: DateTime<Utc>) -> Result<u64>;
+
     /// The committed completion of the keyed command `key` in `namespace`
-    /// (recorded through [`MutationContext::operation`]), if any.
+    /// (recorded through [`MutationContext::operation`]), if any; one past
+    /// its retention is none, and its key takes a new outcome.
     async fn get_operation_result(
         &self,
         namespace: &str,

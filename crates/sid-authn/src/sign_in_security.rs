@@ -145,13 +145,47 @@ fn unavailable<E: From<SignInRefusal>>(e: impl Display) -> E {
 }
 
 /// Run the rules for `owner`'s verified sign-in under `requirements`, the
-/// login requirements the host's policy states for it.
+/// login requirements the host's policy states for it, and record the
+/// admitted sign-in as evidence for later ones.
 pub async fn evaluate<H: SignInSecurityHost>(
     host: &H,
     owner: &H::Owner,
     attempt: SignInAttempt<'_>,
     requirements: &LoginRequirements,
 ) -> Result<(), H::Error> {
+    let client_ip = attempt.client_ip;
+    let geo_location = judge(host, owner, attempt, requirements, None).await?;
+    record_evidence(host, owner, client_ip, geo_location.as_ref()).await;
+    Ok(())
+}
+
+/// Run the same rules as [`evaluate`] without recording anything: for a
+/// repeat of `owner`'s sign-in already admitted and recorded from
+/// `admitted_from`, which must still meet the rules of its own request but
+/// is no further sign-in. That admission answers a CAPTCHA requirement for
+/// a repeat from the same address, as a pass answers it for the sign-in it
+/// was solved for; every other rule applies as it stands now.
+pub async fn check<H: SignInSecurityHost>(
+    host: &H,
+    owner: &H::Owner,
+    attempt: SignInAttempt<'_>,
+    requirements: &LoginRequirements,
+    admitted_from: Option<IpAddr>,
+) -> Result<(), H::Error> {
+    judge(host, owner, attempt, requirements, Some(admitted_from))
+        .await
+        .map(|_| ())
+}
+
+/// The rules themselves, for a repeat of a sign-in admitted from `admitted`
+/// when given; the client's location when it was resolved.
+async fn judge<H: SignInSecurityHost>(
+    host: &H,
+    owner: &H::Owner,
+    attempt: SignInAttempt<'_>,
+    requirements: &LoginRequirements,
+    admitted: Option<Option<IpAddr>>,
+) -> Result<Option<sid_plugin::geoip::GeoLocation>, H::Error> {
     let identity = owner.to_string();
     let client_ip = attempt.client_ip;
 
@@ -278,7 +312,10 @@ pub async fn evaluate<H: SignInSecurityHost>(
                 account: identity.clone(),
                 client_ip,
             };
+            // The admission being repeated was itself judged from that
+            // address: no pass is spent on its repeat.
             let answered = match attempt.captcha_pass {
+                _ if admitted == Some(client_ip) => true,
                 Some(pass) => host
                     .captcha_gate()
                     .redeem(pass, &subject)
@@ -340,9 +377,7 @@ pub async fn evaluate<H: SignInSecurityHost>(
             return Err(SignInRefusal::StepUp(unmet).into());
         }
     }
-
-    record_evidence(host, owner, client_ip, geo_location.as_ref()).await;
-    Ok(())
+    Ok(geo_location)
 }
 
 /// Record `owner`'s sign-in from `client_ip` that the rules admitted and a

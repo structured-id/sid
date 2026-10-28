@@ -46,6 +46,13 @@ impl From<ChallengeStoreError> for tonic::Status {
     }
 }
 
+/// A value read together with the form it is stored in, so a replacement
+/// applies only to exactly what was read.
+pub struct Versioned<V> {
+    pub value: V,
+    stored: Vec<u8>,
+}
+
 /// Short-lived state of one ceremony kind, keyed by the state key handed to
 /// the client when the ceremony starts.
 pub struct ChallengeStore<V> {
@@ -124,6 +131,61 @@ impl<V: Serialize + DeserializeOwned> ChallengeStore<V> {
         };
         let opened = sealed_secret::open(self.keys.as_ref(), &context, &sealed).await?;
         Ok(Some(serde_json::from_slice(&opened.secret)?))
+    }
+
+    /// The value under `key` with its stored form, for a later
+    /// [`ChallengeStore::replace`] that applies only while nobody changed it.
+    pub async fn read_versioned(
+        &self,
+        key: &str,
+    ) -> Result<Option<Versioned<V>>, ChallengeStoreError> {
+        let context = self.context(key);
+        let Some(sealed) = self.cache.get(&context).await? else {
+            return Ok(None);
+        };
+        let opened = sealed_secret::open(self.keys.as_ref(), &context, &sealed).await?;
+        Ok(Some(Versioned {
+            value: serde_json::from_slice(&opened.secret)?,
+            stored: sealed,
+        }))
+    }
+
+    /// Replace the value under `key` with `value` until `deadline`, only while
+    /// it is still `read` (atomic across replicas). Returns the replacement as
+    /// read, for the writer's next replacement, so the writer never adopts a
+    /// state another writer stored after it; `None`, changing nothing, when
+    /// another writer changed or removed it first, or once the deadline has
+    /// passed.
+    pub async fn replace(
+        &self,
+        key: &str,
+        read: &Versioned<V>,
+        value: &V,
+        deadline: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<Versioned<V>>, ChallengeStoreError>
+    where
+        V: Clone,
+    {
+        let Ok(left) = (deadline - chrono::Utc::now()).to_std() else {
+            return Ok(None);
+        };
+        if left.is_zero() {
+            return Ok(None);
+        }
+        let context = self.context(key);
+        let plain = zeroize::Zeroizing::new(serde_json::to_vec(value)?);
+        let sealed = sealed_secret::seal(self.keys.as_ref(), &context, &plain).await?;
+        if !self
+            .cache
+            .compare_and_set(&context, &read.stored, &sealed, left)
+            .await?
+        {
+            return Ok(None);
+        }
+        Ok(Some(Versioned {
+            value: value.clone(),
+            stored: sealed,
+        }))
     }
 
     /// The cache key and sealing context of `key`: binds a sealed value to the

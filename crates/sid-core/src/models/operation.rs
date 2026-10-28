@@ -65,6 +65,10 @@ pub struct OperationCompletion {
     pub method: String,
     pub fingerprint: Vec<u8>,
     pub result: Vec<u8>,
+    /// When the completion stops being kept: past it the key resolves to
+    /// nothing and the record is dropped. `None` keeps it until its owner
+    /// purges it.
+    pub retain_until: Option<DateTime<Utc>>,
 }
 
 impl OperationCompletion {
@@ -83,7 +87,15 @@ impl OperationCompletion {
             method: method.into(),
             fingerprint: fingerprint(inputs),
             result,
+            retain_until: None,
         }
+    }
+
+    /// The same completion, kept no longer than `until`.
+    #[must_use]
+    pub fn retained_until(mut self, until: DateTime<Utc>) -> Self {
+        self.retain_until = Some(until);
+        self
     }
 }
 

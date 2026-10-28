@@ -83,6 +83,7 @@ pub mod sealed_secret;
 #[cfg(feature = "grpc")]
 pub mod service_auth;
 pub mod session_limit;
+pub mod session_revocation;
 #[cfg(feature = "grpc")]
 pub mod sign_in_delivery;
 #[cfg(feature = "grpc")]

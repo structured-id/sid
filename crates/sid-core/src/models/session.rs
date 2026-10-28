@@ -139,7 +139,7 @@ pub struct SessionAuthentication {
 /// SID ACR, the methods and the real authentication time (OpenID Connect Core
 /// 1.0 §2: `acr`, `amr`, `auth_time`). An ACR that is no shared SID URN is no
 /// level: it is never ordered or read as `Basic`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AcceptedEvidence {
     /// The attested level, `None` when the token named none or one SID does
     /// not define.

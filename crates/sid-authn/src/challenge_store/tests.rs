@@ -44,6 +44,59 @@ async fn concurrent_takes_have_one_winner() {
     assert_eq!(winners, 1);
 }
 
+/// A replacement applies only to exactly what was read: of two replicas that
+/// read the same state, the first replaces it and the second, now stale,
+/// changes nothing; a past deadline replaces nothing either.
+#[tokio::test]
+async fn a_replacement_applies_only_to_what_was_read() {
+    let (a, b) = replicas(Duration::from_secs(60));
+    a.insert("k1", &"one".to_string()).await.unwrap();
+    let deadline = chrono::Utc::now() + chrono::Duration::seconds(60);
+    let read_a = a.read_versioned("k1").await.unwrap().unwrap();
+    let read_b = b.read_versioned("k1").await.unwrap().unwrap();
+    assert_eq!(read_a.value, "one");
+
+    let two = a
+        .replace("k1", &read_a, &"two".to_string(), deadline)
+        .await
+        .unwrap()
+        .expect("the first replacement applies");
+    assert_eq!(two.value, "two");
+    assert!(
+        b.replace("k1", &read_b, &"three".to_string(), deadline)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(b.read("k1").await.unwrap().as_deref(), Some("two"));
+
+    // The replacement it returned is the writer's next version: it replaces
+    // exactly what that writer stored, and nothing stored after it.
+    let three = a
+        .replace("k1", &two, &"three".to_string(), deadline)
+        .await
+        .unwrap()
+        .expect("the writer's own version");
+    b.insert("k1", &"other".to_string()).await.unwrap();
+    assert!(
+        a.replace("k1", &three, &"four".to_string(), deadline)
+            .await
+            .unwrap()
+            .is_none(),
+        "a version another writer replaced admits nothing"
+    );
+
+    let read = a.read_versioned("k1").await.unwrap().unwrap();
+    let past = chrono::Utc::now() - chrono::Duration::seconds(1);
+    assert!(
+        a.replace("k1", &read, &"late".to_string(), past)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(a.read("k1").await.unwrap().as_deref(), Some("other"));
+}
+
 /// Reading state leaves it in place: any replica reads it any number of
 /// times, and the one taker still gets it afterwards. Absent state reads as
 /// `None`.
