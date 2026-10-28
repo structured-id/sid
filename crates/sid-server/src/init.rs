@@ -55,7 +55,6 @@ const LOCK_MIGRATION_DEADLINE: i64 = 48;
 const LOCK_AUDIT_PARTITION: i64 = 49;
 const LOCK_PRINCIPAL_EXPIRY: i64 = 50;
 const LOCK_ENROLLMENT_COMPACTION: i64 = 51;
-const LOCK_OPERATION_RESULT_EXPIRY: i64 = 52;
 
 /// Namespace of machine-credential alert event ids.
 const CREDENTIAL_ALERT_NAMESPACE: uuid::Uuid =
@@ -1260,26 +1259,20 @@ pub fn spawn_ce_background_tasks(c: &CeComponents) {
 
     // Operation results past their retention (every minute): a retained
     // sign-in delivery is dropped within a minute of its operation's end.
+    // The purge is idempotent, so replicas running it at once only repeat
+    // it and no job lock holds a connection for it.
     {
         let storage = c.storage.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            let every = std::time::Duration::from_secs(60);
+            let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
             loop {
                 interval.tick().await;
-                if let Some(lock) = take_job_lock(
-                    &*storage,
-                    LOCK_OPERATION_RESULT_EXPIRY,
-                    "operation_result_expiry",
-                )
-                .await
+                if let Err(e) = storage
+                    .purge_expired_operation_results(chrono::Utc::now())
+                    .await
                 {
-                    if let Err(e) = storage
-                        .purge_expired_operation_results(chrono::Utc::now())
-                        .await
-                    {
-                        tracing::warn!("operation result expiry failed: {}", e);
-                    }
-                    release_job_lock(lock, "operation_result_expiry").await;
+                    tracing::warn!("operation result expiry failed: {}", e);
                 }
             }
         });
