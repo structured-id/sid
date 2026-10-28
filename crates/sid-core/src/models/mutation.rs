@@ -38,6 +38,9 @@ pub enum ActorFence {
         revision: i64,
         credential: ProvisioningCredentialId,
     },
+    /// The installation's login policy at `epoch`: a session or code decided
+    /// under it holds only while no policy write has advanced the epoch since.
+    LoginPolicy { epoch: i64 },
 }
 
 impl MutationContext {

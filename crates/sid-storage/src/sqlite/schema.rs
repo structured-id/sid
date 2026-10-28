@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! The SQLite baseline schema: version 1 of a database file.
 //!
-//! Frozen: a file created from it is upgraded by the versioned migrations in
-//! [`super::migrations`], so a change to the schema is a new migration, never
-//! an edit here. Foreign keys and WAL are connection options, not part of it.
+//! A schema change edits this baseline in place; a database file created
+//! from an earlier baseline is recreated, not migrated. The versioned
+//! migrations in [`super::migrations`] apply above it to every new file.
+//! Foreign keys and WAL are connection options, not part of it.
 
 /// Every table, index and constraint of schema version 1.
 pub(crate) const BASELINE: &str = r#"
@@ -1445,4 +1446,9 @@ CREATE TABLE IF NOT EXISTS provisioning_credentials (
 
 CREATE INDEX IF NOT EXISTS idx_provisioning_credentials_connector
     ON provisioning_credentials (connector_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS login_policy_epoch (
+    id              INTEGER PRIMARY KEY CHECK (id = 1),
+    epoch           INTEGER NOT NULL
+);
 "#;

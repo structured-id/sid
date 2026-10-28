@@ -739,6 +739,8 @@ struct Options {
     browser_cookie: Option<sid_authn::browser_session::BrowserCookie>,
     /// Configure no browser sign-in page, as a deployment without one runs.
     without_sign_in_page: bool,
+    /// The host's login policy source; None keeps the fixed requirements.
+    login_policy: Option<Arc<dyn sid_authn::login_policy::LoginPolicySource>>,
 }
 
 /// What the authentication service is built from besides its storage and
@@ -768,6 +770,9 @@ pub struct AuthOptions {
     pub browser_cookie: Option<sid_authn::browser_session::BrowserCookie>,
     /// Configure no browser sign-in page ([`SIGN_IN_PAGE`] otherwise).
     pub without_sign_in_page: bool,
+    /// The host's login policy source; None keeps the fixed requirements of
+    /// `security_policy`.
+    pub login_policy: Option<Arc<dyn sid_authn::login_policy::LoginPolicySource>>,
 }
 
 /// The authentication service over `storage` and `cache`, as a server start
@@ -794,6 +799,7 @@ pub fn auth_service(
         enrollment_pin,
         browser_cookie,
         without_sign_in_page,
+        login_policy,
     } = options;
     // Registration, change and reset run their OPAQUE on the ZKPP server
     // whether or not proofs are verified, as a server start builds it:
@@ -852,8 +858,12 @@ pub fn auth_service(
     } else {
         service.with_sign_in_page(&url::Url::parse(SIGN_IN_PAGE).unwrap())
     };
-    Arc::new(match security_policy {
+    let service = match security_policy {
         Some(policy) => service.with_security_policy(policy),
+        None => service,
+    };
+    Arc::new(match login_policy {
+        Some(source) => service.with_login_policy(source),
         None => service,
     })
 }
@@ -867,6 +877,19 @@ pub fn auth_service_over(
     cache: Arc<dyn sid_plugin::cache::CacheBackend>,
     security_policy: Option<sid_core::models::SecurityPolicy>,
     enrollment_pin: Option<sid_core::models::EnrollmentMode>,
+) -> Arc<AuthServiceImpl> {
+    auth_service_under(storage, cache, security_policy, enrollment_pin, None)
+}
+
+/// As [`auth_service_over`], reading the login requirements from
+/// `login_policy` when given.
+#[allow(dead_code)]
+pub fn auth_service_under(
+    storage: Arc<dyn StorageBackend>,
+    cache: Arc<dyn sid_plugin::cache::CacheBackend>,
+    security_policy: Option<sid_core::models::SecurityPolicy>,
+    enrollment_pin: Option<sid_core::models::EnrollmentMode>,
+    login_policy: Option<Arc<dyn sid_authn::login_policy::LoginPolicySource>>,
 ) -> Arc<AuthServiceImpl> {
     let jwt = test_jwt();
     let revocation_cache = test_revocation();
@@ -894,6 +917,7 @@ pub fn auth_service_over(
             enrollment_pin,
             browser_cookie: None,
             without_sign_in_page: false,
+            login_policy,
         },
     )
 }
@@ -996,6 +1020,7 @@ impl TestServices {
                 enrollment_pin: None,
                 browser_cookie: None,
                 without_sign_in_page: false,
+                login_policy: None,
             },
         )
     }
@@ -1018,6 +1043,7 @@ impl TestServices {
                 enrollment_pin: None,
                 browser_cookie: None,
                 without_sign_in_page: false,
+                login_policy: None,
             },
         )
     }
@@ -1038,6 +1064,7 @@ impl TestServices {
                 enrollment_pin: Some(mode),
                 browser_cookie: None,
                 without_sign_in_page: false,
+                login_policy: None,
             },
         )
     }
@@ -1060,6 +1087,7 @@ impl TestServices {
                 enrollment_pin: None,
                 browser_cookie: Some(cookie),
                 without_sign_in_page: false,
+                login_policy: None,
             },
         )
     }
@@ -1077,6 +1105,7 @@ impl TestServices {
                 enrollment_pin: None,
                 browser_cookie: None,
                 without_sign_in_page: true,
+                login_policy: None,
             },
         )
     }
@@ -1097,6 +1126,29 @@ impl TestServices {
                 enrollment_pin: None,
                 browser_cookie: None,
                 without_sign_in_page: false,
+                login_policy: None,
+            },
+        )
+    }
+
+    /// TestServices reading the login requirements from `source`, as an
+    /// installation whose host keeps its own login policy.
+    #[allow(dead_code)]
+    pub fn with_login_policy(
+        storage: MockStorage,
+        source: Arc<dyn sid_authn::login_policy::LoginPolicySource>,
+    ) -> Self {
+        Self::with_options(
+            storage,
+            FeatureFlagService::disabled(),
+            Options {
+                zkpp: None,
+                magic_links: false,
+                security_policy: None,
+                enrollment_pin: None,
+                browser_cookie: None,
+                without_sign_in_page: false,
+                login_policy: Some(source),
             },
         )
     }
@@ -1113,6 +1165,7 @@ impl TestServices {
                 enrollment_pin: None,
                 browser_cookie: None,
                 without_sign_in_page: false,
+                login_policy: None,
             },
         )
     }
@@ -1128,6 +1181,7 @@ impl TestServices {
                 enrollment_pin: None,
                 browser_cookie: None,
                 without_sign_in_page: false,
+                login_policy: None,
             },
         )
     }
@@ -1151,6 +1205,7 @@ impl TestServices {
                 enrollment_pin: None,
                 browser_cookie: None,
                 without_sign_in_page: false,
+                login_policy: None,
             },
         )
     }
@@ -1208,6 +1263,7 @@ impl TestServices {
                 enrollment_pin: None,
                 browser_cookie: None,
                 without_sign_in_page: false,
+                login_policy: None,
             },
         );
         replica
@@ -1232,6 +1288,7 @@ impl TestServices {
             enrollment_pin,
             browser_cookie,
             without_sign_in_page,
+            login_policy,
         } = options;
         let storage: Arc<dyn StorageBackend> = mock_storage.clone();
         // Provisioned as a server start provisions it; a replica over the same
@@ -1323,6 +1380,7 @@ impl TestServices {
                 enrollment_pin,
                 browser_cookie,
                 without_sign_in_page,
+                login_policy,
             },
         );
 

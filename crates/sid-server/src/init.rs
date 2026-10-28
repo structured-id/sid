@@ -324,10 +324,23 @@ pub(crate) async fn announce_admin_claim(
     Ok(())
 }
 
+/// What a host binary supplies to the CE components it composes.
+#[derive(Default)]
+pub struct CeHost {
+    /// Where the login requirements come from; none keeps the installation's
+    /// fixed security policy.
+    pub login_policy: Option<Arc<dyn sid_authn::login_policy::LoginPolicySource>>,
+}
+
 /// Initialize all CE components: storage, crypto, auth, and gRPC services.
 ///
 /// Does NOT start the server — caller assembles the tonic server and serves.
 pub async fn init_ce() -> anyhow::Result<CeComponents> {
+    init_ce_with(CeHost::default()).await
+}
+
+/// Initialize the CE components with what `host` supplies.
+pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
     let grpc_addr: SocketAddr = env_setting("SID_GRPC_BIND")?
         .unwrap_or_else(|| "127.0.0.1:50051".to_string())
         .parse()?;
@@ -941,6 +954,10 @@ pub async fn init_ce() -> anyhow::Result<CeComponents> {
     .with_trusted_proxies(trusted_proxies)
     .with_enrollment_pin(enrollment_pin)
     .with_browser_cookie(browser_cookie);
+    let auth_svc = match host.login_policy {
+        Some(source) => auth_svc.with_login_policy(source),
+        None => auth_svc,
+    };
     let auth_svc = Arc::new(match &login_url {
         Some(page) => auth_svc.with_sign_in_page(page),
         None => auth_svc,

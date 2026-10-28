@@ -7,16 +7,14 @@ use sid_authn::captcha::{CaptchaGate, CaptchaProvider};
 use sid_authn::geoip::GeoIpChain;
 use sid_authn::ip_intelligence::IpIntelligenceAggregator;
 use sid_authn::sign_in_security::{SignInRefusal, SignInSecurityHost};
-use sid_core::models::enforcement::EnforcementDecision;
-use sid_core::models::security_policy::SecurityPolicy;
-use sid_core::models::{ProfileId, Session};
+use sid_core::models::ProfileId;
 use sid_plugin::SignInHistoryStore;
 use tonic::Status;
 
 use super::AuthServiceImpl;
 use super::refusal::{
-    anomaly_unavailable, captcha_required, sign_in_refused, step_up_after_anomaly, step_up_to_acr,
-    too_many_attempts,
+    anomaly_unavailable, captcha_required, sign_in_refused, step_up_after_anomaly,
+    step_up_required, too_many_attempts,
 };
 
 /// A refusal of the rules as this server answers it.
@@ -31,7 +29,7 @@ impl From<SignInRefusal> for SecurityStatus {
                 Ok(refusal) | Err(refusal) => refusal.into(),
             },
             SignInRefusal::StepUpAfterAnomaly(rule) => step_up_after_anomaly(rule).into(),
-            SignInRefusal::StepUpToAcr(acr) => step_up_to_acr(acr).into(),
+            SignInRefusal::StepUp(unmet) => step_up_required(&unmet).into(),
             SignInRefusal::Unavailable(cause) => anomaly_unavailable(cause),
         })
     }
@@ -64,18 +62,6 @@ impl SignInSecurityHost for ProfileSecurity<'_> {
     }
     fn captcha_provider(&self) -> &dyn CaptchaProvider {
         self.service.captcha_provider.as_ref()
-    }
-    fn policy(&self) -> &SecurityPolicy {
-        &self.service.security_policy
-    }
-
-    fn policy_decision(&self, probe: &Session<ProfileId>) -> EnforcementDecision {
-        sid_authz::conditional_access::ConditionalAccessEngine::check(
-            &self.service.security_policy,
-            None, // the per-app client override is checked at authorize time
-            None,
-            probe,
-        )
     }
 
     async fn security_event(

@@ -263,6 +263,66 @@ async fn reset_of_account_with_second_factor_signs_nobody_in() {
     assert_eq!(passwords.len(), 1, "the password was not replaced");
 }
 
+/// A login policy that cannot be read.
+struct Unreadable;
+
+#[async_trait::async_trait]
+impl sid_authn::login_policy::LoginPolicySource for Unreadable {
+    async fn requirements(
+        &self,
+        _client_id: Option<&str>,
+    ) -> Result<
+        sid_authn::login_policy::LoginRequirements,
+        sid_authn::login_policy::LoginPolicyUnavailable,
+    > {
+        Err(sid_authn::login_policy::LoginPolicyUnavailable(
+            "down".into(),
+        ))
+    }
+}
+
+/// The reset's sign-in is optional: when the login policy does not admit a
+/// password sign-in, or cannot be read, the reset that already replaced the
+/// password still succeeds, with no session. Reporting it failed would leave
+/// the user unaware the password changed, with the reset already consumed.
+#[tokio::test]
+async fn a_reset_the_login_policy_does_not_admit_succeeds_without_a_session() {
+    let mut stricter = sid_core::models::SecurityPolicy::ce_default();
+    stricter.auth.min_acr = sid_core::models::session::AuthLevel::Elevated;
+    stricter.enforcement.mode = sid_core::models::security_policy::EnforcementMode::Hard;
+    let sources: [std::sync::Arc<dyn sid_authn::login_policy::LoginPolicySource>; 2] = [
+        std::sync::Arc::new(sid_authn::login_policy::FixedLoginPolicy::of(&stricter)),
+        std::sync::Arc::new(Unreadable),
+    ];
+    for source in sources {
+        let profile = test_profile();
+        let svc = TestServices::with_login_policy(
+            MockStorage::new().with_profile(profile.clone()),
+            source,
+        );
+
+        let done = complete(&svc, &profile).await;
+
+        assert!(done.metadata().get("authorization").is_none());
+        let done = done.into_inner();
+        assert_eq!(done.session_id, None);
+        assert_eq!(done.expires_in, None);
+        assert!(
+            svc.storage
+                .list_sessions(&profile.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let passwords = svc
+            .storage
+            .get_credentials_by_profile(profile.id, Some(CredentialType::Opaque))
+            .await
+            .unwrap();
+        assert_eq!(passwords.len(), 1, "the password was not replaced");
+    }
+}
+
 /// A password-only account keeps its email reset path: it is signed in with
 /// the new password.
 #[tokio::test]
