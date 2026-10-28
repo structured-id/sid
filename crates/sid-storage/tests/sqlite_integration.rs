@@ -342,6 +342,7 @@ mod operation_result_store {
         concurrent_outcomes_record_once,
         results_travel_between_stores,
         results_are_purged_by_method,
+        a_result_is_kept_no_longer_than_its_retention,
     );
 }
 

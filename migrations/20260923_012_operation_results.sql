@@ -11,5 +11,11 @@ CREATE TABLE IF NOT EXISTS operation_results (
     fingerprint BYTEA NOT NULL,
     result BYTEA NOT NULL,
     completed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    -- Past this the completion is not kept: its key resolves to nothing and
+    -- the expired purge drops it. NULL keeps it until its owner purges it.
+    retain_until TIMESTAMPTZ,
     PRIMARY KEY (namespace, op_key)
 );
+
+CREATE INDEX IF NOT EXISTS operation_results_retain_until
+    ON operation_results (retain_until) WHERE retain_until IS NOT NULL;

@@ -11,22 +11,28 @@ use sqlx::PgPool;
 use super::PostgresBackend;
 
 /// Record `operation` in `tx`. When another transaction already committed
-/// the key, this one must commit nothing: `OperationCompleted`. A concurrent
+/// the key, this one must commit nothing: `OperationCompleted`; a completion
+/// past its retention no longer holds the key and is replaced. A concurrent
 /// transaction holding the same key makes this insert wait for its outcome.
 pub(super) async fn record_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     operation: &OperationCompletion,
 ) -> SidResult<()> {
     let inserted = sqlx::query(
-        "INSERT INTO operation_results (namespace, op_key, method, fingerprint, result)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (namespace, op_key) DO NOTHING",
+        "INSERT INTO operation_results (namespace, op_key, method, fingerprint, result, retain_until)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (namespace, op_key) DO UPDATE SET
+             method = EXCLUDED.method, fingerprint = EXCLUDED.fingerprint,
+             result = EXCLUDED.result, completed_at = NOW(),
+             retain_until = EXCLUDED.retain_until
+         WHERE operation_results.retain_until <= NOW()",
     )
     .bind(&operation.namespace)
     .bind(operation.key.as_str())
     .bind(&operation.method)
     .bind(&operation.fingerprint)
     .bind(&operation.result)
+    .bind(operation.retain_until)
     .execute(&mut **tx)
     .await
     .map_err(|e| SidError::Storage(format!("operation completion: {e}")))?
@@ -37,23 +43,39 @@ pub(super) async fn record_in_tx(
     Ok(())
 }
 
-/// method, fingerprint, result, completed_at
-type RecordRow = (String, Vec<u8>, Vec<u8>, DateTime<Utc>);
+/// method, fingerprint, result, completed_at, retain_until
+type RecordRow = (
+    String,
+    Vec<u8>,
+    Vec<u8>,
+    DateTime<Utc>,
+    Option<DateTime<Utc>>,
+);
 
-/// namespace, op_key, method, fingerprint, result, completed_at
-type FullRow = (String, String, String, Vec<u8>, Vec<u8>, DateTime<Utc>);
+/// namespace, op_key, method, fingerprint, result, completed_at, retain_until
+type FullRow = (
+    String,
+    String,
+    String,
+    Vec<u8>,
+    Vec<u8>,
+    DateTime<Utc>,
+    Option<DateTime<Utc>>,
+);
 
 pub(super) async fn export(pool: &PgPool) -> SidResult<Vec<OperationRecord>> {
     let rows: Vec<FullRow> = sqlx::query_as(
-        "SELECT namespace, op_key, method, fingerprint, result, completed_at
-         FROM operation_results ORDER BY completed_at, namespace, op_key",
+        "SELECT namespace, op_key, method, fingerprint, result, completed_at, retain_until
+         FROM operation_results
+         WHERE retain_until IS NULL OR retain_until > NOW()
+         ORDER BY completed_at, namespace, op_key",
     )
     .fetch_all(pool)
     .await
     .map_err(|e| SidError::Storage(format!("operation results: {e}")))?;
     rows.into_iter()
         .map(
-            |(namespace, key, method, fingerprint, result, completed_at)| {
+            |(namespace, key, method, fingerprint, result, completed_at, retain_until)| {
                 Ok(OperationRecord {
                     completion: OperationCompletion {
                         namespace,
@@ -62,6 +84,7 @@ pub(super) async fn export(pool: &PgPool) -> SidResult<Vec<OperationRecord>> {
                         method,
                         fingerprint,
                         result,
+                        retain_until,
                     },
                     completed_at,
                 })
@@ -73,8 +96,9 @@ pub(super) async fn export(pool: &PgPool) -> SidResult<Vec<OperationRecord>> {
 pub(super) async fn import(pool: &PgPool, record: &OperationRecord) -> SidResult<bool> {
     let c = &record.completion;
     let inserted = sqlx::query(
-        "INSERT INTO operation_results (namespace, op_key, method, fingerprint, result, completed_at)
-         VALUES ($1, $2, $3, $4, $5, $6)
+        "INSERT INTO operation_results
+             (namespace, op_key, method, fingerprint, result, completed_at, retain_until)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
          ON CONFLICT (namespace, op_key) DO NOTHING",
     )
     .bind(&c.namespace)
@@ -83,6 +107,7 @@ pub(super) async fn import(pool: &PgPool, record: &OperationRecord) -> SidResult
     .bind(&c.fingerprint)
     .bind(&c.result)
     .bind(record.completed_at)
+    .bind(c.retain_until)
     .execute(pool)
     .await
     .map_err(|e| SidError::Storage(format!("operation result import: {e}")))?
@@ -96,8 +121,9 @@ pub(super) async fn get(
     key: &OperationKey,
 ) -> SidResult<Option<OperationRecord>> {
     let row: Option<RecordRow> = sqlx::query_as(
-        "SELECT method, fingerprint, result, completed_at FROM operation_results
-         WHERE namespace = $1 AND op_key = $2",
+        "SELECT method, fingerprint, result, completed_at, retain_until FROM operation_results
+         WHERE namespace = $1 AND op_key = $2
+           AND (retain_until IS NULL OR retain_until > NOW())",
     )
     .bind(namespace)
     .bind(key.as_str())
@@ -105,13 +131,14 @@ pub(super) async fn get(
     .await
     .map_err(|e| SidError::Storage(format!("operation result: {e}")))?;
     Ok(row.map(
-        |(method, fingerprint, result, completed_at)| OperationRecord {
+        |(method, fingerprint, result, completed_at, retain_until)| OperationRecord {
             completion: OperationCompletion {
                 namespace: namespace.to_string(),
                 key: key.clone(),
                 method,
                 fingerprint,
                 result,
+                retain_until,
             },
             completed_at,
         },
@@ -155,6 +182,15 @@ impl OperationResultStore for PostgresBackend {
         .await
         .map(|done| done.rows_affected())
         .map_err(|e| SidError::Storage(format!("purge operation results: {e}")))
+    }
+
+    async fn purge_expired_operation_results(&self, now: DateTime<Utc>) -> SidResult<u64> {
+        sqlx::query("DELETE FROM operation_results WHERE retain_until <= $1")
+            .bind(now)
+            .execute(&self.pool)
+            .await
+            .map(|done| done.rows_affected())
+            .map_err(|e| SidError::Storage(format!("purge expired operation results: {e}")))
     }
 
     async fn get_operation_result(

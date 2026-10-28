@@ -511,8 +511,13 @@ CREATE TABLE IF NOT EXISTS operation_results (
     fingerprint  BLOB NOT NULL,
     result       BLOB NOT NULL,
     completed_at TEXT NOT NULL,
+    -- Unix milliseconds past which the completion is not kept; NULL keeps it
+    -- until its owner purges it.
+    retain_until_ms INTEGER,
     PRIMARY KEY (namespace, op_key)
 );
+CREATE INDEX IF NOT EXISTS operation_results_retain_until
+    ON operation_results (retain_until_ms) WHERE retain_until_ms IS NOT NULL;
 
 -- One row per background job currently held: whoever inserted the row runs
 -- the job until it deletes the row or the lease runs out.

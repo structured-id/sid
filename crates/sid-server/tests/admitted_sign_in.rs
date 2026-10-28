@@ -288,6 +288,40 @@ async fn a_repeated_operation_gets_the_same_session_again() {
     assert_eq!(sessions.len(), 1);
 }
 
+// The sealed delivery an admitted sign-in keeps for a lost response is kept
+// no longer than its operation: its completion's retention ends at the
+// operation's deadline, after which the store drops it. Before, it stayed
+// until a general retention long after any repeat could use it.
+#[tokio::test]
+async fn the_retained_delivery_ends_with_its_operation() {
+    let storage = storage().await;
+    let auth = authority(storage.clone(), AuthLevel::Basic);
+    let profile = profile(storage.as_ref()).await;
+    let op = operation();
+    let deadline = Utc::now() + Duration::minutes(10);
+    auth.complete_admitted_sign_in(
+        &tonic::Request::new(()),
+        &profile,
+        &basic(),
+        CLIENT,
+        Some(completion(&op, deadline)),
+    )
+    .await
+    .unwrap();
+    let record = storage
+        .get_operation_result(
+            "admitted-sign-in",
+            &sid_core::models::OperationKey::parse(&op).unwrap(),
+        )
+        .await
+        .unwrap()
+        .expect("the retained delivery");
+    assert_eq!(
+        record.completion.retain_until.map(|t| t.timestamp_millis()),
+        Some(deadline.timestamp_millis())
+    );
+}
+
 // Concurrent repeats of one operation commit one session; every answer that
 // succeeds names it.
 #[tokio::test]
@@ -595,26 +629,28 @@ async fn an_ended_suspended_or_late_operation_is_not_delivered_again() {
     );
     assert_eq!(storage.list_sessions(&profile_b.id).await.unwrap().len(), 1);
 
-    // Late.
+    // Late: the deadline passes between the commit and the repeat. The
+    // repeat neither gets the session again nor signs in anew.
     let profile_c = profile(storage.as_ref()).await;
     let op = operation();
-    let past = Utc::now() - Duration::seconds(1);
+    let soon = Utc::now() + Duration::milliseconds(800);
     auth.complete_admitted_sign_in(
         &request,
         &profile_c,
         &basic(),
         CLIENT,
-        Some(completion(&op, past)),
+        Some(completion(&op, soon)),
     )
     .await
     .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
     let refused = auth
         .complete_admitted_sign_in(
             &request,
             &profile_c,
             &basic(),
             CLIENT,
-            Some(completion(&op, past)),
+            Some(completion(&op, soon)),
         )
         .await
         .err()

@@ -2781,6 +2781,14 @@ impl AuthServiceImpl {
         if !profile.status.can_authenticate() {
             return Err(authentication_failed());
         }
+        // An operation past its end admits nothing, neither a repeat nor a
+        // new sign-in: its retained delivery is gone with it.
+        if completion
+            .as_ref()
+            .is_some_and(|c| c.deadline <= Utc::now())
+        {
+            return Err(authentication_failed());
+        }
         // The rules this request meets now (address, lockout, anomalies and
         // requirements), a repeat of a completed operation included: a
         // retained credential is never delivered where the sign-in itself

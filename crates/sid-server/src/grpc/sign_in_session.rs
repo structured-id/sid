@@ -163,13 +163,17 @@ impl SignInSessions<'_> {
                             )
                             .await
                             .map_err(|e| internal("seal the sign-in delivery", e))?;
-                        Some(sid_core::models::OperationCompletion::new(
-                            ADMITTED_NAMESPACE,
-                            retained.completion_key,
-                            ADMITTED_METHOD,
-                            profile.id.to_string().as_bytes(),
-                            sealed,
-                        ))
+                        // Kept no longer than it can be delivered again.
+                        Some(
+                            sid_core::models::OperationCompletion::new(
+                                ADMITTED_NAMESPACE,
+                                retained.completion_key,
+                                ADMITTED_METHOD,
+                                profile.id.to_string().as_bytes(),
+                                sealed,
+                            )
+                            .retained_until(retained.deadline),
+                        )
                     }
                     None => None,
                 };

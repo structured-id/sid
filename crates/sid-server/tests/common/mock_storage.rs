@@ -1401,15 +1401,28 @@ impl sid_plugin::OperationResultStore for MockStorage {
         });
         Ok((held - inner.operations.len()) as u64)
     }
+    async fn purge_expired_operation_results(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> SidResult<u64> {
+        let mut inner = self.inner.lock().unwrap();
+        let held = inner.operations.len();
+        inner
+            .operations
+            .retain(|_, r| r.completion.retain_until.is_none_or(|until| until > now));
+        Ok((held - inner.operations.len()) as u64)
+    }
     async fn get_operation_result(
         &self,
         namespace: &str,
         key: &OperationKey,
     ) -> SidResult<Option<OperationRecord>> {
         let inner = self.inner.lock().unwrap();
+        let now = chrono::Utc::now();
         Ok(inner
             .operations
             .get(&(namespace.to_string(), key.as_str().to_string()))
+            .filter(|r| r.completion.retain_until.is_none_or(|until| until > now))
             .cloned())
     }
     async fn export_operation_results(&self) -> SidResult<Vec<OperationRecord>> {
@@ -5835,7 +5848,13 @@ impl MockStorageInner {
                 operation.namespace.clone(),
                 operation.key.as_str().to_string(),
             );
-            if self.operations.contains_key(&slot) {
+            // A completion past its retention no longer holds the key.
+            let now = chrono::Utc::now();
+            if self
+                .operations
+                .get(&slot)
+                .is_some_and(|r| r.completion.retain_until.is_none_or(|until| until > now))
+            {
                 return Err(sid_core::Error::OperationCompleted(slot.1));
             }
             self.operations.insert(

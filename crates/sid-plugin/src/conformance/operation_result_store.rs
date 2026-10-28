@@ -148,6 +148,97 @@ pub async fn results_travel_between_stores(store: &dyn OperationResultStore) {
     assert!(matches!(err, Error::OperationCompleted(_)), "{err:?}");
 }
 
+/// A completion recorded with a retention end is kept no longer: past it the
+/// key resolves to nothing, a new outcome for it is recorded, and the expired
+/// purge drops it. A completion without one, or still within it, stays.
+pub async fn a_result_is_kept_no_longer_than_its_retention(store: &dyn OperationResultStore) {
+    let ns = namespace();
+    let (expired, kept, unbounded) = (key(), key(), key());
+    let now = chrono::Utc::now();
+    let retained = |key: &OperationKey, until: chrono::DateTime<chrono::Utc>, result: &[u8]| {
+        MutationContext::from(AuditEntry::system("conformance", "operation_result")).with_operation(
+            OperationCompletion::new(&ns, key.clone(), "deliver", b"inputs", result.to_vec())
+                .retained_until(until),
+        )
+    };
+    store
+        .record_outcome(retained(
+            &expired,
+            now - chrono::Duration::seconds(1),
+            b"old",
+        ))
+        .await
+        .unwrap();
+    store
+        .record_outcome(retained(&kept, now + chrono::Duration::hours(1), b"kept"))
+        .await
+        .unwrap();
+    store
+        .record_outcome(outcome(&ns, &unbounded, "deliver", b"unbounded"))
+        .await
+        .unwrap();
+
+    assert!(
+        store
+            .get_operation_result(&ns, &expired)
+            .await
+            .unwrap()
+            .is_none(),
+        "an expired completion resolves to nothing"
+    );
+    let record = store
+        .get_operation_result(&ns, &kept)
+        .await
+        .unwrap()
+        .expect("within its retention");
+    assert_eq!(
+        record.completion.retain_until.map(|t| t.timestamp_millis()),
+        Some((now + chrono::Duration::hours(1)).timestamp_millis())
+    );
+    assert!(
+        store
+            .get_operation_result(&ns, &unbounded)
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    // The expired key is free again: its new outcome is recorded.
+    store
+        .record_outcome(retained(&expired, now + chrono::Duration::hours(1), b"new"))
+        .await
+        .unwrap();
+    let renewed = store
+        .get_operation_result(&ns, &expired)
+        .await
+        .unwrap()
+        .expect("recorded again");
+    assert_eq!(renewed.completion.result, b"new");
+
+    let dropped = key();
+    store
+        .record_outcome(retained(&dropped, now - chrono::Duration::seconds(1), b""))
+        .await
+        .unwrap();
+    assert!(
+        store
+            .purge_expired_operation_results(chrono::Utc::now())
+            .await
+            .unwrap()
+            >= 1
+    );
+    let left: Vec<_> = store
+        .export_operation_results()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.completion.namespace == ns)
+        .map(|r| r.completion.key)
+        .collect();
+    assert!(!left.contains(&dropped), "the expired purge dropped it");
+    assert!(left.contains(&kept) && left.contains(&unbounded) && left.contains(&expired));
+}
+
 /// Completions of one method in one namespace are dropped once older than
 /// asked; another method's and another namespace's stay.
 pub async fn results_are_purged_by_method(store: &dyn OperationResultStore) {
