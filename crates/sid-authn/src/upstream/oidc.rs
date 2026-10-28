@@ -199,7 +199,7 @@ impl OidcProviderClient {
             .map_err(|e| SidError::Internal(format!("HTTP client error: {e}")))?;
 
         let discovery = match (&provider.discovery_url, provider.protocol) {
-            (Some(discovery_url), _) => Self::fetch_discovery(&http, discovery_url).await?,
+            (Some(discovery_url), _) => fetch_discovery(&http, discovery_url).await?,
             (None, UpstreamProtocol::Oidc) => {
                 return Err(SidError::Validation(
                     "an OIDC provider is configured by its discovery_url".into(),
@@ -239,36 +239,6 @@ impl OidcProviderClient {
         })
     }
 
-    /// Fetch the discovery document at `discovery_url`. Its issuer must be
-    /// the one whose discovery URL that is (OpenID Connect Discovery 1.0
-    /// §4.1, §4.3).
-    async fn fetch_discovery(http: &Client, discovery_url: &str) -> SidResult<OidcDiscovery> {
-        if !discovery_url.ends_with(DISCOVERY_SUFFIX) {
-            return Err(SidError::Validation(format!(
-                "a discovery_url ends with {DISCOVERY_SUFFIX}"
-            )));
-        }
-        let resp = http
-            .get(discovery_url)
-            .send()
-            .await
-            .map_err(|e| SidError::Internal(format!("OIDC discovery fetch failed: {e}")))?;
-
-        if !resp.status().is_success() {
-            return Err(SidError::Internal(format!(
-                "OIDC discovery returned {}",
-                resp.status()
-            )));
-        }
-
-        let discovery = resp
-            .json::<OidcDiscovery>()
-            .await
-            .map_err(|e| SidError::Internal(format!("OIDC discovery parse failed: {e}")))?;
-        check_discovered_issuer(discovery_url, &discovery.issuer)?;
-        Ok(discovery)
-    }
-
     /// The provider's current signing keys.
     async fn fetch_keys(&self) -> SidResult<JwkSet> {
         let uri = self
@@ -276,21 +246,7 @@ impl OidcProviderClient {
             .jwks_uri
             .as_ref()
             .ok_or_else(|| SidError::Internal("no jwks_uri available".into()))?;
-        let resp = self
-            .http
-            .get(uri)
-            .send()
-            .await
-            .map_err(|e| SidError::Internal(format!("JWKS request failed: {e}")))?;
-        if !resp.status().is_success() {
-            return Err(SidError::Internal(format!(
-                "JWKS returned {}",
-                resp.status()
-            )));
-        }
-        resp.json::<JwkSet>()
-            .await
-            .map_err(|e| SidError::Internal(format!("JWKS parse failed: {e}")))
+        fetch_key_set(&self.http, uri).await
     }
 
     /// Fetch user claims from the UserInfo endpoint.
@@ -323,6 +279,73 @@ impl OidcProviderClient {
             .await
             .map_err(|e| SidError::Internal(format!("UserInfo parse failed: {e}")))
     }
+}
+
+/// The discovery document of the issuer whose identifier is exactly `issuer`
+/// (OpenID Connect Discovery 1.0 §4): it must name that issuer (§4.3) and
+/// its JWK Set, the keys its ID Tokens are verified under.
+pub async fn discover(http: &Client, issuer: &str) -> SidResult<OidcDiscovery> {
+    let base = issuer.strip_suffix('/').unwrap_or(issuer);
+    let discovery = fetch_discovery(http, &format!("{base}{DISCOVERY_SUFFIX}")).await?;
+    if discovery.issuer != issuer {
+        return Err(SidError::Validation(format!(
+            "the discovery document of {issuer} names issuer {}",
+            discovery.issuer
+        )));
+    }
+    if discovery.jwks_uri.is_none() {
+        return Err(SidError::Validation(format!(
+            "the discovery document of {issuer} names no jwks_uri"
+        )));
+    }
+    Ok(discovery)
+}
+
+/// The JWK Set at `jwks_uri`: an issuer's current signing keys.
+pub async fn fetch_key_set(http: &Client, jwks_uri: &str) -> SidResult<JwkSet> {
+    let resp = http
+        .get(jwks_uri)
+        .send()
+        .await
+        .map_err(|e| SidError::Internal(format!("JWKS request failed: {e}")))?;
+    if !resp.status().is_success() {
+        return Err(SidError::Internal(format!(
+            "JWKS returned {}",
+            resp.status()
+        )));
+    }
+    resp.json::<JwkSet>()
+        .await
+        .map_err(|e| SidError::Internal(format!("JWKS parse failed: {e}")))
+}
+
+/// Fetch the discovery document at `discovery_url`. Its issuer must be the
+/// one whose discovery URL that is (OpenID Connect Discovery 1.0 §4.1, §4.3).
+async fn fetch_discovery(http: &Client, discovery_url: &str) -> SidResult<OidcDiscovery> {
+    if !discovery_url.ends_with(DISCOVERY_SUFFIX) {
+        return Err(SidError::Validation(format!(
+            "a discovery_url ends with {DISCOVERY_SUFFIX}"
+        )));
+    }
+    let resp = http
+        .get(discovery_url)
+        .send()
+        .await
+        .map_err(|e| SidError::Internal(format!("OIDC discovery fetch failed: {e}")))?;
+
+    if !resp.status().is_success() {
+        return Err(SidError::Internal(format!(
+            "OIDC discovery returned {}",
+            resp.status()
+        )));
+    }
+
+    let discovery = resp
+        .json::<OidcDiscovery>()
+        .await
+        .map_err(|e| SidError::Internal(format!("OIDC discovery parse failed: {e}")))?;
+    check_discovered_issuer(discovery_url, &discovery.issuer)?;
+    Ok(discovery)
 }
 
 /// A discovery document at `discovery_url` must name the issuer whose
