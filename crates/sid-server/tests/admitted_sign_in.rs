@@ -426,6 +426,86 @@ async fn a_sign_in_whose_evictions_did_not_propagate_is_not_delivered() {
     );
 }
 
+// A committed sign-in whose finish was never recorded (the process stopped
+// before it, or the mark could not be written) is not left behind: a repeat
+// after the finish's bound ends its undelivered session, so it holds no
+// session slot, and refuses so the entry starts again. Before, the session
+// stayed live and unreachable until it expired.
+#[tokio::test]
+async fn an_unfinished_sign_in_leaves_no_live_session_behind() {
+    let storage = storage().await;
+    let mut policy = SecurityPolicy::ce_default();
+    policy.session.max_concurrent_sessions = 1;
+    let outage = Arc::new(common::RevocationOutage {
+        inner: Arc::new(sid_plugin::cache::InMemoryCacheBackend::new()),
+        down: std::sync::atomic::AtomicBool::new(false),
+    });
+    let revocation = Arc::new(sid_authn::revocation_cache::RevocationCache::new(
+        std::time::Duration::from_secs(900),
+        outage.clone(),
+    ));
+    let cache: Arc<dyn sid_plugin::cache::CacheBackend> =
+        Arc::new(sid_plugin::cache::InMemoryCacheBackend::new());
+    let auth = common::auth_service_revoking(
+        storage.clone(),
+        cache.clone(),
+        Some(policy.clone()),
+        Some(EnrollmentMode::Open),
+        None,
+        revocation.clone(),
+    );
+    // The same authority later, when any unfinished commit is past its finish.
+    let later = Arc::try_unwrap(common::auth_service_revoking(
+        storage.clone(),
+        cache,
+        Some(policy),
+        Some(EnrollmentMode::Open),
+        None,
+        revocation,
+    ))
+    .ok()
+    .expect("the only handle")
+    .with_admitted_finish_bound(std::time::Duration::ZERO);
+    let profile = profile(storage.as_ref()).await;
+    let request = tonic::Request::new(());
+    auth.complete_admitted_sign_in(&request, &profile, &basic(), CLIENT, None)
+        .await
+        .unwrap();
+    outage.down.store(true, std::sync::atomic::Ordering::SeqCst);
+    let op = operation();
+    let deadline = Utc::now() + Duration::minutes(10);
+    auth.complete_admitted_sign_in(
+        &request,
+        &profile,
+        &basic(),
+        CLIENT,
+        Some(completion(&op, deadline)),
+    )
+    .await
+    .err()
+    .expect("its eviction could not be revoked");
+    outage
+        .down
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(storage.list_sessions(&profile.id).await.unwrap().len(), 1);
+
+    later
+        .complete_admitted_sign_in(
+            &request,
+            &profile,
+            &basic(),
+            CLIENT,
+            Some(completion(&op, deadline)),
+        )
+        .await
+        .err()
+        .expect("an unfinished sign-in is not delivered");
+    assert!(
+        storage.list_sessions(&profile.id).await.unwrap().is_empty(),
+        "the undelivered session is ended"
+    );
+}
+
 // Nothing is delivered again for a session that ended, a Profile suspended
 // since, or after the operation's deadline; no replacement session appears.
 #[tokio::test]

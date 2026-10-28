@@ -508,6 +508,9 @@ pub struct AuthServiceImpl {
     /// Admitted sign-ins that finished (committed, their evictions revoked
     /// everywhere), keyed by operation: only these are delivered again.
     admitted_ready: ChallengeStore<()>,
+    /// How long after its commit an admitted sign-in may still be finishing;
+    /// one committed longer ago and not finished never will.
+    admitted_finish_bound: std::time::Duration,
     /// Magic links for Corporate Profiles; `None` when the instance has not enabled
     /// them, which is the default.
     pub(crate) magic_link: Option<Arc<MagicLinkService>>,
@@ -693,6 +696,7 @@ impl AuthServiceImpl {
                 "admitted-sign-in-ready",
                 ttl,
             ),
+            admitted_finish_bound: ADMITTED_FINISH_BOUND,
             continuations: ChallengeStore::new(
                 cache_backend.clone(),
                 key_manager.clone(),
@@ -844,6 +848,13 @@ impl AuthServiceImpl {
             header("x-forwarded-for"),
             header("x-real-ip"),
         )
+    }
+
+    /// Override how long an admitted sign-in may still be finishing after
+    /// its commit.
+    pub fn with_admitted_finish_bound(mut self, bound: std::time::Duration) -> Self {
+        self.admitted_finish_bound = bound;
+        self
     }
 
     /// Override the security policy (useful for testing conditional access wiring).
@@ -2450,12 +2461,37 @@ impl AuthServiceImpl {
             return Err(authentication_failed());
         }
         // Committed, but not (yet) finished: nothing is delivered until it is.
+        // Which sessions its commit evicted is not kept, so a commit that
+        // will never finish cannot be finished by a repeat; its undelivered
+        // session is ended instead of holding a session slot until it
+        // expires, and the entry starts again (a lost response may, not must,
+        // be delivered again).
         if self
             .admitted_ready
             .read(completion.operation)
             .await?
             .is_none()
         {
+            let unfinished = chrono::Duration::from_std(self.admitted_finish_bound)
+                .map_err(|e| internal("the admitted sign-in's finish bound", e))?;
+            if now - record.completed_at >= unfinished {
+                let session_id = delivery
+                    .session_id
+                    .parse()
+                    .map_err(|e| internal("the retained session reference", e))?;
+                self.storage
+                    .delete_session(
+                        session_id,
+                        &sid_core::models::SessionEnd::new(
+                            sid_core::models::RevocationReason::Cascade,
+                            "system",
+                        ),
+                        AuditEntry::system("session.unfinished_sign_in", session_id.to_string())
+                            .into(),
+                    )
+                    .await
+                    .map_err(storage_failure)?;
+            }
             return Err(sid_core::grpc_error::ApiError::new(
                 ErrorReason::ConcurrentModification,
                 "the sign-in has not finished; start it again",
@@ -6707,6 +6743,10 @@ fn token_endpoint(issuer: &OidcIssuer) -> String {
 
 /// The grant type a device polls the token endpoint with (RFC 8628 §3.4).
 const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
+
+/// How long an admitted sign-in may still be finishing after its commit: the
+/// revocation of its evictions and its ready mark, a few shared-cache writes.
+const ADMITTED_FINISH_BOUND: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The token endpoint's RPC, as a native gRPC client calls it.
 const OAUTH2_TOKEN_RPC: &str = "/sid.v1.authn.AuthService/OAuth2Token";
