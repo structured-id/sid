@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/structured-id/sid/compare/sid-crypto-v0.1.0...sid-crypto-v0.1.1) - 2026-10-28
+
+### Fixed
+
+- *(http)* let the host select the TLS backend ([#233](https://github.com/structured-id/sid/pull/233))
+
+### Other
+
+- release sid-crypto ([#231](https://github.com/structured-id/sid/pull/231))
+
 ## [0.1.0](https://github.com/structured-id/sid/releases/tag/sid-crypto-v0.1.0) - 2026-10-24
 
 ### Added
