@@ -2,16 +2,47 @@
 //! What an ended session owes, committed with the deletion that ends it.
 
 use super::backchannel_logout::LogoutDelivery;
-use super::durable_work::NewWork;
+use super::durable_work::{NewWork, WorkId, WorkKind};
 use super::event::{Event, event_types};
 use super::profile::ProfileId;
 use super::revocation::RevocationReason;
 use super::session::{Session, SessionId};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Work kind revoking one ended session's access tokens in every process.
+pub const SESSION_REVOCATION_KIND: &str = "session.revocation";
+
+/// Namespace of session revocation work ids.
+const SESSION_REVOCATION_NAMESPACE: Uuid =
+    Uuid::from_u128(0x5b2d_8e17_c643_4a09_b1f8_6e3a_d2c4_7f15);
+
+/// The revocation of one ended session's access tokens owed to every
+/// process, committed with the deletion that ends the session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRevocation {
+    pub session_id: String,
+}
+
+impl SessionRevocation {
+    /// The durable work that publishes it. Its id follows from the session,
+    /// so ending the same session again owes nothing new.
+    pub fn work(&self) -> NewWork {
+        let kind = WorkKind::new(SESSION_REVOCATION_KIND).expect("the revocation kind is valid");
+        let payload = serde_json::to_vec(self).expect("a session revocation serializes");
+        let mut work = NewWork::new(kind, payload);
+        work.id = WorkId(Uuid::new_v5(
+            &SESSION_REVOCATION_NAMESPACE,
+            self.session_id.as_bytes(),
+        ));
+        work
+    }
+}
+
 /// Why sessions end and who ended them. Every session a storage deletion
-/// ends owes its client a back-channel logout (when it was issued to one) and
-/// a `sid.session.revoked.v1` event carrying this reason and actor.
+/// ends owes its client a back-channel logout (when it was issued to one), a
+/// `sid.session.revoked.v1` event carrying this reason and actor, and the
+/// revocation of its access tokens in every process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionEnd {
     pub reason: RevocationReason,
@@ -41,7 +72,7 @@ impl SessionEnd {
         profile_id: ProfileId,
         client_id: Option<&str>,
     ) -> Vec<NewWork> {
-        let mut owed = Vec::with_capacity(2);
+        let mut owed = Vec::with_capacity(3);
         if let Some(client_id) = client_id {
             owed.push(
                 LogoutDelivery {
@@ -53,6 +84,12 @@ impl SessionEnd {
             );
         }
         owed.push(self.revoked_event(session_id, profile_id).relay());
+        owed.push(
+            SessionRevocation {
+                session_id: session_id.to_string(),
+            }
+            .work(),
+        );
         owed
     }
 

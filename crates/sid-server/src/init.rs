@@ -1692,8 +1692,8 @@ pub(crate) fn bus_carries_history_evaluator(
 }
 
 /// Start the runner for work the storage commits with a mutation (owed
-/// back-channel logouts, relayed events and their deliveries, contestation
-/// checks). Every replica runs one; leases keep an attempt on a single
+/// back-channel logouts and session revocations, relayed events and their
+/// deliveries, contestation checks). Every replica runs one; leases keep an attempt on a single
 /// replica. Facts are owed to the deployment's required receivers and to
 /// `also_required` (receivers this server runs). Runs until `shutdown`
 /// resolves, then lets attempts in flight record their outcome.
@@ -1729,6 +1729,11 @@ pub fn spawn_work_runner(
         Arc::new(sid_authn::principal_contest::PrincipalContestHandler::new(
             c.storage.clone(),
         )),
+        Arc::new(
+            sid_authn::session_revocation::SessionRevocationHandler::new(
+                c.revocation_cache.clone(),
+            ),
+        ),
         c.auth_svc.enrollment_handler(),
         c.auth_svc.owner_purge_handler(),
     ];

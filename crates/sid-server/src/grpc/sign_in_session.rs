@@ -17,9 +17,9 @@ use sid_core::models::{
 };
 use sid_plugin::storage::StorageBackend;
 use tonic::Status;
-use tracing::info;
+use tracing::{info, warn};
 
-use sid_core::grpc_error::refuse::{dependency_unavailable, internal, storage_failure};
+use sid_core::grpc_error::refuse::{internal, storage_failure};
 
 /// The keyed operation a browser sign-in completes, whose result is its
 /// delivery sealed for a lost response: the session commits with that
@@ -279,14 +279,14 @@ impl SignInSessions<'_> {
                 "Session limit enforced: evicted oldest sessions"
             );
         }
-        // An evicted session's access tokens stop at once in every process;
-        // when that cannot be propagated the sign-in fails rather than leave
-        // them live elsewhere.
+        // An evicted session's access tokens stop at once in every process.
+        // Its revocation committed as owed work with the eviction: one not
+        // published now is published by the work runner, and the committed
+        // sign-in stands either way (refusing it would revoke nothing).
         for ended in &evicted {
-            self.revocation
-                .revoke_session(ended.to_string())
-                .await
-                .map_err(|e| dependency_unavailable("session revocation", e))?;
+            if let Err(e) = self.revocation.revoke_session(ended.to_string()).await {
+                warn!(session_id = %ended, error = %e, "evicted session revocation left to its owed work");
+            }
         }
         #[cfg(feature = "telemetry")]
         {

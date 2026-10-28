@@ -559,12 +559,6 @@ pub struct AuthServiceImpl {
     migration_state: ChallengeStore<MigrationState>,
     /// Ephemeral TOTP enrollment state: enrollment_id → (profile_id, secret_bytes).
     totp_enrollment: ChallengeStore<(ProfileId, Vec<u8>)>,
-    /// Admitted sign-ins that finished (committed, their evictions revoked
-    /// everywhere), keyed by operation: only these are delivered again.
-    admitted_ready: ChallengeStore<AdmittedFinish>,
-    /// How long after its commit an admitted sign-in may still be finishing;
-    /// one committed longer ago and not finished never will.
-    admitted_finish_bound: std::time::Duration,
     /// The credential each pending second-factor context's first factor
     /// proved, keyed by the context: its completion commits only while that
     /// credential is unchanged.
@@ -641,6 +635,18 @@ struct LoginSecurityExtras<'a> {
     /// Pass earned by solving the CAPTCHA this sign-in was asked for.
     captcha_pass: Option<&'a str>,
     user_agent: Option<&'a str>,
+}
+
+/// How the sign-in rules judge one sign-in.
+#[derive(Clone, Copy)]
+enum Judging {
+    /// A new sign-in, recorded as evidence once admitted.
+    Record,
+    /// A repeat of a sign-in already admitted from `admitted_from`, recorded
+    /// as no further sign-in.
+    Repeat {
+        admitted_from: Option<std::net::IpAddr>,
+    },
 }
 
 /// The host's keyed operation an admitted sign-in completes: a repeat of it
@@ -748,13 +754,6 @@ impl AuthServiceImpl {
                 "totp-enrollment",
                 ttl,
             ),
-            admitted_ready: ChallengeStore::new(
-                cache_backend.clone(),
-                key_manager.clone(),
-                "admitted-sign-in-ready",
-                ttl,
-            ),
-            admitted_finish_bound: ADMITTED_FINISH_BOUND,
             first_factor_proofs: ChallengeStore::new(
                 cache_backend.clone(),
                 key_manager.clone(),
@@ -914,13 +913,6 @@ impl AuthServiceImpl {
         )
     }
 
-    /// Override how long an admitted sign-in may still be finishing after
-    /// its commit.
-    pub fn with_admitted_finish_bound(mut self, bound: std::time::Duration) -> Self {
-        self.admitted_finish_bound = bound;
-        self
-    }
-
     /// Override the security policy (useful for testing conditional access wiring).
     pub fn with_security_policy(mut self, policy: SecurityPolicy) -> Self {
         self.security_policy = policy;
@@ -1047,58 +1039,55 @@ impl AuthServiceImpl {
         self.client_sign_in_rules(
             profile_id,
             client_ip,
-            authentication,
-            extras,
+            (authentication, extras),
             client_id,
-            true,
+            Judging::Record,
         )
         .await
     }
 
     /// The same rules as [`Self::evaluate_sign_in`] for a repeat of a sign-in
-    /// already admitted and recorded: judged on its own request, recorded as
-    /// no further sign-in.
+    /// already admitted and recorded from `admitted_from`: judged on its own
+    /// request, recorded as no further sign-in.
     async fn check_sign_in(
         &self,
         profile_id: ProfileId,
         client_ip: Option<std::net::IpAddr>,
-        authentication: sid_authn::sign_in_security::AttemptAuthentication<'_>,
-        extras: LoginSecurityExtras<'_>,
+        attempt: (
+            sid_authn::sign_in_security::AttemptAuthentication<'_>,
+            LoginSecurityExtras<'_>,
+        ),
         client_id: Option<&str>,
+        admitted_from: Option<std::net::IpAddr>,
     ) -> Result<(), Status> {
         self.client_sign_in_rules(
             profile_id,
             client_ip,
-            authentication,
-            extras,
+            attempt,
             client_id,
-            false,
+            Judging::Repeat { admitted_from },
         )
         .await
         .map(|_| ())
     }
 
-    /// The sign-in rules under `client_id`'s requirements, recording the
-    /// admitted sign-in as evidence when `record`.
+    /// The sign-in rules under `client_id`'s requirements, judged as
+    /// `judging` says.
     async fn client_sign_in_rules(
         &self,
         profile_id: ProfileId,
         client_ip: Option<std::net::IpAddr>,
-        authentication: sid_authn::sign_in_security::AttemptAuthentication<'_>,
-        extras: LoginSecurityExtras<'_>,
+        attempt: (
+            sid_authn::sign_in_security::AttemptAuthentication<'_>,
+            LoginSecurityExtras<'_>,
+        ),
         client_id: Option<&str>,
-        record: bool,
+        judging: Judging,
     ) -> Result<Option<sid_core::models::ActorFence>, Status> {
         let requirements = self.login_requirements(client_id).await?;
-        self.sign_in_rules(
-            profile_id,
-            client_ip,
-            (authentication, extras),
-            &requirements,
-            record,
-        )
-        .await
-        .map_err(SecurityStatus::into_status)?;
+        self.sign_in_rules(profile_id, client_ip, attempt, &requirements, judging)
+            .await
+            .map_err(SecurityStatus::into_status)?;
         Ok(requirements.fence)
     }
 
@@ -1126,7 +1115,7 @@ impl AuthServiceImpl {
                 client_ip,
                 (authentication, extras),
                 &requirements,
-                true,
+                Judging::Record,
             )
             .await
         {
@@ -1179,7 +1168,7 @@ impl AuthServiceImpl {
     }
 
     /// The anomaly rules and the login `requirements` for one sign-in,
-    /// recording it as evidence when `record`.
+    /// judged as `judging` says.
     async fn sign_in_rules(
         &self,
         profile_id: ProfileId,
@@ -1189,7 +1178,7 @@ impl AuthServiceImpl {
             LoginSecurityExtras<'_>,
         ),
         requirements: &sid_authn::login_policy::LoginRequirements,
-        record: bool,
+        judging: Judging,
     ) -> Result<(), SecurityStatus> {
         let attempt = sid_authn::sign_in_security::SignInAttempt {
             client_ip,
@@ -1198,10 +1187,21 @@ impl AuthServiceImpl {
             user_agent: extras.user_agent,
         };
         let host = ProfileSecurity { service: self };
-        if record {
-            sid_authn::sign_in_security::evaluate(&host, &profile_id, attempt, requirements).await
-        } else {
-            sid_authn::sign_in_security::check(&host, &profile_id, attempt, requirements).await
+        match judging {
+            Judging::Record => {
+                sid_authn::sign_in_security::evaluate(&host, &profile_id, attempt, requirements)
+                    .await
+            }
+            Judging::Repeat { admitted_from } => {
+                sid_authn::sign_in_security::check(
+                    &host,
+                    &profile_id,
+                    attempt,
+                    requirements,
+                    admitted_from,
+                )
+                .await
+            }
         }
     }
 
@@ -2796,24 +2796,20 @@ impl AuthServiceImpl {
             user_agent,
         };
         // A repeat of an operation already committed is judged by the rules
-        // of its own request but records no further sign-in.
+        // of its own request but records no further sign-in; the admission
+        // it repeats answers a CAPTCHA from the address it was made from.
         if let Some(completion) = &completion
-            && self
-                .storage
-                .get_operation_result(
-                    super::sign_in_session::ADMITTED_NAMESPACE,
-                    &completion.key()?,
-                )
-                .await
-                .map_err(storage_failure)?
-                .is_some()
+            && let Some((delivery, session)) = self.admitted_session(completion, profile.id).await?
         {
-            self.check_sign_in(profile.id, client_ip, attempt(), extras(), Some(client_id))
-                .await?;
-            return self
-                .redeliver_admitted(completion, client_id, profile.id)
-                .await?
-                .ok_or_else(unfinished_sign_in);
+            self.check_sign_in(
+                profile.id,
+                client_ip,
+                (attempt(), extras()),
+                Some(client_id),
+                session.ip_address.parse().ok(),
+            )
+            .await?;
+            return self.deliver_admitted(delivery, &session, client_id).await;
         }
         let policy = self
             .evaluate_sign_in(profile.id, client_ip, attempt(), extras(), Some(client_id))
@@ -2857,7 +2853,6 @@ impl AuthServiceImpl {
             context: self.admitted_context(&completion),
             deadline: completion.deadline.min(session.expires_at),
         };
-        let deadline = retained.deadline;
         match self
             .sign_in(
                 profile,
@@ -2869,9 +2864,8 @@ impl AuthServiceImpl {
             )
             .await
         {
-            // A concurrent repeat committed first: its session is this one,
-            // once that repeat finished. Anything else keeps its refusal,
-            // its own commit's unpropagated evictions included.
+            // A concurrent repeat committed first: its session is this one.
+            // Anything else keeps its refusal.
             Err(refused) => match self
                 .redeliver_admitted(&completion, client_id, profile.id)
                 .await
@@ -2879,20 +2873,7 @@ impl AuthServiceImpl {
                 Ok(Some(signed_in)) => Ok(signed_in),
                 Ok(None) | Err(_) => Err(refused),
             },
-            Ok(signed_in) => {
-                // The session and its evictions are in force everywhere: only
-                // now may a repeat deliver it again. A repeat that already
-                // settled the operation as abandoned ended its session.
-                if deadline > Utc::now()
-                    && !self
-                        .admitted_ready
-                        .insert_new_until(completion.operation, &AdmittedFinish::Ready, deadline)
-                        .await?
-                {
-                    return Err(unfinished_sign_in());
-                }
-                Ok(signed_in)
-            }
+            Ok(signed_in) => Ok(signed_in),
         }
     }
 
@@ -2903,8 +2884,7 @@ impl AuthServiceImpl {
     }
 
     /// The sign-in `completion` already committed for `expected`, delivered
-    /// again: only once that sign-in finished (its evictions revoked
-    /// everywhere), before the operation's deadline, while its session lives,
+    /// again: before the operation's deadline, while its session lives,
     /// its Profile can sign in and its authentication meets `client_id`'s
     /// current requirements. None when the operation has not committed; a
     /// refusal when it has but may not be delivered again.
@@ -2914,6 +2894,30 @@ impl AuthServiceImpl {
         client_id: &str,
         expected: ProfileId,
     ) -> Result<Option<SignedIn>, Status> {
+        match self.admitted_session(completion, expected).await? {
+            Some((delivery, session)) => self
+                .deliver_admitted(delivery, &session, client_id)
+                .await
+                .map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// The live session `completion` committed for `expected` and its
+    /// retained delivery; None when the operation
+    /// has not committed; a refusal when it has but may not be delivered
+    /// again (see [`Self::redeliver_admitted`]).
+    async fn admitted_session(
+        &self,
+        completion: &AdmittedCompletion<'_>,
+        expected: ProfileId,
+    ) -> Result<
+        Option<(
+            sid_authn::sign_in_delivery::RetainedDelivery,
+            sid_core::models::Session,
+        )>,
+        Status,
+    > {
         let Some(record) = self
             .storage
             .get_operation_result(
@@ -2936,62 +2940,13 @@ impl AuthServiceImpl {
         if delivery.deadline <= now {
             return Err(authentication_failed());
         }
-        // Committed, but not (yet) finished: nothing is delivered until it is.
-        // Which sessions its commit evicted is not kept, so a commit that
-        // will never finish cannot be finished by a repeat; its undelivered
-        // session is ended instead of holding a session slot until it
-        // expires, and the entry starts again (a lost response may, not must,
-        // be delivered again).
-        // The operation settles once, Ready by its own attempt after the
-        // finish, Abandoned by a repeat after the bound: whichever is first
-        // decides, so a cleanup never races a delivery.
+        // The commit is the whole sign-in: what it owes (its evictions'
+        // revocations) committed with it as owed work, so the same session
+        // is delivered again from the moment it committed.
         let session_id = delivery
             .session_id
             .parse()
             .map_err(|e| internal("the retained session reference", e))?;
-        let settled = match self.admitted_ready.read(completion.operation).await? {
-            Some(settled) => settled,
-            None => {
-                let unfinished = chrono::Duration::from_std(self.admitted_finish_bound)
-                    .map_err(|e| internal("the admitted sign-in's finish bound", e))?;
-                if now - record.completed_at < unfinished {
-                    return Err(unfinished_sign_in());
-                }
-                if self
-                    .admitted_ready
-                    .insert_new_until(
-                        completion.operation,
-                        &AdmittedFinish::Abandoned,
-                        delivery.deadline,
-                    )
-                    .await?
-                {
-                    AdmittedFinish::Abandoned
-                } else {
-                    self.admitted_ready
-                        .read(completion.operation)
-                        .await?
-                        .ok_or_else(unfinished_sign_in)?
-                }
-            }
-        };
-        if settled == AdmittedFinish::Abandoned {
-            // Every repeat ends the undelivered session again: one whose
-            // ending failed or was cut short is not left holding a slot.
-            // Ending a session already gone ends nothing.
-            self.storage
-                .delete_session(
-                    session_id,
-                    &sid_core::models::SessionEnd::new(
-                        sid_core::models::RevocationReason::Cascade,
-                        "system",
-                    ),
-                    AuditEntry::system("session.unfinished_sign_in", session_id.to_string()).into(),
-                )
-                .await
-                .map_err(storage_failure)?;
-            return Err(unfinished_sign_in());
-        }
         let session = self
             .storage
             .get_session(session_id)
@@ -3005,17 +2960,27 @@ impl AuthServiceImpl {
             .map_err(storage_failure)?
             .filter(|profile| profile.status.can_authenticate())
             .ok_or_else(authentication_failed)?;
+        Ok(Some((delivery, session)))
+    }
+
+    /// `session`'s retained `delivery`, while its authentication meets
+    /// `client_id`'s current requirements.
+    async fn deliver_admitted(
+        &self,
+        delivery: sid_authn::sign_in_delivery::RetainedDelivery,
+        session: &sid_core::models::Session,
+        client_id: &str,
+    ) -> Result<SignedIn, Status> {
         // The requirements the sign-in itself was weighed under, read now;
         // the client's own are applied where the sign-in continues.
         let requirements = self.login_requirements(Some(client_id)).await?;
         if let sid_authn::login_policy::LoginDecision::StepUp(unmet) =
-            requirements.decide(&session, now)
+            requirements.decide(session, Utc::now())
         {
             return Err(step_up_required(&unmet).into());
         }
         delivery
-            .signed_in(&self.browser_cookie, &session)
-            .map(Some)
+            .signed_in(&self.browser_cookie, session)
             .ok_or_else(authentication_failed)
     }
 
@@ -7281,28 +7246,6 @@ fn token_endpoint(issuer: &OidcIssuer) -> String {
 
 /// The grant type a device polls the token endpoint with (RFC 8628 §3.4).
 const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
-
-/// How an admitted sign-in's operation settled after its commit: finished by
-/// its own attempt, or abandoned by a repeat once it could no longer finish.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-enum AdmittedFinish {
-    Ready,
-    Abandoned,
-}
-
-/// A committed admitted sign-in that has not finished, or never will: the
-/// entry starts again.
-fn unfinished_sign_in() -> Status {
-    ApiError::new(
-        ErrorReason::ConcurrentModification,
-        "the sign-in has not finished; start it again",
-    )
-    .into()
-}
-
-/// How long an admitted sign-in may still be finishing after its commit: the
-/// revocation of its evictions and its ready mark, a few shared-cache writes.
-const ADMITTED_FINISH_BOUND: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The token endpoint's RPC, as a native gRPC client calls it.
 const OAUTH2_TOKEN_RPC: &str = "/sid.v1.authn.AuthService/OAuth2Token";

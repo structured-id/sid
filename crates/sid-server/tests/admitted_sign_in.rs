@@ -362,12 +362,15 @@ async fn a_repeat_for_another_profile_gets_nothing() {
     assert!(storage.list_sessions(&other.id).await.unwrap().is_empty());
 }
 
-// A sign-in whose evicted sessions could not be revoked everywhere is not
-// delivered, on its own answer or on a repeat: the evicted sessions' tokens
-// would stay usable on other replicas. Before, the failure became a delivered
-// sign-in through the repeat path.
+// A sign-in commits the revocation of the sessions it evicts as owed work, so
+// a revocation the cache could not publish at once (or a process stopping
+// right after the commit) is published later, and the sign-in is the same
+// operation throughout: its answer and every repeat deliver the one committed
+// session. Before, an unpublished eviction refused the sign-in and, after a
+// bound, a repeat ended the committed session and started the entry again,
+// while the evicted tokens stayed live all the same.
 #[tokio::test]
-async fn a_sign_in_whose_evictions_did_not_propagate_is_not_delivered() {
+async fn a_sign_in_owes_the_revocation_of_what_it_evicted() {
     let storage = storage().await;
     let mut policy = SecurityPolicy::ce_default();
     policy.session.max_concurrent_sessions = 1;
@@ -389,14 +392,16 @@ async fn a_sign_in_whose_evictions_did_not_propagate_is_not_delivered() {
     );
     let profile = profile(storage.as_ref()).await;
     let request = tonic::Request::new(());
-    auth.complete_admitted_sign_in(&request, &profile, &basic(), CLIENT, None)
+    let evicted = auth
+        .complete_admitted_sign_in(&request, &profile, &basic(), CLIENT, None)
         .await
-        .expect("the session to evict");
+        .expect("the session to evict")
+        .session_id;
 
     outage.down.store(true, std::sync::atomic::Ordering::SeqCst);
     let op = operation();
     let deadline = Utc::now() + Duration::minutes(10);
-    let refused = auth
+    let signed_in = auth
         .complete_admitted_sign_in(
             &request,
             &profile,
@@ -405,127 +410,37 @@ async fn a_sign_in_whose_evictions_did_not_propagate_is_not_delivered() {
             Some(completion(&op, deadline)),
         )
         .await
-        .err()
-        .expect("the eviction could not be revoked");
-    assert_eq!(refused.code(), tonic::Code::Unavailable, "{refused:?}");
+        .expect("committed, its eviction owed");
+    let owed = sid_core::models::SessionRevocation {
+        session_id: evicted.clone(),
+    }
+    .work();
+    let record = storage
+        .get_work(owed.id)
+        .await
+        .unwrap()
+        .expect("the evicted session's revocation is owed");
+    assert_eq!(record.kind, owed.kind);
+    let sessions = storage.list_sessions(&profile.id).await.unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].id.to_string(), signed_in.session_id);
 
-    outage
-        .down
-        .store(false, std::sync::atomic::Ordering::SeqCst);
-    assert!(
-        auth.complete_admitted_sign_in(
-            &request,
-            &profile,
-            &basic(),
-            CLIENT,
-            Some(completion(&op, deadline)),
-        )
-        .await
-        .is_err(),
-        "a repeat delivers nothing whose evictions were not revoked"
-    );
-}
-
-// A committed sign-in whose finish was never recorded (the process stopped
-// before it, or the mark could not be written) is not left behind: a repeat
-// after the finish's bound ends its undelivered session, so it holds no
-// session slot, and refuses so the entry starts again. Before, the session
-// stayed live and unreachable until it expired.
-#[tokio::test]
-async fn an_unfinished_sign_in_leaves_no_live_session_behind() {
-    let storage = storage().await;
-    let mut policy = SecurityPolicy::ce_default();
-    policy.session.max_concurrent_sessions = 1;
-    let outage = Arc::new(common::RevocationOutage {
-        inner: Arc::new(sid_plugin::cache::InMemoryCacheBackend::new()),
-        down: std::sync::atomic::AtomicBool::new(false),
-    });
-    let revocation = Arc::new(sid_authn::revocation_cache::RevocationCache::new(
-        std::time::Duration::from_secs(900),
-        outage.clone(),
-    ));
-    let cache: Arc<dyn sid_plugin::cache::CacheBackend> =
-        Arc::new(sid_plugin::cache::InMemoryCacheBackend::new());
-    let auth = common::auth_service_revoking(
-        storage.clone(),
-        cache.clone(),
-        Some(policy.clone()),
-        Some(EnrollmentMode::Open),
-        None,
-        revocation.clone(),
-    );
-    // The same authority later, when any unfinished commit is past its finish.
-    let later = Arc::try_unwrap(common::auth_service_revoking(
-        storage.clone(),
-        cache,
-        Some(policy),
-        Some(EnrollmentMode::Open),
-        None,
-        revocation,
-    ))
-    .ok()
-    .expect("the only handle")
-    .with_admitted_finish_bound(std::time::Duration::ZERO);
-    let profile = profile(storage.as_ref()).await;
-    let request = tonic::Request::new(());
-    auth.complete_admitted_sign_in(&request, &profile, &basic(), CLIENT, None)
-        .await
-        .unwrap();
-    outage.down.store(true, std::sync::atomic::Ordering::SeqCst);
-    let op = operation();
-    let deadline = Utc::now() + Duration::minutes(10);
-    auth.complete_admitted_sign_in(
-        &request,
-        &profile,
-        &basic(),
-        CLIENT,
-        Some(completion(&op, deadline)),
-    )
-    .await
-    .err()
-    .expect("its eviction could not be revoked");
-    outage
-        .down
-        .store(false, std::sync::atomic::Ordering::SeqCst);
-    let undelivered = storage.list_sessions(&profile.id).await.unwrap();
-    assert_eq!(undelivered.len(), 1);
-    let authentication = basic();
-    let repeat = || {
-        later.complete_admitted_sign_in(
-            &request,
-            &profile,
-            &authentication,
-            CLIENT,
-            Some(completion(&op, deadline)),
-        )
-    };
-
-    repeat()
-        .await
-        .err()
-        .expect("an unfinished sign-in is not delivered");
-    assert!(
-        storage.list_sessions(&profile.id).await.unwrap().is_empty(),
-        "the undelivered session is ended"
-    );
-
-    // An ending that never committed (a failure or a cut-short request after
-    // the operation was settled abandoned) is done again by the next repeat.
-    storage
-        .create_session(
-            &undelivered[0],
-            AuditEntry::system("test", "restore").into(),
-        )
-        .await
-        .unwrap();
-    repeat()
-        .await
-        .err()
-        .expect("an abandoned sign-in is not delivered");
-    assert!(
-        storage.list_sessions(&profile.id).await.unwrap().is_empty(),
-        "the undelivered session is ended on a later repeat"
-    );
+    // Its answer lost, the repeat gets the same session, outage or not.
+    for down in [true, false] {
+        outage.down.store(down, std::sync::atomic::Ordering::SeqCst);
+        let again = auth
+            .complete_admitted_sign_in(
+                &request,
+                &profile,
+                &basic(),
+                CLIENT,
+                Some(completion(&op, deadline)),
+            )
+            .await
+            .expect("the committed sign-in delivered again");
+        assert_eq!(again.session_id, signed_in.session_id);
+    }
+    assert_eq!(storage.list_sessions(&profile.id).await.unwrap().len(), 1);
 }
 
 // A repeat is judged by the rules in force now: once the account is locked
