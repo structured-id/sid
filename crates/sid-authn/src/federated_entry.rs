@@ -23,6 +23,7 @@ use sid_core::models::session::AcceptedEvidence;
 use sid_keys::KeyManager;
 use sid_plugin::cache::CacheBackend;
 
+use crate::browser_session::{BrowserCookie, BrowserSecret};
 use crate::challenge_store::{ChallengeStore, ChallengeStoreError};
 use crate::upstream::oidc::{
     IdTokenExpectation, discover, fetch_key_set, pkce_challenge, random_token, validate_id_token,
@@ -75,6 +76,15 @@ struct Pending {
     request: EntryRequest,
 }
 
+/// A started entry as the browser receives it.
+#[derive(Debug, Clone)]
+pub struct Started {
+    /// The issuer's authorization URL to send the browser to.
+    pub authorization_url: String,
+    /// The `Set-Cookie` value that binds the entry to this browser.
+    pub set_cookie: String,
+}
+
 /// A returned entry: the subject the issuer signed in for this recipient,
 /// how it authenticated (the issuer's statement, not this installation's),
 /// where the caller continues and what the entry asked the issuer for.
@@ -89,9 +99,13 @@ pub struct Returned {
 /// Why an entry did not complete. Every case completes nothing.
 #[derive(Debug, thiserror::Error)]
 pub enum EntryError {
-    /// The state is unknown, expired or already taken.
+    /// The state is unknown, expired, already taken or another browser's.
     #[error("the entry is unknown, expired or already completed")]
     Unknown,
+    /// The return carries no correlation cookie of this entry: it reached a
+    /// browser other than the one that started it.
+    #[error("the entry was started in another browser")]
+    OtherBrowser,
     /// The return does not name the redirect URI the entry was started for.
     #[error("the return names another redirect URI")]
     RedirectMismatch,
@@ -110,22 +124,50 @@ pub struct FederatedEntry {
     trusted: TrustedIssuer,
     http: Client,
     pending: ChallengeStore<Pending>,
+    /// The authority's browser-session cookie; an entry's correlation cookie
+    /// is named after it, so authorities sharing a host never read each
+    /// other's.
+    cookie: BrowserCookie,
 }
 
 impl FederatedEntry {
     /// The relying party of `trusted`, reaching it over `http`, its pending
-    /// entries in `cache` sealed under `keys`.
+    /// entries in `cache` sealed under `keys`, for the authority whose
+    /// browser-session cookie is `cookie`.
     pub fn new(
         trusted: TrustedIssuer,
         http: Client,
         cache: Arc<dyn CacheBackend>,
         keys: Arc<dyn KeyManager>,
+        cookie: BrowserCookie,
     ) -> Self {
         Self {
             trusted,
             http,
             pending: ChallengeStore::new(cache, keys, NAMESPACE, PENDING_TTL),
+            cookie,
         }
+    }
+
+    /// The correlation cookie of the entry `state` names: one per entry, so
+    /// entries started at once in several tabs never replace each other's.
+    /// The name is a digest of the state, a fixed short token whatever a
+    /// return sends.
+    fn correlation(&self, state: &str) -> BrowserCookie {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(state.as_bytes());
+        BrowserCookie::new(&format!(
+            "{}-entry-{}",
+            self.cookie.name(),
+            hex::encode(&digest[..8])
+        ))
+        .expect("a __Host- token with a hex suffix is a __Host- token")
+    }
+
+    /// The `Set-Cookie` value that removes the correlation cookie of the
+    /// entry `state` names; a return clears it whatever comes of it.
+    pub fn clear_cookie(&self, state: &str) -> String {
+        self.correlation(state).clear()
     }
 
     /// The trusted issuer's identifier.
@@ -134,13 +176,14 @@ impl FederatedEntry {
     }
 
     /// Start an entry returning to `redirect_uri`, continuing at
-    /// `continuation`: the authorization URL to send the browser to.
+    /// `continuation`: the authorization URL to send the browser to, and the
+    /// cookie that binds the entry to that browser (RFC 9700 §4.7.1).
     pub async fn start(
         &self,
         redirect_uri: &str,
         continuation: &str,
         request: &EntryRequest,
-    ) -> Result<String, EntryError> {
+    ) -> Result<Started, EntryError> {
         let discovery = discover(&self.http, &self.trusted.issuer)
             .await
             .map_err(|e| EntryError::Issuer(e.to_string()))?;
@@ -166,9 +209,10 @@ impl FederatedEntry {
         }
         let url = reqwest::Url::parse_with_params(&discovery.authorization_endpoint, &params)
             .map_err(|e| EntryError::Issuer(format!("authorization endpoint: {e}")))?;
+        let browser = BrowserSecret::generate();
         self.pending
             .insert(
-                &self.key(&state),
+                &self.key(&state, &browser),
                 &Pending {
                     issuer: self.trusted.issuer.clone(),
                     client_id: self.trusted.client_id.clone(),
@@ -180,20 +224,33 @@ impl FederatedEntry {
                 },
             )
             .await?;
-        Ok(url.to_string())
+        let lifetime = i64::try_from(PENDING_TTL.as_secs()).expect("the pending lifetime fits");
+        Ok(Started {
+            authorization_url: url.to_string(),
+            set_cookie: self.correlation(&state).set(&browser, lifetime),
+        })
     }
 
-    /// Complete the entry `state` returned with `code` at `redirect_uri`.
-    /// The state is taken first, so a replayed return completes nothing.
-    pub async fn complete(
+    /// Complete the entry `state` returned with `code` at `redirect_uri` to
+    /// the browser whose `Cookie` header values are `cookies`. The entry is
+    /// found only with the correlation cookie of the browser that started it
+    /// (RFC 6749 §10.12, RFC 9700 §4.7.1): a return reaching another browser
+    /// finds nothing and leaves the entry for its own. The state is taken
+    /// first, so a replayed return completes nothing.
+    pub async fn complete<'a>(
         &self,
         state: &str,
+        cookies: impl IntoIterator<Item = &'a str>,
         code: &str,
         redirect_uri: &str,
     ) -> Result<Returned, EntryError> {
+        let browser = self
+            .correlation(state)
+            .secret(cookies)
+            .ok_or(EntryError::OtherBrowser)?;
         let pending = self
             .pending
-            .take(&self.key(state))
+            .take(&self.key(state, &browser))
             .await?
             .ok_or(EntryError::Unknown)?;
         if pending.issuer != self.trusted.issuer || pending.client_id != self.trusted.client_id {
@@ -264,17 +321,22 @@ impl FederatedEntry {
         })
     }
 
-    /// The store key of `state`: partitioned by this relying party's issuer
-    /// and client, so relying parties of other issuers sharing the store
-    /// neither find nor consume its entries (the mix-up attack class, RFC
-    /// 9207 §1).
-    fn key(&self, state: &str) -> String {
+    /// The store key of `state` started in the browser holding `browser`:
+    /// partitioned by this relying party's issuer and client, so relying
+    /// parties of other issuers sharing the store neither find nor consume
+    /// its entries (the mix-up attack class, RFC 9207 §1), and by the
+    /// browser's secret hash, so a return to another browser takes nothing.
+    fn key(&self, state: &str, browser: &BrowserSecret) -> String {
         use sha2::{Digest, Sha256};
         let mut partition = Sha256::new();
         partition.update(self.trusted.issuer.as_bytes());
         partition.update([0]);
         partition.update(self.trusted.client_id.as_bytes());
-        format!("{}:{state}", hex::encode(partition.finalize()))
+        format!(
+            "{}:{state}:{}",
+            hex::encode(partition.finalize()),
+            hex::encode(browser.hash().as_bytes())
+        )
     }
 
     /// Exchange `code` at `token_endpoint` (RFC 6749 §4.1.3, RFC 7636 §4.5):
