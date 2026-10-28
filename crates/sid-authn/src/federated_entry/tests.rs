@@ -628,10 +628,13 @@ async fn a_return_during_a_live_exchange_is_told_to_retry() {
 /// followed, before anything else reaches the cache, by `interfere`.
 struct FencedOff {
     inner: Arc<dyn CacheBackend>,
-    interfere: Mutex<Option<Box<dyn FnOnce(Arc<dyn CacheBackend>, String) -> Fence + Send>>>,
+    interfere: Mutex<Option<Interference>>,
 }
 
 type Fence = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
+/// What another return does to the shared cache under an entry's key.
+type Interference = Box<dyn FnOnce(Arc<dyn CacheBackend>, String) -> Fence + Send>;
 
 #[async_trait::async_trait]
 impl CacheBackend for FencedOff {
