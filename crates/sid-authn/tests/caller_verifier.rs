@@ -46,7 +46,7 @@ fn token(binding: Option<&DPopBinding>) -> (Profile, String) {
         .issue_access_token(
             &profile.id.to_string(),
             Some(&profile.id.to_string()),
-            &profile,
+            &profile.roles,
             &session,
             &["openid".to_string()],
             binding,

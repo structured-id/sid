@@ -173,6 +173,46 @@ impl MockStorageInner {
         Ok(())
     }
 
+    /// The Profiles holding a live installation administrator assignment.
+    fn administrators(&self) -> Vec<ProfileId> {
+        self.role_assignments
+            .iter()
+            .filter(|a| a.administers_installation())
+            .filter_map(|a| match a.principal {
+                RoleAssignmentPrincipal::Profile(id) => Some(id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Make `profile` an installation administrator, as the engines do.
+    fn grant_administrator(&mut self, profile: ProfileId) {
+        self.role_assignments.push(
+            RoleAssignment::new(
+                RoleAssignmentPrincipal::Profile(profile),
+                sid_core::models::Role::installation_administrator().id,
+            )
+            .on_installation(),
+        );
+    }
+
+    /// Refuse removing `id` when it is the last live administrator
+    /// assignment, as the engines do.
+    fn keep_last_administrator(&self, id: RoleAssignmentId) -> SidResult<()> {
+        let administrators: Vec<RoleAssignmentId> = self
+            .role_assignments
+            .iter()
+            .filter(|a| a.administers_installation())
+            .map(|a| a.id)
+            .collect();
+        if administrators == [id] {
+            return Err(sid_core::Error::InvalidState(
+                "the last administrator assignment cannot be removed".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Remove assignment `id` and every assignment depending on it, as the
     /// engines' cascade does; whether it existed.
     fn remove_assignment(&mut self, id: RoleAssignmentId) -> bool {
@@ -281,14 +321,12 @@ impl MockStorage {
     /// no test signs in as), the state every installation serves users in.
     pub fn new() -> Self {
         let storage = Self::unclaimed();
-        let mut admin = Profile::new(Some("site_administrator"));
-        admin.roles = vec!["admin".to_string()];
-        storage
-            .inner
-            .lock()
-            .unwrap()
-            .profiles
-            .insert(admin.id, admin);
+        let admin = Profile::new(Some("site_administrator"));
+        {
+            let mut inner = storage.inner.lock().unwrap();
+            inner.grant_administrator(admin.id);
+            inner.profiles.insert(admin.id, admin);
+        }
         storage
     }
 
@@ -2063,13 +2101,14 @@ impl StorageBackend for MockStorage {
             let key = sid_core::models::InstanceSecret::AdminClaim;
             let open = inner.instance_secrets.get(&key) == Some(claim)
                 && !inner.centrally_managed
-                && !inner.profiles.values().any(Profile::is_admin);
+                && inner.administrators().is_empty();
             if !open {
                 return Err(sid_core::Error::InvalidState(
                     "the installation has no open administrator claim".into(),
                 ));
             }
             inner.instance_secrets.remove(&key);
+            inner.grant_administrator(registration.profile.id);
         }
         let profile = &registration.profile;
         if let Some(ref username) = profile.username {
@@ -3335,8 +3374,7 @@ impl StorageBackend for MockStorage {
     }
 
     async fn admin_exists(&self) -> SidResult<bool> {
-        let inner = self.inner.lock().unwrap();
-        Ok(inner.profiles.values().any(Profile::is_admin))
+        Ok(!self.inner.lock().unwrap().administrators().is_empty())
     }
 
     async fn bootstrap_policy(&self) -> SidResult<sid_core::models::BootstrapPolicy> {
@@ -3356,7 +3394,7 @@ impl StorageBackend for MockStorage {
         if inner.centrally_managed {
             return Ok(CentralAdoption::AlreadyCentral);
         }
-        if inner.profiles.values().any(Profile::is_admin) {
+        if !inner.administrators().is_empty() {
             return Ok(CentralAdoption::LocalAdministrator);
         }
         inner.centrally_managed = true;
@@ -3397,31 +3435,28 @@ impl StorageBackend for MockStorage {
     async fn claim_first_admin(
         &self,
         claim_sealed: &[u8],
-        profile: &Profile,
-        ctx: MutationContext,
+        profile: ProfileId,
+        _ctx: MutationContext,
     ) -> SidResult<bool> {
+        let mut inner = self.inner.lock().unwrap();
+        let claim = sid_core::models::InstanceSecret::AdminClaim;
+        if inner.centrally_managed
+            || inner.instance_secrets.get(&claim).map(Vec::as_slice) != Some(claim_sealed)
         {
-            let mut inner = self.inner.lock().unwrap();
-            let claim = sid_core::models::InstanceSecret::AdminClaim;
-            if inner.centrally_managed
-                || inner.instance_secrets.get(&claim).map(Vec::as_slice) != Some(claim_sealed)
-            {
-                return Ok(false);
-            }
+            return Ok(false);
+        }
+        if !inner.administrators().is_empty() {
+            // A claim left beside an administrator grants nothing: drop it.
             inner.instance_secrets.remove(&claim);
-            if inner.profiles.values().any(Profile::is_admin) {
-                return Ok(false);
-            }
+            return Ok(false);
         }
-        let updated = self.update_profile(profile, ctx).await?;
-        if !updated {
-            // The real backends roll the claim removal back with the write.
-            self.inner.lock().unwrap().instance_secrets.insert(
-                sid_core::models::InstanceSecret::AdminClaim,
-                claim_sealed.to_vec(),
-            );
+        // The engines roll the removal back when the profile is not stored.
+        if !inner.profiles.contains_key(&profile) {
+            return Ok(false);
         }
-        Ok(updated)
+        inner.instance_secrets.remove(&claim);
+        inner.grant_administrator(profile);
+        Ok(true)
     }
     async fn service_binding(
         &self,
@@ -3870,7 +3905,9 @@ impl StorageBackend for MockStorage {
         id: RoleAssignmentId,
         _audit: MutationContext,
     ) -> SidResult<()> {
-        self.inner.lock().unwrap().remove_assignment(id);
+        let mut inner = self.inner.lock().unwrap();
+        inner.keep_last_administrator(id)?;
+        inner.remove_assignment(id);
         Ok(())
     }
     async fn get_role_assignment(&self, id: RoleAssignmentId) -> SidResult<Option<RoleAssignment>> {
@@ -3900,6 +3937,7 @@ impl StorageBackend for MockStorage {
     ) -> SidResult<bool> {
         let mut inner = self.inner.lock().unwrap();
         inner.check_fence(fence)?;
+        inner.keep_last_administrator(id)?;
         Ok(inner.remove_assignment(id))
     }
     async fn list_role_assignments_for_profile(
@@ -5021,28 +5059,28 @@ impl StorageBackend for MockStorage {
         _: &ClosureRequest,
         ctx: MutationContext,
     ) -> SidResult<bool> {
-        if profile.is_admin() {
-            // As the stores do: another administrator must stay.
-            let others = self
-                .inner
-                .lock()
-                .unwrap()
-                .profiles
-                .values()
-                .filter(|p| {
-                    p.id != profile.id
-                        && p.is_admin()
-                        && matches!(
+        {
+            let inner = self.inner.lock().unwrap();
+            let administrators = inner.administrators();
+            if administrators.contains(&profile.id) {
+                // As the stores do: another administrator must stay.
+                let others = administrators
+                    .iter()
+                    .filter(|id| **id != profile.id)
+                    .filter_map(|id| inner.profiles.get(id))
+                    .filter(|p| {
+                        matches!(
                             p.status,
                             sid_core::models::ProfileStatus::Active
                                 | sid_core::models::ProfileStatus::Suspended
                         )
-                })
-                .count();
-            if others == 0 {
-                return Err(sid_core::Error::InvalidState(
-                    "the last administrator cannot request closure".into(),
-                ));
+                    })
+                    .count();
+                if others == 0 {
+                    return Err(sid_core::Error::InvalidState(
+                        "the last administrator cannot request closure".into(),
+                    ));
+                }
             }
         }
         self.update_profile(profile, ctx).await

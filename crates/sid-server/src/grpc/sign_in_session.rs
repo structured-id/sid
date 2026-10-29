@@ -201,12 +201,15 @@ impl SignInSessions<'_> {
                 self.persist(profile, &session, proved_by, policy, limit, pending, None)
                     .await?;
                 let sub = profile.id.to_string();
+                let roles = sid_authn::account_roles::account_roles(self.storage, profile)
+                    .await
+                    .map_err(|e| internal("read the account's roles", e))?;
                 let access_token = self
                     .jwt
                     .issue_access_token(
                         &sub,
                         Some(&sub),
-                        profile,
+                        &roles,
                         &session,
                         &session.scopes,
                         None,

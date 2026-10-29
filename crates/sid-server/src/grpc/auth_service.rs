@@ -5328,12 +5328,15 @@ impl AuthService for AuthServiceImpl {
             .ok_or_else(session_ended)?;
 
         let sub = profile_id.to_string();
+        let roles = sid_authn::account_roles::account_roles(self.storage.as_ref(), &profile)
+            .await
+            .map_err(storage_failure)?;
         let access_token = self
             .jwt
             .issue_access_token(
                 &sub,
                 Some(&sub),
-                &profile,
+                &roles,
                 &session,
                 &session.scopes,
                 None,
@@ -6727,12 +6730,15 @@ impl AuthServiceImpl {
         let sub = self.subject_for(&issuer, profile.id, &client).await?;
         let (primary_email, primary_phone) = self.primary_contacts(profile.id).await?;
         let signer = self.issuer_signer(&issuer).await?;
+        let roles = sid_authn::account_roles::account_roles(self.storage.as_ref(), &profile)
+            .await
+            .map_err(storage_failure)?;
         let (response, refresh_model) = self
             .oauth2
             .issue_tokens(
                 &signer,
                 &sub,
-                &profile.roles,
+                &roles,
                 &session,
                 &client,
                 &target,

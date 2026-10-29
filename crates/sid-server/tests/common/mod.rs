@@ -431,7 +431,7 @@ pub fn issue_token(jwt: &JwtService, profile: &Profile, scopes: &[String]) -> St
     jwt.issue_access_token(
         &profile.id.to_string(),
         Some(&profile.id.to_string()),
-        profile,
+        &profile.roles,
         &session,
         scopes,
         None,
@@ -629,7 +629,7 @@ pub fn issue_token_with_session(
         .issue_access_token(
             &profile.id.to_string(),
             Some(&profile.id.to_string()),
-            profile,
+            &profile.roles,
             &session,
             scopes,
             None,

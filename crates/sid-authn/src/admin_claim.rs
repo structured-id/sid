@@ -31,9 +31,6 @@ pub enum ClaimError {
     Mismatch,
     #[error("profile {0} not found")]
     UnknownProfile(ProfileId),
-    /// The profile changed between read and write; the claim is still open.
-    #[error("profile changed concurrently")]
-    Changed,
     #[error(transparent)]
     Sealed(#[from] SealedSecretError),
     #[error(transparent)]
@@ -177,17 +174,10 @@ pub async fn claim(
         return Err(ClaimError::NotOpen);
     };
     require_match(keys, &stored, presented).await?;
-    let mut profile = storage
-        .get_profile(profile_id)
-        .await?
-        .ok_or(ClaimError::UnknownProfile(profile_id))?;
-    if !profile.is_admin() {
-        profile.roles.push("admin".to_string());
-    }
     let claimed = storage
         .claim_first_admin(
             &stored,
-            &profile,
+            profile_id,
             AuditEntry::user(
                 profile_id.to_string(),
                 "profile.admin_claimed",
@@ -199,13 +189,13 @@ pub async fn claim(
     if claimed {
         return Ok(());
     }
-    // Still stored: only the profile write lost a race. Gone: someone claimed it.
+    // Still stored: the profile is not. Gone: someone claimed it.
     if storage
         .get_instance_secret(InstanceSecret::AdminClaim)
         .await?
         .is_some_and(|now| now == stored)
     {
-        Err(ClaimError::Changed)
+        Err(ClaimError::UnknownProfile(profile_id))
     } else {
         Err(ClaimError::NotOpen)
     }

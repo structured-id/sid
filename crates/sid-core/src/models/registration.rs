@@ -266,11 +266,10 @@ impl NewRegistration {
     }
 
     /// Register the installation's first administrator with the sealed claim
-    /// value the registrant proved (see [`NewRegistration::instance_claim`]).
+    /// value the registrant proved (see [`NewRegistration::instance_claim`]):
+    /// the store consumes the claim and assigns the installation administrator
+    /// role in the registration's commit.
     pub fn claiming_instance(mut self, sealed_claim: Vec<u8>) -> Self {
-        if !self.profile.is_admin() {
-            self.profile.roles.push("admin".to_string());
-        }
         self.instance_claim = Some(sealed_claim);
         self
     }

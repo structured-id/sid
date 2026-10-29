@@ -5820,7 +5820,7 @@ async fn test_admin_update_profile_invalid_status() {
             AdminUpdateProfileRequest {
                 profile_id: pid.to_string(),
                 profile_status: status,
-                roles: vec!["admin".to_string()],
+                roles: vec!["editor".to_string()],
                 ..Default::default()
             },
             &admin_token,
@@ -5833,8 +5833,45 @@ async fn test_admin_update_profile_invalid_status() {
             Some("INVALID_FIELD_VALUE")
         );
         let stored = svc.storage.get_profile(pid).await.unwrap().unwrap();
-        assert!(!stored.is_admin(), "{status}: the roles were applied");
+        assert!(
+            !stored.has_role("editor"),
+            "{status}: the roles were applied"
+        );
     }
+}
+
+/// Regression: the profile update wrote any role label, the administrator's
+/// included, so an administrator could make another one outside role
+/// administration and its last-administrator guard. The label is now
+/// refused naming the field, and nothing is written.
+#[tokio::test]
+async fn test_admin_update_profile_refuses_the_administrator_label() {
+    let profile = test_profile();
+    let pid = profile.id;
+    let svc = TestServices::new(MockStorage::new().with_profile(profile));
+    let admin_token = issue_admin_token(&svc.jwt, pid);
+
+    let req = authed_request(
+        AdminUpdateProfileRequest {
+            profile_id: pid.to_string(),
+            roles: vec!["editor".to_string(), "admin".to_string()],
+            ..Default::default()
+        },
+        &admin_token,
+    );
+    let err = svc.admin.admin_update_profile(req).await.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert_eq!(
+        common::error_reason(&err).as_deref(),
+        Some("INVALID_FIELD_VALUE")
+    );
+    let stored = svc.storage.get_profile(pid).await.unwrap().unwrap();
+    assert!(stored.roles.is_empty(), "the roles were applied");
+    assert!(
+        !sid_authn::account_roles::administers_installation(svc.storage.as_ref(), pid)
+            .await
+            .unwrap()
+    );
 }
 
 /// Setting a status moves an account only between its ordinary states: a

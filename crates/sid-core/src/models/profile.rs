@@ -656,10 +656,6 @@ impl Profile {
         self.roles.iter().any(|r| r == role)
     }
 
-    pub fn is_admin(&self) -> bool {
-        self.has_role("admin")
-    }
-
     /// Create a new personal profile with an optional username.
     /// Username is None when user registers via email or phone only.
     pub fn new(username: Option<impl Into<String>>) -> Self {

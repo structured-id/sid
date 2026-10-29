@@ -12,6 +12,11 @@ use sid_core::grpc_error::{ApiError, ErrorReason};
 use sid_core::models::ProfileId;
 use tonic::{Request, Status};
 
+/// The role a token's `roles` claim names its installation administrator by;
+/// [`crate::account_roles`] puts it there for a Profile holding the
+/// installation administrator assignment, and only for one.
+pub const ADMIN_ROLE_CLAIM: &str = "admin";
+
 /// `acr` of a token exchanged from a personal access token. Such a token
 /// carries no resource-bound grant, so it is never an installation caller.
 const ACR_PAT: &str = "urn:sid:acr:pat";
@@ -303,7 +308,10 @@ impl Caller {
             _ if claims.act.is_some() => TokenKind::Impersonation,
             _ => TokenKind::Interactive,
         };
-        let admin = claims.roles.split_whitespace().any(|r| r == "admin");
+        let admin = claims
+            .roles
+            .split_whitespace()
+            .any(|r| r == ADMIN_ROLE_CLAIM);
         Ok(Self {
             profile_id,
             session_id: claims.sid.clone(),

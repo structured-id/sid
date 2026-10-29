@@ -188,6 +188,111 @@ pub(crate) async fn insert_role_assignment(
     Ok(())
 }
 
+/// Whether a live installation administrator assignment exists, held by
+/// `profile` when one is given.
+pub(crate) async fn administrator_exists<'e, E>(
+    executor: E,
+    profile: Option<ProfileId>,
+) -> SidResult<bool>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM role_assignments
+             WHERE role_id = ? AND scope = ?
+               AND (expires_at IS NULL OR expires_at > ?)
+               AND (? IS NULL OR profile_id = ?))",
+    )
+    .bind(Role::installation_administrator().id.0.to_string())
+    .bind(sid_core::models::INSTALLATION_SCOPE)
+    .bind(fmt_dt(&chrono::Utc::now()))
+    .bind(profile)
+    .bind(profile)
+    .fetch_one(executor)
+    .await
+    .map_err(|e| SidError::Storage(format!("administrator exists: {e}")))
+}
+
+/// The Profiles holding a live installation administrator assignment, with
+/// their status.
+pub(crate) async fn administrators(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+) -> SidResult<Vec<(ProfileId, String)>> {
+    sqlx::query_as(
+        "SELECT id, status FROM profiles WHERE id IN (
+             SELECT profile_id FROM role_assignments
+             WHERE role_id = ? AND scope = ?
+               AND (expires_at IS NULL OR expires_at > ?))",
+    )
+    .bind(Role::installation_administrator().id.0.to_string())
+    .bind(sid_core::models::INSTALLATION_SCOPE)
+    .bind(fmt_dt(&chrono::Utc::now()))
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|e| SidError::Storage(format!("read administrators: {e}")))
+}
+
+/// Make `profile` an installation administrator in `tx`: the built-in role
+/// is stored if it is not, then assigned across the installation.
+pub(crate) async fn grant_installation_administrator(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    profile: ProfileId,
+) -> SidResult<()> {
+    let role = Role::installation_administrator();
+    sqlx::query(
+        "INSERT INTO roles (id, project_id, key, name, description, group_label, permissions, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(role.id.0.to_string())
+    .bind(role.project_id.0.to_string())
+    .bind(&role.key)
+    .bind(&role.name)
+    .bind(&role.description)
+    .bind(&role.group)
+    .bind(role.permissions_string())
+    .bind(fmt_dt(&role.created_at))
+    .bind(fmt_dt(&role.updated_at))
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| super::insert_error("role", e))?;
+    insert_role_assignment(
+        tx,
+        &RoleAssignment::new(RoleAssignmentPrincipal::Profile(profile), role.id).on_installation(),
+    )
+    .await
+}
+
+/// Refuse, in `tx`, removing the assignment `id` when it is the
+/// installation's last live administrator assignment. The write transaction
+/// holds the database lock: the assignments counted are the ones this write
+/// sees.
+async fn keep_last_administrator(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    id: RoleAssignmentId,
+) -> SidResult<()> {
+    let ids: Vec<(String,)> = sqlx::query_as(
+        "SELECT id FROM role_assignments
+         WHERE role_id = ? AND scope = ?
+           AND (expires_at IS NULL OR expires_at > ?)",
+    )
+    .bind(Role::installation_administrator().id.0.to_string())
+    .bind(sid_core::models::INSTALLATION_SCOPE)
+    .bind(fmt_dt(&chrono::Utc::now()))
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|e| SidError::Storage(format!("read administrator assignments: {e}")))?;
+    let administrators = ids
+        .iter()
+        .map(|(id,)| {
+            uuid::Uuid::parse_str(id)
+                .map(|id| (id,))
+                .map_err(|e| SidError::Storage(format!("column id: {e}")))
+        })
+        .collect::<SidResult<Vec<_>>>()?;
+    crate::check_other_administrator_assignment(id, &administrators)
+}
+
 /// Store `role`'s editable fields in `tx` while the stored role is still at
 /// `role.revision`, moving the revision on; false when it is not.
 async fn update_role_in_tx(
@@ -824,6 +929,7 @@ impl SqliteBackend {
     ) -> SidResult<bool> {
         let mut tx = self.begin_write().await?;
         check_assignment_fence(&mut tx, fence).await?;
+        keep_last_administrator(&mut tx, id).await?;
         let removed: Option<(Option<sid_core::models::ProvisioningConnectorId>,)> = sqlx::query_as(
             "DELETE FROM role_assignments WHERE id = ? RETURNING provisioning_connector_id",
         )
@@ -847,6 +953,7 @@ impl SqliteBackend {
         audit: MutationContext,
     ) -> SidResult<()> {
         let mut tx = self.begin_write().await?;
+        keep_last_administrator(&mut tx, id).await?;
         let removed: Option<(Option<sid_core::models::ProvisioningConnectorId>,)> = sqlx::query_as(
             "DELETE FROM role_assignments WHERE id = ? RETURNING provisioning_connector_id",
         )

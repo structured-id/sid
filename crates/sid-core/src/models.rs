@@ -99,14 +99,14 @@ pub use auth_flow::{
 pub use authz::{
     AUTHZ_CHECK, AdminEnvelope, AdminOperation, AssignmentFence, AssignmentProvenance,
     AuthzPrincipal, CedarPolicy, CedarPolicyId, EnvelopeError, Group, GroupId, GroupMember,
-    INSTALLATION_ADMINISTRATOR_ROLE, INVITE_ACTIONS, INVITE_CREATE, INVITE_ISSUER_ROLE,
-    INVITE_READ, INVITE_REVOKE, PERMISSION_CHECKER_ROLE, PolicyEffect, PolicyScope, ProfileGrant,
-    ProfileGrantId, RecipientKind, Role, RoleAssignment, RoleAssignmentId, RoleAssignmentPrincipal,
-    RoleEditFence, RoleId, SCIM_ACTION_PREFIX, SCIM_ACTIONS, SCIM_GROUP_CREATE, SCIM_GROUP_DELETE,
-    SCIM_GROUP_MEMBERSHIP, SCIM_GROUP_READ, SCIM_GROUP_UPDATE, SCIM_PROVISIONER_ROLE,
-    SCIM_USER_CREATE, SCIM_USER_DEACTIVATE, SCIM_USER_DELETE, SCIM_USER_READ, SCIM_USER_UPDATE,
-    ScopeType, SodConflictRule, TOKEN_INSPECTOR_ROLE, TOKEN_INTROSPECT, Uncovered,
-    is_invite_action,
+    INSTALLATION_ADMINISTRATOR_ROLE, INSTALLATION_SCOPE, INVITE_ACTIONS, INVITE_CREATE,
+    INVITE_ISSUER_ROLE, INVITE_READ, INVITE_REVOKE, PERMISSION_CHECKER_ROLE, PolicyEffect,
+    PolicyScope, ProfileGrant, ProfileGrantId, RecipientKind, Role, RoleAssignment,
+    RoleAssignmentId, RoleAssignmentPrincipal, RoleEditFence, RoleId, SCIM_ACTION_PREFIX,
+    SCIM_ACTIONS, SCIM_GROUP_CREATE, SCIM_GROUP_DELETE, SCIM_GROUP_MEMBERSHIP, SCIM_GROUP_READ,
+    SCIM_GROUP_UPDATE, SCIM_PROVISIONER_ROLE, SCIM_USER_CREATE, SCIM_USER_DEACTIVATE,
+    SCIM_USER_DELETE, SCIM_USER_READ, SCIM_USER_UPDATE, ScopeType, SodConflictRule,
+    TOKEN_INSPECTOR_ROLE, TOKEN_INTROSPECT, Uncovered, is_invite_action,
 };
 pub use backchannel_logout::{LOGOUT_DELIVERY_ATTEMPTS, LOGOUT_DELIVERY_KIND, LogoutDelivery};
 pub use blob::{BlobError, BlobMeta, BlobStorageStatus, EncryptedBlob};

@@ -762,6 +762,34 @@ fn keys() -> sid_keys::SoftwareKeyManager {
     .expect("test key manager")
 }
 
+/// Store `root`, an installation administrator as role administration makes
+/// one.
+async fn store_administrator(storage: &impl StorageBackend) {
+    let root = sid_core::models::Profile::new(Some("root"));
+    storage
+        .create_profile(&root, AuditEntry::system("test", "profile").into())
+        .await
+        .unwrap();
+    storage
+        .create_role(
+            &sid_core::models::Role::installation_administrator(),
+            AuditEntry::system("test", "role").into(),
+        )
+        .await
+        .unwrap();
+    storage
+        .create_role_assignment(
+            &sid_core::models::RoleAssignment::new(
+                sid_core::models::RoleAssignmentPrincipal::Profile(root.id),
+                sid_core::models::Role::installation_administrator().id,
+            )
+            .on_installation(),
+            AuditEntry::system("test", "assignment").into(),
+        )
+        .await
+        .unwrap();
+}
+
 /// A fresh instance opens its administrator claim at start; a start of an
 /// instance that has an administrator opens none. No start grants a role.
 #[tokio::test]
@@ -778,12 +806,7 @@ async fn start_opens_the_claim_only_without_an_admin() {
     assert!(!storage.admin_exists().await.unwrap());
 
     let (storage, keys) = (store().await, keys);
-    let mut root = sid_core::models::Profile::new(Some("root"));
-    root.roles = vec!["admin".into()];
-    storage
-        .create_profile(&root, AuditEntry::system("test", "profile").into())
-        .await
-        .unwrap();
+    store_administrator(&storage).await;
     announce_admin_claim(&storage, &keys).await.unwrap();
     assert!(
         storage
@@ -842,12 +865,7 @@ async fn start_refuses_a_policy_change() {
     );
 
     let storage = store().await;
-    let mut root = sid_core::models::Profile::new(Some("root"));
-    root.roles = vec!["admin".into()];
-    storage
-        .create_profile(&root, AuditEntry::system("test", "profile").into())
-        .await
-        .unwrap();
+    store_administrator(&storage).await;
     assert!(
         apply_bootstrap_policy(&storage, Some("central"))
             .await
@@ -902,7 +920,8 @@ async fn unknown_policy_setting_stops_the_start() {
 #[tokio::test]
 async fn unreadable_store_stops_the_start() {
     let (storage, keys) = (store().await, keys());
-    sqlx::query("DROP TABLE profiles")
+    // The administrators are read from the role assignments.
+    sqlx::query("DROP TABLE role_assignments")
         .execute(storage.pool())
         .await
         .unwrap();

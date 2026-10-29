@@ -186,8 +186,8 @@ pub const INSTALLATION_ADMINISTRATOR_ROLE: &str = "installation-administrator";
 const INSTALLATION_ADMINISTRATOR_ROLE_ID: Uuid =
     Uuid::from_u128(0x0000_0000_0000_0000_0000_0000_0000_0005);
 
-/// Scope of an assignment across the whole installation.
-const INSTALLATION_SCOPE: &str = "installation";
+/// Scope of an assignment across the whole installation, as stored.
+pub const INSTALLATION_SCOPE: &str = "installation";
 
 /// Key of the built-in role holding every invite action.
 pub const INVITE_ISSUER_ROLE: &str = "invite-issuer";

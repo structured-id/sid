@@ -4,7 +4,7 @@
 //! Privileged operations: bootstrap, admin profile update,
 //! bulk session revocation, profile metadata CRUD.
 
-use sid_authn::caller::authenticate;
+use sid_authn::caller::{ADMIN_ROLE_CLAIM, authenticate};
 use sid_authn::jwt::JwtService;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::revocation_cascade::RevocationCascadeService;
@@ -116,7 +116,7 @@ impl AdminService for AdminServiceImpl {
                 "the claim token does not match",
             )
             .into()),
-            Err(ClaimError::Changed) => Err(changed_concurrently()),
+            Err(ClaimError::UnknownProfile(id)) => Err(profile_not_found(id)),
             Err(e) => Err(internal("claim instance", e)),
         }
     }
@@ -175,6 +175,14 @@ impl AdminService for AdminServiceImpl {
             }
         }
         if !req.roles.is_empty() {
+            // Administering the installation is a role assignment, never a
+            // label on the Profile.
+            if req.roles.iter().any(|r| r == ADMIN_ROLE_CLAIM) {
+                return Err(invalid_field(
+                    "roles",
+                    "installation administration is granted by role assignment",
+                ));
+            }
             profile.roles = req.roles;
         }
         // email_verified now managed via profile_emails table

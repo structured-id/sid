@@ -36,11 +36,6 @@ mod policy_evidence;
 /// refused rather than accepted without its obligation.
 pub const OWED_WORK_CAPACITY: u64 = 100_000;
 
-/// Whether a profile holds the `admin` role (`roles` is space-joined).
-#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
-const ADMIN_EXISTS_SQL: &str =
-    "SELECT EXISTS (SELECT 1 FROM profiles WHERE ' ' || roles || ' ' LIKE '% admin %')";
-
 /// Whether the installation is centrally managed (`bootstrap_policy` holds
 /// its row).
 #[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
@@ -162,6 +157,24 @@ fn check_other_administrator(
     if others == 0 {
         return Err(sid_core::Error::InvalidState(
             "the last administrator cannot request closure: assign another administrator first"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Refuse removing the assignment `removed` when, among the live
+/// installation administrator assignments `administrators`, it is the only
+/// one left.
+#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
+fn check_other_administrator_assignment(
+    removed: sid_core::models::RoleAssignmentId,
+    administrators: &[(uuid::Uuid,)],
+) -> sid_core::Result<()> {
+    let is_administrator = administrators.iter().any(|(id,)| *id == removed.0);
+    if is_administrator && administrators.len() == 1 {
+        return Err(sid_core::Error::InvalidState(
+            "the last administrator assignment cannot be removed: assign another administrator first"
                 .into(),
         ));
     }

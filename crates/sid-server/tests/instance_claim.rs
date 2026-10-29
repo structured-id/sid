@@ -35,12 +35,13 @@ async fn is_admin(svc: &TestServices, principal: &str) -> bool {
         .unwrap()
         .and_then(|p| p.assigned_profile_id)
         .expect("registered");
-    svc.storage
-        .get_profile(profile_id)
+    administers(svc, profile_id).await
+}
+
+async fn administers(svc: &TestServices, profile: sid_core::models::ProfileId) -> bool {
+    sid_authn::account_roles::administers_installation(svc.storage.as_ref(), profile)
         .await
         .unwrap()
-        .unwrap()
-        .is_admin()
 }
 
 /// The claim state `GetInstanceStatus` reports.
@@ -176,14 +177,7 @@ async fn centrally_managed_installation_offers_no_claim() {
         .insert("authorization", format!("Bearer {bearer}").parse().unwrap());
     let err = svc.admin.claim_instance(request).await.unwrap_err();
     assert_eq!(err.code(), Code::FailedPrecondition, "{}", err.message());
-    assert!(
-        !svc.storage
-            .get_profile(bob.id)
-            .await
-            .unwrap()
-            .unwrap()
-            .is_admin()
-    );
+    assert!(!administers(&svc, bob.id).await);
     assert!(!svc.storage.admin_exists().await.unwrap());
     assert_eq!(claim_state(&svc).await, AdministratorClaim::Unavailable);
 }
@@ -230,8 +224,7 @@ async fn signed_in_profile_claims_the_installation() {
         .claim_instance(request(Some(&alice_token), token.expose_secret()))
         .await
         .unwrap();
-    let alice_now = svc.storage.get_profile(alice.id).await.unwrap().unwrap();
-    assert!(alice_now.is_admin());
+    assert!(administers(&svc, alice.id).await);
 
     let err = svc
         .admin
@@ -239,12 +232,5 @@ async fn signed_in_profile_claims_the_installation() {
         .await
         .unwrap_err();
     assert_eq!(err.code(), Code::FailedPrecondition);
-    assert!(
-        !svc.storage
-            .get_profile(bob.id)
-            .await
-            .unwrap()
-            .unwrap()
-            .is_admin()
-    );
+    assert!(!administers(&svc, bob.id).await);
 }

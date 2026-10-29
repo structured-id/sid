@@ -12,7 +12,7 @@ use sid_core::{
 };
 use sqlx::Row;
 
-use crate::{ADMIN_EXISTS_SQL, CENTRALLY_MANAGED_SQL};
+use crate::CENTRALLY_MANAGED_SQL;
 
 /// Consumes the admin claim stored under the first bound name with the second
 /// bound (sealed) value, only on a self-managed installation; the PostgreSQL
@@ -492,10 +492,7 @@ impl SqliteBackend {
                 .map_err(|e| SidError::Storage(format!("consume admin claim: {e}")))?
                 .rows_affected()
                 == 1;
-            let admin_exists: bool = sqlx::query_scalar(ADMIN_EXISTS_SQL)
-                .fetch_one(&mut *tx)
-                .await
-                .map_err(|e| SidError::Storage(format!("admin exists: {e}")))?;
+            let admin_exists = super::rbac::administrator_exists(&mut *tx, None).await?;
             if !consumed || admin_exists {
                 return Err(SidError::InvalidState(
                     "the installation has no open administrator claim".into(),
@@ -530,6 +527,11 @@ impl SqliteBackend {
         }
 
         super::directory::insert_profile(&mut tx, profile).await?;
+        // The claim it consumed above makes the registrant the first
+        // administrator, in the same commit.
+        if instance_claim.is_some() {
+            super::rbac::grant_installation_administrator(&mut tx, profile.id).await?;
+        }
 
         if let Some(email) = email {
             sqlx::query(
@@ -1179,10 +1181,7 @@ impl SqliteBackend {
     }
 
     pub(crate) async fn admin_exists_impl(&self) -> SidResult<bool> {
-        sqlx::query_scalar(ADMIN_EXISTS_SQL)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|e| SidError::Storage(e.to_string()))
+        super::rbac::administrator_exists(&self.pool, None).await
     }
 
     pub(crate) async fn bootstrap_policy_impl(
@@ -1228,11 +1227,7 @@ impl SqliteBackend {
                 .map_err(|e| SidError::Storage(e.to_string()))?;
             return Ok(CentralAdoption::AlreadyCentral);
         }
-        let admin_exists: bool = sqlx::query_scalar(ADMIN_EXISTS_SQL)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(|e| SidError::Storage(e.to_string()))?;
-        if admin_exists {
+        if super::rbac::administrator_exists(&mut *tx, None).await? {
             return Ok(CentralAdoption::LocalAdministrator);
         }
         Self::commit_mutation(tx, "installation:bootstrap_policy", audit).await?;
@@ -1286,7 +1281,7 @@ impl SqliteBackend {
     pub(crate) async fn claim_first_admin_impl(
         &self,
         claim_sealed: &[u8],
-        profile: &Profile,
+        profile: ProfileId,
         audit: MutationContext,
     ) -> SidResult<bool> {
         let mut tx = self.begin_write().await?;
@@ -1301,21 +1296,25 @@ impl SqliteBackend {
         if !consumed {
             return Ok(false);
         }
-        let admin_exists: bool = sqlx::query_scalar(ADMIN_EXISTS_SQL)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(|e| SidError::Storage(e.to_string()))?;
-        if admin_exists {
+        if super::rbac::administrator_exists(&mut *tx, None).await? {
             // A claim left beside an administrator grants nothing: drop it.
             tx.commit()
                 .await
                 .map_err(|e| SidError::Storage(e.to_string()))?;
             return Ok(false);
         }
-        if !super::directory::update_profile(&mut tx, profile).await? {
+        let stored: bool =
+            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM profiles WHERE id = ?)")
+                .bind(profile)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| SidError::Storage(format!("claiming profile: {e}")))?;
+        if !stored {
+            // Rolled back: the claim stays for a stored claimer.
             return Ok(false);
         }
-        Self::commit_mutation(tx, &format!("profile:{}", profile.id), audit).await?;
+        super::rbac::grant_installation_administrator(&mut tx, profile).await?;
+        Self::commit_mutation(tx, &format!("profile:{profile}"), audit).await?;
         Ok(true)
     }
 

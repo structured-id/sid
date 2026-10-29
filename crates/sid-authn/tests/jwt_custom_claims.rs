@@ -46,7 +46,7 @@ fn custom_claims_cannot_override_registered_claims() {
         .issue_access_token(
             &sub,
             Some(&sub),
-            &profile,
+            &profile.roles,
             &session,
             &[],
             None,
