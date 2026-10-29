@@ -137,6 +137,21 @@ impl Role {
         role
     }
 
+    /// The built-in role of the installation's administrator: assigned across
+    /// the installation, it allows every action on every project and
+    /// protected resource there. Its authority is the assignment, not a
+    /// permission list.
+    pub fn installation_administrator() -> Self {
+        let mut role = Self::new(
+            ProjectId::system(),
+            INSTALLATION_ADMINISTRATOR_ROLE,
+            "Installation administrator",
+        );
+        role.id = RoleId(INSTALLATION_ADMINISTRATOR_ROLE_ID);
+        role.description = Some("Administers the whole installation".into());
+        role
+    }
+
     /// The built-in role of the system project granting every invite action,
     /// assigned to a service on the enrollment API resource.
     pub fn invite_issuer() -> Self {
@@ -162,6 +177,17 @@ pub const INVITE_ACTIONS: [&str; 3] = [INVITE_CREATE, INVITE_READ, INVITE_REVOKE
 pub fn is_invite_action(action: &str) -> bool {
     INVITE_ACTIONS.contains(&action)
 }
+
+/// Key of the built-in installation administrator role.
+pub const INSTALLATION_ADMINISTRATOR_ROLE: &str = "installation-administrator";
+
+/// Id of the built-in installation administrator role, fixed like the token
+/// inspector's.
+const INSTALLATION_ADMINISTRATOR_ROLE_ID: Uuid =
+    Uuid::from_u128(0x0000_0000_0000_0000_0000_0000_0000_0005);
+
+/// Scope of an assignment across the whole installation.
+const INSTALLATION_SCOPE: &str = "installation";
 
 /// Key of the built-in role holding every invite action.
 pub const INVITE_ISSUER_ROLE: &str = "invite-issuer";
@@ -461,6 +487,21 @@ impl RoleAssignment {
     pub fn on_resource(mut self, resource: super::ResourceId) -> Self {
         self.scope = Some(format!("{OAUTH_RESOURCE_SCOPE}{resource}"));
         self
+    }
+
+    /// Scope this assignment to the whole installation.
+    pub fn on_installation(mut self) -> Self {
+        self.scope = Some(INSTALLATION_SCOPE.to_owned());
+        self
+    }
+
+    /// Whether this is an unexpired assignment of the installation
+    /// administrator role across the installation: the one assignment that
+    /// allows every action on every project and protected resource.
+    pub fn administers_installation(&self) -> bool {
+        self.role_id.0 == INSTALLATION_ADMINISTRATOR_ROLE_ID
+            && self.scope.as_deref() == Some(INSTALLATION_SCOPE)
+            && !self.is_expired()
     }
 
     /// The protected resource this assignment is scoped to, if any.

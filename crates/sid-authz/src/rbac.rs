@@ -9,7 +9,10 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use sid_core::Result;
-use sid_core::models::{AuthzPrincipal, ProfileId, ProjectId, ResourceId, Role, RoleAssignment};
+use sid_core::models::{
+    AuthzPrincipal, INSTALLATION_ADMINISTRATOR_ROLE, ProfileId, ProjectId, ResourceId, Role,
+    RoleAssignment,
+};
 use sid_plugin::StorageBackend;
 
 /// RBAC authorization service (CE).
@@ -108,8 +111,9 @@ impl<S: StorageBackend + ?Sized> RbacService<S> {
 
     /// Keys of the roles granting `permission` to `principal` on the protected
     /// resource `resource`: unexpired assignments scoped to exactly that
-    /// resource (a profile's groups included). Project-wide and unscoped
-    /// assignments grant nothing on a resource.
+    /// resource (a profile's groups included), and the installation
+    /// administrator's. Other project-wide and unscoped assignments grant
+    /// nothing on a resource.
     pub async fn resource_granting_roles(
         &self,
         principal: &AuthzPrincipal,
@@ -120,6 +124,12 @@ impl<S: StorageBackend + ?Sized> RbacService<S> {
         let mut seen = HashSet::new();
         let mut granting = Vec::new();
         for assignment in &assignments {
+            if assignment.administers_installation() {
+                if seen.insert(assignment.role_id) {
+                    granting.push(INSTALLATION_ADMINISTRATOR_ROLE.to_owned());
+                }
+                continue;
+            }
             if assignment.is_expired()
                 || assignment.resource_scope() != Some(resource)
                 || !seen.insert(assignment.role_id)
@@ -137,7 +147,8 @@ impl<S: StorageBackend + ?Sized> RbacService<S> {
 
     /// Keys of the roles of `project` granting `permission` to `principal`:
     /// its unexpired assignments (a profile's groups included), except those
-    /// scoped to one protected resource, which count only there.
+    /// scoped to one protected resource, which count only there, and the
+    /// installation administrator's on every project.
     pub async fn project_granting_roles(
         &self,
         principal: &AuthzPrincipal,
@@ -148,6 +159,12 @@ impl<S: StorageBackend + ?Sized> RbacService<S> {
         let mut seen = HashSet::new();
         let mut granting = Vec::new();
         for assignment in &assignments {
+            if assignment.administers_installation() {
+                if seen.insert(assignment.role_id) {
+                    granting.push(INSTALLATION_ADMINISTRATOR_ROLE.to_owned());
+                }
+                continue;
+            }
             if assignment.is_expired()
                 || assignment.resource_scope().is_some()
                 || !seen.insert(assignment.role_id)
