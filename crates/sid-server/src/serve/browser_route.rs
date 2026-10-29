@@ -17,7 +17,7 @@ use std::task::{Context, Poll};
 use sid_authn::issuer::{AddressedIssuer, IssuerRegistry};
 use sid_authn::resource::TranscodedRequest;
 use sid_core::grpc_error::{ApiError, ErrorReason, refuse};
-use sid_infra::http::api_method;
+use sid_infra::route::api_method;
 use tonic::Status;
 use tonic::body::Body;
 use tonic::codegen::{BoxFuture, Service, http};

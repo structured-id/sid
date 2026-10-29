@@ -849,6 +849,35 @@ async fn a_return_completes_only_in_the_browser_that_started_it() {
     assert_eq!(returned.continuation, CONTINUATION);
 }
 
+// A correlation cookie's name is recognized as one of its issuer's entries:
+// the name a start sets is, while the session cookie itself, a sibling
+// issuer's entry, a digest of another length or case and a longer name are
+// not. An edge in front of the issuer forwards only these.
+#[tokio::test]
+async fn an_entry_cookie_is_recognized_by_its_name() {
+    let issuer = TestIssuer::start().await;
+    let started = entry(&issuer)
+        .start(REDIRECT, CONTINUATION, &EntryRequest::default())
+        .await
+        .unwrap();
+    let name = started.set_cookie.split('=').next().unwrap();
+    assert!(is_entry_cookie("__Host-sid_platform", name), "{name}");
+    let digest = name.rsplit('-').next().unwrap();
+    for other in [
+        "__Host-sid_platform".to_owned(),
+        format!("__Host-sid_platform2-entry-{digest}"),
+        format!("__Host-sid_other-entry-{digest}"),
+        format!("__Host-sid_platform-entry-{}", &digest[1..]),
+        format!("__Host-sid_platform-entry-{digest}0"),
+        // A fixed digest: an uppercased random one may hold only digits.
+        "__Host-sid_platform-entry-ABCDEF0123456789".to_owned(),
+        format!("__Host-sid_platform-entry-{}g", &digest[1..]),
+        format!("__Host-sid_platform-other-{digest}"),
+    ] {
+        assert!(!is_entry_cookie("__Host-sid_platform", &other), "{other}");
+    }
+}
+
 // Entries started together in two tabs each keep their own correlation
 // cookie, named after the authority's cookie and bound to the browser.
 #[tokio::test]

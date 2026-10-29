@@ -2,31 +2,6 @@
 
 use super::*;
 
-/// The gRPC path is split off `/api/...`.
-#[test]
-fn api_method_names_the_grpc_path() {
-    assert_eq!(
-        api_method("/api/sid.v1.authn.AuthService/OpaqueLoginStart"),
-        Some("/sid.v1.authn.AuthService/OpaqueLoginStart")
-    );
-}
-
-/// Anything else is outside the mount: the bare mount, a longer segment that
-/// only starts with it, the transport-named mount it replaced, a root gRPC
-/// path, an issuer-addressed path.
-#[test]
-fn other_paths_are_outside_the_api_mount() {
-    for path in [
-        "/api",
-        "/apix/sid.v1.authn.AuthService/OpaqueLoginStart",
-        "/grpc/sid.v1.authn.AuthService/OpaqueLoginStart",
-        "/sid.v1.authn.AuthService/OpaqueLoginStart",
-        "/i/0123abcd/api/sid.v1.authn.AuthService/OpaqueLoginStart",
-    ] {
-        assert_eq!(api_method(path), None, "{path}");
-    }
-}
-
 /// The transcoder forwards the headers the RPCs read whatever the operator
 /// listed, keeps its listen address and names no upstream of its own.
 #[test]

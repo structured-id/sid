@@ -11,6 +11,17 @@ fn addressed_path_names_handle_and_method() {
     );
 }
 
+/// A method the route contract lets set the session is published on the
+/// sign-in surface: the contract never names a method the issuer path does
+/// not serve.
+#[test]
+fn every_issuing_method_is_published() {
+    use sid_infra::route::{ISSUING_METHODS, PENDING_COMPLETING_METHOD};
+    for method in ISSUING_METHODS.iter().chain(&[PENDING_COMPLETING_METHOD]) {
+        assert!(BROWSER_METHODS.contains(method), "{method}");
+    }
+}
+
 /// Anything else is no addressed call: no handle, no `api` segment, a longer
 /// segment that only starts with it, the transport-named mount the API path
 /// replaced, another issuer endpoint, a root gRPC path.
