@@ -781,6 +781,7 @@ mod grant_store {
     grant_store!(
         session_refused_once_its_owner_is_suspended,
         a_pending_context_takes_no_session_slot,
+        a_pending_context_evicts_no_session,
         a_pending_context_completes_once,
         session_commits_only_under_the_current_login_policy,
         auth_code_commits_only_under_the_current_login_policy,

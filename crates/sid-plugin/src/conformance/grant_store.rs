@@ -1339,6 +1339,29 @@ pub async fn a_pending_context_takes_no_session_slot<H: GrantHarness>(h: &H) {
     assert!(h.store().get_session(first.id).await.unwrap().is_none());
 }
 
+/// Storing a pending context evicts nothing: under a limit of one with one
+/// full session, the sign-in that has not finished leaves that session.
+/// Checking the limit for it ended a live session for a sign-in that may
+/// never finish.
+pub async fn a_pending_context_evicts_no_session<H: GrantHarness>(h: &H) {
+    let owner = h.owner().await;
+    let full = session(owner.clone());
+    h.store()
+        .create_session_atomic(&full, 1, None, ctx())
+        .await
+        .unwrap();
+    let pending = pending_context(owner);
+    let evicted = h
+        .store()
+        .create_session_atomic(&pending, 1, None, ctx())
+        .await
+        .unwrap();
+
+    assert!(evicted.is_empty(), "{evicted:?}");
+    assert!(h.store().get_session(full.id).await.unwrap().is_some());
+    assert!(h.store().get_session(pending.id).await.unwrap().is_some());
+}
+
 /// A pending context completes once: concurrent completions store one
 /// session, and one ended before (completed, or ended with its owner's
 /// sessions) completes nothing.
