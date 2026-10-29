@@ -393,7 +393,7 @@ async fn only_admitted_calls_reach_the_service() {
     let mut guarded = Guarded::new(
         inner,
         Arc::new(f.receiver),
-        Arc::new(|path: &str| (path == PATH).then_some("ops.orgs.ban")),
+        Arc::new(|path: &str| (path == PATH).then_some(Action::OnObject("ops.orgs.ban"))),
     );
     let call = |path: &str| {
         http::Request::builder()
@@ -418,4 +418,80 @@ fn a_handler_without_the_guard_refuses() {
     let request = tonic::Request::new(());
     let status = admitted(&request).expect_err("no admitted call");
     assert_eq!(status.code(), tonic::Code::Unauthenticated);
+}
+
+/// An admitted call of `decision` for the fixture's resource.
+fn admitted_call(resource: sid_core::models::ResourceId, decision: Decision) -> tonic::Request<()> {
+    let mut request = tonic::Request::new(());
+    request.extensions_mut().insert(Admitted {
+        claims: ForwardAuthClaims {
+            sub: SUBJECT.into(),
+            iss: ISSUER.into(),
+            exp: 4_102_444_800,
+            iat: 0,
+            auth_time: 0,
+            acr: String::new(),
+            scope: String::new(),
+            roles: String::new(),
+            sid: "s".into(),
+            jti: "j".into(),
+            email: None,
+            name: None,
+            preferred_username: None,
+            groups: None,
+            cnf: None,
+        },
+        resource,
+        decision,
+    });
+    request
+}
+
+/// An object action the handler has not decided for its object gives out
+/// no admitted call: a handler that forgets to name its target is refused,
+/// never served on the token alone.
+#[tokio::test]
+async fn an_undecided_object_action_is_not_admitted() {
+    let f = fixture();
+    let resource = sid_core::models::ResourceId::generate();
+    let request = admitted_call(resource, Decision::Pending(pending(f.receiver)));
+    let status = admitted(&request).expect_err("undecided");
+    assert_eq!(status.code(), tonic::Code::Internal, "{status:?}");
+}
+
+/// Only an undecided object action is decided for an object, and only for
+/// a named one: a resource action already decided, and an empty object,
+/// are wiring faults asked nothing.
+#[tokio::test]
+async fn only_an_undecided_object_action_is_decided_for_a_named_object() {
+    let f = fixture();
+    let resource = sid_core::models::ResourceId::generate();
+    let mut decided = admitted_call(resource, Decision::Allowed);
+    let status = authorize_object(&mut decided, "org:1")
+        .await
+        .expect_err("already decided");
+    assert_eq!(status.code(), tonic::Code::Internal, "{status:?}");
+    assert!(admitted(&decided).is_ok());
+
+    let mut unnamed = admitted_call(resource, Decision::Pending(pending(f.receiver)));
+    let status = authorize_object(&mut unnamed, "")
+        .await
+        .expect_err("no object");
+    assert_eq!(status.code(), tonic::Code::Internal, "{status:?}");
+    assert!(admitted(&unnamed).is_err());
+    assert_eq!(
+        unnamed.extensions().get::<Admitted>().unwrap().resource,
+        resource
+    );
+}
+
+/// The pending question of an object action at `receiver`.
+fn pending(receiver: Receiver) -> Arc<PendingQuestion> {
+    Arc::new(PendingQuestion {
+        receiver: Arc::new(receiver),
+        action: "ops.orgs.ban",
+        token: "t".into(),
+        method: "POST".into(),
+        uri: format!("https://ops.example.com{PATH}"),
+    })
 }
