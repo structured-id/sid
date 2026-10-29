@@ -20,6 +20,16 @@ use crate::rbac::RbacService;
 /// Resource prefix naming one registered protected resource.
 const OAUTH_RESOURCE: &str = "oauth_resource:";
 
+/// The policies that apply to a decision on one target, with the scopes they
+/// were selected from.
+#[derive(Debug, Clone)]
+pub struct ApplicablePolicies {
+    /// The scopes whose policies apply to the target.
+    pub scopes: Vec<PolicyScope>,
+    /// Every policy of `scopes`, enabled or not.
+    pub policies: Vec<sid_core::models::CedarPolicy>,
+}
+
 /// CE authorization engine: RBAC + Cedar (ABAC).
 ///
 /// Check pipeline:
@@ -188,23 +198,24 @@ impl<S: StorageBackend + ?Sized> CeAuthzEngine<S> {
         }
     }
 
-    /// Every policy, enabled or not, that applies to a decision on
-    /// `resource`, selected as enforcement selects it: what a dry run changes
-    /// and evaluates under [`Self::check_under`].
+    /// The scopes that apply to a decision on `resource` and every policy of
+    /// them, enabled or not, selected as enforcement selects it: what a dry
+    /// run changes and evaluates under [`Self::check_under`].
     pub async fn applicable_policies(
         &self,
         resource: &str,
-    ) -> Result<Vec<sid_core::models::CedarPolicy>, AuthzError> {
+    ) -> Result<ApplicablePolicies, AuthzError> {
+        let scopes = self.scopes_of(resource).await?;
         let mut policies = Vec::new();
-        for scope in self.scopes_of(resource).await? {
+        for scope in &scopes {
             policies.extend(
                 self.storage
-                    .list_cedar_policies(scope)
+                    .list_cedar_policies(*scope)
                     .await
                     .map_err(|e| AuthzError::Storage(e.to_string()))?,
             );
         }
-        Ok(policies)
+        Ok(ApplicablePolicies { scopes, policies })
     }
 
     /// The enabled policies of `scopes`, as (id, text).

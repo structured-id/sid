@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use crate::cedar::CedarService;
 use crate::decision::{AuthzCheckRequest, AuthzCheckResponse};
-use crate::engine::CeAuthzEngine;
+use crate::engine::{ApplicablePolicies, CeAuthzEngine};
 use sid_core::models::{CedarPolicy, CedarPolicyId, PolicyEffect, PolicyScope, ProjectId};
 use sid_plugin::StorageBackend;
 
@@ -131,16 +131,17 @@ impl<S: StorageBackend + ?Sized + 'static> PolicySimulator<S> {
         // 1. Load the policies that apply to the target, as enforcement
         // selects them: the installation's, the project's and, for a
         // protected resource, its own.
-        let current_policies = self
+        let applicable = self
             .engine
             .applicable_policies(resource)
             .await
             .map_err(|e| SimulationError::Storage(e.to_string()))?;
 
         // 2. Apply proposed changes in-memory; a proposed policy is the
-        // project's.
+        // project's, and is refused where that scope does not apply to the
+        // target.
         let proposed_policies =
-            self.apply_changes(project_id, &current_policies, changes, &mut errors);
+            self.apply_changes(project_id, resource, &applicable, changes, &mut errors);
 
         // 3. Build policy pairs for Cedar evaluation.
         let proposed_pairs = Self::to_policy_pairs(&proposed_policies);
@@ -226,11 +227,13 @@ impl<S: StorageBackend + ?Sized + 'static> PolicySimulator<S> {
     fn apply_changes(
         &self,
         project_id: ProjectId,
-        current: &[CedarPolicy],
+        resource: &str,
+        applicable: &ApplicablePolicies,
         changes: &[ProposedChange],
         errors: &mut Vec<String>,
     ) -> Vec<CedarPolicy> {
-        let mut policies: Vec<CedarPolicy> = current.to_vec();
+        let mut policies: Vec<CedarPolicy> = applicable.policies.clone();
+        let scope = PolicyScope::Project(project_id);
 
         for change in changes {
             match change {
@@ -239,6 +242,13 @@ impl<S: StorageBackend + ?Sized + 'static> PolicySimulator<S> {
                     policy_text,
                     effect,
                 } => {
+                    if !applicable.scopes.contains(&scope) {
+                        errors.push(format!(
+                            "proposed policy '{name}' belongs to project {} and does not apply to {resource}",
+                            project_id.0
+                        ));
+                        continue;
+                    }
                     let validation = self.cedar.validate_policy(policy_text);
                     if !validation.valid {
                         errors.push(format!(
@@ -248,12 +258,7 @@ impl<S: StorageBackend + ?Sized + 'static> PolicySimulator<S> {
                         ));
                         continue;
                     }
-                    let mut p = CedarPolicy::new(
-                        PolicyScope::Project(project_id),
-                        name,
-                        policy_text,
-                        *effect,
-                    );
+                    let mut p = CedarPolicy::new(scope, name, policy_text, *effect);
                     p.enabled = true;
                     policies.push(p);
                 }
@@ -468,6 +473,39 @@ mod tests {
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         assert_eq!(result.total_gained, 0, "{:?}", result.impacts);
         assert_eq!(result.total_unchanged, 1);
+    }
+
+    /// Regression: a proposed policy is the named project's, yet it was
+    /// evaluated on a resource of another project, or of none, where storing
+    /// it would not change enforcement, and reported as gained access.
+    #[tokio::test]
+    async fn a_proposed_policy_of_an_unrelated_project_is_refused() {
+        let (sim, storage, pid) = setup().await;
+        let changes = vec![ProposedChange::CreatePolicy {
+            name: "allow_read".into(),
+            policy_text: r#"permit(principal, action == Action::"read", resource);"#.into(),
+            effect: PolicyEffect::Permit,
+        }];
+        for parent in [Some(ProjectId::new()), None] {
+            let target = storage.register_resource(parent);
+            let result = sim
+                .simulate(
+                    pid,
+                    &changes,
+                    &[subject(1)],
+                    &["read".into()],
+                    &format!("oauth_resource:{target}"),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(result.total_gained, 0, "{parent:?}: {:?}", result.impacts);
+            assert!(
+                result.errors.iter().any(|e| e.contains("does not apply")),
+                "{parent:?}: {:?}",
+                result.errors
+            );
+        }
     }
 
     // ── Invalid Cedar syntax → error reported ──
