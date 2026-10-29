@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use common::mock_storage::MockStorage;
 use common::{TestServices, issue_admin_token, test_client, test_profile};
+use sid_auth::receiver::Action;
 use sid_authz::AuthzCheckRequest;
 use sid_authz::cedar::CedarService;
 use sid_authz::grpc::AuthzServiceImpl;
@@ -1282,6 +1283,7 @@ async fn guard_trusting(
         questions,
         lose,
         confirmations,
+        targets: _,
     } = serve_issuer(a, verifiers).await;
     let issuer = &a.svc.issuer.canonical_url;
     let base = issuer.split("/i/").next().unwrap();
@@ -1338,10 +1340,15 @@ struct Issuer {
     lose: Arc<AtomicUsize>,
     /// The confirmation each permission question carried.
     confirmations: Confirmations,
+    /// The action and object each permission question asked about.
+    targets: Targets,
 }
 
 /// The confirmation each permission question carried, in order.
 type Confirmations = Arc<std::sync::Mutex<Vec<Option<RequestConfirmation>>>>;
+
+/// The action and object each permission question asked about, in order.
+type Targets = Arc<std::sync::Mutex<Vec<(String, String)>>>;
 
 /// The authorization API behind a link that loses answers: while `lose` is
 /// above zero, a permission question is decided by sid-authz and its answer
@@ -1352,6 +1359,7 @@ struct LosingAnswers<S> {
     inner: S,
     lose: Arc<AtomicUsize>,
     confirmations: Confirmations,
+    targets: Targets,
 }
 
 impl<S: tonic::server::NamedService> tonic::server::NamedService for LosingAnswers<S> {
@@ -1390,6 +1398,7 @@ where
         let mut inner = std::mem::replace(&mut self.inner, ready);
         let lose = self.lose.clone();
         let confirmations = self.confirmations.clone();
+        let targets = self.targets.clone();
         Box::pin(async move {
             if !request.uri().path().ends_with("/CheckPermission") {
                 return inner.call(request).await;
@@ -1398,6 +1407,14 @@ where
             let bytes = body.collect().await.unwrap().to_bytes();
             // One gRPC message: a flag byte and a four-byte length first.
             let question = CheckPermissionRequest::decode(&bytes[5..]).unwrap();
+            targets.lock().unwrap().push((
+                question.action.clone(),
+                question
+                    .target
+                    .as_ref()
+                    .map(|t| t.object.clone())
+                    .unwrap_or_default(),
+            ));
             let confirmation = match question.evaluation {
                 Some(Evaluation::Request(request)) => request.confirmation,
                 _ => None,
@@ -1434,6 +1451,7 @@ async fn serve_issuer(
     let questions: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
     let lose = Arc::new(AtomicUsize::new(0));
     let confirmations = Confirmations::default();
+    let targets = Targets::default();
     let counting = {
         let tokens = tokens.clone();
         move |request: Request<()>| {
@@ -1478,6 +1496,7 @@ async fn serve_issuer(
             ),
             lose: lose.clone(),
             confirmations: confirmations.clone(),
+            targets: targets.clone(),
         },
         recording,
     ))
@@ -1502,6 +1521,7 @@ async fn serve_issuer(
         questions,
         lose,
         confirmations,
+        targets,
     }
 }
 
@@ -1880,6 +1900,8 @@ async fn only_a_checker_presents_request_evidence() {
 const SERVICE_ORIGIN: &str = "https://orders.example";
 const READ: &str = "/orders.v1.OrderService/Read";
 const WRITE: &str = "/orders.v1.OrderService/Write";
+/// An action on one order the request names.
+const CANCEL: &str = "/orders.v1.OrderService/Cancel";
 
 /// The protected service: answers OK and keeps every admitted call it saw.
 #[derive(Clone, Default)]
@@ -1949,8 +1971,9 @@ async fn protected_at(a: &Asking, issuer: Issuer, cache_url: Option<String>) -> 
         reached.clone(),
         Arc::new(receiver),
         Arc::new(|path: &str| match path {
-            READ => Some("orders.read"),
-            WRITE => Some("orders.write"),
+            READ => Some(Action::OnResource("orders.read")),
+            WRITE => Some(Action::OnResource("orders.write")),
+            CANCEL => Some(Action::OnObject("orders.cancel")),
             _ => None,
         }),
     );
@@ -2015,6 +2038,94 @@ async fn a_receiver_admits_a_permitted_call_with_its_subject() {
     assert_eq!(admitted[0].resource, a.orders.id);
     assert_ne!(admitted[0].claims.sub, a.profile.id.to_string());
     assert!(!admitted[0].claims.sub.is_empty());
+}
+
+/// The call an object action reached the service with, as its handler gets
+/// it.
+fn reached_call(admitted: sid_auth::receiver::Admitted) -> Request<()> {
+    let mut request = Request::new(());
+    request.extensions_mut().insert(admitted);
+    request
+}
+
+/// An action on one object reaches its handler verified but undecided: the
+/// handler names the object and the issuer decides with the subject's
+/// current permission. Without the permission it is denied and the call
+/// stays undecided; once granted the same object is allowed and the call is
+/// admitted; once the grant is revoked, the next call is denied again.
+#[tokio::test]
+async fn an_object_action_is_decided_for_its_object_with_current_permission() {
+    let a = asking().await;
+    a.grant(sid_core::models::Role::permission_checker(), &a.orders)
+        .await;
+    let mut p = protected(&a).await;
+    let (original, _) = a.profile_token(&a.orders, None).await;
+    let bearer = format!("Bearer {original}");
+
+    assert_eq!(p.call(CANCEL, &bearer, None).await, Code::Ok);
+    let mut first = reached_call(p.reached.admitted().pop().expect("reached"));
+    assert_eq!(
+        sid_auth::receiver::admitted(&first).unwrap_err().code(),
+        Code::Internal,
+        "undecided before its object is named"
+    );
+    let denied = sid_auth::receiver::authorize_object(&mut first, "order:7")
+        .await
+        .unwrap_err();
+    assert_eq!(denied.code(), Code::PermissionDenied, "{denied:?}");
+    assert!(sid_auth::receiver::admitted(&first).is_err());
+
+    let mut canceller =
+        sid_core::models::Role::new(ProjectId::system(), "orders-canceller", "Orders canceller");
+    canceller.permissions = vec!["orders.cancel".into()];
+    let audit = || sid_core::models::AuditEntry::system("test", "checking").into();
+    a.svc
+        .storage
+        .create_role(&canceller, audit())
+        .await
+        .unwrap();
+    let assignment = sid_core::models::RoleAssignment::new(
+        sid_core::models::RoleAssignmentPrincipal::Profile(a.profile.id),
+        canceller.id,
+    )
+    .on_resource(a.orders.id);
+    a.svc
+        .storage
+        .create_role_assignment(&assignment, audit())
+        .await
+        .unwrap();
+
+    assert_eq!(p.call(CANCEL, &bearer, None).await, Code::Ok);
+    let mut granted = reached_call(p.reached.admitted().pop().expect("reached"));
+    sid_auth::receiver::authorize_object(&mut granted, "order:7")
+        .await
+        .expect("allowed with the grant");
+    let admitted = sid_auth::receiver::admitted(&granted).expect("admitted");
+    assert_eq!(admitted.resource, a.orders.id);
+    let targets = p.issuer.targets.lock().unwrap().clone();
+    assert!(
+        targets
+            .iter()
+            .all(|(action, object)| action == "orders.cancel" && object == "order:7"),
+        "every question names the action and its object: {targets:?}"
+    );
+    assert_eq!(targets.len(), 2, "asked only when the handler named it");
+
+    a.svc
+        .storage
+        .delete_role_assignment(assignment.id, audit())
+        .await
+        .unwrap();
+    assert_eq!(p.call(CANCEL, &bearer, None).await, Code::Ok);
+    let mut revoked = reached_call(p.reached.admitted().pop().expect("reached"));
+    assert_eq!(
+        sid_auth::receiver::authorize_object(&mut revoked, "order:7")
+            .await
+            .unwrap_err()
+            .code(),
+        Code::PermissionDenied,
+        "the revoked grant decides nothing"
+    );
 }
 
 /// A token whose sign-in ended still verifies by signature at the receiver,
