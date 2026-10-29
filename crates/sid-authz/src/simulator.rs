@@ -101,15 +101,13 @@ impl std::error::Error for SimulationError {}
 pub struct PolicySimulator<S: StorageBackend + ?Sized> {
     engine: CeAuthzEngine<S>,
     cedar: CedarService,
-    storage: Arc<S>,
 }
 
 impl<S: StorageBackend + ?Sized + 'static> PolicySimulator<S> {
     pub fn new(storage: Arc<S>) -> Self {
         Self {
-            engine: CeAuthzEngine::new(storage.clone()),
+            engine: CeAuthzEngine::new(storage),
             cedar: CedarService::new(),
-            storage,
         }
     }
 
@@ -130,17 +128,14 @@ impl<S: StorageBackend + ?Sized + 'static> PolicySimulator<S> {
     ) -> Result<SimulationResult, SimulationError> {
         let mut errors = Vec::new();
 
-        // 1. Load the policies that apply to the project: the installation's
-        // it inherits and its own, as enforcement selects them.
-        let mut current_policies = Vec::new();
-        for scope in [PolicyScope::Installation, PolicyScope::Project(project_id)] {
-            current_policies.extend(
-                self.storage
-                    .list_cedar_policies(scope)
-                    .await
-                    .map_err(|e| SimulationError::Storage(e.to_string()))?,
-            );
-        }
+        // 1. Load the policies that apply to the target, as enforcement
+        // selects them: the installation's, the project's and, for a
+        // protected resource, its own.
+        let current_policies = self
+            .engine
+            .applicable_policies(resource)
+            .await
+            .map_err(|e| SimulationError::Storage(e.to_string()))?;
 
         // 2. Apply proposed changes in-memory; a proposed policy is the
         // project's.
@@ -411,6 +406,68 @@ mod tests {
 
         assert_eq!(result.total_lost, 1);
         assert_eq!(result.impacts[0].impact_type, ImpactType::Lost);
+    }
+
+    // ── A resource target keeps its own policies in the proposed set ──
+
+    /// Regression: simulating a protected resource dropped that resource's
+    /// own policies from the proposed set, so a resource forbid that denies
+    /// a role grant vanished and an unrelated project permit was reported as
+    /// gained access enforcement would still deny.
+    #[tokio::test]
+    async fn a_resource_target_keeps_its_own_policies_when_simulated() {
+        let (sim, storage, pid) = setup().await;
+        let target = storage.register_resource(Some(pid));
+        let mut role = sid_core::models::Role::new(pid, "reader", "reader");
+        role.permissions = vec!["read".into()];
+        storage
+            .create_role(&role, AuditEntry::system("test", "test").into())
+            .await
+            .unwrap();
+        let user = sid_core::models::ProfileId::generate();
+        storage
+            .create_role_assignment(
+                &sid_core::models::RoleAssignment::new(
+                    sid_core::models::RoleAssignmentPrincipal::Profile(user),
+                    role.id,
+                )
+                .on_resource(target),
+                AuditEntry::system("test", "test").into(),
+            )
+            .await
+            .unwrap();
+        storage
+            .create_cedar_policy(
+                &CedarPolicy::new(
+                    PolicyScope::Resource(target),
+                    "deny_all",
+                    "forbid(principal, action, resource);",
+                    PolicyEffect::Forbid,
+                ),
+                AuditEntry::system("test", "test").into(),
+            )
+            .await
+            .unwrap();
+        let changes = vec![ProposedChange::CreatePolicy {
+            name: "allow_read".into(),
+            policy_text: r#"permit(principal, action == Action::"read", resource);"#.into(),
+            effect: PolicyEffect::Permit,
+        }];
+
+        let result = sim
+            .simulate(
+                pid,
+                &changes,
+                &[format!("user:{user}")],
+                &["read".into()],
+                &format!("oauth_resource:{target}"),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.total_gained, 0, "{:?}", result.impacts);
+        assert_eq!(result.total_unchanged, 1);
     }
 
     // ── Invalid Cedar syntax → error reported ──

@@ -117,11 +117,7 @@ impl<S: StorageBackend + ?Sized> CeAuthzEngine<S> {
         let applicable = match policies {
             Some(policies) => policies,
             None => {
-                let mut scopes = vec![PolicyScope::Installation];
-                if let Some(project) = self.parent_project(resource).await? {
-                    scopes.push(PolicyScope::Project(project));
-                }
-                scopes.push(PolicyScope::Resource(resource));
+                let scopes = self.resource_scopes(resource).await?;
                 stored = self.enabled_policies(&scopes).await?;
                 &stored
             }
@@ -162,6 +158,53 @@ impl<S: StorageBackend + ?Sized> CeAuthzEngine<S> {
                 ))
             })?;
         Ok(Some(application.project_id))
+    }
+
+    /// The scopes whose policies apply to a decision on the protected
+    /// `resource`: the installation's, its registered parent project's and
+    /// its own.
+    async fn resource_scopes(&self, resource: ResourceId) -> Result<Vec<PolicyScope>, AuthzError> {
+        let mut scopes = vec![PolicyScope::Installation];
+        if let Some(project) = self.parent_project(resource).await? {
+            scopes.push(PolicyScope::Project(project));
+        }
+        scopes.push(PolicyScope::Resource(resource));
+        Ok(scopes)
+    }
+
+    /// The scopes whose policies apply to a decision on `resource` (a
+    /// protected resource `oauth_resource:<id>`, or a project).
+    async fn scopes_of(&self, resource: &str) -> Result<Vec<PolicyScope>, AuthzError> {
+        match resource.strip_prefix(OAUTH_RESOURCE) {
+            Some(id) => {
+                let id = ResourceId::parse(id)
+                    .map_err(|e| AuthzError::InvalidResource(format!("{resource}: {e}")))?;
+                self.resource_scopes(id).await
+            }
+            None => Ok(vec![
+                PolicyScope::Installation,
+                PolicyScope::Project(Self::parse_project(resource)?),
+            ]),
+        }
+    }
+
+    /// Every policy, enabled or not, that applies to a decision on
+    /// `resource`, selected as enforcement selects it: what a dry run changes
+    /// and evaluates under [`Self::check_under`].
+    pub async fn applicable_policies(
+        &self,
+        resource: &str,
+    ) -> Result<Vec<sid_core::models::CedarPolicy>, AuthzError> {
+        let mut policies = Vec::new();
+        for scope in self.scopes_of(resource).await? {
+            policies.extend(
+                self.storage
+                    .list_cedar_policies(scope)
+                    .await
+                    .map_err(|e| AuthzError::Storage(e.to_string()))?,
+            );
+        }
+        Ok(policies)
     }
 
     /// The enabled policies of `scopes`, as (id, text).
@@ -373,10 +416,7 @@ impl<S: StorageBackend + ?Sized> CeAuthzEngine<S> {
             Some(policies) => policies,
             None => {
                 stored = self
-                    .enabled_policies(&[
-                        PolicyScope::Installation,
-                        PolicyScope::Project(project_id),
-                    ])
+                    .enabled_policies(&self.scopes_of(&request.resource).await?)
                     .await?;
                 &stored
             }
