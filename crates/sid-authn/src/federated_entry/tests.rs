@@ -869,7 +869,8 @@ async fn an_entry_cookie_is_recognized_by_its_name() {
         format!("__Host-sid_other-entry-{digest}"),
         format!("__Host-sid_platform-entry-{}", &digest[1..]),
         format!("__Host-sid_platform-entry-{digest}0"),
-        format!("__Host-sid_platform-entry-{}", digest.to_uppercase()),
+        // A fixed digest: an uppercased random one may hold only digits.
+        "__Host-sid_platform-entry-ABCDEF0123456789".to_owned(),
         format!("__Host-sid_platform-entry-{}g", &digest[1..]),
         format!("__Host-sid_platform-other-{digest}"),
     ] {
