@@ -82,6 +82,21 @@ pub trait LoginPolicyHarness: GrantHarness {
     async fn advance_login_policy(&self) -> i64;
 }
 
+/// A grant store whose owners are local Profiles holding principals: the
+/// scenarios of a sign-in proved by a principal assignment run on it.
+#[async_trait]
+pub trait AssignmentHarness: GrantHarness<Owner = sid_core::models::ProfileId> {
+    /// A trusted issuer's subject newly assigned to `owner`, as the sign-in
+    /// reads its assignment.
+    async fn assign(
+        &self,
+        owner: &sid_core::models::ProfileId,
+    ) -> sid_core::models::PrincipalAssignmentFence;
+
+    /// Release the assignment `fence` read, as retiring the association does.
+    async fn release(&self, fence: &sid_core::models::PrincipalAssignmentFence);
+}
+
 fn ctx() -> MutationContext {
     AuditEntry::system("conformance", "grant_store").into()
 }
@@ -229,6 +244,11 @@ fn fence(id: sid_core::models::CredentialId, data: &[u8]) -> sid_core::models::C
     }
 }
 
+/// A sign-in that proved `fence`.
+fn proof(fence: &sid_core::models::CredentialFence) -> Option<sid_core::models::SignInProof<'_>> {
+    Some(sid_core::models::SignInProof::Credential(fence))
+}
+
 /// A sign-in proved with a password that a reset replaced before the session
 /// committed creates no session, with or without a session limit: the session
 /// insert requires the exact credential the sign-in used to be current. The
@@ -260,7 +280,7 @@ pub async fn session_refused_after_its_password_changed<H: GrantHarness>(h: &H) 
         let late = session(owner.clone());
         let refused = h
             .store()
-            .create_session_atomic(&late, limit, Some(&fence(password.id, before)), ctx())
+            .create_session_atomic(&late, limit, proof(&fence(password.id, before)), ctx())
             .await;
         assert!(
             matches!(refused, Err(Error::Fenced(_))),
@@ -271,7 +291,7 @@ pub async fn session_refused_after_its_password_changed<H: GrantHarness>(h: &H) 
         // A sign-in with the replacement password commits its session.
         let current = session(owner.clone());
         h.store()
-            .create_session_atomic(&current, limit, Some(&fence(password.id, after)), ctx())
+            .create_session_atomic(&current, limit, proof(&fence(password.id, after)), ctx())
             .await
             .unwrap();
         assert!(exists(h, current.id).await, "limit {limit}");
@@ -282,7 +302,7 @@ pub async fn session_refused_after_its_password_changed<H: GrantHarness>(h: &H) 
     let kept = stored_password(h, other.clone(), b"kept-record").await;
     let signed_in = session(other.clone());
     h.store()
-        .create_session_atomic(&signed_in, 0, Some(&fence(kept.id, b"kept-record")), ctx())
+        .create_session_atomic(&signed_in, 0, proof(&fence(kept.id, b"kept-record")), ctx())
         .await
         .unwrap();
     // A passkey keeps the account usable, so the password can be revoked.
@@ -306,7 +326,7 @@ pub async fn session_refused_after_its_password_changed<H: GrantHarness>(h: &H) 
     let revoked = session(other);
     assert!(matches!(
         h.store()
-            .create_session_atomic(&revoked, 0, Some(&fence(kept.id, b"kept-record")), ctx())
+            .create_session_atomic(&revoked, 0, proof(&fence(kept.id, b"kept-record")), ctx())
             .await,
         Err(Error::Fenced(_))
     ));
@@ -322,7 +342,7 @@ pub async fn session_fence_is_the_owners_credential<H: GrantHarness>(h: &H) {
     let mine = session(owner);
     assert!(matches!(
         h.store()
-            .create_session_atomic(&mine, 0, Some(&fence(theirs.id, b"their-record")), ctx())
+            .create_session_atomic(&mine, 0, proof(&fence(theirs.id, b"their-record")), ctx())
             .await,
         Err(Error::Fenced(_))
     ));
@@ -345,7 +365,7 @@ pub async fn session_fence_serializes_with_a_reset<H: GrantHarness>(h: &H) {
     let sessions: Vec<_> = (0..6).map(|_| session(owner.clone())).collect();
     let creates = sessions
         .iter()
-        .map(|s| h.store().create_session_atomic(s, 0, Some(&stale), ctx()));
+        .map(|s| h.store().create_session_atomic(s, 0, proof(&stale), ctx()));
     let reset = h
         .credentials()
         .change_password(password.id, before, &replaced, None, ctx());
@@ -362,7 +382,7 @@ pub async fn session_fence_serializes_with_a_reset<H: GrantHarness>(h: &H) {
     let late = session(owner);
     assert!(matches!(
         h.store()
-            .create_session_atomic(&late, 0, Some(&stale), ctx())
+            .create_session_atomic(&late, 0, proof(&stale), ctx())
             .await,
         Err(Error::Fenced(_))
     ));
@@ -394,7 +414,7 @@ pub async fn session_fence_serializes_with_a_revocation<H: GrantHarness>(h: &H) 
         let sessions: Vec<_> = (0..4).map(|_| session(owner.clone())).collect();
         let creates = sessions
             .iter()
-            .map(|s| h.store().create_session_atomic(s, 3, Some(&proved), ctx()));
+            .map(|s| h.store().create_session_atomic(s, 3, proof(&proved), ctx()));
         let revoke = h.credentials().revoke_credential(password.id, ctx());
         let (created, revoked) = tokio::join!(futures::future::join_all(creates), revoke);
         assert_eq!(
@@ -408,6 +428,79 @@ pub async fn session_fence_serializes_with_a_revocation<H: GrantHarness>(h: &H) 
                 "round {round}: {outcome:?}"
             );
         }
+    }
+}
+
+/// Every store, whether or not it keeps its owners' principals, refuses a
+/// session proved by an assignment it does not hold and stores nothing: an
+/// assignment proof is checked or refused, never ignored.
+pub async fn an_assignment_proof_is_never_ignored<H: GrantHarness>(h: &H) {
+    let owner = h.owner().await;
+    let session = session(owner);
+    let unknown = sid_core::models::PrincipalAssignmentFence {
+        principal: sid_core::models::PrincipalId::new(),
+        profile: sid_core::models::ProfileId::generate(),
+        revision: 1,
+    };
+    let created = h
+        .store()
+        .create_session_atomic(
+            &session,
+            0,
+            Some(sid_core::models::SignInProof::Assignment(unknown)),
+            ctx(),
+        )
+        .await;
+    assert!(matches!(created, Err(Error::Fenced(_))), "{created:?}");
+    assert!(!exists(h, session.id).await);
+}
+
+/// A session proved by a principal assignment commits only while that
+/// principal is still assigned to the session's owner at the revision the
+/// sign-in read: released (the association retired) or another owner's, it
+/// admits nothing, with or without a session limit.
+pub async fn a_session_commits_only_under_its_current_assignment<H: AssignmentHarness>(h: &H) {
+    use sid_core::models::SignInProof;
+    let owner = h.owner().await;
+    let fence = h.assign(&owner).await;
+    for limit in [0, 5] {
+        let current = session(owner);
+        h.store()
+            .create_session_atomic(&current, limit, Some(SignInProof::Assignment(fence)), ctx())
+            .await
+            .expect("the current assignment admits its session");
+        assert!(exists(h, current.id).await, "limit {limit}");
+    }
+
+    // Another owner's session is not admitted by this owner's assignment.
+    let stranger = h.owner().await;
+    let theirs = session(stranger);
+    assert!(matches!(
+        h.store()
+            .create_session_atomic(&theirs, 0, Some(SignInProof::Assignment(fence)), ctx())
+            .await,
+        Err(Error::Fenced(_))
+    ));
+    assert!(!exists(h, theirs.id).await);
+
+    h.release(&fence).await;
+    for limit in [0, 5] {
+        let late = session(owner);
+        assert!(
+            matches!(
+                h.store()
+                    .create_session_atomic(
+                        &late,
+                        limit,
+                        Some(SignInProof::Assignment(fence)),
+                        ctx()
+                    )
+                    .await,
+                Err(Error::Fenced(_))
+            ),
+            "limit {limit}: a released assignment admits nothing"
+        );
+        assert!(!exists(h, late.id).await);
     }
 }
 

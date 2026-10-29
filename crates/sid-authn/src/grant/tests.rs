@@ -56,7 +56,7 @@ impl GrantStore for MemoryGrants {
         &self,
         session: &Session<Account>,
         _max_sessions: u32,
-        _proved_by: Option<&sid_core::models::CredentialFence>,
+        _proved_by: Option<sid_core::models::SignInProof<'_>>,
         _ctx: MutationContext,
     ) -> sid_core::Result<Vec<SessionId>> {
         self.with(|g| g.sessions.push(session.clone()));
@@ -69,7 +69,7 @@ impl GrantStore for MemoryGrants {
         _end: &sid_core::models::SessionEnd,
         session: &Session<Account>,
         _max_sessions: u32,
-        _proved_by: Option<&sid_core::models::CredentialFence>,
+        _proved_by: Option<sid_core::models::SignInProof<'_>>,
         _ctx: MutationContext,
     ) -> sid_core::Result<Vec<SessionId>> {
         self.with(|g| {

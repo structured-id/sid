@@ -97,6 +97,37 @@ pub struct CredentialFence {
     pub data: CredentialData,
 }
 
+/// The principal assignment a federated sign-in resolved its Profile by, as
+/// the sign-in read it. A session that sign-in creates commits only while the
+/// principal is still assigned to that Profile at that revision: a released
+/// or moved assignment admits nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrincipalAssignmentFence {
+    pub principal: super::PrincipalId,
+    pub profile: super::ProfileId,
+    pub revision: i64,
+}
+
+impl PrincipalAssignmentFence {
+    /// The current assignment of `principal`, if it routes to a Profile.
+    pub fn of(principal: &super::PrincipalEntity) -> Option<Self> {
+        principal.assigned_profile_id.map(|profile| Self {
+            principal: principal.id,
+            profile,
+            revision: principal.assignment_revision,
+        })
+    }
+}
+
+/// What a sign-in proved, which must still hold when its session commits.
+#[derive(Debug, Clone, Copy)]
+pub enum SignInProof<'a> {
+    /// A credential the account holds.
+    Credential(&'a CredentialFence),
+    /// An assignment of the principal a trusted issuer's evidence named.
+    Assignment(PrincipalAssignmentFence),
+}
+
 impl Default for CredentialId {
     fn default() -> Self {
         Self::new()
