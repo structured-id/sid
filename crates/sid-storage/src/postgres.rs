@@ -706,7 +706,9 @@ impl PostgresBackend {
 
     /// Make `profile` an installation administrator in `tx`: the built-in
     /// role is stored if it is not, then assigned across the installation.
-    async fn grant_installation_administrator_in_tx(
+    /// A host commits it in its own transaction with its state, as a
+    /// first-administrator claim does.
+    pub async fn grant_installation_administrator_in_tx(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         profile: ProfileId,
     ) -> SidResult<()> {

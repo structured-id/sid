@@ -232,6 +232,19 @@ pub(crate) async fn administrators(
     .map_err(|e| SidError::Storage(format!("read administrators: {e}")))
 }
 
+impl super::SqliteBackend {
+    /// Make `profile` an installation administrator in `tx`, a host's own
+    /// write transaction (begun with [`super::SqliteBackend::begin_write_on`])
+    /// that commits it with the host's state, as a first-administrator claim
+    /// does.
+    pub async fn grant_installation_administrator_in_tx(
+        tx: &mut super::WriteTx,
+        profile: ProfileId,
+    ) -> SidResult<()> {
+        grant_installation_administrator(tx, profile).await
+    }
+}
+
 /// Make `profile` an installation administrator in `tx`: the built-in role
 /// is stored if it is not, then assigned across the installation.
 pub(crate) async fn grant_installation_administrator(
