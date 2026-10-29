@@ -20,13 +20,13 @@ use sid_core::models::{
     GroupId, GroupMember, HistoryCommit, ImpersonationGrant, InitialAccessToken,
     InitialAccessTokenId, Invite, InviteFilter, InviteId, MachineUser, MachineUserCredential,
     MachineUserId, MagicLinkSession, MutationContext, NewRegistration, OAuth2Client,
-    OutboundDlqEntry, OutboundEntityType, PatId, PersonalAccessToken, PhoneSettings, Principal,
-    PrincipalBinding, PrincipalEntity, PrincipalId, PrincipalType, Profile, ProfileEmail,
-    ProfileEmailId, ProfileGrant, ProfileGrantId, ProfileId, ProfileMetadata, ProfilePhone,
-    ProfilePhoneId, Project, ProjectChange, ProjectId, RefreshToken, RegistrationSource,
-    RegistrationSourceType, Role, RoleAssignment, RoleAssignmentId, RoleId, ScimOutboundRecord,
-    ScimOutboundTarget, ScimOutboundTargetId, Session, SessionAuthentication, SessionEnd,
-    SessionId, SodConflictRule, UpstreamIdentity, UpstreamIdentityId, UpstreamLogin,
+    OutboundDlqEntry, OutboundEntityType, PatId, PersonalAccessToken, PhoneSettings, PolicyScope,
+    Principal, PrincipalBinding, PrincipalEntity, PrincipalId, PrincipalType, Profile,
+    ProfileEmail, ProfileEmailId, ProfileGrant, ProfileGrantId, ProfileId, ProfileMetadata,
+    ProfilePhone, ProfilePhoneId, Project, ProjectChange, ProjectId, RefreshToken,
+    RegistrationSource, RegistrationSourceType, Role, RoleAssignment, RoleAssignmentId, RoleId,
+    ScimOutboundRecord, ScimOutboundTarget, ScimOutboundTargetId, Session, SessionAuthentication,
+    SessionEnd, SessionId, SodConflictRule, UpstreamIdentity, UpstreamIdentityId, UpstreamLogin,
     UpstreamProvider, UpstreamProviderId,
 };
 use uuid::Uuid;
@@ -1080,8 +1080,8 @@ pub trait StorageBackend:
     /// Delete a Cedar policy by ID.
     async fn delete_cedar_policy(&self, id: CedarPolicyId, ctx: MutationContext) -> Result<()>;
 
-    /// List Cedar policies in a project.
-    async fn list_cedar_policies(&self, project_id: ProjectId) -> Result<Vec<CedarPolicy>>;
+    /// The Cedar policies `scope` owns, not those of the scopes it is part of.
+    async fn list_cedar_policies(&self, scope: PolicyScope) -> Result<Vec<CedarPolicy>>;
 
     // === PROFILE METADATA OPERATIONS ===
 

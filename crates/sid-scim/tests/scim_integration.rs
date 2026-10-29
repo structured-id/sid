@@ -87,7 +87,7 @@ async fn setup_directory() -> (
     ));
     let directory = ScimDirectory {
         org: OrgId::generate(),
-        resource: ResourceId::generate(),
+        resource: registered_directory(storage.as_ref()).await,
     };
     let service = ScimServiceImpl::new(
         storage.clone(),
@@ -101,6 +101,36 @@ async fn setup_directory() -> (
     CONNECTOR_SECRET.with(|s| *s.borrow_mut() = secret);
 
     (service, storage, revocation, directory)
+}
+
+/// The installation's registered SCIM directory resource, as the server
+/// registers it at start: a decision on a resource reads its registration.
+async fn registered_directory(storage: &dyn StorageBackend) -> ResourceId {
+    storage
+        .ensure_system_project(AuditEntry::system("project.ensure_system", "system").into())
+        .await
+        .unwrap();
+    let organization = sid_authn::instance_org::ensure(storage, "sid.example.com")
+        .await
+        .unwrap();
+    let keys = sid_keys::SoftwareKeyManager::new(
+        secrecy::SecretBox::new(Box::new([0x5Au8; 32])),
+        vec![sid_keys::KeyVersionParams::new(1, vec![0x01; 32], "key-v1")],
+        Arc::new(sid_crypto::RustCryptoPrimitives::new()),
+    )
+    .expect("test key manager");
+    let issuer = sid_authn::issuer::ensure_local_issuer(
+        storage,
+        &keys,
+        &url::Url::parse("https://sid.example.com").unwrap(),
+        organization.id,
+    )
+    .await
+    .unwrap();
+    sid_authn::issuer::ensure_scim_resource(storage, &issuer)
+        .await
+        .unwrap()
+        .id
 }
 
 thread_local! {

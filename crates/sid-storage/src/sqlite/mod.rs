@@ -1945,9 +1945,9 @@ impl StorageBackend for SqliteBackend {
 
     async fn list_cedar_policies(
         &self,
-        project_id: sid_core::models::ProjectId,
+        scope: sid_core::models::PolicyScope,
     ) -> SidResult<Vec<sid_core::models::CedarPolicy>> {
-        self.list_cedar_policies_impl(project_id).await
+        self.list_cedar_policies_impl(scope).await
     }
 
     // Profile metadata operations — see profile.rs

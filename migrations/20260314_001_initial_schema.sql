@@ -332,9 +332,12 @@ CREATE INDEX IF NOT EXISTS idx_role_assignments_machine_user_id ON role_assignme
 -- cedar_policies
 --------------------------------------------------------------------------------
 
+-- A policy's scope: the installation (neither column), one project or one
+-- protected resource (its foreign key is added with that table).
 CREATE TABLE IF NOT EXISTS cedar_policies (
     id          UUID PRIMARY KEY,
-    project_id  UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    project_id  UUID REFERENCES projects(id) ON DELETE CASCADE,
+    resource_id UUID,
     name        TEXT NOT NULL,
     description TEXT,
     policy_text TEXT NOT NULL,
@@ -342,10 +345,12 @@ CREATE TABLE IF NOT EXISTS cedar_policies (
     enabled     BOOLEAN NOT NULL DEFAULT TRUE,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE(project_id, name)
+    CHECK (project_id IS NULL OR resource_id IS NULL),
+    UNIQUE NULLS NOT DISTINCT (project_id, resource_id, name)
 );
 
 CREATE INDEX IF NOT EXISTS idx_cedar_policies_project_id ON cedar_policies(project_id);
+CREATE INDEX IF NOT EXISTS idx_cedar_policies_resource_id ON cedar_policies(resource_id);
 
 --------------------------------------------------------------------------------
 -- entity_attributes

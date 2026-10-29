@@ -16,14 +16,14 @@ use sid_core::{
         InitialAccessToken, InitialAccessTokenId, Invite, InviteFilter, InviteId, MachineUser,
         MachineUserCredential, MachineUserId, MagicLinkSession, MutationContext, NewRegistration,
         OAuth2Client, OutboundDlqEntry, OutboundEntityType, PatId, PersonalAccessToken,
-        PhoneSettings, Principal, PrincipalBinding, PrincipalEntity, PrincipalId, PrincipalType,
-        Profile, ProfileEmail, ProfileEmailId, ProfileGrant, ProfileGrantId, ProfileId,
-        ProfileMetadata, ProfilePhone, ProfilePhoneId, Project, ProjectChange, ProjectId,
-        RefreshToken, RegistrationSource, RegistrationSourceType, RevocationReason, Role,
-        RoleAssignment, RoleAssignmentId, RoleAssignmentPrincipal, RoleId, ScimOutboundRecord,
-        ScimOutboundTarget, ScimOutboundTargetId, Session, SessionAuthentication, SessionEnd,
-        SessionId, SodConflictRule, UpstreamIdentity, UpstreamIdentityId, UpstreamLogin,
-        UpstreamProvider, UpstreamProviderId,
+        PhoneSettings, PolicyScope, Principal, PrincipalBinding, PrincipalEntity, PrincipalId,
+        PrincipalType, Profile, ProfileEmail, ProfileEmailId, ProfileGrant, ProfileGrantId,
+        ProfileId, ProfileMetadata, ProfilePhone, ProfilePhoneId, Project, ProjectChange,
+        ProjectId, RefreshToken, RegistrationSource, RegistrationSourceType, RevocationReason,
+        Role, RoleAssignment, RoleAssignmentId, RoleAssignmentPrincipal, RoleId,
+        ScimOutboundRecord, ScimOutboundTarget, ScimOutboundTargetId, Session,
+        SessionAuthentication, SessionEnd, SessionId, SodConflictRule, UpstreamIdentity,
+        UpstreamIdentityId, UpstreamLogin, UpstreamProvider, UpstreamProviderId,
     },
 };
 use sid_plugin::audit::AuditLog;
@@ -4544,11 +4544,12 @@ impl StorageBackend for PostgresBackend {
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
         sqlx::query(
-            "INSERT INTO cedar_policies (id, project_id, name, description, policy_text, effect, enabled, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+            "INSERT INTO cedar_policies (id, project_id, resource_id, name, description, policy_text, effect, enabled, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
         )
         .bind(policy.id.0)
-        .bind(policy.project_id.0)
+        .bind(policy.scope.project().map(|p| p.0))
+        .bind(policy.scope.resource())
         .bind(&policy.name)
         .bind(&policy.description)
         .bind(&policy.policy_text)
@@ -4588,11 +4589,13 @@ impl StorageBackend for PostgresBackend {
         Ok(())
     }
 
-    async fn list_cedar_policies(&self, project_id: ProjectId) -> SidResult<Vec<CedarPolicy>> {
+    async fn list_cedar_policies(&self, scope: PolicyScope) -> SidResult<Vec<CedarPolicy>> {
         let rows = sqlx::query_as::<_, crate::pg_row::CedarPolicyRow>(
-            "SELECT * FROM cedar_policies WHERE project_id = $1",
+            "SELECT * FROM cedar_policies
+             WHERE project_id IS NOT DISTINCT FROM $1 AND resource_id IS NOT DISTINCT FROM $2",
         )
-        .bind(project_id.0)
+        .bind(scope.project().map(|p| p.0))
+        .bind(scope.resource())
         .fetch_all(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("Query failed: {}", e)))?;

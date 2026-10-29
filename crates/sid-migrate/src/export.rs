@@ -208,8 +208,10 @@ pub async fn export_snapshot(
         }
         snapshot.groups.extend(groups);
 
-        // Cedar policies
-        let policies = backend.list_cedar_policies(proj_id).await?;
+        // Cedar policies of the project
+        let policies = backend
+            .list_cedar_policies(sid_core::models::PolicyScope::Project(proj_id))
+            .await?;
         snapshot.cedar_policies.extend(policies);
 
         // Profile grants for project
@@ -290,6 +292,18 @@ pub async fn export_snapshot(
         }
         resource_offset += batch.len() as u64;
         snapshot.protected_resources.extend(batch);
+    }
+
+    // Cedar policies of the installation and of each protected resource.
+    let installation = backend
+        .list_cedar_policies(sid_core::models::PolicyScope::Installation)
+        .await?;
+    snapshot.cedar_policies.extend(installation);
+    for resource in &snapshot.protected_resources {
+        let policies = backend
+            .list_cedar_policies(sid_core::models::PolicyScope::Resource(resource.id))
+            .await?;
+        snapshot.cedar_policies.extend(policies);
     }
 
     // Durable work: owed deliveries and the failed ones kept as dead letters.

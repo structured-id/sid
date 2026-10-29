@@ -76,7 +76,7 @@ fn test_assignment_to_proto_with_scope_and_expiry() {
 fn test_policy_to_proto_permit() {
     let project_id = ProjectId::new();
     let policy = CedarPolicy::new(
-        project_id,
+        sid_core::models::PolicyScope::Project(project_id),
         "allow-read",
         "permit(principal, action, resource);",
         sid_core::models::PolicyEffect::Permit,
@@ -95,7 +95,7 @@ fn test_policy_to_proto_permit() {
 fn test_policy_to_proto_forbid() {
     let project_id = ProjectId::new();
     let policy = CedarPolicy::new(
-        project_id,
+        sid_core::models::PolicyScope::Project(project_id),
         "deny-delete",
         "forbid(principal, action == Action::\"delete\", resource);",
         sid_core::models::PolicyEffect::Forbid,

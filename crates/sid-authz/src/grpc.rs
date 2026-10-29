@@ -23,8 +23,9 @@ use sid_core::grpc_error::{ApiError, ErrorReason};
 use sid_core::models::audit::{ActorType, AuditOutcome};
 use sid_core::models::{
     AUTHZ_CHECK, AuditEntry, CedarPolicy, CedarPolicyId, ConnectorState, Group, GroupId,
-    GroupMember, ProfileId, ProjectId, ProvisioningConnectorId, ResourceId, ResourceState, Role,
-    RoleAssignment, RoleAssignmentId, RoleAssignmentPrincipal, RoleId, TOKEN_INTROSPECT,
+    GroupMember, PolicyScope, ProfileId, ProjectId, ProvisioningConnectorId, ResourceId,
+    ResourceState, Role, RoleAssignment, RoleAssignmentId, RoleAssignmentPrincipal, RoleId,
+    TOKEN_INTROSPECT,
 };
 use sid_plugin::StorageBackend;
 use sid_plugin::audit::AuditLog;
@@ -397,7 +398,7 @@ fn policy_to_proto(p: &CedarPolicy) -> Policy {
 
     Policy {
         id: p.id.0.to_string(),
-        project_id: p.project_id.0.to_string(),
+        scope: Some(policy_scope_to_proto(p.scope)),
         name: p.name.clone(),
         description: p.description.clone(),
         policy_text: p.policy_text.clone(),
@@ -405,6 +406,34 @@ fn policy_to_proto(p: &CedarPolicy) -> Policy {
         enabled: p.enabled,
         created_at: Some(to_timestamp(p.created_at)),
         updated_at: Some(to_timestamp(p.updated_at)),
+        revision: p.revision,
+    }
+}
+
+fn policy_scope_to_proto(scope: PolicyScope) -> sid_proto::sid::v1::PolicyScope {
+    use sid_proto::sid::v1::policy_scope::Scope;
+    sid_proto::sid::v1::PolicyScope {
+        scope: Some(match scope {
+            PolicyScope::Installation => Scope::Installation(()),
+            PolicyScope::Project(id) => Scope::ProjectId(id.0.to_string()),
+            PolicyScope::Resource(id) => Scope::Resource(id.into()),
+        }),
+    }
+}
+
+/// The scope `field` names; a missing or malformed one is refused.
+fn policy_scope_from_proto(
+    scope: Option<&sid_proto::sid::v1::PolicyScope>,
+    field: &'static str,
+) -> Result<PolicyScope, Status> {
+    use sid_proto::sid::v1::policy_scope::Scope;
+    match scope.and_then(|s| s.scope.as_ref()) {
+        None => Err(missing_field(field)),
+        Some(Scope::Installation(())) => Ok(PolicyScope::Installation),
+        Some(Scope::ProjectId(id)) => parse_project_id(id).map(PolicyScope::Project),
+        Some(Scope::Resource(id)) => ResourceId::try_from(id)
+            .map(PolicyScope::Resource)
+            .map_err(|_| invalid_field(field, "not a protected resource identifier")),
     }
 }
 
@@ -1330,6 +1359,32 @@ impl AuthzServiceImpl {
         }
     }
 
+    /// Refuse a scope whose project or protected resource does not exist:
+    /// a policy written for it would apply nowhere.
+    async fn check_scope_target(&self, scope: PolicyScope) -> Result<(), Status> {
+        match scope {
+            PolicyScope::Installation => Ok(()),
+            PolicyScope::Project(id) => self
+                .storage
+                .get_project(id)
+                .await
+                .map_err(storage_failure)?
+                .map(|_| ())
+                .ok_or_else(|| {
+                    not_found(ErrorReason::ProjectNotFound, "Project", id.0.to_string())
+                }),
+            PolicyScope::Resource(id) => self
+                .storage
+                .get_protected_resource(id)
+                .await
+                .map_err(storage_failure)?
+                .map(|_| ())
+                .ok_or_else(|| {
+                    not_found(ErrorReason::ResourceNotFound, "Resource", id.to_string())
+                }),
+        }
+    }
+
     #[allow(clippy::result_large_err)]
     fn check_maintenance(&self) -> Result<(), Status> {
         if self.maintenance_mode.load(Ordering::Relaxed) {
@@ -2073,7 +2128,7 @@ impl AuthzService for AuthzServiceImpl {
         let caller = self.admin(&request).await?;
         self.check_maintenance()?;
         let req = request.into_inner();
-        let project_id = parse_project_id(&req.project_id)?;
+        let scope = policy_scope_from_proto(req.scope.as_ref(), "scope")?;
 
         if req.name.is_empty() {
             return Err(missing_field("name"));
@@ -2082,9 +2137,10 @@ impl AuthzService for AuthzServiceImpl {
             return Err(missing_field("policy_text"));
         }
         self.check_policy_text(&req.policy_text)?;
+        self.check_scope_target(scope).await?;
 
         let effect = proto_to_policy_effect(req.effect);
-        let mut policy = CedarPolicy::new(project_id, &req.name, &req.policy_text, effect);
+        let mut policy = CedarPolicy::new(scope, &req.name, &req.policy_text, effect);
         policy.description = req.description;
         policy.enabled = req.enabled;
 
@@ -2102,17 +2158,14 @@ impl AuthzService for AuthzServiceImpl {
             .map_err(|e| match e {
                 sid_core::Error::Conflict(_) => ApiError::new(
                     ErrorReason::PolicyAlreadyExists,
-                    "the project already has a policy of this name",
+                    "the scope already has a policy of this name",
                 )
                 .with_resource("Policy", policy.name.clone())
                 .into(),
                 other => storage_failure(other),
             })?;
 
-        info!(
-            "Created policy '{}' in project {}",
-            policy.name, project_id.0
-        );
+        info!("Created policy '{}' in scope {:?}", policy.name, scope);
 
         Ok(Response::new(CreatePolicyResponse {
             policy: Some(policy_to_proto(&policy)),
@@ -2237,11 +2290,11 @@ impl AuthzService for AuthzServiceImpl {
     ) -> Result<Response<ListPoliciesResponse>, Status> {
         self.admin(&request).await?;
         let req = request.into_inner();
-        let project_id = parse_project_id(&req.project_id)?;
+        let scope = policy_scope_from_proto(req.scope.as_ref(), "scope")?;
 
         let policies = self
             .storage
-            .list_cedar_policies(project_id)
+            .list_cedar_policies(scope)
             .await
             .map_err(storage_failure)?;
 
@@ -2261,14 +2314,11 @@ impl AuthzService for AuthzServiceImpl {
         self.admin(&request).await?;
         let req = request.into_inner();
 
-        // Load policies: project-scoped if project_id provided, otherwise all.
-        let project_id = req
-            .project_id
-            .as_deref()
-            .ok_or_else(|| missing_field("project_id"))?;
+        // The policies the named scope owns.
+        let scope = policy_scope_from_proto(req.scope.as_ref(), "scope")?;
         let policies = self
             .storage
-            .list_cedar_policies(parse_project_id(project_id)?)
+            .list_cedar_policies(scope)
             .await
             .map_err(storage_failure)?;
 

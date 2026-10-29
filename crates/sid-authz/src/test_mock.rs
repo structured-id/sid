@@ -14,6 +14,8 @@ pub struct MockStorage {
     pub group_members: Mutex<Vec<GroupMember>>,
     pub role_assignments: Mutex<Vec<RoleAssignment>>,
     pub cedar_policies: Mutex<Vec<CedarPolicy>>,
+    pub applications: Mutex<Vec<Application>>,
+    pub resources: Mutex<Vec<ProtectedResource>>,
     /// While set, the reads a permission check makes fail as an
     /// unreachable store would.
     pub unavailable: std::sync::atomic::AtomicBool,
@@ -27,8 +29,52 @@ impl MockStorage {
             group_members: Mutex::new(Vec::new()),
             role_assignments: Mutex::new(Vec::new()),
             cedar_policies: Mutex::new(Vec::new()),
+            applications: Mutex::new(Vec::new()),
+            resources: Mutex::new(Vec::new()),
             unavailable: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Register a protected resource of an application of `project`, or of
+    /// no application when `project` is none.
+    pub fn register_resource(&self, project: Option<ProjectId>) -> ResourceId {
+        let now = chrono::Utc::now();
+        let application = project.map(|project_id| {
+            let app = Application {
+                id: ApplicationId::generate(),
+                project_id,
+                name: "app".into(),
+                system: None,
+                revision: 0,
+                created_at: now,
+                updated_at: now,
+            };
+            let id = app.id;
+            self.applications.lock().unwrap().push(app);
+            id
+        });
+        let resource = ProtectedResource {
+            id: ResourceId::generate(),
+            application_id: application,
+            issuer_id: IssuerId::generate(),
+            indicator: ResourceIndicator::parse(&format!(
+                "https://resources.sid.example.com/{}",
+                uuid::Uuid::now_v7().simple()
+            ))
+            .expect("an indicator"),
+            scopes: vec![],
+            state: if application.is_some() {
+                ResourceState::Active
+            } else {
+                ResourceState::Retired
+            },
+            revision: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        let id = resource.id;
+        self.resources.lock().unwrap().push(resource);
+        id
     }
 
     fn reachable(&self) -> Result<()> {
@@ -84,9 +130,16 @@ impl sid_plugin::ClientResourceRegistry for MockStorage {
     }
     async fn get_protected_resource(
         &self,
-        _: sid_core::models::ResourceId,
+        id: sid_core::models::ResourceId,
     ) -> Result<Option<sid_core::models::ProtectedResource>> {
-        unimplemented!()
+        self.reachable()?;
+        Ok(self
+            .resources
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|r| r.id == id)
+            .cloned())
     }
     async fn protected_resource_by_indicator(
         &self,
@@ -890,9 +943,16 @@ impl sid_plugin::StorageBackend for MockStorage {
     }
     async fn get_application(
         &self,
-        _: sid_core::models::ApplicationId,
+        id: sid_core::models::ApplicationId,
     ) -> Result<Option<sid_core::models::Application>> {
-        unimplemented!()
+        self.reachable()?;
+        Ok(self
+            .applications
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|a| a.id == id)
+            .cloned())
     }
     async fn system_application(
         &self,
@@ -1324,9 +1384,10 @@ impl sid_plugin::StorageBackend for MockStorage {
         _audit: MutationContext,
     ) -> Result<()> {
         let mut policies = self.cedar_policies.lock().unwrap();
-        if policies.iter().any(|p| {
-            p.id == policy.id || (p.project_id == policy.project_id && p.name == policy.name)
-        }) {
+        if policies
+            .iter()
+            .any(|p| p.id == policy.id || (p.scope == policy.scope && p.name == policy.name))
+        {
             return Err(sid_core::Error::Conflict("policy already exists".into()));
         }
         policies.push(policy.clone());
@@ -1354,14 +1415,17 @@ impl sid_plugin::StorageBackend for MockStorage {
         self.cedar_policies.lock().unwrap().retain(|p| p.id != id);
         Ok(())
     }
-    async fn list_cedar_policies(&self, project_id: ProjectId) -> Result<Vec<CedarPolicy>> {
+    async fn list_cedar_policies(
+        &self,
+        scope: sid_core::models::PolicyScope,
+    ) -> Result<Vec<CedarPolicy>> {
         self.reachable()?;
         Ok(self
             .cedar_policies
             .lock()
             .unwrap()
             .iter()
-            .filter(|p| p.project_id == project_id)
+            .filter(|p| p.scope == scope)
             .cloned()
             .collect())
     }

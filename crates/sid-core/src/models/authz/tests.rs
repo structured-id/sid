@@ -237,16 +237,35 @@ fn test_scope_type_serde_roundtrip() {
 fn test_cedar_policy_new() {
     let project_id = ProjectId::new();
     let policy = CedarPolicy::new(
-        project_id,
+        PolicyScope::Project(project_id),
         "allow-read",
         "permit(principal, action == Action::\"read\", resource);",
         PolicyEffect::Permit,
     );
     assert_eq!(policy.name, "allow-read");
-    assert_eq!(policy.project_id, project_id);
+    assert_eq!(policy.scope, PolicyScope::Project(project_id));
     assert_eq!(policy.effect, PolicyEffect::Permit);
     assert!(policy.enabled);
     assert!(policy.description.is_none());
+}
+
+/// A scope is stored as its project and resource columns and read back as
+/// itself; columns naming both are no scope, never one of the two.
+#[test]
+fn a_policy_scope_round_trips_through_its_columns() {
+    let project = ProjectId::new();
+    let resource = ResourceId::generate();
+    for scope in [
+        PolicyScope::Installation,
+        PolicyScope::Project(project),
+        PolicyScope::Resource(resource),
+    ] {
+        assert_eq!(
+            PolicyScope::from_columns(scope.project(), scope.resource()),
+            Ok(scope)
+        );
+    }
+    assert!(PolicyScope::from_columns(Some(project), Some(resource)).is_err());
 }
 
 #[test]

@@ -22,6 +22,7 @@ pub struct MockStorageInner {
     role_assignments: Vec<RoleAssignment>,
     resources: HashMap<ResourceId, ProtectedResource>,
     resource_access: Vec<ResourceAccess>,
+    cedar_policies: Vec<CedarPolicy>,
     pub refresh_tokens_by_hash: HashMap<Vec<u8>, RefreshToken>,
     auth_codes_by_hash: HashMap<Vec<u8>, AuthorizationCode>,
     projects: HashMap<Uuid, Project>,
@@ -3951,33 +3952,69 @@ impl StorageBackend for MockStorage {
         Ok(vec![])
     }
 
-    // === CEDAR POLICY OPERATIONS — stubs ===
-    async fn get_cedar_policy(&self, _id: CedarPolicyId) -> SidResult<Option<CedarPolicy>> {
-        Ok(None)
+    // === CEDAR POLICY OPERATIONS ===
+    async fn get_cedar_policy(&self, id: CedarPolicyId) -> SidResult<Option<CedarPolicy>> {
+        let inner = self.inner.lock().unwrap();
+        Ok(inner.cedar_policies.iter().find(|p| p.id == id).cloned())
     }
     async fn create_cedar_policy(
         &self,
-        _p: &CedarPolicy,
+        policy: &CedarPolicy,
         _audit: MutationContext,
     ) -> SidResult<()> {
+        let mut inner = self.inner.lock().unwrap();
+        if inner
+            .cedar_policies
+            .iter()
+            .any(|p| p.id == policy.id || (p.scope == policy.scope && p.name == policy.name))
+        {
+            return Err(sid_core::Error::Conflict("policy already exists".into()));
+        }
+        inner.cedar_policies.push(policy.clone());
         Ok(())
     }
     async fn update_cedar_policy(
         &self,
-        _p: &CedarPolicy,
+        policy: &CedarPolicy,
         _audit: MutationContext,
     ) -> SidResult<bool> {
-        Ok(false)
+        let mut inner = self.inner.lock().unwrap();
+        let Some(stored) = inner
+            .cedar_policies
+            .iter_mut()
+            .find(|p| p.id == policy.id && p.revision == policy.revision)
+        else {
+            return Ok(false);
+        };
+        *stored = CedarPolicy {
+            revision: policy.revision + 1,
+            ..policy.clone()
+        };
+        Ok(true)
     }
     async fn delete_cedar_policy(
         &self,
-        _id: CedarPolicyId,
+        id: CedarPolicyId,
         _audit: MutationContext,
     ) -> SidResult<()> {
+        self.inner
+            .lock()
+            .unwrap()
+            .cedar_policies
+            .retain(|p| p.id != id);
         Ok(())
     }
-    async fn list_cedar_policies(&self, _p: ProjectId) -> SidResult<Vec<CedarPolicy>> {
-        Ok(vec![])
+    async fn list_cedar_policies(
+        &self,
+        scope: sid_core::models::PolicyScope,
+    ) -> SidResult<Vec<CedarPolicy>> {
+        let inner = self.inner.lock().unwrap();
+        Ok(inner
+            .cedar_policies
+            .iter()
+            .filter(|p| p.scope == scope)
+            .cloned()
+            .collect())
     }
 
     // === PROFILE METADATA ===

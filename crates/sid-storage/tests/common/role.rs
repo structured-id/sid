@@ -414,28 +414,70 @@ pub async fn test_expiring_role_assignments(backend: &dyn StorageBackend) {
     );
 }
 
-/// Cedar policies list per project only.
-pub async fn test_cedar_policies_by_project(backend: &dyn StorageBackend) {
-    use sid_core::models::{CedarPolicy, PolicyEffect};
+/// Cedar policies list by the exact scope that owns them: a project's, a
+/// protected resource's and the installation's are each listed apart, read
+/// back with their scope, and a name is unique only within its scope.
+pub async fn test_cedar_policies_by_scope(backend: &dyn StorageBackend) {
+    use sid_core::models::{CedarPolicy, PolicyEffect, PolicyScope};
 
-    let project = own_project(backend).await;
-    let other = own_project(backend).await;
+    let project = PolicyScope::Project(own_project(backend).await);
+    let other = PolicyScope::Project(own_project(backend).await);
+    let resource = PolicyScope::Resource(super::application::grant_resource(backend).await);
+    let installation = PolicyScope::Installation;
     let text = "permit(principal, action, resource);";
-    let a = CedarPolicy::new(project, "a", text, PolicyEffect::Permit);
+    let name = format!("a-{}", Uuid::now_v7().simple());
+    let a = CedarPolicy::new(project, &name, text, PolicyEffect::Permit);
     let b = CedarPolicy::new(project, "b", text, PolicyEffect::Forbid);
-    let foreign = CedarPolicy::new(other, "a", text, PolicyEffect::Permit);
-    for p in [&a, &b, &foreign] {
+    let foreign = CedarPolicy::new(other, &name, text, PolicyEffect::Permit);
+    let on_resource = CedarPolicy::new(resource, &name, text, PolicyEffect::Forbid);
+    let everywhere = CedarPolicy::new(installation, &name, text, PolicyEffect::Forbid);
+    for p in [&a, &b, &foreign, &on_resource, &everywhere] {
         backend.create_cedar_policy(p, test_audit()).await.unwrap();
     }
 
-    let listed = backend.list_cedar_policies(project).await.unwrap();
-    let mut ids: Vec<_> = listed.iter().map(|p| p.id).collect();
-    ids.sort_by_key(|id| id.0);
+    let ids = |listed: &[CedarPolicy]| {
+        let mut ids: Vec<_> = listed.iter().map(|p| p.id).collect();
+        ids.sort_by_key(|id| id.0);
+        ids
+    };
     let mut expected = vec![a.id, b.id];
     expected.sort_by_key(|id| id.0);
-    assert_eq!(ids, expected);
+    let listed = backend.list_cedar_policies(project).await.unwrap();
+    assert_eq!(ids(&listed), expected);
     let forbid = listed.iter().find(|p| p.id == b.id).unwrap();
     assert_eq!(forbid.effect, PolicyEffect::Forbid);
+    assert_eq!(forbid.scope, project);
+
+    let listed = backend.list_cedar_policies(resource).await.unwrap();
+    assert_eq!(ids(&listed), vec![on_resource.id]);
+    assert_eq!(listed[0].scope, resource);
+    let listed = backend.list_cedar_policies(installation).await.unwrap();
+    assert!(
+        listed
+            .iter()
+            .any(|p| p.id == everywhere.id && p.scope == installation)
+    );
+    assert!(listed.iter().all(|p| p.scope == installation));
+    assert_eq!(
+        backend
+            .get_cedar_policy(on_resource.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .scope,
+        resource
+    );
+
+    for scope in [project, resource, installation] {
+        let again = CedarPolicy::new(scope, &name, text, PolicyEffect::Permit);
+        assert!(
+            backend
+                .create_cedar_policy(&again, test_audit())
+                .await
+                .is_err(),
+            "a second policy of one name in {scope:?}"
+        );
+    }
 }
 
 /// A stored profile, for assignments.

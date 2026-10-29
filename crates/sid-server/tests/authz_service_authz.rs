@@ -63,9 +63,18 @@ fn authed<T>(msg: T, token: &str) -> Request<T> {
     req
 }
 
+/// The wire scope of `project_id`'s policies.
+fn project_scope(project_id: ProjectId) -> sid_proto::sid::v1::PolicyScope {
+    sid_proto::sid::v1::PolicyScope {
+        scope: Some(sid_proto::sid::v1::policy_scope::Scope::ProjectId(
+            project_id.0.to_string(),
+        )),
+    }
+}
+
 fn allow_all(project_id: ProjectId, name: &str) -> CreatePolicyRequest {
     CreatePolicyRequest {
-        project_id: project_id.0.to_string(),
+        scope: Some(project_scope(project_id)),
         name: name.to_string(),
         policy_text: "permit(principal, action, resource);".to_string(),
         effect: PolicyEffect::Permit as i32,
@@ -108,7 +117,7 @@ async fn test_authz_rpcs_require_a_token() {
 
     assert!(
         h.storage
-            .list_cedar_policies(project)
+            .list_cedar_policies(sid_core::models::PolicyScope::Project(project))
             .await
             .unwrap()
             .is_empty(),
@@ -167,7 +176,7 @@ async fn test_authz_management_refuses_a_non_admin() {
             h.svc
                 .list_policies(authed(
                     ListPoliciesRequest {
-                        project_id: project.0.to_string(),
+                        scope: Some(project_scope(project)),
                         ..Default::default()
                     },
                     &token,
@@ -187,7 +196,7 @@ async fn test_authz_management_refuses_a_non_admin() {
     }
     assert!(
         h.storage
-            .list_cedar_policies(project)
+            .list_cedar_policies(sid_core::models::PolicyScope::Project(project))
             .await
             .unwrap()
             .is_empty(),
