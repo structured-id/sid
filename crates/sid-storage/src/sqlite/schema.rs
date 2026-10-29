@@ -761,9 +761,12 @@ CREATE TABLE IF NOT EXISTS sod_conflict_rules (
 -- cedar_policies
 --------------------------------------------------------------------------------
 
+-- A policy's scope: the installation (neither column), one project or one
+-- protected resource.
 CREATE TABLE IF NOT EXISTS cedar_policies (
     id          TEXT PRIMARY KEY,
-    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    project_id  TEXT REFERENCES projects(id) ON DELETE CASCADE,
+    resource_id TEXT REFERENCES protected_resources(id),
     name        TEXT NOT NULL,
     description TEXT,
     policy_text TEXT NOT NULL,
@@ -772,10 +775,14 @@ CREATE TABLE IF NOT EXISTS cedar_policies (
     revision    INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    UNIQUE(project_id, name)
+    CHECK (project_id IS NULL OR resource_id IS NULL)
 );
 
+-- One name per scope; SQLite keeps NULLs distinct in a UNIQUE constraint.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cedar_policies_scope_name
+    ON cedar_policies(COALESCE(project_id, ''), COALESCE(resource_id, ''), name);
 CREATE INDEX IF NOT EXISTS idx_cedar_policies_project_id ON cedar_policies(project_id);
+CREATE INDEX IF NOT EXISTS idx_cedar_policies_resource_id ON cedar_policies(resource_id);
 
 --------------------------------------------------------------------------------
 -- entity_attributes

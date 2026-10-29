@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::event::{Event, event_types};
-use super::{MachineUserId, ProfileId, ProjectId, ProvisioningConnectorId};
+use super::{MachineUserId, ProfileId, ProjectId, ProvisioningConnectorId, ResourceId};
 
 pub mod admin;
 pub use admin::{
@@ -587,6 +587,53 @@ impl std::fmt::Display for PolicyEffect {
     }
 }
 
+/// What a policy applies to within its installation. A decision on a
+/// protected resource applies the installation's, its parent project's and
+/// its own policies; a decision on a project, the installation's and the
+/// project's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "id", rename_all = "snake_case")]
+pub enum PolicyScope {
+    /// Every decision of the installation.
+    Installation,
+    /// Decisions on one project and on its applications' protected resources.
+    Project(ProjectId),
+    /// Decisions on one registered protected resource.
+    Resource(ResourceId),
+}
+
+impl PolicyScope {
+    /// The project this scope names, if it names one.
+    pub fn project(&self) -> Option<ProjectId> {
+        match self {
+            Self::Project(id) => Some(*id),
+            Self::Installation | Self::Resource(_) => None,
+        }
+    }
+
+    /// The protected resource this scope names, if it names one.
+    pub fn resource(&self) -> Option<ResourceId> {
+        match self {
+            Self::Resource(id) => Some(*id),
+            Self::Installation | Self::Project(_) => None,
+        }
+    }
+
+    /// The scope stored as its project and resource columns: neither for the
+    /// installation, exactly one otherwise.
+    pub fn from_columns(
+        project: Option<ProjectId>,
+        resource: Option<ResourceId>,
+    ) -> Result<Self, String> {
+        match (project, resource) {
+            (None, None) => Ok(Self::Installation),
+            (Some(project), None) => Ok(Self::Project(project)),
+            (None, Some(resource)) => Ok(Self::Resource(resource)),
+            (Some(_), Some(_)) => Err("a policy scope names a project and a resource".into()),
+        }
+    }
+}
+
 /// Cedar policy stored in the database.
 ///
 /// Policies are validated on write (Cedar compile check).
@@ -594,7 +641,8 @@ impl std::fmt::Display for PolicyEffect {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CedarPolicy {
     pub id: CedarPolicyId,
-    pub project_id: ProjectId,
+    /// What the policy applies to; fixed at creation.
+    pub scope: PolicyScope,
     pub name: String,
     pub description: Option<String>,
     pub policy_text: String,
@@ -609,7 +657,7 @@ pub struct CedarPolicy {
 
 impl CedarPolicy {
     pub fn new(
-        project_id: ProjectId,
+        scope: PolicyScope,
         name: impl Into<String>,
         policy_text: impl Into<String>,
         effect: PolicyEffect,
@@ -617,7 +665,7 @@ impl CedarPolicy {
         let now = Utc::now();
         Self {
             id: CedarPolicyId::new(),
-            project_id,
+            scope,
             name: name.into(),
             description: None,
             policy_text: policy_text.into(),

@@ -80,9 +80,18 @@ impl Harness {
         profile.id
     }
 
+    /// The wire scope of the harness project's policies.
+    fn scope(&self) -> sid_proto::sid::v1::PolicyScope {
+        sid_proto::sid::v1::PolicyScope {
+            scope: Some(sid_proto::sid::v1::policy_scope::Scope::ProjectId(
+                self.project.0.to_string(),
+            )),
+        }
+    }
+
     fn policy(&self, name: &str, text: &str) -> CreatePolicyRequest {
         CreatePolicyRequest {
-            project_id: self.project.0.to_string(),
+            scope: Some(self.scope()),
             name: name.to_string(),
             policy_text: text.to_string(),
             effect: PolicyEffect::Permit as i32,
@@ -130,7 +139,11 @@ async fn test_create_policy_refuses_text_cedar_cannot_parse() {
     assert_eq!(err.code(), Code::InvalidArgument);
     assert_eq!(error_reason(&err).as_deref(), Some("INVALID_FIELD_VALUE"));
     assert_eq!(violated_field(&err).as_deref(), Some("policy_text"));
-    let stored = h.storage.list_cedar_policies(h.project).await.unwrap();
+    let stored = h
+        .storage
+        .list_cedar_policies(sid_core::models::PolicyScope::Project(h.project))
+        .await
+        .unwrap();
     assert!(stored.is_empty(), "nothing stored");
 }
 
@@ -324,7 +337,7 @@ async fn test_evaluate_policy_names_an_unreadable_subject() {
     let err = h
         .svc
         .evaluate_policy(h.authed(EvaluatePolicyRequest {
-            project_id: Some(h.project.0.to_string()),
+            scope: Some(h.scope()),
             subject: "alice\"".to_string(),
             action: "read".to_string(),
             resource: "doc".to_string(),

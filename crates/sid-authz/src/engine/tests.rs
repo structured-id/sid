@@ -293,7 +293,7 @@ async fn test_check_cedar_permits_when_rbac_denies() {
 
     // No RBAC roles assigned. Cedar policy permits.
     let policy = sid_core::models::CedarPolicy::new(
-        project_id,
+        sid_core::models::PolicyScope::Project(project_id),
         "allow_read",
         r#"permit(principal, action == Action::"profiles:read", resource);"#,
         sid_core::models::PolicyEffect::Permit,
@@ -328,7 +328,7 @@ async fn test_check_disabled_cedar_policy_ignored() {
     let profile_id = ProfileId::generate();
 
     let mut policy = sid_core::models::CedarPolicy::new(
-        project_id,
+        sid_core::models::PolicyScope::Project(project_id),
         "allow_read",
         r#"permit(principal, action, resource);"#,
         sid_core::models::PolicyEffect::Permit,
@@ -389,7 +389,7 @@ async fn test_explicit_forbid_overrides_a_role_grant() {
     );
 
     let forbid = sid_core::models::CedarPolicy::new(
-        project_id,
+        sid_core::models::PolicyScope::Project(project_id),
         "no_writes",
         r#"forbid(principal, action == Action::"profiles:write", resource);"#,
         sid_core::models::PolicyEffect::Forbid,
@@ -436,7 +436,7 @@ async fn test_an_unevaluable_policy_set_denies_a_role_grant() {
     storage
         .create_cedar_policy(
             &sid_core::models::CedarPolicy::new(
-                project_id,
+                sid_core::models::PolicyScope::Project(project_id),
                 "broken",
                 "forbid(principal, action, resource) when { nonsense",
                 sid_core::models::PolicyEffect::Forbid,
@@ -601,7 +601,7 @@ async fn test_service_actions_are_held_by_services_only() {
         .create_role(&role, AuditEntry::system("test", "test").into())
         .await
         .unwrap();
-    let resource = ResourceId::generate();
+    let resource = storage.register_resource(Some(project_id));
     let profile = ProfileId::generate();
     let machine = MachineUserId::generate();
     for principal in [
@@ -658,7 +658,7 @@ async fn test_invite_actions_are_held_by_machine_users_only() {
         .create_role(&role, AuditEntry::system("test", "test").into())
         .await
         .unwrap();
-    let resource = ResourceId::generate();
+    let resource = storage.register_resource(Some(project_id));
     let profile = ProfileId::generate();
     let machine = MachineUserId::generate();
     for principal in [
@@ -734,7 +734,10 @@ async fn assign(storage: &MockStorage, assignment: &RoleAssignment) {
 async fn test_inspection_is_scoped_to_the_resource() {
     let (engine, storage, _) = setup().await;
     let role = stored_inspector_role(&storage).await;
-    let (orders, wiki) = (ResourceId::generate(), ResourceId::generate());
+    let (orders, wiki) = (
+        storage.register_resource(Some(ProjectId::system())),
+        storage.register_resource(Some(ProjectId::system())),
+    );
     let machine = MachineUserId::generate();
     assign(
         &storage,
@@ -799,12 +802,13 @@ async fn test_inspection_is_scoped_to_the_resource() {
 }
 
 /// An expired assignment, an assignment scoped to a project, and a Cedar
-/// policy of the project grant no inspection of a resource.
+/// policy of the resource's own project, which applies to it, grant no
+/// inspection of a resource.
 #[tokio::test]
 async fn test_inspection_needs_a_live_resource_assignment() {
     let (engine, storage, _) = setup().await;
     let role = stored_inspector_role(&storage).await;
-    let resource = ResourceId::generate();
+    let resource = storage.register_resource(Some(ProjectId::system()));
     assign(
         &storage,
         &RoleAssignment::new(
@@ -830,7 +834,7 @@ async fn test_inspection_needs_a_live_resource_assignment() {
     storage
         .create_cedar_policy(
             &sid_core::models::CedarPolicy::new(
-                ProjectId::system(),
+                sid_core::models::PolicyScope::Project(ProjectId::system()),
                 "allow_all",
                 "permit(principal, action, resource);",
                 sid_core::models::PolicyEffect::Permit,
@@ -880,7 +884,10 @@ async fn test_connector_is_held_to_scim_on_its_resource() {
         .create_role(&broad, AuditEntry::system("test", "test").into())
         .await
         .unwrap();
-    let (directory, other) = (ResourceId::generate(), ResourceId::generate());
+    let (directory, other) = (
+        storage.register_resource(Some(project_id)),
+        storage.register_resource(Some(project_id)),
+    );
     let connector = ProvisioningConnectorId::generate();
     assign(
         &storage,
@@ -1074,7 +1081,12 @@ async fn stored_policy(
 ) {
     storage
         .create_cedar_policy(
-            &sid_core::models::CedarPolicy::new(project_id, "policy", text, effect),
+            &sid_core::models::CedarPolicy::new(
+                sid_core::models::PolicyScope::Project(project_id),
+                "policy",
+                text,
+                effect,
+            ),
             AuditEntry::system("test", "test").into(),
         )
         .await
@@ -1147,6 +1159,239 @@ async fn test_identifiers_with_quotes_reach_the_policies_intact() {
         .await
         .unwrap();
     assert!(resp.is_allowed(), "{resp:?}");
+}
+
+// ── Scoped policies on a protected resource ──────────────────
+
+/// A resource of an application of a project, with a user holding a role
+/// that grants `orders.cancel` on it.
+struct Granted {
+    engine: CeAuthzEngine<MockStorage>,
+    storage: Arc<MockStorage>,
+    project: ProjectId,
+    resource: ResourceId,
+    user: ProfileId,
+}
+
+async fn granted_on_resource() -> Granted {
+    let (engine, storage, project) = setup().await;
+    let role = create_test_role(project, "canceller", &["orders.cancel"]);
+    storage
+        .create_role(&role, AuditEntry::system("test", "test").into())
+        .await
+        .unwrap();
+    let resource = storage.register_resource(Some(project));
+    let user = ProfileId::generate();
+    assign(
+        &storage,
+        &RoleAssignment::new(RoleAssignmentPrincipal::Profile(user), role.id).on_resource(resource),
+    )
+    .await;
+    Granted {
+        engine,
+        storage,
+        project,
+        resource,
+        user,
+    }
+}
+
+impl Granted {
+    async fn policy(&self, scope: PolicyScope, effect: PolicyEffect, text: &str) {
+        self.storage
+            .create_cedar_policy(
+                &CedarPolicy::new(
+                    scope,
+                    format!("p-{}", Uuid::now_v7().simple()),
+                    text,
+                    effect,
+                ),
+                AuditEntry::system("test", "test").into(),
+            )
+            .await
+            .unwrap();
+    }
+
+    /// The decision on the user cancelling `object` on the resource.
+    async fn cancels(&self, object: &str) -> bool {
+        self.decide(self.user, object).await
+    }
+
+    async fn decide(&self, user: ProfileId, object: &str) -> bool {
+        let mut context = HashMap::new();
+        if !object.is_empty() {
+            context.insert("object".to_owned(), object.to_owned());
+        }
+        self.engine
+            .check(&AuthzCheckRequest {
+                subject: format!("user:{user}"),
+                action: "orders.cancel".into(),
+                resource: format!("oauth_resource:{}", self.resource),
+                context,
+            })
+            .await
+            .unwrap()
+            .is_allowed()
+    }
+}
+
+const FORBID_ALL: &str = "forbid(principal, action, resource);";
+const PERMIT_ALL: &str = "permit(principal, action, resource);";
+
+/// Regression: a protected resource's decision used only its role
+/// assignments, so an assigned user bypassed any prohibition by taking the
+/// resource route. A `forbid` of the installation, of the resource's parent
+/// project or of the resource itself now denies the live grant; without it
+/// the grant works.
+#[tokio::test]
+async fn a_resource_grant_is_denied_by_a_forbid_at_every_applicable_scope() {
+    let baseline = granted_on_resource().await;
+    assert!(baseline.cancels("order:1").await, "the grant alone allows");
+    let installation = granted_on_resource().await;
+    installation
+        .policy(PolicyScope::Installation, PolicyEffect::Forbid, FORBID_ALL)
+        .await;
+    assert!(
+        !installation.cancels("order:1").await,
+        "installation forbid"
+    );
+
+    let project = granted_on_resource().await;
+    project
+        .policy(
+            PolicyScope::Project(project.project),
+            PolicyEffect::Forbid,
+            FORBID_ALL,
+        )
+        .await;
+    assert!(!project.cancels("order:1").await, "parent project forbid");
+
+    let resource = granted_on_resource().await;
+    resource
+        .policy(
+            PolicyScope::Resource(resource.resource),
+            PolicyEffect::Forbid,
+            FORBID_ALL,
+        )
+        .await;
+    assert!(!resource.cancels("order:1").await, "resource forbid");
+}
+
+/// A resource policy restricting the object of the action denies that
+/// object and leaves another allowed: the object the receiver names reaches
+/// the policies as `context.object`.
+#[tokio::test]
+async fn a_resource_forbid_on_one_object_denies_only_that_object() {
+    let g = granted_on_resource().await;
+    g.policy(
+        PolicyScope::Resource(g.resource),
+        PolicyEffect::Forbid,
+        r#"forbid(principal, action, resource) when { context has object && context.object == "order:foreign" };"#,
+    )
+    .await;
+    assert!(!g.cancels("order:foreign").await, "the restricted object");
+    assert!(g.cancels("order:own").await, "another object");
+}
+
+/// A permit cannot override a prohibition inherited from a wider scope.
+#[tokio::test]
+async fn a_local_permit_does_not_override_an_inherited_forbid() {
+    let g = granted_on_resource().await;
+    g.policy(PolicyScope::Installation, PolicyEffect::Forbid, FORBID_ALL)
+        .await;
+    g.policy(
+        PolicyScope::Resource(g.resource),
+        PolicyEffect::Permit,
+        PERMIT_ALL,
+    )
+    .await;
+    assert!(!g.cancels("order:1").await);
+}
+
+/// A forbid of another project or of another resource does not reach this
+/// resource's decision.
+#[tokio::test]
+async fn an_unrelated_projects_or_resources_policy_has_no_effect() {
+    let g = granted_on_resource().await;
+    let other_resource = g.storage.register_resource(Some(ProjectId::new()));
+    g.policy(
+        PolicyScope::Project(ProjectId::new()),
+        PolicyEffect::Forbid,
+        FORBID_ALL,
+    )
+    .await;
+    g.policy(
+        PolicyScope::Resource(other_resource),
+        PolicyEffect::Forbid,
+        FORBID_ALL,
+    )
+    .await;
+    assert!(g.cancels("order:1").await);
+}
+
+/// A broad permit allows an ordinary action without a role, but never token
+/// inspection or permission checking, which need their own live assignment
+/// on the exact resource.
+#[tokio::test]
+async fn a_broad_permit_does_not_replace_a_mandatory_assignment() {
+    let g = granted_on_resource().await;
+    g.policy(PolicyScope::Installation, PolicyEffect::Permit, PERMIT_ALL)
+        .await;
+    assert!(
+        g.decide(ProfileId::generate(), "order:1").await,
+        "an ordinary action by permit"
+    );
+    for action in [TOKEN_INTROSPECT, AUTHZ_CHECK] {
+        let allowed = g
+            .engine
+            .check(&AuthzCheckRequest {
+                subject: "oauth_client:anyone".into(),
+                action: action.into(),
+                resource: format!("oauth_resource:{}", g.resource),
+                context: HashMap::new(),
+            })
+            .await
+            .unwrap()
+            .is_allowed();
+        assert!(!allowed, "{action} by permit alone");
+    }
+}
+
+/// A policy that cannot be evaluated might be the prohibition that applies:
+/// the grant is denied.
+#[tokio::test]
+async fn an_unevaluable_resource_policy_denies() {
+    let g = granted_on_resource().await;
+    g.policy(
+        PolicyScope::Resource(g.resource),
+        PolicyEffect::Forbid,
+        r#"forbid(principal, action, resource) when { context.missing == "x" };"#,
+    )
+    .await;
+    assert!(!g.cancels("order:1").await);
+}
+
+/// A resource that is not registered, or whose registration names an
+/// application that does not exist, refuses the decision: it cannot select a
+/// smaller policy set.
+#[tokio::test]
+async fn a_resource_without_a_consistent_registration_refuses_the_decision() {
+    let g = granted_on_resource().await;
+    let ask = |resource: ResourceId| AuthzCheckRequest {
+        subject: format!("user:{}", g.user),
+        action: "orders.cancel".into(),
+        resource: format!("oauth_resource:{resource}"),
+        context: HashMap::new(),
+    };
+    assert!(matches!(
+        g.engine.check(&ask(ResourceId::generate())).await,
+        Err(AuthzError::InvalidResource(_))
+    ));
+    g.storage.applications.lock().unwrap().clear();
+    assert!(matches!(
+        g.engine.check(&ask(g.resource)).await,
+        Err(AuthzError::InvalidResource(_))
+    ));
 }
 
 // ── Over an erased store ─────────────────────────────────────

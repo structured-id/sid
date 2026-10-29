@@ -467,9 +467,20 @@ pub(crate) async fn with_admin_envelopes(
 /// what it was written to deny.
 fn row_to_cedar_policy(row: &sqlx::sqlite::SqliteRow) -> SidResult<CedarPolicy> {
     let revision: i64 = col(row, "revision")?;
+    let project = col::<Option<String>>(row, "project_id")?
+        .map(|raw| {
+            uuid::Uuid::parse_str(&raw)
+                .map(ProjectId)
+                .map_err(|e| SidError::Storage(format!("column project_id: {e}")))
+        })
+        .transpose()?;
+    // A scope naming both a project and a resource would apply where it was
+    // not written: an error, never one of the two.
+    let scope = sid_core::models::PolicyScope::from_columns(project, col(row, "resource_id")?)
+        .map_err(SidError::Storage)?;
     Ok(CedarPolicy {
         id: CedarPolicyId(uuid_col(row, "id")?),
-        project_id: ProjectId(uuid_col(row, "project_id")?),
+        scope,
         name: col(row, "name")?,
         description: col(row, "description")?,
         policy_text: col(row, "policy_text")?,
@@ -1027,11 +1038,12 @@ impl SqliteBackend {
     ) -> SidResult<()> {
         let mut tx = self.begin_write().await?;
         sqlx::query(
-            "INSERT INTO cedar_policies (id, project_id, name, description, policy_text, effect, enabled, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO cedar_policies (id, project_id, resource_id, name, description, policy_text, effect, enabled, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(policy.id.0.to_string())
-        .bind(policy.project_id.0.to_string())
+        .bind(policy.scope.project().map(|p| p.0.to_string()))
+        .bind(policy.scope.resource())
         .bind(&policy.name)
         .bind(&policy.description)
         .bind(&policy.policy_text)
@@ -1061,13 +1073,15 @@ impl SqliteBackend {
 
     pub(crate) async fn list_cedar_policies_impl(
         &self,
-        project_id: ProjectId,
+        scope: sid_core::models::PolicyScope,
     ) -> SidResult<Vec<CedarPolicy>> {
-        let rows = sqlx::query("SELECT * FROM cedar_policies WHERE project_id = ?")
-            .bind(project_id.0.to_string())
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| SidError::Storage(e.to_string()))?;
+        let rows =
+            sqlx::query("SELECT * FROM cedar_policies WHERE project_id IS ? AND resource_id IS ?")
+                .bind(scope.project().map(|p| p.0.to_string()))
+                .bind(scope.resource())
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| SidError::Storage(e.to_string()))?;
         rows.iter().map(row_to_cedar_policy).collect()
     }
 }

@@ -5823,6 +5823,7 @@ dependencies = [
  "sid-authz",
  "sid-core",
  "sid-crypto",
+ "sid-keys",
  "sid-plugin",
  "sid-proto",
  "sid-storage",
@@ -5832,6 +5833,7 @@ dependencies = [
  "tonic",
  "tonic-types",
  "tracing",
+ "url",
  "uuid",
 ]
 

@@ -457,7 +457,7 @@ pub async fn test_cedar_policy_write_contract(backend: &dyn StorageBackend) {
 
     let name = format!("deny_export_{}", Uuid::now_v7().simple());
     let policy = CedarPolicy::new(
-        ProjectId::system(),
+        sid_core::models::PolicyScope::Project(ProjectId::system()),
         &name,
         r#"forbid(principal, action == Action::"export", resource);"#,
         PolicyEffect::Forbid,
@@ -688,7 +688,7 @@ pub async fn test_cedar_policy_concurrent_update(backend: &dyn StorageBackend) {
     use sid_core::models::{CedarPolicy, PolicyEffect};
 
     let policy = CedarPolicy::new(
-        ProjectId::system(),
+        sid_core::models::PolicyScope::Project(ProjectId::system()),
         format!("race_{}", Uuid::now_v7().simple()),
         "permit(principal, action, resource);",
         PolicyEffect::Permit,

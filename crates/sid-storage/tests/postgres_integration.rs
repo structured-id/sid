@@ -2446,8 +2446,8 @@ async fn test_expiring_role_assignments() {
 }
 
 #[tokio::test]
-async fn test_cedar_policies_by_project() {
-    common::role::test_cedar_policies_by_project(&setup().await).await;
+async fn test_cedar_policies_by_scope() {
+    common::role::test_cedar_policies_by_scope(&setup().await).await;
 }
 
 #[tokio::test]

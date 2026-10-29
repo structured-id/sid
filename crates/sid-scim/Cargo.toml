@@ -26,7 +26,10 @@ reqwest = { workspace = true }
 tokio = { workspace = true, features = ["time", "sync"] }
 
 [dev-dependencies]
-sid-crypto = { workspace = true, features = ["tls-aws-lc"] }
+sid-crypto = { workspace = true, features = ["tls-aws-lc", "primitives"] }
+# The installation issuer the test directory resource is registered under.
+sid-keys = { path = "../sid-keys" }
+url = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 sid-storage = { path = "../sid-storage", features = ["storage-sqlite"] }
 secrecy = { workspace = true }

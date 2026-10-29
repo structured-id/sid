@@ -82,3 +82,8 @@ CREATE INDEX IF NOT EXISTS idx_resource_access_resource ON resource_access (reso
 -- The resource a client's token is for when a request names none.
 ALTER TABLE oauth2_clients
     ADD COLUMN IF NOT EXISTS default_resource UUID REFERENCES protected_resources(id);
+
+-- A policy scoped to one protected resource names a registered one.
+ALTER TABLE cedar_policies
+    ADD CONSTRAINT cedar_policies_resource_fk
+    FOREIGN KEY (resource_id) REFERENCES protected_resources(id);

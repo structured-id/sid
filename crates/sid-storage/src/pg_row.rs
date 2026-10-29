@@ -980,7 +980,8 @@ impl RoleAssignmentRow {
 #[derive(Debug, sqlx::FromRow)]
 pub struct CedarPolicyRow {
     pub id: Uuid,
-    pub project_id: Uuid,
+    pub project_id: Option<Uuid>,
+    pub resource_id: Option<sid_core::models::ResourceId>,
     pub name: String,
     pub description: Option<String>,
     pub policy_text: String,
@@ -993,11 +994,16 @@ pub struct CedarPolicyRow {
 
 impl CedarPolicyRow {
     /// An unknown effect is an error: read as permit, a forbid policy would
-    /// grant what it was written to deny.
+    /// grant what it was written to deny. A scope naming both a project and
+    /// a resource is an error too: it would apply where it was not written.
     pub fn into_domain(self) -> SidResult<CedarPolicy> {
         Ok(CedarPolicy {
             id: CedarPolicyId(self.id),
-            project_id: ProjectId(self.project_id),
+            scope: sid_core::models::PolicyScope::from_columns(
+                self.project_id.map(ProjectId),
+                self.resource_id,
+            )
+            .map_err(SidError::Storage)?,
             name: self.name,
             description: self.description,
             policy_text: self.policy_text,

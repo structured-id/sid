@@ -7,8 +7,8 @@
 use std::sync::Arc;
 
 use sid_core::models::{
-    AUTHZ_CHECK, AuthzPrincipal, MachineUserId, ProfileId, ProjectId, ProvisioningConnectorId,
-    ResourceId, SCIM_ACTION_PREFIX, TOKEN_INTROSPECT,
+    AUTHZ_CHECK, AuthzPrincipal, MachineUserId, PolicyScope, ProfileId, ProjectId,
+    ProvisioningConnectorId, ResourceId, SCIM_ACTION_PREFIX, TOKEN_INTROSPECT,
 };
 use sid_plugin::StorageBackend;
 use uuid::Uuid;
@@ -25,11 +25,12 @@ const OAUTH_RESOURCE: &str = "oauth_resource:";
 /// Check pipeline:
 /// 1. Parse subject → AuthzPrincipal (Profile, MachineUser or OAuthClient)
 /// 2. A protected resource (`oauth_resource:<id>`) is decided by the
-///    assignments scoped to exactly that resource; project policies do not
-///    apply to it
+///    assignments scoped to exactly that resource, and by the installation's,
+///    its registered parent project's and its own policies
 /// 3. Otherwise, resource → ProjectId; RBAC: resolve effective roles, check
-///    if any grants the permission
-/// 4. Evaluate the project's enabled Cedar policies: a satisfied `forbid`
+///    if any grants the permission; the installation's and the project's
+///    policies apply
+/// 4. Evaluate the applicable enabled Cedar policies: a satisfied `forbid`
 ///    denies whatever role grants; else a role grant allows; else a satisfied
 ///    `permit` allows; a policy set that cannot be evaluated denies
 /// 5. Return Allow/Deny with reason
@@ -90,30 +91,191 @@ impl<S: StorageBackend + ?Sized> CeAuthzEngine<S> {
             .map_err(|e| AuthzError::InvalidResource(format!("{resource}: {e}")))
     }
 
-    /// The decision on one protected resource: only assignments scoped to it.
+    /// The decision on one protected resource: the assignments scoped to it,
+    /// and the installation's, its parent project's and its own policies.
+    /// Token inspection and permission checking need their assignment on
+    /// the resource whatever a policy permits.
     async fn check_protected_resource(
         &self,
         principal: &AuthzPrincipal,
         resource: ResourceId,
-        action: &str,
+        request: &AuthzCheckRequest,
+        policies: Option<&[(String, String)]>,
     ) -> Result<AuthzCheckResponse, AuthzError> {
+        let action = request.action.as_str();
         let granting = self
             .rbac
             .resource_granting_roles(principal, resource, action)
             .await
             .map_err(|e| AuthzError::Storage(e.to_string()))?;
-        Ok(if granting.is_empty() {
-            AuthzCheckResponse::Deny {
+        if granting.is_empty() && (action == TOKEN_INTROSPECT || action == AUTHZ_CHECK) {
+            return Ok(AuthzCheckResponse::Deny {
                 reason: format!("no role on resource {resource} grants '{action}'"),
+            });
+        }
+        let stored;
+        let applicable = match policies {
+            Some(policies) => policies,
+            None => {
+                let mut scopes = vec![PolicyScope::Installation];
+                if let Some(project) = self.parent_project(resource).await? {
+                    scopes.push(PolicyScope::Project(project));
+                }
+                scopes.push(PolicyScope::Resource(resource));
+                stored = self.enabled_policies(&scopes).await?;
+                &stored
             }
-        } else {
-            AuthzCheckResponse::Allow {
+        };
+        Ok(self.combine(
+            principal,
+            request,
+            &resource.to_string(),
+            &granting,
+            applicable,
+        ))
+    }
+
+    /// The project of the application `resource` belongs to; none for a
+    /// resource of no application. An unknown resource, or one naming an
+    /// application that does not exist, refuses the decision: it cannot
+    /// select a smaller, less restrictive policy set.
+    async fn parent_project(&self, resource: ResourceId) -> Result<Option<ProjectId>, AuthzError> {
+        let registered = self
+            .storage
+            .get_protected_resource(resource)
+            .await
+            .map_err(|e| AuthzError::Storage(e.to_string()))?
+            .ok_or_else(|| {
+                AuthzError::InvalidResource(format!("resource {resource} is not registered"))
+            })?;
+        let Some(application) = registered.application_id else {
+            return Ok(None);
+        };
+        let application = self
+            .storage
+            .get_application(application)
+            .await
+            .map_err(|e| AuthzError::Storage(e.to_string()))?
+            .ok_or_else(|| {
+                AuthzError::InvalidResource(format!(
+                    "resource {resource} names application {application}, which does not exist"
+                ))
+            })?;
+        Ok(Some(application.project_id))
+    }
+
+    /// The enabled policies of `scopes`, as (id, text).
+    async fn enabled_policies(
+        &self,
+        scopes: &[PolicyScope],
+    ) -> Result<Vec<(String, String)>, AuthzError> {
+        let mut enabled = Vec::new();
+        for scope in scopes {
+            enabled.extend(
+                self.storage
+                    .list_cedar_policies(*scope)
+                    .await
+                    .map_err(|e| AuthzError::Storage(e.to_string()))?
+                    .into_iter()
+                    .filter(|p| p.enabled)
+                    .map(|p| (p.id.0.to_string(), p.policy_text)),
+            );
+        }
+        Ok(enabled)
+    }
+
+    /// The decision on `request` for `principal` on the Cedar resource
+    /// `target`, given the roles `granting` its action and the applicable
+    /// `policies`: a satisfied `forbid` denies whatever role grants, as does
+    /// a policy set that cannot be evaluated; otherwise a role grant allows,
+    /// else a satisfied `permit` allows, else deny.
+    fn combine(
+        &self,
+        principal: &AuthzPrincipal,
+        request: &AuthzCheckRequest,
+        target: &str,
+        granting: &[String],
+        policies: &[(String, String)],
+    ) -> AuthzCheckResponse {
+        let rbac_allow = || AuthzCheckResponse::Allow {
+            reason: format!(
+                "RBAC: roles [{}] grant {}",
+                granting.join(", "),
+                request.action
+            ),
+        };
+        if policies.is_empty() {
+            return if granting.is_empty() {
+                AuthzCheckResponse::Deny {
+                    reason: format!(
+                        "no RBAC role grants '{}' and no Cedar policy permits",
+                        request.action
+                    ),
+                }
+            } else {
+                rbac_allow()
+            };
+        }
+        let (subject_type, subject_id) = match principal {
+            AuthzPrincipal::Profile(id) => ("User", id.to_string()),
+            AuthzPrincipal::MachineUser(id) => ("MachineUser", id.to_string()),
+            AuthzPrincipal::OAuthClient(id) => ("OAuthClient", id.clone()),
+            AuthzPrincipal::ProvisioningConnector(id) => ("ProvisioningConnector", id.to_string()),
+        };
+        let policy_ids = |result: &crate::cedar::CedarEvalResult| {
+            result
+                .matches
+                .iter()
+                .map(|m| m.policy_id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        // Entities from their components: an identifier's quotes or
+        // backslashes are part of it, never Cedar syntax.
+        let evaluated = CedarService::entity(subject_type, &subject_id).and_then(|subject| {
+            self.cedar.evaluate_entities(
+                policies,
+                subject,
+                CedarService::entity("Action", &request.action)?,
+                CedarService::entity("Resource", target)?,
+                &request.context,
+            )
+        });
+        match evaluated {
+            Ok(result) if result.forbidden() => AuthzCheckResponse::Deny {
+                reason: format!("Cedar: policies [{}] forbid", policy_ids(&result)),
+            },
+            // A policy that fails to evaluate at runtime is skipped by
+            // Cedar, and might be the prohibition that applies: deny,
+            // whatever role grants.
+            Ok(result) if !result.errors.is_empty() => {
+                tracing::warn!("Cedar evaluation errors: {}", result.errors.join("; "));
+                AuthzCheckResponse::Deny {
+                    reason: format!(
+                        "the applicable policies cannot be evaluated: {}",
+                        result.errors.join("; ")
+                    ),
+                }
+            }
+            Ok(_) if !granting.is_empty() => rbac_allow(),
+            Ok(result) if result.allowed => AuthzCheckResponse::Allow {
+                reason: format!("Cedar: policies [{}] permit", policy_ids(&result)),
+            },
+            Ok(_) => AuthzCheckResponse::Deny {
                 reason: format!(
-                    "RBAC: roles [{}] on resource {resource} grant {action}",
-                    granting.join(", ")
+                    "no RBAC role grants '{}' and no Cedar policy permits",
+                    request.action
                 ),
+            },
+            // A policy set that cannot be evaluated might hold the
+            // prohibition that applies: deny, whatever role grants.
+            Err(e) => {
+                tracing::warn!("Cedar evaluation error: {e}");
+                AuthzCheckResponse::Deny {
+                    reason: format!("the applicable policies cannot be evaluated: {e}"),
+                }
             }
-        })
+        }
     }
 }
 
@@ -190,7 +352,7 @@ impl<S: StorageBackend + ?Sized> CeAuthzEngine<S> {
             let resource = ResourceId::parse(id)
                 .map_err(|e| AuthzError::InvalidResource(format!("{}: {e}", request.resource)))?;
             return self
-                .check_protected_resource(&principal, resource, &request.action)
+                .check_protected_resource(&principal, resource, request, policies)
                 .await;
         }
         let project_id = Self::parse_project(&request.resource)?;
@@ -202,106 +364,30 @@ impl<S: StorageBackend + ?Sized> CeAuthzEngine<S> {
             .project_granting_roles(&principal, project_id, &request.action)
             .await
             .map_err(|e| AuthzError::Storage(e.to_string()))?;
-        let rbac_allow = || AuthzCheckResponse::Allow {
-            reason: format!(
-                "RBAC: roles [{}] grant {}",
-                granting_roles.join(", "),
-                request.action
-            ),
-        };
 
-        // The project's Cedar policies apply to every decision: a `forbid`
-        // prohibits whatever role grants, a `permit` allows without one.
-        let stored: Vec<(String, String)>;
-        let enabled_policies: &[(String, String)] = match policies {
+        // The installation's and the project's policies apply to every
+        // decision on the project: a `forbid` prohibits whatever role
+        // grants, a `permit` allows without one.
+        let stored;
+        let applicable = match policies {
             Some(policies) => policies,
             None => {
                 stored = self
-                    .storage
-                    .list_cedar_policies(project_id)
-                    .await
-                    .map_err(|e| AuthzError::Storage(e.to_string()))?
-                    .into_iter()
-                    .filter(|p| p.enabled)
-                    .map(|p| (p.id.0.to_string(), p.policy_text))
-                    .collect();
+                    .enabled_policies(&[
+                        PolicyScope::Installation,
+                        PolicyScope::Project(project_id),
+                    ])
+                    .await?;
                 &stored
             }
         };
-
-        if !enabled_policies.is_empty() {
-            let (subject_type, subject_id) = match &principal {
-                AuthzPrincipal::Profile(id) => ("User", id.to_string()),
-                AuthzPrincipal::MachineUser(id) => ("MachineUser", id.to_string()),
-                AuthzPrincipal::OAuthClient(id) => ("OAuthClient", id.clone()),
-                AuthzPrincipal::ProvisioningConnector(id) => {
-                    ("ProvisioningConnector", id.to_string())
-                }
-            };
-
-            let policy_ids = |result: &crate::cedar::CedarEvalResult| {
-                result
-                    .matches
-                    .iter()
-                    .map(|m| m.policy_id.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
-            // Entities from their components: an identifier's quotes or
-            // backslashes are part of it, never Cedar syntax.
-            let evaluated = CedarService::entity(subject_type, &subject_id).and_then(|subject| {
-                self.cedar.evaluate_entities(
-                    enabled_policies,
-                    subject,
-                    CedarService::entity("Action", &request.action)?,
-                    CedarService::entity("Resource", &project_id.0.to_string())?,
-                    &request.context,
-                )
-            });
-            match evaluated {
-                Ok(result) if result.forbidden() => {
-                    return Ok(AuthzCheckResponse::Deny {
-                        reason: format!("Cedar: policies [{}] forbid", policy_ids(&result)),
-                    });
-                }
-                // A policy that fails to evaluate at runtime is skipped by
-                // Cedar, and might be the prohibition that applies: deny,
-                // whatever role grants.
-                Ok(result) if !result.errors.is_empty() => {
-                    tracing::warn!("Cedar evaluation errors: {}", result.errors.join("; "));
-                    return Ok(AuthzCheckResponse::Deny {
-                        reason: format!(
-                            "the project's policies cannot be evaluated: {}",
-                            result.errors.join("; ")
-                        ),
-                    });
-                }
-                Ok(_) if !granting_roles.is_empty() => return Ok(rbac_allow()),
-                Ok(result) if result.allowed => {
-                    return Ok(AuthzCheckResponse::Allow {
-                        reason: format!("Cedar: policies [{}] permit", policy_ids(&result)),
-                    });
-                }
-                Ok(_) => {}
-                // A policy set that cannot be evaluated might hold the
-                // prohibition that applies: deny, whatever role grants.
-                Err(e) => {
-                    tracing::warn!("Cedar evaluation error: {e}");
-                    return Ok(AuthzCheckResponse::Deny {
-                        reason: format!("the project's policies cannot be evaluated: {e}"),
-                    });
-                }
-            }
-        } else if !granting_roles.is_empty() {
-            return Ok(rbac_allow());
-        }
-
-        Ok(AuthzCheckResponse::Deny {
-            reason: format!(
-                "no RBAC role grants '{}' and no Cedar policy permits",
-                request.action
-            ),
-        })
+        Ok(self.combine(
+            &principal,
+            request,
+            &project_id.0.to_string(),
+            &granting_roles,
+            applicable,
+        ))
     }
 
     /// One decision per request, in order; the first check that cannot be

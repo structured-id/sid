@@ -151,15 +151,30 @@ async fn a_connector_is_assigned_provisioning_on_a_resource() {
             .unwrap()
             .is_allowed()
     );
+    // Another registered resource of the installation: nothing there.
+    let elsewhere =
+        sid_authn::issuer::ensure_authorization_api_resource(svc.storage.as_ref(), &svc.issuer)
+            .await
+            .unwrap();
     assert!(
         !engine
+            .check(&check(
+                SCIM_USER_CREATE,
+                format!("oauth_resource:{}", elsewhere.id)
+            ))
+            .await
+            .unwrap()
+            .is_allowed()
+    );
+    // A resource that is not registered has no decision at all.
+    assert!(
+        engine
             .check(&check(
                 SCIM_USER_CREATE,
                 format!("oauth_resource:{}", ResourceId::generate())
             ))
             .await
-            .unwrap()
-            .is_allowed()
+            .is_err()
     );
 }
 
