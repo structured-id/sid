@@ -553,9 +553,10 @@ impl PostgresBackend {
         .await
         .map_err(|e| SidError::Storage(format!("count sessions: {e}")))?;
 
-        // Evict oldest sessions if at or over the limit (0 is no limit).
+        // Evict oldest sessions if at or over the limit (0 is no limit). A
+        // pending second-factor context takes no place, so it evicts nothing.
         let mut evicted = Vec::new();
-        if max_sessions > 0 && count >= max_sessions as i64 {
+        if max_sessions > 0 && !session.awaits_second_factor() && count >= max_sessions as i64 {
             let to_evict = (count - max_sessions as i64 + 1) as i64; // +1 for the new session
             let rows: Vec<(SessionId, Option<String>)> = sqlx::query_as(
                 "SELECT id, client_id FROM sessions \

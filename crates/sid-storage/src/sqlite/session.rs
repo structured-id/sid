@@ -270,7 +270,8 @@ impl SqliteBackend {
             }
         }
         let mut evicted = Vec::new();
-        if max_sessions > 0 {
+        // A pending second-factor context takes no place, so it evicts nothing.
+        if max_sessions > 0 && !session.awaits_second_factor() {
             let now = fmt_dt(&chrono::Utc::now());
             let active: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM sessions WHERE profile_id = ? AND expires_at > ?
