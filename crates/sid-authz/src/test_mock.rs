@@ -876,7 +876,7 @@ impl sid_plugin::StorageBackend for MockStorage {
     async fn claim_first_admin(
         &self,
         _: &[u8],
-        _: &sid_core::models::Profile,
+        _: ProfileId,
         _audit: MutationContext,
     ) -> Result<bool> {
         unimplemented!()

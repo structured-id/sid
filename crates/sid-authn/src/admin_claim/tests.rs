@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::test_support::key_manager;
-use sid_core::models::Profile;
+use sid_core::models::{Profile, Role, RoleAssignment, RoleAssignmentPrincipal};
 use sid_plugin::InstanceSecretStore;
 use sid_storage::sqlite::SqliteBackend;
 
@@ -12,9 +12,8 @@ async fn storage() -> SqliteBackend {
         .expect("in-memory SQLite")
 }
 
-async fn profile(storage: &SqliteBackend, username: &str, roles: &[&str]) -> ProfileId {
-    let mut profile = Profile::new(Some(username));
-    profile.roles = roles.iter().map(|r| r.to_string()).collect();
+async fn profile(storage: &SqliteBackend, username: &str) -> ProfileId {
+    let profile = Profile::new(Some(username));
     storage
         .create_profile(&profile, AuditEntry::system("test", "profile").into())
         .await
@@ -22,8 +21,35 @@ async fn profile(storage: &SqliteBackend, username: &str, roles: &[&str]) -> Pro
     profile.id
 }
 
+/// A stored Profile that already administers the installation, as role
+/// administration makes one.
+async fn administrator(storage: &SqliteBackend, username: &str) -> ProfileId {
+    let id = profile(storage, username).await;
+    storage
+        .create_role(
+            &Role::installation_administrator(),
+            AuditEntry::system("test", "role").into(),
+        )
+        .await
+        .unwrap();
+    storage
+        .create_role_assignment(
+            &RoleAssignment::new(
+                RoleAssignmentPrincipal::Profile(id),
+                Role::installation_administrator().id,
+            )
+            .on_installation(),
+            AuditEntry::system("test", "assignment").into(),
+        )
+        .await
+        .unwrap();
+    id
+}
+
 async fn is_admin(storage: &SqliteBackend, id: ProfileId) -> bool {
-    storage.get_profile(id).await.unwrap().unwrap().is_admin()
+    crate::account_roles::administers_installation(storage, id)
+        .await
+        .unwrap()
 }
 
 /// A fresh instance opens one claim; every start sees the same token until
@@ -43,8 +69,8 @@ async fn fresh_instance_keeps_one_claim_across_starts() {
 async fn claiming_makes_the_first_admin_once() {
     let (storage, keys) = (storage().await, key_manager());
     let token = open_claim(&storage, keys.as_ref()).await.unwrap().unwrap();
-    let alice = profile(&storage, "alice", &[]).await;
-    let bob = profile(&storage, "bob", &[]).await;
+    let alice = profile(&storage, "alice").await;
+    let bob = profile(&storage, "bob").await;
 
     claim(&storage, keys.as_ref(), alice, &token).await.unwrap();
     assert!(is_admin(&storage, alice).await);
@@ -62,7 +88,7 @@ async fn claiming_makes_the_first_admin_once() {
 async fn wrong_token_is_refused() {
     let (storage, keys) = (storage().await, key_manager());
     let token = open_claim(&storage, keys.as_ref()).await.unwrap().unwrap();
-    let mallory = profile(&storage, "mallory", &[]).await;
+    let mallory = profile(&storage, "mallory").await;
 
     let guess = SecretString::from(format!("{TOKEN_PREFIX}guess"));
     let err = claim(&storage, keys.as_ref(), mallory, &guess)
@@ -79,7 +105,7 @@ async fn wrong_token_is_refused() {
 #[tokio::test]
 async fn instance_with_admin_opens_no_claim() {
     let (storage, keys) = (storage().await, key_manager());
-    profile(&storage, "root", &["admin"]).await;
+    administrator(&storage, "root").await;
     assert!(open_claim(&storage, keys.as_ref()).await.unwrap().is_none());
     assert!(
         storage
@@ -96,8 +122,8 @@ async fn instance_with_admin_opens_no_claim() {
 async fn claim_left_beside_an_admin_grants_nothing() {
     let (storage, keys) = (storage().await, key_manager());
     let token = open_claim(&storage, keys.as_ref()).await.unwrap().unwrap();
-    profile(&storage, "root", &["admin"]).await;
-    let eve = profile(&storage, "eve", &[]).await;
+    administrator(&storage, "root").await;
+    let eve = profile(&storage, "eve").await;
 
     let err = claim(&storage, keys.as_ref(), eve, &token)
         .await
@@ -118,8 +144,8 @@ async fn claim_left_beside_an_admin_grants_nothing() {
 async fn concurrent_claims_make_one_admin() {
     let (storage, keys) = (storage().await, key_manager());
     let token = open_claim(&storage, keys.as_ref()).await.unwrap().unwrap();
-    let a = profile(&storage, "a", &[]).await;
-    let b = profile(&storage, "b", &[]).await;
+    let a = profile(&storage, "a").await;
+    let b = profile(&storage, "b").await;
 
     let (ra, rb) = tokio::join!(
         claim(&storage, keys.as_ref(), a, &token),
@@ -157,7 +183,7 @@ async fn verify_returns_the_stored_claim_only_for_the_token() {
     let err = verify(&storage, keys.as_ref(), &guess).await.unwrap_err();
     assert!(matches!(err, ClaimError::Mismatch));
 
-    profile(&storage, "root", &["admin"]).await;
+    administrator(&storage, "root").await;
     assert!(matches!(
         verify(&storage, keys.as_ref(), &token).await,
         Ok(None)

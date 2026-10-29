@@ -208,7 +208,7 @@ fn token_for(profile: &Profile) -> String {
         .issue_access_token(
             &profile.id.to_string(),
             Some(&profile.id.to_string()),
-            profile,
+            &profile.roles,
             &session,
             &["openid".to_string()],
             None,

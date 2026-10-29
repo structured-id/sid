@@ -20,6 +20,11 @@ pub async fn ensure_permission_checker_role(storage: &dyn StorageBackend) -> Res
     ensure_builtin(storage, Role::permission_checker()).await
 }
 
+/// The built-in installation administrator role of the system project.
+pub async fn ensure_installation_administrator_role(storage: &dyn StorageBackend) -> Result<Role> {
+    ensure_builtin(storage, Role::installation_administrator()).await
+}
+
 /// The built-in invite issuer role of the system project.
 pub async fn ensure_invite_issuer_role(storage: &dyn StorageBackend) -> Result<Role> {
     ensure_builtin(storage, Role::invite_issuer()).await

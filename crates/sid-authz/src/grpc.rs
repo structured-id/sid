@@ -697,6 +697,47 @@ impl Asker {
 }
 
 /// The status of a refused administration change: no covering authority,
+/// The installation administrator role goes only to a Profile, across the
+/// whole installation, and the installation scope only to that role: any
+/// other combination would make an administrator that the claim, the
+/// last-administrator guard and the token do not see.
+fn check_installation_assignment(role: &Role, assignment: &RoleAssignment) -> Result<(), Status> {
+    let administrator = role.id == Role::installation_administrator().id;
+    let installation_wide =
+        assignment.scope.as_deref() == Some(sid_core::models::INSTALLATION_SCOPE);
+    if administrator && !matches!(assignment.principal, RoleAssignmentPrincipal::Profile(_)) {
+        return Err(ApiError::new(
+            ErrorReason::InvalidFieldValue,
+            "the installation administrator role is assigned to a Profile",
+        )
+        .with_field_violation("principal", "not a Profile")
+        .into());
+    }
+    if administrator != installation_wide {
+        return Err(ApiError::new(
+            ErrorReason::InvalidFieldValue,
+            "the installation scope holds the installation administrator role only, and that role holds only it",
+        )
+        .with_field_violation("scope", "expected installation for the administrator role only")
+        .into());
+    }
+    Ok(())
+}
+
+/// Why revoking an assignment was refused: removing the last installation
+/// administrator assignment, otherwise as [`administration_refusal`].
+fn revocation_refusal(error: sid_core::Error) -> Status {
+    match error {
+        sid_core::Error::InvalidState(why) => ApiError::new(
+            ErrorReason::InvalidState,
+            "the installation's last administrator assignment is kept",
+        )
+        .with_precondition("LAST_ADMINISTRATOR", "installation", why)
+        .into(),
+        other => administration_refusal(other),
+    }
+}
+
 /// an authority that changed before the commit, or an invalid change.
 fn administration_refusal(error: sid_core::Error) -> Status {
     use sid_core::grpc_error::refuse::authority_changed;
@@ -1590,7 +1631,12 @@ impl AuthzService for AuthzServiceImpl {
                 .into(),
             )
             .await
-            .map_err(storage_failure)?;
+            .map_err(|e| match e {
+                // The administrator role, still assigned: deleting it would
+                // remove the installation's administrators with it.
+                sid_core::Error::InvalidState(_) => revocation_refusal(e),
+                other => storage_failure(other),
+            })?;
 
         info!("Deleted role {}", role_id.0);
 
@@ -1712,6 +1758,7 @@ impl AuthzService for AuthzServiceImpl {
         assignment.scope = req.scope;
         assignment.expires_at = expires_at;
         assignment.admin = req.admin.map(envelope_from_proto).transpose()?;
+        check_installation_assignment(&role, &assignment)?;
         if role.has_permission(TOKEN_INTROSPECT) || role.has_permission(AUTHZ_CHECK) {
             self.check_service_assignment(&assignment).await?;
         }
@@ -1775,7 +1822,7 @@ impl AuthzService for AuthzServiceImpl {
         crate::admin::RoleAdministration::new(self.storage.clone())
             .revoke(&administrator, assignment_id, audit)
             .await
-            .map_err(administration_refusal)?;
+            .map_err(revocation_refusal)?;
 
         info!("Revoked role assignment {}", assignment_id.0);
 

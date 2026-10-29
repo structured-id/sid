@@ -1394,6 +1394,169 @@ async fn a_resource_without_a_consistent_registration_refuses_the_decision() {
     ));
 }
 
+// ── Installation administrator ───────────────────────────────
+
+/// A Profile holding the installation administrator role across the
+/// installation, and one holding nothing, with a project and a protected
+/// resource neither has another role on.
+struct Administered {
+    engine: CeAuthzEngine<MockStorage>,
+    storage: Arc<MockStorage>,
+    project: ProjectId,
+    resource: ResourceId,
+    admin: ProfileId,
+    other: ProfileId,
+}
+
+async fn administered() -> Administered {
+    let (engine, storage, project) = setup().await;
+    storage
+        .create_role(
+            &Role::installation_administrator(),
+            AuditEntry::system("test", "test").into(),
+        )
+        .await
+        .unwrap();
+    let resource = storage.register_resource(Some(project));
+    let admin = ProfileId::generate();
+    assign(
+        &storage,
+        &RoleAssignment::new(
+            RoleAssignmentPrincipal::Profile(admin),
+            Role::installation_administrator().id,
+        )
+        .on_installation(),
+    )
+    .await;
+    Administered {
+        engine,
+        storage,
+        project,
+        resource,
+        admin,
+        other: ProfileId::generate(),
+    }
+}
+
+impl Administered {
+    async fn on_project(&self, user: ProfileId, action: &str) -> bool {
+        self.engine
+            .check(&AuthzCheckRequest {
+                subject: format!("user:{user}"),
+                action: action.into(),
+                resource: format!("project:{}", self.project.0),
+                context: HashMap::new(),
+            })
+            .await
+            .unwrap()
+            .is_allowed()
+    }
+
+    async fn on_resource(&self, user: ProfileId, action: &str) -> bool {
+        self.engine
+            .check(&AuthzCheckRequest {
+                subject: format!("user:{user}"),
+                action: action.into(),
+                resource: format!("oauth_resource:{}", self.resource),
+                context: HashMap::new(),
+            })
+            .await
+            .unwrap()
+            .is_allowed()
+    }
+}
+
+/// Regression: the installation's administrator was a string in the
+/// Profile's roles that no decision read, so it held nothing on a project or
+/// a protected resource. The installation-wide administrator assignment now
+/// allows any action on both, with no other role; without it the same
+/// actions are denied.
+#[tokio::test]
+async fn the_installation_administrator_holds_every_action() {
+    let a = administered().await;
+    for action in ["profiles.write", "ops.org.suspend", "orders.cancel"] {
+        assert!(a.on_project(a.admin, action).await, "project {action}");
+        assert!(a.on_resource(a.admin, action).await, "resource {action}");
+        assert!(
+            !a.on_project(a.other, action).await,
+            "other project {action}"
+        );
+        assert!(
+            !a.on_resource(a.other, action).await,
+            "other resource {action}"
+        );
+    }
+}
+
+/// The administrator role counts only as an installation-wide assignment:
+/// held on one resource it grants that resource's actions no more than any
+/// other role would, and an expired assignment grants nothing.
+#[tokio::test]
+async fn only_a_live_installation_wide_assignment_administers() {
+    let a = administered().await;
+    let scoped = ProfileId::generate();
+    assign(
+        &a.storage,
+        &RoleAssignment::new(
+            RoleAssignmentPrincipal::Profile(scoped),
+            Role::installation_administrator().id,
+        )
+        .on_resource(a.resource),
+    )
+    .await;
+    assert!(!a.on_project(scoped, "profiles.write").await);
+    assert!(!a.on_resource(scoped, "orders.cancel").await);
+
+    let expired = ProfileId::generate();
+    assign(
+        &a.storage,
+        &RoleAssignment::new(
+            RoleAssignmentPrincipal::Profile(expired),
+            Role::installation_administrator().id,
+        )
+        .on_installation()
+        .with_expiry(chrono::Utc::now() - chrono::Duration::seconds(1)),
+    )
+    .await;
+    assert!(!a.on_project(expired, "profiles.write").await);
+    assert!(!a.on_resource(expired, "orders.cancel").await);
+}
+
+/// The administrator is still subject to the installation's prohibitions: an
+/// applicable `forbid` denies it on a project and on a protected resource.
+#[tokio::test]
+async fn a_forbid_denies_the_installation_administrator() {
+    let a = administered().await;
+    a.storage
+        .create_cedar_policy(
+            &CedarPolicy::new(
+                PolicyScope::Installation,
+                "no-one",
+                FORBID_ALL,
+                PolicyEffect::Forbid,
+            ),
+            AuditEntry::system("test", "test").into(),
+        )
+        .await
+        .unwrap();
+    assert!(!a.on_project(a.admin, "profiles.write").await);
+    assert!(!a.on_resource(a.admin, "orders.cancel").await);
+}
+
+/// Actions held only by services stay refused to the administrator Profile:
+/// token inspection, permission checks and invites are not a human's to
+/// exercise, whatever its authority.
+#[tokio::test]
+async fn service_actions_stay_refused_to_the_administrator() {
+    let a = administered().await;
+    for action in [TOKEN_INTROSPECT, AUTHZ_CHECK, INVITE_CREATE] {
+        assert!(
+            !a.on_resource(a.admin, action).await,
+            "the administrator was allowed {action}"
+        );
+    }
+}
+
 // ── Over an erased store ─────────────────────────────────────
 
 // The engine decides the same over a store held as `dyn StorageBackend`, as

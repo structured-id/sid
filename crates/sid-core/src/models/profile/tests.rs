@@ -26,12 +26,10 @@ fn test_profile_new_from_string() {
 #[test]
 fn test_has_role() {
     let mut profile = Profile::new(Some("alice"));
-    assert!(!profile.has_role("admin"));
-    assert!(!profile.is_admin());
+    assert!(!profile.has_role("editor"));
 
-    profile.roles = vec!["admin".to_string()];
-    assert!(profile.has_role("admin"));
-    assert!(profile.is_admin());
+    profile.roles = vec!["editor".to_string()];
+    assert!(profile.has_role("editor"));
     assert!(!profile.has_role("operator"));
 }
 

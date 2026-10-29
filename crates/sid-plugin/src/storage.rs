@@ -752,7 +752,8 @@ pub trait StorageBackend:
         ctx: MutationContext,
     ) -> Result<bool>;
 
-    /// Whether any profile holds the administrator role.
+    /// Whether any profile holds an unexpired installation administrator
+    /// assignment.
     async fn admin_exists(&self) -> Result<bool>;
 
     /// The installation's bootstrap policy: centrally managed once adopted,
@@ -785,17 +786,17 @@ pub trait StorageBackend:
         ctx: MutationContext,
     ) -> Result<()>;
 
-    /// Make `profile` (already carrying the administrator role, at the
-    /// revision it was read at) the first administrator, consuming the admin
-    /// claim stored as `claim_sealed`. The claim is removed and the profile
-    /// written in one transaction. Returns `false`, changing nothing, when
+    /// Make `profile` the first administrator, consuming the admin claim
+    /// stored as `claim_sealed`: the claim is removed and the installation
+    /// administrator assignment (the built-in role stored if it is not) is
+    /// created in one transaction. Returns `false`, changing nothing, when
     /// that claim is no longer stored, an administrator already exists, the
-    /// installation is centrally managed or the profile changed since it was
-    /// read: of concurrent claimers exactly one succeeds.
+    /// installation is centrally managed or the profile is not stored: of
+    /// concurrent claimers exactly one succeeds.
     async fn claim_first_admin(
         &self,
         claim_sealed: &[u8],
-        profile: &sid_core::models::Profile,
+        profile: ProfileId,
         ctx: MutationContext,
     ) -> Result<bool>;
 
@@ -977,7 +978,9 @@ pub trait StorageBackend:
         ctx: MutationContext,
     ) -> Result<()>;
 
-    /// Delete a role assignment.
+    /// Delete a role assignment. The last installation administrator
+    /// assignment is kept (`InvalidState`), decided in the same transaction
+    /// as concurrent removals.
     async fn delete_role_assignment(
         &self,
         id: RoleAssignmentId,

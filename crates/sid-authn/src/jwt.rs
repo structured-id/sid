@@ -562,12 +562,13 @@ impl JwtService {
     ///
     /// When `custom_claims` is provided, those claims are merged into the JWT
     /// payload after the standard claims (AUTH-017: static claim mapping).
+    /// `roles` are the account's token roles ([`crate::account_roles`]).
     #[allow(clippy::too_many_arguments)]
     pub fn issue_access_token(
         &self,
         sub: &str,
         pid: Option<&str>,
-        profile: &Profile,
+        roles: &[String],
         session: &Session,
         scopes: &[String],
         dpop_binding: Option<&DPopBinding>,
@@ -578,7 +579,7 @@ impl JwtService {
             TokenAudience::Installation,
             sub,
             pid,
-            &profile.roles,
+            roles,
             session,
             scopes,
             dpop_binding,

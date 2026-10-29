@@ -1672,6 +1672,36 @@ async fn test_last_administrator_cannot_request_closure() {
     finish_isolated(&backend, &schema, outcome).await;
 }
 
+/// Runs in its own schema: the scenario counts the administrators left.
+#[tokio::test]
+async fn test_last_administrator_assignment_is_kept() {
+    let (backend, schema) = isolated("lastassign").await;
+    let outcome =
+        tokio::spawn({
+            let backend = backend.clone();
+            async move {
+                common::admin_claim::test_last_administrator_assignment_is_kept(&backend).await
+            }
+        })
+        .await;
+    finish_isolated(&backend, &schema, outcome).await;
+}
+
+/// Runs in its own schema: the scenario counts the administrators left.
+#[tokio::test]
+async fn test_closing_administrator_is_not_counted() {
+    let (backend, schema) = isolated("closingadmin").await;
+    let outcome =
+        tokio::spawn({
+            let backend = backend.clone();
+            async move {
+                common::admin_claim::test_closing_administrator_is_not_counted(&backend).await
+            }
+        })
+        .await;
+    finish_isolated(&backend, &schema, outcome).await;
+}
+
 #[tokio::test]
 async fn test_list_credentials_by_type_pages() {
     common::test_list_credentials_by_type_pages(&setup().await).await;

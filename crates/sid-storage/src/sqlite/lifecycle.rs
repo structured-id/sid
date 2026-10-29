@@ -422,13 +422,8 @@ impl SqliteBackend {
         // The write transaction holds the database lock: the administrators
         // counted here are the ones this write sees.
         let mut tx = self.begin_write().await?;
-        if profile.is_admin() {
-            let admins: Vec<(sid_core::models::ProfileId, String)> = sqlx::query_as(
-                "SELECT id, status FROM profiles WHERE ' ' || roles || ' ' LIKE '% admin %'",
-            )
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(|e| SidError::Storage(format!("read administrators: {e}")))?;
+        if super::rbac::administrator_exists(&mut *tx, Some(profile.id)).await? {
+            let admins = super::rbac::administrators(&mut tx).await?;
             crate::check_other_administrator(profile.id, &admins)?;
         }
         if !super::directory::update_profile(&mut tx, profile).await? {

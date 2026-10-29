@@ -1586,7 +1586,7 @@ impl StorageBackend for SqliteBackend {
     async fn claim_first_admin(
         &self,
         claim_sealed: &[u8],
-        profile: &sid_core::models::Profile,
+        profile: sid_core::models::ProfileId,
         audit: MutationContext,
     ) -> SidResult<bool> {
         self.claim_first_admin_impl(claim_sealed, profile, audit)

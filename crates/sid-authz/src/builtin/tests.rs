@@ -74,3 +74,27 @@ async fn the_invite_issuer_role_is_provisioned_once() {
     assert_eq!(stored_with_key(&roles, INVITE_ISSUER_ROLE), 1);
     assert_eq!(stored_with_key(&roles, SCIM_PROVISIONER_ROLE), 1);
 }
+
+/// The installation administrator role is created once, at its fixed id,
+/// with no permission list: its authority is its installation-wide
+/// assignment.
+#[tokio::test]
+async fn the_installation_administrator_role_is_provisioned_once() {
+    let storage = MockStorage::new();
+    let first = ensure_installation_administrator_role(&storage)
+        .await
+        .unwrap();
+    assert_eq!(first.id, Role::installation_administrator().id);
+    assert_eq!(first.project_id, ProjectId::system());
+    assert!(first.permissions.is_empty());
+
+    let again = ensure_installation_administrator_role(&storage)
+        .await
+        .unwrap();
+    assert_eq!(again.id, first.id);
+    let roles = storage.list_roles(ProjectId::system()).await.unwrap();
+    assert_eq!(
+        stored_with_key(&roles, sid_core::models::INSTALLATION_ADMINISTRATOR_ROLE),
+        1
+    );
+}

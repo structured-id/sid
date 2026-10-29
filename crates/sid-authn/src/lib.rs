@@ -15,6 +15,7 @@
 
 pub mod account_api;
 pub mod account_closure;
+pub mod account_roles;
 pub mod admin_claim;
 pub mod anomaly;
 pub mod backchannel_logout;

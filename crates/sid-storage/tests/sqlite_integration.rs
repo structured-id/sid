@@ -1061,6 +1061,16 @@ async fn test_last_administrator_cannot_request_closure() {
     common::admin_claim::test_last_administrator_cannot_request_closure(&setup().await).await;
 }
 
+#[tokio::test]
+async fn test_last_administrator_assignment_is_kept() {
+    common::admin_claim::test_last_administrator_assignment_is_kept(&setup().await).await;
+}
+
+#[tokio::test]
+async fn test_closing_administrator_is_not_counted() {
+    common::admin_claim::test_closing_administrator_is_not_counted(&setup().await).await;
+}
+
 // ─── Issuer store conformance ───
 
 /// Run issuer store conformance `scenario`, each on a fresh database: the

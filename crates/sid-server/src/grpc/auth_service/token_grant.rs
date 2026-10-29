@@ -103,9 +103,12 @@ impl GrantHost for ProfileGrant<'_> {
             (!resolved.is_empty()).then_some(resolved)
         };
         let sub = self.service.subject_for(issuer, profile.id, client).await?;
+        let roles = sid_authn::account_roles::account_roles(self.service.storage.as_ref(), profile)
+            .await
+            .map_err(claims_unavailable)?;
         Ok(AccountClaims {
             sub,
-            roles: profile.roles.clone(),
+            roles,
             id_token: Some(IdTokenAccount {
                 profile: profile.clone(),
                 email,

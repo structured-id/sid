@@ -76,7 +76,7 @@ fn a_generated_signing_key_signs_verifiable_tokens() {
         .issue_access_token(
             &profile.id.to_string(),
             Some(&profile.id.to_string()),
-            &profile,
+            &profile.roles,
             &session,
             &["openid".to_string()],
             None,
@@ -109,7 +109,7 @@ fn test_jwt_roundtrip() {
         .issue_access_token(
             &profile.id.to_string(),
             Some(&profile.id.to_string()),
-            &profile,
+            &profile.roles,
             &session,
             &scopes,
             None,
@@ -183,7 +183,7 @@ fn test_access_token_audience() {
         .issue_access_token(
             &profile.id.to_string(),
             Some(&profile.id.to_string()),
-            &profile,
+            &profile.roles,
             &session,
             &scopes,
             None,
@@ -332,7 +332,7 @@ fn test_expired_token_rejected() {
         .issue_access_token(
             &profile.id.to_string(),
             Some(&profile.id.to_string()),
-            &profile,
+            &profile.roles,
             &session,
             &[],
             None,
@@ -362,7 +362,7 @@ fn test_roles_claim_in_access_token() {
         .issue_access_token(
             &profile.id.to_string(),
             Some(&profile.id.to_string()),
-            &profile,
+            &profile.roles,
             &session,
             &["openid".to_string()],
             None,
@@ -396,7 +396,7 @@ fn test_amr_claim_in_access_token() {
         .issue_access_token(
             &profile.id.to_string(),
             Some(&profile.id.to_string()),
-            &profile,
+            &profile.roles,
             &session,
             &["openid".to_string()],
             None,
@@ -452,7 +452,7 @@ fn test_empty_amr_not_serialized() {
         .issue_access_token(
             &profile.id.to_string(),
             Some(&profile.id.to_string()),
-            &profile,
+            &profile.roles,
             &session,
             &["openid".to_string()],
             None,
@@ -481,7 +481,7 @@ fn test_empty_roles_not_serialized() {
         .issue_access_token(
             &profile.id.to_string(),
             Some(&profile.id.to_string()),
-            &profile,
+            &profile.roles,
             &session,
             &["openid".to_string()],
             None,
@@ -535,7 +535,7 @@ fn test_auth_time_is_last_authentication() {
         .issue_access_token(
             &profile.id.to_string(),
             Some(&profile.id.to_string()),
-            &profile,
+            &profile.roles,
             &session,
             &[],
             None,
@@ -571,7 +571,7 @@ fn test_access_token_with_custom_claims() {
         .issue_access_token(
             &profile.id.to_string(),
             Some(&profile.id.to_string()),
-            &profile,
+            &profile.roles,
             &session,
             &["openid".to_string()],
             None,
@@ -613,7 +613,7 @@ fn test_access_token_empty_custom_claims_same_as_none() {
         .issue_access_token(
             &profile.id.to_string(),
             Some(&profile.id.to_string()),
-            &profile,
+            &profile.roles,
             &session,
             &["openid".to_string()],
             None,
@@ -624,7 +624,7 @@ fn test_access_token_empty_custom_claims_same_as_none() {
         .issue_access_token(
             &profile.id.to_string(),
             Some(&profile.id.to_string()),
-            &profile,
+            &profile.roles,
             &session,
             &["openid".to_string()],
             None,
@@ -742,7 +742,7 @@ fn test_impersonation_token_act_not_in_regular_token() {
         .issue_access_token(
             &profile.id.to_string(),
             Some(&profile.id.to_string()),
-            &profile,
+            &profile.roles,
             &session,
             &["openid".into()],
             None,
@@ -773,7 +773,7 @@ fn test_reissue_elevated_token() {
         .issue_access_token(
             &profile.id.to_string(),
             Some(&profile.id.to_string()),
-            &profile,
+            &profile.roles,
             &session,
             &scopes,
             None,
@@ -836,7 +836,7 @@ fn test_elevated_token_ends_with_its_elevation() {
             .issue_access_token(
                 &profile.id.to_string(),
                 Some(&profile.id.to_string()),
-                &profile,
+                &profile.roles,
                 session,
                 &["openid".into()],
                 None,
@@ -1184,7 +1184,7 @@ fn a_pending_second_factor_token_is_accepted_only_where_asked_for() {
         .issue_access_token(
             &profile.id.to_string(),
             Some(&profile.id.to_string()),
-            &profile,
+            &profile.roles,
             &pending,
             &pending.scopes,
             None,
@@ -1205,7 +1205,7 @@ fn a_pending_second_factor_token_is_accepted_only_where_asked_for() {
         .issue_access_token(
             &profile.id.to_string(),
             Some(&profile.id.to_string()),
-            &profile,
+            &profile.roles,
             &session,
             &["openid".to_string()],
             None,

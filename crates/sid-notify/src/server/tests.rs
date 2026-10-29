@@ -691,7 +691,7 @@ fn issue_admin_token(jwt: &sid_authn::jwt::JwtService) -> String {
     jwt.issue_access_token(
         &profile.id.to_string(),
         Some(&profile.id.to_string()),
-        &profile,
+        &profile.roles,
         &session,
         &[],
         None,
@@ -716,7 +716,7 @@ fn issue_user_token(jwt: &sid_authn::jwt::JwtService) -> String {
     jwt.issue_access_token(
         &profile.id.to_string(),
         Some(&profile.id.to_string()),
-        &profile,
+        &profile.roles,
         &session,
         &[],
         None,

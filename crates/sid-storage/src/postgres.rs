@@ -129,7 +129,7 @@ fn key_generation(generation: u32) -> SidResult<i32> {
 use crate::key_versions::{key_derivation_name, key_version_params};
 use sid_core::models::machine_user::MachineUserStatus;
 
-use crate::{ADMIN_EXISTS_SQL, CENTRALLY_MANAGED_SQL, OWED_WORK_CAPACITY};
+use crate::{CENTRALLY_MANAGED_SQL, OWED_WORK_CAPACITY};
 
 /// Consumes the admin claim `$2` (sealed) stored as `$1`, only on a
 /// self-managed installation: a centrally managed one consumes no local
@@ -679,6 +679,109 @@ impl PostgresBackend {
             Self::bump_connector_revision(tx, connector).await?;
         }
         Ok(())
+    }
+
+    /// Whether a live installation administrator assignment exists, held by
+    /// `profile` when one is given.
+    async fn administrator_exists_in<'e, E>(
+        executor: E,
+        profile: Option<ProfileId>,
+    ) -> SidResult<bool>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM role_assignments
+                 WHERE role_id = $1 AND scope = $2
+                   AND (expires_at IS NULL OR expires_at > NOW())
+                   AND ($3::uuid IS NULL OR profile_id = $3))",
+        )
+        .bind(Role::installation_administrator().id.0)
+        .bind(sid_core::models::INSTALLATION_SCOPE)
+        .bind(profile)
+        .fetch_one(executor)
+        .await
+        .map_err(|e| SidError::Storage(format!("administrator exists: {e}")))
+    }
+
+    /// Make `profile` an installation administrator in `tx`: the built-in
+    /// role is stored if it is not, then assigned across the installation.
+    /// A host commits it in its own transaction with its state, as a
+    /// first-administrator claim does.
+    pub async fn grant_installation_administrator_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        profile: ProfileId,
+    ) -> SidResult<()> {
+        let role = Role::installation_administrator();
+        sqlx::query(
+            "INSERT INTO roles (id, project_id, key, name, description, group_label, permissions,
+                 created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(role.id.0)
+        .bind(role.project_id.0)
+        .bind(&role.key)
+        .bind(&role.name)
+        .bind(&role.description)
+        .bind(&role.group)
+        .bind(role.permissions_string())
+        .bind(role.created_at)
+        .bind(role.updated_at)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| insert_error("role", e))?;
+        Self::insert_role_assignment_in_tx(
+            tx,
+            &RoleAssignment::new(RoleAssignmentPrincipal::Profile(profile), role.id)
+                .on_installation(),
+        )
+        .await
+    }
+
+    /// Lock, in `tx`, every Profile holding a live installation administrator
+    /// assignment, in one order, and read its status: closures and
+    /// assignment removals are then decided one after the other.
+    async fn lock_administrators_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> SidResult<Vec<(ProfileId, String)>> {
+        sqlx::query_as(
+            "SELECT id, status FROM profiles WHERE id IN (
+                 SELECT profile_id FROM role_assignments
+                 WHERE role_id = $1 AND scope = $2
+                   AND (expires_at IS NULL OR expires_at > NOW()))
+             ORDER BY id FOR UPDATE",
+        )
+        .bind(Role::installation_administrator().id.0)
+        .bind(sid_core::models::INSTALLATION_SCOPE)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("lock administrators: {e}")))
+    }
+
+    /// Refuse, in `tx`, removing the assignment `id` when it is the
+    /// installation's last live administrator assignment held by an active
+    /// or suspended Profile. The administrators are locked first, as a
+    /// closure locks them, then every administrator assignment in one order,
+    /// so concurrent removals and closures each count what the other left.
+    async fn keep_last_administrator_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        id: RoleAssignmentId,
+    ) -> SidResult<()> {
+        Self::lock_administrators_in_tx(tx).await?;
+        let administrators: Vec<(Uuid, String)> = sqlx::query_as(
+            "SELECT ra.id, p.status FROM role_assignments ra
+             JOIN profiles p ON p.id = ra.profile_id
+             WHERE ra.role_id = $1 AND ra.scope = $2
+               AND (ra.expires_at IS NULL OR ra.expires_at > NOW())
+             ORDER BY ra.id FOR UPDATE OF ra",
+        )
+        .bind(Role::installation_administrator().id.0)
+        .bind(sid_core::models::INSTALLATION_SCOPE)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("lock administrator assignments: {e}")))?;
+        crate::check_other_administrator_assignment(id, &administrators)
     }
 
     /// Store the envelope of the administrative assignment `id` in `tx`; an
@@ -2042,10 +2145,7 @@ impl StorageBackend for PostgresBackend {
                 .map_err(|e| SidError::Storage(format!("consume admin claim: {e}")))?
                 .rows_affected()
                 == 1;
-            let admin_exists: bool = sqlx::query_scalar(ADMIN_EXISTS_SQL)
-                .fetch_one(&mut *tx)
-                .await
-                .map_err(|e| SidError::Storage(format!("admin exists: {e}")))?;
+            let admin_exists = Self::administrator_exists_in(&mut *tx, None).await?;
             if !consumed || admin_exists {
                 return Err(SidError::InvalidState(
                     "the installation has no open administrator claim".into(),
@@ -2084,6 +2184,11 @@ impl StorageBackend for PostgresBackend {
         }
 
         directory::insert_profile(&mut tx, profile).await?;
+        // The claim it consumed above makes the registrant the first
+        // administrator, in the same commit.
+        if instance_claim.is_some() {
+            Self::grant_installation_administrator_in_tx(&mut tx, profile.id).await?;
+        }
 
         if let Some(email) = email {
             sqlx::query(
@@ -3613,10 +3718,7 @@ impl StorageBackend for PostgresBackend {
     }
 
     async fn admin_exists(&self) -> SidResult<bool> {
-        sqlx::query_scalar(ADMIN_EXISTS_SQL)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|e| SidError::Storage(format!("admin exists: {e}")))
+        Self::administrator_exists_in(&self.pool, None).await
     }
 
     async fn bootstrap_policy(&self) -> SidResult<sid_core::models::BootstrapPolicy> {
@@ -3671,11 +3773,7 @@ impl StorageBackend for PostgresBackend {
                 .map_err(|e| SidError::Storage(e.to_string()))?;
             return Ok(CentralAdoption::AlreadyCentral);
         }
-        let admin_exists: bool = sqlx::query_scalar(ADMIN_EXISTS_SQL)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(|e| SidError::Storage(format!("admin exists: {e}")))?;
-        if admin_exists {
+        if Self::administrator_exists_in(&mut *tx, None).await? {
             return Ok(CentralAdoption::LocalAdministrator);
         }
         Self::audit_in_tx(&mut tx, "installation:bootstrap_policy", audit).await?;
@@ -3740,7 +3838,7 @@ impl StorageBackend for PostgresBackend {
     async fn claim_first_admin(
         &self,
         claim_sealed: &[u8],
-        profile: &Profile,
+        profile: ProfileId,
         audit: MutationContext,
     ) -> SidResult<bool> {
         let mut tx = self
@@ -3761,21 +3859,25 @@ impl StorageBackend for PostgresBackend {
         if !consumed {
             return Ok(false);
         }
-        let admin_exists: bool = sqlx::query_scalar(ADMIN_EXISTS_SQL)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(|e| SidError::Storage(format!("admin exists: {e}")))?;
-        if admin_exists {
+        if Self::administrator_exists_in(&mut *tx, None).await? {
             // A claim left beside an administrator grants nothing: drop it.
             tx.commit()
                 .await
                 .map_err(|e| SidError::Storage(e.to_string()))?;
             return Ok(false);
         }
-        if !directory::update_profile(&mut tx, profile).await? {
+        let stored: bool =
+            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM profiles WHERE id = $1)")
+                .bind(profile)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| SidError::Storage(format!("claiming profile: {e}")))?;
+        if !stored {
+            // Rolled back: the claim stays for a stored claimer.
             return Ok(false);
         }
-        Self::audit_in_tx(&mut tx, &format!("profile:{}", profile.id), audit).await?;
+        Self::grant_installation_administrator_in_tx(&mut tx, profile).await?;
+        Self::audit_in_tx(&mut tx, &format!("profile:{profile}"), audit).await?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -4037,6 +4139,18 @@ impl StorageBackend for PostgresBackend {
             .begin()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
+        if id == Role::installation_administrator().id {
+            // The role row is locked first: an assignment of it, which takes
+            // a key-share lock on the row, cannot slip in before the delete.
+            sqlx::query("SELECT id FROM roles WHERE id = $1 FOR UPDATE")
+                .bind(id.0)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| SidError::Storage(format!("lock administrator role: {e}")))?;
+            if Self::administrator_exists_in(&mut *tx, None).await? {
+                return Err(crate::administrator_role_assigned());
+            }
+        }
         sqlx::query("DELETE FROM roles WHERE id = $1")
             .bind(id.0)
             .execute(&mut *tx)
@@ -4257,6 +4371,7 @@ impl StorageBackend for PostgresBackend {
             .begin()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
+        Self::keep_last_administrator_in_tx(&mut tx, id).await?;
         let removed: Option<(Option<sid_core::models::ProvisioningConnectorId>,)> = sqlx::query_as(
             "DELETE FROM role_assignments WHERE id = $1 RETURNING provisioning_connector_id",
         )
@@ -4322,6 +4437,7 @@ impl StorageBackend for PostgresBackend {
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
         Self::check_assignment_fence_in_tx(&mut tx, fence).await?;
+        Self::keep_last_administrator_in_tx(&mut tx, id).await?;
         let removed: Option<(Option<sid_core::models::ProvisioningConnectorId>,)> = sqlx::query_as(
             "DELETE FROM role_assignments WHERE id = $1 RETURNING provisioning_connector_id",
         )
@@ -6813,16 +6929,10 @@ impl StorageBackend for PostgresBackend {
             .begin()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
-        if profile.is_admin() {
+        if Self::administrator_exists_in(&mut *tx, Some(profile.id)).await? {
             // Every administrator row is locked in one order, so concurrent
             // requests are decided one after the other.
-            let admins: Vec<(ProfileId, String)> = sqlx::query_as(
-                "SELECT id, status FROM profiles WHERE ' ' || roles || ' ' LIKE '% admin %'
-                 ORDER BY id FOR UPDATE",
-            )
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(|e| SidError::Storage(format!("lock administrators: {e}")))?;
+            let admins = Self::lock_administrators_in_tx(&mut tx).await?;
             crate::check_other_administrator(profile.id, &admins)?;
         }
         if !directory::update_profile(&mut tx, profile).await? {
