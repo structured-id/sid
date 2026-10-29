@@ -128,7 +128,7 @@ where
             }
             // The page's own calls are served under the API mount only; the
             // services see their gRPC paths.
-            let Some(method) = sid_infra::http::api_method(request.uri().path()) else {
+            let Some(method) = sid_infra::route::api_method(request.uri().path()) else {
                 return Ok(tonic::Status::unimplemented(
                     "the page's calls are served under /api only",
                 )

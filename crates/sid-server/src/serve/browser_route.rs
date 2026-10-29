@@ -17,7 +17,7 @@ use std::task::{Context, Poll};
 use sid_authn::issuer::{AddressedIssuer, IssuerRegistry};
 use sid_authn::resource::TranscodedRequest;
 use sid_core::grpc_error::{ApiError, ErrorReason, refuse};
-use sid_infra::http::api_method;
+use sid_infra::route::api_method;
 use tonic::Status;
 use tonic::body::Body;
 use tonic::codegen::{BoxFuture, Service, http};
@@ -76,106 +76,6 @@ pub const BROWSER_METHODS: &[&str] = &[
     "/sid.v1.admin.EnrollmentService/GetInstanceStatus",
     "/sid.v1.admin.EnrollmentService/GetEnrollmentPolicy",
 ];
-
-/// What an issuer endpoint does with its issuer's browser-session cookie.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionCookieUse {
-    /// Reads the session; sets nothing.
-    Read,
-    /// Sets the session a completed sign-in creates; reads none.
-    Issue,
-    /// Reads the sign-in's pending context and sets the session it completes.
-    ReadAndIssue,
-    /// Reads the session and clears it when single sign-on ends.
-    ReadAndClear,
-}
-
-/// What a federated entry endpoint does with its correlation cookies.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EntryCookieUse {
-    /// Sets the correlation cookie of the entry it starts.
-    Start,
-    /// Reads the returning entry's correlation cookie and clears it; may set
-    /// the cookie of a new entry it restarts.
-    Return,
-}
-
-/// The cookies of its own issuer an endpoint below `/i/{handle}` receives
-/// and sets; an edge in front of the issuer forwards nothing else either way.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct IssuerCookies {
-    pub session: Option<SessionCookieUse>,
-    pub entry: Option<EntryCookieUse>,
-}
-
-impl IssuerCookies {
-    /// Whether the endpoint is sent the issuer's session cookie.
-    pub fn receives_session(&self) -> bool {
-        matches!(
-            self.session,
-            Some(
-                SessionCookieUse::Read
-                    | SessionCookieUse::ReadAndIssue
-                    | SessionCookieUse::ReadAndClear
-            )
-        )
-    }
-
-    /// Whether the endpoint's answer may set or clear the session cookie.
-    pub fn sets_session(&self) -> bool {
-        matches!(
-            self.session,
-            Some(
-                SessionCookieUse::Issue
-                    | SessionCookieUse::ReadAndIssue
-                    | SessionCookieUse::ReadAndClear
-            )
-        )
-    }
-
-    /// Whether the endpoint is sent the entries' correlation cookies.
-    pub fn receives_entry(&self) -> bool {
-        self.entry == Some(EntryCookieUse::Return)
-    }
-
-    /// Whether the endpoint's answer may set or clear correlation cookies.
-    pub fn sets_entry(&self) -> bool {
-        self.entry.is_some()
-    }
-}
-
-/// The sign-in surface's methods whose answer delivers the session a
-/// completed sign-in creates (or its pending second-factor context).
-const ISSUING_METHODS: &[&str] = &[
-    "/sid.v1.authn.AuthService/OpaqueLoginFinish",
-    "/sid.v1.authn.AuthService/LegacyMigrateFinish",
-    "/sid.v1.authn.AuthService/WebAuthnAuthenticationFinish",
-    "/sid.v1.authn.AuthService/VerifyOtp",
-    "/sid.v1.authn.AuthService/VerifyMagicLink",
-    "/sid.v1.authn.AuthService/CompletePasswordReset",
-];
-
-/// The cookies of its issuer the CE endpoint `endpoint` (the path below
-/// `/i/{handle}`) receives and sets: authorization reads the session for
-/// single sign-on, end-session reads and clears it, the sign-in ceremonies
-/// that complete a session set it, and a second factor completing a pending
-/// sign-in reads that context first. Discovery, keys, token, UserInfo,
-/// introspection, revocation and every other method use no cookie.
-pub fn issuer_cookies(endpoint: &str) -> IssuerCookies {
-    let session = match endpoint {
-        "/oauth2/authorize" => Some(SessionCookieUse::Read),
-        "/oauth2/end-session" => Some(SessionCookieUse::ReadAndClear),
-        _ => match api_method(endpoint) {
-            Some("/sid.v1.authn.AuthService/VerifyTotp") => Some(SessionCookieUse::ReadAndIssue),
-            Some(method) if ISSUING_METHODS.contains(&method) => Some(SessionCookieUse::Issue),
-            _ => None,
-        },
-    };
-    IssuerCookies {
-        session,
-        entry: None,
-    }
-}
 
 /// The handle and the gRPC path of a call to `/i/{handle}/api/...`; `None`
 /// for any other path.
