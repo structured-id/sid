@@ -6,7 +6,10 @@
 use sid_core::models::{Profile, ProfileId, RoleAssignment};
 use sid_plugin::StorageBackend;
 
-use crate::caller::ADMIN_ROLE_CLAIM;
+/// The role a token's `roles` claim names its installation administrator by;
+/// [`account_roles`] puts it there for a Profile holding the installation
+/// administrator assignment, and only for one.
+pub const ADMIN_ROLE_CLAIM: &str = "admin";
 
 /// The `roles` of `profile`'s tokens. The administrator role comes from the
 /// installation administrator assignment, never from a label stored on the

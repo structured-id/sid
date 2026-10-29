@@ -4,7 +4,8 @@
 //! Privileged operations: bootstrap, admin profile update,
 //! bulk session revocation, profile metadata CRUD.
 
-use sid_authn::caller::{ADMIN_ROLE_CLAIM, authenticate};
+use sid_authn::account_roles::ADMIN_ROLE_CLAIM;
+use sid_authn::caller::authenticate;
 use sid_authn::jwt::JwtService;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::revocation_cascade::RevocationCascadeService;
