@@ -444,13 +444,6 @@ impl Session {
         session.is_provisional = true;
         session
     }
-
-    /// Whether this is the pending context of a sign-in owing its second
-    /// factor, as opposed to a channel-proof provisional session, which no
-    /// factor ever completes into a full one.
-    pub fn awaits_second_factor(&self) -> bool {
-        self.is_provisional && self.scopes == [SECOND_FACTOR_SCOPE]
-    }
 }
 
 /// The only scope of a sign-in's pending second-factor context.
@@ -460,6 +453,13 @@ pub const SECOND_FACTOR_SCOPE: &str = "sign_in:second_factor";
 pub const PENDING_SECOND_FACTOR_TTL_MINUTES: i64 = 5;
 
 impl<O> Session<O> {
+    /// Whether this is the pending context of a sign-in owing its second
+    /// factor, as opposed to a channel-proof provisional session, which no
+    /// factor ever completes into a full one.
+    pub fn awaits_second_factor(&self) -> bool {
+        self.is_provisional && self.scopes == [SECOND_FACTOR_SCOPE]
+    }
+
     /// When and how this session authenticated, as a grant made from it
     /// carries it.
     pub fn grant_authentication(&self) -> GrantAuthentication {
