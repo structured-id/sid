@@ -152,7 +152,7 @@ fn check_other_administrator(
 ) -> sid_core::Result<()> {
     let others = admins
         .iter()
-        .filter(|(id, status)| *id != closing && matches!(status.as_str(), "active" | "suspended"))
+        .filter(|(id, status)| *id != closing && usable_administrator(status))
         .count();
     if others == 0 {
         return Err(sid_core::Error::InvalidState(
@@ -163,22 +163,45 @@ fn check_other_administrator(
     Ok(())
 }
 
-/// Refuse removing the assignment `removed` when, among the live
-/// installation administrator assignments `administrators`, it is the only
-/// one left.
+/// Whether an administrator Profile in the stored `status` still
+/// administers: active or suspended, not closing or closed.
+fn usable_administrator(status: &str) -> bool {
+    matches!(status, "active" | "suspended")
+}
+
+/// Refuse removing the assignment `removed` when no other live installation
+/// administrator assignment (`administrators`: each id and its holder's
+/// stored status) belongs to an active or suspended Profile: the
+/// installation would be left without a usable administrator. Removing an
+/// assignment that is no administrator's is never refused.
 #[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
 fn check_other_administrator_assignment(
     removed: sid_core::models::RoleAssignmentId,
-    administrators: &[(uuid::Uuid,)],
+    administrators: &[(uuid::Uuid, String)],
 ) -> sid_core::Result<()> {
-    let is_administrator = administrators.iter().any(|(id,)| *id == removed.0);
-    if is_administrator && administrators.len() == 1 {
+    if !administrators.iter().any(|(id, _)| *id == removed.0) {
+        return Ok(());
+    }
+    let others = administrators
+        .iter()
+        .filter(|(id, status)| *id != removed.0 && usable_administrator(status))
+        .count();
+    if others == 0 {
         return Err(sid_core::Error::InvalidState(
             "the last administrator assignment cannot be removed: assign another administrator first"
                 .into(),
         ));
     }
     Ok(())
+}
+
+/// The refusal of deleting the installation administrator role while it is
+/// assigned: the deletion would take every assignment with it.
+#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
+fn administrator_role_assigned() -> sid_core::Error {
+    sid_core::Error::InvalidState(
+        "the installation administrator role cannot be deleted while it is assigned".into(),
+    )
 }
 
 /// The time before which an IP reputation entry counts as stale for a decay

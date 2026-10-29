@@ -3825,6 +3825,16 @@ impl StorageBackend for MockStorage {
     }
     async fn delete_role(&self, id: RoleId, _audit: MutationContext) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
+        // As the backends: the administrator role goes only once unassigned.
+        if inner
+            .role_assignments
+            .iter()
+            .any(|a| a.role_id == id && a.administers_installation())
+        {
+            return Err(sid_core::Error::InvalidState(
+                "the installation administrator role cannot be deleted while it is assigned".into(),
+            ));
+        }
         inner.roles.remove(&id);
         inner.role_assignments.retain(|a| a.role_id != id);
         Ok(())

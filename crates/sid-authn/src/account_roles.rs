@@ -15,6 +15,9 @@ pub async fn account_roles(
     storage: &dyn StorageBackend,
     profile: &Profile,
 ) -> sid_core::Result<Vec<String>> {
+    // Only the assignment is authority: a stored label confers nothing, also
+    // one a database initialized before the assignment existed holds. Such a
+    // database is initialized again from the current schema, not converted.
     let mut roles: Vec<String> = profile
         .roles
         .iter()

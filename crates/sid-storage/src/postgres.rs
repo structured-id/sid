@@ -739,19 +739,42 @@ impl PostgresBackend {
         .await
     }
 
+    /// Lock, in `tx`, every Profile holding a live installation administrator
+    /// assignment, in one order, and read its status: closures and
+    /// assignment removals are then decided one after the other.
+    async fn lock_administrators_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> SidResult<Vec<(ProfileId, String)>> {
+        sqlx::query_as(
+            "SELECT id, status FROM profiles WHERE id IN (
+                 SELECT profile_id FROM role_assignments
+                 WHERE role_id = $1 AND scope = $2
+                   AND (expires_at IS NULL OR expires_at > NOW()))
+             ORDER BY id FOR UPDATE",
+        )
+        .bind(Role::installation_administrator().id.0)
+        .bind(sid_core::models::INSTALLATION_SCOPE)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("lock administrators: {e}")))
+    }
+
     /// Refuse, in `tx`, removing the assignment `id` when it is the
-    /// installation's last live administrator assignment. Every administrator
-    /// assignment is locked in one order, so concurrent removals are decided
-    /// one after the other, each counting what the other left.
+    /// installation's last live administrator assignment held by an active
+    /// or suspended Profile. The administrators are locked first, as a
+    /// closure locks them, then every administrator assignment in one order,
+    /// so concurrent removals and closures each count what the other left.
     async fn keep_last_administrator_in_tx(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         id: RoleAssignmentId,
     ) -> SidResult<()> {
-        let administrators: Vec<(Uuid,)> = sqlx::query_as(
-            "SELECT id FROM role_assignments
-             WHERE role_id = $1 AND scope = $2
-               AND (expires_at IS NULL OR expires_at > NOW())
-             ORDER BY id FOR UPDATE",
+        Self::lock_administrators_in_tx(tx).await?;
+        let administrators: Vec<(Uuid, String)> = sqlx::query_as(
+            "SELECT ra.id, p.status FROM role_assignments ra
+             JOIN profiles p ON p.id = ra.profile_id
+             WHERE ra.role_id = $1 AND ra.scope = $2
+               AND (ra.expires_at IS NULL OR ra.expires_at > NOW())
+             ORDER BY ra.id FOR UPDATE OF ra",
         )
         .bind(Role::installation_administrator().id.0)
         .bind(sid_core::models::INSTALLATION_SCOPE)
@@ -4116,6 +4139,18 @@ impl StorageBackend for PostgresBackend {
             .begin()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
+        if id == Role::installation_administrator().id {
+            // The role row is locked first: an assignment of it, which takes
+            // a key-share lock on the row, cannot slip in before the delete.
+            sqlx::query("SELECT id FROM roles WHERE id = $1 FOR UPDATE")
+                .bind(id.0)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| SidError::Storage(format!("lock administrator role: {e}")))?;
+            if Self::administrator_exists_in(&mut *tx, None).await? {
+                return Err(crate::administrator_role_assigned());
+            }
+        }
         sqlx::query("DELETE FROM roles WHERE id = $1")
             .bind(id.0)
             .execute(&mut *tx)
@@ -6897,18 +6932,7 @@ impl StorageBackend for PostgresBackend {
         if Self::administrator_exists_in(&mut *tx, Some(profile.id)).await? {
             // Every administrator row is locked in one order, so concurrent
             // requests are decided one after the other.
-            let admins: Vec<(ProfileId, String)> = sqlx::query_as(
-                "SELECT id, status FROM profiles WHERE id IN (
-                     SELECT profile_id FROM role_assignments
-                     WHERE role_id = $1 AND scope = $2
-                       AND (expires_at IS NULL OR expires_at > NOW()))
-                 ORDER BY id FOR UPDATE",
-            )
-            .bind(Role::installation_administrator().id.0)
-            .bind(sid_core::models::INSTALLATION_SCOPE)
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(|e| SidError::Storage(format!("lock administrators: {e}")))?;
+            let admins = Self::lock_administrators_in_tx(&mut tx).await?;
             crate::check_other_administrator(profile.id, &admins)?;
         }
         if !directory::update_profile(&mut tx, profile).await? {

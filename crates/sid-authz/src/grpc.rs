@@ -1631,7 +1631,12 @@ impl AuthzService for AuthzServiceImpl {
                 .into(),
             )
             .await
-            .map_err(storage_failure)?;
+            .map_err(|e| match e {
+                // The administrator role, still assigned: deleting it would
+                // remove the installation's administrators with it.
+                sid_core::Error::InvalidState(_) => revocation_refusal(e),
+                other => storage_failure(other),
+            })?;
 
         info!("Deleted role {}", role_id.0);
 

@@ -277,17 +277,18 @@ pub(crate) async fn grant_installation_administrator(
 }
 
 /// Refuse, in `tx`, removing the assignment `id` when it is the
-/// installation's last live administrator assignment. The write transaction
-/// holds the database lock: the assignments counted are the ones this write
-/// sees.
+/// installation's last live administrator assignment held by an active or
+/// suspended Profile. The write transaction holds the database lock: the
+/// assignments and statuses counted are the ones this write sees.
 async fn keep_last_administrator(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     id: RoleAssignmentId,
 ) -> SidResult<()> {
-    let ids: Vec<(String,)> = sqlx::query_as(
-        "SELECT id FROM role_assignments
-         WHERE role_id = ? AND scope = ?
-           AND (expires_at IS NULL OR expires_at > ?)",
+    let ids: Vec<(String, String)> = sqlx::query_as(
+        "SELECT ra.id, p.status FROM role_assignments ra
+         JOIN profiles p ON p.id = ra.profile_id
+         WHERE ra.role_id = ? AND ra.scope = ?
+           AND (ra.expires_at IS NULL OR ra.expires_at > ?)",
     )
     .bind(Role::installation_administrator().id.0.to_string())
     .bind(sid_core::models::INSTALLATION_SCOPE)
@@ -296,10 +297,10 @@ async fn keep_last_administrator(
     .await
     .map_err(|e| SidError::Storage(format!("read administrator assignments: {e}")))?;
     let administrators = ids
-        .iter()
-        .map(|(id,)| {
-            uuid::Uuid::parse_str(id)
-                .map(|id| (id,))
+        .into_iter()
+        .map(|(id, status)| {
+            uuid::Uuid::parse_str(&id)
+                .map(|id| (id, status))
                 .map_err(|e| SidError::Storage(format!("column id: {e}")))
         })
         .collect::<SidResult<Vec<_>>>()?;
@@ -751,6 +752,11 @@ impl SqliteBackend {
         audit: MutationContext,
     ) -> SidResult<()> {
         let mut tx = self.begin_write().await?;
+        if id == Role::installation_administrator().id
+            && administrator_exists(&mut *tx, None).await?
+        {
+            return Err(crate::administrator_role_assigned());
+        }
         sqlx::query("DELETE FROM roles WHERE id = ?")
             .bind(id.0.to_string())
             .execute(&mut *tx)

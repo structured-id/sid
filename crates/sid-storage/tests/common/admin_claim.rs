@@ -121,7 +121,9 @@ pub async fn test_last_administrator_cannot_request_closure(backend: &dyn Storag
 /// The installation never loses its last administrator to a revocation:
 /// removing an administrator assignment is refused while it is the only
 /// one, and allowed once another administrator holds the role. Of two
-/// administrators' assignments removed at once, exactly one goes.
+/// administrators' assignments removed at once, exactly one goes. Deleting
+/// the administrator role itself, which would take every assignment with
+/// it, is refused while anyone holds it.
 pub async fn test_last_administrator_assignment_is_kept(backend: &dyn StorageBackend) {
     let tag = Uuid::now_v7().simple().to_string();
     let a = stored_profile(backend, &format!("keep_a_{tag}")).await;
@@ -143,6 +145,11 @@ pub async fn test_last_administrator_assignment_is_kept(backend: &dyn StorageBac
     let result = backend.delete_role_assignment(only, test_audit()).await;
     assert!(refused(&result), "{result:?}");
     assert!(administers(backend, a.id).await);
+    let result = backend
+        .delete_role(Role::installation_administrator().id, test_audit())
+        .await;
+    assert!(refused(&result), "{result:?}");
+    assert!(administers(backend, a.id).await);
 
     make_admin(backend, b.id).await;
     let other = assignment_of(b.id).await;
@@ -156,6 +163,68 @@ pub async fn test_last_administrator_assignment_is_kept(backend: &dyn StorageBac
     );
     assert!(backend.admin_exists().await.unwrap());
     assert!(administers(backend, a.id).await ^ administers(backend, b.id).await);
+    let result = backend
+        .delete_role(Role::installation_administrator().id, test_audit())
+        .await;
+    assert!(refused(&result), "{result:?}");
+    assert!(backend.admin_exists().await.unwrap());
+}
+
+/// An administrator closing their account administers nothing more: once A
+/// requested closure (allowed while B is active), B's assignment is the last
+/// usable one and cannot be removed, while A's still can. Removals and
+/// closures racing each other leave one usable administrator.
+pub async fn test_closing_administrator_is_not_counted(backend: &dyn StorageBackend) {
+    use sid_core::models::{ClosureMode, ClosureRequest, ProfileStatus};
+    let tag = Uuid::now_v7().simple().to_string();
+    let active = |name: &str| {
+        let mut profile = create_test_profile(&format!("{name}_{tag}"));
+        profile.status = ProfileStatus::Active;
+        profile
+    };
+    let (a, b) = (active("closing_a"), active("closing_b"));
+    for profile in [&a, &b] {
+        backend.create_profile(profile, test_audit()).await.unwrap();
+        make_admin(backend, profile.id).await;
+    }
+    let assignment_of = |profile: ProfileId| async move {
+        backend
+            .list_role_assignments_for_profile(profile)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(RoleAssignment::administers_installation)
+            .unwrap()
+            .id
+    };
+    let (a_assignment, b_assignment) = (assignment_of(a.id).await, assignment_of(b.id).await);
+
+    let mut closing = backend.get_profile(a.id).await.unwrap().unwrap();
+    closing
+        .transition_status(ProfileStatus::ClosureRequested)
+        .unwrap();
+    let request =
+        ClosureRequest::new(a.id, ClosureMode::Voluntary, a.id).with_grace_period_days(30);
+    assert!(
+        backend
+            .request_profile_closure(&closing, &request, test_audit())
+            .await
+            .unwrap()
+    );
+
+    let result = backend
+        .delete_role_assignment(b_assignment, test_audit())
+        .await;
+    assert!(
+        matches!(result, Err(sid_core::Error::InvalidState(_))),
+        "the closing administrator is not counted: {result:?}"
+    );
+    assert!(administers(backend, b.id).await);
+    backend
+        .delete_role_assignment(a_assignment, test_audit())
+        .await
+        .expect("the closing administrator's assignment can go");
+    assert!(administers(backend, b.id).await);
 }
 
 /// A self-registration presenting the instance claim: while the installation

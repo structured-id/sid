@@ -12,7 +12,7 @@ use common::mock_storage::MockStorage;
 use common::{TestServices, issue_admin_token, test_profile};
 use sid_core::models::{AuditEntry, INSTALLATION_SCOPE, ProjectId, Role, RoleAssignment};
 use sid_proto::sid::v1::authz::assign_role_request::Principal;
-use sid_proto::sid::v1::authz::{AssignRoleRequest, RevokeRoleRequest};
+use sid_proto::sid::v1::authz::{AssignRoleRequest, DeleteRoleRequest, RevokeRoleRequest};
 use sid_proto::sid::v1::authz_service_server::AuthzService;
 use tonic::{Code, Request};
 
@@ -140,6 +140,19 @@ async fn the_last_administrator_assignment_is_not_revoked() {
             &root,
             RevokeRoleRequest {
                 assignment_id: only.0.to_string(),
+            },
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), Code::FailedPrecondition, "{status:?}");
+    assert!(svc.storage.admin_exists().await.unwrap());
+
+    // Deleting the role would take the assignment with it: refused the same.
+    let status = authz
+        .delete_role(bearing(
+            &root,
+            DeleteRoleRequest {
+                id: Role::installation_administrator().id.0.to_string(),
             },
         ))
         .await
