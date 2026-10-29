@@ -717,6 +717,36 @@ pub async fn sealed_totp_seed(profile_id: ProfileId, seed: &[u8]) -> Vec<u8> {
     .expect("seal test seed")
 }
 
+/// A trusted issuer's subject newly assigned to `profile`, as a federated
+/// entry's host resolves the Profile its return admits.
+#[allow(dead_code)]
+pub async fn federated_assignment(
+    storage: &dyn StorageBackend,
+    profile: ProfileId,
+) -> sid_core::models::PrincipalAssignmentFence {
+    let principal = sid_core::models::Principal::new_federated_subject(
+        profile,
+        "https://central.sid.example.com/i/c",
+        &uuid::Uuid::now_v7().to_string(),
+    );
+    storage
+        .save_principal(
+            &principal,
+            sid_core::models::AuditEntry::system("test", "principal").into(),
+        )
+        .await
+        .expect("the assignment");
+    let stored = storage
+        .get_principal_by_value(
+            sid_core::models::PrincipalType::FederatedSubject,
+            &principal.value,
+        )
+        .await
+        .unwrap()
+        .expect("the stored principal");
+    sid_core::models::PrincipalAssignmentFence::of(&stored).expect("assigned to its Profile")
+}
+
 /// The installation organization of every test server: applications the
 /// services register, and test clients built by hand, belong to it.
 #[allow(dead_code)]

@@ -119,6 +119,46 @@ fn test_principal_type_from_str() {
     );
 }
 
+/// A trusted issuer's subject is a principal of its own type, held by one
+/// Profile, and its value names the exact issuer: the same subject under
+/// another issuer is another principal. Assigned at creation, as a confirmed
+/// association, and never mistaken for a typed login handle.
+#[test]
+fn test_federated_subject_is_scoped_to_its_issuer() {
+    let profile = ProfileId::generate();
+    let subject = "0192f3a4-7c1e-7b2a-9d4e-3f5a6b7c8d9e";
+    let p =
+        Principal::new_federated_subject(profile, "https://central.sid.example.com/i/c", subject);
+    assert_eq!(p.principal_type, PrincipalType::FederatedSubject);
+    assert!(!PrincipalType::FederatedSubject.is_contestable());
+    assert_eq!(p.assigned_profile_id, Some(profile));
+    assert!(p.verified);
+    assert!(p.email_policy_revision.is_none());
+    assert_eq!(
+        p.value,
+        federated_subject_value("https://central.sid.example.com/i/c", subject)
+    );
+    assert_ne!(
+        p.value,
+        federated_subject_value("https://other.sid.example.com/i/c", subject)
+    );
+    assert_eq!(
+        "federated_subject".parse::<PrincipalType>(),
+        Ok(PrincipalType::FederatedSubject)
+    );
+    assert!(!p.is_federated_username() && !p.is_global_username());
+}
+
+/// An issuer containing the separator cannot forge another issuer's subject:
+/// the value separates the two at the first space, which no issuer URL holds.
+#[test]
+fn test_federated_subject_value_is_unambiguous() {
+    assert_ne!(
+        federated_subject_value("https://a.sid.example.com", "b c"),
+        federated_subject_value("https://a.sid.example.com b", "c")
+    );
+}
+
 #[test]
 fn test_principal_type_serde_roundtrip() {
     let t = PrincipalType::Username;

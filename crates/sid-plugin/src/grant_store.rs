@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sid_core::Result;
 use sid_core::models::{
-    AuthCodeRedemption, AuthorizationCode, BrowserSecretHash, CredentialFence, MutationContext,
-    RefreshToken, Session, SessionEnd, SessionId,
+    AuthCodeRedemption, AuthorizationCode, BrowserSecretHash, MutationContext, RefreshToken,
+    Session, SessionEnd, SessionId, SignInProof,
 };
 use uuid::Uuid;
 
@@ -29,19 +29,22 @@ pub trait GrantStore: Send + Sync {
     /// authenticated; each evicted session owes what its end owes, with
     /// reason `SessionLimit`.
     ///
-    /// With `proved_by`, the session commits only while that credential is
-    /// active and holds the fence's data, checked in the same transaction and
-    /// serialized against the credential's change or revocation: a sign-in
-    /// whose credential a reset replaced meanwhile gets `Error::Fenced` and
-    /// stores nothing. A reset committing after the session ends it through
-    /// its own revocation.
+    /// With `proved_by`, the session commits only while what the sign-in
+    /// proved still holds, checked in the same transaction and serialized
+    /// against its change: a credential still active with the fence's data
+    /// (a sign-in whose credential a reset replaced meanwhile gets
+    /// `Error::Fenced` and stores nothing; a reset committing after the
+    /// session ends it through its own revocation), or a principal still
+    /// assigned to the session's owner at the fence's revision. A store that
+    /// keeps no principals of its owners refuses an assignment proof with
+    /// `Error::Fenced`, never ignores it.
     ///
     /// Returns the list of evicted session IDs (empty if under limit or unlimited).
     async fn create_session_atomic(
         &self,
         session: &Session<Self::Owner>,
         max_sessions: u32,
-        proved_by: Option<&CredentialFence>,
+        proved_by: Option<SignInProof<'_>>,
         ctx: MutationContext,
     ) -> Result<Vec<SessionId>>;
 
@@ -61,7 +64,7 @@ pub trait GrantStore: Send + Sync {
         end: &SessionEnd,
         session: &Session<Self::Owner>,
         max_sessions: u32,
-        proved_by: Option<&CredentialFence>,
+        proved_by: Option<SignInProof<'_>>,
         ctx: MutationContext,
     ) -> Result<Vec<SessionId>>;
 

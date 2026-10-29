@@ -138,6 +138,15 @@ async fn upsert_binding(tx: &mut Tx<'_>, entity_id: Uuid, p: &Principal) -> SidR
     Ok(())
 }
 
+impl PostgresBackend {
+    /// Record `p`'s claim in `tx`, a host's own transaction that commits it
+    /// with the host's state (a confirmed federation association), as
+    /// [`sid_plugin::IdentityStore::save_principal`] records one.
+    pub async fn bind_principal_in_tx(tx: &mut Tx<'_>, p: &Principal) -> SidResult<()> {
+        bind_principal(tx, p).await
+    }
+}
+
 /// Record `p`'s claim. A new principal is first used here and assigned to its
 /// claimant with the proof `p` carries; an existing one gains the claim and
 /// keeps its assignment and proof, which only a proven transfer changes.

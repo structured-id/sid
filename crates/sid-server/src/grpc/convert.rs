@@ -86,8 +86,12 @@ pub(crate) fn profile_to_proto_with_contacts(
     }
 }
 
-/// Convert core `Principal` to proto `Principal`.
-pub(crate) fn principal_to_proto(p: &sid_core::models::Principal) -> sid_proto::sid::v1::Principal {
+/// Convert core `Principal` to proto `Principal`; none for a federated
+/// subject, which is a federation association, not a login handle the
+/// Profile's holder manages.
+pub(crate) fn principal_to_proto(
+    p: &sid_core::models::Principal,
+) -> Option<sid_proto::sid::v1::Principal> {
     use sid_core::models::PrincipalType;
 
     let proto_type = match p.principal_type {
@@ -96,9 +100,10 @@ pub(crate) fn principal_to_proto(p: &sid_core::models::Principal) -> sid_proto::
         PrincipalType::Username => sid_proto::sid::v1::PrincipalType::Username,
         PrincipalType::FaceEmbedding => sid_proto::sid::v1::PrincipalType::FaceEmbedding,
         PrincipalType::NfcTag => sid_proto::sid::v1::PrincipalType::NfcTag,
+        PrincipalType::FederatedSubject => return None,
     };
 
-    sid_proto::sid::v1::Principal {
+    Some(sid_proto::sid::v1::Principal {
         id: p.id.0.to_string(),
         r#type: proto_type.into(),
         value: p.value.clone(),
@@ -113,7 +118,7 @@ pub(crate) fn principal_to_proto(p: &sid_core::models::Principal) -> sid_proto::
         needs_address_confirmation: p.principal_type == PrincipalType::Email
             && p.email_policy_revision
                 != Some(sid_core::models::INSTALLATION_EMAIL_POLICY_REVISION),
-    }
+    })
 }
 
 /// Convert domain `ProfilePhone` to proto `ProfilePhone`.

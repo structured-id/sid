@@ -446,7 +446,7 @@ impl GrantStore for SqliteBackend {
         &self,
         session: &sid_core::models::Session,
         max_sessions: u32,
-        proved_by: Option<&sid_core::models::CredentialFence>,
+        proved_by: Option<sid_core::models::SignInProof<'_>>,
         ctx: MutationContext,
     ) -> SidResult<Vec<sid_core::models::SessionId>> {
         self.create_session_atomic_impl(session, max_sessions, proved_by, None, ctx)
@@ -459,7 +459,7 @@ impl GrantStore for SqliteBackend {
         end: &sid_core::models::SessionEnd,
         session: &sid_core::models::Session,
         max_sessions: u32,
-        proved_by: Option<&sid_core::models::CredentialFence>,
+        proved_by: Option<sid_core::models::SignInProof<'_>>,
         ctx: MutationContext,
     ) -> SidResult<Vec<sid_core::models::SessionId>> {
         self.create_session_atomic_impl(session, max_sessions, proved_by, Some((pending, end)), ctx)
