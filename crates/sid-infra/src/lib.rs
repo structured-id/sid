@@ -25,6 +25,7 @@ pub mod nats_event_bus;
 pub mod nats_topology;
 #[cfg(feature = "redis")]
 pub mod redis_cache;
+pub mod route;
 #[cfg(feature = "redis")]
 pub mod shared_cache;
 

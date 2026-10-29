@@ -12,8 +12,7 @@ use sid_authn::sign_in_delivery::{BrowserCredential, CeremonyClient, Delivery, S
 use sid_authn::sign_in_refusal::authentication_failed;
 use sid_core::models::event::{Event, event_types};
 use sid_core::models::{
-    ActorFence, AuditEntry, CredentialFence, MutationContext, Profile, Session, SessionEnd,
-    SessionId,
+    ActorFence, AuditEntry, MutationContext, Profile, Session, SessionEnd, SessionId, SignInProof,
 };
 use sid_plugin::storage::StorageBackend;
 use tonic::Status;
@@ -32,13 +31,27 @@ pub(crate) struct RetainedSignIn<'a> {
     pub context: String,
     /// The end of the operation; the delivery is never redelivered after.
     pub deadline: chrono::DateTime<Utc>,
+    /// The operation's significant inputs: a repeat must present them again.
+    pub inputs: Vec<u8>,
+}
+
+/// The significant inputs of an admitted sign-in committed under
+/// `assignment`: a repeat is the same operation only under the same
+/// assignment, so one retired and linked again never receives the earlier
+/// session.
+pub(crate) fn admitted_inputs(assignment: sid_core::models::PrincipalAssignmentFence) -> Vec<u8> {
+    format!(
+        "{}:{}:{}",
+        assignment.profile, assignment.principal.0, assignment.revision
+    )
+    .into_bytes()
 }
 
 /// The namespace of admitted sign-ins' completions.
 pub(crate) const ADMITTED_NAMESPACE: &str = "admitted-sign-in";
 
 /// The method name an admitted sign-in's completion records.
-const ADMITTED_METHOD: &str = "admitted_sign_in";
+pub(crate) const ADMITTED_METHOD: &str = "admitted_sign_in";
 
 /// What completing a sign-in uses, borrowed from the service that ran the
 /// ceremony.
@@ -67,9 +80,10 @@ impl SignInSessions<'_> {
     /// Store `session` and deliver its credential to `client`: the browser
     /// sign-in page gets the IdP session cookie, a fresh secret whose hash
     /// the session stores, and no access token; a native client gets the
-    /// session's access token. `proved_by` is the credential the sign-in
-    /// proved, which must still be current when the session commits, and
-    /// `policy` the login policy it was admitted under, which must be too.
+    /// session's access token. `proved_by` is what the sign-in proved (a
+    /// credential, or the principal assignment its evidence resolved), which
+    /// must still hold when the session commits, and `policy` the login
+    /// policy it was admitted under, which must too.
     /// A browser sign-in completing `retained` commits with that operation's
     /// completion, its sealed delivery.
     pub async fn sign_in(
@@ -77,7 +91,7 @@ impl SignInSessions<'_> {
         profile: &Profile,
         session: Session,
         client: CeremonyClient,
-        proved_by: Option<&CredentialFence>,
+        proved_by: Option<SignInProof<'_>>,
         policy: Option<ActorFence>,
         retained: Option<RetainedSignIn<'_>>,
     ) -> Result<SignedIn, Status> {
@@ -99,7 +113,7 @@ impl SignInSessions<'_> {
         pending: (SessionId, &SessionEnd),
         session: Session,
         client: CeremonyClient,
-        proved_by: Option<&CredentialFence>,
+        proved_by: Option<SignInProof<'_>>,
         policy: Option<ActorFence>,
     ) -> Result<SignedIn, Status> {
         let limit = self.max_concurrent_sessions;
@@ -126,7 +140,7 @@ impl SignInSessions<'_> {
         profile: &Profile,
         session: Session,
         client: CeremonyClient,
-        proved_by: Option<&CredentialFence>,
+        proved_by: Option<SignInProof<'_>>,
         policy: Option<ActorFence>,
     ) -> Result<(SignedIn, Option<String>), Status> {
         self.deliver(profile, session, client, proved_by, policy, 0, None, None)
@@ -142,7 +156,7 @@ impl SignInSessions<'_> {
         profile: &Profile,
         mut session: Session,
         client: CeremonyClient,
-        proved_by: Option<&CredentialFence>,
+        proved_by: Option<SignInProof<'_>>,
         policy: Option<ActorFence>,
         limit: u32,
         pending: Option<(SessionId, &SessionEnd)>,
@@ -169,7 +183,7 @@ impl SignInSessions<'_> {
                                 ADMITTED_NAMESPACE,
                                 retained.completion_key,
                                 ADMITTED_METHOD,
-                                profile.id.to_string().as_bytes(),
+                                &retained.inputs,
                                 sealed,
                             )
                             .retained_until(retained.deadline),
@@ -225,7 +239,7 @@ impl SignInSessions<'_> {
         &self,
         profile: &Profile,
         session: &Session,
-        proved_by: Option<&CredentialFence>,
+        proved_by: Option<SignInProof<'_>>,
         policy: Option<ActorFence>,
         limit: u32,
         pending: Option<(SessionId, &SessionEnd)>,

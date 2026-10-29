@@ -42,12 +42,14 @@ async fn repeats_record_no_further_sign_in() {
         operation: "entry-evidence",
         deadline,
     };
+    let assignment = common::federated_assignment(svc.storage.as_ref(), profile.id).await;
 
     for _ in 0..3 {
         svc.auth
             .complete_admitted_sign_in(
                 &from(ip),
                 &profile,
+                assignment,
                 &authentication,
                 "an-application",
                 Some(completion()),

@@ -786,6 +786,8 @@ mod grant_store {
         auth_code_commits_only_under_the_current_login_policy,
         a_policy_write_serializes_with_its_sessions,
         a_login_policy_fence_is_never_ignored,
+        an_assignment_proof_is_never_ignored,
+        a_session_commits_only_under_its_current_assignment,
         session_refused_after_its_password_changed,
         session_fence_is_the_owners_credential,
         session_fence_serializes_with_a_reset,

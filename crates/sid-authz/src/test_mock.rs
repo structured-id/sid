@@ -196,7 +196,7 @@ impl sid_plugin::GrantStore for MockStorage {
         &self,
         _: &Session,
         _: u32,
-        _: Option<&sid_core::models::CredentialFence>,
+        _: Option<sid_core::models::SignInProof<'_>>,
         _: MutationContext,
     ) -> Result<Vec<SessionId>> {
         unimplemented!()
@@ -207,7 +207,7 @@ impl sid_plugin::GrantStore for MockStorage {
         _: &sid_core::models::SessionEnd,
         _: &Session,
         _: u32,
-        _: Option<&sid_core::models::CredentialFence>,
+        _: Option<sid_core::models::SignInProof<'_>>,
         _: MutationContext,
     ) -> Result<Vec<SessionId>> {
         unimplemented!()

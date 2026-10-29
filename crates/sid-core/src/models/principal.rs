@@ -82,6 +82,18 @@ pub enum PrincipalType {
     FaceEmbedding,
     /// NFC tag identifier (physical credential, profile-scoped).
     NfcTag,
+    /// A trusted issuer's opaque subject, scoped to that exact issuer: the
+    /// confirmed association a federated return resolves its Profile by.
+    /// Never parsed from a typed login identifier; no email normalization,
+    /// contestation or matching applies to it.
+    FederatedSubject,
+}
+
+/// The value of the [`PrincipalType::FederatedSubject`] principal of
+/// `subject` under `issuer`: the issuer's length, the issuer and the subject,
+/// so no pair of other inputs yields the same value.
+pub fn federated_subject_value(issuer: &str, subject: &str) -> String {
+    format!("{}:{issuer} {subject}", issuer.len())
 }
 
 impl PrincipalType {
@@ -98,6 +110,7 @@ impl PrincipalType {
             Self::Username => "username",
             Self::FaceEmbedding => "face_embedding",
             Self::NfcTag => "nfc_tag",
+            Self::FederatedSubject => "federated_subject",
         }
     }
 }
@@ -119,6 +132,7 @@ impl std::str::FromStr for PrincipalType {
             "username" => Ok(Self::Username),
             "face_embedding" => Ok(Self::FaceEmbedding),
             "nfc_tag" => Ok(Self::NfcTag),
+            "federated_subject" => Ok(Self::FederatedSubject),
             other => Err(UnknownPrincipalType(other.to_owned())),
         }
     }
@@ -416,6 +430,19 @@ impl Principal {
     /// Create a new username principal (profile-bound, global or federated).
     pub fn new_username(profile_id: ProfileId, username: impl Into<String>) -> Self {
         Self::new(profile_id, PrincipalType::Username, username)
+    }
+
+    /// The confirmed association of `issuer`'s `subject` with `profile_id`:
+    /// assigned to it from the start, the confirmation being its proof,
+    /// which never expires.
+    pub fn new_federated_subject(profile_id: ProfileId, issuer: &str, subject: &str) -> Self {
+        let mut p = Self::new(
+            profile_id,
+            PrincipalType::FederatedSubject,
+            federated_subject_value(issuer, subject),
+        );
+        p.verify(0);
+        p
     }
 
     /// Record channel proof for a principal about to be first bound by its

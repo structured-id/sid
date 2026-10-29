@@ -35,6 +35,26 @@ pub const PENDING_TTL: Duration = Duration::from_secs(600);
 /// The cache namespace of pending entries.
 const NAMESPACE: &str = "federated-entry";
 
+/// What separates a correlation cookie's name from its session cookie's.
+const ENTRY_INFIX: &str = "-entry-";
+
+/// The bytes of the state's digest a correlation cookie's name carries.
+const ENTRY_DIGEST_BYTES: usize = 8;
+
+/// Whether `name` is the name of a correlation cookie of the entries an
+/// issuer whose session cookie is `session` starts: that name, the infix
+/// and the lowercase hex digest of one entry's state.
+pub fn is_entry_cookie(session: &str, name: &str) -> bool {
+    name.strip_prefix(session)
+        .and_then(|rest| rest.strip_prefix(ENTRY_INFIX))
+        .is_some_and(|digest| {
+            digest.len() == 2 * ENTRY_DIGEST_BYTES
+                && digest
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        })
+}
+
 /// The longest one code exchange may take: past it the token request is
 /// abandoned as of unknown outcome.
 const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -211,9 +231,9 @@ impl FederatedEntry {
         use sha2::{Digest, Sha256};
         let digest = Sha256::digest(state.as_bytes());
         BrowserCookie::new(&format!(
-            "{}-entry-{}",
+            "{}{ENTRY_INFIX}{}",
             self.cookie.name(),
-            hex::encode(&digest[..8])
+            hex::encode(&digest[..ENTRY_DIGEST_BYTES])
         ))
         .expect("a __Host- token with a hex suffix is a __Host- token")
     }

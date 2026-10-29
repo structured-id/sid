@@ -3,8 +3,10 @@
 //! Profiles, grants are bound to a registered resource.
 
 use async_trait::async_trait;
-use sid_core::models::{ProfileId, ResourceId};
-use sid_plugin::conformance::grant_store::{GrantHarness, LoginPolicyHarness, OwnerStatusHarness};
+use sid_core::models::{Principal, PrincipalAssignmentFence, PrincipalType, ProfileId, ResourceId};
+use sid_plugin::conformance::grant_store::{
+    AssignmentHarness, GrantHarness, LoginPolicyHarness, OwnerStatusHarness,
+};
 use sid_plugin::{CredentialStore, GrantStore, StorageBackend};
 
 use super::{create_test_profile, test_audit};
@@ -93,6 +95,38 @@ impl LoginPolicyHarness for ProfileGrants<'_> {
                 epoch
             }
         }
+    }
+}
+
+#[async_trait]
+impl AssignmentHarness for ProfileGrants<'_> {
+    async fn assign(&self, owner: &ProfileId) -> PrincipalAssignmentFence {
+        let principal = Principal::new_federated_subject(
+            *owner,
+            "https://central.sid.example.com/i/c",
+            &uuid::Uuid::now_v7().to_string(),
+        );
+        self.store
+            .save_principal(&principal, test_audit())
+            .await
+            .expect("the assignment");
+        let stored = self
+            .store
+            .get_principal_by_value(PrincipalType::FederatedSubject, &principal.value)
+            .await
+            .unwrap()
+            .expect("the stored principal");
+        PrincipalAssignmentFence::of(&stored).expect("assigned to its owner")
+    }
+
+    async fn release(&self, fence: &PrincipalAssignmentFence) {
+        assert!(
+            self.store
+                .unbind_principal(fence.principal, fence.profile, test_audit())
+                .await
+                .unwrap(),
+            "the release applies"
+        );
     }
 }
 

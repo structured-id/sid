@@ -163,6 +163,15 @@ async fn entity_id(tx: &mut WriteTx, p: &Principal) -> SidResult<String> {
         .map_err(storage("principal"))
 }
 
+impl SqliteBackend {
+    /// Record `p`'s claim in `tx`, a host's own write transaction (begun with
+    /// [`SqliteBackend::begin_write_on`]) that commits it with the host's
+    /// state, as [`sid_plugin::IdentityStore::save_principal`] records one.
+    pub async fn bind_principal_in_tx(tx: &mut WriteTx, p: &Principal) -> SidResult<()> {
+        bind_principal(tx, p).await
+    }
+}
+
 /// Record `p`'s claim; other holders keep theirs and the assignment stays.
 /// A login handle is never shared (`Conflict` when another Profile holds it).
 pub(super) async fn bind_principal(tx: &mut WriteTx, p: &Principal) -> SidResult<()> {
