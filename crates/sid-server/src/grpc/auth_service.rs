@@ -889,12 +889,13 @@ impl AuthServiceImpl {
             })
     }
 
-    /// The client address of `request`.
-    fn client_ip<T>(&self, request: &Request<T>) -> Option<std::net::IpAddr> {
+    /// The client address of `request`; a call whose address did not resolve
+    /// is refused before anything counts it.
+    fn client_ip<T>(&self, request: &Request<T>) -> Result<Option<std::net::IpAddr>, Status> {
         #[cfg(feature = "http")]
         return sid_infra::http::client_ip(request);
         #[cfg(not(feature = "http"))]
-        request.remote_addr().map(|addr| addr.ip())
+        Ok(request.remote_addr().map(|addr| addr.ip()))
     }
 
     /// Override the security policy (useful for testing conditional access wiring).
@@ -2695,7 +2696,7 @@ impl AuthServiceImpl {
     ) -> Result<UpstreamCeremony, Status> {
         Ok(UpstreamCeremony {
             client: self.ceremony_client(request.metadata())?,
-            client_ip: self.client_ip(request),
+            client_ip: self.client_ip(request)?,
             user_agent: extract_user_agent(request.metadata()),
             captcha_pass: extract_captcha_pass(request.metadata()),
         })
@@ -2790,7 +2791,7 @@ impl AuthServiceImpl {
         // requirements), a repeat of a completed operation included: a
         // retained credential is never delivered where the sign-in itself
         // would be refused.
-        let client_ip = self.client_ip(request);
+        let client_ip = self.client_ip(request)?;
         let user_agent = extract_user_agent(request.metadata());
         let user_agent = user_agent.as_deref();
         let captcha_pass = extract_captcha_pass(request.metadata());
@@ -3243,7 +3244,7 @@ impl AuthService for AuthServiceImpl {
         self.check_maintenance().await?;
         let host = ProfileSignIn {
             service: self,
-            client_ip: self.client_ip(&request),
+            client_ip: self.client_ip(&request)?,
         };
         let req = request.into_inner();
         let started =
@@ -3265,7 +3266,7 @@ impl AuthService for AuthServiceImpl {
         self.check_maintenance().await?;
         // Refused before the attempt is consumed.
         let client = self.ceremony_client(request.metadata())?;
-        let client_ip = self.client_ip(&request);
+        let client_ip = self.client_ip(&request)?;
         let user_agent = extract_user_agent(request.metadata());
         let captcha_pass = extract_captcha_pass(request.metadata());
         let req = request.into_inner();
@@ -3549,7 +3550,7 @@ impl AuthService for AuthServiceImpl {
 
         // Auth first, feature check second
         let verified = self.caller_claims(&request).await?;
-        let client_ip = self.client_ip(&request);
+        let client_ip = self.client_ip(&request)?;
 
         let zkpp = self.require_zkpp()?;
         let caller = verified.caller.profile_id;
@@ -3933,7 +3934,7 @@ impl AuthService for AuthServiceImpl {
         self.check_maintenance().await?;
         // Refused before the ceremony is consumed.
         let client = self.ceremony_client(request.metadata())?;
-        let client_ip = self.client_ip(&request);
+        let client_ip = self.client_ip(&request)?;
         let user_agent = extract_user_agent(request.metadata());
         let captcha_pass = extract_captcha_pass(request.metadata());
         let req = request.into_inner();
@@ -4131,7 +4132,7 @@ impl AuthService for AuthServiceImpl {
         request: Request<OAuth2TokenRequest>,
     ) -> Result<Response<OAuth2TokenResponse>, Status> {
         self.check_maintenance().await?;
-        let client_ip = self.client_ip(&request);
+        let client_ip = self.client_ip(&request)?;
         // The request a DPoP proof must name: as received, over REST or gRPC.
         let proof_target =
             sid_authn::resource::request_target(&request, &self.public_origin, OAUTH2_TOKEN_RPC);
@@ -4190,7 +4191,7 @@ impl AuthService for AuthServiceImpl {
         &self,
         request: Request<OAuth2IntrospectRequest>,
     ) -> Result<Response<OAuth2IntrospectResponse>, Status> {
-        let client_ip = self.client_ip(&request);
+        let client_ip = self.client_ip(&request)?;
         let (metadata, _, req) = request.into_parts();
 
         // RFC 7662 §2.1, §4: only an authenticated service identity of this
@@ -4412,7 +4413,7 @@ impl AuthService for AuthServiceImpl {
         let magic_link = self.require_magic_links()?;
         // Refused before the link is consumed.
         let client = self.ceremony_client(request.metadata())?;
-        let client_ip = self.client_ip(&request);
+        let client_ip = self.client_ip(&request)?;
         let user_agent = extract_user_agent(request.metadata());
         let captcha_pass = extract_captcha_pass(request.metadata());
         let req = request.into_inner();
@@ -4790,7 +4791,7 @@ impl AuthService for AuthServiceImpl {
         request: Request<LegacyMigrateStartRequest>,
     ) -> Result<Response<LegacyMigrateStartResponse>, Status> {
         self.check_maintenance().await?;
-        let client_ip = self.client_ip(&request);
+        let client_ip = self.client_ip(&request)?;
         let req = request.into_inner();
         let password = SecretBox::new(Box::new(req.password));
 
@@ -4884,7 +4885,7 @@ impl AuthService for AuthServiceImpl {
         self.check_maintenance().await?;
         // Refused before the migration is consumed.
         let client = self.ceremony_client(request.metadata())?;
-        let client_ip = self.client_ip(&request);
+        let client_ip = self.client_ip(&request)?;
         let user_agent = extract_user_agent(request.metadata());
         let captcha_pass = extract_captcha_pass(request.metadata());
         let req = request.into_inner();
@@ -5226,7 +5227,7 @@ impl AuthService for AuthServiceImpl {
         let profile_id = match &caller {
             FactorCaller::Pending(session, _) | FactorCaller::StepUp(session) => session.profile_id,
         };
-        let client_ip = self.client_ip(&request);
+        let client_ip = self.client_ip(&request)?;
 
         let req = request.into_inner();
         require_totp_code_format(&req.code)?;
@@ -5516,7 +5517,7 @@ impl AuthService for AuthServiceImpl {
         self.check_maintenance().await?;
         // Refused before the code is spent.
         let client = self.ceremony_client(request.metadata())?;
-        let client_ip = self.client_ip(&request);
+        let client_ip = self.client_ip(&request)?;
         let user_agent = extract_user_agent(request.metadata());
         let captcha_pass = extract_captcha_pass(request.metadata());
         let req = request.into_inner();
@@ -5718,7 +5719,7 @@ impl AuthService for AuthServiceImpl {
         &self,
         request: Request<VerifyCaptchaRequest>,
     ) -> Result<Response<VerifyCaptchaResponse>, Status> {
-        let remote_ip = self.client_ip(&request);
+        let remote_ip = self.client_ip(&request)?;
         let req = request.into_inner();
 
         // The provider's own error text stays in the log.
@@ -6405,7 +6406,7 @@ impl AuthService for AuthServiceImpl {
     ) -> Result<Response<CompletePasswordResetResponse>, Status> {
         // Refused before the reset is consumed.
         let client = self.ceremony_client(request.metadata())?;
-        let client_ip = self.client_ip(&request);
+        let client_ip = self.client_ip(&request)?;
         let user_agent = extract_user_agent(request.metadata());
         let req = request.into_inner();
         let zkpp = self.require_zkpp()?;

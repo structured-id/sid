@@ -16,17 +16,21 @@ fn a_proxied_call_has_the_address_the_proxy_resolved() {
         .insert(ClientAddress::from_peer(Some(
             "203.0.113.7:5000".parse().unwrap(),
         )));
-    assert_eq!(client_ip(&request), "203.0.113.7".parse().ok());
+    assert_eq!(client_ip(&request).unwrap(), "203.0.113.7".parse().ok());
 }
 
-/// A proxy that resolved no address leaves none: the peer is not the client.
+/// A proxy that resolved no address refuses the call: without an address it
+/// would pass every check that keys on one.
 #[test]
-fn a_call_the_proxy_could_not_resolve_has_no_address() {
+fn a_call_the_proxy_could_not_resolve_is_refused() {
     let mut request = tonic::Request::new(());
     request
         .extensions_mut()
         .insert(ClientAddress::from_peer(None));
-    assert_eq!(client_ip(&request), None);
+    assert_eq!(
+        client_ip(&request).unwrap_err().code(),
+        tonic::Code::Internal
+    );
 }
 
 /// A direct call has no resolved address and no peer here: nothing is made up
@@ -37,7 +41,7 @@ fn a_direct_call_believes_no_forwarding_header() {
     request
         .metadata_mut()
         .insert("x-forwarded-for", "198.51.100.9".parse().unwrap());
-    assert_eq!(client_ip(&request), None);
+    assert_eq!(client_ip(&request).unwrap(), None);
 }
 
 /// Trusted proxies make the address required, so one they report unreadably
@@ -59,14 +63,36 @@ fn edge_trust_reads_the_list_and_requires_an_address_behind_proxies() {
 #[test]
 fn the_edge_trust_reaches_the_transcoder_from_one_source() {
     let mut config = listening_on("127.0.0.1:0");
-    with_edge_trust(&mut config, "10.42.0.14").unwrap();
+    with_edge_trust(&mut config, "10.42.0.14", EdgeReport::Chain).unwrap();
     let proxy = embedded_transcoder(&config, &[], |_| true).unwrap();
     assert_eq!(
         proxy.config().client_address.trusted_proxies,
         ["10.42.0.14"]
     );
     assert!(proxy.config().client_address.required);
-    assert!(with_edge_trust(&mut config, "10.42.0.15").is_err());
+    assert!(with_edge_trust(&mut config, "10.42.0.15", EdgeReport::Chain).is_err());
+}
+
+/// Behind a reporter that resolved the address, the transcoder reads its one
+/// value instead of walking a chain.
+#[test]
+fn a_resolved_report_is_read_from_its_one_header() {
+    let mut config = listening_on("127.0.0.1:0");
+    with_edge_trust(&mut config, "10.42.0.14", EdgeReport::Resolved).unwrap();
+    let proxy = embedded_transcoder(&config, &[], |_| true).unwrap();
+    assert_eq!(
+        proxy.config().client_address.header,
+        structured_proxy::config::ForwardingHeader::XRealIp
+    );
+    assert_eq!(
+        EdgeReport::parse("x-real-ip").unwrap(),
+        EdgeReport::Resolved
+    );
+    assert_eq!(
+        EdgeReport::parse("x-forwarded-for").unwrap(),
+        EdgeReport::Chain
+    );
+    assert!(EdgeReport::parse("forwarded").is_err());
 }
 
 /// An entry that is no address stops startup.

@@ -8,7 +8,7 @@ use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
-use structured_proxy::client_address::ClientAddressLayer;
+use structured_proxy::client_address::{ClientAddressLayer, Resolution};
 use structured_proxy::config::ClientAddressConfig;
 use structured_proxy::upstream::Upstream;
 use structured_proxy::{ClientAddress, ProxyServer};
@@ -108,12 +108,23 @@ pub fn listening_on(bind: &str) -> serde_json::Value {
 }
 
 /// The address of the client behind `request`: what the proxy in front of the
-/// service resolved, nothing when it resolved none, and the transport peer of
-/// a direct call, where no proxy took part.
-pub fn client_ip<T>(request: &tonic::Request<T>) -> Option<IpAddr> {
-    match request.extensions().get::<ClientAddress>() {
-        Some(client) => client.ip(),
-        None => request.remote_addr().map(|peer| peer.ip()),
+/// service resolved, or the transport peer of a direct call, where no proxy
+/// took part. An address the proxy could not resolve is a refusal: a call
+/// with none would pass the checks that key on it.
+pub fn client_ip<T>(request: &tonic::Request<T>) -> Result<Option<IpAddr>, tonic::Status> {
+    let Some(client) = request.extensions().get::<ClientAddress>() else {
+        return Ok(request.remote_addr().map(|peer| peer.ip()));
+    };
+    match client.resolution() {
+        Resolution::Peer(ip) | Resolution::Forwarded(ip) => Ok(Some(ip)),
+        Resolution::Invalid(why) => Err(sid_core::grpc_error::refuse::invalid_field(
+            "x-forwarded-for",
+            format!("a trusted proxy's report is {why}"),
+        )),
+        _ => Err(sid_core::grpc_error::refuse::internal(
+            "client address",
+            "not resolved",
+        )),
     }
 }
 
@@ -130,9 +141,35 @@ fn edge_trust(proxies: &str) -> serde_json::Value {
     serde_json::json!({ "required": !trusted.is_empty(), "trusted_proxies": trusted })
 }
 
-/// `config` resolving the client address behind `proxies`; a `client_address`
-/// section of its own is refused, so the setting has one source.
-pub fn with_edge_trust(config: &mut serde_json::Value, proxies: &str) -> anyhow::Result<()> {
+/// What the proxies in front of a service report the client in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeReport {
+    /// The `X-Forwarded-For` chain, walked through them.
+    Chain,
+    /// One address in `X-Real-IP`, from a reporter that resolved it already:
+    /// a list or a repeat of it is refused, and no chain is walked.
+    Resolved,
+}
+
+impl EdgeReport {
+    /// The report `name` selects, `x-forwarded-for` or `x-real-ip`.
+    pub fn parse(name: &str) -> anyhow::Result<Self> {
+        match name {
+            "x-forwarded-for" => Ok(Self::Chain),
+            "x-real-ip" => Ok(Self::Resolved),
+            _ => anyhow::bail!("{name:?} is neither x-forwarded-for nor x-real-ip"),
+        }
+    }
+}
+
+/// `config` resolving the client address behind `proxies`, read from `report`;
+/// a `client_address` section of its own is refused, so the setting has one
+/// source.
+pub fn with_edge_trust(
+    config: &mut serde_json::Value,
+    proxies: &str,
+    report: EdgeReport,
+) -> anyhow::Result<()> {
     let map = config
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("the HTTP configuration must be a mapping"))?;
@@ -140,7 +177,11 @@ pub fn with_edge_trust(config: &mut serde_json::Value, proxies: &str) -> anyhow:
         !map.contains_key("client_address"),
         "the client address is configured by SID_EDGE_TRUSTED_PROXIES, not in the HTTP configuration"
     );
-    map.insert("client_address".into(), edge_trust(proxies));
+    let mut section = edge_trust(proxies);
+    if report == EdgeReport::Resolved {
+        section["header"] = "x_real_ip".into();
+    }
+    map.insert("client_address".into(), section);
     Ok(())
 }
 

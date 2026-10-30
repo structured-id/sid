@@ -60,6 +60,7 @@ http = [
     "dep:structured-proxy",
     "dep:prost-reflect",
     "dep:anyhow",
+    "sid-core/grpc",
 ]
 
 [dev-dependencies]
