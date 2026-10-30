@@ -78,7 +78,7 @@ structured-proxy = { version = "8.1.2", default-features = false, optional = tru
 serde-saphyr = { workspace = true, optional = true }
 # The gRPC-Web layer wraps the services the transcoder calls in process, and
 # each call carries the HTTP request it was transcoded from.
-tower = { workspace = true, optional = true, features = ["util"] }
+tower = { workspace = true, features = ["util"] }
 
 [features]
 default = ["telemetry", "storage-pg", "scim", "http"]
@@ -86,7 +86,7 @@ default = ["telemetry", "storage-pg", "scim", "http"]
 # Serve the annotated RPCs over HTTP (OIDC endpoints, RFC protocol forms)
 # through structured-proxy embedded as a library, at SID_BIND or per
 # SID_HTTP_CONFIG.
-http = ["dep:structured-proxy", "dep:serde-saphyr", "dep:tower", "sid-infra/http"]
+http = ["dep:structured-proxy", "dep:serde-saphyr", "sid-infra/http"]
 
 # PostgreSQL storage backend (default for a full deployment).
 storage-pg = ["sid-storage/storage-pg"]
