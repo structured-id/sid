@@ -818,9 +818,8 @@ impl AuthServiceImpl {
         self
     }
 
-    /// Name this authority's IdP session cookie `cookie`, as an installation
-    /// sharing its host with another authority configures it
-    /// (`SID_BROWSER_SESSION_COOKIE`).
+    /// Name this authority's IdP session cookie `cookie`, the one its issuer
+    /// derives (`BrowserCookie::for_issuer`).
     pub fn with_browser_cookie(
         mut self,
         cookie: sid_authn::browser_session::BrowserCookie,

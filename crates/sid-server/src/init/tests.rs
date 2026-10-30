@@ -879,11 +879,11 @@ async fn start_refuses_a_policy_change() {
 
 /// An unset setting is none; one that is no text stops the start, naming it,
 /// rather than reading as unset: an unset management setting would let a
-/// self-managed claim open, an unset cookie name would share the default
-/// cookie with another authority on the host.
+/// self-managed claim open, an unset account URL would leave the issuer
+/// without its sign-in page.
 #[test]
 fn setting_refuses_non_text() {
-    const NAME: &str = "SID_BROWSER_SESSION_COOKIE";
+    const NAME: &str = "SID_ACCOUNT_URL";
     assert_eq!(
         setting(NAME, Err(std::env::VarError::NotPresent)).unwrap(),
         None

@@ -59,6 +59,15 @@ impl BrowserCookie {
         }
     }
 
+    /// The cookie of the issuer `handle` names: issuers sharing a host each
+    /// have their own, derived from the issuer rather than configured.
+    pub fn for_issuer(handle: &sid_core::models::IssuerHandle) -> Self {
+        // A handle is lowercase hex, so the name is always a `__Host-` token.
+        Self {
+            name: format!("{DEFAULT_COOKIE_NAME}-{handle}"),
+        }
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }

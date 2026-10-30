@@ -103,7 +103,9 @@ pub struct CeComponents {
     pub migration_deadline_days: i64,
     /// The installation's OIDC issuers and their signers.
     pub issuers: Arc<sid_authn::issuer::IssuerRegistry>,
-    /// The sign-in page the authorization endpoint sends users to.
+    /// The sign-in page the authorization endpoint sends users to: the
+    /// account UI's, or, set by the host before serving, the entry of the
+    /// interactive branch it serves for the issuer.
     pub login_url: Option<url::Url>,
     /// The one authorization evaluator of this process.
     pub authz_engine: Arc<sid_authz::CeAuthzEngine<dyn sid_plugin::StorageBackend>>,
@@ -159,44 +161,30 @@ pub fn magic_links_enabled(
     Ok(enabled)
 }
 
-/// The sign-in page, from the `SID_LOGIN_URL` value, where the authorization
-/// endpoint sends a user who must sign in. Unset or empty means none (the
-/// client then gets `login_required`); a value that is not an http(s) URL is
-/// a configuration error, and so is a page on another site than the issuer
-/// host `issuer`: its ceremonies set the IdP session cookie on that host,
-/// which a response to a cross-site request cannot do.
-pub fn login_url(value: Option<&str>, issuer: &str) -> anyhow::Result<Option<url::Url>> {
-    let Some(value) = value.filter(|v| !v.is_empty()) else {
+/// The sign-in page the authorization endpoint sends a user who must sign in
+/// to: the sign-in route of the account UI the deployment serves, `None`
+/// without one (the client then gets `login_required`). A host serving
+/// another interactive branch for its issuer replaces it on the components.
+/// An account UI on another site than the issuer host `issuer` is a
+/// configuration error: its ceremonies set the IdP session cookie on that
+/// host, which a response to a cross-site request cannot do.
+pub fn sign_in_page(
+    account: Option<&sid_authn::system_integration::AccountSettings>,
+    issuer: &str,
+) -> anyhow::Result<Option<url::Url>> {
+    let Some(account) = account else {
         return Ok(None);
     };
-    let url =
-        url::Url::parse(value).with_context(|| format!("SID_LOGIN_URL {value:?} is not a URL"))?;
-    if !matches!(url.scheme(), "https" | "http") || url.host_str().is_none() {
-        anyhow::bail!("SID_LOGIN_URL {value:?} is not an http(s) URL with a host");
-    }
+    let page = account.sign_in_page();
     let issuer_url =
         url::Url::parse(issuer).with_context(|| format!("SID_ISSUER {issuer:?} is not a URL"))?;
-    if !sid_authn::browser_session::same_site(&url, &issuer_url) {
+    if !sid_authn::browser_session::same_site(&page, &issuer_url) {
         anyhow::bail!(
-            "SID_LOGIN_URL {value:?} is not on the same site as SID_ISSUER {issuer:?}: \
-             the sign-in page must share the issuer's scheme and registrable domain"
+            "the account UI's sign-in page {page} is not on the same site as SID_ISSUER \
+             {issuer:?}: it must share the issuer's scheme and registrable domain"
         );
     }
-    Ok(Some(url))
-}
-
-/// This authority's IdP session cookie, from `SID_BROWSER_SESSION_COOKIE`.
-/// Unset or empty keeps the default name, for an authority alone on its host;
-/// an authority sharing its host with another names its own `__Host-` cookie,
-/// and any other value is a configuration error.
-pub fn browser_cookie(
-    value: Option<&str>,
-) -> anyhow::Result<sid_authn::browser_session::BrowserCookie> {
-    match value.filter(|v| !v.is_empty()) {
-        None => Ok(sid_authn::browser_session::BrowserCookie::default()),
-        Some(name) => sid_authn::browser_session::BrowserCookie::new(name)
-            .map_err(|e| anyhow::anyhow!("SID_BROWSER_SESSION_COOKIE: {e}")),
-    }
+    Ok(Some(page))
 }
 
 /// The account integration's settings from `SID_ACCOUNT_URL` (the account
@@ -647,15 +635,16 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
     let scim_issuer = local_issuer.clone();
     // SID's own account UI, when the deployment serves one: its web client,
     // the account API and the access between them.
-    if let Some(account) = account_settings(
+    let account = account_settings(
         env_setting("SID_ACCOUNT_URL")?.as_deref(),
         env_setting("SID_ACCOUNT_CLIENT_JWKS")?.as_deref(),
-    )? {
+    )?;
+    if let Some(account) = &account {
         let integration = sid_authn::system_integration::ensure_account_integration(
             storage.as_ref(),
             &local_issuer,
             &issuer,
-            &account,
+            account,
         )
         .await
         .context("account integration")?;
@@ -910,8 +899,12 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
     // One authorization evaluator for every service of this process.
     let authz_engine = Arc::new(sid_authz::CeAuthzEngine::new(storage.clone()));
 
-    let login_url = login_url(env_setting("SID_LOGIN_URL")?.as_deref(), &issuer)?;
-    let browser_cookie = browser_cookie(env_setting("SID_BROWSER_SESSION_COOKIE")?.as_deref())?;
+    let login_url = sign_in_page(account.as_ref(), &issuer)?;
+    // Named after the installation's issuer, which shares its host with other
+    // issuers: never configured, so a rebuilt installation's issuer names its
+    // own.
+    let browser_cookie =
+        sid_authn::browser_session::BrowserCookie::for_issuer(&local_issuer.handle);
 
     let history_authority = password_history_authority(
         |name| std::env::var(name),
