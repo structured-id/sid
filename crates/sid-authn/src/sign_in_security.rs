@@ -286,7 +286,12 @@ async fn judge<H: SignInSecurityHost>(
     // Every rule runs on every sign-in; a solved CAPTCHA answers only a
     // CAPTCHA requirement, never a lockout or a block. Rules that cannot read
     // the shared attempt state refuse rather than skip the lockout.
-    let rule_match = host.anomaly().evaluate(&ctx).await.map_err(unavailable)?;
+    let rule_match = if attempt.authentication.answers_step_up() {
+        host.anomaly().evaluate_answered(&ctx).await
+    } else {
+        host.anomaly().evaluate(&ctx).await
+    }
+    .map_err(unavailable)?;
     let event = |reaction: &'static str| {
         host.security_event(
             &identity,
@@ -305,6 +310,9 @@ async fn judge<H: SignInSecurityHost>(
                     reason = %rule_match.reason,
                     "Impossible travel suppressed: both locations are designated"
                 );
+                event("allow").await;
+            } else if rule_match.rule != "none" {
+                info!(account = %identity, rule = rule_match.rule, "Anomaly: step-up answered by the sign-in");
                 event("allow").await;
             }
         }
@@ -348,10 +356,6 @@ async fn judge<H: SignInSecurityHost>(
                     .map_err(unavailable)?;
                 return Err(SignInRefusal::CaptchaRequired(challenge).into());
             }
-        }
-        RuleReaction::StepUp if attempt.authentication.answers_step_up() => {
-            info!(account = %identity, rule = rule_match.rule, "Anomaly: StepUp answered by accepted evidence");
-            event("allow").await;
         }
         RuleReaction::StepUp => {
             warn!(account = %identity, rule = rule_match.rule, reason = %rule_match.reason, "Anomaly: StepUp required");

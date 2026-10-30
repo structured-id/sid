@@ -748,6 +748,33 @@ fn test_haversine_antipodal() {
 
 // ── Impossible travel tests ──
 
+/// A sign-in that already is the stronger one answers a step-up and nothing
+/// else: the rules after it still run, so an address the policy blocks stays
+/// blocked, and the answered rule is named when none of them matches.
+#[tokio::test]
+async fn test_an_answered_step_up_leaves_the_later_rules_in_force() {
+    let policy = NetworkPolicy {
+        block_datacenter_ips: true,
+        violation_reaction: NetworkViolationReaction::Block,
+        ..NetworkPolicy::default()
+    };
+    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_cache());
+    let mut ctx = default_context();
+    ctx.latitude = Some(40.71);
+    ctx.longitude = Some(-74.01);
+    ctx.prev_latitude = Some(52.52);
+    ctx.prev_longitude = Some(13.40);
+    ctx.prev_login_at = Some(chrono::Utc::now() - chrono::Duration::minutes(45));
+
+    let answered = detector.evaluate_answered(&ctx).await.unwrap();
+    assert_eq!(answered.rule, "impossible_travel");
+    assert_eq!(answered.reaction, RuleReaction::Allow);
+
+    ctx.is_datacenter_ip = true;
+    let blocked = detector.evaluate_answered(&ctx).await.unwrap();
+    assert_eq!(blocked.reaction, RuleReaction::Block);
+}
+
 #[tokio::test]
 async fn test_impossible_travel_triggers_step_up() {
     // Berlin → New York in 45 min = ~8533 km/h (> 900 km/h threshold)
