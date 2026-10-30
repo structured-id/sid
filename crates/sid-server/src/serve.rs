@@ -492,6 +492,11 @@ pub fn http_transcoder_with(
     if let Some(sign_in) = sign_in {
         allow_sign_in_origin(&mut config, &sign_in.origin())?;
     }
+    // The proxies in front of this server, whose report names the client;
+    // unset means clients connect directly.
+    if let Some(proxies) = crate::init::env_setting("SID_EDGE_TRUSTED_PROXIES")? {
+        sid_infra::http::with_edge_trust(&mut config, &proxies)?;
+    }
     sid_infra::http::embedded_transcoder_with_sets(
         &config,
         &HTTP_FORWARDED_HEADERS,

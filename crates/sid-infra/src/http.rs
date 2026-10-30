@@ -5,11 +5,13 @@
 //! routes of the proto files the service serves.
 
 use std::future::Future;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
-use structured_proxy::ProxyServer;
+use structured_proxy::client_address::ClientAddressLayer;
+use structured_proxy::config::ClientAddressConfig;
 use structured_proxy::upstream::Upstream;
+use structured_proxy::{ClientAddress, ProxyServer};
 
 /// A transcoder for the RPCs in the proto files `files` selects.
 ///
@@ -103,6 +105,54 @@ pub async fn serve_on<U: Upstream>(
 /// A structured-proxy configuration listening on `bind` and nothing else.
 pub fn listening_on(bind: &str) -> serde_json::Value {
     serde_json::json!({ "listen": { "http": bind } })
+}
+
+/// The address of the client behind `request`: what the proxy in front of the
+/// service resolved, nothing when it resolved none, and the transport peer of
+/// a direct call, where no proxy took part.
+pub fn client_ip<T>(request: &tonic::Request<T>) -> Option<IpAddr> {
+    match request.extensions().get::<ClientAddress>() {
+        Some(client) => client.ip(),
+        None => request.remote_addr().map(|peer| peer.ip()),
+    }
+}
+
+/// The client address settings of a service behind the comma-separated
+/// `proxies`: an address they do not report readably is refused, never
+/// replaced by a proxy's own, and they are the only hops believed (RFC 7239
+/// §8.1). Empty means no proxy: every peer is the client.
+fn edge_trust(proxies: &str) -> serde_json::Value {
+    let trusted: Vec<&str> = proxies
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .collect();
+    serde_json::json!({ "required": !trusted.is_empty(), "trusted_proxies": trusted })
+}
+
+/// `config` resolving the client address behind `proxies`; a `client_address`
+/// section of its own is refused, so the setting has one source.
+pub fn with_edge_trust(config: &mut serde_json::Value, proxies: &str) -> anyhow::Result<()> {
+    let map = config
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("the HTTP configuration must be a mapping"))?;
+    anyhow::ensure!(
+        !map.contains_key("client_address"),
+        "the client address is configured by SID_EDGE_TRUSTED_PROXIES, not in the HTTP configuration"
+    );
+    map.insert("client_address".into(), edge_trust(proxies));
+    Ok(())
+}
+
+/// Resolves the client address behind `proxies` for a tonic server with no
+/// transcoder in front of its services, and leaves only that address in the
+/// forwarding headers, so a call it sends on reports the client alone. The
+/// layer does not refuse: a handler reads [`client_ip`].
+pub fn edge_layer(proxies: &str) -> anyhow::Result<ClientAddressLayer> {
+    let mut section = edge_trust(proxies);
+    section["forward"] = serde_json::json!({ "x_forwarded_for": "resolved" });
+    let config: ClientAddressConfig = serde_json::from_value(section)?;
+    ClientAddressLayer::new(&config)
 }
 
 #[cfg(test)]

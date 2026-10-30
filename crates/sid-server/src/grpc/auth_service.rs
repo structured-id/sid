@@ -613,7 +613,6 @@ pub struct AuthServiceImpl {
     /// Ends a profile's sessions everywhere (tokens, RPs) on a password reset.
     cascade: Arc<RevocationCascadeService>,
     /// Proxies whose forwarding headers name the client; none by default.
-    trusted_proxies: sid_authn::client_address::TrustedProxies,
     /// The shared authorization evaluator: decides who may inspect the
     /// tokens of a protected resource.
     authz: Arc<sid_authz::CeAuthzEngine<dyn StorageBackend>>,
@@ -803,7 +802,6 @@ impl AuthServiceImpl {
             captcha_gate,
             key_manager,
             cascade,
-            trusted_proxies: sid_authn::client_address::TrustedProxies::none(),
             authz,
             sign_in_origin: None,
             browser_cookie: sid_authn::browser_session::BrowserCookie::default(),
@@ -891,29 +889,12 @@ impl AuthServiceImpl {
             })
     }
 
-    /// Believe the forwarding headers of these proxies.
-    pub fn with_trusted_proxies(
-        mut self,
-        proxies: sid_authn::client_address::TrustedProxies,
-    ) -> Self {
-        self.trusted_proxies = proxies;
-        self
-    }
-
-    /// The client address of `request`: the transport peer, or what a
-    /// trusted proxy in front of it reports.
+    /// The client address of `request`.
     fn client_ip<T>(&self, request: &Request<T>) -> Option<std::net::IpAddr> {
-        let header = |name| {
-            request
-                .metadata()
-                .get(name)
-                .and_then(|v: &tonic::metadata::MetadataValue<_>| v.to_str().ok())
-        };
-        self.trusted_proxies.client_ip(
-            request.remote_addr().map(|addr| addr.ip()),
-            header("x-forwarded-for"),
-            header("x-real-ip"),
-        )
+        #[cfg(feature = "http")]
+        return sid_infra::http::client_ip(request);
+        #[cfg(not(feature = "http"))]
+        request.remote_addr().map(|addr| addr.ip())
     }
 
     /// Override the security policy (useful for testing conditional access wiring).

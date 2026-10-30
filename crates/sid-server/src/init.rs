@@ -890,13 +890,6 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
     // ── GeoIP resolution: priority chain with cache ──
     let geoip = Arc::new(build_geoip_chain_from_env(cache_backend.clone())?);
 
-    // Proxies in front of this server whose X-Forwarded-For names the client;
-    // unset means clients connect directly and headers are ignored.
-    let trusted_proxies = sid_authn::client_address::TrustedProxies::parse(
-        &env_setting("SID_TRUSTED_PROXIES")?.unwrap_or_default(),
-    )
-    .map_err(|e| anyhow::anyhow!("SID_TRUSTED_PROXIES: {e}"))?;
-
     // A provider that was asked for and cannot run stops startup.
     let captcha_provider = sid_authn::captcha::build_captcha_provider_from_env(&captcha_pow_key)
         .map_err(|e| anyhow::anyhow!("CAPTCHA: {e}"))?;
@@ -949,7 +942,6 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         authz_engine.clone(),
         history_authority,
     )
-    .with_trusted_proxies(trusted_proxies)
     .with_enrollment_pin(enrollment_pin)
     .with_browser_cookie(browser_cookie);
     let auth_svc = match host.login_policy {

@@ -2,6 +2,80 @@
 
 use super::*;
 
+/// A call through the proxy carries its resolved address: forwarding headers
+/// and the connection, which behind a sidecar is the pod's own address, are
+/// not read again.
+#[test]
+fn a_proxied_call_has_the_address_the_proxy_resolved() {
+    let mut request = tonic::Request::new(());
+    request
+        .metadata_mut()
+        .insert("x-forwarded-for", "198.51.100.9".parse().unwrap());
+    request
+        .extensions_mut()
+        .insert(ClientAddress::from_peer(Some(
+            "203.0.113.7:5000".parse().unwrap(),
+        )));
+    assert_eq!(client_ip(&request), "203.0.113.7".parse().ok());
+}
+
+/// A proxy that resolved no address leaves none: the peer is not the client.
+#[test]
+fn a_call_the_proxy_could_not_resolve_has_no_address() {
+    let mut request = tonic::Request::new(());
+    request
+        .extensions_mut()
+        .insert(ClientAddress::from_peer(None));
+    assert_eq!(client_ip(&request), None);
+}
+
+/// A direct call has no resolved address and no peer here: nothing is made up
+/// from a header a client wrote.
+#[test]
+fn a_direct_call_believes_no_forwarding_header() {
+    let mut request = tonic::Request::new(());
+    request
+        .metadata_mut()
+        .insert("x-forwarded-for", "198.51.100.9".parse().unwrap());
+    assert_eq!(client_ip(&request), None);
+}
+
+/// Trusted proxies make the address required, so one they report unreadably
+/// is refused; without any, every peer is the client.
+#[test]
+fn edge_trust_reads_the_list_and_requires_an_address_behind_proxies() {
+    let trust = edge_trust(" 10.42.0.14, 192.0.2.0/24 ,");
+    assert_eq!(
+        trust["trusted_proxies"],
+        serde_json::json!(["10.42.0.14", "192.0.2.0/24"])
+    );
+    assert_eq!(trust["required"], true);
+    let none = edge_trust("");
+    assert_eq!(none["trusted_proxies"], serde_json::json!([]));
+    assert_eq!(none["required"], false);
+}
+
+/// The transcoder takes the trust; a second source in its file is refused.
+#[test]
+fn the_edge_trust_reaches_the_transcoder_from_one_source() {
+    let mut config = listening_on("127.0.0.1:0");
+    with_edge_trust(&mut config, "10.42.0.14").unwrap();
+    let proxy = embedded_transcoder(&config, &[], |_| true).unwrap();
+    assert_eq!(
+        proxy.config().client_address.trusted_proxies,
+        ["10.42.0.14"]
+    );
+    assert!(proxy.config().client_address.required);
+    assert!(with_edge_trust(&mut config, "10.42.0.15").is_err());
+}
+
+/// An entry that is no address stops startup.
+#[test]
+fn the_edge_layer_refuses_an_unreadable_proxy() {
+    assert!(edge_layer("10.42.0.14").is_ok());
+    assert!(edge_layer("proxy.local").is_err());
+}
+
 /// The transcoder forwards the headers the RPCs read whatever the operator
 /// listed, keeps its listen address and names no upstream of its own.
 #[test]
