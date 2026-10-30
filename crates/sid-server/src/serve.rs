@@ -323,7 +323,9 @@ pub async fn serve(
     let http_proxy = http_transcoder_with(
         crate::init::env_setting("SID_BIND")?.as_deref(),
         crate::init::env_setting("SID_HTTP_CONFIG")?.as_deref(),
-        c.login_url.as_ref(),
+        // The ceremonies' page, not the authorization endpoint's target a
+        // host may have replaced: the auth service admits ceremonies from it.
+        c.ceremony_page.as_ref(),
         &services.transcoded,
     )?;
 

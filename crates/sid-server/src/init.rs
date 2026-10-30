@@ -107,6 +107,11 @@ pub struct CeComponents {
     /// account UI's, or, set by the host before serving, the entry of the
     /// interactive branch it serves for the issuer.
     pub login_url: Option<url::Url>,
+    /// The account UI's sign-in page, the one page whose origin runs the
+    /// browser ceremonies: the auth service admits them from it and the HTTP
+    /// form allows it credentialed CORS. A host's interactive branch replaces
+    /// only [`login_url`](Self::login_url), never this.
+    pub ceremony_page: Option<url::Url>,
     /// The one authorization evaluator of this process.
     pub authz_engine: Arc<sid_authz::CeAuthzEngine<dyn sid_plugin::StorageBackend>>,
     /// The installation's organization.
@@ -899,7 +904,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
     // One authorization evaluator for every service of this process.
     let authz_engine = Arc::new(sid_authz::CeAuthzEngine::new(storage.clone()));
 
-    let login_url = sign_in_page(account.as_ref(), &issuer)?;
+    let ceremony_page = sign_in_page(account.as_ref(), &issuer)?;
     // Named after the installation's issuer, which shares its host with other
     // issuers: never configured, so a rebuilt installation's issuer names its
     // own.
@@ -951,7 +956,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         Some(source) => auth_svc.with_login_policy(source),
         None => auth_svc,
     };
-    let auth_svc = Arc::new(match &login_url {
+    let auth_svc = Arc::new(match &ceremony_page {
         Some(page) => auth_svc.with_sign_in_page(page),
         None => auth_svc,
     });
@@ -1099,7 +1104,8 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         audit_retention,
         migration_deadline_days,
         issuers,
-        login_url,
+        login_url: ceremony_page.clone(),
+        ceremony_page,
         authz_engine,
         organization,
         #[cfg(feature = "scim")]
