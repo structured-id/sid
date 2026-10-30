@@ -39,7 +39,7 @@ sid-crypto = { workspace = true, features = ["jwt"] }
 chrono = { workspace = true }
 # The listener: the adapter's annotated RPCs, gRPC and gRPC-Web to the hosted
 # API and the bundle's routes, through the embedded transcoder.
-structured-proxy = { version = "8.1.2", default-features = false }
+structured-proxy = { version = "8.1.4", default-features = false }
 http = { workspace = true }
 http-body-util = "0.1"
 async-trait = { workspace = true }

@@ -23,7 +23,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 # The HTTP form of a service's own annotated RPCs (`http` feature).
 sid-proto = { workspace = true, optional = true }
-structured-proxy = { version = "8.1.2", default-features = false, optional = true }
+structured-proxy = { version = "8.1.4", default-features = false, optional = true }
 prost-reflect = { workspace = true, optional = true }
 anyhow = { workspace = true, optional = true }
 # The issuer RPC clients (`issuer-client` feature).
@@ -60,6 +60,8 @@ http = [
     "dep:structured-proxy",
     "dep:prost-reflect",
     "dep:anyhow",
+    "dep:tonic",
+    "sid-core/grpc",
 ]
 
 [dev-dependencies]

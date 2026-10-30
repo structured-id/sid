@@ -349,10 +349,21 @@ pub async fn serve(
     #[cfg(not(feature = "http"))]
     let mut http: Option<tokio::task::JoinHandle<anyhow::Result<()>>> = None;
 
+    // The gRPC port is a direct path unless a proxy in front of it is named:
+    // its own trust, since other callers than the HTTP port's reach it.
+    #[cfg(feature = "http")]
+    let grpc_edge = crate::init::env_setting("SID_GRPC_TRUSTED_PROXIES")?
+        .map(|proxies| sid_infra::http::edge_layer(&proxies))
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("SID_GRPC_TRUSTED_PROXIES: {e}"))?;
+    #[cfg(not(feature = "http"))]
+    let grpc_edge: Option<tower::layer::util::Identity> = None;
+
     // Browser gRPC-web is answered here; CORS for it comes from the fronting
     // proxy, and for the HTTP form from the transcoder's configuration.
     let server = TonicServer::builder()
         .accept_http1(true)
+        .layer(tower::util::option_layer(grpc_edge))
         .layer(tonic_web::GrpcWebLayer::new())
         .add_routes(routes)
         .serve_with_shutdown(c.grpc_addr, stopped.wait());
@@ -491,6 +502,16 @@ pub fn http_transcoder_with(
     };
     if let Some(sign_in) = sign_in {
         allow_sign_in_origin(&mut config, &sign_in.origin())?;
+    }
+    // The proxies in front of this port, whose report names the client, and
+    // what they report it in; unset means clients connect directly.
+    if let Some(proxies) = crate::init::env_setting("SID_EDGE_TRUSTED_PROXIES")? {
+        let report = match crate::init::env_setting("SID_EDGE_CLIENT_HEADER")? {
+            Some(header) => sid_infra::http::EdgeReport::parse(&header)
+                .map_err(|e| anyhow::anyhow!("SID_EDGE_CLIENT_HEADER: {e}"))?,
+            None => sid_infra::http::EdgeReport::Chain,
+        };
+        sid_infra::http::with_edge_trust(&mut config, &proxies, report)?;
     }
     sid_infra::http::embedded_transcoder_with_sets(
         &config,

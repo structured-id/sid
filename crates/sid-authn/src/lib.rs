@@ -29,7 +29,6 @@ pub mod captcha;
 pub mod ceremony_context;
 pub mod challenge_store;
 pub mod claim_mapping;
-pub mod client_address;
 pub mod client_assertion;
 pub mod client_auth;
 pub mod client_connection;

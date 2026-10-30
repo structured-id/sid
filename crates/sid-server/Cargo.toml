@@ -74,11 +74,11 @@ thiserror = { workspace = true }
 zeroize = { workspace = true }
 tokio-stream = "0.1.19"
 # HTTP form of the annotated RPCs through the embedded transcoder (`http`).
-structured-proxy = { version = "8.1.2", default-features = false, optional = true }
+structured-proxy = { version = "8.1.4", default-features = false, optional = true }
 serde-saphyr = { workspace = true, optional = true }
 # The gRPC-Web layer wraps the services the transcoder calls in process, and
 # each call carries the HTTP request it was transcoded from.
-tower = { workspace = true, optional = true, features = ["util"] }
+tower = { workspace = true, features = ["util"] }
 
 [features]
 default = ["telemetry", "storage-pg", "scim", "http"]
@@ -86,7 +86,7 @@ default = ["telemetry", "storage-pg", "scim", "http"]
 # Serve the annotated RPCs over HTTP (OIDC endpoints, RFC protocol forms)
 # through structured-proxy embedded as a library, at SID_BIND or per
 # SID_HTTP_CONFIG.
-http = ["dep:structured-proxy", "dep:serde-saphyr", "dep:tower", "sid-infra/http"]
+http = ["dep:structured-proxy", "dep:serde-saphyr", "sid-infra/http"]
 
 # PostgreSQL storage backend (default for a full deployment).
 storage-pg = ["sid-storage/storage-pg"]
@@ -153,7 +153,7 @@ sqlx = { workspace = true }
 sid-storage = { workspace = true, features = ["storage-sqlite"] }
 # Protocol endpoints are checked through the transcoder that serves them, over
 # the service's own descriptors: the HTTP shape comes from the annotations.
-structured-proxy = { version = "8.1.2", default-features = false }
+structured-proxy = { version = "8.1.4", default-features = false }
 prost-reflect = { workspace = true }
 # Every served method is called to check the error contract.
 sid-serve = { workspace = true, features = ["error-contract"] }
