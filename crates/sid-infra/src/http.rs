@@ -147,7 +147,8 @@ pub enum EdgeReport {
     /// The `X-Forwarded-For` chain, walked through them.
     Chain,
     /// One address in `X-Real-IP`, from a reporter that resolved it already:
-    /// a list or a repeat of it is refused, and no chain is walked.
+    /// a list, a repeat or any other header disagreeing with it is refused,
+    /// and no chain is walked.
     Resolved,
 }
 
@@ -179,7 +180,7 @@ pub fn with_edge_trust(
     );
     let mut section = edge_trust(proxies);
     if report == EdgeReport::Resolved {
-        section["header"] = "x_real_ip".into();
+        section["header"] = "cleaned_report".into();
     }
     map.insert("client_address".into(), section);
     Ok(())

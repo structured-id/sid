@@ -82,7 +82,7 @@ fn a_resolved_report_is_read_from_its_one_header() {
     let proxy = embedded_transcoder(&config, &[], |_| true).unwrap();
     assert_eq!(
         proxy.config().client_address.header,
-        structured_proxy::config::ForwardingHeader::XRealIp
+        structured_proxy::config::ForwardingHeader::CleanedReport
     );
     assert_eq!(
         EdgeReport::parse("x-real-ip").unwrap(),

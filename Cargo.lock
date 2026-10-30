@@ -6490,9 +6490,9 @@ dependencies = [
 
 [[package]]
 name = "structured-proxy"
-version = "8.1.3"
+version = "8.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab05710c9316a12a1e35c67ced13ffd0b4561e3872fde14b6fbdd943ab229d2d"
+checksum = "8d0ad00100aab1e8266c9c6ee4d9e0864fee1d715dd67003cd9f054edb088b39"
 dependencies = [
  "anyhow",
  "async-trait",
