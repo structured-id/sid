@@ -83,6 +83,15 @@ impl Default for AnomalyConfig {
     }
 }
 
+/// What a sign-in already answered of the rules' requirements.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Answered {
+    /// It is the stronger sign-in a step-up asks for.
+    pub step_up: bool,
+    /// It solved the CAPTCHA asked of it.
+    pub captcha: bool,
+}
+
 /// Login context for anomaly evaluation.
 #[derive(Debug, Clone)]
 pub struct LoginContext {
@@ -231,26 +240,32 @@ impl AnomalyDetector {
     /// 8. New device + new IP (both new, for a profile that signed in before → StepUp)
     /// 9. None matched → Allow
     pub async fn evaluate(&self, ctx: &LoginContext) -> CacheResult<RuleMatch> {
-        self.run(ctx, false).await
+        self.evaluate_answered(ctx, Answered::default()).await
     }
 
-    /// [`Self::evaluate`] for a sign-in that already is the stronger one a
-    /// step-up asks for: a step-up is answered, every other reaction stands,
-    /// and the rules after it run. The first answered rule comes back as an
-    /// `Allow` when nothing else matched.
-    pub async fn evaluate_answered(&self, ctx: &LoginContext) -> CacheResult<RuleMatch> {
-        self.run(ctx, true).await
-    }
-
-    async fn run(&self, ctx: &LoginContext, answered: bool) -> CacheResult<RuleMatch> {
-        // The first step-up the sign-in answered.
+    /// [`Self::evaluate`] for a sign-in that already answered what `answered`
+    /// says. A rule that passes the sign-in speaks for itself alone: the rules
+    /// after it run, and the first one that passed comes back as an `Allow`
+    /// when nothing else matched.
+    pub async fn evaluate_answered(
+        &self,
+        ctx: &LoginContext,
+        answered: Answered,
+    ) -> CacheResult<RuleMatch> {
+        // The first rule that passed the sign-in.
         let mut passed = None;
-        // Ends the evaluation at a rule's match, unless it is a step-up the
-        // sign-in answers.
+        // Ends the evaluation at a rule's match, unless the rule passes the
+        // sign-in.
         macro_rules! matched {
             ($found:expr) => {
                 if let Some(m) = $found {
-                    if !answered || m.reaction != RuleReaction::StepUp {
+                    let passes = match m.reaction {
+                        RuleReaction::Allow => true,
+                        RuleReaction::StepUp => answered.step_up,
+                        RuleReaction::RequireCaptcha => answered.captcha,
+                        RuleReaction::Block | RuleReaction::HardNo => false,
+                    };
+                    if !passes {
                         return Ok(m);
                     }
                     passed.get_or_insert(RuleMatch {

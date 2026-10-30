@@ -15,7 +15,7 @@ use sid_core::models::session::SessionAuthentication;
 use sid_plugin::SignInHistoryStore;
 use tracing::{info, warn};
 
-use crate::anomaly::{AnomalyDetector, LoginContext, RuleReaction};
+use crate::anomaly::{AnomalyDetector, Answered, LoginContext, RuleReaction};
 use crate::captcha::{CaptchaChallenge, CaptchaGate, CaptchaProvider, CaptchaSubject};
 use crate::geoip::GeoIpChain;
 use crate::ip_intelligence::IpIntelligenceAggregator;
@@ -286,12 +286,41 @@ async fn judge<H: SignInSecurityHost>(
     // Every rule runs on every sign-in; a solved CAPTCHA answers only a
     // CAPTCHA requirement, never a lockout or a block. Rules that cannot read
     // the shared attempt state refuse rather than skip the lockout.
-    let rule_match = if attempt.authentication.answers_step_up() {
-        host.anomaly().evaluate_answered(&ctx).await
-    } else {
-        host.anomaly().evaluate(&ctx).await
+    let mut answered = Answered {
+        step_up: attempt.authentication.answers_step_up(),
+        captcha: false,
+    };
+    let mut rule_match = host
+        .anomaly()
+        .evaluate_answered(&ctx, answered)
+        .await
+        .map_err(unavailable)?;
+    let subject = CaptchaSubject {
+        account: identity.clone(),
+        client_ip,
+    };
+    if rule_match.reaction == RuleReaction::RequireCaptcha {
+        // The admission being repeated was itself judged from that
+        // address: no pass is spent on its repeat.
+        answered.captcha = match attempt.captcha_pass {
+            _ if admitted == Some(client_ip) => true,
+            Some(pass) => host
+                .captcha_gate()
+                .redeem(pass, &subject)
+                .await
+                .map_err(unavailable)?,
+            None => false,
+        };
+        // The rules after the CAPTCHA's still have their say.
+        if answered.captcha {
+            info!(account = %identity, rule = rule_match.rule, "Anomaly: RequireCaptcha answered by a solved challenge");
+            rule_match = host
+                .anomaly()
+                .evaluate_answered(&ctx, answered)
+                .await
+                .map_err(unavailable)?;
+        }
     }
-    .map_err(unavailable)?;
     let event = |reaction: &'static str| {
         host.security_event(
             &identity,
@@ -312,7 +341,7 @@ async fn judge<H: SignInSecurityHost>(
                 );
                 event("allow").await;
             } else if rule_match.rule != "none" {
-                info!(account = %identity, rule = rule_match.rule, "Anomaly: step-up answered by the sign-in");
+                info!(account = %identity, rule = rule_match.rule, "Anomaly: the rule passed the sign-in");
                 event("allow").await;
             }
         }
@@ -327,35 +356,16 @@ async fn judge<H: SignInSecurityHost>(
             return Err(SignInRefusal::TooManyAttempts(host.anomaly().lockout_duration()).into());
         }
         RuleReaction::RequireCaptcha => {
-            let subject = CaptchaSubject {
-                account: identity.clone(),
-                client_ip,
-            };
-            // The admission being repeated was itself judged from that
-            // address: no pass is spent on its repeat.
-            let answered = match attempt.captcha_pass {
-                _ if admitted == Some(client_ip) => true,
-                Some(pass) => host
-                    .captcha_gate()
-                    .redeem(pass, &subject)
-                    .await
-                    .map_err(unavailable)?,
-                None => false,
-            };
-            if answered {
-                info!(account = %identity, rule = rule_match.rule, "Anomaly: RequireCaptcha answered by a solved challenge");
-            } else {
-                warn!(account = %identity, rule = rule_match.rule, reason = %rule_match.reason, "Anomaly: RequireCaptcha, issuing a CAPTCHA challenge");
-                event(rule_match.reaction.as_str()).await;
-                // The challenge is recorded for this sign-in, so solving it
-                // earns a pass only for this account from this client.
-                let challenge = host.captcha_provider().create_challenge();
-                host.captcha_gate()
-                    .asked(&challenge.challenge_id, &subject)
-                    .await
-                    .map_err(unavailable)?;
-                return Err(SignInRefusal::CaptchaRequired(challenge).into());
-            }
+            warn!(account = %identity, rule = rule_match.rule, reason = %rule_match.reason, "Anomaly: RequireCaptcha, issuing a CAPTCHA challenge");
+            event(rule_match.reaction.as_str()).await;
+            // The challenge is recorded for this sign-in, so solving it
+            // earns a pass only for this account from this client.
+            let challenge = host.captcha_provider().create_challenge();
+            host.captcha_gate()
+                .asked(&challenge.challenge_id, &subject)
+                .await
+                .map_err(unavailable)?;
+            return Err(SignInRefusal::CaptchaRequired(challenge).into());
         }
         RuleReaction::StepUp => {
             warn!(account = %identity, rule = rule_match.rule, reason = %rule_match.reason, "Anomaly: StepUp required");

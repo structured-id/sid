@@ -251,6 +251,44 @@ async fn one_factor_does_not() {
     }
 }
 
+/// A CAPTCHA answered by the admission a repeat stands on leaves the rules
+/// after it in force: the address's stuffing limit is passed, and the new
+/// device and address still ask for a stronger sign-in.
+#[tokio::test]
+async fn a_solved_captcha_does_not_pass_the_next_rule() {
+    let (host, _) = Host::new(Vec::new());
+    let client: IpAddr = CLIENT.parse().unwrap();
+    for _ in 0..=host.anomaly.config().credential_stuffing_threshold {
+        host.anomaly.record_ip_attempt(client).await.unwrap();
+    }
+    let requirements = FixedLoginPolicy::of(&SecurityPolicy::ce_default())
+        .requirements(None)
+        .await
+        .unwrap();
+    let amr = vec!["pwd".to_owned()];
+    let refused = check(
+        &host,
+        &ProfileId::generate(),
+        SignInAttempt {
+            client_ip: Some(client),
+            authentication: AttemptAuthentication::Local {
+                method: "opaque",
+                assurance: AuthLevel::Basic,
+                amr: &amr,
+            },
+            captcha_pass: None,
+            user_agent: Some("a new browser"),
+        },
+        &requirements,
+        Some(client),
+    )
+    .await;
+    assert!(matches!(
+        refused,
+        Err(Refused(SignInRefusal::StepUpAfterAnomaly("new_device_ip")))
+    ));
+}
+
 /// A rule that refuses outright is no step-up: a second factor does not pass
 /// a blocklist.
 #[tokio::test]

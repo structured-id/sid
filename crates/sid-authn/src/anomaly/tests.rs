@@ -766,13 +766,92 @@ async fn test_an_answered_step_up_leaves_the_later_rules_in_force() {
     ctx.prev_longitude = Some(13.40);
     ctx.prev_login_at = Some(chrono::Utc::now() - chrono::Duration::minutes(45));
 
-    let answered = detector.evaluate_answered(&ctx).await.unwrap();
+    let step_up = Answered {
+        step_up: true,
+        captcha: false,
+    };
+    let answered = detector.evaluate_answered(&ctx, step_up).await.unwrap();
     assert_eq!(answered.rule, "impossible_travel");
     assert_eq!(answered.reaction, RuleReaction::Allow);
 
     ctx.is_datacenter_ip = true;
-    let blocked = detector.evaluate_answered(&ctx).await.unwrap();
+    let blocked = detector.evaluate_answered(&ctx, step_up).await.unwrap();
     assert_eq!(blocked.reaction, RuleReaction::Block);
+}
+
+/// Travel between designated countries is no anomaly, and that says nothing
+/// of the address: a policy's datacenter block still applies.
+#[tokio::test]
+async fn test_suppressed_travel_leaves_the_later_rules_in_force() {
+    let policy = NetworkPolicy {
+        block_datacenter_ips: true,
+        violation_reaction: NetworkViolationReaction::Block,
+        ..NetworkPolicy::default()
+    };
+    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_cache());
+    let mut ctx = default_context();
+    ctx.latitude = Some(40.71);
+    ctx.longitude = Some(-74.01);
+    ctx.prev_latitude = Some(52.52);
+    ctx.prev_longitude = Some(13.40);
+    ctx.prev_login_at = Some(chrono::Utc::now() - chrono::Duration::minutes(45));
+    ctx.country = Some("US".to_owned());
+    ctx.prev_country = Some("DE".to_owned());
+    ctx.designated_countries = vec!["US".to_owned(), "DE".to_owned()];
+
+    let suppressed = detector.evaluate(&ctx).await.unwrap();
+    assert_eq!(suppressed.rule, "location_switch");
+    assert_eq!(suppressed.reaction, RuleReaction::Allow);
+
+    ctx.is_datacenter_ip = true;
+    let blocked = detector.evaluate(&ctx).await.unwrap();
+    assert_eq!(blocked.rule, "datacenter_ip");
+    assert_eq!(blocked.reaction, RuleReaction::Block);
+}
+
+/// A solved CAPTCHA answers the CAPTCHA, not the rules after it.
+#[tokio::test]
+async fn test_a_solved_captcha_leaves_the_later_rules_in_force() {
+    let policy = NetworkPolicy {
+        block_datacenter_ips: true,
+        violation_reaction: NetworkViolationReaction::Block,
+        ..NetworkPolicy::default()
+    };
+    let cache = test_cache();
+    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, cache.clone());
+    let mut ctx = default_context();
+    ctx.failed = true;
+    for _ in 0..4 {
+        cache
+            .incr(&attempts_key(&ctx.identity), Duration::from_secs(300))
+            .await
+            .unwrap();
+    }
+    let solved = Answered {
+        step_up: false,
+        captcha: true,
+    };
+    assert_eq!(
+        detector.evaluate(&ctx).await.unwrap().reaction,
+        RuleReaction::RequireCaptcha
+    );
+    assert_eq!(
+        detector
+            .evaluate_answered(&ctx, solved)
+            .await
+            .unwrap()
+            .reaction,
+        RuleReaction::Allow
+    );
+    ctx.is_datacenter_ip = true;
+    assert_eq!(
+        detector
+            .evaluate_answered(&ctx, solved)
+            .await
+            .unwrap()
+            .reaction,
+        RuleReaction::Block
+    );
 }
 
 #[tokio::test]
