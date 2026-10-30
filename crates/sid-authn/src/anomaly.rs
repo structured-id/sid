@@ -83,6 +83,15 @@ impl Default for AnomalyConfig {
     }
 }
 
+/// What a sign-in already answered of the rules' requirements.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Answered {
+    /// It is the stronger sign-in a step-up asks for.
+    pub step_up: bool,
+    /// It solved the CAPTCHA asked of it.
+    pub captcha: bool,
+}
+
 /// Login context for anomaly evaluation.
 #[derive(Debug, Clone)]
 pub struct LoginContext {
@@ -231,6 +240,42 @@ impl AnomalyDetector {
     /// 8. New device + new IP (both new, for a profile that signed in before → StepUp)
     /// 9. None matched → Allow
     pub async fn evaluate(&self, ctx: &LoginContext) -> CacheResult<RuleMatch> {
+        self.evaluate_answered(ctx, Answered::default()).await
+    }
+
+    /// [`Self::evaluate`] for a sign-in that already answered what `answered`
+    /// says. A rule that passes the sign-in speaks for itself alone: the rules
+    /// after it run, and the first one that passed comes back as an `Allow`
+    /// when nothing else matched.
+    pub async fn evaluate_answered(
+        &self,
+        ctx: &LoginContext,
+        answered: Answered,
+    ) -> CacheResult<RuleMatch> {
+        // The first rule that passed the sign-in.
+        let mut passed = None;
+        // Ends the evaluation at a rule's match, unless the rule passes the
+        // sign-in.
+        macro_rules! matched {
+            ($found:expr) => {
+                if let Some(m) = $found {
+                    let passes = match m.reaction {
+                        RuleReaction::Allow => true,
+                        RuleReaction::StepUp => answered.step_up,
+                        RuleReaction::RequireCaptcha => answered.captcha,
+                        RuleReaction::Block | RuleReaction::HardNo => false,
+                    };
+                    if !passes {
+                        return Ok(m);
+                    }
+                    passed.get_or_insert(RuleMatch {
+                        reaction: RuleReaction::Allow,
+                        ..m
+                    });
+                }
+            };
+        }
+
         // 1. IP blocklist (absolute deny, no override)
         if ctx.is_blocklisted {
             return Ok(RuleMatch {
@@ -241,55 +286,41 @@ impl AnomalyDetector {
         }
 
         // 2. Check active lockout (highest priority after blocklist)
-        if let Some(m) = self.check_brute_force_lockout(ctx).await? {
-            return Ok(m);
-        }
+        matched!(self.check_brute_force_lockout(ctx).await?);
 
         // 3. Country restriction
-        if let Some(m) = self.check_country_restriction(ctx) {
-            return Ok(m);
-        }
+        matched!(self.check_country_restriction(ctx));
 
         // 4. Tor exit node
-        if let Some(m) = self.check_tor_exit(ctx) {
-            return Ok(m);
-        }
+        matched!(self.check_tor_exit(ctx));
 
         // 5. Brute force threshold
-        if let Some(m) = self.check_brute_force(ctx).await? {
-            return Ok(m);
-        }
+        matched!(self.check_brute_force(ctx).await?);
 
         // 6. Impossible travel (haversine distance + speed check)
-        if let Some(m) = self.check_impossible_travel(ctx) {
-            return Ok(m);
-        }
+        matched!(self.check_impossible_travel(ctx));
 
         // 7. Datacenter IP
-        if let Some(m) = self.check_datacenter_ip(ctx) {
-            return Ok(m);
-        }
+        matched!(self.check_datacenter_ip(ctx));
 
         // 8. Credential stuffing (IP-based rate limit)
-        if let Some(m) = self.check_credential_stuffing(ctx).await? {
-            return Ok(m);
-        }
+        matched!(self.check_credential_stuffing(ctx).await?);
 
         // 9. New device + new IP: a change from the profile's history. A first
         // sign-in has no familiar device or address to differ from.
-        if ctx.prev_login_at.is_some() && ctx.new_device && ctx.new_ip {
-            return Ok(RuleMatch {
+        matched!(
+            (ctx.prev_login_at.is_some() && ctx.new_device && ctx.new_ip).then(|| RuleMatch {
                 rule: "new_device_ip",
                 reaction: RuleReaction::StepUp,
                 reason: "login from new device and new IP address".to_string(),
-            });
-        }
+            })
+        );
 
-        Ok(RuleMatch {
+        Ok(passed.unwrap_or_else(|| RuleMatch {
             rule: "none",
             reaction: RuleReaction::Allow,
             reason: "no anomalies detected".to_string(),
-        })
+        }))
     }
 
     /// Count a failed attempt for `identity`; the attempt that reaches the
