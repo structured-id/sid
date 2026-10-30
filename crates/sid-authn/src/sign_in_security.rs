@@ -70,6 +70,12 @@ impl AttemptAuthentication<'_> {
             Self::Accepted(_) => "federated",
         }
     }
+
+    /// Whether this is already the stronger sign-in an anomaly rule asks for:
+    /// a trusted issuer's accepted evidence at the multi-factor level.
+    fn answers_step_up(&self) -> bool {
+        matches!(self, Self::Accepted(evidence) if evidence.assurance_level >= AuthLevel::Standard)
+    }
 }
 
 /// One verified sign-in as the rules see it.
@@ -338,6 +344,10 @@ async fn judge<H: SignInSecurityHost>(
                 return Err(SignInRefusal::CaptchaRequired(challenge).into());
             }
         }
+        RuleReaction::StepUp if attempt.authentication.answers_step_up() => {
+            info!(account = %identity, rule = rule_match.rule, "Anomaly: StepUp answered by accepted evidence");
+            event("allow").await;
+        }
         RuleReaction::StepUp => {
             warn!(account = %identity, rule = rule_match.rule, reason = %rule_match.reason, "Anomaly: StepUp required");
             event(rule_match.reaction.as_str()).await;
@@ -424,3 +434,6 @@ async fn record_evidence<H: SignInSecurityHost>(
         warn!(error = %e, "failed to record login location");
     }
 }
+
+#[cfg(test)]
+mod tests;
