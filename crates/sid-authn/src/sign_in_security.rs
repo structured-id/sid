@@ -72,9 +72,14 @@ impl AttemptAuthentication<'_> {
     }
 
     /// Whether this is already the stronger sign-in an anomaly rule asks for:
-    /// a trusted issuer's accepted evidence at the multi-factor level.
+    /// an authentication established at the multi-factor level, by this
+    /// authority or a trusted issuer. The level decides, never a method's name.
     fn answers_step_up(&self) -> bool {
-        matches!(self, Self::Accepted(evidence) if evidence.assurance_level >= AuthLevel::Standard)
+        let level = match self {
+            Self::Local { assurance, .. } => *assurance,
+            Self::Accepted(evidence) => evidence.assurance_level,
+        };
+        level >= AuthLevel::Standard
     }
 }
 
