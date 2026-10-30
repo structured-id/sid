@@ -213,3 +213,30 @@ fn the_account_url_is_checked() {
         assert!(AccountSettings::new(bad, keys("k")).is_err(), "{bad}");
     }
 }
+
+/// The issuer sends a user who must sign in to the account UI's own sign-in
+/// route under the configured mount, with or without a trailing slash: the
+/// page is derived from the account URL, never configured beside it.
+#[test]
+fn the_sign_in_page_is_the_account_ui_route() {
+    for (account, page) in [
+        (
+            "https://sid.example.com/account/",
+            "https://sid.example.com/account/login",
+        ),
+        (
+            "https://sid.example.com/account",
+            "https://sid.example.com/account/login",
+        ),
+        (
+            "https://account.sid.example.com",
+            "https://account.sid.example.com/login",
+        ),
+    ] {
+        assert_eq!(
+            settings(account, "k").sign_in_page().as_str(),
+            page,
+            "{account}"
+        );
+    }
+}

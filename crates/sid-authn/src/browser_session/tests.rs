@@ -80,6 +80,23 @@ fn test_cookie_name_is_a_host_only_token() {
     assert_eq!(cookie().name(), "__Host-sid_session");
 }
 
+/// An issuer's session cookie is named after its handle, so issuers sharing
+/// a host never read each other's session, and no deployment value has to
+/// copy the handle: a rebuilt installation's new issuer names its own.
+#[test]
+fn test_an_issuer_names_its_cookie_after_its_handle() {
+    let handle = sid_core::models::IssuerHandle::parse("c33049901234268c3b5523658a5fb92b").unwrap();
+    let other = sid_core::models::IssuerHandle::parse("790f3195782d0c14b8ead28374525367").unwrap();
+    assert_eq!(
+        BrowserCookie::for_issuer(&handle).name(),
+        "__Host-sid_session-c33049901234268c3b5523658a5fb92b"
+    );
+    assert_ne!(
+        BrowserCookie::for_issuer(&handle),
+        BrowserCookie::for_issuer(&other)
+    );
+}
+
 /// Every secret is fresh: two sessions never share a hash.
 #[test]
 fn test_generated_secrets_differ() {

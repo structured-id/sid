@@ -25,6 +25,9 @@ const CLIENT_SCOPES: [&str; 4] = ["openid", "profile", "email", "account"];
 /// The path under the account URL the BFF receives authorization responses at.
 pub const CALLBACK_PATH: &str = "/auth/callback";
 
+/// The path under the account URL of the account UI's sign-in page.
+pub const SIGN_IN_PATH: &str = "/login";
+
 /// Attempts at storing a changed client before giving up to a concurrent
 /// writer that keeps changing it.
 const UPDATE_ATTEMPTS: usize = 3;
@@ -76,6 +79,15 @@ impl AccountSettings {
             "{}{CALLBACK_PATH}",
             self.account_url.as_str().trim_end_matches('/')
         )
+    }
+
+    /// The account UI's sign-in route, where the issuer sends a user who
+    /// must sign in.
+    pub fn sign_in_page(&self) -> url::Url {
+        let mut page = self.account_url.clone();
+        let path = format!("{}{SIGN_IN_PATH}", page.path().trim_end_matches('/'));
+        page.set_path(&path);
+        page
     }
 
     /// The account BFF's public keys.
