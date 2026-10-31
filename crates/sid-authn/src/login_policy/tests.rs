@@ -9,6 +9,7 @@ fn requirements(min_acr: AuthLevel, enforcement: EnforcementMode) -> LoginRequir
         required_amr: BTreeSet::new(),
         max_authentication_age: None,
         enforcement,
+        new_device: RuleReaction::StepUp,
         fence: None,
     }
 }

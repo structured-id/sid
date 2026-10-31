@@ -292,7 +292,7 @@ async fn judge<H: SignInSecurityHost>(
     };
     let mut rule_match = host
         .anomaly()
-        .evaluate_answered(&ctx, answered)
+        .evaluate_answered(&ctx, answered, requirements.new_device)
         .await
         .map_err(unavailable)?;
     let subject = CaptchaSubject {
@@ -316,7 +316,7 @@ async fn judge<H: SignInSecurityHost>(
             info!(account = %identity, rule = rule_match.rule, "Anomaly: RequireCaptcha answered by a solved challenge");
             rule_match = host
                 .anomaly()
-                .evaluate_answered(&ctx, answered)
+                .evaluate_answered(&ctx, answered, requirements.new_device)
                 .await
                 .map_err(unavailable)?;
         }
