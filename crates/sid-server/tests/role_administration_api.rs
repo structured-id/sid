@@ -55,12 +55,17 @@ async fn harness() -> Harness {
         )),
         common::RecordingAuditLog::shared(),
     );
-    let admin = ProfileId::generate();
+    let admin = Profile::new(Some(format!("admin-{}", uuid::Uuid::now_v7().simple())));
+    storage
+        .create_profile(&admin, AuditEntry::system("test", "administrator").into())
+        .await
+        .unwrap();
+    common::assign_administrator(storage.as_ref(), admin.id).await;
     Harness {
         svc,
         storage,
-        admin,
-        admin_token: issue_admin_token(&jwt, admin),
+        admin: admin.id,
+        admin_token: issue_admin_token(&jwt, admin.id),
     }
 }
 
@@ -104,6 +109,7 @@ fn assign(role: &Role, to: ProfileId, expires: Option<i64>) -> AssignRoleRequest
         scope: None,
         expires_at: expires.map(days),
         admin: None,
+        policy_admin: None,
     }
 }
 
@@ -276,6 +282,7 @@ async fn a_grantor_is_not_added_to_its_group() {
             scope: None,
             expires_at: Some(days(5)),
             admin: None,
+            policy_admin: None,
         },
         &holder_token,
     )

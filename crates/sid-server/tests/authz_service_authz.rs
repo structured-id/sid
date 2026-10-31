@@ -8,7 +8,7 @@
 
 mod common;
 
-use common::{issue_admin_token, issue_token, test_jwt};
+use common::{issue_token, test_jwt};
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authz::cedar::CedarService;
 use sid_authz::grpc::AuthzServiceImpl;
@@ -256,7 +256,7 @@ fn about_another(project: ProjectId) -> CheckPermissionRequest {
 #[tokio::test]
 async fn test_authz_management_allows_an_administrator() {
     let h = harness().await;
-    let token = issue_admin_token(&h.jwt, sid_core::models::ProfileId::generate());
+    let token = common::administrator_token(&h.jwt, h.storage.as_ref()).await;
     let name = format!("allow-read-{}", uuid::Uuid::now_v7().simple());
     let created = h
         .svc

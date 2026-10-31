@@ -9,8 +9,8 @@ mod common;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+use common::TestServices;
 use common::mock_storage::MockStorage;
-use common::{TestServices, issue_admin_token};
 use sid_authz::AuthzCheckRequest;
 use sid_authz::cedar::CedarService;
 use sid_authz::grpc::AuthzServiceImpl;
@@ -37,8 +37,8 @@ fn authz(svc: &TestServices) -> AuthzServiceImpl {
     )
 }
 
-fn as_admin<T>(svc: &TestServices, message: T) -> Request<T> {
-    let token = issue_admin_token(&svc.jwt, sid_core::models::ProfileId::generate());
+async fn as_admin<T>(svc: &TestServices, message: T) -> Request<T> {
+    let token = common::administrator_token(&svc.jwt, svc.storage.as_ref()).await;
     let mut request = Request::new(message);
     request
         .metadata_mut()
@@ -83,6 +83,7 @@ fn assign(principal: Principal, role_id: String, scope: Option<String>) -> Assig
         scope,
         expires_at: None,
         admin: None,
+        policy_admin: None,
     }
 }
 
@@ -96,14 +97,17 @@ async fn a_connector_is_assigned_provisioning_on_a_resource() {
     let directory = common::userinfo_resource(&svc).await;
     let connector = stored_connector(&svc).await;
     let assigned = authz
-        .assign_role(as_admin(
-            &svc,
-            assign(
-                Principal::ProvisioningConnectorId(connector.id.into()),
-                provisioner_role(&svc).await,
-                on(directory),
-            ),
-        ))
+        .assign_role(
+            as_admin(
+                &svc,
+                assign(
+                    Principal::ProvisioningConnectorId(connector.id.into()),
+                    provisioner_role(&svc).await,
+                    on(directory),
+                ),
+            )
+            .await,
+        )
         .await
         .unwrap()
         .into_inner()
@@ -117,12 +121,15 @@ async fn a_connector_is_assigned_provisioning_on_a_resource() {
     );
 
     let listed = authz
-        .list_role_assignments(as_admin(
-            &svc,
-            ListRoleAssignmentsRequest {
-                filter: Some(Filter::ProvisioningConnectorId(connector.id.into())),
-            },
-        ))
+        .list_role_assignments(
+            as_admin(
+                &svc,
+                ListRoleAssignmentsRequest {
+                    filter: Some(Filter::ProvisioningConnectorId(connector.id.into())),
+                },
+            )
+            .await,
+        )
         .await
         .unwrap()
         .into_inner();
@@ -226,7 +233,7 @@ async fn provisioning_is_assigned_only_to_a_live_connector_on_one_resource() {
     ];
     for (i, (principal, scope, code)) in cases.into_iter().enumerate() {
         let err = authz
-            .assign_role(as_admin(&svc, assign(principal, role.clone(), scope)))
+            .assign_role(as_admin(&svc, assign(principal, role.clone(), scope)).await)
             .await
             .unwrap_err();
         assert_eq!(err.code(), code, "case {i}: {err:?}");

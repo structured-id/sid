@@ -54,6 +54,7 @@ async fn setup() -> Setup {
         .create_role(&role, AuditEntry::system("test", "role").into())
         .await
         .unwrap();
+    common::assign_administrator(storage.as_ref(), admin.id).await;
     Setup {
         svc: GovernanceServiceImpl::new(storage.clone(), test_jwt(), test_revocation()),
         storage,

@@ -150,6 +150,7 @@ async fn test_pending_queue_with_unreadable_requester_is_reported() {
         )
         .await
         .unwrap();
+    common::assign_administrator(storage.as_ref(), admin.id).await;
     let svc = GovernanceServiceImpl::new(storage.clone(), test_jwt(), test_revocation());
     let user_token = issue_token(&test_jwt(), &user, &["openid".to_string()]);
     svc.request_access(authed(
@@ -180,7 +181,9 @@ async fn test_pending_queue_with_unreadable_requester_is_reported() {
 #[tokio::test]
 async fn test_governance_rpcs_allow_an_administrator() {
     let admin = Profile::new(Some("root"));
-    let svc = service(MockStorage::new().with_profile(admin.clone()));
+    let storage = MockStorage::new().with_profile(admin.clone());
+    common::assign_administrator(&storage, admin.id).await;
+    let svc = service(storage);
     let token = issue_admin_token(&test_jwt(), admin.id);
 
     svc.list_pending_requests(authed(ListPendingRequestsRequest::default(), &token))

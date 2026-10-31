@@ -956,6 +956,7 @@ impl RoleAssignmentRow {
             created_at: self.created_at,
             // The envelope lives in its own tables; the store attaches it.
             admin: None,
+            policy_admin: None,
             provenance: self.granted_by.map(|granted_by| AssignmentProvenance {
                 granted_by,
                 basis: self.basis_assignment_id.map(RoleAssignmentId),

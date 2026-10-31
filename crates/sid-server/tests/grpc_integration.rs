@@ -7430,6 +7430,7 @@ async fn test_governance_decide_request_with_bearer_extracts_reviewer() {
 
     let profile = test_profile();
     let storage = MockStorage::new().with_profile(profile.clone());
+    common::assign_administrator(&storage, profile.id).await;
     let jwt = test_jwt();
     let svc = sid_authz::governance_grpc::GovernanceServiceImpl::new(
         Arc::new(storage),

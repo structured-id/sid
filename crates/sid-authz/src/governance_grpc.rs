@@ -99,6 +99,10 @@ impl GovernanceServiceImpl {
     async fn admin<T>(&self, request: &Request<T>) -> Result<Caller, Status> {
         let caller = self.caller(request).await?;
         caller.require_admin()?;
+        crate::admin::RoleAdministration::new(self.storage.clone())
+            .require_installation_administrator(caller.profile_id)
+            .await
+            .map_err(crate::grpc::administration_refusal)?;
         Ok(caller)
     }
 

@@ -86,13 +86,36 @@ fn in_days(days: i64) -> chrono::DateTime<chrono::Utc> {
     chrono::Utc::now() + chrono::Duration::days(days)
 }
 
+/// `profile` as an installation administrator: the assignment is its authority.
+async fn installation_administrator(
+    storage: &Arc<dyn StorageBackend>,
+    profile: ProfileId,
+) -> (Administrator, RoleAssignment) {
+    sid_authz::builtin::ensure_installation_administrator_role(storage.as_ref())
+        .await
+        .unwrap();
+    let assignment = RoleAssignment::new(
+        RoleAssignmentPrincipal::Profile(profile),
+        Role::installation_administrator().id,
+    )
+    .on_installation();
+    storage
+        .create_role_assignment(&assignment, audit())
+        .await
+        .unwrap();
+    (
+        Administrator::Root(AuthzPrincipal::Profile(profile)),
+        assignment,
+    )
+}
+
 impl Office {
     async fn new(storage: Arc<dyn StorageBackend>) -> Self {
         let accountant = role(&storage, &["ledger.read", "ledger.post"]).await;
         let auditor = role(&storage, &["ledger.read"]).await;
         let administrator_role = role(&storage, &["roles.administer"]).await;
         let installation_admin = profile(&storage).await;
-        let root = Administrator::Root(AuthzPrincipal::Profile(installation_admin));
+        let (root, _) = installation_administrator(&storage, installation_admin).await;
         let core = RoleAdministration::new(storage.clone());
         let access_admin = profile(&storage).await;
         let access_admin_grant = core
@@ -958,6 +981,294 @@ async fn a_holder_sees_what_it_administers(storage: Arc<dyn StorageBackend>) {
     assert_eq!(everything, expected);
 }
 
+/// An assignment on `resource` carrying `operations`, for `holder`.
+fn policy_grant(
+    o: &Office,
+    holder: ProfileId,
+    resource: sid_core::models::ResourceId,
+    operations: &[sid_core::models::PolicyOperation],
+) -> RoleAssignment {
+    let mut grant = RoleAssignment::new(
+        RoleAssignmentPrincipal::Profile(holder),
+        o.administrator_role.id,
+    )
+    .with_expiry(in_days(30));
+    grant.scope = Some(format!("oauth_resource:{resource}"));
+    grant.policy_admin = Some(sid_core::models::PolicyAuthority {
+        operations: operations.iter().copied().collect(),
+    });
+    grant
+}
+
+/// Policy administration is an explicit authority over one protected
+/// resource: role administration does not imply it, operations do not imply
+/// each other, and it reaches no other scope. It is stored with the assignment
+/// and passes on only through its own redelegation right, no wider; only its
+/// source removes what it passed on.
+async fn policy_authority_is_explicit_and_scoped(storage: Arc<dyn StorageBackend>) {
+    use sid_core::models::PolicyOperation::{Edit, Read, Redelegate};
+    use sid_core::models::{PolicyScope, ResourceId};
+    let o = Office::new(storage).await;
+    let resource = ResourceId::generate();
+    let scope = PolicyScope::Resource(resource);
+    let holder = profile(&o.storage).await;
+    let as_holder = Administrator::Holder(AuthzPrincipal::Profile(holder));
+    denied(o.core.policy_authority(&o.admin(), Read, scope).await);
+    denied(o.core.policy_authority(&as_holder, Read, scope).await);
+
+    let granted = o
+        .core
+        .assign(
+            &o.root,
+            policy_grant(&o, holder, resource, &[Read, Edit, Redelegate]),
+            audit(),
+        )
+        .await
+        .unwrap();
+    let stored = o
+        .storage
+        .get_role_assignment(granted.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.policy_admin, granted.policy_admin);
+    o.core
+        .policy_authority(&as_holder, Edit, scope)
+        .await
+        .unwrap();
+    denied(
+        o.core
+            .policy_authority(
+                &as_holder,
+                Edit,
+                PolicyScope::Resource(ResourceId::generate()),
+            )
+            .await,
+    );
+    denied(
+        o.core
+            .policy_authority(&as_holder, Edit, PolicyScope::Installation)
+            .await,
+    );
+    denied(
+        o.core
+            .policy_authority(&as_holder, Edit, PolicyScope::Project(ProjectId::system()))
+            .await,
+    );
+
+    let reader = profile(&o.storage).await;
+    let as_reader = Administrator::Holder(AuthzPrincipal::Profile(reader));
+    let passed = o
+        .core
+        .assign(
+            &as_holder,
+            policy_grant(&o, reader, resource, &[Read]).with_expiry(in_days(10)),
+            audit(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        passed.provenance.as_ref().unwrap().depends_on,
+        Some(granted.id)
+    );
+    o.core
+        .policy_authority(&as_reader, Read, scope)
+        .await
+        .unwrap();
+    denied(o.core.policy_authority(&as_reader, Edit, scope).await);
+    let further = profile(&o.storage).await;
+    denied(
+        o.core
+            .assign(
+                &as_reader,
+                policy_grant(&o, further, resource, &[Read]).with_expiry(in_days(5)),
+                audit(),
+            )
+            .await,
+    );
+    let wider = profile(&o.storage).await;
+    let narrow = o
+        .core
+        .assign(
+            &o.root,
+            policy_grant(&o, wider, resource, &[Read, Redelegate]),
+            audit(),
+        )
+        .await
+        .unwrap();
+    denied(
+        o.core
+            .assign(
+                &Administrator::Holder(AuthzPrincipal::Profile(wider)),
+                policy_grant(&o, further, resource, &[Edit]).with_expiry(in_days(5)),
+                audit(),
+            )
+            .await,
+    );
+    denied(o.core.revoke(&o.admin(), passed.id, audit()).await);
+    assert!(o.core.revoke(&as_holder, passed.id, audit()).await.unwrap());
+    denied(o.core.policy_authority(&as_reader, Read, scope).await);
+    assert!(o.core.revoke(&o.root, narrow.id, audit()).await.unwrap());
+}
+
+/// A policy write authorized by an assignment commits only while that
+/// assignment stands: revoked after the check, nothing changes.
+async fn policy_writes_are_fenced_by_their_authority(storage: Arc<dyn StorageBackend>) {
+    use sid_core::models::PolicyOperation::Edit;
+    use sid_core::models::{CedarPolicy, PolicyEffect, PolicyScope, ResourceId};
+    let o = Office::new(storage).await;
+    let resource = ResourceId::generate();
+    let holder = profile(&o.storage).await;
+    let granted = o
+        .core
+        .assign(
+            &o.root,
+            policy_grant(&o, holder, resource, &[Edit]),
+            audit(),
+        )
+        .await
+        .unwrap();
+    let fence = o
+        .core
+        .policy_authority(
+            &Administrator::Holder(AuthzPrincipal::Profile(holder)),
+            Edit,
+            PolicyScope::Resource(resource),
+        )
+        .await
+        .unwrap();
+    let policy = |name: String| {
+        CedarPolicy::new(
+            PolicyScope::Project(ProjectId::system()),
+            &name,
+            "forbid(principal, action, resource);",
+            PolicyEffect::Forbid,
+        )
+    };
+    let first = policy(format!("p{}", tag()));
+    o.storage
+        .create_cedar_policy(&first, audit().fenced_by(fence))
+        .await
+        .unwrap();
+    o.storage
+        .delete_cedar_policy(first.id, audit().fenced_by(fence))
+        .await
+        .unwrap();
+
+    assert!(o.core.revoke(&o.root, granted.id, audit()).await.unwrap());
+    let second = policy(format!("p{}", tag()));
+    let err = o
+        .storage
+        .create_cedar_policy(&second, audit().fenced_by(fence))
+        .await
+        .expect_err("the authority is gone");
+    assert!(matches!(err, Error::Fenced(_)), "{err:?}");
+    assert!(
+        o.storage
+            .get_cedar_policy(second.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// Regression: a fence named only the group's assignment, so a member removed
+/// after the check still committed under the group's unchanged authority.
+async fn a_group_authority_holds_only_for_a_current_member(storage: Arc<dyn StorageBackend>) {
+    use sid_core::models::PolicyOperation::Edit;
+    use sid_core::models::{CedarPolicy, PolicyEffect, PolicyScope, ResourceId};
+    let o = Office::new(storage).await;
+    let resource = ResourceId::generate();
+    let team = Group::new(ProjectId::system(), format!("g{}", tag()));
+    o.storage.create_group(&team, audit()).await.unwrap();
+    let member = profile(&o.storage).await;
+    o.storage
+        .add_to_group(&GroupMember::new(team.id, member), audit())
+        .await
+        .unwrap();
+    let mut grant = policy_grant(&o, member, resource, &[Edit]);
+    grant.principal = RoleAssignmentPrincipal::Group(team.id);
+    o.core.assign(&o.root, grant, audit()).await.unwrap();
+    let fence = o
+        .core
+        .policy_authority(
+            &Administrator::Holder(AuthzPrincipal::Profile(member)),
+            Edit,
+            PolicyScope::Resource(resource),
+        )
+        .await
+        .unwrap();
+
+    o.storage
+        .remove_from_group(team.id, member, audit())
+        .await
+        .unwrap();
+    let policy = CedarPolicy::new(
+        PolicyScope::Project(ProjectId::system()),
+        format!("p{}", tag()),
+        "forbid(principal, action, resource);",
+        PolicyEffect::Forbid,
+    );
+    let err = o
+        .storage
+        .create_cedar_policy(&policy, audit().fenced_by(fence))
+        .await
+        .expect_err("the member left");
+    assert!(matches!(err, Error::Fenced(_)), "{err:?}");
+    assert!(
+        o.storage
+            .get_cedar_policy(policy.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// Regression: the root was taken from the token's claim alone, so a live
+/// session kept full administration after its assignment was revoked. The
+/// root administers only under its current assignment, and a write checked
+/// before the revocation does not commit after it.
+async fn the_root_holds_only_its_current_assignment(storage: Arc<dyn StorageBackend>) {
+    use sid_core::models::PolicyOperation::{Edit, Read};
+    use sid_core::models::{CedarPolicy, PolicyEffect, PolicyScope, ResourceId};
+    let o = Office::new(storage).await;
+    let scope = PolicyScope::Resource(ResourceId::generate());
+    let id = profile(&o.storage).await;
+    let (leaving, grant) = installation_administrator(&o.storage, id).await;
+    let fence = o
+        .core
+        .policy_authority(&leaving, Edit, scope)
+        .await
+        .unwrap();
+
+    assert!(o.core.revoke(&o.root, grant.id, audit()).await.unwrap());
+    denied(o.core.policy_authority(&leaving, Read, scope).await);
+    denied(o.core.policy_authority(&leaving, Edit, scope).await);
+    let worker = profile(&o.storage).await;
+    denied(
+        o.core
+            .assign(&leaving, o.accountant_for(worker, 10), audit())
+            .await,
+    );
+    denied(
+        o.core
+            .revoke(&leaving, o.access_admin_grant.id, audit())
+            .await,
+    );
+    let policy = CedarPolicy::new(
+        PolicyScope::Project(ProjectId::system()),
+        format!("p{}", tag()),
+        "forbid(principal, action, resource);",
+        PolicyEffect::Forbid,
+    );
+    let err = o
+        .storage
+        .create_cedar_policy(&policy, audit().fenced_by(fence))
+        .await
+        .expect_err("the assignment is gone");
+    assert!(matches!(err, Error::Fenced(_)), "{err:?}");
+}
+
 macro_rules! on_both_engines {
     ($($scenario:ident),* $(,)?) => {
         mod on_postgres {
@@ -981,6 +1292,10 @@ macro_rules! on_both_engines {
 
 on_both_engines!(
     administration_is_independent_of_use,
+    policy_authority_is_explicit_and_scoped,
+    policy_writes_are_fenced_by_their_authority,
+    a_group_authority_holds_only_for_a_current_member,
+    the_root_holds_only_its_current_assignment,
     every_bound_refuses,
     self_assignment_is_refused,
     envelopes_are_not_combined,

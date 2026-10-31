@@ -64,9 +64,22 @@ async fn main() {
 
     let accountant = role(&storage, "accountant", &["ledger.read", "ledger.post"]).await;
     let access_admin_role = role(&storage, "access-admin", &["roles.administer"]).await;
-    let root = Administrator::Root(AuthzPrincipal::Profile(
-        profile(&storage, "installation-admin").await,
-    ));
+    let root = profile(&storage, "installation-admin").await;
+    sid_authz::builtin::ensure_installation_administrator_role(storage.as_ref())
+        .await
+        .unwrap();
+    storage
+        .create_role_assignment(
+            &RoleAssignment::new(
+                RoleAssignmentPrincipal::Profile(root),
+                Role::installation_administrator().id,
+            )
+            .on_installation(),
+            audit(),
+        )
+        .await
+        .unwrap();
+    let root = Administrator::Root(AuthzPrincipal::Profile(root));
     let access_admin = profile(&storage, "access-admin").await;
     let worker = profile(&storage, "worker").await;
 

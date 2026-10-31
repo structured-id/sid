@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use common::mock_storage::MockStorage;
-use common::{TestServices, issue_admin_token, issue_token, test_profile};
+use common::{TestServices, issue_token, test_profile};
 use sid_authz::cedar::CedarService;
 use sid_authz::grpc::AuthzServiceImpl;
 use sid_core::models::{ProjectId, ProtectedResource, SCIM_PROVISIONER_ROLE};
@@ -88,7 +88,7 @@ async fn fixture() -> Fixture {
         svc.revocation_cache.clone(),
     )
     .with_access_tokens(Arc::new(tokens));
-    let admin_token = issue_admin_token(&svc.jwt, sid_core::models::ProfileId::generate());
+    let admin_token = common::administrator_token(&svc.jwt, svc.storage.as_ref()).await;
     Fixture {
         svc,
         provisioning,
@@ -152,6 +152,7 @@ impl Fixture {
                 scope: Some(format!("oauth_resource:{}", self.directory.id)),
                 expires_at: None,
                 admin: None,
+                policy_admin: None,
             }))
             .await
             .unwrap();
