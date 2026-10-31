@@ -31,7 +31,7 @@ fn fixture() -> Fixture {
     let other = Profile::new(Some("mallory"));
     let session = Session::new(
         owner.id,
-        "127.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     let storage = MockStorage::new()

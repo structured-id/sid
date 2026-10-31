@@ -5,6 +5,7 @@
 //! shared database.
 
 use std::fmt::Debug;
+use std::net::IpAddr;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -24,14 +25,18 @@ pub trait SignInHistoryHarness: Send + Sync {
     async fn owner(&self) -> Self::Owner;
 
     /// A session of `owner` established now from `ip` and `device`.
-    async fn sign_in(&self, owner: &Self::Owner, ip: &str, device: Option<Uuid>);
+    async fn sign_in(&self, owner: &Self::Owner, ip: Option<IpAddr>, device: Option<Uuid>);
 
     /// A sign-in of `owner` from `ip` and `device` that proved its first
     /// factor and still owes its second: its pending context stored now.
-    async fn begin_sign_in(&self, owner: &Self::Owner, ip: &str, device: Option<Uuid>);
+    async fn begin_sign_in(&self, owner: &Self::Owner, ip: IpAddr, device: Option<Uuid>);
 }
 
 const DAY: Duration = Duration::from_secs(24 * 3600);
+
+fn addr(text: &str) -> IpAddr {
+    text.parse().expect("a test address")
+}
 
 /// The most recent session's address is the baseline: none before the
 /// first session, then the latest one's, never another account's.
@@ -45,17 +50,62 @@ pub async fn most_recent_session_is_the_latest<H: SignInHistoryHarness>(h: &H) {
             .unwrap(),
         None
     );
-    h.sign_in(&owner, "192.0.2.1", None).await;
+    h.sign_in(&owner, Some(addr("192.0.2.1")), None).await;
     // Sessions are ordered by their creation time; keep them distinct.
     tokio::time::sleep(Duration::from_millis(5)).await;
-    h.sign_in(&owner, "192.0.2.2", None).await;
-    h.sign_in(&other, "198.51.100.9", None).await;
+    h.sign_in(&owner, Some(addr("192.0.2.2")), None).await;
+    h.sign_in(&other, Some(addr("198.51.100.9")), None).await;
     let (ip, _) = store
         .get_most_recent_session_ip(owner)
         .await
         .unwrap()
         .expect("the latest session");
-    assert_eq!(ip, "192.0.2.2");
+    assert_eq!(ip, addr("192.0.2.2"));
+}
+
+/// A session with no address is no location: the latest one with an address
+/// stays the baseline. A session a grant started has none, and hiding the
+/// location behind it turned impossible travel detection off.
+pub async fn a_session_without_an_address_is_no_location<H: SignInHistoryHarness>(h: &H) {
+    let store = h.store();
+    let owner = h.owner().await;
+    h.sign_in(&owner, Some(addr("192.0.2.30")), None).await;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    h.sign_in(&owner, None, None).await;
+
+    let (ip, _) = store
+        .get_most_recent_session_ip(owner)
+        .await
+        .unwrap()
+        .expect("the session with an address");
+    assert_eq!(ip, addr("192.0.2.30"));
+}
+
+/// An IPv6 address is one value at its full width: it round-trips and matches
+/// itself in any spelling, and no other address.
+pub async fn an_ipv6_address_keeps_its_width<H: SignInHistoryHarness>(h: &H) {
+    let store = h.store();
+    let owner = h.owner().await;
+    h.sign_in(&owner, Some(addr("2001:db8::1")), None).await;
+
+    let (ip, _) = store
+        .get_most_recent_session_ip(owner.clone())
+        .await
+        .unwrap()
+        .expect("the session");
+    assert_eq!(ip, addr("2001:db8::1"));
+    assert!(
+        store
+            .has_recent_session_from_ip(owner.clone(), addr("2001:0db8:0:0:0:0:0:1"), DAY)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .has_recent_session_from_ip(owner, addr("2001:db8::2"), DAY)
+            .await
+            .unwrap()
+    );
 }
 
 /// An address or device counts as seen only for the account that signed in
@@ -64,23 +114,24 @@ pub async fn seen_address_and_device_are_per_account<H: SignInHistoryHarness>(h:
     let store = h.store();
     let (owner, other) = (h.owner().await, h.owner().await);
     let device = Uuid::now_v7();
-    h.sign_in(&owner, "203.0.113.7", Some(device)).await;
+    h.sign_in(&owner, Some(addr("203.0.113.7")), Some(device))
+        .await;
 
     assert!(
         store
-            .has_recent_session_from_ip(owner.clone(), "203.0.113.7", DAY)
+            .has_recent_session_from_ip(owner.clone(), addr("203.0.113.7"), DAY)
             .await
             .unwrap()
     );
     assert!(
         !store
-            .has_recent_session_from_ip(owner.clone(), "203.0.113.8", DAY)
+            .has_recent_session_from_ip(owner.clone(), addr("203.0.113.8"), DAY)
             .await
             .unwrap()
     );
     assert!(
         !store
-            .has_recent_session_from_ip(other.clone(), "203.0.113.7", DAY)
+            .has_recent_session_from_ip(other.clone(), addr("203.0.113.7"), DAY)
             .await
             .unwrap(),
         "another account's address counted"
@@ -109,7 +160,7 @@ pub async fn seen_address_and_device_are_per_account<H: SignInHistoryHarness>(h:
     tokio::time::sleep(Duration::from_millis(5)).await;
     assert!(
         !store
-            .has_recent_session_from_ip(owner.clone(), "203.0.113.7", Duration::ZERO)
+            .has_recent_session_from_ip(owner.clone(), addr("203.0.113.7"), Duration::ZERO)
             .await
             .unwrap()
     );
@@ -129,19 +180,20 @@ pub async fn an_unfinished_sign_in_is_no_history<H: SignInHistoryHarness>(h: &H)
     let store = h.store();
     let owner = h.owner().await;
     let device = Uuid::now_v7();
-    h.sign_in(&owner, "192.0.2.10", None).await;
+    h.sign_in(&owner, Some(addr("192.0.2.10")), None).await;
     tokio::time::sleep(Duration::from_millis(5)).await;
-    h.begin_sign_in(&owner, "198.51.100.20", Some(device)).await;
+    h.begin_sign_in(&owner, addr("198.51.100.20"), Some(device))
+        .await;
 
     let (ip, _) = store
         .get_most_recent_session_ip(owner.clone())
         .await
         .unwrap()
         .expect("the completed session");
-    assert_eq!(ip, "192.0.2.10");
+    assert_eq!(ip, addr("192.0.2.10"));
     assert!(
         !store
-            .has_recent_session_from_ip(owner.clone(), "198.51.100.20", DAY)
+            .has_recent_session_from_ip(owner.clone(), addr("198.51.100.20"), DAY)
             .await
             .unwrap()
     );

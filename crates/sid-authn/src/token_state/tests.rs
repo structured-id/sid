@@ -168,11 +168,7 @@ async fn an_active_token_names_its_actor() {
     );
 
     let profile = stored_profile(&f.storage).await;
-    let session = Session::new(
-        profile,
-        "127.0.0.1".into(),
-        Utc::now() + chrono::Duration::hours(1),
-    );
+    let session = Session::new(profile, None, Utc::now() + chrono::Duration::hours(1));
     f.storage.create_session(&session, audit()).await.unwrap();
     // The `sub` is a pairwise identifier that is not the ProfileId.
     let pairwise = uuid::Uuid::now_v7().to_string();
@@ -262,11 +258,7 @@ async fn a_token_whose_actor_cannot_act_now_is_inactive() {
         .await,
         "ended sign-in"
     );
-    let mut expired = Session::new(
-        profile,
-        "127.0.0.1".into(),
-        Utc::now() + chrono::Duration::hours(1),
-    );
+    let mut expired = Session::new(profile, None, Utc::now() + chrono::Duration::hours(1));
     expired.expires_at = Utc::now() - chrono::Duration::minutes(1);
     f.storage.create_session(&expired, audit()).await.unwrap();
     assert!(

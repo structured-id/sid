@@ -60,11 +60,7 @@ async fn closing_profile(
         )
         .await
         .unwrap();
-    let session = Session::new(
-        profile.id,
-        "127.0.0.1".to_string(),
-        Utc::now() + Duration::hours(1),
-    );
+    let session = Session::new(profile.id, None, Utc::now() + Duration::hours(1));
     storage
         .create_session(&session, AuditEntry::system("test", "s").into())
         .await

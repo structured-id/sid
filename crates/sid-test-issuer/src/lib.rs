@@ -431,7 +431,7 @@ impl TestIssuer {
     pub async fn token(&self, profile: &Profile, indicator: &str, jkt: Option<&str>) -> Issued {
         let session = Session::new(
             profile.id,
-            "127.0.0.1".into(),
+            None,
             chrono::Utc::now() + chrono::Duration::hours(1),
         );
         self.storage

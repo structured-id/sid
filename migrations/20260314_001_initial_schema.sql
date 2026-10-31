@@ -136,11 +136,12 @@ CREATE TABLE anomaly_events (
     id uuid NOT NULL,
     rule_id text NOT NULL,
     profile_id text DEFAULT ''::text NOT NULL,
-    ip_address text DEFAULT ''::text NOT NULL,
+    ip_address inet,
     description text DEFAULT ''::text NOT NULL,
     risk_score integer DEFAULT 0 NOT NULL,
     reaction text DEFAULT ''::text NOT NULL,
-    "timestamp" timestamp with time zone DEFAULT now() NOT NULL
+    "timestamp" timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT anomaly_events_host_address CHECK ((masklen(ip_address) = CASE family(ip_address) WHEN 4 THEN 32 ELSE 128 END))
 );
 
 CREATE TABLE applications (
@@ -180,7 +181,7 @@ CREATE TABLE audit_records (
     resource text CONSTRAINT audit_records_resource_not_null1 NOT NULL,
     outcome text CONSTRAINT audit_records_outcome_not_null1 NOT NULL,
     metadata jsonb DEFAULT '{}'::jsonb CONSTRAINT audit_records_metadata_not_null1 NOT NULL,
-    ip_address text,
+    ip_address inet,
     device_id text,
     prev_hash text CONSTRAINT audit_records_prev_hash_not_null1 NOT NULL,
     hash text CONSTRAINT audit_records_hash_not_null1 NOT NULL
@@ -198,7 +199,7 @@ CREATE TABLE audit_records_2026_01 (
     resource text CONSTRAINT audit_records_resource_not_null1 NOT NULL,
     outcome text CONSTRAINT audit_records_outcome_not_null1 NOT NULL,
     metadata jsonb DEFAULT '{}'::jsonb CONSTRAINT audit_records_metadata_not_null1 NOT NULL,
-    ip_address text,
+    ip_address inet,
     device_id text,
     prev_hash text CONSTRAINT audit_records_prev_hash_not_null1 NOT NULL,
     hash text CONSTRAINT audit_records_hash_not_null1 NOT NULL
@@ -215,7 +216,7 @@ CREATE TABLE audit_records_2026_02 (
     resource text CONSTRAINT audit_records_resource_not_null1 NOT NULL,
     outcome text CONSTRAINT audit_records_outcome_not_null1 NOT NULL,
     metadata jsonb DEFAULT '{}'::jsonb CONSTRAINT audit_records_metadata_not_null1 NOT NULL,
-    ip_address text,
+    ip_address inet,
     device_id text,
     prev_hash text CONSTRAINT audit_records_prev_hash_not_null1 NOT NULL,
     hash text CONSTRAINT audit_records_hash_not_null1 NOT NULL
@@ -232,7 +233,7 @@ CREATE TABLE audit_records_2026_03 (
     resource text CONSTRAINT audit_records_resource_not_null1 NOT NULL,
     outcome text CONSTRAINT audit_records_outcome_not_null1 NOT NULL,
     metadata jsonb DEFAULT '{}'::jsonb CONSTRAINT audit_records_metadata_not_null1 NOT NULL,
-    ip_address text,
+    ip_address inet,
     device_id text,
     prev_hash text CONSTRAINT audit_records_prev_hash_not_null1 NOT NULL,
     hash text CONSTRAINT audit_records_hash_not_null1 NOT NULL
@@ -249,7 +250,7 @@ CREATE TABLE audit_records_2026_04 (
     resource text CONSTRAINT audit_records_resource_not_null1 NOT NULL,
     outcome text CONSTRAINT audit_records_outcome_not_null1 NOT NULL,
     metadata jsonb DEFAULT '{}'::jsonb CONSTRAINT audit_records_metadata_not_null1 NOT NULL,
-    ip_address text,
+    ip_address inet,
     device_id text,
     prev_hash text CONSTRAINT audit_records_prev_hash_not_null1 NOT NULL,
     hash text CONSTRAINT audit_records_hash_not_null1 NOT NULL
@@ -266,7 +267,7 @@ CREATE TABLE audit_records_2026_05 (
     resource text CONSTRAINT audit_records_resource_not_null1 NOT NULL,
     outcome text CONSTRAINT audit_records_outcome_not_null1 NOT NULL,
     metadata jsonb DEFAULT '{}'::jsonb CONSTRAINT audit_records_metadata_not_null1 NOT NULL,
-    ip_address text,
+    ip_address inet,
     device_id text,
     prev_hash text CONSTRAINT audit_records_prev_hash_not_null1 NOT NULL,
     hash text CONSTRAINT audit_records_hash_not_null1 NOT NULL
@@ -283,7 +284,7 @@ CREATE TABLE audit_records_2026_06 (
     resource text CONSTRAINT audit_records_resource_not_null1 NOT NULL,
     outcome text CONSTRAINT audit_records_outcome_not_null1 NOT NULL,
     metadata jsonb DEFAULT '{}'::jsonb CONSTRAINT audit_records_metadata_not_null1 NOT NULL,
-    ip_address text,
+    ip_address inet,
     device_id text,
     prev_hash text CONSTRAINT audit_records_prev_hash_not_null1 NOT NULL,
     hash text CONSTRAINT audit_records_hash_not_null1 NOT NULL
@@ -300,7 +301,7 @@ CREATE TABLE audit_records_2026_07 (
     resource text CONSTRAINT audit_records_resource_not_null1 NOT NULL,
     outcome text CONSTRAINT audit_records_outcome_not_null1 NOT NULL,
     metadata jsonb DEFAULT '{}'::jsonb CONSTRAINT audit_records_metadata_not_null1 NOT NULL,
-    ip_address text,
+    ip_address inet,
     device_id text,
     prev_hash text CONSTRAINT audit_records_prev_hash_not_null1 NOT NULL,
     hash text CONSTRAINT audit_records_hash_not_null1 NOT NULL
@@ -317,7 +318,7 @@ CREATE TABLE audit_records_2026_08 (
     resource text CONSTRAINT audit_records_resource_not_null1 NOT NULL,
     outcome text CONSTRAINT audit_records_outcome_not_null1 NOT NULL,
     metadata jsonb DEFAULT '{}'::jsonb CONSTRAINT audit_records_metadata_not_null1 NOT NULL,
-    ip_address text,
+    ip_address inet,
     device_id text,
     prev_hash text CONSTRAINT audit_records_prev_hash_not_null1 NOT NULL,
     hash text CONSTRAINT audit_records_hash_not_null1 NOT NULL
@@ -334,7 +335,7 @@ CREATE TABLE audit_records_2026_09 (
     resource text CONSTRAINT audit_records_resource_not_null1 NOT NULL,
     outcome text CONSTRAINT audit_records_outcome_not_null1 NOT NULL,
     metadata jsonb DEFAULT '{}'::jsonb CONSTRAINT audit_records_metadata_not_null1 NOT NULL,
-    ip_address text,
+    ip_address inet,
     device_id text,
     prev_hash text CONSTRAINT audit_records_prev_hash_not_null1 NOT NULL,
     hash text CONSTRAINT audit_records_hash_not_null1 NOT NULL
@@ -351,7 +352,7 @@ CREATE TABLE audit_records_2026_10 (
     resource text CONSTRAINT audit_records_resource_not_null1 NOT NULL,
     outcome text CONSTRAINT audit_records_outcome_not_null1 NOT NULL,
     metadata jsonb DEFAULT '{}'::jsonb CONSTRAINT audit_records_metadata_not_null1 NOT NULL,
-    ip_address text,
+    ip_address inet,
     device_id text,
     prev_hash text CONSTRAINT audit_records_prev_hash_not_null1 NOT NULL,
     hash text CONSTRAINT audit_records_hash_not_null1 NOT NULL
@@ -368,7 +369,7 @@ CREATE TABLE audit_records_2026_11 (
     resource text CONSTRAINT audit_records_resource_not_null1 NOT NULL,
     outcome text CONSTRAINT audit_records_outcome_not_null1 NOT NULL,
     metadata jsonb DEFAULT '{}'::jsonb CONSTRAINT audit_records_metadata_not_null1 NOT NULL,
-    ip_address text,
+    ip_address inet,
     device_id text,
     prev_hash text CONSTRAINT audit_records_prev_hash_not_null1 NOT NULL,
     hash text CONSTRAINT audit_records_hash_not_null1 NOT NULL
@@ -385,7 +386,7 @@ CREATE TABLE audit_records_2026_12 (
     resource text CONSTRAINT audit_records_resource_not_null1 NOT NULL,
     outcome text CONSTRAINT audit_records_outcome_not_null1 NOT NULL,
     metadata jsonb DEFAULT '{}'::jsonb CONSTRAINT audit_records_metadata_not_null1 NOT NULL,
-    ip_address text,
+    ip_address inet,
     device_id text,
     prev_hash text CONSTRAINT audit_records_prev_hash_not_null1 NOT NULL,
     hash text CONSTRAINT audit_records_hash_not_null1 NOT NULL
@@ -402,7 +403,7 @@ CREATE TABLE audit_records_default (
     resource text CONSTRAINT audit_records_resource_not_null1 NOT NULL,
     outcome text CONSTRAINT audit_records_outcome_not_null1 NOT NULL,
     metadata jsonb DEFAULT '{}'::jsonb CONSTRAINT audit_records_metadata_not_null1 NOT NULL,
-    ip_address text,
+    ip_address inet,
     device_id text,
     prev_hash text CONSTRAINT audit_records_prev_hash_not_null1 NOT NULL,
     hash text CONSTRAINT audit_records_hash_not_null1 NOT NULL
@@ -1394,7 +1395,7 @@ CREATE TABLE sessions (
     profile_id uuid NOT NULL,
     client_id character varying(255),
     device_id uuid,
-    ip_address character varying(45) NOT NULL,
+    ip_address inet,
     user_agent text,
     scopes text DEFAULT ''::text NOT NULL,
     assurance_level character varying(20) DEFAULT 'basic'::character varying NOT NULL,
@@ -1413,7 +1414,8 @@ CREATE TABLE sessions (
     authenticated_by uuid,
     browser_csrf bytea,
     CONSTRAINT sessions_base_assurance CHECK (((assurance_level)::text = ANY ((ARRAY['basic'::character varying, 'standard'::character varying])::text[]))),
-    CONSTRAINT sessions_elevation_complete CHECK ((((elevation_level IS NULL) AND (elevation_until IS NULL)) OR ((elevation_level = ANY (ARRAY['elevated'::text, 'critical'::text])) AND (elevation_until IS NOT NULL))))
+    CONSTRAINT sessions_elevation_complete CHECK ((((elevation_level IS NULL) AND (elevation_until IS NULL)) OR ((elevation_level = ANY (ARRAY['elevated'::text, 'critical'::text])) AND (elevation_until IS NOT NULL)))),
+    CONSTRAINT sessions_host_address CHECK ((masklen(ip_address) = CASE family(ip_address) WHEN 4 THEN 32 ELSE 128 END))
 );
 
 CREATE TABLE upstream_identities (
@@ -1487,6 +1489,9 @@ ALTER TABLE ONLY audit_records ATTACH PARTITION audit_records_2026_11 FOR VALUES
 ALTER TABLE ONLY audit_records ATTACH PARTITION audit_records_2026_12 FOR VALUES FROM ('2026-12-01 00:00:00+00') TO ('2027-01-01 00:00:00+00');
 
 ALTER TABLE ONLY audit_records ATTACH PARTITION audit_records_default DEFAULT;
+
+ALTER TABLE audit_records
+    ADD CONSTRAINT audit_records_host_address CHECK ((masklen(ip_address) = CASE family(ip_address) WHEN 4 THEN 32 ELSE 128 END));
 
 ALTER TABLE ONLY access_requests
     ADD CONSTRAINT access_requests_pkey PRIMARY KEY (id);

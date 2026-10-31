@@ -228,7 +228,7 @@ async fn judge<H: SignInSecurityHost>(
 
     let new_ip = match client_ip {
         Some(ip) => !history
-            .has_recent_session_from_ip(owner.clone(), &ip.to_string(), SEEN_WINDOW)
+            .has_recent_session_from_ip(owner.clone(), ip, SEEN_WINDOW)
             .await
             .map_err(unavailable)?,
         None => false,
@@ -237,16 +237,13 @@ async fn judge<H: SignInSecurityHost>(
     // The previous session's location, resolved only with a current one to
     // compare against.
     let (prev_latitude, prev_longitude, prev_country) = match (&geo_location, &previous) {
-        (Some(_), Some((prev_ip, _))) => match prev_ip.parse::<IpAddr>() {
-            Ok(prev_ip) => match host.geoip().resolve(prev_ip).await {
-                Some(prev) => (
-                    Some(prev.latitude),
-                    Some(prev.longitude),
-                    Some(prev.country),
-                ),
-                None => (None, None, None),
-            },
-            Err(_) => (None, None, None),
+        (Some(_), Some((prev_ip, _))) => match host.geoip().resolve(*prev_ip).await {
+            Some(prev) => (
+                Some(prev.latitude),
+                Some(prev.longitude),
+                Some(prev.country),
+            ),
+            None => (None, None, None),
         },
         _ => (None, None, None),
     };

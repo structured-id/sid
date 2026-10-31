@@ -4,6 +4,7 @@
 //! Represents an active user session with scopes, assurance level, and metadata.
 
 use chrono::{DateTime, Utc};
+use core::net::IpAddr;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -290,8 +291,8 @@ pub struct Session<O = ProfileId> {
     /// Device identifier for session binding.
     pub device_id: Option<Uuid>,
 
-    /// Client IP address.
-    pub ip_address: String,
+    /// Client address; none when the transport reported no peer.
+    pub ip_address: Option<IpAddr>,
 
     /// User-Agent header.
     pub user_agent: Option<String>,
@@ -359,7 +360,7 @@ pub struct Session<O = ProfileId> {
 
 impl<O> Session<O> {
     /// Create a new session.
-    pub fn new(profile_id: O, ip_address: String, expires_at: DateTime<Utc>) -> Self {
+    pub fn new(profile_id: O, ip_address: Option<IpAddr>, expires_at: DateTime<Utc>) -> Self {
         let now = Utc::now();
         Self {
             id: SessionId::generate(),
@@ -390,7 +391,7 @@ impl<O> Session<O> {
 impl Session {
     /// Create a provisional session (from OTP/passwordless).
     /// TTL: 15 minutes, restricted scopes, passkey prompt enabled.
-    pub fn new_provisional(profile_id: ProfileId, ip_address: String) -> Self {
+    pub fn new_provisional(profile_id: ProfileId, ip_address: Option<IpAddr>) -> Self {
         let now = Utc::now();
         Self {
             id: SessionId::generate(),
@@ -429,7 +430,7 @@ impl Session {
     /// completing that sign-in.
     pub fn new_awaiting_second_factor(
         profile_id: ProfileId,
-        ip_address: String,
+        ip_address: Option<IpAddr>,
         assurance: AuthLevel,
         amr: Vec<String>,
     ) -> Self {

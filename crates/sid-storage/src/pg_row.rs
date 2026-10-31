@@ -388,7 +388,7 @@ pub struct SessionRow {
     pub profile_id: ProfileId,
     pub client_id: Option<String>,
     pub device_id: Option<Uuid>,
-    pub ip_address: String,
+    pub ip_address: Option<std::net::IpAddr>,
     pub user_agent: Option<String>,
     pub scopes: String,
     pub assurance_level: String,

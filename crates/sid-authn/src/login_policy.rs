@@ -193,7 +193,7 @@ pub fn local_authentication<O>(
     amr: &[String],
     now: DateTime<Utc>,
 ) -> Session<O> {
-    let mut probe = Session::new(owner, "probe".to_string(), now + chrono::Duration::hours(1));
+    let mut probe = Session::new(owner, None, now + chrono::Duration::hours(1));
     probe.assurance_level = assurance;
     probe.amr = amr.to_vec();
     probe.authenticated_at = now;

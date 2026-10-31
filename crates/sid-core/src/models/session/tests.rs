@@ -1,12 +1,11 @@
 use super::*;
 use chrono::Duration;
+use core::net::Ipv4Addr;
+
+const LOCAL: Option<IpAddr> = Some(IpAddr::V4(Ipv4Addr::LOCALHOST));
 
 fn make_session(expires_in: Duration) -> Session {
-    Session::new(
-        ProfileId::generate(),
-        "127.0.0.1".to_string(),
-        Utc::now() + expires_in,
-    )
+    Session::new(ProfileId::generate(), LOCAL, Utc::now() + expires_in)
 }
 
 /// A session redeemed from a grant reports the authorizing session's
@@ -51,7 +50,7 @@ fn test_session_new_defaults() {
     assert!(session.user_agent.is_none());
     assert!(session.scopes.is_empty());
     assert!(session.last_activity_at.is_none());
-    assert_eq!(session.ip_address, "127.0.0.1");
+    assert_eq!(session.ip_address, LOCAL);
 }
 
 #[test]
@@ -144,7 +143,7 @@ fn test_auth_level_serde_roundtrip() {
 
 #[test]
 fn test_provisional_session() {
-    let session = Session::new_provisional(ProfileId::generate(), "10.0.0.1".to_string());
+    let session = Session::new_provisional(ProfileId::generate(), None);
     assert!(session.is_provisional);
     assert!(session.passkey_prompt);
     assert_eq!(session.assurance_level, AuthLevel::Basic);
@@ -304,7 +303,7 @@ fn test_session_add_amr() {
 
 #[test]
 fn test_provisional_session_amr() {
-    let session = Session::new_provisional(ProfileId::generate(), "10.0.0.1".to_string());
+    let session = Session::new_provisional(ProfileId::generate(), None);
     assert_eq!(session.amr, vec!["mca"]);
 }
 
@@ -419,7 +418,7 @@ fn test_active_gateway_unavailable_for_expired() {
 
 #[test]
 fn test_active_gateway_unavailable_for_provisional() {
-    let mut session = Session::new_provisional(ProfileId::generate(), "10.0.0.1".to_string());
+    let mut session = Session::new_provisional(ProfileId::generate(), None);
     assert!(session.as_active().is_none());
 }
 
@@ -491,7 +490,7 @@ fn test_expired_gateway_unavailable_for_active() {
 fn test_expired_session_inner_readonly() {
     let session = make_session(Duration::hours(-1));
     let expired = session.as_expired().unwrap();
-    assert_eq!(expired.inner().ip_address, "127.0.0.1");
+    assert_eq!(expired.inner().ip_address, LOCAL);
 }
 
 #[test]
@@ -576,7 +575,7 @@ fn an_elevated_attestation_is_bounded_from_its_authentication_time() {
 fn a_pending_second_factor_context_is_told_from_channel_proof() {
     let pending = Session::new_awaiting_second_factor(
         ProfileId::generate(),
-        "127.0.0.1".to_string(),
+        None,
         AuthLevel::Basic,
         vec!["pwd".into()],
     );
@@ -588,7 +587,7 @@ fn a_pending_second_factor_context_is_told_from_channel_proof() {
         pending.expires_at <= Utc::now() + Duration::minutes(PENDING_SECOND_FACTOR_TTL_MINUTES)
     );
 
-    let channel = Session::new_provisional(ProfileId::generate(), "127.0.0.1".to_string());
+    let channel = Session::new_provisional(ProfileId::generate(), None);
     assert!(!channel.awaits_second_factor());
     assert!(!make_session(Duration::hours(1)).awaits_second_factor());
 }

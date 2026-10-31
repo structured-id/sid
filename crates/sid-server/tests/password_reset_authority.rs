@@ -210,7 +210,7 @@ async fn a_reset_signs_in_with_the_clients_address_and_device() {
         .iter()
         .find(|s| Some(s.id.to_string()) == done.session_id)
         .expect("the reset's session");
-    assert_eq!(session.ip_address, "203.0.113.7");
+    assert_eq!(session.ip_address, Some("203.0.113.7".parse().unwrap()));
     assert!(
         session.device_id.is_some(),
         "the reset's session names no device"

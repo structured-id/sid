@@ -28,11 +28,7 @@ fn create_test_email() -> ProfileEmail {
 }
 
 fn create_test_session(profile: &Profile) -> Session {
-    Session::new(
-        profile.id,
-        "127.0.0.1".to_string(),
-        Utc::now() + Duration::hours(1),
-    )
+    Session::new(profile.id, None, Utc::now() + Duration::hours(1))
 }
 
 /// Helper: issue_id_token with default primary email, no phone
@@ -654,7 +650,7 @@ fn test_impersonation_token_roundtrip() {
 
     let session = Session::new(
         sid_core::models::ProfileId::generate(),
-        "127.0.0.1".into(),
+        None,
         Utc::now() + Duration::seconds(300),
     );
     let token = jwt
@@ -689,7 +685,7 @@ fn test_impersonation_token_ends_with_its_session() {
     .expect("JwtService creation failed");
     let session = Session::new(
         sid_core::models::ProfileId::generate(),
-        "127.0.0.1".into(),
+        None,
         Utc::now() + Duration::seconds(60),
     );
 
@@ -713,7 +709,7 @@ fn test_impersonation_token_ttl_capped_at_300s() {
 
     let session = Session::new(
         sid_core::models::ProfileId::generate(),
-        "127.0.0.1".into(),
+        None,
         Utc::now() + Duration::hours(1),
     );
     let token = jwt
@@ -1176,7 +1172,7 @@ fn a_pending_second_factor_token_is_accepted_only_where_asked_for() {
     let profile = create_test_profile();
     let pending = Session::new_awaiting_second_factor(
         profile.id,
-        "127.0.0.1".to_string(),
+        None,
         sid_core::models::session::AuthLevel::Basic,
         vec!["pwd".into()],
     );

@@ -7,7 +7,7 @@ use chrono::Utc;
 fn session(client_id: Option<&str>) -> Session {
     let mut session = Session::new(
         ProfileId::generate(),
-        "127.0.0.1".into(),
+        None,
         Utc::now() + chrono::Duration::hours(1),
     );
     session.client_id = client_id.map(str::to_string);

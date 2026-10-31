@@ -201,7 +201,7 @@ fn test_jwt() -> Arc<JwtService> {
 fn token_for(profile: &Profile) -> String {
     let session = Session::new(
         profile.id,
-        "127.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     test_jwt()
@@ -1697,7 +1697,7 @@ async fn signed_in_employee(
     let profile_id = ProfileId::parse(&created.id).unwrap();
     let session = Session::new(
         profile_id,
-        "127.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     storage

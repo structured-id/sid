@@ -4,6 +4,7 @@
 
 use sid_core::{Error as SidError, Result as SidResult, models::ProfileId};
 use sqlx::Row;
+use std::net::IpAddr;
 
 use super::{SqliteBackend, col, fmt_dt, parse_dt};
 
@@ -18,11 +19,11 @@ impl SqliteBackend {
     pub(crate) async fn get_most_recent_session_ip_impl(
         &self,
         profile_id: ProfileId,
-    ) -> SidResult<Option<(String, chrono::DateTime<chrono::Utc>)>> {
+    ) -> SidResult<Option<(IpAddr, chrono::DateTime<chrono::Utc>)>> {
         // A sign-in still owing its second factor is no history.
         let row = sqlx::query(
             "SELECT ip_address, created_at FROM sessions WHERE profile_id = ? \
-             AND NOT (is_provisional AND scopes = ?) \
+             AND ip_address IS NOT NULL AND NOT (is_provisional AND scopes = ?) \
              ORDER BY created_at DESC LIMIT 1",
         )
         .bind(profile_id)
@@ -31,8 +32,9 @@ impl SqliteBackend {
         .await
         .map_err(|e| SidError::Storage(e.to_string()))?;
         row.map(|row| {
+            let ip: Vec<u8> = col(&row, "ip_address")?;
             Ok((
-                col(&row, "ip_address")?,
+                super::ip_from_bytes(&ip)?,
                 parse_dt(&row.get::<String, _>("created_at")),
             ))
         })
@@ -42,7 +44,7 @@ impl SqliteBackend {
     pub(crate) async fn has_recent_session_from_ip_impl(
         &self,
         profile_id: ProfileId,
-        ip: &str,
+        ip: IpAddr,
         window: std::time::Duration,
     ) -> SidResult<bool> {
         sqlx::query_scalar(
@@ -51,7 +53,7 @@ impl SqliteBackend {
              AND NOT (is_provisional AND scopes = ?))",
         )
         .bind(profile_id)
-        .bind(ip)
+        .bind(super::ip_to_bytes(ip))
         .bind(since(window)?)
         .bind(sid_core::models::session::SECOND_FACTOR_SCOPE)
         .fetch_one(&self.pool)

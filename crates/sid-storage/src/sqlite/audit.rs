@@ -95,7 +95,7 @@ impl SqliteAuditLog {
         .bind(&record.resource)
         .bind(record.outcome.to_string())
         .bind(&metadata_str)
-        .bind(&record.ip_address)
+        .bind(record.ip_address.map(super::ip_to_bytes))
         .bind(&record.device_id)
         .bind(&record.prev_hash)
         .bind(&record.hash)
@@ -243,7 +243,9 @@ fn row_to_audit_record(row: &sqlx::sqlite::SqliteRow) -> AuditRecord {
         resource: row.get("resource"),
         outcome,
         metadata,
-        ip_address: row.get("ip_address"),
+        ip_address: row
+            .get::<Option<Vec<u8>>, _>("ip_address")
+            .map(|ip| super::ip_from_bytes(&ip).expect("the schema admits 4 or 16 bytes")),
         device_id: row.get("device_id"),
         prev_hash: row.get("prev_hash"),
         hash: row.get("hash"),

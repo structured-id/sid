@@ -52,7 +52,7 @@ pub(super) fn row_to_session(row: &sqlx::sqlite::SqliteRow) -> SidResult<Session
                     .map_err(|e| SidError::Storage(format!("column device_id: {e}")))
             })
             .transpose()?,
-        ip_address: col(row, "ip_address")?,
+        ip_address: super::ip_col(row, "ip_address")?,
         user_agent: col(row, "user_agent")?,
         scopes: Session::parse_scopes(&scopes),
         assurance_level: auth_level("assurance_level", &assurance_level)?,
@@ -95,7 +95,7 @@ where
     .bind(session.profile_id)
     .bind(&session.client_id)
     .bind(session.device_id.map(|d| d.to_string()))
-    .bind(&session.ip_address)
+    .bind(session.ip_address.map(super::ip_to_bytes))
     .bind(&session.user_agent)
     .bind(session.scopes_string())
     .bind(session.assurance_level.as_str())

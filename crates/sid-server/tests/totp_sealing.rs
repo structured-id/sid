@@ -27,7 +27,7 @@ fn authed<T>(body: T, bearer: &str) -> Request<T> {
 async fn signed_in(svc: &TestServices, profile: &Profile) -> String {
     let session = Session::new(
         profile.id,
-        "127.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     let (bearer, session) =

@@ -1461,7 +1461,7 @@ struct AnomalyEventRow {
     id: uuid::Uuid,
     rule_id: String,
     profile_id: String,
-    ip_address: String,
+    ip_address: Option<std::net::IpAddr>,
     description: String,
     risk_score: i32,
     reaction: String,
@@ -6539,7 +6539,7 @@ impl StorageBackend for PostgresBackend {
         .bind(event.id.0)
         .bind(&event.rule_id)
         .bind(&event.profile_id)
-        .bind(&event.ip_address)
+        .bind(event.ip_address)
         .bind(&event.description)
         .bind(event.risk_score)
         .bind(&event.reaction)

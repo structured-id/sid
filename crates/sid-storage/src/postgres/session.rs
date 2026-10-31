@@ -23,7 +23,7 @@ pub(super) async fn write(
     .bind(session.profile_id)
     .bind(&session.client_id)
     .bind(session.device_id)
-    .bind(&session.ip_address)
+    .bind(session.ip_address)
     .bind(&session.user_agent)
     .bind(session.scopes_string())
     .bind(session.assurance_level.as_str())

@@ -682,11 +682,7 @@ fn issue_admin_token(jwt: &sid_authn::jwt::JwtService) -> String {
     let mut profile = Profile::new(Some("admin-user"));
     profile.roles = vec!["admin".into()];
 
-    let session = Session::new(
-        profile.id,
-        "127.0.0.1".to_string(),
-        Utc::now() + Duration::hours(1),
-    );
+    let session = Session::new(profile.id, None, Utc::now() + Duration::hours(1));
 
     jwt.issue_access_token(
         &profile.id.to_string(),
@@ -707,11 +703,7 @@ fn issue_user_token(jwt: &sid_authn::jwt::JwtService) -> String {
     let profile = Profile::new(Some("regular-user"));
     // No admin role
 
-    let session = Session::new(
-        profile.id,
-        "127.0.0.1".to_string(),
-        Utc::now() + Duration::hours(1),
-    );
+    let session = Session::new(profile.id, None, Utc::now() + Duration::hours(1));
 
     jwt.issue_access_token(
         &profile.id.to_string(),

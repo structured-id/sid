@@ -451,10 +451,6 @@ impl GrantHost for Host {
         self.ended.lock().unwrap().push((session, action));
         Ok(())
     }
-
-    fn session_address(&self) -> String {
-        "test".into()
-    }
 }
 
 fn code_grant(code: &str) -> CodeGrant<'_> {

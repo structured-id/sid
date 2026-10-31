@@ -1908,7 +1908,7 @@ async fn test_authorize_acr_values_step_up_required() {
     // Create a session with Basic assurance level (default) and store it.
     let session = Session::new(
         profile.id,
-        "127.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     let (bearer, session) = common::issue_token_with_session(
@@ -1983,7 +1983,7 @@ async fn test_authorize_acr_values_satisfied() {
     // Create a session with Standard assurance level.
     let mut session = Session::new(
         profile.id,
-        "127.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     session.as_active().unwrap().elevate(AuthLevel::Standard);
@@ -2050,7 +2050,7 @@ async fn test_authorize_client_required_acr_enforced() {
     // Session with Basic assurance.
     let session = Session::new(
         profile.id,
-        "127.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     let (bearer, session) =
@@ -2110,7 +2110,7 @@ async fn test_authorize_client_required_amr_enforced() {
     // Session with amr=["pwd"] (password only, no hardware key).
     let mut session = Session::new(
         profile.id,
-        "127.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     session.amr = vec!["pwd".to_string()];
@@ -2182,7 +2182,7 @@ async fn test_authorize_client_amr_satisfied() {
     // Session with amr=["pwd", "hwk"] — satisfies "pwd" requirement.
     let mut session = Session::new(
         profile.id,
-        "127.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     session.amr = vec!["pwd".to_string(), "hwk".to_string()];
@@ -2451,7 +2451,7 @@ async fn test_id_token_contains_sid_claim() {
     let profile = Profile::new(Some("sid_claim_test"));
     let session = Session::new(
         profile.id,
-        "127.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
 
@@ -2482,7 +2482,7 @@ async fn test_id_token_oidc_standard_claims_from_profile_fields() {
     profile.middle_name = Some("Marie".to_string());
     let session = Session::new(
         profile.id,
-        "127.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
 
@@ -2527,7 +2527,7 @@ async fn test_id_token_no_email_omits_email_verified() {
     profile.given_name = Some("Bob".to_string());
     let session = Session::new(
         profile.id,
-        "127.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
 
@@ -4185,7 +4185,7 @@ async fn test_admin_list_sessions() {
     // Create a session
     let session = Session::new(
         profile.id,
-        "127.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     svc.storage
@@ -4214,7 +4214,7 @@ async fn test_admin_revoke_session() {
     // Create a session
     let session = Session::new(
         profile.id,
-        "127.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     svc.storage
@@ -4247,7 +4247,7 @@ async fn test_admin_revoke_all_sessions() {
     for _ in 0..2 {
         let session = Session::new(
             profile.id,
-            "127.0.0.1".to_string(),
+            None,
             chrono::Utc::now() + chrono::Duration::hours(1),
         );
         svc.storage
@@ -5283,7 +5283,7 @@ async fn test_introspect_expired_token() {
     let signer = svc.issuers.signer(&svc.issuer).await.unwrap();
     let mut session = Session::new(
         profile.id,
-        "127.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     // The token expires with its session, already past.
@@ -5561,7 +5561,7 @@ async fn test_magic_link_verify_issues_provisional_session() {
     assert_eq!(session.profile_id, profile.id);
     assert!(session.is_provisional);
     assert!(session.expires_at <= chrono::Utc::now() + chrono::Duration::minutes(15));
-    let provisional = sid_core::models::Session::new_provisional(profile.id, String::new());
+    let provisional = sid_core::models::Session::new_provisional(profile.id, None);
     assert_eq!(session.scopes, provisional.scopes);
     // Mailbox possession over a second channel, as for an emailed code:
     // `mca` (RFC 8176 §2); the registry has no link method.
@@ -5759,11 +5759,7 @@ async fn test_admin_suspend_ends_live_sessions() {
 
     let profile = test_profile();
     let pid = profile.id;
-    let mut session = Session::new(
-        pid,
-        "127.0.0.1".to_string(),
-        chrono::Utc::now() + chrono::Duration::hours(1),
-    );
+    let mut session = Session::new(pid, None, chrono::Utc::now() + chrono::Duration::hours(1));
     session.client_id = Some("rp-client".into());
     let storage = MockStorage::new()
         .with_profile(profile)
@@ -5940,11 +5936,7 @@ async fn test_admin_rpc_revoke_all_sessions() {
     let svc = TestServices::new(storage);
 
     // Create a session first
-    let session = Session::new(
-        pid,
-        "127.0.0.1".to_string(),
-        chrono::Utc::now() + chrono::Duration::hours(1),
-    );
+    let session = Session::new(pid, None, chrono::Utc::now() + chrono::Duration::hours(1));
     svc.storage
         .create_session(&session, AuditEntry::system("test", "test").into())
         .await
@@ -5972,11 +5964,7 @@ async fn test_admin_revoke_all_sessions_stops_tokens_and_owes_logout() {
 
     let profile = test_profile();
     let pid = profile.id;
-    let mut session = Session::new(
-        pid,
-        "127.0.0.1".to_string(),
-        chrono::Utc::now() + chrono::Duration::hours(1),
-    );
+    let mut session = Session::new(pid, None, chrono::Utc::now() + chrono::Duration::hours(1));
     session.client_id = Some("rp-client".into());
     let storage = MockStorage::new()
         .with_profile(profile)
@@ -7240,7 +7228,7 @@ async fn test_delete_mfa_credential_not_found() {
     // Create elevated session.
     let mut session = Session::new(
         profile.id,
-        "127.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     session.as_active().unwrap().elevate(AuthLevel::Elevated);
@@ -7277,7 +7265,7 @@ async fn test_delete_totp_credential_then_reenroll() {
     // Create elevated session.
     let mut session = Session::new(
         profile.id,
-        "127.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     session.as_active().unwrap().elevate(AuthLevel::Elevated);
@@ -7552,7 +7540,7 @@ async fn test_request_step_up_totp_returns_empty_challenge() {
     // Create a session (fresh, Full decay) and TOTP credential.
     let session = Session::new(
         profile.id,
-        "10.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     let totp_cred = Credential::new(profile.id, CredentialType::Totp, vec![1, 2, 3], None);
@@ -7583,7 +7571,7 @@ async fn test_request_step_up_recovery_returns_empty_challenge() {
     let profile = test_profile();
     let session = Session::new(
         profile.id,
-        "10.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     let recovery_cred = Credential::new(profile.id, CredentialType::Recovery, vec![1, 2, 3], None);
@@ -7615,7 +7603,7 @@ async fn test_request_step_up_webauthn_no_passkeys_enrolled() {
     // Create and save session (no passkeys enrolled for this profile).
     let session = Session::new(
         profile.id,
-        "127.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     svc.storage
@@ -7651,7 +7639,7 @@ async fn test_request_step_up_webauthn_invalid_session() {
     // again (TOKEN_EXPIRED).
     let unstored = Session::new(
         profile.id,
-        "127.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     let req = step_up_request(&svc, &profile, &unstored, StepUpMethod::Webauthn);
@@ -7666,7 +7654,7 @@ async fn test_request_step_up_unspecified_returns_available_methods() {
     let profile = test_profile();
     let session = Session::new(
         profile.id,
-        "10.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     let totp_cred = Credential::new(profile.id, CredentialType::Totp, vec![1, 2, 3], None);
@@ -7706,7 +7694,7 @@ async fn test_request_step_up_unspecified_medium_decay_totp_only_fails_precondit
     let profile = test_profile();
     let mut session = Session::new(
         profile.id,
-        "10.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     // 5 hours ago → Medium decay.
@@ -7737,7 +7725,7 @@ async fn test_request_step_up_unspecified_no_methods_fails_precondition() {
     let profile = test_profile();
     let session = Session::new(
         profile.id,
-        "10.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     // No MFA credentials registered for this profile.
@@ -7764,7 +7752,7 @@ async fn test_request_step_up_medium_decay_only_phishing_resistant() {
     let profile = test_profile();
     let mut session = Session::new(
         profile.id,
-        "10.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     // Set authenticated_at to 5 hours ago → Medium decay.
@@ -7808,7 +7796,7 @@ async fn test_request_step_up_medium_decay_rejects_totp() {
     let profile = test_profile();
     let mut session = Session::new(
         profile.id,
-        "10.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     session.authenticated_at = chrono::Utc::now() - chrono::Duration::hours(5);
@@ -7839,7 +7827,7 @@ async fn test_request_step_up_low_decay_requires_reauth() {
     let profile = test_profile();
     let mut session = Session::new(
         profile.id,
-        "10.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     session.authenticated_at = chrono::Utc::now() - chrono::Duration::hours(13);
@@ -7870,7 +7858,7 @@ async fn test_complete_step_up_totp_elevates_session() {
     // Create session at Basic level, signed in two hours ago.
     let mut session = Session::new(
         profile.id,
-        "127.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     session.authenticated_at = chrono::Utc::now() - chrono::Duration::hours(2);
@@ -7979,7 +7967,7 @@ async fn recovery_step_up_fixture(
     let svc = TestServices::new(MockStorage::new().with_profile(profile.clone()));
     let session = Session::new(
         profile.id,
-        "127.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     let (bearer, session) =
@@ -8084,7 +8072,7 @@ async fn test_complete_step_up_totp_wrong_code() {
 
     let session = Session::new(
         profile.id,
-        "127.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     let (bearer, session) =
@@ -8143,7 +8131,7 @@ async fn test_complete_step_up_no_mfa_enrolled() {
 
     let session = Session::new(
         profile.id,
-        "127.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     let (bearer, session) =
@@ -8187,7 +8175,7 @@ async fn test_complete_step_up_webauthn_expired_challenge() {
 
     let session = Session::new(
         profile.id,
-        "127.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     let (bearer, session) =
@@ -8233,7 +8221,7 @@ async fn test_complete_step_up_webauthn_no_challenge_id() {
 
     let session = Session::new(
         profile.id,
-        "127.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     let (bearer, session) =
@@ -9725,7 +9713,7 @@ async fn test_complete_password_reset_ends_earlier_sessions() {
     let profile = test_profile();
     let mut earlier = Session::new(
         profile.id,
-        "127.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     earlier.client_id = Some("rp-client".into());
@@ -10093,11 +10081,7 @@ async fn test_event_session_revoked_on_revoke() {
 
     let profile = test_profile();
     let pid = profile.id;
-    let session = Session::new(
-        pid,
-        "127.0.0.1".to_string(),
-        chrono::Utc::now() + chrono::Duration::hours(1),
-    );
+    let session = Session::new(pid, None, chrono::Utc::now() + chrono::Duration::hours(1));
     let session_id = session.id;
     let storage = MockStorage::new()
         .with_profile(profile.clone())
@@ -10148,11 +10132,7 @@ async fn test_event_session_revoked_on_admin_revoke_all() {
 
     let profile = test_profile();
     let pid = profile.id;
-    let session = Session::new(
-        pid,
-        "127.0.0.1".to_string(),
-        chrono::Utc::now() + chrono::Duration::hours(1),
-    );
+    let session = Session::new(pid, None, chrono::Utc::now() + chrono::Duration::hours(1));
     let session_id = session.id;
     let storage = MockStorage::new()
         .with_profile(profile)
@@ -10202,11 +10182,7 @@ async fn test_event_mfa_disabled_on_credential_delete() {
     let pid = profile.id;
 
     // Create elevated session (required for MFA credential deletion)
-    let mut session = Session::new(
-        pid,
-        "127.0.0.1".to_string(),
-        chrono::Utc::now() + chrono::Duration::hours(1),
-    );
+    let mut session = Session::new(pid, None, chrono::Utc::now() + chrono::Duration::hours(1));
     session.as_active().unwrap().elevate(AuthLevel::Elevated);
 
     // Create a TOTP credential
