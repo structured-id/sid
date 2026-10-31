@@ -28,14 +28,14 @@ impl SignInHistoryStore for KnownElsewhere {
     async fn get_most_recent_session_ip(
         &self,
         _: ProfileId,
-    ) -> sid_core::Result<Option<(String, chrono::DateTime<Utc>)>> {
-        Ok(Some(("198.51.100.1".to_owned(), Utc::now())))
+    ) -> sid_core::Result<Option<(IpAddr, chrono::DateTime<Utc>)>> {
+        Ok(Some(("198.51.100.1".parse().unwrap(), Utc::now())))
     }
 
     async fn has_recent_session_from_ip(
         &self,
         _: ProfileId,
-        _: &str,
+        _: IpAddr,
         _: Duration,
     ) -> sid_core::Result<bool> {
         Ok(false)

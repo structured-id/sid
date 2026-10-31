@@ -121,11 +121,12 @@ CREATE TABLE anomaly_events (
     id uuid NOT NULL,
     rule_id text NOT NULL,
     profile_id text DEFAULT ''::text NOT NULL,
-    ip_address text DEFAULT ''::text NOT NULL,
+    ip_address inet,
     description text DEFAULT ''::text NOT NULL,
     risk_score integer DEFAULT 0 NOT NULL,
     reaction text DEFAULT ''::text NOT NULL,
     "timestamp" timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT anomaly_events_host_address CHECK ((masklen(ip_address) = CASE family(ip_address) WHEN 4 THEN 32 ELSE 128 END)),
     CONSTRAINT anomaly_events_pkey PRIMARY KEY (id)
 );
 
@@ -157,10 +158,11 @@ CREATE TABLE audit_records (
     resource text CONSTRAINT audit_records_resource_not_null1 NOT NULL,
     outcome text CONSTRAINT audit_records_outcome_not_null1 NOT NULL,
     metadata jsonb DEFAULT '{}'::jsonb CONSTRAINT audit_records_metadata_not_null1 NOT NULL,
-    ip_address text,
+    ip_address inet,
     device_id text,
     prev_hash text CONSTRAINT audit_records_prev_hash_not_null1 NOT NULL,
     hash text CONSTRAINT audit_records_hash_not_null1 NOT NULL,
+    CONSTRAINT audit_records_host_address CHECK ((masklen(ip_address) = CASE family(ip_address) WHEN 4 THEN 32 ELSE 128 END)),
     CONSTRAINT uq_audit_chain_seq UNIQUE (chain_id, sequence, "timestamp"),
     CONSTRAINT audit_records_pkey1 PRIMARY KEY (id, "timestamp")
 )
@@ -848,7 +850,7 @@ CREATE TABLE sessions (
     profile_id uuid NOT NULL,
     client_id character varying(255),
     device_id uuid,
-    ip_address character varying(45) NOT NULL,
+    ip_address inet,
     user_agent text,
     scopes text DEFAULT ''::text NOT NULL,
     assurance_level character varying(20) DEFAULT 'basic'::character varying NOT NULL,
@@ -868,6 +870,7 @@ CREATE TABLE sessions (
     browser_csrf bytea,
     CONSTRAINT sessions_base_assurance CHECK (((assurance_level)::text = ANY ((ARRAY['basic'::character varying, 'standard'::character varying])::text[]))),
     CONSTRAINT sessions_elevation_complete CHECK ((((elevation_level IS NULL) AND (elevation_until IS NULL)) OR ((elevation_level = ANY (ARRAY['elevated'::text, 'critical'::text])) AND (elevation_until IS NOT NULL)))),
+    CONSTRAINT sessions_host_address CHECK ((masklen(ip_address) = CASE family(ip_address) WHEN 4 THEN 32 ELSE 128 END)),
     CONSTRAINT sessions_pkey PRIMARY KEY (id),
     CONSTRAINT sessions_authenticated_by_fkey FOREIGN KEY (authenticated_by) REFERENCES sessions(id) ON DELETE SET NULL,
     CONSTRAINT sessions_profile_id_fkey FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE

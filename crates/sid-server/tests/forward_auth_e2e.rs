@@ -120,11 +120,7 @@ async fn machine_token(svc: &TestServices) -> String {
 /// A user's access token for `indicator` as the installation's issuer signs
 /// it for client `orders-web`.
 async fn user_token(svc: &TestServices, profile: &Profile, indicator: &str) -> String {
-    let session = Session::new(
-        profile.id,
-        "127.0.0.1".to_string(),
-        Utc::now() + Duration::hours(1),
-    );
+    let session = Session::new(profile.id, None, Utc::now() + Duration::hours(1));
     let signer = svc.issuers.signer(&svc.issuer).await.unwrap();
     svc.jwt
         .access_token_signed_by(

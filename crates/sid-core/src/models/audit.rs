@@ -5,6 +5,7 @@
 //! Hash chain provides tamper-evidence without requiring full event sourcing.
 
 use chrono::{DateTime, Utc};
+use core::net::IpAddr;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -30,8 +31,8 @@ pub struct AuditEntry {
     #[serde(default)]
     pub metadata: serde_json::Value,
 
-    /// Source IP address.
-    pub ip_address: Option<String>,
+    /// Source address.
+    pub ip_address: Option<IpAddr>,
 
     /// Device identifier (if applicable).
     pub device_id: Option<String>,
@@ -114,9 +115,9 @@ impl AuditEntry {
         self
     }
 
-    /// Set IP address on this entry.
-    pub fn with_ip(mut self, ip: impl Into<String>) -> Self {
-        self.ip_address = Some(ip.into());
+    /// Set the source address of this entry.
+    pub fn with_ip(mut self, ip: Option<IpAddr>) -> Self {
+        self.ip_address = ip;
         self
     }
 
@@ -163,8 +164,8 @@ pub struct AuditRecord {
     #[serde(default)]
     pub metadata: serde_json::Value,
 
-    /// Source IP address.
-    pub ip_address: Option<String>,
+    /// Source address.
+    pub ip_address: Option<IpAddr>,
 
     /// Device identifier.
     pub device_id: Option<String>,

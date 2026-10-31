@@ -111,11 +111,7 @@ fn create_test_profile() -> Profile {
 }
 
 fn create_test_session(profile: &Profile) -> Session {
-    Session::new(
-        profile.id,
-        "127.0.0.1".to_string(),
-        Utc::now() + Duration::hours(1),
-    )
+    Session::new(profile.id, None, Utc::now() + Duration::hours(1))
 }
 
 /// A complete, valid OIDC authorization request.
@@ -471,7 +467,7 @@ async fn test_issue_tokens_for_another_user_representation() {
     let signer = issuers.signer(&issuer).await.unwrap();
     let session = Session::new(
         OtherAccount(7),
-        "127.0.0.1".into(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     let client = create_test_client();
@@ -514,7 +510,7 @@ async fn test_issue_tokens_for_a_user_representation_that_is_not_copy() {
     let signer = issuers.signer(&issuer).await.unwrap();
     let session = Session::new(
         "account-7".to_string(),
-        "127.0.0.1".into(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     let client = create_test_client();

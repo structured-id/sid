@@ -98,11 +98,7 @@ fn credentials_go_into_sensitive_metadata() {
 #[test]
 fn cookie_lifetime_is_taken_at_delivery() {
     let cookie = BrowserCookie::new("__Host-sid_account").unwrap();
-    let mut session = Session::new(
-        ProfileId::generate(),
-        "127.0.0.1".into(),
-        Utc::now() + Duration::hours(1),
-    );
+    let mut session = Session::new(ProfileId::generate(), None, Utc::now() + Duration::hours(1));
     let credential = BrowserCredential::bind(&mut session);
     // The session being stored.
     std::thread::sleep(std::time::Duration::from_millis(1100));
@@ -122,11 +118,7 @@ fn cookie_lifetime_is_taken_at_delivery() {
 #[test]
 fn browser_sign_in_binds_the_cookie_to_the_session() {
     let cookie = BrowserCookie::new("__Host-sid_account").unwrap();
-    let mut session = Session::new(
-        ProfileId::generate(),
-        "127.0.0.1".into(),
-        Utc::now() + Duration::hours(1),
-    );
+    let mut session = Session::new(ProfileId::generate(), None, Utc::now() + Duration::hours(1));
     assert!(session.browser_secret_hash.is_none());
 
     let signed = BrowserCredential::bind(&mut session).signed_in(&cookie, &session);
@@ -157,11 +149,7 @@ fn browser_sign_in_binds_the_cookie_to_the_session() {
 /// sign-in a new one: a replaced session's token is not carried over.
 #[test]
 fn browser_sign_in_gives_the_session_a_csrf_token() {
-    let mut session = Session::new(
-        ProfileId::generate(),
-        "127.0.0.1".into(),
-        Utc::now() + Duration::hours(1),
-    );
+    let mut session = Session::new(ProfileId::generate(), None, Utc::now() + Duration::hours(1));
     assert!(session.browser_csrf.is_none());
     BrowserCredential::bind(&mut session);
     let first = session.browser_csrf.expect("bound session has a token");

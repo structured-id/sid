@@ -110,13 +110,14 @@ pub fn listening_on(bind: &str) -> serde_json::Value {
 /// The address of the client behind `request`: what the proxy in front of the
 /// service resolved, or the transport peer of a direct call, where no proxy
 /// took part. An address the proxy could not resolve is a refusal: a call
-/// with none would pass the checks that key on it.
+/// with none would pass the checks that key on it. An IPv4-mapped address is
+/// its IPv4 address, so one client has one recorded form.
 pub fn client_ip<T>(request: &tonic::Request<T>) -> Result<Option<IpAddr>, tonic::Status> {
     let Some(client) = request.extensions().get::<ClientAddress>() else {
-        return Ok(request.remote_addr().map(|peer| peer.ip()));
+        return Ok(request.remote_addr().map(|peer| peer.ip().to_canonical()));
     };
     match client.resolution() {
-        Resolution::Peer(ip) | Resolution::Forwarded(ip) => Ok(Some(ip)),
+        Resolution::Peer(ip) | Resolution::Forwarded(ip) => Ok(Some(ip.to_canonical())),
         Resolution::Invalid(why) => Err(sid_core::grpc_error::refuse::invalid_field(
             "x-forwarded-for",
             format!("a trusted proxy's report is {why}"),

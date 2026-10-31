@@ -24,11 +24,7 @@ fn jwt() -> JwtService {
 fn custom_claims_cannot_override_registered_claims() {
     let jwt = jwt();
     let profile = Profile::new(Some("alice"));
-    let session = Session::new(
-        profile.id,
-        "127.0.0.1".to_string(),
-        Utc::now() + Duration::hours(1),
-    );
+    let session = Session::new(profile.id, None, Utc::now() + Duration::hours(1));
     let far_future = (Utc::now() + Duration::days(3650)).timestamp();
     let mut custom = HashMap::new();
     custom.insert("sub".to_string(), serde_json::json!("attacker"));

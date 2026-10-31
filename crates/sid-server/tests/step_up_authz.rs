@@ -23,7 +23,7 @@ fn authed<T>(msg: T, token: &str) -> Request<T> {
 fn session_of(profile: &Profile) -> Session {
     Session::new(
         profile.id,
-        "127.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     )
 }

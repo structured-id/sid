@@ -131,7 +131,7 @@ impl PostgresAuditLog {
         .bind(&record.resource)
         .bind(record.outcome.to_string())
         .bind(&record.metadata)
-        .bind(&record.ip_address)
+        .bind(record.ip_address)
         .bind(&record.device_id)
         .bind(&record.prev_hash)
         .bind(&record.hash)

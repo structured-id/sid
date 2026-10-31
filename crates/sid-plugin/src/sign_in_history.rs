@@ -4,6 +4,7 @@
 //! account type the authority authenticates; CE's is the local Profile.
 
 use async_trait::async_trait;
+use core::net::IpAddr;
 use sid_core::Result;
 
 #[async_trait]
@@ -11,14 +12,16 @@ pub trait SignInHistoryStore: Send + Sync {
     /// The account whose sign-ins are recorded.
     type Owner: Send + Sync;
 
-    /// The IP address and time of the account's most recent session.
+    /// The address and time of the account's most recent session with one.
+    /// A session started by a grant has none: its request came from the
+    /// application's server, not from the user.
     ///
     /// Used for impossible travel detection: resolves previous IP via GeoIP
     /// to get lat/lon, then compares with current login location.
     async fn get_most_recent_session_ip(
         &self,
         profile_id: Self::Owner,
-    ) -> Result<Option<(String, chrono::DateTime<chrono::Utc>)>>;
+    ) -> Result<Option<(IpAddr, chrono::DateTime<chrono::Utc>)>>;
 
     /// Whether the account had a session from `ip` within `window`.
     ///
@@ -27,7 +30,7 @@ pub trait SignInHistoryStore: Send + Sync {
     async fn has_recent_session_from_ip(
         &self,
         profile_id: Self::Owner,
-        ip: &str,
+        ip: IpAddr,
         window: std::time::Duration,
     ) -> Result<bool>;
 

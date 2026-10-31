@@ -132,10 +132,6 @@ impl GrantHost for ProfileGrant<'_> {
     ) -> Result<(), Status> {
         self.service.end_replayed_session(session, action).await
     }
-
-    fn session_address(&self) -> String {
-        "grpc".to_string()
-    }
 }
 
 fn token_response(response: TokenResponse) -> Response<OAuth2TokenResponse> {

@@ -415,7 +415,7 @@ async fn signed_in_with_cookie(cookie: sid_authn::browser_session::BrowserCookie
     profile.family_name = Some("Smith".into());
     let mut session = sid_core::models::Session::new(
         profile.id,
-        "127.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     let secret = sid_authn::browser_session::BrowserSecret::generate();
@@ -1802,7 +1802,7 @@ async fn sign_in_again(browser: &mut Browser) -> sid_core::models::Session {
     let secret = sid_authn::browser_session::BrowserSecret::generate();
     let mut session = sid_core::models::Session::new(
         browser.user.profile.id,
-        "127.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     session.browser_secret_hash = Some(secret.hash());
@@ -2326,7 +2326,7 @@ async fn authorize_continues_on_another_replica() {
     let secret = sid_authn::browser_session::BrowserSecret::generate();
     let mut session = sid_core::models::Session::new(
         profile.id,
-        "127.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     session.browser_secret_hash = Some(secret.hash());
@@ -2377,7 +2377,7 @@ impl Browser {
         let svc = &self.user.svc;
         let mut session = sid_core::models::Session::new(
             self.user.profile.id,
-            "127.0.0.1".to_string(),
+            None,
             chrono::Utc::now() + chrono::Duration::hours(1),
         )
         .with_grant_authentication(&self.user.session.grant_authentication());
@@ -2877,7 +2877,7 @@ async fn end_session_without_revocation_state_fails() {
     let secret = sid_authn::browser_session::BrowserSecret::generate();
     let mut session = sid_core::models::Session::new(
         profile.id,
-        "127.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     session.browser_secret_hash = Some(secret.hash());

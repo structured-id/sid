@@ -36,7 +36,7 @@ fn test_profile_id() -> ProfileId {
 fn create_test_session(profile_id: ProfileId, ip: &str) -> Session {
     Session::new(
         profile_id,
-        ip.to_string(),
+        Some(ip.parse().unwrap()),
         chrono::Utc::now() + chrono::Duration::hours(1),
     )
 }
@@ -54,7 +54,7 @@ async fn test_has_recent_session_from_ip_no_sessions() {
 
     // No sessions at all → IP is new.
     let result = storage
-        .has_recent_session_from_ip(profile_id, "192.168.1.1", window)
+        .has_recent_session_from_ip(profile_id, "192.168.1.1".parse().unwrap(), window)
         .await
         .unwrap();
     assert!(!result, "no sessions → IP should be new");
@@ -90,14 +90,14 @@ async fn test_has_recent_session_from_ip_found() {
 
     // Same IP → should be found (not new).
     let result = storage
-        .has_recent_session_from_ip(profile_id, "10.0.0.42", window)
+        .has_recent_session_from_ip(profile_id, "10.0.0.42".parse().unwrap(), window)
         .await
         .unwrap();
     assert!(result, "same IP should be found in session history");
 
     // Different IP → should NOT be found (new).
     let result = storage
-        .has_recent_session_from_ip(profile_id, "10.0.0.99", window)
+        .has_recent_session_from_ip(profile_id, "10.0.0.99".parse().unwrap(), window)
         .await
         .unwrap();
     assert!(!result, "different IP should not be found");
@@ -127,7 +127,7 @@ async fn test_has_recent_session_different_profiles_independent() {
     // Profile B should NOT see profile A's IP.
     let profile_b = test_profile_id();
     let result = storage
-        .has_recent_session_from_ip(profile_b, "10.0.0.1", window)
+        .has_recent_session_from_ip(profile_b, "10.0.0.1".parse().unwrap(), window)
         .await
         .unwrap();
     assert!(!result, "profile B should not see profile A's sessions");

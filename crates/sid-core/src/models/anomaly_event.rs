@@ -6,6 +6,7 @@
 //! Persisted to anomaly_events table for admin dashboard queries.
 
 use chrono::{DateTime, Utc};
+use core::net::IpAddr;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -36,8 +37,8 @@ pub struct AnomalyEventRecord {
     pub rule_id: String,
     /// Profile that triggered the rule (may be empty for IP-only rules).
     pub profile_id: String,
-    /// Client IP address.
-    pub ip_address: String,
+    /// Client address; none when the transport reported no peer.
+    pub ip_address: Option<IpAddr>,
     /// Human-readable description of what happened.
     pub description: String,
     /// Risk weight of the rule (from AnomalyRule.weight, 0-100).
@@ -51,7 +52,7 @@ impl AnomalyEventRecord {
     pub fn new(
         rule_id: impl Into<String>,
         profile_id: impl Into<String>,
-        ip_address: impl Into<String>,
+        ip_address: Option<IpAddr>,
         description: impl Into<String>,
         risk_score: i32,
         reaction: impl Into<String>,
@@ -60,7 +61,7 @@ impl AnomalyEventRecord {
             id: AnomalyEventId::new(),
             rule_id: rule_id.into(),
             profile_id: profile_id.into(),
-            ip_address: ip_address.into(),
+            ip_address,
             description: description.into(),
             risk_score,
             reaction: reaction.into(),

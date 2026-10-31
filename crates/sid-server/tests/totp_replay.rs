@@ -24,7 +24,7 @@ fn authed<T>(body: T, bearer: &str) -> Request<T> {
 async fn enrolled(svc: &TestServices, profile: &Profile, seed: &[u8]) -> (String, Session) {
     let mut session = Session::new(
         profile.id,
-        "127.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     session.authenticated_at = chrono::Utc::now() - chrono::Duration::hours(2);
@@ -142,7 +142,7 @@ async fn enrollment_code_cannot_be_reused() {
     let svc = TestServices::new(MockStorage::new().with_profile(profile.clone()));
     let session = Session::new(
         profile.id,
-        "127.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     let (bearer, session) =

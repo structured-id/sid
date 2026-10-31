@@ -830,7 +830,7 @@ async fn test_handler_verify_recovery_code_success() {
     // Save the token's session so the handler can update AMR.
     let session = Session::new(
         profile.id,
-        "127.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     svc.storage
@@ -906,7 +906,7 @@ async fn test_handler_verify_recovery_code_single_use() {
 
     let session = Session::new(
         profile.id,
-        "127.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     svc.storage

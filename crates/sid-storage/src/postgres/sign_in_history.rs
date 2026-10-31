@@ -15,11 +15,12 @@ impl SignInHistoryStore for PostgresBackend {
     async fn get_most_recent_session_ip(
         &self,
         profile_id: ProfileId,
-    ) -> SidResult<Option<(String, chrono::DateTime<chrono::Utc>)>> {
+    ) -> SidResult<Option<(std::net::IpAddr, chrono::DateTime<chrono::Utc>)>> {
         // A sign-in still owing its second factor is no history.
-        let row: Option<(String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        let row: Option<(std::net::IpAddr, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
             "SELECT ip_address, created_at FROM sessions WHERE profile_id = $1 \
-             AND NOT (is_provisional AND scopes = $2) ORDER BY created_at DESC LIMIT 1",
+             AND ip_address IS NOT NULL AND NOT (is_provisional AND scopes = $2) \
+             ORDER BY created_at DESC LIMIT 1",
         )
         .bind(profile_id)
         .bind(sid_core::models::session::SECOND_FACTOR_SCOPE)
@@ -32,7 +33,7 @@ impl SignInHistoryStore for PostgresBackend {
     async fn has_recent_session_from_ip(
         &self,
         profile_id: ProfileId,
-        ip: &str,
+        ip: std::net::IpAddr,
         window: std::time::Duration,
     ) -> SidResult<bool> {
         let cutoff = chrono::Utc::now() - chrono::Duration::seconds(window.as_secs() as i64);

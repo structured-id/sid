@@ -196,7 +196,7 @@ impl AuditLog for RecordingAuditLog {
             resource: entry.resource.clone(),
             outcome: entry.outcome,
             metadata: entry.metadata.clone(),
-            ip_address: entry.ip_address.clone(),
+            ip_address: entry.ip_address,
             device_id: entry.device_id.clone(),
             prev_hash: String::new(),
             hash: String::new(),
@@ -423,11 +423,7 @@ pub async fn store_client(
 
 /// Issue a bearer token for a profile with given scopes.
 pub fn issue_token(jwt: &JwtService, profile: &Profile, scopes: &[String]) -> String {
-    let session = Session::new(
-        profile.id,
-        "127.0.0.1".to_string(),
-        Utc::now() + Duration::hours(1),
-    );
+    let session = Session::new(profile.id, None, Utc::now() + Duration::hours(1));
     jwt.issue_access_token(
         &profile.id.to_string(),
         Some(&profile.id.to_string()),
@@ -529,11 +525,7 @@ pub async fn issue_application_token_to(
     scopes: &[String],
     client_id: &str,
 ) -> String {
-    let session = Session::new(
-        profile.id,
-        "127.0.0.1".to_string(),
-        Utc::now() + Duration::hours(1),
-    );
+    let session = Session::new(profile.id, None, Utc::now() + Duration::hours(1));
     // A real grant is redeemed from a stored session; its token lives only
     // as long as that session.
     svc.storage
@@ -646,11 +638,7 @@ pub fn authenticated_session(
     level: sid_core::models::AuthLevel,
     minutes_ago: i64,
 ) -> Session {
-    let mut session = Session::new(
-        profile.id,
-        "127.0.0.1".to_string(),
-        Utc::now() + Duration::hours(24),
-    );
+    let mut session = Session::new(profile.id, None, Utc::now() + Duration::hours(24));
     session.assurance_level = level;
     session.authenticated_at = Utc::now() - Duration::minutes(minutes_ago);
     session

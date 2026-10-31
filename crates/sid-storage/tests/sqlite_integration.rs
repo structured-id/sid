@@ -392,7 +392,29 @@ mod sign_in_history {
         seen_address_and_device_are_per_account,
         location_is_designated_at_threshold,
         an_unfinished_sign_in_is_no_history,
+        a_session_without_an_address_is_no_location,
+        an_ipv6_address_keeps_its_width,
     );
+}
+
+/// An address column holds 4 or 16 bytes, whatever reaches it.
+#[tokio::test]
+async fn test_address_columns_hold_one_host() {
+    let backend = setup().await;
+    let event = |ip: Vec<u8>| {
+        sqlx::query(
+            "INSERT INTO anomaly_events (id, rule_id, profile_id, ip_address, description,
+                 risk_score, reaction, timestamp)
+             VALUES (?, 'r', '', ?, '', 0, '', '2026-01-01T00:00:00Z')",
+        )
+        .bind(uuid::Uuid::now_v7().to_string())
+        .bind(ip)
+        .execute(backend.pool())
+    };
+    assert!(event(vec![10, 0, 0]).await.is_err(), "3 bytes");
+    assert!(event(vec![0; 5]).await.is_err(), "5 bytes");
+    event(vec![10, 0, 0, 1]).await.expect("IPv4");
+    event(vec![0; 16]).await.expect("IPv6");
 }
 
 // ─── Principal store conformance ───
@@ -950,7 +972,10 @@ async fn test_audit_retention_keeps_chains_verifiable() {
                 .bind(&r.resource)
                 .bind(r.outcome.to_string())
                 .bind(r.metadata.to_string())
-                .bind(&r.ip_address)
+                .bind(r.ip_address.map(|ip| match ip {
+                    std::net::IpAddr::V4(ip) => ip.octets().to_vec(),
+                    std::net::IpAddr::V6(ip) => ip.octets().to_vec(),
+                }))
                 .bind(&r.device_id)
                 .bind(&r.prev_hash)
                 .bind(&r.hash)

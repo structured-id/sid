@@ -39,7 +39,7 @@ async fn fixture() -> Fixture {
     let credential = Credential::new(victim.id, CredentialType::Totp, vec![1u8; 20], None);
     let session = Session::new(
         victim.id,
-        "127.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     let storage = MockStorage::new()

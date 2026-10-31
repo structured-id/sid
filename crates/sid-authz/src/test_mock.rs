@@ -337,13 +337,13 @@ impl sid_plugin::SignInHistoryStore for MockStorage {
     async fn get_most_recent_session_ip(
         &self,
         _: ProfileId,
-    ) -> Result<Option<(String, chrono::DateTime<chrono::Utc>)>> {
+    ) -> Result<Option<(std::net::IpAddr, chrono::DateTime<chrono::Utc>)>> {
         Ok(None)
     }
     async fn has_recent_session_from_ip(
         &self,
         _: ProfileId,
-        _: &str,
+        _: std::net::IpAddr,
         _: std::time::Duration,
     ) -> Result<bool> {
         Ok(false)

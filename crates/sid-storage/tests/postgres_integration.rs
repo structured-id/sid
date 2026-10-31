@@ -457,7 +457,49 @@ mod sign_in_history {
         seen_address_and_device_are_per_account,
         location_is_designated_at_threshold,
         an_unfinished_sign_in_is_no_history,
+        a_session_without_an_address_is_no_location,
+        an_ipv6_address_keeps_its_width,
     );
+}
+
+/// An address column holds one host, whatever reaches it: a network is
+/// refused in the session, event and audit tables, partitions included.
+#[tokio::test]
+async fn test_address_columns_hold_one_host() {
+    let backend = setup().await;
+    let profile = common::create_test_profile("host_address");
+    backend
+        .create_profile(&profile, common::test_audit())
+        .await
+        .unwrap();
+
+    let session = sqlx::query(
+        "INSERT INTO sessions (id, profile_id, ip_address, expires_at)
+         VALUES ($1, $2, '10.0.0.0/8', NOW())",
+    )
+    .bind(uuid::Uuid::now_v7())
+    .bind(profile.id)
+    .execute(backend.pool())
+    .await;
+    assert!(session.is_err(), "a network in sessions");
+
+    let event = sqlx::query(
+        "INSERT INTO anomaly_events (id, rule_id, ip_address) VALUES ($1, 'r', '2001:db8::/32')",
+    )
+    .bind(uuid::Uuid::now_v7())
+    .execute(backend.pool())
+    .await;
+    assert!(event.is_err(), "a network in anomaly_events");
+
+    let audit = sqlx::query(
+        "INSERT INTO audit_records (id, chain_id, sequence, actor_id, actor_type, action,
+             resource, outcome, ip_address, prev_hash, hash)
+         VALUES ($1, 'c', 1, 'a', 'system', 'x', 'r', 'success', '10.0.0.0/8', 'p', 'h')",
+    )
+    .bind(uuid::Uuid::now_v7().to_string())
+    .execute(backend.pool())
+    .await;
+    assert!(audit.is_err(), "a network in audit_records");
 }
 
 // ─── Principal store conformance ───
@@ -1111,7 +1153,7 @@ async fn test_audit_retention_keeps_chains_verifiable() {
                         .bind(&r.resource)
                         .bind(r.outcome.to_string())
                         .bind(&r.metadata)
-                        .bind(&r.ip_address)
+                        .bind(r.ip_address)
                         .bind(&r.device_id)
                         .bind(&r.prev_hash)
                         .bind(&r.hash)
