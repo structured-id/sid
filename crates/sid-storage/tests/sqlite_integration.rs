@@ -1854,84 +1854,82 @@ async fn test_email_key_written_only_under_the_active_revision() {
         .await;
 }
 
-/// The cutover on a database file written before email policy revisions
-/// (schema version 1), opened by the build that has them: each historical
-/// email assignment is kept, quarantined with a recorded reason, and the
-/// installation's active revision is the current one.
+/// Keys written under a revision that is no longer active are kept,
+/// quarantined with a recorded reason, and can be repaired.
 #[tokio::test]
-async fn test_email_policy_cutover_quarantines_legacy_keys() {
+async fn test_stale_email_keys_are_quarantined_and_reconciled() {
+    use common::email_policy::{STALE_REVISION, stale_rows};
+    use sid_core::models::INSTALLATION_EMAIL_POLICY_REVISION;
     use sid_plugin::storage::StorageBackend;
 
-    let dir = tempfile::tempdir().unwrap();
-    let path = format!("sqlite://{}", dir.path().join("sid.db").display());
-    let domain = "cutover.sid.example.com";
-    let mut legacy = Vec::new();
-    {
-        let old = SqliteBackend::new_through(&path, 1)
-            .await
-            .expect("a version 1 file");
-        for row in common::email_policy::legacy_rows(domain) {
-            let profile = common::create_test_profile("cutover");
-            old.create_profile(&profile, common::test_audit())
-                .await
-                .unwrap();
-            let contact_id = match &row.contact {
-                Some(address) => Some(legacy_contact(&old, profile.id, address).await),
-                None => None,
-            };
-            let principal_id = uuid::Uuid::now_v7().to_string();
-            sqlx::query(
-                "INSERT INTO principals (id, principal_type, value, verified, verified_at,
-                     assigned_profile_id, assignment_revision)
-                 VALUES (?, 'email', ?, ?, CASE WHEN ? THEN '2026-01-01T00:00:00Z' END, ?, 1)",
-            )
-            .bind(&principal_id)
-            .bind(&row.key)
-            .bind(row.verified)
-            .bind(row.verified)
-            .bind(profile.id.to_string())
-            .execute(old.pool())
+    let backend = SqliteBackend::new_in_memory().await.unwrap();
+    let domain = "stale.sid.example.com";
+    let activate = |revision: i64| {
+        sqlx::query("UPDATE email_policy_activations SET revision = ? WHERE scope = 'installation'")
+            .bind(revision)
+    };
+    activate(STALE_REVISION)
+        .execute(backend.pool())
+        .await
+        .unwrap();
+    let mut stale = Vec::new();
+    for row in stale_rows(domain) {
+        let profile = common::create_test_profile("stale");
+        backend
+            .create_profile(&profile, common::test_audit())
             .await
             .unwrap();
-            sqlx::query(
-                "INSERT INTO principal_bindings (id, principal_id, profile_id, is_primary,
-                     source_field, source_email_id)
-                 VALUES (?, ?, ?, 1, 'email', ?)",
-            )
-            .bind(uuid::Uuid::now_v7().to_string())
-            .bind(&principal_id)
-            .bind(profile.id.to_string())
-            .bind(contact_id)
-            .execute(old.pool())
-            .await
-            .unwrap();
-            legacy.push((row.key, profile.id));
-        }
-        old.pool().close().await;
+        let contact_id = match &row.contact {
+            Some(address) => Some(stale_contact(&backend, profile.id, address).await),
+            None => None,
+        };
+        let principal_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO principals (id, principal_type, value, verified, verified_at,
+                 assigned_profile_id, assignment_revision, email_policy_revision)
+             VALUES (?, 'email', ?, ?, CASE WHEN ? THEN '2026-01-01T00:00:00Z' END, ?, 1, ?)",
+        )
+        .bind(&principal_id)
+        .bind(&row.key)
+        .bind(row.verified)
+        .bind(row.verified)
+        .bind(profile.id.to_string())
+        .bind(STALE_REVISION)
+        .execute(backend.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO principal_bindings (id, principal_id, profile_id, is_primary,
+                 source_field, source_email_id)
+             VALUES (?, ?, ?, 1, 'email', ?)",
+        )
+        .bind(uuid::Uuid::now_v7().to_string())
+        .bind(&principal_id)
+        .bind(profile.id.to_string())
+        .bind(contact_id)
+        .execute(backend.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO email_policy_dispositions
+                 (principal_id, from_revision, to_revision, disposition, reason)
+             VALUES (?, ?, ?, 'quarantined', 'no_source_evidence')",
+        )
+        .bind(&principal_id)
+        .bind(STALE_REVISION)
+        .bind(INSTALLATION_EMAIL_POLICY_REVISION)
+        .execute(backend.pool())
+        .await
+        .unwrap();
+        stale.push((row.key, profile.id));
     }
+    activate(INSTALLATION_EMAIL_POLICY_REVISION)
+        .execute(backend.pool())
+        .await
+        .unwrap();
 
-    let backend = SqliteBackend::new(&path).await.expect("the upgraded file");
-    let dispositions: Vec<(String, String)> =
-        sqlx::query_as("SELECT disposition, reason FROM email_policy_dispositions")
-            .fetch_all(backend.pool())
-            .await
-            .unwrap();
-    assert_eq!(dispositions.len(), legacy.len());
-    assert!(
-        dispositions
-            .iter()
-            .all(|(d, r)| d == "quarantined" && r == "no_source_evidence")
-    );
-    let active: i64 = sqlx::query_scalar(
-        "SELECT revision FROM email_policy_activations WHERE scope = 'installation'",
-    )
-    .fetch_one(backend.pool())
-    .await
-    .unwrap();
-    assert_eq!(active, sid_core::models::INSTALLATION_EMAIL_POLICY_REVISION);
-
-    common::email_policy::legacy_keys_are_quarantined(&backend, &legacy, domain).await;
-    common::email_policy::legacy_keys_are_reconciled(&backend, &legacy).await;
+    common::email_policy::stale_keys_are_quarantined(&backend, &stale, domain).await;
+    common::email_policy::stale_keys_are_reconciled(&backend, &stale).await;
     let migrated: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM email_policy_dispositions WHERE disposition = 'migrated'",
     )
@@ -1941,8 +1939,8 @@ async fn test_email_policy_cutover_quarantines_legacy_keys() {
     assert_eq!(migrated, 2, "the repaired key and the race winner");
 }
 
-/// A contact row as the old code wrote it.
-async fn legacy_contact(
+/// A contact row of a stale key.
+async fn stale_contact(
     backend: &SqliteBackend,
     profile: sid_core::models::ProfileId,
     address: &str,

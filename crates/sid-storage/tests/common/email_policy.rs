@@ -89,9 +89,11 @@ pub async fn test_email_key_written_only_under_the_active_revision(backend: &dyn
     );
 }
 
-/// A row the email normalizer left behind before policy revisions.
-#[allow(dead_code)]
-pub struct LegacyRow {
+/// The revision a stale key was written under: not the active one.
+pub const STALE_REVISION: i64 = INSTALLATION_EMAIL_POLICY_REVISION + 1;
+
+/// A row a policy revision that is no longer active left behind.
+pub struct StaleRow {
     /// The principal value as stored.
     pub key: String,
     /// The linked contact as stored, if any.
@@ -99,35 +101,34 @@ pub struct LegacyRow {
     pub verified: bool,
 }
 
-/// The historical shapes the cutover must not promote: a Cyrillic address
-/// whose ASCII skeleton was copied into both principal and contact, a
-/// registration whose dots, tag and case were folded into both, a principal
-/// with no source contact, a bare `verified`, and an administrator's raw
-/// address whose key under the current rules differs from the stored value.
-#[allow(dead_code)]
-pub fn legacy_rows(domain: &str) -> Vec<LegacyRow> {
+/// The shapes a revision change must not promote: a Cyrillic address whose
+/// ASCII skeleton was copied into both principal and contact, a registration
+/// whose dots, tag and case were folded into both, a principal with no source
+/// contact, a bare `verified`, and an administrator's raw address whose key
+/// under the current rules differs from the stored value.
+pub fn stale_rows(domain: &str) -> Vec<StaleRow> {
     vec![
-        LegacyRow {
+        StaleRow {
             key: format!("alice@{domain}"),
             contact: Some(format!("alice@{domain}")),
             verified: false,
         },
-        LegacyRow {
+        StaleRow {
             key: format!("annsmith@{domain}"),
             contact: Some(format!("annsmith@{domain}")),
             verified: false,
         },
-        LegacyRow {
+        StaleRow {
             key: format!("carol@{domain}"),
             contact: None,
             verified: false,
         },
-        LegacyRow {
+        StaleRow {
             key: format!("dave@{domain}"),
             contact: Some(format!("dave@{domain}")),
             verified: true,
         },
-        LegacyRow {
+        StaleRow {
             key: format!("Bob.Jones@{domain}"),
             contact: Some(format!("Bob.Jones@{domain}")),
             verified: false,
@@ -135,24 +136,23 @@ pub fn legacy_rows(domain: &str) -> Vec<LegacyRow> {
     ]
 }
 
-/// After the cutover every legacy key (`legacy`: stored value and its
-/// assigned Profile) is kept with revision 0 and routes nobody, its holder
-/// included; it still reserves the handle against a new registration; the
-/// accounts are untouched; no key is rewritten into its current form; and a
-/// new key under the current revision is written normally.
-#[allow(dead_code)]
-pub async fn legacy_keys_are_quarantined(
+/// Every stale key (`stale`: stored value and its assigned Profile) is kept
+/// with its revision and routes nobody, its holder included; it still reserves
+/// the handle against a new registration; the accounts are untouched; no key
+/// is rewritten into its current form; and a new key under the current
+/// revision is written normally.
+pub async fn stale_keys_are_quarantined(
     backend: &dyn StorageBackend,
-    legacy: &[(String, ProfileId)],
+    stale: &[(String, ProfileId)],
     domain: &str,
 ) {
-    for (key, profile) in legacy {
+    for (key, profile) in stale {
         let entity = backend
             .get_principal_by_value(PrincipalType::Email, key)
             .await
             .unwrap()
             .unwrap_or_else(|| panic!("{key} kept"));
-        assert_eq!(entity.email_policy_revision, Some(0), "{key}");
+        assert_eq!(entity.email_policy_revision, Some(STALE_REVISION), "{key}");
         assert_eq!(entity.assigned_profile_id, Some(*profile), "{key}");
         assert_eq!(
             check_principal_eligibility(&entity, *profile, true, CURRENT),
@@ -195,7 +195,6 @@ pub async fn legacy_keys_are_quarantined(
 
 /// A contact of `profile` at `address`, as an authorized operation
 /// establishes it.
-#[allow(dead_code)]
 fn evidence(profile: ProfileId, address: &str) -> ProfileEmail {
     let now = chrono::Utc::now();
     ProfileEmail {
@@ -212,17 +211,16 @@ fn evidence(profile: ProfileId, address: &str) -> ProfileEmail {
     }
 }
 
-/// Repairing quarantined keys (`legacy`, at least three, after the cutover):
-/// the holder's key comes back on its established address, linked to it and
-/// routing again; a repeat, another profile and a key no longer quarantined
-/// change nothing; evidence that is another profile's contact is refused;
-/// of two repairs racing for one key exactly one succeeds.
-#[allow(dead_code)]
-pub async fn legacy_keys_are_reconciled(
+/// Repairing quarantined keys (`stale`, at least three): the holder's key
+/// comes back on its established address, linked to it and routing again; a
+/// repeat, another profile and a key no longer quarantined change nothing;
+/// evidence that is another profile's contact is refused; of two repairs
+/// racing for one key exactly one succeeds.
+pub async fn stale_keys_are_reconciled(
     backend: &dyn StorageBackend,
-    legacy: &[(String, ProfileId)],
+    stale: &[(String, ProfileId)],
 ) {
-    let key = |i: usize| -> (&str, ProfileId) { (legacy[i].0.as_str(), legacy[i].1) };
+    let key = |i: usize| -> (&str, ProfileId) { (stale[i].0.as_str(), stale[i].1) };
     let entity = |value: &str| {
         let value = value.to_string();
         async move {
@@ -318,7 +316,10 @@ pub async fn legacy_keys_are_reconciled(
         .await
         .unwrap_err();
     assert!(matches!(err, Error::Validation(_)), "{err:?}");
-    assert_eq!(entity(value).await.email_policy_revision, Some(0));
+    assert_eq!(
+        entity(value).await.email_policy_revision,
+        Some(STALE_REVISION)
+    );
 
     let (value, holder) = key(2);
     let principal = entity(value).await;

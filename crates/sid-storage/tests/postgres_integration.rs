@@ -3209,3 +3209,131 @@ async fn test_email_key_written_only_under_the_active_revision() {
     common::email_policy::test_email_key_written_only_under_the_active_revision(&setup().await)
         .await;
 }
+
+/// Keys written under a revision that is no longer active are kept,
+/// quarantined with a recorded reason, and can be repaired. In a schema of its
+/// own: the test moves the installation's active revision.
+#[tokio::test]
+async fn test_stale_email_keys_are_quarantined_and_reconciled() {
+    use common::email_policy::{STALE_REVISION, stale_rows};
+    use sid_core::models::INSTALLATION_EMAIL_POLICY_REVISION;
+
+    let schema = format!("email_stale_{}", uuid::Uuid::now_v7().simple());
+    let backend = PostgresBackend::new(&database_url(), Some(schema.clone()))
+        .await
+        .expect("Failed to connect to PostgreSQL. Is the database running?");
+    sid_storage::migrator::run_migrations(backend.pool(), Some(&schema))
+        .await
+        .expect("the schema");
+
+    let domain = "stale.sid.example.com";
+    let activate = |revision: i64| {
+        sqlx::query(
+            "UPDATE email_policy_activations SET revision = $1 WHERE scope = 'installation'",
+        )
+        .bind(revision)
+    };
+    activate(STALE_REVISION)
+        .execute(backend.pool())
+        .await
+        .unwrap();
+    let mut stale = Vec::new();
+    for row in stale_rows(domain) {
+        let profile = common::create_test_profile("stale");
+        backend
+            .create_profile(&profile, common::test_audit())
+            .await
+            .unwrap();
+        let contact_id = match &row.contact {
+            Some(address) => Some(stale_contact(&backend, profile.id, address).await),
+            None => None,
+        };
+        let principal_id = uuid::Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO principals (id, principal_type, value, verified, verified_at,
+                 assigned_profile_id, assignment_revision, email_policy_revision,
+                 created_at, updated_at)
+             VALUES ($1, 'email', $2, $3, CASE WHEN $3 THEN NOW() END, $4, 1, $5, NOW(), NOW())",
+        )
+        .bind(principal_id)
+        .bind(&row.key)
+        .bind(row.verified)
+        .bind(profile.id)
+        .bind(STALE_REVISION)
+        .execute(backend.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO principal_bindings (id, principal_id, profile_id, is_primary,
+                 source_field, source_email_id, created_at)
+             VALUES ($1, $2, $3, TRUE, 'email', $4, NOW())",
+        )
+        .bind(uuid::Uuid::now_v7())
+        .bind(principal_id)
+        .bind(profile.id)
+        .bind(contact_id)
+        .execute(backend.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO email_policy_dispositions
+                 (principal_id, from_revision, to_revision, disposition, reason)
+             VALUES ($1, $2, $3, 'quarantined', 'no_source_evidence')",
+        )
+        .bind(principal_id)
+        .bind(STALE_REVISION)
+        .bind(INSTALLATION_EMAIL_POLICY_REVISION)
+        .execute(backend.pool())
+        .await
+        .unwrap();
+        stale.push((row.key, profile.id));
+    }
+    activate(INSTALLATION_EMAIL_POLICY_REVISION)
+        .execute(backend.pool())
+        .await
+        .unwrap();
+
+    common::email_policy::stale_keys_are_quarantined(&backend, &stale, domain).await;
+    common::email_policy::stale_keys_are_reconciled(&backend, &stale).await;
+    let migrated: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM email_policy_dispositions WHERE disposition = 'migrated'",
+    )
+    .fetch_one(backend.pool())
+    .await
+    .unwrap();
+    assert_eq!(migrated, 2, "the repaired key and the race winner");
+
+    // The scratch schema goes with the test; the shared database stays clean.
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP SCHEMA \"{schema}\" CASCADE"
+    )))
+    .execute(backend.pool())
+    .await
+    .unwrap();
+}
+
+/// A contact row of a stale key.
+async fn stale_contact(
+    backend: &PostgresBackend,
+    profile: sid_core::models::ProfileId,
+    address: &str,
+) -> uuid::Uuid {
+    let now = chrono::Utc::now();
+    let contact = sid_core::models::ProfileEmail {
+        id: sid_core::models::ProfileEmailId::new(),
+        profile_id: profile,
+        email: address.to_string(),
+        label: sid_core::models::EmailLabel::Personal,
+        custom_label: None,
+        is_primary: true,
+        verified: false,
+        verified_at: None,
+        created_at: now,
+        updated_at: now,
+    };
+    backend
+        .create_profile_email(&contact, common::test_audit())
+        .await
+        .unwrap();
+    contact.id.0
+}

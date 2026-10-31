@@ -1,30 +1,8 @@
 use super::*;
-use crate::sqlite::schema::BASELINE;
-use sqlx::sqlite::SqliteJournalMode;
+use crate::sqlite::schema::SCHEMA;
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+use std::str::FromStr;
 use std::time::Duration;
-
-/// Two changes above the baseline: a new table and a column on an existing one.
-const TWO: &[Migration] = &[
-    Migration::sql(
-        2,
-        "CREATE TABLE extra (id INTEGER PRIMARY KEY);
-         ALTER TABLE profiles ADD COLUMN nickname TEXT;",
-    ),
-    Migration::sql(3, "CREATE INDEX idx_extra ON extra (id);"),
-];
-
-/// The same first change, then one that fails half way.
-const BROKEN: &[Migration] = &[
-    Migration::sql(
-        2,
-        "CREATE TABLE extra (id INTEGER PRIMARY KEY);
-         ALTER TABLE profiles ADD COLUMN nickname TEXT;",
-    ),
-    Migration::sql(
-        3,
-        "CREATE INDEX idx_extra ON extra (id); CREATE TABLE broken (",
-    ),
-];
 
 /// A pool on the file at `path`, opened as the backend opens it.
 async fn open(path: &std::path::Path) -> SqlitePool {
@@ -81,61 +59,36 @@ fn scratch() -> (tempfile::TempDir, std::path::PathBuf) {
     (dir, path)
 }
 
-/// An empty file gets the baseline and every migration, and records the
-/// latest version.
+/// An empty file gets the schema and records its version.
 #[tokio::test]
-async fn an_empty_file_is_created_at_the_latest_version() {
+async fn an_empty_file_gets_the_schema() {
     let (_dir, path) = scratch();
     let pool = open(&path).await;
-    upgrade(&pool, BASELINE, TWO).await.unwrap();
-    assert_eq!(version(&pool).await, 3);
-    assert!(has_table(&pool, "extra").await);
-    assert!(has_table(&pool, "idx_extra").await);
+    prepare(&pool, SCHEMA).await.unwrap();
+    assert_eq!(version(&pool).await, SCHEMA_VERSION);
+    assert!(has_table(&pool, "history_key_epochs").await);
 }
 
-/// Reopening a current file keeps its data and changes nothing: a repeated
-/// upgrade is a no-op.
+/// Reopening a current file keeps its data and changes nothing.
 #[tokio::test]
 async fn reopening_keeps_the_data() {
     let (_dir, path) = scratch();
     let pool = open(&path).await;
-    upgrade(&pool, BASELINE, TWO).await.unwrap();
+    prepare(&pool, SCHEMA).await.unwrap();
     add_profile(&pool, "p1").await;
     pool.close().await;
 
     let pool = open(&path).await;
-    upgrade(&pool, BASELINE, TWO).await.unwrap();
-    upgrade(&pool, BASELINE, TWO).await.unwrap();
-    assert_eq!(version(&pool).await, 3);
+    prepare(&pool, SCHEMA).await.unwrap();
+    prepare(&pool, SCHEMA).await.unwrap();
+    assert_eq!(version(&pool).await, SCHEMA_VERSION);
     assert!(has_profile(&pool, "p1").await);
 }
 
-/// Regression: a file written before versioning got only the missing tables
-/// on reopen (`CREATE TABLE IF NOT EXISTS`), never a new column. A file that
-/// is exactly the baseline is now upgraded, its data kept.
+/// An unversioned file of any shape is refused and left as it was: its data
+/// stays and nothing is created in it.
 #[tokio::test]
-async fn an_unversioned_baseline_file_is_upgraded_with_its_data() {
-    let (_dir, path) = scratch();
-    let pool = open(&path).await;
-    sqlx::raw_sql(BASELINE).execute(&pool).await.unwrap();
-    add_profile(&pool, "p1").await;
-    assert_eq!(version(&pool).await, 0);
-
-    upgrade(&pool, BASELINE, TWO).await.unwrap();
-    assert_eq!(version(&pool).await, 3);
-    assert!(has_profile(&pool, "p1").await);
-    let nickname: Option<String> =
-        sqlx::query_scalar("SELECT nickname FROM profiles WHERE id = 'p1'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(nickname, None);
-}
-
-/// An unversioned file of any other shape is refused and left as it was:
-/// its data stays and nothing is created in it.
-#[tokio::test]
-async fn an_unknown_unversioned_schema_is_refused_unchanged() {
+async fn an_unversioned_file_is_refused_unchanged() {
     let (_dir, path) = scratch();
     let pool = open(&path).await;
     sqlx::raw_sql("CREATE TABLE profiles (id TEXT PRIMARY KEY, username TEXT NOT NULL)")
@@ -144,392 +97,79 @@ async fn an_unknown_unversioned_schema_is_refused_unchanged() {
         .unwrap();
     add_profile(&pool, "p1").await;
 
-    let err = upgrade(&pool, BASELINE, TWO).await.unwrap_err();
+    let err = prepare(&pool, SCHEMA).await.unwrap_err();
     assert!(matches!(err, SidError::InvalidState(_)), "{err:?}");
     assert_eq!(version(&pool).await, 0);
     assert!(has_profile(&pool, "p1").await);
     assert!(!has_table(&pool, "sessions").await);
 }
 
-/// A file from a newer build is refused, not rolled back to this build's
-/// schema.
+/// A file of another version, older or newer, is refused unchanged.
 #[tokio::test]
-async fn a_newer_file_is_refused_unchanged() {
-    let (_dir, path) = scratch();
-    let pool = open(&path).await;
-    upgrade(&pool, BASELINE, TWO).await.unwrap();
-
-    let err = upgrade(&pool, BASELINE, &TWO[..1]).await.unwrap_err();
-    assert!(matches!(err, SidError::InvalidState(_)), "{err:?}");
-    assert_eq!(version(&pool).await, 3);
-}
-
-/// An upgrade that fails part way leaves the file at its old version with
-/// none of the changes; the next open applies them all.
-#[tokio::test]
-async fn an_interrupted_upgrade_leaves_the_file_and_resumes() {
-    let (_dir, path) = scratch();
-    let pool = open(&path).await;
-    upgrade(&pool, BASELINE, &[]).await.unwrap();
-    add_profile(&pool, "p1").await;
-    assert_eq!(version(&pool).await, 1);
-
-    upgrade(&pool, BASELINE, BROKEN).await.unwrap_err();
-    assert_eq!(version(&pool).await, 1);
-    assert!(
-        !has_table(&pool, "extra").await,
-        "the first change rolled back"
-    );
-    assert!(has_profile(&pool, "p1").await);
-
-    upgrade(&pool, BASELINE, TWO).await.unwrap();
-    assert_eq!(version(&pool).await, 3);
-    assert!(has_profile(&pool, "p1").await);
-}
-
-/// The baseline is the released schema: an older build's file, created from
-/// it and upgraded only by the migrations it knew, upgrades to the latest
-/// version, its data kept.
-#[tokio::test]
-async fn a_released_file_upgrades_to_the_latest_version() {
-    let (_dir, path) = scratch();
-    let pool = open(&path).await;
-    upgrade(&pool, BASELINE, &MIGRATIONS[..2]).await.unwrap();
-    add_profile(&pool, "p-released").await;
-    pool.close().await;
-
-    let pool = open(&path).await;
-    upgrade(&pool, BASELINE, MIGRATIONS).await.unwrap();
-    assert_eq!(version(&pool).await, MIGRATIONS.last().unwrap().version);
-    assert!(has_profile(&pool, "p-released").await);
-    assert!(has_table(&pool, "history_key_epochs").await);
-}
-
-async fn session_columns(pool: &SqlitePool) -> Vec<String> {
-    sqlx::query_scalar("SELECT name FROM pragma_table_info('sessions')")
-        .fetch_all(pool)
-        .await
-        .unwrap()
-}
-
-/// Regression: the browser session's CSRF column was added to the frozen
-/// baseline, so a released file (created from the baseline, at a version
-/// the new code reads as current) never got it and every session query
-/// failed. The baseline keeps the released sessions table; a migration adds
-/// the column to every file, released or new.
-#[tokio::test]
-async fn browser_csrf_reaches_released_files_by_migration() {
-    let (_dir, path) = scratch();
-    let pool = open(&path).await;
-    upgrade(&pool, BASELINE, &[]).await.unwrap();
-    assert!(
-        !session_columns(&pool)
-            .await
-            .contains(&"browser_csrf".to_string()),
-        "the released baseline has no CSRF column"
-    );
-    upgrade(&pool, BASELINE, MIGRATIONS).await.unwrap();
-    assert!(
-        session_columns(&pool)
-            .await
-            .contains(&"browser_csrf".to_string())
-    );
-}
-
-/// A file of the build that put the column into the baseline is at version
-/// 10 with the column already there: the migration finds it and the upgrade
-/// completes instead of failing on a duplicate column at every start.
-#[tokio::test]
-async fn browser_csrf_migration_accepts_a_file_that_has_the_column() {
-    let (_dir, path) = scratch();
-    let pool = open(&path).await;
-    upgrade(&pool, BASELINE, &MIGRATIONS[..9]).await.unwrap();
-    sqlx::raw_sql("ALTER TABLE sessions ADD COLUMN browser_csrf BLOB")
-        .execute(&pool)
-        .await
-        .unwrap();
-    assert_eq!(version(&pool).await, 10);
-
-    upgrade(&pool, BASELINE, MIGRATIONS).await.unwrap();
-    assert_eq!(version(&pool).await, MIGRATIONS.last().unwrap().version);
-    assert!(
-        session_columns(&pool)
-            .await
-            .contains(&"browser_csrf".to_string())
-    );
-}
-
-/// The history evaluator split converts only an empty history layout: a file
-/// holding history refuses the upgrade, its version and tables unchanged;
-/// emptied, it converts and its credential tables carry no key.
-#[tokio::test]
-async fn history_split_refuses_populated_history() {
-    let (_dir, path) = scratch();
-    let pool = open(&path).await;
-    upgrade(&pool, BASELINE, &MIGRATIONS[..3]).await.unwrap();
-    add_profile(&pool, "p-history").await;
-    sqlx::query("INSERT INTO password_histories (owner_id, revision) VALUES ('p-history', 1)")
+async fn a_file_of_another_version_is_refused_unchanged() {
+    for other in [1, SCHEMA_VERSION + 1] {
+        let (_dir, path) = scratch();
+        let pool = open(&path).await;
+        prepare(&pool, SCHEMA).await.unwrap();
+        add_profile(&pool, "p1").await;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "PRAGMA user_version = {other}"
+        )))
         .execute(&pool)
         .await
         .unwrap();
 
-    let err = upgrade(&pool, BASELINE, MIGRATIONS)
-        .await
-        .expect_err("a populated history refuses the split");
-    assert!(
-        err.to_string()
-            .contains("password_history_data_exists_in_the_pre_release_layout_and_is_kept"),
-        "the refusal states its reason: {err}"
-    );
-    assert_eq!(version(&pool).await, 4, "the version is unchanged");
-    assert!(has_table(&pool, "password_histories").await);
-    assert!(!has_table(&pool, "history_key_epochs").await);
-    let history_kept: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM password_histories WHERE owner_id = 'p-history'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(history_kept, 1, "the history data is kept");
+        let err = prepare(&pool, SCHEMA).await.unwrap_err();
+        assert!(matches!(err, SidError::InvalidState(_)), "{err:?}");
+        assert_eq!(version(&pool).await, other);
+        assert!(has_profile(&pool, "p1").await);
+    }
+}
 
-    sqlx::query("DELETE FROM password_histories")
-        .execute(&pool)
-        .await
-        .unwrap();
-    upgrade(&pool, BASELINE, MIGRATIONS).await.unwrap();
-    assert_eq!(
-        version(&pool).await,
-        MIGRATIONS.last().unwrap().version,
-        "converted, then upgraded to the latest version"
-    );
-    assert!(has_table(&pool, "history_key_epochs").await);
-    assert!(!has_table(&pool, "password_history_lifecycle").await);
-    let key_column: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM pragma_table_info('password_history_epochs') WHERE name = 'wrapped_key'",
+/// A schema that fails part way leaves the file empty and unversioned, and the
+/// next open creates it.
+#[tokio::test]
+async fn an_interrupted_creation_leaves_the_file_and_resumes() {
+    let (_dir, path) = scratch();
+    let pool = open(&path).await;
+    prepare(
+        &pool,
+        "CREATE TABLE extra (id INTEGER PRIMARY KEY); CREATE TABLE broken (",
     )
-    .fetch_one(&pool)
     .await
-    .unwrap();
-    assert_eq!(
-        key_column, 0,
-        "the credential service's epochs carry no key"
-    );
+    .unwrap_err();
+    assert_eq!(version(&pool).await, 0);
+    assert!(!has_table(&pool, "extra").await, "the change rolled back");
+
+    prepare(&pool, SCHEMA).await.unwrap();
+    assert_eq!(version(&pool).await, SCHEMA_VERSION);
 }
 
-/// The lifecycle tables a development build may have created before the
-/// split; a released file has none of them.
-const DEV_LIFECYCLE_TABLES: &str = "
-CREATE TABLE password_history_lifecycle (
-    owner_id    TEXT PRIMARY KEY REFERENCES profiles(id) ON DELETE CASCADE,
-    revision    INTEGER NOT NULL CHECK (revision >= 0),
-    live_epochs TEXT NOT NULL
-);
-CREATE TABLE password_history_replaced (
-    epoch_id             TEXT PRIMARY KEY REFERENCES password_history_epochs(id) ON DELETE CASCADE,
-    owner_id             TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
-    replaced_at_revision INTEGER NOT NULL CHECK (replaced_at_revision > 0)
-);
-CREATE TABLE password_history_uses (
-    operation_id TEXT NOT NULL,
-    epoch_id     TEXT NOT NULL REFERENCES password_history_epochs(id) ON DELETE CASCADE,
-    owner_id     TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
-    expires_at   TEXT NOT NULL,
-    PRIMARY KEY (operation_id, epoch_id)
-);
-";
-
-/// Every row of `table`, as text, in a stable order: what a refused upgrade
-/// must leave byte for byte.
-async fn rows(pool: &SqlitePool, table: &str) -> Vec<String> {
-    let columns: Vec<String> =
-        sqlx::query_scalar("SELECT name FROM pragma_table_info(?) ORDER BY cid")
-            .bind(table)
-            .fetch_all(pool)
-            .await
-            .unwrap();
-    // `quote` renders a blob as its exact hex, so equal text is equal bytes.
-    let row = columns
-        .iter()
-        .map(|c| format!("quote({c})"))
-        .collect::<Vec<_>>()
-        .join(" || ',' || ");
-    // Table and column names come from this test's fixed list and the
-    // table's own schema, never from input.
-    sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-        "SELECT {row} FROM {table} ORDER BY 1"
-    )))
-    .fetch_all(pool)
-    .await
-    .unwrap()
-}
-
-/// Lifecycle state alone (no history, no epoch) is history data too: a
-/// development file holding it refuses the split as PostgreSQL does, keeps
-/// it and its version, and refuses again on the next start. Existing but
-/// empty lifecycle tables convert.
+/// A row whose policy evidence disagrees is refused on insert and on update;
+/// a complete verdict is stored.
 #[tokio::test]
-async fn history_split_refuses_lifecycle_only_state() {
+async fn disagreeing_policy_evidence_is_refused() {
     let (_dir, path) = scratch();
     let pool = open(&path).await;
-    upgrade(&pool, BASELINE, &MIGRATIONS[..3]).await.unwrap();
-    sqlx::raw_sql(DEV_LIFECYCLE_TABLES)
-        .execute(&pool)
-        .await
-        .unwrap();
-    add_profile(&pool, "p-lifecycle").await;
+    prepare(&pool, SCHEMA).await.unwrap();
+    add_profile(&pool, "p-1").await;
+    add_profile(&pool, "p-2").await;
     sqlx::query(
-        "INSERT INTO password_history_lifecycle (owner_id, revision, live_epochs)
-         VALUES ('p-lifecycle', 2, '[]')",
+        "INSERT INTO credentials (id, profile_id, credential_type, data)
+         VALUES ('c1', 'p-1', 'opaque', X'00')",
     )
     .execute(&pool)
     .await
     .unwrap();
-    let before = rows(&pool, "password_history_lifecycle").await;
-
-    for start in 1..=2 {
-        let err = upgrade(&pool, BASELINE, MIGRATIONS)
-            .await
-            .expect_err("lifecycle state refuses the split");
-        assert!(
-            err.to_string()
-                .contains("password_history_data_exists_in_the_pre_release_layout_and_is_kept"),
-            "start {start}: {err}"
-        );
-        assert_eq!(version(&pool).await, 4, "start {start}: version unchanged");
-        assert_eq!(
-            rows(&pool, "password_history_lifecycle").await,
-            before,
-            "start {start}: lifecycle kept byte for byte"
-        );
-        assert!(!has_table(&pool, "history_key_epochs").await);
-    }
-
-    sqlx::query("DELETE FROM password_history_lifecycle")
-        .execute(&pool)
-        .await
-        .unwrap();
-    upgrade(&pool, BASELINE, MIGRATIONS)
-        .await
-        .expect("empty lifecycle tables convert");
-    assert!(!has_table(&pool, "password_history_lifecycle").await);
-    assert!(has_table(&pool, "history_key_epochs").await);
-}
-
-/// A refused split keeps a populated history byte for byte: the sealed key
-/// of its epoch and its entry, as well as its lifecycle.
-#[tokio::test]
-async fn history_split_keeps_populated_history_byte_for_byte() {
-    let (_dir, path) = scratch();
-    let pool = open(&path).await;
-    upgrade(&pool, BASELINE, &MIGRATIONS[..3]).await.unwrap();
-    sqlx::raw_sql(DEV_LIFECYCLE_TABLES)
-        .execute(&pool)
-        .await
-        .unwrap();
-    add_profile(&pool, "p-full").await;
-    sqlx::raw_sql(
-        "INSERT INTO password_histories (owner_id, revision) VALUES ('p-full', 2);
-         INSERT INTO password_history_epochs
-             (id, owner_id, suite, public_key, wrapped_key, ksf_memory_kib, ksf_passes,
-              ksf_lanes, ksf_salt, status, created_at)
-         VALUES ('e-1', 'p-full', 'pallas-poseidon-v1', zeroblob(32), X'00112233445566778899',
-                 19456, 3, 1, zeroblob(32), 'active', '2026-10-01T00:00:00.000000Z');
-         INSERT INTO password_history_entries
-             (epoch_id, owner_id, seq, entry, operation_id, policy_version, created_at)
-         VALUES ('e-1', 'p-full', 1, randomblob(32), 'op-1', 1, '2026-10-01T00:00:00.000000Z');
-         INSERT INTO password_history_lifecycle (owner_id, revision, live_epochs)
-         VALUES ('p-full', 2, '[\"e-1\"]');
-         INSERT INTO password_history_uses (operation_id, epoch_id, owner_id, expires_at)
-         VALUES ('op-2', 'e-1', 'p-full', '2026-10-02T00:00:00.000000Z');",
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
-    let tables = [
-        "password_histories",
-        "password_history_epochs",
-        "password_history_entries",
-        "password_history_lifecycle",
-        "password_history_uses",
-    ];
-    let mut before = Vec::new();
-    for table in tables {
-        before.push(rows(&pool, table).await);
-    }
-
-    upgrade(&pool, BASELINE, MIGRATIONS)
-        .await
-        .expect_err("a populated history refuses the split");
-    assert_eq!(version(&pool).await, 4);
-    for (table, before) in tables.iter().zip(before) {
-        assert_eq!(
-            rows(&pool, table).await,
-            before,
-            "{table} kept byte for byte"
-        );
-    }
-}
-
-/// Verdicts stored before artifacts were named are demoted with their
-/// provenance kept: the password reads as policy-unverified, the legacy
-/// table holds what was claimed. Afterwards a row whose evidence columns
-/// disagree is refused on insert and on update.
-#[tokio::test]
-async fn unattributed_policy_verdicts_are_demoted_with_provenance() {
-    let (_dir, path) = scratch();
-    let pool = open(&path).await;
-    upgrade(&pool, BASELINE, &MIGRATIONS[..2]).await.unwrap();
-    // One password per profile.
-    for (id, verified, version) in [("c1", 1, Some(1)), ("c2", 0, None), ("c3", 0, Some(1))] {
-        add_profile(&pool, &format!("p-{id}")).await;
-        sqlx::query(
-            "INSERT INTO credentials (id, profile_id, credential_type, data, zkpp_verified, policy_version)
-             VALUES (?, ?, 'opaque', X'00', ?, ?)",
-        )
-        .bind(id)
-        .bind(format!("p-{id}"))
-        .bind(verified)
-        .bind(version)
-        .execute(&pool)
-        .await
-        .unwrap();
-    }
-    add_profile(&pool, "p-c4").await;
-
-    upgrade(&pool, BASELINE, MIGRATIONS).await.unwrap();
-    let rows: Vec<(String, i64, Option<i64>)> =
-        sqlx::query_as("SELECT id, zkpp_verified, policy_version FROM credentials ORDER BY id")
-            .fetch_all(&pool)
-            .await
-            .unwrap();
-    assert_eq!(
-        rows,
-        vec![
-            ("c1".into(), 0, None),
-            ("c2".into(), 0, None),
-            ("c3".into(), 0, None)
-        ]
-    );
-    let kept: Vec<(String, i64, Option<i64>)> = sqlx::query_as(
-        "SELECT credential_id, zkpp_verified, policy_version
-         FROM credential_policy_evidence_legacy ORDER BY credential_id",
-    )
-    .fetch_all(&pool)
-    .await
-    .unwrap();
-    assert_eq!(
-        kept,
-        vec![("c1".into(), 1, Some(1)), ("c3".into(), 0, Some(1))],
-        "every claimed verdict keeps its provenance"
-    );
 
     let disagreeing = sqlx::query(
         "INSERT INTO credentials (id, profile_id, credential_type, data, zkpp_verified, policy_version)
-         VALUES ('c4', 'p-c4', 'opaque', X'00', 1, 1)",
+         VALUES ('c2', 'p-2', 'opaque', X'00', 1, 1)",
     )
     .execute(&pool)
     .await;
     assert!(disagreeing.is_err(), "a verdict without its artifact");
-    let disagreeing = sqlx::query("UPDATE credentials SET zkpp_verified = 1 WHERE id = 'c2'")
+    let disagreeing = sqlx::query("UPDATE credentials SET zkpp_verified = 1 WHERE id = 'c1'")
         .execute(&pool)
         .await;
     assert!(
@@ -538,7 +178,7 @@ async fn unattributed_policy_verdicts_are_demoted_with_provenance() {
     );
     sqlx::query(
         "UPDATE credentials SET zkpp_verified = 1, policy_version = 1, zkpp_artifact = ?
-         WHERE id = 'c2'",
+         WHERE id = 'c1'",
     )
     .bind(vec![7u8; 32])
     .execute(&pool)
@@ -546,19 +186,19 @@ async fn unattributed_policy_verdicts_are_demoted_with_provenance() {
     .expect("a complete verdict is stored");
 }
 
-/// Processes opening one empty file at once: one creates and upgrades it,
-/// the others wait and find it current.
+/// Processes opening one empty file at once: one creates it, the others wait
+/// and find it current.
 #[tokio::test]
-async fn concurrent_starters_upgrade_once() {
+async fn concurrent_starters_create_once() {
     let (_dir, path) = scratch();
     let (a, b, c) = (open(&path).await, open(&path).await, open(&path).await);
     let (ra, rb, rc) = tokio::join!(
-        upgrade(&a, BASELINE, TWO),
-        upgrade(&b, BASELINE, TWO),
-        upgrade(&c, BASELINE, TWO),
+        prepare(&a, SCHEMA),
+        prepare(&b, SCHEMA),
+        prepare(&c, SCHEMA),
     );
     ra.unwrap();
     rb.unwrap();
     rc.unwrap();
-    assert_eq!(version(&a).await, 3);
+    assert_eq!(version(&a).await, SCHEMA_VERSION);
 }

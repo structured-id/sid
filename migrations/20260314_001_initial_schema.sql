@@ -500,16 +500,6 @@ CREATE TABLE consents (
     CONSTRAINT consents_status_check CHECK ((status = ANY (ARRAY['requested'::text, 'active'::text, 'revoked'::text, 'expired'::text])))
 );
 
-CREATE TABLE credential_policy_evidence_legacy (
-    credential_id uuid NOT NULL,
-    profile_id uuid NOT NULL,
-    zkpp_verified boolean NOT NULL,
-    policy_version integer,
-    reason text NOT NULL,
-    demoted_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT credential_policy_evidence_legacy_reason_check CHECK ((reason = 'artifact_not_recorded'::text))
-);
-
 CREATE TABLE credentials (
     id uuid NOT NULL,
     profile_id uuid NOT NULL,
@@ -1630,9 +1620,6 @@ ALTER TABLE ONLY consents
 ALTER TABLE ONLY consents
     ADD CONSTRAINT consents_profile_id_client_id_key UNIQUE (profile_id, client_id);
 
-ALTER TABLE ONLY credential_policy_evidence_legacy
-    ADD CONSTRAINT credential_policy_evidence_legacy_pkey PRIMARY KEY (credential_id);
-
 ALTER TABLE ONLY credentials
     ADD CONSTRAINT credentials_pkey PRIMARY KEY (id);
 
@@ -2490,9 +2477,6 @@ ALTER TABLE ONLY closure_requests
 
 ALTER TABLE ONLY consents
     ADD CONSTRAINT consents_profile_id_fkey FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE;
-
-ALTER TABLE ONLY credential_policy_evidence_legacy
-    ADD CONSTRAINT credential_policy_evidence_legacy_profile_id_fkey FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY credentials
     ADD CONSTRAINT credentials_profile_id_fkey FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE;

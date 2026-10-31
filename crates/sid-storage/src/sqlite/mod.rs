@@ -93,32 +93,11 @@ pub struct SqliteBackend {
 impl SqliteBackend {
     /// Create a new SQLite backend with a file-based database.
     ///
-    /// Creates the database file if it doesn't exist and brings its schema
-    /// to the version this build serves; a file it cannot serve is refused
-    /// unchanged.
+    /// Creates the database file if it doesn't exist and gives it the
+    /// schema; a file of another schema is refused unchanged.
     pub async fn new(path: &str) -> SidResult<Self> {
         let backend = Self::open(path).await?;
         backend.init_schema().await?;
-        Ok(backend)
-    }
-
-    /// [`Self::new`] stopping at schema version `version`: a staged upgrade,
-    /// leaving later migrations for the next open. A file already past
-    /// `version`, or a version this build does not have, is refused.
-    pub async fn new_through(path: &str, version: i64) -> SidResult<Self> {
-        let last = migrations::MIGRATIONS
-            .iter()
-            .position(|m| m.version == version)
-            .map(|i| i + 1)
-            .or((version == migrations::BASELINE_VERSION).then_some(0))
-            .ok_or_else(|| SidError::Validation(format!("no SQLite schema version {version}")))?;
-        let backend = Self::open(path).await?;
-        migrations::upgrade(
-            &backend.pool,
-            schema::BASELINE,
-            &migrations::MIGRATIONS[..last],
-        )
-        .await?;
         Ok(backend)
     }
 
@@ -181,10 +160,9 @@ impl SqliteBackend {
         &self.pool
     }
 
-    /// Create the schema of an empty file, or upgrade an existing one to the
-    /// version this build serves.
+    /// Create the schema of an empty file, or check an existing one.
     async fn init_schema(&self) -> SidResult<()> {
-        migrations::upgrade(&self.pool, schema::BASELINE, migrations::MIGRATIONS).await?;
+        migrations::prepare(&self.pool, schema::SCHEMA).await?;
         let quarantined: i64 = sqlx::query_scalar(crate::QUARANTINED_EMAIL_KEYS_SQL)
             .fetch_one(&self.pool)
             .await

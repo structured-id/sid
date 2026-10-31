@@ -1,515 +1,61 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Versioned upgrades of a SQLite database file.
+//! The schema of a SQLite database file.
 //!
-//! A file records its schema version in `PRAGMA user_version`. Opening one
-//! applies, in one `BEGIN IMMEDIATE` transaction, the baseline (an empty file
-//! only) and every migration above its version, then records the new
-//! version: an interrupted upgrade leaves the file as it was and the next
-//! open starts again, and a second process opening the same file waits for
-//! the first and finds it current. A file this build cannot serve (from a
-//! newer build, or a pre-versioning file whose schema is not the baseline)
-//! is refused unchanged, never recreated.
+//! A file records its schema version in `PRAGMA user_version`. An empty file
+//! gets the schema in one `BEGIN IMMEDIATE` transaction, so a second process
+//! opening it waits for the first and finds it current. A file of any other
+//! version or shape is refused unchanged, never recreated: before the first
+//! release such a file is recreated by its owner, not migrated.
 
 use sid_core::{Error as SidError, Result as SidResult};
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{SqliteConnection, SqlitePool};
-use std::str::FromStr;
 
-/// The version a file has once the baseline schema is applied.
-pub(crate) const BASELINE_VERSION: i64 = 1;
+/// The version of [`super::schema::SCHEMA`]. Raised with every schema change.
+pub(crate) const SCHEMA_VERSION: i64 = 14;
 
-/// One schema change, applied to files below `version`.
-pub(crate) struct Migration {
-    pub version: i64,
-    pub sql: &'static str,
-    /// The column `(table, column)` the change adds, when that is all it
-    /// does: a file that already has it skips the change. SQLite has no
-    /// `ADD COLUMN IF NOT EXISTS`.
-    pub adds_column: Option<(&'static str, &'static str)>,
-}
-
-impl Migration {
-    const fn sql(version: i64, sql: &'static str) -> Self {
-        Self {
-            version,
-            sql,
-            adds_column: None,
-        }
-    }
-}
-
-/// Every migration above the baseline, in ascending version order.
-pub(crate) const MIGRATIONS: &[Migration] = &[
-    Migration::sql(2, EMAIL_POLICY_REVISION),
-    Migration::sql(3, WEBAUTHN_USER_HANDLES),
-    Migration::sql(4, CREDENTIAL_POLICY_ARTIFACT),
-    Migration::sql(5, HISTORY_EVALUATOR_SPLIT),
-    Migration::sql(6, ENROLLMENT_CLEANUP),
-    Migration::sql(7, HISTORY_KEY_VERSIONS),
-    Migration::sql(8, HISTORY_OWNER_PURGE),
-    Migration::sql(9, BOOTSTRAP_POLICY),
-    Migration::sql(10, ENROLLMENT_POLICY),
-    // A file of one development build has the column already, from its
-    // baseline, at version 10.
-    Migration {
-        version: 11,
-        sql: BROWSER_CSRF,
-        adds_column: Some(("sessions", "browser_csrf")),
-    },
-    Migration::sql(12, INVITE_CREATOR_AND_REDEMPTIONS),
-    Migration::sql(13, INVITE_REDEMPTION_CREDENTIAL),
-];
-
-/// The credential an invite registration installed; the PostgreSQL
-/// migration 065 states the contract.
-const INVITE_REDEMPTION_CREDENTIAL: &str = "
-ALTER TABLE invite_redemptions
-    ADD COLUMN credential_id TEXT REFERENCES credentials(id) ON DELETE SET NULL;
-";
-
-/// Invites name a Profile or a machine user as creator, and record the
-/// registrations that used them; the PostgreSQL migration 064 states the
-/// contract. SQLite cannot relax a column's constraint, so the table is
-/// rebuilt with its rows; nothing references it.
-const INVITE_CREATOR_AND_REDEMPTIONS: &str = "
-CREATE TABLE invites_rebuilt (
-    id                 TEXT PRIMARY KEY,
-    code               TEXT NOT NULL,
-    created_by         TEXT REFERENCES profiles(id),
-    created_by_machine TEXT REFERENCES machine_users(id),
-    created_by_name    TEXT NOT NULL,
-    metadata           TEXT NOT NULL,
-    max_uses           INTEGER NOT NULL CHECK (max_uses >= 0),
-    use_count          INTEGER NOT NULL CHECK (use_count >= 0),
-    expires_at         TEXT,
-    active             INTEGER NOT NULL,
-    created_at         TEXT NOT NULL,
-    CONSTRAINT invites_one_creator
-        CHECK ((created_by IS NULL) <> (created_by_machine IS NULL))
-);
-
-INSERT INTO invites_rebuilt (
-    id, code, created_by, created_by_name, metadata, max_uses, use_count,
-    expires_at, active, created_at
-)
-SELECT id, code, created_by, created_by_name, metadata, max_uses, use_count,
-       expires_at, active, created_at
-FROM invites;
-
-DROP TABLE invites;
-ALTER TABLE invites_rebuilt RENAME TO invites;
-
-CREATE UNIQUE INDEX idx_invites_code ON invites (UPPER(code));
-CREATE INDEX idx_invites_created_id ON invites (created_at DESC, id DESC);
-
-CREATE TABLE invite_redemptions (
-    invite_id   TEXT NOT NULL REFERENCES invites(id) ON DELETE CASCADE,
-    profile_id  TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
-    redeemed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    PRIMARY KEY (invite_id, profile_id)
-);
-
-CREATE INDEX idx_invite_redemptions_order
-    ON invite_redemptions (invite_id, redeemed_at, profile_id);
-";
-
-/// The CSRF token a browser session carries; the PostgreSQL migration 063
-/// states the contract.
-const BROWSER_CSRF: &str = "
-ALTER TABLE sessions ADD COLUMN browser_csrf BLOB;
-";
-
-/// The installation's enrollment policy; the PostgreSQL migration 062 states
-/// the contract. The allowed domains are a JSON array of strings.
-const ENROLLMENT_POLICY: &str = "
-CREATE TABLE enrollment_policy (
-    scope                       TEXT PRIMARY KEY CHECK (scope = 'installation'),
-    mode                        TEXT NOT NULL
-        CHECK (mode IN ('open', 'invite_only', 'admin_only', 'domain_restricted')),
-    allowed_domains             TEXT NOT NULL DEFAULT '[]' CHECK (json_type(allowed_domains) = 'array'),
-    track_source                INTEGER NOT NULL CHECK (track_source IN (0, 1)),
-    invite_default_max_uses     INTEGER NOT NULL CHECK (invite_default_max_uses BETWEEN 0 AND 4294967295),
-    invite_default_expiry_hours INTEGER NOT NULL CHECK (invite_default_expiry_hours BETWEEN 0 AND 4294967295),
-    updated_at                  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    CONSTRAINT enrollment_policy_domains_for_restricted_mode
-        CHECK (mode <> 'domain_restricted' OR json_array_length(allowed_domains) > 0)
-);
-";
-
-/// The installation's bootstrap policy; the PostgreSQL migration 061 states
-/// the contract.
-const BOOTSTRAP_POLICY: &str = "
-CREATE TABLE bootstrap_policy (
-    scope      TEXT PRIMARY KEY CHECK (scope = 'installation'),
-    policy     TEXT NOT NULL CHECK (policy = 'centrally_managed'),
-    adopted_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
-
-CREATE TRIGGER instance_secrets_no_claim_when_centrally_managed_insert
-BEFORE INSERT ON instance_secrets
-WHEN NEW.name = 'admin_claim' AND EXISTS (SELECT 1 FROM bootstrap_policy)
-BEGIN
-    SELECT RAISE(ABORT, 'centrally managed installation: no administrator claim');
-END;
-
-CREATE TRIGGER instance_secrets_no_claim_when_centrally_managed_update
-BEFORE UPDATE ON instance_secrets
-WHEN NEW.name = 'admin_claim' AND EXISTS (SELECT 1 FROM bootstrap_policy)
-BEGIN
-    SELECT RAISE(ABORT, 'centrally managed installation: no administrator claim');
-END;
-";
-
-/// Fences of purged owners; the evaluator's PostgreSQL migration 004 states
-/// the contract.
-const HISTORY_OWNER_PURGE: &str = "
-CREATE TABLE history_key_purged (
-    owner_domain BLOB PRIMARY KEY CHECK (length(owner_domain) = 32),
-    purged_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
-";
-
-/// The evaluator's own key custody versions; its PostgreSQL migration 003
-/// states the contract.
-const HISTORY_KEY_VERSIONS: &str = "
-CREATE TABLE history_key_versions (
-    version    INTEGER PRIMARY KEY CHECK (version > 0),
-    salt       BLOB NOT NULL,
-    algorithm  TEXT NOT NULL,
-    context    TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
-";
-
-/// Reclaiming the keys of first enrollments that never committed; the
-/// evaluator's PostgreSQL migration 002 states the contract.
-const ENROLLMENT_CLEANUP: &str = "
-ALTER TABLE history_key_epochs ADD COLUMN created_by TEXT;
-
-CREATE INDEX history_key_epochs_created_by
-    ON history_key_epochs (created_by) WHERE created_by IS NOT NULL;
-
-CREATE TABLE history_key_abandoned (
-    operation_id TEXT PRIMARY KEY,
-    owner_domain BLOB NOT NULL CHECK (length(owner_domain) = 32),
-    abandoned_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
-";
-
-/// The history evaluator's keys and lifecycle move to its own tables, keyed by
-/// the owner's history input domain; the PostgreSQL migration 058 and the
-/// evaluator's own migration set state the contract. An embedded file keeps
-/// both in one database. The converted layout existed only in development
-/// builds, and only an empty one is converted: the guard row's check fails,
-/// aborting the whole upgrade unchanged with the data kept, when any history
-/// data exists, lifecycle state included; history is never deleted to
-/// proceed. The check is named so the refusal states its reason. The upgrade
-/// transaction holds the write lock, so nothing is written between the check
-/// and the change. A released file has no lifecycle tables; one created by a
-/// development build may have them, so they are created empty where absent,
-/// only for the check, and dropped with the rest.
-const HISTORY_EVALUATOR_SPLIT: &str = "
-CREATE TABLE IF NOT EXISTS password_history_lifecycle (owner_id TEXT);
-CREATE TABLE IF NOT EXISTS password_history_replaced (epoch_id TEXT);
-CREATE TABLE IF NOT EXISTS password_history_uses (operation_id TEXT);
-CREATE TEMP TABLE history_split_guard (
-    rows INTEGER NOT NULL
-    CONSTRAINT password_history_data_exists_in_the_pre_release_layout_and_is_kept CHECK (rows = 0)
-);
-INSERT INTO history_split_guard (rows) SELECT
-    EXISTS (SELECT 1 FROM password_histories)
-    OR EXISTS (SELECT 1 FROM password_history_epochs)
-    OR EXISTS (SELECT 1 FROM password_history_entries)
-    OR EXISTS (SELECT 1 FROM password_history_lifecycle)
-    OR EXISTS (SELECT 1 FROM password_history_replaced)
-    OR EXISTS (SELECT 1 FROM password_history_uses);
-DROP TABLE history_split_guard;
-
-DROP TABLE password_history_uses;
-DROP TABLE password_history_replaced;
-DROP TABLE password_history_lifecycle;
-ALTER TABLE password_history_epochs DROP COLUMN wrapped_key;
-
-CREATE TABLE password_history_write_cutoff (
-    singleton  INTEGER PRIMARY KEY CHECK (singleton = 1),
-    not_before TEXT
-);
-INSERT INTO password_history_write_cutoff (singleton) VALUES (1);
-
-CREATE TABLE history_key_write_cutoff (
-    singleton  INTEGER PRIMARY KEY CHECK (singleton = 1),
-    not_before TEXT
-);
-INSERT INTO history_key_write_cutoff (singleton) VALUES (1);
-
-CREATE TABLE history_key_epochs (
-    id              TEXT PRIMARY KEY,
-    owner_domain    BLOB NOT NULL CHECK (length(owner_domain) = 32),
-    suite           TEXT NOT NULL CHECK (suite IN ('pallas-poseidon-v1')),
-    public_key      BLOB NOT NULL CHECK (length(public_key) = 32),
-    wrapped_key     BLOB NOT NULL,
-    ksf_memory_kib  INTEGER NOT NULL CHECK (ksf_memory_kib > 0),
-    ksf_passes      INTEGER NOT NULL CHECK (ksf_passes > 0),
-    ksf_lanes       INTEGER NOT NULL CHECK (ksf_lanes > 0),
-    ksf_salt        BLOB NOT NULL CHECK (length(ksf_salt) = 32),
-    status          TEXT NOT NULL CHECK (status IN ('active', 'compare_only', 'retired')),
-    created_at      TEXT NOT NULL
-);
-
-CREATE UNIQUE INDEX history_key_one_active_epoch
-    ON history_key_epochs (owner_domain) WHERE status = 'active';
-
-CREATE INDEX history_key_epochs_owner ON history_key_epochs (owner_domain);
-
-CREATE TABLE history_key_lifecycle (
-    owner_domain BLOB PRIMARY KEY CHECK (length(owner_domain) = 32),
-    revision     INTEGER NOT NULL CHECK (revision >= 0),
-    live_epochs  TEXT NOT NULL
-);
-
-CREATE TABLE history_key_replaced (
-    epoch_id             TEXT PRIMARY KEY REFERENCES history_key_epochs(id) ON DELETE CASCADE,
-    owner_domain         BLOB NOT NULL CHECK (length(owner_domain) = 32),
-    replaced_at_revision INTEGER NOT NULL CHECK (replaced_at_revision > 0)
-);
-
-CREATE TABLE history_key_uses (
-    operation_id TEXT NOT NULL,
-    epoch_id     TEXT NOT NULL REFERENCES history_key_epochs(id) ON DELETE CASCADE,
-    owner_domain BLOB NOT NULL CHECK (length(owner_domain) = 32),
-    expires_at   TEXT NOT NULL,
-    PRIMARY KEY (operation_id, epoch_id)
-);
-
-CREATE INDEX history_key_uses_owner ON history_key_uses (owner_domain, epoch_id);
-
-CREATE TABLE history_key_audit (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    occurred_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    actor_id    TEXT NOT NULL,
-    actor_type  TEXT NOT NULL,
-    action      TEXT NOT NULL,
-    resource    TEXT NOT NULL,
-    outcome     TEXT NOT NULL,
-    metadata    TEXT NOT NULL
-);
-";
-
-/// Policy verdicts name their verifying artifact; the PostgreSQL migration
-/// 056 states the contract. SQLite cannot add a table constraint, so
-/// triggers refuse a row whose evidence columns disagree.
-const CREDENTIAL_POLICY_ARTIFACT: &str = "
-ALTER TABLE credentials ADD COLUMN zkpp_artifact BLOB CHECK (length(zkpp_artifact) = 32);
-
-CREATE TABLE credential_policy_evidence_legacy (
-    credential_id   TEXT PRIMARY KEY,
-    profile_id      TEXT NOT NULL REFERENCES profiles (id) ON DELETE CASCADE,
-    zkpp_verified   INTEGER NOT NULL,
-    policy_version  INTEGER,
-    reason          TEXT NOT NULL CHECK (reason IN ('artifact_not_recorded')),
-    demoted_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
-
-INSERT INTO credential_policy_evidence_legacy (credential_id, profile_id, zkpp_verified, policy_version, reason)
-SELECT id, profile_id, zkpp_verified, policy_version, 'artifact_not_recorded'
-FROM credentials
-WHERE zkpp_artifact IS NULL AND (zkpp_verified <> 0 OR policy_version IS NOT NULL);
-
-UPDATE credentials SET zkpp_verified = 0, policy_version = NULL
-WHERE zkpp_artifact IS NULL AND (zkpp_verified <> 0 OR policy_version IS NOT NULL);
-
-CREATE TRIGGER credentials_policy_evidence_insert
-BEFORE INSERT ON credentials
-WHEN NOT ((NEW.zkpp_verified <> 0 AND NEW.policy_version IS NOT NULL AND NEW.zkpp_artifact IS NOT NULL)
-       OR (NEW.zkpp_verified = 0 AND NEW.policy_version IS NULL AND NEW.zkpp_artifact IS NULL))
-BEGIN
-    SELECT RAISE(ABORT, 'credential policy evidence');
-END;
-
-CREATE TRIGGER credentials_policy_evidence_update
-BEFORE UPDATE OF zkpp_verified, policy_version, zkpp_artifact ON credentials
-WHEN NOT ((NEW.zkpp_verified <> 0 AND NEW.policy_version IS NOT NULL AND NEW.zkpp_artifact IS NOT NULL)
-       OR (NEW.zkpp_verified = 0 AND NEW.policy_version IS NULL AND NEW.zkpp_artifact IS NULL))
-BEGIN
-    SELECT RAISE(ABORT, 'credential policy evidence');
-END;
-";
-
-/// WebAuthn user handles; the PostgreSQL migration 054 states the contract.
-const WEBAUTHN_USER_HANDLES: &str = "
-CREATE TABLE webauthn_user_handles (
-    profile_id  TEXT NOT NULL REFERENCES profiles (id) ON DELETE CASCADE,
-    rp_id       TEXT NOT NULL,
-    user_handle BLOB NOT NULL CHECK (length(user_handle) = 16),
-    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    PRIMARY KEY (profile_id, rp_id),
-    UNIQUE (rp_id, user_handle)
-);
-";
-
-/// Email policy revisions; the PostgreSQL migration 053 states the contract.
-/// Keys written before revisions are revision 0 and quarantined: reserved,
-/// never routed. The fence lets an email key be written only under the
-/// active revision; a build that does not know revisions writes none.
-const EMAIL_POLICY_REVISION: &str = "
-CREATE TABLE email_policy_activations (
-    scope        TEXT PRIMARY KEY,
-    revision     INTEGER NOT NULL CHECK (revision > 0),
-    activated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
-
-ALTER TABLE principals ADD COLUMN email_policy_revision INTEGER;
-
-UPDATE principals SET email_policy_revision = 0 WHERE principal_type = 'email';
-
-CREATE TABLE email_policy_dispositions (
-    principal_id  TEXT PRIMARY KEY REFERENCES principals (id) ON DELETE CASCADE,
-    from_revision INTEGER NOT NULL,
-    to_revision   INTEGER NOT NULL,
-    disposition   TEXT NOT NULL CHECK (disposition IN ('migrated', 'quarantined')),
-    reason        TEXT NOT NULL,
-    recorded_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
-
-INSERT INTO email_policy_dispositions (principal_id, from_revision, to_revision, disposition, reason)
-SELECT id, 0, 1, 'quarantined', 'no_source_evidence'
-FROM principals WHERE principal_type = 'email';
-
-INSERT INTO email_policy_activations (scope, revision) VALUES ('installation', 1);
-
-CREATE TRIGGER principals_email_policy_insert
-BEFORE INSERT ON principals
-WHEN (NEW.principal_type = 'email') <> (NEW.email_policy_revision IS NOT NULL)
-  OR (NEW.principal_type = 'email'
-      AND NEW.email_policy_revision IS NOT
-          (SELECT revision FROM email_policy_activations WHERE scope = 'installation'))
-BEGIN
-    SELECT RAISE(ABORT, 'email policy fence');
-END;
-
-CREATE TRIGGER principals_email_policy_update
-BEFORE UPDATE OF value, email_policy_revision, principal_type ON principals
-WHEN (NEW.principal_type = 'email') <> (NEW.email_policy_revision IS NOT NULL)
-  OR (NEW.principal_type = 'email'
-      AND (NEW.value IS NOT OLD.value
-           OR NEW.email_policy_revision IS NOT OLD.email_policy_revision)
-      AND NEW.email_policy_revision IS NOT
-          (SELECT revision FROM email_policy_activations WHERE scope = 'installation'))
-BEGIN
-    SELECT RAISE(ABORT, 'email policy fence');
-END;
-";
-
-/// Bring the file behind `pool` to the latest version of `baseline` plus
-/// `migrations`.
-pub(crate) async fn upgrade(
-    pool: &SqlitePool,
-    baseline: &'static str,
-    migrations: &[Migration],
-) -> SidResult<()> {
-    let latest = migrations.last().map_or(BASELINE_VERSION, |m| m.version);
+/// Give the empty file behind `pool` the schema, or check that it has it.
+pub(crate) async fn prepare(pool: &SqlitePool, schema: &'static str) -> SidResult<()> {
     let mut tx = pool
         .begin_with("BEGIN IMMEDIATE")
         .await
-        .map_err(storage("begin schema upgrade"))?;
+        .map_err(storage("begin schema creation"))?;
     let version: i64 = sqlx::query_scalar("PRAGMA user_version")
         .fetch_one(&mut *tx)
         .await
         .map_err(storage("read schema version"))?;
-    let from = match version {
-        0 if objects(&mut tx).await?.is_empty() => {
-            sqlx::raw_sql(baseline)
-                .execute(&mut *tx)
-                .await
-                .map_err(storage("create baseline schema"))?;
-            BASELINE_VERSION
-        }
-        // A file from before versioning is served only if it is exactly the
-        // baseline; anything else has an unknown shape.
-        0 if objects(&mut tx).await? == baseline_objects(baseline).await? => BASELINE_VERSION,
-        0 => {
-            return Err(SidError::InvalidState(
-                "the SQLite file has an unversioned schema that is not the baseline; \
-                 it is left unchanged"
-                    .into(),
-            ));
-        }
-        v if v > latest => {
+    match version {
+        SCHEMA_VERSION => return Ok(()),
+        0 if is_empty(&mut tx).await? => {}
+        v => {
             return Err(SidError::InvalidState(format!(
-                "the SQLite file has schema version {v}, newer than {latest} this build \
-                 serves; it is left unchanged"
+                "the SQLite file has schema version {v}, this build serves {SCHEMA_VERSION}; \
+                 it is left unchanged"
             )));
         }
-        v => v,
-    };
-    for migration in migrations.iter().filter(|m| m.version > from) {
-        if let Some((table, column)) = migration.adds_column
-            && has_column(&mut tx, table, column).await?
-        {
-            continue;
-        }
-        sqlx::raw_sql(migration.sql)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| {
-                SidError::Storage(format!("schema migration {}: {e}", migration.version))
-            })?;
     }
-    if version != latest {
-        // A PRAGMA takes no bound parameter; `latest` is an integer.
-        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
-            "PRAGMA user_version = {latest}"
-        )))
+    sqlx::raw_sql(schema)
         .execute(&mut *tx)
         .await
-        .map_err(storage("record schema version"))?;
-    }
-    tx.commit().await.map_err(storage("commit schema upgrade"))
-}
-
-/// Whether `table` has `column`.
-async fn has_column(conn: &mut SqliteConnection, table: &str, column: &str) -> SidResult<bool> {
-    sqlx::query_scalar::<_, i64>("SELECT count(*) FROM pragma_table_info(?) WHERE name = ?")
-        .bind(table)
-        .bind(column)
-        .fetch_one(conn)
-        .await
-        .map(|n| n == 1)
-        .map_err(storage("read table columns"))
-}
-
-/// The schema objects of a database (tables, indexes, triggers, views) as
-/// SQLite records them, in a stable order.
-async fn objects(conn: &mut SqliteConnection) -> SidResult<Vec<(String, String, Option<String>)>> {
-    sqlx::query_as(
-        "SELECT type, name, sql FROM sqlite_master
-         WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
-    )
-    .fetch_all(conn)
+        .map_err(storage("create schema"))?;
+    // A PRAGMA takes no bound parameter; the version is an integer constant.
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "PRAGMA user_version = {SCHEMA_VERSION}"
+    )))
+    .execute(&mut *tx)
     .await
-    .map_err(storage("read schema objects"))
+    .map_err(storage("record schema version"))?;
+    tx.commit().await.map_err(storage("commit schema creation"))
 }
 
-/// The schema objects `baseline` creates, from a scratch in-memory database.
-async fn baseline_objects(
-    baseline: &'static str,
-) -> SidResult<Vec<(String, String, Option<String>)>> {
-    let options = SqliteConnectOptions::from_str("sqlite::memory:")
-        .map_err(storage("open reference database"))?;
-    let reference = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(options)
-        .await
-        .map_err(storage("open reference database"))?;
-    let mut conn = reference
-        .acquire()
-        .await
-        .map_err(storage("open reference database"))?;
-    sqlx::raw_sql(baseline)
-        .execute(&mut *conn)
-        .await
-        .map_err(storage("create reference schema"))?;
-    objects(&mut conn).await
+/// Whether the database holds no schema object.
+async fn is_empty(conn: &mut SqliteConnection) -> SidResult<bool> {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'",
+    )
+    .fetch_one(conn)
+    .await
+    .map(|n| n == 0)
+    .map_err(storage("read schema objects"))
 }
 
 fn storage(what: &'static str) -> impl Fn(sqlx::Error) -> SidError {
