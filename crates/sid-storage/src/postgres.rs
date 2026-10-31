@@ -2794,12 +2794,17 @@ impl StorageBackend for PostgresBackend {
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
         // The key leaves quarantine only while it still is quarantined and
-        // assigned to this profile; the row lock orders concurrent repairs.
+        // assigned to this profile. The row lock orders concurrent repairs:
+        // the revision test is on the row itself, so the loser sees the
+        // winner's write when PostgreSQL rechecks it; the subquery alone
+        // would read the statement's older snapshot.
         let moved = sqlx::query(
             "UPDATE principals SET email_policy_revision =
                  (SELECT revision FROM email_policy_activations WHERE scope = 'installation'),
                  updated_at = NOW()
              WHERE id = $1 AND principal_type = 'email' AND assigned_profile_id = $2
+               AND email_policy_revision IS DISTINCT FROM
+                   (SELECT revision FROM email_policy_activations WHERE scope = 'installation')
                AND EXISTS (SELECT 1 FROM email_policy_dispositions d
                            WHERE d.principal_id = principals.id
                              AND d.disposition = 'quarantined')",
