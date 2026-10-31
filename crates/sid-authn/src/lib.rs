@@ -109,8 +109,8 @@ mod test_crypto;
 // TOTP seed import/migration utilities + verification + enrollment helpers
 pub use totp::{
     TOTP_DIGITS, TOTP_PERIOD, TotpImportError, TotpReplayGuard, base32_decode, base32_encode,
-    build_otpauth_uri, generate_current_totp, generate_secret, import_totp_enrollment, totp_step,
-    validate_totp_seed, verify_imported_totp_seed, verify_totp,
+    build_otpauth_uri, generate_current_totp, generate_next_totp, generate_secret,
+    import_totp_enrollment, totp_step, validate_totp_seed, verify_imported_totp_seed, verify_totp,
 };
 
 // Recovery code generation + verification helpers

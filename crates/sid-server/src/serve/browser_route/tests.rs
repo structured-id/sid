@@ -22,6 +22,18 @@ fn every_issuing_method_is_published() {
     }
 }
 
+/// A sign-in may be offered a first factor to enroll: the ceremony is on the
+/// surface that offers it.
+#[test]
+fn a_first_factor_enrollment_is_published() {
+    for method in [
+        "/sid.v1.authn.AuthService/StartTotpEnrollment",
+        "/sid.v1.authn.AuthService/FinishTotpEnrollment",
+    ] {
+        assert!(BROWSER_METHODS.contains(&method), "{method}");
+    }
+}
+
 /// Anything else is no addressed call: no handle, no `api` segment, a longer
 /// segment that only starts with it, the transport-named mount the API path
 /// replaced, another issuer endpoint, a root gRPC path.
