@@ -1293,7 +1293,7 @@ impl IdentityService for IdentityServiceImpl {
                     profile_id: s.profile_id.to_string(),
                     client_id: s.client_id.unwrap_or_default(),
                     device_id: s.device_id.map(|d| d.to_string()),
-                    ip_address: s.ip_address,
+                    ip_address: s.ip_address.map(|ip| ip.to_string()).unwrap_or_default(),
                     user_agent: s.user_agent,
                     created_at: Some(convert::to_timestamp(s.created_at)),
                     expires_at: Some(convert::to_timestamp(s.expires_at)),

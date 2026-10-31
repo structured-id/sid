@@ -425,7 +425,7 @@ impl Asking {
     ) -> (String, sid_core::models::Session) {
         let session = sid_core::models::Session::new(
             self.profile.id,
-            "127.0.0.1".into(),
+            None,
             chrono::Utc::now() + chrono::Duration::hours(1),
         );
         self.svc

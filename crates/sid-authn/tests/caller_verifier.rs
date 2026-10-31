@@ -39,7 +39,7 @@ fn token(binding: Option<&DPopBinding>) -> (Profile, String) {
     let profile = Profile::new(Some("alice"));
     let session = Session::new(
         profile.id,
-        "127.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     let token = jwt()

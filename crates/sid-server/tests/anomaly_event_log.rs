@@ -57,7 +57,7 @@ async fn test_get_anomaly_event_log_with_events() {
         let event = AnomalyEventRecord::new(
             "brute_force",
             format!("profile-{i}"),
-            "10.0.0.1",
+            Some("10.0.0.1".parse().unwrap()),
             format!("Test event {i}"),
             95,
             "block",
@@ -90,7 +90,7 @@ async fn test_get_anomaly_event_log_filter_by_rule() {
         .save_anomaly_event(&AnomalyEventRecord::new(
             "brute_force",
             "p1",
-            "10.0.0.1",
+            Some("10.0.0.1".parse().unwrap()),
             "bf",
             95,
             "block",
@@ -101,7 +101,7 @@ async fn test_get_anomaly_event_log_filter_by_rule() {
         .save_anomaly_event(&AnomalyEventRecord::new(
             "credential_stuffing",
             "p2",
-            "10.0.0.2",
+            Some("10.0.0.2".parse().unwrap()),
             "cs",
             90,
             "captcha",
@@ -112,7 +112,7 @@ async fn test_get_anomaly_event_log_filter_by_rule() {
         .save_anomaly_event(&AnomalyEventRecord::new(
             "brute_force",
             "p3",
-            "10.0.0.3",
+            Some("10.0.0.3".parse().unwrap()),
             "bf2",
             95,
             "block",
@@ -144,7 +144,7 @@ async fn test_get_anomaly_event_log_pagination() {
             .save_anomaly_event(&AnomalyEventRecord::new(
                 "brute_force",
                 format!("p{i}"),
-                "10.0.0.1",
+                Some("10.0.0.1".parse().unwrap()),
                 format!("event {i}"),
                 95,
                 "block",
@@ -235,7 +235,7 @@ async fn test_pg_anomaly_event_save_and_list() {
     let event = AnomalyEventRecord::new(
         "brute_force",
         "pg-test-profile",
-        "192.168.1.1",
+        Some("192.168.1.1".parse().unwrap()),
         "5 failed attempts in 300s",
         95,
         "block",
@@ -250,7 +250,7 @@ async fn test_pg_anomaly_event_save_and_list() {
     let found = found.unwrap();
     assert_eq!(found.rule_id, "brute_force");
     assert_eq!(found.profile_id, "pg-test-profile");
-    assert_eq!(found.ip_address, "192.168.1.1");
+    assert_eq!(found.ip_address, Some("192.168.1.1".parse().unwrap()));
     assert_eq!(found.risk_score, 95);
     assert_eq!(found.reaction, "block");
 }
@@ -276,7 +276,7 @@ async fn test_pg_anomaly_event_filter_by_rule() {
         .save_anomaly_event(&AnomalyEventRecord::new(
             &unique_rule,
             "p1",
-            "10.0.0.1",
+            Some("10.0.0.1".parse().unwrap()),
             "test",
             50,
             "alert",
@@ -287,7 +287,7 @@ async fn test_pg_anomaly_event_filter_by_rule() {
         .save_anomaly_event(&AnomalyEventRecord::new(
             "other_rule",
             "p2",
-            "10.0.0.2",
+            Some("10.0.0.2".parse().unwrap()),
             "test",
             30,
             "allow",

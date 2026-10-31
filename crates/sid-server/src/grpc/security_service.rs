@@ -408,7 +408,7 @@ impl SecurityService for SecurityServiceImpl {
                 id: r.id.0.to_string(),
                 rule_id: r.rule_id,
                 profile_id: r.profile_id,
-                ip_address: r.ip_address,
+                ip_address: r.ip_address.map(|ip| ip.to_string()).unwrap_or_default(),
                 description: r.description,
                 risk_score: r.risk_score,
                 timestamp: Some(prost_types::Timestamp {

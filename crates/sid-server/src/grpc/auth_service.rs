@@ -278,12 +278,6 @@ fn claims_unavailable(e: sid_core::Error) -> Status {
     internal("token claims", e)
 }
 
-/// The address a session records: the client's, or none when the transport
-/// reported no peer (an in-process call).
-fn session_address(client_ip: Option<std::net::IpAddr>) -> String {
-    client_ip.map(|ip| ip.to_string()).unwrap_or_default()
-}
-
 /// Extract User-Agent from gRPC metadata.
 ///
 /// Checks `user-agent` header (standard HTTP) and `x-user-agent` (proxy-forwarded).
@@ -1457,12 +1451,7 @@ impl AuthServiceImpl {
             _ => 50,
         };
         let record = sid_core::models::AnomalyEventRecord::new(
-            rule,
-            profile_id,
-            client_ip.map_or(String::new(), |ip| ip.to_string()),
-            reason,
-            risk_score,
-            reaction,
+            rule, profile_id, client_ip, reason, risk_score, reaction,
         );
         if let Err(e) = self.storage.save_anomaly_event(&record).await {
             warn!("Failed to persist anomaly event: {}", e);
@@ -2495,7 +2484,7 @@ impl AuthServiceImpl {
         proved_by: Option<&sid_core::models::CredentialFence>,
         policy: Option<sid_core::models::ActorFence>,
     ) -> Result<SignedIn, Status> {
-        let mut session = self.new_session(profile.id, session_address(client_ip));
+        let mut session = self.new_session(profile.id, client_ip);
         session.device_id = device_id;
         session.assurance_level =
             method.auth_level(self.security_policy.auth.passkey_satisfies_mfa);
@@ -2508,7 +2497,7 @@ impl AuthServiceImpl {
     /// A full session of `profile_id` from `ip_address`, for the
     /// installation's absolute lifetime when it sets one, with the sign-in
     /// scopes; its authentication is the caller's to set.
-    fn new_session(&self, profile_id: ProfileId, ip_address: String) -> Session {
+    fn new_session(&self, profile_id: ProfileId, ip_address: Option<std::net::IpAddr>) -> Session {
         let lifetime = match self.security_policy.session.max_lifetime_hours {
             0 => Duration::hours(24),
             hours => Duration::hours(i64::from(hours)),
@@ -2616,7 +2605,7 @@ impl AuthServiceImpl {
 
         let proved_by = self.first_factor_fence(&pending).await?;
 
-        let mut session = self.new_session(profile.id, pending.ip_address.clone());
+        let mut session = self.new_session(profile.id, pending.ip_address);
         session.device_id = pending.device_id;
         session.user_agent = pending.user_agent.clone();
         session.assurance_level = pending.assurance_level.max(AuthLevel::Standard);
@@ -2656,7 +2645,7 @@ impl AuthServiceImpl {
         sid_authn::sign_in_security::record_completed_sign_in(
             &ProfileSecurity { service: self },
             &profile.id,
-            pending.ip_address.parse().ok(),
+            pending.ip_address,
         )
         .await;
         Ok(signed_in)
@@ -2694,7 +2683,7 @@ impl AuthServiceImpl {
             } => {
                 let mut session = Session::new_awaiting_second_factor(
                     profile.id,
-                    session_address(client_ip),
+                    client_ip,
                     method.auth_level(self.security_policy.auth.passkey_satisfies_mfa),
                     method.amr(),
                 );
@@ -2745,8 +2734,7 @@ impl AuthServiceImpl {
         client: CeremonyClient,
         policy: Option<sid_core::models::ActorFence>,
     ) -> Result<SignedIn, Status> {
-        let mut session =
-            sid_core::models::Session::new_provisional(profile.id, session_address(client_ip));
+        let mut session = sid_core::models::Session::new_provisional(profile.id, client_ip);
         session.device_id = device_id;
         session.amr = vec![amr.to_string()];
         // Mailbox possession proves no stored credential.
@@ -2831,11 +2819,8 @@ impl AuthServiceImpl {
             0 => Duration::hours(24),
             hours => Duration::hours(i64::from(hours)),
         };
-        let mut session = sid_core::models::Session::new(
-            profile.id,
-            session_address(ceremony.client_ip),
-            Utc::now() + lifetime,
-        );
+        let mut session =
+            sid_core::models::Session::new(profile.id, ceremony.client_ip, Utc::now() + lifetime);
         session.device_id = ceremony.user_agent.as_deref().map(compute_device_id);
         session.scopes = vec![
             "openid".to_string(),
@@ -2911,7 +2896,7 @@ impl AuthServiceImpl {
                 client_ip,
                 (attempt(), extras()),
                 Some(client_id),
-                session.ip_address.parse().ok(),
+                session.ip_address,
             )
             .await?;
             return self
@@ -2926,11 +2911,8 @@ impl AuthServiceImpl {
             0 => Duration::hours(24),
             hours => Duration::hours(i64::from(hours)),
         };
-        let mut session = sid_core::models::Session::new(
-            profile.id,
-            session_address(client_ip),
-            Utc::now() + lifetime,
-        );
+        let mut session =
+            sid_core::models::Session::new(profile.id, client_ip, Utc::now() + lifetime);
         session.device_id = user_agent.map(compute_device_id);
         session.assurance_level = authentication.assurance_level;
         session.elevation = authentication.elevation;
@@ -6797,11 +6779,8 @@ impl AuthServiceImpl {
             .await?
             .fence;
 
-        let mut session = sid_core::models::Session::new(
-            profile.id,
-            "device".to_string(),
-            Utc::now() + Duration::hours(24),
-        );
+        let mut session =
+            sid_core::models::Session::new(profile.id, None, Utc::now() + Duration::hours(24));
         session.client_id = Some(client.client_id.clone());
         session.scopes = code
             .scope
@@ -7307,9 +7286,8 @@ impl AuthServiceImpl {
         // token. It is recorded together with its audit entry, which cannot
         // be skipped.
         let lifetime = chrono::Duration::seconds(i64::from(IMPERSONATION_MAX_LIFETIME_SECONDS));
-        let ip = client_ip.map(|ip| ip.to_string()).unwrap_or_default();
         let mut session =
-            sid_core::models::Session::new(profile_id, ip.clone(), Utc::now() + lifetime);
+            sid_core::models::Session::new(profile_id, client_ip, Utc::now() + lifetime);
         session.client_id = Some(mu.client_id.clone());
         session.scopes = scopes.clone();
         session.amr = vec!["token_exchange".to_string()];
@@ -7318,7 +7296,7 @@ impl AuthServiceImpl {
             "sid.token.impersonation.v1",
             format!("profile:{profile_id}"),
         )
-        .with_ip(ip)
+        .with_ip(client_ip)
         .with_metadata(serde_json::json!({
             "actor": { "type": "machine", "id": mu.id.to_string(), "client_id": mu.client_id },
             "target": { "type": "user", "id": target_profile_id },

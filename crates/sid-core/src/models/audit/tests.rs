@@ -8,7 +8,7 @@ fn make_entry() -> AuditEntry {
         resource: "prof_123".into(),
         outcome: AuditOutcome::Success,
         metadata: serde_json::json!({"field": "email"}),
-        ip_address: Some("1.2.3.4".into()),
+        ip_address: Some("1.2.3.4".parse().unwrap()),
         device_id: None,
     }
 }

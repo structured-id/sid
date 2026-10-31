@@ -134,9 +134,6 @@ pub trait GrantHost: Send + Sync {
         session: SessionId,
         action: &'static str,
     ) -> Result<(), Self::Error>;
-
-    /// The client address a session started by a grant records.
-    fn session_address(&self) -> String;
 }
 
 /// The parameters of an authorization code grant request.
@@ -217,9 +214,10 @@ pub async fn redeem_code<H: GrantHost>(
 
     // The application's session reports the authentication of the session
     // that authorized the code (`auth_time`, `amr`, `acr`) and ends with it.
+    // It records no address: the request comes from the application's server.
     let mut session = Session::new(
         owner.clone(),
-        host.session_address(),
+        None,
         Utc::now() + Duration::hours(GRANT_SESSION_TTL_HOURS),
     )
     .with_grant_authentication(exchanged.authentication());

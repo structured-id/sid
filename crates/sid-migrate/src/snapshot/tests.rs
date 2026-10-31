@@ -39,7 +39,7 @@ fn test_session_round_trips_with_its_profile() {
     let profile = sid_core::models::ProfileId::generate();
     let session = Session::new(
         profile,
-        "127.0.0.1".into(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     let mut snapshot = Snapshot::new("sqlite", "sqlite://a.db");

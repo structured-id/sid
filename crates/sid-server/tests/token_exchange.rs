@@ -674,7 +674,7 @@ async fn test_revoked_subject_token_is_refused() {
     let svc = TestServices::new(storage);
     let session = Session::new(
         profile.id,
-        "127.0.0.1".to_string(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     let (subject_token, session) =

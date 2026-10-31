@@ -18,7 +18,7 @@ fn row_to_anomaly_event(row: &sqlx::sqlite::SqliteRow) -> SidResult<AnomalyEvent
         ),
         rule_id: col(row, "rule_id")?,
         profile_id: col(row, "profile_id")?,
-        ip_address: col(row, "ip_address")?,
+        ip_address: super::ip_col(row, "ip_address")?,
         description: col(row, "description")?,
         risk_score: col(row, "risk_score")?,
         reaction: col(row, "reaction")?,
@@ -38,7 +38,7 @@ impl SqliteBackend {
         .bind(event.id.0.to_string())
         .bind(&event.rule_id)
         .bind(&event.profile_id)
-        .bind(&event.ip_address)
+        .bind(event.ip_address.map(super::ip_to_bytes))
         .bind(&event.description)
         .bind(event.risk_score)
         .bind(&event.reaction)

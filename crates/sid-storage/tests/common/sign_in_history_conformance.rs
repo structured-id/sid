@@ -29,9 +29,9 @@ impl SignInHistoryHarness for ProfileSignIns<'_> {
         profile.id
     }
 
-    async fn sign_in(&self, owner: &ProfileId, ip: &str, device: Option<Uuid>) {
+    async fn sign_in(&self, owner: &ProfileId, ip: Option<std::net::IpAddr>, device: Option<Uuid>) {
         let mut session = create_test_session(*owner);
-        session.ip_address = ip.to_string();
+        session.ip_address = ip;
         session.device_id = device;
         self.0
             .create_session_atomic(&session, 0, None, test_audit())
@@ -39,10 +39,10 @@ impl SignInHistoryHarness for ProfileSignIns<'_> {
             .expect("a stored session");
     }
 
-    async fn begin_sign_in(&self, owner: &ProfileId, ip: &str, device: Option<Uuid>) {
+    async fn begin_sign_in(&self, owner: &ProfileId, ip: std::net::IpAddr, device: Option<Uuid>) {
         let mut pending = sid_core::models::Session::new_awaiting_second_factor(
             *owner,
-            ip.to_string(),
+            Some(ip),
             sid_core::models::AuthLevel::Basic,
             vec!["pwd".into()],
         );

@@ -60,7 +60,7 @@ fn create_test_session_with_device(
 ) -> Session {
     let mut session = Session::new(
         profile_id,
-        ip.to_string(),
+        Some(ip.parse().unwrap()),
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     session.device_id = device_id;

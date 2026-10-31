@@ -299,6 +299,33 @@ where
         .map_err(|e| SidError::Storage(format!("column {name}: {e}")))
 }
 
+/// An address as stored: 4 bytes for IPv4, 16 for IPv6.
+pub(crate) fn ip_to_bytes(ip: std::net::IpAddr) -> Vec<u8> {
+    match ip {
+        std::net::IpAddr::V4(ip) => ip.octets().to_vec(),
+        std::net::IpAddr::V6(ip) => ip.octets().to_vec(),
+    }
+}
+
+/// The address `bytes` store; any other length is an error.
+pub(crate) fn ip_from_bytes(bytes: &[u8]) -> SidResult<std::net::IpAddr> {
+    if let Ok(v4) = <[u8; 4]>::try_from(bytes) {
+        return Ok(v4.into());
+    }
+    <[u8; 16]>::try_from(bytes)
+        .map(Into::into)
+        .map_err(|_| SidError::Storage(format!("a stored address of {} bytes", bytes.len())))
+}
+
+/// Decode an optional stored address, naming the column in the error.
+pub(crate) fn ip_col(
+    row: &sqlx::sqlite::SqliteRow,
+    name: &str,
+) -> SidResult<Option<std::net::IpAddr>> {
+    let raw: Option<Vec<u8>> = col(row, name)?;
+    raw.map(|bytes| ip_from_bytes(&bytes)).transpose()
+}
+
 /// Decode a UUID stored as text; a malformed value is an error, never nil.
 pub(crate) fn uuid_col(row: &sqlx::sqlite::SqliteRow, name: &str) -> SidResult<uuid::Uuid> {
     let raw: String = col(row, name)?;
@@ -573,14 +600,14 @@ impl sid_plugin::SignInHistoryStore for SqliteBackend {
     async fn get_most_recent_session_ip(
         &self,
         profile_id: sid_core::models::ProfileId,
-    ) -> SidResult<Option<(String, chrono::DateTime<chrono::Utc>)>> {
+    ) -> SidResult<Option<(std::net::IpAddr, chrono::DateTime<chrono::Utc>)>> {
         self.get_most_recent_session_ip_impl(profile_id).await
     }
 
     async fn has_recent_session_from_ip(
         &self,
         profile_id: sid_core::models::ProfileId,
-        ip: &str,
+        ip: std::net::IpAddr,
         window: std::time::Duration,
     ) -> SidResult<bool> {
         self.has_recent_session_from_ip_impl(profile_id, ip, window)

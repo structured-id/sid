@@ -111,7 +111,7 @@ pub fn create_test_profile(username: &str) -> Profile {
 pub fn create_test_session(profile_id: ProfileId) -> Session {
     Session::new(
         profile_id,
-        "127.0.0.1".to_string(),
+        Some(std::net::Ipv4Addr::LOCALHOST.into()),
         Utc::now() + Duration::hours(1),
     )
 }
@@ -416,7 +416,7 @@ pub async fn test_session_save_and_get(backend: &dyn StorageBackend) {
     let retrieved = retrieved.unwrap();
     assert_eq!(retrieved.id, session.id);
     assert_eq!(retrieved.profile_id, profile.id);
-    assert_eq!(retrieved.ip_address, "127.0.0.1");
+    assert_eq!(retrieved.ip_address, session.ip_address);
 }
 
 /// A role keeps its machine key, display name, grouping label and
@@ -1538,7 +1538,7 @@ pub async fn test_security_signals_persist(backend: &dyn StorageBackend) {
                 id: AnomalyEventId(Uuid::now_v7()),
                 rule_id: rule.clone(),
                 profile_id: String::new(),
-                ip_address: "203.0.113.7".into(),
+                ip_address: Some("2001:db8::7".parse().unwrap()),
                 description: "failed logins".into(),
                 risk_score: score,
                 reaction: "challenge".into(),
@@ -1555,6 +1555,7 @@ pub async fn test_security_signals_persist(backend: &dyn StorageBackend) {
         events.iter().map(|e| e.risk_score).collect::<Vec<_>>(),
         [80, 40]
     );
+    assert_eq!(events[0].ip_address, Some("2001:db8::7".parse().unwrap()));
 
     // An address of the documentation prefix (RFC 3849) no other run used:
     // the shared database keeps earlier runs' counters.
@@ -1618,14 +1619,14 @@ pub async fn test_login_history_signals(backend: &dyn StorageBackend) {
         .unwrap();
     let device = Uuid::now_v7();
     let mut earlier = create_test_session(profile.id);
-    earlier.ip_address = "192.0.2.10".into();
+    earlier.ip_address = Some("192.0.2.10".parse().unwrap());
     earlier.created_at = Utc::now() - Duration::minutes(10);
     backend
         .create_session(&earlier, test_audit())
         .await
         .unwrap();
     let mut latest = create_test_session(profile.id);
-    latest.ip_address = "192.0.2.20".into();
+    latest.ip_address = Some("192.0.2.20".parse().unwrap());
     latest.device_id = Some(device);
     backend.create_session(&latest, test_audit()).await.unwrap();
 
@@ -1634,17 +1635,17 @@ pub async fn test_login_history_signals(backend: &dyn StorageBackend) {
         .await
         .unwrap()
         .expect("a session exists");
-    assert_eq!(ip, "192.0.2.20");
+    assert_eq!(ip, "192.0.2.20".parse::<std::net::IpAddr>().unwrap());
     let hour = std::time::Duration::from_secs(3600);
     assert!(
         backend
-            .has_recent_session_from_ip(profile.id, "192.0.2.10", hour)
+            .has_recent_session_from_ip(profile.id, "192.0.2.10".parse().unwrap(), hour)
             .await
             .unwrap()
     );
     assert!(
         !backend
-            .has_recent_session_from_ip(profile.id, "192.0.2.99", hour)
+            .has_recent_session_from_ip(profile.id, "192.0.2.99".parse().unwrap(), hour)
             .await
             .unwrap()
     );

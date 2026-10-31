@@ -5,7 +5,7 @@ fn session(level: AuthLevel, authenticated_minutes_ago: i64) -> Session {
     let now = Utc::now();
     let mut session = Session::new(
         ProfileId::generate(),
-        "127.0.0.1".into(),
+        None,
         now + chrono::Duration::hours(24),
     );
     session.assurance_level = level;
@@ -109,7 +109,7 @@ fn stale_session_refuses() {
 /// Mailbox possession never binds a credential, whatever the account holds.
 #[test]
 fn provisional_session_refuses() {
-    let mut provisional = Session::new_provisional(ProfileId::generate(), "127.0.0.1".into());
+    let mut provisional = Session::new_provisional(ProfileId::generate(), None);
     provisional.assurance_level = AuthLevel::Critical;
     for account in [
         credentials(&[]),
@@ -220,7 +220,7 @@ fn proof_is_accepted_when_not_required() {
 /// changes nothing.
 #[test]
 fn proof_does_not_lift_a_provisional_session() {
-    let provisional = Session::new_provisional(ProfileId::generate(), "127.0.0.1".into());
+    let provisional = Session::new_provisional(ProfileId::generate(), None);
     assert_eq!(
         change(&provisional, CurrentPasswordRule::Always, true),
         Err(EnrollmentRefusal::Provisional)

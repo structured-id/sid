@@ -11,7 +11,7 @@ use sid_core::{Error as SidError, Result as SidResult};
 use sqlx::{SqliteConnection, SqlitePool};
 
 /// The version of [`super::schema::SCHEMA`]. Raised with every schema change.
-pub(crate) const SCHEMA_VERSION: i64 = 14;
+pub(crate) const SCHEMA_VERSION: i64 = 15;
 
 /// Give the empty file behind `pool` the schema, or check that it has it.
 pub(crate) async fn prepare(pool: &SqlitePool, schema: &'static str) -> SidResult<()> {

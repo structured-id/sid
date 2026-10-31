@@ -22,7 +22,7 @@ fn profile_id() -> ProfileId {
 fn session() -> Session {
     Session::new(
         profile_id(),
-        "127.0.0.1".into(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     )
 }

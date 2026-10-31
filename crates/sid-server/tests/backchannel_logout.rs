@@ -300,13 +300,13 @@ async fn test_revoked_session_logout_is_owed_and_delivered() {
 
     let mut session = Session::new(
         profile_id(),
-        "127.0.0.1".into(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     session.client_id = Some("client-456".into());
     let first_party = Session::new(
         profile_id(),
-        "127.0.0.1".into(),
+        None,
         chrono::Utc::now() + chrono::Duration::hours(1),
     );
     for s in [&session, &first_party] {

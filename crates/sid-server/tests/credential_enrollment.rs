@@ -68,12 +68,8 @@ fn assert_mfa_required(result: Result<(), Status>, continuation: &str) {
 #[tokio::test]
 async fn provisional_session_binds_nothing() {
     let (svc, profile) = account(&[CredentialType::Opaque]).await;
-    let bearer = stored_session_token(
-        &svc,
-        &profile,
-        Session::new_provisional(profile.id, "127.0.0.1".into()),
-    )
-    .await;
+    let bearer =
+        stored_session_token(&svc, &profile, Session::new_provisional(profile.id, None)).await;
 
     assert_mfa_required(start_passkey(&svc, &bearer).await, "authenticate");
     assert_mfa_required(start_totp(&svc, &bearer).await, "authenticate");

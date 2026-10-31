@@ -18,7 +18,7 @@ fn requirements(min_acr: AuthLevel, enforcement: EnforcementMode) -> LoginRequir
 fn session(level: AuthLevel, amr: &[&str], ago: ChronoDuration) -> Session {
     let mut session = Session::new(
         ProfileId::generate(),
-        "127.0.0.1".to_string(),
+        None,
         Utc::now() + ChronoDuration::hours(24),
     );
     session.assurance_level = level;
