@@ -2794,13 +2794,20 @@ impl StorageBackend for PostgresBackend {
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
         // The key leaves quarantine only while it still is quarantined and
-        // assigned to this profile; the row lock orders concurrent repairs.
+        // assigned to this profile. The row lock orders concurrent repairs:
+        // the revision test is on the row itself, so the loser sees the
+        // winner's write when PostgreSQL rechecks it; the subquery alone
+        // would read the statement's older snapshot.
         let moved = sqlx::query(
             "UPDATE principals SET email_policy_revision =
                  (SELECT revision FROM email_policy_activations WHERE scope = 'installation'),
                  updated_at = NOW()
-             WHERE id = $1 AND principal_type = 'email'
-               AND email_policy_revision = 0 AND assigned_profile_id = $2",
+             WHERE id = $1 AND principal_type = 'email' AND assigned_profile_id = $2
+               AND email_policy_revision IS DISTINCT FROM
+                   (SELECT revision FROM email_policy_activations WHERE scope = 'installation')
+               AND EXISTS (SELECT 1 FROM email_policy_dispositions d
+                           WHERE d.principal_id = principals.id
+                             AND d.disposition = 'quarantined')",
         )
         .bind(principal_id.0)
         .bind(profile_id)
@@ -2823,13 +2830,11 @@ impl StorageBackend for PostgresBackend {
         .await
         .map_err(|e| SidError::Storage(format!("link reconciled key: {e}")))?;
         sqlx::query(
-            "INSERT INTO email_policy_dispositions
-                 (principal_id, from_revision, to_revision, disposition, reason)
-             SELECT $1, 0, revision, 'migrated', $2
-             FROM email_policy_activations WHERE scope = 'installation'
-             ON CONFLICT (principal_id) DO UPDATE SET
-                 to_revision = EXCLUDED.to_revision, disposition = 'migrated',
-                 reason = EXCLUDED.reason, recorded_at = NOW()",
+            "UPDATE email_policy_dispositions SET
+                 to_revision = (SELECT revision FROM email_policy_activations
+                                WHERE scope = 'installation'),
+                 disposition = 'migrated', reason = $2, recorded_at = NOW()
+             WHERE principal_id = $1",
         )
         .bind(principal_id.0)
         .bind(reason)

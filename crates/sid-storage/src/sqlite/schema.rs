@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! The SQLite baseline schema: version 1 of a database file.
+//! The SQLite schema of a database file.
 //!
-//! A schema change edits this baseline in place; a database file created
-//! from an earlier baseline is recreated, not migrated. The versioned
-//! migrations in [`super::migrations`] apply above it to every new file.
-//! Foreign keys and WAL are connection options, not part of it.
+//! A schema change edits this schema in place, raises
+//! [`super::migrations::SCHEMA_VERSION`], and a file of another version is
+//! recreated, not migrated. Foreign keys and WAL are connection options, not
+//! part of it.
 
-/// Every table, index and constraint of schema version 1.
-pub(crate) const BASELINE: &str = r#"
--- StructuredID CE — SQLite schema version 1
+/// Every table, index and constraint of the schema.
+pub(crate) const SCHEMA: &str = r#"
+-- StructuredID CE — SQLite schema
 
 --------------------------------------------------------------------------------
 -- profiles
@@ -38,7 +38,6 @@ CREATE TABLE IF NOT EXISTS profiles (
 
 CREATE INDEX IF NOT EXISTS idx_profiles_username ON profiles(username);
 CREATE INDEX IF NOT EXISTS idx_profiles_status ON profiles(status);
-DROP INDEX IF EXISTS idx_profiles_created_at;
 CREATE INDEX IF NOT EXISTS idx_profiles_created_id ON profiles(created_at, id);
 CREATE INDEX IF NOT EXISTS idx_profiles_migration_pending ON profiles(migration_pending) WHERE migration_pending = 1;
 
@@ -137,7 +136,9 @@ CREATE TABLE IF NOT EXISTS credentials (
     -- RFC 9807 credential_identifier of a password: its own OPRF key.
     opaque_credential_identifier BLOB CHECK (length(opaque_credential_identifier) = 16),
     created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    last_used_at        TEXT
+    last_used_at        TEXT,
+    -- The artifact a policy verdict was verified against.
+    zkpp_artifact       BLOB CHECK (length(zkpp_artifact) = 32)
 );
 
 CREATE INDEX IF NOT EXISTS idx_credentials_profile_id ON credentials(profile_id);
@@ -146,6 +147,33 @@ CREATE INDEX IF NOT EXISTS idx_credentials_profile_type ON credentials(profile_i
 -- A profile has one password: at most one active OPAQUE credential.
 CREATE UNIQUE INDEX IF NOT EXISTS uq_credentials_active_opaque
     ON credentials(profile_id) WHERE credential_type = 'opaque' AND status = 'active';
+
+-- SQLite cannot add a table constraint across these columns by name: triggers
+-- refuse a row whose policy evidence disagrees.
+CREATE TRIGGER IF NOT EXISTS credentials_policy_evidence_insert
+BEFORE INSERT ON credentials
+WHEN NOT ((NEW.zkpp_verified <> 0 AND NEW.policy_version IS NOT NULL AND NEW.zkpp_artifact IS NOT NULL)
+       OR (NEW.zkpp_verified = 0 AND NEW.policy_version IS NULL AND NEW.zkpp_artifact IS NULL))
+BEGIN
+    SELECT RAISE(ABORT, 'credential policy evidence');
+END;
+
+CREATE TRIGGER IF NOT EXISTS credentials_policy_evidence_update
+BEFORE UPDATE OF zkpp_verified, policy_version, zkpp_artifact ON credentials
+WHEN NOT ((NEW.zkpp_verified <> 0 AND NEW.policy_version IS NOT NULL AND NEW.zkpp_artifact IS NOT NULL)
+       OR (NEW.zkpp_verified = 0 AND NEW.policy_version IS NULL AND NEW.zkpp_artifact IS NULL))
+BEGIN
+    SELECT RAISE(ABORT, 'credential policy evidence');
+END;
+
+CREATE TABLE IF NOT EXISTS webauthn_user_handles (
+    profile_id  TEXT NOT NULL REFERENCES profiles (id) ON DELETE CASCADE,
+    rp_id       TEXT NOT NULL,
+    user_handle BLOB NOT NULL CHECK (length(user_handle) = 16),
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (profile_id, rp_id),
+    UNIQUE (rp_id, user_handle)
+);
 
 --------------------------------------------------------------------------------
 -- password history: per-owner epochs with
@@ -163,7 +191,6 @@ CREATE TABLE IF NOT EXISTS password_history_epochs (
     owner_id        TEXT NOT NULL REFERENCES password_histories(owner_id) ON DELETE CASCADE,
     suite           TEXT NOT NULL CHECK (suite IN ('pallas-poseidon-v1')),
     public_key      BLOB NOT NULL CHECK (length(public_key) = 32),
-    wrapped_key     BLOB NOT NULL,
     ksf_memory_kib  INTEGER NOT NULL CHECK (ksf_memory_kib > 0),
     ksf_passes      INTEGER NOT NULL CHECK (ksf_passes > 0),
     ksf_lanes       INTEGER NOT NULL CHECK (ksf_lanes > 0),
@@ -188,6 +215,98 @@ CREATE TABLE IF NOT EXISTS password_history_entries (
 
 CREATE INDEX IF NOT EXISTS password_history_entries_owner
     ON password_history_entries (owner_id, seq);
+
+CREATE TABLE IF NOT EXISTS password_history_write_cutoff (
+    singleton  INTEGER PRIMARY KEY CHECK (singleton = 1),
+    not_before TEXT
+);
+INSERT OR IGNORE INTO password_history_write_cutoff (singleton) VALUES (1);
+
+--------------------------------------------------------------------------------
+-- The history evaluator's own store, keyed by the owner's history input domain.
+-- An embedded file keeps it beside the credential data.
+--------------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS history_key_write_cutoff (
+    singleton  INTEGER PRIMARY KEY CHECK (singleton = 1),
+    not_before TEXT
+);
+INSERT OR IGNORE INTO history_key_write_cutoff (singleton) VALUES (1);
+
+CREATE TABLE IF NOT EXISTS history_key_epochs (
+    id              TEXT PRIMARY KEY,
+    owner_domain    BLOB NOT NULL CHECK (length(owner_domain) = 32),
+    suite           TEXT NOT NULL CHECK (suite IN ('pallas-poseidon-v1')),
+    public_key      BLOB NOT NULL CHECK (length(public_key) = 32),
+    wrapped_key     BLOB NOT NULL,
+    ksf_memory_kib  INTEGER NOT NULL CHECK (ksf_memory_kib > 0),
+    ksf_passes      INTEGER NOT NULL CHECK (ksf_passes > 0),
+    ksf_lanes       INTEGER NOT NULL CHECK (ksf_lanes > 0),
+    ksf_salt        BLOB NOT NULL CHECK (length(ksf_salt) = 32),
+    status          TEXT NOT NULL CHECK (status IN ('active', 'compare_only', 'retired')),
+    created_at      TEXT NOT NULL,
+    created_by      TEXT
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS history_key_one_active_epoch
+    ON history_key_epochs (owner_domain) WHERE status = 'active';
+
+CREATE INDEX IF NOT EXISTS history_key_epochs_owner ON history_key_epochs (owner_domain);
+
+CREATE INDEX IF NOT EXISTS history_key_epochs_created_by
+    ON history_key_epochs (created_by) WHERE created_by IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS history_key_abandoned (
+    operation_id TEXT PRIMARY KEY,
+    owner_domain BLOB NOT NULL CHECK (length(owner_domain) = 32),
+    abandoned_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS history_key_lifecycle (
+    owner_domain BLOB PRIMARY KEY CHECK (length(owner_domain) = 32),
+    revision     INTEGER NOT NULL CHECK (revision >= 0),
+    live_epochs  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS history_key_replaced (
+    epoch_id             TEXT PRIMARY KEY REFERENCES history_key_epochs(id) ON DELETE CASCADE,
+    owner_domain         BLOB NOT NULL CHECK (length(owner_domain) = 32),
+    replaced_at_revision INTEGER NOT NULL CHECK (replaced_at_revision > 0)
+);
+
+CREATE TABLE IF NOT EXISTS history_key_uses (
+    operation_id TEXT NOT NULL,
+    epoch_id     TEXT NOT NULL REFERENCES history_key_epochs(id) ON DELETE CASCADE,
+    owner_domain BLOB NOT NULL CHECK (length(owner_domain) = 32),
+    expires_at   TEXT NOT NULL,
+    PRIMARY KEY (operation_id, epoch_id)
+);
+
+CREATE INDEX IF NOT EXISTS history_key_uses_owner ON history_key_uses (owner_domain, epoch_id);
+
+CREATE TABLE IF NOT EXISTS history_key_audit (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    occurred_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    actor_id    TEXT NOT NULL,
+    actor_type  TEXT NOT NULL,
+    action      TEXT NOT NULL,
+    resource    TEXT NOT NULL,
+    outcome     TEXT NOT NULL,
+    metadata    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS history_key_versions (
+    version    INTEGER PRIMARY KEY CHECK (version > 0),
+    salt       BLOB NOT NULL,
+    algorithm  TEXT NOT NULL,
+    context    TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS history_key_purged (
+    owner_domain BLOB PRIMARY KEY CHECK (length(owner_domain) = 32),
+    purged_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
 
 --------------------------------------------------------------------------------
 -- sessions
@@ -219,6 +338,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     -- The IdP session whose authentication a session redeemed from a grant
     -- reuses; ending it ends this one.
     authenticated_by  TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+    -- The CSRF token a browser session carries.
+    browser_csrf      BLOB,
     CHECK ((elevation_level IS NULL AND elevation_until IS NULL)
         OR (elevation_level IN ('elevated', 'critical') AND elevation_until IS NOT NULL))
 );
@@ -242,12 +363,53 @@ CREATE TABLE IF NOT EXISTS principals (
     assigned_profile_id TEXT,
     assignment_revision INTEGER NOT NULL DEFAULT 0,
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    -- The email policy revision an email key was written under.
+    email_policy_revision INTEGER
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_principals_type_value ON principals(principal_type, value);
 CREATE INDEX IF NOT EXISTS idx_principals_value ON principals(value);
 CREATE INDEX IF NOT EXISTS idx_principals_assigned ON principals(assigned_profile_id);
+
+CREATE TABLE IF NOT EXISTS email_policy_activations (
+    scope        TEXT PRIMARY KEY,
+    revision     INTEGER NOT NULL CHECK (revision > 0),
+    activated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+INSERT OR IGNORE INTO email_policy_activations (scope, revision) VALUES ('installation', 1);
+
+CREATE TABLE IF NOT EXISTS email_policy_dispositions (
+    principal_id  TEXT PRIMARY KEY REFERENCES principals (id) ON DELETE CASCADE,
+    from_revision INTEGER NOT NULL,
+    to_revision   INTEGER NOT NULL,
+    disposition   TEXT NOT NULL CHECK (disposition IN ('migrated', 'quarantined')),
+    reason        TEXT NOT NULL,
+    recorded_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+-- An email key is written only under the active revision.
+CREATE TRIGGER IF NOT EXISTS principals_email_policy_insert
+BEFORE INSERT ON principals
+WHEN (NEW.principal_type = 'email') <> (NEW.email_policy_revision IS NOT NULL)
+  OR (NEW.principal_type = 'email'
+      AND NEW.email_policy_revision IS NOT
+          (SELECT revision FROM email_policy_activations WHERE scope = 'installation'))
+BEGIN
+    SELECT RAISE(ABORT, 'email policy fence');
+END;
+
+CREATE TRIGGER IF NOT EXISTS principals_email_policy_update
+BEFORE UPDATE OF value, email_policy_revision, principal_type ON principals
+WHEN (NEW.principal_type = 'email') <> (NEW.email_policy_revision IS NOT NULL)
+  OR (NEW.principal_type = 'email'
+      AND (NEW.value IS NOT OLD.value
+           OR NEW.email_policy_revision IS NOT OLD.email_policy_revision)
+      AND NEW.email_policy_revision IS NOT
+          (SELECT revision FROM email_policy_activations WHERE scope = 'installation'))
+BEGIN
+    SELECT RAISE(ABORT, 'email policy fence');
+END;
 
 CREATE TABLE IF NOT EXISTS principal_bindings (
     id              TEXT PRIMARY KEY,
@@ -557,6 +719,39 @@ CREATE TABLE IF NOT EXISTS instance_secrets (
     name        TEXT PRIMARY KEY,
     sealed      BLOB NOT NULL,
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS bootstrap_policy (
+    scope      TEXT PRIMARY KEY CHECK (scope = 'installation'),
+    policy     TEXT NOT NULL CHECK (policy = 'centrally_managed'),
+    adopted_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE TRIGGER IF NOT EXISTS instance_secrets_no_claim_when_centrally_managed_insert
+BEFORE INSERT ON instance_secrets
+WHEN NEW.name = 'admin_claim' AND EXISTS (SELECT 1 FROM bootstrap_policy)
+BEGIN
+    SELECT RAISE(ABORT, 'centrally managed installation: no administrator claim');
+END;
+
+CREATE TRIGGER IF NOT EXISTS instance_secrets_no_claim_when_centrally_managed_update
+BEFORE UPDATE ON instance_secrets
+WHEN NEW.name = 'admin_claim' AND EXISTS (SELECT 1 FROM bootstrap_policy)
+BEGIN
+    SELECT RAISE(ABORT, 'centrally managed installation: no administrator claim');
+END;
+
+CREATE TABLE IF NOT EXISTS enrollment_policy (
+    scope                       TEXT PRIMARY KEY CHECK (scope = 'installation'),
+    mode                        TEXT NOT NULL
+        CHECK (mode IN ('open', 'invite_only', 'admin_only', 'domain_restricted')),
+    allowed_domains             TEXT NOT NULL DEFAULT '[]' CHECK (json_type(allowed_domains) = 'array'),
+    track_source                INTEGER NOT NULL CHECK (track_source IN (0, 1)),
+    invite_default_max_uses     INTEGER NOT NULL CHECK (invite_default_max_uses BETWEEN 0 AND 4294967295),
+    invite_default_expiry_hours INTEGER NOT NULL CHECK (invite_default_expiry_hours BETWEEN 0 AND 4294967295),
+    updated_at                  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    CONSTRAINT enrollment_policy_domains_for_restricted_mode
+        CHECK (mode <> 'domain_restricted' OR json_array_length(allowed_domains) > 0)
 );
 
 --------------------------------------------------------------------------------
@@ -1073,10 +1268,6 @@ CREATE TABLE IF NOT EXISTS export_jobs (
 
 CREATE INDEX IF NOT EXISTS idx_export_jobs_profile ON export_jobs(profile_id);
 
--- An undeliverable back-channel logout is a failed durable_work record; the
--- earlier dead-letter table goes.
-DROP TABLE IF EXISTS logout_dlq;
-
 --------------------------------------------------------------------------------
 -- magic_link_sessions
 --------------------------------------------------------------------------------
@@ -1239,21 +1430,35 @@ CREATE TABLE IF NOT EXISTS claim_grants (
 --------------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS invites (
-    id              TEXT PRIMARY KEY,
-    code            TEXT NOT NULL,
-    created_by      TEXT NOT NULL REFERENCES profiles(id),
-    created_by_name TEXT NOT NULL,
-    metadata        TEXT NOT NULL,
-    max_uses        INTEGER NOT NULL CHECK (max_uses >= 0),
-    use_count       INTEGER NOT NULL CHECK (use_count >= 0),
-    expires_at      TEXT,
-    active          INTEGER NOT NULL,
-    created_at      TEXT NOT NULL
+    id                 TEXT PRIMARY KEY,
+    code               TEXT NOT NULL,
+    created_by         TEXT REFERENCES profiles(id),
+    created_by_machine TEXT REFERENCES machine_users(id),
+    created_by_name    TEXT NOT NULL,
+    metadata           TEXT NOT NULL,
+    max_uses           INTEGER NOT NULL CHECK (max_uses >= 0),
+    use_count          INTEGER NOT NULL CHECK (use_count >= 0),
+    expires_at         TEXT,
+    active             INTEGER NOT NULL,
+    created_at         TEXT NOT NULL,
+    CONSTRAINT invites_one_creator
+        CHECK ((created_by IS NULL) <> (created_by_machine IS NULL))
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_invites_code ON invites (UPPER(code));
-DROP INDEX IF EXISTS idx_invites_created;
 CREATE INDEX IF NOT EXISTS idx_invites_created_id ON invites (created_at DESC, id DESC);
+
+-- The registrations that used an invite, and the credential each installed.
+CREATE TABLE IF NOT EXISTS invite_redemptions (
+    invite_id     TEXT NOT NULL REFERENCES invites(id) ON DELETE CASCADE,
+    profile_id    TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    redeemed_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    credential_id TEXT REFERENCES credentials(id) ON DELETE SET NULL,
+    PRIMARY KEY (invite_id, profile_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_invite_redemptions_order
+    ON invite_redemptions (invite_id, redeemed_at, profile_id);
 
 CREATE TABLE IF NOT EXISTS registration_sources (
     profile_id      TEXT PRIMARY KEY REFERENCES profiles(id) ON DELETE CASCADE,

@@ -287,8 +287,8 @@ pub trait StorageBackend:
     /// Returns the number of principals whose proof lapsed.
     async fn expire_principal_verifications(&self) -> Result<i64>;
 
-    /// Bring a quarantined email key (written before email policy revisions,
-    /// its address unknown) back into routing on the evidence of `contact`:
+    /// Bring a quarantined email key (written under an earlier email policy
+    /// revision, its address unknown) back into routing on the evidence of `contact`:
     /// an address of `profile_id` an authorized operation established, whose
     /// key under the active rules is the principal's value. In one
     /// transaction the contact is stored, the key moves to the active

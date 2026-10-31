@@ -909,8 +909,10 @@ impl SqliteBackend {
             "UPDATE principals SET email_policy_revision =
                  (SELECT revision FROM email_policy_activations WHERE scope = 'installation'),
                  updated_at = ?3
-             WHERE id = ?1 AND principal_type = 'email'
-               AND email_policy_revision = 0 AND assigned_profile_id = ?2",
+             WHERE id = ?1 AND principal_type = 'email' AND assigned_profile_id = ?2
+               AND EXISTS (SELECT 1 FROM email_policy_dispositions d
+                           WHERE d.principal_id = principals.id
+                             AND d.disposition = 'quarantined')",
         )
         .bind(principal_id.0.to_string())
         .bind(profile_id.to_string())
@@ -934,14 +936,12 @@ impl SqliteBackend {
         .await
         .map_err(|e| SidError::Storage(format!("link reconciled key: {e}")))?;
         sqlx::query(
-            "INSERT INTO email_policy_dispositions
-                 (principal_id, from_revision, to_revision, disposition, reason)
-             SELECT ?1, 0, revision, 'migrated', ?2
-             FROM email_policy_activations WHERE scope = 'installation'
-             ON CONFLICT (principal_id) DO UPDATE SET
-                 to_revision = excluded.to_revision, disposition = 'migrated',
-                 reason = excluded.reason,
-                 recorded_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+            "UPDATE email_policy_dispositions SET
+                 to_revision = (SELECT revision FROM email_policy_activations
+                                WHERE scope = 'installation'),
+                 disposition = 'migrated', reason = ?2,
+                 recorded_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE principal_id = ?1",
         )
         .bind(principal_id.0.to_string())
         .bind(reason)
