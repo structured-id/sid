@@ -174,6 +174,74 @@ fn from_ip<T>(ip: std::net::IpAddr, message: T) -> Request<T> {
     request
 }
 
+/// A password sign-in from `ip` on the device `user_agent` names.
+async fn sign_in_from(
+    svc: &TestServices,
+    ip: &str,
+    user_agent: &str,
+) -> Result<Response<OpaqueLoginFinishResponse>, Status> {
+    let finish = start_login(svc, PRINCIPAL, PASSWORD).await;
+    let mut request = from_ip(ip.parse().unwrap(), finish);
+    request
+        .metadata_mut()
+        .insert("user-agent", user_agent.parse().unwrap());
+    svc.auth.opaque_login_finish(request).await
+}
+
+/// A new device from a new address, under a reaction asking a step-up, is
+/// answered by the factor the account has enrolled: the first factor gets the
+/// same pending context a requirement would give it. Before, it was refused
+/// and the factor could never be given.
+#[tokio::test]
+async fn a_new_device_is_answered_by_the_enrolled_factor() {
+    let seed = sid_authn::generate_secret();
+    let (svc, policy, _) = services(Some(&seed)).await;
+    policy.set(Some(requiring(&[])));
+    sign_in_from(&svc, "198.51.100.23", "known-device")
+        .await
+        .expect("the first device signs in");
+
+    let first = sign_in_from(&svc, "203.0.113.45", "another-device")
+        .await
+        .expect("pending context");
+    let pending_token = bearer(&first);
+    let body = first.into_inner();
+    assert_eq!(body.second_factors, [StepUpMethod::Totp as i32]);
+    let pending_id = SessionId::parse(&body.session_id).unwrap();
+    let pending = svc.storage.get_session(pending_id).await.unwrap().unwrap();
+    assert!(pending.awaits_second_factor());
+
+    let completed = verify_with_token(
+        &svc,
+        &pending_token,
+        sid_authn::generate_current_totp(&seed),
+    )
+    .await
+    .expect("TOTP answers the rule");
+    let body = completed.into_inner();
+    let session_id = SessionId::parse(body.session_id.as_deref().unwrap()).unwrap();
+    let session = svc.storage.get_session(session_id).await.unwrap().unwrap();
+    assert!(!session.is_provisional);
+    assert_eq!(session.assurance_level, AuthLevel::Standard);
+}
+
+/// With no enrolled factor there is nothing to challenge: no pending context
+/// offering an empty list of factors, no session.
+#[tokio::test]
+async fn a_new_device_without_a_factor_is_offered_no_empty_challenge() {
+    let (svc, policy, profile) = services(None).await;
+    policy.set(Some(requiring(&[])));
+    sign_in_from(&svc, "198.51.100.23", "known-device")
+        .await
+        .expect("the first device signs in");
+
+    let refused = sign_in_from(&svc, "203.0.113.45", "another-device")
+        .await
+        .expect_err("nothing can answer the rule");
+    assert_eq!(reason(&refused).as_deref(), Some("STEP_UP_REQUIRED"));
+    assert_eq!(svc.mock_storage.sessions_of(profile), 1);
+}
+
 /// A sign-in counts as successful evidence for later ones (the address's
 /// reputation) only once its second factor completed it, never while it
 /// waits. Before, a sign-in completed this way recorded none.
