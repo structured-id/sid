@@ -43,6 +43,13 @@ pub fn generate_current_totp(secret: &[u8]) -> String {
     compute_totp(secret, step)
 }
 
+/// Generate the code of the next time step, valid now within the clock skew
+/// tolerance (for testing a second code after a spent one).
+pub fn generate_next_totp(secret: &[u8]) -> String {
+    let step = current_timestamp() / TOTP_PERIOD;
+    compute_totp(secret, step + 1)
+}
+
 /// Compute TOTP code for a given time step.
 fn compute_totp(secret: &[u8], time_step: u64) -> String {
     let msg = time_step.to_be_bytes();
