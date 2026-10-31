@@ -1467,13 +1467,13 @@ CREATE VIEW profiles_view AS
 
 CREATE UNIQUE INDEX applications_system_integration ON applications USING btree (system_integration) WHERE (system_integration IS NOT NULL);
 
-CREATE INDEX idx_audit_action ON ONLY audit_records USING btree (action);
+CREATE INDEX idx_audit_action ON audit_recordsUSING btree (action);
 
-CREATE INDEX idx_audit_actor ON ONLY audit_records USING btree (actor_id);
+CREATE INDEX idx_audit_actor ON audit_recordsUSING btree (actor_id);
 
-CREATE INDEX idx_audit_chain_id ON ONLY audit_records USING btree (chain_id, sequence);
+CREATE INDEX idx_audit_chain_id ON audit_recordsUSING btree (chain_id, sequence);
 
-CREATE INDEX idx_audit_timestamp ON ONLY audit_records USING btree ("timestamp");
+CREATE INDEX idx_audit_timestamp ON audit_recordsUSING btree ("timestamp");
 
 CREATE INDEX idx_access_requests_requester ON access_requests USING btree (requester_id);
 
