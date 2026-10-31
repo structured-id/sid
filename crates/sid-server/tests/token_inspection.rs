@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use common::mock_storage::MockStorage;
-use common::{TestServices, issue_admin_token, test_client, test_profile};
+use common::{TestServices, test_client, test_profile};
 use sid_authz::cedar::CedarService;
 use sid_authz::grpc::AuthzServiceImpl;
 use sid_core::models::{ProjectId, ResourceId, TOKEN_INSPECTOR_ROLE};
@@ -36,8 +36,8 @@ fn authz(svc: &TestServices) -> AuthzServiceImpl {
     )
 }
 
-fn as_admin<T>(svc: &TestServices, message: T) -> Request<T> {
-    let token = issue_admin_token(&svc.jwt, sid_core::models::ProfileId::generate());
+async fn as_admin<T>(svc: &TestServices, message: T) -> Request<T> {
+    let token = common::administrator_token(&svc.jwt, svc.storage.as_ref()).await;
     let mut request = Request::new(message);
     request
         .metadata_mut()
@@ -70,17 +70,20 @@ async fn an_oauth_client_is_assigned_inspection_on_a_resource() {
     let authz = authz(&svc);
     let userinfo = common::userinfo_resource(&svc).await;
     let assigned = authz
-        .assign_role(as_admin(
-            &svc,
-            AssignRoleRequest {
-                principal: Some(Principal::OauthClientId(common::CONFIDENTIAL_CLIENT.into())),
-                role_id: inspector_role(&svc).await,
-                scope: on(userinfo),
-                expires_at: None,
-                admin: None,
-                policy_admin: None,
-            },
-        ))
+        .assign_role(
+            as_admin(
+                &svc,
+                AssignRoleRequest {
+                    principal: Some(Principal::OauthClientId(common::CONFIDENTIAL_CLIENT.into())),
+                    role_id: inspector_role(&svc).await,
+                    scope: on(userinfo),
+                    expires_at: None,
+                    admin: None,
+                    policy_admin: None,
+                },
+            )
+            .await,
+        )
         .await
         .unwrap()
         .into_inner()
@@ -89,12 +92,15 @@ async fn an_oauth_client_is_assigned_inspection_on_a_resource() {
     assert_eq!(assigned.scope, on(userinfo));
 
     let listed = authz
-        .list_role_assignments(as_admin(
-            &svc,
-            ListRoleAssignmentsRequest {
-                filter: Some(Filter::OauthClientId(common::CONFIDENTIAL_CLIENT.into())),
-            },
-        ))
+        .list_role_assignments(
+            as_admin(
+                &svc,
+                ListRoleAssignmentsRequest {
+                    filter: Some(Filter::OauthClientId(common::CONFIDENTIAL_CLIENT.into())),
+                },
+            )
+            .await,
+        )
         .await
         .unwrap()
         .into_inner();
@@ -142,17 +148,20 @@ async fn inspection_is_assigned_only_to_a_service_on_one_resource() {
     ];
     for (i, (principal, scope, code)) in cases.into_iter().enumerate() {
         let err = authz
-            .assign_role(as_admin(
-                &svc,
-                AssignRoleRequest {
-                    principal,
-                    role_id: role.clone(),
-                    scope,
-                    expires_at: None,
-                    admin: None,
-                    policy_admin: None,
-                },
-            ))
+            .assign_role(
+                as_admin(
+                    &svc,
+                    AssignRoleRequest {
+                        principal,
+                        role_id: role.clone(),
+                        scope,
+                        expires_at: None,
+                        admin: None,
+                        policy_admin: None,
+                    },
+                )
+                .await,
+            )
             .await
             .unwrap_err();
         assert_eq!(err.code(), code, "case {i}: {err:?}");
@@ -187,17 +196,22 @@ async fn an_assignment_expiry_is_a_future_timestamp() {
     .enumerate()
     {
         let err = authz
-            .assign_role(as_admin(
-                &svc,
-                AssignRoleRequest {
-                    principal: Some(Principal::OauthClientId(common::CONFIDENTIAL_CLIENT.into())),
-                    role_id: inspector_role(&svc).await,
-                    scope: on(userinfo),
-                    expires_at: Some(expires_at),
-                    admin: None,
-                    policy_admin: None,
-                },
-            ))
+            .assign_role(
+                as_admin(
+                    &svc,
+                    AssignRoleRequest {
+                        principal: Some(Principal::OauthClientId(
+                            common::CONFIDENTIAL_CLIENT.into(),
+                        )),
+                        role_id: inspector_role(&svc).await,
+                        scope: on(userinfo),
+                        expires_at: Some(expires_at),
+                        admin: None,
+                        policy_admin: None,
+                    },
+                )
+                .await,
+            )
             .await
             .unwrap_err();
         assert_eq!(err.code(), Code::InvalidArgument, "case {i}: {err:?}");
@@ -248,17 +262,20 @@ async fn a_retired_resource_takes_no_inspector() {
         .unwrap();
 
     let err = authz
-        .assign_role(as_admin(
-            &svc,
-            AssignRoleRequest {
-                principal: Some(Principal::OauthClientId(common::CONFIDENTIAL_CLIENT.into())),
-                role_id: inspector_role(&svc).await,
-                scope: on(resource.id),
-                expires_at: None,
-                admin: None,
-                policy_admin: None,
-            },
-        ))
+        .assign_role(
+            as_admin(
+                &svc,
+                AssignRoleRequest {
+                    principal: Some(Principal::OauthClientId(common::CONFIDENTIAL_CLIENT.into())),
+                    role_id: inspector_role(&svc).await,
+                    scope: on(resource.id),
+                    expires_at: None,
+                    admin: None,
+                    policy_admin: None,
+                },
+            )
+            .await,
+        )
         .await
         .unwrap_err();
     assert_eq!(err.code(), Code::FailedPrecondition, "{err:?}");

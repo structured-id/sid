@@ -399,28 +399,42 @@ async fn insert_admin_envelope(
     Ok(())
 }
 
-/// Check in `tx` that the administrative assignment `authority` still exists,
-/// unexpired, at `checked`.
+/// Check in `tx` that `basis` still holds. The write transaction is the only
+/// writer, so nothing can change what it read before it commits.
 pub(crate) async fn check_authority_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    authority: RoleAssignmentId,
-    checked: u64,
+    basis: &sid_core::models::AuthorityBasis,
 ) -> SidResult<()> {
-    let checked =
-        i64::try_from(checked).map_err(|e| SidError::Validation(format!("revision: {e}")))?;
+    let read = |e: sqlx::Error| SidError::Storage(format!("check authority: {e}"));
+    let checked = i64::try_from(basis.revision)
+        .map_err(|e| SidError::Validation(format!("revision: {e}")))?;
     let held: Option<(i64,)> = sqlx::query_as(
         "SELECT revision FROM role_assignments
          WHERE id = ? AND (expires_at IS NULL OR expires_at > ?)",
     )
-    .bind(authority.0.to_string())
+    .bind(basis.assignment.0.to_string())
     .bind(fmt_dt(&chrono::Utc::now()))
     .fetch_optional(&mut **tx)
     .await
-    .map_err(|e| SidError::Storage(format!("check administrative authority: {e}")))?;
+    .map_err(read)?;
     if held.map(|(v,)| v) != Some(checked) {
         return Err(SidError::Fenced(
-            "the editor's authority changed since it was checked".into(),
+            "the authorizing assignment changed since it was checked".into(),
         ));
+    }
+    if let Some((group, member)) = basis.member {
+        let held: Option<(i64,)> =
+            sqlx::query_as("SELECT 1 FROM group_members WHERE group_id = ? AND profile_id = ?")
+                .bind(group.0.to_string())
+                .bind(member)
+                .fetch_optional(&mut **tx)
+                .await
+                .map_err(read)?;
+        if held.is_none() {
+            return Err(SidError::Fenced(
+                "the actor left the group holding its authority".into(),
+            ));
+        }
     }
     Ok(())
 }
@@ -450,25 +464,8 @@ async fn check_assignment_fence(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     fence: &sid_core::models::AssignmentFence,
 ) -> SidResult<()> {
-    let revision =
-        |r: u64| i64::try_from(r).map_err(|_| SidError::Fenced("revision out of range".into()));
     let read = |e: sqlx::Error| SidError::Storage(format!("check assignment fence: {e}"));
-    if let Some((basis, checked)) = fence.basis {
-        let held: Option<(i64,)> = sqlx::query_as(
-            "SELECT revision FROM role_assignments
-             WHERE id = ? AND (expires_at IS NULL OR expires_at > ?)",
-        )
-        .bind(basis.0.to_string())
-        .bind(fmt_dt(&chrono::Utc::now()))
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(read)?;
-        if held.map(|(r,)| r) != Some(revision(checked)?) {
-            return Err(SidError::Fenced(
-                "the authorizing assignment changed since it was checked".into(),
-            ));
-        }
-    }
+    check_authority_in_tx(tx, &fence.basis).await?;
     let (role, checked) = &fence.role;
     let held: Option<(String,)> = sqlx::query_as("SELECT permissions FROM roles WHERE id = ?")
         .bind(role.0.to_string())
@@ -773,9 +770,7 @@ impl SqliteBackend {
     ) -> SidResult<bool> {
         let read = |e: sqlx::Error| SidError::Storage(format!("check role edit fence: {e}"));
         let mut tx = self.begin_write().await?;
-        if let Some((authority, checked)) = fence.authority {
-            check_authority_in_tx(&mut tx, authority, checked).await?;
-        }
+        check_authority_in_tx(&mut tx, &fence.authority).await?;
         if let Some(bounded) = &fence.bounded {
             let present: Vec<(String,)> = sqlx::query_as(
                 "SELECT DISTINCT a.id FROM role_assignments a

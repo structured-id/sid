@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use common::mock_storage::MockStorage;
-use common::{TestServices, issue_admin_token, test_client, test_profile};
+use common::{TestServices, test_client, test_profile};
 use sid_auth::receiver::Action;
 use sid_authz::AuthzCheckRequest;
 use sid_authz::cedar::CedarService;
@@ -52,8 +52,8 @@ fn authz_recording(svc: &TestServices, audit: Arc<common::RecordingAuditLog>) ->
     )
 }
 
-fn as_admin<T>(svc: &TestServices, message: T) -> Request<T> {
-    let token = issue_admin_token(&svc.jwt, sid_core::models::ProfileId::generate());
+async fn as_admin<T>(svc: &TestServices, message: T) -> Request<T> {
+    let token = common::administrator_token(&svc.jwt, svc.storage.as_ref()).await;
     let mut request = Request::new(message);
     request
         .metadata_mut()
@@ -86,17 +86,20 @@ async fn a_service_is_assigned_permission_checking_on_one_resource() {
     let svc = TestServices::new(MockStorage::new().with_client(common::confidential_client()));
     let userinfo = common::userinfo_resource(&svc).await;
     authz(&svc)
-        .assign_role(as_admin(
-            &svc,
-            AssignRoleRequest {
-                principal: Some(Principal::OauthClientId(common::CONFIDENTIAL_CLIENT.into())),
-                role_id: checker_role(&svc).await,
-                scope: on(userinfo),
-                expires_at: None,
-                admin: None,
-                policy_admin: None,
-            },
-        ))
+        .assign_role(
+            as_admin(
+                &svc,
+                AssignRoleRequest {
+                    principal: Some(Principal::OauthClientId(common::CONFIDENTIAL_CLIENT.into())),
+                    role_id: checker_role(&svc).await,
+                    scope: on(userinfo),
+                    expires_at: None,
+                    admin: None,
+                    policy_admin: None,
+                },
+            )
+            .await,
+        )
         .await
         .unwrap();
 
@@ -172,17 +175,20 @@ async fn permission_checking_is_assigned_only_to_a_service_on_one_resource() {
     ];
     for (i, (principal, scope, code)) in cases.into_iter().enumerate() {
         let err = authz
-            .assign_role(as_admin(
-                &svc,
-                AssignRoleRequest {
-                    principal,
-                    role_id: role.clone(),
-                    scope,
-                    expires_at: None,
-                    admin: None,
-                    policy_admin: None,
-                },
-            ))
+            .assign_role(
+                as_admin(
+                    &svc,
+                    AssignRoleRequest {
+                        principal,
+                        role_id: role.clone(),
+                        scope,
+                        expires_at: None,
+                        admin: None,
+                        policy_admin: None,
+                    },
+                )
+                .await,
+            )
             .await
             .unwrap_err();
         assert_eq!(err.code(), code, "case {i}: {err:?}");

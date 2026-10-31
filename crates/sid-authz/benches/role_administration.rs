@@ -72,7 +72,22 @@ struct Setup {
 async fn setup(storage: Arc<dyn StorageBackend>) -> Setup {
     storage.ensure_system_project(audit()).await.unwrap();
     let core = Arc::new(RoleAdministration::new(storage.clone()));
-    let root = Administrator::Root(AuthzPrincipal::Profile(profile(&storage).await));
+    let root = profile(&storage).await;
+    sid_authz::builtin::ensure_installation_administrator_role(storage.as_ref())
+        .await
+        .unwrap();
+    storage
+        .create_role_assignment(
+            &RoleAssignment::new(
+                RoleAssignmentPrincipal::Profile(root),
+                Role::installation_administrator().id,
+            )
+            .on_installation(),
+            audit(),
+        )
+        .await
+        .unwrap();
+    let root = Administrator::Root(AuthzPrincipal::Profile(root));
     let administrator_role = role(&storage, &["roles.administer"]).await;
     let holder = profile(&storage).await;
     let mut roles = Vec::with_capacity(SOURCES);

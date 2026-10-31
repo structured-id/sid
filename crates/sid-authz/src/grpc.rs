@@ -734,19 +734,15 @@ impl Asker {
     }
 }
 
-/// What a policy mutation commits with: its audit naming the asker and, for a
-/// holder, the assignment that must still authorize it.
+/// What a policy mutation commits with: its audit naming the asker and the
+/// authority that must still hold.
 fn policy_mutation(
     asker: &Asker,
     action: &str,
     id: CedarPolicyId,
-    fence: Option<sid_core::models::ActorFence>,
+    fence: sid_core::models::ActorFence,
 ) -> sid_core::models::MutationContext {
-    let ctx: sid_core::models::MutationContext = asker.audit(action, id.0.to_string()).into();
-    match fence {
-        Some(fence) => ctx.fenced_by(fence),
-        None => ctx,
-    }
+    sid_core::models::MutationContext::from(asker.audit(action, id.0.to_string())).fenced_by(fence)
 }
 
 /// The status of a refused administration change: no covering authority,
@@ -792,7 +788,7 @@ fn revocation_refusal(error: sid_core::Error) -> Status {
 }
 
 /// an authority that changed before the commit, or an invalid change.
-fn administration_refusal(error: sid_core::Error) -> Status {
+pub(crate) fn administration_refusal(error: sid_core::Error) -> Status {
     use sid_core::grpc_error::refuse::authority_changed;
     match error {
         sid_core::Error::AuthorizationDenied(_) => ApiError::new(
@@ -1132,7 +1128,12 @@ impl AuthzServiceImpl {
         resource: Option<ResourceId>,
     ) -> Result<(), Status> {
         match (asker, resource) {
-            (Asker::Profile(caller), _) if caller.is_admin() => Ok(()),
+            (Asker::Profile(caller), _) if caller.is_admin() => {
+                crate::admin::RoleAdministration::new(self.storage.clone())
+                    .require_installation_administrator(caller.profile_id)
+                    .await
+                    .map_err(administration_refusal)
+            }
             (Asker::Service(checker), Some(resource)) => {
                 let decision = self
                     .engine
@@ -1294,6 +1295,10 @@ impl AuthzServiceImpl {
     async fn admin<T>(&self, request: &Request<T>) -> Result<Caller, Status> {
         let caller = self.caller(request).await?;
         caller.require_admin()?;
+        crate::admin::RoleAdministration::new(self.storage.clone())
+            .require_installation_administrator(caller.profile_id)
+            .await
+            .map_err(administration_refusal)?;
         Ok(caller)
     }
 
@@ -1304,7 +1309,7 @@ impl AuthzServiceImpl {
         asker: &Asker,
         operation: sid_core::models::PolicyOperation,
         scope: sid_core::models::PolicyScope,
-    ) -> Result<Option<sid_core::models::ActorFence>, Status> {
+    ) -> Result<sid_core::models::ActorFence, Status> {
         crate::admin::RoleAdministration::new(self.storage.clone())
             .policy_authority(&asker.administrator()?, operation, scope)
             .await
@@ -1318,7 +1323,7 @@ impl AuthzServiceImpl {
         asker: &Asker,
         id: CedarPolicyId,
         operation: sid_core::models::PolicyOperation,
-    ) -> Result<(CedarPolicy, Option<sid_core::models::ActorFence>), Status> {
+    ) -> Result<(CedarPolicy, sid_core::models::ActorFence), Status> {
         let administrator = asker.administrator()?;
         let Some(policy) = self
             .storage

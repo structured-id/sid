@@ -473,7 +473,7 @@ async fn the_invite_issuer_role_is_assigned_to_a_machine_user_on_one_resource() 
         .id
         .0
         .to_string();
-    let admin = issue_admin_token(&i.svc.jwt, sid_core::models::ProfileId::generate());
+    let admin = common::administrator_token(&i.svc.jwt, i.svc.storage.as_ref()).await;
     let on = Some(format!("oauth_resource:{}", i.resource.id));
     let machine = || Some(Principal::MachineUserId(i.machine.id.to_string()));
     let cases = [

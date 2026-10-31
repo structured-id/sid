@@ -141,19 +141,22 @@ pub struct MockStorageInner {
 type StoredWork = (WorkRecord, Vec<u8>, Option<chrono::DateTime<chrono::Utc>>);
 
 impl MockStorageInner {
+    /// Whether `basis` still holds. No group memberships here, so an authority
+    /// held through a group never does.
+    fn authority_holds(&self, basis: &sid_core::models::AuthorityBasis) -> bool {
+        basis.member.is_none()
+            && self.role_assignments.iter().any(|a| {
+                a.id == basis.assignment && a.revision == basis.revision && !a.is_expired()
+            })
+    }
+
     /// Whether `fence` still holds, as the storage engines check it at
     /// commit. This mock keeps no group memberships, so a membership fence
     /// never holds.
     fn check_fence(&self, fence: &AssignmentFence) -> SidResult<()> {
         let fenced = |what: &str| Err(sid_core::Error::Fenced(format!("{what} changed")));
-        if let Some((basis, revision)) = fence.basis {
-            let held = self
-                .role_assignments
-                .iter()
-                .any(|a| a.id == basis && a.revision == revision && !a.is_expired());
-            if !held {
-                return fenced("the authorizing assignment");
-            }
+        if !self.authority_holds(&fence.basis) {
+            return fenced("the authorizing assignment");
         }
         let (role, checked) = &fence.role;
         let same = self.roles.get(role).is_some_and(|r| {
@@ -3801,14 +3804,8 @@ impl StorageBackend for MockStorage {
         {
             let inner = self.inner.lock().unwrap();
             let fenced = |what: &str| Err(sid_core::Error::Fenced(format!("{what} changed")));
-            if let Some((authority, revision)) = fence.authority {
-                let held = inner
-                    .role_assignments
-                    .iter()
-                    .any(|a| a.id == authority && a.revision == revision && !a.is_expired());
-                if !held {
-                    return fenced("the editor's authority");
-                }
+            if !inner.authority_holds(&fence.authority) {
+                return fenced("the editor's authority");
             }
             if let Some(bounded) = &fence.bounded {
                 let unseen = inner.role_assignments.iter().any(|a| {

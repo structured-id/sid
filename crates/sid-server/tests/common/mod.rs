@@ -681,6 +681,49 @@ pub fn issue_admin_token(jwt: &JwtService, profile_id: ProfileId) -> String {
     )
 }
 
+/// `profile` as an installation administrator: the stored assignment the
+/// authorization API requires beside the token's claim.
+#[allow(dead_code)]
+pub async fn assign_administrator(storage: &dyn sid_plugin::StorageBackend, profile: ProfileId) {
+    use sid_core::models::{AuditEntry, Role, RoleAssignment, RoleAssignmentPrincipal};
+    storage
+        .ensure_system_project(AuditEntry::system("test", "system-project").into())
+        .await
+        .unwrap();
+    sid_authz::builtin::ensure_installation_administrator_role(storage)
+        .await
+        .unwrap();
+    storage
+        .create_role_assignment(
+            &RoleAssignment::new(
+                RoleAssignmentPrincipal::Profile(profile),
+                Role::installation_administrator().id,
+            )
+            .on_installation(),
+            AuditEntry::system("test", "administrator").into(),
+        )
+        .await
+        .unwrap();
+}
+
+/// A new stored installation administrator's bearer token.
+#[allow(dead_code)]
+pub async fn administrator_token(
+    jwt: &JwtService,
+    storage: &dyn sid_plugin::StorageBackend,
+) -> String {
+    let profile = Profile::new(Some(format!("admin-{}", uuid::Uuid::now_v7().simple())));
+    storage
+        .create_profile(
+            &profile,
+            sid_core::models::AuditEntry::system("test", "administrator").into(),
+        )
+        .await
+        .unwrap();
+    assign_administrator(storage, profile.id).await;
+    issue_admin_token(jwt, profile.id)
+}
+
 /// The field-encryption key manager every test server uses.
 pub fn test_key_manager() -> Arc<dyn sid_keys::KeyManager> {
     Arc::new(

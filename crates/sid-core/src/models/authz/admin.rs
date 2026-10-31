@@ -287,12 +287,21 @@ pub struct AssignmentProvenance {
     pub ceiling: Option<BTreeSet<String>>,
 }
 
+/// The assignment an administrative write was authorized under, as it stood
+/// at the check: it must still exist, unexpired, at `revision`, and when it
+/// reached the actor through a group the actor must still belong to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthorityBasis {
+    pub assignment: super::RoleAssignmentId,
+    pub revision: u64,
+    pub member: Option<(GroupId, super::ProfileId)>,
+}
+
 /// What a role edit was checked against, re-verified when it commits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoleEditFence {
-    /// The editor's administrative assignment and its checked revision; it
-    /// must still exist, unexpired, at that revision. `None` for the root.
-    pub authority: Option<(super::RoleAssignmentId, u64)>,
+    /// The editor's authority.
+    pub authority: AuthorityBasis,
     /// When the edit adds permissions: every assignment of the role carrying
     /// an approved ceiling, each checked to admit the new content. No other
     /// may exist at commit. `None` when the edit adds nothing.
@@ -304,10 +313,8 @@ pub struct RoleEditFence {
 /// changed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssignmentFence {
-    /// The authorizing administrative assignment and the revision it was
-    /// checked at; it must still exist, unexpired, at that revision. `None`
-    /// when the installation's administrator authorized it as root.
-    pub basis: Option<(super::RoleAssignmentId, u64)>,
+    /// The actor's authority.
+    pub basis: AuthorityBasis,
     /// The administered role and the permissions it was checked with: an
     /// edit of anything else (its name, its description) leaves the check
     /// valid, while any change of its permissions breaks it.

@@ -10,7 +10,7 @@ mod common;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use common::{issue_admin_token, test_jwt};
+use common::test_jwt;
 use sid_authn::operation::OPERATION_KEY_HEADER;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authz::cedar::CedarService;
@@ -45,7 +45,7 @@ async fn harness(storage: Arc<dyn StorageBackend>) -> Harness {
         )),
         common::RecordingAuditLog::shared(),
     );
-    let token = issue_admin_token(&jwt, ProfileId::generate());
+    let token = common::administrator_token(&jwt, storage.as_ref()).await;
     Harness {
         svc: Arc::new(svc),
         storage,
@@ -235,7 +235,7 @@ async fn keys_are_per_caller(h: Harness) {
         .svc
         .assign_role(call(
             assign(&role, other),
-            &issue_admin_token(&h.jwt, ProfileId::generate()),
+            &common::administrator_token(&h.jwt, h.storage.as_ref()).await,
             Some(&key),
         ))
         .await

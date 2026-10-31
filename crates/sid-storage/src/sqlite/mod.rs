@@ -210,10 +210,9 @@ impl SqliteBackend {
             Some(sid_core::models::ActorFence::LoginPolicy { epoch }) => {
                 login_policy::check_fence(&mut tx, epoch).await?
             }
-            Some(sid_core::models::ActorFence::Assignment {
-                assignment,
-                revision,
-            }) => rbac::check_authority_in_tx(&mut tx, assignment, revision).await?,
+            Some(sid_core::models::ActorFence::Authority(basis)) => {
+                rbac::check_authority_in_tx(&mut tx, &basis).await?
+            }
             None => {}
         }
         // Then the completion: a keyed command another commit already

@@ -55,12 +55,17 @@ async fn harness() -> Harness {
         )),
         common::RecordingAuditLog::shared(),
     );
-    let admin = ProfileId::generate();
+    let admin = Profile::new(Some(format!("admin-{}", uuid::Uuid::now_v7().simple())));
+    storage
+        .create_profile(&admin, AuditEntry::system("test", "administrator").into())
+        .await
+        .unwrap();
+    common::assign_administrator(storage.as_ref(), admin.id).await;
     Harness {
         svc,
         storage,
-        admin,
-        admin_token: issue_admin_token(&jwt, admin),
+        admin: admin.id,
+        admin_token: issue_admin_token(&jwt, admin.id),
     }
 }
 

@@ -7,7 +7,7 @@
 
 mod common;
 
-use common::{error_reason, issue_admin_token, test_jwt};
+use common::{error_reason, test_jwt};
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authz::cedar::CedarService;
 use sid_authz::grpc::AuthzServiceImpl;
@@ -43,7 +43,7 @@ async fn harness() -> Harness {
         .expect("Failed to run migrations");
     let storage: Arc<dyn StorageBackend> = Arc::new(backend);
     let jwt = test_jwt();
-    let token = issue_admin_token(&jwt, ProfileId::generate());
+    let token = common::administrator_token(&jwt, storage.as_ref()).await;
     let svc = AuthzServiceImpl::new(
         Arc::new(sid_authz::CeAuthzEngine::new(storage.clone())),
         storage.clone(),

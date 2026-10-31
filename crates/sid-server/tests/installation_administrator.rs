@@ -66,7 +66,7 @@ async fn the_administrator_role_goes_to_a_profile_across_the_installation() {
     let profile = test_profile();
     let svc = TestServices::new(MockStorage::new().with_profile(profile.clone()));
     let authz = authz(&svc).await;
-    let root = issue_admin_token(&svc.jwt, sid_core::models::ProfileId::generate());
+    let root = common::administrator_token(&svc.jwt, svc.storage.as_ref()).await;
     let administrator = Role::installation_administrator();
     let editor = svc
         .storage

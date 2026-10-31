@@ -11,6 +11,18 @@ use uuid::Uuid;
 
 use super::test_audit;
 
+/// Authority held directly through `assignment` at `revision`.
+fn authority(
+    assignment: sid_core::models::RoleAssignmentId,
+    revision: u64,
+) -> sid_core::models::AuthorityBasis {
+    sid_core::models::AuthorityBasis {
+        assignment,
+        revision,
+        member: None,
+    }
+}
+
 /// A stored role of the system project, as read back from the store.
 async fn stored_role(backend: &dyn StorageBackend) -> Role {
     backend.ensure_system_project(test_audit()).await.unwrap();
@@ -659,7 +671,7 @@ pub async fn test_fenced_assignment(backend: &dyn StorageBackend) {
         .await
         .unwrap();
     let fence = AssignmentFence {
-        basis: Some((basis.id, 0)),
+        basis: authority(basis.id, 0),
         role: content(&working),
         recipient_membership: Some((group.id, worker)),
         grantor_outside: None,
@@ -686,7 +698,7 @@ pub async fn test_fenced_assignment(backend: &dyn StorageBackend) {
     // A stale basis revision, other role permissions than stored.
     for stale in [
         AssignmentFence {
-            basis: Some((basis.id, 1)),
+            basis: authority(basis.id, 1),
             ..fence.clone()
         },
         AssignmentFence {
@@ -828,7 +840,7 @@ pub async fn test_grantor_never_joins_its_group(backend: &dyn StorageBackend) {
             .with_expiry(chrono::Utc::now() + chrono::Duration::hours(1))
     };
     let fence = |group: &Group| AssignmentFence {
-        basis: Some((basis.id, 0)),
+        basis: authority(basis.id, 0),
         role: content(&working),
         recipient_membership: None,
         grantor_outside: Some((group.id, grantor)),
@@ -946,7 +958,7 @@ pub async fn test_fenced_role_edit(backend: &dyn StorageBackend) {
             .update_role_fenced(
                 &widened,
                 &RoleEditFence {
-                    authority: None,
+                    authority: authority(editor.id, 0),
                     bounded: Some(Default::default()),
                 },
                 test_audit(),
@@ -961,7 +973,7 @@ pub async fn test_fenced_role_edit(backend: &dyn StorageBackend) {
             .update_role_fenced(
                 &widened,
                 &RoleEditFence {
-                    authority: Some((editor.id, 1)),
+                    authority: authority(editor.id, 1),
                     bounded: None,
                 },
                 test_audit(),
@@ -972,7 +984,7 @@ pub async fn test_fenced_role_edit(backend: &dyn StorageBackend) {
     assert_eq!(revision_of(backend, working.id).await, working.revision);
 
     let fence = RoleEditFence {
-        authority: Some((editor.id, 0)),
+        authority: authority(editor.id, 0),
         bounded: Some([approved.id].into()),
     };
     assert!(

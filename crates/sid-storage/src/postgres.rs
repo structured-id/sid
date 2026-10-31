@@ -440,10 +440,9 @@ impl PostgresBackend {
             Some(sid_core::models::ActorFence::LoginPolicy { epoch }) => {
                 Self::check_login_policy_fence(tx, epoch).await?
             }
-            Some(sid_core::models::ActorFence::Assignment {
-                assignment,
-                revision,
-            }) => Self::check_authority_in_tx(tx, assignment, revision).await?,
+            Some(sid_core::models::ActorFence::Authority(basis)) => {
+                Self::check_authority_in_tx(tx, &basis).await?
+            }
             None => {}
         }
         // Then the completion: a keyed command another commit already
@@ -851,28 +850,43 @@ impl PostgresBackend {
         Ok(())
     }
 
-    /// Check in `tx` that the administrative assignment `authority` still
-    /// exists, unexpired, at `checked`, locking it until the transaction ends.
+    /// Check in `tx` that `basis` still holds, locking the assignment and the
+    /// membership it reached the actor through until the transaction ends.
     async fn check_authority_in_tx(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-        authority: RoleAssignmentId,
-        checked: u64,
+        basis: &sid_core::models::AuthorityBasis,
     ) -> SidResult<()> {
-        let checked =
-            i64::try_from(checked).map_err(|e| SidError::Validation(format!("revision: {e}")))?;
+        let read = |e: sqlx::Error| SidError::Storage(format!("check authority: {e}"));
+        let checked = i64::try_from(basis.revision)
+            .map_err(|e| SidError::Validation(format!("revision: {e}")))?;
         let held: Option<(i64,)> = sqlx::query_as(
             "SELECT revision FROM role_assignments
              WHERE id = $1 AND (expires_at IS NULL OR expires_at > now())
              FOR SHARE",
         )
-        .bind(authority.0)
+        .bind(basis.assignment.0)
         .fetch_optional(&mut **tx)
         .await
-        .map_err(|e| SidError::Storage(format!("check administrative authority: {e}")))?;
+        .map_err(read)?;
         if held.map(|(v,)| v) != Some(checked) {
             return Err(SidError::Fenced(
-                "the editor's authority changed since it was checked".into(),
+                "the authorizing assignment changed since it was checked".into(),
             ));
+        }
+        if let Some((group, member)) = basis.member {
+            let held: Option<(i32,)> = sqlx::query_as(
+                "SELECT 1 FROM group_members WHERE group_id = $1 AND profile_id = $2 FOR SHARE",
+            )
+            .bind(group.0)
+            .bind(member)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(read)?;
+            if held.is_none() {
+                return Err(SidError::Fenced(
+                    "the actor left the group holding its authority".into(),
+                ));
+            }
         }
         Ok(())
     }
@@ -903,25 +917,8 @@ impl PostgresBackend {
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         fence: &sid_core::models::AssignmentFence,
     ) -> SidResult<()> {
-        let revision =
-            |r: u64| i64::try_from(r).map_err(|_| SidError::Fenced("revision out of range".into()));
         let read = |e: sqlx::Error| SidError::Storage(format!("check assignment fence: {e}"));
-        if let Some((basis, checked)) = fence.basis {
-            let held: Option<(i64,)> = sqlx::query_as(
-                "SELECT revision FROM role_assignments
-                 WHERE id = $1 AND (expires_at IS NULL OR expires_at > now())
-                 FOR SHARE",
-            )
-            .bind(basis.0)
-            .fetch_optional(&mut **tx)
-            .await
-            .map_err(read)?;
-            if held.map(|(r,)| r) != Some(revision(checked)?) {
-                return Err(SidError::Fenced(
-                    "the authorizing assignment changed since it was checked".into(),
-                ));
-            }
-        }
+        Self::check_authority_in_tx(tx, &fence.basis).await?;
         let (role, checked) = &fence.role;
         let held: Option<(String,)> =
             sqlx::query_as("SELECT permissions FROM roles WHERE id = $1 FOR SHARE")
@@ -4169,9 +4166,7 @@ impl StorageBackend for PostgresBackend {
         if held.map(|(v,)| v) != Some(revision(r.revision)?) {
             return Ok(false);
         }
-        if let Some((authority, checked)) = fence.authority {
-            Self::check_authority_in_tx(&mut tx, authority, checked).await?;
-        }
+        Self::check_authority_in_tx(&mut tx, &fence.authority).await?;
         if let Some(bounded) = &fence.bounded {
             let present: Vec<(uuid::Uuid,)> = sqlx::query_as(
                 "SELECT DISTINCT a.id FROM role_assignments a
@@ -4504,8 +4499,11 @@ impl StorageBackend for PostgresBackend {
             .begin()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
-        Self::check_assignment_fence_in_tx(&mut tx, fence).await?;
+        // The administrators first: the fence share-locks the actor's own
+        // assignment, and two administrators revoking at once would each wait
+        // for the other's share lock.
         Self::keep_last_administrator_in_tx(&mut tx, id).await?;
+        Self::check_assignment_fence_in_tx(&mut tx, fence).await?;
         let removed: Option<(Option<sid_core::models::ProvisioningConnectorId>,)> = sqlx::query_as(
             "DELETE FROM role_assignments WHERE id = $1 RETURNING provisioning_connector_id",
         )

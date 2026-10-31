@@ -128,6 +128,8 @@ async fn installation(engine: Engine) -> Installation {
     sid_authz::builtin::ensure_scim_provisioner_role(storage.as_ref())
         .await
         .unwrap();
+    let token = common::administrator_token(&common::test_jwt_service(), storage.as_ref()).await;
+    ADMINISTRATOR_TOKEN.get_or_init(|| token);
     Installation {
         storage,
         history_keys,
@@ -291,11 +293,14 @@ async fn over_http(routes: tonic::service::Routes) -> String {
     format!("http://{addr}")
 }
 
+/// The bearer token of the installation's administrator; nextest gives each
+/// test its own process.
+static ADMINISTRATOR_TOKEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
 fn admin<T>(message: T) -> Request<T> {
-    let token = common::issue_admin_token(
-        &common::test_jwt_service(),
-        sid_core::models::ProfileId::generate(),
-    );
+    let token = ADMINISTRATOR_TOKEN
+        .get()
+        .expect("an installation is set up");
     let mut request = Request::new(message);
     request
         .metadata_mut()

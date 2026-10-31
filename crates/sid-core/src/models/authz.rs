@@ -13,8 +13,8 @@ use super::{MachineUserId, ProfileId, ProjectId, ProvisioningConnectorId, Resour
 
 pub mod admin;
 pub use admin::{
-    AdminEnvelope, AdminOperation, AssignmentFence, AssignmentProvenance, EnvelopeError,
-    PolicyAuthority, PolicyOperation, RecipientKind, RoleEditFence, Uncovered,
+    AdminEnvelope, AdminOperation, AssignmentFence, AssignmentProvenance, AuthorityBasis,
+    EnvelopeError, PolicyAuthority, PolicyOperation, RecipientKind, RoleEditFence, Uncovered,
 };
 
 // ── Role ──────────────────────────────────────────────────────────────
