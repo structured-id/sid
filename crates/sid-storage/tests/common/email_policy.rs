@@ -90,6 +90,7 @@ pub async fn test_email_key_written_only_under_the_active_revision(backend: &dyn
 }
 
 /// A row the email normalizer left behind before policy revisions.
+#[allow(dead_code)]
 pub struct LegacyRow {
     /// The principal value as stored.
     pub key: String,
@@ -103,6 +104,7 @@ pub struct LegacyRow {
 /// registration whose dots, tag and case were folded into both, a principal
 /// with no source contact, a bare `verified`, and an administrator's raw
 /// address whose key under the current rules differs from the stored value.
+#[allow(dead_code)]
 pub fn legacy_rows(domain: &str) -> Vec<LegacyRow> {
     vec![
         LegacyRow {
@@ -138,6 +140,7 @@ pub fn legacy_rows(domain: &str) -> Vec<LegacyRow> {
 /// included; it still reserves the handle against a new registration; the
 /// accounts are untouched; no key is rewritten into its current form; and a
 /// new key under the current revision is written normally.
+#[allow(dead_code)]
 pub async fn legacy_keys_are_quarantined(
     backend: &dyn StorageBackend,
     legacy: &[(String, ProfileId)],
@@ -192,6 +195,7 @@ pub async fn legacy_keys_are_quarantined(
 
 /// A contact of `profile` at `address`, as an authorized operation
 /// establishes it.
+#[allow(dead_code)]
 fn evidence(profile: ProfileId, address: &str) -> ProfileEmail {
     let now = chrono::Utc::now();
     ProfileEmail {
@@ -213,6 +217,7 @@ fn evidence(profile: ProfileId, address: &str) -> ProfileEmail {
 /// routing again; a repeat, another profile and a key no longer quarantined
 /// change nothing; evidence that is another profile's contact is refused;
 /// of two repairs racing for one key exactly one succeeds.
+#[allow(dead_code)]
 pub async fn legacy_keys_are_reconciled(
     backend: &dyn StorageBackend,
     legacy: &[(String, ProfileId)],

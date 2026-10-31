@@ -12,9 +12,9 @@ use sid_core::{Error as SidError, Result as SidResult};
 use sid_plugin::WorkStore;
 use sqlx::{PgConnection, PgPool, Row};
 
-/// The durable work table, shared by the engine migrations and by services
-/// that keep their own database (sid-notify).
-const SCHEMA: &str = include_str!("../../../../migrations/20260923_009_durable_work.sql");
+/// The durable work table of a service that keeps its own database
+/// (sid-notify); the engine's schema holds the same table.
+const SCHEMA: &str = include_str!("durable_work.sql");
 
 /// Durable work in a PostgreSQL database of its own owner, apart from the
 /// engine backend (a delivery service's job store).
