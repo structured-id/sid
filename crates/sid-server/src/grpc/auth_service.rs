@@ -2195,6 +2195,8 @@ impl AuthServiceImpl {
                     .await
             }
             Enroller::SignIn(pending) => {
+                // A password replaced since the first factor binds nothing.
+                self.first_factor_fence(pending).await?;
                 sid_authn::credential_enrollment::authorize_sign_in(
                     self.storage.as_ref(),
                     pending,
@@ -2203,6 +2205,36 @@ impl AuthServiceImpl {
                 .await
             }
         }
+    }
+
+    /// The credential `pending`'s first factor proved, while it still holds:
+    /// it commits with what the context completes, as in a sign-in that needs
+    /// no second factor. One replaced or revoked since completes nothing, and
+    /// a reset after waits for the session and ends it.
+    async fn first_factor_fence(
+        &self,
+        pending: &Session,
+    ) -> Result<Option<sid_core::models::CredentialFence>, Status> {
+        let proof = self
+            .first_factor_proofs
+            .read(&pending.id.to_string())
+            .await?
+            .ok_or_else(session_ended)?;
+        let Some(proof) = proof else {
+            return Ok(None);
+        };
+        let credential = self
+            .storage
+            .get_credentials_by_profile(pending.profile_id, None)
+            .await
+            .map_err(storage_failure)?
+            .into_iter()
+            .find(|c| c.status.is_active() && proof.proves(c))
+            .ok_or_else(authentication_failed)?;
+        Ok(Some(sid_core::models::CredentialFence {
+            id: credential.id,
+            data: credential.data,
+        }))
     }
 
     /// Refuse unless the caller may change its own password now; answer
@@ -2582,32 +2614,7 @@ impl AuthServiceImpl {
             return Err(step_up_required(&requirements.unmet(&completed, now)).into());
         }
 
-        // The credential the first factor proved commits with the session, as
-        // in a sign-in that needs no second factor: one replaced or revoked
-        // since completes nothing, and a reset after waits for the session
-        // and ends it.
-        let proof = self
-            .first_factor_proofs
-            .read(&pending.id.to_string())
-            .await?
-            .ok_or_else(session_ended)?;
-        let proved_by = match proof {
-            Some(proof) => {
-                let credential = self
-                    .storage
-                    .get_credentials_by_profile(profile.id, None)
-                    .await
-                    .map_err(storage_failure)?
-                    .into_iter()
-                    .find(|c| c.status.is_active() && proof.proves(c))
-                    .ok_or_else(authentication_failed)?;
-                Some(sid_core::models::CredentialFence {
-                    id: credential.id,
-                    data: credential.data,
-                })
-            }
-            None => None,
-        };
+        let proved_by = self.first_factor_fence(&pending).await?;
 
         let mut session = self.new_session(profile.id, pending.ip_address.clone());
         session.device_id = pending.device_id;

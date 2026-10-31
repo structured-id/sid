@@ -314,6 +314,59 @@ async fn a_protected_account_enrolls_nothing_from_a_pending_context() {
     assert_eq!(reason(&refused).as_deref(), Some("MFA_REQUIRED"));
 }
 
+/// A sign-in begun with a password replaced since binds nothing, at the start
+/// or at the finish of the ceremony: its proof no longer holds, and a seed of
+/// its choosing would lock the owner out.
+#[tokio::test]
+async fn a_replaced_password_enrolls_nothing_from_its_older_sign_in() {
+    let (svc, _policy, profile) = services(None).await;
+    let replace_password = || async {
+        let mut password = svc
+            .storage
+            .get_credentials_by_profile(profile, Some(CredentialType::Opaque))
+            .await
+            .unwrap()
+            .remove(0);
+        password.data = CredentialData::new(b"the password file of a later change".to_vec());
+        svc.mock_storage.set_credential(&password);
+    };
+
+    let first = native_sign_in(&svc).await.expect("pending context");
+    let token = bearer(&first);
+    let challenge = svc
+        .auth
+        .start_totp_enrollment(with_token(&token, StartTotpEnrollmentRequest {}))
+        .await
+        .expect("the proof holds at the start")
+        .into_inner();
+    let seed = sid_authn::base32_decode(&challenge.secret).unwrap();
+    replace_password().await;
+
+    let refused = svc
+        .auth
+        .finish_totp_enrollment(with_token(
+            &token,
+            FinishTotpEnrollmentRequest {
+                code: sid_authn::generate_current_totp(&seed),
+            },
+        ))
+        .await
+        .expect_err("the proof no longer holds at the finish");
+    assert_eq!(refused.code(), Code::Unauthenticated, "{refused:?}");
+    svc.auth
+        .start_totp_enrollment(with_token(&token, StartTotpEnrollmentRequest {}))
+        .await
+        .expect_err("nor at a new start");
+    assert!(
+        svc.storage
+            .get_credentials_by_profile(profile, Some(CredentialType::Totp))
+            .await
+            .unwrap()
+            .is_empty(),
+        "nothing was bound"
+    );
+}
+
 /// A passkey protects the account though this password sign-in cannot use
 /// it: no enrollment is offered and the sign-in is refused for recovery.
 #[tokio::test]

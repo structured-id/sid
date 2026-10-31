@@ -41,6 +41,8 @@ pub const BROWSER_METHODS: &[&str] = &[
     "/sid.v1.authn.AuthService/WebAuthnAuthenticationStart",
     "/sid.v1.authn.AuthService/WebAuthnAuthenticationFinish",
     "/sid.v1.authn.AuthService/VerifyTotp",
+    "/sid.v1.authn.AuthService/StartTotpEnrollment",
+    "/sid.v1.authn.AuthService/FinishTotpEnrollment",
     "/sid.v1.authn.AuthService/VerifySmsMfa",
     "/sid.v1.authn.AuthService/ResendSmsMfa",
     "/sid.v1.authn.AuthService/VerifyRecoveryCode",
