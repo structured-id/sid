@@ -95,6 +95,8 @@ struct Host {
     geoip: GeoIpChain,
     gate: CaptchaGate,
     captcha: SidPowProvider,
+    /// The rule and reaction of each security event.
+    events: std::sync::Mutex<Vec<(String, String)>>,
 }
 
 impl Host {
@@ -111,6 +113,7 @@ impl Host {
             geoip: GeoIpChain::empty(cache.clone()),
             gate: CaptchaGate::new(cache.clone(), crate::test_support::key_manager()),
             captcha: SidPowProvider::new([0; 32], 1, 60),
+            events: Default::default(),
         };
         (host, cache)
     }
@@ -148,7 +151,19 @@ impl SignInSecurityHost for Host {
     fn captcha_provider(&self) -> &dyn CaptchaProvider {
         &self.captcha
     }
-    async fn security_event(&self, _: &str, _: &str, _: &str, _: &str, _: Option<IpAddr>) {}
+    async fn security_event(
+        &self,
+        _: &str,
+        rule: &str,
+        reaction: &str,
+        _: &str,
+        _: Option<IpAddr>,
+    ) {
+        self.events
+            .lock()
+            .unwrap()
+            .push((rule.to_owned(), reaction.to_owned()));
+    }
     async fn record_ip_reputation(&self, _: &str) -> sid_core::Result<()> {
         Ok(())
     }
@@ -249,6 +264,40 @@ async fn one_factor_does_not() {
             Err(Refused(SignInRefusal::StepUpAfterAnomaly("new_device_ip")))
         ));
     }
+}
+
+/// A policy that passes a new device admits a single factor and keeps the
+/// sign-in visible: the event is recorded, as the refused one's would be.
+#[tokio::test]
+async fn a_passed_new_device_is_admitted_and_recorded() {
+    let (host, _) = Host::new(Vec::new());
+    let mut requirements = FixedLoginPolicy::of(&SecurityPolicy::ce_default())
+        .requirements(None)
+        .await
+        .unwrap();
+    requirements.new_device = RuleReaction::Allow;
+    let amr = vec!["pwd".to_owned()];
+    evaluate(
+        &host,
+        &ProfileId::generate(),
+        SignInAttempt {
+            client_ip: CLIENT.parse().ok(),
+            authentication: AttemptAuthentication::Local {
+                method: "opaque",
+                assurance: AuthLevel::Basic,
+                amr: &amr,
+            },
+            captcha_pass: None,
+            user_agent: Some("a new browser"),
+        },
+        &requirements,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        *host.events.lock().unwrap(),
+        [("new_device_ip".to_owned(), "allow".to_owned())]
+    );
 }
 
 /// A CAPTCHA answered by the admission a repeat stands on leaves the rules

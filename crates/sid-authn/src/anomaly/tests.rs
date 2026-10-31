@@ -770,13 +770,77 @@ async fn test_an_answered_step_up_leaves_the_later_rules_in_force() {
         step_up: true,
         captcha: false,
     };
-    let answered = detector.evaluate_answered(&ctx, step_up).await.unwrap();
+    let answered = detector
+        .evaluate_answered(&ctx, step_up, RuleReaction::StepUp)
+        .await
+        .unwrap();
     assert_eq!(answered.rule, "impossible_travel");
     assert_eq!(answered.reaction, RuleReaction::Allow);
 
     ctx.is_datacenter_ip = true;
-    let blocked = detector.evaluate_answered(&ctx, step_up).await.unwrap();
+    let blocked = detector
+        .evaluate_answered(&ctx, step_up, RuleReaction::StepUp)
+        .await
+        .unwrap();
     assert_eq!(blocked.reaction, RuleReaction::Block);
+}
+
+/// The login requirements state what a new device from a new address asks. A
+/// host whose users have no second factor passes it, named so the event is
+/// still recorded, while a stated reaction applies as written. Without this a
+/// sign-in that meets every requirement was refused for good on that browser.
+#[tokio::test]
+async fn test_the_requirements_state_the_new_device_reaction() {
+    let detector = AnomalyDetector::ce_default(test_cache());
+    let mut ctx = default_context();
+    ctx.prev_login_at = Some(chrono::Utc::now() - chrono::Duration::days(1));
+    ctx.new_device = true;
+    ctx.new_ip = true;
+
+    let passed = detector
+        .evaluate_answered(&ctx, Answered::default(), RuleReaction::Allow)
+        .await
+        .unwrap();
+    assert_eq!(passed.rule, "new_device_ip");
+    assert_eq!(passed.reaction, RuleReaction::Allow);
+
+    let stated = detector
+        .evaluate_answered(&ctx, Answered::default(), RuleReaction::Block)
+        .await
+        .unwrap();
+    assert_eq!(stated.rule, "new_device_ip");
+    assert_eq!(stated.reaction, RuleReaction::Block);
+}
+
+/// Passing a new device says nothing of the other rules.
+#[tokio::test]
+async fn test_passing_a_new_device_leaves_the_other_rules_in_force() {
+    let policy = NetworkPolicy {
+        block_datacenter_ips: true,
+        violation_reaction: NetworkViolationReaction::Block,
+        ..NetworkPolicy::default()
+    };
+    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_cache());
+    let mut ctx = default_context();
+    ctx.prev_login_at = Some(chrono::Utc::now() - chrono::Duration::days(1));
+    ctx.new_device = true;
+    ctx.new_ip = true;
+    ctx.is_datacenter_ip = true;
+
+    let blocked = detector
+        .evaluate_answered(&ctx, Answered::default(), RuleReaction::Allow)
+        .await
+        .unwrap();
+    assert_eq!(blocked.rule, "datacenter_ip");
+    assert_eq!(blocked.reaction, RuleReaction::Block);
+}
+
+/// The reaction reads as an installation's specification writes it.
+#[test]
+fn test_a_reaction_has_its_wire_name() {
+    let read: RuleReaction = serde_json::from_str("\"step_up\"").unwrap();
+    assert_eq!(read, RuleReaction::StepUp);
+    assert_eq!(serde_json::to_string(&read).unwrap(), "\"step_up\"");
 }
 
 /// Travel between designated countries is no anomaly, and that says nothing
@@ -837,7 +901,7 @@ async fn test_a_solved_captcha_leaves_the_later_rules_in_force() {
     );
     assert_eq!(
         detector
-            .evaluate_answered(&ctx, solved)
+            .evaluate_answered(&ctx, solved, RuleReaction::StepUp)
             .await
             .unwrap()
             .reaction,
@@ -846,7 +910,7 @@ async fn test_a_solved_captcha_leaves_the_later_rules_in_force() {
     ctx.is_datacenter_ip = true;
     assert_eq!(
         detector
-            .evaluate_answered(&ctx, solved)
+            .evaluate_answered(&ctx, solved, RuleReaction::StepUp)
             .await
             .unwrap()
             .reaction,

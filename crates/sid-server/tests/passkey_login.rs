@@ -300,6 +300,7 @@ impl sid_authn::login_policy::LoginPolicySource for RequiresOtp {
             required_amr: ["otp".to_string()].into(),
             max_authentication_age: None,
             enforcement: sid_core::models::security_policy::EnforcementMode::Hard,
+            new_device: sid_authn::anomaly::RuleReaction::StepUp,
             fence: None,
         })
     }

@@ -56,6 +56,7 @@ fn baseline() -> LoginRequirements {
         required_amr: BTreeSet::new(),
         max_authentication_age: None,
         enforcement: EnforcementMode::Hard,
+        new_device: sid_authn::anomaly::RuleReaction::StepUp,
         fence: None,
     }
 }

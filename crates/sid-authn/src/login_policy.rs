@@ -19,6 +19,8 @@ use sid_core::models::oauth2_client::OAuth2Client;
 use sid_core::models::security_policy::{EnforcementMode, SecurityPolicy};
 use sid_core::models::session::{AuthLevel, Session};
 
+use crate::anomaly::RuleReaction;
+
 /// The requirements an admitted authentication must meet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoginRequirements {
@@ -31,6 +33,8 @@ pub struct LoginRequirements {
     pub max_authentication_age: Option<Duration>,
     /// How an unmet requirement is enforced.
     pub enforcement: EnforcementMode,
+    /// What a new device from a new address asks of a sign-in.
+    pub new_device: RuleReaction,
     /// The policy state these were read under: what is decided on them
     /// commits only while it holds. None for a policy that never changes.
     pub fence: Option<ActorFence>,
@@ -67,6 +71,7 @@ impl FixedLoginPolicy {
             required_amr: policy.auth.required_amr.iter().cloned().collect(),
             max_authentication_age: None,
             enforcement: policy.enforcement.mode,
+            new_device: RuleReaction::StepUp,
             fence: None,
         })
     }

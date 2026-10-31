@@ -62,6 +62,7 @@ fn requiring(amr: &[&str]) -> LoginRequirements {
             .collect::<BTreeSet<_>>(),
         max_authentication_age: None,
         enforcement: EnforcementMode::Hard,
+        new_device: sid_authn::anomaly::RuleReaction::StepUp,
         fence: None,
     }
 }

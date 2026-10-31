@@ -16,7 +16,8 @@ const IP_WINDOW: Duration = Duration::from_secs(60);
 /// Reaction to a security rule match.
 ///
 /// CE rules produce direct reactions — no scoring aggregation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RuleReaction {
     /// Allow the request to proceed.
     Allow,
@@ -240,17 +241,20 @@ impl AnomalyDetector {
     /// 8. New device + new IP (both new, for a profile that signed in before → StepUp)
     /// 9. None matched → Allow
     pub async fn evaluate(&self, ctx: &LoginContext) -> CacheResult<RuleMatch> {
-        self.evaluate_answered(ctx, Answered::default()).await
+        self.evaluate_answered(ctx, Answered::default(), RuleReaction::StepUp)
+            .await
     }
 
     /// [`Self::evaluate`] for a sign-in that already answered what `answered`
-    /// says. A rule that passes the sign-in speaks for itself alone: the rules
-    /// after it run, and the first one that passed comes back as an `Allow`
-    /// when nothing else matched.
+    /// says, with `new_device` the reaction its login requirements state for
+    /// a new device from a new address. A rule that passes the sign-in speaks
+    /// for itself alone: the rules after it run, and the first one that passed
+    /// comes back as an `Allow` when nothing else matched.
     pub async fn evaluate_answered(
         &self,
         ctx: &LoginContext,
         answered: Answered,
+        new_device: RuleReaction,
     ) -> CacheResult<RuleMatch> {
         // The first rule that passed the sign-in.
         let mut passed = None;
@@ -311,7 +315,7 @@ impl AnomalyDetector {
         matched!(
             (ctx.prev_login_at.is_some() && ctx.new_device && ctx.new_ip).then(|| RuleMatch {
                 rule: "new_device_ip",
-                reaction: RuleReaction::StepUp,
+                reaction: new_device,
                 reason: "login from new device and new IP address".to_string(),
             })
         );
