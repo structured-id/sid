@@ -91,21 +91,40 @@ use sign_in_security::{ProfileSecurity, SecurityStatus};
 enum FirstFactor {
     /// Admitted: the session commits under this policy fence.
     Admitted(Option<sid_core::models::ActorFence>),
-    /// The requirements need a second factor, one of `factors` the account
-    /// has enrolled: the sign-in gets its pending context, under this fence.
+    /// A second factor is owed, one of `factors` the account has enrolled or,
+    /// with none ever enrolled, one of `enrollable` it enrolls first: the
+    /// sign-in gets its pending context, under this fence.
     AwaitsSecondFactor {
         factors: Vec<StepUpMethod>,
+        enrollable: Vec<StepUpMethod>,
         fence: Option<sid_core::models::ActorFence>,
     },
 }
 
 /// A completed first-factor sign-in: its credential, and when it is a
-/// pending context the second factors that complete it (`StepUpMethod`
-/// values) with a browser's CSRF token.
+/// pending context the second factors that complete it or may be enrolled
+/// first (`StepUpMethod` values) with a browser's CSRF token.
 struct FirstFactorSignedIn {
     signed_in: SignedIn,
     second_factors: Vec<i32>,
+    enrollable_factors: Vec<i32>,
     browser_csrf: Option<String>,
+}
+
+/// Who binds a second factor: an interactive session, or a sign-in's pending
+/// context owing its first.
+enum Enroller {
+    Session(sid_authn::caller::Caller),
+    SignIn(Box<Session>),
+}
+
+impl Enroller {
+    fn profile_id(&self) -> ProfileId {
+        match self {
+            Self::Session(caller) => caller.profile_id,
+            Self::SignIn(pending) => pending.profile_id,
+        }
+    }
 }
 
 /// The credential a pending second-factor context's first factor proved: its
@@ -1113,15 +1132,55 @@ impl AuthServiceImpl {
                 let factors = self
                     .second_factors(profile_id, &requirements, &first, now)
                     .await?;
-                if factors.is_empty() {
+                let enrollable = if factors.is_empty() {
+                    self.enrollable_factors(profile_id, &requirements, &first, now)
+                        .await?
+                } else {
+                    Vec::new()
+                };
+                if factors.is_empty() && enrollable.is_empty() {
                     return Err(owed.into_status());
                 }
                 Ok(FirstFactor::AwaitsSecondFactor {
                     factors,
+                    enrollable,
                     fence: requirements.fence,
                 })
             }
         }
+    }
+
+    /// The factors `profile_id` may enroll first to complete `first` under
+    /// `requirements`: none on an account with established protection, whose
+    /// lost factor goes through recovery.
+    async fn enrollable_factors(
+        &self,
+        profile_id: ProfileId,
+        requirements: &sid_authn::login_policy::LoginRequirements,
+        first: &Session,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<Vec<StepUpMethod>, Status> {
+        use sid_core::models::session::AuthLevel;
+        if !requirements.met_with(first, AuthLevel::Standard, "otp", now) {
+            return Ok(Vec::new());
+        }
+        let active: Vec<Credential> = self
+            .storage
+            .get_credentials_by_profile(profile_id, None)
+            .await
+            .map_err(storage_failure)?
+            .into_iter()
+            .filter(|c| c.status.is_active())
+            .collect();
+        let established = sid_authn::credential_enrollment::established_assurance(
+            &active,
+            self.security_policy.auth.passkey_satisfies_mfa,
+        );
+        Ok(if established == AuthLevel::Basic {
+            vec![StepUpMethod::Totp]
+        } else {
+            Vec::new()
+        })
     }
 
     /// The second factors `profile_id` has enrolled that complete `first`
@@ -2119,6 +2178,33 @@ impl AuthServiceImpl {
         .await
     }
 
+    /// Who binds a second factor in `request`: a sign-in's pending context
+    /// when it presents one, otherwise the caller's session.
+    async fn enroller<T>(&self, request: &Request<T>) -> Result<Enroller, Status> {
+        if let Ok(FactorCaller::Pending(pending, _)) = self.factor_caller(request).await {
+            return Ok(Enroller::SignIn(Box::new(pending)));
+        }
+        Ok(Enroller::Session(self.caller_claims(request).await?.caller))
+    }
+
+    /// Refuse unless `enroller` may bind a new TOTP authenticator now.
+    async fn require_totp_enrollment_authority(&self, enroller: &Enroller) -> Result<(), Status> {
+        match enroller {
+            Enroller::Session(caller) => {
+                self.require_enrollment_authority(caller, caller.profile_id, CredentialType::Totp)
+                    .await
+            }
+            Enroller::SignIn(pending) => {
+                sid_authn::credential_enrollment::authorize_sign_in(
+                    self.storage.as_ref(),
+                    pending,
+                    self.security_policy.auth.passkey_satisfies_mfa,
+                )
+                .await
+            }
+        }
+    }
+
     /// Refuse unless the caller may change its own password now; answer
     /// whether the change must prove the current password (see
     /// [`sid_authn::credential_enrollment::password_change_authority`]).
@@ -2591,9 +2677,14 @@ impl AuthServiceImpl {
                     )
                     .await?,
                 second_factors: Vec::new(),
+                enrollable_factors: Vec::new(),
                 browser_csrf: None,
             }),
-            FirstFactor::AwaitsSecondFactor { factors, fence } => {
+            FirstFactor::AwaitsSecondFactor {
+                factors,
+                enrollable,
+                fence,
+            } => {
                 let mut session = Session::new_awaiting_second_factor(
                     profile.id,
                     session_address(client_ip),
@@ -2624,10 +2715,11 @@ impl AuthServiceImpl {
                         fence,
                     )
                     .await?;
-                info!(profile = %profile.id, ?factors, "Sign-in awaits its second factor");
+                info!(profile = %profile.id, ?factors, ?enrollable, "Sign-in awaits its second factor");
                 Ok(FirstFactorSignedIn {
                     signed_in,
                     second_factors: factors.into_iter().map(i32::from).collect(),
+                    enrollable_factors: enrollable.into_iter().map(i32::from).collect(),
                     browser_csrf,
                 })
             }
@@ -3304,6 +3396,7 @@ impl AuthService for AuthServiceImpl {
         let FirstFactorSignedIn {
             signed_in,
             second_factors,
+            enrollable_factors,
             browser_csrf,
         } = self
             .complete_first_factor(
@@ -3323,6 +3416,7 @@ impl AuthService for AuthServiceImpl {
             session_id,
             expires_in,
             second_factors,
+            enrollable_factors,
             browser_csrf,
         })
     }
@@ -4035,6 +4129,7 @@ impl AuthService for AuthServiceImpl {
         let FirstFactorSignedIn {
             signed_in,
             second_factors,
+            enrollable_factors,
             browser_csrf,
         } = self
             .complete_first_factor(
@@ -4057,6 +4152,7 @@ impl AuthService for AuthServiceImpl {
                 session_id,
                 expires_in,
                 second_factors,
+                enrollable_factors,
                 browser_csrf,
             },
         )
@@ -4990,6 +5086,7 @@ impl AuthService for AuthServiceImpl {
         let FirstFactorSignedIn {
             signed_in,
             second_factors,
+            enrollable_factors,
             browser_csrf,
         } = self
             .complete_first_factor(
@@ -5015,6 +5112,7 @@ impl AuthService for AuthServiceImpl {
             session_id,
             expires_in,
             second_factors,
+            enrollable_factors,
             browser_csrf,
         })
     }
@@ -5047,10 +5145,9 @@ impl AuthService for AuthServiceImpl {
         request: Request<StartTotpEnrollmentRequest>,
     ) -> Result<Response<TotpEnrollmentChallenge>, Status> {
         self.check_maintenance().await?;
-        let caller = self.caller_claims(&request).await?.caller;
-        let profile_id = caller.profile_id;
-        self.require_enrollment_authority(&caller, profile_id, CredentialType::Totp)
-            .await?;
+        let enroller = self.enroller(&request).await?;
+        let profile_id = enroller.profile_id();
+        self.require_totp_enrollment_authority(&enroller).await?;
 
         // Check if user already has an active TOTP credential.
         let existing = self
@@ -5117,8 +5214,8 @@ impl AuthService for AuthServiceImpl {
         request: Request<FinishTotpEnrollmentRequest>,
     ) -> Result<Response<FinishTotpEnrollmentResponse>, Status> {
         self.check_maintenance().await?;
-        let caller = self.caller_claims(&request).await?.caller;
-        let profile_id = caller.profile_id;
+        let enroller = self.enroller(&request).await?;
+        let profile_id = enroller.profile_id();
 
         let req = request.into_inner();
         require_totp_code_format(&req.code)?;
@@ -5134,8 +5231,7 @@ impl AuthService for AuthServiceImpl {
             .map(|(_, secret)| secret)
             .ok_or_else(|| ceremony_expired("TOTP enrollment"))?;
         // The account may have changed since the start.
-        self.require_enrollment_authority(&caller, profile_id, CredentialType::Totp)
-            .await?;
+        self.require_totp_enrollment_authority(&enroller).await?;
 
         // Verify the TOTP code to confirm the user set up their authenticator
         // correctly; the code is spent, like any accepted one.

@@ -225,21 +225,114 @@ async fn a_new_device_is_answered_by_the_enrolled_factor() {
     assert_eq!(session.assurance_level, AuthLevel::Standard);
 }
 
-/// With no enrolled factor there is nothing to challenge: no pending context
-/// offering an empty list of factors, no session.
+/// `message` carrying `token`.
+fn with_token<T>(token: &str, message: T) -> Request<T> {
+    let mut request = Request::new(message);
+    request
+        .metadata_mut()
+        .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    request
+}
+
+/// With no factor ever enrolled there is nothing to challenge: the sign-in
+/// gets no empty list of factors, it may enroll its first.
 #[tokio::test]
-async fn a_new_device_without_a_factor_is_offered_no_empty_challenge() {
-    let (svc, policy, profile) = services(None).await;
+async fn a_new_device_without_a_factor_enrolls_its_first() {
+    let (svc, policy, _) = services(None).await;
     policy.set(Some(requiring(&[])));
     sign_in_from(&svc, "198.51.100.23", "known-device")
         .await
         .expect("the first device signs in");
 
-    let refused = sign_in_from(&svc, "203.0.113.45", "another-device")
+    let body = sign_in_from(&svc, "203.0.113.45", "another-device")
         .await
-        .expect_err("nothing can answer the rule");
-    assert_eq!(reason(&refused).as_deref(), Some("STEP_UP_REQUIRED"));
+        .expect("pending context")
+        .into_inner();
+    assert!(body.second_factors.is_empty());
+    assert_eq!(body.enrollable_factors, [StepUpMethod::Totp as i32]);
+}
+
+/// A password-only account owing a factor enrolls its first from the pending
+/// context, which elevates nothing by itself: the new factor then completes
+/// the sign-in at Standard. The context reaches nothing else meanwhile.
+#[tokio::test]
+async fn a_sign_in_enrolls_its_first_factor_and_completes_with_it() {
+    let (svc, _policy, profile) = services(None).await;
+    let first = native_sign_in(&svc).await.expect("pending context");
+    let token = bearer(&first);
+    let pending_id = SessionId::parse(&first.into_inner().session_id).unwrap();
     assert_eq!(svc.mock_storage.sessions_of(profile), 1);
+
+    let challenge = svc
+        .auth
+        .start_totp_enrollment(with_token(&token, StartTotpEnrollmentRequest {}))
+        .await
+        .expect("the first enrollment starts")
+        .into_inner();
+    let seed = sid_authn::base32_decode(&challenge.secret).unwrap();
+    let finished = svc
+        .auth
+        .finish_totp_enrollment(with_token(
+            &token,
+            FinishTotpEnrollmentRequest {
+                code: sid_authn::generate_current_totp(&seed),
+            },
+        ))
+        .await
+        .expect("the first enrollment commits")
+        .into_inner();
+    assert!(!finished.recovery_codes.is_empty());
+    let pending = svc.storage.get_session(pending_id).await.unwrap().unwrap();
+    assert!(pending.awaits_second_factor(), "enrolling elevates nothing");
+
+    let completed = verify_with_token(&svc, &token, sid_authn::generate_next_totp(&seed))
+        .await
+        .expect("the new factor completes the sign-in")
+        .into_inner();
+    let session_id = SessionId::parse(completed.session_id.as_deref().unwrap()).unwrap();
+    let session = svc.storage.get_session(session_id).await.unwrap().unwrap();
+    assert!(!session.is_provisional);
+    assert_eq!(session.assurance_level, AuthLevel::Standard);
+    assert!(session.amr.iter().any(|m| m == "otp"), "{:?}", session.amr);
+}
+
+/// A pending context binds nothing to an account with established
+/// protection: a factor it cannot give is not replaced by enrolling another.
+#[tokio::test]
+async fn a_protected_account_enrolls_nothing_from_a_pending_context() {
+    let seed = sid_authn::generate_secret();
+    let (svc, _policy, _) = services(Some(&seed)).await;
+    let first = native_sign_in(&svc).await.expect("pending context");
+    let token = bearer(&first);
+    assert!(first.into_inner().enrollable_factors.is_empty());
+
+    let refused = svc
+        .auth
+        .start_totp_enrollment(with_token(&token, StartTotpEnrollmentRequest {}))
+        .await
+        .expect_err("established protection stays");
+    assert_eq!(reason(&refused).as_deref(), Some("MFA_REQUIRED"));
+}
+
+/// A passkey protects the account though this password sign-in cannot use
+/// it: no enrollment is offered and the sign-in is refused for recovery.
+#[tokio::test]
+async fn a_lost_factor_is_no_first_enrollment() {
+    let (svc, _policy, profile) = services(None).await;
+    let passkey = Credential::new(
+        profile,
+        CredentialType::WebAuthn,
+        CredentialData::new(b"a registered passkey".to_vec()),
+        None,
+    );
+    svc.storage
+        .create_credential(&passkey, AuditEntry::system("test", "passkey").into())
+        .await
+        .unwrap();
+
+    let refused = native_sign_in(&svc).await.unwrap_err();
+    assert_eq!(reason(&refused).as_deref(), Some("STEP_UP_REQUIRED"));
+    assert_eq!(svc.mock_storage.sessions_of(profile), 0);
 }
 
 /// A sign-in counts as successful evidence for later ones (the address's
@@ -391,11 +484,12 @@ async fn a_pending_context_authorizes_nothing_else() {
     assert_eq!(again.code(), Code::Unauthenticated, "{again:?}");
 }
 
-/// Without an enrolled factor, and when the requirement is one TOTP cannot
-/// meet, the sign-in is refused as before and stores no session.
+/// A requirement TOTP cannot meet is refused and stores no session, with no
+/// factor enrolled or one enrolled.
 #[tokio::test]
-async fn a_sign_in_no_enrolled_factor_completes_is_refused() {
-    let (svc, _policy, profile) = services(None).await;
+async fn a_sign_in_no_factor_completes_is_refused() {
+    let (svc, policy, profile) = services(None).await;
+    policy.set(Some(requiring(&["hwk"])));
     let refused = native_sign_in(&svc).await.unwrap_err();
     assert_eq!(reason(&refused).as_deref(), Some("STEP_UP_REQUIRED"));
     assert_eq!(svc.mock_storage.sessions_of(profile), 0);

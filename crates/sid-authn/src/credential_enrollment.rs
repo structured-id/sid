@@ -74,6 +74,23 @@ pub fn check_enrollment(
     Ok(())
 }
 
+/// Check that `pending`, a sign-in's context owing its second factor, may bind
+/// the first one to an account whose active credentials are `active`: only
+/// with no stronger protection established, which stays out of its reach.
+pub fn check_sign_in_enrollment(
+    pending: &Session,
+    active: &[Credential],
+    passkey_satisfies_mfa: bool,
+) -> Result<(), EnrollmentRefusal> {
+    if !pending.awaits_second_factor() || pending.is_expired() {
+        return Err(EnrollmentRefusal::Provisional);
+    }
+    match established_assurance(active, passkey_satisfies_mfa) {
+        AuthLevel::Basic => Ok(()),
+        required => Err(EnrollmentRefusal::Insufficient { required }),
+    }
+}
+
 /// How long from `now` a password change of `session` may still go without
 /// the current password; zero when it needs it now. A relaxed rule counts
 /// from the session's last authentication and never outlasts the
@@ -143,6 +160,26 @@ pub async fn authorize(
         Utc::now(),
     )
     .map_err(refusal_status)
+}
+
+/// Refuse unless `pending` may bind the account's first second factor now,
+/// judged by the account's current active credentials (see
+/// [`check_sign_in_enrollment`]).
+#[cfg(feature = "grpc")]
+#[allow(clippy::result_large_err)]
+pub async fn authorize_sign_in(
+    storage: &dyn sid_plugin::StorageBackend,
+    pending: &Session,
+    passkey_satisfies_mfa: bool,
+) -> Result<(), tonic::Status> {
+    let active: Vec<Credential> = storage
+        .get_credentials_by_profile(pending.profile_id, None)
+        .await
+        .map_err(storage_failure)?
+        .into_iter()
+        .filter(|c| c.status.is_active())
+        .collect();
+    check_sign_in_enrollment(pending, &active, passkey_satisfies_mfa).map_err(refusal_status)
 }
 
 /// Refuse unless `caller`'s own interactive session may replace the
