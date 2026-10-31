@@ -296,27 +296,50 @@ async fn judge<H: SignInSecurityHost>(
         account: identity.clone(),
         client_ip,
     };
-    if rule_match.reaction == RuleReaction::RequireCaptcha {
-        // The admission being repeated was itself judged from that
-        // address: no pass is spent on its repeat.
-        answered.captcha = match attempt.captcha_pass {
-            _ if admitted == Some(client_ip) => true,
-            Some(pass) => host
-                .captcha_gate()
-                .redeem(pass, &subject)
-                .await
-                .map_err(unavailable)?,
-            None => false,
-        };
-        // The rules after the CAPTCHA's still have their say.
-        if answered.captcha {
-            info!(account = %identity, rule = rule_match.rule, "Anomaly: RequireCaptcha answered by a solved challenge");
-            rule_match = host
-                .anomaly()
-                .evaluate_answered(&ctx, answered, requirements.new_device)
-                .await
-                .map_err(unavailable)?;
+    // The first step-up this sign-in owes. A second factor may yet answer it
+    // and nothing judges the rules again then, so the rules after it have
+    // their say now: a stricter one answers first.
+    let mut owed_step_up = None;
+    loop {
+        match rule_match.reaction {
+            RuleReaction::StepUp => {
+                warn!(account = %identity, rule = rule_match.rule, reason = %rule_match.reason, "Anomaly: StepUp required");
+                host.security_event(
+                    &identity,
+                    rule_match.rule,
+                    rule_match.reaction.as_str(),
+                    &rule_match.reason,
+                    client_ip,
+                )
+                .await;
+                owed_step_up.get_or_insert(rule_match.rule);
+                answered.step_up = true;
+            }
+            RuleReaction::RequireCaptcha => {
+                // The admission being repeated was itself judged from that
+                // address: no pass is spent on its repeat.
+                answered.captcha = match attempt.captcha_pass {
+                    _ if admitted == Some(client_ip) => true,
+                    Some(pass) => host
+                        .captcha_gate()
+                        .redeem(pass, &subject)
+                        .await
+                        .map_err(unavailable)?,
+                    None => false,
+                };
+                if !answered.captcha {
+                    break;
+                }
+                // The rules after the CAPTCHA's still have their say.
+                info!(account = %identity, rule = rule_match.rule, "Anomaly: RequireCaptcha answered by a solved challenge");
+            }
+            _ => break,
         }
+        rule_match = host
+            .anomaly()
+            .evaluate_answered(&ctx, answered, requirements.new_device)
+            .await
+            .map_err(unavailable)?;
     }
     let event = |reaction: &'static str| {
         host.security_event(
@@ -328,6 +351,8 @@ async fn judge<H: SignInSecurityHost>(
         )
     };
     match rule_match.reaction {
+        // What passed here is the step-up still owed, not an allowed sign-in.
+        RuleReaction::Allow if owed_step_up.is_some() => {}
         RuleReaction::Allow => {
             if rule_match.rule == "location_switch" {
                 info!(
@@ -364,11 +389,11 @@ async fn judge<H: SignInSecurityHost>(
                 .map_err(unavailable)?;
             return Err(SignInRefusal::CaptchaRequired(challenge).into());
         }
-        RuleReaction::StepUp => {
-            warn!(account = %identity, rule = rule_match.rule, reason = %rule_match.reason, "Anomaly: StepUp required");
-            event(rule_match.reaction.as_str()).await;
-            return Err(SignInRefusal::StepUpAfterAnomaly(rule_match.rule).into());
-        }
+        // Answered above: every step-up left the loop as owed.
+        RuleReaction::StepUp => {}
+    }
+    if let Some(rule) = owed_step_up {
+        return Err(SignInRefusal::StepUpAfterAnomaly(rule).into());
     }
 
     // The login requirements, checked on a probe of the session the sign-in

@@ -1072,8 +1072,8 @@ impl AuthServiceImpl {
 
     /// The same rules for a local sign-in that proved its first factor at
     /// `assurance` with `amr`, under the organization's requirements: admitted,
-    /// or, when the requirements are all it left unmet and a second factor the
-    /// account has enrolled meets them, awaiting that factor.
+    /// or, when it owes the requirements or an anomaly rule's step-up and a
+    /// second factor the account has enrolled answers that, awaiting the factor.
     async fn evaluate_first_factor(
         &self,
         profile_id: ProfileId,
@@ -1099,7 +1099,8 @@ impl AuthServiceImpl {
             .await
         {
             Ok(()) => Ok(FirstFactor::Admitted(requirements.fence)),
-            Err(SecurityStatus::StepUp(unmet)) => {
+            Err(SecurityStatus::Refused(status)) => Err(status),
+            Err(owed) => {
                 let now = Utc::now();
                 let first =
                     sid_authn::login_policy::local_authentication(profile_id, assurance, amr, now);
@@ -1107,14 +1108,13 @@ impl AuthServiceImpl {
                     .second_factors(profile_id, &requirements, &first, now)
                     .await?;
                 if factors.is_empty() {
-                    return Err(step_up_required(&unmet).into());
+                    return Err(owed.into_status());
                 }
                 Ok(FirstFactor::AwaitsSecondFactor {
                     factors,
                     fence: requirements.fence,
                 })
             }
-            Err(SecurityStatus::Refused(status)) => Err(status),
         }
     }
 

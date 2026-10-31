@@ -19,9 +19,11 @@ use super::refusal::{
 };
 
 /// A refusal of the rules as this server answers it: the login requirements
-/// left unmet, which a further factor may still meet, or any other refusal.
+/// left unmet or an anomaly rule's step-up, which a further factor may still
+/// answer, or any other refusal.
 pub(super) enum SecurityStatus {
     StepUp(Unmet),
+    AnomalyStepUp(&'static str),
     Refused(Status),
 }
 
@@ -30,6 +32,7 @@ impl SecurityStatus {
     pub(super) fn into_status(self) -> Status {
         match self {
             Self::StepUp(unmet) => step_up_required(&unmet).into(),
+            Self::AnomalyStepUp(rule) => step_up_after_anomaly(rule).into(),
             Self::Refused(status) => status,
         }
     }
@@ -39,12 +42,12 @@ impl From<SignInRefusal> for SecurityStatus {
     fn from(r: SignInRefusal) -> Self {
         Self::Refused(match r {
             SignInRefusal::StepUp(unmet) => return Self::StepUp(unmet),
+            SignInRefusal::StepUpAfterAnomaly(rule) => return Self::AnomalyStepUp(rule),
             SignInRefusal::Refused => sign_in_refused(),
             SignInRefusal::TooManyAttempts(retry_after) => too_many_attempts(retry_after),
             SignInRefusal::CaptchaRequired(challenge) => match captcha_required(&challenge) {
                 Ok(refusal) | Err(refusal) => refusal.into(),
             },
-            SignInRefusal::StepUpAfterAnomaly(rule) => step_up_after_anomaly(rule).into(),
             SignInRefusal::Unavailable(cause) => anomaly_unavailable(cause),
         })
     }

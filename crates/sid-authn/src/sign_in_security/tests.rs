@@ -6,6 +6,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use sid_core::models::ProfileId;
 use sid_core::models::SecurityPolicy;
+use sid_core::models::security_policy::{NetworkPolicy, NetworkViolationReaction};
 use sid_plugin::CacheBackend;
 use sid_plugin::cache::InMemoryCacheBackend;
 
@@ -336,6 +337,90 @@ async fn a_solved_captcha_does_not_pass_the_next_rule() {
         refused,
         Err(Refused(SignInRefusal::StepUpAfterAnomaly("new_device_ip")))
     ));
+}
+
+/// Marks every address as a datacenter's.
+struct Datacenter;
+
+#[async_trait]
+impl IpIntelligenceProvider for Datacenter {
+    async fn classify(&self, _: IpAddr) -> Result<Option<IpClassification>, IpIntelError> {
+        Ok(Some(IpClassification {
+            labels: vec![IpLabel::Datacenter],
+            risk_score: None,
+            source: "test".to_owned(),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+        }))
+    }
+
+    async fn refresh(&self) -> Result<(), IpIntelError> {
+        Ok(())
+    }
+
+    fn source_name(&self) -> &str {
+        "test"
+    }
+}
+
+/// A step-up does not hide the rules after it: a second factor could
+/// complete the sign-in past them, so the stricter one answers first. Here
+/// the datacenter rule asks a step-up and the stuffing limit a CAPTCHA.
+#[tokio::test]
+async fn a_step_up_leaves_the_stricter_rule_after_it_in_force() {
+    let (mut host, _) = Host::new(vec![Arc::new(Datacenter)]);
+    host.anomaly.set_network_policy(NetworkPolicy {
+        block_datacenter_ips: true,
+        violation_reaction: NetworkViolationReaction::StepUp,
+        ..NetworkPolicy::default()
+    });
+    let client: IpAddr = CLIENT.parse().unwrap();
+    for _ in 0..=host.anomaly.config().credential_stuffing_threshold {
+        host.anomaly.record_ip_attempt(client).await.unwrap();
+    }
+    let amr = vec!["pwd".to_owned()];
+    let refused = judged(
+        &host,
+        ProfileId::generate(),
+        AttemptAuthentication::Local {
+            method: "opaque",
+            assurance: AuthLevel::Basic,
+            amr: &amr,
+        },
+    )
+    .await;
+    assert!(
+        matches!(refused, Err(Refused(SignInRefusal::CaptchaRequired(_)))),
+        "{refused:?}"
+    );
+}
+
+/// With nothing stricter after it the step-up stands, under the rule that
+/// asked first, and that rule's reaction is recorded once.
+#[tokio::test]
+async fn the_first_step_up_is_the_one_owed() {
+    let (mut host, _) = Host::new(vec![Arc::new(Datacenter)]);
+    host.anomaly.set_network_policy(NetworkPolicy {
+        block_datacenter_ips: true,
+        violation_reaction: NetworkViolationReaction::StepUp,
+        ..NetworkPolicy::default()
+    });
+    let amr = vec!["pwd".to_owned()];
+    let refused = judged(
+        &host,
+        ProfileId::generate(),
+        AttemptAuthentication::Local {
+            method: "opaque",
+            assurance: AuthLevel::Basic,
+            amr: &amr,
+        },
+    )
+    .await;
+    let Err(Refused(SignInRefusal::StepUpAfterAnomaly(rule))) = refused else {
+        panic!("{refused:?}");
+    };
+    let events = host.events.lock().unwrap();
+    assert_eq!(events.first().map(|(r, _)| r.as_str()), Some(rule));
+    assert_eq!(events.iter().filter(|(r, _)| r == rule).count(), 1);
 }
 
 /// A rule that refuses outright is no step-up: a second factor does not pass

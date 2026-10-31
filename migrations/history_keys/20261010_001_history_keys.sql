@@ -9,28 +9,21 @@ CREATE TABLE history_key_abandoned (
     operation_id uuid NOT NULL,
     owner_domain bytea NOT NULL,
     abandoned_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT history_key_abandoned_pkey PRIMARY KEY (operation_id),
     CONSTRAINT history_key_abandoned_owner_domain_check CHECK ((octet_length(owner_domain) = 32))
 );
 
 CREATE TABLE history_key_audit (
-    id bigint NOT NULL,
+    id bigserial NOT NULL,
     occurred_at timestamp with time zone DEFAULT now() NOT NULL,
     actor_id text NOT NULL,
     actor_type text NOT NULL,
     action text NOT NULL,
     resource text NOT NULL,
     outcome text NOT NULL,
-    metadata jsonb NOT NULL
+    metadata jsonb NOT NULL,
+    CONSTRAINT history_key_audit_pkey PRIMARY KEY (id)
 );
-
-CREATE SEQUENCE history_key_audit_id_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-ALTER SEQUENCE history_key_audit_id_seq OWNED BY history_key_audit.id;
 
 CREATE TABLE history_key_epochs (
     id uuid NOT NULL,
@@ -45,6 +38,7 @@ CREATE TABLE history_key_epochs (
     status text NOT NULL,
     created_at timestamp with time zone NOT NULL,
     created_by uuid,
+    CONSTRAINT history_key_epochs_pkey PRIMARY KEY (id),
     CONSTRAINT history_key_epochs_ksf_lanes_check CHECK ((ksf_lanes > 0)),
     CONSTRAINT history_key_epochs_ksf_memory_kib_check CHECK ((ksf_memory_kib > 0)),
     CONSTRAINT history_key_epochs_ksf_passes_check CHECK ((ksf_passes > 0)),
@@ -59,6 +53,7 @@ CREATE TABLE history_key_lifecycle (
     owner_domain bytea NOT NULL,
     revision bigint NOT NULL,
     live_epochs uuid[] NOT NULL,
+    CONSTRAINT history_key_lifecycle_pkey PRIMARY KEY (owner_domain),
     CONSTRAINT history_key_lifecycle_owner_domain_check CHECK ((octet_length(owner_domain) = 32)),
     CONSTRAINT history_key_lifecycle_revision_check CHECK ((revision >= 0))
 );
@@ -66,6 +61,7 @@ CREATE TABLE history_key_lifecycle (
 CREATE TABLE history_key_purged (
     owner_domain bytea NOT NULL,
     purged_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT history_key_purged_pkey PRIMARY KEY (owner_domain),
     CONSTRAINT history_key_purged_owner_domain_check CHECK ((octet_length(owner_domain) = 32))
 );
 
@@ -73,6 +69,8 @@ CREATE TABLE history_key_replaced (
     epoch_id uuid NOT NULL,
     owner_domain bytea NOT NULL,
     replaced_at_revision bigint NOT NULL,
+    CONSTRAINT history_key_replaced_pkey PRIMARY KEY (epoch_id),
+    CONSTRAINT history_key_replaced_epoch_id_fkey FOREIGN KEY (epoch_id) REFERENCES history_key_epochs(id) ON DELETE CASCADE,
     CONSTRAINT history_key_replaced_owner_domain_check CHECK ((octet_length(owner_domain) = 32)),
     CONSTRAINT history_key_replaced_replaced_at_revision_check CHECK ((replaced_at_revision > 0))
 );
@@ -82,6 +80,8 @@ CREATE TABLE history_key_uses (
     epoch_id uuid NOT NULL,
     owner_domain bytea NOT NULL,
     expires_at timestamp with time zone NOT NULL,
+    CONSTRAINT history_key_uses_pkey PRIMARY KEY (operation_id, epoch_id),
+    CONSTRAINT history_key_uses_epoch_id_fkey FOREIGN KEY (epoch_id) REFERENCES history_key_epochs(id) ON DELETE CASCADE,
     CONSTRAINT history_key_uses_owner_domain_check CHECK ((octet_length(owner_domain) = 32))
 );
 
@@ -91,43 +91,16 @@ CREATE TABLE history_key_versions (
     algorithm text NOT NULL,
     context text NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT history_key_versions_pkey PRIMARY KEY (version),
     CONSTRAINT history_key_versions_version_check CHECK ((version > 0))
 );
 
 CREATE TABLE history_key_write_cutoff (
     singleton boolean DEFAULT true NOT NULL,
     not_before timestamp with time zone,
+    CONSTRAINT history_key_write_cutoff_pkey PRIMARY KEY (singleton),
     CONSTRAINT history_key_write_cutoff_singleton_check CHECK (singleton)
 );
-
-ALTER TABLE ONLY history_key_audit ALTER COLUMN id SET DEFAULT nextval('history_key_audit_id_seq'::regclass);
-
-ALTER TABLE ONLY history_key_abandoned
-    ADD CONSTRAINT history_key_abandoned_pkey PRIMARY KEY (operation_id);
-
-ALTER TABLE ONLY history_key_audit
-    ADD CONSTRAINT history_key_audit_pkey PRIMARY KEY (id);
-
-ALTER TABLE ONLY history_key_epochs
-    ADD CONSTRAINT history_key_epochs_pkey PRIMARY KEY (id);
-
-ALTER TABLE ONLY history_key_lifecycle
-    ADD CONSTRAINT history_key_lifecycle_pkey PRIMARY KEY (owner_domain);
-
-ALTER TABLE ONLY history_key_purged
-    ADD CONSTRAINT history_key_purged_pkey PRIMARY KEY (owner_domain);
-
-ALTER TABLE ONLY history_key_replaced
-    ADD CONSTRAINT history_key_replaced_pkey PRIMARY KEY (epoch_id);
-
-ALTER TABLE ONLY history_key_uses
-    ADD CONSTRAINT history_key_uses_pkey PRIMARY KEY (operation_id, epoch_id);
-
-ALTER TABLE ONLY history_key_versions
-    ADD CONSTRAINT history_key_versions_pkey PRIMARY KEY (version);
-
-ALTER TABLE ONLY history_key_write_cutoff
-    ADD CONSTRAINT history_key_write_cutoff_pkey PRIMARY KEY (singleton);
 
 CREATE INDEX history_key_epochs_created_by ON history_key_epochs USING btree (created_by) WHERE (created_by IS NOT NULL);
 
@@ -136,11 +109,5 @@ CREATE INDEX history_key_epochs_owner ON history_key_epochs USING btree (owner_d
 CREATE UNIQUE INDEX history_key_one_active_epoch ON history_key_epochs USING btree (owner_domain) WHERE (status = 'active'::text);
 
 CREATE INDEX history_key_uses_owner ON history_key_uses USING btree (owner_domain, epoch_id);
-
-ALTER TABLE ONLY history_key_replaced
-    ADD CONSTRAINT history_key_replaced_epoch_id_fkey FOREIGN KEY (epoch_id) REFERENCES history_key_epochs(id) ON DELETE CASCADE;
-
-ALTER TABLE ONLY history_key_uses
-    ADD CONSTRAINT history_key_uses_epoch_id_fkey FOREIGN KEY (epoch_id) REFERENCES history_key_epochs(id) ON DELETE CASCADE;
 
 INSERT INTO history_key_write_cutoff (singleton) VALUES (TRUE);
