@@ -87,8 +87,9 @@ pub fn evaluate_step_up(
         config.require_phishing_resistant_for_elevated && target_acr >= AuthLevel::Elevated;
 
     let available_methods = select_methods(enrolled_methods, require_phishing_resistant);
-    // A required strength is never lowered to what happens to be enrolled.
-    if available_methods.is_empty() && require_phishing_resistant {
+    // A required strength is never lowered to what happens to be enrolled,
+    // and a challenge no method can answer is no challenge.
+    if available_methods.is_empty() {
         return StepUpDecision::NoSufficientMethod {
             current_acr,
             target_acr,
@@ -112,6 +113,9 @@ pub fn evaluate_step_up(
 ///
 /// SMS OTP is excluded per `offer_only_as_fallback` unless it's the only option.
 fn select_methods(enrolled: &[MfaMethod], require_phishing_resistant: bool) -> Vec<MfaMethod> {
+    let fallback_only = !enrolled
+        .iter()
+        .any(|m| *m != MfaMethod::Recovery && !m.offer_only_as_fallback());
     let mut methods: Vec<(MfaMethod, FactorProperties)> = enrolled
         .iter()
         .copied()
@@ -124,11 +128,8 @@ fn select_methods(enrolled: &[MfaMethod], require_phishing_resistant: bool) -> V
             if require_phishing_resistant {
                 return m.factor_properties().resistance == PhishingResistance::PhishingResistant;
             }
-            // Skip SMS OTP unless it's the only option (handled by caller fallback).
-            if m.offer_only_as_fallback() {
-                return false;
-            }
-            true
+            // Skip SMS OTP unless it's the only option.
+            !m.offer_only_as_fallback() || fallback_only
         })
         .map(|m| {
             let props = m.factor_properties();
@@ -313,6 +314,49 @@ mod tests {
             StepUpDecision::NoSufficientMethod {
                 current_acr: AuthLevel::Basic,
                 target_acr: AuthLevel::Elevated,
+            }
+        );
+    }
+
+    // Nothing can answer a challenge with no method: the account needs
+    // enrollment or recovery, also at a target where any factor would do.
+    #[test]
+    fn test_no_offerable_method_is_no_challenge() {
+        for enrolled in [&[][..], &[MfaMethod::Recovery][..]] {
+            let result = evaluate_step_up(
+                AuthLevel::Basic,
+                AuthLevel::Standard,
+                SessionDecayLevel::Full,
+                enrolled,
+                &default_config(),
+            );
+            assert_eq!(
+                result,
+                StepUpDecision::NoSufficientMethod {
+                    current_acr: AuthLevel::Basic,
+                    target_acr: AuthLevel::Standard,
+                }
+            );
+        }
+    }
+
+    // SMS is the fallback: offered when it is all the account has.
+    #[test]
+    fn test_sms_is_offered_when_it_is_the_only_method() {
+        let result = evaluate_step_up(
+            AuthLevel::Basic,
+            AuthLevel::Standard,
+            SessionDecayLevel::Full,
+            &[MfaMethod::SmsOtp],
+            &default_config(),
+        );
+        assert_eq!(
+            result,
+            StepUpDecision::StepUpRequired {
+                current_acr: AuthLevel::Basic,
+                target_acr: AuthLevel::Standard,
+                available_methods: vec![MfaMethod::SmsOtp],
+                require_phishing_resistant: false,
             }
         );
     }
