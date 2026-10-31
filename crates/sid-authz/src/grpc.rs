@@ -260,6 +260,7 @@ fn assignment_to_proto(a: &RoleAssignment) -> sid_proto::sid::v1::RoleAssignment
         expires_at: a.expires_at.map(to_timestamp),
         created_at: Some(to_timestamp(a.created_at)),
         admin: a.admin.as_ref().map(envelope_to_proto),
+        policy_admin: a.policy_admin.as_ref().map(policy_authority_to_proto),
         provenance: a.provenance.as_ref().map(|p| AssignmentProvenance {
             granted_by: p.granted_by.clone(),
             basis_assignment_id: p.basis.map(|id| id.0.to_string()),
@@ -271,6 +272,43 @@ fn assignment_to_proto(a: &RoleAssignment) -> sid_proto::sid::v1::RoleAssignment
                 .unwrap_or_default(),
         }),
     }
+}
+
+fn policy_authority_to_proto(a: &sid_core::models::PolicyAuthority) -> PolicyAuthority {
+    use sid_core::models::PolicyOperation as Op;
+    PolicyAuthority {
+        operations: a
+            .operations
+            .iter()
+            .map(|op| match op {
+                Op::Read => PolicyOperation::Read,
+                Op::Edit => PolicyOperation::Edit,
+                Op::Redelegate => PolicyOperation::Redelegate,
+            } as i32)
+            .collect(),
+    }
+}
+
+/// The policy authority a request asks for, refused naming the field it breaks.
+#[allow(clippy::result_large_err)]
+fn policy_authority_from_proto(
+    a: PolicyAuthority,
+) -> Result<sid_core::models::PolicyAuthority, Status> {
+    use sid_core::models::PolicyOperation as Op;
+    let operations = a
+        .operations
+        .iter()
+        .map(|op| match PolicyOperation::try_from(*op) {
+            Ok(PolicyOperation::Read) => Ok(Op::Read),
+            Ok(PolicyOperation::Edit) => Ok(Op::Edit),
+            Ok(PolicyOperation::Redelegate) => Ok(Op::Redelegate),
+            Ok(PolicyOperation::Unspecified) | Err(_) => Err(invalid_field(
+                "policy_admin.operations",
+                "not a policy operation",
+            )),
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(sid_core::models::PolicyAuthority { operations })
 }
 
 fn envelope_to_proto(e: &sid_core::models::AdminEnvelope) -> AdminEnvelope {
@@ -693,6 +731,21 @@ impl Asker {
     fn audit(&self, action: &str, resource: String) -> AuditEntry {
         let (actor, kind) = self.audit_actor();
         AuditEntry::by_actor(actor, kind, action, resource)
+    }
+}
+
+/// What a policy mutation commits with: its audit naming the asker and, for a
+/// holder, the assignment that must still authorize it.
+fn policy_mutation(
+    asker: &Asker,
+    action: &str,
+    id: CedarPolicyId,
+    fence: Option<sid_core::models::ActorFence>,
+) -> sid_core::models::MutationContext {
+    let ctx: sid_core::models::MutationContext = asker.audit(action, id.0.to_string()).into();
+    match fence {
+        Some(fence) => ctx.fenced_by(fence),
+        None => ctx,
     }
 }
 
@@ -1244,6 +1297,48 @@ impl AuthzServiceImpl {
         Ok(caller)
     }
 
+    /// `asker`'s authority for `operation` on policies of `scope`, and the
+    /// fence a write under it commits with.
+    async fn policy_authority(
+        &self,
+        asker: &Asker,
+        operation: sid_core::models::PolicyOperation,
+        scope: sid_core::models::PolicyScope,
+    ) -> Result<Option<sid_core::models::ActorFence>, Status> {
+        crate::admin::RoleAdministration::new(self.storage.clone())
+            .policy_authority(&asker.administrator()?, operation, scope)
+            .await
+            .map_err(administration_refusal)
+    }
+
+    /// The stored policy `id` and `asker`'s authority for `operation` on it,
+    /// decided on the policy's real scope. Only the root learns it is missing.
+    async fn policy_for(
+        &self,
+        asker: &Asker,
+        id: CedarPolicyId,
+        operation: sid_core::models::PolicyOperation,
+    ) -> Result<(CedarPolicy, Option<sid_core::models::ActorFence>), Status> {
+        let administrator = asker.administrator()?;
+        let Some(policy) = self
+            .storage
+            .get_cedar_policy(id)
+            .await
+            .map_err(storage_failure)?
+        else {
+            return Err(match administrator {
+                crate::admin::Administrator::Root(_) => policy_not_found(id),
+                crate::admin::Administrator::Holder(_) => {
+                    administration_refusal(sid_core::Error::AuthorizationDenied(String::new()))
+                }
+            });
+        };
+        let fence = self
+            .policy_authority(asker, operation, policy.scope)
+            .await?;
+        Ok((policy, fence))
+    }
+
     /// The confidential OAuth client `client_id` names: only a client that
     /// authenticates can act as its own principal.
     async fn confidential_client(&self, client_id: &str) -> Result<(), Status> {
@@ -1758,6 +1853,10 @@ impl AuthzService for AuthzServiceImpl {
         assignment.scope = req.scope;
         assignment.expires_at = expires_at;
         assignment.admin = req.admin.map(envelope_from_proto).transpose()?;
+        assignment.policy_admin = req
+            .policy_admin
+            .map(policy_authority_from_proto)
+            .transpose()?;
         check_installation_assignment(&role, &assignment)?;
         if role.has_permission(TOKEN_INTROSPECT) || role.has_permission(AUTHZ_CHECK) {
             self.check_service_assignment(&assignment).await?;
@@ -2172,10 +2271,13 @@ impl AuthzService for AuthzServiceImpl {
         &self,
         request: Request<CreatePolicyRequest>,
     ) -> Result<Response<CreatePolicyResponse>, Status> {
-        let caller = self.admin(&request).await?;
+        let asker = self.asker(&request).await?;
         self.check_maintenance()?;
         let req = request.into_inner();
         let scope = policy_scope_from_proto(req.scope.as_ref(), "scope")?;
+        let fence = self
+            .policy_authority(&asker, sid_core::models::PolicyOperation::Edit, scope)
+            .await?;
 
         if req.name.is_empty() {
             return Err(missing_field("name"));
@@ -2194,12 +2296,7 @@ impl AuthzService for AuthzServiceImpl {
         self.storage
             .create_cedar_policy(
                 &policy,
-                AuditEntry::admin(
-                    caller.profile_id.to_string(),
-                    "policy.create",
-                    policy.id.0.to_string(),
-                )
-                .into(),
+                policy_mutation(&asker, "policy.create", policy.id, fence),
             )
             .await
             .map_err(|e| match e {
@@ -2224,16 +2321,12 @@ impl AuthzService for AuthzServiceImpl {
         &self,
         request: Request<GetPolicyRequest>,
     ) -> Result<Response<GetPolicyResponse>, Status> {
-        self.admin(&request).await?;
+        let asker = self.asker(&request).await?;
         let req = request.into_inner();
         let policy_id = parse_policy_id(&req.id)?;
-
-        let policy = self
-            .storage
-            .get_cedar_policy(policy_id)
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(|| policy_not_found(policy_id))?;
+        let (policy, _) = self
+            .policy_for(&asker, policy_id, sid_core::models::PolicyOperation::Read)
+            .await?;
 
         Ok(Response::new(GetPolicyResponse {
             policy: Some(policy_to_proto(&policy)),
@@ -2245,17 +2338,13 @@ impl AuthzService for AuthzServiceImpl {
         &self,
         request: Request<UpdatePolicyRequest>,
     ) -> Result<Response<UpdatePolicyResponse>, Status> {
-        let caller = self.admin(&request).await?;
+        let asker = self.asker(&request).await?;
         self.check_maintenance()?;
         let req = request.into_inner();
         let policy_id = parse_policy_id(&req.id)?;
-
-        let mut policy = self
-            .storage
-            .get_cedar_policy(policy_id)
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(|| policy_not_found(policy_id))?;
+        let (mut policy, fence) = self
+            .policy_for(&asker, policy_id, sid_core::models::PolicyOperation::Edit)
+            .await?;
 
         if let Some(desc) = req.description {
             policy.description = Some(desc);
@@ -2276,12 +2365,7 @@ impl AuthzService for AuthzServiceImpl {
             .storage
             .update_cedar_policy(
                 &policy,
-                AuditEntry::admin(
-                    caller.profile_id.to_string(),
-                    "policy.update",
-                    policy.id.0.to_string(),
-                )
-                .into(),
+                policy_mutation(&asker, "policy.update", policy.id, fence),
             )
             .await
             .map_err(storage_failure)?;
@@ -2301,26 +2385,18 @@ impl AuthzService for AuthzServiceImpl {
         &self,
         request: Request<DeletePolicyRequest>,
     ) -> Result<Response<DeletePolicyResponse>, Status> {
-        let caller = self.admin(&request).await?;
+        let asker = self.asker(&request).await?;
         self.check_maintenance()?;
         let req = request.into_inner();
         let policy_id = parse_policy_id(&req.id)?;
-
-        self.storage
-            .get_cedar_policy(policy_id)
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(|| policy_not_found(policy_id))?;
+        let (_, fence) = self
+            .policy_for(&asker, policy_id, sid_core::models::PolicyOperation::Edit)
+            .await?;
 
         self.storage
             .delete_cedar_policy(
                 policy_id,
-                AuditEntry::admin(
-                    caller.profile_id.to_string(),
-                    "policy.delete",
-                    policy_id.0.to_string(),
-                )
-                .into(),
+                policy_mutation(&asker, "policy.delete", policy_id, fence),
             )
             .await
             .map_err(storage_failure)?;
@@ -2335,9 +2411,11 @@ impl AuthzService for AuthzServiceImpl {
         &self,
         request: Request<ListPoliciesRequest>,
     ) -> Result<Response<ListPoliciesResponse>, Status> {
-        self.admin(&request).await?;
+        let asker = self.asker(&request).await?;
         let req = request.into_inner();
         let scope = policy_scope_from_proto(req.scope.as_ref(), "scope")?;
+        self.policy_authority(&asker, sid_core::models::PolicyOperation::Read, scope)
+            .await?;
 
         let policies = self
             .storage

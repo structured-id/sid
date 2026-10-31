@@ -1458,6 +1458,14 @@ CREATE TABLE role_assignment_admin_roles (
     CONSTRAINT role_assignment_admin_roles_role_id_fkey FOREIGN KEY (role_id) REFERENCES roles(id) ON DELETE CASCADE
 );
 
+CREATE TABLE role_assignment_policy_admin (
+    assignment_id uuid NOT NULL,
+    operation text NOT NULL,
+    CONSTRAINT role_assignment_policy_admin_operation_check CHECK ((operation = ANY (ARRAY['read'::text, 'edit'::text, 'redelegate'::text]))),
+    CONSTRAINT role_assignment_policy_admin_pkey PRIMARY KEY (assignment_id, operation),
+    CONSTRAINT role_assignment_policy_admin_assignment_id_fkey FOREIGN KEY (assignment_id) REFERENCES role_assignments(id) ON DELETE CASCADE
+);
+
 CREATE VIEW profiles_view AS
  SELECT p.id,
     NULLIF(concat_ws(' '::text, p.given_name, p.middle_name, p.family_name), ''::text) AS display_name,

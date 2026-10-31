@@ -52,6 +52,7 @@ fn assign(principal: Principal, role: &Role, scope: Option<&str>) -> AssignRoleR
         scope: scope.map(str::to_owned),
         expires_at: None,
         admin: None,
+        policy_admin: None,
     }
 }
 

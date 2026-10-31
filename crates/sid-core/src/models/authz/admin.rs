@@ -51,6 +51,48 @@ impl AdminOperation {
     }
 }
 
+/// A policy administration operation an assignment may permit on the
+/// policies of its protected resource. None implies another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyOperation {
+    /// Read the resource's policies.
+    Read,
+    /// Create, change, disable and remove them.
+    Edit,
+    /// Grant this authority, no wider, to another holder.
+    Redelegate,
+}
+
+impl PolicyOperation {
+    /// The stored and wire spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Edit => "edit",
+            Self::Redelegate => "redelegate",
+        }
+    }
+
+    /// The operation spelled `s`, if any.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "read" => Some(Self::Read),
+            "edit" => Some(Self::Edit),
+            "redelegate" => Some(Self::Redelegate),
+            _ => None,
+        }
+    }
+}
+
+/// What an assignment may do with the policies of the protected resource it
+/// is scoped to. Independent of [`AdminEnvelope`]: neither implies the other.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyAuthority {
+    /// The permitted operations, at least one.
+    pub operations: BTreeSet<PolicyOperation>,
+}
+
 /// A kind of principal an envelope lets its holder assign roles to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -116,6 +116,7 @@ fn assign(role: &Role, to: ProfileId) -> AssignRoleRequest {
         scope: None,
         expires_at: None,
         admin: None,
+        policy_admin: None,
     }
 }
 

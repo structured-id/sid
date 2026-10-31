@@ -78,6 +78,7 @@ async fn an_oauth_client_is_assigned_inspection_on_a_resource() {
                 scope: on(userinfo),
                 expires_at: None,
                 admin: None,
+                policy_admin: None,
             },
         ))
         .await
@@ -149,6 +150,7 @@ async fn inspection_is_assigned_only_to_a_service_on_one_resource() {
                     scope,
                     expires_at: None,
                     admin: None,
+                    policy_admin: None,
                 },
             ))
             .await
@@ -193,6 +195,7 @@ async fn an_assignment_expiry_is_a_future_timestamp() {
                     scope: on(userinfo),
                     expires_at: Some(expires_at),
                     admin: None,
+                    policy_admin: None,
                 },
             ))
             .await
@@ -253,6 +256,7 @@ async fn a_retired_resource_takes_no_inspector() {
                 scope: on(resource.id),
                 expires_at: None,
                 admin: None,
+                policy_admin: None,
             },
         ))
         .await

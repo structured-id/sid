@@ -361,6 +361,7 @@ impl Replica {
                 scope: Some(format!("oauth_resource:{}", installation.directory.id)),
                 expires_at: None,
                 admin: None,
+                policy_admin: None,
             }))
             .await
             .unwrap();
@@ -977,6 +978,7 @@ async fn refuses_before_effects(engine: Engine) {
             scope: None,
             expires_at: None,
             admin: None,
+            policy_admin: None,
         });
         request.metadata_mut().insert(
             "authorization",

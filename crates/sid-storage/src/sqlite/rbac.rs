@@ -93,6 +93,7 @@ fn row_to_role_assignment(row: &sqlx::sqlite::SqliteRow) -> SidResult<RoleAssign
         created_at: dt_col(row, "created_at")?,
         // The envelope lives in its own tables; `with_admin_envelopes` attaches it.
         admin: None,
+        policy_admin: None,
         provenance: col::<Option<String>>(row, "granted_by")?
             .map(|granted_by| {
                 let reference = |column: &str| -> SidResult<Option<RoleAssignmentId>> {
@@ -163,6 +164,9 @@ pub(crate) async fn insert_role_assignment(
     .map_err(|e| super::insert_error("role assignment", e))?;
     if let Some(envelope) = &assignment.admin {
         insert_admin_envelope(tx, assignment.id, envelope).await?;
+    }
+    if let Some(authority) = &assignment.policy_admin {
+        insert_policy_authority_in_tx(tx, assignment.id, authority).await?;
     }
     if let Some(ceiling) = provenance.and_then(|p| p.ceiling.as_ref()) {
         // An empty ceiling would read back as no ceiling at all.
@@ -395,6 +399,51 @@ async fn insert_admin_envelope(
     Ok(())
 }
 
+/// Check in `tx` that the administrative assignment `authority` still exists,
+/// unexpired, at `checked`.
+pub(crate) async fn check_authority_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    authority: RoleAssignmentId,
+    checked: u64,
+) -> SidResult<()> {
+    let checked =
+        i64::try_from(checked).map_err(|e| SidError::Validation(format!("revision: {e}")))?;
+    let held: Option<(i64,)> = sqlx::query_as(
+        "SELECT revision FROM role_assignments
+         WHERE id = ? AND (expires_at IS NULL OR expires_at > ?)",
+    )
+    .bind(authority.0.to_string())
+    .bind(fmt_dt(&chrono::Utc::now()))
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|e| SidError::Storage(format!("check administrative authority: {e}")))?;
+    if held.map(|(v,)| v) != Some(checked) {
+        return Err(SidError::Fenced(
+            "the editor's authority changed since it was checked".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Store what assignment `id` may do with its resource's policies in `tx`.
+pub(crate) async fn insert_policy_authority_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    id: RoleAssignmentId,
+    authority: &sid_core::models::PolicyAuthority,
+) -> SidResult<()> {
+    for operation in &authority.operations {
+        sqlx::query(
+            "INSERT INTO role_assignment_policy_admin (assignment_id, operation) VALUES (?, ?)",
+        )
+        .bind(id.0.to_string())
+        .bind(operation.as_str())
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| super::insert_error("policy authority", e))?;
+    }
+    Ok(())
+}
+
 /// Check in `tx` that `fence` still holds. The write transaction is the
 /// only writer, so nothing can change what it read before it commits.
 async fn check_assignment_fence(
@@ -507,6 +556,29 @@ pub(crate) async fn with_admin_envelopes(
         .map_err(|e| SidError::Storage(format!("read approved ceilings: {e}")))?;
         if !permissions.is_empty() {
             provenance.ceiling = Some(permissions.into_iter().map(|(p,)| p).collect());
+        }
+    }
+    for assignment in &mut assignments {
+        let id = assignment.id.0.to_string();
+        let held = sqlx::query(
+            "SELECT operation FROM role_assignment_policy_admin WHERE assignment_id = ?",
+        )
+        .bind(&id)
+        .fetch_all(pool)
+        .await
+        .map_err(read_error)?;
+        for row in held {
+            let operation: String = row.try_get("operation").map_err(read_error)?;
+            assignment
+                .policy_admin
+                .get_or_insert_with(|| sid_core::models::PolicyAuthority {
+                    operations: Default::default(),
+                })
+                .operations
+                .insert(
+                    sid_core::models::PolicyOperation::parse(&operation)
+                        .ok_or_else(|| unreadable(&id))?,
+                );
         }
     }
     let mut envelopes = std::collections::HashMap::<String, AdminEnvelope>::new();
@@ -699,25 +771,10 @@ impl SqliteBackend {
         fence: &sid_core::models::RoleEditFence,
         audit: MutationContext,
     ) -> SidResult<bool> {
-        let revision =
-            |v: u64| i64::try_from(v).map_err(|e| SidError::Validation(format!("revision: {e}")));
         let read = |e: sqlx::Error| SidError::Storage(format!("check role edit fence: {e}"));
         let mut tx = self.begin_write().await?;
         if let Some((authority, checked)) = fence.authority {
-            let held: Option<(i64,)> = sqlx::query_as(
-                "SELECT revision FROM role_assignments
-                 WHERE id = ? AND (expires_at IS NULL OR expires_at > ?)",
-            )
-            .bind(authority.0.to_string())
-            .bind(fmt_dt(&chrono::Utc::now()))
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(read)?;
-            if held.map(|(v,)| v) != Some(revision(checked)?) {
-                return Err(SidError::Fenced(
-                    "the editor's authority changed since it was checked".into(),
-                ));
-            }
+            check_authority_in_tx(&mut tx, authority, checked).await?;
         }
         if let Some(bounded) = &fence.bounded {
             let present: Vec<(String,)> = sqlx::query_as(

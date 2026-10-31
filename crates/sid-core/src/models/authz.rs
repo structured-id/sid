@@ -14,7 +14,7 @@ use super::{MachineUserId, ProfileId, ProjectId, ProvisioningConnectorId, Resour
 pub mod admin;
 pub use admin::{
     AdminEnvelope, AdminOperation, AssignmentFence, AssignmentProvenance, EnvelopeError,
-    RecipientKind, RoleEditFence, Uncovered,
+    PolicyAuthority, PolicyOperation, RecipientKind, RoleEditFence, Uncovered,
 };
 
 // ── Role ──────────────────────────────────────────────────────────────
@@ -445,6 +445,10 @@ pub struct RoleAssignment {
     /// its scope (D050 B); `None` for an ordinary working assignment.
     #[serde(default)]
     pub admin: Option<AdminEnvelope>,
+    /// What its holder may do with the policies of the protected resource
+    /// `scope` names; `None` for an assignment that administers none.
+    #[serde(default)]
+    pub policy_admin: Option<PolicyAuthority>,
     /// Who created it and on what authority; `None` where it was not
     /// recorded, which confers no delegation authority.
     #[serde(default)]
@@ -466,9 +470,16 @@ impl RoleAssignment {
             expires_at: None,
             created_at: Utc::now(),
             admin: None,
+            policy_admin: None,
             provenance: None,
             revision: 0,
         }
+    }
+
+    /// Whether it carries any administrative authority: role administration,
+    /// policy administration or both.
+    pub fn administers(&self) -> bool {
+        self.admin.is_some() || self.policy_admin.is_some()
     }
 
     /// Make this an administrative assignment bounded by `envelope`.

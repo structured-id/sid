@@ -41,6 +41,12 @@ pub enum ActorFence {
     /// The installation's login policy at `epoch`: a session or code decided
     /// under it holds only while no policy write has advanced the epoch since.
     LoginPolicy { epoch: i64 },
+    /// The administrative assignment that authorized the write, at the
+    /// `revision` it was checked: it must still exist, unexpired, unchanged.
+    Assignment {
+        assignment: super::authz::RoleAssignmentId,
+        revision: u64,
+    },
 }
 
 impl MutationContext {

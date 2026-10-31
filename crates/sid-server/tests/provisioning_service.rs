@@ -152,6 +152,7 @@ impl Fixture {
                 scope: Some(format!("oauth_resource:{}", self.directory.id)),
                 expires_at: None,
                 admin: None,
+                policy_admin: None,
             }))
             .await
             .unwrap();

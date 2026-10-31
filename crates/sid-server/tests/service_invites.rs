@@ -497,6 +497,7 @@ async fn the_invite_issuer_role_is_assigned_to_a_machine_user_on_one_resource() 
                     scope,
                     expires_at: None,
                     admin: None,
+                    policy_admin: None,
                 },
             ))
             .await
@@ -512,6 +513,7 @@ async fn the_invite_issuer_role_is_assigned_to_a_machine_user_on_one_resource() 
                 scope: on,
                 expires_at: None,
                 admin: None,
+                policy_admin: None,
             },
         ))
         .await

@@ -83,6 +83,7 @@ fn assign(principal: Principal, role_id: String, scope: Option<String>) -> Assig
         scope,
         expires_at: None,
         admin: None,
+        policy_admin: None,
     }
 }
 

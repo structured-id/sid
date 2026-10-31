@@ -12,9 +12,9 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use sid_core::models::{
-    AdminOperation, AssignmentFence, AssignmentProvenance, AuthzPrincipal, GroupId,
-    MutationContext, OperationCompletion, RecipientKind, Role, RoleAssignment, RoleAssignmentId,
-    RoleAssignmentPrincipal, RoleEditFence,
+    ActorFence, AdminOperation, AssignmentFence, AssignmentProvenance, AuthzPrincipal, GroupId,
+    MutationContext, OperationCompletion, PolicyOperation, PolicyScope, RecipientKind, Role,
+    RoleAssignment, RoleAssignmentId, RoleAssignmentPrincipal, RoleEditFence,
 };
 use sid_core::{Error, Result};
 use sid_plugin::StorageBackend;
@@ -115,6 +115,23 @@ impl RoleAdministration {
                 ));
             }
         }
+        if let Some(authority) = &proposed.policy_admin {
+            if authority.operations.is_empty() {
+                return Err(Error::Validation(
+                    "a policy authority names no operation".into(),
+                ));
+            }
+            if proposed.resource_scope().is_none() {
+                return Err(Error::Validation(
+                    "a policy authority is scoped to one protected resource".into(),
+                ));
+            }
+            if RecipientKind::of(&proposed.principal).is_none() {
+                return Err(Error::Validation(
+                    "a provisioning connector cannot hold administrative authority".into(),
+                ));
+            }
+        }
         let (fence, basis, depends_on, ceiling) = match actor {
             Administrator::Root(_) => (
                 AssignmentFence {
@@ -129,17 +146,16 @@ impl RoleAdministration {
             ),
             Administrator::Holder(holder) => {
                 let (basis, fence) = self.basis_for_grant(holder, &role, &proposed).await?;
-                match proposed.admin {
+                if proposed.administers() {
                     // A redelegation depends on its source.
-                    Some(_) => (fence, Some(basis.id), Some(basis.id), None),
+                    (fence, Some(basis.id), Some(basis.id), None)
+                } else {
                     // A working grant keeps the ceiling it was approved under.
-                    None => {
-                        let ceiling = basis
-                            .admin
-                            .map(|envelope| envelope.permission_ceiling)
-                            .expect("a basis is an administrative assignment");
-                        (fence, Some(basis.id), None, Some(ceiling))
-                    }
+                    let ceiling = basis
+                        .admin
+                        .map(|envelope| envelope.permission_ceiling)
+                        .expect("a working grant's basis holds an envelope");
+                    (fence, Some(basis.id), None, Some(ceiling))
                 }
             }
         };
@@ -314,15 +330,51 @@ impl RoleAdministration {
         held.extend(self.envelopes_of(holder, &project).await?);
         held.into_iter()
             .find(|candidate| {
-                let envelope = candidate.admin.as_ref().expect("filtered to envelopes");
-                envelope.operations.contains(&AdminOperation::EditRole)
-                    && envelope.roles.contains(&role.id)
-                    && role
-                        .permissions
-                        .iter()
-                        .all(|p| envelope.permission_ceiling.contains(p))
+                candidate.admin.as_ref().is_some_and(|envelope| {
+                    envelope.operations.contains(&AdminOperation::EditRole)
+                        && envelope.roles.contains(&role.id)
+                        && role
+                            .permissions
+                            .iter()
+                            .all(|p| envelope.permission_ceiling.contains(p))
+                })
             })
             .map(|candidate| (candidate.id, candidate.revision))
+            .ok_or_else(not_permitted)
+    }
+
+    /// Whether `actor` may perform `operation` on policies of `scope`, and
+    /// the fence its write commits under: none for the root, the authorizing
+    /// assignment for a holder. A holder's authority reaches only the policies
+    /// of the exact protected resource its assignment is scoped to.
+    pub async fn policy_authority(
+        &self,
+        actor: &Administrator,
+        operation: PolicyOperation,
+        scope: PolicyScope,
+    ) -> Result<Option<ActorFence>> {
+        let holder = match actor {
+            Administrator::Root(_) => return Ok(None),
+            Administrator::Holder(holder) => holder,
+        };
+        let PolicyScope::Resource(resource) = scope else {
+            return Err(not_permitted());
+        };
+        self.envelopes_of(holder, &Some(format!("oauth_resource:{resource}")))
+            .await?
+            .into_iter()
+            .find(|candidate| {
+                candidate
+                    .policy_admin
+                    .as_ref()
+                    .is_some_and(|authority| authority.operations.contains(&operation))
+            })
+            .map(|candidate| {
+                Some(ActorFence::Assignment {
+                    assignment: candidate.id,
+                    revision: candidate.revision,
+                })
+            })
             .ok_or_else(not_permitted)
     }
 
@@ -369,7 +421,7 @@ impl RoleAdministration {
             // A connector's purpose limits never include role administration.
             AuthzPrincipal::ProvisioningConnector(_) => Vec::new(),
         };
-        held.retain(|a| a.admin.is_some() && !a.is_expired());
+        held.retain(|a| a.administers() && !a.is_expired());
         Ok(held)
     }
 
@@ -431,7 +483,6 @@ impl RoleAdministration {
             .expires_at
             .map(|at| (at - chrono::Utc::now()).num_seconds());
         for candidate in self.envelopes_of(holder, &proposed.scope).await? {
-            let envelope = candidate.admin.as_ref().expect("filtered to envelopes");
             // Never outlast the authority it was granted under.
             if candidate
                 .expires_at
@@ -439,25 +490,30 @@ impl RoleAdministration {
             {
                 continue;
             }
-            let (member, membership) = match envelope.recipient_group {
+            let envelope = candidate.admin.as_ref();
+            let (member, membership) = match envelope.and_then(|e| e.recipient_group) {
                 Some(group) => self.in_group(group, &proposed.principal).await?,
                 None => (false, None),
             };
-            let covered = match &proposed.admin {
+            let roles_covered = match &proposed.admin {
+                // Only a policy authority is proposed: no role is administered.
+                None if proposed.policy_admin.is_some() => true,
                 // A working role: assignment of exactly this role, at its
                 // current content.
-                None => envelope
-                    .covers(
-                        AdminOperation::Assign,
-                        role,
-                        &proposed.principal,
-                        member,
-                        validity,
-                    )
-                    .is_ok(),
+                None => envelope.is_some_and(|envelope| {
+                    envelope
+                        .covers(
+                            AdminOperation::Assign,
+                            role,
+                            &proposed.principal,
+                            member,
+                            validity,
+                        )
+                        .is_ok()
+                }),
                 // Redelegation: the same administrative role, only narrower,
                 // to an eligible recipient, within the validity.
-                Some(child) => {
+                Some(child) => envelope.is_some_and(|envelope| {
                     envelope.operations.contains(&AdminOperation::Redelegate)
                         && candidate.role_id == proposed.role_id
                         && envelope.is_narrowed_by(child)
@@ -465,9 +521,20 @@ impl RoleAdministration {
                             .is_some_and(|k| envelope.recipient_kinds.contains(&k))
                         && (envelope.recipient_group.is_none() || member)
                         && validity.is_some_and(|v| v > 0 && v <= envelope.max_validity_secs)
-                }
+                }),
             };
-            if covered {
+            // A policy authority passes on through the same one assignment:
+            // its redelegation right, the same role, nothing wider, expiring.
+            let policies_covered = match &proposed.policy_admin {
+                None => true,
+                Some(child) => candidate.policy_admin.as_ref().is_some_and(|authority| {
+                    authority.operations.contains(&PolicyOperation::Redelegate)
+                        && candidate.role_id == proposed.role_id
+                        && child.operations.is_subset(&authority.operations)
+                        && validity.is_some_and(|v| v > 0)
+                }),
+            };
+            if roles_covered && policies_covered {
                 // Checked outside by `is_self`; the commit re-checks it.
                 let grantor_outside = match (holder, &proposed.principal) {
                     (AuthzPrincipal::Profile(grantor), RoleAssignmentPrincipal::Group(group)) => {
@@ -510,15 +577,27 @@ impl RoleAdministration {
         target: &RoleAssignment,
     ) -> Result<AssignmentFence> {
         for candidate in candidates {
-            let envelope = candidate.admin.as_ref().expect("filtered to envelopes");
-            let covered = if target.admin.is_some() {
-                // Only its source ends a redelegated administrative assignment.
-                envelope.operations.contains(&AdminOperation::Redelegate)
+            let envelope = candidate.admin.as_ref();
+            let covered = if target.administers() {
+                // Only its source ends a redelegated administrative assignment,
+                // with the redelegation right of every part it carries.
+                let roles = target.admin.is_none()
+                    || envelope.is_some_and(|e| e.operations.contains(&AdminOperation::Redelegate));
+                let policies = target.policy_admin.is_none()
+                    || candidate
+                        .policy_admin
+                        .as_ref()
+                        .is_some_and(|a| a.operations.contains(&PolicyOperation::Redelegate));
+                roles
+                    && policies
                     && target
                         .provenance
                         .as_ref()
                         .is_some_and(|p| p.depends_on == Some(candidate.id))
             } else {
+                let Some(envelope) = envelope else {
+                    continue;
+                };
                 let member = match envelope.recipient_group {
                     Some(group) => self.in_group(group, &target.principal).await?.0,
                     None => false,

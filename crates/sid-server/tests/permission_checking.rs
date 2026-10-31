@@ -94,6 +94,7 @@ async fn a_service_is_assigned_permission_checking_on_one_resource() {
                 scope: on(userinfo),
                 expires_at: None,
                 admin: None,
+                policy_admin: None,
             },
         ))
         .await
@@ -179,6 +180,7 @@ async fn permission_checking_is_assigned_only_to_a_service_on_one_resource() {
                     scope,
                     expires_at: None,
                     admin: None,
+                    policy_admin: None,
                 },
             ))
             .await
@@ -630,6 +632,7 @@ async fn the_checker_role_grants_nothing_else() {
                 scope: on(a.wiki.id),
                 expires_at: None,
                 admin: None,
+                policy_admin: None,
             },
         ))
         .await

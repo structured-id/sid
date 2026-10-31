@@ -440,6 +440,10 @@ impl PostgresBackend {
             Some(sid_core::models::ActorFence::LoginPolicy { epoch }) => {
                 Self::check_login_policy_fence(tx, epoch).await?
             }
+            Some(sid_core::models::ActorFence::Assignment {
+                assignment,
+                revision,
+            }) => Self::check_authority_in_tx(tx, assignment, revision).await?,
             None => {}
         }
         // Then the completion: a keyed command another commit already
@@ -657,6 +661,9 @@ impl PostgresBackend {
         if let Some(envelope) = &assignment.admin {
             Self::insert_admin_envelope_in_tx(tx, assignment.id, envelope).await?;
         }
+        if let Some(authority) = &assignment.policy_admin {
+            Self::insert_policy_authority_in_tx(tx, assignment.id, authority).await?;
+        }
         if let Some(ceiling) = provenance.and_then(|p| p.ceiling.as_ref()) {
             // An empty ceiling would read back as no ceiling at all.
             if ceiling.is_empty() {
@@ -844,6 +851,51 @@ impl PostgresBackend {
         Ok(())
     }
 
+    /// Check in `tx` that the administrative assignment `authority` still
+    /// exists, unexpired, at `checked`, locking it until the transaction ends.
+    async fn check_authority_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        authority: RoleAssignmentId,
+        checked: u64,
+    ) -> SidResult<()> {
+        let checked =
+            i64::try_from(checked).map_err(|e| SidError::Validation(format!("revision: {e}")))?;
+        let held: Option<(i64,)> = sqlx::query_as(
+            "SELECT revision FROM role_assignments
+             WHERE id = $1 AND (expires_at IS NULL OR expires_at > now())
+             FOR SHARE",
+        )
+        .bind(authority.0)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("check administrative authority: {e}")))?;
+        if held.map(|(v,)| v) != Some(checked) {
+            return Err(SidError::Fenced(
+                "the editor's authority changed since it was checked".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Store what assignment `id` may do with its resource's policies in `tx`.
+    async fn insert_policy_authority_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        id: RoleAssignmentId,
+        authority: &sid_core::models::PolicyAuthority,
+    ) -> SidResult<()> {
+        let operations: Vec<&str> = authority.operations.iter().map(|o| o.as_str()).collect();
+        sqlx::query(
+            "INSERT INTO role_assignment_policy_admin (assignment_id, operation)
+             SELECT $1, o FROM UNNEST($2::text[]) AS t(o)",
+        )
+        .bind(id.0)
+        .bind(&operations)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| insert_error("policy authority", e))?;
+        Ok(())
+    }
+
     /// Check in `tx` that `fence` still holds, locking what it names until
     /// the transaction ends so no concurrent revoke, role edit or membership
     /// change can slip in before the commit.
@@ -964,6 +1016,30 @@ impl PostgresBackend {
                 .ceiling
                 .get_or_insert_with(Default::default)
                 .insert(permission);
+        }
+        let held_operations: Vec<(uuid::Uuid, String)> = sqlx::query_as(
+            "SELECT assignment_id, operation FROM role_assignment_policy_admin
+             WHERE assignment_id = ANY($1)",
+        )
+        .bind(&ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(format!("read policy authority: {e}")))?;
+        for (id, operation) in held_operations {
+            let operation = sid_core::models::PolicyOperation::parse(&operation)
+                .ok_or_else(|| SidError::Storage(format!("policy authority {id} unreadable")))?;
+            let Some(i) = position.get(&id) else {
+                return Err(SidError::Storage(format!(
+                    "policy authority {id} unreadable"
+                )));
+            };
+            assignments[*i]
+                .policy_admin
+                .get_or_insert_with(|| sid_core::models::PolicyAuthority {
+                    operations: Default::default(),
+                })
+                .operations
+                .insert(operation);
         }
         let heads: Vec<(uuid::Uuid, Option<uuid::Uuid>, i64)> = sqlx::query_as(
             "SELECT assignment_id, recipient_group_id, max_validity_secs
@@ -4094,20 +4170,7 @@ impl StorageBackend for PostgresBackend {
             return Ok(false);
         }
         if let Some((authority, checked)) = fence.authority {
-            let held: Option<(i64,)> = sqlx::query_as(
-                "SELECT revision FROM role_assignments
-                 WHERE id = $1 AND (expires_at IS NULL OR expires_at > now())
-                 FOR SHARE",
-            )
-            .bind(authority.0)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(read)?;
-            if held.map(|(v,)| v) != Some(revision(checked)?) {
-                return Err(SidError::Fenced(
-                    "the editor's authority changed since it was checked".into(),
-                ));
-            }
+            Self::check_authority_in_tx(&mut tx, authority, checked).await?;
         }
         if let Some(bounded) = &fence.bounded {
             let present: Vec<(uuid::Uuid,)> = sqlx::query_as(

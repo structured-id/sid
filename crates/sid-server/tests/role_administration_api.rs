@@ -104,6 +104,7 @@ fn assign(role: &Role, to: ProfileId, expires: Option<i64>) -> AssignRoleRequest
         scope: None,
         expires_at: expires.map(days),
         admin: None,
+        policy_admin: None,
     }
 }
 
@@ -276,6 +277,7 @@ async fn a_grantor_is_not_added_to_its_group() {
             scope: None,
             expires_at: Some(days(5)),
             admin: None,
+            policy_admin: None,
         },
         &holder_token,
     )

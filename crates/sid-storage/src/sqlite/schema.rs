@@ -923,6 +923,12 @@ CREATE TABLE IF NOT EXISTS role_assignment_admin_roles (
 CREATE INDEX IF NOT EXISTS idx_role_assignment_admin_roles_role
     ON role_assignment_admin_roles(role_id);
 
+CREATE TABLE IF NOT EXISTS role_assignment_policy_admin (
+    assignment_id TEXT NOT NULL REFERENCES role_assignments(id) ON DELETE CASCADE,
+    operation TEXT NOT NULL CHECK (operation IN ('read', 'edit', 'redelegate')),
+    PRIMARY KEY (assignment_id, operation)
+);
+
 -- The permission ceiling an envelope approved a working assignment under; its
 -- role is never edited past it while the assignment exists.
 CREATE TABLE IF NOT EXISTS role_assignment_ceilings (
