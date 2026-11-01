@@ -40,7 +40,7 @@ digest = "0.11"
 displaydoc = { version = "0.2", default-features = false }
 ecdsa = { version = "0.17", default-features = false, features = ["algorithm"], optional = true }
 ed25519-dalek = { version = "3", default-features = false, features = ["digest", "hazmat"], optional = true }
-elliptic-curve = { version = "0.14", features = ["sec1"] }
+elliptic-curve = { version = "0.14.3", features = ["sec1"] }
 hkdf = "0.13"
 hmac = "0.13"
 # Primitives (keys, hashes, nonces) are RustCrypto `hybrid_array::Array`s.
