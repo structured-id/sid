@@ -147,7 +147,7 @@ pub enum ErrorReason {
 
 impl ErrorReason {
     /// Every reason, for exhaustive checks against the proto enum.
-    pub const ALL: [ErrorReason; 83] = [
+    pub const ALL: [ErrorReason; 84] = [
         Self::CsrfTokenInvalid,
         Self::InviteNotFound,
         Self::OrganizationNotFound,
