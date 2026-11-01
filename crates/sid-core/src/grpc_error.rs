@@ -120,6 +120,7 @@ pub enum ErrorReason {
     LegacyMigrationRequired,
     InvalidState,
     FeatureNotConfigured,
+    RegistrationDisabled,
 
     // RESOURCE_EXHAUSTED
     RateLimitExceeded,
@@ -185,6 +186,7 @@ impl ErrorReason {
         Self::LegacyMigrationRequired,
         Self::InvalidState,
         Self::FeatureNotConfigured,
+        Self::RegistrationDisabled,
         Self::ServiceMaintenance,
         Self::DependencyUnavailable,
         Self::PasswordProofInvalid,
@@ -315,6 +317,7 @@ impl ErrorReason {
             Self::LegacyMigrationRequired => "LEGACY_MIGRATION_REQUIRED",
             Self::InvalidState => "INVALID_STATE",
             Self::FeatureNotConfigured => "FEATURE_NOT_CONFIGURED",
+            Self::RegistrationDisabled => "REGISTRATION_DISABLED",
             Self::ServiceMaintenance => "SERVICE_MAINTENANCE",
             Self::DependencyUnavailable => "DEPENDENCY_UNAVAILABLE",
             Self::InternalError => "INTERNAL_ERROR",
@@ -401,7 +404,8 @@ impl ErrorReason {
             | Self::CaptchaRequired
             | Self::LegacyMigrationRequired
             | Self::InvalidState
-            | Self::FeatureNotConfigured => Code::FailedPrecondition,
+            | Self::FeatureNotConfigured
+            | Self::RegistrationDisabled => Code::FailedPrecondition,
 
             Self::PasswordHistoryUnavailable
             | Self::ServiceMaintenance
