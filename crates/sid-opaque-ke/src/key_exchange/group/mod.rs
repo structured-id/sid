@@ -13,6 +13,8 @@ pub mod curve25519;
 #[cfg(feature = "ed25519")]
 pub mod ed25519;
 pub mod elliptic_curve;
+#[cfg(feature = "pallas")]
+pub mod pallas;
 #[cfg(feature = "ristretto255")]
 pub mod ristretto255;
 

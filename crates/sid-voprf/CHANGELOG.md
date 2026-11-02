@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.6.2](https://github.com/structured-id/sid/compare/sid-voprf-v0.6.1...sid-voprf-v0.6.2) - 2026-11-02
+
+### Added
+
+- *(opaque)* OPAQUE and VOPRF on Pallas ([#346](https://github.com/structured-id/sid/pull/346))
+
 ## [0.6.1](https://github.com/structured-id/sid/compare/sid-voprf-v0.6.0...sid-voprf-v0.6.1) - 2026-11-02
 
 ### Fixed

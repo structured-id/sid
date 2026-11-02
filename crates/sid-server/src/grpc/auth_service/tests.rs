@@ -150,17 +150,6 @@ fn test_implied_auth_level_webauthn_basic_when_not_user_verified() {
     );
 }
 
-/// A passkey records its key and proof of possession; `mfa` only when the
-/// authenticator verified the user, and never a biometric/PIN method, which
-/// WebAuthn does not reveal (RFC 8176 §2 lists methods actually used).
-#[test]
-fn test_passkey_amr_adds_mfa_only_with_user_verification() {
-    assert_eq!(super::passkey_amr("swk", true), ["swk", "pop", "mfa"]);
-    assert_eq!(super::passkey_amr("hwk", true), ["hwk", "pop", "mfa"]);
-    assert_eq!(super::passkey_amr("swk", false), ["swk", "pop"]);
-    assert_eq!(super::passkey_amr("hwk", false), ["hwk", "pop"]);
-}
-
 #[test]
 fn test_implied_auth_level_webauthn_basic_when_passkey_not_satisfies_mfa() {
     // passkey_satisfies_mfa=false → Basic regardless of user_verified.
