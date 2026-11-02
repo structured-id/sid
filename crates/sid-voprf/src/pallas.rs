@@ -156,15 +156,24 @@ impl ConstantTimeEq for PallasScalar {
     }
 }
 
+// pasta_curves implements no `Zeroize`, and a plain assignment before a drop
+// is a dead store the optimizer may remove. A volatile write and a compiler
+// fence are what `zeroize` itself uses for primitive storage.
 impl Zeroize for PallasElem {
+    #[allow(unsafe_code)]
     fn zeroize(&mut self) {
-        self.0 = pallas::Point::identity();
+        // SAFETY: `self.0` is a valid, aligned, exclusively borrowed point.
+        unsafe { core::ptr::write_volatile(&mut self.0, pallas::Point::identity()) };
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
     }
 }
 
 impl Zeroize for PallasScalar {
+    #[allow(unsafe_code)]
     fn zeroize(&mut self) {
-        self.0 = pallas::Scalar::ZERO;
+        // SAFETY: `self.0` is a valid, aligned, exclusively borrowed scalar.
+        unsafe { core::ptr::write_volatile(&mut self.0, pallas::Scalar::ZERO) };
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
     }
 }
 
