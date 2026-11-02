@@ -32,15 +32,20 @@ fn deadline(now: i64, ttl: Duration) -> SidResult<i64> {
         })
 }
 
+type CeremonyQuery<'q> = sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments>;
+
 impl SqliteBackend {
-    /// Run one write statement and commit; the number of rows it changed.
-    async fn ceremony_write(
+    /// Run the write statement `build` makes for the clock's `now` and
+    /// commit; the number of rows it changed. The clock is read holding the
+    /// write lock: a write that waited for another writer judges expiry when
+    /// it applies, not when it was asked for.
+    async fn ceremony_write<'q>(
         &self,
         what: &str,
-        query: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments>,
+        build: impl FnOnce(i64) -> SidResult<CeremonyQuery<'q>>,
     ) -> SidResult<u64> {
         let mut tx = self.begin_write().await?;
-        let changed = query
+        let changed = build(now_ms())?
             .execute(&mut *tx)
             .await
             .map_err(failure(what))?
@@ -53,11 +58,9 @@ impl SqliteBackend {
 #[async_trait]
 impl SingleUseAdmissions for SqliteBackend {
     async fn admit_once(&self, namespace: &str, key: &str, ttl: Duration) -> SidResult<bool> {
-        let now = now_ms();
         let admitted = self
-            .ceremony_write(
-                "admit once",
-                sqlx::query(
+            .ceremony_write("admit once", |now| {
+                Ok(sqlx::query(
                     "INSERT INTO ceremony_states (namespace, state_key, value, expires_at_ms)
                      VALUES (?, ?, X'', ?)
                      ON CONFLICT (namespace, state_key) DO UPDATE SET
@@ -67,8 +70,8 @@ impl SingleUseAdmissions for SqliteBackend {
                 .bind(namespace)
                 .bind(key)
                 .bind(deadline(now, ttl)?)
-                .bind(now),
-            )
+                .bind(now))
+            })
             .await?;
         Ok(admitted == 1)
     }
@@ -80,11 +83,9 @@ impl SingleUseAdmissions for SqliteBackend {
         holder: &[u8],
         ttl: Duration,
     ) -> SidResult<bool> {
-        let now = now_ms();
         let held = self
-            .ceremony_write(
-                "admit for holder",
-                sqlx::query(
+            .ceremony_write("admit for holder", |now| {
+                Ok(sqlx::query(
                     "INSERT INTO ceremony_states (namespace, state_key, value, expires_at_ms)
                      VALUES (?, ?, ?, ?)
                      ON CONFLICT (namespace, state_key) DO UPDATE SET
@@ -101,8 +102,8 @@ impl SingleUseAdmissions for SqliteBackend {
                 .bind(deadline(now, ttl)?)
                 .bind(now)
                 .bind(now)
-                .bind(now),
-            )
+                .bind(now))
+            })
             .await?;
         Ok(held == 1)
     }
@@ -117,10 +118,8 @@ impl CeremonyStateStore for SqliteBackend {
         value: &[u8],
         ttl: Duration,
     ) -> SidResult<()> {
-        let expires = deadline(now_ms(), ttl)?;
-        self.ceremony_write(
-            "store ceremony state",
-            sqlx::query(
+        self.ceremony_write("store ceremony state", |now| {
+            Ok(sqlx::query(
                 "INSERT INTO ceremony_states (namespace, state_key, value, expires_at_ms)
                  VALUES (?, ?, ?, ?)
                  ON CONFLICT (namespace, state_key) DO UPDATE SET
@@ -129,8 +128,8 @@ impl CeremonyStateStore for SqliteBackend {
             .bind(namespace)
             .bind(key)
             .bind(value)
-            .bind(expires),
-        )
+            .bind(deadline(now, ttl)?))
+        })
         .await?;
         Ok(())
     }
@@ -173,11 +172,9 @@ impl CeremonyStateStore for SqliteBackend {
         value: &[u8],
         ttl: Duration,
     ) -> SidResult<bool> {
-        let now = now_ms();
         let replaced = self
-            .ceremony_write(
-                "replace ceremony state",
-                sqlx::query(
+            .ceremony_write("replace ceremony state", |now| {
+                Ok(sqlx::query(
                     "UPDATE ceremony_states SET value = ?, expires_at_ms = ?
                      WHERE namespace = ? AND state_key = ? AND value = ? AND expires_at_ms > ?",
                 )
@@ -186,8 +183,8 @@ impl CeremonyStateStore for SqliteBackend {
                 .bind(namespace)
                 .bind(key)
                 .bind(expected)
-                .bind(now),
-            )
+                .bind(now))
+            })
             .await?;
         Ok(replaced == 1)
     }
@@ -198,8 +195,9 @@ impl CeremonyStateStore for SqliteBackend {
         key: &str,
         window: Duration,
     ) -> SidResult<u64> {
-        let now = now_ms();
         let mut tx = self.begin_write().await?;
+        // Read holding the write lock, as `ceremony_write` does.
+        let now = now_ms();
         let count: i64 = sqlx::query_scalar(
             "INSERT INTO ceremony_counts (namespace, count_key, count, window_ends_ms)
              VALUES (?, ?, 1, ?)
@@ -239,29 +237,27 @@ impl CeremonyStateStore for SqliteBackend {
     }
 
     async fn clear_count(&self, namespace: &str, key: &str) -> SidResult<()> {
-        self.ceremony_write(
-            "clear count",
-            sqlx::query("DELETE FROM ceremony_counts WHERE namespace = ? AND count_key = ?")
-                .bind(namespace)
-                .bind(key),
-        )
+        self.ceremony_write("clear count", |_| {
+            Ok(
+                sqlx::query("DELETE FROM ceremony_counts WHERE namespace = ? AND count_key = ?")
+                    .bind(namespace)
+                    .bind(key),
+            )
+        })
         .await?;
         Ok(())
     }
 
     async fn purge_expired_ceremony_state(&self) -> SidResult<u64> {
-        let now = now_ms();
         let states = self
-            .ceremony_write(
-                "purge ceremony state",
-                sqlx::query("DELETE FROM ceremony_states WHERE expires_at_ms <= ?").bind(now),
-            )
+            .ceremony_write("purge ceremony state", |now| {
+                Ok(sqlx::query("DELETE FROM ceremony_states WHERE expires_at_ms <= ?").bind(now))
+            })
             .await?;
         let counts = self
-            .ceremony_write(
-                "purge ceremony counts",
-                sqlx::query("DELETE FROM ceremony_counts WHERE window_ends_ms <= ?").bind(now),
-            )
+            .ceremony_write("purge ceremony counts", |now| {
+                Ok(sqlx::query("DELETE FROM ceremony_counts WHERE window_ends_ms <= ?").bind(now))
+            })
             .await?;
         Ok(states + counts)
     }
