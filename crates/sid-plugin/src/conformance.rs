@@ -3,6 +3,7 @@
 //! its caller, whatever engine and account type it uses. A backend's test
 //! harness constructs that backend and runs every scenario against it.
 
+pub mod backend;
 pub mod cache;
 pub mod client_registry;
 pub mod credential_store;
@@ -10,6 +11,7 @@ pub mod grant_store;
 pub mod history_key_store;
 pub mod instance_secret_store;
 pub mod issuer_store;
+pub mod key_manager;
 pub mod operation_result_store;
 pub mod principal_store;
 pub mod sign_in_history;
