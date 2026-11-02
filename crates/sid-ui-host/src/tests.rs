@@ -150,6 +150,7 @@ fn projection(revision: u64, registration: &[PrincipalType], minimum: u32) -> Pu
         registration_principal_types: registration.iter().map(|t| *t as i32).collect(),
         registration_username_min_length: minimum,
         sign_in_principal_types: vec![PrincipalType::Email as i32, PrincipalType::Username as i32],
+        registration_open: true,
     }
 }
 
@@ -179,16 +180,19 @@ async fn test_live_config_carries_the_settings() {
     assert_eq!(
         config["settings"],
         serde_json::json!({
+            "registrationOpen": true,
             "registrationPrincipalTypes": ["email", "username"],
             "registrationUsernameMinLength": 6,
             "signInPrincipalTypes": ["email", "username"],
         })
     );
-    // Without usernames in registration there is no minimum to state.
-    sink.stream()
-        .apply(&projection(2, &[PrincipalType::Email], 0))
-        .unwrap();
+    // A closed registration reaches the page, with its types still named.
+    let mut closed = projection(2, &[PrincipalType::Email], 0);
+    closed.registration_open = false;
+    sink.stream().apply(&closed).unwrap();
     let config = config_json(&app).await;
+    assert_eq!(config["settings"]["registrationOpen"], false);
+    // Without usernames in registration there is no minimum to state.
     assert_eq!(
         config["settings"]["registrationPrincipalTypes"],
         serde_json::json!(["email"])

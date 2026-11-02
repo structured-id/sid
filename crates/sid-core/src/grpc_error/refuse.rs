@@ -102,6 +102,16 @@ pub fn not_configured(feature: &'static str) -> Status {
     .into()
 }
 
+/// REGISTRATION_DISABLED: self-registration was deliberately closed. A store
+/// that cannot answer or a setting never initialized is not this refusal.
+pub fn registration_disabled() -> Status {
+    ApiError::new(
+        ErrorReason::RegistrationDisabled,
+        "self-registration is closed",
+    )
+    .into()
+}
+
 /// How long a client waits before retrying during maintenance; the end of a
 /// maintenance window is not known in advance, so this is a polling interval.
 pub const MAINTENANCE_RETRY_AFTER: Duration = Duration::from_secs(60);
