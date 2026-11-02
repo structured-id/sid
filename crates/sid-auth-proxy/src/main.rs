@@ -119,6 +119,16 @@ async fn main() -> anyhow::Result<()> {
         .bff_api_upstream()
         .map(|url| url::Url::parse(url).with_context(|| format!("BFF API upstream {url:?}")))
         .transpose()?;
+    // The BFF's sessions are its own records, kept in its own database; a
+    // BFF without a client key serves none and needs none.
+    let session_store: Arc<dyn sid_plugin::CeremonyStateStore> =
+        match (config.bff_database_url(), &account) {
+            (Some(url), _) => sid_storage::application_store::ceremony_store(url)
+                .await
+                .context("BFF database")?,
+            (None, Some(_)) => anyhow::bail!("a BFF with a client key needs its database"),
+            (None, None) => Arc::new(sid_plugin::InProcessCeremonyState::new()),
+        };
 
     let state = ProxyState {
         issuer_url: config.issuer_url().to_string(),
@@ -130,7 +140,7 @@ async fn main() -> anyhow::Result<()> {
         api_upstream,
         http: api_client()?,
         bff_sessions: Arc::new(BffSessionStore::new(
-            cache.clone(),
+            session_store,
             std::time::Duration::from_secs(config.bff_max_age()),
             std::time::Duration::from_secs(config.bff_idle_timeout()),
             std::time::Duration::from_secs(config.bff_pending_ttl()),

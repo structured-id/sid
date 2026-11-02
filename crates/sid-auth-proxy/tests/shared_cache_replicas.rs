@@ -1,16 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Two replicas over one real cache.
+//! Two replicas over the real servers they share.
 //!
-//! The unit tests for the session store and for Shield run over
-//! `InMemoryCacheBackend`, which is one process holding a mutex: it proves the
-//! logic reads and writes the right keys, and it passes whether or not the
-//! deployed backend is atomic or even shared. What this gap is about is the
-//! other half — that two processes behind a load balancer agree — and that can
-//! only be answered by the server they would actually agree through. So these
-//! run against Redis, with the two stores and the two Shields standing in for
-//! the two replicas.
+//! The unit tests for the session store and for Shield run over in-process
+//! stand-ins holding a mutex: they prove the logic reads and writes the right
+//! records, and they pass whether or not the deployed backend is atomic or
+//! even shared. Whether two processes behind a load balancer agree can only
+//! be answered by the server they would actually agree through: the BFF's
+//! database for its sessions, Redis for Shield's counters. The stores and
+//! Shields here stand in for the replicas.
 //!
-//! Run with: cargo nextest run -p sid-auth --test shared_cache_replicas
+//! Run with: cargo nextest run -p sid-auth-proxy --test shared_cache_replicas
 
 use std::net::{IpAddr, Ipv6Addr};
 use std::sync::Arc;
@@ -21,6 +20,7 @@ use secrecy::ExposeSecret;
 use sid_auth_proxy::shield::{Shield, ShieldConfig};
 use sid_authn::bff_session::{BffSessionStore, RefreshClaim, SessionClaims};
 use sid_infra::RedisCacheBackend;
+use sid_plugin::CeremonyStateStore;
 use sid_plugin::cache::{CacheBackend, InMemoryCacheBackend};
 
 const LONG: Duration = Duration::from_secs(3600);
@@ -34,11 +34,23 @@ const CONN: &str = "https://sid.example.com/i/0123456789abcdef0123456789abcdef\n
 
 /// A store with the two session lifetimes a test cares about.
 fn build(
-    cache: Arc<dyn CacheBackend>,
+    store: Arc<dyn CeremonyStateStore>,
     max_age: Duration,
     idle_timeout: Duration,
 ) -> BffSessionStore {
-    BffSessionStore::new(cache, max_age, idle_timeout, PENDING)
+    BffSessionStore::new(store, max_age, idle_timeout, PENDING)
+}
+
+fn database_url() -> String {
+    std::env::var("SID_TEST_DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://sid:sid_dev@localhost:54399/sid".to_string())
+}
+
+/// The BFF's database, as every replica opens it.
+async fn shared_store() -> Arc<dyn CeremonyStateStore> {
+    sid_storage::application_store::ceremony_store(&database_url())
+        .await
+        .expect("Failed to open the test database. Is it running?")
 }
 
 /// An auth endpoint, so the request is classified into the `auth_rate` bucket.
@@ -56,10 +68,12 @@ async fn shared_cache() -> Arc<dyn CacheBackend> {
     )
 }
 
-/// Two session stores over one Redis: what a load balancer does to a BFF.
+/// Two session stores over one database: what a load balancer does to a BFF.
 async fn store_pair() -> (BffSessionStore, BffSessionStore) {
-    let cache = shared_cache().await;
-    (build(cache.clone(), LONG, LONG), build(cache, LONG, LONG))
+    (
+        build(shared_store().await, LONG, LONG),
+        build(shared_store().await, LONG, LONG),
+    )
 }
 
 /// The Redis server outlives a single test run, and tests run in parallel, so
@@ -151,26 +165,27 @@ async fn logout_on_one_replica_ends_the_session_on_the_other() {
 
 #[tokio::test]
 async fn a_replica_started_later_serves_an_existing_session() {
-    let cache = shared_cache().await;
-    let first = build(cache.clone(), LONG, LONG);
+    let first = build(shared_store().await, LONG, LONG);
     let (id, _) = first
         .create_session("access".into(), None, test_claims(), CONN)
         .await
         .unwrap();
+    drop(first);
 
-    // A rolling update, or scaling out: the new process has an empty heap.
-    let later = build(cache, LONG, LONG);
+    // A rolling update, scaling out or a cache restart: the new process has
+    // an empty heap and no cache.
+    let later = build(shared_store().await, LONG, LONG);
     assert!(later.get_session(&id).await.unwrap().is_some());
 }
 
 #[tokio::test]
 async fn a_session_past_its_absolute_deadline_is_gone_on_both_replicas() {
-    let cache = shared_cache().await;
+    let store = shared_store().await;
     // max_age far below idle_timeout, so what expires the session is the
-    // absolute deadline and not the cache TTL.
+    // absolute deadline and not the idle window.
     let short = Duration::from_millis(300);
-    let a = build(cache.clone(), short, LONG);
-    let b = build(cache, short, LONG);
+    let a = build(store.clone(), short, LONG);
+    let b = build(store, short, LONG);
 
     let (id, _) = a
         .create_session("access".into(), None, test_claims(), CONN)
@@ -188,13 +203,13 @@ async fn a_session_past_its_absolute_deadline_is_gone_on_both_replicas() {
 }
 
 #[tokio::test]
-async fn the_idle_window_is_the_ttl_redis_actually_applies() {
-    let cache = shared_cache().await;
-    // Only the real server can show that the idle window is enforced by the
-    // store rather than by a sweeper this code does not have.
+async fn the_idle_window_is_enforced_by_the_database_at_use() {
+    let store = shared_store().await;
+    // Only the real server can show that the idle window is enforced at use
+    // on its clock rather than by the periodic purge.
     let idle = Duration::from_secs(1);
-    let a = build(cache.clone(), LONG, idle);
-    let b = build(cache, LONG, idle);
+    let a = build(store.clone(), LONG, idle);
+    let b = build(store, LONG, idle);
 
     let (id, _) = a
         .create_session("access".into(), None, test_claims(), CONN)
@@ -205,7 +220,7 @@ async fn the_idle_window_is_the_ttl_redis_actually_applies() {
 
     assert!(
         b.get_session(&id).await.unwrap().is_none(),
-        "an untouched session should have expired out of the cache"
+        "an untouched session should have expired"
     );
 }
 
@@ -216,9 +231,9 @@ async fn the_idle_window_is_the_ttl_redis_actually_applies() {
 /// others see the tokens the winner stored.
 #[tokio::test]
 async fn one_replica_refreshes_a_session() {
-    let cache = shared_cache().await;
+    let store = shared_store().await;
     let stores: Vec<_> = (0..8)
-        .map(|_| Arc::new(build(cache.clone(), LONG, LONG)))
+        .map(|_| Arc::new(build(store.clone(), LONG, LONG)))
         .collect();
     let (id, _) = stores[0]
         .create_session(
@@ -260,7 +275,7 @@ async fn one_replica_refreshes_a_session() {
         sid_authn::bff_session::TokenReplacement::Replaced
     ));
     // A result of the replaced refresh token, from a replica whose claim had
-    // expired, does not overwrite the newer tokens on the shared cache.
+    // expired, does not overwrite the newer tokens in the shared store.
     assert!(matches!(
         stores[6]
             .replace_tokens(
@@ -332,9 +347,9 @@ async fn a_pending_authorization_is_taken_exactly_once_across_replicas() {
 
 #[tokio::test]
 async fn many_concurrent_takes_still_produce_one_winner() {
-    let cache = shared_cache().await;
+    let store = shared_store().await;
     let stores: Vec<_> = (0..8)
-        .map(|_| Arc::new(build(cache.clone(), LONG, LONG)))
+        .map(|_| Arc::new(build(store.clone(), LONG, LONG)))
         .collect();
 
     let state = stores[0]

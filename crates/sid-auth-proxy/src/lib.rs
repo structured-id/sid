@@ -43,7 +43,7 @@ pub struct ProxyState {
     /// HTTP client for the account API. Follows no redirect: the API's
     /// answer goes back to the browser as it is.
     pub http: reqwest::Client,
-    /// BFF session store, shared across replicas.
+    /// BFF session store, in the BFF's own database shared by its replicas.
     pub bff_sessions: Arc<BffSessionStore>,
     /// BFF session cookie name (e.g., "__Host-sid-bff").
     pub bff_cookie_name: String,
@@ -109,7 +109,7 @@ pub(crate) fn test_state() -> ProxyState {
         api_upstream: None,
         http: test_crypto::with_tls(api_client),
         bff_sessions: Arc::new(BffSessionStore::new(
-            cache,
+            Arc::new(sid_plugin::InProcessCeremonyState::new()),
             std::time::Duration::from_secs(86400),
             std::time::Duration::from_secs(3600),
             std::time::Duration::from_secs(300),
