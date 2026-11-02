@@ -204,6 +204,8 @@ impl CeremonyStateStore for PostgresBackend {
         Ok(())
     }
 
+    // Use refuses expired rows already; the server's periodic task calls this
+    // to reclaim them (`background_tasks::purge_ceremony_state`).
     async fn purge_expired_ceremony_state(&self) -> SidResult<u64> {
         let states = sqlx::query("DELETE FROM ceremony_states WHERE expires_at <= NOW()")
             .execute(&self.pool)

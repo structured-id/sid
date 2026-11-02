@@ -107,6 +107,12 @@ impl RevocationCache {
     /// to receive the other processes' revocations. Until then every local
     /// miss is confirmed against the shared cache.
     ///
+    /// Apart from the issuer this is a view of the revocations delivered to
+    /// it: it refuses what it knows and proves nothing by a miss, since the
+    /// issuer records revocations in its store ([`Self::recorded_in`]). A
+    /// receiver asks the issuer for the token's current state on each
+    /// admission (`caller::AtIssuer`, the shared resource receiver).
+    ///
     /// `max_token_lifetime` is the maximum access token TTL (e.g. 15 min).
     /// Session-level revocations expire after this duration (worst case:
     /// a token issued just before the session was killed).
