@@ -11,8 +11,9 @@
 //! 2. Match its route policy for the original path and method
 //! 3. auth: none → allow, no identity
 //! 4. Resolve the registered target, then validate the token for it
-//! 5. Revocation and sender constraint
-//! 6. Required roles and, when configured, sid-authz
+//! 5. Known revocation and sender constraint
+//! 6. Required roles, then the token's current state at its issuer: in the
+//!    sid-authz question, the proof's admission, or introspection
 //! 7. Identity headers
 
 use std::sync::Arc;
@@ -53,6 +54,9 @@ pub struct Pdp {
     /// issuer; routes that ask sid-authz, and DPoP-bound tokens, have no
     /// verdict without it.
     pub checker: Option<Arc<sid_infra::client_credential::ClientCredential>>,
+    /// The tokens' current state at their issuer, for routes that ask no
+    /// permission question; such a route has no verdict without it.
+    pub token_state: Option<Arc<dyn super::token_state::TokenState>>,
     /// Where a 401 sends a browser to sign in; empty for none.
     pub login_url: String,
 }
@@ -159,18 +163,17 @@ impl Pdp {
             }
         };
 
-        // A revoked token or session opens nothing; an unanswerable check
-        // refuses rather than admits.
+        // A revocation this service already knows refuses at once. A miss is
+        // no evidence that the token is still active, and an unanswerable
+        // view stops nothing: the token's current state comes from its
+        // issuer below, on every route.
         match self.revocation.is_revoked(&claims.jti, &claims.sid).await {
             Ok(false) => {}
             Ok(true) => {
                 tracing::debug!(sid = %claims.sid, "token or session revoked");
                 return Ok(anonymous_or(self.unauthorized(request.path)));
             }
-            Err(e) => {
-                tracing::error!(error = %e, "revocation check unavailable");
-                return Err(DecisionError::Unavailable("revocation check"));
-            }
+            Err(e) => tracing::warn!(error = %e, "revocation view unavailable, asking the issuer"),
         }
 
         // A key-bound token needs its proof for this request (RFC 9449 §7.1),
@@ -213,6 +216,35 @@ impl Pdp {
                 "insufficient roles"
             );
             return Ok(Verdict::bare(StatusCode::FORBIDDEN));
+        }
+
+        // A route that asks no permission question gets the token's current
+        // state from its issuer otherwise: the admission of its proof, which
+        // checks it, or the issuer's introspection of a bearer token.
+        if policy.authz_action.is_none() && confirmation.is_none() {
+            // The token goes only to its own issuer, the one that knows it.
+            let Some(state) = self
+                .token_state
+                .as_deref()
+                .filter(|state| state.issuer() == app.target.issuer)
+            else {
+                tracing::error!(
+                    application,
+                    "no credential at the token's issuer for its state"
+                );
+                return Err(DecisionError::Unavailable("token state"));
+            };
+            match state.active(presented.token()).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::debug!(sid = %claims.sid, "token not active at its issuer");
+                    return Ok(anonymous_or(self.unauthorized(request.path)));
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "token state unavailable");
+                    return Err(DecisionError::Unavailable("token state"));
+                }
+            }
         }
 
         if policy.authz_action.is_none()

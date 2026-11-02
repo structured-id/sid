@@ -66,8 +66,28 @@ pub(crate) fn keypair() -> (jsonwebtoken::EncodingKey, [u8; 32]) {
     )
 }
 
+/// The issuer's answer about every token: active, inactive, or no answer.
+pub(crate) struct AtIssuer(pub Option<bool>);
+
+#[async_trait::async_trait]
+impl super::super::token_state::TokenState for AtIssuer {
+    fn issuer(&self) -> &str {
+        ISSUER
+    }
+
+    async fn active(
+        &self,
+        _: &str,
+    ) -> Result<bool, super::super::token_state::TokenStateUnavailable> {
+        self.0.ok_or_else(|| {
+            super::super::token_state::TokenStateUnavailable("issuer unreachable".into())
+        })
+    }
+}
+
 /// The decision over two issuers of the installation; Orders registered in
 /// the given state (`None` = not registered), Wiki registered and active.
+/// The issuer reports every token active.
 pub(crate) struct Fixture {
     pub key: jsonwebtoken::EncodingKey,
     pub other_key: jsonwebtoken::EncodingKey,
@@ -111,6 +131,7 @@ pub(crate) fn fixture_with(orders_routes: &str, orders: Option<bool>) -> Fixture
         revocation: crate::revocation_view(cache),
         authz: crate::test_channel(),
         checker: None,
+        token_state: Some(Arc::new(AtIssuer(Some(true)))),
         login_url: "https://sid.example.com/auth/login".into(),
     };
     Fixture {
@@ -473,6 +494,92 @@ async fn test_revoked_session_is_refused() {
     let token = access_token(&f.key, ISSUER, ORDERS, 300);
     let verdict = with_bearer(&f.pdp, "orders", "/dashboard", &token).await;
     assert_eq!(verdict.status, StatusCode::UNAUTHORIZED);
+}
+
+/// A valid token its issuer no longer reports active (revoked or ended
+/// where this service has seen nothing of it) opens nothing.
+#[tokio::test]
+async fn test_token_inactive_at_its_issuer_is_refused() {
+    let mut f = fixture();
+    f.pdp.token_state = Some(Arc::new(AtIssuer(Some(false))));
+    let token = access_token(&f.key, ISSUER, ORDERS, 300);
+    let verdict = with_bearer(&f.pdp, "orders", "/dashboard", &token).await;
+    assert_eq!(verdict.status, StatusCode::UNAUTHORIZED);
+    assert!(verdict.headers.get("x-forwarded-user").is_none());
+}
+
+/// Without the token's current state there is no verdict: an unreachable
+/// issuer, or no source for it, is never an allow.
+#[tokio::test]
+async fn test_token_state_unavailable_has_no_verdict() {
+    let token_for = |f: &Fixture| access_token(&f.key, ISSUER, ORDERS, 300);
+    for state in [
+        Some(Arc::new(AtIssuer(None)) as Arc<dyn super::super::token_state::TokenState>),
+        None,
+    ] {
+        let mut f = fixture();
+        f.pdp.token_state = state;
+        let token = token_for(&f);
+        let result = decide(
+            &f.pdp,
+            "orders",
+            Method::GET,
+            "/dashboard",
+            &[("authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+        assert!(matches!(result, Err(DecisionError::Unavailable(_))));
+    }
+}
+
+/// A revocation view that cannot answer stops nothing: the issuer's
+/// current state decides.
+#[tokio::test]
+async fn test_unreadable_revocation_view_defers_to_the_issuer() {
+    let mut f = fixture();
+    f.pdp.revocation = Arc::new(sid_authn::revocation_cache::RevocationCache::new(
+        std::time::Duration::from_secs(900),
+        Arc::new(DownCache),
+    ));
+    let token = access_token(&f.key, ISSUER, ORDERS, 300);
+    let verdict = with_bearer(&f.pdp, "orders", "/dashboard", &token).await;
+    assert_eq!(verdict.status, StatusCode::OK);
+}
+
+/// A shared cache whose every operation fails.
+struct DownCache;
+
+#[async_trait::async_trait]
+impl sid_plugin::cache::CacheBackend for DownCache {
+    async fn get(&self, _: &str) -> sid_plugin::cache::CacheResult<Option<Vec<u8>>> {
+        Err(sid_plugin::cache::CacheError::Connection("down".into()))
+    }
+    async fn set(
+        &self,
+        _: &str,
+        _: &[u8],
+        _: std::time::Duration,
+    ) -> sid_plugin::cache::CacheResult<()> {
+        Err(sid_plugin::cache::CacheError::Connection("down".into()))
+    }
+    async fn delete(&self, _: &str) -> sid_plugin::cache::CacheResult<()> {
+        Err(sid_plugin::cache::CacheError::Connection("down".into()))
+    }
+    async fn take(&self, _: &str) -> sid_plugin::cache::CacheResult<Option<Vec<u8>>> {
+        Err(sid_plugin::cache::CacheError::Connection("down".into()))
+    }
+    async fn publish(&self, _: &str, _: &[u8]) -> sid_plugin::cache::CacheResult<()> {
+        Err(sid_plugin::cache::CacheError::Connection("down".into()))
+    }
+    async fn subscribe(
+        &self,
+        _: &str,
+    ) -> sid_plugin::cache::CacheResult<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>> {
+        Err(sid_plugin::cache::CacheError::Connection("down".into()))
+    }
+    async fn health_check(&self) -> sid_plugin::cache::CacheResult<()> {
+        Err(sid_plugin::cache::CacheError::Connection("down".into()))
+    }
 }
 
 // ── Helpers ──

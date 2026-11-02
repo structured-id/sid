@@ -22,7 +22,7 @@ prost-types = { workspace = true }
 # Resource indicators, issuer handles and the canonical google.rpc error
 # model of the forward-auth RPC.
 sid-core = { workspace = true, features = ["grpc"] }
-# The shared cache holding revocations and DPoP proof `jti`s.
+# The shared cache carrying revocations.
 sid-plugin = { workspace = true }
 sid-infra = { workspace = true, features = ["redis", "issuer-client"] }
 # Health on shutdown, bounded drain, the shutdown signal.
@@ -68,6 +68,8 @@ globset = { workspace = true }
 secrecy = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
+# The token state source is a trait over the remote and in-process issuer.
+async-trait = { workspace = true }
 
 [[test]]
 name = "forward_auth_integration"
@@ -94,8 +96,9 @@ ed25519-dalek = { workspace = true, features = ["pkcs8"] }
 rand = { workspace = true }
 # Test tokens are signed with the library the verifier reads them with.
 jsonwebtoken = { workspace = true }
-# The tests' fixed issuer source implements the directory's source trait.
-async-trait = { workspace = true }
+# The tests' issuer answers introspection, the one AuthService method the
+# decision calls, through tonic's unary server.
+tonic-prost = "0.14"
 # The permission-query benchmark asks a real issuer served over gRPC.
 sid-test-issuer = { path = "../sid-test-issuer" }
 
