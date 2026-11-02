@@ -2238,6 +2238,11 @@ async fn test_directory_group_writes() {
 // ─── Background job locks (two instances: two pools on one database) ───
 
 #[tokio::test]
+async fn test_commit_survives_restart() {
+    common::restart::test_commit_survives_restart(setup).await;
+}
+
+#[tokio::test]
 async fn test_job_lock_exclusive_across_instances() {
     common::job_lock::test_job_lock_exclusive_across_instances(&setup().await, &setup().await)
         .await;
