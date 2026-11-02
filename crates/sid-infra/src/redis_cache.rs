@@ -27,7 +27,9 @@ impl RedisCacheBackend {
         let config = Config::from_url(redis_url)
             .map_err(|e| CacheError::Connection(format!("invalid Redis URL: {e}")))?;
 
-        let client = Client::new(config, None, None, None);
+        let client = commands(config)
+            .build()
+            .map_err(|e| CacheError::Connection(format!("Redis client: {e}")))?;
         client
             .init()
             .await
@@ -40,6 +42,82 @@ impl RedisCacheBackend {
     pub fn from_client(client: Client) -> Self {
         Self { client }
     }
+}
+
+/// A command the cache has not answered in this time fails. The cache runs
+/// beside its callers; waiting longer only moves the failure to the caller's
+/// own deadline.
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The client every command goes through. A dropped connection is opened
+/// again, retrying without limit, 100 ms doubling up to 5 s apart; commands
+/// sent meanwhile wait for it within [`COMMAND_TIMEOUT`]. Each connection is
+/// named after the client, so the server can tell them apart.
+fn commands(config: Config) -> Builder {
+    let mut builder = Builder::from_config(config);
+    builder
+        .set_policy(ReconnectPolicy::new_exponential(0, 100, 5_000, 2))
+        .with_performance_config(|p| p.default_command_timeout = COMMAND_TIMEOUT)
+        .with_connection_config(|c| c.auto_client_setname = true);
+    builder
+}
+
+/// The client of one subscription. It is not reconnected: whatever was
+/// published while it was down is lost, so the subscription ends instead
+/// and its consumer subscribes again knowing there was a gap.
+fn subscriber(config: Config) -> Builder {
+    let mut builder = Builder::from_config(config);
+    builder.with_connection_config(|c| c.auto_client_setname = true);
+    builder
+}
+
+/// Subscribe `subscriber` to `channel` and hand its messages to the stream,
+/// which ends when the connection fails or messages were dropped.
+async fn subscribed(
+    subscriber: Client,
+    channel: &str,
+) -> CacheResult<mpsc::UnboundedReceiver<Vec<u8>>> {
+    subscriber
+        .init()
+        .await
+        .map_err(|e| CacheError::Other(format!("subscriber init: {e}")))?;
+
+    PubsubInterface::subscribe(&subscriber, channel)
+        .await
+        .map_err(|e| CacheError::Other(format!("SUBSCRIBE {channel}: {e}")))?;
+
+    let (tx, rx) = mpsc::unbounded_channel();
+    let mut message_stream = subscriber.message_rx();
+    let mut errors = subscriber.error_rx();
+    let channel_owned = channel.to_string();
+
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                message = message_stream.recv() => {
+                    // A lagged receiver skipped messages: the same gap as a
+                    // dropped connection.
+                    let Ok(message) = message else { break };
+                    let ch_str: String = message.channel.to_string();
+                    if ch_str == channel_owned
+                        && let Some(bytes) = message.value.into_bytes()
+                        && tx.send(bytes.to_vec()).is_err()
+                    {
+                        break;
+                    }
+                }
+                error = errors.recv() => {
+                    tracing::warn!(channel = %channel_owned, error = ?error, "subscription connection failed");
+                    break;
+                }
+            }
+        }
+        if let Err(e) = subscriber.quit().await {
+            tracing::debug!(error = %e, "subscriber did not close cleanly");
+        }
+    });
+
+    Ok(rx)
 }
 
 /// The bytes of a string reply; `None` for a missing key.
@@ -193,37 +271,10 @@ impl CacheBackend for RedisCacheBackend {
     }
 
     async fn subscribe(&self, channel: &str) -> CacheResult<mpsc::UnboundedReceiver<Vec<u8>>> {
-        // Create a separate subscriber client from the main client's config.
-        let config = self.client.client_config();
-        let subscriber = Client::new(config, None, None, None);
-        subscriber
-            .init()
-            .await
-            .map_err(|e| CacheError::Other(format!("subscriber init: {e}")))?;
-
-        PubsubInterface::subscribe(&subscriber, channel)
-            .await
-            .map_err(|e| CacheError::Other(format!("SUBSCRIBE {channel}: {e}")))?;
-
-        let (tx, rx) = mpsc::unbounded_channel();
-        let mut message_stream = subscriber.message_rx();
-        let channel_owned = channel.to_string();
-
-        tokio::spawn(async move {
-            // Keep subscriber alive in the spawned task.
-            let _subscriber = subscriber;
-            while let Ok(message) = message_stream.recv().await {
-                let ch_str: String = message.channel.to_string();
-                if ch_str == channel_owned
-                    && let Some(bytes) = message.value.into_bytes()
-                    && tx.send(bytes.to_vec()).is_err()
-                {
-                    break;
-                }
-            }
-        });
-
-        Ok(rx)
+        let subscriber = subscriber(self.client.client_config())
+            .build()
+            .map_err(|e| CacheError::Other(format!("subscriber client: {e}")))?;
+        subscribed(subscriber, channel).await
     }
 
     async fn health_check(&self) -> CacheResult<()> {
@@ -236,12 +287,4 @@ impl CacheBackend for RedisCacheBackend {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_redis_cache_is_send_sync() {
-        fn assert_send_sync<T: Send + Sync>() {}
-        assert_send_sync::<RedisCacheBackend>();
-    }
-}
+mod tests;
