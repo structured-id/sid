@@ -535,18 +535,17 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
     let opaque_zkpp = init_zkpp(&opaque_router, &zkpp_cache_dir);
 
     // ── Revocation cache ──
-    let revocation_cache = Arc::new(RevocationCache::new(
+    // Revocations are committed in the store; the shared cache carries them
+    // to the other replicas and is not needed to refuse a revoked token.
+    let revocation_cache = Arc::new(RevocationCache::recorded_in(
         access_token_ttl
             .duration()
             .to_std()
             .expect("access token lifetime is positive"),
         cache_backend.clone(),
+        storage.clone(),
     ));
-    // Revocations made on other replicas reach this one through the shared cache.
-    revocation_cache
-        .listen()
-        .await
-        .unwrap_or_else(|e| panic!("Revocation propagation: {e}"));
+    revocation_cache.listen().await;
 
     // ── Feature flags ──
     let feature_flags = init_feature_flags()?;

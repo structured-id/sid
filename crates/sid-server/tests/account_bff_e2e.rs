@@ -134,7 +134,7 @@ async fn replica(deployment: &Deployment) -> String {
         ClientKey::ed25519_from_pem(&secrecy::SecretString::from(deployment.key_pem.as_str()))
             .unwrap();
     let revocation = sid_auth::revocation_view(deployment.svc.cache.clone());
-    revocation.listen().await.unwrap();
+    revocation.listen().await;
     let issuer = sid_infra::deadline::issuer(channel.clone());
     let adapter = ApplicationSessions::new(
         Arc::new(RpClient::new(key, installation.clone(), issuer.clone()).unwrap()),

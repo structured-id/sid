@@ -904,6 +904,47 @@ pub fn auth_service_under(
     )
 }
 
+/// A shared cache that cannot be reached: every operation fails.
+#[allow(dead_code)]
+pub struct DownCache;
+
+fn down() -> sid_plugin::cache::CacheError {
+    sid_plugin::cache::CacheError::Connection("down".into())
+}
+
+#[async_trait::async_trait]
+impl sid_plugin::cache::CacheBackend for DownCache {
+    async fn get(&self, _: &str) -> sid_plugin::cache::CacheResult<Option<Vec<u8>>> {
+        Err(down())
+    }
+    async fn set(
+        &self,
+        _: &str,
+        _: &[u8],
+        _: std::time::Duration,
+    ) -> sid_plugin::cache::CacheResult<()> {
+        Err(down())
+    }
+    async fn delete(&self, _: &str) -> sid_plugin::cache::CacheResult<()> {
+        Err(down())
+    }
+    async fn take(&self, _: &str) -> sid_plugin::cache::CacheResult<Option<Vec<u8>>> {
+        Err(down())
+    }
+    async fn publish(&self, _: &str, _: &[u8]) -> sid_plugin::cache::CacheResult<()> {
+        Err(down())
+    }
+    async fn subscribe(
+        &self,
+        _: &str,
+    ) -> sid_plugin::cache::CacheResult<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>> {
+        Err(down())
+    }
+    async fn health_check(&self) -> sid_plugin::cache::CacheResult<()> {
+        Err(down())
+    }
+}
+
 /// A shared cache whose session revocations fail while `down` is set, every
 /// other key served by the cache it wraps.
 #[allow(dead_code)]
@@ -1326,6 +1367,27 @@ impl TestServices {
         (a, b)
     }
 
+    /// Two replicas over one database, each with its own view of the shared
+    /// cache: one may see it down while the other runs without it.
+    #[allow(dead_code)]
+    pub async fn replicas_seeing(
+        storage: MockStorage,
+        a: Arc<dyn sid_plugin::cache::CacheBackend>,
+        b: Arc<dyn sid_plugin::cache::CacheBackend>,
+    ) -> (Self, Self) {
+        let storage = Arc::new(storage);
+        let first = Self::replica(storage.clone(), a).await;
+        let second = Self::replica(storage, b).await;
+        (first, second)
+    }
+
+    /// Another replica over this one's database with `cache`, started now:
+    /// a cache that restarted empty, or one this replica cannot reach.
+    #[allow(dead_code)]
+    pub async fn restarted_with(&self, cache: Arc<dyn sid_plugin::cache::CacheBackend>) -> Self {
+        Self::replica(self.mock_storage.clone(), cache).await
+    }
+
     /// Another replica over this one's database and cache, started now: a
     /// restart, or a replica added later.
     #[allow(dead_code)]
@@ -1355,11 +1417,7 @@ impl TestServices {
                 login_policy: None,
             },
         );
-        replica
-            .revocation_cache
-            .listen()
-            .await
-            .expect("revocation listener");
+        replica.revocation_cache.listen().await;
         replica
     }
 
@@ -1429,9 +1487,10 @@ impl TestServices {
         let jwt = Arc::new(test_jwt_service().with_account_api(Arc::new(account_api)));
         let oauth2 = Arc::new(OAuth2Server::new(jwt.clone()));
         let webauthn = test_webauthn(storage.clone());
-        let revocation_cache = Arc::new(RevocationCache::new(
+        let revocation_cache = Arc::new(RevocationCache::recorded_in(
             std::time::Duration::from_secs(900),
             cache_backend.clone(),
+            storage.clone(),
         ));
         let magic_link = magic_links.then(|| Arc::new(MagicLinkService::new(storage.clone())));
         let event_bus: Arc<dyn sid_plugin::event_bus::EventBus> =

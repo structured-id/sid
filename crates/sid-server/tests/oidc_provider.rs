@@ -2826,45 +2826,37 @@ async fn an_older_sessions_confirmation_does_not_end_a_newer_one() {
     confirmation_of(response).await;
 }
 
-/// A cache that cannot be reached.
-struct DownCache;
-
-#[async_trait::async_trait]
-impl sid_plugin::cache::CacheBackend for DownCache {
-    async fn get(&self, _: &str) -> sid_plugin::cache::CacheResult<Option<Vec<u8>>> {
-        Err(down())
-    }
-    async fn set(&self, _: &str, _: &[u8], _: Duration) -> sid_plugin::cache::CacheResult<()> {
-        Err(down())
-    }
-    async fn delete(&self, _: &str) -> sid_plugin::cache::CacheResult<()> {
-        Err(down())
-    }
-    async fn take(&self, _: &str) -> sid_plugin::cache::CacheResult<Option<Vec<u8>>> {
-        Err(down())
-    }
-    async fn publish(&self, _: &str, _: &[u8]) -> sid_plugin::cache::CacheResult<()> {
-        Err(down())
-    }
-    async fn subscribe(
-        &self,
-        _: &str,
-    ) -> sid_plugin::cache::CacheResult<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>> {
-        Err(down())
-    }
-    async fn health_check(&self) -> sid_plugin::cache::CacheResult<()> {
-        Err(down())
-    }
+/// The confirmed end-session POST of a signed-in browser at `svc`.
+async fn end_session_at(
+    svc: &TestServices,
+    secret: &sid_authn::browser_session::BrowserSecret,
+) -> reqwest::Response {
+    let base = over_http(provider_of(svc)).await;
+    let end_session = format!("{base}/i/{}/oauth2/end-session", svc.issuer.handle);
+    let page = no_redirects()
+        .get(&end_session)
+        .header("cookie", cookie_of(secret))
+        .send()
+        .await
+        .unwrap();
+    let confirmation = confirmation_of(page).await;
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("confirmation", &confirmation)
+        .finish();
+    no_redirects()
+        .post(&end_session)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("cookie", cookie_of(secret))
+        .body(body)
+        .send()
+        .await
+        .unwrap()
 }
 
-fn down() -> sid_plugin::cache::CacheError {
-    sid_plugin::cache::CacheError::Connection("down".into())
-}
-
-/// When the revocation state cannot be written, logout is an error to retry,
-/// never a "Signed out" that left the tokens live, and it clears no cookie.
-#[tokio::test]
-async fn end_session_without_revocation_state_fails() {
+/// A signed-in browser's session over `cache`.
+fn signed_in_over(
+    cache: std::sync::Arc<dyn sid_plugin::cache::CacheBackend>,
+) -> (TestServices, sid_authn::browser_session::BrowserSecret) {
     let profile = sid_core::models::Profile::new(Some("alice"));
     let secret = sid_authn::browser_session::BrowserSecret::generate();
     let mut session = sid_core::models::Session::new(
@@ -2875,33 +2867,36 @@ async fn end_session_without_revocation_state_fails() {
     session.browser_secret_hash = Some(secret.hash());
     let svc = TestServices::with_cache(
         MockStorage::new()
-            .with_profile(profile.clone())
-            .with_session(session.clone()),
-        std::sync::Arc::new(DownCache),
+            .with_profile(profile)
+            .with_session(session),
+        cache,
     );
-    let base = over_http(provider_of(&svc)).await;
-    let end_session = format!("{base}/i/{}/oauth2/end-session", svc.issuer.handle);
+    (svc, secret)
+}
 
-    // The confirmation page needs no revocation state; confirming it ends
-    // the session, and that is what fails.
-    let page = no_redirects()
-        .get(&end_session)
-        .header("cookie", cookie_of(&secret))
-        .send()
-        .await
-        .unwrap();
-    let confirmation = confirmation_of(page).await;
-    let body = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("confirmation", &confirmation)
-        .finish();
-    let response = no_redirects()
-        .post(&end_session)
-        .header("content-type", "application/x-www-form-urlencoded")
-        .header("cookie", cookie_of(&secret))
-        .body(body)
-        .send()
-        .await
-        .unwrap();
+/// The revocation is committed in the store, so logout signs out with the
+/// shared cache down.
+#[tokio::test]
+async fn end_session_needs_no_cache() {
+    let (svc, secret) = signed_in_over(std::sync::Arc::new(common::DownCache));
+    let response = end_session_at(&svc, &secret).await;
+    assert!(
+        !response.status().is_server_error(),
+        "{}",
+        response.status()
+    );
+    assert!(clears_the_cookie(&response));
+}
+
+/// When the revocation cannot be recorded, logout is an error to retry,
+/// never a "Signed out" that left the tokens live, and it clears no cookie.
+#[tokio::test]
+async fn end_session_without_revocation_state_fails() {
+    let (svc, secret) = signed_in_over(std::sync::Arc::new(
+        sid_plugin::cache::InMemoryCacheBackend::new(),
+    ));
+    svc.mock_storage.fail_admissions("revoked-session");
+    let response = end_session_at(&svc, &secret).await;
     assert!(response.status().is_server_error(), "{}", response.status());
     assert!(!clears_the_cookie(&response));
 }

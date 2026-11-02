@@ -208,9 +208,10 @@ impl TestIssuer {
         .expect("request verifiers");
 
         let cache: Arc<dyn CacheBackend> = Arc::new(sid_plugin::cache::InMemoryCacheBackend::new());
-        let revocation = Arc::new(RevocationCache::new(
+        let revocation = Arc::new(RevocationCache::recorded_in(
             std::time::Duration::from_secs(900),
             cache.clone(),
+            storage.clone(),
         ));
         let service_tokens = Arc::new(
             sid_authn::resource_token::ResourceTokenVerifier::new(

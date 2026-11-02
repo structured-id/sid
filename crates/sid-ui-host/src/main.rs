@@ -181,7 +181,7 @@ async fn adapter(key_file: &str) -> anyhow::Result<ApplicationSessions> {
         .context("the longest access-token lifetime is positive")?;
     let revocation = Arc::new(RevocationCache::new(lifetime, cache.clone()));
     // Revocations made anywhere reach this process before it answers.
-    revocation.listen().await?;
+    revocation.listen().await;
     Ok(ApplicationSessions::new(
         Arc::new(client),
         Arc::new(IssuerDirectory::new(

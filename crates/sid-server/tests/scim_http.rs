@@ -172,7 +172,7 @@ impl Installation {
             Duration::from_secs(900),
             self.cache.clone(),
         ));
-        revocation.listen().await.expect("revocation listener");
+        revocation.listen().await;
         let issuers = Arc::new(IssuerRegistry::new(
             storage.clone(),
             common::test_key_manager(),

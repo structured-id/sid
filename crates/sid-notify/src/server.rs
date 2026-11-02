@@ -239,7 +239,7 @@ impl NotifyServer {
             shared_cache,
         ));
         // Runs until the cache connection closes with the process.
-        let _revocation_listener = revocation.listen().await?;
+        let _revocation_listener = revocation.listen().await;
 
         // Build gRPC server.
         let template_svc = NotificationTemplateServiceImpl::new(

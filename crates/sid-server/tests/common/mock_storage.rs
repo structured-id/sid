@@ -348,7 +348,7 @@ impl MockStorage {
         }
     }
 
-    /// From now on, no admission in `namespace` can be recorded.
+    /// From now on, no admission or state in `namespace` can be recorded.
     #[allow(dead_code)]
     pub fn fail_admissions(&self, namespace: &'static str) {
         *self.unrecordable_admissions.lock().unwrap() = Some(namespace);
@@ -1492,6 +1492,9 @@ impl sid_plugin::CeremonyStateStore for MockStorage {
         value: &[u8],
         ttl: std::time::Duration,
     ) -> SidResult<()> {
+        if *self.unrecordable_admissions.lock().unwrap() == Some(namespace) {
+            return Err(sid_core::Error::Storage("state unavailable".into()));
+        }
         self.ceremonies
             .put_ceremony_state(namespace, key, value, ttl)
             .await
