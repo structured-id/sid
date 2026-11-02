@@ -19,6 +19,8 @@ default = ["ristretto255", "serde"]
 ecdsa = ["dep:ecdsa"]
 ed25519 = ["dep:curve25519-dalek", "dep:ed25519-dalek"]
 kem = ["dep:ml-kem"]
+# OPAQUE on Pallas, over the Pallas suite of sid-voprf.
+pallas = ["argon2", "sid-voprf/pallas", "dep:pasta_curves", "dep:ff", "dep:group", "dep:sha2"]
 ristretto255 = ["dep:curve25519-dalek", "sid-voprf/ristretto255-ciphersuite"]
 serde = [
   "dep:serde",
@@ -41,6 +43,8 @@ displaydoc = { version = "0.2", default-features = false }
 ecdsa = { version = "0.17", default-features = false, features = ["algorithm"], optional = true }
 ed25519-dalek = { version = "3", default-features = false, features = ["digest", "hazmat"], optional = true }
 elliptic-curve = { version = "0.14.3", features = ["sec1"] }
+ff = { version = "0.14", optional = true }
+group = { version = "0.14", optional = true }
 hkdf = "0.13"
 hmac = "0.13"
 # Primitives (keys, hashes, nonces) are RustCrypto `hybrid_array::Array`s.
@@ -50,9 +54,11 @@ hmac = "0.13"
 generic-array = { version = "1", features = ["hybrid-array-0_4", "serde", "zeroize"] }
 hybrid-array = "0.4"
 ml-kem = { version = "0.3", default-features = false, features = ["zeroize"], optional = true }
+pasta_curves = { version = "0.6", optional = true }
 rand_core = { version = "0.10", default-features = false }
 serde = { version = "1", default-features = false, features = ["derive"], optional = true }
 sid-voprf = { path = "../sid-voprf", version = "0.6", default-features = false, features = ["danger"] }
+sha2 = { version = "0.11", default-features = false, optional = true }
 subtle = { version = "2.6", default-features = false }
 zeroize = { version = "1.9", features = ["zeroize_derive"] }
 
@@ -86,6 +92,10 @@ name = "opaque"
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
+
+[[test]]
+name = "pallas_vectors"
+required-features = ["pallas"]
 
 [[example]]
 name = "simple_login"
