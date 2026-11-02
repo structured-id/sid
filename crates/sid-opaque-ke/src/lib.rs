@@ -1397,6 +1397,8 @@ pub use crate::ciphersuite::CipherSuite;
 pub use crate::key_exchange::group::curve25519::Curve25519;
 #[cfg(feature = "ed25519")]
 pub use crate::key_exchange::group::ed25519::Ed25519;
+#[cfg(feature = "pallas")]
+pub use crate::key_exchange::group::pallas::{Pallas, PallasCipherSuite, PallasSecretKey};
 #[cfg(feature = "ristretto255")]
 pub use crate::key_exchange::group::ristretto255::Ristretto255;
 pub use crate::key_exchange::sigma_i::SigmaI;

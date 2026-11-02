@@ -526,6 +526,10 @@
 //! - The `ristretto255-ciphersuite` features enables using [`Ristretto255`] as
 //!   a [`CipherSuite`].
 //!
+//! - The `pallas` feature adds the Pallas group and the
+//!   `Pallas-Poseidon-SHA256` suite in the `pallas` module, with the Poseidon
+//!   hash-to-curve a Halo2 circuit over the Pallas base field can recompute.
+//!
 //! - The `ristretto255` feature enables using [`Ristretto255`] as the
 //!   underlying group for the [Group] choice. To select a specific backend see
 //!   the [curve25519-dalek] documentation.
@@ -553,6 +557,8 @@ mod common;
 mod error;
 mod group;
 mod oprf;
+#[cfg(feature = "pallas")]
+pub mod pallas;
 mod poprf;
 mod serialization;
 mod voprf;
