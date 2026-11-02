@@ -2,18 +2,18 @@ use super::soft_authenticator::SoftAuthenticator;
 use super::*;
 use crate::test_support::key_manager;
 use sid_core::models::{CredentialType, ProfileId};
-use sid_plugin::cache::InMemoryCacheBackend;
+use sid_plugin::InProcessCeremonyState;
 
 const ORIGIN: &str = "https://sid.example.com";
 const RP: &str = "sid.example.com";
 
-fn server_on(cache: Arc<dyn CacheBackend>) -> WebAuthnServer {
-    WebAuthnServer::new(RP, &Url::parse(ORIGIN).unwrap(), cache, key_manager())
+fn server_on(ceremonies: Arc<dyn CeremonyStateStore>) -> WebAuthnServer {
+    WebAuthnServer::new(RP, &Url::parse(ORIGIN).unwrap(), ceremonies, key_manager())
         .expect("WebAuthn server creation should succeed")
 }
 
 fn server() -> WebAuthnServer {
-    server_on(Arc::new(InMemoryCacheBackend::new()))
+    server_on(Arc::new(InProcessCeremonyState::new()))
 }
 
 fn handle(byte: u8) -> WebAuthnUserHandle {
@@ -269,11 +269,11 @@ async fn test_ceremony_is_single_use_and_bound_to_its_purpose() {
     ));
 }
 
-/// A ceremony started on one replica finishes on another sharing the cache.
+/// A ceremony started on one replica finishes on another sharing the store.
 #[tokio::test]
 async fn test_ceremony_finishes_on_another_replica() {
-    let cache: Arc<dyn CacheBackend> = Arc::new(InMemoryCacheBackend::new());
-    let (a, b) = (server_on(cache.clone()), server_on(cache));
+    let ceremonies: Arc<dyn CeremonyStateStore> = Arc::new(InProcessCeremonyState::new());
+    let (a, b) = (server_on(ceremonies.clone()), server_on(ceremonies));
     let mut key = SoftAuthenticator::new(ORIGIN, RP);
     let start = a.registration_start(handle(1), "alice", &[]).await.unwrap();
     let response = RegistrationResponse::parse(&key.register(&start.options)).unwrap();
@@ -433,7 +433,7 @@ fn test_origin_must_be_on_the_rp() {
         WebAuthnServer::new(
             RP,
             &Url::parse(origin).unwrap(),
-            Arc::new(InMemoryCacheBackend::new()),
+            Arc::new(InProcessCeremonyState::new()),
             key_manager(),
         )
     };

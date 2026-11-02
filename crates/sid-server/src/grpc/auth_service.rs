@@ -718,12 +718,13 @@ impl AuthServiceImpl {
         password_history: sid_authn::password_operation::PasswordHistoryAuthority,
     ) -> Self {
         let ttl = std::time::Duration::from_secs(300); // 5 minutes
+        let ceremonies: Arc<dyn sid_plugin::CeremonyStateStore> = storage.clone();
         let captcha_gate =
-            sid_authn::captcha::CaptchaGate::new(cache_backend.clone(), key_manager.clone());
+            sid_authn::captcha::CaptchaGate::new(ceremonies.clone(), key_manager.clone());
         let (password_ops, history_evaluation) =
             super::password_operation::PasswordOperations::with_authority(
                 storage.clone(),
-                cache_backend.clone(),
+                ceremonies.clone(),
                 key_manager.clone(),
                 installation_org,
                 password_history,
@@ -739,7 +740,7 @@ impl AuthServiceImpl {
             revocation_cache,
             feature_flags,
             login_state: ChallengeStore::new(
-                cache_backend.clone(),
+                ceremonies.clone(),
                 key_manager.clone(),
                 "opaque-login",
                 ttl,
@@ -747,43 +748,43 @@ impl AuthServiceImpl {
             password_ops,
             history_evaluation,
             webauthn_state: ChallengeStore::new(
-                cache_backend.clone(),
+                ceremonies.clone(),
                 key_manager.clone(),
                 "webauthn-binding",
                 ttl,
             ),
             step_up_state: ChallengeStore::new(
-                cache_backend.clone(),
+                ceremonies.clone(),
                 key_manager.clone(),
                 "webauthn-step-up",
                 ttl,
             ),
             migration_state: ChallengeStore::new(
-                cache_backend.clone(),
+                ceremonies.clone(),
                 key_manager.clone(),
                 "legacy-migration",
                 ttl,
             ),
             totp_enrollment: ChallengeStore::new(
-                cache_backend.clone(),
+                ceremonies.clone(),
                 key_manager.clone(),
                 "totp-enrollment",
                 ttl,
             ),
             first_factor_proofs: ChallengeStore::new(
-                cache_backend.clone(),
+                ceremonies.clone(),
                 key_manager.clone(),
                 "first-factor-proof",
                 ttl,
             ),
             continuations: ChallengeStore::new(
-                cache_backend.clone(),
+                ceremonies.clone(),
                 key_manager.clone(),
                 "authorize-continuation",
                 authorize::CONTINUATION_TTL,
             ),
             logout_confirmations: ChallengeStore::new(
-                cache_backend.clone(),
+                ceremonies,
                 key_manager.clone(),
                 "logout-confirmation",
                 end_session::CONFIRMATION_TTL,

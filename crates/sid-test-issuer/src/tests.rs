@@ -173,7 +173,7 @@ async fn a_split_history_evaluator_takes_preparation_internally_only() {
     let cache: Arc<dyn CacheBackend> = Arc::new(sid_plugin::cache::InMemoryCacheBackend::new());
     let evaluation = Arc::new(HistoryEvaluation::new(
         issuer.history_keys.clone(),
-        Arc::new(sid_plugin::cache::InMemoryCacheBackend::new()),
+        Arc::new(sid_plugin::InProcessCeremonyState::new()),
         manager(0x11),
     ));
     let (internal_url, stop_internal, serving_internal) =

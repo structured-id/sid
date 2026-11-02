@@ -258,11 +258,12 @@ pub fn test_revocation() -> Arc<RevocationCache> {
     ))
 }
 
-/// A WebAuthn server keeping its ceremony state in `cache`.
-pub fn test_webauthn(cache: Arc<dyn sid_plugin::cache::CacheBackend>) -> Arc<WebAuthnServer> {
+/// A WebAuthn server keeping its ceremony state in `storage`, as a server
+/// does.
+pub fn test_webauthn(storage: Arc<dyn StorageBackend>) -> Arc<WebAuthnServer> {
     let origin = Url::parse("https://sid.example.com").unwrap();
     Arc::new(
-        WebAuthnServer::new("sid.example.com", &origin, cache, test_key_manager())
+        WebAuthnServer::new("sid.example.com", &origin, storage, test_key_manager())
             .expect("WebAuthn creation failed"),
     )
 }
@@ -1044,7 +1045,7 @@ pub fn auth_service_revoking(
             opaque_router: test_opaque_router(),
             oauth2: Arc::new(OAuth2Server::new(jwt.clone())),
             jwt,
-            webauthn: test_webauthn(cache),
+            webauthn: test_webauthn(storage.clone()),
             revocation_cache: revocation_cache.clone(),
             feature_flags: FeatureFlagService::disabled(),
             magic_link: None,
@@ -1483,7 +1484,7 @@ impl TestServices {
             .expect("account API verifier");
         let jwt = Arc::new(test_jwt_service().with_account_api(Arc::new(account_api)));
         let oauth2 = Arc::new(OAuth2Server::new(jwt.clone()));
-        let webauthn = test_webauthn(cache_backend.clone());
+        let webauthn = test_webauthn(storage.clone());
         let revocation_cache = Arc::new(RevocationCache::new(
             std::time::Duration::from_secs(900),
             cache_backend.clone(),
@@ -1586,7 +1587,6 @@ impl TestServices {
         let upstream = sid_server::grpc::upstream_service::UpstreamServiceImpl::new(
             storage.clone(),
             test_key_manager(),
-            cache_backend.clone(),
             jwt.clone(),
             revocation_cache.clone(),
             auth.clone(),

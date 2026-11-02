@@ -503,7 +503,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
             .await
             .map_err(|e| anyhow::anyhow!("CAPTCHA key: {e}"))?;
 
-    // ── Shared cache: ceremony state, one-time codes, replay and rate state ──
+    // ── Shared cache: one-time codes, replay and rate state ──
     let cache_backend: Arc<dyn CacheBackend> =
         sid_infra::shared_cache(sid_infra::cache_url_from_env().as_deref())
             .await
@@ -519,7 +519,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
     let webauthn = Arc::new(WebAuthnServer::new(
         &rp_id,
         &rp_origin_url,
-        cache_backend.clone(),
+        storage.clone(),
         key_manager.clone(),
     )?);
 
@@ -957,7 +957,6 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
     let upstream_svc = Arc::new(crate::grpc::upstream_service::UpstreamServiceImpl::new(
         storage.clone(),
         key_manager.clone(),
-        cache_backend.clone(),
         jwt.clone(),
         revocation_cache.clone(),
         auth_svc.clone(),

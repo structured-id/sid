@@ -299,6 +299,8 @@ impl MockStorageInner {
 
 pub struct MockStorage {
     pub inner: Mutex<MockStorageInner>,
+    /// Ceremony state, as a single process holds it.
+    ceremonies: sid_plugin::InProcessCeremonyState,
 }
 
 impl MockStorage {
@@ -338,6 +340,7 @@ impl MockStorage {
     pub fn unclaimed() -> Self {
         Self {
             inner: Mutex::new(MockStorageInner::default()),
+            ceremonies: sid_plugin::InProcessCeremonyState::new(),
         }
     }
 
@@ -1439,6 +1442,60 @@ impl GrantStore for MockStorage {
             .refresh_tokens_by_hash
             .insert(refresh_token.token_hash.clone(), refresh_token.clone());
         Ok(AuthCodeRedemption::Redeemed)
+    }
+}
+
+#[async_trait]
+impl sid_plugin::CeremonyStateStore for MockStorage {
+    async fn put_ceremony_state(
+        &self,
+        namespace: &str,
+        key: &str,
+        value: &[u8],
+        ttl: std::time::Duration,
+    ) -> SidResult<()> {
+        self.ceremonies
+            .put_ceremony_state(namespace, key, value, ttl)
+            .await
+    }
+    async fn take_ceremony_state(&self, namespace: &str, key: &str) -> SidResult<Option<Vec<u8>>> {
+        self.ceremonies.take_ceremony_state(namespace, key).await
+    }
+    async fn read_ceremony_state(&self, namespace: &str, key: &str) -> SidResult<Option<Vec<u8>>> {
+        self.ceremonies.read_ceremony_state(namespace, key).await
+    }
+    async fn replace_ceremony_state(
+        &self,
+        namespace: &str,
+        key: &str,
+        expected: &[u8],
+        value: &[u8],
+        ttl: std::time::Duration,
+    ) -> SidResult<bool> {
+        self.ceremonies
+            .replace_ceremony_state(namespace, key, expected, value, ttl)
+            .await
+    }
+    async fn admit_once(
+        &self,
+        namespace: &str,
+        key: &str,
+        ttl: std::time::Duration,
+    ) -> SidResult<bool> {
+        self.ceremonies.admit_once(namespace, key, ttl).await
+    }
+    async fn count_in_window(
+        &self,
+        namespace: &str,
+        key: &str,
+        window: std::time::Duration,
+    ) -> SidResult<u64> {
+        self.ceremonies
+            .count_in_window(namespace, key, window)
+            .await
+    }
+    async fn purge_expired_ceremony_state(&self) -> SidResult<u64> {
+        self.ceremonies.purge_expired_ceremony_state().await
     }
 }
 

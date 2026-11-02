@@ -216,6 +216,38 @@ pub async fn key_is_admitted_once(store: &dyn CeremonyStateStore) {
     assert!(!store.admit_once(&ns, &key, LONG).await.unwrap());
 }
 
+/// Events in one window add up, per key and namespace; the first event after
+/// the window ends starts a new count at 1.
+pub async fn events_count_within_their_window(store: &dyn CeremonyStateStore) {
+    let (ns, key) = (namespace(), key());
+    assert_eq!(store.count_in_window(&ns, &key, SHORT).await.unwrap(), 1);
+    assert_eq!(store.count_in_window(&ns, &key, SHORT).await.unwrap(), 2);
+    assert_eq!(store.count_in_window(&ns, &key, SHORT).await.unwrap(), 3);
+    assert_eq!(
+        store
+            .count_in_window(&namespace(), &key, SHORT)
+            .await
+            .unwrap(),
+        1
+    );
+    tokio::time::sleep(SHORT + Duration::from_millis(500)).await;
+    assert_eq!(store.count_in_window(&ns, &key, LONG).await.unwrap(), 1);
+}
+
+/// Concurrent events are each counted once: the counts handed out are
+/// exactly 1..=n, so a limit of n admits n events across every replica.
+pub async fn concurrent_events_are_counted_once(store: &dyn CeremonyStateStore) {
+    let (ns, key) = (namespace(), key());
+    let mut counts: Vec<u64> =
+        futures::future::join_all((0..16).map(|_| store.count_in_window(&ns, &key, LONG)))
+            .await
+            .into_iter()
+            .map(|c| c.unwrap())
+            .collect();
+    counts.sort_unstable();
+    assert_eq!(counts, (1..=16).collect::<Vec<u64>>());
+}
+
 /// Of many concurrent admissions of one key exactly one succeeds: a replayed
 /// token is refused on every replica but one.
 pub async fn concurrent_admissions_succeed_once(store: &dyn CeremonyStateStore) {

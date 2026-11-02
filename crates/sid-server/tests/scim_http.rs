@@ -185,7 +185,7 @@ impl Installation {
                 opaque_router: common::stored_opaque_router(storage.as_ref()).await,
                 jwt: jwt.clone(),
                 oauth2: Arc::new(sid_authn::oauth2::OAuth2Server::new(jwt.clone())),
-                webauthn: common::test_webauthn(self.cache.clone()),
+                webauthn: common::test_webauthn(storage.clone()),
                 revocation_cache: revocation.clone(),
                 feature_flags: flags.clone(),
                 magic_link: None,

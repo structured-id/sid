@@ -112,7 +112,10 @@ impl Host {
                 Duration::from_secs(60),
             ),
             geoip: GeoIpChain::empty(cache.clone()),
-            gate: CaptchaGate::new(cache.clone(), crate::test_support::key_manager()),
+            gate: CaptchaGate::new(
+                Arc::new(sid_plugin::InProcessCeremonyState::new()),
+                crate::test_support::key_manager(),
+            ),
             captcha: SidPowProvider::new([0; 32], 1, 60),
             events: Default::default(),
         };

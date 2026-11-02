@@ -2888,10 +2888,25 @@ async fn end_session_without_revocation_state_fails() {
         std::sync::Arc::new(DownCache),
     );
     let base = over_http(provider_of(&svc)).await;
+    let end_session = format!("{base}/i/{}/oauth2/end-session", svc.issuer.handle);
 
-    let response = no_redirects()
-        .get(format!("{base}/i/{}/oauth2/end-session", svc.issuer.handle))
+    // The confirmation page needs no revocation state; confirming it ends
+    // the session, and that is what fails.
+    let page = no_redirects()
+        .get(&end_session)
         .header("cookie", cookie_of(&secret))
+        .send()
+        .await
+        .unwrap();
+    let confirmation = confirmation_of(page).await;
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("confirmation", &confirmation)
+        .finish();
+    let response = no_redirects()
+        .post(&end_session)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("cookie", cookie_of(&secret))
+        .body(body)
         .send()
         .await
         .unwrap();

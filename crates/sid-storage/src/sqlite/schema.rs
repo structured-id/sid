@@ -693,6 +693,17 @@ CREATE TABLE IF NOT EXISTS ceremony_states (
 CREATE INDEX IF NOT EXISTS ceremony_states_expires_at
     ON ceremony_states (expires_at_ms);
 
+-- Events counted per key in a window ending at window_ends_ms.
+CREATE TABLE IF NOT EXISTS ceremony_counts (
+    namespace      TEXT NOT NULL,
+    count_key      TEXT NOT NULL,
+    count          INTEGER NOT NULL,
+    window_ends_ms INTEGER NOT NULL,
+    PRIMARY KEY (namespace, count_key)
+);
+CREATE INDEX IF NOT EXISTS ceremony_counts_window_ends
+    ON ceremony_counts (window_ends_ms);
+
 -- One row per background job currently held: whoever inserted the row runs
 -- the job until it deletes the row or the lease runs out.
 CREATE TABLE IF NOT EXISTS job_locks (

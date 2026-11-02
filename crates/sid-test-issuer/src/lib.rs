@@ -632,7 +632,7 @@ fn auth_service(
         sid_authn::webauthn::WebAuthnServer::new(
             "sid.example.com",
             &url::Url::parse(INSTALLATION).unwrap(),
-            cache.clone(),
+            storage.clone(),
             keys.clone(),
         )
         .expect("WebAuthn"),

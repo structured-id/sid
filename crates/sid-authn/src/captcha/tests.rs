@@ -151,13 +151,14 @@ fn pow_verify_hash_correctness() {
 
 // ── Captcha gate tests ──
 
-/// Two replicas over one shared cache and one master key.
+/// Two replicas over one ceremony state store and one master key.
 fn gates() -> (CaptchaGate, CaptchaGate) {
-    let cache: Arc<dyn CacheBackend> = Arc::new(sid_plugin::cache::InMemoryCacheBackend::new());
+    let ceremonies: Arc<dyn CeremonyStateStore> =
+        Arc::new(sid_plugin::InProcessCeremonyState::new());
     let keys = crate::test_support::key_manager();
     (
-        CaptchaGate::new(cache.clone(), keys.clone()),
-        CaptchaGate::new(cache, keys),
+        CaptchaGate::new(ceremonies.clone(), keys.clone()),
+        CaptchaGate::new(ceremonies, keys),
     )
 }
 

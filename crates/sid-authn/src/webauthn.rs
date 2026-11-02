@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use sid_core::models::{Credential, CredentialId as SidCredentialId, WebAuthnUserHandle};
 use sid_core::{Error as SidError, Result as SidResult};
 use sid_keys::KeyManager;
-use sid_plugin::cache::CacheBackend;
+use sid_plugin::CeremonyStateStore;
 use std::sync::Arc;
 use std::time::Duration;
 use structured_webauthn::bin::{Decode, Encode};
@@ -206,12 +206,12 @@ pub struct WebAuthnServer {
 
 impl WebAuthnServer {
     /// A relying party `rp_id` serving `rp_origin`, whose host must be the RP
-    /// ID or a subdomain of it (WebAuthn Level 3 §5.1.4.1). `cache` and `keys`
-    /// hold ceremony state shared between replicas and seal it there.
+    /// ID or a subdomain of it (WebAuthn Level 3 §5.1.4.1). `ceremonies` and
+    /// `keys` hold ceremony state shared between replicas and seal it there.
     pub fn new(
         rp_id: &str,
         rp_origin: &Url,
-        cache: Arc<dyn CacheBackend>,
+        ceremonies: Arc<dyn CeremonyStateStore>,
         keys: Arc<dyn KeyManager>,
     ) -> SidResult<Self> {
         let host = rp_origin
@@ -227,7 +227,7 @@ impl WebAuthnServer {
         Ok(Self {
             rp_id: RpId::Domain(domain),
             origin: rp_origin.origin().ascii_serialization(),
-            ceremonies: ChallengeStore::new(cache, keys, "webauthn", CEREMONY_TTL),
+            ceremonies: ChallengeStore::new(ceremonies, keys, "webauthn", CEREMONY_TTL),
         })
     }
 

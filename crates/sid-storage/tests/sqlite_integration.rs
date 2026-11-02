@@ -371,6 +371,8 @@ mod ceremony_state {
         concurrent_replacements_apply_once,
         key_is_admitted_once,
         concurrent_admissions_succeed_once,
+        events_count_within_their_window,
+        concurrent_events_are_counted_once,
     );
 }
 

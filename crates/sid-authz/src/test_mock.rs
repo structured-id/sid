@@ -331,6 +331,44 @@ impl sid_plugin::OperationResultStore for MockStorage {
 }
 
 #[async_trait::async_trait]
+impl sid_plugin::CeremonyStateStore for MockStorage {
+    async fn put_ceremony_state(
+        &self,
+        _: &str,
+        _: &str,
+        _: &[u8],
+        _: std::time::Duration,
+    ) -> Result<()> {
+        unimplemented!()
+    }
+    async fn take_ceremony_state(&self, _: &str, _: &str) -> Result<Option<Vec<u8>>> {
+        unimplemented!()
+    }
+    async fn read_ceremony_state(&self, _: &str, _: &str) -> Result<Option<Vec<u8>>> {
+        unimplemented!()
+    }
+    async fn replace_ceremony_state(
+        &self,
+        _: &str,
+        _: &str,
+        _: &[u8],
+        _: &[u8],
+        _: std::time::Duration,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
+    async fn admit_once(&self, _: &str, _: &str, _: std::time::Duration) -> Result<bool> {
+        unimplemented!()
+    }
+    async fn count_in_window(&self, _: &str, _: &str, _: std::time::Duration) -> Result<u64> {
+        unimplemented!()
+    }
+    async fn purge_expired_ceremony_state(&self) -> Result<u64> {
+        unimplemented!()
+    }
+}
+
+#[async_trait::async_trait]
 impl sid_plugin::SignInHistoryStore for MockStorage {
     type Owner = ProfileId;
 

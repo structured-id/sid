@@ -8,7 +8,7 @@ use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use p256::elliptic_curve::sec1::ToSec1Point;
 use p256::pkcs8::EncodePrivateKey;
 use serde_json::json;
-use sid_plugin::cache::InMemoryCacheBackend;
+use sid_plugin::InProcessCeremonyState;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const CLIENT: &str = "platform-recipient";
@@ -238,16 +238,16 @@ fn http() -> Client {
 }
 
 fn entry(issuer: &TestIssuer) -> FederatedEntry {
-    entry_on(issuer, Arc::new(InMemoryCacheBackend::new()))
+    entry_on(issuer, Arc::new(InProcessCeremonyState::new()))
 }
 
-/// The relying party of `issuer` over `cache`, which other relying parties
-/// may share.
-fn entry_on(issuer: &TestIssuer, cache: Arc<dyn CacheBackend>) -> FederatedEntry {
+/// The relying party of `issuer` over `ceremonies`, which other relying
+/// parties may share.
+fn entry_on(issuer: &TestIssuer, ceremonies: Arc<dyn CeremonyStateStore>) -> FederatedEntry {
     FederatedEntry::new(
         issuer.trusted(),
         http(),
-        cache,
+        ceremonies,
         crate::test_support::key_manager(),
         BrowserCookie::new("__Host-sid_platform").unwrap(),
     )
@@ -407,7 +407,7 @@ async fn a_return_completes_once_and_only_at_its_redirect() {
     ));
 }
 
-// Regression guard: relying parties of two issuers sharing one cache and one
+// Regression guard: relying parties of two issuers sharing one store and one
 // sealing key never complete each other's entries. An entry started for
 // issuer A and returned to B's relying party is refused before B's token
 // endpoint sees A's code verifier, and stays A's to complete.
@@ -415,9 +415,9 @@ async fn a_return_completes_once_and_only_at_its_redirect() {
 async fn an_entry_completes_only_at_the_issuer_it_was_started_for() {
     let a = TestIssuer::start().await;
     let b = TestIssuer::start().await;
-    let cache: Arc<dyn CacheBackend> = Arc::new(InMemoryCacheBackend::new());
-    let at_a = entry_on(&a, cache.clone());
-    let at_b = entry_on(&b, cache);
+    let ceremonies: Arc<dyn CeremonyStateStore> = Arc::new(InProcessCeremonyState::new());
+    let at_a = entry_on(&a, ceremonies.clone());
+    let at_b = entry_on(&b, ceremonies);
     let browser = begin(&at_a, &EntryRequest::default()).await;
     a.issue_for(&browser.url, json!({}));
     b.issue_for(&browser.url, json!({}));
@@ -578,8 +578,11 @@ async fn a_resumed_return_keeps_its_redirect_binding() {
 #[tokio::test]
 async fn racing_returns_exchange_at_most_once() {
     let issuer = TestIssuer::start().await;
-    let cache: Arc<dyn CacheBackend> = Arc::new(InMemoryCacheBackend::new());
-    let replicas = [entry_on(&issuer, cache.clone()), entry_on(&issuer, cache)];
+    let ceremonies: Arc<dyn CeremonyStateStore> = Arc::new(InProcessCeremonyState::new());
+    let replicas = [
+        entry_on(&issuer, ceremonies.clone()),
+        entry_on(&issuer, ceremonies),
+    ];
     let browser = begin(&replicas[0], &EntryRequest::default()).await;
     issuer.issue_for(&browser.url, json!({}));
     let (a, b) = tokio::join!(
@@ -607,8 +610,11 @@ async fn racing_returns_exchange_at_most_once() {
 #[tokio::test]
 async fn a_return_during_a_live_exchange_is_told_to_retry() {
     let issuer = TestIssuer::start().await;
-    let cache: Arc<dyn CacheBackend> = Arc::new(InMemoryCacheBackend::new());
-    let replicas = [entry_on(&issuer, cache.clone()), entry_on(&issuer, cache)];
+    let ceremonies: Arc<dyn CeremonyStateStore> = Arc::new(InProcessCeremonyState::new());
+    let replicas = [
+        entry_on(&issuer, ceremonies.clone()),
+        entry_on(&issuer, ceremonies),
+    ];
     let browser = begin(&replicas[0], &EntryRequest::default()).await;
     issuer.issue_for(&browser.url, json!({}));
     issuer.fail(Fault::TokenSlow);
@@ -623,48 +629,57 @@ async fn a_return_during_a_live_exchange_is_told_to_retry() {
     assert_eq!(issuer.exchanges(), 1);
 }
 
-/// A shared cache over which another return fences an entry off as soon as
-/// one return took its exchange: the first successful compare-and-set is
-/// followed, before anything else reaches the cache, by `interfere`.
+/// A shared store over which another return fences an entry off as soon as
+/// one return took its exchange: the first successful replacement is
+/// followed, before anything else reaches the store, by `interfere`.
 struct FencedOff {
-    inner: Arc<dyn CacheBackend>,
+    inner: Arc<dyn CeremonyStateStore>,
     interfere: Mutex<Option<Interference>>,
 }
 
 type Fence = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 
-/// What another return does to the shared cache under an entry's key.
-type Interference = Box<dyn FnOnce(Arc<dyn CacheBackend>, String) -> Fence + Send>;
+/// What another return does to the shared store under an entry's key.
+type Interference = Box<dyn FnOnce(Arc<dyn CeremonyStateStore>, String) -> Fence + Send>;
 
 #[async_trait::async_trait]
-impl CacheBackend for FencedOff {
-    async fn get(&self, key: &str) -> sid_plugin::cache::CacheResult<Option<Vec<u8>>> {
-        self.inner.get(key).await
-    }
-    async fn set(
+impl CeremonyStateStore for FencedOff {
+    async fn put_ceremony_state(
         &self,
+        namespace: &str,
         key: &str,
         value: &[u8],
         ttl: std::time::Duration,
-    ) -> sid_plugin::cache::CacheResult<()> {
-        self.inner.set(key, value, ttl).await
+    ) -> sid_core::Result<()> {
+        self.inner
+            .put_ceremony_state(namespace, key, value, ttl)
+            .await
     }
-    async fn delete(&self, key: &str) -> sid_plugin::cache::CacheResult<()> {
-        self.inner.delete(key).await
-    }
-    async fn take(&self, key: &str) -> sid_plugin::cache::CacheResult<Option<Vec<u8>>> {
-        self.inner.take(key).await
-    }
-    async fn compare_and_set(
+    async fn take_ceremony_state(
         &self,
+        namespace: &str,
+        key: &str,
+    ) -> sid_core::Result<Option<Vec<u8>>> {
+        self.inner.take_ceremony_state(namespace, key).await
+    }
+    async fn read_ceremony_state(
+        &self,
+        namespace: &str,
+        key: &str,
+    ) -> sid_core::Result<Option<Vec<u8>>> {
+        self.inner.read_ceremony_state(namespace, key).await
+    }
+    async fn replace_ceremony_state(
+        &self,
+        namespace: &str,
         key: &str,
         expected: &[u8],
         value: &[u8],
         ttl: std::time::Duration,
-    ) -> sid_plugin::cache::CacheResult<bool> {
+    ) -> sid_core::Result<bool> {
         let swapped = self
             .inner
-            .compare_and_set(key, expected, value, ttl)
+            .replace_ceremony_state(namespace, key, expected, value, ttl)
             .await?;
         let interfere = if swapped {
             self.interfere.lock().unwrap().take()
@@ -676,17 +691,24 @@ impl CacheBackend for FencedOff {
         }
         Ok(swapped)
     }
-    async fn publish(&self, channel: &str, message: &[u8]) -> sid_plugin::cache::CacheResult<()> {
-        self.inner.publish(channel, message).await
-    }
-    async fn subscribe(
+    async fn admit_once(
         &self,
-        channel: &str,
-    ) -> sid_plugin::cache::CacheResult<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>> {
-        self.inner.subscribe(channel).await
+        namespace: &str,
+        key: &str,
+        ttl: std::time::Duration,
+    ) -> sid_core::Result<bool> {
+        self.inner.admit_once(namespace, key, ttl).await
     }
-    async fn health_check(&self) -> sid_plugin::cache::CacheResult<()> {
-        self.inner.health_check().await
+    async fn count_in_window(
+        &self,
+        namespace: &str,
+        key: &str,
+        window: std::time::Duration,
+    ) -> sid_core::Result<u64> {
+        self.inner.count_in_window(namespace, key, window).await
+    }
+    async fn purge_expired_ceremony_state(&self) -> sid_core::Result<u64> {
+        self.inner.purge_expired_ceremony_state().await
     }
 }
 
@@ -698,7 +720,7 @@ impl CacheBackend for FencedOff {
 #[tokio::test]
 async fn a_fenced_off_exchange_completes_nothing() {
     let issuer = TestIssuer::start().await;
-    let inner: Arc<dyn CacheBackend> = Arc::new(InMemoryCacheBackend::new());
+    let inner: Arc<dyn CeremonyStateStore> = Arc::new(InProcessCeremonyState::new());
     let keys = crate::test_support::key_manager();
     let fenced = Arc::new(FencedOff {
         inner: inner.clone(),
@@ -713,14 +735,10 @@ async fn a_fenced_off_exchange_completes_nothing() {
     );
     let browser = begin(&entry, &EntryRequest::default()).await;
     issuer.issue_for(&browser.url, json!({}));
-    *fenced.interfere.lock().unwrap() = Some(Box::new(move |cache, context| {
+    *fenced.interfere.lock().unwrap() = Some(Box::new(move |ceremonies, key| {
         Box::pin(async move {
             let store: ChallengeStore<Progress> =
-                ChallengeStore::new(cache, keys, NAMESPACE, PENDING_TTL);
-            let key = context
-                .strip_prefix(&format!("ceremony:{NAMESPACE}:"))
-                .unwrap()
-                .to_owned();
+                ChallengeStore::new(ceremonies, keys, NAMESPACE, PENDING_TTL);
             store
                 .insert(
                     &key,

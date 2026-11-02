@@ -118,11 +118,45 @@ impl CeremonyStateStore for PostgresBackend {
         Ok(admitted == 1)
     }
 
+    async fn count_in_window(
+        &self,
+        namespace: &str,
+        key: &str,
+        window: Duration,
+    ) -> SidResult<u64> {
+        // Concurrent upserts of the key serialize on its row, so each event
+        // adds exactly one.
+        let count: i64 = sqlx::query_scalar(
+            "INSERT INTO ceremony_counts (namespace, count_key, count, window_ends)
+             VALUES ($1, $2, 1, NOW() + make_interval(secs => $3))
+             ON CONFLICT (namespace, count_key) DO UPDATE SET
+                 count = CASE WHEN ceremony_counts.window_ends <= NOW() THEN 1
+                              ELSE ceremony_counts.count + 1 END,
+                 window_ends = CASE WHEN ceremony_counts.window_ends <= NOW()
+                                    THEN EXCLUDED.window_ends
+                                    ELSE ceremony_counts.window_ends END
+             RETURNING count",
+        )
+        .bind(namespace)
+        .bind(key)
+        .bind(seconds(window))
+        .fetch_one(&self.pool)
+        .await
+        .map_err(failure("count in window"))?;
+        u64::try_from(count).map_err(|_| SidError::Storage(format!("count of {key} is {count}")))
+    }
+
     async fn purge_expired_ceremony_state(&self) -> SidResult<u64> {
-        sqlx::query("DELETE FROM ceremony_states WHERE expires_at <= NOW()")
+        let states = sqlx::query("DELETE FROM ceremony_states WHERE expires_at <= NOW()")
             .execute(&self.pool)
             .await
-            .map(|done| done.rows_affected())
-            .map_err(failure("purge ceremony state"))
+            .map_err(failure("purge ceremony state"))?
+            .rows_affected();
+        let counts = sqlx::query("DELETE FROM ceremony_counts WHERE window_ends <= NOW()")
+            .execute(&self.pool)
+            .await
+            .map_err(failure("purge ceremony counts"))?
+            .rows_affected();
+        Ok(states + counts)
     }
 }

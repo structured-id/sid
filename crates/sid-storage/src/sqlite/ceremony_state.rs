@@ -155,11 +155,51 @@ impl CeremonyStateStore for SqliteBackend {
         Ok(admitted == 1)
     }
 
-    async fn purge_expired_ceremony_state(&self) -> SidResult<u64> {
-        self.ceremony_write(
-            "purge ceremony state",
-            sqlx::query("DELETE FROM ceremony_states WHERE expires_at_ms <= ?").bind(now_ms()),
+    async fn count_in_window(
+        &self,
+        namespace: &str,
+        key: &str,
+        window: Duration,
+    ) -> SidResult<u64> {
+        let now = now_ms();
+        let mut tx = self.begin_write().await?;
+        let count: i64 = sqlx::query_scalar(
+            "INSERT INTO ceremony_counts (namespace, count_key, count, window_ends_ms)
+             VALUES (?, ?, 1, ?)
+             ON CONFLICT (namespace, count_key) DO UPDATE SET
+                 count = CASE WHEN ceremony_counts.window_ends_ms <= ? THEN 1
+                              ELSE ceremony_counts.count + 1 END,
+                 window_ends_ms = CASE WHEN ceremony_counts.window_ends_ms <= ?
+                                       THEN excluded.window_ends_ms
+                                       ELSE ceremony_counts.window_ends_ms END
+             RETURNING count",
         )
+        .bind(namespace)
+        .bind(key)
+        .bind(deadline(now, window)?)
+        .bind(now)
+        .bind(now)
+        .fetch_one(&mut *tx)
         .await
+        .map_err(failure("count in window"))?;
+        tx.commit().await.map_err(failure("count in window"))?;
+        u64::try_from(count).map_err(|_| SidError::Storage(format!("count of {key} is {count}")))
+    }
+
+    async fn purge_expired_ceremony_state(&self) -> SidResult<u64> {
+        let now = now_ms();
+        let states = self
+            .ceremony_write(
+                "purge ceremony state",
+                sqlx::query("DELETE FROM ceremony_states WHERE expires_at_ms <= ?").bind(now),
+            )
+            .await?;
+        let counts = self
+            .ceremony_write(
+                "purge ceremony counts",
+                sqlx::query("DELETE FROM ceremony_counts WHERE window_ends_ms <= ?").bind(now),
+            )
+            .await?;
+        Ok(states + counts)
     }
 }
