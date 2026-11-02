@@ -40,6 +40,37 @@ impl SingleUseAdmissions for PostgresBackend {
         .rows_affected();
         Ok(admitted == 1)
     }
+
+    async fn admit_for(
+        &self,
+        namespace: &str,
+        key: &str,
+        holder: &[u8],
+        ttl: Duration,
+    ) -> SidResult<bool> {
+        // One statement: an expired admission is taken over, the holder's own
+        // live one is touched without a new deadline, another holder's live
+        // one leaves the row unchanged and no row affected.
+        let held = sqlx::query(
+            "INSERT INTO ceremony_states (namespace, state_key, value, expires_at)
+             VALUES ($1, $2, $3, NOW() + make_interval(secs => $4))
+             ON CONFLICT (namespace, state_key) DO UPDATE SET
+                 value = CASE WHEN ceremony_states.expires_at <= NOW()
+                              THEN EXCLUDED.value ELSE ceremony_states.value END,
+                 expires_at = CASE WHEN ceremony_states.expires_at <= NOW()
+                                   THEN EXCLUDED.expires_at ELSE ceremony_states.expires_at END
+             WHERE ceremony_states.expires_at <= NOW() OR ceremony_states.value = EXCLUDED.value",
+        )
+        .bind(namespace)
+        .bind(key)
+        .bind(holder)
+        .bind(seconds(ttl))
+        .execute(&self.pool)
+        .await
+        .map_err(failure("admit for holder"))?
+        .rows_affected();
+        Ok(held == 1)
+    }
 }
 
 #[async_trait]

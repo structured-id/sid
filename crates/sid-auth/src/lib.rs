@@ -46,6 +46,21 @@ impl sid_plugin::SingleUseAdmissions for SharedCacheAdmissions {
             .await
             .map_err(|e| sid_core::Error::Internal(format!("replay record: {e}")))
     }
+
+    async fn admit_for(
+        &self,
+        namespace: &str,
+        key: &str,
+        holder: &[u8],
+        ttl: std::time::Duration,
+    ) -> sid_core::Result<bool> {
+        let key = format!("{namespace}:{key}");
+        let failure = |e| sid_core::Error::Internal(format!("replay record: {e}"));
+        if self.0.set_nx(&key, holder, ttl).await.map_err(failure)? {
+            return Ok(true);
+        }
+        Ok(self.0.get(&key).await.map_err(failure)?.as_deref() == Some(holder))
+    }
 }
 
 /// A revocation view over `cache` for a verifier that does not know the

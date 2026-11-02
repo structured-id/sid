@@ -1468,6 +1468,19 @@ impl sid_plugin::SingleUseAdmissions for MockStorage {
         }
         sid_plugin::SingleUseAdmissions::admit_once(&self.ceremonies, namespace, key, ttl).await
     }
+    async fn admit_for(
+        &self,
+        namespace: &str,
+        key: &str,
+        holder: &[u8],
+        ttl: std::time::Duration,
+    ) -> SidResult<bool> {
+        if *self.unrecordable_admissions.lock().unwrap() == Some(namespace) {
+            return Err(sid_core::Error::Storage("admissions unavailable".into()));
+        }
+        sid_plugin::SingleUseAdmissions::admit_for(&self.ceremonies, namespace, key, holder, ttl)
+            .await
+    }
 }
 
 #[async_trait]

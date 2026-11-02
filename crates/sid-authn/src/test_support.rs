@@ -103,6 +103,15 @@ impl sid_plugin::SingleUseAdmissions for DownCeremonies {
     async fn admit_once(&self, _: &str, _: &str, _: std::time::Duration) -> sid_core::Result<bool> {
         down()
     }
+    async fn admit_for(
+        &self,
+        _: &str,
+        _: &str,
+        _: &[u8],
+        _: std::time::Duration,
+    ) -> sid_core::Result<bool> {
+        down()
+    }
 }
 
 #[async_trait::async_trait]

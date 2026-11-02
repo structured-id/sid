@@ -23,6 +23,19 @@ pub trait SingleUseAdmissions: Send + Sync {
     /// holds it, `false` while a live admission of it exists. An expired
     /// admission no longer holds the key.
     async fn admit_once(&self, namespace: &str, key: &str, ttl: Duration) -> Result<bool>;
+
+    /// Admit `key` for `holder` for `ttl` from now, or confirm that `holder`
+    /// already holds it: `true` when `holder` holds the live admission after
+    /// the call, `false`, changing nothing, while another holder does. A
+    /// confirmation keeps the admission's original deadline; an expired
+    /// admission no longer holds the key for anyone.
+    async fn admit_for(
+        &self,
+        namespace: &str,
+        key: &str,
+        holder: &[u8],
+        ttl: Duration,
+    ) -> Result<bool>;
 }
 
 #[async_trait]
@@ -115,6 +128,26 @@ impl SingleUseAdmissions for InProcessCeremonyState {
             return Ok(false);
         }
         *entry = (Vec::new(), expires);
+        Ok(true)
+    }
+
+    async fn admit_for(
+        &self,
+        namespace: &str,
+        key: &str,
+        holder: &[u8],
+        ttl: Duration,
+    ) -> Result<bool> {
+        let expires = deadline(ttl)?;
+        let now = std::time::Instant::now();
+        let mut entries = self.entries();
+        let entry = entries
+            .entry((namespace.into(), key.into()))
+            .or_insert((Vec::new(), now));
+        if entry.1 > now {
+            return Ok(entry.0 == holder);
+        }
+        *entry = (holder.to_vec(), expires);
         Ok(true)
     }
 }

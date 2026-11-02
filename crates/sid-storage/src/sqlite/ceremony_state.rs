@@ -72,6 +72,40 @@ impl SingleUseAdmissions for SqliteBackend {
             .await?;
         Ok(admitted == 1)
     }
+
+    async fn admit_for(
+        &self,
+        namespace: &str,
+        key: &str,
+        holder: &[u8],
+        ttl: Duration,
+    ) -> SidResult<bool> {
+        let now = now_ms();
+        let held = self
+            .ceremony_write(
+                "admit for holder",
+                sqlx::query(
+                    "INSERT INTO ceremony_states (namespace, state_key, value, expires_at_ms)
+                     VALUES (?, ?, ?, ?)
+                     ON CONFLICT (namespace, state_key) DO UPDATE SET
+                         value = CASE WHEN ceremony_states.expires_at_ms <= ?
+                                      THEN excluded.value ELSE ceremony_states.value END,
+                         expires_at_ms = CASE WHEN ceremony_states.expires_at_ms <= ?
+                                              THEN excluded.expires_at_ms
+                                              ELSE ceremony_states.expires_at_ms END
+                     WHERE ceremony_states.expires_at_ms <= ? OR ceremony_states.value = excluded.value",
+                )
+                .bind(namespace)
+                .bind(key)
+                .bind(holder)
+                .bind(deadline(now, ttl)?)
+                .bind(now)
+                .bind(now)
+                .bind(now),
+            )
+            .await?;
+        Ok(held == 1)
+    }
 }
 
 #[async_trait]

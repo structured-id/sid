@@ -216,6 +216,70 @@ pub async fn key_is_admitted_once(store: &dyn CeremonyStateStore) {
     assert!(!store.admit_once(&ns, &key, LONG).await.unwrap());
 }
 
+/// A key admitted for a holder is confirmed to that holder and refused to
+/// any other while it lives; a confirmation does not extend it, and once it
+/// expires another holder takes it.
+pub async fn admission_is_confirmed_only_to_its_holder(store: &dyn CeremonyStateStore) {
+    let (ns, key) = (namespace(), key());
+    assert!(
+        store
+            .admit_for(&ns, &key, b"request-1", SHORT)
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .admit_for(&ns, &key, b"request-1", LONG)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .admit_for(&ns, &key, b"request-2", LONG)
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .admit_for(&namespace(), &key, b"request-2", LONG)
+            .await
+            .unwrap()
+    );
+    // The confirmation asked for LONG, yet the first deadline stands.
+    tokio::time::sleep(SHORT + Duration::from_millis(500)).await;
+    assert!(
+        store
+            .admit_for(&ns, &key, b"request-2", LONG)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .admit_for(&ns, &key, b"request-1", LONG)
+            .await
+            .unwrap()
+    );
+}
+
+/// Of many concurrent holders admitting one key exactly one holds it, and it
+/// is confirmed to that one alone.
+pub async fn concurrent_holders_admit_once(store: &dyn CeremonyStateStore) {
+    let (ns, key) = (namespace(), key());
+    let holders: Vec<Vec<u8>> = (0..16u8).map(|i| vec![i]).collect();
+    let held: Vec<bool> = futures::future::join_all(
+        holders
+            .iter()
+            .map(|holder| store.admit_for(&ns, &key, holder, LONG)),
+    )
+    .await
+    .into_iter()
+    .map(|r| r.unwrap())
+    .collect();
+    assert_eq!(held.iter().filter(|held| **held).count(), 1);
+    let winner = &holders[held.iter().position(|held| *held).unwrap()];
+    assert!(store.admit_for(&ns, &key, winner, LONG).await.unwrap());
+}
+
 /// Events in one window add up, per key and namespace; the first event after
 /// the window ends starts a new count at 1.
 pub async fn events_count_within_their_window(store: &dyn CeremonyStateStore) {

@@ -652,6 +652,15 @@ impl sid_plugin::SingleUseAdmissions for FencedOff {
     ) -> sid_core::Result<bool> {
         self.inner.admit_once(namespace, key, ttl).await
     }
+    async fn admit_for(
+        &self,
+        namespace: &str,
+        key: &str,
+        holder: &[u8],
+        ttl: std::time::Duration,
+    ) -> sid_core::Result<bool> {
+        self.inner.admit_for(namespace, key, holder, ttl).await
+    }
 }
 
 #[async_trait::async_trait]
