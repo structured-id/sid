@@ -16,7 +16,11 @@ async fn record_bytes() -> Vec<u8> {
     )
     .unwrap();
     let start = server
-        .registration_start(WebAuthnUserHandle([3; 16]), "alice", &[])
+        .registration_start::<sid_core::models::ProfileId>(
+            WebAuthnUserHandle([3; 16]),
+            "alice",
+            &[],
+        )
         .await
         .unwrap();
     let mut key = SoftAuthenticator::new("https://sid.example.com", "sid.example.com");

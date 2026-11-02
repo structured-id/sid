@@ -16,6 +16,9 @@ fn server() -> WebAuthnServer {
     server_on(Arc::new(InProcessCeremonyState::new()))
 }
 
+/// An account with no passkeys yet.
+const NO_PASSKEYS: &[Credential] = &[];
+
 fn handle(byte: u8) -> WebAuthnUserHandle {
     WebAuthnUserHandle([byte; 16])
 }
@@ -29,7 +32,7 @@ fn stored(profile: ProfileId, data: Vec<u8>) -> Credential {
 async fn registered(server: &WebAuthnServer) -> (SoftAuthenticator, Credential) {
     let mut key = SoftAuthenticator::new(ORIGIN, RP);
     let start = server
-        .registration_start(handle(1), "alice", &[])
+        .registration_start(handle(1), "alice", NO_PASSKEYS)
         .await
         .unwrap();
     let response = RegistrationResponse::parse(&key.register(&start.options)).unwrap();
@@ -76,7 +79,7 @@ fn is_auth_failure(result: &SidResult<VerifiedAssertion>) -> bool {
 async fn test_registration_options() {
     let server = server();
     let start = server
-        .registration_start(handle(7), "alice", &[])
+        .registration_start(handle(7), "alice", NO_PASSKEYS)
         .await
         .unwrap();
     let options: serde_json::Value = serde_json::from_slice(&start.options).unwrap();
@@ -275,7 +278,10 @@ async fn test_ceremony_finishes_on_another_replica() {
     let ceremonies: Arc<dyn CeremonyStateStore> = Arc::new(InProcessCeremonyState::new());
     let (a, b) = (server_on(ceremonies.clone()), server_on(ceremonies));
     let mut key = SoftAuthenticator::new(ORIGIN, RP);
-    let start = a.registration_start(handle(1), "alice", &[]).await.unwrap();
+    let start = a
+        .registration_start(handle(1), "alice", NO_PASSKEYS)
+        .await
+        .unwrap();
     let response = RegistrationResponse::parse(&key.register(&start.options)).unwrap();
     b.registration_finish(&response).await.unwrap();
 }
@@ -293,7 +299,7 @@ async fn test_registration_checks_origin_and_rp() {
             key.behavior.rp_id = "evil.example.com".into();
         }
         let start = server
-            .registration_start(handle(1), "alice", &[])
+            .registration_start(handle(1), "alice", NO_PASSKEYS)
             .await
             .unwrap();
         let response = RegistrationResponse::parse(&key.register(&start.options)).unwrap();
@@ -311,7 +317,7 @@ async fn test_responses_parse_strictly() {
     let server = server();
     let mut key = SoftAuthenticator::new(ORIGIN, RP);
     let start = server
-        .registration_start(handle(1), "alice", &[])
+        .registration_start(handle(1), "alice", NO_PASSKEYS)
         .await
         .unwrap();
     let mut json: serde_json::Value =
@@ -440,4 +446,146 @@ fn test_origin_must_be_on_the_rp() {
     assert!(new("https://auth.sid.example.com").is_ok());
     assert!(new("https://example.com").is_err());
     assert!(new("https://notsid.example.com.evil").is_err());
+}
+
+/// A passkey records its key and proof of possession; `mfa` only when the
+/// authenticator verified the user, and never a biometric/PIN method, which
+/// WebAuthn does not reveal (RFC 8176 §2 lists methods actually used).
+#[test]
+fn test_passkey_amr_adds_mfa_only_with_user_verification() {
+    assert_eq!(passkey_amr("swk", true), ["swk", "pop", "mfa"]);
+    assert_eq!(passkey_amr("hwk", true), ["hwk", "pop", "mfa"]);
+    assert_eq!(passkey_amr("swk", false), ["swk", "pop"]);
+    assert_eq!(passkey_amr("hwk", false), ["hwk", "pop"]);
+}
+
+/// A store holding `passkey` under a stored profile of its own.
+async fn store_with(passkey: &mut Credential) -> sid_storage::sqlite::SqliteBackend {
+    use sid_plugin::StorageBackend;
+    let store = sid_storage::sqlite::SqliteBackend::new_in_memory()
+        .await
+        .expect("in-memory SQLite");
+    let profile =
+        sid_core::models::Profile::new(Some(format!("u{}", uuid::Uuid::now_v7().simple())));
+    store
+        .create_profile(&profile, AuditEntry::system("test", "profile").into())
+        .await
+        .unwrap();
+    passkey.profile_id = profile.id;
+    store
+        .create_credential(passkey, AuditEntry::system("test", "passkey").into())
+        .await
+        .unwrap();
+    store
+}
+
+/// A recorded assertion stores the passkey's new counter and yields the
+/// fence of what it stored: the next sign-in verifies against that record,
+/// and the fence names it.
+#[tokio::test]
+async fn test_recorded_use_stores_the_new_record_and_its_fence() {
+    let server = server();
+    let (mut key, mut passkey) = registered(&server).await;
+    let store = store_with(&mut passkey).await;
+    let verified = sign_in(&server, &mut key, std::slice::from_ref(&passkey))
+        .await
+        .unwrap();
+    let updated = verified.updated_data.clone().expect("the counter advanced");
+
+    let fence = record_passkey_use(&store, std::slice::from_ref(&passkey), &verified)
+        .await
+        .unwrap()
+        .expect("recorded");
+    assert_eq!(fence.id, passkey.id);
+    assert_eq!(fence.data.expose(), updated.as_slice());
+    let stored = store.get_credential(passkey.id).await.unwrap().unwrap();
+    assert_eq!(stored.data.expose(), updated.as_slice());
+    assert!(stored.last_used_at.is_some());
+}
+
+/// Of two assertions racing on one key, only the first is recorded: the
+/// second compares against a record that moved and writes nothing, so a
+/// cloned key cannot sign in alongside the original.
+#[tokio::test]
+async fn test_a_lost_race_records_nothing() {
+    let server = server();
+    let (mut key, mut passkey) = registered(&server).await;
+    let store = store_with(&mut passkey).await;
+    let first = sign_in(&server, &mut key, std::slice::from_ref(&passkey))
+        .await
+        .unwrap();
+    let second = sign_in(&server, &mut key, std::slice::from_ref(&passkey))
+        .await
+        .unwrap();
+    assert!(
+        record_passkey_use(&store, std::slice::from_ref(&passkey), &first)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    // Read before the first was recorded, the second compares against the
+    // old record.
+    assert!(
+        record_passkey_use(&store, std::slice::from_ref(&passkey), &second)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let stored = store.get_credential(passkey.id).await.unwrap().unwrap();
+    assert_eq!(stored.data.expose(), first.updated_data.unwrap().as_slice());
+}
+
+/// A passkey revoked after its assertion verified records nothing, with or
+/// without a counter change, so a sign-in in flight cannot finish on it.
+#[tokio::test]
+async fn test_a_revoked_passkey_records_nothing() {
+    let server = server();
+    let (mut key, mut passkey) = registered(&server).await;
+    let store = store_with(&mut passkey).await;
+    // A second credential, so the passkey is not the last primary one.
+    let mut other = stored(passkey.profile_id, Vec::new());
+    other.credential_type = CredentialType::Opaque;
+    store
+        .create_credential(&other, AuditEntry::system("test", "password").into())
+        .await
+        .unwrap();
+    let advanced = sign_in(&server, &mut key, std::slice::from_ref(&passkey))
+        .await
+        .unwrap();
+    key.behavior.counter = Some(0);
+    let unchanged = sign_in(&server, &mut key, std::slice::from_ref(&passkey))
+        .await
+        .unwrap();
+    assert!(unchanged.updated_data.is_none());
+    store
+        .revoke_credential(passkey.id, AuditEntry::system("test", "revoke").into())
+        .await
+        .unwrap();
+    for verified in [&advanced, &unchanged] {
+        assert!(
+            record_passkey_use(&store, std::slice::from_ref(&passkey), verified)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+/// An assertion is recorded only on a passkey among those it was verified
+/// against: another account's list records nothing.
+#[tokio::test]
+async fn test_a_passkey_not_listed_records_nothing() {
+    let server = server();
+    let (mut key, mut passkey) = registered(&server).await;
+    let store = store_with(&mut passkey).await;
+    let verified = sign_in(&server, &mut key, std::slice::from_ref(&passkey))
+        .await
+        .unwrap();
+    let (_, unrelated) = registered(&server).await;
+    assert!(
+        record_passkey_use(&store, std::slice::from_ref(&unrelated), &verified)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }

@@ -198,17 +198,7 @@ impl LoginMethod {
     }
 }
 
-/// `amr` values of a passkey assertion: the key (`hwk`/`swk`, RFC 8176 §2),
-/// proof of possession (`pop`, OpenID EAP ACR Values 1.0), and `mfa` when the
-/// authenticator verified the user. WebAuthn reports only that the user was
-/// verified, not how, so no biometric or PIN value is claimed.
-fn passkey_amr(key_amr: &'static str, user_verified: bool) -> Vec<&'static str> {
-    if user_verified {
-        vec![key_amr, "pop", "mfa"]
-    } else {
-        vec![key_amr, "pop"]
-    }
-}
+use sid_authn::webauthn::passkey_amr;
 
 /// Parse space-separated acr_values string into the highest requested AuthLevel.
 ///
@@ -2277,71 +2267,20 @@ impl AuthServiceImpl {
             .collect())
     }
 
-    /// Record a successful assertion on the passkey that made it: its new
-    /// signature counter and backup state, and when it was used. The counter
-    /// is what later assertions are checked against, so a copy of the key is
-    /// noticed; the write is a compare-and-swap on the credential, so of two
-    /// assertions racing on one key only one is recorded and the other
-    /// sign-in fails, as it does when the credential was revoked meanwhile.
-    /// Returns the RFC 8176 method of the key that asserted.
+    /// Record a successful assertion on the passkey that made it (see
+    /// [`sid_authn::webauthn::record_passkey_use`]): a lost race or a revoked
+    /// passkey fails the sign-in. Returns the RFC 8176 method of the key and
+    /// the fence that proved this sign-in's first factor.
     async fn record_passkey_use(
         &self,
         passkeys: &[Credential],
         verified: &VerifiedAssertion,
-    ) -> Result<&'static str, Status> {
-        let credential = passkeys
-            .iter()
-            .find(|c| c.id == verified.credential)
-            .ok_or_else(authentication_failed)?;
-        let audit = || {
-            MutationContext::from(AuditEntry::user(
-                credential.profile_id.to_string(),
-                "credential.passkey_used",
-                credential.id.0.to_string(),
-            ))
-        };
-        let recorded = match &verified.updated_data {
-            Some(updated) => {
-                self.storage
-                    .replace_credential_data(
-                        credential.id,
-                        credential.data.expose(),
-                        updated,
-                        audit(),
-                    )
-                    .await
-            }
-            None => {
-                self.storage
-                    .mark_credential_used(credential.id, audit())
-                    .await
-            }
-        }
-        .map_err(storage_failure)?;
-        if recorded {
-            Ok(verified.key_amr)
-        } else {
-            Err(authentication_failed())
-        }
-    }
-
-    /// The fence of the passkey that made `verified`, holding what its
-    /// recorded use stored: what proved this sign-in's first factor.
-    fn passkey_fence(
-        passkeys: &[Credential],
-        verified: &VerifiedAssertion,
-    ) -> Result<sid_core::models::CredentialFence, Status> {
-        let credential = passkeys
-            .iter()
-            .find(|c| c.id == verified.credential)
-            .ok_or_else(authentication_failed)?;
-        Ok(sid_core::models::CredentialFence {
-            id: credential.id,
-            data: match &verified.updated_data {
-                Some(updated) => CredentialData::new(updated.clone()),
-                None => credential.data.clone(),
-            },
-        })
+    ) -> Result<(&'static str, sid_core::models::CredentialFence), Status> {
+        sid_authn::webauthn::record_passkey_use(self.storage.as_ref(), passkeys, verified)
+            .await
+            .map_err(storage_failure)?
+            .map(|fence| (verified.key_amr, fence))
+            .ok_or_else(authentication_failed)
     }
 
     /// The result of a passkey assertion finish: a refused assertion counts
@@ -4053,8 +3992,7 @@ impl AuthService for AuthServiceImpl {
                 .await;
             let verified = self.passkey_outcome(finished, p.id, client_ip).await?;
             user_verified = verified.user_verified;
-            key_amr = self.record_passkey_use(&passkeys, &verified).await?;
-            proved_by = Self::passkey_fence(&passkeys, &verified)?;
+            (key_amr, proved_by) = self.record_passkey_use(&passkeys, &verified).await?;
 
             p
         } else {
@@ -4089,8 +4027,7 @@ impl AuthService for AuthServiceImpl {
                 .await;
             let verified = self.passkey_outcome(finished, p.id, client_ip).await?;
             user_verified = verified.user_verified;
-            key_amr = self.record_passkey_use(&passkeys, &verified).await?;
-            proved_by = Self::passkey_fence(&passkeys, &verified)?;
+            (key_amr, proved_by) = self.record_passkey_use(&passkeys, &verified).await?;
 
             p
         };
@@ -6106,7 +6043,7 @@ impl AuthService for AuthServiceImpl {
                         }
                         other => internal("finish passkey step-up", other),
                     })?;
-                let key_amr = self.record_passkey_use(&passkeys, &verified).await?;
+                let (key_amr, _) = self.record_passkey_use(&passkeys, &verified).await?;
 
                 // Determine target level based on user_verified.
                 // user_verified=true → Elevated (phishing-resistant, 2 NIST factors).

@@ -69,7 +69,11 @@ async fn register(
 ) -> (Duration, u64, Vec<u8>) {
     let (t0, a0) = (Instant::now(), ALLOCATIONS.load(Ordering::Relaxed));
     let start = server
-        .registration_start(WebAuthnUserHandle([1; 16]), "alice", &[])
+        .registration_start::<sid_core::models::ProfileId>(
+            WebAuthnUserHandle([1; 16]),
+            "alice",
+            &[],
+        )
         .await
         .unwrap();
     let (mut spent, mut allocs) = (t0.elapsed(), ALLOCATIONS.load(Ordering::Relaxed) - a0);

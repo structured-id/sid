@@ -242,5 +242,8 @@ fn passkey_assurance_follows_policy() {
         established_assurance(&credentials(&[CredentialType::WebAuthn]), false),
         AuthLevel::Basic
     );
-    assert_eq!(established_assurance(&[], true), AuthLevel::Basic);
+    assert_eq!(
+        established_assurance::<ProfileId>(&[], true),
+        AuthLevel::Basic
+    );
 }
