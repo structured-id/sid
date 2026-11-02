@@ -9,9 +9,9 @@
 #![cfg(feature = "grpc")]
 
 use sid_authn::caller::{AtIssuer, authenticate, bearer_token};
+use sid_authn::issuer_state::{IssuerState, IssuerStateUnavailable};
 use sid_authn::jwt::{JwtService, TokenVerifier};
 use sid_authn::revocation_cache::RevocationCache;
-use sid_authn::token_state::{IssuerState, IssuerStateUnavailable};
 use sid_core::models::dpop::DPopBinding;
 use sid_core::models::{Profile, Session};
 use sid_plugin::cache::{CacheError, CacheResult};

@@ -108,23 +108,5 @@ pub async fn current_state(
     })
 }
 
-/// The issuer could not say whether a token is active: the request it was
-/// asked for has no verdict.
-#[derive(Debug, thiserror::Error)]
-#[error("token state unavailable: {0}")]
-pub struct IssuerStateUnavailable(pub String);
-
-/// Where a resource apart from its issuer learns a token's state: the exact
-/// issuer, which applies [`current_state`] to its own records, asked over
-/// its authenticated integration (RFC 7662).
-#[async_trait::async_trait]
-pub trait IssuerState: Send + Sync {
-    /// The exact issuer whose tokens this source answers for.
-    fn issuer(&self) -> &str;
-
-    /// Whether `token` is active at its issuer now.
-    async fn active(&self, token: &str) -> Result<bool, IssuerStateUnavailable>;
-}
-
 #[cfg(test)]
 mod tests;

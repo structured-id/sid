@@ -81,7 +81,7 @@ impl AuthServer {
             authz: upstream,
             token_state: checker
                 .clone()
-                .map(|checker| checker as Arc<dyn sid_authn::token_state::IssuerState>),
+                .map(|checker| checker as Arc<dyn sid_authn::issuer_state::IssuerState>),
             checker,
             login_url: config.login_url.clone(),
         });

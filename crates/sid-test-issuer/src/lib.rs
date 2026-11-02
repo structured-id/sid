@@ -427,6 +427,48 @@ impl TestIssuer {
             .expect("grant");
     }
 
+    /// Let the checker `client_id` inspect tokens issued for every registered
+    /// resource (RFC 7662): the token inspector role on each, a permission of
+    /// its own beside the checker's.
+    pub async fn grant_inspection(&self, client_id: &str) {
+        let role = sid_authz::builtin::ensure_token_inspector_role(self.storage.as_ref())
+            .await
+            .expect("token inspector role");
+        let machine = self
+            .storage
+            .get_machine_user_by_client_id(client_id)
+            .await
+            .expect("machine user lookup")
+            .expect("a registered checker");
+        for resource in &self.resources {
+            self.storage
+                .create_role_assignment(
+                    &RoleAssignment::new(RoleAssignmentPrincipal::MachineUser(machine.id), role.id)
+                        .on_resource(resource.id),
+                    audit("role_assignment.create"),
+                )
+                .await
+                .expect("inspection");
+        }
+    }
+
+    /// Make `profile` the installation's administrator: the built-in role,
+    /// assigned across the installation, as the first claim assigns it.
+    pub async fn administrator(&self, profile: &Profile) {
+        let role =
+            sid_authz::builtin::ensure_installation_administrator_role(self.storage.as_ref())
+                .await
+                .expect("installation administrator role");
+        self.storage
+            .create_role_assignment(
+                &RoleAssignment::new(RoleAssignmentPrincipal::Profile(profile.id), role.id)
+                    .on_installation(),
+                audit("role_assignment.create"),
+            )
+            .await
+            .expect("installation administrator");
+    }
+
     /// An access token of `profile` for the resource `indicator`, from a
     /// stored sign-in; bound to the key `jkt` when given. Its subject is
     /// pairwise, never the ProfileId.

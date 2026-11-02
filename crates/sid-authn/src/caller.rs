@@ -18,7 +18,7 @@ use crate::account_roles::ADMIN_ROLE_CLAIM;
 /// carries no resource-bound grant, so it is never an installation caller.
 const ACR_PAT: &str = "urn:sid:acr:pat";
 /// `acr` of an impersonation token (RFC 8693 token exchange).
-const ACR_IMPERSONATION: &str = "urn:sid:acr:impersonation";
+pub const ACR_IMPERSONATION: &str = "urn:sid:acr:impersonation";
 
 /// What kind of session the caller's token stands for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,7 +137,7 @@ impl<T: CurrentToken + ?Sized> CurrentToken for std::sync::Arc<T> {
 /// view's silence or failure proves nothing either way.
 pub struct AtIssuer {
     pub known: std::sync::Arc<RevocationCache>,
-    pub issuer: std::sync::Arc<dyn crate::token_state::IssuerState>,
+    pub issuer: std::sync::Arc<dyn crate::issuer_state::IssuerState>,
 }
 
 #[async_trait::async_trait]

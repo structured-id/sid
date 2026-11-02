@@ -486,10 +486,40 @@ async fn only_an_undecided_object_action_is_decided_for_a_named_object() {
 
 /// The pending question of an object action at `receiver`.
 fn pending(receiver: Receiver) -> Arc<PendingQuestion> {
+    pending_with(receiver, false)
+}
+
+/// The pending question of an object action at `receiver`, its token found
+/// current at admission when `current`.
+fn pending_with(receiver: Receiver, current: bool) -> Arc<PendingQuestion> {
     Arc::new(PendingQuestion {
         receiver: Arc::new(receiver),
         action: "ops.orgs.ban",
         token: "t".into(),
         confirmation: None,
+        current,
     })
+}
+
+/// An owner is let through only on an owned-object action, whose admission
+/// asked the issuer whether the token is current: on a plain object action,
+/// which asked nothing yet, or an already decided one, letting an owner
+/// through is a wiring fault and is refused.
+#[tokio::test]
+async fn only_an_owned_object_action_lets_its_owner_through() {
+    let f = fixture();
+    let resource = sid_core::models::ResourceId::generate();
+    let mut owned = admitted_call(resource, Decision::Pending(pending_with(f.receiver, true)));
+    allow_owner(&mut owned).expect("the owner of an owned object");
+    assert!(admitted(&owned).is_ok());
+
+    let f = fixture();
+    let mut plain = admitted_call(resource, Decision::Pending(pending(f.receiver)));
+    let status = allow_owner(&mut plain).expect_err("a plain object action");
+    assert_eq!(status.code(), tonic::Code::Internal, "{status:?}");
+    assert!(admitted(&plain).is_err());
+
+    let mut decided = admitted_call(resource, Decision::Allowed);
+    let status = allow_owner(&mut decided).expect_err("already decided");
+    assert_eq!(status.code(), tonic::Code::Internal, "{status:?}");
 }

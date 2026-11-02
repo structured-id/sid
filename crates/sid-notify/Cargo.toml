@@ -19,7 +19,10 @@ path = "src/main.rs"
 sid-core = { workspace = true, features = ["grpc"] }
 sid-plugin = { workspace = true }
 sid-authn = { workspace = true, features = ["grpc"] }
-sid-infra = { workspace = true, features = ["nats", "redis"] }
+# The shared receiver: calls are admitted with tokens for the installation's
+# account API resource, decided by its issuer.
+sid-auth = { workspace = true, default-features = false }
+sid-infra = { workspace = true, features = ["nats"] }
 sid-serve = { workspace = true }
 # Durable job store in this service's own PostgreSQL database.
 sid-storage = { workspace = true, features = ["storage-pg"] }
@@ -89,3 +92,5 @@ tokio-stream = "0.1"
 tempfile = "3"
 # Every served method is called to check the error contract.
 sid-serve = { workspace = true, features = ["error-contract"] }
+# A real issuer the template API's receiver asks, over the network.
+sid-test-issuer = { path = "../sid-test-issuer" }

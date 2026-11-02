@@ -472,7 +472,7 @@ impl ClientCredential {
 
 /// The issuer's own answer on a token, asked with this service's client.
 #[async_trait::async_trait]
-impl sid_authn::token_state::IssuerState for ClientCredential {
+impl sid_authn::issuer_state::IssuerState for ClientCredential {
     fn issuer(&self) -> &str {
         &self.issuer
     }
@@ -480,10 +480,10 @@ impl sid_authn::token_state::IssuerState for ClientCredential {
     async fn active(
         &self,
         token: &str,
-    ) -> Result<bool, sid_authn::token_state::IssuerStateUnavailable> {
+    ) -> Result<bool, sid_authn::issuer_state::IssuerStateUnavailable> {
         self.introspect(token)
             .await
-            .map_err(|e| sid_authn::token_state::IssuerStateUnavailable(e.to_string()))
+            .map_err(|e| sid_authn::issuer_state::IssuerStateUnavailable(e.to_string()))
     }
 }
 

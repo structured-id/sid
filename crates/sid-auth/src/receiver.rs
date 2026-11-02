@@ -94,6 +94,9 @@ struct PendingQuestion {
     /// The confirmation of the call's proof, already admitted by the issuer;
     /// the question carries it again and the issuer confirms that admission.
     confirmation: Option<sid_proto::sid::v1::authn::RequestConfirmation>,
+    /// The issuer reported the token active at admission: its owner may be
+    /// let through without a question ([`allow_owner`]).
+    current: bool,
 }
 
 impl std::fmt::Debug for PendingQuestion {
@@ -113,6 +116,14 @@ pub enum Action {
     /// On one object the request names, decided by the handler with that
     /// object ([`authorize_object`]) before its effect.
     OnObject(&'static str),
+    /// On one object the request names that its owner acts on by the
+    /// service's own rule: the handler lets the owner through
+    /// ([`allow_owner`]) and has any other caller decided for that object
+    /// ([`authorize_object`]). No permission question is asked of the
+    /// owner, so the token's current state is the issuer's answer to this
+    /// service's inspection of it at admission; the service's credential
+    /// holds the inspection permission on its resource for that.
+    OwnedObject(&'static str),
 }
 
 /// A call whose token and proof are verified for this resource: what its
@@ -210,8 +221,23 @@ impl Receiver {
         path: &str,
         headers: &HeaderMap,
         action: &'static str,
+        owned: bool,
     ) -> Result<Admitted, Status> {
         let verified = self.verify(method, path, headers).await?;
+        // An owner is let through without a question, so whether the token is
+        // still current is asked of its issuer now (RFC 7662 §2.2).
+        if owned {
+            match self.checker.introspect(verified.presented.token()).await {
+                Ok(true) => {}
+                Ok(false) => return Err(unauthenticated()),
+                Err(e) => {
+                    return Err(sid_core::grpc_error::refuse::dependency_unavailable(
+                        "token state",
+                        e,
+                    ));
+                }
+            }
+        }
         // No question is asked before the handler names the object, so the
         // issuer admits the call's proof now: a replayed proof reaches no
         // handler.
@@ -238,6 +264,7 @@ impl Receiver {
             action,
             token: verified.presented.token().into(),
             confirmation: verified.confirmation,
+            current: owned,
         };
         Ok(Admitted {
             claims: verified.claims,
@@ -453,7 +480,12 @@ where
                 }
                 Action::OnObject(action) => {
                     receiver
-                        .admit_pending(request.method(), &path, request.headers(), action)
+                        .admit_pending(request.method(), &path, request.headers(), action, false)
+                        .await
+                }
+                Action::OwnedObject(action) => {
+                    receiver
+                        .admit_pending(request.method(), &path, request.headers(), action, true)
                         .await
                 }
             };
@@ -530,6 +562,39 @@ pub async fn authorize_object<T>(
         .ok_or_else(unauthenticated)?;
     admitted.decision = Decision::Allowed;
     Ok(())
+}
+
+/// The verified claims of an owned-object action not yet decided, for the
+/// handler to establish by its own rule whether the caller owns the object
+/// the request names; nothing else is decided from them. Any other call is
+/// refused: its claims are given out only through [`admitted`].
+pub fn owner_claims<T>(request: &tonic::Request<T>) -> Result<&ForwardAuthClaims, Status> {
+    let admitted = request
+        .extensions()
+        .get::<Admitted>()
+        .ok_or_else(unauthenticated)?;
+    match &admitted.decision {
+        Decision::Pending(pending) if pending.current => Ok(&admitted.claims),
+        _ => Err(undecided()),
+    }
+}
+
+/// Admit the call of an owned-object action ([`Action::OwnedObject`]) for
+/// its owner, as the handler established by its own rule: the issuer found
+/// the token current at admission. Any other call is a wiring fault and is
+/// refused: an object action of another kind never established that state.
+pub fn allow_owner<T>(request: &mut tonic::Request<T>) -> Result<(), Status> {
+    let admitted = request
+        .extensions_mut()
+        .get_mut::<Admitted>()
+        .ok_or_else(unauthenticated)?;
+    match &admitted.decision {
+        Decision::Pending(pending) if pending.current => {
+            admitted.decision = Decision::Allowed;
+            Ok(())
+        }
+        _ => Err(undecided()),
+    }
 }
 
 fn undecided() -> Status {

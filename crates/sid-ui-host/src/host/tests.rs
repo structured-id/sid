@@ -111,6 +111,42 @@ async fn a_signed_in_call_reaches_the_api_with_the_session_token() {
     assert!(headers.get(CSRF_HEADER).is_none());
 }
 
+/// A call of a service the API's resource serves in a process of its own
+/// reaches that process, with the same session token: the resource is one,
+/// its processes several. Any other call still reaches the API.
+#[tokio::test]
+async fn a_call_of_a_separately_served_service_reaches_its_own_process() {
+    let f = fixture(memory(), true);
+    let (id, csrf) = signed_in(&f, false).await;
+    let (api, api_seen) = recording_api();
+    let (templates, templates_seen) = recording_api();
+    let host = HostUpstream::new(Arc::new(f.adapter), Some(api))
+        .with_service("sid.v1.admin.NotificationTemplateService", templates);
+    let cookie = format!("{COOKIE}={id}");
+    for path in [
+        "/api/sid.v1.admin.NotificationTemplateService/ListTemplates",
+        &api_path(),
+    ] {
+        let answer = host
+            .clone()
+            .oneshot(call(path, Some(&cookie), Some(&csrf)))
+            .await
+            .unwrap();
+        assert_eq!(grpc_status(&answer), "0", "{path}");
+    }
+    let templates_seen = templates_seen.lock().unwrap();
+    assert_eq!(templates_seen.len(), 1);
+    assert_eq!(
+        templates_seen[0].0,
+        "/sid.v1.admin.NotificationTemplateService/ListTemplates"
+    );
+    assert_eq!(templates_seen[0].1["authorization"], "Bearer access");
+    assert!(templates_seen[0].1.get("cookie").is_none());
+    let api_seen = api_seen.lock().unwrap();
+    assert_eq!(api_seen.len(), 1);
+    assert_eq!(api_seen[0].0, API_METHOD);
+}
+
 /// A call outside the API mount is UNIMPLEMENTED and reaches neither the
 /// adapter nor the API, even signed in: the root path, the transport-named
 /// mount the API path replaced, a longer segment that only starts with
