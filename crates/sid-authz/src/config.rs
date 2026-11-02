@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Configuration for sid-authz standalone binary.
+//! Configuration of an authorization service built on this library.
 
 use std::net::SocketAddr;
 
