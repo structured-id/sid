@@ -26,11 +26,9 @@ use sid_core::{
         UpstreamIdentityId, UpstreamLogin, UpstreamProvider, UpstreamProviderId,
     },
 };
-use sid_plugin::audit::AuditLog;
 use sid_plugin::storage::StorageBackend;
 use sid_plugin::{ClientResourceRegistry, GrantStore, IssuerStore};
 use sqlx::PgPool;
-use std::sync::Arc;
 use uuid::Uuid;
 
 /// Map an insert failure: a unique-key violation means the row (account, identifier,
@@ -276,7 +274,6 @@ pub struct PostgresBackend {
     pool: PgPool,
     #[allow(dead_code)]
     schema: Option<String>,
-    audit_log: Option<Arc<dyn AuditLog>>,
 }
 
 /// The columns an invite row is read with.
@@ -401,20 +398,7 @@ impl PostgresBackend {
         let pool =
             pool_opts.map_err(|e| SidError::Storage(format!("Failed to connect (sqlx): {}", e)))?;
 
-        Ok(Self {
-            pool,
-            schema,
-            audit_log: None,
-        })
-    }
-
-    /// Set the audit log backend for tamper-evident logging.
-    ///
-    /// When set, all write operations (save, delete) will log an audit record
-    /// alongside the data mutation. Audit failures cause the operation to fail.
-    pub fn with_audit_log(mut self, audit_log: Arc<dyn AuditLog>) -> Self {
-        self.audit_log = Some(audit_log);
-        self
+        Ok(Self { pool, schema })
     }
 
     /// Write the mutation's audit record and the work it owes inside its

@@ -4,6 +4,7 @@
 //! harness constructs that backend and runs every scenario against it.
 
 pub mod backend;
+pub mod blob_store;
 pub mod cache;
 pub mod client_registry;
 pub mod credential_store;

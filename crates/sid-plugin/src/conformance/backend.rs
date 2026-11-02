@@ -14,6 +14,7 @@ use uuid::Uuid;
 pub mod admin_claim;
 mod all;
 pub mod application;
+pub mod audit_chain;
 pub mod audit_retention;
 pub mod backup;
 pub mod branding;
@@ -32,6 +33,7 @@ pub mod flow_action;
 pub mod group;
 pub mod job_lock;
 pub mod machine;
+pub mod notification;
 pub mod operation;
 pub mod organization;
 pub mod principal_assignment;
@@ -172,6 +174,20 @@ pub async fn test_profile_create_and_get(backend: &dyn StorageBackend) {
     assert_eq!(retrieved.given_name, profile.given_name);
     assert_eq!(retrieved.family_name, profile.family_name);
     assert_eq!(retrieved.status, profile.status);
+}
+
+/// A profile registered by email alone has no username, and reads back
+/// without one rather than with an empty one.
+pub async fn test_profile_without_username_round_trip(backend: &dyn StorageBackend) {
+    let mut profile = create_test_profile("nousername");
+    profile.username = None;
+    backend
+        .create_profile(&profile, test_audit())
+        .await
+        .unwrap();
+    let retrieved = backend.get_profile(profile.id).await.unwrap().unwrap();
+    assert_eq!(retrieved.username, None);
+    assert_eq!(retrieved.profile_type, profile.profile_type);
 }
 
 pub async fn test_profile_get_by_username(backend: &dyn StorageBackend) {
