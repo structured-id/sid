@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Ceremony state and single-use admissions. Every statement is one atomic
-//! step on its row, and every deadline is the server's `NOW()`.
+//! step on its row, and every deadline is the server's `clock_timestamp()`:
+//! `NOW()` is fixed when the transaction began, so a statement that waited
+//! on a row lock past an expiry would still see the row live. The current
+//! clock is read when the row is reached, its lock held.
 
 use std::time::Duration;
 
@@ -12,6 +15,30 @@ use super::PostgresBackend;
 
 fn failure(what: &str) -> impl FnOnce(sqlx::Error) -> SidError + '_ {
     move |e| SidError::Storage(format!("{what}: {e}"))
+}
+
+impl PostgresBackend {
+    /// A transaction holding the lock of the state row `key`, if it exists.
+    /// A statement whose row lock merely waited is not re-evaluated by
+    /// PostgreSQL when the row is unchanged, so its expiry check would rest
+    /// on a read made before the wait; the check runs after this instead.
+    async fn lock_state(
+        &self,
+        namespace: &str,
+        key: &str,
+        what: &str,
+    ) -> SidResult<sqlx::Transaction<'static, sqlx::Postgres>> {
+        let mut tx = self.pool.begin().await.map_err(failure(what))?;
+        sqlx::query(
+            "SELECT 1 FROM ceremony_states WHERE namespace = $1 AND state_key = $2 FOR UPDATE",
+        )
+        .bind(namespace)
+        .bind(key)
+        .execute(&mut *tx)
+        .await
+        .map_err(failure(what))?;
+        Ok(tx)
+    }
 }
 
 /// `ttl` in seconds, as `make_interval` takes it.
@@ -26,10 +53,10 @@ impl SingleUseAdmissions for PostgresBackend {
         // then takes the key over only from an expired admission.
         let admitted = sqlx::query(
             "INSERT INTO ceremony_states (namespace, state_key, value, expires_at)
-             VALUES ($1, $2, ''::bytea, NOW() + make_interval(secs => $3))
+             VALUES ($1, $2, ''::bytea, clock_timestamp() + make_interval(secs => $3))
              ON CONFLICT (namespace, state_key) DO UPDATE SET
                  value = EXCLUDED.value, expires_at = EXCLUDED.expires_at
-             WHERE ceremony_states.expires_at <= NOW()",
+             WHERE ceremony_states.expires_at <= clock_timestamp()",
         )
         .bind(namespace)
         .bind(key)
@@ -53,13 +80,13 @@ impl SingleUseAdmissions for PostgresBackend {
         // one leaves the row unchanged and no row affected.
         let held = sqlx::query(
             "INSERT INTO ceremony_states (namespace, state_key, value, expires_at)
-             VALUES ($1, $2, $3, NOW() + make_interval(secs => $4))
+             VALUES ($1, $2, $3, clock_timestamp() + make_interval(secs => $4))
              ON CONFLICT (namespace, state_key) DO UPDATE SET
-                 value = CASE WHEN ceremony_states.expires_at <= NOW()
+                 value = CASE WHEN ceremony_states.expires_at <= clock_timestamp()
                               THEN EXCLUDED.value ELSE ceremony_states.value END,
-                 expires_at = CASE WHEN ceremony_states.expires_at <= NOW()
+                 expires_at = CASE WHEN ceremony_states.expires_at <= clock_timestamp()
                                    THEN EXCLUDED.expires_at ELSE ceremony_states.expires_at END
-             WHERE ceremony_states.expires_at <= NOW() OR ceremony_states.value = EXCLUDED.value",
+             WHERE ceremony_states.expires_at <= clock_timestamp() OR ceremony_states.value = EXCLUDED.value",
         )
         .bind(namespace)
         .bind(key)
@@ -84,7 +111,7 @@ impl CeremonyStateStore for PostgresBackend {
     ) -> SidResult<()> {
         sqlx::query(
             "INSERT INTO ceremony_states (namespace, state_key, value, expires_at)
-             VALUES ($1, $2, $3, NOW() + make_interval(secs => $4))
+             VALUES ($1, $2, $3, clock_timestamp() + make_interval(secs => $4))
              ON CONFLICT (namespace, state_key) DO UPDATE SET
                  value = EXCLUDED.value, expires_at = EXCLUDED.expires_at",
         )
@@ -101,22 +128,27 @@ impl CeremonyStateStore for PostgresBackend {
     async fn take_ceremony_state(&self, namespace: &str, key: &str) -> SidResult<Option<Vec<u8>>> {
         // A concurrent delete of the same row waits for this one and then
         // finds nothing, so one taker gets the value.
-        sqlx::query_scalar(
+        let mut tx = self
+            .lock_state(namespace, key, "take ceremony state")
+            .await?;
+        let value = sqlx::query_scalar(
             "DELETE FROM ceremony_states
-             WHERE namespace = $1 AND state_key = $2 AND expires_at > NOW()
+             WHERE namespace = $1 AND state_key = $2 AND expires_at > clock_timestamp()
              RETURNING value",
         )
         .bind(namespace)
         .bind(key)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
-        .map_err(failure("take ceremony state"))
+        .map_err(failure("take ceremony state"))?;
+        tx.commit().await.map_err(failure("take ceremony state"))?;
+        Ok(value)
     }
 
     async fn read_ceremony_state(&self, namespace: &str, key: &str) -> SidResult<Option<Vec<u8>>> {
         sqlx::query_scalar(
             "SELECT value FROM ceremony_states
-             WHERE namespace = $1 AND state_key = $2 AND expires_at > NOW()",
+             WHERE namespace = $1 AND state_key = $2 AND expires_at > clock_timestamp()",
         )
         .bind(namespace)
         .bind(key)
@@ -133,22 +165,28 @@ impl CeremonyStateStore for PostgresBackend {
         value: &[u8],
         ttl: Duration,
     ) -> SidResult<bool> {
-        // A concurrent update of the row waits, then re-evaluates the
-        // condition on the version it left: only the first one applies.
+        // A concurrent update of the row waits on its lock, then evaluates
+        // the condition on the version it left: only the first one applies.
+        let mut tx = self
+            .lock_state(namespace, key, "replace ceremony state")
+            .await?;
         let replaced = sqlx::query(
             "UPDATE ceremony_states
-             SET value = $4, expires_at = NOW() + make_interval(secs => $5)
-             WHERE namespace = $1 AND state_key = $2 AND value = $3 AND expires_at > NOW()",
+             SET value = $4, expires_at = clock_timestamp() + make_interval(secs => $5)
+             WHERE namespace = $1 AND state_key = $2 AND value = $3 AND expires_at > clock_timestamp()",
         )
         .bind(namespace)
         .bind(key)
         .bind(expected)
         .bind(value)
         .bind(seconds(ttl))
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(failure("replace ceremony state"))?
         .rows_affected();
+        tx.commit()
+            .await
+            .map_err(failure("replace ceremony state"))?;
         Ok(replaced == 1)
     }
 
@@ -162,11 +200,11 @@ impl CeremonyStateStore for PostgresBackend {
         // adds exactly one.
         let count: i64 = sqlx::query_scalar(
             "INSERT INTO ceremony_counts (namespace, count_key, count, window_ends)
-             VALUES ($1, $2, 1, NOW() + make_interval(secs => $3))
+             VALUES ($1, $2, 1, clock_timestamp() + make_interval(secs => $3))
              ON CONFLICT (namespace, count_key) DO UPDATE SET
-                 count = CASE WHEN ceremony_counts.window_ends <= NOW() THEN 1
+                 count = CASE WHEN ceremony_counts.window_ends <= clock_timestamp() THEN 1
                               ELSE ceremony_counts.count + 1 END,
-                 window_ends = CASE WHEN ceremony_counts.window_ends <= NOW()
+                 window_ends = CASE WHEN ceremony_counts.window_ends <= clock_timestamp()
                                     THEN EXCLUDED.window_ends
                                     ELSE ceremony_counts.window_ends END
              RETURNING count",
@@ -183,7 +221,7 @@ impl CeremonyStateStore for PostgresBackend {
     async fn read_count(&self, namespace: &str, key: &str) -> SidResult<u64> {
         let count: Option<i64> = sqlx::query_scalar(
             "SELECT count FROM ceremony_counts
-             WHERE namespace = $1 AND count_key = $2 AND window_ends > NOW()",
+             WHERE namespace = $1 AND count_key = $2 AND window_ends > clock_timestamp()",
         )
         .bind(namespace)
         .bind(key)
@@ -207,16 +245,18 @@ impl CeremonyStateStore for PostgresBackend {
     // Use refuses expired rows already; the server's periodic task calls this
     // to reclaim them (`background_tasks::purge_ceremony_state`).
     async fn purge_expired_ceremony_state(&self) -> SidResult<u64> {
-        let states = sqlx::query("DELETE FROM ceremony_states WHERE expires_at <= NOW()")
-            .execute(&self.pool)
-            .await
-            .map_err(failure("purge ceremony state"))?
-            .rows_affected();
-        let counts = sqlx::query("DELETE FROM ceremony_counts WHERE window_ends <= NOW()")
-            .execute(&self.pool)
-            .await
-            .map_err(failure("purge ceremony counts"))?
-            .rows_affected();
+        let states =
+            sqlx::query("DELETE FROM ceremony_states WHERE expires_at <= clock_timestamp()")
+                .execute(&self.pool)
+                .await
+                .map_err(failure("purge ceremony state"))?
+                .rows_affected();
+        let counts =
+            sqlx::query("DELETE FROM ceremony_counts WHERE window_ends <= clock_timestamp()")
+                .execute(&self.pool)
+                .await
+                .map_err(failure("purge ceremony counts"))?
+                .rows_affected();
         Ok(states + counts)
     }
 }
