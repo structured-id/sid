@@ -1,5 +1,11 @@
 # Changelog
 
+## [4.1.2](https://github.com/structured-id/sid/compare/sid-opaque-ke-v4.1.1...sid-opaque-ke-v4.1.2) - 2026-11-02
+
+### Fixed
+
+- *(deps)* require the patched elliptic-curve ([#336](https://github.com/structured-id/sid/pull/336))
+
 ## [4.1.1](https://github.com/structured-id/sid/compare/sid-opaque-ke-v4.1.0...sid-opaque-ke-v4.1.1) - 2026-10-23
 
 ### Other
