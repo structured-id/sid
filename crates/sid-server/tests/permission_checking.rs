@@ -1316,6 +1316,8 @@ applications:
         policy: {{ auth: required, check_authz: true, action: orders.read }}
       - match: {{ path: "/write/**" }}
         policy: {{ auth: required, check_authz: true, action: orders.write }}
+      - match: {{ path: "/open/**" }}
+        policy: {{ auth: required }}
   - name: wiki
     origin: https://wiki.example
     issuer: {issuer}
@@ -1717,6 +1719,52 @@ async fn forward_auth_hands_over_a_bound_token_with_its_confirmation() {
         guard.decide_bound("/write/1", &bound, &write).await,
         Some(403),
         "the Profile may not write"
+    );
+}
+
+/// A route that asks no permission question still has the token's issuer
+/// admit a bound token's proof: the first request is served without any
+/// question, the same proof sent again is refused (RFC 9449 §11.1).
+#[tokio::test]
+async fn forward_auth_has_a_proof_admitted_on_a_route_without_a_question() {
+    let a = asking().await;
+    let verifiers = sid_authz::request_verifier::RequestVerifiers::from_json(&format!(
+        r#"{{"verifiers": [{{"subject": "machine:{}", "resources": ["{}"], "profiles": ["dpop"]}}]}}"#,
+        a.checker.id, a.orders.indicator
+    ))
+    .unwrap();
+    let guard = guard_trusting(&a, secret_authentication(), verifiers).await;
+    let (bound, _) = a.profile_token(&a.orders, Some(TEST_KEY_JKT)).await;
+    let proof = dpop_proof("GET", "https://orders.example/open/1", &bound);
+
+    assert_eq!(
+        guard.decide_bound("/open/1", &bound, &proof).await,
+        Some(200)
+    );
+    assert_eq!(
+        guard.decide_bound("/open/1", &bound, &proof).await,
+        Some(401),
+        "a replayed proof"
+    );
+    assert_eq!(
+        guard.questions(),
+        0,
+        "the route asks no permission question"
+    );
+}
+
+/// The issuer admits a proof only for a verifier it trusts with the
+/// resource's requests: forward auth without that trust gets no admission,
+/// so the bound token is never served.
+#[tokio::test]
+async fn an_untrusted_verifier_gets_no_proof_admitted() {
+    let a = asking().await;
+    let guard = guard(&a, secret_authentication()).await;
+    let (bound, _) = a.profile_token(&a.orders, Some(TEST_KEY_JKT)).await;
+    let proof = dpop_proof("GET", "https://orders.example/open/1", &bound);
+    assert_ne!(
+        guard.decide_bound("/open/1", &bound, &proof).await,
+        Some(200)
     );
 }
 
@@ -2155,6 +2203,63 @@ async fn an_object_action_is_decided_for_its_object_with_current_permission() {
         Code::PermissionDenied,
         "the revoked grant decides nothing"
     );
+}
+
+/// An object action with a key-bound token has its proof admitted before
+/// the handler names the object, so a replay never reaches the handler.
+/// The question the handler asks later is about the same request: the
+/// issuer confirms that admission instead of refusing it as a replay.
+#[tokio::test]
+async fn an_object_action_has_its_proof_admitted_before_its_handler() {
+    let a = asking().await;
+    a.grant(sid_core::models::Role::permission_checker(), &a.orders)
+        .await;
+    let verifiers = sid_authz::request_verifier::RequestVerifiers::from_json(&format!(
+        r#"{{"verifiers": [{{"subject": "machine:{}", "resources": ["{}"], "profiles": ["dpop"]}}]}}"#,
+        a.checker.id, a.orders.indicator
+    ))
+    .unwrap();
+    let mut p = protected_at(&a, serve_issuer(&a, verifiers).await).await;
+    let mut canceller =
+        sid_core::models::Role::new(ProjectId::system(), "orders-canceller", "Orders canceller");
+    canceller.permissions = vec!["orders.cancel".into()];
+    let audit = || sid_core::models::AuditEntry::system("test", "checking").into();
+    a.svc
+        .storage
+        .create_role(&canceller, audit())
+        .await
+        .unwrap();
+    let assignment = sid_core::models::RoleAssignment::new(
+        sid_core::models::RoleAssignmentPrincipal::Profile(a.profile.id),
+        canceller.id,
+    )
+    .on_resource(a.orders.id);
+    a.svc
+        .storage
+        .create_role_assignment(&assignment, audit())
+        .await
+        .unwrap();
+    let (bound, _) = a.profile_token(&a.orders, Some(TEST_KEY_JKT)).await;
+    let dpop = format!("DPoP {bound}");
+    let proof = dpop_proof("POST", &format!("{SERVICE_ORIGIN}{CANCEL}"), &bound);
+
+    assert_eq!(p.call(CANCEL, &dpop, Some(&proof)).await, Code::Ok);
+    assert_eq!(
+        p.call(CANCEL, &dpop, Some(&proof)).await,
+        Code::Unauthenticated,
+        "a replayed proof"
+    );
+    let reached = p.reached.admitted();
+    assert_eq!(reached.len(), 1, "the replay never reached the handler");
+    assert!(
+        p.issuer.targets.lock().unwrap().is_empty(),
+        "no question before the handler names the object"
+    );
+    let mut call = reached_call(reached.into_iter().next().unwrap());
+    sid_auth::receiver::authorize_object(&mut call, "order:7")
+        .await
+        .expect("the same request's question confirms its admission");
+    assert!(sid_auth::receiver::admitted(&call).is_ok());
 }
 
 /// A token whose sign-in ended still verifies by signature at the receiver,
