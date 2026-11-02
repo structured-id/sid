@@ -36,6 +36,7 @@ pub mod organization;
 pub mod principal_assignment;
 pub mod project;
 pub mod provisioning_connector;
+pub mod restart;
 pub mod role;
 pub mod service_binding;
 pub mod session;

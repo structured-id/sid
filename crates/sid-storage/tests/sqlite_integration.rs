@@ -1652,6 +1652,14 @@ async fn two_instances() -> (tempfile::TempDir, SqliteBackend, SqliteBackend) {
 }
 
 #[tokio::test]
+async fn test_commit_survives_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = format!("sqlite://{}", dir.path().join("sid.db").display());
+    let open = || async { SqliteBackend::new(&path).await.unwrap() };
+    common::restart::test_commit_survives_restart(open).await;
+}
+
+#[tokio::test]
 async fn test_job_lock_exclusive_across_instances() {
     let (_dir, a, b) = two_instances().await;
     common::job_lock::test_job_lock_exclusive_across_instances(&a, &b).await;
