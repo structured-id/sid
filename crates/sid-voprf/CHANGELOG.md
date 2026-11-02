@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.6.1](https://github.com/structured-id/sid/compare/sid-voprf-v0.6.0...sid-voprf-v0.6.1) - 2026-11-02
+
+### Fixed
+
+- *(deps)* require the patched elliptic-curve ([#336](https://github.com/structured-id/sid/pull/336))
+
 ## 0.6.0-pre.1 (April 6, 2026)
 * MSRV bumped to 1.85
 * Updated rand_core dependency to 0.9
