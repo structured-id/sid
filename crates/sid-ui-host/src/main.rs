@@ -212,7 +212,10 @@ async fn adapter(key_file: &str) -> anyhow::Result<ApplicationSessions> {
     let store = sid_storage::application_store::ceremony_store(&database)
         .await
         .context("SID_UI_DATABASE_URL")?;
-    tokio::spawn(purge(store.clone()));
+    tokio::spawn(sid_storage::application_store::purge_expired(
+        store.clone(),
+        PURGE_INTERVAL,
+    ));
     // The cache only brings revocation notices sooner; without one, this
     // process learns of none, and every call it forwards is still admitted
     // by its issuer.
@@ -238,18 +241,6 @@ async fn adapter(key_file: &str) -> anyhow::Result<ApplicationSessions> {
         revocation,
         cookie,
     ))
-}
-
-/// Reclaims expired sessions and sign-ins: each is already refused at use,
-/// so a missed round only leaves rows longer.
-async fn purge(store: Arc<dyn sid_plugin::CeremonyStateStore>) {
-    let mut every = tokio::time::interval(PURGE_INTERVAL);
-    loop {
-        every.tick().await;
-        if let Err(e) = store.purge_expired_ceremony_state().await {
-            tracing::warn!(error = %e, "expired sessions not purged");
-        }
-    }
 }
 
 fn required(name: &str) -> anyhow::Result<String> {

@@ -123,9 +123,18 @@ async fn main() -> anyhow::Result<()> {
     // BFF without a client key serves none and needs none.
     let session_store: Arc<dyn sid_plugin::CeremonyStateStore> =
         match (config.bff_database_url(), &account) {
-            (Some(url), _) => sid_storage::application_store::ceremony_store(url)
-                .await
-                .context("BFF database")?,
+            (Some(url), _) => {
+                let store = sid_storage::application_store::ceremony_store(url)
+                    .await
+                    .context("BFF database")?;
+                // Expired sessions, sign-ins and refresh claims are reclaimed
+                // by the BFF that owns the database.
+                tokio::spawn(sid_storage::application_store::purge_expired(
+                    store.clone(),
+                    std::time::Duration::from_secs(60),
+                ));
+                store
+            }
             (None, Some(_)) => anyhow::bail!("a BFF with a client key needs its database"),
             (None, None) => Arc::new(sid_plugin::InProcessCeremonyState::new()),
         };

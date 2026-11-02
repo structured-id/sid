@@ -38,5 +38,18 @@ pub async fn ceremony_store(url: &str) -> SidResult<Arc<dyn CeremonyStateStore>>
     ))
 }
 
+/// Reclaim `store`'s expired records every `interval`, for as long as the
+/// application runs. Each is already refused at use, so a failed round only
+/// leaves rows longer; the application that owns the store runs this.
+pub async fn purge_expired(store: Arc<dyn CeremonyStateStore>, interval: std::time::Duration) {
+    let mut every = tokio::time::interval(interval);
+    loop {
+        every.tick().await;
+        if let Err(e) = store.purge_expired_ceremony_state().await {
+            tracing::warn!(error = %e, "expired ceremony state not purged");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;

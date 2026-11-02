@@ -43,6 +43,36 @@ async fn a_sqlite_store_keeps_its_state_across_a_restart() {
     );
 }
 
+/// The application's purge removes expired rows on its own: after it ran,
+/// nothing expired is left for another purge to find.
+#[cfg(feature = "storage-sqlite")]
+#[tokio::test]
+async fn the_periodic_purge_reclaims_expired_records() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("sqlite:{}", dir.path().join("app.db").display());
+    let store = ceremony_store(&url).await.unwrap();
+    store
+        .put_ceremony_state("app", "gone", b"v", Duration::from_millis(10))
+        .await
+        .unwrap();
+    store
+        .put_ceremony_state("app", "kept", b"v", LONG)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let purge = tokio::spawn(purge_expired(store.clone(), Duration::from_millis(20)));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    purge.abort();
+    assert_eq!(store.purge_expired_ceremony_state().await.unwrap(), 0);
+    assert!(
+        store
+            .read_ceremony_state("app", "kept")
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
 fn database_url() -> String {
     std::env::var("SID_STORAGE_TEST_DATABASE_URL")
         .or_else(|_| std::env::var("DATABASE_URL"))
