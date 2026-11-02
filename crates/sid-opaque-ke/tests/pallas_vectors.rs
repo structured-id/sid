@@ -49,14 +49,14 @@ fn a_run_matches_the_published_vector() {
     let start = ClientRegistration::<PallasCipherSuite>::start(&mut reg_rng, password).unwrap();
     assert_eq!(
         hex(&start.message.serialize()),
-        "3b6c499c59c2a119f4cc6bc4fbe083f7ec0a886196df4a03cabfb63718ac0fa6"
+        "4d0ea205a46bc9962af4cb1bea39a447cdc4e10a513a81e8a25935804665dc35"
     );
     let response =
         ServerRegistration::<PallasCipherSuite>::start(&setup, start.message, b"credential")
             .unwrap();
     assert_eq!(
         hex(&response.message.serialize()),
-        "2b0d5ea31ecb55a9082234102086eba3bde2fefb06808c17f614ab741c55db01e0444568aef18328bf12fa6defbd7629998fc5f548e19815f983e9a0a86fe689"
+        "4f98c1e176ea52f7583da970d349adc2cbfba32428dbff794599732d68f7dd17e0444568aef18328bf12fa6defbd7629998fc5f548e19815f983e9a0a86fe689"
     );
     let finished = start
         .state
@@ -69,7 +69,7 @@ fn a_run_matches_the_published_vector() {
         .unwrap();
     assert_eq!(
         hex(&finished.message.serialize()),
-        "dd77f4c45251e35586db73aafa7f4c0c0cdd2301cc86f09faa2ab76aeb59ba368b6c2814175626750b1dedc6eaa46401a16288d3ce0ca6c1f36159c894c38f3e52171f497804d21a8f9110f22db43718ceda44ff4a8bd83ea730ea0d2b4dc6e910245de87b44aeb1c2ea80f58f85ed22c57309f8a9527c6338d519e224f35b1c"
+        "c0a66841345cfd6f89b7aea9b8ce6e76f89f19103a64ed8a1ca426a08b14282bdcdd983a988eacb03b48988dca2773b4b81cfa187ae50a19f66ce5919b005b5e52171f497804d21a8f9110f22db43718ceda44ff4a8bd83ea730ea0d2b4dc6e9aa73d0d3203b4274ce1de2a1258b443a14e5dd370af546f58a3b91ca0a0de16d"
     );
     let file = ServerRegistration::<PallasCipherSuite>::finish(finished.message);
 
@@ -95,14 +95,14 @@ fn a_run_matches_the_published_vector() {
         .unwrap();
     assert_eq!(
         hex(&done.message.serialize()),
-        "e9338ad92638d99ab8b0152656e232ccb95c980b7b7df7477f661a590397eb2a"
+        "bd726ce8923aeb9f2203c6ece5872d6bc0cba5cdc45fe5771d9dce7465db06c1"
     );
     assert_eq!(
         hex(&done.session_key),
-        "64a7e110934f5191bcd28da4bfe8f76fd9efb8f8f0487a2ac591a6fcd079d04c"
+        "5964d2f724accb16487e0e5a91c2d4e537f8de1cc9e68b71d0133674af70db12"
     );
     assert_eq!(
         hex(&done.export_key),
-        "5f629e93c5ad406ac43c2bcab2ce10640f7e6a3fcde3827ebbb9a7c0171f6f45"
+        "b390e9e1e83e8c049139b750d60b290b77102cac8c3f47d15577f97581411625"
     );
 }

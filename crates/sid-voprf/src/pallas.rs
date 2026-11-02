@@ -2,11 +2,12 @@
 //! suite hashes passwords with.
 //!
 //! Hash-to-curve is Poseidon based, so a Halo2 circuit over the Pallas base
-//! field can recompute it: the password, zero-padded to [`MAX_PASSWORD_LEN`],
-//! is packed into field elements of 31 bytes, hashed with a Poseidon chain to
-//! `u`, and mapped to the first `x = u + offset` (`offset < 2^HTC_TRY_BITS`)
-//! with `y² = x³ + 5`, taking the even root. A circuit that proves statements
-//! about the hashed password must use these functions and parameters.
+//! field can recompute it: [`password_hash`] absorbs the password's length,
+//! then the password packed into field elements of 31 bytes (zero-padded to
+//! [`MAX_PASSWORD_LEN`] when it fits), giving `u`, which is mapped to the first
+//! `x = u + offset` (`offset < 2^HTC_TRY_BITS`) with `y² = x³ + 5`, taking the
+//! even root. A circuit that proves statements about the hashed password must
+//! use these functions and parameters.
 
 use alloc::vec::Vec;
 use core::num::NonZeroU16;
@@ -89,15 +90,50 @@ pub fn poseidon_hash_chain(elements: &[pallas::Base]) -> pallas::Base {
     acc
 }
 
-/// The password hashed to the curve: the point, `u = Poseidon(password)` and
-/// the offset that found it. The scan always makes `2^HTC_TRY_BITS` constant-
-/// time tries, so its duration does not depend on the password (RFC 9380
-/// §10.1).
+/// The domain tag of the password hash: the ASCII bytes of
+/// `SID-PALLAS-PASSWORD-v2` packed as one field element.
+pub fn password_hash_tag() -> pallas::Base {
+    bytes_to_field_elements(b"SID-PALLAS-PASSWORD-v2")[0]
+}
+
+/// The password as the hash absorbs it: zero-padded to [`MAX_PASSWORD_LEN`]
+/// when it fits, so the circuit's fixed buffer packs alike, and as given
+/// otherwise.
+pub fn password_elements(password: &[u8]) -> Vec<pallas::Base> {
+    if password.len() <= MAX_PASSWORD_LEN {
+        let mut padded = [0u8; MAX_PASSWORD_LEN];
+        padded[..password.len()].copy_from_slice(password);
+        bytes_to_field_elements(&padded)
+    } else {
+        bytes_to_field_elements(password)
+    }
+}
+
+/// The password hash `u`: `Poseidon(TAG, L)` with `L` the password's byte
+/// length, then each element of [`password_elements`] absorbed in turn. The
+/// number of elements follows from `L`, so two passwords hash alike only by
+/// a Poseidon collision: neither trailing zero bytes nor a shortened chain
+/// make another password (RFC 9497 §4.6).
+///
+/// # Panics
+/// On a length beyond `u64`, which no input reaches.
+pub fn password_hash(password: &[u8]) -> pallas::Base {
+    let length = u64::try_from(password.len()).expect("a length fits u64");
+    password_elements(password).into_iter().fold(
+        poseidon_hash_2(&[password_hash_tag(), pallas::Base::from(length)]),
+        |acc, element| poseidon_hash_2(&[acc, element]),
+    )
+}
+
+/// The password hashed to the curve: the point, `u = password_hash(password)`
+/// and the offset that found it. The scan always makes `2^HTC_TRY_BITS`
+/// constant-time tries, so its duration does not depend on the password (RFC
+/// 9380 §10.1).
 ///
 /// # Panics
 /// If no offset gives a point, which happens with negligible probability.
 pub fn hash_to_curve_native(password: &[u8]) -> (pallas::Affine, pallas::Base, pallas::Base) {
-    let u = poseidon_hash_chain(&bytes_to_field_elements(password));
+    let u = password_hash(password);
     let b = pallas::Base::from(5u64);
     let mut found = Choice::from(0u8);
     let mut sel_x = pallas::Base::ZERO;
@@ -124,16 +160,6 @@ pub fn hash_to_curve_native(password: &[u8]) -> (pallas::Affine, pallas::Base, p
     let sel_y = pallas::Base::conditional_select(&sel_y, &-sel_y, odd);
     let point = pallas::Affine::from_xy(sel_x, sel_y).unwrap();
     (point, u, sel_offset)
-}
-
-/// The password as the suite hashes it: zero-padded to [`MAX_PASSWORD_LEN`].
-/// A longer password is hashed as given.
-pub fn padded_password(password: &[u8]) -> Vec<u8> {
-    let mut bytes = password.to_vec();
-    if bytes.len() < MAX_PASSWORD_LEN {
-        bytes.resize(MAX_PASSWORD_LEN, 0);
-    }
-    bytes
 }
 
 /// A Pallas point as a VOPRF group element.
@@ -237,7 +263,7 @@ impl Group for PallasGroup {
         if bytes.is_empty() {
             return Err(InternalError::Input);
         }
-        let (point, _u, _offset) = hash_to_curve_native(&padded_password(&bytes));
+        let (point, _u, _offset) = hash_to_curve_native(&bytes);
         Ok(PallasElem(point.to_curve()))
     }
 
@@ -320,11 +346,13 @@ impl Group for PallasGroup {
 }
 
 /// The VOPRF suite: Pallas with Poseidon hash-to-curve and SHA-256 framing.
+/// `v2` is the hash that absorbs the password length; a credential of the
+/// earlier hash is of another suite.
 #[derive(Debug)]
 pub struct PallasVoprf;
 
 impl crate::CipherSuite for PallasVoprf {
-    const ID: &'static str = "Pallas-Poseidon-SHA256";
+    const ID: &'static str = "Pallas-Poseidon-SHA256-v2";
     type Group = PallasGroup;
     type Hash = sha2::Sha256;
 }

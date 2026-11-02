@@ -527,7 +527,7 @@
 //!   a [`CipherSuite`].
 //!
 //! - The `pallas` feature adds the Pallas group and the
-//!   `Pallas-Poseidon-SHA256` suite in the `pallas` module, with the Poseidon
+//!   `Pallas-Poseidon-SHA256-v2` suite in the `pallas` module, with the Poseidon
 //!   hash-to-curve a Halo2 circuit over the Pallas base field can recompute.
 //!
 //! - The `ristretto255` feature enables using [`Ristretto255`] as the

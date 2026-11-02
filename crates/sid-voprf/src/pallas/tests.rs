@@ -8,33 +8,34 @@ fn hex(bytes: &[u8]) -> alloc::string::String {
     bytes.iter().map(|b| alloc::format!("{b:02x}")).collect()
 }
 
-/// The values the published TypeScript client reproduces (its
-/// `hash-to-curve.json` fixture): moving the suite must not change one bit.
+/// The values the proof crate's circuit computes for this password (its
+/// `circuit_vectors` example, `hash-to-curve.json`), which the TypeScript
+/// client reproduces: the suite and the circuit hash alike.
 #[test]
-fn hash_to_curve_matches_the_published_vector() {
+fn hash_to_curve_matches_the_circuit_vector() {
     let (point, u, offset) = hash_to_curve_native(b"Str0ngP@ssword!");
     let coords = point.coordinates().unwrap();
     assert_eq!(
         hex(u.to_repr().as_ref()),
-        "0e06d86167c3e8564a6aed401e3a23650bcd5c43df79350eb279ed55c29dd23d"
+        "41c16d0decf874c6948613891d6c3507646197b4058deede6038eeae2cb6a423"
     );
-    assert_eq!(offset, pallas::Base::ZERO);
+    assert_eq!(offset, pallas::Base::ONE);
     assert_eq!(
         hex(coords.x().to_repr().as_ref()),
-        "0e06d86167c3e8564a6aed401e3a23650bcd5c43df79350eb279ed55c29dd23d"
+        "42c16d0decf874c6948613891d6c3507646197b4058deede6038eeae2cb6a423"
     );
     assert_eq!(
         hex(coords.y().to_repr().as_ref()),
-        "1289644e798c301f400854bc8435147247e6f0e03be397a148b641cb09355e01"
+        "2ce0bbc4ca40ecffa3bfd4efb1772501a78aadb756e8f0405f841ac9aca79338"
     );
 }
 
-/// The OPRF element is the native hash of the padded password, the buffer a
-/// proof commits to, and the DST takes no part in it.
+/// The OPRF element is the native hash of the password, the one a proof
+/// commits to, and the DST takes no part in it.
 #[test]
-fn the_group_hashes_the_padded_password() {
+fn the_group_hashes_the_password() {
     let password = b"Str0ngP@ssword!";
-    let (native, _, _) = hash_to_curve_native(&padded_password(password));
+    let (native, _, _) = hash_to_curve_native(password);
     let a = PallasGroup::hash_to_curve::<sha2::Sha256>(&[password], &[b"dst-1"]).unwrap();
     let b = PallasGroup::hash_to_curve::<sha2::Sha256>(&[password], &[b"dst-2"]).unwrap();
     assert_eq!(a.0, native.to_curve());
@@ -49,13 +50,15 @@ fn an_empty_input_is_refused() {
     assert!(PallasGroup::hash_to_scalar::<sha2::Sha256>(&[b""], &[b"dst"]).is_err());
 }
 
-/// The padded password is the circuit's buffer; a longer one stays as given.
+/// A password that fits is absorbed as the circuit's padded buffer; a longer
+/// one as given.
 #[test]
-fn passwords_are_padded_to_the_circuit_length() {
-    assert_eq!(padded_password(b"abc").len(), MAX_PASSWORD_LEN);
-    assert_eq!(&padded_password(b"abc")[..3], b"abc");
+fn passwords_are_packed_as_the_circuit_packs_them() {
+    let mut padded = [0u8; MAX_PASSWORD_LEN];
+    padded[..3].copy_from_slice(b"abc");
+    assert_eq!(password_elements(b"abc"), bytes_to_field_elements(&padded));
     let long = [b'a'; MAX_PASSWORD_LEN + 2];
-    assert_eq!(padded_password(&long), long);
+    assert_eq!(password_elements(&long), bytes_to_field_elements(&long));
 }
 
 #[test]
@@ -63,6 +66,63 @@ fn field_elements_pack_31_bytes() {
     assert_eq!(bytes_to_field_elements(&[0u8; 128]).len(), 5);
     assert_eq!(bytes_to_field_elements(&[1u8; 31]).len(), 1);
     assert_eq!(bytes_to_field_elements(&[1u8]), [pallas::Base::ONE]);
+}
+
+fn group_point(password: &[u8]) -> pallas::Point {
+    PallasGroup::hash_to_curve::<sha2::Sha256>(&[password], &[b"dst"])
+        .unwrap()
+        .0
+}
+
+/// `value` as one 31-byte little-endian chunk, the unit the password is
+/// packed in.
+fn chunk(value: pallas::Base) -> [u8; 31] {
+    let repr = value.to_repr();
+    assert_eq!(repr[31], 0, "the value fits 31 bytes");
+    repr[..31].try_into().unwrap()
+}
+
+/// A password and the same bytes with a trailing NUL are different inputs:
+/// one OPRF evaluation must not answer for both (RFC 9497 §4.6).
+#[test]
+fn trailing_nul_is_another_password() {
+    assert_ne!(group_point(b"a"), group_point(b"a\0"));
+    let mut padded = b"Str0ngP@ss".to_vec();
+    padded.resize(MAX_PASSWORD_LEN, 0);
+    assert_ne!(group_point(b"Str0ngP@ss"), group_point(&padded));
+}
+
+/// The chain over a long input cannot be shortened: replacing its first two
+/// elements by their hash, which fits one chunk, is another password.
+#[test]
+fn long_input_chain_does_not_compress() {
+    let values: Vec<pallas::Base> = [173u64, 1, 2, 3, 4, 5]
+        .into_iter()
+        .map(pallas::Base::from)
+        .collect();
+    let head = poseidon_hash_2(&[values[0], values[1]]);
+    let long: Vec<u8> = values.iter().flat_map(|v| chunk(*v)).collect();
+    let short: Vec<u8> = core::iter::once(head)
+        .chain(values[2..].iter().copied())
+        .flat_map(chunk)
+        .collect();
+    assert_eq!((long.len(), short.len()), (186, 155));
+    assert_ne!(group_point(&long), group_point(&short));
+}
+
+/// Inputs at the packing and circuit boundaries each hash to their own point.
+#[test]
+fn boundary_lengths_hash_apart() {
+    let lengths = [1usize, 30, 31, 32, 62, 127, 128, 129, 155, 186];
+    let points: Vec<_> = lengths
+        .iter()
+        .map(|&n| group_point(&alloc::vec![b'x'; n]))
+        .collect();
+    for (i, a) in points.iter().enumerate() {
+        for b in &points[i + 1..] {
+            assert_ne!(a, b);
+        }
+    }
 }
 
 #[test]
