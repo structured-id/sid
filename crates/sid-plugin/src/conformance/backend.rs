@@ -12,6 +12,7 @@ use sid_plugin::storage::StorageBackend;
 use uuid::Uuid;
 
 pub mod admin_claim;
+mod all;
 pub mod application;
 pub mod audit_retention;
 pub mod branding;
