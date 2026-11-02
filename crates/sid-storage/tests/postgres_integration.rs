@@ -2245,9 +2245,18 @@ async fn test_commit_survives_restart() {
     common::restart::test_commit_survives_restart(setup).await;
 }
 
-/// `url` with its database replaced by `database`.
+/// `url` with its database replaced by `database`; its connection parameters
+/// stay as they are.
 fn with_database(url: &str, database: &str) -> String {
-    format!("{}/{database}", url.rsplit_once('/').unwrap().0)
+    let mut parsed = url::Url::parse(url).expect("the test database URL parses");
+    parsed.set_path(database);
+    parsed.into()
+}
+
+/// The database `url` names.
+fn database_of(url: &str) -> String {
+    let parsed = url::Url::parse(url).expect("the test database URL parses");
+    parsed.path().trim_start_matches('/').to_owned()
 }
 
 /// Run PostgreSQL client `tool` on `database` of the configured test server.
@@ -2261,7 +2270,7 @@ fn pg_tool(tool: &str, database: &str, args: &[&str], input: Option<&[u8]>) -> V
     let mut command = if url == COMPOSE_DATABASE_URL {
         let mut command = Command::new("docker");
         command.args(["exec", "-i", "sid-test-postgres", tool, "-U", "sid"]);
-        if tool == "createdb" {
+        if matches!(tool, "createdb" | "dropdb") {
             command.arg(database);
         } else {
             command.args(["-d", database]);
@@ -2269,7 +2278,7 @@ fn pg_tool(tool: &str, database: &str, args: &[&str], input: Option<&[u8]>) -> V
         command
     } else {
         let mut command = Command::new(tool);
-        if tool == "createdb" {
+        if matches!(tool, "createdb" | "dropdb") {
             command.args(["--maintenance-db", &url, database]);
         } else {
             command.args(["--dbname", &with_database(&url, database)]);
@@ -2310,16 +2319,17 @@ async fn test_restore_returns_the_backed_up_state() {
         .await
         .unwrap();
     let log = sid_storage::audit_log::PostgresAuditLog::new(live.pool().clone());
-    let source = database_url().rsplit('/').next().unwrap().to_owned();
-    let restored_db = format!("restore_{}", uuid::Uuid::now_v7().simple());
+    let source = database_of(&database_url());
+    let restored_name = format!("restore_{}", uuid::Uuid::now_v7().simple());
+    let restored_db = restored_name.as_str();
     common::backup::test_restore_returns_the_backed_up_state(
         &live,
         &log,
         || async { pg_tool("pg_dump", &source, &["--schema", schema, "-Fc"], None) },
         |dump: Vec<u8>| async move {
-            pg_tool("createdb", &restored_db, &[], None);
-            pg_tool("pg_restore", &restored_db, &[], Some(&dump));
-            let url = with_database(&database_url(), &restored_db);
+            pg_tool("createdb", restored_db, &[], None);
+            pg_tool("pg_restore", restored_db, &[], Some(&dump));
+            let url = with_database(&database_url(), restored_db);
             let restored = PostgresBackend::new(&url, Some(schema.to_owned()))
                 .await
                 .unwrap();
@@ -2328,6 +2338,12 @@ async fn test_restore_returns_the_backed_up_state() {
         },
     )
     .await;
+
+    // The restored store was dropped with the scenario; `--force` ends any
+    // connection its pool has not closed yet.
+    pg_tool("dropdb", restored_db, &["--force"], None);
+    drop(live);
+    drop_schema(schema).await;
 }
 
 #[tokio::test]
