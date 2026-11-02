@@ -681,6 +681,18 @@ CREATE TABLE IF NOT EXISTS operation_results (
 CREATE INDEX IF NOT EXISTS operation_results_retain_until
     ON operation_results (retain_until_ms) WHERE retain_until_ms IS NOT NULL;
 
+-- Short-lived state a ceremony step leaves for the next, and single-use
+-- admissions; live while expires_at_ms (Unix milliseconds) is ahead.
+CREATE TABLE IF NOT EXISTS ceremony_states (
+    namespace     TEXT NOT NULL,
+    state_key     TEXT NOT NULL,
+    value         BLOB NOT NULL,
+    expires_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (namespace, state_key)
+);
+CREATE INDEX IF NOT EXISTS ceremony_states_expires_at
+    ON ceremony_states (expires_at_ms);
+
 -- One row per background job currently held: whoever inserted the row runs
 -- the job until it deletes the row or the lease runs out.
 CREATE TABLE IF NOT EXISTS job_locks (

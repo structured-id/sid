@@ -5,6 +5,7 @@
 
 pub mod backend;
 pub mod cache;
+pub mod ceremony_state;
 pub mod client_registry;
 pub mod credential_store;
 pub mod grant_store;

@@ -346,6 +346,34 @@ mod operation_result_store {
     );
 }
 
+// ─── Ceremony state conformance ───
+
+/// Run ceremony state conformance `scenario`; each one uses namespaces of
+/// its own.
+macro_rules! ceremony_state {
+    ($($scenario:ident),* $(,)?) => {$(
+        #[tokio::test]
+        async fn $scenario() {
+            sid_plugin::conformance::ceremony_state::$scenario(&setup().await).await;
+        }
+    )*};
+}
+
+mod ceremony_state {
+    use super::*;
+
+    ceremony_state!(
+        state_is_taken_once,
+        concurrent_takers_get_it_once,
+        expired_state_is_refused_at_use,
+        put_replaces,
+        replace_applies_only_to_what_was_read,
+        concurrent_replacements_apply_once,
+        key_is_admitted_once,
+        concurrent_admissions_succeed_once,
+    );
+}
+
 // ─── Instance secret conformance ───
 
 /// Run instance secret conformance `scenario` against a fresh database.
