@@ -8,6 +8,10 @@
 // application can link on its own to encrypt its stored fields.
 use sid_keys::KeyManager;
 
+// The backend scenarios name this crate as its users do.
+#[cfg(feature = "conformance")]
+extern crate self as sid_plugin;
+
 pub mod audit;
 pub mod auth;
 pub mod blob_store;

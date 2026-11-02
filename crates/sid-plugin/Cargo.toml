@@ -37,7 +37,7 @@ url = { workspace = true }
 conformance = ["tokio/macros", "tokio/time", "dep:futures", "dep:pasta_curves", "dep:group"]
 
 [dev-dependencies]
-sid-crypto = { workspace = true, features = ["tls-aws-lc", "tls-rustcrypto"] }
+sid-crypto = { workspace = true, features = ["primitives", "tls-aws-lc", "tls-rustcrypto"] }
 # Certificate generation and the TLS peer are confined to HTTPS tests.
 rcgen = "0.14"
 tokio-rustls = { version = "0.26", default-features = false }
