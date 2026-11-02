@@ -53,10 +53,17 @@ jobs:
     permissions:
       contents: read
       packages: write
+    # The CE binary built on the runner links with mold (see ci.yml); on arm64
+    # the target's own linker is the system one, which mold replaces.
+    env:
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C linker-features=-lld -C link-arg=-fuse-ld=mold
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C link-arg=-fuse-ld=mold
     steps:
       - name: Skip arm64 on pull requests
         id: scope
         run: echo "run=${{ github.event_name != 'pull_request' || !matrix.release_only }}" >> "$GITHUB_OUTPUT"
+      - uses: rui314/setup-mold@v1
+        if: steps.scope.outputs.run == 'true' && matrix.host_binary
       - uses: actions/checkout@v7
         if: steps.scope.outputs.run == 'true'
         with:
