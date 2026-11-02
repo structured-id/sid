@@ -13,10 +13,13 @@ use sid_plugin::InstanceSecretStore;
 use sid_plugin::storage::StorageBackend;
 use sid_storage::PostgresBackend;
 
+/// The Compose test server's database.
+const COMPOSE_DATABASE_URL: &str = "postgres://sid:sid_dev@localhost:54399/sid_storage_test";
+
 fn database_url() -> String {
     std::env::var("SID_STORAGE_TEST_DATABASE_URL")
         .or_else(|_| std::env::var("DATABASE_URL"))
-        .unwrap_or_else(|_| "postgres://sid:sid_dev@localhost:54399/sid_storage_test".to_string())
+        .unwrap_or_else(|_| COMPOSE_DATABASE_URL.to_string())
 }
 
 async fn setup() -> PostgresBackend {
@@ -2242,19 +2245,44 @@ async fn test_commit_survives_restart() {
     common::restart::test_commit_survives_restart(setup).await;
 }
 
-/// The test server's own `pg_dump` and `pg_restore`, so their version is the
-/// server's.
-fn in_test_server(tool: &str, args: &[&str], input: Option<&[u8]>) -> Vec<u8> {
+/// `url` with its database replaced by `database`.
+fn with_database(url: &str, database: &str) -> String {
+    format!("{}/{database}", url.rsplit_once('/').unwrap().0)
+}
+
+/// Run PostgreSQL client `tool` on `database` of the configured test server.
+/// The Compose server runs its own client, whose version is the server's; a
+/// server named by URL is reached by the client on `PATH`, which must match
+/// that server's version.
+fn pg_tool(tool: &str, database: &str, args: &[&str], input: Option<&[u8]>) -> Vec<u8> {
     use std::io::Write as _;
     use std::process::{Command, Stdio};
-    let mut child = Command::new("docker")
-        .args(["exec", "-i", "sid-test-postgres", tool, "-U", "sid"])
+    let url = database_url();
+    let mut command = if url == COMPOSE_DATABASE_URL {
+        let mut command = Command::new("docker");
+        command.args(["exec", "-i", "sid-test-postgres", tool, "-U", "sid"]);
+        if tool == "createdb" {
+            command.arg(database);
+        } else {
+            command.args(["-d", database]);
+        }
+        command
+    } else {
+        let mut command = Command::new(tool);
+        if tool == "createdb" {
+            command.args(["--maintenance-db", &url, database]);
+        } else {
+            command.args(["--dbname", &with_database(&url, database)]);
+        }
+        command
+    };
+    let mut child = command
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("docker runs the test server");
+        .unwrap_or_else(|e| panic!("{tool} cannot run: {e}"));
     let mut stdin = child.stdin.take().unwrap();
     if let Some(input) = input {
         stdin.write_all(input).unwrap();
@@ -2287,14 +2315,11 @@ async fn test_restore_returns_the_backed_up_state() {
     common::backup::test_restore_returns_the_backed_up_state(
         &live,
         &log,
-        || async { in_test_server("pg_dump", &["-d", &source, "--schema", schema, "-Fc"], None) },
+        || async { pg_tool("pg_dump", &source, &["--schema", schema, "-Fc"], None) },
         |dump: Vec<u8>| async move {
-            in_test_server("createdb", &[&restored_db], None);
-            in_test_server("pg_restore", &["-d", &restored_db], Some(&dump));
-            let url = format!(
-                "{}/{restored_db}",
-                database_url().rsplit_once('/').unwrap().0
-            );
+            pg_tool("createdb", &restored_db, &[], None);
+            pg_tool("pg_restore", &restored_db, &[], Some(&dump));
+            let url = with_database(&database_url(), &restored_db);
             let restored = PostgresBackend::new(&url, Some(schema.to_owned()))
                 .await
                 .unwrap();
