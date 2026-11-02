@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Pairwise service bindings: one per (profile, scope), allocated on first use.
 
 use chrono::{DateTime, Utc};

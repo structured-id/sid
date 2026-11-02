@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! The one mutation core for role assignments (D050 B, constrained role
 //! administration).
 //!

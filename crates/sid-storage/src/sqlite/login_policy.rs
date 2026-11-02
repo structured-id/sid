@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! The installation's login-policy epoch for the SQLite backend: advanced by
 //! every policy write of the host, checked by every session or code decided
 //! under a policy, both inside the single writer's transaction.

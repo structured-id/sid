@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Session domain model.
 //!
 //! Represents an active user session with scopes, assurance level, and metadata.

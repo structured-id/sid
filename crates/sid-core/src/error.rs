@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Core error types for StructuredID.
 //!
 //! Domain-level errors used across all service crates.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Who may bind a new credential to an existing account.
 //!
 //! Binding needs the lower of the account's highest established assurance and

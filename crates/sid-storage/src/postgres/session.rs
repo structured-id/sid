@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Writing a session row: one statement for every path that stores one.
 
 use sid_core::models::{Session, SessionAuthentication, SessionId};

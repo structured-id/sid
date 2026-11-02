@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! The HTTP form of an issuer's OAuth endpoints: a form-encoded request body
 //! in (RFC 6749 §3.2), the RFC's JSON, status and headers out. The body
 //! travels as `google.api.HttpBody`, the status as `x-http-code` response

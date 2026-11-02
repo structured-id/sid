@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! PBKDF2-HMAC KSF implementations for FIPS cipher suites.
 //!
 //! FIPS 800-132 requires minimum 1,000 iterations.

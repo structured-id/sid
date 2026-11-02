@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Shared in-memory mock storage for authz tests.
 //!
 //! Implements all StorageBackend methods. RBAC/group operations are functional;

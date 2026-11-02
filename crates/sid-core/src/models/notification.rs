@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Notification delivery domain model.
 //!
 //! Core types for sid-notify integration. Notifications are published

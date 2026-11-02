@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Built-in legacy hash verifiers for password migration.
 //!
 //! Supports bcrypt, argon2id, and pbkdf2-sha256 — covering Keycloak, Auth0,

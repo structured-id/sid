@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! A profile's own phones and emails: created once, and one primary per
 //! profile moved in a single write.
 

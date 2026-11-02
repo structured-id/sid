@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! CE Authorization Engine: the fixed RBAC + Cedar decision.
 //!
 //! Pipeline: RBAC role check → Cedar policy evaluation. No graph

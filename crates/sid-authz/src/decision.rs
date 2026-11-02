@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! A permission check and its decision, as [`crate::CeAuthzEngine`] takes
 //! and answers them.
 

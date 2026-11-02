@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Claiming the first administrator of an instance.
 //!
 //! While the instance has no administrator it holds one claim token, shared

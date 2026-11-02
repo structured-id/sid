@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Separation of Duties (SoD) — CE conflict detection.
 //!
 //! CE: warning only. Admin can override.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Account, contact, principal and group writes inside a caller's
 //! transaction, and the directory (SCIM) writes built from them: one
 //! request's changes commit together with its audit entry and owed work.

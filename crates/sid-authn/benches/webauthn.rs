@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Server-side cost of passkey ceremonies: registration (start + finish) and
 //! identifier-first sign-in (start + finish), over an in-memory ceremony
 //! store. Only the relying party's calls are timed; the software

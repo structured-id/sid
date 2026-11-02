@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Durable work on SQLite: enqueue inside the caller's transaction, claims
 //! under the database write lock (`BEGIN IMMEDIATE`) with a lease, outcomes
 //! fenced by the claim generation.

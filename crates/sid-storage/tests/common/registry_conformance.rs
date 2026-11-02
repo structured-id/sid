@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! The client and resource registry conformance harness of this crate's
 //! backends: registration goes through the administrative application API,
 //! each client and resource under an application of its own in the system

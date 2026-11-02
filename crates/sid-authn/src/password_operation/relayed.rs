@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! The relayed cleanup between a credential authority and a separate
 //! evaluator. The credential authority owes an aborted first enrollment's
 //! and a deleted owner's cleanup as an event addressed to its evaluator,

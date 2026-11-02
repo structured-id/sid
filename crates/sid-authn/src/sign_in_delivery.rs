@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! How a sign-in ceremony hands its session's credential to the client:
 //! the configured browser sign-in page gets the HttpOnly session cookie, a
 //! native client the access token in response metadata, never the message.

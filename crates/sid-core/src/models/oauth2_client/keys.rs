@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Public keys a client authenticates with (RFC 7591 §2 `jwks`).
 
 use std::fmt;

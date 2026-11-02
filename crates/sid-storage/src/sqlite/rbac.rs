@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! RBAC operations: Role, Group, GroupMember, RoleAssignment, SoD, CedarPolicy.
 
 use super::{SqliteBackend, col, dt_col, fmt_dt, fmt_dt_opt, uuid_col};

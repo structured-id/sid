@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Private password history, split along its authority boundary:
 //!
 //! - [`HistoryEvaluator`] holds the per-owner VOPRF keys: it prepares epochs

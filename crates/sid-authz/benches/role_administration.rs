@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Latency of constrained role administration (D050 B), P50 and P99, on
 //! SQLite (in memory) and PostgreSQL (port 54399):
 //!

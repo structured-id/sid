@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Writes a directory (SCIM) makes to one user or group: everything a
 //! request changes is applied in one transaction with the request's audit
 //! entry and event, so a crash leaves the whole change or none of it.

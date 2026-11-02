@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! A session's time-bound step-up and its last authentication survive storage.
 
 use chrono::{Duration, Utc};

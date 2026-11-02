@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Subject resolution: the `sub` an application's tokens carry.
 //!
 //! The hop decides it, not the client's `subject_type` metadata: which

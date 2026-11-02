@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Applications and their protected-resource role.
 //!
 //! An application is the managed registration of a product or integration in

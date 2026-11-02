@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! A client's signing key: what a confidential client authenticates with at
 //! its issuer's token endpoint (`private_key_jwt`, RFC 7523 §2.2) and what a
 //! relying party proves its registration with. The private half never leaves

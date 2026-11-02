@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! GDPR Art. 20 data export service (CE).
 //!
 //! Collects profile data into a JSON archive for data portability.

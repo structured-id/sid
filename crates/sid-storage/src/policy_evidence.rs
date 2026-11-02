@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! A password's policy evidence in its credential columns: `zkpp_verified`,
 //! `policy_version` and `zkpp_artifact`. Both backends store and read it here.
 

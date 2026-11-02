@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! OPAQUE password authentication (RFC 9807)
 //!
 //! Multi-curve OPAQUE implementations behind the [`OpaqueOperations`] trait.

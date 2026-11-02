@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Audit retention removes whole months that ended before the cut, never a
 //! month still running on it, and leaves each chain verifiable from the
 //! checkpoint of its last removed record.

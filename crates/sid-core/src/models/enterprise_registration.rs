@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Enterprise registration model for Level 2 federation.
 //!
 //! Enterprises register via direct certificate exchange (no DNS required).

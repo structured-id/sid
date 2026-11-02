@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Directory (SCIM) writes: one request's changes to a user or a group are
 //! applied in one transaction with its audit entry and owed work.
 

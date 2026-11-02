@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! A host's own table beside CE's in one SQL database: its mutation is
 //! finalized like every storage mutation, in its own transaction. Its row
 //! commits only together with the audit record, the operation completion

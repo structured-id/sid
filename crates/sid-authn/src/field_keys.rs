@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! The field-encryption key manager of an authority.
 //!
 //! The master secret lives in a file outside the database (sealed

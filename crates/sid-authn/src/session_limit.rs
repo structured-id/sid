@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Concurrent session limit enforcement.
 //!
 //! Session limits are now enforced atomically in `StorageBackend::create_session_atomic()`

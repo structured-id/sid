@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Branding configurations for the SQLite backend: content in `data`,
 //! status, revision and last change in their columns.
 

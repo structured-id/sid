@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! What a BFF needs to sign users in as a registered confidential web client
 //! (auth/session-management.md, deployment-provisioned BFF connection): one
 //! representation, read from the committed registration. The account API

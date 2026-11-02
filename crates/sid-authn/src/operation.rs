@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Keyed commands over gRPC. A method that promises safe retry takes the
 //! caller's operation key, answers a retry of a completed command with its
 //! recorded result, and commits its completion with its effect.

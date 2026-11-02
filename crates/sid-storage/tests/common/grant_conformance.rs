@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! The grant store conformance harness of this crate's backends: owners are
 //! Profiles, grants are bound to a registered resource.
 

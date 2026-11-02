@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! [`HistoryKeyStore`] scenarios, the history evaluator's key store contract:
 //! keys are durable before first use, one owner domain never sees or resets
 //! another's keys, rotations and preparations agree under concurrency, and

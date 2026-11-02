@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Secrets of the whole instance that every replica must share, stored sealed.
 
 /// A secret the instance creates once and every replica reads back.

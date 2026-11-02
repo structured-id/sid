@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Personal Access Token (PAT) domain model.
 //!
 //! PATs provide API access with scoped permissions. The token value

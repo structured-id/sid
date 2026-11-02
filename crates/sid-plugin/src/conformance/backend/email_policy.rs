@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Email policy revisions: an email key is written only under the active
 //! revision, and keys written before revisions existed stay reserved but
 //! route nobody after the cutover.

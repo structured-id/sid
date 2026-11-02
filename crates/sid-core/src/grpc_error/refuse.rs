@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Refusals every service gives the same way. Each carries `ErrorInfo` and
 //! the detail its code calls for (`BadRequest`, `ResourceInfo`, `RetryInfo`);
 //! an internal cause goes to the log, never to the client.

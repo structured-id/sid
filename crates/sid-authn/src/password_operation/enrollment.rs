@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! The terminal step of a first enrollment. The credential authority admits
 //! a new owner's registration as durable work before the evaluator makes the
 //! owner's key; at the registration's expiry the work runs once:

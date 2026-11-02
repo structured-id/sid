@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Constrained role administration (D050 B).
 //!
 //! Permission to use an application and permission to manage its role

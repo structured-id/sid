@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Completions of keyed commands, committed with their effect.
 
 use async_trait::async_trait;

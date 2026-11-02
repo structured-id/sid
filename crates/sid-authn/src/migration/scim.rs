@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! SCIM 2.0 (RFC 7643/7644) user resource parser.
 //!
 //! Parses SCIM User Resource JSON exports (ListResponse or direct JSON array).

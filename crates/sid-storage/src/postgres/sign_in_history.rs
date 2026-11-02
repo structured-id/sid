@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Sign-in history of local Profiles (`SignInHistoryStore`).
 
 use async_trait::async_trait;

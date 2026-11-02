@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! The harness of the storage conformance scenarios: what reaches past the
 //! trait to an engine, or runs a capability suite on this crate's backends.
 //! The scenarios themselves are `sid_plugin::conformance::backend`.

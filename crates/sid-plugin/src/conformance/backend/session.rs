@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Sessions: a create never replaces one, and recording an authentication
 //! never brings back an ended session or undoes a concurrent authentication.
 

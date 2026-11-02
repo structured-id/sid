@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! [`SignInHistoryStore`] scenarios: what an account's earlier sign-ins
 //! tell the sign-in rules, for any account type. Every scenario works on
 //! accounts it created, so a harness may run them concurrently against one

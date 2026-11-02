@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Claim mapping model for static JWT claim configuration.
 //!
 //! Per-client mapping rules: profile field → JWT claim name,

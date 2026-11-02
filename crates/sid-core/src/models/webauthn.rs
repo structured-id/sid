@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! WebAuthn credential domain model.
 //!
 //! Typed representation of WebAuthn/Passkey credential data.

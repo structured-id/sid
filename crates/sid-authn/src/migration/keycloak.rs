@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Keycloak realm JSON export parser.
 //!
 //! Parses Keycloak's realm export format (Admin Console → Export → Include users).

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! A software WebAuthn authenticator for tests: ES256 keys, `none`
 //! attestation, discoverable credentials, and the Level 3 JSON a browser's
 //! `PublicKeyCredential.toJSON()` returns. Every value a relying party checks

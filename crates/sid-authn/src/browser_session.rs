@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! The IdP browser session: the random secret an authority's browser cookie
 //! holds, the cookie itself, and the same-site relation the sign-in page and
 //! the issuer host must share for the ceremony response to set it. The

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! NIST P-521 OPAQUE provider (FIPS-approved curve).
 //!
 //! Uses `p521::NistP521` as both VOPRF and key exchange group.

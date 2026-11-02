@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! TOTP (RFC 6238): codes, verification and replay refusal.
 //!
 //! HMAC-SHA1 with 6-digit codes and 30-second steps. Seeds are stored sealed

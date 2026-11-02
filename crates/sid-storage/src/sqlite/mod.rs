@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! SQLite storage backend for embedded/dev mode.
 //!
 //! Provides `SqliteBackend` implementing `StorageBackend` trait for:

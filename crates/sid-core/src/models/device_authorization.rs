@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Device Authorization Grant (RFC 8628) domain model.
 //!
 //! Stores device authorization requests: device_code + user_code pairs

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! PostgreSQL row types for sqlx `FromRow` deserialization.
 //!
 //! Each struct maps 1:1 to a PostgreSQL table, using native PG types

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Audit retention for SQLite: the records of months past retention are
 //! deleted, with each chain's checkpoint recorded first (the delete trigger
 //! allows removing records only below the recorded cut).

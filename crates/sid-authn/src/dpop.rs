@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! DPoP (Demonstrating Proof-of-Possession) validation service.
 //!
 //! RFC 9449: validates DPoP proof JWTs and provides JWK thumbprints

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Shared gRPC caller authentication and authorization.
 //!
 //! [`authenticate`] turns the bearer token of a request into a [`Caller`]; the

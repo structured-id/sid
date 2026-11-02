@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! SQLite-based AuditLog implementation with hash chain integrity.
 
 use async_trait::async_trait;

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! [`PrincipalStore`] scenarios: a sign-in principal routes to the one
 //! account holding it, under the key it is held by, for any account type.
 //! Every scenario works on accounts and values it created, so a harness may

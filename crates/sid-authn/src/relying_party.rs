@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! A browser adapter as the confidential web client its installation
 //! registered: the connection details it signs users in and calls its API
 //! under, validated before use. How the details arrive (a delivered bundle, an

@@ -163,7 +163,7 @@ and prover; it does not replace them with reduced-cost fixtures.
 
 ## License
 
-The crates an application embeds (`sid-authn`, `sid-authz`, `sid-storage`, `sid-core`, `sid-plugin`, `sid-keys`) are Apache-2.0: each carries its `LICENSE-APACHE` and `NOTICE`, see [LICENSE-APACHE](LICENSE-APACHE). Copyright 2026 Dmitry Prudnikov, see [NOTICE](NOTICE). Each crate's `Cargo.toml` names its license; everything else, the service composition included, is AGPL-3.0-only, see [LICENSE](LICENSE).
+AGPL-3.0-only, see [LICENSE](LICENSE). Copyright 2026 Dmitry Prudnikov, see [NOTICE](NOTICE). Each crate's `Cargo.toml` names its license: `sid-crypto` and `sid-keys` are Apache-2.0 primitives and carry their own license file.
 
 > Proto definitions (`proto/`) are licensed separately under Apache 2.0 to allow unrestricted integration by third parties.
 

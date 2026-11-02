@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! SCIM 2.0 outbound provisioning domain types.
 //!
 //! Outbound provisioning pushes corporate profile changes to downstream apps

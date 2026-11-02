@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! IP Intelligence — pluggable provider chain for IP classification.
 //!
 //! Enriches `LoginContext` with Tor exit, datacenter, blocklist, and reputation labels

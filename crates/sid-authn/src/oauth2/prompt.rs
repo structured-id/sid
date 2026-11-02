@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! What an authorization request asks of the user's authentication and of
 //! the interaction: OIDC `prompt` and `max_age` (OpenID Connect Core
 //! §3.1.2.1).

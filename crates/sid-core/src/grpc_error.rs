@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! gRPC error model: every error a service returns is a canonical
 //! `google.rpc.Status` carrying a `google.rpc.ErrorInfo`.
 //!

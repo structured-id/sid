@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! The schema of a SQLite database file.
 //!
 //! A file records its schema version in `PRAGMA user_version`. An empty file

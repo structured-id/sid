@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Criterion benchmarks for OPAQUE operations per curve.
 //!
 //! Measures registration and login latency for each supported curve:

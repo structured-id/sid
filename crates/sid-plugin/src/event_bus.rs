@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Event bus abstraction for internal event publishing and subscription.
 //!
 //! All SID binaries publish domain events through the EventBus.

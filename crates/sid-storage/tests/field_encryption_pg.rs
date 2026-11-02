@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Field encryption through the real database.
 //!
 //! The unit tests of `sid-keys` prove the cipher and the key schedule. What

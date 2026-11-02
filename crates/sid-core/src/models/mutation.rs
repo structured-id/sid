@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! What a storage mutation commits besides its own state: the audit record
 //! of the action and the required work it creates, all in one transaction.
 

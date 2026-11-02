@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! The session store of a relying party's browser adapter (BFF): the tokens
 //! its issuer gave it, held server-side under an opaque cookie value, and the
 //! sign-ins it has started and not yet completed.

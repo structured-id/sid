@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! CE access request model — profile requests role access, admin approves/denies.
 //!
 //! 1-step approval. Optional temporary duration with auto-expiry.

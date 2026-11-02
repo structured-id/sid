@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! A profile's closure request, written inside the transaction that moves the
 //! profile's status.
 

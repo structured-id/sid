@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! OTP Session Service: passwordless authentication entry point.
 //!
 //! Every piece of state lives in the shared cache, so a code requested on one

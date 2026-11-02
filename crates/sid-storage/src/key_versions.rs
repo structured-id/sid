@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Stored form of field-encryption key version parameters, shared by backends.
 
 use sid_core::{Error as SidError, Result as SidResult};

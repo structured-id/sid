@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! The installation's login-policy epoch: a host that stores its login
 //! policy advances it in every policy write, and a session or code decided
 //! under a policy commits only while the epoch is still the one it read.

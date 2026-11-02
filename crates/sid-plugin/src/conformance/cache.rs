@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! What every [`CacheBackend`] that offers compare-and-set owes its caller.
 //! Each scenario takes a key prefix of its own, since a real server is shared.
 

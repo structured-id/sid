@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Load measurement of the password-history checker: concurrent checks with
 //! a real KSF, real evaluator DLEQ proofs and a retained history, reporting
 //! the latency distribution (queue wait included), refusals for lack of

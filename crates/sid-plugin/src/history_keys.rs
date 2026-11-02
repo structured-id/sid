@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! The password-history evaluator's own store: per-owner VOPRF keys, sealed,
 //! and the lifecycle that decides which replaced keys stay in use. Keyed by
 //! the owner's history input domain; it holds no account, entry or credential

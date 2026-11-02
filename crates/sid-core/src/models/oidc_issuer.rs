@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Logical OIDC issuers.
 //!
 //! One issuer exists for each issuing authority and recipient organization.

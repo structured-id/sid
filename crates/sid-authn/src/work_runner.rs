@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Storage-backed worker for durable work. It finds pending work in storage
 //! on start and while running (a wake-up only shortens the wait, losing one
 //! strands nothing), runs each item under a lease with bounded concurrency,

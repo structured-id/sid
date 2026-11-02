@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! What an ended session owes, committed with the deletion that ends it.
 
 use super::backchannel_logout::LogoutDelivery;

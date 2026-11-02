@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Groups: a create never replaces a group or duplicates a name in its
 //! project; a description change touches only the description and never
 //! brings back a deleted group.

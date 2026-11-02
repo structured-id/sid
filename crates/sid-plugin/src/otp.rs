@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! OTP Transport plugin traits.
 //!
 //! Extensible OTP delivery: implement `OtpTransport` to add new delivery

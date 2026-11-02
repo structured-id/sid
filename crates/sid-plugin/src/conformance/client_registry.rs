@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! [`ClientResourceRegistry`] scenarios: what issuance reads about clients,
 //! protected resources and the access between them. Every scenario registers
 //! records under fresh identifiers, so a harness may run them concurrently

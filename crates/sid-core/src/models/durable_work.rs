@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Required work committed together with the state change that needs it
 //! (transactional outbox): stored, claimed by one worker at a time under a
 //! fenced lease, retried, and ended in a recorded outcome.

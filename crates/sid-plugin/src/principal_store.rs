@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Principal store capability: the account a sign-in principal routes to.
 //! `Owner` is the account type the authority authenticates; CE's is the
 //! local Profile.

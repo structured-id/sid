@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! [`OperationResultStore`] scenarios: a keyed command completes once per key
 //! within its namespace, its completion resolves later, survives a move to
 //! another store, and is dropped only when its owner asks.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Token revocation cache shared by every replica and service.
 //!
 //! Every revocation is written to the shared cache as a key living as long as

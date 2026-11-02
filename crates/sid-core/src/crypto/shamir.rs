@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Shamir's Secret Sharing over GF(256).
 //!
 //! Splits a secret byte slice into N shares with threshold M,

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! The password-history evaluator's store on PostgreSQL: its own tables
 //! (`history_key_*`), its own migrations and its own pool, so the evaluator can
 //! run against a database and role that reach nothing else.

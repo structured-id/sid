@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! What every [`KeyManager`] owes the fields it protects, whoever holds its
 //! keys. A harness gives the same key source at three moments: `earlier` holds
 //! one version, `current` holds that version and a newer one, `without_earlier`

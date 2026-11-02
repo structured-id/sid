@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! MachineUser, MachineUserCredential, and ImpersonationGrant operations for SQLite backend.
 
 use sid_core::{

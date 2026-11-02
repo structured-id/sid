@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! [`CredentialStore`] scenarios: credentials and their atomic transitions,
 //! password history and WebAuthn user handles, for any account type. Every
 //! scenario works on accounts it created and keys it drew, so a harness may

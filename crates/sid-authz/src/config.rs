@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Configuration of an authorization service built on this library.
 
 use std::net::SocketAddr;

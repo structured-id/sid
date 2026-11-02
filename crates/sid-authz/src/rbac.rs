@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! CE RBAC authorization service.
 //!
 //! Flat role resolution: direct role assignments + group-based assignments.

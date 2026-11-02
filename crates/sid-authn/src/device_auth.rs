@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Device Authorization Grant (RFC 8628).
 //!
 //! Implements the server-side logic for the device authorization flow:

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! The issuer store conformance harness of this crate's backends: issuers
 //! serve the installation organization, so each scenario runs on a backend
 //! of its own (an isolated schema or a fresh database).

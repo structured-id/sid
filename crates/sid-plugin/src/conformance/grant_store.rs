@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! [`GrantStore`] scenarios: sessions, authorization codes and refresh token
 //! families with their atomic transitions, for any account type. Every
 //! scenario works on records it created under fresh keys, so a harness may run

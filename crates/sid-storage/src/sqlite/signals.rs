@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Anomaly events, IP reputation and the IP allowlist for SQLite backend.
 
 use sid_core::{

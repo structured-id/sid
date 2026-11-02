@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Registration source tracking.
 //!
 //! Records how each profile was created — self-signup, invite, admin,

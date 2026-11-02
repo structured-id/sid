@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! The ZKPP server a credential service runs: its proof settings and the
 //! verifying keys made in the background on the service's own OPAQUE setup.
 //! Every credential authority that installs passwords composes it the same

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! OpaqueRouter — dispatches OPAQUE operations to curve-specific providers.
 //!
 //! Holds a **primary** provider (for new registrations) and **verifiers** for

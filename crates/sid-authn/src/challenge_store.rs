@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Ceremony state shared by every replica.
 //!
 //! A ceremony started on one replica is finished on whichever one the next

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! How gRPC services read the caller's access token.
 //!
 //! A DPoP-bound token must not be accepted as a plain bearer token, or a

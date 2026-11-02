@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Provisioning connectors and their credentials for the SQLite backend.
 //! Writes run under the backend's single-writer transaction, so a state
 //! check, a count and the write it allows are one step.

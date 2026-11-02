@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Installation and project configuration: flow configurations put whole
 //! per project and flow type, and the email provider stored as one
 //! configuration or refused with nothing stored.

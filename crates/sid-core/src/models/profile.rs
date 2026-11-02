@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Profile domain model.
 //!
 //! In StructuredID CE: Profile IS the user (no separate User entity).

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! OIDC issuers: one per authority and recipient organization, with their
 //! token-signing keys.
 

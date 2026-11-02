@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Consent and Claim Grant domain models.
 //!
 //! Tracks user consent for data sharing with external sites/services.

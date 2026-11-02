@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Passkey Registration Prompt Service.
 //!
 //! Decides whether and how to prompt users to register a passkey

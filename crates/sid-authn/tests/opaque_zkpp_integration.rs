@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Integration tests for OPAQUE-ZKPP password installation with private
 //! history: the real prover, the VOPRF evaluator, the verifier and the
 //! history checker, end to end, and login through the installation's OPAQUE

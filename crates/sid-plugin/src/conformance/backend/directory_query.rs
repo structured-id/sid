@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! The user directory query contract, run against every backend: the filter
 //! is applied before pagination over the whole directory, the total counts
 //! every match, a user appears once however many of its values match, a

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! The authorization code and refresh token grants of a token endpoint
 //! (RFC 6749 §4.1.3, §6) for any authenticated account type. The host resolves
 //! the client, the target, the proof of possession and the account; this
