@@ -168,7 +168,7 @@ async fn test_pg_provider_pipeline_to_anomaly_detector() {
         Duration::from_secs(60),
     ));
 
-    let detector = AnomalyDetector::ce_default(no_cache());
+    let detector = AnomalyDetector::ce_default(Arc::new(sid_plugin::InProcessCeremonyState::new()));
 
     // Suspicious IP → classify → LoginContext → HardNo (ip_blocklist rule).
     let parsed_ip: IpAddr = ip.parse().unwrap();

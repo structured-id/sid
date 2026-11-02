@@ -1527,6 +1527,12 @@ impl sid_plugin::CeremonyStateStore for MockStorage {
             .count_in_window(namespace, key, window)
             .await
     }
+    async fn read_count(&self, namespace: &str, key: &str) -> SidResult<u64> {
+        self.ceremonies.read_count(namespace, key).await
+    }
+    async fn clear_count(&self, namespace: &str, key: &str) -> SidResult<()> {
+        self.ceremonies.clear_count(namespace, key).await
+    }
     async fn purge_expired_ceremony_state(&self) -> SidResult<u64> {
         self.ceremonies.purge_expired_ceremony_state().await
     }

@@ -298,6 +298,35 @@ pub async fn events_count_within_their_window(store: &dyn CeremonyStateStore) {
     assert_eq!(store.count_in_window(&ns, &key, LONG).await.unwrap(), 1);
 }
 
+/// A count reads as it stands in its window without counting, as 0 once
+/// the window ended; a cleared count starts again at 1.
+pub async fn counts_are_read_and_cleared(store: &dyn CeremonyStateStore) {
+    let (ns, key) = (namespace(), key());
+    assert_eq!(store.read_count(&ns, &key).await.unwrap(), 0);
+    store.count_in_window(&ns, &key, SHORT).await.unwrap();
+    store.count_in_window(&ns, &key, SHORT).await.unwrap();
+    assert_eq!(store.read_count(&ns, &key).await.unwrap(), 2);
+    assert_eq!(
+        store.read_count(&ns, &key).await.unwrap(),
+        2,
+        "reading counts nothing"
+    );
+    tokio::time::sleep(SHORT + Duration::from_millis(500)).await;
+    assert_eq!(
+        store.read_count(&ns, &key).await.unwrap(),
+        0,
+        "the window ended"
+    );
+
+    let other = self::key();
+    store.count_in_window(&ns, &other, LONG).await.unwrap();
+    store.count_in_window(&ns, &other, LONG).await.unwrap();
+    store.clear_count(&ns, &other).await.unwrap();
+    assert_eq!(store.read_count(&ns, &other).await.unwrap(), 0);
+    assert_eq!(store.count_in_window(&ns, &other, LONG).await.unwrap(), 1);
+    store.clear_count(&ns, &self::key()).await.unwrap();
+}
+
 /// Concurrent events are each counted once: the counts handed out are
 /// exactly 1..=n, so a limit of n admits n events across every replica.
 pub async fn concurrent_events_are_counted_once(store: &dyn CeremonyStateStore) {

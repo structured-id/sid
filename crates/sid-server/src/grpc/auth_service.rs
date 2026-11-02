@@ -806,8 +806,8 @@ impl AuthServiceImpl {
             rate_limit_stats: Arc::new(crate::rate_limit::RateLimitStats::new(
                 cache_backend.clone(),
             )),
-            totp_replay: sid_authn::TotpReplayGuard::new(cache_backend.clone()),
-            anomaly_detector: Arc::new(AnomalyDetector::ce_default(cache_backend)),
+            totp_replay: sid_authn::TotpReplayGuard::new(ceremonies.clone()),
+            anomaly_detector: Arc::new(AnomalyDetector::ce_default(ceremonies.clone())),
             ip_intelligence,
             geoip,
             security_policy: SecurityPolicy::ce_default(),

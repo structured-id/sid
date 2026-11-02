@@ -220,7 +220,7 @@ async fn test_pg_allowlist_overrides_tor_in_pipeline() {
     let detector = AnomalyDetector::new(
         sid_authn::anomaly::AnomalyConfig::default(),
         policy,
-        no_cache(),
+        Arc::new(sid_plugin::InProcessCeremonyState::new()),
     );
 
     // Classify: allowlist wins over Tor.

@@ -4,8 +4,9 @@
 //! 9 deterministic rules evaluated in priority order. First match wins.
 //! No scoring, no ML — predictable, auditable behavior.
 
+use sid_core::Result;
 use sid_core::models::security_policy::{CountryMode, NetworkPolicy, NetworkViolationReaction};
-use sid_plugin::cache::{CacheBackend, CacheError, CacheResult};
+use sid_plugin::CeremonyStateStore;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -135,28 +136,23 @@ pub struct LoginContext {
 /// CE Anomaly Detection Service.
 ///
 /// Evaluates 9 binary rules in priority order against login context. The
-/// attempt counters and lockouts live only in the shared cache, so every
-/// replica sees the same state; a cache that cannot answer fails the check
-/// instead of reading as "no attempts".
+/// attempt counters and lockouts are held by the authoritative store, so
+/// every replica sees the same state with or without the shared cache; a
+/// store that cannot answer fails the check instead of reading as "no
+/// attempts".
 pub struct AnomalyDetector {
     config: AnomalyConfig,
     /// Network policy from SecurityPolicy (country, Tor, datacenter restrictions).
     network_policy: NetworkPolicy,
-    /// Shared attempt counters and lockouts.
-    cache: Arc<dyn CacheBackend>,
+    /// Attempt counters and lockouts.
+    store: Arc<dyn CeremonyStateStore>,
 }
 
-fn lockout_key(identity: &str) -> String {
-    format!("rate:brute:lockout:{identity}")
-}
-
-fn attempts_key(identity: &str) -> String {
-    format!("rate:brute:{identity}")
-}
-
-fn ip_key(ip: IpAddr) -> String {
-    format!("rate:ip:{ip}")
-}
+/// Store namespaces: failed attempts and lockouts by identity, sign-in
+/// attempts by source address.
+const ATTEMPTS: &str = "anomaly-attempts";
+const LOCKOUTS: &str = "anomaly-lockout";
+const IP_ATTEMPTS: &str = "anomaly-ip";
 
 /// Haversine distance between two (lat, lon) points in kilometers.
 ///
@@ -190,12 +186,12 @@ impl AnomalyDetector {
     pub fn new(
         config: AnomalyConfig,
         network_policy: NetworkPolicy,
-        cache: Arc<dyn CacheBackend>,
+        store: Arc<dyn CeremonyStateStore>,
     ) -> Self {
         Self {
             config,
             network_policy,
-            cache,
+            store,
         }
     }
 
@@ -204,20 +200,9 @@ impl AnomalyDetector {
         &self.config
     }
 
-    /// The value of a shared counter (0 when absent).
-    async fn counter(&self, key: &str) -> CacheResult<u64> {
-        match self.cache.get(key).await? {
-            None => Ok(0),
-            Some(data) => std::str::from_utf8(&data)
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .ok_or_else(|| CacheError::Serialization(format!("counter {key}"))),
-        }
-    }
-
     /// Create with default CE configuration.
-    pub fn ce_default(cache: Arc<dyn CacheBackend>) -> Self {
-        Self::new(AnomalyConfig::default(), NetworkPolicy::default(), cache)
+    pub fn ce_default(store: Arc<dyn CeremonyStateStore>) -> Self {
+        Self::new(AnomalyConfig::default(), NetworkPolicy::default(), store)
     }
 
     /// Update network policy (e.g., when admin changes SecurityPolicy).
@@ -240,7 +225,7 @@ impl AnomalyDetector {
     /// 7. Credential stuffing (IP rate limit → RequireCaptcha)
     /// 8. New device + new IP (both new, for a profile that signed in before → StepUp)
     /// 9. None matched → Allow
-    pub async fn evaluate(&self, ctx: &LoginContext) -> CacheResult<RuleMatch> {
+    pub async fn evaluate(&self, ctx: &LoginContext) -> Result<RuleMatch> {
         self.evaluate_answered(ctx, Answered::default(), RuleReaction::StepUp)
             .await
     }
@@ -255,7 +240,7 @@ impl AnomalyDetector {
         ctx: &LoginContext,
         answered: Answered,
         new_device: RuleReaction,
-    ) -> CacheResult<RuleMatch> {
+    ) -> Result<RuleMatch> {
         // The first rule that passed the sign-in.
         let mut passed = None;
         // Ends the evaluation at a rule's match, unless the rule passes the
@@ -329,7 +314,7 @@ impl AnomalyDetector {
 
     /// Count a failed attempt for `identity`; the attempt that reaches the
     /// limit starts the lockout. An error means the attempt was not counted.
-    pub async fn record_failed_attempt(&self, identity: &str) -> CacheResult<()> {
+    pub async fn record_failed_attempt(&self, identity: &str) -> Result<()> {
         self.count_attempt(identity).await.map(|_| ())
     }
 
@@ -337,22 +322,28 @@ impl AnomalyDetector {
     /// limit. The count is one atomic step, so of attempts made at once only
     /// the limit get `true`; the one reaching the limit starts the lockout.
     /// An error means the attempt was not counted.
-    pub async fn count_attempt(&self, identity: &str) -> CacheResult<bool> {
+    pub async fn count_attempt(&self, identity: &str) -> Result<bool> {
         let window = Duration::from_secs(self.config.brute_force_window_secs);
-        let count = self.cache.incr(&attempts_key(identity), window).await?;
+        let count = self
+            .store
+            .count_in_window(ATTEMPTS, identity, window)
+            .await?;
         let limit = u64::from(self.config.brute_force_max_attempts);
         if count >= limit {
             let lockout_ttl = Duration::from_secs(self.config.brute_force_lockout_secs);
-            self.cache
-                .set(&lockout_key(identity), b"1", lockout_ttl)
+            self.store
+                .put_ceremony_state(LOCKOUTS, identity, b"1", lockout_ttl)
                 .await?;
         }
         Ok(count <= limit)
     }
 
     /// Count a login attempt from `ip` (credential stuffing).
-    pub async fn record_ip_attempt(&self, ip: IpAddr) -> CacheResult<()> {
-        self.cache.incr(&ip_key(ip), IP_WINDOW).await.map(|_| ())
+    pub async fn record_ip_attempt(&self, ip: IpAddr) -> Result<()> {
+        self.store
+            .count_in_window(IP_ATTEMPTS, &ip.to_string(), IP_WINDOW)
+            .await
+            .map(|_| ())
     }
 
     /// How long a lockout lasts from its start: the most a locked-out client
@@ -362,15 +353,19 @@ impl AnomalyDetector {
     }
 
     /// Whether `identity` is locked out after repeated failed attempts, on
-    /// any replica. A cache failure is an error, not "unlocked".
-    pub async fn lockout_active(&self, identity: &str) -> CacheResult<bool> {
-        self.cache.exists(&lockout_key(identity)).await
+    /// any replica. A store failure is an error, not "unlocked".
+    pub async fn lockout_active(&self, identity: &str) -> Result<bool> {
+        Ok(self
+            .store
+            .read_ceremony_state(LOCKOUTS, identity)
+            .await?
+            .is_some())
     }
 
     /// Lift the lockout of `identity` and forget its failed attempts.
-    pub async fn clear_lockout(&self, identity: &str) -> CacheResult<()> {
-        self.cache.delete(&lockout_key(identity)).await?;
-        self.cache.delete(&attempts_key(identity)).await
+    pub async fn clear_lockout(&self, identity: &str) -> Result<()> {
+        self.store.take_ceremony_state(LOCKOUTS, identity).await?;
+        self.store.clear_count(ATTEMPTS, identity).await
     }
 
     /// Check country restriction rule.
@@ -526,10 +521,7 @@ impl AnomalyDetector {
         })
     }
 
-    async fn check_brute_force_lockout(
-        &self,
-        ctx: &LoginContext,
-    ) -> CacheResult<Option<RuleMatch>> {
+    async fn check_brute_force_lockout(&self, ctx: &LoginContext) -> Result<Option<RuleMatch>> {
         if !self.lockout_active(&ctx.identity).await? {
             return Ok(None);
         }
@@ -540,13 +532,13 @@ impl AnomalyDetector {
         }))
     }
 
-    async fn check_brute_force(&self, ctx: &LoginContext) -> CacheResult<Option<RuleMatch>> {
+    async fn check_brute_force(&self, ctx: &LoginContext) -> Result<Option<RuleMatch>> {
         if !ctx.failed {
             return Ok(None);
         }
         // Warn at 80% of the limit: the attempts before the lockout need a CAPTCHA.
         let warn_threshold = u64::from(self.config.brute_force_max_attempts) * 4 / 5;
-        let count = self.counter(&attempts_key(&ctx.identity)).await?;
+        let count = self.store.read_count(ATTEMPTS, &ctx.identity).await?;
         if count < warn_threshold {
             return Ok(None);
         }
@@ -560,14 +552,11 @@ impl AnomalyDetector {
         }))
     }
 
-    async fn check_credential_stuffing(
-        &self,
-        ctx: &LoginContext,
-    ) -> CacheResult<Option<RuleMatch>> {
+    async fn check_credential_stuffing(&self, ctx: &LoginContext) -> Result<Option<RuleMatch>> {
         let Some(ip) = ctx.ip else {
             return Ok(None);
         };
-        let count = self.counter(&ip_key(ip)).await?;
+        let count = self.store.read_count(IP_ATTEMPTS, &ip.to_string()).await?;
         if count < u64::from(self.config.credential_stuffing_threshold) {
             return Ok(None);
         }

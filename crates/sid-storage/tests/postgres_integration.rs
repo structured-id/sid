@@ -429,6 +429,7 @@ mod ceremony_state {
         concurrent_admissions_succeed_once,
         events_count_within_their_window,
         concurrent_events_are_counted_once,
+        counts_are_read_and_cleared,
         admission_is_confirmed_only_to_its_holder,
         concurrent_holders_admit_once,
     );

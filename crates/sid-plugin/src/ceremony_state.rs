@@ -76,6 +76,13 @@ pub trait CeremonyStateStore: SingleUseAdmissions {
     /// Concurrent events on any replica are each counted exactly once.
     async fn count_in_window(&self, namespace: &str, key: &str, window: Duration) -> Result<u64>;
 
+    /// The count under `key` in its current window, counting nothing: 0 when
+    /// nothing was counted or its window has ended.
+    async fn read_count(&self, namespace: &str, key: &str) -> Result<u64>;
+
+    /// Forget the count under `key`: the next event opens a new window at 1.
+    async fn clear_count(&self, namespace: &str, key: &str) -> Result<()>;
+
     /// Drop every state and admission expired by now. Returns how many.
     async fn purge_expired_ceremony_state(&self) -> Result<u64>;
 }
@@ -220,6 +227,23 @@ impl CeremonyStateStore for InProcessCeremonyState {
             .checked_add(1)
             .ok_or_else(|| sid_core::Error::Internal(format!("count of {key} overflows")))?;
         Ok(entry.0)
+    }
+
+    async fn read_count(&self, namespace: &str, key: &str) -> Result<u64> {
+        let now = std::time::Instant::now();
+        let counts = self.counts.lock().unwrap_or_else(|p| p.into_inner());
+        Ok(counts
+            .get(&(namespace.into(), key.into()))
+            .filter(|(_, ends)| *ends > now)
+            .map_or(0, |(count, _)| *count))
+    }
+
+    async fn clear_count(&self, namespace: &str, key: &str) -> Result<()> {
+        self.counts
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&(namespace.into(), key.into()));
+        Ok(())
     }
 
     async fn purge_expired_ceremony_state(&self) -> Result<u64> {

@@ -180,6 +180,30 @@ impl CeremonyStateStore for PostgresBackend {
         u64::try_from(count).map_err(|_| SidError::Storage(format!("count of {key} is {count}")))
     }
 
+    async fn read_count(&self, namespace: &str, key: &str) -> SidResult<u64> {
+        let count: Option<i64> = sqlx::query_scalar(
+            "SELECT count FROM ceremony_counts
+             WHERE namespace = $1 AND count_key = $2 AND window_ends > NOW()",
+        )
+        .bind(namespace)
+        .bind(key)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(failure("read count"))?;
+        let count = count.unwrap_or(0);
+        u64::try_from(count).map_err(|_| SidError::Storage(format!("count of {key} is {count}")))
+    }
+
+    async fn clear_count(&self, namespace: &str, key: &str) -> SidResult<()> {
+        sqlx::query("DELETE FROM ceremony_counts WHERE namespace = $1 AND count_key = $2")
+            .bind(namespace)
+            .bind(key)
+            .execute(&self.pool)
+            .await
+            .map_err(failure("clear count"))?;
+        Ok(())
+    }
+
     async fn purge_expired_ceremony_state(&self) -> SidResult<u64> {
         let states = sqlx::query("DELETE FROM ceremony_states WHERE expires_at <= NOW()")
             .execute(&self.pool)

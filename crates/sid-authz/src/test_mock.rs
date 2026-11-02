@@ -370,6 +370,12 @@ impl sid_plugin::CeremonyStateStore for MockStorage {
     async fn count_in_window(&self, _: &str, _: &str, _: std::time::Duration) -> Result<u64> {
         unimplemented!()
     }
+    async fn read_count(&self, _: &str, _: &str) -> Result<u64> {
+        unimplemented!()
+    }
+    async fn clear_count(&self, _: &str, _: &str) -> Result<()> {
+        unimplemented!()
+    }
     async fn purge_expired_ceremony_state(&self) -> Result<u64> {
         unimplemented!()
     }

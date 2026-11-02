@@ -223,6 +223,32 @@ impl CeremonyStateStore for SqliteBackend {
         u64::try_from(count).map_err(|_| SidError::Storage(format!("count of {key} is {count}")))
     }
 
+    async fn read_count(&self, namespace: &str, key: &str) -> SidResult<u64> {
+        let count: Option<i64> = sqlx::query_scalar(
+            "SELECT count FROM ceremony_counts
+             WHERE namespace = ? AND count_key = ? AND window_ends_ms > ?",
+        )
+        .bind(namespace)
+        .bind(key)
+        .bind(now_ms())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(failure("read count"))?;
+        let count = count.unwrap_or(0);
+        u64::try_from(count).map_err(|_| SidError::Storage(format!("count of {key} is {count}")))
+    }
+
+    async fn clear_count(&self, namespace: &str, key: &str) -> SidResult<()> {
+        self.ceremony_write(
+            "clear count",
+            sqlx::query("DELETE FROM ceremony_counts WHERE namespace = ? AND count_key = ?")
+                .bind(namespace)
+                .bind(key),
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn purge_expired_ceremony_state(&self) -> SidResult<u64> {
         let now = now_ms();
         let states = self

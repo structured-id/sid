@@ -149,6 +149,12 @@ impl sid_plugin::CeremonyStateStore for DownCeremonies {
     ) -> sid_core::Result<u64> {
         down()
     }
+    async fn read_count(&self, _: &str, _: &str) -> sid_core::Result<u64> {
+        down()
+    }
+    async fn clear_count(&self, _: &str, _: &str) -> sid_core::Result<()> {
+        down()
+    }
     async fn purge_expired_ceremony_state(&self) -> sid_core::Result<u64> {
         down()
     }

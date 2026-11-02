@@ -720,6 +720,12 @@ impl CeremonyStateStore for FencedOff {
     ) -> sid_core::Result<u64> {
         self.inner.count_in_window(namespace, key, window).await
     }
+    async fn read_count(&self, namespace: &str, key: &str) -> sid_core::Result<u64> {
+        self.inner.read_count(namespace, key).await
+    }
+    async fn clear_count(&self, namespace: &str, key: &str) -> sid_core::Result<()> {
+        self.inner.clear_count(namespace, key).await
+    }
     async fn purge_expired_ceremony_state(&self) -> sid_core::Result<u64> {
         self.inner.purge_expired_ceremony_state().await
     }
