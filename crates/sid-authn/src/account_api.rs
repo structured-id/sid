@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! The account API's side of the account integration
 //! (auth/session-management.md, API authority and identity boundary): the
 //! access tokens it accepts besides the installation's own session tokens,

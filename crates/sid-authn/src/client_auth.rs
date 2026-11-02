@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! How a token request authenticates its client (RFC 6749 §2.3): which method
 //! it used and the credential it presented, before any lookup.
 

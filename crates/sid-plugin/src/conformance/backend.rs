@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! The scenarios of the complete [`StorageBackend`] contract. Each takes
 //! `&dyn StorageBackend`, so whatever backend a harness constructs runs the
 //! same contract.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! What an authentication must have achieved before a session is admitted or
 //! an authorization code issued over it: a minimum assurance, the methods it
 //! used (`amr`, RFC 8176) and how long ago it happened. A host reads them

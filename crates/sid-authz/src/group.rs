@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! CE flat group service.
 //!
 //! Groups are flat in CE — no parent-child hierarchy, no transitive membership.

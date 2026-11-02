@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Consents: a create never replaces one, a claim decision never brings back
 //! a revoked or disconnected consent, and concurrent decisions keep one
 //! active grant per claim.

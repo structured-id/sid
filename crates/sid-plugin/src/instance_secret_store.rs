@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Instance secret capability: the sealed secrets every replica of one
 //! authority shares, created once by the first replica to start.
 

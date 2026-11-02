@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! The fixed sign-in rules a verified credential passes before a session is
 //! created, for any authenticated account type: anomaly detection over the
 //! account's sign-in history and the client address, then the login

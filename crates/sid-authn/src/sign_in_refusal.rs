@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! How every authority answers a refused password sign-in: one answer for
 //! every failed credential, and the reason in `ErrorInfo` with what the
 //! client must do as typed details, never in the status message.

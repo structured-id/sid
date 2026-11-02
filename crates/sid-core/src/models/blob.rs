@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Encrypted profile blob types for blind vault storage.
 //!
 //! Blobs are opaque ciphertext (typically <1MB) encrypted by their owner (the

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Password history through the operations outside the credential store
 //! capability, run against every backend: archive transfer, the first
 //! history of a registration, a password reset's commit, age retention over

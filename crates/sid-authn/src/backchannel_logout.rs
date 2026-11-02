@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! OIDC Back-Channel Logout (OpenID Connect Back-Channel Logout 1.0).
 //!
 //! Every ended session issued to a client owes that client a `logout_token`

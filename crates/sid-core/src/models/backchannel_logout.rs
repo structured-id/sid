@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Back-channel logout owed to a relying party for an ended session.
 //!
 //! It is durable work: delivered by a worker, retried, and kept as a failed

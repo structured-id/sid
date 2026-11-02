@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! A deleted owner's history keys. The transaction that deletes an owner
 //! owes its purge ([`OwnerPurge::work`]) as durable work; the work runs once
 //! and has the evaluator destroy the owner's keys and lifecycle and fence

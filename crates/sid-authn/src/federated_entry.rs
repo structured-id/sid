@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Federated entry: this installation as the registered recipient of a
 //! trusted issuer's selected-Profile issuance, through the authorization
 //! code flow (OpenID Connect Core 1.0 §3.1).

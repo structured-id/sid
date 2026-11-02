@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! OPAQUE-ZKPP: Pallas OPAQUE registration with a zero-knowledge proof that
 //! the password satisfies policy and yields the operation's history tags.
 //!

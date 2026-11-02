@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Roles: a create never replaces one and never duplicates a key or a name in
 //! its project; an update applies only over the role it read and never
 //! brings back a deleted role. A role assignment, once stored, is never

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! CE Anomaly Detection — hardcoded binary rules.
 //!
 //! 9 deterministic rules evaluated in priority order. First match wins.

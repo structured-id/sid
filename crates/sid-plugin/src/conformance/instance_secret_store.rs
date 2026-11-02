@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! [`InstanceSecretStore`] scenarios: the first stored value of a secret is
 //! the one every replica reads. Secrets are store-wide, so each scenario runs
 //! against a store of its own that has none stored yet.

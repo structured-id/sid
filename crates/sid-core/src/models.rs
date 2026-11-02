@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Domain models for StructuredID.
 
 /// `FromStr` accepting exactly the values `as_str` writes; anything else is

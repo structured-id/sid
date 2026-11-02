@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Device authorization requests (RFC 8628): stored whole and never
 //! replaced, decided once, polled no faster than their interval, and
 //! redeemed for tokens exactly once.

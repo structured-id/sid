@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! JWT Service — EdDSA (Ed25519) access tokens and OIDC ID tokens.
 //!
 //! Handles signing, validation, and JWK Set generation for StructuredID.

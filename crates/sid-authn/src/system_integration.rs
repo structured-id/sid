@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! The installation's account integration (auth/session-management.md,
 //! system account integration): SID's own account UI is an application of the
 //! installation, provisioned automatically in the ordinary Application

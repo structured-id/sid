@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Provisioning connectors and their credentials: a create never replaces,
 //! every change is a compare-and-swap on the state or revision it read, the
 //! usable-credential limit holds under concurrent adds, and a credential is

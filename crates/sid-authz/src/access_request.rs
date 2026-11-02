@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! CE access request workflow.
 //!
 //! Types are defined in `sid_core::models::access_request`.

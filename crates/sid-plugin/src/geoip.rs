@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! GeoIP Provider — pluggable IP-to-location resolution.
 //!
 //! Enriches `LoginContext.country` (and lat/lon for impossible travel)

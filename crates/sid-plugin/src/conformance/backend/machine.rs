@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Machine users and their credentials: a create never replaces, and a
 //! lifecycle change or a rotation never undoes a concurrent one.
 

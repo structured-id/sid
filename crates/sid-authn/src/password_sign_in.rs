@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Password sign-in (OPAQUE, RFC 9807 §6) for any authenticated account type.
 //! The host resolves the principal, keeps the lockout, opens the stored
 //! password and reads the account; this module keeps the two-step ceremony,

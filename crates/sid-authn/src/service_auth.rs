@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! A service authenticating as itself with an access token it obtained
 //! through OAuth client credentials for one protected API of its issuer,
 //! such as the authorization API a permission checker calls (D054).

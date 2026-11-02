@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Recovery key derivation and data_key encryption/decryption.
 //!
 //! Flow: BIP-39 mnemonic → PBKDF2(600K) → HKDF → AES-256-GCM key

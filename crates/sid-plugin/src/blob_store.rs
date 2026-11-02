@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Blob store abstraction for encrypted profile blobs (blind vault).
 //!
 //! Blobs are opaque ciphertext — the storage layer never decrypts them.

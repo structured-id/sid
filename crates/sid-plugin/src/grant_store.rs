@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Grant store capability: the state an authorization server keeps for its
 //! authenticated accounts: sessions, authorization codes and refresh token
 //! families, with their atomic transitions. `Owner` is the account type the

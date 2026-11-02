@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! gRPC AuthzService implementation.
 //!
 //! CE authorization: the fixed RBAC + Cedar ABAC engine.

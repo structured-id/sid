@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! GeoIP Resolution — priority chain with cache.
 //!
 //! Resolves IP addresses to geographic locations for anomaly detection.

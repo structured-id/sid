@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! One entry point to the complete storage contract: a harness names a function
 //! that builds its backend and gets one test per scenario, each on a backend of
 //! its own.

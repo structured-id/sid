@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Credential store capability: the authentication factors of an
 //! authority's accounts, their password history and their atomic
 //! transitions. `Owner` is the account type the authority authenticates;

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Durable work capability: required work stored, claimed by one worker at a
 //! time under a fenced lease, retried, and ended in a recorded outcome.
 //!

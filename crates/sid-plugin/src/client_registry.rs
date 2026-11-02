@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Client and resource registry capability: what issuance and target
 //! selection read about OAuth clients, protected resources and the access
 //! between them. A host that keeps only authorization-server state provides

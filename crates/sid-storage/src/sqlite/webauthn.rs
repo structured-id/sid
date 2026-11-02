@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! WebAuthn user handles: one per Profile and relying party. The write runs
 //! in a `BEGIN IMMEDIATE` transaction, so concurrent first enrollments of a
 //! Profile are serialized and agree on one handle.

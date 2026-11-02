@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Private password history on SQLite: the credential service's epoch
 //! descriptors and retained entries, and the evaluator's own key store
 //! ([`SqliteHistoryKeyStore`], tables `history_key_*`) in the same embedded

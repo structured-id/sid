@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! A protected resource's authentication of a machine user calling it with
 //! an access token it obtained through OAuth client credentials.
 //!

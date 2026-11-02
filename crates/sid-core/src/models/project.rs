@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Project domain model.
 //!
 //! Project = container for related applications (OAuth2 clients)

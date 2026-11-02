@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Generic OIDC Provider Client.
 //!
 //! Implements `UpstreamIdpProvider` for any standard OIDC provider, and for

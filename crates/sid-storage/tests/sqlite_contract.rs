@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! The complete storage contract on SQLite through its one entry point: what a
 //! backend outside this crate writes to run it.
 

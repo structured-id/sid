@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Authorization code domain model.
 //!
 //! Short-lived authorization codes for OAuth2 code flow.

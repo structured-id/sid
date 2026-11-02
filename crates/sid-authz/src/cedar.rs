@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Cedar Policy Engine integration.
 //!
 //! CE: hardcoded Cedar evaluator. ABAC conditions via context map.

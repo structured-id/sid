@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Authentication of an inbound SCIM provisioning connector.
 //!
 //! A connector proves itself in one of two ways, each with its own kind of

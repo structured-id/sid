@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Credential secrets stored through the key manager, and the OPAQUE
 //! password records sign-in opens from their sealed form.
 //!

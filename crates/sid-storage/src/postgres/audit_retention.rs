@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Monthly audit partitions: created ahead of their month, and removed whole
 //! once their month is past retention, with a chain checkpoint left behind.
 

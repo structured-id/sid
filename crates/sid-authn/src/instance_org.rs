@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! The installation's own organization.
 //!
 //! A CE installation is one implicit Community organization, created by the

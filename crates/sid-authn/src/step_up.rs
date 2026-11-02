@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Step-up authentication orchestration.
 //!
 //! Evaluates whether a session's current assurance level meets requirements

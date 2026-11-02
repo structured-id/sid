@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Multi-valued email contact for a Profile.
 //!
 //! Replaces scalar `Profile.email` / `Profile.email_verified` with a 1:N table.

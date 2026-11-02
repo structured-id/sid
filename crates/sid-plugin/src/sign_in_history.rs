@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Sign-in history capability: the facts about an account's earlier
 //! sign-ins that the fixed CE sign-in rules read and record. `Owner` is the
 //! account type the authority authenticates; CE's is the local Profile.

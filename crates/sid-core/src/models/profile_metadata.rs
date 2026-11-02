@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Profile metadata domain model.
 //!
 //! CE: free-form key-value pairs. No schema validation.

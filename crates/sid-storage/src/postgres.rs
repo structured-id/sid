@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! PostgreSQL storage backend (sqlx)
 //!
 //! Fully async, non-blocking implementation for all StructuredID CRUD operations.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Auth0 Management API export parser.
 //!
 //! Parses Auth0 user export JSON (Management API → GET /api/v2/users or bulk export job).

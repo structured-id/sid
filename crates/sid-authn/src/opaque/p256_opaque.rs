@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! NIST P-256 OPAQUE provider (FIPS-approved curve).
 //!
 //! Uses `p256::NistP256` as both VOPRF and key exchange group.

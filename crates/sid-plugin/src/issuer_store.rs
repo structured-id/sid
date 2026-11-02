@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Issuer store capability: the OIDC issuers a token service signs as and
 //! their signing keys. A host that keeps only authorization-server state
 //! provides this without the rest of [`crate::StorageBackend`].

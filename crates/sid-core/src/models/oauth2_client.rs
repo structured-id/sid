@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! OAuth2 Client domain model.
 //!
 //! Represents a registered OAuth2/OIDC client (relying party).

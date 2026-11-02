@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Zitadel gRPC export parser.
 //!
 //! Parses Zitadel user export JSON (exported via Management API or Admin API).

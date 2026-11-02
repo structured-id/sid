@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Writing a refresh token row: one statement for every path that stores one.
 
 use sid_core::Result as SidResult;

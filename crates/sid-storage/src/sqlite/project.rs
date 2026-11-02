@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Project and OAuth2Client operations for SQLite backend.
 
 use sid_core::{

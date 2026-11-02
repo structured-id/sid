@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Recovery codes: CE built-in fallback MFA, 10 one-time codes for emergency
 //! account access. Recovery codes are NOT considered a security factor for
 //! policy purposes (classified as `PhishingResistance::Fallback`).

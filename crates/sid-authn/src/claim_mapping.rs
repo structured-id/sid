@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Claim mapping resolution engine.
 //!
 //! Resolves static YAML claim mappings against profile data,

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! High-entropy bearer secrets SID issues to non-human callers (machine user
 //! client secrets, provisioning connector credentials): shown once, stored
 //! only as a verifier.

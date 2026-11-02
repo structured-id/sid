@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 
 use chrono::{Duration, Utc};
 use sid_core::grpc_error::extract_error_info;

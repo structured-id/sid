@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Private password history: the owner's
 //! history epochs (one VOPRF key and KSF configuration each) and the retained
 //! KSF outputs of accepted passwords.

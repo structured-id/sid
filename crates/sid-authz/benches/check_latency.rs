@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Permission check cost of the CE engine on SQLite (in memory) and
 //! PostgreSQL (port 54399): P50/P99 and heap allocations per call of
 //!

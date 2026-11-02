@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Access-token lifetime: five minutes by default, configurable from one to
 //! sixty minutes, nothing outside that range.
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Login history the anomaly rules read (recent IPs and devices, designated
 //! countries) for SQLite backend.
 

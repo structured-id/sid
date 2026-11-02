@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Which services this installation trusts to confirm checks of an original
 //! request (D054, receiver-side verifier trust).
 //!

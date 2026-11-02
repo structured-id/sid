@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Service bindings: one stable pairwise identity per (profile, scope).
 
 use sid_core::models::{BindingScope, Profile};

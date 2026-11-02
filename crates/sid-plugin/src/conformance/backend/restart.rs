@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! What a store owes across a restart: a command whose reply was lost
 //! resolves by its key, and work its executor left behind is taken over.
 

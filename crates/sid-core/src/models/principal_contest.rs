@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Contestation check owed by a new login-handle binding.
 //!
 //! When a profile binds an identifier other profiles already hold, every

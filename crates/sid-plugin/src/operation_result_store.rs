@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Operation result capability: the committed completions of keyed
 //! commands, so a retried command resolves to its original outcome.
 

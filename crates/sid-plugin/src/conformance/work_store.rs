@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! [`WorkStore`] scenarios: durable work admission, leases, retries, failure
 //! and export. Each scenario uses its own work kind, so scenarios sharing one
 //! database never see each other's work.

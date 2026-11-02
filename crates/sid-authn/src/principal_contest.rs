@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Runs the contestation check a new login-handle binding owes.
 //!
 //! The binding commits a [`ContestCheck`]; this handler reads the committed

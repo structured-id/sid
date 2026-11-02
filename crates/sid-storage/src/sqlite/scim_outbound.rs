@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! SCIM outbound provisioning targets, sync records and dead letters for
 //! SQLite backend.
 

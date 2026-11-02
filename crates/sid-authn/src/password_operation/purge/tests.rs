@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 use super::super::tests::{Operations, change, manager, split, sqlite, zkpp_without_proofs};
 use super::super::*;
 use super::*;

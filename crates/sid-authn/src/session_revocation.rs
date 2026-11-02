@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Revocation of an ended session's access tokens in every process: the
 //! storage commits it with the session's deletion, and this handler publishes
 //! it for the durable work runner, so a crash between the commit and the

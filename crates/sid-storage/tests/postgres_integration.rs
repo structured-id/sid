@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Integration tests for PostgreSQL backend.
 //!
 //! These tests require a running PostgreSQL instance.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! The sign-in history conformance harness of this crate's backends: owners
 //! are Profiles, sign-ins their stored sessions.
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Policy enforcement decision model.
 //!
 //! Runtime result of evaluating a security policy against the current

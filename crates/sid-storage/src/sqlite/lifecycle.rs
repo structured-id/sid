@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! PAT, Quarantine, ClosureRequest, ExportJob, and MagicLink operations for SQLite backend.
 
 use chrono::{DateTime, Utc};

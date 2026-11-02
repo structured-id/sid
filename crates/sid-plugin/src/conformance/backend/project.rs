@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Project and OAuth client listings: counted and paged, pages of one
 //! project disjoint and complete, never another project's clients.
 

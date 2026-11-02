@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Authentik API export parser.
 //!
 //! Parses Authentik user export JSON (Core API → GET /api/v3/core/users/).

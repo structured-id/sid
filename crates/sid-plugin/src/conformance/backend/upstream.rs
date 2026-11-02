@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Upstream providers and the identities linked through them: created once,
 //! a provider updated only over the revision it was read at, a login counted
 //! in place.

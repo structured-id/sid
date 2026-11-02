@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! OAuth 2.0 and OpenID Connect implementation.
 //!
 //! Supports:

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! The resource an application access token is issued for (RFC 8707).
 //!
 //! A token is issued for exactly one registered, active resource the client

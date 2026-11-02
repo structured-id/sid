@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! A query over the installation's user directory, as a SCIM service provider
 //! answers `GET /Users` (RFC 7644 §3.4.2): a filter applied by storage before
 //! pagination, the total of the whole matching set, and one page of users

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! The installation's OIDC issuers as a receiver or a relying party knows
 //! them: their exact identifiers, public keys and registered resources, read
 //! from the installation's registry and cached per replica.

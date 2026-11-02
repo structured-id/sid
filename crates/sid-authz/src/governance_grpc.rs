@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! gRPC GovernanceService implementation.
 //!
 //! CE governance: 1-step access requests, temporary roles with auto-expiry.

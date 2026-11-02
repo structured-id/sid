@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! The grants of a serving authority that represents its stable user by
 //! something other than a local `ProfileId`, with a grant store kept in
 //! memory.

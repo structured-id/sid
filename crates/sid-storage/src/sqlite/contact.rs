@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! A profile's own phones and emails for the SQLite backend: created once,
 //! settings changed field by field, one primary moved in a single write
 //! (`BEGIN IMMEDIATE` serializes the writers).

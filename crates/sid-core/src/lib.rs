@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! StructuredID Core
 //!
 //! Domain models, errors, and shared types for the StructuredID identity provider.

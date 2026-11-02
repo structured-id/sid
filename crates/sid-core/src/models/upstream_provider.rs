@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Upstream Identity Provider domain model.
 //!
 //! Stores configuration for external IdPs that users can authenticate through

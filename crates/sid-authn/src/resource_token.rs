@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! A protected resource's check of the access tokens presented to it: signed
 //! by one issuer of this installation (`at+jwt`, RFC 9068 §4) for exactly this
 //! resource. What the token's subject stands for is the resource's own

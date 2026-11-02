@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! The OPAQUE server setup every replica shares.
 //!
 //! The setup (OPRF seed and server keypair, RFC 9807 §6.3.2.2) is created by

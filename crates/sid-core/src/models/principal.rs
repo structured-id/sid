@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Principal domain model.
 //!
 //! A Principal is a **singleton entity** per (type, value) — e.g., there is exactly

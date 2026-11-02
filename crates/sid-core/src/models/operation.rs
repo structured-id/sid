@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Durable results of ordinary mutations: a caller's key names one logical
 //! command, and the owning database records that command's completion in the
 //! same transaction as its effect, so a retry after a lost response finds

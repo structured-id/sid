@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! StructuredID Plugin API
 //!
 //! Traits and types for extending StructuredID with custom functionality.

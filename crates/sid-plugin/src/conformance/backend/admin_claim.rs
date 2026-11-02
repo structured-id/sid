@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! First-administrator claim: the claim is consumed with the installation
 //! administrator assignment, once.
 //!

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Applications and their roles: a client role, a protected-resource role or
 //! both, stored together; resource indicators reserved for ever within their
 //! issuer; explicit client-to-resource access.

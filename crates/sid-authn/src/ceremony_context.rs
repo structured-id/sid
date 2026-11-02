@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! The protected context of a ceremony operation that takes several steps
 //! before any login session exists, such as a registration whose client
 //! stages data between its start and its finish.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Provisioning connectors: one directory source sending SCIM to this
 //! installation, or one downstream target SID provisions, acting as its own
 //! non-human actor with its own credentials and grants. Neither a Profile, a

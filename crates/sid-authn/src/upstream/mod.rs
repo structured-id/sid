@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Upstream Identity Provider implementations.
 //!
 //! SID acts as a Relying Party to upstream IdPs.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Devices: a create never replaces one, a rename touches only the name and
 //! never brings back a removed device, and trust changes respect the
 //! per-profile limit under concurrency.

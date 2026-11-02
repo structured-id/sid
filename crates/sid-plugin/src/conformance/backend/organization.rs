@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! The installation organization and the clients that belong to it.
 //!
 //! Needs a backend of its own (an isolated schema or a fresh database): it

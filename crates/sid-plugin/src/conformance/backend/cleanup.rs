@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Cleanup operations: each removes what is expired or dismissed and nothing
 //! that is still live. Other writers share the store, so counts are checked
 //! as lower bounds and live records by name.

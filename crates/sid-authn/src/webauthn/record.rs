@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! The stored form of a registered passkey (`Credential::data`): an explicit
 //! SID format version over the `structured-webauthn` binary codecs, decoded
 //! strictly on every read.

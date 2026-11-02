@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! A protected resource's side of an access token: how it was presented
 //! (RFC 6750 §2.1, RFC 9449 §7.1) and whether the sender honours the token's
 //! key binding (RFC 9449 §7).

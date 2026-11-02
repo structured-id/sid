@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Security Policy domain model.
 //!
 //! Defines the organizational security policy with sub-policies for

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Durable work on PostgreSQL: enqueue inside the caller's transaction,
 //! claims with `FOR UPDATE SKIP LOCKED` under a lease, outcomes fenced by
 //! the claim generation.

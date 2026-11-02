@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Upstream Identity Provider plugin trait.
 //!
 //! Defines the interface for upstream IdP providers (Google, GitHub, Microsoft, etc.).

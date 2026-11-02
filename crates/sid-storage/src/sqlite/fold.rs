@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! `sid_fold(text)`: Unicode simple lower case, registered on every SQLite
 //! connection the backend opens. SQLite's built-in `lower()` folds ASCII
 //! only, so a case-insensitive comparison (`caseExact: false`, RFC 7643 §2.2)

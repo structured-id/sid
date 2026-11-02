@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! The installation's stored enrollment policy.
 //!
 //! Needs a backend whose policy was never set (an isolated schema or a fresh

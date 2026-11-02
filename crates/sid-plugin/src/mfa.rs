@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! MFA provider plugin traits.
 //!
 //! Extensible multi-factor authentication: implement `MfaProvider` to add

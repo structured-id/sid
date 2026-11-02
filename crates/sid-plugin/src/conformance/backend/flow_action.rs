@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Flow actions: created once, listed per hook point in execution order, and
 //! updated only over the revision they were read at.
 

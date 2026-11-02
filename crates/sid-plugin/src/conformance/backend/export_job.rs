@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Data export jobs: created once, read back field for field, moved only from
 //! ready (to downloaded while the window is open, to expired once it closed),
 //! and committed with the mutation's audit and owed work.

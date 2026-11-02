@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! The user directory filter as SQL: the condition both engines apply to
 //! `profiles p` before pagination. Every value is a bound parameter; only
 //! fixed column names, metadata keys and status literals are written into the

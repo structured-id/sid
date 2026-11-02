@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Branding configurations: a draft is edited over the revision it was read
 //! at, published in one write that archives the previous publication, and a
 //! project has at most one published config.

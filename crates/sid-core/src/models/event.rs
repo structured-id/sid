@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 //! Domain event types following CloudEvents 1.0 specification (CNCF).
 //!
 //! All SID events use CloudEvents envelope for transport-agnostic
