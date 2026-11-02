@@ -108,10 +108,7 @@ pub(crate) fn fixture_with(orders_routes: &str, orders: Option<bool>) -> Fixture
             resources,
         ),
         applications: Arc::new(PolicyEngine::from_yaml(&applications(orders_routes)).unwrap()),
-        revocation: crate::revocation_view(cache.clone()),
-        dpop: Arc::new(sid_authn::dpop::DPopValidator::new(Arc::new(
-            crate::SharedCacheAdmissions(cache),
-        ))),
+        revocation: crate::revocation_view(cache),
         authz: crate::test_channel(),
         checker: None,
         login_url: "https://sid.example.com/auth/login".into(),

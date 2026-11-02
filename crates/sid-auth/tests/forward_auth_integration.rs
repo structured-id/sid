@@ -257,6 +257,15 @@ impl OidcIssuerService for MockIssuers {
             _ => Err(Status::not_found("no resource")),
         }
     }
+
+    /// Never reached: this service holds no credential for the issuer, so a
+    /// bound token gets no verdict before its proof would be admitted.
+    async fn admit_sender_proof(
+        &self,
+        _: TonicRequest<sid_proto::sid::v1::authn::AdmitSenderProofRequest>,
+    ) -> Result<TonicResponse<()>, Status> {
+        Err(Status::unimplemented("not expected without a credential"))
+    }
 }
 
 // ── Harness ──
@@ -567,8 +576,9 @@ fn dpop_proof(htu: &str, token: &str) -> String {
     encode(&header, &payload, &key).unwrap()
 }
 
-/// A bound token under the DPoP scheme with a proof for the request at the
-/// configured origin passes once; the same proof again is a replay; the
+/// A bound token under the DPoP scheme with a valid proof is admitted only
+/// once its issuer admitted the proof: without a credential for the issuer
+/// the service gives no verdict, and never admits the proof itself. The
 /// token as a bearer token is refused with the DPoP challenge.
 #[tokio::test]
 async fn http_dpop_bound_token() {
@@ -582,13 +592,9 @@ async fn http_dpop_bound_token() {
         ("x-original-uri", "/items"),
         ("x-original-method", "GET"),
     ];
-    assert_eq!(
+    assert_ne!(
         http(&h.http, "GET", "orders", &request).await.status(),
         StatusCode::OK
-    );
-    assert_eq!(
-        http(&h.http, "GET", "orders", &request).await.status(),
-        StatusCode::UNAUTHORIZED
     );
 
     let bearer = format!("Bearer {token}");

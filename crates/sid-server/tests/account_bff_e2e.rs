@@ -93,6 +93,7 @@ async fn deploy() -> Deployment {
     let registry = sid_server::grpc::oidc_issuer_service::OidcIssuerServiceImpl::new(
         svc.issuers.clone(),
         svc.storage.clone(),
+        svc.authz.clone(),
     );
     let identity = svc.identity.clone();
     let auth = svc.auth.clone();

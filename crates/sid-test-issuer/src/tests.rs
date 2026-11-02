@@ -22,7 +22,7 @@ async fn a_receiver_is_admitted_through_the_test_issuer() {
     std::fs::write(&secret, "ops-receiver-secret").unwrap();
     let receiver = sid_auth::receiver::Receiver::connect(
         "ops",
-        &issuer.receiver_config(RESOURCE, ORIGIN, "ops-receiver", &secret, None),
+        &issuer.receiver_config(RESOURCE, ORIGIN, "ops-receiver", &secret),
     )
     .await
     .unwrap();

@@ -52,11 +52,9 @@ pub struct Receiver {
     /// Scheme and authority of this service as its callers address it, the
     /// prefix of every proof's `htu`; never taken from the request.
     origin: String,
-    /// Proof checks; `jti`s are recorded where every replica of this
-    /// resource records them, so a proof is accepted once.
-    dpop: Arc<sid_authn::dpop::DPopValidator>,
     checker: Arc<ClientCredential>,
-    /// Channel to the issuer's authorization API.
+    /// Channel to the issuer: its authorization API, and its admission of
+    /// each DPoP proof once across every replica (RFC 9449 §11.1).
     authz: tonic::transport::Channel,
 }
 
@@ -88,13 +86,14 @@ enum Decision {
 }
 
 /// What an object action's question is asked with once its object is known:
-/// the call's verified token, action and request, and who asks.
+/// the call's verified token, action and proof confirmation, and who asks.
 struct PendingQuestion {
     receiver: Arc<Receiver>,
     action: &'static str,
     token: secrecy::SecretString,
-    method: String,
-    uri: String,
+    /// The confirmation of the call's proof, already admitted by the issuer;
+    /// the question carries it again and the issuer confirms that admission.
+    confirmation: Option<sid_proto::sid::v1::authn::RequestConfirmation>,
 }
 
 impl std::fmt::Debug for PendingQuestion {
@@ -122,7 +121,9 @@ struct Verified<'a> {
     claims: ForwardAuthClaims,
     resource: sid_core::models::ResourceId,
     presented: crate::auth::jwt::Presented<'a>,
-    uri: String,
+    /// The confirmation of the call's proof, made once for the call; `None`
+    /// for a token bound to no key.
+    confirmation: Option<sid_proto::sid::v1::authn::RequestConfirmation>,
 }
 
 impl Receiver {
@@ -143,7 +144,6 @@ impl Receiver {
             sid_infra::deadline::Deadline::new(upstream.clone(), std::time::Duration::from_secs(5));
         let checker =
             ClientCredential::checker(&config.checker, &config.issuer_url, issuer.clone())?;
-        let cache = crate::shared_cache(config.cache_url.as_deref()).await?;
         Ok(Self::new(
             name,
             Arc::new(IssuerDirectory::new(
@@ -155,9 +155,6 @@ impl Receiver {
                 resource: config.resource.clone(),
             },
             &config.origin,
-            Arc::new(sid_authn::dpop::DPopValidator::new(Arc::new(
-                crate::SharedCacheAdmissions(cache),
-            ))),
             Arc::new(checker),
             upstream,
         ))
@@ -169,7 +166,6 @@ impl Receiver {
         issuers: Arc<IssuerDirectory>,
         target: Target,
         origin: &str,
-        dpop: Arc<sid_authn::dpop::DPopValidator>,
         checker: Arc<ClientCredential>,
         authz: tonic::transport::Channel,
     ) -> Self {
@@ -178,7 +174,6 @@ impl Receiver {
             issuers,
             target,
             origin: origin.trim_end_matches('/').to_owned(),
-            dpop,
             checker,
             authz,
         }
@@ -195,7 +190,9 @@ impl Receiver {
         action: &str,
     ) -> Result<Admitted, Status> {
         let verified = self.verify(method, path, headers).await?;
-        self.decide(&verified, method, action, "").await?;
+        // The question admits the call's proof at the issuer within its own
+        // exchange.
+        self.decide(&verified, action, "").await?;
         Ok(Admitted {
             claims: verified.claims,
             resource: verified.resource,
@@ -215,12 +212,32 @@ impl Receiver {
         action: &'static str,
     ) -> Result<Admitted, Status> {
         let verified = self.verify(method, path, headers).await?;
+        // No question is asked before the handler names the object, so the
+        // issuer admits the call's proof now: a replayed proof reaches no
+        // handler.
+        if let Some(confirmation) = &verified.confirmation {
+            match crate::auth::permission::admit(
+                Some(&self.checker),
+                &self.authz,
+                &self.name,
+                &self.target.issuer,
+                verified.presented.token(),
+                verified.resource,
+                confirmation,
+            )
+            .await
+            .map_err(|e| {
+                sid_core::grpc_error::refuse::dependency_unavailable("sender proof admission", e)
+            })? {
+                true => {}
+                false => return Err(unauthenticated()),
+            }
+        }
         let pending = PendingQuestion {
             receiver: self.clone(),
             action,
             token: verified.presented.token().into(),
-            method: method.as_str().to_owned(),
-            uri: verified.uri,
+            confirmation: verified.confirmation,
         };
         Ok(Admitted {
             claims: verified.claims,
@@ -230,11 +247,10 @@ impl Receiver {
     }
 
     /// The issuer's decision on `verified`'s subject performing `action` on
-    /// `object` (empty: the resource itself), made with `method`.
+    /// `object` (empty: the resource itself).
     async fn decide(
         &self,
         verified: &Verified<'_>,
-        method: &http::Method,
         action: &str,
         object: &str,
     ) -> Result<(), Status> {
@@ -242,8 +258,7 @@ impl Receiver {
             verified.presented.token(),
             &verified.claims,
             verified.resource,
-            method.as_str(),
-            &verified.uri,
+            verified.confirmation.as_ref(),
             action,
             object,
         )
@@ -251,16 +266,14 @@ impl Receiver {
     }
 
     /// Ask the issuer whether the subject of `token` (verified as `claims`
-    /// for `resource`, its request `method` and `uri`) may perform `action`
-    /// on `object`.
-    #[allow(clippy::too_many_arguments)]
+    /// for `resource`, its proof confirmed by `confirmation`) may perform
+    /// `action` on `object`.
     async fn ask(
         &self,
         token: &str,
         claims: &ForwardAuthClaims,
         resource: sid_core::models::ResourceId,
-        method: &str,
-        uri: &str,
+        confirmation: Option<&sid_proto::sid::v1::authn::RequestConfirmation>,
         action: &str,
         object: &str,
     ) -> Result<(), Status> {
@@ -272,8 +285,7 @@ impl Receiver {
             object,
             token,
             claims,
-            method,
-            uri,
+            confirmation,
         };
         use crate::auth::permission::Permission;
         match crate::auth::permission::ask(Some(&self.checker), &self.authz, question)
@@ -335,24 +347,35 @@ impl Receiver {
             }
         };
         let uri = format!("{}{path}", self.origin);
-        if let Err(e) = crate::auth::sender::check_sender(
-            &self.dpop,
+        let proof = crate::auth::sender::check_sender(
             presented,
             &claims,
             headers,
             method.as_str(),
             Some(&uri),
         )
-        .await
-        {
+        .map_err(|e| {
             tracing::debug!(receiver = self.name, error = %e, "sender constraint not met");
-            return Err(unauthenticated());
-        }
+            unauthenticated()
+        })?;
+        // Made once for the call: every question about it carries the same
+        // request identifier, so the issuer admits its proof once.
+        let confirmation = match (&proof, &claims.cnf) {
+            (Some(proof), Some(cnf)) => Some(crate::auth::permission::dpop_confirmation(
+                &cnf.jkt,
+                method.as_str(),
+                &uri,
+                claims.exp,
+                proof,
+                chrono::Utc::now(),
+            )),
+            _ => None,
+        };
         Ok(Verified {
             claims,
             resource,
             presented,
-            uri,
+            confirmation,
         })
     }
 }
@@ -495,8 +518,7 @@ pub async fn authorize_object<T>(
                 pending.token.expose_secret(),
                 &admitted.claims,
                 admitted.resource,
-                &pending.method,
-                &pending.uri,
+                pending.confirmation.as_ref(),
                 pending.action,
                 object,
             )

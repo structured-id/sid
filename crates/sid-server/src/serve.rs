@@ -91,6 +91,7 @@ impl CeServices {
                 crate::grpc::oidc_issuer_service::OidcIssuerServiceImpl::new(
                     c.issuers.clone(),
                     c.storage.clone(),
+                    c.authz_svc.clone(),
                 ),
             ))
             .await

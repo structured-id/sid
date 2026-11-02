@@ -99,7 +99,6 @@ fn a_receiver_needs_its_resource_origin_and_credential() {
     assert_eq!(config.resource, "https://ops.example.com/");
     assert_eq!(config.origin, "https://ops.example.com");
     assert_eq!(config.checker.issuer, "https://sid.example.com/i/platform");
-    assert!(config.cache_url.is_none());
     for (name, _) in complete {
         assert!(without(name).is_err(), "{name} is required");
     }

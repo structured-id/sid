@@ -3,16 +3,12 @@
 use super::*;
 use crate::auth::jwt::Confirmation;
 use axum::http::HeaderValue;
-use std::sync::Arc;
+use sid_authn::dpop::VerifiedProof;
 
 const URI: &str = "https://app.sid.example.com/api/items";
 const TOKEN: &str = "eyJ.bound.token";
 /// RFC 7638 thumbprint of the fixture key.
 const FIXTURE_JKT: &str = "IzldvVrK202QRbmgX2y6_CaeNdfk9cCd6-2B-mLPdBA";
-
-fn validator() -> DPopValidator {
-    DPopValidator::new(Arc::new(sid_plugin::InProcessCeremonyState::new()))
-}
 
 fn claims(jkt: Option<&str>) -> ForwardAuthClaims {
     ForwardAuthClaims {
@@ -68,17 +64,21 @@ async fn check(
     presented: Presented<'_>,
     claims: &ForwardAuthClaims,
     headers: &HeaderMap,
-) -> Result<(), SenderError> {
-    check_sender(&validator(), presented, claims, headers, "GET", Some(URI)).await
+) -> Result<Option<VerifiedProof>, SenderError> {
+    check_sender(presented, claims, headers, "GET", Some(URI))
 }
 
-/// An unbound token keeps working as a bearer token.
+/// An unbound token is still accepted as a bearer token, with no proof to
+/// admit.
 #[tokio::test]
 async fn unbound_bearer_is_accepted() {
     let none = HeaderMap::new();
-    check(Presented::Bearer(TOKEN), &claims(None), &none)
-        .await
-        .unwrap();
+    assert_eq!(
+        check(Presented::Bearer(TOKEN), &claims(None), &none)
+            .await
+            .unwrap(),
+        None
+    );
 }
 
 /// A bound token presented as a bearer token is refused, even beside a
@@ -93,13 +93,23 @@ async fn bound_token_as_bearer_is_refused() {
     assert!(matches!(err, SenderError::ProofRequired), "{err:?}");
 }
 
-/// The DPoP scheme with a proof by the bound key for this request passes.
+/// The DPoP scheme with a proof by the bound key for this request passes,
+/// and the proof is handed back for the issuer to admit; checking it again
+/// admits nothing here, so the same proof checks again.
 #[tokio::test]
 async fn bound_token_with_its_proof_is_accepted() {
     let headers = with_proof(&proof("s-2", URI, TOKEN));
-    check(Presented::DPoP(TOKEN), &claims(Some(FIXTURE_JKT)), &headers)
+    let bound = claims(Some(FIXTURE_JKT));
+    let verified = check(Presented::DPoP(TOKEN), &bound, &headers)
         .await
-        .unwrap();
+        .unwrap()
+        .expect("the proof to admit");
+    assert_eq!(verified.jti, "s-2");
+    assert!(
+        check(Presented::DPoP(TOKEN), &bound, &headers)
+            .await
+            .is_ok()
+    );
 }
 
 /// The DPoP scheme without a proof, or with two, is refused.

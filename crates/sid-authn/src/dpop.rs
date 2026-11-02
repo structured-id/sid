@@ -49,6 +49,32 @@ pub enum DPopError {
 /// §11.1 lets the server bound clock difference).
 const FUTURE_IAT_ALLOWANCE_SECS: i64 = 5;
 
+/// The holder of a proof's admission: one original request as its verifier
+/// identified it, bound to the request's token, method and URI and to the
+/// verifier that confirmed it, so the same `request_id` with anything else
+/// changed is another request.
+pub fn request_holder(
+    request_id: &[u8],
+    access_token: &str,
+    method: &str,
+    uri: &str,
+    verifier: &str,
+) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    for part in [
+        request_id,
+        access_token.as_bytes(),
+        method.as_bytes(),
+        uri.as_bytes(),
+        verifier.as_bytes(),
+    ] {
+        // Length-prefixed, so no two different requests share a digest input.
+        digest.update((part.len() as u64).to_be_bytes());
+        digest.update(part);
+    }
+    digest.finalize().into()
+}
+
 /// `ath` of an access token: base64url SHA-256 of its ASCII form (RFC 9449 §4.2).
 pub fn access_token_hash(access_token: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(access_token.as_bytes()))
@@ -57,8 +83,19 @@ pub fn access_token_hash(access_token: &str) -> String {
 /// A proof whose signature, method, URI and age were checked.
 struct CheckedProof {
     jti: String,
+    iat: i64,
     ath: Option<String>,
     jwk: serde_json::Value,
+}
+
+/// A proof checked at a resource for its bound token, not yet admitted: what
+/// the token's issuer needs to admit it once (RFC 9449 §11.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedProof {
+    /// The proof's `jti`.
+    pub jti: String,
+    /// The proof's `iat`, seconds since the epoch.
+    pub iat: i64,
 }
 
 /// DPoP proof validator with JTI replay detection (RFC 9449 §11.1) in the
@@ -142,6 +179,62 @@ impl DPopValidator {
         access_token: &str,
         bound_jkt: &str,
     ) -> Result<(), DPopError> {
+        let proof = Self::verify_for_resource(proof_jwt, method, url, access_token, bound_jkt)?;
+        self.first_use(bound_jkt, url, &proof.jti).await
+    }
+
+    /// Admit `proof`, verified by a resource-side verifier for a token of
+    /// this issuer bound to `jkt`, once for the request `holder` stands for
+    /// (RFC 9449 §11.1). `scope` names the issuer and the resource the
+    /// request was made to. The same request confirms its admission without
+    /// extending it; the proof used for any other request is a replay. The
+    /// admission lasts as long as this issuer would still accept the proof.
+    pub async fn admit_for_request(
+        &self,
+        scope: &str,
+        jkt: &str,
+        proof: &VerifiedProof,
+        holder: &[u8],
+    ) -> Result<(), DPopError> {
+        let now = chrono::Utc::now().timestamp();
+        let age = now - proof.iat;
+        if age < -FUTURE_IAT_ALLOWANCE_SECS || age > i64::from(DPopProof::MAX_AGE_SECONDS) {
+            return Err(DPopError::Expired {
+                max_age: DPopProof::MAX_AGE_SECONDS,
+            });
+        }
+        // Accepted until iat + max age; kept past the latest accepted moment.
+        let remaining = i64::from(DPopProof::MAX_AGE_SECONDS) + FUTURE_IAT_ALLOWANCE_SECS - age;
+        let retention =
+            Duration::from_secs(u64::try_from(remaining).expect("an accepted proof has time left"));
+        // A thumbprint is base64url and an issuer URL and resource id have no
+        // raw space, so the jti after the third space is unambiguous.
+        let key = format!("{scope} {jkt} {}", proof.jti);
+        let held = self
+            .admissions
+            .admit_for("dpop-request", &key, holder, retention)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "DPoP replay store unavailable");
+                DPopError::ReplayStoreUnavailable
+            })?;
+        if held {
+            Ok(())
+        } else {
+            Err(DPopError::ReplayDetected)
+        }
+    }
+
+    /// The checks of [`Self::validate_for_resource`] without the admission:
+    /// for a resource outside the token's issuer, which has the issuer admit
+    /// the returned proof instead of recording it itself.
+    pub fn verify_for_resource(
+        proof_jwt: &str,
+        method: &str,
+        url: &str,
+        access_token: &str,
+        bound_jkt: &str,
+    ) -> Result<VerifiedProof, DPopError> {
         let proof = Self::check(proof_jwt, method, url)?;
         if proof.ath.as_deref() != Some(access_token_hash(access_token).as_str()) {
             return Err(DPopError::AccessTokenHashMismatch);
@@ -149,7 +242,10 @@ impl DPopValidator {
         if compute_jwk_thumbprint(&proof.jwk)? != bound_jkt {
             return Err(DPopError::KeyMismatch);
         }
-        self.first_use(bound_jkt, url, &proof.jti).await
+        Ok(VerifiedProof {
+            jti: proof.jti,
+            iat: proof.iat,
+        })
     }
 
     /// Record the proof's `jti` (insert-or-reject, RFC 9449 §11.1), scoped to
@@ -257,6 +353,7 @@ impl DPopValidator {
 
         Ok(CheckedProof {
             jti: payload.jti,
+            iat: payload.iat,
             ath: payload.ath,
             jwk: header.jwk,
         })

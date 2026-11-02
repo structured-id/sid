@@ -511,6 +511,72 @@ async fn test_replay_record_is_scoped_to_key_and_target() {
     ));
 }
 
+/// A proof admitted for one request is confirmed to that request and refused
+/// to any other; a proof the issuer no longer accepts is not admitted.
+#[tokio::test]
+async fn test_a_request_holds_its_proof_admission() {
+    let validator = DPopValidator::new(test_admissions());
+    let scope = "https://sid.example.com/i/a resource-1";
+    let proof = VerifiedProof {
+        jti: "j".into(),
+        iat: chrono::Utc::now().timestamp(),
+    };
+    let first = request_holder(&[1; 16], "token", "POST", "https://app/x", "verifier");
+    let retried = request_holder(&[1; 16], "token", "POST", "https://app/x", "verifier");
+    let changed = request_holder(&[1; 16], "token", "POST", "https://app/y", "verifier");
+    validator
+        .admit_for_request(scope, "key", &proof, &first)
+        .await
+        .unwrap();
+    validator
+        .admit_for_request(scope, "key", &proof, &retried)
+        .await
+        .unwrap();
+    assert!(matches!(
+        validator
+            .admit_for_request(scope, "key", &proof, &changed)
+            .await,
+        Err(DPopError::ReplayDetected)
+    ));
+    // Another resource's scope is another admission.
+    validator
+        .admit_for_request(
+            "https://sid.example.com/i/a resource-2",
+            "key",
+            &proof,
+            &changed,
+        )
+        .await
+        .unwrap();
+
+    let stale = VerifiedProof {
+        jti: "old".into(),
+        iat: chrono::Utc::now().timestamp() - 120,
+    };
+    assert!(matches!(
+        validator
+            .admit_for_request(scope, "key", &stale, &first)
+            .await,
+        Err(DPopError::Expired { .. })
+    ));
+}
+
+/// Admission that cannot be decided is no admission.
+#[tokio::test]
+async fn test_undecided_admission_is_unavailable() {
+    let validator = DPopValidator::new(Arc::new(crate::test_support::DownCeremonies));
+    let proof = VerifiedProof {
+        jti: "j".into(),
+        iat: chrono::Utc::now().timestamp(),
+    };
+    assert!(matches!(
+        validator
+            .admit_for_request("scope", "key", &proof, &[0; 32])
+            .await,
+        Err(DPopError::ReplayStoreUnavailable)
+    ));
+}
+
 /// A replay record outlives the last moment its proof is still accepted: a
 /// proof issued at the furthest accepted future `iat` stays fresh for the
 /// whole proof age after it.

@@ -28,6 +28,16 @@ use super::policy::{AuthRequirement, PolicyEngine};
 use super::sender::check_sender;
 use sid_authn::issuer_directory::IssuerDirectory;
 
+/// 401 with the DPoP `challenge` (RFC 9449 §7.1), without a login redirect:
+/// signing in again does not supply a proof.
+fn proof_refused(challenge: &'static str) -> Verdict {
+    let mut refusal = Verdict::bare(StatusCode::UNAUTHORIZED);
+    refusal
+        .headers
+        .insert(WWW_AUTHENTICATE, HeaderValue::from_static(challenge));
+    refusal
+}
+
 /// What forward auth needs to decide.
 pub struct Pdp {
     /// The installation's issuers and registered resources.
@@ -36,12 +46,12 @@ pub struct Pdp {
     pub applications: Arc<PolicyEngine>,
     /// Revoked tokens and sessions, as every SID process records them.
     pub revocation: Arc<sid_authn::revocation_cache::RevocationCache>,
-    /// DPoP proof checks; proof `jti`s are recorded in the shared cache.
-    pub dpop: Arc<sid_authn::dpop::DPopValidator>,
-    /// Channel to sid-authz for routes that ask it.
+    /// Channel to the SID server: sid-authz for routes that ask it, and the
+    /// issuer, which admits each DPoP proof once.
     pub authz: tonic::transport::Channel,
-    /// This service's own credential for the authorization API; routes that
-    /// ask sid-authz have no verdict without it.
+    /// This service's own credential for the authorization API and the
+    /// issuer; routes that ask sid-authz, and DPoP-bound tokens, have no
+    /// verdict without it.
     pub checker: Option<Arc<sid_infra::client_credential::ClientCredential>>,
     /// Where a 401 sends a browser to sign in; empty for none.
     pub login_url: String,
@@ -167,24 +177,33 @@ impl Pdp {
         // checked against the configured origin of the application, not
         // against a forwarded host the client could have set.
         let uri = format!("{}{}", app.origin, request.path);
-        if let Err(e) = check_sender(
-            &self.dpop,
+        let proof = match check_sender(
             presented,
             &claims,
             request.headers,
             request.method.as_str(),
             Some(&uri),
-        )
-        .await
-        {
-            tracing::debug!(error = %e, "sender constraint not met");
-            let mut refusal = Verdict::bare(StatusCode::UNAUTHORIZED);
-            // No login redirect: signing in again does not supply a proof.
-            refusal
-                .headers
-                .insert(WWW_AUTHENTICATE, HeaderValue::from_static(e.challenge()));
-            return Ok(anonymous_or(refusal));
-        }
+        ) {
+            Ok(proof) => proof,
+            Err(e) => {
+                tracing::debug!(error = %e, "sender constraint not met");
+                return Ok(anonymous_or(proof_refused(e.challenge())));
+            }
+        };
+        // The proof's confirmation, made once for this request: the issuer
+        // admits the proof once, within the permission question when the
+        // route asks one, on its own otherwise.
+        let confirmation = match (&proof, &claims.cnf) {
+            (Some(proof), Some(cnf)) => Some(super::permission::dpop_confirmation(
+                &cnf.jkt,
+                request.method.as_str(),
+                &uri,
+                claims.exp,
+                proof,
+                chrono::Utc::now(),
+            )),
+            _ => None,
+        };
 
         if !policy.required_roles.is_empty() && !has_any_role(&claims, &policy.required_roles) {
             tracing::debug!(
@@ -196,6 +215,30 @@ impl Pdp {
             return Ok(Verdict::bare(StatusCode::FORBIDDEN));
         }
 
+        if policy.authz_action.is_none()
+            && let Some(confirmation) = &confirmation
+        {
+            match super::permission::admit(
+                self.checker.as_deref(),
+                &self.authz,
+                application,
+                &app.target.issuer,
+                presented.token(),
+                resource,
+                confirmation,
+            )
+            .await
+            .map_err(|_| DecisionError::Unavailable("sender proof admission"))?
+            {
+                true => {}
+                false => {
+                    return Ok(anonymous_or(proof_refused(
+                        r#"DPoP error="invalid_dpop_proof""#,
+                    )));
+                }
+            }
+        }
+
         if let Some(action) = &policy.authz_action {
             let question = super::permission::Question {
                 asking: application,
@@ -205,8 +248,7 @@ impl Pdp {
                 object: "",
                 token: presented.token(),
                 claims: &claims,
-                method: request.method.as_str(),
-                uri: &uri,
+                confirmation: confirmation.as_ref(),
             };
             use super::permission::Permission;
             match super::permission::ask(self.checker.as_deref(), &self.authz, question)

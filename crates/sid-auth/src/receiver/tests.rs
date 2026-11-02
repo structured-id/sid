@@ -66,8 +66,6 @@ fn fixture_with(registered: bool) -> Fixture {
         sid_infra::deadline::issuer(crate::test_channel()),
     )
     .unwrap();
-    let admissions: Arc<dyn sid_plugin::SingleUseAdmissions> =
-        Arc::new(sid_plugin::InProcessCeremonyState::new());
     let receiver = Receiver::new(
         "ops",
         issuers,
@@ -76,7 +74,6 @@ fn fixture_with(registered: bool) -> Fixture {
             resource: ORDERS.into(),
         },
         ORIGIN,
-        Arc::new(sid_authn::dpop::DPopValidator::new(admissions)),
         Arc::new(checker),
         crate::test_channel(),
     );
@@ -303,14 +300,16 @@ async fn a_bound_token_needs_a_proof_for_this_call() {
         )
         .await,
     );
-    // The right proof gets past the sender check (and fails only at the
-    // unreachable authorization API); its replay does not.
+    // The right proof gets past the sender check and fails only at the
+    // unreachable issuer, which alone admits it once: the receiver neither
+    // admits nor refuses it on its own, so its repeat is unavailable too.
     let call = headers(&[("authorization", &dpop), ("dpop", &right)]);
-    let first = admit(&f, http::Method::POST, &call)
-        .await
-        .expect_err("no PDP");
-    assert_eq!(first.code(), tonic::Code::Unavailable, "{first:?}");
-    assert_unauthenticated(admit(&f, http::Method::POST, &call).await);
+    for _ in 0..2 {
+        let status = admit(&f, http::Method::POST, &call)
+            .await
+            .expect_err("no issuer");
+        assert_eq!(status.code(), tonic::Code::Unavailable, "{status:?}");
+    }
 }
 
 /// A valid token is admitted only on the authorization API's decision:
@@ -491,7 +490,6 @@ fn pending(receiver: Receiver) -> Arc<PendingQuestion> {
         receiver: Arc::new(receiver),
         action: "ops.orgs.ban",
         token: "t".into(),
-        method: "POST".into(),
-        uri: format!("https://ops.example.com{PATH}"),
+        confirmation: None,
     })
 }

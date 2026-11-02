@@ -145,6 +145,7 @@ async fn serve_registry(svc: &TestServices) -> SocketAddr {
     let registry = sid_server::grpc::oidc_issuer_service::OidcIssuerServiceImpl::new(
         svc.issuers.clone(),
         svc.storage.clone(),
+        svc.authz.clone(),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

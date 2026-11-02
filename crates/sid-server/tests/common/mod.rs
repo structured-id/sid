@@ -1037,6 +1037,9 @@ pub struct TestServices {
     pub account: sid_server::grpc::account_service::AccountServiceImpl,
     pub storage: Arc<dyn StorageBackend>,
     pub mock_storage: Arc<MockStorage>,
+    /// The authorization service, with no configured verifier.
+    #[allow(dead_code)]
+    pub authz: Arc<sid_authz::grpc::AuthzServiceImpl>,
     #[allow(dead_code)]
     pub cache: Arc<dyn sid_plugin::cache::CacheBackend>,
     pub jwt: Arc<JwtService>,
@@ -1512,9 +1515,22 @@ impl TestServices {
             jwt.clone(),
             revocation_cache.clone(),
         );
+        // The authorization service as a server composes it, without a
+        // configured verifier: no proof admission is trusted until a test
+        // configures one.
+        let authz = Arc::new(sid_authz::grpc::AuthzServiceImpl::new(
+            Arc::new(sid_authz::CeAuthzEngine::new(storage.clone())),
+            storage.clone(),
+            sid_authz::cedar::CedarService::new(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            jwt.clone(),
+            revocation_cache.clone(),
+            RecordingAuditLog::shared(),
+        ));
         let oidc_issuer = sid_server::grpc::oidc_issuer_service::OidcIssuerServiceImpl::new(
             issuers.clone(),
             storage.clone(),
+            authz.clone(),
         );
         let evaluator = auth
             .history_evaluator()
@@ -1547,6 +1563,7 @@ impl TestServices {
             account,
             storage,
             mock_storage,
+            authz,
             cache: cache_backend,
             jwt,
             event_bus,

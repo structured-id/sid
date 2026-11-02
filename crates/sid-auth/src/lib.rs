@@ -28,41 +28,6 @@ pub async fn shared_cache(
     Ok(sid_infra::shared_cache(url).await?)
 }
 
-/// The replay record of a resource-side verifier (the decision service, a
-/// receiver): the shared cache it is deployed with, the one state its
-/// replicas share.
-pub struct SharedCacheAdmissions(pub Arc<dyn sid_plugin::cache::CacheBackend>);
-
-#[async_trait::async_trait]
-impl sid_plugin::SingleUseAdmissions for SharedCacheAdmissions {
-    async fn admit_once(
-        &self,
-        namespace: &str,
-        key: &str,
-        ttl: std::time::Duration,
-    ) -> sid_core::Result<bool> {
-        self.0
-            .set_nx(&format!("{namespace}:{key}"), b"1", ttl)
-            .await
-            .map_err(|e| sid_core::Error::Internal(format!("replay record: {e}")))
-    }
-
-    async fn admit_for(
-        &self,
-        namespace: &str,
-        key: &str,
-        holder: &[u8],
-        ttl: std::time::Duration,
-    ) -> sid_core::Result<bool> {
-        let key = format!("{namespace}:{key}");
-        let failure = |e| sid_core::Error::Internal(format!("replay record: {e}"));
-        if self.0.set_nx(&key, holder, ttl).await.map_err(failure)? {
-            return Ok(true);
-        }
-        Ok(self.0.get(&key).await.map_err(failure)?.as_deref() == Some(holder))
-    }
-}
-
 /// A revocation view over `cache` for a verifier that does not know the
 /// issuer's access-token lifetime: it assumes the longest allowed one.
 pub fn revocation_view(

@@ -221,17 +221,19 @@ impl TestIssuer {
             .await
             .expect("authorization API token verifier"),
         );
-        let authz = sid_authz::grpc::AuthzServiceImpl::new(
-            Arc::new(sid_authz::CeAuthzEngine::new(storage.clone())),
-            storage.clone(),
-            sid_authz::cedar::CedarService::new(),
-            Arc::new(AtomicBool::new(false)),
-            jwt.clone(),
-            revocation.clone(),
-            audit_log,
-        )
-        .with_service_tokens(service_tokens)
-        .with_request_verifiers(verifiers);
+        let authz = Arc::new(
+            sid_authz::grpc::AuthzServiceImpl::new(
+                Arc::new(sid_authz::CeAuthzEngine::new(storage.clone())),
+                storage.clone(),
+                sid_authz::cedar::CedarService::new(),
+                Arc::new(AtomicBool::new(false)),
+                jwt.clone(),
+                revocation.clone(),
+                audit_log,
+            )
+            .with_service_tokens(service_tokens)
+            .with_request_verifiers(verifiers),
+        );
         let auth = auth_service(
             storage.clone(),
             cache,
@@ -248,11 +250,12 @@ impl TestIssuer {
         let oidc = sid_server::grpc::oidc_issuer_service::OidcIssuerServiceImpl::new(
             issuers.clone(),
             storage.clone(),
+            authz.clone(),
         );
         let routes = tonic::service::Routes::new(
             sid_proto::sid::v1::auth_service_server::AuthServiceServer::from_arc(auth),
         )
-        .add_service(sid_proto::sid::v1::authz_service_server::AuthzServiceServer::new(authz))
+        .add_service(sid_proto::sid::v1::authz_service_server::AuthzServiceServer::from_arc(authz))
         .add_service(
             sid_proto::sid::v1::oidc_issuer_service_server::OidcIssuerServiceServer::new(oidc),
         );
@@ -309,14 +312,12 @@ impl TestIssuer {
         origin: &str,
         checker: &str,
         secret_file: &std::path::Path,
-        cache_url: Option<String>,
     ) -> sid_auth::config::ReceiverConfig {
         sid_auth::config::ReceiverConfig {
             upstream: self.upstream(),
             issuer_url: INSTALLATION.into(),
             resource: resource.into(),
             origin: origin.into(),
-            cache_url,
             checker: self.client_config(checker, secret_file),
         }
     }

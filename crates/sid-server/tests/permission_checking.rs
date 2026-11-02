@@ -24,13 +24,13 @@ use sid_core::models::{
     AUTHZ_CHECK, PERMISSION_CHECKER_ROLE, ProjectId, ResourceId, ResourceIndicator,
     TOKEN_INTROSPECT,
 };
+use sid_proto::sid::v1::authn::{RequestConfirmation, SenderProofProfile};
 use sid_proto::sid::v1::authz::assign_role_request::Principal;
 use sid_proto::sid::v1::authz::check_permission_request::Evaluation;
 use sid_proto::sid::v1::authz::{
     AssignRoleRequest, BatchCheckPermissionRequest, CheckPermissionRequest,
-    CheckPermissionResponse, IssuerSubject, PermissionOutcome, PermissionTarget,
-    RequestConfirmation, RequestEvaluation, SenderProofProfile, SubjectReference,
-    permission_target, subject_reference,
+    CheckPermissionResponse, IssuerSubject, PermissionOutcome, PermissionTarget, RequestEvaluation,
+    SubjectReference, permission_target, subject_reference,
 };
 use sid_proto::sid::v1::authz_service_server::AuthzService;
 use tonic::{Code, Request};
@@ -986,6 +986,11 @@ async fn a_key_bound_token_needs_its_proof() {
                 seconds: now.timestamp() + 30,
                 nanos: 0,
             }),
+            proof_jti: "proof-1".into(),
+            proof_iat: Some(prost_types::Timestamp {
+                seconds: now.timestamp(),
+                nanos: 0,
+            }),
         });
     }
     let err = a
@@ -1019,7 +1024,8 @@ fn at(time: chrono::DateTime<chrono::Utc>) -> Option<prost_types::Timestamp> {
     })
 }
 
-/// A DPoP confirmation for key `jkt`, checked now and usable for 30 s.
+/// A DPoP confirmation for key `jkt` of a new proof made now, checked now
+/// and usable for 30 s.
 fn dpop_confirmation(jkt: &str) -> RequestConfirmation {
     let now = chrono::Utc::now();
     RequestConfirmation {
@@ -1030,6 +1036,8 @@ fn dpop_confirmation(jkt: &str) -> RequestConfirmation {
         jkt: jkt.into(),
         verified_at: at(now),
         valid_until: at(now + chrono::Duration::seconds(30)),
+        proof_jti: uuid::Uuid::new_v4().to_string(),
+        proof_iat: at(now),
     }
 }
 
@@ -1492,17 +1500,20 @@ async fn serve_issuer(
         .await
         .unwrap(),
     );
+    // One authorization service answers the questions and admits the proofs
+    // of requests that ask none, as in a server.
+    let authz = Arc::new(
+        authz_recording(&a.svc, a.audit.clone())
+            .with_service_tokens(service_tokens)
+            .with_request_verifiers(verifiers),
+    );
     let routes = tonic::service::Routes::new(InterceptedService::new(
         AuthServiceServer::from_arc(a.svc.auth.clone()),
         counting,
     ))
     .add_service(InterceptedService::new(
         LosingAnswers {
-            inner: AuthzServiceServer::new(
-                authz_recording(&a.svc, a.audit.clone())
-                    .with_service_tokens(service_tokens)
-                    .with_request_verifiers(verifiers),
-            ),
+            inner: AuthzServiceServer::from_arc(authz.clone()),
             lose: lose.clone(),
             confirmations: confirmations.clone(),
             targets: targets.clone(),
@@ -1513,6 +1524,7 @@ async fn serve_issuer(
         sid_server::grpc::oidc_issuer_service::OidcIssuerServiceImpl::new(
             a.svc.issuers.clone(),
             a.svc.storage.clone(),
+            authz,
         ),
     ));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1668,8 +1680,9 @@ impl Guard {
 
 /// The deployment trusts forward auth to confirm DPoP proofs for orders:
 /// a sender-bound request whose proof checked out here is decided on its
-/// subject's grants. The same proof sent again is a new request and is
-/// refused here, before anything is asked (RFC 9449 §11.1).
+/// subject's grants. The same proof sent again is a new request, and the
+/// issuer, which admits each proof once, refuses it within the question
+/// (RFC 9449 §11.1).
 #[tokio::test]
 async fn forward_auth_hands_over_a_bound_token_with_its_confirmation() {
     let a = asking().await;
@@ -1694,7 +1707,11 @@ async fn forward_auth_hands_over_a_bound_token_with_its_confirmation() {
         Some(401),
         "a replayed proof"
     );
-    assert_eq!(guard.questions(), 1, "a replay asks nothing");
+    assert_eq!(
+        guard.questions(),
+        2,
+        "the issuer refuses the replay within its question"
+    );
     let write = dpop_proof("GET", "https://orders.example/write/1", &bound);
     assert_eq!(
         guard.decide_bound("/write/1", &bound, &write).await,
@@ -1704,11 +1721,11 @@ async fn forward_auth_hands_over_a_bound_token_with_its_confirmation() {
 }
 
 /// The answer to a permission question is lost on its way back after
-/// sid-authz decided it. Forward auth asks once more about the same pending
-/// request, with the same confirmation, and the request is decided; the
-/// original proof is not consumed again, so the same proof sent anew is
-/// still refused. A second loss in a row leaves the request without a
-/// verdict.
+/// sid-authz decided it and admitted the proof. Forward auth asks once more
+/// about the same pending request, with the same confirmation: the issuer
+/// confirms that admission and the request is decided. The same proof sent
+/// anew is another request and is refused. A second loss in a row leaves
+/// the request without a verdict.
 #[tokio::test]
 async fn forward_auth_asks_again_when_an_answer_is_lost() {
     let a = asking().await;
@@ -1743,7 +1760,11 @@ async fn forward_auth_asks_again_when_an_answer_is_lost() {
         Some(401),
         "the proof is used once"
     );
-    assert_eq!(guard.questions(), 2, "a replay asks nothing");
+    assert_eq!(
+        guard.questions(),
+        3,
+        "the issuer refuses the replay within its question"
+    );
 
     guard.lose.store(2, Ordering::SeqCst);
     let next = dpop_proof("GET", "https://orders.example/read/2", &bound);
@@ -1752,7 +1773,7 @@ async fn forward_auth_asks_again_when_an_answer_is_lost() {
         None,
         "asked again once, not until an answer arrives"
     );
-    assert_eq!(guard.questions(), 4);
+    assert_eq!(guard.questions(), 5);
 }
 
 /// Without the deployment trusting forward auth to confirm proofs, a
@@ -1947,7 +1968,7 @@ impl OrderService {
 }
 
 /// The order service behind its receiver, which reaches the issuer only
-/// over gRPC and keeps DPoP proof `jti`s in `cache_url`.
+/// over gRPC and has the issuer admit each DPoP proof once.
 struct Protected {
     service: sid_auth::receiver::Guarded<OrderService>,
     reached: OrderService,
@@ -1955,7 +1976,7 @@ struct Protected {
     _secret: tempfile::NamedTempFile,
 }
 
-async fn protected_at(a: &Asking, issuer: Issuer, cache_url: Option<String>) -> Protected {
+async fn protected_at(a: &Asking, issuer: Issuer) -> Protected {
     let secret = file(CHECKER_SECRET);
     let canonical = a.svc.issuer.canonical_url.clone();
     let config = sid_auth::config::ReceiverConfig {
@@ -1963,7 +1984,6 @@ async fn protected_at(a: &Asking, issuer: Issuer, cache_url: Option<String>) -> 
         issuer_url: canonical.split("/i/").next().unwrap().to_owned(),
         resource: a.orders.indicator.as_str().to_owned(),
         origin: SERVICE_ORIGIN.into(),
-        cache_url,
         checker: sid_infra::client_credential::ClientCredentialConfig {
             issuer: canonical,
             client_id: CHECKER.into(),
@@ -1996,7 +2016,7 @@ async fn protected_at(a: &Asking, issuer: Issuer, cache_url: Option<String>) -> 
 
 async fn protected(a: &Asking) -> Protected {
     let issuer = serve_issuer(a, Default::default()).await;
-    protected_at(a, issuer, None).await
+    protected_at(a, issuer).await
 }
 
 impl Protected {
@@ -2185,11 +2205,6 @@ async fn a_receiver_without_the_checker_role_serves_nothing() {
     assert!(p.reached.admitted().is_empty());
 }
 
-/// The shared cache of the test stack.
-fn test_redis_url() -> String {
-    std::env::var("SID_TEST_REDIS_URL").unwrap_or_else(|_| "redis://localhost:63799".to_string())
-}
-
 /// A key-bound token is admitted with a proof of its key for exactly this
 /// call (POST, the service's origin and the RPC path), confirmed to the
 /// issuer by the receiver it trusts for this resource. Replicas share the
@@ -2206,18 +2221,10 @@ async fn a_receiver_admits_a_bound_token_once_across_replicas() {
         ))
         .unwrap()
     };
-    let mut first = protected_at(
-        &a,
-        serve_issuer(&a, verifiers()).await,
-        Some(test_redis_url()),
-    )
-    .await;
-    let mut second = protected_at(
-        &a,
-        serve_issuer(&a, verifiers()).await,
-        Some(test_redis_url()),
-    )
-    .await;
+    // Two receiver replicas, each reaching its own issuer replica over one
+    // store: the issuer admits the proof once for both.
+    let mut first = protected_at(&a, serve_issuer(&a, verifiers()).await).await;
+    let mut second = protected_at(&a, serve_issuer(&a, verifiers()).await).await;
     let (bound, _) = a.profile_token(&a.orders, Some(TEST_KEY_JKT)).await;
     let dpop = format!("DPoP {bound}");
 
