@@ -162,7 +162,7 @@ pub async fn authorize(
         passkey_satisfies_mfa,
         Utc::now(),
     )
-    .map_err(refusal_status)
+    .map_err(tonic::Status::from)
 }
 
 /// Refuse unless `pending` may bind the account's first second factor now,
@@ -182,7 +182,7 @@ pub async fn authorize_sign_in(
         .into_iter()
         .filter(|c| c.status.is_active())
         .collect();
-    check_sign_in_enrollment(pending, &active, passkey_satisfies_mfa).map_err(refusal_status)
+    check_sign_in_enrollment(pending, &active, passkey_satisfies_mfa).map_err(tonic::Status::from)
 }
 
 /// Refuse unless `caller`'s own interactive session may replace the
@@ -210,7 +210,7 @@ pub async fn password_change_authority(
     ) {
         Ok(()) => Ok(false),
         Err(EnrollmentRefusal::CurrentPasswordRequired) => Ok(true),
-        Err(refusal) => Err(refusal_status(refusal)),
+        Err(refusal) => Err(refusal.into()),
     }
 }
 
@@ -218,7 +218,7 @@ pub async fn password_change_authority(
 /// did not prove it.
 #[cfg(feature = "grpc")]
 pub fn current_password_required() -> tonic::Status {
-    refusal_status(EnrollmentRefusal::CurrentPasswordRequired)
+    EnrollmentRefusal::CurrentPasswordRequired.into()
 }
 
 /// How long the caller's session may still change its password without the
@@ -281,37 +281,39 @@ fn storage_failure(e: sid_core::Error) -> tonic::Status {
 /// The status a refusal answers with; `continuation` tells the client what
 /// to do next.
 #[cfg(feature = "grpc")]
-fn refusal_status(refusal: EnrollmentRefusal) -> tonic::Status {
-    use sid_core::grpc_error::{ApiError, ErrorReason};
+impl From<EnrollmentRefusal> for tonic::Status {
+    fn from(refusal: EnrollmentRefusal) -> Self {
+        use sid_core::grpc_error::{ApiError, ErrorReason};
 
-    let err = match refusal {
-        EnrollmentRefusal::Provisional => ApiError::new(
-            ErrorReason::MfaRequired,
-            "sign in to the account, or recover it, before changing its credentials",
-        )
-        .with_metadata("continuation", "authenticate"),
-        EnrollmentRefusal::Insufficient { required } => ApiError::new(
-            ErrorReason::MfaRequired,
-            "a stronger authentication is required to change this credential",
-        )
-        .with_metadata("required_acr", required.acr_value())
-        .with_metadata("continuation", "step_up"),
-        EnrollmentRefusal::Stale { required } => ApiError::new(
-            ErrorReason::MfaRequired,
-            "authenticate again to change this credential",
-        )
-        .with_metadata("required_acr", required.acr_value())
-        .with_metadata("continuation", "reauthenticate"),
-        EnrollmentRefusal::CurrentPasswordRequired => ApiError::new(
-            ErrorReason::StepUpRequired,
-            "enter the current password to change it",
-        )
-        .with_metadata("continuation", "current_password")
-        // The canonical STEP_UP_REQUIRED detail: the method to add, the
-        // password (RFC 8176 §2 `pwd`).
-        .with_precondition("amr", "pwd", "prove the current password"),
-    };
-    tonic::Status::from(err)
+        let err = match refusal {
+            EnrollmentRefusal::Provisional => ApiError::new(
+                ErrorReason::MfaRequired,
+                "sign in to the account, or recover it, before changing its credentials",
+            )
+            .with_metadata("continuation", "authenticate"),
+            EnrollmentRefusal::Insufficient { required } => ApiError::new(
+                ErrorReason::MfaRequired,
+                "a stronger authentication is required to change this credential",
+            )
+            .with_metadata("required_acr", required.acr_value())
+            .with_metadata("continuation", "step_up"),
+            EnrollmentRefusal::Stale { required } => ApiError::new(
+                ErrorReason::MfaRequired,
+                "authenticate again to change this credential",
+            )
+            .with_metadata("required_acr", required.acr_value())
+            .with_metadata("continuation", "reauthenticate"),
+            EnrollmentRefusal::CurrentPasswordRequired => ApiError::new(
+                ErrorReason::StepUpRequired,
+                "enter the current password to change it",
+            )
+            .with_metadata("continuation", "current_password")
+            // The canonical STEP_UP_REQUIRED detail: the method to add, the
+            // password (RFC 8176 §2 `pwd`).
+            .with_precondition("amr", "pwd", "prove the current password"),
+        };
+        tonic::Status::from(err)
+    }
 }
 
 #[cfg(test)]
