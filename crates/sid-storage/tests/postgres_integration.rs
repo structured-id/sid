@@ -2242,6 +2242,69 @@ async fn test_commit_survives_restart() {
     common::restart::test_commit_survives_restart(setup).await;
 }
 
+/// The test server's own `pg_dump` and `pg_restore`, so their version is the
+/// server's.
+fn in_test_server(tool: &str, args: &[&str], input: Option<&[u8]>) -> Vec<u8> {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("docker")
+        .args(["exec", "-i", "sid-test-postgres", tool, "-U", "sid"])
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("docker runs the test server");
+    let mut stdin = child.stdin.take().unwrap();
+    if let Some(input) = input {
+        stdin.write_all(input).unwrap();
+    }
+    drop(stdin);
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{tool} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output.stdout
+}
+
+/// `pg_dump` of the store's schema is the backup; the restore loads it with
+/// `pg_restore` into a database of its own and opens a store there.
+#[tokio::test]
+async fn test_restore_returns_the_backed_up_state() {
+    let schema_name = format!("backup_{}", uuid::Uuid::now_v7().simple());
+    let schema = schema_name.as_str();
+    let live = PostgresBackend::new(&database_url(), Some(schema.to_owned()))
+        .await
+        .unwrap();
+    sid_storage::migrator::run_migrations(live.pool(), Some(schema))
+        .await
+        .unwrap();
+    let log = sid_storage::audit_log::PostgresAuditLog::new(live.pool().clone());
+    let source = database_url().rsplit('/').next().unwrap().to_owned();
+    let restored_db = format!("restore_{}", uuid::Uuid::now_v7().simple());
+    common::backup::test_restore_returns_the_backed_up_state(
+        &live,
+        &log,
+        || async { in_test_server("pg_dump", &["-d", &source, "--schema", schema, "-Fc"], None) },
+        |dump: Vec<u8>| async move {
+            in_test_server("createdb", &[&restored_db], None);
+            in_test_server("pg_restore", &["-d", &restored_db], Some(&dump));
+            let url = format!(
+                "{}/{restored_db}",
+                database_url().rsplit_once('/').unwrap().0
+            );
+            let restored = PostgresBackend::new(&url, Some(schema.to_owned()))
+                .await
+                .unwrap();
+            let log = sid_storage::audit_log::PostgresAuditLog::new(restored.pool().clone());
+            (restored, log)
+        },
+    )
+    .await;
+}
+
 #[tokio::test]
 async fn test_job_lock_exclusive_across_instances() {
     common::job_lock::test_job_lock_exclusive_across_instances(&setup().await, &setup().await)

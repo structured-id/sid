@@ -1659,6 +1659,40 @@ async fn test_commit_survives_restart() {
     common::restart::test_commit_survives_restart(open).await;
 }
 
+/// SQLite's online copy, `VACUUM INTO`, is the backup; the restore opens a
+/// store on the copied file.
+#[tokio::test]
+async fn test_restore_returns_the_backed_up_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let live_path = dir.path().join("sid.db");
+    let copy = dir.path().join("backup.db");
+    let live = SqliteBackend::new(&format!("sqlite://{}", live_path.display()))
+        .await
+        .unwrap();
+    let log = sid_storage::sqlite::SqliteAuditLog::new(live.pool().clone());
+    let pool = live.pool().clone();
+    common::backup::test_restore_returns_the_backed_up_state(
+        &live,
+        &log,
+        || async {
+            sqlx::query("VACUUM INTO ?")
+                .bind(copy.display().to_string())
+                .execute(&pool)
+                .await
+                .unwrap();
+            copy.clone()
+        },
+        |copy: std::path::PathBuf| async move {
+            let restored = SqliteBackend::new(&format!("sqlite://{}", copy.display()))
+                .await
+                .unwrap();
+            let log = sid_storage::sqlite::SqliteAuditLog::new(restored.pool().clone());
+            (restored, log)
+        },
+    )
+    .await;
+}
+
 #[tokio::test]
 async fn test_job_lock_exclusive_across_instances() {
     let (_dir, a, b) = two_instances().await;

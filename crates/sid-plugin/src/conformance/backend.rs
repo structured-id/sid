@@ -15,6 +15,7 @@ pub mod admin_claim;
 mod all;
 pub mod application;
 pub mod audit_retention;
+pub mod backup;
 pub mod branding;
 pub mod browser_session;
 pub mod cleanup;
