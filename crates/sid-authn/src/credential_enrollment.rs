@@ -43,7 +43,10 @@ pub fn credential_assurance(
 }
 
 /// The highest assurance the account's active credentials establish.
-pub fn established_assurance(active: &[Credential], passkey_satisfies_mfa: bool) -> AuthLevel {
+pub fn established_assurance<O>(
+    active: &[Credential<O>],
+    passkey_satisfies_mfa: bool,
+) -> AuthLevel {
     active
         .iter()
         .map(|c| credential_assurance(c.credential_type, passkey_satisfies_mfa))
@@ -53,9 +56,9 @@ pub fn established_assurance(active: &[Credential], passkey_satisfies_mfa: bool)
 
 /// Check that `session` may bind a new `credential_type` credential to an
 /// account whose active credentials are `active`, at `now`.
-pub fn check_enrollment(
-    session: &Session,
-    active: &[Credential],
+pub fn check_enrollment<O>(
+    session: &Session<O>,
+    active: &[Credential<O>],
     credential_type: CredentialType,
     passkey_satisfies_mfa: bool,
     now: DateTime<Utc>,
@@ -77,9 +80,9 @@ pub fn check_enrollment(
 /// Check that `pending`, a sign-in's context owing its second factor, may bind
 /// the first one to an account whose active credentials are `active`: only
 /// with no stronger protection established, which stays out of its reach.
-pub fn check_sign_in_enrollment(
-    pending: &Session,
-    active: &[Credential],
+pub fn check_sign_in_enrollment<O>(
+    pending: &Session<O>,
+    active: &[Credential<O>],
     passkey_satisfies_mfa: bool,
 ) -> Result<(), EnrollmentRefusal> {
     if !pending.awaits_second_factor() || pending.is_expired() {
@@ -95,8 +98,8 @@ pub fn check_sign_in_enrollment(
 /// the current password; zero when it needs it now. A relaxed rule counts
 /// from the session's last authentication and never outlasts the
 /// credential-binding freshness window.
-pub fn current_password_required_in(
-    session: &Session,
+pub fn current_password_required_in<O>(
+    session: &Session<O>,
     rule: CurrentPasswordRule,
     now: DateTime<Utc>,
 ) -> chrono::Duration {
@@ -113,9 +116,9 @@ pub fn current_password_required_in(
 /// password: that is a fresh authentication at the password's level, so it
 /// satisfies freshness whenever it is sent, required or not. It lifts no
 /// other condition.
-pub fn check_password_change(
-    session: &Session,
-    active: &[Credential],
+pub fn check_password_change<O>(
+    session: &Session<O>,
+    active: &[Credential<O>],
     passkey_satisfies_mfa: bool,
     rule: CurrentPasswordRule,
     proven: bool,
