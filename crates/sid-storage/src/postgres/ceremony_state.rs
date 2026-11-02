@@ -3,7 +3,9 @@
 //! step on its row, and every deadline is the server's `clock_timestamp()`:
 //! `NOW()` is fixed when the transaction began, so a statement that waited
 //! on a row lock past an expiry would still see the row live. The current
-//! clock is read when the row is reached, its lock held.
+//! clock is read when the row is reached, its lock held, and a conflict
+//! update computes its new deadline then, never from `EXCLUDED`, whose value
+//! the insert computed before the wait.
 
 use std::time::Duration;
 
@@ -55,7 +57,8 @@ impl SingleUseAdmissions for PostgresBackend {
             "INSERT INTO ceremony_states (namespace, state_key, value, expires_at)
              VALUES ($1, $2, ''::bytea, clock_timestamp() + make_interval(secs => $3))
              ON CONFLICT (namespace, state_key) DO UPDATE SET
-                 value = EXCLUDED.value, expires_at = EXCLUDED.expires_at
+                 value = EXCLUDED.value,
+                 expires_at = clock_timestamp() + make_interval(secs => $3)
              WHERE ceremony_states.expires_at <= clock_timestamp()",
         )
         .bind(namespace)
@@ -85,7 +88,8 @@ impl SingleUseAdmissions for PostgresBackend {
                  value = CASE WHEN ceremony_states.expires_at <= clock_timestamp()
                               THEN EXCLUDED.value ELSE ceremony_states.value END,
                  expires_at = CASE WHEN ceremony_states.expires_at <= clock_timestamp()
-                                   THEN EXCLUDED.expires_at ELSE ceremony_states.expires_at END
+                                   THEN clock_timestamp() + make_interval(secs => $4)
+                                   ELSE ceremony_states.expires_at END
              WHERE ceremony_states.expires_at <= clock_timestamp() OR ceremony_states.value = EXCLUDED.value",
         )
         .bind(namespace)
@@ -113,7 +117,8 @@ impl CeremonyStateStore for PostgresBackend {
             "INSERT INTO ceremony_states (namespace, state_key, value, expires_at)
              VALUES ($1, $2, $3, clock_timestamp() + make_interval(secs => $4))
              ON CONFLICT (namespace, state_key) DO UPDATE SET
-                 value = EXCLUDED.value, expires_at = EXCLUDED.expires_at",
+                 value = EXCLUDED.value,
+                 expires_at = clock_timestamp() + make_interval(secs => $4)",
         )
         .bind(namespace)
         .bind(key)
@@ -205,7 +210,7 @@ impl CeremonyStateStore for PostgresBackend {
                  count = CASE WHEN ceremony_counts.window_ends <= clock_timestamp() THEN 1
                               ELSE ceremony_counts.count + 1 END,
                  window_ends = CASE WHEN ceremony_counts.window_ends <= clock_timestamp()
-                                    THEN EXCLUDED.window_ends
+                                    THEN clock_timestamp() + make_interval(secs => $3)
                                     ELSE ceremony_counts.window_ends END
              RETURNING count",
         )

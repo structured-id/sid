@@ -525,6 +525,36 @@ async fn test_ceremony_count_window_ending_behind_a_row_lock_restarts() {
     .await
     .unwrap();
     assert_eq!(count, 1, "an ended window was added to");
+    assert_eq!(
+        backend.read_count(&namespace, "k").await.unwrap(),
+        1,
+        "the new window ended before it was used"
+    );
+}
+
+/// An admission taken over after waiting on the row lock past the old one's
+/// expiry is live afterwards: its deadline counts from when it was taken.
+#[tokio::test]
+async fn test_admission_taken_behind_a_row_lock_stays_live() {
+    use sid_plugin::SingleUseAdmissions;
+    let backend = setup().await;
+    let ttl = std::time::Duration::from_millis(300);
+    let namespace = format!("lock-{}", uuid::Uuid::now_v7());
+    assert!(backend.admit_once(&namespace, "k", ttl).await.unwrap());
+    let taken = after_a_held_row_lock(
+        &backend,
+        LOCK_STATE,
+        &namespace,
+        ttl,
+        backend.admit_once(&namespace, "k", ttl),
+    )
+    .await
+    .unwrap();
+    assert!(taken, "the lapsed admission was not taken over");
+    assert!(
+        !backend.admit_once(&namespace, "k", ttl).await.unwrap(),
+        "the admission taken over had already lapsed"
+    );
 }
 
 // ─── Instance secret conformance ───
