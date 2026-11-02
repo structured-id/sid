@@ -84,6 +84,17 @@ fn maintenance_says_when_to_poll() {
     );
 }
 
+/// A closed registration has its own reason, apart from a feature never set up.
+#[test]
+fn registration_disabled_is_its_own_reason() {
+    let status = registration_disabled();
+    assert_eq!(status.code(), Code::FailedPrecondition);
+    assert_eq!(
+        status.get_error_details().error_info().unwrap().reason,
+        "REGISTRATION_DISABLED"
+    );
+}
+
 /// A feature outside the build names the feature and no edition.
 #[test]
 fn not_in_this_build_names_no_edition() {

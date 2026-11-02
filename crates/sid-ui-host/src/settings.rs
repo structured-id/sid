@@ -131,6 +131,7 @@ fn projection(settings: &PublicUiSettings) -> Result<Value, SettingsRejected> {
         }
         object.insert("registrationUsernameMinLength".into(), minimum.into());
     }
+    object.insert("registrationOpen".into(), settings.registration_open.into());
     object.insert("registrationPrincipalTypes".into(), registration.into());
     object.insert(
         "signInPrincipalTypes".into(),
