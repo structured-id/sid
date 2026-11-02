@@ -63,7 +63,6 @@ COMBOS=(
   "sid-authn|--features grpc"
   "sid-authz|"
   "sid-authz|--no-default-features"
-  "sid-authz|--features standalone"
   "sid-admin|"
   "sid-fed|"
   "sid-i18n|"
