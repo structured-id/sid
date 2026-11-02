@@ -643,6 +643,18 @@ type Fence = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 type Interference = Box<dyn FnOnce(Arc<dyn CeremonyStateStore>, String) -> Fence + Send>;
 
 #[async_trait::async_trait]
+impl sid_plugin::SingleUseAdmissions for FencedOff {
+    async fn admit_once(
+        &self,
+        namespace: &str,
+        key: &str,
+        ttl: std::time::Duration,
+    ) -> sid_core::Result<bool> {
+        self.inner.admit_once(namespace, key, ttl).await
+    }
+}
+
+#[async_trait::async_trait]
 impl CeremonyStateStore for FencedOff {
     async fn put_ceremony_state(
         &self,
@@ -690,14 +702,6 @@ impl CeremonyStateStore for FencedOff {
             interfere(self.inner.clone(), key.to_owned()).await;
         }
         Ok(swapped)
-    }
-    async fn admit_once(
-        &self,
-        namespace: &str,
-        key: &str,
-        ttl: std::time::Duration,
-    ) -> sid_core::Result<bool> {
-        self.inner.admit_once(namespace, key, ttl).await
     }
     async fn count_in_window(
         &self,

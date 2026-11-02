@@ -62,7 +62,7 @@ async fn sign_in(
     ip: IpAddr,
     pass: Option<&str>,
 ) -> Result<VerifyOtpResponse, Status> {
-    let (pending, code) = sid_authn::otp::OtpService::new(svc.cache.clone())
+    let (pending, code) = sid_authn::otp::OtpService::new(svc.storage.clone())
         .request_otp(ADDRESS)
         .await
         .unwrap();

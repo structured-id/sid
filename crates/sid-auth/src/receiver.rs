@@ -155,7 +155,9 @@ impl Receiver {
                 resource: config.resource.clone(),
             },
             &config.origin,
-            Arc::new(sid_authn::dpop::DPopValidator::new(cache)),
+            Arc::new(sid_authn::dpop::DPopValidator::new(Arc::new(
+                crate::SharedCacheAdmissions(cache),
+            ))),
             Arc::new(checker),
             upstream,
         ))

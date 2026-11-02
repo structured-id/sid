@@ -217,7 +217,6 @@ impl Installation {
             issuers.clone(),
             storage.clone(),
             revocation.clone(),
-            self.cache.clone(),
             auth,
             project,
             None,

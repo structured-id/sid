@@ -14,8 +14,19 @@ use std::time::Duration;
 use async_trait::async_trait;
 use sid_core::Result;
 
+/// Single-use admissions: the atomic replay record a verifier needs to
+/// accept a one-time value (a proof's `jti`) exactly once across every
+/// replica sharing it. A host gives a verifier this alone, not its store.
 #[async_trait]
-pub trait CeremonyStateStore: Send + Sync {
+pub trait SingleUseAdmissions: Send + Sync {
+    /// Admit `key` once for `ttl` from now: `true` for the one caller that
+    /// holds it, `false` while a live admission of it exists. An expired
+    /// admission no longer holds the key.
+    async fn admit_once(&self, namespace: &str, key: &str, ttl: Duration) -> Result<bool>;
+}
+
+#[async_trait]
+pub trait CeremonyStateStore: SingleUseAdmissions {
     /// Hold `value` under `key` in `namespace` for `ttl` from now, replacing
     /// whatever it held.
     async fn put_ceremony_state(
@@ -45,11 +56,6 @@ pub trait CeremonyStateStore: Send + Sync {
         value: &[u8],
         ttl: Duration,
     ) -> Result<bool>;
-
-    /// Admit `key` once for `ttl` from now: `true` for the one caller that
-    /// holds it, `false` while a live admission of it exists. An expired
-    /// admission no longer holds the key.
-    async fn admit_once(&self, namespace: &str, key: &str, ttl: Duration) -> Result<bool>;
 
     /// Count one more event under `key` and return the count in its window:
     /// the first event opens a window of `window` from now, events within it
@@ -94,6 +100,23 @@ fn deadline(ttl: Duration) -> Result<std::time::Instant> {
     std::time::Instant::now()
         .checked_add(ttl)
         .ok_or_else(|| sid_core::Error::Internal(format!("ceremony state lifetime {ttl:?}")))
+}
+
+#[async_trait]
+impl SingleUseAdmissions for InProcessCeremonyState {
+    async fn admit_once(&self, namespace: &str, key: &str, ttl: Duration) -> Result<bool> {
+        let expires = deadline(ttl)?;
+        let now = std::time::Instant::now();
+        let mut entries = self.entries();
+        let entry = entries
+            .entry((namespace.into(), key.into()))
+            .or_insert((Vec::new(), now));
+        if entry.1 > now {
+            return Ok(false);
+        }
+        *entry = (Vec::new(), expires);
+        Ok(true)
+    }
 }
 
 #[async_trait]
@@ -147,20 +170,6 @@ impl CeremonyStateStore for InProcessCeremonyState {
             }
             _ => Ok(false),
         }
-    }
-
-    async fn admit_once(&self, namespace: &str, key: &str, ttl: Duration) -> Result<bool> {
-        let expires = deadline(ttl)?;
-        let now = std::time::Instant::now();
-        let mut entries = self.entries();
-        let entry = entries
-            .entry((namespace.into(), key.into()))
-            .or_insert((Vec::new(), now));
-        if entry.1 > now {
-            return Ok(false);
-        }
-        *entry = (Vec::new(), expires);
-        Ok(true)
     }
 
     async fn count_in_window(&self, namespace: &str, key: &str, window: Duration) -> Result<u64> {

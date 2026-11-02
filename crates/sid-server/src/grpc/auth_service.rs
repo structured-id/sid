@@ -599,7 +599,7 @@ pub struct AuthServiceImpl {
     /// proof names, never taken from a request.
     public_origin: String,
     /// RFC 7523: assertion JTI replay prevention cache.
-    assertion_jti_cache: Arc<sid_authn::client_assertion::AssertionJtiCache>,
+    assertion_jti_log: Arc<sid_authn::client_assertion::AssertionJtiLog>,
     /// Per-client rate limiter for machine user requests.
     rate_limiter: Arc<crate::rate_limit::RateLimiter>,
     /// Distributed rate limit stats for admin dashboard.
@@ -784,14 +784,14 @@ impl AuthServiceImpl {
                 authorize::CONTINUATION_TTL,
             ),
             logout_confirmations: ChallengeStore::new(
-                ceremonies,
+                ceremonies.clone(),
                 key_manager.clone(),
                 "logout-confirmation",
                 end_session::CONFIRMATION_TTL,
             ),
             magic_link,
             otp,
-            dpop_validator: DPopValidator::new(cache_backend.clone()),
+            dpop_validator: DPopValidator::new(ceremonies.clone()),
             issuers,
             installation_org,
             public_origin: url::Url::parse(&issuer)
@@ -799,8 +799,8 @@ impl AuthServiceImpl {
                 .origin()
                 .ascii_serialization(),
             issuer,
-            assertion_jti_cache: Arc::new(sid_authn::client_assertion::AssertionJtiCache::new(
-                cache_backend.clone(),
+            assertion_jti_log: Arc::new(sid_authn::client_assertion::AssertionJtiLog::new(
+                ceremonies.clone(),
             )),
             rate_limiter: Arc::new(crate::rate_limit::RateLimiter::new(cache_backend.clone())),
             rate_limit_stats: Arc::new(crate::rate_limit::RateLimitStats::new(
@@ -1485,8 +1485,8 @@ impl AuthServiceImpl {
             .map_err(|e| match e {
                 // An unreachable replay record cannot rule out a replay; the
                 // client retries the same request.
-                sid_authn::dpop::DPopError::ReplayCacheUnavailable => {
-                    dependency_unavailable("DPoP replay record", "replay cache unreachable")
+                sid_authn::dpop::DPopError::ReplayStoreUnavailable => {
+                    dependency_unavailable("DPoP replay record", "replay store unreachable")
                 }
                 other => {
                     warn!("DPoP proof validation failed: {}", other);
@@ -1567,7 +1567,7 @@ impl AuthServiceImpl {
             client,
             &issuer.canonical_url,
             &self.oauth2,
-            &self.assertion_jti_cache,
+            &self.assertion_jti_log,
         )
         .await
         .map_err(|refusal| match refusal {
@@ -1646,7 +1646,7 @@ impl AuthServiceImpl {
                         &audience,
                         &cred.credential_data,
                         alg,
-                        &self.assertion_jti_cache,
+                        &self.assertion_jti_log,
                     )
                     .await
                     {

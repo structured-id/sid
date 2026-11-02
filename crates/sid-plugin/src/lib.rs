@@ -44,7 +44,7 @@ pub use audit::{AuditLog, VerifyResult};
 pub use auth::{AuthContext, AuthProvider, AuthResult};
 pub use blob_store::BlobStore;
 pub use cache::{CacheBackend, CacheError, CacheResult, NoCacheBackend};
-pub use ceremony_state::{CeremonyStateStore, InProcessCeremonyState};
+pub use ceremony_state::{CeremonyStateStore, InProcessCeremonyState, SingleUseAdmissions};
 pub use client_registry::ClientResourceRegistry;
 pub use credential_store::CredentialStore;
 pub use crypto::{

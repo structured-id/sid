@@ -97,7 +97,7 @@ async fn code_signs_in_the_assigned_holder() {
         .unwrap();
 
     // The mailbox reader's code, issued the way RequestOtp issues it.
-    let (pending, code) = sid_authn::otp::OtpService::new(svc.cache.clone())
+    let (pending, code) = sid_authn::otp::OtpService::new(svc.storage.clone())
         .request_otp(address)
         .await
         .unwrap();
@@ -153,7 +153,7 @@ async fn unreadable_sign_in_history_refuses_the_sign_in() {
         .await
         .unwrap();
 
-    let (pending, code) = sid_authn::otp::OtpService::new(svc.cache.clone())
+    let (pending, code) = sid_authn::otp::OtpService::new(svc.storage.clone())
         .request_otp(address)
         .await
         .unwrap();

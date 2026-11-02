@@ -653,7 +653,7 @@ fn auth_service(
         revocation,
         sid_server::feature_flags::FeatureFlagService::disabled(),
         None,
-        sid_authn::otp::OtpService::new(cache.clone()),
+        sid_authn::otp::OtpService::new(storage.clone()),
         issuers,
         org,
         INSTALLATION.to_string(),

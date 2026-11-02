@@ -331,6 +331,13 @@ impl sid_plugin::OperationResultStore for MockStorage {
 }
 
 #[async_trait::async_trait]
+impl sid_plugin::SingleUseAdmissions for MockStorage {
+    async fn admit_once(&self, _: &str, _: &str, _: std::time::Duration) -> Result<bool> {
+        unimplemented!()
+    }
+}
+
+#[async_trait::async_trait]
 impl sid_plugin::CeremonyStateStore for MockStorage {
     async fn put_ceremony_state(
         &self,
@@ -355,9 +362,6 @@ impl sid_plugin::CeremonyStateStore for MockStorage {
         _: &[u8],
         _: std::time::Duration,
     ) -> Result<bool> {
-        unimplemented!()
-    }
-    async fn admit_once(&self, _: &str, _: &str, _: std::time::Duration) -> Result<bool> {
         unimplemented!()
     }
     async fn count_in_window(&self, _: &str, _: &str, _: std::time::Duration) -> Result<u64> {

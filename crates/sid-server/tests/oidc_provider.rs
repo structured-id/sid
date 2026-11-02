@@ -30,7 +30,6 @@ fn provider_signing_in_at(svc: &TestServices, login_url: Option<&str>) -> OidcPr
         svc.issuers.clone(),
         svc.storage.clone(),
         svc.revocation_cache.clone(),
-        svc.cache.clone(),
         svc.auth.clone(),
         svc.project.clone(),
         login_url.map(|url| url::Url::parse(url).unwrap()),
@@ -731,15 +730,8 @@ async fn user_info_honours_the_key_binding() {
 async fn user_info_without_the_replay_record_is_unavailable() {
     let user = signed_in().await;
     let token = user.token(&["openid"], Some(TEST_JKT)).await;
-    let provider = OidcProviderServiceImpl::new(
-        user.svc.issuers.clone(),
-        user.svc.storage.clone(),
-        user.svc.revocation_cache.clone(),
-        std::sync::Arc::new(common::NoReplayRecord(user.svc.cache.clone())),
-        user.svc.auth.clone(),
-        user.svc.project.clone(),
-        None,
-    );
+    let provider = provider_of(&user.svc);
+    user.svc.mock_storage.fail_admissions("dpop-jti");
     let proof = dpop_proof("POST", &user_info_rpc("GetUserInfo"), &token);
     let err = provider
         .get_user_info(user.request(Some(&format!("DPoP {token}")), Some(&proof)))

@@ -9,7 +9,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Utc;
 use sid_core::{Error as SidError, Result as SidResult};
-use sid_plugin::CeremonyStateStore;
+use sid_plugin::{CeremonyStateStore, SingleUseAdmissions};
 
 use super::SqliteBackend;
 
@@ -47,6 +47,30 @@ impl SqliteBackend {
             .rows_affected();
         tx.commit().await.map_err(failure(what))?;
         Ok(changed)
+    }
+}
+
+#[async_trait]
+impl SingleUseAdmissions for SqliteBackend {
+    async fn admit_once(&self, namespace: &str, key: &str, ttl: Duration) -> SidResult<bool> {
+        let now = now_ms();
+        let admitted = self
+            .ceremony_write(
+                "admit once",
+                sqlx::query(
+                    "INSERT INTO ceremony_states (namespace, state_key, value, expires_at_ms)
+                     VALUES (?, ?, X'', ?)
+                     ON CONFLICT (namespace, state_key) DO UPDATE SET
+                         value = excluded.value, expires_at_ms = excluded.expires_at_ms
+                     WHERE ceremony_states.expires_at_ms <= ?",
+                )
+                .bind(namespace)
+                .bind(key)
+                .bind(deadline(now, ttl)?)
+                .bind(now),
+            )
+            .await?;
+        Ok(admitted == 1)
     }
 }
 
@@ -132,27 +156,6 @@ impl CeremonyStateStore for SqliteBackend {
             )
             .await?;
         Ok(replaced == 1)
-    }
-
-    async fn admit_once(&self, namespace: &str, key: &str, ttl: Duration) -> SidResult<bool> {
-        let now = now_ms();
-        let admitted = self
-            .ceremony_write(
-                "admit once",
-                sqlx::query(
-                    "INSERT INTO ceremony_states (namespace, state_key, value, expires_at_ms)
-                     VALUES (?, ?, X'', ?)
-                     ON CONFLICT (namespace, state_key) DO UPDATE SET
-                         value = excluded.value, expires_at_ms = excluded.expires_at_ms
-                     WHERE ceremony_states.expires_at_ms <= ?",
-                )
-                .bind(namespace)
-                .bind(key)
-                .bind(deadline(now, ttl)?)
-                .bind(now),
-            )
-            .await?;
-        Ok(admitted == 1)
     }
 
     async fn count_in_window(

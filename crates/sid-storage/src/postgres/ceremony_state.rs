@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use sid_core::{Error as SidError, Result as SidResult};
-use sid_plugin::CeremonyStateStore;
+use sid_plugin::{CeremonyStateStore, SingleUseAdmissions};
 
 use super::PostgresBackend;
 
@@ -17,6 +17,29 @@ fn failure(what: &str) -> impl FnOnce(sqlx::Error) -> SidError + '_ {
 /// `ttl` in seconds, as `make_interval` takes it.
 fn seconds(ttl: Duration) -> f64 {
     ttl.as_secs_f64()
+}
+
+#[async_trait]
+impl SingleUseAdmissions for PostgresBackend {
+    async fn admit_once(&self, namespace: &str, key: &str, ttl: Duration) -> SidResult<bool> {
+        // A concurrent insert of the key waits for this one; the conflict
+        // then takes the key over only from an expired admission.
+        let admitted = sqlx::query(
+            "INSERT INTO ceremony_states (namespace, state_key, value, expires_at)
+             VALUES ($1, $2, ''::bytea, NOW() + make_interval(secs => $3))
+             ON CONFLICT (namespace, state_key) DO UPDATE SET
+                 value = EXCLUDED.value, expires_at = EXCLUDED.expires_at
+             WHERE ceremony_states.expires_at <= NOW()",
+        )
+        .bind(namespace)
+        .bind(key)
+        .bind(seconds(ttl))
+        .execute(&self.pool)
+        .await
+        .map_err(failure("admit once"))?
+        .rows_affected();
+        Ok(admitted == 1)
+    }
 }
 
 #[async_trait]
@@ -96,26 +119,6 @@ impl CeremonyStateStore for PostgresBackend {
         .map_err(failure("replace ceremony state"))?
         .rows_affected();
         Ok(replaced == 1)
-    }
-
-    async fn admit_once(&self, namespace: &str, key: &str, ttl: Duration) -> SidResult<bool> {
-        // A concurrent insert of the key waits for this one; the conflict
-        // then takes the key over only from an expired admission.
-        let admitted = sqlx::query(
-            "INSERT INTO ceremony_states (namespace, state_key, value, expires_at)
-             VALUES ($1, $2, ''::bytea, NOW() + make_interval(secs => $3))
-             ON CONFLICT (namespace, state_key) DO UPDATE SET
-                 value = EXCLUDED.value, expires_at = EXCLUDED.expires_at
-             WHERE ceremony_states.expires_at <= NOW()",
-        )
-        .bind(namespace)
-        .bind(key)
-        .bind(seconds(ttl))
-        .execute(&self.pool)
-        .await
-        .map_err(failure("admit once"))?
-        .rows_affected();
-        Ok(admitted == 1)
     }
 
     async fn count_in_window(

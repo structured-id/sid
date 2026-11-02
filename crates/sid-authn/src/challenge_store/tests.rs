@@ -180,49 +180,12 @@ async fn stored_state_is_sealed_and_bound_to_its_key() {
 /// a fresh start or as success.
 #[tokio::test]
 async fn unreachable_store_is_an_error() {
-    struct Down;
-    fn down<T>() -> sid_core::Result<T> {
-        Err(sid_core::Error::Storage("down".into()))
-    }
-    #[async_trait::async_trait]
-    impl CeremonyStateStore for Down {
-        async fn put_ceremony_state(
-            &self,
-            _: &str,
-            _: &str,
-            _: &[u8],
-            _: Duration,
-        ) -> sid_core::Result<()> {
-            down()
-        }
-        async fn take_ceremony_state(&self, _: &str, _: &str) -> sid_core::Result<Option<Vec<u8>>> {
-            down()
-        }
-        async fn read_ceremony_state(&self, _: &str, _: &str) -> sid_core::Result<Option<Vec<u8>>> {
-            down()
-        }
-        async fn replace_ceremony_state(
-            &self,
-            _: &str,
-            _: &str,
-            _: &[u8],
-            _: &[u8],
-            _: Duration,
-        ) -> sid_core::Result<bool> {
-            down()
-        }
-        async fn admit_once(&self, _: &str, _: &str, _: Duration) -> sid_core::Result<bool> {
-            down()
-        }
-        async fn count_in_window(&self, _: &str, _: &str, _: Duration) -> sid_core::Result<u64> {
-            down()
-        }
-        async fn purge_expired_ceremony_state(&self) -> sid_core::Result<u64> {
-            down()
-        }
-    }
-    let store: ChallengeStore<String> =
-        ChallengeStore::new(Arc::new(Down), keys(), "test", Duration::from_secs(60));
+    let store: ChallengeStore<String> = ChallengeStore::new(
+        Arc::new(crate::test_support::DownCeremonies),
+        keys(),
+        "test",
+        Duration::from_secs(60),
+    );
 
     assert!(store.insert("k1", &"s".to_string()).await.is_err());
     assert!(store.take("k1").await.is_err());

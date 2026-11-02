@@ -66,8 +66,8 @@ fn fixture_with(registered: bool) -> Fixture {
         sid_infra::deadline::issuer(crate::test_channel()),
     )
     .unwrap();
-    let cache: Arc<dyn sid_plugin::cache::CacheBackend> =
-        Arc::new(sid_plugin::cache::InMemoryCacheBackend::new());
+    let admissions: Arc<dyn sid_plugin::SingleUseAdmissions> =
+        Arc::new(sid_plugin::InProcessCeremonyState::new());
     let receiver = Receiver::new(
         "ops",
         issuers,
@@ -76,7 +76,7 @@ fn fixture_with(registered: bool) -> Fixture {
             resource: ORDERS.into(),
         },
         ORIGIN,
-        Arc::new(sid_authn::dpop::DPopValidator::new(cache)),
+        Arc::new(sid_authn::dpop::DPopValidator::new(admissions)),
         Arc::new(checker),
         crate::test_channel(),
     );

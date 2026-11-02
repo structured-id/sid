@@ -88,65 +88,6 @@ impl AuditLog for NoOpAuditLog {
     }
 }
 
-/// A shared cache whose DPoP replay records cannot be written, every other
-/// key served by the cache it wraps: a proof's single use cannot be recorded.
-#[allow(dead_code)]
-pub struct NoReplayRecord(pub Arc<dyn sid_plugin::cache::CacheBackend>);
-
-#[async_trait::async_trait]
-impl sid_plugin::cache::CacheBackend for NoReplayRecord {
-    async fn get(&self, key: &str) -> sid_plugin::cache::CacheResult<Option<Vec<u8>>> {
-        self.0.get(key).await
-    }
-    async fn set(
-        &self,
-        key: &str,
-        value: &[u8],
-        ttl: std::time::Duration,
-    ) -> sid_plugin::cache::CacheResult<()> {
-        self.0.set(key, value, ttl).await
-    }
-    async fn delete(&self, key: &str) -> sid_plugin::cache::CacheResult<()> {
-        self.0.delete(key).await
-    }
-    async fn take(&self, key: &str) -> sid_plugin::cache::CacheResult<Option<Vec<u8>>> {
-        self.0.take(key).await
-    }
-    async fn exists(&self, key: &str) -> sid_plugin::cache::CacheResult<bool> {
-        self.0.exists(key).await
-    }
-    async fn set_nx(
-        &self,
-        key: &str,
-        value: &[u8],
-        ttl: std::time::Duration,
-    ) -> sid_plugin::cache::CacheResult<bool> {
-        if key.starts_with("jti:dpop:") {
-            return Err(sid_plugin::cache::CacheError::Connection("down".into()));
-        }
-        self.0.set_nx(key, value, ttl).await
-    }
-    async fn incr(
-        &self,
-        key: &str,
-        ttl: std::time::Duration,
-    ) -> sid_plugin::cache::CacheResult<u64> {
-        self.0.incr(key, ttl).await
-    }
-    async fn publish(&self, channel: &str, message: &[u8]) -> sid_plugin::cache::CacheResult<()> {
-        self.0.publish(channel, message).await
-    }
-    async fn subscribe(
-        &self,
-        channel: &str,
-    ) -> sid_plugin::cache::CacheResult<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>> {
-        self.0.subscribe(channel).await
-    }
-    async fn health_check(&self) -> sid_plugin::cache::CacheResult<()> {
-        self.0.health_check().await
-    }
-}
-
 /// The shared cache of the test stack (Redis 63799).
 #[allow(dead_code)]
 pub async fn test_redis() -> Arc<dyn sid_plugin::cache::CacheBackend> {
@@ -881,7 +822,7 @@ pub fn auth_service(
     let opaque_zkpp: Arc<arc_swap::ArcSwap<Option<Arc<ZkppOpaqueServer>>>> =
         Arc::new(arc_swap::ArcSwap::from_pointee(Some(zkpp)));
 
-    let otp_service = sid_authn::otp::OtpService::new(cache.clone());
+    let otp_service = sid_authn::otp::OtpService::new(storage.clone());
     let service = AuthServiceImpl::new(
         storage.clone(),
         oauth2,

@@ -89,11 +89,7 @@ async fn deploy() -> Deployment {
         .await
         .unwrap();
 
-    let integrations = SystemIntegrationServiceImpl::new(
-        svc.storage.clone(),
-        installation.clone(),
-        svc.cache.clone(),
-    );
+    let integrations = SystemIntegrationServiceImpl::new(svc.storage.clone(), installation.clone());
     let registry = sid_server::grpc::oidc_issuer_service::OidcIssuerServiceImpl::new(
         svc.issuers.clone(),
         svc.storage.clone(),

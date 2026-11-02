@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! OTP Session Service: passwordless authentication entry point.
 //!
-//! Every piece of state lives in the shared cache, so a code requested on one
-//! replica is verified on any other against the same attempt count:
+//! Every piece of state lives in the authoritative ceremony state, so a code
+//! requested on one replica is verified on any other against the same
+//! attempt count:
 //! - 8-digit codes (CSPRNG), stored only as an Argon2id hash
 //! - 10 minute expiry
 //! - 5 attempts per code, counted with an atomic increment
 //! - a correct code is consumed with an atomic take, so it signs in once
 //! - 3 requests per target per 15 minutes
 //!
-//! A cache that cannot answer is an error, never a pass: limits that fail
+//! A store that cannot answer is an error, never a pass: limits that fail
 //! open would let guessing run unbounded.
 
 use argon2::{
@@ -18,7 +19,7 @@ use argon2::{
 };
 use chrono::{DateTime, Utc};
 use rand::RngExt;
-use sid_plugin::cache::CacheBackend;
+use sid_plugin::CeremonyStateStore;
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
@@ -27,7 +28,7 @@ use uuid::Uuid;
 const OTP_CODE_LENGTH: u32 = 8;
 /// OTP expiry duration (10 minutes).
 const OTP_EXPIRY: Duration = Duration::from_secs(600);
-/// How long the cache keeps a session: past its expiry, so an expired code is
+/// How long a session is kept: past its expiry, so an expired code is
 /// reported as expired rather than unknown.
 const OTP_RETENTION: Duration = Duration::from_secs(1200);
 /// Maximum verification attempts per code.
@@ -80,35 +81,34 @@ pub enum OtpError {
     Internal(String),
 }
 
-/// An OTP session as the cache holds it.
+/// An OTP session as the store holds it.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct CachedOtpSession {
+struct StoredOtpSession {
     code_hash: String,
     target: String,
     expires_at: DateTime<Utc>,
 }
 
-fn session_key(id: &Uuid) -> String {
-    format!("otp:session:{id}")
-}
+/// Namespaces of the sessions, their attempt counts and the per-target
+/// request counts. A session's id is never reused, so its count needs no
+/// clearing: it expires with the session's retention.
+const SESSIONS: &str = "otp-session";
+const ATTEMPTS: &str = "otp-attempts";
+const REQUESTS: &str = "otp-requests";
 
-fn attempts_key(id: &Uuid) -> String {
-    format!("otp:attempts:{id}")
-}
-
-fn cache_error(what: &str) -> impl Fn(sid_plugin::cache::CacheError) -> OtpError + '_ {
+fn store_error(what: &str) -> impl Fn(sid_core::Error) -> OtpError + '_ {
     move |e| OtpError::Internal(format!("{what}: {e}"))
 }
 
-/// OTP session service over the shared cache.
+/// OTP session service over the ceremony state every replica shares.
 pub struct OtpService {
-    cache: Arc<dyn CacheBackend>,
+    ceremonies: Arc<dyn CeremonyStateStore>,
 }
 
 impl OtpService {
-    /// Create an OTP service over the cache every replica shares.
-    pub fn new(cache: Arc<dyn CacheBackend>) -> Self {
-        Self { cache }
+    /// Create an OTP service over the ceremony state every replica shares.
+    pub fn new(ceremonies: Arc<dyn CeremonyStateStore>) -> Self {
+        Self { ceremonies }
     }
 
     /// Request a new OTP code for a target.
@@ -117,10 +117,10 @@ impl OtpService {
     /// transport); only its hash is stored.
     pub async fn request_otp(&self, target: &str) -> Result<(OtpRequestResult, String), OtpError> {
         let requests = self
-            .cache
-            .incr(&format!("rate:otp:{target}"), RATE_LIMIT_WINDOW)
+            .ceremonies
+            .count_in_window(REQUESTS, target, RATE_LIMIT_WINDOW)
             .await
-            .map_err(cache_error("rate limit"))?;
+            .map_err(store_error("rate limit"))?;
         if requests > RATE_LIMIT_MAX {
             return Err(OtpError::RateLimited {
                 wait_seconds: RATE_LIMIT_WINDOW.as_secs(),
@@ -133,16 +133,16 @@ impl OtpService {
         let session_id = Uuid::now_v7();
         let expiry = chrono::Duration::from_std(OTP_EXPIRY)
             .map_err(|e| OtpError::Internal(e.to_string()))?;
-        let session = CachedOtpSession {
+        let session = StoredOtpSession {
             code_hash,
             target: target.to_string(),
             expires_at: Utc::now() + expiry,
         };
         let data = serde_json::to_vec(&session).map_err(|e| OtpError::Internal(e.to_string()))?;
-        self.cache
-            .set(&session_key(&session_id), &data, OTP_RETENTION)
+        self.ceremonies
+            .put_ceremony_state(SESSIONS, &session_id.to_string(), &data, OTP_RETENTION)
             .await
-            .map_err(cache_error("store session"))?;
+            .map_err(store_error("store session"))?;
 
         Ok((
             OtpRequestResult {
@@ -163,37 +163,37 @@ impl OtpService {
         session_id: &Uuid,
         code: &str,
     ) -> Result<OtpVerifyResult, OtpError> {
-        let key = session_key(session_id);
+        let key = session_id.to_string();
         let Some(data) = self
-            .cache
-            .get(&key)
+            .ceremonies
+            .read_ceremony_state(SESSIONS, &key)
             .await
-            .map_err(cache_error("read session"))?
+            .map_err(store_error("read session"))?
         else {
             return Ok(OtpVerifyResult::SessionNotFound);
         };
-        let session: CachedOtpSession =
+        let session: StoredOtpSession =
             serde_json::from_slice(&data).map_err(|e| OtpError::Internal(e.to_string()))?;
 
         if Utc::now() >= session.expires_at {
-            self.end(session_id).await?;
+            self.end(&key).await?;
             return Ok(OtpVerifyResult::Expired);
         }
 
         let attempt = self
-            .cache
-            .incr(&attempts_key(session_id), OTP_RETENTION)
+            .ceremonies
+            .count_in_window(ATTEMPTS, &key, OTP_RETENTION)
             .await
-            .map_err(cache_error("count attempt"))?;
+            .map_err(store_error("count attempt"))?;
         if attempt > MAX_ATTEMPTS {
-            self.end(session_id).await?;
+            self.end(&key).await?;
             return Ok(OtpVerifyResult::MaxAttempts);
         }
 
         if !verify_code(code, &session.code_hash) {
             let remaining = MAX_ATTEMPTS - attempt;
             if remaining == 0 {
-                self.end(session_id).await?;
+                self.end(&key).await?;
                 return Ok(OtpVerifyResult::MaxAttempts);
             }
             return Ok(OtpVerifyResult::InvalidCode {
@@ -204,20 +204,14 @@ impl OtpService {
         // Of concurrent correct verifications, only the one that takes the
         // session signs in.
         match self
-            .cache
-            .take(&key)
+            .ceremonies
+            .take_ceremony_state(SESSIONS, &key)
             .await
-            .map_err(cache_error("consume session"))?
+            .map_err(store_error("consume session"))?
         {
-            Some(_) => {
-                self.cache
-                    .delete(&attempts_key(session_id))
-                    .await
-                    .map_err(cache_error("clear attempts"))?;
-                Ok(OtpVerifyResult::Success {
-                    target: session.target,
-                })
-            }
+            Some(_) => Ok(OtpVerifyResult::Success {
+                target: session.target,
+            }),
             None => Ok(OtpVerifyResult::SessionNotFound),
         }
     }
@@ -225,28 +219,25 @@ impl OtpService {
     /// Get the target for a session (for resend).
     pub async fn get_session_target(&self, session_id: &Uuid) -> Result<Option<String>, OtpError> {
         let Some(data) = self
-            .cache
-            .get(&session_key(session_id))
+            .ceremonies
+            .read_ceremony_state(SESSIONS, &session_id.to_string())
             .await
-            .map_err(cache_error("read session"))?
+            .map_err(store_error("read session"))?
         else {
             return Ok(None);
         };
-        let session: CachedOtpSession =
+        let session: StoredOtpSession =
             serde_json::from_slice(&data).map_err(|e| OtpError::Internal(e.to_string()))?;
         Ok(Some(session.target))
     }
 
-    /// End a session: its code and its attempt count are gone.
-    async fn end(&self, session_id: &Uuid) -> Result<(), OtpError> {
-        self.cache
-            .delete(&session_key(session_id))
+    /// End a session: its code is gone, and no verification takes it.
+    async fn end(&self, key: &str) -> Result<(), OtpError> {
+        self.ceremonies
+            .take_ceremony_state(SESSIONS, key)
             .await
-            .map_err(cache_error("end session"))?;
-        self.cache
-            .delete(&attempts_key(session_id))
-            .await
-            .map_err(cache_error("clear attempts"))
+            .map(|_| ())
+            .map_err(store_error("end session"))
     }
 }
 

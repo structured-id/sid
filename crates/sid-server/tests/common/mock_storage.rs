@@ -301,6 +301,9 @@ pub struct MockStorage {
     pub inner: Mutex<MockStorageInner>,
     /// Ceremony state, as a single process holds it.
     ceremonies: sid_plugin::InProcessCeremonyState,
+    /// A namespace whose admissions cannot be recorded, as when the database
+    /// does not answer.
+    unrecordable_admissions: Mutex<Option<&'static str>>,
 }
 
 impl MockStorage {
@@ -341,7 +344,14 @@ impl MockStorage {
         Self {
             inner: Mutex::new(MockStorageInner::default()),
             ceremonies: sid_plugin::InProcessCeremonyState::new(),
+            unrecordable_admissions: Mutex::new(None),
         }
+    }
+
+    /// From now on, no admission in `namespace` can be recorded.
+    #[allow(dead_code)]
+    pub fn fail_admissions(&self, namespace: &'static str) {
+        *self.unrecordable_admissions.lock().unwrap() = Some(namespace);
     }
 
     /// Storage whose refresh-token revocation fails with a storage fault.
@@ -1446,6 +1456,21 @@ impl GrantStore for MockStorage {
 }
 
 #[async_trait]
+impl sid_plugin::SingleUseAdmissions for MockStorage {
+    async fn admit_once(
+        &self,
+        namespace: &str,
+        key: &str,
+        ttl: std::time::Duration,
+    ) -> SidResult<bool> {
+        if *self.unrecordable_admissions.lock().unwrap() == Some(namespace) {
+            return Err(sid_core::Error::Storage("admissions unavailable".into()));
+        }
+        sid_plugin::SingleUseAdmissions::admit_once(&self.ceremonies, namespace, key, ttl).await
+    }
+}
+
+#[async_trait]
 impl sid_plugin::CeremonyStateStore for MockStorage {
     async fn put_ceremony_state(
         &self,
@@ -1475,14 +1500,6 @@ impl sid_plugin::CeremonyStateStore for MockStorage {
         self.ceremonies
             .replace_ceremony_state(namespace, key, expected, value, ttl)
             .await
-    }
-    async fn admit_once(
-        &self,
-        namespace: &str,
-        key: &str,
-        ttl: std::time::Duration,
-    ) -> SidResult<bool> {
-        self.ceremonies.admit_once(namespace, key, ttl).await
     }
     async fn count_in_window(
         &self,

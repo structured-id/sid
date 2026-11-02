@@ -3,7 +3,6 @@
 use super::*;
 use crate::auth::jwt::Confirmation;
 use axum::http::HeaderValue;
-use sid_plugin::cache::InMemoryCacheBackend;
 use std::sync::Arc;
 
 const URI: &str = "https://app.sid.example.com/api/items";
@@ -12,7 +11,7 @@ const TOKEN: &str = "eyJ.bound.token";
 const FIXTURE_JKT: &str = "IzldvVrK202QRbmgX2y6_CaeNdfk9cCd6-2B-mLPdBA";
 
 fn validator() -> DPopValidator {
-    DPopValidator::new(Arc::new(InMemoryCacheBackend::new()))
+    DPopValidator::new(Arc::new(sid_plugin::InProcessCeremonyState::new()))
 }
 
 fn claims(jkt: Option<&str>) -> ForwardAuthClaims {

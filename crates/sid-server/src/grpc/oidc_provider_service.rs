@@ -17,7 +17,6 @@ use sid_authn::resource::{self, Scheme};
 use sid_authn::revocation_cache::RevocationCache;
 use sid_core::grpc_error::{ApiError, ErrorReason};
 use sid_core::models::{OidcIssuer, SessionId};
-use sid_plugin::cache::CacheBackend;
 use sid_plugin::storage::StorageBackend;
 use sid_proto::google::api::HttpBody;
 use sid_proto::sid::v1::auth_service_server::AuthService;
@@ -62,24 +61,23 @@ pub struct OidcProviderServiceImpl {
 impl OidcProviderServiceImpl {
     /// The endpoints of the issuers in `issuers`; UserInfo reads users from
     /// `storage`, checks revocation in `revocation` and records DPoP proofs
-    /// in `cache`, which every replica shares. The OAuth endpoints run the
-    /// logic of `auth`, the registration endpoints that of `project`; a user
-    /// who must sign in is sent to `login_url`, or, without one, the client
-    /// gets `login_required`.
+    /// in `storage`'s ceremony state, which every replica shares. The OAuth
+    /// endpoints run the logic of `auth`, the registration endpoints that of
+    /// `project`; a user who must sign in is sent to `login_url`, or,
+    /// without one, the client gets `login_required`.
     pub fn new(
         issuers: Arc<IssuerRegistry>,
         storage: Arc<dyn StorageBackend>,
         revocation: Arc<RevocationCache>,
-        cache: Arc<dyn CacheBackend>,
         auth: Arc<AuthServiceImpl>,
         project: Arc<ProjectServiceImpl>,
         login_url: Option<url::Url>,
     ) -> Self {
         Self {
             issuers,
+            dpop: DPopValidator::new(storage.clone()),
             storage,
             revocation,
-            dpop: DPopValidator::new(cache),
             auth,
             project,
             login_url,
@@ -370,10 +368,10 @@ impl OidcProviderServiceImpl {
         .map_err(|e| match e {
             // An unreachable replay record cannot rule out a replay; the
             // client retries the same request with a new proof.
-            resource::SenderError::Proof(sid_authn::dpop::DPopError::ReplayCacheUnavailable) => {
+            resource::SenderError::Proof(sid_authn::dpop::DPopError::ReplayStoreUnavailable) => {
                 sid_core::grpc_error::refuse::dependency_unavailable(
                     "DPoP replay record",
-                    "replay cache unreachable",
+                    "replay store unreachable",
                 )
             }
             other => {

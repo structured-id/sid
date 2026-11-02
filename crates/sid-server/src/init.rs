@@ -794,7 +794,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         data_export,
     ));
 
-    let otp_service = OtpService::new(cache_backend.clone());
+    let otp_service = OtpService::new(storage.clone());
 
     // ── IP Intelligence: configurable provider chain ──
     // SID_IPINTEL_PROVIDERS: comma-separated list of enabled providers.

@@ -78,7 +78,9 @@ impl AuthServer {
             )),
             applications: Arc::new(applications),
             revocation: crate::revocation_view(cache.clone()),
-            dpop: Arc::new(sid_authn::dpop::DPopValidator::new(cache)),
+            dpop: Arc::new(sid_authn::dpop::DPopValidator::new(Arc::new(
+                crate::SharedCacheAdmissions(cache),
+            ))),
             authz: upstream,
             checker,
             login_url: config.login_url.clone(),
