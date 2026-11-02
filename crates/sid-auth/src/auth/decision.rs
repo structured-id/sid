@@ -56,7 +56,7 @@ pub struct Pdp {
     pub checker: Option<Arc<sid_infra::client_credential::ClientCredential>>,
     /// The tokens' current state at their issuer, for routes that ask no
     /// permission question; such a route has no verdict without it.
-    pub token_state: Option<Arc<dyn super::token_state::TokenState>>,
+    pub token_state: Option<Arc<dyn sid_authn::token_state::IssuerState>>,
     /// Where a 401 sends a browser to sign in; empty for none.
     pub login_url: String,
 }

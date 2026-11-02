@@ -295,6 +295,20 @@ pub async fn cleanup_quarantine(storage: &dyn StorageBackend) -> u64 {
     }
 }
 
+// ─── Ceremony state expiry ──────────────────────────────────────
+
+/// Drop the ceremony state, admissions and counts past their deadline.
+/// Use already refuses them; this reclaims their storage. Returns how many.
+pub async fn purge_ceremony_state(store: &dyn sid_plugin::CeremonyStateStore) -> u64 {
+    match store.purge_expired_ceremony_state().await {
+        Ok(n) => n,
+        Err(e) => {
+            warn!("ceremony state expiry failed: {}", e);
+            0
+        }
+    }
+}
+
 // ─── Audit partition auto-management ─────────────────────────────
 
 /// One run of audit storage maintenance at `now`: the current and next

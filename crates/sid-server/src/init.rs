@@ -1267,6 +1267,21 @@ pub fn spawn_ce_background_tasks(c: &CeComponents) {
         });
     }
 
+    // Ceremony state past its deadline (every minute): one-time proofs,
+    // codes and counts leave rows behind, which no database expires by
+    // itself. Idempotent like the purge above, so no job lock.
+    {
+        let storage = c.storage.clone();
+        tokio::spawn(async move {
+            let every = std::time::Duration::from_secs(60);
+            let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+            loop {
+                interval.tick().await;
+                crate::background_tasks::purge_ceremony_state(storage.as_ref()).await;
+            }
+        });
+    }
+
     // PAT auto-revoke (hourly)
     {
         let storage = c.storage.clone();

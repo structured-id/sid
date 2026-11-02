@@ -470,6 +470,23 @@ impl ClientCredential {
     }
 }
 
+/// The issuer's own answer on a token, asked with this service's client.
+#[async_trait::async_trait]
+impl sid_authn::token_state::IssuerState for ClientCredential {
+    fn issuer(&self) -> &str {
+        &self.issuer
+    }
+
+    async fn active(
+        &self,
+        token: &str,
+    ) -> Result<bool, sid_authn::token_state::IssuerStateUnavailable> {
+        self.introspect(token)
+            .await
+            .map_err(|e| sid_authn::token_state::IssuerStateUnavailable(e.to_string()))
+    }
+}
+
 /// A gRPC channel whose every call carries this service's own token for the
 /// resource it calls. A call the resource refuses as unauthenticated drops
 /// that token, so the next call presents a new one; the refused call itself

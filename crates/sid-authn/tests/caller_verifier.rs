@@ -8,11 +8,13 @@
 
 #![cfg(feature = "grpc")]
 
-use sid_authn::caller::{authenticate, bearer_token};
+use sid_authn::caller::{AtIssuer, authenticate, bearer_token};
 use sid_authn::jwt::{JwtService, TokenVerifier};
 use sid_authn::revocation_cache::RevocationCache;
+use sid_authn::token_state::{IssuerState, IssuerStateUnavailable};
 use sid_core::models::dpop::DPopBinding;
 use sid_core::models::{Profile, Session};
+use sid_plugin::cache::{CacheError, CacheResult};
 use tonic::{Code, Request};
 
 const ISSUER: &str = "https://sid.example.com";
@@ -261,6 +263,137 @@ async fn only_the_installation_session_kind_is_admitted() {
         !admitted(&signed(None, &requested)).await,
         "a requesting client"
     );
+}
+
+/// An issuer answering every token with one verdict, or unreachable.
+struct Issuer {
+    issuer: &'static str,
+    active: Option<bool>,
+    asked: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl IssuerState for Issuer {
+    fn issuer(&self) -> &str {
+        self.issuer
+    }
+
+    async fn active(&self, _token: &str) -> Result<bool, IssuerStateUnavailable> {
+        self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.active
+            .ok_or_else(|| IssuerStateUnavailable("issuer unreachable".into()))
+    }
+}
+
+fn at_issuer(issuer: &'static str, active: Option<bool>, known: RevocationCache) -> AtIssuer {
+    AtIssuer {
+        known: std::sync::Arc::new(known),
+        issuer: std::sync::Arc::new(Issuer {
+            issuer,
+            active,
+            asked: 0.into(),
+        }),
+    }
+}
+
+/// A cache that cannot answer anything.
+struct DownCache;
+
+#[async_trait::async_trait]
+impl sid_plugin::cache::CacheBackend for DownCache {
+    async fn get(&self, _: &str) -> CacheResult<Option<Vec<u8>>> {
+        Err(CacheError::Connection("down".into()))
+    }
+    async fn set(&self, _: &str, _: &[u8], _: std::time::Duration) -> CacheResult<()> {
+        Err(CacheError::Connection("down".into()))
+    }
+    async fn delete(&self, _: &str) -> CacheResult<()> {
+        Err(CacheError::Connection("down".into()))
+    }
+    async fn take(&self, _: &str) -> CacheResult<Option<Vec<u8>>> {
+        Err(CacheError::Connection("down".into()))
+    }
+    async fn publish(&self, _: &str, _: &[u8]) -> CacheResult<()> {
+        Err(CacheError::Connection("down".into()))
+    }
+    async fn subscribe(
+        &self,
+        _: &str,
+    ) -> CacheResult<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>> {
+        Err(CacheError::Connection("down".into()))
+    }
+    async fn health_check(&self) -> CacheResult<()> {
+        Err(CacheError::Connection("down".into()))
+    }
+}
+
+/// A resource apart from its issuer refuses a token the issuer no longer
+/// reports active, though nothing told its local view of the revocation:
+/// a view started after the revocation, or one that missed its delivery,
+/// knows nothing of it (resource-sdk.md token-state freshness).
+#[tokio::test]
+async fn resource_refuses_a_token_its_issuer_reports_inactive() {
+    let (_, token) = token(None);
+    let current = at_issuer(ISSUER, Some(false), revocation());
+    let err = authenticate(
+        &request(&format!("Bearer {token}")),
+        jwt().verifier(),
+        &current,
+    )
+    .await
+    .expect_err("revoked at the issuer");
+    assert_eq!(err.code(), Code::Unauthenticated);
+}
+
+/// The local view is only a shortcut for what it already knows: without
+/// its cache the issuer still answers, so the request is served.
+#[tokio::test]
+async fn resource_admits_an_active_token_without_its_cache() {
+    let (profile, token) = token(None);
+    let known = RevocationCache::new(
+        std::time::Duration::from_secs(3600),
+        std::sync::Arc::new(DownCache),
+    );
+    let current = at_issuer(ISSUER, Some(true), known);
+    let caller = authenticate(
+        &request(&format!("Bearer {token}")),
+        jwt().verifier(),
+        &current,
+    )
+    .await
+    .expect("active at the issuer");
+    assert_eq!(caller.profile_id, profile.id);
+}
+
+/// An issuer that cannot answer leaves the request without a verdict: it
+/// is refused as unavailable, never admitted.
+#[tokio::test]
+async fn resource_refuses_when_its_issuer_cannot_answer() {
+    let (_, token) = token(None);
+    let current = at_issuer(ISSUER, None, revocation());
+    let err = authenticate(
+        &request(&format!("Bearer {token}")),
+        jwt().verifier(),
+        &current,
+    )
+    .await
+    .expect_err("no verdict");
+    assert_eq!(err.code(), Code::Unavailable);
+}
+
+/// A token of another issuer is never asked of this one.
+#[tokio::test]
+async fn resource_refuses_a_token_of_another_issuer_than_it_asks() {
+    let (_, token) = token(None);
+    let current = at_issuer("https://other.example.com", Some(true), revocation());
+    let err = authenticate(
+        &request(&format!("Bearer {token}")),
+        jwt().verifier(),
+        &current,
+    )
+    .await
+    .expect_err("another issuer");
+    assert_eq!(err.code(), Code::Unauthenticated);
 }
 
 /// A token from another issuer is refused by the verifier.

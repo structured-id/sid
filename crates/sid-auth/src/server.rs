@@ -79,7 +79,9 @@ impl AuthServer {
             applications: Arc::new(applications),
             revocation: crate::revocation_view(cache),
             authz: upstream,
-            token_state: crate::auth::token_state::of(&checker),
+            token_state: checker
+                .clone()
+                .map(|checker| checker as Arc<dyn sid_authn::token_state::IssuerState>),
             checker,
             login_url: config.login_url.clone(),
         });

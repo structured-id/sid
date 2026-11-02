@@ -70,7 +70,7 @@ pub(crate) fn keypair() -> (jsonwebtoken::EncodingKey, [u8; 32]) {
 pub(crate) struct AtIssuer(pub Option<bool>);
 
 #[async_trait::async_trait]
-impl super::super::token_state::TokenState for AtIssuer {
+impl sid_authn::token_state::IssuerState for AtIssuer {
     fn issuer(&self) -> &str {
         ISSUER
     }
@@ -78,9 +78,9 @@ impl super::super::token_state::TokenState for AtIssuer {
     async fn active(
         &self,
         _: &str,
-    ) -> Result<bool, super::super::token_state::TokenStateUnavailable> {
+    ) -> Result<bool, sid_authn::token_state::IssuerStateUnavailable> {
         self.0.ok_or_else(|| {
-            super::super::token_state::TokenStateUnavailable("issuer unreachable".into())
+            sid_authn::token_state::IssuerStateUnavailable("issuer unreachable".into())
         })
     }
 }
@@ -514,7 +514,7 @@ async fn test_token_inactive_at_its_issuer_is_refused() {
 async fn test_token_state_unavailable_has_no_verdict() {
     let token_for = |f: &Fixture| access_token(&f.key, ISSUER, ORDERS, 300);
     for state in [
-        Some(Arc::new(AtIssuer(None)) as Arc<dyn super::super::token_state::TokenState>),
+        Some(Arc::new(AtIssuer(None)) as Arc<dyn sid_authn::token_state::IssuerState>),
         None,
     ] {
         let mut f = fixture();
