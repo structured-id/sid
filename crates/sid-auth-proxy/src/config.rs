@@ -269,6 +269,11 @@ pub struct BffConfig {
     /// with the `/api` prefix removed.
     #[serde(default)]
     pub api_upstream: Option<String>,
+    /// The BFF's own database, where its sessions and started sign-ins live:
+    /// `postgres://` for replicas behind a load balancer, `sqlite:` for a
+    /// single instance. Required with a client key.
+    #[serde(default)]
+    pub database_url: Option<String>,
     /// Dev mode: no Secure flag on the cookies (a plain-HTTP localhost), and
     /// with it no `__Host-` prefix on their names, which needs the flag.
     #[serde(default)]
@@ -286,6 +291,7 @@ impl Default for BffConfig {
             client_key: None,
             connection: None,
             api_upstream: None,
+            database_url: None,
             dev_mode: false,
         }
     }
@@ -371,6 +377,9 @@ impl ProxyConfig {
                 api_upstream: std::env::var("SID_BFF_API_UPSTREAM")
                     .ok()
                     .filter(|url| !url.is_empty()),
+                database_url: std::env::var("SID_BFF_DATABASE_URL")
+                    .ok()
+                    .filter(|url| !url.is_empty()),
                 dev_mode: std::env::var("SID_BFF_DEV_MODE")
                     .map(|v| v == "true" || v == "1")
                     .unwrap_or(false),
@@ -429,6 +438,11 @@ impl ProxyConfig {
     /// The gRPC-Web endpoint of the connection's API.
     pub fn bff_api_upstream(&self) -> Option<&str> {
         self.bff.api_upstream.as_deref()
+    }
+
+    /// The BFF's own database.
+    pub fn bff_database_url(&self) -> Option<&str> {
+        self.bff.database_url.as_deref()
     }
 
     /// BFF dev mode (skip Secure flag on cookies for localhost).

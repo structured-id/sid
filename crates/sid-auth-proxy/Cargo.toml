@@ -28,6 +28,9 @@ sid-crypto = { workspace = true, features = ["jwt", "tls-aws-lc"] }
 sid-core = { workspace = true }
 sid-plugin = { workspace = true }
 sid-proto = { workspace = true }
+# The BFF's own database, where its sessions live: PostgreSQL for shared
+# replicas, SQLite for a single instance.
+sid-storage = { workspace = true, features = ["storage-pg", "storage-sqlite"] }
 
 # HTTP framework (router assembly)
 axum = { workspace = true }

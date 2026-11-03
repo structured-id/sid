@@ -2,8 +2,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use sid_plugin::cache::{CacheResult, InMemoryCacheBackend};
-use tokio::sync::mpsc;
+use sid_plugin::{InProcessCeremonyState, SingleUseAdmissions};
 
 use super::*;
 
@@ -12,7 +11,7 @@ const LONG: Duration = Duration::from_secs(3600);
 /// The shipped lifetime of a pending authorization. None of these tests is
 /// about that number, so they all take the configured default and say so once
 /// here rather than at every construction.
-const PENDING: Duration = Duration::from_secs(300);
+const PENDING_TTL: Duration = Duration::from_secs(300);
 
 /// The connection binding records are made under; the store keeps it, the
 /// BFF compares it.
@@ -20,21 +19,29 @@ const CONN: &str = "https://sid.example.com/i/0123456789abcdef0123456789abcdef\n
 
 /// A store with the two session lifetimes a test cares about.
 fn build(
-    cache: Arc<dyn CacheBackend>,
+    backend: Arc<dyn CeremonyStateStore>,
     max_age: Duration,
     idle_timeout: Duration,
 ) -> BffSessionStore {
-    BffSessionStore::new(cache, max_age, idle_timeout, PENDING)
+    BffSessionStore::new(backend, max_age, idle_timeout, PENDING_TTL)
+}
+
+fn memory() -> Arc<InProcessCeremonyState> {
+    Arc::new(InProcessCeremonyState::new())
 }
 
 fn store() -> BffSessionStore {
-    build(Arc::new(InMemoryCacheBackend::new()), LONG, LONG)
+    build(memory(), LONG, LONG)
 }
 
-/// Two stores over one cache: what a load balancer does to a BFF.
+/// Two stores over one authoritative store: what a load balancer does to a
+/// BFF.
 fn replica_pair() -> (BffSessionStore, BffSessionStore) {
-    let cache: Arc<dyn CacheBackend> = Arc::new(InMemoryCacheBackend::new());
-    (build(cache.clone(), LONG, LONG), build(cache, LONG, LONG))
+    let backend: Arc<dyn CeremonyStateStore> = memory();
+    (
+        build(backend.clone(), LONG, LONG),
+        build(backend, LONG, LONG),
+    )
 }
 
 fn test_claims() -> SessionClaims {
@@ -56,67 +63,6 @@ fn test_claims() -> SessionClaims {
     }
 }
 
-/// A working cache that counts its writes, so a test can say how many round
-/// trips a read costs.
-struct CountingCache {
-    inner: InMemoryCacheBackend,
-    writes: std::sync::atomic::AtomicUsize,
-}
-
-impl CountingCache {
-    fn new() -> Self {
-        Self {
-            inner: InMemoryCacheBackend::new(),
-            writes: std::sync::atomic::AtomicUsize::new(0),
-        }
-    }
-
-    fn writes(&self) -> usize {
-        self.writes.load(std::sync::atomic::Ordering::Relaxed)
-    }
-}
-
-#[async_trait]
-impl CacheBackend for CountingCache {
-    async fn get(&self, key: &str) -> CacheResult<Option<Vec<u8>>> {
-        self.inner.get(key).await
-    }
-    async fn set(&self, key: &str, value: &[u8], ttl: Duration) -> CacheResult<()> {
-        self.writes
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.inner.set(key, value, ttl).await
-    }
-    async fn delete(&self, key: &str) -> CacheResult<()> {
-        self.inner.delete(key).await
-    }
-    async fn take(&self, key: &str) -> CacheResult<Option<Vec<u8>>> {
-        self.inner.take(key).await
-    }
-    async fn set_nx(&self, key: &str, value: &[u8], ttl: Duration) -> CacheResult<bool> {
-        self.inner.set_nx(key, value, ttl).await
-    }
-    async fn compare_and_set(
-        &self,
-        key: &str,
-        expected: &[u8],
-        value: &[u8],
-        ttl: Duration,
-    ) -> CacheResult<bool> {
-        self.writes
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.inner.compare_and_set(key, expected, value, ttl).await
-    }
-    async fn publish(&self, channel: &str, message: &[u8]) -> CacheResult<()> {
-        self.inner.publish(channel, message).await
-    }
-    async fn subscribe(&self, channel: &str) -> CacheResult<mpsc::UnboundedReceiver<Vec<u8>>> {
-        self.inner.subscribe(channel).await
-    }
-    async fn health_check(&self) -> CacheResult<()> {
-        self.inner.health_check().await
-    }
-}
-
 /// What another replica does to a session between this one's read and its
 /// write.
 enum Meanwhile {
@@ -126,36 +72,122 @@ enum Meanwhile {
     Write(Vec<u8>),
 }
 
-/// A working cache that lets another replica act right after the next read
-/// of a key: a deterministic stand-in for the interleaving of two replicas
-/// sharing one store.
-struct InterleavingCache {
-    inner: InMemoryCacheBackend,
+/// A store a test watches and steers: it counts writes, so a test can say
+/// how many round trips a read costs; it lets another replica act right
+/// after the next read of a session, a deterministic stand-in for the
+/// interleaving of two replicas; or it fails every call, to prove the store
+/// reports a failure instead of reporting an empty store.
+struct Probe {
+    inner: InProcessCeremonyState,
+    writes: std::sync::atomic::AtomicUsize,
     after_read: std::sync::Mutex<Option<(String, Meanwhile)>>,
+    broken: bool,
 }
 
-impl InterleavingCache {
+impl Probe {
     fn new() -> Self {
         Self {
-            inner: InMemoryCacheBackend::new(),
+            inner: InProcessCeremonyState::new(),
+            writes: std::sync::atomic::AtomicUsize::new(0),
             after_read: std::sync::Mutex::new(None),
+            broken: false,
         }
     }
 
-    /// After the next read of `key`, `meanwhile` happens.
-    fn after_next_read(&self, key: String, meanwhile: Meanwhile) {
-        *self.after_read.lock().unwrap() = Some((key, meanwhile));
+    fn broken() -> Self {
+        Self {
+            broken: true,
+            ..Self::new()
+        }
+    }
+
+    fn writes(&self) -> usize {
+        self.writes.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// After the next read of session `id`, `meanwhile` happens.
+    fn after_next_read(&self, id: String, meanwhile: Meanwhile) {
+        *self.after_read.lock().unwrap() = Some((id, meanwhile));
+    }
+
+    /// The stored form of session `id`, read past the probe.
+    async fn stored(&self, id: &str) -> Option<Vec<u8>> {
+        self.inner.read_ceremony_state(SESSIONS, id).await.unwrap()
+    }
+
+    fn check(&self) -> sid_core::Result<()> {
+        if self.broken {
+            return Err(sid_core::Error::Storage("down".into()));
+        }
+        Ok(())
+    }
+
+    fn count_write(&self) {
+        self.writes
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
 #[async_trait]
-impl CacheBackend for InterleavingCache {
-    async fn get(&self, key: &str) -> CacheResult<Option<Vec<u8>>> {
-        let read = self.inner.get(key).await?;
+impl SingleUseAdmissions for Probe {
+    async fn admit_once(
+        &self,
+        namespace: &str,
+        key: &str,
+        ttl: Duration,
+    ) -> sid_core::Result<bool> {
+        self.check()?;
+        self.inner.admit_once(namespace, key, ttl).await
+    }
+
+    async fn admit_for(
+        &self,
+        namespace: &str,
+        key: &str,
+        holder: &[u8],
+        ttl: Duration,
+    ) -> sid_core::Result<bool> {
+        self.check()?;
+        self.inner.admit_for(namespace, key, holder, ttl).await
+    }
+}
+
+#[async_trait]
+impl CeremonyStateStore for Probe {
+    async fn put_ceremony_state(
+        &self,
+        namespace: &str,
+        key: &str,
+        value: &[u8],
+        ttl: Duration,
+    ) -> sid_core::Result<()> {
+        self.check()?;
+        self.count_write();
+        self.inner
+            .put_ceremony_state(namespace, key, value, ttl)
+            .await
+    }
+
+    async fn take_ceremony_state(
+        &self,
+        namespace: &str,
+        key: &str,
+    ) -> sid_core::Result<Option<Vec<u8>>> {
+        self.check()?;
+        self.inner.take_ceremony_state(namespace, key).await
+    }
+
+    async fn read_ceremony_state(
+        &self,
+        namespace: &str,
+        key: &str,
+    ) -> sid_core::Result<Option<Vec<u8>>> {
+        self.check()?;
+        let read = self.inner.read_ceremony_state(namespace, key).await?;
         let due = {
             let mut armed = self.after_read.lock().unwrap();
             match armed.take() {
-                Some((armed_key, meanwhile)) if armed_key == key => Some(meanwhile),
+                Some((id, meanwhile)) if namespace == SESSIONS && id == key => Some(meanwhile),
                 other => {
                     *armed = other;
                     None
@@ -163,61 +195,73 @@ impl CacheBackend for InterleavingCache {
             }
         };
         match due {
-            Some(Meanwhile::Destroy) => self.inner.delete(key).await?,
-            Some(Meanwhile::Write(value)) => self.inner.set(key, &value, LONG).await?,
+            Some(Meanwhile::Destroy) => {
+                self.inner.take_ceremony_state(namespace, key).await?;
+            }
+            Some(Meanwhile::Write(value)) => {
+                self.inner
+                    .put_ceremony_state(namespace, key, &value, LONG)
+                    .await?;
+            }
             None => {}
         }
         Ok(read)
     }
-    async fn set(&self, key: &str, value: &[u8], ttl: Duration) -> CacheResult<()> {
-        self.inner.set(key, value, ttl).await
-    }
-    async fn delete(&self, key: &str) -> CacheResult<()> {
-        self.inner.delete(key).await
-    }
-    async fn take(&self, key: &str) -> CacheResult<Option<Vec<u8>>> {
-        self.inner.take(key).await
-    }
-    async fn set_nx(&self, key: &str, value: &[u8], ttl: Duration) -> CacheResult<bool> {
-        self.inner.set_nx(key, value, ttl).await
-    }
-    async fn compare_and_set(
+
+    async fn replace_ceremony_state(
         &self,
+        namespace: &str,
         key: &str,
         expected: &[u8],
         value: &[u8],
         ttl: Duration,
-    ) -> CacheResult<bool> {
-        self.inner.compare_and_set(key, expected, value, ttl).await
+    ) -> sid_core::Result<bool> {
+        self.check()?;
+        self.count_write();
+        self.inner
+            .replace_ceremony_state(namespace, key, expected, value, ttl)
+            .await
     }
-    async fn publish(&self, channel: &str, message: &[u8]) -> CacheResult<()> {
-        self.inner.publish(channel, message).await
+
+    async fn count_in_window(
+        &self,
+        namespace: &str,
+        key: &str,
+        window: Duration,
+    ) -> sid_core::Result<u64> {
+        self.check()?;
+        self.inner.count_in_window(namespace, key, window).await
     }
-    async fn subscribe(&self, channel: &str) -> CacheResult<mpsc::UnboundedReceiver<Vec<u8>>> {
-        self.inner.subscribe(channel).await
+
+    async fn read_count(&self, namespace: &str, key: &str) -> sid_core::Result<u64> {
+        self.check()?;
+        self.inner.read_count(namespace, key).await
     }
-    async fn health_check(&self) -> CacheResult<()> {
-        self.inner.health_check().await
+
+    async fn clear_count(&self, namespace: &str, key: &str) -> sid_core::Result<()> {
+        self.check()?;
+        self.inner.clear_count(namespace, key).await
+    }
+
+    async fn purge_expired_ceremony_state(&self) -> sid_core::Result<u64> {
+        self.check()?;
+        self.inner.purge_expired_ceremony_state().await
     }
 }
 
 /// A session whose idle window is due to be pushed out on its next read,
-/// stored over `cache`: its id and stored form.
-async fn idle_session(s: &BffSessionStore, cache: &InterleavingCache) -> (String, BffSession) {
+/// stored in `probe`: its id and stored form.
+async fn idle_session(s: &BffSessionStore, probe: &Probe) -> (String, BffSession) {
     let (id, _) = s
         .create_session("access".into(), Some("refresh".into()), test_claims(), CONN)
         .await
         .unwrap();
-    let raw = cache.inner.get(&session_key(&id)).await.unwrap().unwrap();
+    let raw = probe.stored(&id).await.unwrap();
     let mut session: BffSession = serde_json::from_slice(&raw).unwrap();
     session.last_access = Utc::now() - chrono::Duration::hours(2);
-    cache
+    probe
         .inner
-        .set(
-            &session_key(&id),
-            &serde_json::to_vec(&session).unwrap(),
-            LONG,
-        )
+        .put_ceremony_state(SESSIONS, &id, &serde_json::to_vec(&session).unwrap(), LONG)
         .await
         .unwrap();
     (id, session)
@@ -228,13 +272,13 @@ async fn idle_session(s: &BffSessionStore, cache: &InterleavingCache) -> (String
 /// back.
 #[tokio::test]
 async fn test_idle_push_does_not_resurrect_a_destroyed_session() {
-    let cache = Arc::new(InterleavingCache::new());
-    let s = build(cache.clone(), LONG, LONG);
-    let (id, _) = idle_session(&s, &cache).await;
+    let probe = Arc::new(Probe::new());
+    let s = build(probe.clone(), LONG, LONG);
+    let (id, _) = idle_session(&s, &probe).await;
 
-    cache.after_next_read(session_key(&id), Meanwhile::Destroy);
+    probe.after_next_read(id.clone(), Meanwhile::Destroy);
     assert!(s.get_session(&id).await.unwrap().is_none());
-    assert!(cache.inner.get(&session_key(&id)).await.unwrap().is_none());
+    assert!(probe.stored(&id).await.is_none());
 }
 
 /// A refresh another replica stored between this replica's read and its push
@@ -242,21 +286,19 @@ async fn test_idle_push_does_not_resurrect_a_destroyed_session() {
 /// token the issuer already rotated.
 #[tokio::test]
 async fn test_idle_push_does_not_undo_a_refresh() {
-    let cache = Arc::new(InterleavingCache::new());
-    let s = build(cache.clone(), LONG, LONG);
-    let (id, mut refreshed) = idle_session(&s, &cache).await;
+    let probe = Arc::new(Probe::new());
+    let s = build(probe.clone(), LONG, LONG);
+    let (id, mut refreshed) = idle_session(&s, &probe).await;
     refreshed.access_token = "access-2".into();
     refreshed.refresh_token = Some("refresh-2".into());
 
-    cache.after_next_read(
-        session_key(&id),
+    probe.after_next_read(
+        id.clone(),
         Meanwhile::Write(serde_json::to_vec(&refreshed).unwrap()),
     );
     s.get_session(&id).await.unwrap();
 
-    let stored: BffSession =
-        serde_json::from_slice(&cache.inner.get(&session_key(&id)).await.unwrap().unwrap())
-            .unwrap();
+    let stored: BffSession = serde_json::from_slice(&probe.stored(&id).await.unwrap()).unwrap();
     assert_eq!(
         stored
             .refresh_token
@@ -271,14 +313,14 @@ async fn test_idle_push_does_not_undo_a_refresh() {
 /// not stored: the session stays gone.
 #[tokio::test]
 async fn test_replace_tokens_does_not_resurrect_a_destroyed_session() {
-    let cache = Arc::new(InterleavingCache::new());
-    let s = build(cache.clone(), LONG, LONG);
+    let probe = Arc::new(Probe::new());
+    let s = build(probe.clone(), LONG, LONG);
     let (id, _) = s
         .create_session("access".into(), Some("refresh".into()), test_claims(), CONN)
         .await
         .unwrap();
 
-    cache.after_next_read(session_key(&id), Meanwhile::Destroy);
+    probe.after_next_read(id.clone(), Meanwhile::Destroy);
     let outcome = s
         .replace_tokens(
             &id,
@@ -290,7 +332,7 @@ async fn test_replace_tokens_does_not_resurrect_a_destroyed_session() {
         .await
         .unwrap();
     assert!(matches!(outcome, TokenReplacement::Ended), "{outcome:?}");
-    assert!(cache.inner.get(&session_key(&id)).await.unwrap().is_none());
+    assert!(probe.stored(&id).await.is_none());
 }
 
 /// Tokens of a refresh are stored even when another write (an idle push)
@@ -298,13 +340,13 @@ async fn test_replace_tokens_does_not_resurrect_a_destroyed_session() {
 /// current session, not lost.
 #[tokio::test]
 async fn test_replace_tokens_applies_over_a_concurrent_write() {
-    let cache = Arc::new(InterleavingCache::new());
-    let s = build(cache.clone(), LONG, LONG);
-    let (id, mut touched) = idle_session(&s, &cache).await;
+    let probe = Arc::new(Probe::new());
+    let s = build(probe.clone(), LONG, LONG);
+    let (id, mut touched) = idle_session(&s, &probe).await;
     touched.last_access = Utc::now();
 
-    cache.after_next_read(
-        session_key(&id),
+    probe.after_next_read(
+        id.clone(),
         Meanwhile::Write(serde_json::to_vec(&touched).unwrap()),
     );
     let outcome = s
@@ -583,36 +625,17 @@ async fn test_a_refresh_in_flight_is_not_taken_over() {
     );
 }
 
-/// A backend whose every call fails, to prove the store reports the failure
-/// instead of reporting an empty store.
-struct BrokenCache;
-
-#[async_trait]
-impl CacheBackend for BrokenCache {
-    async fn get(&self, _key: &str) -> CacheResult<Option<Vec<u8>>> {
-        Err(CacheError::Connection("down".into()))
-    }
-    async fn set(&self, _key: &str, _value: &[u8], _ttl: Duration) -> CacheResult<()> {
-        Err(CacheError::Connection("down".into()))
-    }
-    async fn delete(&self, _key: &str) -> CacheResult<()> {
-        Err(CacheError::Connection("down".into()))
-    }
-    async fn take(&self, _key: &str) -> CacheResult<Option<Vec<u8>>> {
-        Err(CacheError::Connection("down".into()))
-    }
-    async fn set_nx(&self, _key: &str, _value: &[u8], _ttl: Duration) -> CacheResult<bool> {
-        Err(CacheError::Connection("down".into()))
-    }
-    async fn publish(&self, _channel: &str, _message: &[u8]) -> CacheResult<()> {
-        Err(CacheError::Connection("down".into()))
-    }
-    async fn subscribe(&self, _channel: &str) -> CacheResult<mpsc::UnboundedReceiver<Vec<u8>>> {
-        Err(CacheError::Connection("down".into()))
-    }
-    async fn health_check(&self) -> CacheResult<()> {
-        Err(CacheError::Connection("down".into()))
-    }
+/// A refresh claim held across a store restart keeps holding: another
+/// replica (or the restarted one) does not present the version in flight.
+#[tokio::test]
+async fn test_a_refresh_claim_outlives_the_replicas() {
+    let backend = memory();
+    let (id, _) = build(backend.clone(), LONG, LONG)
+        .create_session("access".into(), Some("refresh".into()), test_claims(), CONN)
+        .await
+        .unwrap();
+    assert!(wins(&build(backend.clone(), LONG, LONG), &id, "refresh").await);
+    assert!(!wins(&build(backend, LONG, LONG), &id, "refresh").await);
 }
 
 // ── Sessions ──
@@ -701,19 +724,19 @@ async fn test_get_session_updates_last_access() {
 /// cost a write to the shared store.
 #[tokio::test]
 async fn test_a_read_within_half_the_window_writes_nothing() {
-    let cache = Arc::new(CountingCache::new());
-    let s = build(cache.clone(), LONG, Duration::from_secs(3600));
+    let probe = Arc::new(Probe::new());
+    let s = build(probe.clone(), LONG, Duration::from_secs(3600));
     let (id, _) = s
         .create_session("access".into(), None, test_claims(), CONN)
         .await
         .unwrap();
-    let after_create = cache.writes();
+    let after_create = probe.writes();
 
     for _ in 0..5 {
         assert!(s.get_session(&id).await.unwrap().is_some());
     }
     assert_eq!(
-        cache.writes(),
+        probe.writes(),
         after_create,
         "five reads inside the window cost no write"
     );
@@ -724,18 +747,18 @@ async fn test_a_read_within_half_the_window_writes_nothing() {
 /// loaded test host to oversleep: a 100 ms window expired there.
 #[tokio::test]
 async fn test_a_read_past_half_the_window_refreshes_it() {
-    let cache = Arc::new(CountingCache::new());
-    let s = build(cache.clone(), LONG, Duration::from_secs(2));
+    let probe = Arc::new(Probe::new());
+    let s = build(probe.clone(), LONG, Duration::from_secs(2));
     let (id, _) = s
         .create_session("access".into(), None, test_claims(), CONN)
         .await
         .unwrap();
-    let after_create = cache.writes();
+    let after_create = probe.writes();
 
     tokio::time::sleep(Duration::from_millis(1200)).await;
     assert!(s.get_session(&id).await.unwrap().is_some());
     assert_eq!(
-        cache.writes(),
+        probe.writes(),
         after_create + 1,
         "the window was pushed out"
     );
@@ -777,14 +800,10 @@ async fn test_session_id_is_hex_of_32_bytes() {
 
 // ── Expiry ──
 
-/// The idle window is the cache's TTL: an untouched session disappears.
+/// The idle window is the entry's lifetime: an untouched session disappears.
 #[tokio::test]
 async fn test_session_expires_when_idle() {
-    let s = build(
-        Arc::new(InMemoryCacheBackend::new()),
-        LONG,
-        Duration::from_millis(50),
-    );
+    let s = build(memory(), LONG, Duration::from_millis(50));
     let (id, _) = s
         .create_session("access".into(), None, test_claims(), CONN)
         .await
@@ -798,11 +817,7 @@ async fn test_session_expires_when_idle() {
 /// for a loaded test host.
 #[tokio::test]
 async fn test_use_pushes_the_idle_window_out() {
-    let s = build(
-        Arc::new(InMemoryCacheBackend::new()),
-        LONG,
-        Duration::from_millis(400),
-    );
+    let s = build(memory(), LONG, Duration::from_millis(400));
     let (id, _) = s
         .create_session("access".into(), None, test_claims(), CONN)
         .await
@@ -821,7 +836,7 @@ async fn test_use_pushes_the_idle_window_out() {
 #[tokio::test]
 async fn test_session_expires_at_max_age_despite_use() {
     let max_age = Duration::from_millis(200);
-    let s = build(Arc::new(InMemoryCacheBackend::new()), max_age, LONG);
+    let s = build(memory(), max_age, LONG);
     // Taken before the session exists, so the elapsed time bounds its age
     // from above: a slow machine can skip a "still young" check, never fail it.
     let start = std::time::Instant::now();
@@ -846,8 +861,8 @@ async fn test_session_expires_at_max_age_despite_use() {
 /// A session refused for age is also removed, not left for the next reader.
 #[tokio::test]
 async fn test_expired_session_is_deleted_not_just_hidden() {
-    let cache: Arc<dyn CacheBackend> = Arc::new(InMemoryCacheBackend::new());
-    let s = build(cache.clone(), Duration::from_millis(40), LONG);
+    let backend = memory();
+    let s = build(backend.clone(), Duration::from_millis(40), LONG);
     let (id, _) = s
         .create_session("access".into(), None, test_claims(), CONN)
         .await
@@ -855,8 +870,12 @@ async fn test_expired_session_is_deleted_not_just_hidden() {
     tokio::time::sleep(Duration::from_millis(60)).await;
     assert!(s.get_session(&id).await.unwrap().is_none());
     assert!(
-        cache.get(&session_key(&id)).await.unwrap().is_none(),
-        "the entry is gone from the cache"
+        backend
+            .read_ceremony_state(SESSIONS, &id)
+            .await
+            .unwrap()
+            .is_none(),
+        "the entry is gone from the store"
     );
 }
 
@@ -867,12 +886,7 @@ async fn test_expired_session_is_deleted_not_just_hidden() {
 /// but not applied would be worse than none: it would read as enforced.
 #[tokio::test]
 async fn test_pending_expires_on_its_configured_ttl() {
-    let s = BffSessionStore::new(
-        Arc::new(InMemoryCacheBackend::new()),
-        LONG,
-        LONG,
-        Duration::from_millis(50),
-    );
+    let s = BffSessionStore::new(memory(), LONG, LONG, Duration::from_millis(50));
     let state = s
         .store_pending("verifier".into(), "nonce".into(), "/dashboard".into(), CONN)
         .await
@@ -898,7 +912,7 @@ async fn test_pending_expires_on_its_configured_ttl() {
 /// test above would also pass if the TTL were hardcoded to something short.
 #[tokio::test]
 async fn test_a_longer_configured_ttl_outlives_the_old_default() {
-    let s = BffSessionStore::new(Arc::new(InMemoryCacheBackend::new()), LONG, LONG, LONG);
+    let s = BffSessionStore::new(memory(), LONG, LONG, LONG);
     let state = s
         .store_pending("verifier".into(), "nonce".into(), "/dashboard".into(), CONN)
         .await
@@ -1058,15 +1072,15 @@ async fn test_logout_on_one_replica_ends_the_session_on_another() {
 /// what a rolling update does.
 #[tokio::test]
 async fn test_a_replica_started_later_sees_existing_sessions() {
-    let cache: Arc<dyn CacheBackend> = Arc::new(InMemoryCacheBackend::new());
-    let old = build(cache.clone(), LONG, LONG);
+    let backend: Arc<dyn CeremonyStateStore> = memory();
+    let old = build(backend.clone(), LONG, LONG);
     let (id, _) = old
         .create_session("access".into(), None, test_claims(), CONN)
         .await
         .unwrap();
     drop(old);
 
-    let fresh = build(cache, LONG, LONG);
+    let fresh = build(backend, LONG, LONG);
     assert!(fresh.get_session(&id).await.unwrap().is_some());
 }
 
@@ -1079,8 +1093,8 @@ fn plausible_id() -> String {
 }
 
 #[tokio::test]
-async fn test_unreachable_cache_is_an_error_not_an_empty_store() {
-    let s = build(Arc::new(BrokenCache), LONG, LONG);
+async fn test_unreachable_store_is_an_error_not_an_empty_store() {
+    let s = build(Arc::new(Probe::broken()), LONG, LONG);
     assert!(matches!(
         s.get_session(&plausible_id()).await,
         Err(SessionStoreError::Backend(_))
@@ -1096,11 +1110,16 @@ async fn test_unreachable_cache_is_an_error_not_an_empty_store() {
     ));
 }
 
-/// The dangerous one: a broken cache must not let a pending authorization look
-/// freshly claimable.
+/// The dangerous one: a broken store must not let a pending authorization
+/// look freshly claimable, nor a refresh look unclaimed.
 #[tokio::test]
-async fn test_unreachable_cache_does_not_hand_out_a_pending_authorization() {
-    let s = build(Arc::new(BrokenCache), LONG, LONG);
+async fn test_unreachable_store_does_not_hand_out_a_pending_authorization() {
+    let s = build(Arc::new(Probe::broken()), LONG, LONG);
+    assert!(matches!(
+        s.claim_refresh(&plausible_id(), &"refresh".into(), LONG, always)
+            .await,
+        Err(SessionStoreError::Backend(_))
+    ));
     assert!(matches!(
         s.take_pending(&plausible_id(), CONN).await,
         Err(SessionStoreError::Backend(_))
@@ -1114,26 +1133,25 @@ async fn test_unreachable_cache_does_not_hand_out_a_pending_authorization() {
 
 #[tokio::test]
 async fn test_unreadable_value_is_an_error_not_a_missing_session() {
-    let cache: Arc<dyn CacheBackend> = Arc::new(InMemoryCacheBackend::new());
+    let backend = memory();
     let id = plausible_id();
-    cache
-        .set(&session_key(&id), b"not json", LONG)
+    backend
+        .put_ceremony_state(SESSIONS, &id, b"not json", LONG)
         .await
         .unwrap();
-    let s = build(cache, LONG, LONG);
+    let s = build(backend, LONG, LONG);
     assert!(matches!(
         s.get_session(&id).await,
         Err(SessionStoreError::Corrupt(_))
     ));
 }
 
-/// Records of earlier shapes stay in a shared cache while replicas are
-/// replaced. A new replica must not read them: not as a session (503 for its
-/// user), not as a sign-in to complete. They are someone else's key space
-/// and expire there.
+/// Records of earlier shapes stay in the store while replicas are replaced.
+/// A new replica must not read them: not as a session (503 for its user),
+/// not as a sign-in to complete. They are another namespace and expire there.
 #[tokio::test]
 async fn test_records_of_the_previous_shape_are_not_read() {
-    let cache: Arc<dyn CacheBackend> = Arc::new(InMemoryCacheBackend::new());
+    let backend = memory();
     let id = plausible_id();
     let previous_session = serde_json::json!({
         "access_token": "a",
@@ -1150,27 +1168,24 @@ async fn test_records_of_the_previous_shape_are_not_read() {
         "redirect_url": "/",
         "created_at": Utc::now(),
     });
-    let previous_pending_key = pending_key(CONN, &id).replace(PENDING_PREFIX, "bff:pending:3:");
-    for (key, value) in [
-        (format!("bff:sess:{id}"), &previous_session),
-        (format!("bff:sess:2:{id}"), &previous_session),
-        (format!("bff:pending:{id}"), &previous_pending),
-        (previous_pending_key, &previous_pending),
+    for (namespace, key, value) in [
+        ("bff_session_2", id.clone(), &previous_session),
+        ("bff_pending_3", pending_key(CONN, &id), &previous_pending),
     ] {
-        cache
-            .set(&key, &serde_json::to_vec(value).unwrap(), LONG)
+        backend
+            .put_ceremony_state(namespace, &key, &serde_json::to_vec(value).unwrap(), LONG)
             .await
             .unwrap();
     }
-    let s = build(cache, LONG, LONG);
+    let s = build(backend, LONG, LONG);
     assert!(s.get_session(&id).await.unwrap().is_none());
     assert!(s.take_pending(&id, CONN).await.unwrap().is_none());
 }
 
 // ── Keys and redaction ──
 
-/// Sessions and pending authorizations share a cache with everything else that
-/// uses one; their keys must not collide with each other or with a bare id.
+/// Sessions and pending authorizations share one store; their records must
+/// not be read as each other.
 #[tokio::test]
 async fn test_a_pending_state_is_not_readable_as_a_session() {
     let (a, _b) = replica_pair();
@@ -1182,15 +1197,15 @@ async fn test_a_pending_state_is_not_readable_as_a_session() {
 }
 
 /// The id comes from a cookie, so it is client input. Anything that is not
-/// the shape we issue is refused before it reaches the shared cache.
+/// the shape we issue is refused before it reaches the store.
 #[tokio::test]
-async fn test_a_client_supplied_id_of_the_wrong_shape_never_reaches_the_cache() {
-    let cache: Arc<dyn CacheBackend> = Arc::new(InMemoryCacheBackend::new());
-    let s = build(cache.clone(), LONG, LONG);
+async fn test_a_client_supplied_id_of_the_wrong_shape_never_reaches_the_store() {
+    let backend = memory();
+    let s = build(backend.clone(), LONG, LONG);
 
     // Planted under the key such an id would produce, to show it is not read.
-    cache
-        .set(&session_key("../other"), b"{}", LONG)
+    backend
+        .put_ceremony_state(SESSIONS, "../other", b"{}", LONG)
         .await
         .unwrap();
 

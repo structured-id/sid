@@ -257,17 +257,6 @@ async fn a_transcoded_adapter_route_is_answered_at_its_rpc_path() {
     assert!(seen.lock().unwrap().is_empty());
 }
 
-/// A host with a browser adapter does not start without the shared cache:
-/// a store of its own would break every sign-in another replica completes.
-#[test]
-fn the_adapter_requires_the_shared_cache() {
-    assert!(required_shared_cache(None).is_err());
-    assert_eq!(
-        required_shared_cache(Some("redis://cache:6379".into())).unwrap(),
-        "redis://cache:6379"
-    );
-}
-
 /// A call to the issuer is bounded below the refresh claim's hold, so a
 /// refresh never outlives its claim.
 #[test]
