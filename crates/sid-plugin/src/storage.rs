@@ -294,9 +294,11 @@ pub trait StorageBackend:
     /// key under the active rules is the principal's value. In one
     /// transaction the contact is stored, the key moves to the active
     /// revision, `profile_id`'s claim links to the contact and the key's
-    /// disposition becomes migrated for `reason`. `false`, and nothing
-    /// written, when the key is no longer quarantined or no longer assigned
-    /// to `profile_id`.
+    /// disposition becomes migrated for `reason`; a keyed command's `ctx`
+    /// records the claim as `profile_id` holds it after that commit
+    /// ([`MutationContext::record_effect`]). `false`, and nothing written,
+    /// when the key is no longer quarantined or no longer assigned to
+    /// `profile_id`.
     async fn reconcile_email_key(
         &self,
         principal_id: PrincipalId,

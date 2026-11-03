@@ -2910,7 +2910,7 @@ impl StorageBackend for PostgresBackend {
         profile_id: ProfileId,
         contact: &ProfileEmail,
         reason: &str,
-        audit: MutationContext,
+        mut audit: MutationContext,
     ) -> SidResult<bool> {
         if contact.profile_id != profile_id {
             return Err(SidError::Validation(
@@ -2970,6 +2970,26 @@ impl StorageBackend for PostgresBackend {
         .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("record reconciliation: {e}")))?;
+        if audit.operation.is_some() {
+            // The claim as the profile holds it after this commit.
+            let held = sqlx::query_as::<_, crate::pg_row::PrincipalRow>(
+                "SELECT p.id, p.principal_type, p.value, p.verified, p.verified_at,
+                        p.verification_expires, p.assigned_profile_id, p.assignment_revision,
+                        p.email_policy_revision, p.created_at, p.updated_at,
+                        pb.id AS binding_id, pb.profile_id,
+                        pb.is_primary, pb.source_field, pb.source_email_id, pb.source_phone_id
+                 FROM principals p
+                 JOIN principal_bindings pb ON pb.principal_id = p.id
+                 WHERE p.id = $1 AND pb.profile_id = $2",
+            )
+            .bind(principal_id.0)
+            .bind(profile_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| SidError::Storage(format!("read the reconciled principal: {e}")))?
+            .into_domain()?;
+            audit.record_effect(&held)?;
+        }
         Self::audit_in_tx(&mut tx, &format!("principal:profile:{profile_id}"), audit).await?;
         tx.commit()
             .await

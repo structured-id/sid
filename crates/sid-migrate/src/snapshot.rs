@@ -214,12 +214,38 @@ pub struct SnapshotMetadata {
     pub total_entities: u64,
 }
 
+/// The snapshot format this build writes and reads. A snapshot of another
+/// format is refused, never converted: its contents are not this format's.
+pub const FORMAT_VERSION: u32 = 6;
+
 impl Snapshot {
+    /// `json` as a snapshot of [`FORMAT_VERSION`]; another format is refused
+    /// by its version before its contents are read.
+    pub fn parse(json: &str) -> anyhow::Result<Self> {
+        use anyhow::Context as _;
+
+        #[derive(Deserialize)]
+        struct Head {
+            metadata: HeadMetadata,
+        }
+        #[derive(Deserialize)]
+        struct HeadMetadata {
+            version: u32,
+        }
+        let head: Head = serde_json::from_str(json).context("failed to parse snapshot JSON")?;
+        anyhow::ensure!(
+            head.metadata.version == FORMAT_VERSION,
+            "unsupported snapshot format {}: export a new snapshot with this build",
+            head.metadata.version
+        );
+        serde_json::from_str(json).context("failed to parse snapshot JSON")
+    }
+
     /// Create a new empty snapshot with metadata.
     pub fn new(source_backend: &str, source_url: &str) -> Self {
         Self {
             metadata: SnapshotMetadata {
-                version: 5,
+                version: FORMAT_VERSION,
                 installation_org: None,
                 created_at: Utc::now(),
                 source_backend: source_backend.to_string(),

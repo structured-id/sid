@@ -332,6 +332,81 @@ async fn test_suspending_a_deleted_machine_user_is_invalid_state() {
     assert_eq!(violation.description, "deleted");
 }
 
+/// A suspension of a machine user already suspended changes nothing and is
+/// still its command's outcome: retried after a reactivation it answers as
+/// it did and does not suspend the machine user again. The same holds for a
+/// reactivation of an active one retried after a suspension.
+#[tokio::test]
+async fn test_a_state_change_already_in_effect_is_recorded_for_its_retry() {
+    use sid_core::models::MachineUserStatus;
+    let mut mu = existing();
+    mu.status = MachineUserStatus::Suspended;
+    let svc = TestServices::new(MockStorage::new().with_machine_user(mu.clone()));
+    let token = issue_admin_token(&svc.jwt, ProfileId::generate());
+    let keyed = |key: &str| {
+        let mut r = Request::new(mu.id.to_string());
+        r.metadata_mut()
+            .insert("authorization", format!("Bearer {token}").parse().unwrap());
+        common::name_command(r.metadata_mut(), key);
+        r
+    };
+    let suspend = |key: &str| {
+        let r = keyed(key);
+        let (meta, ext, id) = r.into_parts();
+        Request::from_parts(
+            meta,
+            ext,
+            SuspendMachineUserRequest {
+                machine_user_id: id,
+            },
+        )
+    };
+    let reactivate = |key: &str| {
+        let r = keyed(key);
+        let (meta, ext, id) = r.into_parts();
+        Request::from_parts(
+            meta,
+            ext,
+            ReactivateMachineUserRequest {
+                machine_user_id: id,
+            },
+        )
+    };
+    let status = || async {
+        svc.storage
+            .get_machine_user(mu.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status
+    };
+    let m = &svc.machine_user;
+
+    m.suspend_machine_user(suspend("k-suspended"))
+        .await
+        .unwrap();
+    m.reactivate_machine_user(reactivate("k-reactivate"))
+        .await
+        .unwrap();
+    m.suspend_machine_user(suspend("k-suspended"))
+        .await
+        .unwrap();
+    assert_eq!(status().await, MachineUserStatus::Active, "suspended again");
+
+    m.reactivate_machine_user(reactivate("k-active"))
+        .await
+        .unwrap();
+    m.suspend_machine_user(suspend("k-suspend")).await.unwrap();
+    m.reactivate_machine_user(reactivate("k-active"))
+        .await
+        .unwrap();
+    assert_eq!(
+        status().await,
+        MachineUserStatus::Suspended,
+        "reactivated again"
+    );
+}
+
 /// A rotated-out secret works only for its grace period: the rotation gives
 /// it an end 72 hours away, instead of leaving it valid for ever.
 #[tokio::test]

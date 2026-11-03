@@ -1014,6 +1014,47 @@ async fn test_allowlist_addition_retry_keeps_a_later_removal() {
     );
 }
 
+/// An allowlist change answers with the allowlist its own commit left, as its
+/// retry does, not with a read made after the commit: a failed read does not
+/// report a committed change as failed.
+#[tokio::test]
+async fn test_an_allowlist_change_answers_with_what_it_committed() {
+    use sid_proto::sid::v1::security_service_server::SecurityService;
+    let svc = TestServices::new(MockStorage::new());
+    let token = issue_admin_token(&svc.jwt, ProfileId::generate());
+    svc.mock_storage.fail_allowlist_reads();
+
+    let added = svc
+        .security
+        .add_ip_allowlist_entry(keyed(
+            AddIpAllowlistEntryRequest {
+                cidr: "10.30.0.0/16".into(),
+                description: "office".into(),
+            },
+            &token,
+            Some("op-allow-office"),
+        ))
+        .await
+        .expect("the committed addition is answered")
+        .into_inner();
+    assert_eq!(added.entries.len(), 1);
+    assert_eq!(added.entries[0].cidr, "10.30.0.0/16");
+
+    let removed = svc
+        .security
+        .remove_ip_allowlist_entry(keyed(
+            RemoveIpAllowlistEntryRequest {
+                cidr: "10.30.0.0/16".into(),
+            },
+            &token,
+            Some("op-disallow-office"),
+        ))
+        .await
+        .expect("the committed removal is answered")
+        .into_inner();
+    assert!(removed.entries.is_empty());
+}
+
 /// An upstream provider's creation is retried after its response was lost:
 /// the retry answers with the provider it created, not "name taken" by that
 /// very provider, and one provider exists.

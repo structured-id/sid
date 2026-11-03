@@ -291,9 +291,12 @@ impl IdentityServiceImpl {
     /// `email` the caller gives. Only an administrator's assertion, within
     /// the installation's authority over its managed accounts, establishes
     /// the address here; the owner confirms it instead, so an owner gets
-    /// FAILED_PRECONDITION. `None` when the key is not such a key.
+    /// FAILED_PRECONDITION. The repair commits `command`'s completion and
+    /// answers with the claim that commit recorded. `None` when the key is
+    /// not such a key.
     async fn repair_quarantined_email(
         &self,
+        command: &KeyedCommand,
         caller: &Caller,
         profile_id: ProfileId,
         key: &str,
@@ -334,26 +337,27 @@ impl IdentityServiceImpl {
                 profile_id,
                 &contact,
                 "administrator_asserted",
-                AuditEntry::user(
+                MutationContext::from(AuditEntry::user(
                     caller.profile_id.to_string(),
                     "principal.email_repaired",
                     existing.id.0.to_string(),
-                )
-                .into(),
+                ))
+                .with_operation(command.effect_completion()),
             )
             .await
             .map_err(storage_failure)?;
         if !repaired {
-            return Err(changed_concurrently());
+            // Another attempt of this command may have made the repair.
+            return match command.recorded_effect(&*self.storage).await {
+                Ok(held) => Ok(Some(held)),
+                Err(sid_authn::operation::OperationError::OutcomeUnknown) => {
+                    Err(changed_concurrently())
+                }
+                Err(e) => Err(e.into()),
+            };
         }
-        self.storage
-            .get_principals_by_profile(profile_id)
-            .await
-            .map_err(storage_failure)?
-            .into_iter()
-            .find(|p| p.principal_type == PrincipalType::Email && p.value == key)
-            .map(Some)
-            .ok_or_else(|| internal("repair email", "repaired principal missing"))
+        // The claim as this commit left it, whatever changed since.
+        Ok(Some(command.recorded_effect(&*self.storage).await?))
     }
 
     /// A profile's primary email and phone for a profile read; a failed read
@@ -1214,7 +1218,7 @@ impl IdentityService for IdentityServiceImpl {
                 if let Some(email) = &email {
                     principal.email_policy_revision = Some(email.revision);
                     if let Some(repaired) = self
-                        .repair_quarantined_email(&caller, pid, &value, email)
+                        .repair_quarantined_email(&command, &caller, pid, &value, email)
                         .await?
                     {
                         // The repair is complete as written: a retry finds

@@ -154,8 +154,9 @@ pub async fn import_snapshot(
     snapshot: &Snapshot,
 ) -> anyhow::Result<ImportResult> {
     anyhow::ensure!(
-        snapshot.metadata.version == 5,
-        "unsupported snapshot format: export a new snapshot with password history keys, write cutoffs and OPAQUE setup"
+        snapshot.metadata.version == crate::snapshot::FORMAT_VERSION,
+        "unsupported snapshot format {}: export a new snapshot with this build",
+        snapshot.metadata.version
     );
     anyhow::ensure!(
         snapshot.metadata.installation_org == backend.instance_organization().await?.map(|o| o.id),

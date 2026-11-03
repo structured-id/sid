@@ -26,10 +26,29 @@ fn test_snapshot_empty_count() {
 #[test]
 fn test_snapshot_metadata_version() {
     let snapshot = Snapshot::new("postgresql", "postgres://localhost/sid");
-    // Version 4 carries the history evaluator's sealed keys apart from the
-    // history, besides the sealed setup required by OPAQUE files.
-    assert_eq!(snapshot.metadata.version, 5);
+    assert_eq!(snapshot.metadata.version, FORMAT_VERSION);
     assert_eq!(snapshot.metadata.source_backend, "postgresql");
+}
+
+// A snapshot written by this build is read back; one of an earlier format,
+// whose contents this format does not have (operation period state), is
+// refused by its version, not by a missing field deep in its body.
+#[test]
+fn test_only_this_format_is_read() {
+    let snapshot = Snapshot::new("sqlite", "sqlite://a.db");
+    let json = serde_json::to_string(&snapshot).unwrap();
+    assert!(Snapshot::parse(&json).is_ok());
+
+    let mut earlier = serde_json::to_value(&snapshot).unwrap();
+    earlier["metadata"]["version"] = serde_json::json!(5);
+    earlier.as_object_mut().unwrap().remove("operation_periods");
+    let refused = Snapshot::parse(&earlier.to_string()).unwrap_err();
+    assert!(
+        refused
+            .to_string()
+            .contains("unsupported snapshot format 5"),
+        "{refused}"
+    );
 }
 
 // A session exported in a snapshot names its Profile as `profile_id` and is

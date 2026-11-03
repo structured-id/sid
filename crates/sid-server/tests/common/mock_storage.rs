@@ -101,6 +101,8 @@ pub struct MockStorageInner {
     magic_link_reads_fail: bool,
     /// Reading a profile by id fails as a storage fault would.
     profile_reads_fail: bool,
+    /// Listing the IP allowlist fails as a storage fault would.
+    allowlist_reads_fail: bool,
     /// Consuming a magic link session fails as a storage fault would.
     magic_link_consume_fails: bool,
     /// Owing new work fails as a full queue refuses it.
@@ -484,6 +486,12 @@ impl MockStorage {
     #[allow(dead_code)]
     pub fn fail_magic_link_consume(&self) {
         self.inner.lock().unwrap().magic_link_consume_fails = true;
+    }
+
+    /// From now on, listing the IP allowlist fails.
+    #[allow(dead_code)]
+    pub fn fail_allowlist_reads(&self) {
+        self.inner.lock().unwrap().allowlist_reads_fail = true;
     }
 
     /// From now on, listing a profile's principals fails.
@@ -2766,7 +2774,7 @@ impl StorageBackend for MockStorage {
         profile_id: ProfileId,
         contact: &ProfileEmail,
         _reason: &str,
-        ctx: MutationContext,
+        mut ctx: MutationContext,
     ) -> SidResult<bool> {
         if contact.profile_id != profile_id {
             return Err(sid_core::Error::Validation(
@@ -2774,13 +2782,26 @@ impl StorageBackend for MockStorage {
             ));
         }
         let mut inner = self.inner.lock().unwrap();
-        let quarantined = inner.principals.values().any(|p| {
-            p.id == principal_id
-                && p.email_policy_revision == Some(0)
-                && p.assigned_profile_id == Some(profile_id)
-        });
-        if !quarantined {
+        let Some(held) = inner
+            .principals
+            .values()
+            .find(|p| {
+                p.id == principal_id
+                    && p.profile_id == profile_id
+                    && p.email_policy_revision == Some(0)
+                    && p.assigned_profile_id == Some(profile_id)
+            })
+            .cloned()
+        else {
             return Ok(false);
+        };
+        if ctx.operation.is_some() {
+            // The claim as the profile holds it after this commit.
+            let mut held = held;
+            held.email_policy_revision = Some(sid_core::models::INSTALLATION_EMAIL_POLICY_REVISION);
+            held.source_field = Some("email".into());
+            held.source_email_id = Some(contact.id);
+            ctx.record_effect(&held.as_seen_by_subject())?;
         }
         inner.owe(&ctx)?;
         inner.profile_emails.insert(contact.id.0, contact.clone());
@@ -3034,7 +3055,11 @@ impl StorageBackend for MockStorage {
     async fn list_ip_allowlist_entries(
         &self,
     ) -> SidResult<Vec<(String, String, chrono::DateTime<chrono::Utc>)>> {
-        Ok(self.inner.lock().unwrap().ip_allowlist.clone())
+        let inner = self.inner.lock().unwrap();
+        if inner.allowlist_reads_fail {
+            return Err(sid_core::Error::Storage("list the allowlist".into()));
+        }
+        Ok(inner.ip_allowlist.clone())
     }
 
     async fn create_session(&self, session: &Session, audit: MutationContext) -> SidResult<()> {

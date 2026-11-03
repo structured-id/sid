@@ -632,10 +632,19 @@ impl MachineUserService for MachineUserServiceImpl {
                     return Err(machine_user_state(id, "deleted", "suspended").into());
                 }
                 if mu.status == DomainMachineUserStatus::Suspended {
-                    // Already suspended: the current state, nothing changes.
-                    return Ok(MachineUserResponse {
+                    // Already suspended: nothing changes, and the current
+                    // state is the command's outcome for its retry.
+                    let response = MachineUserResponse {
                         machine_user: Some(machine_user_to_proto(&mu)),
-                    });
+                    };
+                    let audit = MutationContext::from(AuditEntry::admin(
+                        caller.profile_id.to_string(),
+                        "machine_user.suspend",
+                        mu.id.to_string(),
+                    ))
+                    .with_operation(command.completion(response.encode_to_vec()));
+                    self.storage.record_outcome(audit).await?;
+                    return Ok(response);
                 }
 
                 // Expired is the one state left here.
@@ -704,10 +713,19 @@ impl MachineUserService for MachineUserServiceImpl {
                     return Err(machine_user_state(id, "deleted", "reactivated").into());
                 }
                 if mu.status == DomainMachineUserStatus::Active {
-                    // Already active: the current state, nothing changes.
-                    return Ok(MachineUserResponse {
+                    // Already active: nothing changes, and the current state
+                    // is the command's outcome for its retry.
+                    let response = MachineUserResponse {
                         machine_user: Some(machine_user_to_proto(&mu)),
-                    });
+                    };
+                    let audit = MutationContext::from(AuditEntry::admin(
+                        caller.profile_id.to_string(),
+                        "machine_user.reactivate",
+                        mu.id.to_string(),
+                    ))
+                    .with_operation(command.completion(response.encode_to_vec()));
+                    self.storage.record_outcome(audit).await?;
+                    return Ok(response);
                 }
 
                 let previous = mu.status;

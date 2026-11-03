@@ -847,7 +847,8 @@ impl SecurityService for SecurityServiceImpl {
                 self.storage
                     .add_ip_allowlist_entry(&req.cidr, &req.description, ctx)
                     .await?;
-                Ok(self.allowlist().await?)
+                // The allowlist as this commit left it, whatever changed since.
+                Ok(command.recorded_effect(&*self.storage).await?)
             })
             .await?;
         Ok(Response::new(allowlist_response(left)))
@@ -881,7 +882,8 @@ impl SecurityService for SecurityServiceImpl {
                 self.storage
                     .remove_ip_allowlist_entry(&req.cidr, ctx)
                     .await?;
-                Ok(self.allowlist().await?)
+                // The allowlist as this commit left it, whatever changed since.
+                Ok(command.recorded_effect(&*self.storage).await?)
             })
             .await?;
         Ok(Response::new(allowlist_response(left)))
