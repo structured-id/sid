@@ -24,6 +24,25 @@ const OFF: Coverage = Coverage::NotServed;
 /// Every mutating CE method and its coverage, by full method name.
 pub const COVERAGE: &[(&str, Coverage)] = &[
     (
+        "sid.v1.admin.BrandingService/CreateBrandingConfig",
+        Coverage::Keyed,
+    ),
+    (
+        "sid.v1.admin.BrandingService/DeleteBrandingConfig",
+        Coverage::Natural(
+            "a deleted config stays deleted: a repeat finds none and answers as the \
+             first; a published config is refused either way",
+        ),
+    ),
+    (
+        "sid.v1.admin.BrandingService/PublishBrandingConfig",
+        Coverage::Keyed,
+    ),
+    (
+        "sid.v1.admin.BrandingService/UpdateBrandingConfig",
+        Coverage::Keyed,
+    ),
+    (
         "sid.v1.admin.SecurityService/AddIpAllowlistEntry",
         Coverage::Keyed,
     ),
