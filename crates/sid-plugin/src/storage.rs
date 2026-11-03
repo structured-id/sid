@@ -419,11 +419,19 @@ pub trait StorageBackend:
 
     // === IP ALLOWLIST ===
 
-    /// Add a CIDR to the admin-configured IP allowlist.
-    async fn add_ip_allowlist_entry(&self, cidr: &str, description: &str) -> Result<()>;
+    /// Add a CIDR to the admin-configured IP allowlist, or relabel it, under
+    /// `ctx`. A keyed command records the allowlist the change left
+    /// ([`MutationContext::record_effect`]).
+    async fn add_ip_allowlist_entry(
+        &self,
+        cidr: &str,
+        description: &str,
+        ctx: MutationContext,
+    ) -> Result<()>;
 
-    /// Remove a CIDR from the IP allowlist.
-    async fn remove_ip_allowlist_entry(&self, cidr: &str) -> Result<()>;
+    /// Remove a CIDR from the IP allowlist under `ctx`; a keyed command
+    /// records the allowlist the change left.
+    async fn remove_ip_allowlist_entry(&self, cidr: &str, ctx: MutationContext) -> Result<()>;
 
     /// List all IP allowlist entries.
     async fn list_ip_allowlist_entries(

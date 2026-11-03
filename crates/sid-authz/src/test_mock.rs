@@ -753,10 +753,10 @@ impl sid_plugin::StorageBackend for MockStorage {
     async fn decay_ip_reputation(&self, _: std::time::Duration) -> Result<u64> {
         Ok(0)
     }
-    async fn add_ip_allowlist_entry(&self, _: &str, _: &str) -> Result<()> {
+    async fn add_ip_allowlist_entry(&self, _: &str, _: &str, _: MutationContext) -> Result<()> {
         Ok(())
     }
-    async fn remove_ip_allowlist_entry(&self, _: &str) -> Result<()> {
+    async fn remove_ip_allowlist_entry(&self, _: &str, _: MutationContext) -> Result<()> {
         Ok(())
     }
     async fn list_ip_allowlist_entries(

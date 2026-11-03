@@ -822,6 +822,60 @@ async fn test_machine_user_suspension_retry_keeps_a_later_reactivation() {
     );
 }
 
+/// An allowlist entry is added, removed, then the addition's lost response
+/// is retried: the retry answers with the allowlist the addition left and
+/// the entry stays removed.
+#[tokio::test]
+async fn test_allowlist_addition_retry_keeps_a_later_removal() {
+    use sid_proto::sid::v1::admin::security_service_server::SecurityService;
+    use sid_proto::sid::v1::admin::{AddIpAllowlistEntryRequest, RemoveIpAllowlistEntryRequest};
+    let svc = TestServices::new(MockStorage::new());
+    let token = issue_admin_token(&svc.jwt, ProfileId::generate());
+    let add = || {
+        keyed(
+            AddIpAllowlistEntryRequest {
+                cidr: "10.20.0.0/16".into(),
+                description: "office".into(),
+            },
+            &token,
+            Some("op-allow"),
+        )
+    };
+
+    let first = svc
+        .security
+        .add_ip_allowlist_entry(add())
+        .await
+        .unwrap()
+        .into_inner();
+    svc.security
+        .remove_ip_allowlist_entry(keyed(
+            RemoveIpAllowlistEntryRequest {
+                cidr: "10.20.0.0/16".into(),
+            },
+            &token,
+            Some("op-disallow"),
+        ))
+        .await
+        .unwrap();
+    let retry = svc
+        .security
+        .add_ip_allowlist_entry(add())
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(retry, first);
+    assert!(
+        svc.storage
+            .list_ip_allowlist_entries()
+            .await
+            .unwrap()
+            .is_empty(),
+        "the retry added back a removed entry"
+    );
+}
+
 /// An edit without a key cannot promise a safe retry and changes nothing.
 #[tokio::test]
 async fn test_update_project_without_key_is_refused() {

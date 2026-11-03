@@ -474,6 +474,28 @@ impl PostgresBackend {
             .map_err(|e| SidError::Storage(format!("commit a completion: {e}")))
     }
 
+    /// Commit an allowlist change under `ctx`, recording for a keyed command
+    /// the allowlist the transaction leaves.
+    async fn commit_allowlist_change(
+        mut tx: sqlx::Transaction<'_, sqlx::Postgres>,
+        mut ctx: MutationContext,
+    ) -> SidResult<()> {
+        if ctx.operation.is_some() {
+            let left: Vec<(String, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+                "SELECT cidr, description, created_at FROM ip_allowlist_entries \
+                 ORDER BY created_at",
+            )
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| SidError::Storage(format!("read the allowlist: {e}")))?;
+            ctx.record_effect(&left)?;
+        }
+        Self::audit_in_tx(&mut tx, "ip_allowlist", ctx).await?;
+        tx.commit()
+            .await
+            .map_err(|e| SidError::Storage(format!("commit an allowlist change: {e}")))
+    }
+
     /// Device `id` as the transaction leaves it.
     async fn device_in_tx(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -6812,7 +6834,14 @@ impl StorageBackend for PostgresBackend {
 
     // === IP ALLOWLIST ===
 
-    async fn add_ip_allowlist_entry(&self, cidr: &str, description: &str) -> SidResult<()> {
+    async fn add_ip_allowlist_entry(
+        &self,
+        cidr: &str,
+        description: &str,
+        ctx: MutationContext,
+    ) -> SidResult<()> {
+        let storage = |e: sqlx::Error| SidError::Storage(format!("add_ip_allowlist_entry: {e}"));
+        let mut tx = self.pool.begin().await.map_err(storage)?;
         sqlx::query(
             "INSERT INTO ip_allowlist_entries (cidr, description)
              VALUES ($1, $2)
@@ -6820,19 +6849,21 @@ impl StorageBackend for PostgresBackend {
         )
         .bind(cidr)
         .bind(description)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
-        .map_err(|e| sid_core::Error::Storage(format!("add_ip_allowlist_entry: {e}")))?;
-        Ok(())
+        .map_err(storage)?;
+        Self::commit_allowlist_change(tx, ctx).await
     }
 
-    async fn remove_ip_allowlist_entry(&self, cidr: &str) -> SidResult<()> {
+    async fn remove_ip_allowlist_entry(&self, cidr: &str, ctx: MutationContext) -> SidResult<()> {
+        let storage = |e: sqlx::Error| SidError::Storage(format!("remove_ip_allowlist_entry: {e}"));
+        let mut tx = self.pool.begin().await.map_err(storage)?;
         sqlx::query("DELETE FROM ip_allowlist_entries WHERE cidr = $1")
             .bind(cidr)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
-            .map_err(|e| sid_core::Error::Storage(format!("remove_ip_allowlist_entry: {e}")))?;
-        Ok(())
+            .map_err(storage)?;
+        Self::commit_allowlist_change(tx, ctx).await
     }
 
     async fn list_ip_allowlist_entries(

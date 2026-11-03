@@ -1581,17 +1581,48 @@ pub async fn test_security_signals_persist(backend: &dyn StorageBackend) {
 
     let cidr = format!("10.{}.0.0/16", Uuid::now_v7().as_u128() % 250);
     backend
-        .add_ip_allowlist_entry(&cidr, "office")
+        .add_ip_allowlist_entry(&cidr, "office", test_audit())
         .await
         .unwrap();
+    // A keyed change records the allowlist it left, read in its transaction.
+    let (ns, key) = (
+        format!("profile:{}", Uuid::now_v7()),
+        sid_core::models::OperationKey::parse(&Uuid::new_v4().to_string()).unwrap(),
+    );
     backend
-        .add_ip_allowlist_entry(&cidr, "head office")
+        .add_ip_allowlist_entry(
+            &cidr,
+            "head office",
+            test_audit().with_operation(sid_core::models::OperationCompletion::new(
+                &ns,
+                key.clone(),
+                "sid.v1.admin.SecurityService/AddIpAllowlistEntry",
+                b"relabel",
+                Vec::new(),
+            )),
+        )
         .await
         .unwrap();
+    let record = backend
+        .get_operation_result(&ns, &key)
+        .await
+        .unwrap()
+        .expect("recorded");
+    let recorded: Vec<(String, String, chrono::DateTime<chrono::Utc>)> =
+        serde_json::from_slice(&record.completion.result).unwrap();
+    assert!(
+        recorded
+            .iter()
+            .any(|(c, d, _)| *c == cidr && d == "head office"),
+        "the record is not the allowlist the change left"
+    );
     let listed = backend.list_ip_allowlist_entries().await.unwrap();
     let entry = listed.iter().find(|(c, _, _)| *c == cidr).expect("listed");
     assert_eq!(entry.1, "head office");
-    backend.remove_ip_allowlist_entry(&cidr).await.unwrap();
+    backend
+        .remove_ip_allowlist_entry(&cidr, test_audit())
+        .await
+        .unwrap();
     assert!(
         !backend
             .list_ip_allowlist_entries()

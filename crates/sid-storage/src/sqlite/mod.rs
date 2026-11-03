@@ -1225,11 +1225,17 @@ impl StorageBackend for SqliteBackend {
         self.decay_ip_reputation_impl(older_than).await
     }
 
-    async fn add_ip_allowlist_entry(&self, cidr: &str, description: &str) -> SidResult<()> {
-        self.add_ip_allowlist_entry_impl(cidr, description).await
+    async fn add_ip_allowlist_entry(
+        &self,
+        cidr: &str,
+        description: &str,
+        ctx: MutationContext,
+    ) -> SidResult<()> {
+        self.add_ip_allowlist_entry_impl(cidr, description, ctx)
+            .await
     }
-    async fn remove_ip_allowlist_entry(&self, cidr: &str) -> SidResult<()> {
-        self.remove_ip_allowlist_entry_impl(cidr).await
+    async fn remove_ip_allowlist_entry(&self, cidr: &str, ctx: MutationContext) -> SidResult<()> {
+        self.remove_ip_allowlist_entry_impl(cidr, ctx).await
     }
     async fn list_ip_allowlist_entries(
         &self,

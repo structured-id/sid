@@ -105,6 +105,8 @@ pub struct MockStorageInner {
     magic_link_consume_fails: bool,
     /// Owing new work fails as a full queue refuses it.
     owed_work_full: bool,
+    /// The admin IP allowlist: CIDR, description and creation time.
+    ip_allowlist: Vec<(String, String, chrono::DateTime<chrono::Utc>)>,
     /// Durable work items with their payload and lease deadline.
     work: HashMap<WorkId, StoredWork>,
     /// Completions of keyed commands by (namespace, key).
@@ -2883,16 +2885,44 @@ impl StorageBackend for MockStorage {
         Ok(0)
     }
 
-    async fn add_ip_allowlist_entry(&self, _cidr: &str, _description: &str) -> SidResult<()> {
+    async fn add_ip_allowlist_entry(
+        &self,
+        cidr: &str,
+        description: &str,
+        mut ctx: MutationContext,
+    ) -> SidResult<()> {
+        let mut inner = self.inner.lock().unwrap();
+        let mut left = inner.ip_allowlist.clone();
+        match left.iter_mut().find(|(c, _, _)| c == cidr) {
+            Some(entry) => entry.1 = description.to_string(),
+            None => left.push((
+                cidr.to_string(),
+                description.to_string(),
+                chrono::Utc::now(),
+            )),
+        }
+        ctx.record_effect(&left)?;
+        inner.owe(&ctx)?;
+        inner.ip_allowlist = left;
         Ok(())
     }
-    async fn remove_ip_allowlist_entry(&self, _cidr: &str) -> SidResult<()> {
+    async fn remove_ip_allowlist_entry(
+        &self,
+        cidr: &str,
+        mut ctx: MutationContext,
+    ) -> SidResult<()> {
+        let mut inner = self.inner.lock().unwrap();
+        let mut left = inner.ip_allowlist.clone();
+        left.retain(|(c, _, _)| c != cidr);
+        ctx.record_effect(&left)?;
+        inner.owe(&ctx)?;
+        inner.ip_allowlist = left;
         Ok(())
     }
     async fn list_ip_allowlist_entries(
         &self,
     ) -> SidResult<Vec<(String, String, chrono::DateTime<chrono::Utc>)>> {
-        Ok(vec![])
+        Ok(self.inner.lock().unwrap().ip_allowlist.clone())
     }
 
     async fn create_session(&self, session: &Session, audit: MutationContext) -> SidResult<()> {

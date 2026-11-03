@@ -8,6 +8,7 @@
 use sid_admin::integrity::{IntegrityCheckRequest, IntegrityService, VerificationLayer};
 use sid_authn::caller::authenticate;
 use sid_authn::jwt::JwtService;
+use sid_authn::operation::{KeyedCommand, required_key};
 use sid_authn::revocation_cache::RevocationCache;
 use sid_core::models::security_policy::{
     CE_PASSWORD_MAX_AGE_DAYS, CE_PASSWORD_MIN_DIGITS, CE_PASSWORD_MIN_LENGTH,
@@ -15,6 +16,7 @@ use sid_core::models::security_policy::{
     CE_REQUIRE_PHISHING_RESISTANT, CE_SESSION_IDLE_TIMEOUT_HOURS, CE_SESSION_MAX_CONCURRENT,
     CE_SESSION_MAX_LIFETIME_HOURS, EnforcementMode, MfaEnforcement, SecurityPolicy,
 };
+use sid_core::models::{AuditEntry, MutationContext};
 use sid_plugin::audit::AuditLog;
 use sid_plugin::storage::StorageBackend;
 use sid_proto::sid::v1::admin::{self as pb, security_service_server::SecurityService};
@@ -800,7 +802,7 @@ impl SecurityService for SecurityServiceImpl {
         request: Request<pb::ListIpAllowlistEntriesRequest>,
     ) -> Result<Response<pb::IpAllowlistResponse>, Status> {
         self.require_admin(&request).await?;
-        self.allowlist_response().await
+        Ok(Response::new(allowlist_response(self.allowlist().await?)))
     }
 
     #[instrument(skip_all, name = "security.add_ip_allowlist")]
@@ -808,7 +810,8 @@ impl SecurityService for SecurityServiceImpl {
         &self,
         request: Request<pb::AddIpAllowlistEntryRequest>,
     ) -> Result<Response<pb::IpAllowlistResponse>, Status> {
-        self.require_admin(&request).await?;
+        let admin = self.admin(&request).await?;
+        let key = required_key(request.metadata())?;
         let req = request.into_inner();
 
         if req.cidr.is_empty() {
@@ -827,12 +830,24 @@ impl SecurityService for SecurityServiceImpl {
             })
             .map_err(|_| invalid_field("cidr", "not an IP address or CIDR block"))?;
 
-        self.storage
-            .add_ip_allowlist_entry(&req.cidr, &req.description)
-            .await
-            .map_err(|e| internal("add", e))?;
-
-        self.allowlist_response().await
+        // A retry of a completed addition answers with the allowlist as it
+        // left it and never adds back an entry removed since.
+        let command = KeyedCommand::by_profile(admin, key, ADD_IP_ALLOWLIST_ENTRY, &req);
+        let left = command
+            .run_recorded(&*self.storage, || async {
+                let ctx = MutationContext::from(AuditEntry::admin(
+                    admin.to_string(),
+                    "ip_allowlist.add",
+                    req.cidr.clone(),
+                ))
+                .with_operation(command.effect_completion());
+                self.storage
+                    .add_ip_allowlist_entry(&req.cidr, &req.description, ctx)
+                    .await?;
+                Ok(self.allowlist().await?)
+            })
+            .await?;
+        Ok(Response::new(allowlist_response(left)))
     }
 
     #[instrument(skip_all, name = "security.remove_ip_allowlist")]
@@ -840,42 +855,72 @@ impl SecurityService for SecurityServiceImpl {
         &self,
         request: Request<pb::RemoveIpAllowlistEntryRequest>,
     ) -> Result<Response<pb::IpAllowlistResponse>, Status> {
-        self.require_admin(&request).await?;
+        let admin = self.admin(&request).await?;
+        let key = required_key(request.metadata())?;
         let req = request.into_inner();
 
         if req.cidr.is_empty() {
             return Err(missing_field("cidr"));
         }
 
-        self.storage
-            .remove_ip_allowlist_entry(&req.cidr)
-            .await
-            .map_err(|e| internal("remove", e))?;
+        // A retry of a completed removal answers with the allowlist as it
+        // left it and never removes an entry added again since.
+        let command = KeyedCommand::by_profile(admin, key, REMOVE_IP_ALLOWLIST_ENTRY, &req);
+        let left = command
+            .run_recorded(&*self.storage, || async {
+                let ctx = MutationContext::from(AuditEntry::admin(
+                    admin.to_string(),
+                    "ip_allowlist.remove",
+                    req.cidr.clone(),
+                ))
+                .with_operation(command.effect_completion());
+                self.storage
+                    .remove_ip_allowlist_entry(&req.cidr, ctx)
+                    .await?;
+                Ok(self.allowlist().await?)
+            })
+            .await?;
+        Ok(Response::new(allowlist_response(left)))
+    }
+}
 
-        self.allowlist_response().await
+/// An IP allowlist entry as stored: CIDR, description and creation time.
+type AllowlistEntry = (String, String, chrono::DateTime<chrono::Utc>);
+
+const ADD_IP_ALLOWLIST_ENTRY: &str = "sid.v1.admin.SecurityService/AddIpAllowlistEntry";
+const REMOVE_IP_ALLOWLIST_ENTRY: &str = "sid.v1.admin.SecurityService/RemoveIpAllowlistEntry";
+
+/// The answer listing `entries`.
+fn allowlist_response(entries: Vec<AllowlistEntry>) -> pb::IpAllowlistResponse {
+    pb::IpAllowlistResponse {
+        entries: entries
+            .into_iter()
+            .map(|(cidr, description, created_at)| pb::IpAllowlistEntry {
+                cidr,
+                description,
+                created_at: Some(prost_types::Timestamp {
+                    seconds: created_at.timestamp(),
+                    nanos: created_at.timestamp_subsec_nanos() as i32,
+                }),
+            })
+            .collect(),
     }
 }
 
 impl SecurityServiceImpl {
     /// The current allowlist, for a caller already authorized by its handler.
-    async fn allowlist_response(&self) -> Result<Response<pb::IpAllowlistResponse>, Status> {
-        let entries = self
-            .storage
+    async fn allowlist(&self) -> Result<Vec<AllowlistEntry>, Status> {
+        self.storage
             .list_ip_allowlist_entries()
             .await
-            .map_err(|e| internal("list", e))?;
-        Ok(Response::new(pb::IpAllowlistResponse {
-            entries: entries
-                .into_iter()
-                .map(|(cidr, description, created_at)| pb::IpAllowlistEntry {
-                    cidr,
-                    description,
-                    created_at: Some(prost_types::Timestamp {
-                        seconds: created_at.timestamp(),
-                        nanos: created_at.timestamp_subsec_nanos() as i32,
-                    }),
-                })
-                .collect(),
-        }))
+            .map_err(|e| internal("list", e))
+    }
+
+    /// The administrator calling: the allowlist is instance administration.
+    #[allow(clippy::result_large_err)]
+    async fn admin<T>(&self, req: &Request<T>) -> Result<sid_core::models::ProfileId, Status> {
+        let caller = authenticate(req, self.jwt.verifier(), &self.revocation).await?;
+        caller.require_admin()?;
+        Ok(caller.profile_id)
     }
 }
