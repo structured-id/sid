@@ -30,6 +30,8 @@ use sid_core::grpc_error::{ApiError, ErrorReason};
 use super::convert;
 use sid_core::grpc_error::refuse::{invalid_field, missing_field, not_found, storage_failure};
 
+const CREATE_PAT: &str = "sid.v1.machine.PatService/CreatePat";
+
 /// Proto `PatStatus` enum alias to avoid collision with domain type.
 type ProtoPatStatus = v1::PatStatus;
 
@@ -165,7 +167,16 @@ impl PatService for PatServiceImpl {
         request: Request<CreatePatRequest>,
     ) -> Result<Response<CreatePatResponse>, Status> {
         let profile_id = self.token_owner(&request).await?;
+        let key = sid_authn::operation::required_key(request.metadata())?;
         let req = request.into_inner();
+        let command =
+            sid_authn::operation::KeyedCommand::by_profile(profile_id, key, CREATE_PAT, &req);
+        // SID keeps only the token's hash: a retry of a completed creation
+        // answers with the token it created, its value empty, and creates no
+        // second token.
+        if let Some(recorded) = command.replay::<CreatePatResponse>(&*self.storage).await? {
+            return Ok(Response::new(recorded));
+        }
 
         // Validate required fields.
         if req.name.is_empty() {
@@ -211,39 +222,59 @@ impl PatService for PatServiceImpl {
             pat.ip_allowlist = req.ip_allowlist;
         }
 
-        let audit: MutationContext =
-            AuditEntry::user(profile_id.to_string(), "pat.create", pat.id.0.to_string()).into();
+        let mut response = CreatePatResponse {
+            pat_id: pat.id.0.to_string(),
+            token: String::new(),
+            token_prefix: prefix,
+            metadata: Some(pat_to_proto(&pat)),
+        };
+        let audit = MutationContext::from(AuditEntry::user(
+            profile_id.to_string(),
+            "pat.create",
+            pat.id.0.to_string(),
+        ))
+        .with_operation(command.completion(prost::Message::encode_to_vec(&response)));
 
         // The per-user limit is checked with the insert, so concurrent creates
         // cannot exceed it.
-        self.storage
+        match self
+            .storage
             .create_pat(&pat, Some(PAT_MAX_ACTIVE_PER_USER as u64), audit)
             .await
-            .map_err(|e| match e {
-                sid_core::Error::ResourceExhausted(_) => Status::from(
-                    ApiError::new(
-                        ErrorReason::QuotaExceeded,
-                        "the limit of active personal access tokens is reached",
-                    )
-                    .with_quota_violation(
-                        "personal_access_tokens",
-                        format!("at most {PAT_MAX_ACTIVE_PER_USER} active tokens per user"),
-                    ),
-                ),
-                e => storage_failure(e),
-            })?;
+        {
+            Ok(_) => {}
+            // Another attempt of this command committed first: its token is
+            // the created one.
+            Err(sid_core::Error::OperationCompleted(_)) => {
+                let recorded = command.committed_elsewhere(&*self.storage).await?;
+                return prost::Message::decode(recorded.as_slice())
+                    .map(Response::new)
+                    .map_err(|e| {
+                        sid_core::grpc_error::refuse::internal("read a recorded token", e)
+                    });
+            }
+            Err(sid_core::Error::ResourceExhausted(_)) => {
+                return Err(ApiError::new(
+                    ErrorReason::QuotaExceeded,
+                    "the limit of active personal access tokens is reached",
+                )
+                .with_quota_violation(
+                    "personal_access_tokens",
+                    format!("at most {PAT_MAX_ACTIVE_PER_USER} active tokens per user"),
+                )
+                .into());
+            }
+            Err(e) => return Err(storage_failure(e)),
+        }
 
         info!(
             "Created PAT {} ({}) for profile {}",
             pat.id.0, pat.name, pat.profile_id
         );
 
-        Ok(Response::new(CreatePatResponse {
-            pat_id: pat.id.0.to_string(),
-            token: plaintext,
-            token_prefix: prefix,
-            metadata: Some(pat_to_proto(&pat)),
-        }))
+        // The value is shown in this answer only.
+        response.token = plaintext;
+        Ok(Response::new(response))
     }
 
     async fn list_pats(

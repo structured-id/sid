@@ -61,13 +61,70 @@ async fn pat(storage: &Arc<dyn StorageBackend>, owner: ProfileId) -> PersonalAcc
     pat
 }
 
+/// `msg` as one new command, of `token`'s when given (a method that promises
+/// a safe retry takes an operation key).
 fn req<T>(msg: T, token: Option<&str>) -> Request<T> {
+    keyed(msg, token, &Uuid::new_v4().to_string())
+}
+
+/// `msg` under the operation key `key`.
+fn keyed<T>(msg: T, token: Option<&str>, key: &str) -> Request<T> {
     let mut req = Request::new(msg);
     if let Some(token) = token {
         req.metadata_mut()
             .insert("authorization", format!("Bearer {token}").parse().unwrap());
     }
+    req.metadata_mut().insert(
+        sid_authn::operation::OPERATION_KEY_HEADER,
+        key.parse().unwrap(),
+    );
     req
+}
+
+/// The creation's response is lost and retried: the retry answers with the
+/// token it created, without its value (only its hash is kept), and the
+/// user holds one token, not two.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_create_retry_answers_with_its_token_without_the_value() {
+    let storage = pg_storage().await;
+    let owner = profile(&storage, &[]).await;
+    let (svc, jwt) = service(storage.clone()).await;
+    let token = common::issue_token(&jwt, &owner, &["openid".to_string()]);
+    // One command: the retry repeats the same inputs.
+    let expires = (chrono::Utc::now() + chrono::Duration::days(1)).timestamp();
+    let create = || {
+        keyed(
+            sid_proto::sid::v1::CreatePatRequest {
+                name: "ci".into(),
+                scopes: vec!["repos:read".into()],
+                expires_at: Some(prost_types::Timestamp {
+                    seconds: expires,
+                    nanos: 0,
+                }),
+                ..Default::default()
+            },
+            Some(&token),
+            "op-create-pat",
+        )
+    };
+
+    let first = svc.create_pat(create()).await.unwrap().into_inner();
+    let retry = svc.create_pat(create()).await.unwrap().into_inner();
+
+    assert!(!first.token.is_empty());
+    assert_eq!(
+        retry.pat_id, first.pat_id,
+        "the retry created another token"
+    );
+    assert!(
+        retry.token.is_empty(),
+        "the retry disclosed the value again"
+    );
+    assert_eq!(retry.metadata, first.metadata);
+    assert_eq!(
+        storage.list_pats_by_profile(owner.id).await.unwrap().len(),
+        1
+    );
 }
 
 async fn service(

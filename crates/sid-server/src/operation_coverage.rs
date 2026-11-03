@@ -23,6 +23,30 @@ const OFF: Coverage = Coverage::NotServed;
 
 /// Every mutating CE method and its coverage, by full method name.
 pub const COVERAGE: &[(&str, Coverage)] = &[
+    (
+        "sid.v1.machine.PatService/AdminRevokePat",
+        Coverage::Natural(
+            "a revoked token stays revoked: a repeat finds it revoked and answers \
+             as the first",
+        ),
+    ),
+    ("sid.v1.machine.PatService/CreatePat", Coverage::Keyed),
+    ("sid.v1.machine.PatService/ExchangePat", OFF),
+    (
+        "sid.v1.machine.PatService/RevokePat",
+        Coverage::Natural(
+            "a revoked token stays revoked: a repeat finds it revoked and answers \
+             as the first",
+        ),
+    ),
+    ("sid.v1.admin.RealmService/DeleteTranslationOverride", OFF),
+    ("sid.v1.admin.RealmService/ImportRealm", OFF),
+    ("sid.v1.admin.RealmService/SetTranslationOverride", OFF),
+    ("sid.v1.admin.RealmService/UpdateLocalizationSettings", OFF),
+    ("sid.v1.admin.RealmService/UpdateLoginSettings", OFF),
+    ("sid.v1.admin.RealmService/UpdateRealm", OFF),
+    ("sid.v1.admin.RealmService/UpdateSessionConfig", OFF),
+    ("sid.v1.admin.RealmService/UpdateTokenConfig", OFF),
     ("sid.v1.authn.AuthService/AcceptTerms", OFF),
     ("sid.v1.authn.AuthService/ApproveCiba", OFF),
     (

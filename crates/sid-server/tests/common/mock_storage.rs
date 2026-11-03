@@ -4667,9 +4667,9 @@ impl StorageBackend for MockStorage {
         &self,
         _pat: &PersonalAccessToken,
         _active_limit: Option<u64>,
-        _audit: MutationContext,
+        audit: MutationContext,
     ) -> SidResult<()> {
-        Ok(())
+        self.inner.lock().unwrap().owe(&audit)
     }
     async fn record_pat_use(
         &self,
