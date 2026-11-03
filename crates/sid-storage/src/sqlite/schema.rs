@@ -1282,6 +1282,7 @@ CREATE TABLE IF NOT EXISTS magic_link_sessions (
     id          TEXT PRIMARY KEY,
     email       TEXT NOT NULL,
     token_hash  TEXT NOT NULL,
+    sealed_token BLOB NOT NULL,
     consumed    INTEGER NOT NULL DEFAULT 0,
     client_id   TEXT,
     redirect_uri TEXT,

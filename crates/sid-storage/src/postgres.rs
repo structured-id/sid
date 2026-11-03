@@ -7154,12 +7154,14 @@ impl StorageBackend for PostgresBackend {
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
         sqlx::query(
-            "INSERT INTO magic_link_sessions (id, email, token_hash, consumed, created_at, expires_at)
-             VALUES ($1, $2, $3, $4, $5, $6)",
+            "INSERT INTO magic_link_sessions
+                 (id, email, token_hash, sealed_token, consumed, created_at, expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
         .bind(session.id)
         .bind(&session.email)
         .bind(&session.token_hash)
+        .bind(&session.sealed_token)
         .bind(session.consumed)
         .bind(session.created_at)
         .bind(session.expires_at)
@@ -7194,7 +7196,9 @@ impl StorageBackend for PostgresBackend {
             .begin()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
-        sqlx::query("UPDATE magic_link_sessions SET consumed = true WHERE id = $1")
+        sqlx::query(
+            "UPDATE magic_link_sessions SET consumed = true, sealed_token = ''::bytea WHERE id = $1",
+        )
             .bind(id)
             .execute(&mut *tx)
             .await
@@ -7218,7 +7222,7 @@ impl StorageBackend for PostgresBackend {
             .map_err(|e| SidError::Storage(e.to_string()))?;
         let row = sqlx::query_as::<_, crate::pg_row::MagicLinkRow>(
             "UPDATE magic_link_sessions
-             SET consumed = true
+             SET consumed = true, sealed_token = ''::bytea
              WHERE id = $1 AND consumed = false AND expires_at > NOW()
              RETURNING *",
         )

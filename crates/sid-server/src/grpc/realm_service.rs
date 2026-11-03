@@ -84,49 +84,16 @@ impl RealmServiceImpl {
         Ok(SecretBox::new(Box::new(STANDARD.encode(sealed))))
     }
 
-    /// The credential a stored value holds. A value that is not sealed for
-    /// `context` is refused rather than used as the credential.
-    async fn open(
-        &self,
-        context: &str,
-        stored: &SecretBox<String>,
-    ) -> Result<SecretBox<String>, Status> {
-        if stored.expose_secret().is_empty() {
-            return Ok(SecretBox::new(Box::new(String::new())));
-        }
-        let refused =
-            |e: &dyn std::fmt::Display| internal("open stored email provider credential", e);
-        let bytes = STANDARD
-            .decode(stored.expose_secret())
-            .map_err(|e| refused(&e))?;
-        let opened = sid_authn::sealed_secret::open(self.keys.as_ref(), context, &bytes)
-            .await
-            .map_err(|e| refused(&e))?;
-        let text = String::from_utf8(opened.secret.to_vec()).map_err(|e| refused(&e))?;
-        Ok(SecretBox::new(Box::new(text)))
-    }
-
     /// The stored config with its credentials opened.
     async fn load(&self) -> Result<Option<EmailProviderConfig>, Status> {
-        let Some(mut cfg) = self
-            .storage
-            .get_email_provider_config()
+        stored_email_provider(self.storage.as_ref(), self.keys.as_ref())
             .await
-            .map_err(storage_failure)?
-        else {
-            return Ok(None);
-        };
-        cfg.password = self.open(SMTP_PASSWORD_CONTEXT, &cfg.password).await?;
-        if let Some(x) = cfg.xoauth2.as_mut() {
-            x.client_secret = self
-                .open(XOAUTH2_CLIENT_SECRET_CONTEXT, &x.client_secret)
-                .await?;
-            if let Some(key) = x.service_account_key.as_ref() {
-                x.service_account_key =
-                    Some(self.open(XOAUTH2_SERVICE_ACCOUNT_KEY_CONTEXT, key).await?);
-            }
-        }
-        Ok(Some(cfg))
+            .map_err(|e| match e {
+                ProviderError::Storage(e) => storage_failure(e),
+                ProviderError::Credential(e) => {
+                    internal("open stored email provider credential", e)
+                }
+            })
     }
 
     /// `cfg` with its credentials sealed, as it is stored.
@@ -152,6 +119,81 @@ impl RealmServiceImpl {
         let caller = authenticate(req, self.jwt.verifier(), &self.revocation).await?;
         caller.require_admin()?;
         Ok(caller.profile_id.to_string())
+    }
+}
+
+/// Why the stored email provider could not be read.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ProviderError {
+    #[error("read the email provider: {0}")]
+    Storage(sid_core::Error),
+    /// A stored credential that is not sealed for its field, or that the
+    /// keys cannot open now.
+    #[error("open an email provider credential: {0}")]
+    Credential(String),
+}
+
+/// The credential a stored value holds. A value that is not sealed for
+/// `context` is refused rather than used as the credential.
+async fn open_credential(
+    keys: &dyn sid_keys::KeyManager,
+    context: &str,
+    stored: &SecretBox<String>,
+) -> Result<SecretBox<String>, ProviderError> {
+    if stored.expose_secret().is_empty() {
+        return Ok(SecretBox::new(Box::new(String::new())));
+    }
+    let refused = |e: &dyn std::fmt::Display| ProviderError::Credential(e.to_string());
+    let bytes = STANDARD
+        .decode(stored.expose_secret())
+        .map_err(|e| refused(&e))?;
+    let opened = sid_authn::sealed_secret::open(keys, context, &bytes)
+        .await
+        .map_err(|e| refused(&e))?;
+    let text = String::from_utf8(opened.secret.to_vec()).map_err(|e| refused(&e))?;
+    Ok(SecretBox::new(Box::new(text)))
+}
+
+/// The installation's stored email provider with its credentials opened,
+/// `None` when none is configured.
+pub(crate) async fn stored_email_provider(
+    storage: &dyn StorageBackend,
+    keys: &dyn sid_keys::KeyManager,
+) -> Result<Option<EmailProviderConfig>, ProviderError> {
+    let Some(mut cfg) = storage
+        .get_email_provider_config()
+        .await
+        .map_err(ProviderError::Storage)?
+    else {
+        return Ok(None);
+    };
+    cfg.password = open_credential(keys, SMTP_PASSWORD_CONTEXT, &cfg.password).await?;
+    if let Some(x) = cfg.xoauth2.as_mut() {
+        x.client_secret =
+            open_credential(keys, XOAUTH2_CLIENT_SECRET_CONTEXT, &x.client_secret).await?;
+        if let Some(key) = x.service_account_key.as_ref() {
+            x.service_account_key =
+                Some(open_credential(keys, XOAUTH2_SERVICE_ACCOUNT_KEY_CONTEXT, key).await?);
+        }
+    }
+    Ok(Some(cfg))
+}
+
+/// The channel mail goes out on under `cfg`: XOAUTH2 when configured, plain
+/// SMTP otherwise. An error names what an administrator must correct.
+pub(crate) fn email_channel(
+    cfg: &EmailProviderConfig,
+) -> Result<Arc<dyn NotificationChannel>, String> {
+    if cfg.auth_type == SmtpAuthMethod::XOAuth2 {
+        let channel = channel_from_email_config(cfg)
+            .map_err(|e| format!("XOAUTH2 HTTP client: {e}"))?
+            .ok_or("the XOAUTH2 configuration is incomplete")?;
+        Ok(Arc::new(channel))
+    } else {
+        Ok(Arc::new(
+            SmtpChannel::new(config_to_smtp_config(cfg))
+                .map_err(|e| format!("the SMTP configuration is invalid: {e}"))?,
+        ))
     }
 }
 

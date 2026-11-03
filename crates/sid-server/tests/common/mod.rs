@@ -1488,7 +1488,8 @@ impl TestServices {
             std::time::Duration::from_secs(900),
             cache_backend.clone(),
         ));
-        let magic_link = magic_links.then(|| Arc::new(MagicLinkService::new(storage.clone())));
+        let magic_link = magic_links
+            .then(|| Arc::new(MagicLinkService::new(storage.clone(), test_key_manager())));
         let event_bus: Arc<dyn sid_plugin::event_bus::EventBus> =
             Arc::new(InProcessEventBus::new());
         let cascade_service = Arc::new(RevocationCascadeService::new(

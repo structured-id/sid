@@ -3253,6 +3253,7 @@ pub async fn test_magic_link_crud(backend: &dyn StorageBackend) {
         id,
         email: email.clone(),
         token_hash: format!("hash_{}", id),
+        sealed_token: vec![0xA5, 0x00, 0x5A],
         consumed: false,
         created_at: Utc::now(),
         expires_at: Utc::now() + Duration::hours(1),
@@ -3263,9 +3264,14 @@ pub async fn test_magic_link_crud(backend: &dyn StorageBackend) {
         .await
         .unwrap();
 
-    let retrieved = backend.get_magic_link_session(id).await.unwrap();
-    assert!(retrieved.is_some());
-    assert!(!retrieved.unwrap().consumed);
+    let retrieved = backend
+        .get_magic_link_session(id)
+        .await
+        .unwrap()
+        .expect("the stored link");
+    assert!(!retrieved.consumed);
+    // The sealed token the link's email needs is kept byte for byte.
+    assert_eq!(retrieved.sealed_token, session.sealed_token);
 
     backend
         .consume_magic_link_session(id, test_audit())
@@ -3274,6 +3280,11 @@ pub async fn test_magic_link_crud(backend: &dyn StorageBackend) {
 
     let consumed = backend.get_magic_link_session(id).await.unwrap().unwrap();
     assert!(consumed.consumed);
+    // A spent link keeps no token: nothing is left to send.
+    assert!(
+        consumed.sealed_token.is_empty(),
+        "a consumed link kept its token"
+    );
 
     let active = backend
         .count_active_magic_links_for_email(&email)

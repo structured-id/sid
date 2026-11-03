@@ -10,6 +10,11 @@
 //! - 15 minute expiry
 //! - Single-use (consumed on first verification)
 //! - 3 requests per email per 15 minutes (rate limiting)
+//!
+//! The link reaches its address through durable work committed with the
+//! session: the work names only the session, whose row keeps the token
+//! sealed to it until the link is consumed or expires, so a lost send is
+//! retried with the same link and no copy of it is stored elsewhere.
 
 use argon2::{
     Argon2,
@@ -17,9 +22,16 @@ use argon2::{
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::TryRng;
-use sid_core::models::{MAGIC_LINK_RATE_LIMIT_MAX, MagicLinkSession};
+use sid_core::models::{
+    MAGIC_LINK_EMAIL_KIND, MAGIC_LINK_RATE_LIMIT_MAX, MagicLinkSession, NewWork, WorkKind,
+    magic_link_sealing_context,
+};
 use sid_plugin::StorageBackend;
 use std::sync::Arc;
+
+/// Attempts at emailing one link before its work fails: its retries fit in
+/// the link's lifetime, past which the work expires unsent.
+const EMAIL_ATTEMPTS: u32 = 8;
 
 /// Token size in bytes (256-bit).
 const MAGIC_LINK_TOKEN_BYTES: usize = 32;
@@ -56,8 +68,20 @@ pub enum MagicLinkVerifyResult {
 pub enum MagicLinkError {
     #[error("rate limited: try again in {wait_seconds} seconds")]
     RateLimited { wait_seconds: u64 },
+    /// The stored token is not sealed to its session: it can never be sent.
+    #[error("sealed token: {0}")]
+    Sealed(String),
     #[error("internal error: {0}")]
     Internal(String),
+}
+
+/// A link still waiting for its email: the address bound at the request,
+/// the token, and until when the link works.
+pub struct PendingLink {
+    pub session_id: uuid::Uuid,
+    pub email: String,
+    pub token: secrecy::SecretString,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// Magic link session service.
@@ -67,18 +91,23 @@ pub enum MagicLinkError {
 /// Uses StorageBackend for persistence (survives restarts).
 pub struct MagicLinkService {
     storage: Arc<dyn StorageBackend>,
+    /// Seals each token to its session for the email delivery.
+    keys: Arc<dyn sid_keys::KeyManager>,
 }
 
 impl MagicLinkService {
-    /// Create a new magic link service backed by storage.
-    pub fn new(storage: Arc<dyn StorageBackend>) -> Self {
-        Self { storage }
+    /// Create a new magic link service backed by storage, sealing tokens
+    /// under `keys`.
+    pub fn new(storage: Arc<dyn StorageBackend>, keys: Arc<dyn sid_keys::KeyManager>) -> Self {
+        Self { storage, keys }
     }
 
-    /// Request a new magic link token for an email.
+    /// Request a new magic link token for an email: the session and the work
+    /// emailing its link commit together.
     ///
-    /// Returns the session metadata and the plaintext token (for building the URL).
-    /// The token is Argon2-hashed before storage — only the caller has the plaintext.
+    /// Returns the session metadata and the plaintext token. The stored
+    /// session keeps its Argon2 hash for verification and the token sealed
+    /// to it for the delivery.
     pub async fn request_magic_link(
         &self,
         email: &str,
@@ -105,14 +134,28 @@ impl MagicLinkService {
                 .map_err(|e| MagicLinkError::Internal(format!("hash failed: {}", e)))?
                 .to_string();
 
-        let session = MagicLinkSession::new(email, token_hash);
+        let mut session = MagicLinkSession::new(email, token_hash);
         let session_id = session.id;
         let expires_in = sid_core::models::MAGIC_LINK_EXPIRY_SECS as u32;
+        session.sealed_token = crate::sealed_secret::seal(
+            self.keys.as_ref(),
+            &magic_link_sealing_context(session_id),
+            token.as_bytes(),
+        )
+        .await
+        .map_err(|e| MagicLinkError::Internal(format!("seal the token: {e}")))?;
 
-        // Persist to storage
-        let audit: sid_core::models::MutationContext =
-            sid_core::models::AuditEntry::system("magic_link.create", session_id.to_string())
-                .into();
+        let mut email = NewWork::new(
+            WorkKind::new(MAGIC_LINK_EMAIL_KIND).expect("the magic link kind is valid"),
+            session_id.as_bytes().to_vec(),
+        );
+        email.expires_at = Some(session.expires_at);
+        email.max_attempts = EMAIL_ATTEMPTS;
+        let audit = sid_core::models::MutationContext::from(sid_core::models::AuditEntry::system(
+            "magic_link.create",
+            session_id.to_string(),
+        ))
+        .with_work(email);
         self.storage
             .create_magic_link_session(&session, audit)
             .await
@@ -189,6 +232,52 @@ impl MagicLinkService {
             // Another instance consumed it between our read and this atomic consume
             None => MagicLinkVerifyResult::AlreadyConsumed,
         })
+    }
+
+    /// What emailing session `id`'s link needs while the link is still
+    /// usable at `now`: none once it was consumed or expired (or the session
+    /// is gone), so a late retry sends nothing.
+    pub async fn pending_delivery(
+        &self,
+        id: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<PendingLink>, MagicLinkError> {
+        let Some(session) = self
+            .storage
+            .get_magic_link_session(id)
+            .await
+            .map_err(|e| MagicLinkError::Internal(e.to_string()))?
+        else {
+            return Ok(None);
+        };
+        if session.consumed || now >= session.expires_at {
+            return Ok(None);
+        }
+        let opened = crate::sealed_secret::open(
+            self.keys.as_ref(),
+            &magic_link_sealing_context(id),
+            &session.sealed_token,
+        )
+        .await
+        .map_err(|e| match e {
+            crate::sealed_secret::SealedSecretError::KeyManager(
+                sid_keys::KeyManagerError::ContextMismatch,
+            )
+            | crate::sealed_secret::SealedSecretError::NotSealed
+            | crate::sealed_secret::SealedSecretError::Malformed(_)
+            | crate::sealed_secret::SealedSecretError::ContextMismatch => {
+                MagicLinkError::Sealed(e.to_string())
+            }
+            other => MagicLinkError::Internal(format!("open the token: {other}")),
+        })?;
+        let token = String::from_utf8(opened.secret.to_vec())
+            .map_err(|_| MagicLinkError::Sealed("the sealed token is not text".into()))?;
+        Ok(Some(PendingLink {
+            session_id: id,
+            email: session.email,
+            token: secrecy::SecretString::from(token),
+            expires_at: session.expires_at,
+        }))
     }
 
     /// Remove all expired sessions (background cleanup).

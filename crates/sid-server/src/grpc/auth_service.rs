@@ -4404,16 +4404,20 @@ impl AuthService for AuthServiceImpl {
             return unsent();
         }
 
-        // The token leaves this service only inside the email delivery; it is
-        // never logged or put into an event.
+        // The session and the work emailing its link commit together; the
+        // token leaves this service only inside that email, never logged or
+        // put into an event.
         let (result, _token) = match magic_link.request_magic_link(&address).await {
             Ok(sent) => sent,
             Err(sid_authn::magic_link::MagicLinkError::RateLimited { .. }) => {
                 info!("Magic link request past the per-address limit: no link sent");
                 return unsent();
             }
-            Err(sid_authn::magic_link::MagicLinkError::Internal(msg)) => {
-                return Err(internal("request magic link", msg));
+            Err(
+                e @ (sid_authn::magic_link::MagicLinkError::Internal(_)
+                | sid_authn::magic_link::MagicLinkError::Sealed(_)),
+            ) => {
+                return Err(internal("request magic link", e));
             }
         };
 

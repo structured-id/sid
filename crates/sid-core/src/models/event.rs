@@ -679,6 +679,8 @@ pub mod event_types {
     // One-time codes: the event a flow renders its code mail from; no event
     // carrying a code is published.
     pub const OTP_REQUESTED: &str = "sid.auth.otp_requested.v1";
+    /// The event a sign-in link mail renders from; never published.
+    pub const MAGIC_LINK_REQUESTED: &str = "sid.auth.magic_link_requested.v1";
 
     // Organization (SaaS)
     pub const ORG_TRIAL_ACTIVATED: &str = "sid.organization.trial_activated.v1";

@@ -6,6 +6,7 @@
 // tonic::Status is 176 bytes — standard for gRPC Result<T, Status> pattern.
 #![allow(clippy::result_large_err)]
 
+pub mod auth_mail;
 pub mod background_tasks;
 pub mod embedded_nats;
 pub mod enrollment;

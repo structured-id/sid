@@ -11,6 +11,15 @@ pub const MAGIC_LINK_EXPIRY_SECS: i64 = 900;
 /// Rate limit: max requests per email within the window.
 pub const MAGIC_LINK_RATE_LIMIT_MAX: u32 = 3;
 
+/// The work that emails a requested link; its payload is the session id.
+pub const MAGIC_LINK_EMAIL_KIND: &str = "auth.magic_link.email";
+
+/// The sealing context of session `id`'s token: sealed for one session, it
+/// is never opened as another's.
+pub fn magic_link_sealing_context(id: Uuid) -> String {
+    format!("magic_link:{id}")
+}
+
 /// A persisted magic link session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MagicLinkSession {
@@ -20,6 +29,10 @@ pub struct MagicLinkSession {
     pub email: String,
     /// Argon2 hash of the URL-safe token.
     pub token_hash: String,
+    /// The token sealed to this session, kept only for its email delivery
+    /// and its retries: emptied when the link is consumed, gone with the
+    /// session.
+    pub sealed_token: Vec<u8>,
     /// Whether this link has been consumed (single-use).
     pub consumed: bool,
     pub created_at: DateTime<Utc>,
@@ -33,6 +46,7 @@ impl MagicLinkSession {
             id: Uuid::now_v7(),
             email: email.into(),
             token_hash,
+            sealed_token: Vec::new(),
             consumed: false,
             created_at: now,
             expires_at: now + chrono::Duration::seconds(MAGIC_LINK_EXPIRY_SECS),

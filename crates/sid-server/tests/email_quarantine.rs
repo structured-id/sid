@@ -119,10 +119,13 @@ async fn magic_link_refuses_a_quarantined_handle() {
         )
         .await
         .unwrap();
-    let (link, token) = sid_authn::magic_link::MagicLinkService::new(svc.storage.clone())
-        .request_magic_link(address)
-        .await
-        .unwrap();
+    let (link, token) = sid_authn::magic_link::MagicLinkService::new(
+        svc.storage.clone(),
+        common::test_key_manager(),
+    )
+    .request_magic_link(address)
+    .await
+    .unwrap();
     svc.mock_storage.quarantine_email_key(address);
 
     let answer = svc

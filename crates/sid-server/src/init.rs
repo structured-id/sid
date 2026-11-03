@@ -116,6 +116,8 @@ pub struct CeComponents {
     pub authz_engine: Arc<sid_authz::CeAuthzEngine<dyn sid_plugin::StorageBackend>>,
     /// The installation's organization.
     pub organization: sid_core::models::Organization,
+    /// Emails requested sign-in links, when magic links are enabled.
+    pub magic_link_mail: Option<Arc<crate::auth_mail::MagicLinkMail>>,
     /// The directory the SCIM endpoint serves.
     #[cfg(feature = "scim")]
     pub scim_directory: sid_scim::grpc::ScimDirectory,
@@ -164,6 +166,34 @@ pub fn magic_links_enabled(
         );
     }
     Ok(enabled)
+}
+
+/// The mail of requested sign-in links when `links` are enabled. A link
+/// opens the account UI's verification page, so enabling them without an
+/// account UI (`SID_ACCOUNT_URL`) is a configuration error: requested links
+/// would be owed a mail that can never name a page.
+pub fn magic_link_mail(
+    links: Option<&Arc<MagicLinkService>>,
+    account: Option<&sid_authn::system_integration::AccountSettings>,
+    storage: &Arc<dyn StorageBackend>,
+    keys: &Arc<dyn sid_keys::KeyManager>,
+) -> anyhow::Result<Option<Arc<crate::auth_mail::MagicLinkMail>>> {
+    let Some(links) = links else {
+        return Ok(None);
+    };
+    let Some(account) = account else {
+        anyhow::bail!(
+            "SID_MAGIC_LINKS_ENABLED needs the account UI that opens the links: set SID_ACCOUNT_URL"
+        );
+    };
+    Ok(Some(Arc::new(crate::auth_mail::MagicLinkMail::new(
+        links.clone(),
+        account.magic_link_page(),
+        Arc::new(crate::auth_mail::StoredProvider::new(
+            storage.clone(),
+            keys.clone(),
+        )),
+    ))))
 }
 
 /// The sign-in page the authorization endpoint sends a user who must sign in
@@ -741,7 +771,13 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         env_setting("SID_MAGIC_LINKS_ENABLED")?.as_deref(),
         &sid_core::models::SecurityPolicy::ce_default(),
     )?
-    .then(|| Arc::new(MagicLinkService::new(storage.clone())));
+    .then(|| Arc::new(MagicLinkService::new(storage.clone(), key_manager.clone())));
+    let magic_link_mail = magic_link_mail(
+        magic_link.as_ref(),
+        account.as_ref(),
+        &storage,
+        &key_manager,
+    )?;
 
     let export_dir =
         env_setting("SID_EXPORT_DIR")?.unwrap_or_else(|| "/tmp/sid-exports".to_string());
@@ -1093,6 +1129,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
     };
 
     Ok(CeComponents {
+        magic_link_mail,
         audit_retention,
         migration_deadline_days,
         issuers,
@@ -1720,7 +1757,7 @@ pub fn spawn_work_runner(
         .chain(also_required)
         .cloned()
         .collect();
-    let handlers: Vec<Arc<dyn WorkHandler>> = vec![
+    let mut handlers: Vec<Arc<dyn WorkHandler>> = vec![
         Arc::new(BackChannelLogoutHandler::new(
             c.issuers.clone(),
             c.storage.clone(),
@@ -1749,6 +1786,9 @@ pub fn spawn_work_runner(
         c.auth_svc.enrollment_handler(),
         c.auth_svc.owner_purge_handler(),
     ];
+    if let Some(mail) = &c.magic_link_mail {
+        handlers.push(mail.clone());
+    }
     let worker = format!("sid-server-{}-{}", std::process::id(), uuid::Uuid::now_v7());
     let runner = WorkRunner::new(c.storage.clone(), worker, handlers, RunnerConfig::default())
         .map_err(|e| anyhow::anyhow!("work runner: {e}"))?;

@@ -94,6 +94,7 @@ fn row_to_magic_link(row: &sqlx::sqlite::SqliteRow) -> SidResult<MagicLinkSessio
             .map_err(|e| SidError::Storage(format!("column id: bad magic link id {id}: {e}")))?,
         email: col(row, "email")?,
         token_hash: col(row, "token_hash")?,
+        sealed_token: col(row, "sealed_token")?,
         consumed: col(row, "consumed")?,
         created_at: dt_col(row, "created_at")?,
         expires_at: dt_col(row, "expires_at")?,
@@ -589,12 +590,14 @@ impl SqliteBackend {
     ) -> SidResult<()> {
         let mut tx = self.begin_write().await?;
         sqlx::query(
-            "INSERT INTO magic_link_sessions (id, email, token_hash, consumed, created_at, expires_at)
-             VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO magic_link_sessions
+                 (id, email, token_hash, sealed_token, consumed, created_at, expires_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(session.id.to_string())
         .bind(&session.email)
         .bind(&session.token_hash)
+        .bind(&session.sealed_token)
         .bind(session.consumed)
         .bind(fmt_dt(&session.created_at))
         .bind(fmt_dt(&session.expires_at))
@@ -622,7 +625,7 @@ impl SqliteBackend {
         audit: MutationContext,
     ) -> SidResult<()> {
         let mut tx = self.begin_write().await?;
-        sqlx::query("UPDATE magic_link_sessions SET consumed = 1 WHERE id = ?")
+        sqlx::query("UPDATE magic_link_sessions SET consumed = 1, sealed_token = x'' WHERE id = ?")
             .bind(id.to_string())
             .execute(&mut *tx)
             .await
@@ -639,7 +642,7 @@ impl SqliteBackend {
     ) -> SidResult<Option<MagicLinkSession>> {
         let mut tx = self.begin_write().await?;
         let consumed = sqlx::query(
-            "UPDATE magic_link_sessions SET consumed = 1
+            "UPDATE magic_link_sessions SET consumed = 1, sealed_token = x''
              WHERE id = ? AND consumed = 0 AND expires_at > ?
              RETURNING *",
         )
