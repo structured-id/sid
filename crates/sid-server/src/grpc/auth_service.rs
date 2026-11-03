@@ -440,6 +440,30 @@ fn require_totp_code_format(code: &str) -> Result<(), Status> {
     }
 }
 
+const GENERATE_RECOVERY_CODES: &str = "sid.v1.authn.AuthService/GenerateRecoveryCodes";
+const DELETE_MFA_CREDENTIAL: &str = "sid.v1.authn.AuthService/DeleteMfaCredential";
+
+/// A retried GenerateRecoveryCodes whose set was issued: the codes were shown
+/// once and only their hashes are kept, so the answer names the set
+/// (`recorded`, its credential id) instead of codes. Replacing the set is a
+/// new command with a new key.
+fn recovery_codes_issued(recorded: &[u8]) -> Status {
+    let set = match uuid::Uuid::from_slice(recorded) {
+        Ok(id) => id.to_string(),
+        Err(e) => return internal("read the issued recovery code set", e),
+    };
+    ApiError::new(
+        ErrorReason::OperationResultUnavailable,
+        "these recovery codes were issued once; generate a new set to replace them",
+    )
+    .with_precondition(
+        "RECOVERY_CODES_ISSUED",
+        set,
+        "the codes are shown only once",
+    )
+    .into()
+}
+
 /// CREDENTIAL_NOT_FOUND for `id`: also the answer for a credential the caller
 /// does not own, so a foreign id reveals nothing.
 fn credential_not_found(id: CredentialId) -> Status {
@@ -5454,6 +5478,19 @@ impl AuthService for AuthServiceImpl {
         // New codes step up to Standard, so issuing them is an enrollment.
         self.require_enrollment_authority(&caller, profile_id, CredentialType::Recovery)
             .await?;
+        let key = sid_authn::operation::required_key(request.metadata())?;
+        let command = sid_authn::operation::KeyedCommand::by_profile(
+            profile_id,
+            key,
+            GENERATE_RECOVERY_CODES,
+            request.get_ref(),
+        );
+        // SID keeps only the codes' hashes: a retry of a completed generation
+        // names the set it issued and issues no other, so the codes already
+        // delivered stay valid until a new command replaces them.
+        if let Some(recorded) = command.completed(&*self.storage).await? {
+            return Err(recovery_codes_issued(&recorded));
+        }
 
         // Generate new recovery codes.
         let (plaintext, hashes) = sid_authn::generate_recovery_codes();
@@ -5481,11 +5518,19 @@ impl AuthService for AuthServiceImpl {
             "credential.recovery_codes_generated",
             credential.id.0.to_string(),
         ))
-        .with_work(generated.relay());
-        self.storage
-            .replace_credential(&credential, ctx)
-            .await
-            .map_err(storage_failure)?;
+        .with_work(generated.relay())
+        .with_operation(command.completion(credential.id.0.as_bytes().to_vec()));
+        match self.storage.replace_credential(&credential, ctx).await {
+            Ok(_) => {}
+            // Another attempt of this command committed first: its set is
+            // the issued one.
+            Err(sid_core::Error::OperationCompleted(_)) => {
+                return Err(recovery_codes_issued(
+                    &command.committed_elsewhere(&*self.storage).await?,
+                ));
+            }
+            Err(e) => return Err(storage_failure(e)),
+        }
 
         info!(
             "Recovery codes generated for profile {} ({} codes)",
@@ -6213,69 +6258,81 @@ impl AuthService for AuthServiceImpl {
 
         let profile_id = verified.caller.profile_id;
 
+        let key = sid_authn::operation::required_key(request.metadata())?;
         let req = request.into_inner();
         let credential_id = sid_core::models::CredentialId(
             uuid::Uuid::parse_str(&req.credential_id)
                 .map_err(|_| invalid_field("credential_id", "not a credential identifier"))?,
         );
 
-        // Load credential and verify ownership + type.
-        let credentials = self
-            .storage
-            .get_credentials_by_profile(profile_id, None)
-            .await
-            .map_err(storage_failure)?;
-
-        let credential = credentials
-            .iter()
-            .find(|c| c.id == credential_id)
-            .ok_or_else(|| credential_not_found(credential_id))?;
-
-        // Only allow deleting MFA credentials (TOTP, WebAuthn, Recovery).
-        let cred_type = match credential.credential_type {
-            CredentialType::Totp => "totp",
-            CredentialType::WebAuthn => "webauthn",
-            CredentialType::Recovery => "recovery",
-            _ => {
-                return Err(invalid_field(
-                    "credential_id",
-                    "not a second factor (TOTP, passkey or recovery codes)",
-                ));
-            }
-        };
-
-        let disabled = Event::new("sid-auth", event_types::MFA_DISABLED)
-            .with_subject(format!("profile/{}", profile_id))
-            .with_data(serde_json::json!({
-                "credential_type": cred_type,
-                "credential_id": credential_id.0.to_string(),
-            }));
-        let ctx = MutationContext::from(AuditEntry::user(
-            profile_id.to_string(),
-            "credential.mfa_deleted",
-            credential_id.0.to_string(),
-        ))
-        .with_work(disabled.relay());
-        // Revoked, not deleted; a passkey that is the last way to sign in
-        // stays. The event commits only with a revocation that happened.
-        let outcome = self
-            .storage
-            .revoke_credential(credential_id, ctx)
-            .await
-            .map_err(storage_failure)?;
-        crate::grpc::identity_service::refuse_last_primary(outcome, credential_id)?;
-
-        info!(
-            profile = %profile_id,
-            credential = %credential_id.0,
-            r#type = cred_type,
-            "MFA credential deleted (self-service)"
+        // A retry of a completed deletion answers as it did, not as a
+        // credential no longer there, and owes no second event.
+        let command = sid_authn::operation::KeyedCommand::by_profile(
+            profile_id,
+            key,
+            DELETE_MFA_CREDENTIAL,
+            &req,
         );
+        let response = command
+            .run(&*self.storage, || async {
+                // Load credential and verify ownership + type.
+                let credentials = self
+                    .storage
+                    .get_credentials_by_profile(profile_id, None)
+                    .await?;
+                let credential = credentials
+                    .iter()
+                    .find(|c| c.id == credential_id)
+                    .ok_or_else(|| credential_not_found(credential_id))?;
 
-        Ok(Response::new(DeleteMfaCredentialResponse {
-            deleted: true,
-            credential_type: cred_type.to_string(),
-        }))
+                // Only allow deleting MFA credentials (TOTP, WebAuthn, Recovery).
+                let cred_type = match credential.credential_type {
+                    CredentialType::Totp => "totp",
+                    CredentialType::WebAuthn => "webauthn",
+                    CredentialType::Recovery => "recovery",
+                    _ => {
+                        return Err(invalid_field(
+                            "credential_id",
+                            "not a second factor (TOTP, passkey or recovery codes)",
+                        )
+                        .into());
+                    }
+                };
+
+                let response = DeleteMfaCredentialResponse {
+                    deleted: true,
+                    credential_type: cred_type.to_string(),
+                };
+                let disabled = Event::new("sid-auth", event_types::MFA_DISABLED)
+                    .with_subject(format!("profile/{}", profile_id))
+                    .with_data(serde_json::json!({
+                        "credential_type": cred_type,
+                        "credential_id": credential_id.0.to_string(),
+                    }));
+                let ctx = MutationContext::from(AuditEntry::user(
+                    profile_id.to_string(),
+                    "credential.mfa_deleted",
+                    credential_id.0.to_string(),
+                ))
+                .with_work(disabled.relay())
+                .with_operation(command.completion(prost::Message::encode_to_vec(&response)));
+                // Revoked, not deleted; a passkey that is the last way to sign
+                // in stays. The event commits only with a revocation that
+                // happened.
+                let outcome = self.storage.revoke_credential(credential_id, ctx).await?;
+                crate::grpc::identity_service::refuse_last_primary(outcome, credential_id)?;
+
+                info!(
+                    profile = %profile_id,
+                    credential = %credential_id.0,
+                    r#type = cred_type,
+                    "MFA credential deleted (self-service)"
+                );
+                Ok(response)
+            })
+            .await?;
+
+        Ok(Response::new(response))
     }
 
     // ── Account deletion ──

@@ -1949,7 +1949,7 @@ impl CredentialStore for MockStorage {
     async fn replace_credential(
         &self,
         credential: &Credential,
-        _audit: MutationContext,
+        ctx: MutationContext,
     ) -> SidResult<()> {
         let replaced = credential.credential_type.replaces();
         if replaced.is_empty() {
@@ -1958,6 +1958,7 @@ impl CredentialStore for MockStorage {
             ));
         }
         let mut inner = self.inner.lock().unwrap();
+        inner.owe(&ctx)?;
         inner.credentials.retain(|_, c| {
             c.profile_id != credential.profile_id || !replaced.contains(&c.credential_type)
         });

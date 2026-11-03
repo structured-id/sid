@@ -18,8 +18,233 @@ pub enum Coverage {
     NotServed,
 }
 
+/// A method this build refuses before any effect.
+const OFF: Coverage = Coverage::NotServed;
+
 /// Every mutating CE method and its coverage, by full method name.
 pub const COVERAGE: &[(&str, Coverage)] = &[
+    ("sid.v1.authn.AuthService/AcceptTerms", OFF),
+    ("sid.v1.authn.AuthService/ApproveCiba", OFF),
+    (
+        "sid.v1.authn.AuthService/CompletePasswordReset",
+        Coverage::Ceremony(
+            "the reset session is consumed by the password it sets: a repeat finds \
+             no pending reset and changes nothing",
+        ),
+    ),
+    (
+        "sid.v1.authn.AuthService/CompleteStepUp",
+        Coverage::Ceremony(
+            "its proof counts once: a TOTP time step, recovery code or passkey \
+             challenge is spent by its first use, so a repeat elevates nothing",
+        ),
+    ),
+    ("sid.v1.authn.AuthService/ConfirmAccountDeletion", OFF),
+    ("sid.v1.authn.AuthService/ConfirmIdpLink", OFF),
+    (
+        "sid.v1.authn.AuthService/DeleteMfaCredential",
+        Coverage::Keyed,
+    ),
+    ("sid.v1.authn.AuthService/DenyCiba", OFF),
+    (
+        "sid.v1.authn.AuthService/ExecutePasswordReset",
+        Coverage::Ceremony(
+            "an OPAQUE step of the reset: it changes no account state, and the \
+             reset commits only in its single-use completion",
+        ),
+    ),
+    (
+        "sid.v1.authn.AuthService/FinishTotpEnrollment",
+        Coverage::Ceremony(
+            "the pending enrollment is taken by its first finish: a repeat finds \
+             none and enrolls nothing",
+        ),
+    ),
+    (
+        "sid.v1.authn.AuthService/GenerateRecoveryCodes",
+        Coverage::Keyed,
+    ),
+    (
+        "sid.v1.authn.AuthService/LegacyMigrateFinish",
+        Coverage::Ceremony(
+            "the migration state is taken by its first finish: a repeat finds \
+             none and replaces nothing",
+        ),
+    ),
+    (
+        "sid.v1.authn.AuthService/OAuth2Authorize",
+        Coverage::Ceremony(
+            "RFC 6749 §4.1.1: each authorization request issues its own single-use \
+             code",
+        ),
+    ),
+    (
+        "sid.v1.authn.AuthService/OAuth2Revoke",
+        Coverage::Ceremony(
+            "RFC 7009 §2.2: revoking a revoked or unknown token answers success and \
+             changes nothing",
+        ),
+    ),
+    (
+        "sid.v1.authn.AuthService/OAuth2Token",
+        Coverage::Ceremony(
+            "RFC 6749 §4.1.2 and §10.4: a code or rotated refresh token is \
+             consumed once; a second use is refused, never answered with tokens",
+        ),
+    ),
+    (
+        "sid.v1.authn.AuthService/OpaqueLoginFinish",
+        Coverage::Ceremony(
+            "RFC 9807 §6: the login state is consumed by its finish; a repeat \
+             finds none and creates no session",
+        ),
+    ),
+    ("sid.v1.authn.AuthService/OpaqueRegistrationFinish", OFF),
+    (
+        "sid.v1.authn.AuthService/OpaqueZkppRegistrationFinish",
+        Coverage::Ceremony(
+            "RFC 9807 §5: the registration's pending operation is consumed by its \
+             commit, which records its own outcome",
+        ),
+    ),
+    (
+        "sid.v1.authn.AuthService/OpaqueZkppRegistrationStart",
+        Coverage::Ceremony(
+            "RFC 9807 §5: each start opens its own pending registration; nothing \
+             is registered before its finish",
+        ),
+    ),
+    (
+        "sid.v1.authn.AuthService/PasswordChangeChallenge",
+        Coverage::Ceremony(
+            "each challenge opens its own pending change; nothing changes before \
+             its finish",
+        ),
+    ),
+    (
+        "sid.v1.authn.AuthService/PasswordChangeExecute",
+        Coverage::Ceremony(
+            "an OPAQUE step of the change: it changes no account state, and the \
+             change commits only in its single-use finish",
+        ),
+    ),
+    (
+        "sid.v1.authn.AuthService/PasswordChangeFinish",
+        Coverage::Ceremony(
+            "the change's pending operation is consumed by its commit: a repeat \
+             finds none and changes nothing",
+        ),
+    ),
+    (
+        "sid.v1.authn.AuthService/RequestMagicLink",
+        Coverage::Ceremony(
+            "each request issues its own single-use link under the delivery rate \
+             limit; no account state changes",
+        ),
+    ),
+    (
+        "sid.v1.authn.AuthService/RequestOtp",
+        Coverage::Ceremony(
+            "each request opens its own code session under the rate limit; no \
+             account state changes",
+        ),
+    ),
+    (
+        "sid.v1.authn.AuthService/RequestPasswordReset",
+        Coverage::Ceremony(
+            "each request issues its own single-use reset link under the delivery \
+             rate limit; no account state changes",
+        ),
+    ),
+    (
+        "sid.v1.authn.AuthService/RequestStepUp",
+        Coverage::Ceremony(
+            "each request opens its own single-use challenge; nothing is elevated \
+             before it completes",
+        ),
+    ),
+    ("sid.v1.authn.AuthService/ResendEmailVerification", OFF),
+    (
+        "sid.v1.authn.AuthService/ResendOtp",
+        Coverage::Ceremony(
+            "a new code replaces the session's previous one under the rate limit; \
+             no account state changes",
+        ),
+    ),
+    ("sid.v1.authn.AuthService/ResendPhoneVerification", OFF),
+    ("sid.v1.authn.AuthService/ResendSmsMfa", OFF),
+    ("sid.v1.authn.AuthService/SelectOrganization", OFF),
+    (
+        "sid.v1.authn.AuthService/StartDeviceAuthorization",
+        Coverage::Ceremony("RFC 8628 §3.2: each request issues its own device and user codes"),
+    ),
+    (
+        "sid.v1.authn.AuthService/StartTotpEnrollment",
+        Coverage::Ceremony(
+            "each start opens its own pending enrollment; nothing is enrolled \
+             before its finish",
+        ),
+    ),
+    ("sid.v1.authn.AuthService/SubmitDeferredZkProof", OFF),
+    (
+        "sid.v1.authn.AuthService/SubmitDeviceUserCode",
+        Coverage::Ceremony(
+            "RFC 8628 §3.3: a user code is decided once; a repeat is refused as \
+             decided and changes nothing",
+        ),
+    ),
+    ("sid.v1.authn.AuthService/SubmitDynamicPrompt", OFF),
+    (
+        "sid.v1.authn.AuthService/VerifyCaptcha",
+        Coverage::Ceremony("a solution counts once, for the challenge a sign-in was asked"),
+    ),
+    (
+        "sid.v1.authn.AuthService/VerifyMagicLink",
+        Coverage::Ceremony(
+            "the link is single-use: a repeat finds it spent and creates no session",
+        ),
+    ),
+    (
+        "sid.v1.authn.AuthService/VerifyOtp",
+        Coverage::Ceremony(
+            "the code session is consumed by its first valid code; wrong codes \
+             count toward its attempt limit",
+        ),
+    ),
+    (
+        "sid.v1.authn.AuthService/VerifyPasswordReset",
+        Coverage::Ceremony("the reset link is consumed once into a reset session"),
+    ),
+    ("sid.v1.authn.AuthService/VerifyPhone", OFF),
+    (
+        "sid.v1.authn.AuthService/VerifyRecoveryCode",
+        Coverage::Ceremony(
+            "each recovery code is consumed once; a repeat of a used code is \
+             refused",
+        ),
+    ),
+    ("sid.v1.authn.AuthService/VerifySmsMfa", OFF),
+    (
+        "sid.v1.authn.AuthService/VerifyTotp",
+        Coverage::Ceremony(
+            "RFC 6238 §5.2: a time step's code is accepted once; a replayed code \
+             is refused",
+        ),
+    ),
+    (
+        "sid.v1.authn.AuthService/WebAuthnAuthenticationFinish",
+        Coverage::Ceremony(
+            "WebAuthn §13.4.3: the challenge is single-use; a repeat finds it \
+             spent and creates no session",
+        ),
+    ),
+    (
+        "sid.v1.authn.AuthService/WebAuthnRegistrationFinish",
+        Coverage::Ceremony(
+            "WebAuthn §13.4.3: the challenge is single-use; a repeat finds it \
+             spent and registers nothing",
+        ),
+    ),
     (
         "sid.v1.identity.IdentityService/AcknowledgeExport",
         Coverage::Keyed,
