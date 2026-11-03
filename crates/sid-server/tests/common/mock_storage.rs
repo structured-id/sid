@@ -4621,9 +4621,9 @@ impl StorageBackend for MockStorage {
         provider: &UpstreamProvider,
         audit: MutationContext,
     ) -> SidResult<()> {
-        self.inner
-            .lock()
-            .unwrap()
+        let mut inner = self.inner.lock().unwrap();
+        inner.owe(&audit)?;
+        inner
             .upstream_creations
             .push((provider.clone(), audit.audit));
         Ok(())

@@ -6,14 +6,16 @@
 //! Supports provider CRUD, upstream auth initiation, and callback handling
 //! with account resolution (returning user, linking, JIT provisioning).
 
+use prost::Message;
 use sid_authn::caller::{Caller, authenticate};
 use sid_authn::challenge_store::ChallengeStore;
 use sid_authn::jwt::JwtService;
+use sid_authn::operation::{KeyedCommand, required_key};
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::upstream::oidc::OidcProviderClient;
 use sid_core::models::upstream_provider::ProviderTrustCategory;
 use sid_core::models::{
-    AuditEntry, Profile, UpstreamIdentity, UpstreamLogin,
+    AuditEntry, MutationContext, Profile, UpstreamIdentity, UpstreamLogin,
     UpstreamProtocol as DomainUpstreamProtocol, UpstreamProvider as DomainUpstreamProvider,
     UpstreamProviderId,
 };
@@ -45,6 +47,17 @@ use sid_core::grpc_error::refuse::{
     changed_concurrently, dependency_unavailable, internal, invalid_field, missing_field,
     not_found, storage_failure,
 };
+
+const CREATE_UPSTREAM_PROVIDER: &str = "sid.v1.federation.UpstreamService/CreateUpstreamProvider";
+const UPDATE_UPSTREAM_PROVIDER: &str = "sid.v1.federation.UpstreamService/UpdateUpstreamProvider";
+
+/// The answer another attempt of the same command recorded.
+#[allow(clippy::result_large_err)]
+fn recorded_answer<T: Message + Default>(recorded: &[u8]) -> Result<Response<T>, Status> {
+    T::decode(recorded)
+        .map(Response::new)
+        .map_err(|e| internal("read a recorded result", e))
+}
 
 /// Proto enum types aliased to avoid collision with domain types.
 type ProtoUpstreamProtocol = v1::UpstreamProtocol;
@@ -248,6 +261,7 @@ impl UpstreamService for UpstreamServiceImpl {
         request: Request<CreateUpstreamProviderRequest>,
     ) -> Result<Response<UpstreamProviderResponse>, Status> {
         let caller = self.admin(&request).await?;
+        let key = required_key(request.metadata())?;
         let req = request.into_inner();
 
         if req.name.is_empty() {
@@ -258,6 +272,24 @@ impl UpstreamService for UpstreamServiceImpl {
         }
         if req.client_secret.is_empty() {
             return Err(missing_field("client_secret"));
+        }
+        // A retry of a completed creation answers with the provider it
+        // created and creates no second one. The command's fingerprint, an
+        // unsalted digest stored with its result, leaves the secret out: a
+        // reader of the database without the key manager's keys could
+        // otherwise test guesses of the upstream secret against it.
+        let fingerprinted = CreateUpstreamProviderRequest {
+            client_secret: String::new(),
+            ..req.clone()
+        };
+        let command = KeyedCommand::by_profile(
+            caller.profile_id,
+            key,
+            CREATE_UPSTREAM_PROVIDER,
+            &fingerprinted,
+        );
+        if let Some(recorded) = command.replay(&*self.storage).await? {
+            return Ok(Response::new(recorded));
         }
 
         let protocol = Self::proto_to_domain_protocol(req.protocol)?;
@@ -291,36 +323,37 @@ impl UpstreamService for UpstreamServiceImpl {
         provider.display_order = req.display_order;
         provider.logo_url = Self::optional_string(&req.logo_url);
 
-        self.storage
-            .create_upstream_provider(
-                &provider,
-                AuditEntry::admin(
-                    caller.profile_id.to_string(),
-                    "upstream_provider.create",
-                    provider.id.0.to_string(),
+        let response = UpstreamProviderResponse {
+            provider: Some(Self::provider_to_proto(&provider)),
+        };
+        let ctx = MutationContext::from(AuditEntry::admin(
+            caller.profile_id.to_string(),
+            "upstream_provider.create",
+            provider.id.0.to_string(),
+        ))
+        .with_operation(command.completion(response.encode_to_vec()));
+        match self.storage.create_upstream_provider(&provider, ctx).await {
+            Ok(_) => {}
+            Err(sid_core::Error::OperationCompleted(_)) => {
+                return recorded_answer(&command.committed_elsewhere(&*self.storage).await?);
+            }
+            Err(sid_core::Error::Conflict(_)) => {
+                return Err(ApiError::new(
+                    ErrorReason::UpstreamProviderAlreadyExists,
+                    "an upstream provider with this name already exists",
                 )
-                .into(),
-            )
-            .await
-            .map_err(|e| match e {
-                sid_core::Error::Conflict(_) => Status::from(
-                    ApiError::new(
-                        ErrorReason::UpstreamProviderAlreadyExists,
-                        "an upstream provider with this name already exists",
-                    )
-                    .with_resource("UpstreamProvider", provider.name.clone()),
-                ),
-                other => storage_failure(other),
-            })?;
+                .with_resource("UpstreamProvider", provider.name.clone())
+                .into());
+            }
+            Err(other) => return Err(storage_failure(other)),
+        }
 
         info!(
             "Created upstream provider {} ({})",
             provider.name, provider.id
         );
 
-        Ok(Response::new(UpstreamProviderResponse {
-            provider: Some(Self::provider_to_proto(&provider)),
-        }))
+        Ok(Response::new(response))
     }
 
     async fn get_upstream_provider(
@@ -348,8 +381,25 @@ impl UpstreamService for UpstreamServiceImpl {
         request: Request<UpdateUpstreamProviderRequest>,
     ) -> Result<Response<UpstreamProviderResponse>, Status> {
         let caller = self.admin(&request).await?;
+        let key = required_key(request.metadata())?;
         let req = request.into_inner();
         let provider_id = Self::parse_provider_id(&req.provider_id)?;
+        // A retry of a completed edit answers with the provider as that edit
+        // left it and never writes it over a later edit. The fingerprint
+        // leaves a new secret out, as for a creation.
+        let fingerprinted = UpdateUpstreamProviderRequest {
+            client_secret: req.client_secret.as_ref().map(|_| String::new()),
+            ..req.clone()
+        };
+        let command = KeyedCommand::by_profile(
+            caller.profile_id,
+            key,
+            UPDATE_UPSTREAM_PROVIDER,
+            &fingerprinted,
+        );
+        if let Some(recorded) = command.replay(&*self.storage).await? {
+            return Ok(Response::new(recorded));
+        }
 
         let mut provider = self
             .storage
@@ -409,33 +459,32 @@ impl UpstreamService for UpstreamServiceImpl {
 
         provider.updated_at = chrono::Utc::now();
 
-        let updated = self
-            .storage
-            .update_upstream_provider(
-                &provider,
-                AuditEntry::admin(
-                    caller.profile_id.to_string(),
-                    "upstream_provider.update",
-                    provider.id.0.to_string(),
-                )
-                .into(),
-            )
-            .await
-            .map_err(storage_failure)?;
-        if !updated {
-            // Deleted or changed since it was read: never recreated or overwritten.
-            return Err(changed_concurrently());
+        let response = UpstreamProviderResponse {
+            provider: Some(Self::provider_to_proto(&provider)),
+        };
+        let ctx = MutationContext::from(AuditEntry::admin(
+            caller.profile_id.to_string(),
+            "upstream_provider.update",
+            provider.id.0.to_string(),
+        ))
+        .with_operation(command.completion(response.encode_to_vec()));
+        match self.storage.update_upstream_provider(&provider, ctx).await {
+            Ok(true) => {}
+            // Deleted or changed since it was read: never recreated or
+            // overwritten.
+            Ok(false) => return Err(changed_concurrently()),
+            Err(sid_core::Error::OperationCompleted(_)) => {
+                return recorded_answer(&command.committed_elsewhere(&*self.storage).await?);
+            }
+            Err(e) => return Err(storage_failure(e)),
         }
-        provider.revision += 1;
 
         info!(
             "Updated upstream provider {} ({})",
             provider.name, provider.id
         );
 
-        Ok(Response::new(UpstreamProviderResponse {
-            provider: Some(Self::provider_to_proto(&provider)),
-        }))
+        Ok(Response::new(response))
     }
 
     async fn delete_upstream_provider(

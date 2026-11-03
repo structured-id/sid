@@ -876,6 +876,50 @@ async fn test_allowlist_addition_retry_keeps_a_later_removal() {
     );
 }
 
+/// An upstream provider's creation is retried after its response was lost:
+/// the retry answers with the provider it created, not "name taken" by that
+/// very provider, and one provider exists.
+#[tokio::test]
+async fn test_upstream_provider_creation_retry_answers_with_its_provider() {
+    use sid_proto::sid::v1::upstream_service_server::UpstreamService;
+    let svc = TestServices::new(MockStorage::new());
+    let token = issue_admin_token(&svc.jwt, ProfileId::generate());
+    let create = || {
+        keyed(
+            CreateUpstreamProviderRequest {
+                name: "Corporate IdP".into(),
+                protocol: UpstreamProtocol::Oidc as i32,
+                client_id: "sid".into(),
+                client_secret: "upstream-secret".into(),
+                discovery_url: "https://idp.sid.example.com".into(),
+                ..Default::default()
+            },
+            &token,
+            Some("op-upstream"),
+        )
+    };
+
+    let first = svc
+        .upstream
+        .create_upstream_provider(create())
+        .await
+        .unwrap()
+        .into_inner();
+    let retry = svc
+        .upstream
+        .create_upstream_provider(create())
+        .await
+        .expect("the retry answers with the provider it created")
+        .into_inner();
+
+    assert_eq!(retry, first);
+    assert_eq!(
+        svc.mock_storage.upstream_creations().len(),
+        1,
+        "the retry created another provider"
+    );
+}
+
 /// An edit without a key cannot promise a safe retry and changes nothing.
 #[tokio::test]
 async fn test_update_project_without_key_is_refused() {

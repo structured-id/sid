@@ -24,6 +24,35 @@ const OFF: Coverage = Coverage::NotServed;
 /// Every mutating CE method and its coverage, by full method name.
 pub const COVERAGE: &[(&str, Coverage)] = &[
     (
+        "sid.v1.federation.UpstreamService/CreateUpstreamProvider",
+        Coverage::Keyed,
+    ),
+    (
+        "sid.v1.federation.UpstreamService/DeleteUpstreamProvider",
+        Coverage::Natural(
+            "a deleted provider stays deleted: a repeat deletes nothing and answers \
+             as the first",
+        ),
+    ),
+    (
+        "sid.v1.federation.UpstreamService/HandleUpstreamCallback",
+        Coverage::Ceremony(
+            "RFC 6749 §10.12: the sign-in state is taken by its callback; a repeat \
+             finds none and signs nobody in",
+        ),
+    ),
+    (
+        "sid.v1.federation.UpstreamService/InitiateUpstreamAuth",
+        Coverage::Ceremony(
+            "each request opens its own single-use sign-in state; nothing changes \
+             before its callback",
+        ),
+    ),
+    (
+        "sid.v1.federation.UpstreamService/UpdateUpstreamProvider",
+        Coverage::Keyed,
+    ),
+    (
         "sid.v1.admin.EnrollmentService/BulkCreateInvites",
         Coverage::Keyed,
     ),
