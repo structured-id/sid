@@ -681,6 +681,29 @@ CREATE TABLE IF NOT EXISTS operation_results (
 CREATE INDEX IF NOT EXISTS operation_results_retain_until
     ON operation_results (retain_until_ms) WHERE retain_until_ms IS NOT NULL;
 
+-- Short-lived state a ceremony step leaves for the next, and single-use
+-- admissions; live while expires_at_ms (Unix milliseconds) is ahead.
+CREATE TABLE IF NOT EXISTS ceremony_states (
+    namespace     TEXT NOT NULL,
+    state_key     TEXT NOT NULL,
+    value         BLOB NOT NULL,
+    expires_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (namespace, state_key)
+);
+CREATE INDEX IF NOT EXISTS ceremony_states_expires_at
+    ON ceremony_states (expires_at_ms);
+
+-- Events counted per key in a window ending at window_ends_ms.
+CREATE TABLE IF NOT EXISTS ceremony_counts (
+    namespace      TEXT NOT NULL,
+    count_key      TEXT NOT NULL,
+    count          INTEGER NOT NULL,
+    window_ends_ms INTEGER NOT NULL,
+    PRIMARY KEY (namespace, count_key)
+);
+CREATE INDEX IF NOT EXISTS ceremony_counts_window_ends
+    ON ceremony_counts (window_ends_ms);
+
 -- One row per background job currently held: whoever inserted the row runs
 -- the job until it deletes the row or the lease runs out.
 CREATE TABLE IF NOT EXISTS job_locks (
@@ -1281,7 +1304,9 @@ CREATE INDEX IF NOT EXISTS idx_export_jobs_profile ON export_jobs(profile_id);
 CREATE TABLE IF NOT EXISTS magic_link_sessions (
     id          TEXT PRIMARY KEY,
     email       TEXT NOT NULL,
+    destination TEXT NOT NULL,
     token_hash  TEXT NOT NULL,
+    sealed_token BLOB NOT NULL,
     consumed    INTEGER NOT NULL DEFAULT 0,
     client_id   TEXT,
     redirect_uri TEXT,

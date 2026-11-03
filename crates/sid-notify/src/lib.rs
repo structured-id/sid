@@ -15,6 +15,7 @@
 //!
 //! Channels: Email (SMTP), Webhook (HMAC-SHA256), Web Push (VAPID).
 
+pub mod access;
 pub mod channels;
 pub mod config;
 pub mod delivery;

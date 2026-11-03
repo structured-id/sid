@@ -489,10 +489,11 @@ impl NotificationChannel for XOAuth2SmtpChannel {
             .build_message(email_addr, message, &message_id)
             .map_err(DeliveryError::InvalidRecipient)?;
 
+        // No subject: rendered content (a sign-in code in the otp subject)
+        // never reaches the logs.
         debug!(
             channel = "email:xoauth2",
             to = email_addr,
-            subject = message.subject.as_deref().unwrap_or("(no subject)"),
             from = %self.config.from_address,
             host = %self.config.host,
             message_id,

@@ -93,9 +93,10 @@ fn totp_step_names_the_matching_step() {
 /// A code's first use is recorded once; replicas share the record.
 #[tokio::test]
 async fn replay_guard_accepts_a_code_once() {
-    let cache: Arc<dyn CacheBackend> = Arc::new(sid_plugin::cache::InMemoryCacheBackend::new());
-    let a = TotpReplayGuard::new(cache.clone());
-    let b = TotpReplayGuard::new(cache);
+    let store: Arc<dyn sid_plugin::SingleUseAdmissions> =
+        Arc::new(sid_plugin::InProcessCeremonyState::new());
+    let a = TotpReplayGuard::new(store.clone());
+    let b = TotpReplayGuard::new(store);
     let profile = ProfileId::generate();
     assert!(a.first_use(profile, 42).await.unwrap());
     assert!(!b.first_use(profile, 42).await.unwrap());

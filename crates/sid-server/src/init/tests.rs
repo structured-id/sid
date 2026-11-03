@@ -280,26 +280,6 @@ async fn every_name_of_one_sqlite_file_locks_the_same_file() {
     assert!(hold_database(&by_url, true).is_err());
 }
 
-/// The in-process bus reaches the subscribers of one process only. Over
-/// storage several replicas share (PostgreSQL), the replica that claims a
-/// fact's fan-out would publish it to its own subscribers alone and the
-/// others would silently miss it, so that pairing stops startup. A SQLite
-/// file serves one process, and both NATS modes reach every replica.
-#[test]
-fn the_in_process_bus_needs_single_process_storage() {
-    use crate::embedded_nats::EventBusMode;
-    assert!(bus_fits_storage(&EventBusMode::InProcess, false).is_ok());
-    let refused = bus_fits_storage(&EventBusMode::InProcess, true)
-        .expect_err("replicas would miss live events")
-        .to_string();
-    assert!(refused.contains("in-process"), "{refused}");
-    let external = EventBusMode::External("nats://nats.sid.example.com:4222".into());
-    for mode in [EventBusMode::Embedded, external] {
-        assert!(bus_fits_storage(&mode, true).is_ok());
-        assert!(bus_fits_storage(&mode, false).is_ok());
-    }
-}
-
 /// The SQLite file is named by `SID_STORAGE_SQLITE_PATH`. The old name
 /// `SID_SQLITE_PATH` is refused rather than ignored: ignoring it would open
 /// the default file and start a deployment that set it as a new one.

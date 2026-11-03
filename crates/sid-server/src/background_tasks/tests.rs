@@ -126,3 +126,31 @@ fn test_is_migration_expired_created_recently() {
 fn test_default_deadline_days_constant() {
     assert_eq!(DEFAULT_MIGRATION_DEADLINE_DAYS, 180);
 }
+
+/// The periodic purge removes ceremony state and admissions past their
+/// deadline and keeps live ones: database deadlines reclaim nothing by
+/// themselves, so without it every proof and code leaves a row forever.
+#[tokio::test]
+async fn ceremony_state_purge_removes_only_expired_entries() {
+    use sid_plugin::{CeremonyStateStore, InProcessCeremonyState, SingleUseAdmissions};
+    let store = InProcessCeremonyState::new();
+    let brief = std::time::Duration::from_millis(5);
+    let long = std::time::Duration::from_secs(600);
+    store
+        .put_ceremony_state("ns", "lapsed", b"v", brief)
+        .await
+        .unwrap();
+    store.admit_once("ns", "lapsed-jti", brief).await.unwrap();
+    store
+        .put_ceremony_state("ns", "live", b"v", long)
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+    assert_eq!(purge_ceremony_state(&store).await, 2);
+    assert_eq!(
+        store.read_ceremony_state("ns", "live").await.unwrap(),
+        Some(b"v".to_vec())
+    );
+    assert_eq!(purge_ceremony_state(&store).await, 0);
+}

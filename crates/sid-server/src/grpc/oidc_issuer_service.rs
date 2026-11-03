@@ -20,11 +20,22 @@ use tonic::{Request, Response, Status};
 pub struct OidcIssuerServiceImpl {
     issuers: Arc<IssuerRegistry>,
     storage: Arc<dyn StorageBackend>,
+    /// Establishes an original request's token and admits its proof, as it
+    /// does for a request-bound permission question.
+    authz: Arc<sid_authz::grpc::AuthzServiceImpl>,
 }
 
 impl OidcIssuerServiceImpl {
-    pub fn new(issuers: Arc<IssuerRegistry>, storage: Arc<dyn StorageBackend>) -> Self {
-        Self { issuers, storage }
+    pub fn new(
+        issuers: Arc<IssuerRegistry>,
+        storage: Arc<dyn StorageBackend>,
+        authz: Arc<sid_authz::grpc::AuthzServiceImpl>,
+    ) -> Self {
+        Self {
+            issuers,
+            storage,
+            authz,
+        }
     }
 }
 
@@ -107,5 +118,15 @@ impl OidcIssuerService for OidcIssuerServiceImpl {
             active: resource.state == ResourceState::Active,
             id: Some(resource.id.into()),
         }))
+    }
+
+    /// Authenticated: only the configured verifier of the resource may have
+    /// a request's proof admitted.
+    async fn admit_sender_proof(
+        &self,
+        request: Request<sid_proto::sid::v1::authn::AdmitSenderProofRequest>,
+    ) -> Result<Response<()>, Status> {
+        self.authz.admit_sender_proof(request).await?;
+        Ok(Response::new(()))
     }
 }

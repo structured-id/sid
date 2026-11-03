@@ -127,7 +127,8 @@ fn key_generation(generation: u32) -> SidResult<i32> {
 use crate::key_versions::{key_derivation_name, key_version_params};
 use sid_core::models::machine_user::MachineUserStatus;
 
-use crate::{CENTRALLY_MANAGED_SQL, OWED_WORK_CAPACITY};
+use crate::CENTRALLY_MANAGED_SQL;
+use sid_plugin::OWED_WORK_CAPACITY;
 
 /// Consumes the admin claim `$2` (sealed) stored as `$1`, only on a
 /// self-managed installation: a centrally managed one consumes no local
@@ -437,9 +438,7 @@ impl PostgresBackend {
         crate::audit_log::PostgresAuditLog::log_in_conn(tx, chain_id, ctx.audit)
             .await
             .map_err(|e| SidError::Storage(format!("Audit log failed: {}", e)))?;
-        for work in &ctx.work {
-            work::insert_work_in_tx(tx, work, OWED_WORK_CAPACITY).await?;
-        }
+        work::insert_owed_work_in_tx(tx, &ctx.work, OWED_WORK_CAPACITY).await?;
         Ok(())
     }
 
@@ -7140,12 +7139,15 @@ impl StorageBackend for PostgresBackend {
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
         sqlx::query(
-            "INSERT INTO magic_link_sessions (id, email, token_hash, consumed, created_at, expires_at)
-             VALUES ($1, $2, $3, $4, $5, $6)",
+            "INSERT INTO magic_link_sessions
+                 (id, email, destination, token_hash, sealed_token, consumed, created_at, expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind(session.id)
         .bind(&session.email)
+        .bind(&session.destination)
         .bind(&session.token_hash)
+        .bind(&session.sealed_token)
         .bind(session.consumed)
         .bind(session.created_at)
         .bind(session.expires_at)
@@ -7180,7 +7182,9 @@ impl StorageBackend for PostgresBackend {
             .begin()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
-        sqlx::query("UPDATE magic_link_sessions SET consumed = true WHERE id = $1")
+        sqlx::query(
+            "UPDATE magic_link_sessions SET consumed = true, sealed_token = ''::bytea WHERE id = $1",
+        )
             .bind(id)
             .execute(&mut *tx)
             .await
@@ -7204,7 +7208,7 @@ impl StorageBackend for PostgresBackend {
             .map_err(|e| SidError::Storage(e.to_string()))?;
         let row = sqlx::query_as::<_, crate::pg_row::MagicLinkRow>(
             "UPDATE magic_link_sessions
-             SET consumed = true
+             SET consumed = true, sealed_token = ''::bytea
              WHERE id = $1 AND consumed = false AND expires_at > NOW()
              RETURNING *",
         )
@@ -8801,6 +8805,7 @@ impl AccessRequestRow {
 mod application;
 mod audit_retention;
 mod binding;
+mod ceremony_state;
 mod closure;
 mod contact;
 mod credentials;

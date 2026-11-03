@@ -49,20 +49,20 @@ struct Deployment {
     key_pem: String,
     /// The account application's compiled bundle.
     bundle: tempfile::TempDir,
-    /// The cache the host's replicas share sessions and started sign-ins
-    /// through: a real Redis, whose atomic operations those depend on.
-    shared: Arc<dyn sid_plugin::cache::CacheBackend>,
+    /// The application's database the host's replicas share sessions and
+    /// started sign-ins through: a real PostgreSQL, whose atomic operations
+    /// those depend on.
+    shared: Arc<dyn sid_plugin::CeremonyStateStore>,
 }
 
-/// The test Redis (docker-compose.test.yml).
-async fn shared_cache() -> Arc<dyn sid_plugin::cache::CacheBackend> {
-    let url = std::env::var("SID_TEST_REDIS_URL")
-        .unwrap_or_else(|_| "redis://localhost:63799".to_owned());
-    Arc::new(
-        sid_infra::RedisCacheBackend::connect(&url)
-            .await
-            .expect("the test Redis is running"),
-    )
+/// The test PostgreSQL (docker-compose.test.yml) as the application's
+/// database.
+async fn shared_store() -> Arc<dyn sid_plugin::CeremonyStateStore> {
+    let url = std::env::var("SID_TEST_DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://sid:sid_dev@localhost:54399/sid".to_owned());
+    sid_storage::application_store::ceremony_store(&url)
+        .await
+        .expect("the test PostgreSQL is running")
 }
 
 /// Provision the account integration for a freshly generated client key and
@@ -89,14 +89,11 @@ async fn deploy() -> Deployment {
         .await
         .unwrap();
 
-    let integrations = SystemIntegrationServiceImpl::new(
-        svc.storage.clone(),
-        installation.clone(),
-        svc.cache.clone(),
-    );
+    let integrations = SystemIntegrationServiceImpl::new(svc.storage.clone(), installation.clone());
     let registry = sid_server::grpc::oidc_issuer_service::OidcIssuerServiceImpl::new(
         svc.issuers.clone(),
         svc.storage.clone(),
+        svc.authz.clone(),
     );
     let identity = svc.identity.clone();
     let auth = svc.auth.clone();
@@ -121,13 +118,13 @@ async fn deploy() -> Deployment {
         addr,
         key_pem,
         bundle,
-        shared: shared_cache().await,
+        shared: shared_store().await,
     }
 }
 
 /// A replica of the account application's UI host, serving on a local port
-/// of its own: its own process state, the deployment's shared cache for
-/// sessions and revocations. Its URL.
+/// of its own: its own process state, the application's database for
+/// sessions and the deployment's cache for revocations. Its URL.
 async fn replica(deployment: &Deployment) -> String {
     let channel = tonic::transport::Channel::from_shared(format!("http://{}", deployment.addr))
         .unwrap()
@@ -137,7 +134,7 @@ async fn replica(deployment: &Deployment) -> String {
         ClientKey::ed25519_from_pem(&secrecy::SecretString::from(deployment.key_pem.as_str()))
             .unwrap();
     let revocation = sid_auth::revocation_view(deployment.svc.cache.clone());
-    revocation.listen().await.unwrap();
+    revocation.listen().await;
     let issuer = sid_infra::deadline::issuer(channel.clone());
     let adapter = ApplicationSessions::new(
         Arc::new(RpClient::new(key, installation.clone(), issuer.clone()).unwrap()),

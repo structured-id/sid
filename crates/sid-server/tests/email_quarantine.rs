@@ -74,10 +74,7 @@ async fn email_code_refuses_a_quarantined_handle() {
     let svc = TestServices::new(MockStorage::new().with_system_project());
     let profile = quarantined(&svc, "bea@sid.example.com").await;
 
-    let (pending, code) = sid_authn::otp::OtpService::new(svc.cache.clone())
-        .request_otp("bea@sid.example.com")
-        .await
-        .unwrap();
+    let (pending, code) = common::issue_code(&svc.storage, "bea@sid.example.com").await;
     let verified = svc
         .auth
         .verify_otp(Request::new(VerifyOtpRequest {
@@ -119,10 +116,13 @@ async fn magic_link_refuses_a_quarantined_handle() {
         )
         .await
         .unwrap();
-    let (link, token) = sid_authn::magic_link::MagicLinkService::new(svc.storage.clone())
-        .request_magic_link(address)
-        .await
-        .unwrap();
+    let (link, token) = sid_authn::magic_link::MagicLinkService::new(
+        svc.storage.clone(),
+        common::test_key_manager(),
+    )
+    .request_magic_link(address, address)
+    .await
+    .unwrap();
     svc.mock_storage.quarantine_email_key(address);
 
     let answer = svc

@@ -13,7 +13,7 @@ use tower::ServiceExt;
 fn broken_store_state() -> ProxyState {
     let mut state = bff_test_state();
     state.bff_sessions = Arc::new(BffSessionStore::new(
-        Arc::new(UnreachableCache),
+        Arc::new(UnreachableStore),
         std::time::Duration::from_secs(86400),
         std::time::Duration::from_secs(3600),
         std::time::Duration::from_secs(300),
@@ -30,46 +30,72 @@ async fn logout_grant(response: Response) -> String {
     json["grant"].as_str().unwrap().to_owned()
 }
 
-struct UnreachableCache;
+/// A session store whose every call fails, as an unreachable database does.
+struct UnreachableStore;
+
+fn down() -> sid_core::Error {
+    sid_core::Error::Storage("down".into())
+}
 
 #[async_trait::async_trait]
-impl sid_plugin::cache::CacheBackend for UnreachableCache {
-    async fn get(&self, _k: &str) -> sid_plugin::cache::CacheResult<Option<Vec<u8>>> {
-        Err(sid_plugin::cache::CacheError::Connection("down".into()))
+impl sid_plugin::SingleUseAdmissions for UnreachableStore {
+    async fn admit_once(&self, _: &str, _: &str, _: std::time::Duration) -> sid_core::Result<bool> {
+        Err(down())
     }
-    async fn set(
+    async fn admit_for(
         &self,
-        _k: &str,
-        _v: &[u8],
-        _t: std::time::Duration,
-    ) -> sid_plugin::cache::CacheResult<()> {
-        Err(sid_plugin::cache::CacheError::Connection("down".into()))
+        _: &str,
+        _: &str,
+        _: &[u8],
+        _: std::time::Duration,
+    ) -> sid_core::Result<bool> {
+        Err(down())
     }
-    async fn delete(&self, _k: &str) -> sid_plugin::cache::CacheResult<()> {
-        Err(sid_plugin::cache::CacheError::Connection("down".into()))
-    }
-    async fn take(&self, _k: &str) -> sid_plugin::cache::CacheResult<Option<Vec<u8>>> {
-        Err(sid_plugin::cache::CacheError::Connection("down".into()))
-    }
-    async fn set_nx(
+}
+
+#[async_trait::async_trait]
+impl sid_plugin::CeremonyStateStore for UnreachableStore {
+    async fn put_ceremony_state(
         &self,
-        _k: &str,
-        _v: &[u8],
-        _t: std::time::Duration,
-    ) -> sid_plugin::cache::CacheResult<bool> {
-        Err(sid_plugin::cache::CacheError::Connection("down".into()))
+        _: &str,
+        _: &str,
+        _: &[u8],
+        _: std::time::Duration,
+    ) -> sid_core::Result<()> {
+        Err(down())
     }
-    async fn publish(&self, _c: &str, _m: &[u8]) -> sid_plugin::cache::CacheResult<()> {
-        Err(sid_plugin::cache::CacheError::Connection("down".into()))
+    async fn take_ceremony_state(&self, _: &str, _: &str) -> sid_core::Result<Option<Vec<u8>>> {
+        Err(down())
     }
-    async fn subscribe(
+    async fn read_ceremony_state(&self, _: &str, _: &str) -> sid_core::Result<Option<Vec<u8>>> {
+        Err(down())
+    }
+    async fn replace_ceremony_state(
         &self,
-        _c: &str,
-    ) -> sid_plugin::cache::CacheResult<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>> {
-        Err(sid_plugin::cache::CacheError::Connection("down".into()))
+        _: &str,
+        _: &str,
+        _: &[u8],
+        _: &[u8],
+        _: std::time::Duration,
+    ) -> sid_core::Result<bool> {
+        Err(down())
     }
-    async fn health_check(&self) -> sid_plugin::cache::CacheResult<()> {
-        Err(sid_plugin::cache::CacheError::Connection("down".into()))
+    async fn count_in_window(
+        &self,
+        _: &str,
+        _: &str,
+        _: std::time::Duration,
+    ) -> sid_core::Result<u64> {
+        Err(down())
+    }
+    async fn read_count(&self, _: &str, _: &str) -> sid_core::Result<u64> {
+        Err(down())
+    }
+    async fn clear_count(&self, _: &str, _: &str) -> sid_core::Result<()> {
+        Err(down())
+    }
+    async fn purge_expired_ceremony_state(&self) -> sid_core::Result<u64> {
+        Err(down())
     }
 }
 
@@ -944,7 +970,7 @@ fn test_extract_bff_cookie_missing() {
 #[tokio::test]
 async fn test_pending_store_and_take() {
     let store = BffSessionStore::new(
-        Arc::new(sid_plugin::cache::InMemoryCacheBackend::new()),
+        Arc::new(sid_plugin::InProcessCeremonyState::new()),
         std::time::Duration::from_secs(86400),
         std::time::Duration::from_secs(3600),
         std::time::Duration::from_secs(300),

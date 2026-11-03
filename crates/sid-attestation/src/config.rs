@@ -9,16 +9,16 @@ pub struct AttestationConfig {
     pub grpc_bind: SocketAddr,
     /// PostgreSQL connection URL.
     pub database_url: String,
-    /// Ed25519 public key PEM path used to verify callers' tokens (the
-    /// service never holds the signing key).
-    pub jwt_public_key_path: String,
-    /// Token issuer URL.
-    pub jwt_issuer: String,
+    /// Where calls are admitted: the installation's account API resource,
+    /// decided by its issuer (`crate::access`). From `SID_GRPC_UPSTREAM`,
+    /// `SID_ISSUER_URL`, `SID_RECEIVER_RESOURCE`, `SID_RECEIVER_ORIGIN` and
+    /// `SID_AUTHZ_CHECKER_*`.
+    pub api: sid_auth::config::ReceiverConfig,
 }
 
 impl AttestationConfig {
     /// Load configuration from environment variables. The database and the
-    /// token verifier are required: device keys are bound only for an
+    /// receiver are required: device keys are bound only for an
     /// authenticated owner.
     pub fn from_env() -> anyhow::Result<Self> {
         let grpc_bind: SocketAddr = std::env::var("SID_ATTESTATION_BIND")
@@ -34,8 +34,7 @@ impl AttestationConfig {
         Ok(Self {
             grpc_bind,
             database_url: required("DATABASE_URL")?,
-            jwt_public_key_path: required("SID_JWT_PUBLIC_KEY_PATH")?,
-            jwt_issuer: required("SID_ISSUER")?,
+            api: sid_auth::config::ReceiverConfig::from_env()?,
         })
     }
 
@@ -55,32 +54,4 @@ impl AttestationConfig {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_database_url_display_masks_password() {
-        let config = AttestationConfig {
-            grpc_bind: "127.0.0.1:50061".parse().unwrap(),
-            database_url: "postgres://sid:secret_pass@localhost:5432/sid".into(),
-            jwt_public_key_path: String::new(),
-            jwt_issuer: String::new(),
-        };
-        let display = config.database_url_display();
-        assert!(!display.contains("secret_pass"));
-        assert!(display.contains("***"));
-        assert!(display.contains("localhost:5432/sid"));
-    }
-
-    #[test]
-    fn test_database_url_display_no_password() {
-        let config = AttestationConfig {
-            grpc_bind: "127.0.0.1:50061".parse().unwrap(),
-            database_url: "postgres://localhost:5432/sid".into(),
-            jwt_public_key_path: String::new(),
-            jwt_issuer: String::new(),
-        };
-        let display = config.database_url_display();
-        assert_eq!(display, "postgres://localhost:5432/sid");
-    }
-}
+mod tests;

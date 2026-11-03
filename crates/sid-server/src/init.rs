@@ -116,6 +116,10 @@ pub struct CeComponents {
     pub authz_engine: Arc<sid_authz::CeAuthzEngine<dyn sid_plugin::StorageBackend>>,
     /// The installation's organization.
     pub organization: sid_core::models::Organization,
+    /// Emails requested sign-in links, when magic links are enabled.
+    pub magic_link_mail: Option<Arc<crate::auth_mail::MagicLinkMail>>,
+    /// Emails requested sign-in codes.
+    pub code_mail: Arc<crate::auth_mail::CodeMail>,
     /// The directory the SCIM endpoint serves.
     #[cfg(feature = "scim")]
     pub scim_directory: sid_scim::grpc::ScimDirectory,
@@ -164,6 +168,34 @@ pub fn magic_links_enabled(
         );
     }
     Ok(enabled)
+}
+
+/// The mail of requested sign-in links when `links` are enabled. A link
+/// opens the account UI's verification page, so enabling them without an
+/// account UI (`SID_ACCOUNT_URL`) is a configuration error: requested links
+/// would be owed a mail that can never name a page.
+pub fn magic_link_mail(
+    links: Option<&Arc<MagicLinkService>>,
+    account: Option<&sid_authn::system_integration::AccountSettings>,
+    storage: &Arc<dyn StorageBackend>,
+    keys: &Arc<dyn sid_keys::KeyManager>,
+) -> anyhow::Result<Option<Arc<crate::auth_mail::MagicLinkMail>>> {
+    let Some(links) = links else {
+        return Ok(None);
+    };
+    let Some(account) = account else {
+        anyhow::bail!(
+            "SID_MAGIC_LINKS_ENABLED needs the account UI that opens the links: set SID_ACCOUNT_URL"
+        );
+    };
+    Ok(Some(Arc::new(crate::auth_mail::MagicLinkMail::new(
+        links.clone(),
+        account.magic_link_page(),
+        Arc::new(crate::auth_mail::StoredProvider::new(
+            storage.clone(),
+            keys.clone(),
+        )),
+    ))))
 }
 
 /// The sign-in page the authorization endpoint sends a user who must sign in
@@ -501,7 +533,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
             .await
             .map_err(|e| anyhow::anyhow!("CAPTCHA key: {e}"))?;
 
-    // ── Shared cache: ceremony state, one-time codes, replay and rate state ──
+    // ── Shared cache: one-time codes, replay and rate state ──
     let cache_backend: Arc<dyn CacheBackend> =
         sid_infra::shared_cache(sid_infra::cache_url_from_env().as_deref())
             .await
@@ -517,7 +549,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
     let webauthn = Arc::new(WebAuthnServer::new(
         &rp_id,
         &rp_origin_url,
-        cache_backend.clone(),
+        storage.clone(),
         key_manager.clone(),
     )?);
 
@@ -533,18 +565,17 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
     let opaque_zkpp = init_zkpp(&opaque_router, &zkpp_cache_dir);
 
     // ── Revocation cache ──
-    let revocation_cache = Arc::new(RevocationCache::new(
+    // Revocations are committed in the store; the shared cache carries them
+    // to the other replicas and is not needed to refuse a revoked token.
+    let revocation_cache = Arc::new(RevocationCache::recorded_in(
         access_token_ttl
             .duration()
             .to_std()
             .expect("access token lifetime is positive"),
         cache_backend.clone(),
+        storage.clone(),
     ));
-    // Revocations made on other replicas reach this one through the shared cache.
-    revocation_cache
-        .listen()
-        .await
-        .unwrap_or_else(|e| panic!("Revocation propagation: {e}"));
+    revocation_cache.listen().await;
 
     // ── Feature flags ──
     let feature_flags = init_feature_flags()?;
@@ -739,7 +770,13 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         env_setting("SID_MAGIC_LINKS_ENABLED")?.as_deref(),
         &sid_core::models::SecurityPolicy::ce_default(),
     )?
-    .then(|| Arc::new(MagicLinkService::new(storage.clone())));
+    .then(|| Arc::new(MagicLinkService::new(storage.clone(), key_manager.clone())));
+    let magic_link_mail = magic_link_mail(
+        magic_link.as_ref(),
+        account.as_ref(),
+        &storage,
+        &key_manager,
+    )?;
 
     let export_dir =
         env_setting("SID_EXPORT_DIR")?.unwrap_or_else(|| "/tmp/sid-exports".to_string());
@@ -764,21 +801,22 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         sid_infra::TopologyRole::from_env(sid_infra::TopologyRole::Own)?,
     )
     .await?;
-    // PostgreSQL may be shared by several replicas; a SQLite file may be
-    // opened by several processes, so the in-process bus locks it and takes
-    // over no addressed work it could never hand on.
-    bus_fits_storage(&nats_mode, cfg!(feature = "storage-pg"))?;
+    // Without a broker, replicas sharing PostgreSQL claim committed work from
+    // that database under fenced leases; the in-process bus only wakes their
+    // workers and feeds this process's live views, which may miss facts
+    // another replica handled. A SQLite file serves one engine process, so
+    // the in-process bus locks it. Either way it takes over no addressed work
+    // it could never hand on.
     let in_process = nats_mode == crate::embedded_nats::EventBusMode::InProcess;
+    // The file lock comes first, so no process on another bus can address
+    // work between the check and the lock.
     let database_lock = match sqlite_file.as_deref() {
-        Some(database) => {
-            let lock = hold_database(database, in_process)?;
-            if in_process {
-                refuse_addressed_history(storage.as_ref()).await?;
-            }
-            Some(Arc::new(lock))
-        }
+        Some(database) => Some(Arc::new(hold_database(database, in_process)?)),
         None => None,
     };
+    if in_process {
+        refuse_addressed_history(storage.as_ref()).await?;
+    }
     let required_receivers =
         required_receivers(&nats_mode, env_setting("SID_EVENT_RECEIVERS")?.as_deref())?;
 
@@ -792,7 +830,21 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         data_export,
     ));
 
-    let otp_service = OtpService::new(cache_backend.clone());
+    let otp_service = Arc::new(OtpService::new(
+        storage.clone(),
+        sid_authn::otp::CodeDelivery {
+            keys: key_manager.clone(),
+            work: storage.clone(),
+            capacity: sid_plugin::OWED_WORK_CAPACITY,
+        },
+    ));
+    let code_mail = Arc::new(crate::auth_mail::CodeMail::new(
+        otp_service.clone(),
+        Arc::new(crate::auth_mail::StoredProvider::new(
+            storage.clone(),
+            key_manager.clone(),
+        )),
+    ));
 
     // ── IP Intelligence: configurable provider chain ──
     // SID_IPINTEL_PROVIDERS: comma-separated list of enabled providers.
@@ -955,7 +1007,6 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
     let upstream_svc = Arc::new(crate::grpc::upstream_service::UpstreamServiceImpl::new(
         storage.clone(),
         key_manager.clone(),
-        cache_backend.clone(),
         jwt.clone(),
         revocation_cache.clone(),
         auth_svc.clone(),
@@ -1091,6 +1142,8 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
     };
 
     Ok(CeComponents {
+        magic_link_mail,
+        code_mail,
         audit_retention,
         migration_deadline_days,
         issuers,
@@ -1246,6 +1299,24 @@ pub fn spawn_ce_background_tasks(c: &CeComponents) {
         });
     }
 
+    // Ended authentication mail records (hourly). Idempotent, so no job lock.
+    {
+        let storage = c.storage.clone();
+        tokio::spawn(async move {
+            let every = std::time::Duration::from_secs(3600);
+            let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+            loop {
+                interval.tick().await;
+                match crate::auth_mail::purge_ended_mail(storage.as_ref(), chrono::Utc::now()).await
+                {
+                    Ok(0) => {}
+                    Ok(n) => info!("Dropped {} ended authentication mail records", n),
+                    Err(e) => tracing::warn!("authentication mail purge failed: {}", e),
+                }
+            }
+        });
+    }
+
     // Operation results past their retention (every minute): a retained
     // sign-in delivery is dropped within a minute of its operation's end.
     // The purge is idempotent, so replicas running it at once only repeat
@@ -1263,6 +1334,21 @@ pub fn spawn_ce_background_tasks(c: &CeComponents) {
                 {
                     tracing::warn!("operation result expiry failed: {}", e);
                 }
+            }
+        });
+    }
+
+    // Ceremony state past its deadline (every minute): one-time proofs,
+    // codes and counts leave rows behind, which no database expires by
+    // itself. Idempotent like the purge above, so no job lock.
+    {
+        let storage = c.storage.clone();
+        tokio::spawn(async move {
+            let every = std::time::Duration::from_secs(60);
+            let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+            loop {
+                interval.tick().await;
+                crate::background_tasks::purge_ceremony_state(storage.as_ref()).await;
             }
         });
     }
@@ -1593,23 +1679,6 @@ pub(crate) fn required_receivers(
     Ok(receivers)
 }
 
-/// The in-process bus reaches only this process's subscribers. Over storage
-/// several replicas can share (`shared_storage`), the replica that claims a
-/// fact's fan-out would publish it to its own subscribers alone, so others
-/// would silently miss live events: that pairing stops startup.
-pub(crate) fn bus_fits_storage(
-    mode: &crate::embedded_nats::EventBusMode,
-    shared_storage: bool,
-) -> anyhow::Result<()> {
-    if shared_storage && *mode == crate::embedded_nats::EventBusMode::InProcess {
-        anyhow::bail!(
-            "the in-process bus serves one process, but this storage can be shared by \
-             several replicas: set SID_NATS_URL to `embedded` or a NATS URL"
-        );
-    }
-    Ok(())
-}
-
 /// An installation that ever addressed work to a receiver cannot move to the
 /// in-process bus: a delivery recorded done may still wait in the durable
 /// bus that accepted it, and the in-process bus never reaches that bus.
@@ -1718,7 +1787,7 @@ pub fn spawn_work_runner(
         .chain(also_required)
         .cloned()
         .collect();
-    let handlers: Vec<Arc<dyn WorkHandler>> = vec![
+    let mut handlers: Vec<Arc<dyn WorkHandler>> = vec![
         Arc::new(BackChannelLogoutHandler::new(
             c.issuers.clone(),
             c.storage.clone(),
@@ -1726,12 +1795,12 @@ pub fn spawn_work_runner(
         Arc::new(EventRelayHandler::new(
             c.storage.clone(),
             receivers,
-            sid_storage::OWED_WORK_CAPACITY,
+            sid_plugin::OWED_WORK_CAPACITY,
         )),
         Arc::new(sid_authn::event_relay::EventFanoutHandler::new(
             c.event_bus.clone(),
             c.storage.clone(),
-            sid_storage::OWED_WORK_CAPACITY,
+            sid_plugin::OWED_WORK_CAPACITY,
         )),
         Arc::new(sid_authn::event_relay::EventDeliveryHandler::new(
             c.event_bus.clone(),
@@ -1746,7 +1815,11 @@ pub fn spawn_work_runner(
         ),
         c.auth_svc.enrollment_handler(),
         c.auth_svc.owner_purge_handler(),
+        c.code_mail.clone(),
     ];
+    if let Some(mail) = &c.magic_link_mail {
+        handlers.push(mail.clone());
+    }
     let worker = format!("sid-server-{}-{}", std::process::id(), uuid::Uuid::now_v7());
     let runner = WorkRunner::new(c.storage.clone(), worker, handlers, RunnerConfig::default())
         .map_err(|e| anyhow::anyhow!("work runner: {e}"))?;

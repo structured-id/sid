@@ -208,9 +208,10 @@ impl TestIssuer {
         .expect("request verifiers");
 
         let cache: Arc<dyn CacheBackend> = Arc::new(sid_plugin::cache::InMemoryCacheBackend::new());
-        let revocation = Arc::new(RevocationCache::new(
+        let revocation = Arc::new(RevocationCache::recorded_in(
             std::time::Duration::from_secs(900),
             cache.clone(),
+            storage.clone(),
         ));
         let service_tokens = Arc::new(
             sid_authn::resource_token::ResourceTokenVerifier::new(
@@ -221,17 +222,19 @@ impl TestIssuer {
             .await
             .expect("authorization API token verifier"),
         );
-        let authz = sid_authz::grpc::AuthzServiceImpl::new(
-            Arc::new(sid_authz::CeAuthzEngine::new(storage.clone())),
-            storage.clone(),
-            sid_authz::cedar::CedarService::new(),
-            Arc::new(AtomicBool::new(false)),
-            jwt.clone(),
-            revocation.clone(),
-            audit_log,
-        )
-        .with_service_tokens(service_tokens)
-        .with_request_verifiers(verifiers);
+        let authz = Arc::new(
+            sid_authz::grpc::AuthzServiceImpl::new(
+                Arc::new(sid_authz::CeAuthzEngine::new(storage.clone())),
+                storage.clone(),
+                sid_authz::cedar::CedarService::new(),
+                Arc::new(AtomicBool::new(false)),
+                jwt.clone(),
+                revocation.clone(),
+                audit_log,
+            )
+            .with_service_tokens(service_tokens)
+            .with_request_verifiers(verifiers),
+        );
         let auth = auth_service(
             storage.clone(),
             cache,
@@ -248,11 +251,12 @@ impl TestIssuer {
         let oidc = sid_server::grpc::oidc_issuer_service::OidcIssuerServiceImpl::new(
             issuers.clone(),
             storage.clone(),
+            authz.clone(),
         );
         let routes = tonic::service::Routes::new(
             sid_proto::sid::v1::auth_service_server::AuthServiceServer::from_arc(auth),
         )
-        .add_service(sid_proto::sid::v1::authz_service_server::AuthzServiceServer::new(authz))
+        .add_service(sid_proto::sid::v1::authz_service_server::AuthzServiceServer::from_arc(authz))
         .add_service(
             sid_proto::sid::v1::oidc_issuer_service_server::OidcIssuerServiceServer::new(oidc),
         );
@@ -309,14 +313,12 @@ impl TestIssuer {
         origin: &str,
         checker: &str,
         secret_file: &std::path::Path,
-        cache_url: Option<String>,
     ) -> sid_auth::config::ReceiverConfig {
         sid_auth::config::ReceiverConfig {
             upstream: self.upstream(),
             issuer_url: INSTALLATION.into(),
             resource: resource.into(),
             origin: origin.into(),
-            cache_url,
             checker: self.client_config(checker, secret_file),
         }
     }
@@ -423,6 +425,48 @@ impl TestIssuer {
             )
             .await
             .expect("grant");
+    }
+
+    /// Let the checker `client_id` inspect tokens issued for every registered
+    /// resource (RFC 7662): the token inspector role on each, a permission of
+    /// its own beside the checker's.
+    pub async fn grant_inspection(&self, client_id: &str) {
+        let role = sid_authz::builtin::ensure_token_inspector_role(self.storage.as_ref())
+            .await
+            .expect("token inspector role");
+        let machine = self
+            .storage
+            .get_machine_user_by_client_id(client_id)
+            .await
+            .expect("machine user lookup")
+            .expect("a registered checker");
+        for resource in &self.resources {
+            self.storage
+                .create_role_assignment(
+                    &RoleAssignment::new(RoleAssignmentPrincipal::MachineUser(machine.id), role.id)
+                        .on_resource(resource.id),
+                    audit("role_assignment.create"),
+                )
+                .await
+                .expect("inspection");
+        }
+    }
+
+    /// Make `profile` the installation's administrator: the built-in role,
+    /// assigned across the installation, as the first claim assigns it.
+    pub async fn administrator(&self, profile: &Profile) {
+        let role =
+            sid_authz::builtin::ensure_installation_administrator_role(self.storage.as_ref())
+                .await
+                .expect("installation administrator role");
+        self.storage
+            .create_role_assignment(
+                &RoleAssignment::new(RoleAssignmentPrincipal::Profile(profile.id), role.id)
+                    .on_installation(),
+                audit("role_assignment.create"),
+            )
+            .await
+            .expect("installation administrator");
     }
 
     /// An access token of `profile` for the resource `indicator`, from a
@@ -632,7 +676,7 @@ fn auth_service(
         sid_authn::webauthn::WebAuthnServer::new(
             "sid.example.com",
             &url::Url::parse(INSTALLATION).unwrap(),
-            cache.clone(),
+            storage.clone(),
             keys.clone(),
         )
         .expect("WebAuthn"),
@@ -653,7 +697,14 @@ fn auth_service(
         revocation,
         sid_server::feature_flags::FeatureFlagService::disabled(),
         None,
-        sid_authn::otp::OtpService::new(cache.clone()),
+        Arc::new(sid_authn::otp::OtpService::new(
+            storage.clone(),
+            sid_authn::otp::CodeDelivery {
+                keys: keys.clone(),
+                work: storage.clone(),
+                capacity: sid_plugin::OWED_WORK_CAPACITY,
+            },
+        )),
         issuers,
         org,
         INSTALLATION.to_string(),

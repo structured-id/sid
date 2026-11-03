@@ -91,6 +91,7 @@ impl CeServices {
                 crate::grpc::oidc_issuer_service::OidcIssuerServiceImpl::new(
                     c.issuers.clone(),
                     c.storage.clone(),
+                    c.authz_svc.clone(),
                 ),
             ))
             .await
@@ -99,7 +100,6 @@ impl CeServices {
                     c.issuers.clone(),
                     c.storage.clone(),
                     c.revocation_cache.clone(),
-                    c.cache_backend.clone(),
                     c.auth_svc.clone(),
                     c.project_svc.clone(),
                     c.login_url.clone(),
@@ -144,7 +144,6 @@ impl CeServices {
                 crate::grpc::system_integration_service::SystemIntegrationServiceImpl::new(
                     c.storage.clone(),
                     c.issuer.clone(),
-                    c.cache_backend.clone(),
                 ),
             ))
             .await

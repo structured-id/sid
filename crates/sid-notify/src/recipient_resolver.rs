@@ -133,17 +133,61 @@ impl RecipientResolver {
         Ok(recipient)
     }
 
-    /// The addresses the identity service holds for `profile_id`, or `None`
-    /// when no identity service is configured.
-    pub(crate) async fn contact(&self, profile_id: &str) -> Result<Option<Contact>, ResolveError> {
+    /// The Profile and addresses of the caller whose access token for the
+    /// account API is `authorization` (`Bearer …`), asked of the identity
+    /// service with that same token: both serve that resource, so the token
+    /// is for its audience. `None` when no identity service is configured.
+    pub(crate) async fn current_contact(
+        &self,
+        authorization: &tonic::metadata::AsciiMetadataValue,
+    ) -> Result<Option<(String, Contact)>, ResolveError> {
         let Some(ref client) = self.identity_client else {
             return Ok(None);
         };
-        let found = self.lookup(client, profile_id).await?;
-        Ok(Some(Contact {
-            email: found.email,
-            phone: found.phone,
-        }))
+        let mut client = client.write().await;
+        let classify = |status: tonic::Status| {
+            warn!(error = %status, "the caller's own addresses are unavailable");
+            ResolveError::Unavailable(status.message().to_string())
+        };
+        let mut request =
+            tonic::Request::new(sid_proto::sid::v1::identity::GetCurrentProfileRequest {});
+        request
+            .metadata_mut()
+            .insert("authorization", authorization.clone());
+        let profile = client
+            .get_current_profile(request)
+            .await
+            .map_err(classify)?
+            .into_inner()
+            .profile
+            .ok_or_else(|| ResolveError::Unavailable("no current profile".into()))?;
+        let mut request =
+            tonic::Request::new(sid_proto::sid::v1::identity::ListPrincipalsRequest {
+                profile_id: profile.id.clone(),
+            });
+        request
+            .metadata_mut()
+            .insert("authorization", authorization.clone());
+        let principals = client
+            .list_principals(request)
+            .await
+            .map_err(classify)?
+            .into_inner()
+            .principals;
+        let phone = principals
+            .iter()
+            .filter(|p| {
+                p.r#type == sid_proto::sid::v1::identity::PrincipalType::Phone as i32 && p.verified
+            })
+            .min_by_key(|p| !p.is_primary)
+            .map(|p| p.value.clone());
+        Ok(Some((
+            profile.id,
+            Contact {
+                email: profile.email,
+                phone,
+            },
+        )))
     }
 
     /// [`Self::resolve_via_grpc`] with its failure classified.

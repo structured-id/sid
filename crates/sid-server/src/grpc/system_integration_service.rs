@@ -5,12 +5,11 @@
 
 use std::sync::Arc;
 
-use sid_authn::client_assertion::{AssertionJtiCache, validate_key_proof};
+use sid_authn::client_assertion::{AssertionJtiLog, validate_key_proof};
 use sid_authn::client_connection::ClientConnection;
 use sid_authn::system_integration::account_integration;
 use sid_core::grpc_error::{ApiError, ErrorReason};
 use sid_core::models::IssuerAuthority;
-use sid_plugin::cache::CacheBackend;
 use sid_plugin::storage::StorageBackend;
 use sid_proto::sid::v1::system_integration_service_server::SystemIntegrationService;
 use sid_proto::sid::v1::{AccountConnection, GetAccountConnectionRequest};
@@ -20,19 +19,15 @@ pub struct SystemIntegrationServiceImpl {
     storage: Arc<dyn StorageBackend>,
     /// The installation's public URL, the base of a key proof's audience.
     installation_url: String,
-    proofs: AssertionJtiCache,
+    proofs: AssertionJtiLog,
 }
 
 impl SystemIntegrationServiceImpl {
-    pub fn new(
-        storage: Arc<dyn StorageBackend>,
-        installation_url: String,
-        cache: Arc<dyn CacheBackend>,
-    ) -> Self {
+    pub fn new(storage: Arc<dyn StorageBackend>, installation_url: String) -> Self {
         Self {
+            proofs: AssertionJtiLog::new(storage.clone()),
             storage,
             installation_url,
-            proofs: AssertionJtiCache::new(cache),
         }
     }
 

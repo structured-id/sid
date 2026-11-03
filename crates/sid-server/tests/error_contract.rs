@@ -84,7 +84,6 @@ async fn services(svc: TestServices) -> sid_serve::Services {
         security,
         account,
         storage,
-        cache,
         jwt,
         event_bus,
         revocation_cache,
@@ -114,7 +113,6 @@ async fn services(svc: TestServices) -> sid_serve::Services {
                 issuers,
                 storage.clone(),
                 revocation_cache.clone(),
-                cache.clone(),
                 auth,
                 project,
                 None,
@@ -177,7 +175,6 @@ async fn services(svc: TestServices) -> sid_serve::Services {
             sid_server::grpc::system_integration_service::SystemIntegrationServiceImpl::new(
                 storage.clone(),
                 issuer.canonical_url,
-                cache,
             ),
         ))
         .await

@@ -103,6 +103,8 @@ pub struct MockStorageInner {
     profile_reads_fail: bool,
     /// Consuming a magic link session fails as a storage fault would.
     magic_link_consume_fails: bool,
+    /// Owing new work fails as a full queue refuses it.
+    owed_work_full: bool,
     /// Durable work items with their payload and lease deadline.
     work: HashMap<WorkId, StoredWork>,
     /// Completions of keyed commands by (namespace, key).
@@ -299,6 +301,11 @@ impl MockStorageInner {
 
 pub struct MockStorage {
     pub inner: Mutex<MockStorageInner>,
+    /// Ceremony state, as a single process holds it.
+    ceremonies: sid_plugin::InProcessCeremonyState,
+    /// A namespace whose admissions cannot be recorded, as when the database
+    /// does not answer.
+    unrecordable_admissions: Mutex<Option<&'static str>>,
 }
 
 impl MockStorage {
@@ -338,7 +345,15 @@ impl MockStorage {
     pub fn unclaimed() -> Self {
         Self {
             inner: Mutex::new(MockStorageInner::default()),
+            ceremonies: sid_plugin::InProcessCeremonyState::new(),
+            unrecordable_admissions: Mutex::new(None),
         }
+    }
+
+    /// From now on, no admission or state in `namespace` can be recorded.
+    #[allow(dead_code)]
+    pub fn fail_admissions(&self, namespace: &'static str) {
+        *self.unrecordable_admissions.lock().unwrap() = Some(namespace);
     }
 
     /// Storage whose refresh-token revocation fails with a storage fault.
@@ -429,6 +444,13 @@ impl MockStorage {
     #[allow(dead_code)]
     pub fn fail_profile_reads(&self) {
         self.inner.lock().unwrap().profile_reads_fail = true;
+    }
+
+    /// From now on, every queue of owed work is full: a mutation that owes
+    /// work is refused as the store refuses it past its capacity.
+    #[allow(dead_code)]
+    pub fn fill_owed_work(&self) {
+        self.inner.lock().unwrap().owed_work_full = true;
     }
 
     /// From now on, reading a magic link session fails.
@@ -1439,6 +1461,89 @@ impl GrantStore for MockStorage {
             .refresh_tokens_by_hash
             .insert(refresh_token.token_hash.clone(), refresh_token.clone());
         Ok(AuthCodeRedemption::Redeemed)
+    }
+}
+
+#[async_trait]
+impl sid_plugin::SingleUseAdmissions for MockStorage {
+    async fn admit_once(
+        &self,
+        namespace: &str,
+        key: &str,
+        ttl: std::time::Duration,
+    ) -> SidResult<bool> {
+        if *self.unrecordable_admissions.lock().unwrap() == Some(namespace) {
+            return Err(sid_core::Error::Storage("admissions unavailable".into()));
+        }
+        sid_plugin::SingleUseAdmissions::admit_once(&self.ceremonies, namespace, key, ttl).await
+    }
+    async fn admit_for(
+        &self,
+        namespace: &str,
+        key: &str,
+        holder: &[u8],
+        ttl: std::time::Duration,
+    ) -> SidResult<bool> {
+        if *self.unrecordable_admissions.lock().unwrap() == Some(namespace) {
+            return Err(sid_core::Error::Storage("admissions unavailable".into()));
+        }
+        sid_plugin::SingleUseAdmissions::admit_for(&self.ceremonies, namespace, key, holder, ttl)
+            .await
+    }
+}
+
+#[async_trait]
+impl sid_plugin::CeremonyStateStore for MockStorage {
+    async fn put_ceremony_state(
+        &self,
+        namespace: &str,
+        key: &str,
+        value: &[u8],
+        ttl: std::time::Duration,
+    ) -> SidResult<()> {
+        if *self.unrecordable_admissions.lock().unwrap() == Some(namespace) {
+            return Err(sid_core::Error::Storage("state unavailable".into()));
+        }
+        self.ceremonies
+            .put_ceremony_state(namespace, key, value, ttl)
+            .await
+    }
+    async fn take_ceremony_state(&self, namespace: &str, key: &str) -> SidResult<Option<Vec<u8>>> {
+        self.ceremonies.take_ceremony_state(namespace, key).await
+    }
+    async fn read_ceremony_state(&self, namespace: &str, key: &str) -> SidResult<Option<Vec<u8>>> {
+        self.ceremonies.read_ceremony_state(namespace, key).await
+    }
+    async fn replace_ceremony_state(
+        &self,
+        namespace: &str,
+        key: &str,
+        expected: &[u8],
+        value: &[u8],
+        ttl: std::time::Duration,
+    ) -> SidResult<bool> {
+        self.ceremonies
+            .replace_ceremony_state(namespace, key, expected, value, ttl)
+            .await
+    }
+    async fn count_in_window(
+        &self,
+        namespace: &str,
+        key: &str,
+        window: std::time::Duration,
+    ) -> SidResult<u64> {
+        self.ceremonies
+            .count_in_window(namespace, key, window)
+            .await
+    }
+    async fn read_count(&self, namespace: &str, key: &str) -> SidResult<u64> {
+        self.ceremonies.read_count(namespace, key).await
+    }
+    async fn clear_count(&self, namespace: &str, key: &str) -> SidResult<()> {
+        self.ceremonies.clear_count(namespace, key).await
+    }
+    async fn purge_expired_ceremony_state(&self) -> SidResult<u64> {
+        self.ceremonies.purge_expired_ceremony_state().await
     }
 }
 
@@ -5964,8 +6069,9 @@ impl MockStorageInner {
                 },
             );
         }
+        let capacity = if self.owed_work_full { 0 } else { u64::MAX };
         for owed in &ctx.work {
-            self.enqueue(owed, u64::MAX)?;
+            self.enqueue(owed, capacity)?;
         }
         Ok(())
     }

@@ -19,7 +19,10 @@ path = "src/main.rs"
 sid-authn = { workspace = true, features = ["grpc"] }
 # The process's JWT signature provider, installed at startup.
 sid-crypto = { workspace = true, features = ["jwt", "tls-aws-lc"] }
-sid-infra = { workspace = true, features = ["redis"] }
+# The shared receiver: calls are admitted with tokens for the installation's
+# account API resource, decided by its issuer.
+sid-auth = { workspace = true, default-features = false }
+sid-infra = { workspace = true }
 sid-serve = { workspace = true }
 sid-core = { workspace = true, features = ["grpc"] }
 sid-plugin = { workspace = true }
@@ -59,3 +62,6 @@ tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"
 tonic-types = { workspace = true }
 # Every served method is called to check the error contract.
 sid-serve = { workspace = true, features = ["error-contract"] }
+# A real issuer the receiver asks, over the network.
+sid-test-issuer = { path = "../sid-test-issuer" }
+tokio-stream = "0.1"

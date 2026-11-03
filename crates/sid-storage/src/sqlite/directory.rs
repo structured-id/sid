@@ -557,6 +557,14 @@ impl SqliteBackend {
         for id in &write.unbind {
             unbind_principal(&mut tx, *id, profile_id).await?;
         }
+        // Contacts before bindings: an email binding names the contact that
+        // holds its mailbox.
+        for id in &write.remove_emails {
+            delete_email(&mut tx, *id, Some(profile_id)).await?;
+        }
+        for email in &write.add_emails {
+            upsert_email(&mut tx, email).await?;
+        }
         for p in &write.bind {
             if p.profile_id != profile_id {
                 return Err(SidError::Validation(
@@ -568,12 +576,6 @@ impl SqliteBackend {
             } else {
                 bind_principal(&mut tx, p).await?;
             }
-        }
-        for id in &write.remove_emails {
-            delete_email(&mut tx, *id, Some(profile_id)).await?;
-        }
-        for email in &write.add_emails {
-            upsert_email(&mut tx, email).await?;
         }
         for id in &write.remove_phones {
             delete_phone(&mut tx, *id, Some(profile_id)).await?;

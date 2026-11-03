@@ -5388,6 +5388,37 @@ async fn test_magic_link_disabled_by_default() {
     );
 }
 
+/// Regression: while the magic-link email queue is full, a request for a
+/// real Corporate account is refused by its store, yet the caller gets the
+/// same answer as for an unknown address. Otherwise a delivery backlog would
+/// tell an unauthenticated caller which addresses have accounts.
+#[tokio::test]
+async fn test_magic_link_queue_full_answers_as_an_unknown_address() {
+    let corporate = "corporate-backlog@sid.example.com";
+    let unknown = "unknown-backlog@sid.example.com";
+    let svc = TestServices::with_magic_links(MockStorage::new());
+    account_with_email(&svc, corporate, sid_core::models::ProfileType::Corporate).await;
+    svc.mock_storage.fill_owed_work();
+
+    for email in [unknown, corporate] {
+        let resp = svc
+            .auth
+            .request_magic_link(magic_link_request(email))
+            .await
+            .unwrap_or_else(|e| panic!("uniform answer for {email}: {e:?}"))
+            .into_inner();
+        assert_eq!(resp.expires_in, 900, "{email}");
+    }
+    assert_eq!(
+        svc.storage
+            .count_active_magic_links_for_email(corporate)
+            .await
+            .unwrap(),
+        0,
+        "no link exists that no email will carry"
+    );
+}
+
 /// Regression:with magic links enabled, only a Corporate Profile gets a
 /// link. A personal account and an unknown address get the same answer and no link.
 #[tokio::test]
@@ -5508,10 +5539,13 @@ async fn test_magic_link_follows_the_principal_assignment() {
         "a link was sent for an address that routes to nobody"
     );
 
-    let (link, token) = sid_authn::magic_link::MagicLinkService::new(svc.storage.clone())
-        .request_magic_link(email)
-        .await
-        .unwrap();
+    let (link, token) = sid_authn::magic_link::MagicLinkService::new(
+        svc.storage.clone(),
+        common::test_key_manager(),
+    )
+    .request_magic_link(email, email)
+    .await
+    .unwrap();
     let err = svc
         .auth
         .verify_magic_link(Request::new(VerifyMagicLinkRequest {
@@ -5535,10 +5569,13 @@ async fn test_magic_link_verify_issues_provisional_session() {
     let email = "corp-verify@sid.example.com";
     let svc = TestServices::with_magic_links(MockStorage::new());
     let profile = account_with_email(&svc, email, sid_core::models::ProfileType::Corporate).await;
-    let (link, token) = sid_authn::magic_link::MagicLinkService::new(svc.storage.clone())
-        .request_magic_link(email)
-        .await
-        .unwrap();
+    let (link, token) = sid_authn::magic_link::MagicLinkService::new(
+        svc.storage.clone(),
+        common::test_key_manager(),
+    )
+    .request_magic_link(email, email)
+    .await
+    .unwrap();
 
     let resp = svc
         .auth
@@ -5578,10 +5615,13 @@ async fn test_magic_link_verify_unreadable_session_is_reported() {
     let email = "corp-unreadable@sid.example.com";
     let svc = TestServices::with_magic_links(MockStorage::new());
     account_with_email(&svc, email, sid_core::models::ProfileType::Corporate).await;
-    let (link, token) = sid_authn::magic_link::MagicLinkService::new(svc.storage.clone())
-        .request_magic_link(email)
-        .await
-        .unwrap();
+    let (link, token) = sid_authn::magic_link::MagicLinkService::new(
+        svc.storage.clone(),
+        common::test_key_manager(),
+    )
+    .request_magic_link(email, email)
+    .await
+    .unwrap();
     svc.mock_storage.fail_magic_link_reads();
 
     let err = svc
@@ -5602,10 +5642,13 @@ async fn test_magic_link_verify_unrecorded_consumption_is_reported() {
     let email = "corp-unrecorded@sid.example.com";
     let svc = TestServices::with_magic_links(MockStorage::new());
     account_with_email(&svc, email, sid_core::models::ProfileType::Corporate).await;
-    let (link, token) = sid_authn::magic_link::MagicLinkService::new(svc.storage.clone())
-        .request_magic_link(email)
-        .await
-        .unwrap();
+    let (link, token) = sid_authn::magic_link::MagicLinkService::new(
+        svc.storage.clone(),
+        common::test_key_manager(),
+    )
+    .request_magic_link(email, email)
+    .await
+    .unwrap();
     svc.mock_storage.fail_magic_link_consume();
 
     let err = svc
@@ -5626,10 +5669,13 @@ async fn test_magic_link_verify_rejects_personal_profile() {
     let email = "personal-verify@sid.example.com";
     let svc = TestServices::with_magic_links(MockStorage::new());
     let profile = account_with_email(&svc, email, sid_core::models::ProfileType::Personal).await;
-    let (link, token) = sid_authn::magic_link::MagicLinkService::new(svc.storage.clone())
-        .request_magic_link(email)
-        .await
-        .unwrap();
+    let (link, token) = sid_authn::magic_link::MagicLinkService::new(
+        svc.storage.clone(),
+        common::test_key_manager(),
+    )
+    .request_magic_link(email, email)
+    .await
+    .unwrap();
 
     let err = svc
         .auth

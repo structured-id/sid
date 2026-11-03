@@ -40,23 +40,29 @@ pub(super) async fn sqlite() -> Arc<SqliteBackend> {
     Arc::new(SqliteBackend::new_in_memory().await.unwrap())
 }
 
-/// The two authorities over one database and cache, as a standalone
-/// installation runs them: the evaluator over its own store, sealing history
-/// keys and its records with `history_keys`; the credential side sealing its
-/// records with `field_keys`, holding no history key.
+/// The two authorities over one database, as a standalone installation runs
+/// them: the evaluator over its own store, sealing history keys and its
+/// records with `history_keys`; the credential side sealing its records with
+/// `field_keys`, holding no history key.
 pub(super) fn split(
     storage: Arc<SqliteBackend>,
     installation: sid_core::models::OrgId,
     history_keys: Arc<dyn sid_keys::KeyManager>,
     field_keys: Arc<dyn sid_keys::KeyManager>,
 ) -> (Operations, Arc<HistoryEvaluation>) {
-    let cache: Arc<dyn CacheBackend> = Arc::new(sid_plugin::cache::InMemoryCacheBackend::new());
+    let ceremonies: Arc<dyn CeremonyStateStore> = storage.clone();
     let evaluation = Arc::new(HistoryEvaluation::new(
         Arc::new(storage.history_keys()),
-        cache.clone(),
+        ceremonies.clone(),
         history_keys,
     ));
-    let ops = PasswordOperations::new(storage, cache, field_keys, installation, evaluation.clone());
+    let ops = PasswordOperations::new(
+        storage,
+        ceremonies,
+        field_keys,
+        installation,
+        evaluation.clone(),
+    );
     (ops, evaluation)
 }
 
@@ -1028,7 +1034,7 @@ async fn the_sides_share_no_secret_record() {
 
     ops.store(&op).await.unwrap();
     let evaluator_view = ChallengeStore::<PendingOperation<ProfileId, Change>>::new(
-        evaluation.cache.clone(),
+        evaluation.ceremonies.clone(),
         history_keys,
         "password-operation",
         OPERATION_TTL,
@@ -1038,7 +1044,7 @@ async fn the_sides_share_no_secret_record() {
         "the evaluator's keys open no credential record"
     );
     let credential_view = ChallengeStore::<EvaluatorOperation>::new(
-        evaluation.cache.clone(),
+        evaluation.ceremonies.clone(),
         field_keys,
         "password-history-evaluation",
         OPERATION_TTL,
@@ -1571,12 +1577,10 @@ async fn only_an_admitted_live_operation_is_evaluated() {
     );
     assert_eq!(
         evaluation
-            .cache
-            .incr(
-                &format!(
-                    "password-history-evaluations:{}",
-                    charge_key("profile:test")
-                ),
+            .ceremonies
+            .count_in_window(
+                "password-history-evaluations",
+                &charge_key("profile:test").to_string(),
                 EVALUATION_WINDOW,
             )
             .await

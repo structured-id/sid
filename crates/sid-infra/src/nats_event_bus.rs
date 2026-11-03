@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! NATS JetStream event bus implementation.
 //!
-//! Production EventBus for multi-binary deployments, on the identity
-//! [`Topology`]: facts go to the retained history, addressed work to the
-//! work stream, where it stays until its receiver settles it.
+//! Production EventBus for multi-binary deployments, on one family's
+//! [`Topology`]: facts of that family go to its retained history, addressed
+//! work to its work stream, where it stays until its receiver settles it.
+//! Events of another family are refused.
 //!
 //! Connects to an embedded or external NATS server.
 
@@ -152,29 +153,33 @@ impl NatsEventBus {
     }
 }
 
-/// Refuses `event` unless its route is one `accepts`.
-fn routed(event: &Event, accepts: fn(EventRoute) -> bool) -> EventBusResult<()> {
+/// Refuses `event` unless its route is one `accepts` for `family`.
+fn routed(
+    event: &Event,
+    family: EventFamily,
+    accepts: fn(EventRoute, EventFamily) -> bool,
+) -> EventBusResult<()> {
     match event_route(&event.event_type) {
-        Some(route) if accepts(route) => Ok(()),
+        Some(route) if accepts(route, family) => Ok(()),
         _ => Err(EventBusError::Unroutable(event.event_type.clone())),
     }
 }
 
-/// An identity fact: the only thing kept in this bus's history.
-fn identity_fact(route: EventRoute) -> bool {
-    route == EventRoute::Fact(EventFamily::Identity)
+/// A fact of the bus's family: the only thing kept in its history.
+fn family_fact(route: EventRoute, family: EventFamily) -> bool {
+    route == EventRoute::Fact(family)
 }
 
-/// Anything of the identity family: a fact owed to a required receiver, or
+/// Anything of the bus's family: a fact owed to a required receiver, or
 /// work addressed to a named one.
-fn identity_work(route: EventRoute) -> bool {
-    route.family() == EventFamily::Identity
+fn family_work(route: EventRoute, family: EventFamily) -> bool {
+    route.family() == family
 }
 
 #[async_trait]
 impl EventBus for NatsEventBus {
     async fn publish(&self, event: Event) -> EventBusResult<()> {
-        routed(&event, identity_fact)?;
+        routed(&event, self.topology.family(), family_fact)?;
         let subject = self
             .topology
             .history_subject(&event.event_type)
@@ -196,7 +201,7 @@ impl EventBus for NatsEventBus {
         delivery: WorkId,
         event: &Event,
     ) -> EventBusResult<()> {
-        routed(event, identity_work)?;
+        routed(event, self.topology.family(), family_work)?;
         let subject = self
             .topology
             .work_subject(recipient, &event.event_type)

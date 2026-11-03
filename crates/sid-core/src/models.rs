@@ -170,7 +170,10 @@ pub use machine_user::{
     MachineRestrictions, MachineUser, MachineUserCredential, MachineUserId, MachineUserStatus,
     MachineUserType, OwnerType,
 };
-pub use magic_link::{MAGIC_LINK_EXPIRY_SECS, MAGIC_LINK_RATE_LIMIT_MAX, MagicLinkSession};
+pub use magic_link::{
+    MAGIC_LINK_EMAIL_KIND, MAGIC_LINK_EXPIRY_SECS, MAGIC_LINK_RATE_LIMIT_MAX, MagicLinkSession,
+    magic_link_sealing_context,
+};
 pub use mapped_claims::MappedClaims;
 pub use mfa::{
     ChallengeStatus, EnrollmentStatus, FactorCategory, FactorProperties, MfaChallenge,
