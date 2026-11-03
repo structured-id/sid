@@ -16,11 +16,17 @@ use sid_proto::sid::v1::authz::{AssignRoleRequest, DeleteRoleRequest, RevokeRole
 use sid_proto::sid::v1::authz_service_server::AuthzService;
 use tonic::{Code, Request};
 
+/// `message` as one new command of `token`'s (a method that promises a safe
+/// retry takes an operation key).
 fn bearing<T>(token: &str, message: T) -> Request<T> {
     let mut request = Request::new(message);
     request
         .metadata_mut()
         .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    request.metadata_mut().insert(
+        sid_authn::operation::OPERATION_KEY_HEADER,
+        uuid::Uuid::new_v4().to_string().parse().unwrap(),
+    );
     request
 }
 

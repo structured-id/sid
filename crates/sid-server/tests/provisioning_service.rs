@@ -144,16 +144,19 @@ impl Fixture {
             .find(|r| r.key == SCIM_PROVISIONER_ROLE)
             .unwrap();
         self.authz
-            .assign_role(self.admin(AssignRoleRequest {
-                principal: Some(Principal::ProvisioningConnectorId(
-                    connector.id.clone().unwrap(),
-                )),
-                role_id: role.id.0.to_string(),
-                scope: Some(format!("oauth_resource:{}", self.directory.id)),
-                expires_at: None,
-                admin: None,
-                policy_admin: None,
-            }))
+            .assign_role(self.keyed(
+                AssignRoleRequest {
+                    principal: Some(Principal::ProvisioningConnectorId(
+                        connector.id.clone().unwrap(),
+                    )),
+                    role_id: role.id.0.to_string(),
+                    scope: Some(format!("oauth_resource:{}", self.directory.id)),
+                    expires_at: None,
+                    admin: None,
+                    policy_admin: None,
+                },
+                &uuid::Uuid::new_v4().to_string(),
+            ))
             .await
             .unwrap();
     }

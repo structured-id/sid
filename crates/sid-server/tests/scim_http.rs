@@ -357,7 +357,7 @@ impl Replica {
             .find(|r| r.key == SCIM_PROVISIONER_ROLE)
             .unwrap();
         self.authz
-            .assign_role(admin(AssignRoleRequest {
+            .assign_role(keyed(AssignRoleRequest {
                 principal: Some(Principal::ProvisioningConnectorId(
                     connector.proto.id.clone().unwrap(),
                 )),

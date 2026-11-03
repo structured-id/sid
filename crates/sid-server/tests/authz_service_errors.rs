@@ -100,11 +100,17 @@ impl Harness {
         }
     }
 
+    /// `msg` as one new command of the administrator's (a method that
+    /// promises a safe retry takes an operation key).
     fn authed<T>(&self, msg: T) -> Request<T> {
         let mut req = Request::new(msg);
         req.metadata_mut().insert(
             "authorization",
             format!("Bearer {}", self.token).parse().unwrap(),
+        );
+        req.metadata_mut().insert(
+            sid_authn::operation::OPERATION_KEY_HEADER,
+            uuid::Uuid::new_v4().to_string().parse().unwrap(),
         );
         req
     }

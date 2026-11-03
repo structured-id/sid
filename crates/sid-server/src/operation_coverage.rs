@@ -24,6 +24,158 @@ const OFF: Coverage = Coverage::NotServed;
 /// Every mutating CE method and its coverage, by full method name.
 pub const COVERAGE: &[(&str, Coverage)] = &[
     (
+        "sid.v1.authn.OidcIssuerService/AdmitSenderProof",
+        Coverage::Ceremony(
+            "RFC 9449 §11.1: each DPoP proof is admitted once; a repeat is refused \
+             as a replay",
+        ),
+    ),
+    (
+        "sid.v1.authn.PasswordHistoryEvaluatorService/EvaluatePasswordHistory",
+        Coverage::Ceremony(
+            "the password operation the request names keeps its answers: a repeat \
+             with the same input returns them, another input is refused",
+        ),
+    ),
+    (
+        "sid.v1.authn.PasswordHistoryEvaluatorService/PreparePasswordHistory",
+        Coverage::Ceremony(
+            "the password operation the request names keeps its admission: an exact \
+             repeat returns the original selection, any other is a conflict",
+        ),
+    ),
+    (
+        "sid.v1.authn.SystemIntegrationService/GetAccountConnection",
+        Coverage::Ceremony(
+            "RFC 7523 §3: the key proof's jti is admitted once; the answer \
+             otherwise only reads the integration",
+        ),
+    ),
+    ("sid.v1.authz.AuthzService/AddToGroup", Coverage::Keyed),
+    ("sid.v1.authz.AuthzService/AssignRole", Coverage::Keyed),
+    ("sid.v1.authz.AuthzService/CreateGroup", Coverage::Keyed),
+    ("sid.v1.authz.AuthzService/CreatePolicy", Coverage::Keyed),
+    ("sid.v1.authz.AuthzService/CreateRole", Coverage::Keyed),
+    ("sid.v1.authz.AuthzService/DeleteGroup", Coverage::Keyed),
+    ("sid.v1.authz.AuthzService/DeletePolicy", Coverage::Keyed),
+    ("sid.v1.authz.AuthzService/DeleteRole", Coverage::Keyed),
+    ("sid.v1.authz.AuthzService/RemoveFromGroup", Coverage::Keyed),
+    ("sid.v1.authz.AuthzService/RevokeRole", Coverage::Keyed),
+    ("sid.v1.authz.AuthzService/UpdateGroup", Coverage::Keyed),
+    ("sid.v1.authz.AuthzService/UpdatePolicy", Coverage::Keyed),
+    ("sid.v1.authz.AuthzService/UpdateRole", Coverage::Keyed),
+    (
+        "sid.v1.authz.AuthzService/BatchCheckPermission",
+        Coverage::Natural(
+            "the checks decide from current state; only a refused caller is \
+             audited, each attempt as its own event",
+        ),
+    ),
+    (
+        "sid.v1.authz.AuthzService/CheckPermission",
+        Coverage::Natural(
+            "the check decides from current state; only a refused caller is \
+             audited, each attempt as its own event",
+        ),
+    ),
+    (
+        "sid.v1.authz.ForwardAuthService/Verify",
+        Coverage::Ceremony(
+            "RFC 9449 §11.1: a DPoP proof is admitted once by its issuer; the \
+             decision otherwise only reads",
+        ),
+    ),
+    // The issuer's HTTP endpoints delegate to the gRPC methods above them
+    // and keep their rules.
+    (
+        "sid.v1.authn.OidcProviderService/DeleteRegistration",
+        Coverage::Ceremony(
+            "RFC 7592 §2.3: deletion invalidates the client and its registration \
+             access token, so a repeat is refused and changes nothing",
+        ),
+    ),
+    (
+        "sid.v1.authn.OidcProviderService/DeviceAuthorization",
+        Coverage::Ceremony("RFC 8628 §3.2: each request issues its own device and user codes"),
+    ),
+    (
+        "sid.v1.authn.OidcProviderService/GetAuthorize",
+        Coverage::Ceremony(
+            "RFC 6749 §4.1.1: each authorization request issues its own single-use \
+             code",
+        ),
+    ),
+    (
+        "sid.v1.authn.OidcProviderService/GetEndSession",
+        Coverage::Natural(
+            "an ended session stays ended: a repeat finds nothing to end and signs \
+             nobody else out",
+        ),
+    ),
+    (
+        "sid.v1.authn.OidcProviderService/GetUserInfo",
+        Coverage::Ceremony(
+            "RFC 9449 §11.1: a DPoP proof is admitted once; the request otherwise \
+             only reads",
+        ),
+    ),
+    (
+        "sid.v1.authn.OidcProviderService/Introspect",
+        Coverage::Ceremony(
+            "RFC 7523 §3: a client assertion's jti is admitted once; the answer \
+             otherwise only reads the token",
+        ),
+    ),
+    (
+        "sid.v1.authn.OidcProviderService/PostAuthorize",
+        Coverage::Ceremony(
+            "RFC 6749 §4.1.1: each authorization request issues its own single-use \
+             code",
+        ),
+    ),
+    (
+        "sid.v1.authn.OidcProviderService/PostEndSession",
+        Coverage::Natural(
+            "an ended session stays ended: a repeat finds nothing to end and signs \
+             nobody else out",
+        ),
+    ),
+    (
+        "sid.v1.authn.OidcProviderService/PostUserInfo",
+        Coverage::Ceremony(
+            "RFC 9449 §11.1: a DPoP proof is admitted once; the request otherwise \
+             only reads",
+        ),
+    ),
+    (
+        "sid.v1.authn.OidcProviderService/Register",
+        Coverage::Ceremony(
+            "RFC 7591 §3: the client presents no operation key; each registration \
+             issues a new client, its secret and registration access token once",
+        ),
+    ),
+    (
+        "sid.v1.authn.OidcProviderService/Revoke",
+        Coverage::Ceremony(
+            "RFC 7009 §2.2: revoking a revoked or unknown token answers success and \
+             changes nothing",
+        ),
+    ),
+    (
+        "sid.v1.authn.OidcProviderService/Token",
+        Coverage::Ceremony(
+            "RFC 6749 §4.1.2 and §10.4: a code or rotated refresh token is \
+             consumed once; a second use is refused, never answered with tokens",
+        ),
+    ),
+    (
+        "sid.v1.authn.OidcProviderService/UpdateRegistration",
+        Coverage::Ceremony(
+            "RFC 7592 §2.2: the request carries the client's whole metadata and \
+             replaces it, so a repeat leaves the same registration",
+        ),
+    ),
+    (
         "sid.v1.federation.UpstreamService/CreateUpstreamProvider",
         Coverage::Keyed,
     ),

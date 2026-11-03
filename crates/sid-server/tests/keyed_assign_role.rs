@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! AssignRole as a keyed command, on PostgreSQL (port 54399) and SQLite: a
-//! repeated operation key returns the assignment the first call made and
-//! makes none, even after that assignment was revoked; the same key with
-//! another request conflicts; concurrent calls with one key make one
-//! assignment; keys are per caller.
+//! The authorization administration commands as keyed commands, on
+//! PostgreSQL (port 54399) and SQLite: a repeated operation key returns the
+//! assignment the first call made and makes none, even after that assignment
+//! was revoked; the same key with another request conflicts; concurrent calls
+//! with one key make one assignment; keys are per caller; a call without a
+//! key is refused; retried role creation and membership removal answer as
+//! their first call and undo no later change.
 
 mod common;
 
@@ -20,7 +22,10 @@ use sid_core::models::{AuditEntry, Profile, ProfileId, ProjectId, Role};
 use sid_plugin::StorageBackend;
 use sid_proto::sid::v1::authz::assign_role_request::Principal;
 use sid_proto::sid::v1::authz::list_role_assignments_request::Filter;
-use sid_proto::sid::v1::authz::{AssignRoleRequest, ListRoleAssignmentsRequest, RevokeRoleRequest};
+use sid_proto::sid::v1::authz::{
+    AddToGroupRequest, AssignRoleRequest, CreateGroupRequest, CreateRoleRequest,
+    ListRoleAssignmentsRequest, RemoveFromGroupRequest, RevokeRoleRequest,
+};
 use sid_proto::sid::v1::authz_service_server::AuthzService;
 use tonic::{Code, Request};
 
@@ -88,6 +93,11 @@ fn call<T>(msg: T, token: &str, key: Option<&str>) -> Request<T> {
 
 fn tag() -> String {
     uuid::Uuid::now_v7().simple().to_string()
+}
+
+/// The unique part of a key made as `k-{tag}`.
+fn tag_of(key: &str) -> &str {
+    key.trim_start_matches("k-")
 }
 
 async fn profile(h: &Harness) -> ProfileId {
@@ -174,7 +184,7 @@ async fn retry_after_revocation_recreates_nothing(h: Harness) {
                 assignment_id: first.clone(),
             },
             &h.token,
-            None,
+            Some(&format!("k-{}", tag())),
         ))
         .await
         .unwrap();
@@ -247,17 +257,116 @@ async fn keys_are_per_caller(h: Harness) {
     assert_ne!(mine, theirs);
 }
 
-/// Without a key a call is as before: each one assigns.
-async fn without_a_key_each_call_assigns(h: Harness) {
+/// A call without a key cannot promise a safe retry: it is refused and
+/// assigns nothing.
+async fn without_a_key_nothing_is_assigned(h: Harness) {
     let role = role(&h).await;
     let who = profile(&h).await;
-    for _ in 0..2 {
-        h.svc
-            .assign_role(call(assign(&role, who), &h.token, None))
-            .await
-            .unwrap();
-    }
-    assert_eq!(held(&h, who).await.len(), 2);
+    let refused = h
+        .svc
+        .assign_role(call(assign(&role, who), &h.token, None))
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code(), Code::InvalidArgument);
+    assert_eq!(
+        extract_error_info(&refused).expect("ErrorInfo").0,
+        "REQUIRED_FIELD_MISSING"
+    );
+    assert!(held(&h, who).await.is_empty());
+}
+
+/// A role creation is retried after its response was lost: the retry
+/// answers with the role it created, not "name taken" by that very role.
+async fn role_creation_retry_answers_with_its_role(h: Harness) {
+    h.storage
+        .ensure_system_project(AuditEntry::system("test", "role").into())
+        .await
+        .unwrap();
+    let key = format!("k-{}", tag());
+    let create = || {
+        call(
+            CreateRoleRequest {
+                project_id: ProjectId::system().0.to_string(),
+                name: format!("n{}", tag_of(&key)),
+                description: None,
+                permissions: vec!["ledger.read".into()],
+            },
+            &h.token,
+            Some(&key),
+        )
+    };
+    let first = h.svc.create_role(create()).await.unwrap().into_inner();
+    let retry = h
+        .svc
+        .create_role(create())
+        .await
+        .expect("the retry answers with the role it created")
+        .into_inner();
+    assert_eq!(retry, first);
+}
+
+/// A member's removal is retried after the member was added back: the retry
+/// answers as the first removal and leaves the later addition in place.
+async fn membership_removal_retry_keeps_a_later_addition(h: Harness) {
+    h.storage
+        .ensure_system_project(AuditEntry::system("test", "group").into())
+        .await
+        .unwrap();
+    let who = profile(&h).await;
+    let group = h
+        .svc
+        .create_group(call(
+            CreateGroupRequest {
+                project_id: ProjectId::system().0.to_string(),
+                name: format!("g{}", tag()),
+                description: None,
+            },
+            &h.token,
+            Some(&format!("k-{}", tag())),
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .group
+        .unwrap()
+        .id;
+    let add = || {
+        call(
+            AddToGroupRequest {
+                group_id: group.clone(),
+                profile_id: who.to_string(),
+            },
+            &h.token,
+            Some(&format!("k-{}", tag())),
+        )
+    };
+    let key = format!("k-{}", tag());
+    let remove = || {
+        call(
+            RemoveFromGroupRequest {
+                group_id: group.clone(),
+                profile_id: who.to_string(),
+            },
+            &h.token,
+            Some(&key),
+        )
+    };
+    h.svc.add_to_group(add()).await.unwrap();
+    h.svc.remove_from_group(remove()).await.unwrap();
+    h.svc.add_to_group(add()).await.unwrap();
+    h.svc.remove_from_group(remove()).await.unwrap();
+
+    let members = h
+        .storage
+        .list_group_members(sid_core::models::GroupId(
+            uuid::Uuid::parse_str(&group).unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        members.iter().any(|m| m.profile_id == who),
+        "the retried removal took the later addition away"
+    );
 }
 
 macro_rules! on_both_engines {
@@ -287,5 +396,7 @@ on_both_engines!(
     the_same_key_for_another_request_conflicts,
     concurrent_calls_with_one_key_assign_once,
     keys_are_per_caller,
-    without_a_key_each_call_assigns,
+    without_a_key_nothing_is_assigned,
+    role_creation_retry_answers_with_its_role,
+    membership_removal_retry_keeps_a_later_addition,
 );

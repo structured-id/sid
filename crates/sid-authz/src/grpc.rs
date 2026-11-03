@@ -9,8 +9,10 @@
 use crate::cedar::{CedarError, CedarService};
 use crate::decision::AuthzCheckRequest;
 use crate::engine::CeAuthzEngine;
+use prost::Message;
 use sid_authn::caller::{Caller, authenticate};
 use sid_authn::jwt::JwtService;
+use sid_authn::operation::{KeyedCommand, required_key};
 use sid_authn::resource_token::ResourceTokenVerifier;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::service_auth::authenticate_service;
@@ -23,9 +25,9 @@ use sid_core::grpc_error::{ApiError, ErrorReason};
 use sid_core::models::audit::{ActorType, AuditOutcome};
 use sid_core::models::{
     AUTHZ_CHECK, AuditEntry, CedarPolicy, CedarPolicyId, ConnectorState, Group, GroupId,
-    GroupMember, PolicyScope, ProfileId, ProjectId, ProvisioningConnectorId, ResourceId,
-    ResourceState, Role, RoleAssignment, RoleAssignmentId, RoleAssignmentPrincipal, RoleId,
-    TOKEN_INTROSPECT,
+    GroupMember, MutationContext, PolicyScope, ProfileId, ProjectId, ProvisioningConnectorId,
+    ResourceId, ResourceState, Role, RoleAssignment, RoleAssignmentId, RoleAssignmentPrincipal,
+    RoleId, TOKEN_INTROSPECT,
 };
 use sid_plugin::StorageBackend;
 use sid_plugin::audit::AuditLog;
@@ -232,6 +234,61 @@ fn decode_assigned(result: &[u8]) -> Result<Response<AssignRoleResponse>, Status
             tracing::warn!(error = %e, "recorded AssignRole answer unreadable");
             Status::from(sid_core::grpc_error::ApiError::internal())
         })
+}
+
+const CREATE_ROLE: &str = "authz.create_role";
+const UPDATE_ROLE: &str = "authz.update_role";
+const DELETE_ROLE: &str = "authz.delete_role";
+const REVOKE_ROLE: &str = "authz.revoke_role";
+const CREATE_GROUP: &str = "authz.create_group";
+const UPDATE_GROUP: &str = "authz.update_group";
+const DELETE_GROUP: &str = "authz.delete_group";
+const ADD_TO_GROUP: &str = "authz.add_to_group";
+const REMOVE_FROM_GROUP: &str = "authz.remove_from_group";
+const CREATE_POLICY: &str = "authz.create_policy";
+const UPDATE_POLICY: &str = "authz.update_policy";
+const DELETE_POLICY: &str = "authz.delete_policy";
+
+/// One administrative command of the engine subject `subject` under the
+/// request's operation key.
+#[allow(clippy::result_large_err)]
+fn command(
+    metadata: &tonic::metadata::MetadataMap,
+    subject: impl std::fmt::Display,
+    method: &'static str,
+    req: &impl prost::Message,
+) -> Result<KeyedCommand, Status> {
+    Ok(KeyedCommand::new(
+        format!("authz:{subject}"),
+        required_key(metadata)?,
+        method,
+        req.encode_to_vec(),
+    ))
+}
+
+/// The answer to `command` once its commit returned `committed`: `answer`
+/// when this attempt committed, the recorded answer when a concurrent
+/// attempt committed first, otherwise the failure as `refuse` maps it.
+async fn settled<T: prost::Message + Default>(
+    storage: &dyn StorageBackend,
+    command: &KeyedCommand,
+    committed: Result<(), sid_core::Error>,
+    answer: T,
+    refuse: impl FnOnce(sid_core::Error) -> Status,
+) -> Result<Response<T>, Status> {
+    match committed {
+        Ok(()) => Ok(Response::new(answer)),
+        Err(sid_core::Error::OperationCompleted(_)) => {
+            let recorded = command.committed_elsewhere(storage).await?;
+            T::decode(recorded.as_slice())
+                .map(Response::new)
+                .map_err(|e| {
+                    tracing::warn!(error = %e, "recorded authorization answer unreadable");
+                    Status::from(sid_core::grpc_error::ApiError::internal())
+                })
+        }
+        Err(e) => Err(refuse(e)),
+    }
 }
 
 fn assignment_to_proto(a: &RoleAssignment) -> sid_proto::sid::v1::RoleAssignment {
@@ -1694,7 +1751,18 @@ impl AuthzService for AuthzServiceImpl {
     ) -> Result<Response<CreateRoleResponse>, Status> {
         let caller = self.admin(&request).await?;
         self.check_maintenance()?;
-        let req = request.into_inner();
+        let (metadata, _, req) = request.into_parts();
+        // A retry of a completed creation answers with the role it created,
+        // not "name taken" by that very role.
+        let command = command(
+            &metadata,
+            format!("user:{}", caller.profile_id),
+            CREATE_ROLE,
+            &req,
+        )?;
+        if let Some(recorded) = command.replay(&*self.storage).await? {
+            return Ok(Response::new(recorded));
+        }
         let project_id = parse_project_id(&req.project_id)?;
 
         if req.name.is_empty() {
@@ -1705,32 +1773,29 @@ impl AuthzService for AuthzServiceImpl {
         role.description = req.description;
         role.permissions = req.permissions;
 
-        self.storage
-            .create_role(
-                &role,
-                AuditEntry::admin(
-                    caller.profile_id.to_string(),
-                    "role.create",
-                    role.id.0.to_string(),
-                )
-                .into(),
+        let answer = CreateRoleResponse {
+            role: Some(role_to_proto(&role)),
+        };
+        let ctx = MutationContext::from(AuditEntry::admin(
+            caller.profile_id.to_string(),
+            "role.create",
+            role.id.0.to_string(),
+        ))
+        .with_operation(command.completion(answer.encode_to_vec()));
+        let committed = self.storage.create_role(&role, ctx).await;
+        let answer = settled(&*self.storage, &command, committed, answer, |e| match e {
+            sid_core::Error::Conflict(_) => ApiError::new(
+                ErrorReason::RoleAlreadyExists,
+                "the project already has a role of this name",
             )
-            .await
-            .map_err(|e| match e {
-                sid_core::Error::Conflict(_) => ApiError::new(
-                    ErrorReason::RoleAlreadyExists,
-                    "the project already has a role of this name",
-                )
-                .with_resource("Role", req.name.clone())
-                .into(),
-                other => storage_failure(other),
-            })?;
+            .with_resource("Role", req.name.clone())
+            .into(),
+            other => storage_failure(other),
+        })
+        .await?;
 
         info!("Created role '{}' in project {}", role.key, project_id.0);
-
-        Ok(Response::new(CreateRoleResponse {
-            role: Some(role_to_proto(&role)),
-        }))
+        Ok(answer)
     }
 
     #[instrument(skip_all, fields(method = "get_role"))]
@@ -1778,7 +1843,13 @@ impl AuthzService for AuthzServiceImpl {
         let asker = self.asker(&request).await?;
         let administrator = asker.administrator()?;
         self.check_maintenance()?;
-        let req = request.into_inner();
+        let (metadata, _, req) = request.into_parts();
+        // A retry of a completed edit answers with the role as that edit left
+        // it, and never writes it over a later edit.
+        let command = command(&metadata, asker.own_subject(), UPDATE_ROLE, &req)?;
+        if let Some(recorded) = command.replay(&*self.storage).await? {
+            return Ok(Response::new(recorded));
+        }
         let role_id = parse_role_id(&req.id)?;
 
         // Only the root learns a role is missing.
@@ -1807,20 +1878,29 @@ impl AuthzService for AuthzServiceImpl {
         }
         role.updated_at = chrono::Utc::now();
 
-        let audit = asker.audit("role.update", role.id.0.to_string()).into();
-        let updated = crate::admin::RoleAdministration::new(self.storage.clone())
+        let answer = UpdateRoleResponse {
+            role: Some(role_to_proto(&role)),
+        };
+        let audit = MutationContext::from(asker.audit("role.update", role.id.0.to_string()))
+            .with_operation(command.completion(answer.encode_to_vec()));
+        let committed = match crate::admin::RoleAdministration::new(self.storage.clone())
             .edit_role(&administrator, &role, audit)
             .await
-            .map_err(administration_refusal)?;
-        if !updated {
-            // Deleted or changed since it was read: never recreated or overwritten.
-            return Err(changed_concurrently());
-        }
-        role.revision += 1;
-
-        Ok(Response::new(UpdateRoleResponse {
-            role: Some(role_to_proto(&role)),
-        }))
+        {
+            // Deleted or changed since it was read: never recreated or
+            // overwritten.
+            Ok(false) => return Err(changed_concurrently()),
+            Ok(true) => Ok(()),
+            Err(e) => Err(e),
+        };
+        settled(
+            &*self.storage,
+            &command,
+            committed,
+            answer,
+            administration_refusal,
+        )
+        .await
     }
 
     #[instrument(skip_all, fields(method = "delete_role"))]
@@ -1830,7 +1910,18 @@ impl AuthzService for AuthzServiceImpl {
     ) -> Result<Response<DeleteRoleResponse>, Status> {
         let caller = self.admin(&request).await?;
         self.check_maintenance()?;
-        let req = request.into_inner();
+        let (metadata, _, req) = request.into_parts();
+        // A retry of a completed deletion answers as the first, not "not
+        // found" for the role it deleted.
+        let command = command(
+            &metadata,
+            format!("user:{}", caller.profile_id),
+            DELETE_ROLE,
+            &req,
+        )?;
+        if let Some(recorded) = command.replay(&*self.storage).await? {
+            return Ok(Response::new(recorded));
+        }
         let role_id = parse_role_id(&req.id)?;
 
         self.storage
@@ -1839,27 +1930,24 @@ impl AuthzService for AuthzServiceImpl {
             .map_err(storage_failure)?
             .ok_or_else(|| role_not_found(role_id))?;
 
-        self.storage
-            .delete_role(
-                role_id,
-                AuditEntry::admin(
-                    caller.profile_id.to_string(),
-                    "role.delete",
-                    role_id.0.to_string(),
-                )
-                .into(),
-            )
-            .await
-            .map_err(|e| match e {
-                // The administrator role, still assigned: deleting it would
-                // remove the installation's administrators with it.
-                sid_core::Error::InvalidState(_) => revocation_refusal(e),
-                other => storage_failure(other),
-            })?;
+        let answer = DeleteRoleResponse {};
+        let ctx = MutationContext::from(AuditEntry::admin(
+            caller.profile_id.to_string(),
+            "role.delete",
+            role_id.0.to_string(),
+        ))
+        .with_operation(command.completion(answer.encode_to_vec()));
+        let committed = self.storage.delete_role(role_id, ctx).await;
+        let answer = settled(&*self.storage, &command, committed, answer, |e| match e {
+            // The administrator role, still assigned: deleting it would
+            // remove the installation's administrators with it.
+            sid_core::Error::InvalidState(_) => revocation_refusal(e),
+            other => storage_failure(other),
+        })
+        .await?;
 
         info!("Deleted role {}", role_id.0);
-
-        Ok(Response::new(DeleteRoleResponse {}))
+        Ok(answer)
     }
 
     #[instrument(skip_all, fields(method = "list_roles"))]
@@ -1893,26 +1981,11 @@ impl AuthzService for AuthzServiceImpl {
         let asker = self.asker(&request).await?;
         let administrator = asker.administrator()?;
         self.check_maintenance()?;
-        // A caller that names its command by an operation key gets the
-        // recorded answer on a retry: the assignment the first call made,
-        // whether or not it is still in force, and never a second one.
-        let key = request
-            .metadata()
-            .contains_key(sid_authn::operation::OPERATION_KEY_HEADER)
-            .then(|| sid_authn::operation::required_key(request.metadata()))
-            .transpose()?;
-        let req = request.into_inner();
-        let command = key.map(|key| {
-            sid_authn::operation::KeyedCommand::new(
-                format!("authz:{}", administrator.subject()),
-                key,
-                ASSIGN_ROLE,
-                prost::Message::encode_to_vec(&req),
-            )
-        });
-        if let Some(command) = &command
-            && let Some(result) = command.completed(&*self.storage).await?
-        {
+        // A retry gets the recorded answer: the assignment the first call
+        // made, whether or not it is still in force, and never a second one.
+        let (metadata, _, req) = request.into_parts();
+        let command = command(&metadata, administrator.subject(), ASSIGN_ROLE, &req)?;
+        if let Some(result) = command.completed(&*self.storage).await? {
             return decode_assigned(&result);
         }
 
@@ -2002,20 +2075,23 @@ impl AuthzService for AuthzServiceImpl {
             .into();
         let assigned = crate::admin::RoleAdministration::new(self.storage.clone())
             .assign_recording(&administrator, assignment, audit, |stored| {
-                command.as_ref().map(|command| {
-                    command.completion(prost::Message::encode_to_vec(&AssignRoleResponse {
-                        assignment: Some(assignment_to_proto(stored)),
-                    }))
-                })
+                Some(
+                    command.completion(
+                        AssignRoleResponse {
+                            assignment: Some(assignment_to_proto(stored)),
+                        }
+                        .encode_to_vec(),
+                    ),
+                )
             })
             .await;
-        let assignment = match (assigned, &command) {
-            (Ok(assignment), _) => assignment,
+        let assignment = match assigned {
+            Ok(assignment) => assignment,
             // A concurrent call with the same key committed first.
-            (Err(sid_core::Error::OperationCompleted(_)), Some(command)) => {
+            Err(sid_core::Error::OperationCompleted(_)) => {
                 return decode_assigned(&command.committed_elsewhere(&*self.storage).await?);
             }
-            (Err(e), _) => return Err(administration_refusal(e)),
+            Err(e) => return Err(administration_refusal(e)),
         };
 
         info!(
@@ -2036,20 +2112,34 @@ impl AuthzService for AuthzServiceImpl {
         let asker = self.asker(&request).await?;
         let administrator = asker.administrator()?;
         self.check_maintenance()?;
-        let req = request.into_inner();
+        let (metadata, _, req) = request.into_parts();
+        // A retry of a completed revocation answers as the first, not "not
+        // found" for the assignment it removed.
+        let command = command(&metadata, administrator.subject(), REVOKE_ROLE, &req)?;
+        if let Some(recorded) = command.replay(&*self.storage).await? {
+            return Ok(Response::new(recorded));
+        }
         let assignment_id = parse_assignment_id(&req.assignment_id)?;
 
-        let audit = asker
-            .audit("role.revoke", assignment_id.0.to_string())
-            .into();
-        crate::admin::RoleAdministration::new(self.storage.clone())
+        let answer = RevokeRoleResponse {};
+        let audit = MutationContext::from(asker.audit("role.revoke", assignment_id.0.to_string()))
+            .with_operation(command.completion(answer.encode_to_vec()));
+        let committed = crate::admin::RoleAdministration::new(self.storage.clone())
             .revoke(&administrator, assignment_id, audit)
             .await
-            .map_err(revocation_refusal)?;
+            // `false`: no such assignment to revoke, answered as revoked.
+            .map(|_| ());
+        let answer = settled(
+            &*self.storage,
+            &command,
+            committed,
+            answer,
+            revocation_refusal,
+        )
+        .await?;
 
         info!("Revoked role assignment {}", assignment_id.0);
-
-        Ok(Response::new(RevokeRoleResponse {}))
+        Ok(answer)
     }
 
     #[instrument(skip_all, fields(method = "list_role_assignments"))]
@@ -2113,7 +2203,18 @@ impl AuthzService for AuthzServiceImpl {
     ) -> Result<Response<CreateGroupResponse>, Status> {
         let caller = self.admin(&request).await?;
         self.check_maintenance()?;
-        let req = request.into_inner();
+        let (metadata, _, req) = request.into_parts();
+        // A retry of a completed creation answers with the group it created,
+        // not "name taken" by that very group.
+        let command = command(
+            &metadata,
+            format!("user:{}", caller.profile_id),
+            CREATE_GROUP,
+            &req,
+        )?;
+        if let Some(recorded) = command.replay(&*self.storage).await? {
+            return Ok(Response::new(recorded));
+        }
         let project_id = parse_project_id(&req.project_id)?;
 
         if req.name.is_empty() {
@@ -2123,32 +2224,29 @@ impl AuthzService for AuthzServiceImpl {
         let mut group = Group::new(project_id, &req.name);
         group.description = req.description;
 
-        self.storage
-            .create_group(
-                &group,
-                AuditEntry::admin(
-                    caller.profile_id.to_string(),
-                    "group.create",
-                    group.id.0.to_string(),
-                )
-                .into(),
+        let answer = CreateGroupResponse {
+            group: Some(group_to_proto(&group)),
+        };
+        let ctx = MutationContext::from(AuditEntry::admin(
+            caller.profile_id.to_string(),
+            "group.create",
+            group.id.0.to_string(),
+        ))
+        .with_operation(command.completion(answer.encode_to_vec()));
+        let committed = self.storage.create_group(&group, ctx).await;
+        let answer = settled(&*self.storage, &command, committed, answer, |e| match e {
+            sid_core::Error::Conflict(_) => ApiError::new(
+                ErrorReason::GroupAlreadyExists,
+                "the project already has a group of this name",
             )
-            .await
-            .map_err(|e| match e {
-                sid_core::Error::Conflict(_) => ApiError::new(
-                    ErrorReason::GroupAlreadyExists,
-                    "the project already has a group of this name",
-                )
-                .with_resource("Group", req.name.clone())
-                .into(),
-                other => storage_failure(other),
-            })?;
+            .with_resource("Group", req.name.clone())
+            .into(),
+            other => storage_failure(other),
+        })
+        .await?;
 
         info!("Created group '{}' in project {}", group.name, project_id.0);
-
-        Ok(Response::new(CreateGroupResponse {
-            group: Some(group_to_proto(&group)),
-        }))
+        Ok(answer)
     }
 
     #[instrument(skip_all, fields(method = "get_group"))]
@@ -2199,41 +2297,57 @@ impl AuthzService for AuthzServiceImpl {
     ) -> Result<Response<UpdateGroupResponse>, Status> {
         let caller = self.admin(&request).await?;
         self.check_maintenance()?;
-        let req = request.into_inner();
+        let (metadata, _, req) = request.into_parts();
+        // A retry of a completed edit answers with the group as that edit
+        // left it.
+        let command = command(
+            &metadata,
+            format!("user:{}", caller.profile_id),
+            UPDATE_GROUP,
+            &req,
+        )?;
+        if let Some(recorded) = command.replay(&*self.storage).await? {
+            return Ok(Response::new(recorded));
+        }
         let group_id = parse_group_id(&req.id)?;
 
-        // Only the description is written, so a concurrent directory sync of
-        // the name is never reverted and a deleted group is never recreated.
-        if let Some(desc) = req.description.as_deref() {
-            let updated = self
-                .storage
-                .set_group_description(
-                    group_id,
-                    Some(desc),
-                    AuditEntry::admin(
-                        caller.profile_id.to_string(),
-                        "group.update",
-                        group_id.0.to_string(),
-                    )
-                    .into(),
-                )
-                .await
-                .map_err(storage_failure)?;
-            if !updated {
-                return Err(group_not_found(group_id.0.to_string()));
-            }
-        }
-
-        let group = self
+        let mut group = self
             .storage
             .get_group(group_id)
             .await
             .map_err(storage_failure)?
             .ok_or_else(|| group_not_found(group_id.0.to_string()))?;
+        // Without a description nothing is written, so there is nothing to
+        // repeat.
+        let Some(desc) = req.description else {
+            return Ok(Response::new(UpdateGroupResponse {
+                group: Some(group_to_proto(&group)),
+            }));
+        };
+        group.description = Some(desc);
+        group.updated_at = chrono::Utc::now();
 
-        Ok(Response::new(UpdateGroupResponse {
+        // Only the description is written, so a concurrent directory sync of
+        // the name is never reverted and a deleted group is never recreated.
+        let answer = UpdateGroupResponse {
             group: Some(group_to_proto(&group)),
-        }))
+        };
+        let ctx = MutationContext::from(AuditEntry::admin(
+            caller.profile_id.to_string(),
+            "group.update",
+            group_id.0.to_string(),
+        ))
+        .with_operation(command.completion(answer.encode_to_vec()));
+        let committed = match self
+            .storage
+            .set_group_description(group_id, group.description.as_deref(), ctx)
+            .await
+        {
+            Ok(true) => Ok(()),
+            Ok(false) => return Err(group_not_found(group_id.0.to_string())),
+            Err(e) => Err(e),
+        };
+        settled(&*self.storage, &command, committed, answer, storage_failure).await
     }
 
     #[instrument(skip_all, fields(method = "delete_group"))]
@@ -2243,7 +2357,18 @@ impl AuthzService for AuthzServiceImpl {
     ) -> Result<Response<DeleteGroupResponse>, Status> {
         let caller = self.admin(&request).await?;
         self.check_maintenance()?;
-        let req = request.into_inner();
+        let (metadata, _, req) = request.into_parts();
+        // A retry of a completed deletion answers as the first, not "not
+        // found" for the group it deleted.
+        let command = command(
+            &metadata,
+            format!("user:{}", caller.profile_id),
+            DELETE_GROUP,
+            &req,
+        )?;
+        if let Some(recorded) = command.replay(&*self.storage).await? {
+            return Ok(Response::new(recorded));
+        }
         let group_id = parse_group_id(&req.id)?;
 
         self.storage
@@ -2252,22 +2377,18 @@ impl AuthzService for AuthzServiceImpl {
             .map_err(storage_failure)?
             .ok_or_else(|| group_not_found(group_id.0.to_string()))?;
 
-        self.storage
-            .delete_group(
-                group_id,
-                AuditEntry::admin(
-                    caller.profile_id.to_string(),
-                    "group.delete",
-                    group_id.0.to_string(),
-                )
-                .into(),
-            )
-            .await
-            .map_err(storage_failure)?;
+        let answer = DeleteGroupResponse {};
+        let ctx = MutationContext::from(AuditEntry::admin(
+            caller.profile_id.to_string(),
+            "group.delete",
+            group_id.0.to_string(),
+        ))
+        .with_operation(command.completion(answer.encode_to_vec()));
+        let committed = self.storage.delete_group(group_id, ctx).await;
+        let answer = settled(&*self.storage, &command, committed, answer, storage_failure).await?;
 
         info!("Deleted group {}", group_id.0);
-
-        Ok(Response::new(DeleteGroupResponse {}))
+        Ok(answer)
     }
 
     #[instrument(skip_all, fields(method = "list_groups"))]
@@ -2300,7 +2421,18 @@ impl AuthzService for AuthzServiceImpl {
     ) -> Result<Response<AddToGroupResponse>, Status> {
         let caller = self.admin(&request).await?;
         self.check_maintenance()?;
-        let req = request.into_inner();
+        let (metadata, _, req) = request.into_parts();
+        // A retry of a completed addition answers as the first and never
+        // adds the member back after a later removal.
+        let command = command(
+            &metadata,
+            format!("user:{}", caller.profile_id),
+            ADD_TO_GROUP,
+            &req,
+        )?;
+        if let Some(recorded) = command.replay(&*self.storage).await? {
+            return Ok(Response::new(recorded));
+        }
         let group_id = parse_group_id(&req.group_id)?;
         let profile_id = parse_profile_id(&req.profile_id)?;
 
@@ -2311,31 +2443,28 @@ impl AuthzService for AuthzServiceImpl {
             .ok_or_else(|| group_not_found(group_id.0.to_string()))?;
 
         let member = GroupMember::new(group_id, profile_id);
-        self.storage
-            .add_to_group(
-                &member,
-                AuditEntry::admin(
-                    caller.profile_id.to_string(),
-                    "group.add_member",
-                    format!("{}:{}", group_id.0, profile_id),
+        let answer = AddToGroupResponse {};
+        let ctx = MutationContext::from(AuditEntry::admin(
+            caller.profile_id.to_string(),
+            "group.add_member",
+            format!("{}:{}", group_id.0, profile_id),
+        ))
+        .with_operation(command.completion(answer.encode_to_vec()));
+        let committed = self.storage.add_to_group(&member, ctx).await;
+        let answer = settled(&*self.storage, &command, committed, answer, |e| match e {
+            sid_core::Error::PolicyViolation(why) => Status::from(
+                ApiError::new(
+                    ErrorReason::InvalidState,
+                    "the profile granted this group a role and cannot join it",
                 )
-                .into(),
-            )
-            .await
-            .map_err(|e| match e {
-                sid_core::Error::PolicyViolation(why) => Status::from(
-                    ApiError::new(
-                        ErrorReason::InvalidState,
-                        "the profile granted this group a role and cannot join it",
-                    )
-                    .with_precondition("GRANTOR_OUTSIDE_GROUP", "group", why),
-                ),
-                other => storage_failure(other),
-            })?;
+                .with_precondition("GRANTOR_OUTSIDE_GROUP", "group", why),
+            ),
+            other => storage_failure(other),
+        })
+        .await?;
 
         info!("Added profile {} to group {}", profile_id, group_id.0);
-
-        Ok(Response::new(AddToGroupResponse {}))
+        Ok(answer)
     }
 
     #[instrument(skip_all, fields(method = "remove_from_group"))]
@@ -2345,27 +2474,36 @@ impl AuthzService for AuthzServiceImpl {
     ) -> Result<Response<RemoveFromGroupResponse>, Status> {
         let caller = self.admin(&request).await?;
         self.check_maintenance()?;
-        let req = request.into_inner();
+        let (metadata, _, req) = request.into_parts();
+        // A retry of a completed removal answers as the first and never
+        // removes the member again after a later addition.
+        let command = command(
+            &metadata,
+            format!("user:{}", caller.profile_id),
+            REMOVE_FROM_GROUP,
+            &req,
+        )?;
+        if let Some(recorded) = command.replay(&*self.storage).await? {
+            return Ok(Response::new(recorded));
+        }
         let group_id = parse_group_id(&req.group_id)?;
         let profile_id = parse_profile_id(&req.profile_id)?;
 
-        self.storage
-            .remove_from_group(
-                group_id,
-                profile_id,
-                AuditEntry::admin(
-                    caller.profile_id.to_string(),
-                    "group.remove_member",
-                    format!("{}:{}", group_id.0, profile_id),
-                )
-                .into(),
-            )
-            .await
-            .map_err(storage_failure)?;
+        let answer = RemoveFromGroupResponse {};
+        let ctx = MutationContext::from(AuditEntry::admin(
+            caller.profile_id.to_string(),
+            "group.remove_member",
+            format!("{}:{}", group_id.0, profile_id),
+        ))
+        .with_operation(command.completion(answer.encode_to_vec()));
+        let committed = self
+            .storage
+            .remove_from_group(group_id, profile_id, ctx)
+            .await;
+        let answer = settled(&*self.storage, &command, committed, answer, storage_failure).await?;
 
         info!("Removed profile {} from group {}", profile_id, group_id.0);
-
-        Ok(Response::new(RemoveFromGroupResponse {}))
+        Ok(answer)
     }
 
     #[instrument(skip_all, fields(method = "list_group_members"))]
@@ -2397,7 +2535,13 @@ impl AuthzService for AuthzServiceImpl {
     ) -> Result<Response<CreatePolicyResponse>, Status> {
         let asker = self.asker(&request).await?;
         self.check_maintenance()?;
-        let req = request.into_inner();
+        let (metadata, _, req) = request.into_parts();
+        // A retry of a completed creation answers with the policy it created,
+        // not "name taken" by that very policy.
+        let command = command(&metadata, asker.own_subject(), CREATE_POLICY, &req)?;
+        if let Some(recorded) = command.replay(&*self.storage).await? {
+            return Ok(Response::new(recorded));
+        }
         let scope = policy_scope_from_proto(req.scope.as_ref(), "scope")?;
         let fence = self
             .policy_authority(&asker, sid_core::models::PolicyOperation::Edit, scope)
@@ -2417,27 +2561,25 @@ impl AuthzService for AuthzServiceImpl {
         policy.description = req.description;
         policy.enabled = req.enabled;
 
-        self.storage
-            .create_cedar_policy(
-                &policy,
-                policy_mutation(&asker, "policy.create", policy.id, fence),
+        let answer = CreatePolicyResponse {
+            policy: Some(policy_to_proto(&policy)),
+        };
+        let ctx = policy_mutation(&asker, "policy.create", policy.id, fence)
+            .with_operation(command.completion(answer.encode_to_vec()));
+        let committed = self.storage.create_cedar_policy(&policy, ctx).await;
+        let answer = settled(&*self.storage, &command, committed, answer, |e| match e {
+            sid_core::Error::Conflict(_) => ApiError::new(
+                ErrorReason::PolicyAlreadyExists,
+                "the scope already has a policy of this name",
             )
-            .await
-            .map_err(|e| match e {
-                sid_core::Error::Conflict(_) => ApiError::new(
-                    ErrorReason::PolicyAlreadyExists,
-                    "the scope already has a policy of this name",
-                )
-                .with_resource("Policy", policy.name.clone())
-                .into(),
-                other => storage_failure(other),
-            })?;
+            .with_resource("Policy", policy.name.clone())
+            .into(),
+            other => storage_failure(other),
+        })
+        .await?;
 
         info!("Created policy '{}' in scope {:?}", policy.name, scope);
-
-        Ok(Response::new(CreatePolicyResponse {
-            policy: Some(policy_to_proto(&policy)),
-        }))
+        Ok(answer)
     }
 
     #[instrument(skip_all, fields(method = "get_policy"))]
@@ -2464,7 +2606,13 @@ impl AuthzService for AuthzServiceImpl {
     ) -> Result<Response<UpdatePolicyResponse>, Status> {
         let asker = self.asker(&request).await?;
         self.check_maintenance()?;
-        let req = request.into_inner();
+        let (metadata, _, req) = request.into_parts();
+        // A retry of a completed edit answers with the policy as that edit
+        // left it, and never writes it over a later edit.
+        let command = command(&metadata, asker.own_subject(), UPDATE_POLICY, &req)?;
+        if let Some(recorded) = command.replay(&*self.storage).await? {
+            return Ok(Response::new(recorded));
+        }
         let policy_id = parse_policy_id(&req.id)?;
         let (mut policy, fence) = self
             .policy_for(&asker, policy_id, sid_core::models::PolicyOperation::Edit)
@@ -2485,23 +2633,19 @@ impl AuthzService for AuthzServiceImpl {
         }
         policy.updated_at = chrono::Utc::now();
 
-        let updated = self
-            .storage
-            .update_cedar_policy(
-                &policy,
-                policy_mutation(&asker, "policy.update", policy.id, fence),
-            )
-            .await
-            .map_err(storage_failure)?;
-        if !updated {
-            // Deleted or changed since it was read: never recreated or overwritten.
-            return Err(changed_concurrently());
-        }
-        policy.revision += 1;
-
-        Ok(Response::new(UpdatePolicyResponse {
+        let answer = UpdatePolicyResponse {
             policy: Some(policy_to_proto(&policy)),
-        }))
+        };
+        let ctx = policy_mutation(&asker, "policy.update", policy.id, fence)
+            .with_operation(command.completion(answer.encode_to_vec()));
+        let committed = match self.storage.update_cedar_policy(&policy, ctx).await {
+            // Deleted or changed since it was read: never recreated or
+            // overwritten.
+            Ok(false) => return Err(changed_concurrently()),
+            Ok(true) => Ok(()),
+            Err(e) => Err(e),
+        };
+        settled(&*self.storage, &command, committed, answer, storage_failure).await
     }
 
     #[instrument(skip_all, fields(method = "delete_policy"))]
@@ -2511,23 +2655,26 @@ impl AuthzService for AuthzServiceImpl {
     ) -> Result<Response<DeletePolicyResponse>, Status> {
         let asker = self.asker(&request).await?;
         self.check_maintenance()?;
-        let req = request.into_inner();
+        let (metadata, _, req) = request.into_parts();
+        // A retry of a completed deletion answers as the first, not "not
+        // found" for the policy it deleted.
+        let command = command(&metadata, asker.own_subject(), DELETE_POLICY, &req)?;
+        if let Some(recorded) = command.replay(&*self.storage).await? {
+            return Ok(Response::new(recorded));
+        }
         let policy_id = parse_policy_id(&req.id)?;
         let (_, fence) = self
             .policy_for(&asker, policy_id, sid_core::models::PolicyOperation::Edit)
             .await?;
 
-        self.storage
-            .delete_cedar_policy(
-                policy_id,
-                policy_mutation(&asker, "policy.delete", policy_id, fence),
-            )
-            .await
-            .map_err(storage_failure)?;
+        let answer = DeletePolicyResponse {};
+        let ctx = policy_mutation(&asker, "policy.delete", policy_id, fence)
+            .with_operation(command.completion(answer.encode_to_vec()));
+        let committed = self.storage.delete_cedar_policy(policy_id, ctx).await;
+        let answer = settled(&*self.storage, &command, committed, answer, storage_failure).await?;
 
         info!("Deleted policy {}", policy_id.0);
-
-        Ok(Response::new(DeletePolicyResponse {}))
+        Ok(answer)
     }
 
     #[instrument(skip_all, fields(method = "list_policies"))]
