@@ -13,10 +13,13 @@ use sid_plugin::InstanceSecretStore;
 use sid_plugin::storage::StorageBackend;
 use sid_storage::PostgresBackend;
 
+/// The Compose test server's database.
+const COMPOSE_DATABASE_URL: &str = "postgres://sid:sid_dev@localhost:54399/sid_storage_test";
+
 fn database_url() -> String {
     std::env::var("SID_STORAGE_TEST_DATABASE_URL")
         .or_else(|_| std::env::var("DATABASE_URL"))
-        .unwrap_or_else(|_| "postgres://sid:sid_dev@localhost:54399/sid_storage_test".to_string())
+        .unwrap_or_else(|_| COMPOSE_DATABASE_URL.to_string())
 }
 
 async fn setup() -> PostgresBackend {
@@ -2404,6 +2407,107 @@ async fn test_commit_survives_restart() {
     common::restart::test_commit_survives_restart(setup).await;
 }
 
+/// `url` with its database replaced by `database`; its connection parameters
+/// stay as they are.
+fn with_database(url: &str, database: &str) -> String {
+    let mut parsed = url::Url::parse(url).expect("the test database URL parses");
+    parsed.set_path(database);
+    parsed.into()
+}
+
+/// The database `url` names.
+fn database_of(url: &str) -> String {
+    let parsed = url::Url::parse(url).expect("the test database URL parses");
+    parsed.path().trim_start_matches('/').to_owned()
+}
+
+/// Run PostgreSQL client `tool` on `database` of the configured test server.
+/// The Compose server runs its own client, whose version is the server's; a
+/// server named by URL is reached by the client on `PATH`, which must match
+/// that server's version.
+fn pg_tool(tool: &str, database: &str, args: &[&str], input: Option<&[u8]>) -> Vec<u8> {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+    let url = database_url();
+    let mut command = if url == COMPOSE_DATABASE_URL {
+        let mut command = Command::new("docker");
+        command.args(["exec", "-i", "sid-test-postgres", tool, "-U", "sid"]);
+        if matches!(tool, "createdb" | "dropdb") {
+            command.arg(database);
+        } else {
+            command.args(["-d", database]);
+        }
+        command
+    } else {
+        let mut command = Command::new(tool);
+        if matches!(tool, "createdb" | "dropdb") {
+            command.args(["--maintenance-db", &url, database]);
+        } else {
+            command.args(["--dbname", &with_database(&url, database)]);
+        }
+        command
+    };
+    let mut child = command
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("{tool} cannot run: {e}"));
+    let mut stdin = child.stdin.take().unwrap();
+    if let Some(input) = input {
+        stdin.write_all(input).unwrap();
+    }
+    drop(stdin);
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{tool} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output.stdout
+}
+
+/// `pg_dump` of the store's schema is the backup; the restore loads it with
+/// `pg_restore` into a database of its own and opens a store there.
+#[tokio::test]
+async fn test_restore_returns_the_backed_up_state() {
+    let schema_name = format!("backup_{}", uuid::Uuid::now_v7().simple());
+    let schema = schema_name.as_str();
+    let live = PostgresBackend::new(&database_url(), Some(schema.to_owned()))
+        .await
+        .unwrap();
+    sid_storage::migrator::run_migrations(live.pool(), Some(schema))
+        .await
+        .unwrap();
+    let log = sid_storage::audit_log::PostgresAuditLog::new(live.pool().clone());
+    let source = database_of(&database_url());
+    let restored_name = format!("restore_{}", uuid::Uuid::now_v7().simple());
+    let restored_db = restored_name.as_str();
+    common::backup::test_restore_returns_the_backed_up_state(
+        &live,
+        &log,
+        || async { pg_tool("pg_dump", &source, &["--schema", schema, "-Fc"], None) },
+        |dump: Vec<u8>| async move {
+            pg_tool("createdb", restored_db, &[], None);
+            pg_tool("pg_restore", restored_db, &[], Some(&dump));
+            let url = with_database(&database_url(), restored_db);
+            let restored = PostgresBackend::new(&url, Some(schema.to_owned()))
+                .await
+                .unwrap();
+            let log = sid_storage::audit_log::PostgresAuditLog::new(restored.pool().clone());
+            (restored, log)
+        },
+    )
+    .await;
+
+    // The restored store was dropped with the scenario; `--force` ends any
+    // connection its pool has not closed yet.
+    pg_tool("dropdb", restored_db, &["--force"], None);
+    drop(live);
+    drop_schema(schema).await;
+}
+
 #[tokio::test]
 async fn test_job_lock_exclusive_across_instances() {
     common::job_lock::test_job_lock_exclusive_across_instances(&setup().await, &setup().await)
@@ -2638,114 +2742,13 @@ async fn test_pat_crud() {
 // ─── Notification Preferences ───
 
 #[tokio::test]
-async fn test_notification_preferences_save_and_get() {
-    let backend = setup().await;
-    let audit_log = std::sync::Arc::new(sid_storage::audit_log::PostgresAuditLog::new(
-        backend.pool().clone(),
-    ));
-    let backend = backend.with_audit_log(audit_log);
-
-    // Create profile first.
-    let profile =
-        sid_core::models::Profile::new(Some(format!("notif-test-{}", uuid::Uuid::now_v7())));
-    backend
-        .create_profile(
-            &profile,
-            sid_core::models::AuditEntry::system("test", "create").into(),
-        )
-        .await
-        .unwrap();
-
-    // No preferences yet → returns None.
-    let prefs = backend
-        .get_notification_preferences(profile.id)
-        .await
-        .unwrap();
-    assert!(prefs.is_none());
-
-    // Save preferences.
-    let prefs = sid_core::models::notification::NotificationPreferences::defaults(profile.id);
-    backend
-        .save_notification_preferences(
-            &prefs,
-            sid_core::models::AuditEntry::system("test", "save_prefs").into(),
-        )
-        .await
-        .unwrap();
-
-    // Get preferences.
-    let loaded = backend
-        .get_notification_preferences(profile.id)
-        .await
-        .unwrap()
-        .expect("Preferences should exist after save");
-    assert_eq!(loaded.profile_id, profile.id);
-    assert_eq!(loaded.categories.len(), 4);
-
-    // Verify security_alerts is present.
-    assert!(loaded.categories.iter().any(
-        |c| c.category == sid_core::models::notification::NotificationCategory::SecurityAlerts
-    ));
+async fn test_notification_preferences_round_trip() {
+    common::notification::test_notification_preferences_round_trip(&setup().await).await;
 }
 
 #[tokio::test]
-async fn test_notification_preferences_upsert() {
-    let backend = setup().await;
-    let audit_log = std::sync::Arc::new(sid_storage::audit_log::PostgresAuditLog::new(
-        backend.pool().clone(),
-    ));
-    let backend = backend.with_audit_log(audit_log);
-
-    let profile =
-        sid_core::models::Profile::new(Some(format!("notif-upsert-{}", uuid::Uuid::now_v7())));
-    backend
-        .create_profile(
-            &profile,
-            sid_core::models::AuditEntry::system("test", "create").into(),
-        )
-        .await
-        .unwrap();
-
-    // Save defaults.
-    let prefs = sid_core::models::notification::NotificationPreferences::defaults(profile.id);
-    backend
-        .save_notification_preferences(
-            &prefs,
-            sid_core::models::AuditEntry::system("test", "save_v1").into(),
-        )
-        .await
-        .unwrap();
-
-    // Update: disable login notifications.
-    let mut updated = prefs.clone();
-    if let Some(cat) = updated.categories.iter_mut().find(|c| {
-        c.category == sid_core::models::notification::NotificationCategory::LoginNotifications
-    }) {
-        cat.enabled = false;
-    }
-    updated.updated_at = chrono::Utc::now();
-    backend
-        .save_notification_preferences(
-            &updated,
-            sid_core::models::AuditEntry::system("test", "save_v2").into(),
-        )
-        .await
-        .unwrap();
-
-    // Verify update.
-    let loaded = backend
-        .get_notification_preferences(profile.id)
-        .await
-        .unwrap()
-        .unwrap();
-    let login_cat = loaded
-        .categories
-        .iter()
-        .find(|c| {
-            c.category == sid_core::models::notification::NotificationCategory::LoginNotifications
-        })
-        .unwrap();
-    assert!(!login_cat.enabled);
+async fn test_notification_preferences_replace() {
+    common::notification::test_notification_preferences_replace(&setup().await).await;
 }
 
 // ─── Audit Log Partitioning ───
@@ -2974,143 +2977,33 @@ async fn test_audit_append_only_trigger_on_partitioned() {
 
 // ─── BlobStore (PostgresBlobStore) ───
 
-#[tokio::test]
-async fn test_blob_put_and_get() {
-    use sid_core::models::{AuditEntry, EncryptedBlob, Profile};
-    use sid_plugin::blob_store::BlobStore;
-    use sid_storage::PostgresBlobStore;
-
-    let backend = setup().await;
-    let blob_store = PostgresBlobStore::new(backend.pool().clone());
-
-    let profile = Profile::new(Some(format!("blob-test-{}", uuid::Uuid::now_v7())));
-    backend
-        .create_profile(&profile, AuditEntry::system("test", "setup").into())
-        .await
-        .unwrap();
-
-    // Initial upload (expected_version = 0).
-    let blob = EncryptedBlob {
-        ciphertext: b"encrypted-profile-data".to_vec(),
-        nonce: [42u8; 12],
-        version: 0,
-        updated_at: chrono::Utc::now(),
-    };
-    let v1 = blob_store.put_blob(&profile.id, blob, 0).await.unwrap();
-    assert_eq!(v1, 1);
-
-    // Retrieve.
-    let retrieved = blob_store.get_blob(&profile.id).await.unwrap().unwrap();
-    assert_eq!(retrieved.ciphertext, b"encrypted-profile-data");
-    assert_eq!(retrieved.version, 1);
-    assert_eq!(retrieved.nonce, [42u8; 12]);
+/// Run blob store conformance `scenario` against `PostgresBlobStore`.
+macro_rules! blob_store {
+    ($($scenario:ident),* $(,)?) => {$(
+        #[tokio::test]
+        async fn $scenario() {
+            let backend = setup().await;
+            let store = sid_storage::PostgresBlobStore::new(backend.pool().clone());
+            sid_plugin::conformance::blob_store::$scenario(&backend, &store).await;
+        }
+    )*};
 }
 
-#[tokio::test]
-async fn test_blob_optimistic_locking() {
-    use sid_core::models::{AuditEntry, BlobError, EncryptedBlob, Profile};
-    use sid_plugin::blob_store::BlobStore;
-    use sid_storage::PostgresBlobStore;
+mod blob_store {
+    use super::*;
 
-    let backend = setup().await;
-    let blob_store = PostgresBlobStore::new(backend.pool().clone());
+    blob_store!(
+        put_and_get,
+        write_names_the_version_it_replaces,
+        delete_is_visible_in_metadata,
+    );
 
-    let profile = Profile::new(Some(format!("blob-lock-{}", uuid::Uuid::now_v7())));
-    backend
-        .create_profile(&profile, AuditEntry::system("test", "setup").into())
-        .await
-        .unwrap();
-
-    // Upload v1.
-    let blob = EncryptedBlob {
-        ciphertext: b"v1".to_vec(),
-        nonce: [0u8; 12],
-        version: 0,
-        updated_at: chrono::Utc::now(),
-    };
-    blob_store.put_blob(&profile.id, blob, 0).await.unwrap();
-
-    // Update with correct version.
-    let blob_v2 = EncryptedBlob {
-        ciphertext: b"v2".to_vec(),
-        nonce: [1u8; 12],
-        version: 0,
-        updated_at: chrono::Utc::now(),
-    };
-    let v2 = blob_store.put_blob(&profile.id, blob_v2, 1).await.unwrap();
-    assert_eq!(v2, 2);
-
-    // Update with WRONG version → conflict.
-    let blob_bad = EncryptedBlob {
-        ciphertext: b"bad".to_vec(),
-        nonce: [2u8; 12],
-        version: 0,
-        updated_at: chrono::Utc::now(),
-    };
-    let result = blob_store.put_blob(&profile.id, blob_bad, 1).await;
-    assert!(matches!(result, Err(BlobError::VersionConflict { .. })));
-}
-
-#[tokio::test]
-async fn test_blob_delete_and_metadata() {
-    use sid_core::models::{AuditEntry, BlobStorageStatus, EncryptedBlob, Profile};
-    use sid_plugin::blob_store::BlobStore;
-    use sid_storage::PostgresBlobStore;
-
-    let backend = setup().await;
-    let blob_store = PostgresBlobStore::new(backend.pool().clone());
-
-    let profile = Profile::new(Some(format!("blob-del-{}", uuid::Uuid::now_v7())));
-    backend
-        .create_profile(&profile, AuditEntry::system("test", "setup").into())
-        .await
-        .unwrap();
-
-    // Upload.
-    let blob = EncryptedBlob {
-        ciphertext: b"to-delete".to_vec(),
-        nonce: [0u8; 12],
-        version: 0,
-        updated_at: chrono::Utc::now(),
-    };
-    blob_store.put_blob(&profile.id, blob, 0).await.unwrap();
-
-    // Metadata before delete.
-    let meta = blob_store
-        .blob_metadata(&profile.id)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(meta.version, 1);
-    assert_eq!(meta.storage_status, BlobStorageStatus::Local);
-
-    // Delete.
-    blob_store.delete_blob(&profile.id).await.unwrap();
-
-    // get_blob returns None (soft deleted).
-    assert!(blob_store.get_blob(&profile.id).await.unwrap().is_none());
-
-    // Metadata shows Deleted status.
-    let meta = blob_store
-        .blob_metadata(&profile.id)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(meta.storage_status, BlobStorageStatus::Deleted);
-}
-
-#[tokio::test]
-async fn test_blob_nonexistent_returns_none() {
-    use sid_core::models::ProfileId;
-    use sid_plugin::blob_store::BlobStore;
-    use sid_storage::PostgresBlobStore;
-
-    let backend = setup().await;
-    let blob_store = PostgresBlobStore::new(backend.pool().clone());
-
-    let pid = ProfileId::generate();
-    assert!(blob_store.get_blob(&pid).await.unwrap().is_none());
-    assert!(blob_store.blob_metadata(&pid).await.unwrap().is_none());
+    #[tokio::test]
+    async fn absent_blob_reads_as_none() {
+        let backend = setup().await;
+        let store = sid_storage::PostgresBlobStore::new(backend.pool().clone());
+        sid_plugin::conformance::blob_store::absent_blob_reads_as_none(&store).await;
+    }
 }
 
 // ─── EP-6 Audit Wiring Verification ───
@@ -3120,10 +3013,7 @@ async fn test_blob_nonexistent_returns_none() {
 #[tokio::test]
 async fn test_ep6_audit_wiring_produces_records() {
     let backend = setup().await;
-    let audit_log = std::sync::Arc::new(sid_storage::audit_log::PostgresAuditLog::new(
-        backend.pool().clone(),
-    ));
-    let backend = backend.with_audit_log(audit_log.clone());
+    let audit_log = sid_storage::audit_log::PostgresAuditLog::new(backend.pool().clone());
 
     let audit: sid_core::models::MutationContext =
         sid_core::models::AuditEntry::system("ep6_test", "verify_wiring").into();
@@ -3254,162 +3144,32 @@ async fn test_reset_session_save_get_update() {
     assert_eq!(count, 1);
 }
 
-/// EP-6 Regression: verify audit record is written IN the same transaction as data.
-/// After save_profile, both profile AND audit record must exist. If audit were
-/// written outside the tx (the old bug), a crash between data commit and audit
-/// write would leave data without audit — undetectable without this test.
-#[tokio::test]
-async fn test_ep6_audit_transactional_with_data() {
-    let backend = setup().await;
-    let audit_log = std::sync::Arc::new(sid_storage::audit_log::PostgresAuditLog::new(
-        backend.pool().clone(),
-    ));
-    let backend = backend.with_audit_log(audit_log.clone());
-
-    let uid = uuid::Uuid::now_v7();
-    let profile = sid_core::models::Profile::new(Some(format!("ep6-tx-{uid}")));
-    let audit: sid_core::models::MutationContext =
-        sid_core::models::AuditEntry::system("ep6_tx_test", "save_profile").into();
-
-    // Save profile — data + audit should be atomic.
-    backend.create_profile(&profile, audit).await.unwrap();
-
-    // Verify data exists.
-    let loaded = backend.get_profile(profile.id).await.unwrap();
-    assert!(loaded.is_some(), "profile should exist after save");
-
-    // Verify audit exists for the same chain.
-    let chain_id = format!("profile:{}", profile.id);
-    let records = audit_log.query(&chain_id, None, None).await.unwrap();
-    assert_eq!(
-        records.len(),
-        1,
-        "exactly one audit record should exist after save_profile"
-    );
-    assert_eq!(records[0].action, "ep6_tx_test");
-    assert_eq!(records[0].resource, "save_profile");
-
-    // Verify chain integrity.
-    let verify = audit_log.verify_chain(&chain_id).await.unwrap();
-    assert!(verify.valid, "audit chain should be valid");
-    assert_eq!(verify.records_verified, 1);
-}
-
-/// EP-6 Regression: multiple operations on same entity produce valid hash chain.
-#[tokio::test]
-async fn test_ep6_audit_chain_integrity_after_update() {
-    let backend = setup().await;
-    let audit_log = std::sync::Arc::new(sid_storage::audit_log::PostgresAuditLog::new(
-        backend.pool().clone(),
-    ));
-    let backend = backend.with_audit_log(audit_log.clone());
-
-    let uid = uuid::Uuid::now_v7();
-    let mut profile = sid_core::models::Profile::new(Some(format!("ep6-chain-{uid}")));
-
-    // Create.
-    backend
-        .create_profile(
-            &profile,
-            sid_core::models::AuditEntry::system("create", "ep6_chain_test").into(),
-        )
-        .await
-        .unwrap();
-
-    // Update.
-    profile.given_name = Some("Updated".to_string());
-    assert!(
-        backend
-            .update_profile(
-                &profile,
-                sid_core::models::AuditEntry::system("update", "ep6_chain_test").into(),
-            )
-            .await
-            .unwrap()
-    );
-
-    // Delete.
-    backend
-        .delete_profile(
-            profile.id,
-            sid_core::models::AuditEntry::system("delete", "ep6_chain_test").into(),
-        )
-        .await
-        .unwrap();
-
-    // Verify chain: 3 records, valid hash chain.
-    let chain_id = format!("profile:{}", profile.id);
-    let records = audit_log.query(&chain_id, None, None).await.unwrap();
-    assert_eq!(
-        records.len(),
-        3,
-        "3 audit records expected (create+update+delete)"
-    );
-    assert_eq!(records[0].action, "create");
-    assert_eq!(records[1].action, "update");
-    assert_eq!(records[2].action, "delete");
-
-    let verify = audit_log.verify_chain(&chain_id).await.unwrap();
-    assert!(
-        verify.valid,
-        "audit chain should be valid after 3 operations"
-    );
-    assert_eq!(verify.records_verified, 3);
-}
-
-// ── Profile nullable username ─────────────────────────────
+// ─── Audit chain, profiles (shared) ───
 
 #[tokio::test]
-async fn test_pg_profile_nullable_username_roundtrip() {
+async fn test_audit_chain_links_records() {
     let backend = setup().await;
-    let storage: &dyn StorageBackend = &backend;
-
-    // Profile with username = None (email-only registration).
-    let profile = sid_core::models::Profile::new(None::<String>);
-    assert!(profile.username.is_none());
-
-    storage
-        .create_profile(
-            &profile,
-            sid_core::models::AuditEntry::system("test", "create_profile").into(),
-        )
-        .await
-        .expect("save profile with null username");
-
-    let loaded = storage
-        .get_profile(profile.id)
-        .await
-        .expect("get profile")
-        .expect("profile should exist");
-
-    assert!(loaded.username.is_none(), "loaded username should be None");
-    assert_eq!(loaded.id, profile.id);
-    assert_eq!(loaded.profile_type, profile.profile_type);
+    let log = sid_storage::audit_log::PostgresAuditLog::new(backend.pool().clone());
+    common::audit_chain::test_audit_chain_links_records(&log).await;
 }
 
 #[tokio::test]
-async fn test_pg_profile_with_username_roundtrip() {
+async fn test_audit_chains_are_independent() {
     let backend = setup().await;
-    let storage: &dyn StorageBackend = &backend;
+    let log = sid_storage::audit_log::PostgresAuditLog::new(backend.pool().clone());
+    common::audit_chain::test_audit_chains_are_independent(&log).await;
+}
 
-    let username = format!("alice-{}", uuid::Uuid::now_v7().simple());
-    let profile = sid_core::models::Profile::new(Some(&username));
+#[tokio::test]
+async fn test_mutations_leave_their_audit_chain() {
+    let backend = setup().await;
+    let log = sid_storage::audit_log::PostgresAuditLog::new(backend.pool().clone());
+    common::audit_chain::test_mutations_leave_their_audit_chain(&backend, &log).await;
+}
 
-    storage
-        .create_profile(
-            &profile,
-            sid_core::models::AuditEntry::system("test", "create_profile").into(),
-        )
-        .await
-        .expect("save profile with username");
-
-    let loaded = storage
-        .get_profile(profile.id)
-        .await
-        .expect("get profile")
-        .expect("profile should exist");
-
-    assert_eq!(loaded.username.as_deref(), Some(username.as_str()));
+#[tokio::test]
+async fn test_profile_without_username_round_trip() {
+    common::test_profile_without_username_round_trip(&setup().await).await;
 }
 
 // ─── Email policy revisions ───

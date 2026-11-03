@@ -47,7 +47,6 @@ async fn setup() -> (
     let audit_log: Arc<dyn sid_plugin::audit::AuditLog> = Arc::new(
         sid_storage::audit_log::PostgresAuditLog::new(backend.pool().clone()),
     );
-    let backend = backend.with_audit_log(audit_log.clone());
     let storage: Arc<dyn StorageBackend> = Arc::new(backend);
     let jwt = test_jwt();
     let no_cache: Arc<dyn sid_plugin::cache::CacheBackend> =

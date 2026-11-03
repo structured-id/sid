@@ -1741,6 +1741,40 @@ async fn test_commit_survives_restart() {
     common::restart::test_commit_survives_restart(open).await;
 }
 
+/// SQLite's online copy, `VACUUM INTO`, is the backup; the restore opens a
+/// store on the copied file.
+#[tokio::test]
+async fn test_restore_returns_the_backed_up_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let live_path = dir.path().join("sid.db");
+    let copy = dir.path().join("backup.db");
+    let live = SqliteBackend::new(&format!("sqlite://{}", live_path.display()))
+        .await
+        .unwrap();
+    let log = sid_storage::sqlite::SqliteAuditLog::new(live.pool().clone());
+    let pool = live.pool().clone();
+    common::backup::test_restore_returns_the_backed_up_state(
+        &live,
+        &log,
+        || async {
+            sqlx::query("VACUUM INTO ?")
+                .bind(copy.display().to_string())
+                .execute(&pool)
+                .await
+                .unwrap();
+            copy.clone()
+        },
+        |copy: std::path::PathBuf| async move {
+            let restored = SqliteBackend::new(&format!("sqlite://{}", copy.display()))
+                .await
+                .unwrap();
+            let log = sid_storage::sqlite::SqliteAuditLog::new(restored.pool().clone());
+            (restored, log)
+        },
+    )
+    .await;
+}
+
 #[tokio::test]
 async fn test_job_lock_exclusive_across_instances() {
     let (_dir, a, b) = two_instances().await;
@@ -1893,72 +1927,42 @@ async fn test_pat_crud() {
     common::test_pat_crud(&setup().await).await;
 }
 
-// ─── SQLite-only: Audit log chain ───
+// ─── Audit chain, notification preferences, profiles (shared) ───
 
 #[tokio::test]
-async fn test_audit_log_chain() {
-    use sid_core::models::AuditEntry;
-    use sid_core::models::audit::compute_record_hash;
-    use sid_plugin::audit::AuditLog;
-    use sid_storage::sqlite::SqliteAuditLog;
-
+async fn test_audit_chain_links_records() {
     let backend = setup().await;
-    let audit_log = SqliteAuditLog::new(backend.pool().clone());
-
-    let entry1 = AuditEntry::system("profile.created", "profile:abc123");
-    let r1 = audit_log.log("profile:abc123", entry1).await.unwrap();
-    assert_eq!(r1.sequence, 1);
-    assert_eq!(r1.prev_hash, "genesis");
-    assert!(!r1.hash.is_empty());
-
-    let entry2 = AuditEntry::system("profile.updated", "profile:abc123");
-    let r2 = audit_log.log("profile:abc123", entry2).await.unwrap();
-    assert_eq!(r2.sequence, 2);
-    assert_eq!(r2.prev_hash, r1.hash);
-
-    let records = audit_log.query("profile:abc123", None, None).await.unwrap();
-    assert_eq!(records.len(), 2);
-    assert_eq!(records[0].action, "profile.created");
-    assert_eq!(records[1].action, "profile.updated");
-
-    for record in &records {
-        let recomputed = compute_record_hash(record);
-        assert_eq!(
-            record.hash, recomputed,
-            "Hash mismatch for record {} (seq {}). timestamp stored={:?}",
-            record.id, record.sequence, record.timestamp
-        );
-    }
-
-    assert_eq!(records[1].prev_hash, records[0].hash);
-
-    let result = audit_log.verify_chain("profile:abc123").await.unwrap();
-    assert!(result.valid, "Chain should be valid");
-    assert_eq!(result.records_verified, 2);
+    let log = sid_storage::sqlite::SqliteAuditLog::new(backend.pool().clone());
+    common::audit_chain::test_audit_chain_links_records(&log).await;
 }
 
 #[tokio::test]
-async fn test_audit_log_parallel_chains() {
-    use sid_core::models::AuditEntry;
-    use sid_plugin::audit::AuditLog;
-    use sid_storage::sqlite::SqliteAuditLog;
-
+async fn test_audit_chains_are_independent() {
     let backend = setup().await;
-    let audit_log = SqliteAuditLog::new(backend.pool().clone());
+    let log = sid_storage::sqlite::SqliteAuditLog::new(backend.pool().clone());
+    common::audit_chain::test_audit_chains_are_independent(&log).await;
+}
 
-    let ra = audit_log
-        .log("chain_A", AuditEntry::system("a1", "res"))
-        .await
-        .unwrap();
-    let rb = audit_log
-        .log("chain_B", AuditEntry::system("b1", "res"))
-        .await
-        .unwrap();
+#[tokio::test]
+async fn test_mutations_leave_their_audit_chain() {
+    let backend = setup().await;
+    let log = sid_storage::sqlite::SqliteAuditLog::new(backend.pool().clone());
+    common::audit_chain::test_mutations_leave_their_audit_chain(&backend, &log).await;
+}
 
-    assert_eq!(ra.sequence, 1);
-    assert_eq!(rb.sequence, 1);
-    assert_eq!(ra.prev_hash, "genesis");
-    assert_eq!(rb.prev_hash, "genesis");
+#[tokio::test]
+async fn test_notification_preferences_round_trip() {
+    common::notification::test_notification_preferences_round_trip(&setup().await).await;
+}
+
+#[tokio::test]
+async fn test_notification_preferences_replace() {
+    common::notification::test_notification_preferences_replace(&setup().await).await;
+}
+
+#[tokio::test]
+async fn test_profile_without_username_round_trip() {
+    common::test_profile_without_username_round_trip(&setup().await).await;
 }
 
 // ─── Email policy revisions ───
