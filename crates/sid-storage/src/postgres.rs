@@ -3030,6 +3030,7 @@ impl StorageBackend for PostgresBackend {
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
         let sessions = directory::end_sessions(&mut tx, profile_id, end, &mut ctx).await?;
+        ctx.record_effect(&sessions.len())?;
         Self::audit_in_tx(&mut tx, &format!("profile:{profile_id}:sessions"), ctx).await?;
         tx.commit()
             .await

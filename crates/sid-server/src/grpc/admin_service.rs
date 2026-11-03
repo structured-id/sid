@@ -175,6 +175,7 @@ impl AdminServiceImpl {
 const ADMIN_UPDATE_PROFILE: &str = "sid.v1.admin.AdminService/AdminUpdateProfile";
 const SET_PROFILE_METADATA: &str = "sid.v1.admin.AdminService/SetProfileMetadata";
 const DELETE_PROFILE_METADATA: &str = "sid.v1.admin.AdminService/DeleteProfileMetadata";
+const REVOKE_ALL_SESSIONS: &str = "sid.v1.admin.AdminService/RevokeAllSessions";
 
 /// The administrator `actor`'s command `method` with `req`'s inputs under
 /// `key`.
@@ -280,26 +281,34 @@ impl AdminService for AdminServiceImpl {
         request: Request<RevokeAllSessionsRequest>,
     ) -> Result<Response<RevokeAllSessionsResponse>, Status> {
         let actor = self.require_admin(&request).await?;
+        let key = required_key(request.metadata())?;
 
         let req = request.into_inner();
         let profile_id = parse_profile_id(&req.profile_id)?;
 
-        // Through the cascade: the sessions' tokens stop in every process and
-        // each RP they signed in to is owed a back-channel logout.
-        let revoked = self
-            .cascade
-            .revoke_sessions(
-                profile_id,
-                RevocationReason::Admin,
-                &actor,
-                AuditEntry::admin(actor.clone(), "session.revoke_all", profile_id.to_string())
-                    .into(),
-            )
-            .await
-            .map_err(storage_failure)?;
-        // Each ended session's revoked event is committed with its deletion.
-        let count =
-            u64::try_from(revoked.cascade_entries.len()).expect("a session count fits in u64");
+        // A retry of a completed revocation answers with the count it ended
+        // and never ends sessions signed in after it. The store records that
+        // count with the deletion.
+        let command = admin_command(&actor, key, REVOKE_ALL_SESSIONS, &req);
+        let ended: usize = command
+            .run_recorded(&*self.storage, || async {
+                // Through the cascade: the sessions' tokens stop in every
+                // process and each RP they signed in to is owed a back-channel
+                // logout; each revoked event commits with its deletion.
+                let ctx = MutationContext::from(AuditEntry::admin(
+                    actor.clone(),
+                    "session.revoke_all",
+                    profile_id.to_string(),
+                ))
+                .with_operation(command.effect_completion());
+                let revoked = self
+                    .cascade
+                    .revoke_sessions(profile_id, RevocationReason::Admin, &actor, ctx)
+                    .await?;
+                Ok(revoked.cascade_entries.len())
+            })
+            .await?;
+        let count = u64::try_from(ended).expect("a session count fits in u64");
 
         info!(
             "Admin: revoked {} sessions for profile {}",

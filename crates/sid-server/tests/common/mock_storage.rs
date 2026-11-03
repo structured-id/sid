@@ -2912,11 +2912,13 @@ impl StorageBackend for MockStorage {
             .filter(|s| s.profile_id == profile_id)
             .cloned()
             .collect();
-        inner.sessions.retain(|_, s| s.profile_id != profile_id);
         for session in &ended {
             ctx.work.extend(end.owed_by(session));
         }
+        ctx.record_effect(&ended.len())?;
+        // A completed command commits nothing, as the stores refuse it.
         inner.owe(&ctx)?;
+        inner.sessions.retain(|_, s| s.profile_id != profile_id);
         Ok(ended)
     }
 

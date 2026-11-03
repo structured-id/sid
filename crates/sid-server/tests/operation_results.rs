@@ -348,6 +348,64 @@ async fn test_admin_suspension_retry_keeps_a_later_reactivation() {
     );
 }
 
+/// Revoking all sessions completes, the user signs in again, then the
+/// revocation's lost response is retried: the retry answers with the count
+/// it ended and leaves the new session alive.
+#[tokio::test]
+async fn test_revoke_all_sessions_retry_keeps_a_later_session() {
+    use sid_proto::sid::v1::admin_service_server::AdminService;
+    let user = sid_core::models::Profile::new(Some("revoke_retry"));
+    let svc = TestServices::new(MockStorage::new().with_profile(user.clone()));
+    let token = issue_admin_token(&svc.jwt, ProfileId::generate());
+    let sign_in = || async {
+        let session = sid_core::models::Session::new(
+            user.id,
+            None,
+            chrono::Utc::now() + chrono::Duration::hours(1),
+        );
+        svc.storage
+            .create_session(
+                &session,
+                sid_core::models::AuditEntry::system("test", "session").into(),
+            )
+            .await
+            .unwrap();
+        session.id
+    };
+    let revoke = || {
+        keyed(
+            RevokeAllSessionsRequest {
+                profile_id: user.id.to_string(),
+            },
+            &token,
+            Some("op-revoke"),
+        )
+    };
+
+    sign_in().await;
+    sign_in().await;
+    let first = svc
+        .admin
+        .revoke_all_sessions(revoke())
+        .await
+        .unwrap()
+        .into_inner();
+    let later = sign_in().await;
+    let retry = svc
+        .admin
+        .revoke_all_sessions(revoke())
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(first.revoked_count, 2);
+    assert_eq!(retry, first);
+    assert!(
+        svc.storage.get_session(later).await.unwrap().is_some(),
+        "the retry ended a session signed in after the revocation"
+    );
+}
+
 /// An edit without a key cannot promise a safe retry and changes nothing.
 #[tokio::test]
 async fn test_update_project_without_key_is_refused() {

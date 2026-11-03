@@ -455,7 +455,9 @@ pub trait StorageBackend:
     /// owes what [`SessionEnd::owed`] names under `end` (its client's
     /// back-channel logout, the revoked event); that work commits in the same
     /// transaction as the deletion, so a session created concurrently is either
-    /// kept or ended with what it owes, never ended without it.
+    /// kept or ended with what it owes, never ended without it. A keyed
+    /// command records the number of sessions it ended as its result
+    /// ([`MutationContext::record_effect`]).
     async fn delete_sessions_by_profile(
         &self,
         profile_id: ProfileId,

@@ -39,6 +39,10 @@ pub const COVERAGE: &[(&str, Coverage)] = &[
         "sid.v1.admin.AdminService/SetProfileMetadata",
         Coverage::Keyed,
     ),
+    (
+        "sid.v1.admin.AdminService/RevokeAllSessions",
+        Coverage::Keyed,
+    ),
     ("sid.v1.account.AccountService/AddEmail", Coverage::Keyed),
     ("sid.v1.account.AccountService/AddPhone", Coverage::Keyed),
     (
