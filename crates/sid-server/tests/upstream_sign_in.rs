@@ -56,11 +56,10 @@ fn service(
 ) -> UpstreamServiceImpl {
     let cache: Arc<dyn sid_plugin::cache::CacheBackend> =
         Arc::new(sid_plugin::cache::InMemoryCacheBackend::new());
-    let auth = common::auth_service_over(storage.clone(), cache.clone(), policy, Some(pin));
+    let auth = common::auth_service_over(storage.clone(), cache, policy, Some(pin));
     UpstreamServiceImpl::new(
         storage,
         common::test_key_manager(),
-        cache,
         common::test_jwt(),
         common::test_revocation(),
         auth,

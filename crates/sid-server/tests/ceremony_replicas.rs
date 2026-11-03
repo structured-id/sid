@@ -100,6 +100,57 @@ async fn opaque_ceremonies_finish_on_another_replica() {
     assert!(!common::opaque_client::bearer(&signed_in).is_empty());
 }
 
+/// The ceremonies do not need the shared cache: a registration and a login
+/// started on a replica that sees the cache down finish on a replica that
+/// runs without one, and the other way round. Both agree, because the
+/// state lives in the store alone.
+#[tokio::test]
+async fn opaque_ceremonies_need_no_cache() {
+    use std::sync::Arc;
+    let (down, none) = TestServices::replicas_seeing(
+        MockStorage::new(),
+        Arc::new(common::DownCache),
+        Arc::new(sid_plugin::cache::NoCacheBackend),
+    )
+    .await;
+    register(&down, &none, "nocache@sid.example.com", PASSWORD).await;
+
+    for (start, finish) in [(&down, &none), (&none, &down)] {
+        let request = start_login(start, "nocache@sid.example.com", PASSWORD).await;
+        let signed_in = finish
+            .auth
+            .opaque_login_finish(Request::new(request))
+            .await
+            .unwrap();
+        assert!(!common::opaque_client::bearer(&signed_in).is_empty());
+    }
+}
+
+/// A cache that restarts empty revives nothing: a finished login's state
+/// is not served again by a replica over the same store and an empty cache.
+#[tokio::test]
+async fn an_empty_cache_revives_no_ceremony() {
+    let (a, _) = TestServices::replicas(MockStorage::new()).await;
+    register(&a, &a, "revive@sid.example.com", PASSWORD).await;
+    let finish = start_login(&a, "revive@sid.example.com", PASSWORD).await;
+    a.auth
+        .opaque_login_finish(Request::new(finish.clone()))
+        .await
+        .unwrap();
+
+    let after = a
+        .restarted_with(std::sync::Arc::new(
+            sid_plugin::cache::InMemoryCacheBackend::new(),
+        ))
+        .await;
+    let replay = after
+        .auth
+        .opaque_login_finish(Request::new(finish))
+        .await
+        .unwrap_err();
+    assert_eq!(replay.code(), tonic::Code::FailedPrecondition, "{replay:?}");
+}
+
 /// A password registered before a restart signs in after it: the restarted
 /// process loads the same OPAQUE server setup instead of creating a new one.
 #[tokio::test]

@@ -1,17 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! gRPC AttestationService handler implementation.
+//! gRPC AttestationService handler implementation. It is served only behind
+//! its receiver (`crate::access`), which admits each call and asks the
+//! issuer whether its token is current before it reaches a handler.
 //!
 //! CE: stores attestation data and device public keys without
 //! cryptographic verification of attestation chains.
 
-use sid_authn::caller::{Caller, authenticate};
-use sid_authn::jwt::TokenVerifier;
-use sid_authn::revocation_cache::RevocationCache;
 use sid_core::grpc_error::refuse::{invalid_field, missing_field, not_found, storage_failure};
 use sid_core::grpc_error::{ApiError, ErrorReason};
 use sid_core::models::{
     AuditEntry, DeviceAttestation, DeviceAttestationFormat, DeviceId, KeyStorageType,
-    MutationContext, ProfileId,
+    MutationContext, ProfileId, SessionId,
 };
 use sid_plugin::StorageBackend;
 use sid_proto::sid::v1::attestation::attestation_service_server::AttestationService;
@@ -22,50 +21,103 @@ use tracing::{info, instrument};
 
 pub struct AttestationServiceImpl {
     storage: Arc<dyn StorageBackend>,
-    verifier: Arc<TokenVerifier>,
-    revocation: Arc<RevocationCache>,
+}
+
+/// The verified caller of an admitted call.
+struct Caller {
+    /// The Profile whose sign-in the token stands for, read from that
+    /// sign-in in the store, never from the token's subject.
+    profile: Option<ProfileId>,
+    /// The token's subject, what the audit names a caller without a Profile.
+    subject: String,
+    /// The Profile's own sign-in, not an impersonation: only such a session
+    /// changes a device's keys.
+    interactive: bool,
+}
+
+impl Caller {
+    /// Mutation context whose audit entry names this caller.
+    fn audit(&self, action: &str, resource: &str) -> MutationContext {
+        let actor = self
+            .profile
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| self.subject.clone());
+        AuditEntry::user(actor, action, resource).into()
+    }
+}
+
+fn denied() -> Status {
+    ApiError::new(
+        ErrorReason::InsufficientPermissions,
+        "the caller may not perform this operation",
+    )
+    .into()
 }
 
 impl AttestationServiceImpl {
-    pub fn new(
-        storage: Arc<dyn StorageBackend>,
-        verifier: Arc<TokenVerifier>,
-        revocation: Arc<RevocationCache>,
-    ) -> Self {
-        Self {
-            storage,
-            verifier,
-            revocation,
-        }
+    pub fn new(storage: Arc<dyn StorageBackend>) -> Self {
+        Self { storage }
     }
 
-    /// Authenticate the caller of `request`.
-    #[allow(clippy::result_large_err)]
+    /// The caller of `request`: the Profile of the stored, live sign-in its
+    /// token was issued from. A token of no sign-in (a client's own) has no
+    /// Profile and owns no device.
     async fn caller<T>(&self, request: &Request<T>) -> Result<Caller, Status> {
-        authenticate(request, &self.verifier, &self.revocation).await
+        let claims = sid_auth::receiver::owner_claims(request)?;
+        let profile = match SessionId::parse(&claims.sid) {
+            Ok(id) => self
+                .storage
+                .get_session(id)
+                .await
+                .map_err(storage_failure)?
+                .filter(|s| !s.is_expired())
+                .map(|s| s.profile_id),
+            Err(_) => None,
+        };
+        Ok(Caller {
+            profile,
+            subject: claims.sub.clone(),
+            interactive: profile.is_some() && claims.acr != sid_authn::caller::ACR_IMPERSONATION,
+        })
     }
 
-    /// Load `device_id` for the owner of its profile or an administrator;
-    /// key changes also require the owner's own sign-in session. Another
-    /// profile's device is DEVICE_NOT_FOUND, as an unknown one: its
+    /// Load `device_id` for its owner, or for a caller the issuer allows the
+    /// call's action on that device (the installation's administrator); key
+    /// changes also require the caller's own sign-in session. A device the
+    /// caller may not reach is DEVICE_NOT_FOUND, as an unknown one: its
     /// existence is not disclosed.
-    async fn authorized_device(
+    async fn authorized_device<T>(
         &self,
+        request: &mut Request<T>,
         caller: &Caller,
         device_id: DeviceId,
         change: bool,
     ) -> Result<sid_core::models::Device, Status> {
+        let unknown = || not_found(ErrorReason::DeviceNotFound, "Device", device_id.to_string());
         let device = self
             .storage
             .get_device(device_id)
             .await
-            .map_err(storage_failure)?
-            .filter(|d| caller.is_admin() || d.profile_id == caller.profile_id)
-            .ok_or_else(|| {
-                not_found(ErrorReason::DeviceNotFound, "Device", device_id.to_string())
-            })?;
-        if change {
-            caller.require_interactive()?;
+            .map_err(storage_failure)?;
+        match &device {
+            Some(d) if caller.profile == Some(d.profile_id) => {
+                sid_auth::receiver::allow_owner(request)?;
+            }
+            _ => {
+                match sid_auth::receiver::authorize_object(request, &format!("device:{device_id}"))
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(status) if status.code() == tonic::Code::PermissionDenied => {
+                        return Err(unknown());
+                    }
+                    Err(status) => return Err(status),
+                }
+            }
+        }
+        let device = device.ok_or_else(unknown)?;
+        if change && !caller.interactive {
+            return Err(denied());
         }
         Ok(device)
     }
@@ -160,26 +212,22 @@ fn domain_to_proto(att: &DeviceAttestation) -> super::handler::DeviceAttestation
 // Use proto-generated DeviceAttestation message name
 use sid_proto::sid::v1::attestation::DeviceAttestation as DeviceAttestationProto;
 
-/// Mutation context whose audit entry names the authenticated caller.
-fn caller_audit(caller: &Caller, action: &str, resource: &str) -> MutationContext {
-    AuditEntry::user(caller.profile_id.to_string(), action, resource).into()
-}
-
 #[tonic::async_trait]
 impl AttestationService for AttestationServiceImpl {
     #[instrument(skip_all, fields(method = "register_device_key"))]
     async fn register_device_key(
         &self,
-        request: Request<RegisterDeviceKeyRequest>,
+        mut request: Request<RegisterDeviceKeyRequest>,
     ) -> Result<Response<DeviceAttestationProto>, Status> {
         let caller = self.caller(&request).await?;
-        let req = request.into_inner();
-        let device_id = parse_id::<DeviceId>(&req.device_id, "device_id")?;
-
-        if req.device_public_key.is_empty() {
+        let device_id = parse_id::<DeviceId>(&request.get_ref().device_id, "device_id")?;
+        if request.get_ref().device_public_key.is_empty() {
             return Err(missing_field("device_public_key"));
         }
-        let device = self.authorized_device(&caller, device_id, true).await?;
+        let device = self
+            .authorized_device(&mut request, &caller, device_id, true)
+            .await?;
+        let req = request.into_inner();
 
         let mut att = DeviceAttestation::new_ce(
             device_id,
@@ -196,10 +244,7 @@ impl AttestationService for AttestationServiceImpl {
         // The store refuses a device that already has a live attestation; a
         // revoked one is replaced by this new enrollment.
         self.storage
-            .create_device_attestation(
-                &att,
-                caller_audit(&caller, "register_device_key", &req.device_id),
-            )
+            .create_device_attestation(&att, caller.audit("register_device_key", &req.device_id))
             .await
             .map_err(|e| match e {
                 sid_core::Error::Conflict(_) => ApiError::new(
@@ -221,11 +266,12 @@ impl AttestationService for AttestationServiceImpl {
     #[instrument(skip_all, fields(method = "get_device_attestation"))]
     async fn get_device_attestation(
         &self,
-        request: Request<GetDeviceAttestationRequest>,
+        mut request: Request<GetDeviceAttestationRequest>,
     ) -> Result<Response<DeviceAttestationProto>, Status> {
         let caller = self.caller(&request).await?;
-        let device_id = parse_id::<DeviceId>(&request.into_inner().device_id, "device_id")?;
-        self.authorized_device(&caller, device_id, false).await?;
+        let device_id = parse_id::<DeviceId>(&request.get_ref().device_id, "device_id")?;
+        self.authorized_device(&mut request, &caller, device_id, false)
+            .await?;
 
         let att = self
             .storage
@@ -240,16 +286,16 @@ impl AttestationService for AttestationServiceImpl {
     #[instrument(skip_all, fields(method = "rotate_device_key"))]
     async fn rotate_device_key(
         &self,
-        request: Request<RotateDeviceKeyRequest>,
+        mut request: Request<RotateDeviceKeyRequest>,
     ) -> Result<Response<DeviceAttestationProto>, Status> {
         let caller = self.caller(&request).await?;
-        let req = request.into_inner();
-        let device_id = parse_id::<DeviceId>(&req.device_id, "device_id")?;
-
-        if req.new_device_public_key.is_empty() {
+        let device_id = parse_id::<DeviceId>(&request.get_ref().device_id, "device_id")?;
+        if request.get_ref().new_device_public_key.is_empty() {
             return Err(missing_field("new_device_public_key"));
         }
-        self.authorized_device(&caller, device_id, true).await?;
+        self.authorized_device(&mut request, &caller, device_id, true)
+            .await?;
+        let req = request.into_inner();
 
         // Applies only to a live attestation: a key revoked meanwhile is
         // never replaced and revived.
@@ -260,7 +306,7 @@ impl AttestationService for AttestationServiceImpl {
                 &req.new_device_public_key,
                 req.new_attestation_object.as_deref(),
                 req.new_attestation_certificate.as_deref(),
-                caller_audit(&caller, "rotate_device_key", &req.device_id),
+                caller.audit("rotate_device_key", &req.device_id),
             )
             .await
             .map_err(storage_failure)?;
@@ -281,11 +327,12 @@ impl AttestationService for AttestationServiceImpl {
     #[instrument(skip_all, fields(method = "revoke_device_key"))]
     async fn revoke_device_key(
         &self,
-        request: Request<RevokeDeviceKeyRequest>,
+        mut request: Request<RevokeDeviceKeyRequest>,
     ) -> Result<Response<()>, Status> {
         let caller = self.caller(&request).await?;
-        let device_id = parse_id::<DeviceId>(&request.into_inner().device_id, "device_id")?;
-        self.authorized_device(&caller, device_id, true).await?;
+        let device_id = parse_id::<DeviceId>(&request.get_ref().device_id, "device_id")?;
+        self.authorized_device(&mut request, &caller, device_id, true)
+            .await?;
 
         // The store also stops counting the device as hardware-attested, in
         // the same transaction.
@@ -293,7 +340,7 @@ impl AttestationService for AttestationServiceImpl {
             .storage
             .revoke_device_attestation(
                 device_id,
-                caller_audit(&caller, "revoke_device_key", &device_id.to_string()),
+                caller.audit("revoke_device_key", &device_id.to_string()),
             )
             .await
             .map_err(storage_failure)?;
@@ -308,11 +355,16 @@ impl AttestationService for AttestationServiceImpl {
     #[instrument(skip_all, fields(method = "list_device_attestations"))]
     async fn list_device_attestations(
         &self,
-        request: Request<ListDeviceAttestationsRequest>,
+        mut request: Request<ListDeviceAttestationsRequest>,
     ) -> Result<Response<ListDeviceAttestationsResponse>, Status> {
         let caller = self.caller(&request).await?;
-        let profile_id = parse_id::<ProfileId>(&request.into_inner().profile_id, "profile_id")?;
-        caller.require_self_or_admin(profile_id)?;
+        let profile_id = parse_id::<ProfileId>(&request.get_ref().profile_id, "profile_id")?;
+        if caller.profile == Some(profile_id) {
+            sid_auth::receiver::allow_owner(&mut request)?;
+        } else {
+            sid_auth::receiver::authorize_object(&mut request, &format!("profile:{profile_id}"))
+                .await?;
+        }
 
         let attestations = self
             .storage

@@ -66,8 +66,6 @@ fn fixture_with(registered: bool) -> Fixture {
         sid_infra::deadline::issuer(crate::test_channel()),
     )
     .unwrap();
-    let cache: Arc<dyn sid_plugin::cache::CacheBackend> =
-        Arc::new(sid_plugin::cache::InMemoryCacheBackend::new());
     let receiver = Receiver::new(
         "ops",
         issuers,
@@ -76,7 +74,6 @@ fn fixture_with(registered: bool) -> Fixture {
             resource: ORDERS.into(),
         },
         ORIGIN,
-        Arc::new(sid_authn::dpop::DPopValidator::new(cache)),
         Arc::new(checker),
         crate::test_channel(),
     );
@@ -303,14 +300,16 @@ async fn a_bound_token_needs_a_proof_for_this_call() {
         )
         .await,
     );
-    // The right proof gets past the sender check (and fails only at the
-    // unreachable authorization API); its replay does not.
+    // The right proof gets past the sender check and fails only at the
+    // unreachable issuer, which alone admits it once: the receiver neither
+    // admits nor refuses it on its own, so its repeat is unavailable too.
     let call = headers(&[("authorization", &dpop), ("dpop", &right)]);
-    let first = admit(&f, http::Method::POST, &call)
-        .await
-        .expect_err("no PDP");
-    assert_eq!(first.code(), tonic::Code::Unavailable, "{first:?}");
-    assert_unauthenticated(admit(&f, http::Method::POST, &call).await);
+    for _ in 0..2 {
+        let status = admit(&f, http::Method::POST, &call)
+            .await
+            .expect_err("no issuer");
+        assert_eq!(status.code(), tonic::Code::Unavailable, "{status:?}");
+    }
 }
 
 /// A valid token is admitted only on the authorization API's decision:
@@ -487,11 +486,40 @@ async fn only_an_undecided_object_action_is_decided_for_a_named_object() {
 
 /// The pending question of an object action at `receiver`.
 fn pending(receiver: Receiver) -> Arc<PendingQuestion> {
+    pending_with(receiver, false)
+}
+
+/// The pending question of an object action at `receiver`, its token found
+/// current at admission when `current`.
+fn pending_with(receiver: Receiver, current: bool) -> Arc<PendingQuestion> {
     Arc::new(PendingQuestion {
         receiver: Arc::new(receiver),
         action: "ops.orgs.ban",
         token: "t".into(),
-        method: "POST".into(),
-        uri: format!("https://ops.example.com{PATH}"),
+        confirmation: None,
+        current,
     })
+}
+
+/// An owner is let through only on an owned-object action, whose admission
+/// asked the issuer whether the token is current: on a plain object action,
+/// which asked nothing yet, or an already decided one, letting an owner
+/// through is a wiring fault and is refused.
+#[tokio::test]
+async fn only_an_owned_object_action_lets_its_owner_through() {
+    let f = fixture();
+    let resource = sid_core::models::ResourceId::generate();
+    let mut owned = admitted_call(resource, Decision::Pending(pending_with(f.receiver, true)));
+    allow_owner(&mut owned).expect("the owner of an owned object");
+    assert!(admitted(&owned).is_ok());
+
+    let f = fixture();
+    let mut plain = admitted_call(resource, Decision::Pending(pending(f.receiver)));
+    let status = allow_owner(&mut plain).expect_err("a plain object action");
+    assert_eq!(status.code(), tonic::Code::Internal, "{status:?}");
+    assert!(admitted(&plain).is_err());
+
+    let mut decided = admitted_call(resource, Decision::Allowed);
+    let status = allow_owner(&mut decided).expect_err("already decided");
+    assert_eq!(status.code(), tonic::Code::Internal, "{status:?}");
 }

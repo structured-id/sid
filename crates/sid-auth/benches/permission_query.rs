@@ -91,7 +91,7 @@ fn main() {
         // admit
         let receiver = sid_auth::receiver::Receiver::connect(
             "orders",
-            &issuer.receiver_config(RESOURCE, ORIGIN, CHECKER, &secret, None),
+            &issuer.receiver_config(RESOURCE, ORIGIN, CHECKER, &secret),
         )
         .await
         .expect("receiver");

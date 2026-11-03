@@ -16,6 +16,7 @@ pub mod audit;
 pub mod auth;
 pub mod blob_store;
 pub mod cache;
+pub mod ceremony_state;
 pub mod client_registry;
 #[cfg(feature = "conformance")]
 pub mod conformance;
@@ -43,6 +44,7 @@ pub use audit::{AuditLog, VerifyResult};
 pub use auth::{AuthContext, AuthProvider, AuthResult};
 pub use blob_store::BlobStore;
 pub use cache::{CacheBackend, CacheError, CacheResult, NoCacheBackend};
+pub use ceremony_state::{CeremonyStateStore, InProcessCeremonyState, SingleUseAdmissions};
 pub use client_registry::ClientResourceRegistry;
 pub use credential_store::CredentialStore;
 pub use crypto::{

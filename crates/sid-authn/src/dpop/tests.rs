@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::*;
-use sid_plugin::cache::InMemoryCacheBackend;
 
 /// ES256 test key JWK coordinates (from test_es256_public.pem fixture).
 const TEST_JWK_X: &str = "b0K7RgRe5HiYfkZuCqJFDTDaIAkBIkVOP3xIggAghyc";
 const TEST_JWK_Y: &str = "01y9J7CAYH9p1uB6va3wvUKXiyIlFK_fm2NJckH7xcQ";
 
-fn test_cache() -> Arc<dyn CacheBackend> {
-    Arc::new(InMemoryCacheBackend::new())
+fn test_admissions() -> Arc<dyn SingleUseAdmissions> {
+    Arc::new(sid_plugin::InProcessCeremonyState::new())
 }
 
 /// Build a DPoP proof JWT signed with ES256 for testing.
@@ -46,7 +45,7 @@ fn build_dpop_proof(method: &str, url: &str, iat_offset_secs: i64, jti: &str) ->
 
 #[tokio::test]
 async fn test_valid_dpop_proof() {
-    let validator = DPopValidator::new(test_cache());
+    let validator = DPopValidator::new(test_admissions());
     let proof = build_dpop_proof(
         "POST",
         "https://sid.example.com/v1/oauth2/token",
@@ -65,7 +64,7 @@ async fn test_valid_dpop_proof() {
 
 #[tokio::test]
 async fn test_dpop_thumbprint_matches_known_value() {
-    let validator = DPopValidator::new(test_cache());
+    let validator = DPopValidator::new(test_admissions());
     let proof = build_dpop_proof(
         "POST",
         "https://sid.example.com/v1/oauth2/token",
@@ -84,7 +83,7 @@ async fn test_dpop_thumbprint_matches_known_value() {
 
 #[tokio::test]
 async fn test_dpop_replay_detected() {
-    let validator = DPopValidator::new(test_cache());
+    let validator = DPopValidator::new(test_admissions());
     let proof = build_dpop_proof(
         "POST",
         "https://sid.example.com/v1/oauth2/token",
@@ -113,7 +112,7 @@ async fn test_dpop_replay_detected() {
 
 #[tokio::test]
 async fn test_dpop_expired_proof() {
-    let validator = DPopValidator::new(test_cache());
+    let validator = DPopValidator::new(test_admissions());
     let proof = build_dpop_proof(
         "POST",
         "https://sid.example.com/v1/oauth2/token",
@@ -129,7 +128,7 @@ async fn test_dpop_expired_proof() {
 
 #[tokio::test]
 async fn test_dpop_future_proof_rejected() {
-    let validator = DPopValidator::new(test_cache());
+    let validator = DPopValidator::new(test_admissions());
     let proof = build_dpop_proof(
         "POST",
         "https://sid.example.com/v1/oauth2/token",
@@ -145,7 +144,7 @@ async fn test_dpop_future_proof_rejected() {
 
 #[tokio::test]
 async fn test_dpop_wrong_method() {
-    let validator = DPopValidator::new(test_cache());
+    let validator = DPopValidator::new(test_admissions());
     let proof = build_dpop_proof(
         "GET",
         "https://sid.example.com/v1/oauth2/token",
@@ -161,7 +160,7 @@ async fn test_dpop_wrong_method() {
 
 #[tokio::test]
 async fn test_dpop_wrong_url() {
-    let validator = DPopValidator::new(test_cache());
+    let validator = DPopValidator::new(test_admissions());
     let proof = build_dpop_proof("POST", "https://evil.example.com/token", 0, "url-jti");
 
     let result = validator
@@ -172,7 +171,7 @@ async fn test_dpop_wrong_url() {
 
 #[tokio::test]
 async fn test_dpop_url_ignores_query_fragment() {
-    let validator = DPopValidator::new(test_cache());
+    let validator = DPopValidator::new(test_admissions());
     let proof = build_dpop_proof(
         "POST",
         "https://sid.example.com/v1/oauth2/token",
@@ -195,7 +194,7 @@ async fn test_dpop_url_ignores_query_fragment() {
 /// §6.2.2/§6.2.3): host case and the scheme's default port do not matter.
 #[tokio::test]
 async fn test_dpop_url_normalized() {
-    let validator = DPopValidator::new(test_cache());
+    let validator = DPopValidator::new(test_admissions());
     let proof = build_dpop_proof(
         "POST",
         "https://SID.Example.com:443/v1/oauth2/token",
@@ -212,7 +211,7 @@ async fn test_dpop_url_normalized() {
 /// A different port or path is a different resource.
 #[tokio::test]
 async fn test_dpop_url_other_port_rejected() {
-    let validator = DPopValidator::new(test_cache());
+    let validator = DPopValidator::new(test_admissions());
     let proof = build_dpop_proof(
         "POST",
         "https://sid.example.com:8443/v1/oauth2/token",
@@ -263,7 +262,7 @@ async fn test_dpop_private_key_in_jwk_rejected() {
         jsonwebtoken::crypto::sign(signing_input.as_bytes(), &key, Algorithm::ES256).unwrap();
     let proof = format!("{signing_input}.{signature}");
 
-    let result = DPopValidator::new(test_cache())
+    let result = DPopValidator::new(test_admissions())
         .validate(&proof, "POST", "https://sid.example.com/token")
         .await;
 
@@ -273,7 +272,7 @@ async fn test_dpop_private_key_in_jwk_rejected() {
 
 #[tokio::test]
 async fn test_dpop_malformed_jwt() {
-    let validator = DPopValidator::new(test_cache());
+    let validator = DPopValidator::new(test_admissions());
     let result = validator
         .validate("not-a-jwt", "POST", "https://sid.example.com")
         .await;
@@ -297,7 +296,7 @@ async fn test_dpop_symmetric_algorithm_rejected() {
     let payload_b64 = URL_SAFE_NO_PAD.encode(payload.to_string().as_bytes());
     let fake_jwt = format!("{header_b64}.{payload_b64}.fakesig");
 
-    let validator = DPopValidator::new(test_cache());
+    let validator = DPopValidator::new(test_admissions());
     let result = validator
         .validate(&fake_jwt, "POST", "https://sid.example.com/token")
         .await;
@@ -340,7 +339,7 @@ async fn test_dpop_proof_signed_by_another_key_rejected() {
     .unwrap();
     let proof = encode(&header, &payload, &signing_key).unwrap();
 
-    let validator = DPopValidator::new(test_cache());
+    let validator = DPopValidator::new(test_admissions());
     let result = validator
         .validate(&proof, "POST", "https://sid.example.com/token")
         .await;
@@ -371,7 +370,7 @@ async fn test_dpop_unknown_key_type_rejected() {
     let payload_b64 = URL_SAFE_NO_PAD.encode(payload.to_string().as_bytes());
     let fake_jwt = format!("{header_b64}.{payload_b64}.fakesig");
 
-    let validator = DPopValidator::new(test_cache());
+    let validator = DPopValidator::new(test_admissions());
     let result = validator
         .validate(&fake_jwt, "POST", "https://sid.example.com/token")
         .await;
@@ -403,7 +402,7 @@ async fn test_dpop_algorithm_not_matching_key_type_rejected() {
     let payload_b64 = URL_SAFE_NO_PAD.encode(payload.to_string().as_bytes());
     let fake_jwt = format!("{header_b64}.{payload_b64}.fakesig");
 
-    let validator = DPopValidator::new(test_cache());
+    let validator = DPopValidator::new(test_admissions());
     let result = validator
         .validate(&fake_jwt, "POST", "https://sid.example.com/token")
         .await;
@@ -432,7 +431,7 @@ async fn test_dpop_wrong_typ_rejected() {
     let payload_b64 = URL_SAFE_NO_PAD.encode(payload.to_string().as_bytes());
     let fake_jwt = format!("{header_b64}.{payload_b64}.fakesig");
 
-    let validator = DPopValidator::new(test_cache());
+    let validator = DPopValidator::new(test_admissions());
     let result = validator
         .validate(&fake_jwt, "POST", "https://sid.example.com/token")
         .await;
@@ -480,61 +479,121 @@ fn test_jwk_thumbprint_deterministic() {
 }
 
 /// A proof is rejected when its replay cannot be checked: accepting it
-/// would accept a replay the cache would have caught.
+/// would accept a replay the store would have caught.
 #[tokio::test]
-async fn test_unreachable_replay_cache_rejects_the_proof() {
-    struct Down;
-    #[async_trait::async_trait]
-    impl CacheBackend for Down {
-        async fn get(&self, _: &str) -> sid_plugin::cache::CacheResult<Option<Vec<u8>>> {
-            Err(sid_plugin::cache::CacheError::Connection("down".into()))
-        }
-        async fn set(&self, _: &str, _: &[u8], _: Duration) -> sid_plugin::cache::CacheResult<()> {
-            Err(sid_plugin::cache::CacheError::Connection("down".into()))
-        }
-        async fn delete(&self, _: &str) -> sid_plugin::cache::CacheResult<()> {
-            Err(sid_plugin::cache::CacheError::Connection("down".into()))
-        }
-        async fn take(&self, _: &str) -> sid_plugin::cache::CacheResult<Option<Vec<u8>>> {
-            Err(sid_plugin::cache::CacheError::Connection("down".into()))
-        }
-        async fn set_nx(
-            &self,
-            _: &str,
-            _: &[u8],
-            _: Duration,
-        ) -> sid_plugin::cache::CacheResult<bool> {
-            Err(sid_plugin::cache::CacheError::Connection("down".into()))
-        }
-        async fn publish(&self, _: &str, _: &[u8]) -> sid_plugin::cache::CacheResult<()> {
-            Err(sid_plugin::cache::CacheError::Connection("down".into()))
-        }
-        async fn subscribe(
-            &self,
-            _: &str,
-        ) -> sid_plugin::cache::CacheResult<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>> {
-            Err(sid_plugin::cache::CacheError::Connection("down".into()))
-        }
-        async fn health_check(&self) -> sid_plugin::cache::CacheResult<()> {
-            Err(sid_plugin::cache::CacheError::Connection("down".into()))
-        }
-    }
-    let validator = DPopValidator::new(Arc::new(Down));
+async fn test_unreachable_replay_store_rejects_the_proof() {
+    let validator = DPopValidator::new(Arc::new(crate::test_support::DownCeremonies));
     let proof = build_dpop_proof("POST", "https://sid.example.com/token", 0, "jti-down");
 
     let result = validator
         .validate(&proof, "POST", "https://sid.example.com/token")
         .await;
 
-    assert!(matches!(result, Err(DPopError::ReplayCacheUnavailable)));
+    assert!(matches!(result, Err(DPopError::ReplayStoreUnavailable)));
 }
 
-/// Two replicas sharing the cache: a proof used on one is a replay on the other.
+/// A `jti` is recorded for the key and target that proved it: another key
+/// using the same `jti`, or the same key at another target, is no replay,
+/// while the same key at the same target is.
+#[tokio::test]
+async fn test_replay_record_is_scoped_to_key_and_target() {
+    let validator = DPopValidator::new(test_admissions());
+    let token = "https://sid.example.com/token";
+    validator.first_use("key-a", token, "j").await.unwrap();
+    validator.first_use("key-b", token, "j").await.unwrap();
+    validator
+        .first_use("key-a", "https://sid.example.com/userinfo", "j")
+        .await
+        .unwrap();
+    assert!(matches!(
+        validator.first_use("key-a", token, "j").await,
+        Err(DPopError::ReplayDetected)
+    ));
+}
+
+/// A proof admitted for one request is confirmed to that request and refused
+/// to any other; a proof the issuer no longer accepts is not admitted.
+#[tokio::test]
+async fn test_a_request_holds_its_proof_admission() {
+    let validator = DPopValidator::new(test_admissions());
+    let scope = "https://sid.example.com/i/a resource-1";
+    let proof = VerifiedProof {
+        jti: "j".into(),
+        iat: chrono::Utc::now().timestamp(),
+    };
+    let first = request_holder(&[1; 16], "token", "POST", "https://app/x", "verifier");
+    let retried = request_holder(&[1; 16], "token", "POST", "https://app/x", "verifier");
+    let changed = request_holder(&[1; 16], "token", "POST", "https://app/y", "verifier");
+    validator
+        .admit_for_request(scope, "key", &proof, &first)
+        .await
+        .unwrap();
+    validator
+        .admit_for_request(scope, "key", &proof, &retried)
+        .await
+        .unwrap();
+    assert!(matches!(
+        validator
+            .admit_for_request(scope, "key", &proof, &changed)
+            .await,
+        Err(DPopError::ReplayDetected)
+    ));
+    // Another resource's scope is another admission.
+    validator
+        .admit_for_request(
+            "https://sid.example.com/i/a resource-2",
+            "key",
+            &proof,
+            &changed,
+        )
+        .await
+        .unwrap();
+
+    let stale = VerifiedProof {
+        jti: "old".into(),
+        iat: chrono::Utc::now().timestamp() - 120,
+    };
+    assert!(matches!(
+        validator
+            .admit_for_request(scope, "key", &stale, &first)
+            .await,
+        Err(DPopError::Expired { .. })
+    ));
+}
+
+/// Admission that cannot be decided is no admission.
+#[tokio::test]
+async fn test_undecided_admission_is_unavailable() {
+    let validator = DPopValidator::new(Arc::new(crate::test_support::DownCeremonies));
+    let proof = VerifiedProof {
+        jti: "j".into(),
+        iat: chrono::Utc::now().timestamp(),
+    };
+    assert!(matches!(
+        validator
+            .admit_for_request("scope", "key", &proof, &[0; 32])
+            .await,
+        Err(DPopError::ReplayStoreUnavailable)
+    ));
+}
+
+/// A replay record outlives the last moment its proof is still accepted: a
+/// proof issued at the furthest accepted future `iat` stays fresh for the
+/// whole proof age after it.
+#[test]
+fn test_replay_record_outlives_the_acceptance_window() {
+    let validator = DPopValidator::new(test_admissions());
+    let latest_acceptance = DPopProof::MAX_AGE_SECONDS as i64 + FUTURE_IAT_ALLOWANCE_SECS;
+    assert!(validator.retention.as_secs() as i64 >= latest_acceptance);
+}
+
+/// Two replicas sharing the store: a proof used on one is a replay on the
+/// other.
 #[tokio::test]
 async fn test_replay_is_caught_across_replicas() {
-    let cache = test_cache();
-    let a = DPopValidator::new(cache.clone());
-    let b = DPopValidator::new(cache);
+    let admissions = test_admissions();
+    let a = DPopValidator::new(admissions.clone());
+    let b = DPopValidator::new(admissions);
     let proof = build_dpop_proof("POST", "https://sid.example.com/token", 0, "jti-shared");
 
     a.validate(&proof, "POST", "https://sid.example.com/token")
@@ -609,7 +668,7 @@ fn test_key_jkt() -> String {
 /// the presented token and is signed by the key the token is bound to.
 #[tokio::test]
 async fn test_resource_proof_accepted() {
-    let validator = DPopValidator::new(test_cache());
+    let validator = DPopValidator::new(test_admissions());
     let token = "eyJ.access.token";
     let proof = build_resource_proof("res-1", Some(&access_token_hash(token)));
     validator
@@ -621,7 +680,7 @@ async fn test_resource_proof_accepted() {
 /// A proof without `ath` cannot accompany an access token.
 #[tokio::test]
 async fn test_resource_proof_without_ath_rejected() {
-    let validator = DPopValidator::new(test_cache());
+    let validator = DPopValidator::new(test_admissions());
     let proof = build_resource_proof("res-2", None);
     let err = validator
         .validate_for_resource(&proof, "GET", RESOURCE, "eyJ.access.token", &test_key_jkt())
@@ -633,7 +692,7 @@ async fn test_resource_proof_without_ath_rejected() {
 /// A proof made for another token does not cover this one.
 #[tokio::test]
 async fn test_resource_proof_for_another_token_rejected() {
-    let validator = DPopValidator::new(test_cache());
+    let validator = DPopValidator::new(test_admissions());
     let proof = build_resource_proof("res-3", Some(&access_token_hash("eyJ.other.token")));
     let err = validator
         .validate_for_resource(&proof, "GET", RESOURCE, "eyJ.access.token", &test_key_jkt())
@@ -646,7 +705,7 @@ async fn test_resource_proof_for_another_token_rejected() {
 /// stolen bound token cannot be used with the thief's own key.
 #[tokio::test]
 async fn test_resource_proof_by_another_key_rejected() {
-    let validator = DPopValidator::new(test_cache());
+    let validator = DPopValidator::new(test_admissions());
     let token = "eyJ.access.token";
     let proof = build_resource_proof("res-4", Some(&access_token_hash(token)));
     let err = validator

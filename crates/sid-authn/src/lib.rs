@@ -51,6 +51,7 @@ pub mod instance_secret;
 pub mod ip_intelligence;
 pub mod issuer;
 pub mod issuer_directory;
+pub mod issuer_state;
 pub mod jwt;
 pub mod legacy_hash;
 pub mod login_policy;

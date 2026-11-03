@@ -10,7 +10,6 @@ mod common;
 use sid_authn::anomaly::{AnomalyDetector, LoginContext, RuleReaction};
 use sid_core::models::session::Session;
 use sid_core::models::{AuditEntry, Profile, ProfileId};
-use sid_plugin::cache::NoCacheBackend;
 use sid_plugin::storage::StorageBackend;
 use std::sync::Arc;
 use std::time::Duration;
@@ -266,8 +265,7 @@ async fn test_pg_multiple_designated_countries() {
 async fn test_pipeline_roaming_suppression() {
     // Simulate roaming: Kyiv (UA) → Bucharest (RO) in 5 seconds.
     // Both designated → location_switch (Allow).
-    let cache: Arc<dyn sid_plugin::cache::CacheBackend> = Arc::new(NoCacheBackend);
-    let detector = AnomalyDetector::ce_default(cache);
+    let detector = AnomalyDetector::ce_default(Arc::new(sid_plugin::InProcessCeremonyState::new()));
 
     let ctx = LoginContext {
         identity: "roaming-user".to_string(),
@@ -296,8 +294,7 @@ async fn test_pipeline_roaming_suppression() {
 #[tokio::test]
 async fn test_pipeline_new_country_not_suppressed() {
     // Same speed but destination is NOT designated → StepUp.
-    let cache: Arc<dyn sid_plugin::cache::CacheBackend> = Arc::new(NoCacheBackend);
-    let detector = AnomalyDetector::ce_default(cache);
+    let detector = AnomalyDetector::ce_default(Arc::new(sid_plugin::InProcessCeremonyState::new()));
 
     let ctx = LoginContext {
         identity: "traveler".to_string(),

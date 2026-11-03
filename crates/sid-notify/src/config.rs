@@ -10,8 +10,10 @@
 //! - `SID_NOTIFY_DATABASE_URL` — PostgreSQL URL for delivery jobs and templates (required)
 //! - `SID_NOTIFY_JOB_CAPACITY` — open jobs per kind before events stay with the broker (default: 100000)
 //! - `SID_IDENTITY_GRPC_ADDRESS` — sid-identity gRPC address for recipient resolution (optional, e.g., `http://127.0.0.1:9000`)
-//! - `SID_JWT_PUBLIC_KEY_PATH` — Ed25519 public key PEM that verifies administrators' tokens (required)
-//! - `SID_ISSUER` — token issuer URL (required)
+//! - `SID_GRPC_UPSTREAM`, `SID_ISSUER_URL`, `SID_RECEIVER_RESOURCE`,
+//!   `SID_RECEIVER_ORIGIN`, `SID_AUTHZ_CHECKER_*` — the template API's
+//!   receiver: the issuer it asks, the installation's account API resource it
+//!   serves, its external origin and its own checker credential (required)
 //! - `SID_SMTP_HOST` — SMTP server hostname (default: `localhost`)
 //! - `SID_SMTP_PORT` — SMTP server port (default: `587`)
 //! - `SID_SMTP_FROM` — Sender email address (default: `noreply@sid.example.com`)
@@ -74,12 +76,9 @@ pub struct NotifyConfig {
     /// Example: `http://127.0.0.1:9000`
     pub identity_grpc_address: Option<String>,
 
-    /// Ed25519 public key PEM path that verifies administrators' tokens; the
-    /// server does not start without it. The signing key is never loaded here.
-    pub jwt_public_key_path: Option<String>,
-
-    /// JWT issuer URL for token validation.
-    pub jwt_issuer: String,
+    /// Where the template API's calls are admitted: the installation's
+    /// account API resource, decided by its issuer (`crate::access`).
+    pub api: sid_auth::config::ReceiverConfig,
 }
 
 impl NotifyConfig {
@@ -203,14 +202,8 @@ impl NotifyConfig {
             .ok()
             .filter(|s| !s.is_empty());
 
-        let jwt_public_key_path = std::env::var("SID_JWT_PUBLIC_KEY_PATH")
-            .ok()
-            .filter(|s| !s.is_empty());
-
-        let jwt_issuer = std::env::var("SID_ISSUER")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .ok_or(ConfigError::Missing("SID_ISSUER"))?;
+        let api = sid_auth::config::ReceiverConfig::from_env()
+            .map_err(|e| ConfigError::Invalid("template API receiver", e.to_string()))?;
 
         Ok(Self {
             nats_url,
@@ -224,8 +217,7 @@ impl NotifyConfig {
             database_url,
             job_capacity,
             identity_grpc_address,
-            jwt_public_key_path,
-            jwt_issuer,
+            api,
         })
     }
 }
@@ -260,126 +252,4 @@ pub enum ConfigError {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    // Config tests construct NotifyConfig directly to avoid env var race conditions
-    // (env vars are process-global, tests run in parallel).
-
-    #[test]
-    fn test_config_struct_defaults() {
-        let config = NotifyConfig {
-            nats_url: "nats://127.0.0.1:4222".into(),
-            grpc_bind: "0.0.0.0:9040".parse().unwrap(),
-            receiver: WorkRecipient::new(DEFAULT_RECEIVER).unwrap(),
-            event_receivers: Vec::new(),
-            smtp: SmtpConfig::default(),
-            smtp_enabled: true,
-            webhook_enabled: true,
-            vapid: None,
-            database_url: "postgres://sid:sid_dev@localhost:54399/sid".into(),
-            job_capacity: DEFAULT_JOB_CAPACITY,
-            identity_grpc_address: None,
-            jwt_public_key_path: None,
-            jwt_issuer: "https://sid.example.com".into(),
-        };
-
-        assert_eq!(config.nats_url, "nats://127.0.0.1:4222");
-        assert_eq!(config.grpc_bind.port(), 9040);
-        assert_eq!(config.receiver.as_str(), "sid-notify");
-        assert_eq!(config.smtp.host, "localhost");
-        assert_eq!(config.smtp.port, 587);
-        assert!(config.smtp_enabled);
-        assert!(config.webhook_enabled);
-        assert!(config.vapid.is_none());
-    }
-
-    #[test]
-    fn test_config_with_vapid() {
-        let config = NotifyConfig {
-            nats_url: "nats://127.0.0.1:4222".into(),
-            grpc_bind: "0.0.0.0:9040".parse().unwrap(),
-            receiver: WorkRecipient::new(DEFAULT_RECEIVER).unwrap(),
-            event_receivers: Vec::new(),
-            smtp: SmtpConfig::default(),
-            smtp_enabled: true,
-            webhook_enabled: true,
-            vapid: Some(VapidConfig {
-                subject: "mailto:admin@sid.example.com".into(),
-                public_key: "BEl62iUYgUivxIkv69yViEuiBIa".into(),
-                private_key: "Dt1CLgQlkiaA-tmCkATyKZeoF1".into(),
-            }),
-            database_url: "postgres://sid:sid_dev@localhost:54399/sid".into(),
-            job_capacity: DEFAULT_JOB_CAPACITY,
-            identity_grpc_address: None,
-            jwt_public_key_path: None,
-            jwt_issuer: "https://sid.example.com".into(),
-        };
-
-        assert!(config.vapid.is_some());
-        let vapid = config.vapid.unwrap();
-        assert_eq!(vapid.subject, "mailto:admin@sid.example.com");
-    }
-
-    /// This service's facts are owed to every listed receiver but itself;
-    /// `none` lists none, and an invalid name is refused.
-    #[test]
-    fn test_other_receivers_exclude_this_service() {
-        let own = WorkRecipient::new(DEFAULT_RECEIVER).unwrap();
-        let names = |list| {
-            other_receivers(&own, list)
-                .unwrap()
-                .into_iter()
-                .map(|r| r.recipient.to_string())
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(names("sid-notify, audit-sink"), ["audit-sink"]);
-        assert_eq!(names("sid-notify"), Vec::<String>::new());
-        assert_eq!(names("none"), Vec::<String>::new());
-        assert!(other_receivers(&own, "a.b").is_err());
-    }
-
-    #[test]
-    fn test_config_error_display() {
-        let err = ConfigError::Missing("SID_NATS_URL");
-        assert!(err.to_string().contains("SID_NATS_URL"));
-
-        let err = ConfigError::Invalid("SID_NOTIFY_BIND", "bad address".into());
-        assert!(err.to_string().contains("SID_NOTIFY_BIND"));
-        assert!(err.to_string().contains("bad address"));
-    }
-
-    #[test]
-    fn test_config_disabled_channels() {
-        let config = NotifyConfig {
-            nats_url: "nats://127.0.0.1:4222".into(),
-            grpc_bind: "0.0.0.0:9040".parse().unwrap(),
-            receiver: WorkRecipient::new(DEFAULT_RECEIVER).unwrap(),
-            event_receivers: Vec::new(),
-            smtp: SmtpConfig::default(),
-            smtp_enabled: false,
-            webhook_enabled: false,
-            vapid: None,
-            database_url: "postgres://sid:sid_dev@localhost:54399/sid".into(),
-            job_capacity: DEFAULT_JOB_CAPACITY,
-            identity_grpc_address: None,
-            jwt_public_key_path: None,
-            jwt_issuer: "https://sid.example.com".into(),
-        };
-
-        assert!(!config.smtp_enabled);
-        assert!(!config.webhook_enabled);
-        assert!(config.vapid.is_none());
-    }
-
-    #[test]
-    fn test_smtp_config_default() {
-        let smtp = SmtpConfig::default();
-        assert_eq!(smtp.host, "localhost");
-        assert_eq!(smtp.port, 587);
-        assert_eq!(smtp.from_address, "noreply@sid.example.com");
-        assert_eq!(smtp.from_name, "StructuredID");
-        assert_eq!(smtp.tls_mode, SmtpTlsMode::StartTls);
-        assert_eq!(smtp.auth_method, EmailAuthMethod::None);
-    }
-}
+mod tests;

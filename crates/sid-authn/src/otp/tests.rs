@@ -1,46 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::*;
-use sid_plugin::cache::{CacheError, CacheResult, InMemoryCacheBackend};
-use tokio::sync::mpsc;
 
-fn shared() -> Arc<dyn CacheBackend> {
-    Arc::new(InMemoryCacheBackend::new())
+fn shared() -> Arc<dyn CeremonyStateStore> {
+    Arc::new(sid_plugin::InProcessCeremonyState::new())
 }
 
 fn service() -> OtpService {
     OtpService::new(shared())
-}
-
-/// A cache that cannot answer anything.
-struct DownCache;
-
-#[async_trait::async_trait]
-impl CacheBackend for DownCache {
-    async fn get(&self, _: &str) -> CacheResult<Option<Vec<u8>>> {
-        Err(CacheError::Connection("down".into()))
-    }
-    async fn set(&self, _: &str, _: &[u8], _: Duration) -> CacheResult<()> {
-        Err(CacheError::Connection("down".into()))
-    }
-    async fn delete(&self, _: &str) -> CacheResult<()> {
-        Err(CacheError::Connection("down".into()))
-    }
-    async fn take(&self, _: &str) -> CacheResult<Option<Vec<u8>>> {
-        Err(CacheError::Connection("down".into()))
-    }
-    async fn incr(&self, _: &str, _: Duration) -> CacheResult<u64> {
-        Err(CacheError::Connection("down".into()))
-    }
-    async fn publish(&self, _: &str, _: &[u8]) -> CacheResult<()> {
-        Err(CacheError::Connection("down".into()))
-    }
-    async fn subscribe(&self, _: &str) -> CacheResult<mpsc::UnboundedReceiver<Vec<u8>>> {
-        Err(CacheError::Connection("down".into()))
-    }
-    async fn health_check(&self) -> CacheResult<()> {
-        Err(CacheError::Connection("down".into()))
-    }
 }
 
 #[test]
@@ -206,16 +173,27 @@ async fn right_code_signs_in_once_under_concurrency() {
 /// An expired code is reported as expired and ends its session.
 #[tokio::test]
 async fn expired_code_is_refused() {
-    let cache = shared();
-    let service = OtpService::new(cache.clone());
+    let store = shared();
+    let service = OtpService::new(store.clone());
     let (result, code) = service.request_otp("old@example.com").await.unwrap();
     // Age the stored session past its expiry.
-    let key = session_key(&result.session_id);
-    let mut session: CachedOtpSession =
-        serde_json::from_slice(&cache.get(&key).await.unwrap().unwrap()).unwrap();
+    let key = result.session_id.to_string();
+    let mut session: StoredOtpSession = serde_json::from_slice(
+        &store
+            .read_ceremony_state(SESSIONS, &key)
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
     session.expires_at = Utc::now() - chrono::Duration::seconds(1);
-    cache
-        .set(&key, &serde_json::to_vec(&session).unwrap(), OTP_RETENTION)
+    store
+        .put_ceremony_state(
+            SESSIONS,
+            &key,
+            &serde_json::to_vec(&session).unwrap(),
+            OTP_RETENTION,
+        )
         .await
         .unwrap();
 
@@ -229,11 +207,11 @@ async fn expired_code_is_refused() {
     ));
 }
 
-/// Without a cache nothing passes: requests and verifications are errors, so
-/// neither the request limit nor the attempt limit can fail open.
+/// Without the store nothing passes: requests and verifications are errors,
+/// so neither the request limit nor the attempt limit can fail open.
 #[tokio::test]
-async fn unreachable_cache_fails_closed() {
-    let service = OtpService::new(Arc::new(DownCache));
+async fn unreachable_store_fails_closed() {
+    let service = OtpService::new(Arc::new(crate::test_support::DownCeremonies));
     assert!(matches!(
         service.request_otp("down@example.com").await,
         Err(OtpError::Internal(_))

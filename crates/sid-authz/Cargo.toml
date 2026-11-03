@@ -30,6 +30,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tonic = { workspace = true, optional = true }
+# Reads which field a refusal names, to tell a refused token from other refusals.
+tonic-types = { workspace = true, optional = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 
@@ -42,7 +44,7 @@ tracing-subscriber = { workspace = true, optional = true }
 
 [features]
 default = ["grpc"]
-grpc = ["dep:sid-authn", "sid-authn/grpc", "sid-core/grpc", "dep:sid-proto", "dep:tonic", "dep:prost", "dep:prost-types"]
+grpc = ["dep:sid-authn", "sid-authn/grpc", "sid-core/grpc", "dep:sid-proto", "dep:tonic", "dep:tonic-types", "dep:prost", "dep:prost-types"]
 standalone = ["grpc", "dep:anyhow", "dep:sid-crypto", "dep:tokio", "dep:tracing-subscriber"]
 
 [dev-dependencies]

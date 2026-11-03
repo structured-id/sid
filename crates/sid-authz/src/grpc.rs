@@ -29,6 +29,7 @@ use sid_core::models::{
 };
 use sid_plugin::StorageBackend;
 use sid_plugin::audit::AuditLog;
+use sid_proto::sid::v1::authn::{RequestConfirmation, SenderProofProfile};
 use sid_proto::sid::v1::authz::*;
 use sid_proto::sid::v1::authz_service_server::AuthzService;
 use std::sync::Arc;
@@ -586,6 +587,40 @@ fn instant(ts: Option<&prost_types::Timestamp>) -> Option<chrono::DateTime<chron
     chrono::DateTime::from_timestamp(ts.seconds, u32::try_from(ts.nanos).ok()?)
 }
 
+/// Whether `status` refuses a request's token or proof as evidence: the
+/// INVALID_ARGUMENT naming `request.access_token`.
+fn refuses_evidence(status: &Status) -> bool {
+    use tonic_types::StatusExt;
+    status.code() == tonic::Code::InvalidArgument
+        && status.get_details_bad_request().is_some_and(|bad| {
+            bad.field_violations
+                .iter()
+                .any(|violation| violation.field == "request.access_token")
+        })
+}
+
+/// The proof `confirmation` reports, as the issuer admits it: its `jti` and
+/// `iat` as the verifier read them from the proof.
+#[allow(clippy::result_large_err)]
+fn confirmed_proof(
+    confirmation: &RequestConfirmation,
+) -> Result<sid_authn::dpop::VerifiedProof, Status> {
+    if confirmation.proof_jti.is_empty() {
+        return Err(confirmation_unfit(
+            "request.confirmation.proof_jti",
+            "missing",
+        ));
+    }
+    let iat = confirmation
+        .proof_iat
+        .as_ref()
+        .ok_or_else(|| confirmation_unfit("request.confirmation.proof_iat", "missing"))?;
+    Ok(sid_authn::dpop::VerifiedProof {
+        jti: confirmation.proof_jti.clone(),
+        iat: iat.seconds,
+    })
+}
+
 /// Whether `confirmation` fits the original request's verified `claims`
 /// at `now`: the proof was made with the token's own key (RFC 9449 §6.1),
 /// for a well-formed method and external URI without query or fragment
@@ -848,6 +883,43 @@ impl AuthzServiceImpl {
     pub fn with_service_tokens(mut self, tokens: Arc<ResourceTokenVerifier>) -> Self {
         self.service_tokens = Some(tokens);
         self
+    }
+
+    /// Admit one original request's sender proof for the configured verifier
+    /// asking (OidcIssuerService.AdmitSenderProof): the request's token is
+    /// established as for a request-bound question, then its proof admitted
+    /// once for that request. A token or proof refused as evidence is
+    /// UNAUTHENTICATED (TOKEN_INVALID, `invalid_dpop_proof`); an untrusted caller
+    /// PERMISSION_DENIED; an undecidable admission UNAVAILABLE.
+    pub async fn admit_sender_proof(
+        &self,
+        request: Request<sid_proto::sid::v1::authn::AdmitSenderProofRequest>,
+    ) -> Result<(), Status> {
+        let asker = self.asker(&request).await?;
+        if !matches!(asker, Asker::Service(_)) {
+            return Err(checker_denied());
+        }
+        let request = request.into_inner();
+        let resource =
+            ResourceId::try_from(request.resource.ok_or_else(|| missing_field("resource"))?)
+                .map_err(|_| invalid_field("resource", "not a protected resource identifier"))?;
+        let confirmation = request
+            .confirmation
+            .ok_or_else(|| missing_field("confirmation"))?;
+        let evaluation = RequestEvaluation {
+            access_token: request.access_token,
+            confirmation: Some(confirmation),
+        };
+        match self.request_evidence(&asker, resource, &evaluation).await {
+            Ok(_) => Ok(()),
+            Err(status) if refuses_evidence(&status) => Err(sid_core::grpc_error::ApiError::new(
+                ErrorReason::TokenInvalid,
+                "the request's token or proof is not usable for this request",
+            )
+            .with_metadata("oauthError", "invalid_dpop_proof")
+            .into()),
+            Err(status) => Err(status),
+        }
     }
 
     /// Who asks: a service with its own token for the authorization API, or
@@ -1267,6 +1339,14 @@ impl AuthzServiceImpl {
                     return Err(checker_denied());
                 }
                 check_confirmation(confirmation, &claims, chrono::Utc::now())?;
+                self.admit_confirmed_proof(
+                    confirmation,
+                    &request.access_token,
+                    &claims.iss,
+                    &registered.id,
+                    verifier,
+                )
+                .await?;
                 false
             }
         };
@@ -1281,6 +1361,45 @@ impl AuthzServiceImpl {
             delegated: claims.act.as_ref().map(|act| act.sub.clone()),
             client: claims.client_id.clone(),
         })
+    }
+
+    /// Admit the original request's proof that `confirmation` reports at this
+    /// issuer, once for that request (RFC 9449 §11.1): the question about a
+    /// request whose proof another request used is refused, and one this
+    /// issuer cannot decide is UNAVAILABLE, never an allow.
+    #[allow(clippy::result_large_err)]
+    async fn admit_confirmed_proof(
+        &self,
+        confirmation: &RequestConfirmation,
+        access_token: &str,
+        issuer: &str,
+        resource: &sid_core::models::ResourceId,
+        verifier: &str,
+    ) -> Result<(), Status> {
+        let proof = confirmed_proof(confirmation)?;
+        let holder = sid_authn::dpop::request_holder(
+            &confirmation.request_id,
+            access_token,
+            &confirmation.method,
+            &confirmation.uri,
+            verifier,
+        );
+        sid_authn::dpop::DPopValidator::new(self.storage.clone())
+            .admit_for_request(
+                &format!("{issuer} {resource}"),
+                &confirmation.jkt,
+                &proof,
+                &holder,
+            )
+            .await
+            .map_err(|e| match e {
+                sid_authn::dpop::DPopError::ReplayStoreUnavailable => {
+                    dependency_unavailable("DPoP replay record", "replay store unreachable")
+                }
+                // The request's token with its proof is no longer usable: the
+                // evidence itself is refused, as for a revoked token.
+                other => invalid_field("request.access_token", other.to_string()),
+            })
     }
 
     /// Authenticate the caller of `request`.

@@ -203,6 +203,22 @@ CREATE TABLE bootstrap_policy (
     CONSTRAINT bootstrap_policy_pkey PRIMARY KEY (scope)
 );
 
+CREATE TABLE ceremony_counts (
+    namespace text NOT NULL,
+    count_key text NOT NULL,
+    count bigint NOT NULL,
+    window_ends timestamp with time zone NOT NULL,
+    CONSTRAINT ceremony_counts_pkey PRIMARY KEY (namespace, count_key)
+);
+
+CREATE TABLE ceremony_states (
+    namespace text NOT NULL,
+    state_key text NOT NULL,
+    value bytea NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    CONSTRAINT ceremony_states_pkey PRIMARY KEY (namespace, state_key)
+);
+
 CREATE TABLE device_attestations (
     id uuid NOT NULL,
     device_id uuid NOT NULL,
@@ -1479,6 +1495,10 @@ CREATE VIEW profiles_view AS
 CREATE UNIQUE INDEX applications_system_integration ON applications USING btree (system_integration) WHERE (system_integration IS NOT NULL);
 
 CREATE INDEX idx_audit_action ON audit_records USING btree (action);
+
+CREATE INDEX idx_ceremony_counts_window_ends ON ceremony_counts USING btree (window_ends);
+
+CREATE INDEX idx_ceremony_states_expires_at ON ceremony_states USING btree (expires_at);
 
 CREATE INDEX idx_audit_actor ON audit_records USING btree (actor_id);
 

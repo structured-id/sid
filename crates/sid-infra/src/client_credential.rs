@@ -147,6 +147,19 @@ pub enum CredentialError {
     /// The token endpoint refused or could not be reached.
     #[error("token request: {0}")]
     Token(String),
+    /// The introspection endpoint refused this client or could not answer.
+    #[error("token inspection: {0}")]
+    Inspection(String),
+}
+
+/// The client's proof at an issuer endpoint (RFC 6749 §2.3), in the form a
+/// request carries it.
+struct Proof {
+    basic: Option<AsciiMetadataValue>,
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    client_assertion: Option<String>,
+    client_assertion_type: Option<String>,
 }
 
 /// How the client proves itself at the token endpoint.
@@ -333,35 +346,20 @@ impl ClientCredential {
     /// resource, with the required scope when there is one.
     async fn request(&self) -> Result<Held, CredentialError> {
         use sid_proto::sid::v1::OAuth2TokenRequest;
-        let token_endpoint = sid_authn::issuer::token_endpoint(&self.issuer);
-        let mut body = OAuth2TokenRequest {
+        let proof = self.proof()?;
+        let body = OAuth2TokenRequest {
             grant_type: "client_credentials".into(),
             scope: self.scope.map(str::to_owned),
             issuer_handle: self.handle.clone(),
             resource: vec![self.resource.clone()],
+            client_id: proof.client_id,
+            client_secret: proof.client_secret,
+            client_assertion: proof.client_assertion,
+            client_assertion_type: proof.client_assertion_type,
             ..Default::default()
         };
-        let mut basic = None;
-        match &self.credential {
-            Credential::Basic(secret) => {
-                basic = Some(basic_authorization(&self.client_id, secret)?)
-            }
-            Credential::Post(secret) => {
-                body.client_id = Some(self.client_id.clone());
-                body.client_secret = Some(secret.expose_secret().to_owned());
-            }
-            Credential::Assertion(key) => {
-                body.client_id = Some(self.client_id.clone());
-                body.client_assertion =
-                    Some(key.sign(&self.client_id, &token_endpoint).map_err(|e| {
-                        CredentialError::Config(format!("signing the client assertion: {e}"))
-                    })?);
-                body.client_assertion_type =
-                    Some(sid_authn::client_assertion::JWT_BEARER_ASSERTION_TYPE.into());
-            }
-        }
         let mut request = tonic::Request::new(body);
-        if let Some(basic) = basic {
+        if let Some(basic) = proof.basic {
             request.metadata_mut().insert("authorization", basic);
         }
         let asked = Instant::now();
@@ -409,6 +407,83 @@ impl ClientCredential {
             authorization,
             refresh_at,
         })
+    }
+
+    /// This client's proof for one request. An assertion is addressed to
+    /// the token endpoint, as the issuer accepts it at every endpoint that
+    /// authenticates clients (RFC 7523 §3, RFC 7662 §2.1).
+    fn proof(&self) -> Result<Proof, CredentialError> {
+        let mut proof = Proof {
+            basic: None,
+            client_id: None,
+            client_secret: None,
+            client_assertion: None,
+            client_assertion_type: None,
+        };
+        match &self.credential {
+            Credential::Basic(secret) => {
+                proof.basic = Some(basic_authorization(&self.client_id, secret)?);
+            }
+            Credential::Post(secret) => {
+                proof.client_id = Some(self.client_id.clone());
+                proof.client_secret = Some(secret.expose_secret().to_owned());
+            }
+            Credential::Assertion(key) => {
+                let token_endpoint = sid_authn::issuer::token_endpoint(&self.issuer);
+                proof.client_id = Some(self.client_id.clone());
+                proof.client_assertion =
+                    Some(key.sign(&self.client_id, &token_endpoint).map_err(|e| {
+                        CredentialError::Config(format!("signing the client assertion: {e}"))
+                    })?);
+                proof.client_assertion_type =
+                    Some(sid_authn::client_assertion::JWT_BEARER_ASSERTION_TYPE.into());
+            }
+        }
+        Ok(proof)
+    }
+
+    /// Whether the issuer reports `token` active to this client now (RFC
+    /// 7662 §2.2): its own current decision on the token's grant, session
+    /// and actor, which a local revocation view cannot replace. Inactive
+    /// covers revoked, ended and unknown tokens alike; an issuer that cannot
+    /// answer is an error, never an active token.
+    pub async fn introspect(&self, token: &str) -> Result<bool, CredentialError> {
+        use sid_proto::sid::v1::OAuth2IntrospectRequest;
+        let proof = self.proof()?;
+        let mut request = tonic::Request::new(OAuth2IntrospectRequest {
+            token: token.to_owned(),
+            issuer_handle: self.handle.clone(),
+            client_id: proof.client_id,
+            client_secret: proof.client_secret,
+            client_assertion: proof.client_assertion,
+            client_assertion_type: proof.client_assertion_type,
+        });
+        if let Some(basic) = proof.basic {
+            request.metadata_mut().insert("authorization", basic);
+        }
+        let mut client =
+            sid_proto::sid::v1::auth_service_client::AuthServiceClient::new(self.channel.clone());
+        let answer = client.o_auth2_introspect(request).await.map_err(|status| {
+            CredentialError::Inspection(format!("{:?}: {}", status.code(), status.message()))
+        })?;
+        Ok(answer.into_inner().active)
+    }
+}
+
+/// The issuer's own answer on a token, asked with this service's client.
+#[async_trait::async_trait]
+impl sid_authn::issuer_state::IssuerState for ClientCredential {
+    fn issuer(&self) -> &str {
+        &self.issuer
+    }
+
+    async fn active(
+        &self,
+        token: &str,
+    ) -> Result<bool, sid_authn::issuer_state::IssuerStateUnavailable> {
+        self.introspect(token)
+            .await
+            .map_err(|e| sid_authn::issuer_state::IssuerStateUnavailable(e.to_string()))
     }
 }
 

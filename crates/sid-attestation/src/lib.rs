@@ -4,6 +4,7 @@
 //! Manages device keys, platform attestation, and device-bound credentials.
 //! Attestation data is stored without cryptographic verification.
 
+pub mod access;
 pub mod config;
 pub mod handler;
 pub mod server;

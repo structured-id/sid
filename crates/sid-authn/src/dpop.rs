@@ -10,7 +10,7 @@
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use sha2::{Digest, Sha256};
 use sid_core::models::dpop::{DPopBinding, DPopProof};
-use sid_plugin::cache::CacheBackend;
+use sid_plugin::SingleUseAdmissions;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,8 +24,8 @@ pub enum DPopError {
     #[error("DPoP proof replay detected")]
     ReplayDetected,
 
-    #[error("DPoP replay cache unavailable")]
-    ReplayCacheUnavailable,
+    #[error("DPoP replay store unavailable")]
+    ReplayStoreUnavailable,
 
     #[error("DPoP proof expired (max age: {max_age}s)")]
     Expired { max_age: u32 },
@@ -45,6 +45,36 @@ pub enum DPopError {
     KeyMismatch,
 }
 
+/// How far ahead of this server's clock a proof's `iat` may be (RFC 9449
+/// §11.1 lets the server bound clock difference).
+const FUTURE_IAT_ALLOWANCE_SECS: i64 = 5;
+
+/// The holder of a proof's admission: one original request as its verifier
+/// identified it, bound to the request's token, method and URI and to the
+/// verifier that confirmed it, so the same `request_id` with anything else
+/// changed is another request.
+pub fn request_holder(
+    request_id: &[u8],
+    access_token: &str,
+    method: &str,
+    uri: &str,
+    verifier: &str,
+) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    for part in [
+        request_id,
+        access_token.as_bytes(),
+        method.as_bytes(),
+        uri.as_bytes(),
+        verifier.as_bytes(),
+    ] {
+        // Length-prefixed, so no two different requests share a digest input.
+        digest.update((part.len() as u64).to_be_bytes());
+        digest.update(part);
+    }
+    digest.finalize().into()
+}
+
 /// `ath` of an access token: base64url SHA-256 of its ASCII form (RFC 9449 §4.2).
 pub fn access_token_hash(access_token: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(access_token.as_bytes()))
@@ -53,21 +83,34 @@ pub fn access_token_hash(access_token: &str) -> String {
 /// A proof whose signature, method, URI and age were checked.
 struct CheckedProof {
     jti: String,
+    iat: i64,
     ath: Option<String>,
     jwk: serde_json::Value,
 }
 
+/// A proof checked at a resource for its bound token, not yet admitted: what
+/// the token's issuer needs to admit it once (RFC 9449 §11.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedProof {
+    /// The proof's `jti`.
+    pub jti: String,
+    /// The proof's `iat`, seconds since the epoch.
+    pub iat: i64,
+}
+
 /// DPoP proof validator with JTI replay detection (RFC 9449 §11.1) in the
-/// cache every replica shares.
+/// single-use admissions every replica of its verifier shares.
 pub struct DPopValidator {
-    max_age: Duration,
-    cache: Arc<dyn CacheBackend>,
+    /// How long a proof's replay record is kept: past every moment it could
+    /// still be accepted.
+    retention: Duration,
+    admissions: Arc<dyn SingleUseAdmissions>,
 }
 
 impl std::fmt::Debug for DPopValidator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DPopValidator")
-            .field("max_age", &self.max_age)
+            .field("retention", &self.retention)
             .finish_non_exhaustive()
     }
 }
@@ -94,10 +137,17 @@ struct DPopPayload {
 }
 
 impl DPopValidator {
-    /// Create a new validator with replay window = `DPopProof::MAX_AGE_SECONDS` (60s).
-    pub fn new(cache: Arc<dyn CacheBackend>) -> Self {
-        let max_age = Duration::from_secs(DPopProof::MAX_AGE_SECONDS as u64);
-        Self { max_age, cache }
+    /// Create a new validator whose replay records outlive every proof it
+    /// accepts: the proof age `DPopProof::MAX_AGE_SECONDS` past the latest
+    /// accepted `iat`.
+    pub fn new(admissions: Arc<dyn SingleUseAdmissions>) -> Self {
+        let retention = Duration::from_secs(
+            u64::from(DPopProof::MAX_AGE_SECONDS) + FUTURE_IAT_ALLOWANCE_SECS.unsigned_abs(),
+        );
+        Self {
+            retention,
+            admissions,
+        }
     }
 
     /// Validate a DPoP proof JWT string.
@@ -112,7 +162,8 @@ impl DPopValidator {
     ) -> Result<DPopBinding, DPopError> {
         let proof = Self::check(proof_jwt, expected_method, expected_url)?;
         let thumbprint = compute_jwk_thumbprint(&proof.jwk)?;
-        self.first_use(&proof.jti).await?;
+        self.first_use(&thumbprint, expected_url, &proof.jti)
+            .await?;
         Ok(DPopBinding::new(thumbprint))
     }
 
@@ -128,6 +179,62 @@ impl DPopValidator {
         access_token: &str,
         bound_jkt: &str,
     ) -> Result<(), DPopError> {
+        let proof = Self::verify_for_resource(proof_jwt, method, url, access_token, bound_jkt)?;
+        self.first_use(bound_jkt, url, &proof.jti).await
+    }
+
+    /// Admit `proof`, verified by a resource-side verifier for a token of
+    /// this issuer bound to `jkt`, once for the request `holder` stands for
+    /// (RFC 9449 §11.1). `scope` names the issuer and the resource the
+    /// request was made to. The same request confirms its admission without
+    /// extending it; the proof used for any other request is a replay. The
+    /// admission lasts as long as this issuer would still accept the proof.
+    pub async fn admit_for_request(
+        &self,
+        scope: &str,
+        jkt: &str,
+        proof: &VerifiedProof,
+        holder: &[u8],
+    ) -> Result<(), DPopError> {
+        let now = chrono::Utc::now().timestamp();
+        let age = now - proof.iat;
+        if age < -FUTURE_IAT_ALLOWANCE_SECS || age > i64::from(DPopProof::MAX_AGE_SECONDS) {
+            return Err(DPopError::Expired {
+                max_age: DPopProof::MAX_AGE_SECONDS,
+            });
+        }
+        // Accepted until iat + max age; kept past the latest accepted moment.
+        let remaining = i64::from(DPopProof::MAX_AGE_SECONDS) + FUTURE_IAT_ALLOWANCE_SECS - age;
+        let retention =
+            Duration::from_secs(u64::try_from(remaining).expect("an accepted proof has time left"));
+        // A thumbprint is base64url and an issuer URL and resource id have no
+        // raw space, so the jti after the third space is unambiguous.
+        let key = format!("{scope} {jkt} {}", proof.jti);
+        let held = self
+            .admissions
+            .admit_for("dpop-request", &key, holder, retention)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "DPoP replay store unavailable");
+                DPopError::ReplayStoreUnavailable
+            })?;
+        if held {
+            Ok(())
+        } else {
+            Err(DPopError::ReplayDetected)
+        }
+    }
+
+    /// The checks of [`Self::validate_for_resource`] without the admission:
+    /// for a resource outside the token's issuer, which has the issuer admit
+    /// the returned proof instead of recording it itself.
+    pub fn verify_for_resource(
+        proof_jwt: &str,
+        method: &str,
+        url: &str,
+        access_token: &str,
+        bound_jkt: &str,
+    ) -> Result<VerifiedProof, DPopError> {
         let proof = Self::check(proof_jwt, method, url)?;
         if proof.ath.as_deref() != Some(access_token_hash(access_token).as_str()) {
             return Err(DPopError::AccessTokenHashMismatch);
@@ -135,20 +242,28 @@ impl DPopValidator {
         if compute_jwk_thumbprint(&proof.jwk)? != bound_jkt {
             return Err(DPopError::KeyMismatch);
         }
-        self.first_use(&proof.jti).await
+        Ok(VerifiedProof {
+            jti: proof.jti,
+            iat: proof.iat,
+        })
     }
 
-    /// Record the proof's `jti` (insert-or-reject, RFC 9449 §11.1). A replay
-    /// cache that cannot be reached rejects the proof: accepting it would
+    /// Record the proof's `jti` (insert-or-reject, RFC 9449 §11.1), scoped to
+    /// the verified key `jkt` and the target `htu` this verifier admits it
+    /// for, so a proof by one key never takes another key's `jti`. A replay
+    /// store that cannot be reached rejects the proof: accepting it would
     /// accept replays.
-    async fn first_use(&self, jti: &str) -> Result<(), DPopError> {
+    async fn first_use(&self, jkt: &str, htu: &str, jti: &str) -> Result<(), DPopError> {
+        // A thumbprint is base64url and a URI has no raw space, so the jti
+        // after the second space is unambiguous.
+        let key = format!("{jkt} {htu} {jti}");
         let first_use = self
-            .cache
-            .set_nx(&format!("jti:dpop:{jti}"), b"1", self.max_age)
+            .admissions
+            .admit_once("dpop-jti", &key, self.retention)
             .await
             .map_err(|e| {
-                tracing::error!(error = %e, "DPoP replay cache unavailable");
-                DPopError::ReplayCacheUnavailable
+                tracing::error!(error = %e, "DPoP replay store unavailable");
+                DPopError::ReplayStoreUnavailable
             })?;
         if first_use {
             Ok(())
@@ -230,7 +345,7 @@ impl DPopValidator {
         // 9. Check iat freshness (within MAX_AGE window)
         let now = chrono::Utc::now().timestamp();
         let age = now - payload.iat;
-        if age < -5 || age > DPopProof::MAX_AGE_SECONDS as i64 {
+        if age < -FUTURE_IAT_ALLOWANCE_SECS || age > DPopProof::MAX_AGE_SECONDS as i64 {
             return Err(DPopError::Expired {
                 max_age: DPopProof::MAX_AGE_SECONDS,
             });
@@ -238,6 +353,7 @@ impl DPopValidator {
 
         Ok(CheckedProof {
             jti: payload.jti,
+            iat: payload.iat,
             ath: payload.ath,
             jwk: header.jwk,
         })

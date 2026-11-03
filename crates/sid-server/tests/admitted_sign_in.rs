@@ -743,7 +743,7 @@ async fn a_repeat_after_a_lockout_is_refused() {
     .await
     .unwrap();
 
-    let detector = sid_authn::anomaly::AnomalyDetector::ce_default(cache);
+    let detector = sid_authn::anomaly::AnomalyDetector::ce_default(storage.clone());
     for _ in 0..5 {
         detector
             .record_failed_attempt(&profile.id.to_string())

@@ -66,11 +66,11 @@ pub struct UpstreamServiceImpl {
 
 impl UpstreamServiceImpl {
     /// Create a new upstream service whose sign-ins `auth` completes;
-    /// pending upstream logins live in the shared `cache` for 10 minutes.
+    /// pending upstream logins live in `storage`'s ceremony state for 10
+    /// minutes.
     pub fn new(
         storage: Arc<dyn StorageBackend>,
         key_manager: Arc<dyn KeyManager>,
-        cache: Arc<dyn sid_plugin::cache::CacheBackend>,
         jwt: Arc<JwtService>,
         revocation: Arc<RevocationCache>,
         auth: Arc<AuthServiceImpl>,
@@ -78,13 +78,13 @@ impl UpstreamServiceImpl {
         Self {
             jwt,
             revocation,
-            storage,
             auth_state: ChallengeStore::new(
-                cache,
+                storage.clone(),
                 key_manager.clone(),
                 "upstream-auth",
                 Duration::from_secs(600),
             ),
+            storage,
             key_manager,
             auth,
         }

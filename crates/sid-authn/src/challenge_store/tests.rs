@@ -2,15 +2,16 @@
 
 use super::*;
 use crate::test_support::key_manager as keys;
-use sid_plugin::cache::InMemoryCacheBackend;
+use sid_plugin::InProcessCeremonyState;
 
-/// Two replicas: separate stores over one shared cache and one master key.
+/// Two replicas: separate stores over one authoritative store and one
+/// master key.
 fn replicas(ttl: Duration) -> (ChallengeStore<String>, ChallengeStore<String>) {
-    let cache: Arc<dyn CacheBackend> = Arc::new(InMemoryCacheBackend::new());
+    let store: Arc<dyn CeremonyStateStore> = Arc::new(InProcessCeremonyState::new());
     let keys = keys();
     (
-        ChallengeStore::new(cache.clone(), keys.clone(), "test", ttl),
-        ChallengeStore::new(cache, keys, "test", ttl),
+        ChallengeStore::new(store.clone(), keys.clone(), "test", ttl),
+        ChallengeStore::new(store, keys, "test", ttl),
     )
 }
 
@@ -144,23 +145,27 @@ async fn state_stored_until_a_deadline_ends_with_it() {
     assert_eq!(b.take("k2").await.unwrap(), None);
 }
 
-/// The cache holds only sealed state, bound to its ceremony kind and key: the
-/// plaintext is not in it, and a value moved to another key is refused.
+/// The store holds only sealed state, bound to its ceremony kind and key:
+/// the plaintext is not in it, and a value moved to another key is refused.
 #[tokio::test]
-async fn cached_state_is_sealed_and_bound_to_its_key() {
-    let cache: Arc<dyn CacheBackend> = Arc::new(InMemoryCacheBackend::new());
+async fn stored_state_is_sealed_and_bound_to_its_key() {
+    let raw_store: Arc<dyn CeremonyStateStore> = Arc::new(InProcessCeremonyState::new());
     let store: ChallengeStore<String> =
-        ChallengeStore::new(cache.clone(), keys(), "test", Duration::from_secs(60));
+        ChallengeStore::new(raw_store.clone(), keys(), "test", Duration::from_secs(60));
     store
         .insert("k1", &"totp-seed-plaintext".to_string())
         .await
         .unwrap();
 
-    let raw = cache.get("ceremony:test:k1").await.unwrap().unwrap();
+    let raw = raw_store
+        .read_ceremony_state("test", "k1")
+        .await
+        .unwrap()
+        .unwrap();
     assert!(!raw.windows(19).any(|w| w == b"totp-seed-plaintext"));
 
-    cache
-        .set("ceremony:test:k2", &raw, Duration::from_secs(60))
+    raw_store
+        .put_ceremony_state("test", "k2", &raw, Duration::from_secs(60))
         .await
         .unwrap();
     assert!(matches!(
@@ -171,40 +176,16 @@ async fn cached_state_is_sealed_and_bound_to_its_key() {
     ));
 }
 
-/// An unreachable cache is an error, never "no state" that could be read as
+/// An unreachable store is an error, never "no state" that could be read as
 /// a fresh start or as success.
 #[tokio::test]
-async fn unreachable_cache_is_an_error() {
-    struct Down;
-    #[async_trait::async_trait]
-    impl CacheBackend for Down {
-        async fn get(&self, _: &str) -> sid_plugin::cache::CacheResult<Option<Vec<u8>>> {
-            Err(CacheError::Connection("down".into()))
-        }
-        async fn set(&self, _: &str, _: &[u8], _: Duration) -> sid_plugin::cache::CacheResult<()> {
-            Err(CacheError::Connection("down".into()))
-        }
-        async fn delete(&self, _: &str) -> sid_plugin::cache::CacheResult<()> {
-            Err(CacheError::Connection("down".into()))
-        }
-        async fn take(&self, _: &str) -> sid_plugin::cache::CacheResult<Option<Vec<u8>>> {
-            Err(CacheError::Connection("down".into()))
-        }
-        async fn publish(&self, _: &str, _: &[u8]) -> sid_plugin::cache::CacheResult<()> {
-            Err(CacheError::Connection("down".into()))
-        }
-        async fn subscribe(
-            &self,
-            _: &str,
-        ) -> sid_plugin::cache::CacheResult<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>> {
-            Err(CacheError::Connection("down".into()))
-        }
-        async fn health_check(&self) -> sid_plugin::cache::CacheResult<()> {
-            Err(CacheError::Connection("down".into()))
-        }
-    }
-    let store: ChallengeStore<String> =
-        ChallengeStore::new(Arc::new(Down), keys(), "test", Duration::from_secs(60));
+async fn unreachable_store_is_an_error() {
+    let store: ChallengeStore<String> = ChallengeStore::new(
+        Arc::new(crate::test_support::DownCeremonies),
+        keys(),
+        "test",
+        Duration::from_secs(60),
+    );
 
     assert!(store.insert("k1", &"s".to_string()).await.is_err());
     assert!(store.take("k1").await.is_err());

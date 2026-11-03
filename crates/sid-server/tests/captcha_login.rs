@@ -48,9 +48,10 @@ async fn services() -> (TestServices, Profile) {
     (svc, holder)
 }
 
-/// Enough attempts from `ip` that its next sign-in needs a CAPTCHA.
+/// Enough attempts from `ip`, counted in the server's store, that its next
+/// sign-in needs a CAPTCHA.
 async fn crowd(svc: &TestServices, ip: IpAddr) {
-    let detector = AnomalyDetector::ce_default(svc.cache.clone());
+    let detector = AnomalyDetector::ce_default(svc.storage.clone());
     for _ in 0..10 {
         detector.record_ip_attempt(ip).await.unwrap();
     }
@@ -62,7 +63,7 @@ async fn sign_in(
     ip: IpAddr,
     pass: Option<&str>,
 ) -> Result<VerifyOtpResponse, Status> {
-    let (pending, code) = sid_authn::otp::OtpService::new(svc.cache.clone())
+    let (pending, code) = sid_authn::otp::OtpService::new(svc.storage.clone())
         .request_otp(ADDRESS)
         .await
         .unwrap();
@@ -371,7 +372,7 @@ async fn pass_does_not_lift_a_lockout() {
     let challenge = challenge_of(&sign_in(&svc, ip, None).await.unwrap_err());
     let pass = earn_pass(&svc, ip, &challenge).await.unwrap();
 
-    let detector = AnomalyDetector::ce_default(svc.cache.clone());
+    let detector = AnomalyDetector::ce_default(svc.storage.clone());
     for _ in 0..5 {
         detector
             .record_failed_attempt(&holder.id.to_string())

@@ -589,7 +589,7 @@ pub struct AuthServiceImpl {
     /// proof names, never taken from a request.
     public_origin: String,
     /// RFC 7523: assertion JTI replay prevention cache.
-    assertion_jti_cache: Arc<sid_authn::client_assertion::AssertionJtiCache>,
+    assertion_jti_log: Arc<sid_authn::client_assertion::AssertionJtiLog>,
     /// Per-client rate limiter for machine user requests.
     rate_limiter: Arc<crate::rate_limit::RateLimiter>,
     /// Distributed rate limit stats for admin dashboard.
@@ -708,12 +708,13 @@ impl AuthServiceImpl {
         password_history: sid_authn::password_operation::PasswordHistoryAuthority,
     ) -> Self {
         let ttl = std::time::Duration::from_secs(300); // 5 minutes
+        let ceremonies: Arc<dyn sid_plugin::CeremonyStateStore> = storage.clone();
         let captcha_gate =
-            sid_authn::captcha::CaptchaGate::new(cache_backend.clone(), key_manager.clone());
+            sid_authn::captcha::CaptchaGate::new(ceremonies.clone(), key_manager.clone());
         let (password_ops, history_evaluation) =
             super::password_operation::PasswordOperations::with_authority(
                 storage.clone(),
-                cache_backend.clone(),
+                ceremonies.clone(),
                 key_manager.clone(),
                 installation_org,
                 password_history,
@@ -729,7 +730,7 @@ impl AuthServiceImpl {
             revocation_cache,
             feature_flags,
             login_state: ChallengeStore::new(
-                cache_backend.clone(),
+                ceremonies.clone(),
                 key_manager.clone(),
                 "opaque-login",
                 ttl,
@@ -737,50 +738,50 @@ impl AuthServiceImpl {
             password_ops,
             history_evaluation,
             webauthn_state: ChallengeStore::new(
-                cache_backend.clone(),
+                ceremonies.clone(),
                 key_manager.clone(),
                 "webauthn-binding",
                 ttl,
             ),
             step_up_state: ChallengeStore::new(
-                cache_backend.clone(),
+                ceremonies.clone(),
                 key_manager.clone(),
                 "webauthn-step-up",
                 ttl,
             ),
             migration_state: ChallengeStore::new(
-                cache_backend.clone(),
+                ceremonies.clone(),
                 key_manager.clone(),
                 "legacy-migration",
                 ttl,
             ),
             totp_enrollment: ChallengeStore::new(
-                cache_backend.clone(),
+                ceremonies.clone(),
                 key_manager.clone(),
                 "totp-enrollment",
                 ttl,
             ),
             first_factor_proofs: ChallengeStore::new(
-                cache_backend.clone(),
+                ceremonies.clone(),
                 key_manager.clone(),
                 "first-factor-proof",
                 ttl,
             ),
             continuations: ChallengeStore::new(
-                cache_backend.clone(),
+                ceremonies.clone(),
                 key_manager.clone(),
                 "authorize-continuation",
                 authorize::CONTINUATION_TTL,
             ),
             logout_confirmations: ChallengeStore::new(
-                cache_backend.clone(),
+                ceremonies.clone(),
                 key_manager.clone(),
                 "logout-confirmation",
                 end_session::CONFIRMATION_TTL,
             ),
             magic_link,
             otp,
-            dpop_validator: DPopValidator::new(cache_backend.clone()),
+            dpop_validator: DPopValidator::new(ceremonies.clone()),
             issuers,
             installation_org,
             public_origin: url::Url::parse(&issuer)
@@ -788,15 +789,15 @@ impl AuthServiceImpl {
                 .origin()
                 .ascii_serialization(),
             issuer,
-            assertion_jti_cache: Arc::new(sid_authn::client_assertion::AssertionJtiCache::new(
-                cache_backend.clone(),
+            assertion_jti_log: Arc::new(sid_authn::client_assertion::AssertionJtiLog::new(
+                ceremonies.clone(),
             )),
             rate_limiter: Arc::new(crate::rate_limit::RateLimiter::new(cache_backend.clone())),
             rate_limit_stats: Arc::new(crate::rate_limit::RateLimitStats::new(
                 cache_backend.clone(),
             )),
-            totp_replay: sid_authn::TotpReplayGuard::new(cache_backend.clone()),
-            anomaly_detector: Arc::new(AnomalyDetector::ce_default(cache_backend)),
+            totp_replay: sid_authn::TotpReplayGuard::new(ceremonies.clone()),
+            anomaly_detector: Arc::new(AnomalyDetector::ce_default(ceremonies.clone())),
             ip_intelligence,
             geoip,
             security_policy: SecurityPolicy::ce_default(),
@@ -1474,8 +1475,8 @@ impl AuthServiceImpl {
             .map_err(|e| match e {
                 // An unreachable replay record cannot rule out a replay; the
                 // client retries the same request.
-                sid_authn::dpop::DPopError::ReplayCacheUnavailable => {
-                    dependency_unavailable("DPoP replay record", "replay cache unreachable")
+                sid_authn::dpop::DPopError::ReplayStoreUnavailable => {
+                    dependency_unavailable("DPoP replay record", "replay store unreachable")
                 }
                 other => {
                     warn!("DPoP proof validation failed: {}", other);
@@ -1556,7 +1557,7 @@ impl AuthServiceImpl {
             client,
             &issuer.canonical_url,
             &self.oauth2,
-            &self.assertion_jti_cache,
+            &self.assertion_jti_log,
         )
         .await
         .map_err(|refusal| match refusal {
@@ -1635,7 +1636,7 @@ impl AuthServiceImpl {
                         &audience,
                         &cred.credential_data,
                         alg,
-                        &self.assertion_jti_cache,
+                        &self.assertion_jti_log,
                     )
                     .await
                     {

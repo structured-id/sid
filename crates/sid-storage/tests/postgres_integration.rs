@@ -402,6 +402,161 @@ mod operation_result_store {
     );
 }
 
+// ─── Ceremony state conformance ───
+
+/// Run ceremony state conformance `scenario`; each one uses namespaces of
+/// its own.
+macro_rules! ceremony_state {
+    ($($scenario:ident),* $(,)?) => {$(
+        #[tokio::test]
+        async fn $scenario() {
+            sid_plugin::conformance::ceremony_state::$scenario(&setup().await).await;
+        }
+    )*};
+}
+
+mod ceremony_state {
+    use super::*;
+
+    ceremony_state!(
+        state_is_taken_once,
+        concurrent_takers_get_it_once,
+        expired_state_is_refused_at_use,
+        put_replaces,
+        replace_applies_only_to_what_was_read,
+        concurrent_replacements_apply_once,
+        key_is_admitted_once,
+        concurrent_admissions_succeed_once,
+        events_count_within_their_window,
+        concurrent_events_are_counted_once,
+        counts_are_read_and_cleared,
+        admission_is_confirmed_only_to_its_holder,
+        concurrent_holders_admit_once,
+    );
+}
+
+/// While another transaction holds the row `lock_sql` locks past `ttl`,
+/// `write` waits for it; its outcome, evaluated once the lock is released.
+async fn after_a_held_row_lock<T>(
+    backend: &PostgresBackend,
+    lock_sql: &'static str,
+    namespace: &str,
+    ttl: std::time::Duration,
+    write: impl std::future::Future<Output = T>,
+) -> T {
+    let mut held = backend.pool().begin().await.unwrap();
+    sqlx::query(lock_sql)
+        .bind(namespace)
+        .execute(&mut *held)
+        .await
+        .unwrap();
+    let release = async {
+        tokio::time::sleep(ttl * 3).await;
+        held.commit().await.unwrap();
+    };
+    let (outcome, ()) = tokio::join!(write, release);
+    outcome
+}
+
+const LOCK_STATE: &str =
+    "SELECT 1 FROM ceremony_states WHERE namespace = $1 AND state_key = 'k' FOR UPDATE";
+const LOCK_COUNT: &str =
+    "SELECT 1 FROM ceremony_counts WHERE namespace = $1 AND count_key = 'k' FOR UPDATE";
+
+/// A ceremony state that expires while its replacement or take waits on its
+/// row lock is neither replaced nor taken: expiry is judged on the clock
+/// when the row is reached, not when the statement began.
+#[tokio::test]
+async fn test_ceremony_state_expiring_behind_a_row_lock_is_not_used() {
+    use sid_plugin::CeremonyStateStore;
+    let backend = setup().await;
+    let ttl = std::time::Duration::from_millis(300);
+    for take in [false, true] {
+        let namespace = format!("lock-{}", uuid::Uuid::now_v7());
+        backend
+            .put_ceremony_state(&namespace, "k", b"v1", ttl)
+            .await
+            .unwrap();
+        if take {
+            let taken = after_a_held_row_lock(
+                &backend,
+                LOCK_STATE,
+                &namespace,
+                ttl,
+                backend.take_ceremony_state(&namespace, "k"),
+            )
+            .await
+            .unwrap();
+            assert_eq!(taken, None, "an expired state was taken");
+        } else {
+            let replaced = after_a_held_row_lock(
+                &backend,
+                LOCK_STATE,
+                &namespace,
+                ttl,
+                backend.replace_ceremony_state(&namespace, "k", b"v1", b"v2", ttl),
+            )
+            .await
+            .unwrap();
+            assert!(!replaced, "an expired state was advanced");
+        }
+    }
+}
+
+/// A count whose window ends while the event waits on its row lock opens a
+/// new window instead of adding to the ended one.
+#[tokio::test]
+async fn test_ceremony_count_window_ending_behind_a_row_lock_restarts() {
+    use sid_plugin::CeremonyStateStore;
+    let backend = setup().await;
+    let window = std::time::Duration::from_millis(300);
+    let namespace = format!("lock-{}", uuid::Uuid::now_v7());
+    backend
+        .count_in_window(&namespace, "k", window)
+        .await
+        .unwrap();
+    let count = after_a_held_row_lock(
+        &backend,
+        LOCK_COUNT,
+        &namespace,
+        window,
+        backend.count_in_window(&namespace, "k", window),
+    )
+    .await
+    .unwrap();
+    assert_eq!(count, 1, "an ended window was added to");
+    assert_eq!(
+        backend.read_count(&namespace, "k").await.unwrap(),
+        1,
+        "the new window ended before it was used"
+    );
+}
+
+/// An admission taken over after waiting on the row lock past the old one's
+/// expiry is live afterwards: its deadline counts from when it was taken.
+#[tokio::test]
+async fn test_admission_taken_behind_a_row_lock_stays_live() {
+    use sid_plugin::SingleUseAdmissions;
+    let backend = setup().await;
+    let ttl = std::time::Duration::from_millis(300);
+    let namespace = format!("lock-{}", uuid::Uuid::now_v7());
+    assert!(backend.admit_once(&namespace, "k", ttl).await.unwrap());
+    let taken = after_a_held_row_lock(
+        &backend,
+        LOCK_STATE,
+        &namespace,
+        ttl,
+        backend.admit_once(&namespace, "k", ttl),
+    )
+    .await
+    .unwrap();
+    assert!(taken, "the lapsed admission was not taken over");
+    assert!(
+        !backend.admit_once(&namespace, "k", ttl).await.unwrap(),
+        "the admission taken over had already lapsed"
+    );
+}
+
 // ─── Instance secret conformance ───
 
 /// Run instance secret conformance `scenario` in a schema of its own:
