@@ -2759,12 +2759,12 @@ async fn test_admin_delete_project() {
     let storage = MockStorage::new().with_project(custom);
     let svc = TestServices::new(storage);
 
-    let req = admin_request(
+    let req = new_command(admin_request(
         &svc,
         DeleteProjectRequest {
             id: project_id.0.to_string(),
         },
-    );
+    ));
 
     let resp = svc.project.delete_project(req).await;
     assert!(resp.is_ok());
@@ -2786,12 +2786,12 @@ async fn test_admin_delete_system_project_forbidden() {
     let svc = TestServices::new(storage);
 
     let system_id = sid_core::models::ProjectId::system();
-    let req = admin_request(
+    let req = new_command(admin_request(
         &svc,
         DeleteProjectRequest {
             id: system_id.0.to_string(),
         },
-    );
+    ));
 
     let err = svc.project.delete_project(req).await.unwrap_err();
     // SID provisions and keeps the system project: the administrator has the
@@ -4516,7 +4516,10 @@ async fn test_e2e_admin_project_and_application_flow() {
     // Step 7: Delete project
     let resp = svc
         .project
-        .delete_project(admin_request(&svc, DeleteProjectRequest { id: project_id }))
+        .delete_project(new_command(admin_request(
+            &svc,
+            DeleteProjectRequest { id: project_id },
+        )))
         .await;
     assert!(resp.is_ok());
 

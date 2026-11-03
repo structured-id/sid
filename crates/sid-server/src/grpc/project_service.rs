@@ -606,6 +606,9 @@ const CREATE_PROJECT: &str = "sid.v1.ProjectService/CreateProject";
 /// The canonical method name keyed UpdateProject commands are recorded under.
 const UPDATE_PROJECT: &str = "sid.v1.ProjectService/UpdateProject";
 
+/// The canonical method name keyed DeleteProject commands are recorded under.
+const DELETE_PROJECT: &str = "sid.v1.ProjectService/DeleteProject";
+
 /// The project a completed CreateProject recorded as its result.
 #[allow(clippy::result_large_err)]
 fn decode_result(result: &[u8]) -> Result<sid_proto::sid::v1::Project, Status> {
@@ -881,6 +884,7 @@ impl ProjectService for ProjectServiceImpl {
     ) -> Result<Response<()>, Status> {
         let caller = self.admin(&request).await?;
         self.check_maintenance().await?;
+        let key = required_key(request.metadata())?;
         let req = request.into_inner();
         let project_id = parse_project_id(&req.id)?;
 
@@ -888,27 +892,31 @@ impl ProjectService for ProjectServiceImpl {
             return Err(system_project("delete"));
         }
 
-        // Verify project exists
-        self.storage
-            .get_project(project_id)
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(|| project_not_found(project_id))?;
-
-        self.storage
-            .delete_project(
-                project_id,
-                AuditEntry::admin(
+        // A retry of a completed deletion answers as the deletion did, not
+        // with the absence it left.
+        let command = KeyedCommand::new(
+            format!("profile:{}", caller.profile_id),
+            key,
+            DELETE_PROJECT,
+            req.encode_to_vec(),
+        );
+        command
+            .run(&*self.storage, || async {
+                self.storage
+                    .get_project(project_id)
+                    .await?
+                    .ok_or_else(|| project_not_found(project_id))?;
+                let ctx = MutationContext::from(AuditEntry::admin(
                     caller.profile_id.to_string(),
                     "project.delete",
                     project_id.0.to_string(),
-                )
-                .into(),
-            )
-            .await
-            .map_err(storage_failure)?;
-
-        info!("Deleted project {}", project_id.0);
+                ))
+                .with_operation(command.completion(().encode_to_vec()));
+                self.storage.delete_project(project_id, ctx).await?;
+                info!("Deleted project {}", project_id.0);
+                Ok(())
+            })
+            .await?;
 
         Ok(Response::new(()))
     }

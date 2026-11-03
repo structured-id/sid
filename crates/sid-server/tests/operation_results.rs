@@ -152,6 +152,41 @@ async fn test_update_project_retry_does_not_overwrite_a_later_edit() {
     assert_eq!(projects_named(&svc, &token, "ledger").await, 0);
 }
 
+/// A deletion's lost response is retried: the retry answers as the deletion
+/// did (it answered NOT_FOUND, the absence the deletion left).
+#[tokio::test]
+async fn test_delete_project_retry_answers_as_the_deletion() {
+    let svc = TestServices::new(MockStorage::new());
+    let token = issue_admin_token(&svc.jwt, ProfileId::generate());
+    let project = svc
+        .project
+        .create_project(keyed(create("scratch"), &token, Some("op-e")))
+        .await
+        .unwrap()
+        .into_inner();
+    let delete = || DeleteProjectRequest {
+        id: project.id.clone(),
+    };
+
+    svc.project
+        .delete_project(keyed(delete(), &token, Some("op-f")))
+        .await
+        .unwrap();
+    svc.project
+        .delete_project(keyed(delete(), &token, Some("op-f")))
+        .await
+        .expect("the retry answers as the deletion");
+
+    assert_eq!(projects_named(&svc, &token, "scratch").await, 0);
+    // A new deletion under a new key finds nothing to delete.
+    let err = svc
+        .project
+        .delete_project(keyed(delete(), &token, Some("op-g")))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::NotFound);
+}
+
 /// An edit without a key cannot promise a safe retry and changes nothing.
 #[tokio::test]
 async fn test_update_project_without_key_is_refused() {

@@ -3796,7 +3796,7 @@ impl StorageBackend for MockStorage {
         Ok(Some(project))
     }
 
-    async fn delete_project(&self, id: ProjectId, _audit: MutationContext) -> SidResult<()> {
+    async fn delete_project(&self, id: ProjectId, ctx: MutationContext) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
         if let Some(project) = inner.projects.get(&id.0)
             && project.is_system
@@ -3805,6 +3805,7 @@ impl StorageBackend for MockStorage {
                 "Cannot delete system project".into(),
             ));
         }
+        inner.owe(&ctx)?;
         inner.projects.remove(&id.0);
         Ok(())
     }
