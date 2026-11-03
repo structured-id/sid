@@ -110,6 +110,45 @@ fn route_handler(store: &Arc<dyn WorkStore>, resolver: RecipientResolver) -> Rou
     )
 }
 
+/// Run every plan job `store` holds once with `handler`, returning the
+/// outcomes.
+async fn carry_out_plans(store: &Arc<dyn WorkStore>, handler: &PlanHandler) -> Vec<WorkOutcome> {
+    let plans = store
+        .claim_work(&[kind(PLAN)], "w", 10, Duration::from_secs(30))
+        .await
+        .unwrap();
+    let mut outcomes = Vec::new();
+    for plan in plans {
+        let outcome = handler.handle(&plan).await;
+        match &outcome {
+            WorkOutcome::Done(result) => {
+                store
+                    .complete_work(plan.id, plan.generation, result.as_deref())
+                    .await
+                    .unwrap();
+            }
+            WorkOutcome::Retry(error) => {
+                store
+                    .fail_work(
+                        plan.id,
+                        plan.generation,
+                        &sid_core::models::WorkFailure {
+                            error: error.clone(),
+                            ambiguous: false,
+                            retry_at: Some(Utc::now()),
+                            on_dead: None,
+                        },
+                    )
+                    .await
+                    .unwrap();
+            }
+            other => panic!("unexpected plan outcome {other:?}"),
+        }
+        outcomes.push(outcome);
+    }
+    outcomes
+}
+
 /// An accepted event is owned by one routing job, however often the bus
 /// redelivers it (also after a crash between storing and settling); another
 /// producer's event with the same id is a different fact with its own job.
@@ -167,9 +206,10 @@ async fn test_same_id_from_two_sources_is_two_notifications() {
         let work = claimed(ROUTE, serde_json::to_vec(event).unwrap());
         assert_eq!(
             handler.handle(&work).await,
-            WorkOutcome::Done(Some("2 deliveries".into()))
+            WorkOutcome::Done(Some("2 deliveries planned".into()))
         );
     }
+    carry_out_plans(&store, &PlanHandler::new(Arc::clone(&store), 1_000)).await;
     let deliveries = store
         .claim_work(&[kind(DELIVER)], "w", 10, Duration::from_secs(30))
         .await
@@ -190,9 +230,15 @@ async fn test_route_fans_out_once() {
 
     assert_eq!(
         handler.handle(&work).await,
-        WorkOutcome::Done(Some("2 deliveries".into()))
+        WorkOutcome::Done(Some("2 deliveries planned".into()))
     );
     handler.handle(&work).await;
+    let plans = PlanHandler::new(Arc::clone(&store), 1_000);
+    assert_eq!(
+        carry_out_plans(&store, &plans).await,
+        [WorkOutcome::Done(Some("2 deliveries".into()))],
+        "a repeated routing stored its plan twice"
+    );
 
     for channel in ["email", "webhook"] {
         let id = delivery_job_id(&event, "security_alert", channel);
@@ -215,6 +261,57 @@ async fn test_route_fans_out_once() {
         job.recipient.email.as_deref(),
         Some("alice@sid.example.com")
     );
+}
+
+/// A fan-out cut short after one delivery was stored finishes the rest even
+/// when the rules changed meanwhile: the plan stored by the first routing is
+/// carried out whole, each delivery once. Routing once resolved the rules
+/// again on every attempt, so a rule removed between attempts dropped the
+/// remaining delivery while the routing reported done.
+#[tokio::test]
+async fn test_partial_fan_out_finishes_after_a_rule_change() {
+    let store = store().await;
+    let event = security_event();
+    let work = claimed(ROUTE, serde_json::to_vec(&event).unwrap());
+    assert!(matches!(
+        route_handler(&store, RecipientResolver::without_identity())
+            .handle(&work)
+            .await,
+        WorkOutcome::Done(_)
+    ));
+
+    // Room for one delivery only: the plan stores the first and stays owed.
+    let cramped = PlanHandler::new(Arc::clone(&store), 1);
+    assert!(matches!(
+        carry_out_plans(&store, &cramped).await.as_slice(),
+        [WorkOutcome::Retry(_)]
+    ));
+
+    // The rules change: routing the event again now matches nothing, and
+    // owes nothing new.
+    let silent = RouteHandler::new(
+        RoutingTable::new(),
+        Arc::new(RecipientResolver::without_identity()),
+        Arc::clone(&store),
+        1_000,
+    );
+    assert_eq!(
+        silent.handle(&work).await,
+        WorkOutcome::Done(Some("no routing rule".into()))
+    );
+
+    let roomy = PlanHandler::new(Arc::clone(&store), 1_000);
+    assert_eq!(
+        carry_out_plans(&store, &roomy).await,
+        [WorkOutcome::Done(Some("2 deliveries".into()))]
+    );
+    for channel in ["email", "webhook"] {
+        let id = delivery_job_id(&event, "security_alert", channel);
+        assert!(
+            store.get_work(id).await.unwrap().is_some(),
+            "the planned {channel} delivery was dropped"
+        );
+    }
 }
 
 /// Events without a rule, malformed events and an unreachable identity
@@ -324,6 +421,7 @@ async fn test_runner_delivers_and_alerts_dead_letters() {
         .unwrap();
     let handlers: Vec<Arc<dyn WorkHandler>> = vec![
         Arc::new(route_handler(&store, RecipientResolver::without_identity())),
+        Arc::new(PlanHandler::new(Arc::clone(&store), 1_000)),
         Arc::new(DeliverHandler::new(dispatcher(&[
             Arc::clone(&email),
             webhook,

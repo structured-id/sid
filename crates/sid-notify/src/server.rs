@@ -168,6 +168,10 @@ impl NotifyServer {
                 Arc::clone(&self.jobs),
                 self.config.job_capacity,
             )),
+            Arc::new(delivery::PlanHandler::new(
+                Arc::clone(&self.jobs),
+                self.config.job_capacity,
+            )),
             Arc::new(delivery::DeliverHandler::new(self.dispatcher.clone())),
             // This service's own facts (dead-letter alerts) are relayed as
             // every fact is: owed to the other required receivers, then
