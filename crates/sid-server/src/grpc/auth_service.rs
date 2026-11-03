@@ -1847,9 +1847,10 @@ impl AuthServiceImpl {
 
     /// The mailbox login mail for the email key `key` goes to on `profile`,
     /// the account it routes to: the address in the spelling that profile
-    /// bound it with (its binding's contact), never another spelling of the
-    /// key. `None` when that binding records no such contact: a lost
-    /// spelling is not inferred from the key.
+    /// bound it with (its binding's contact, which registration, import and
+    /// directory provisioning each record with the binding), never another
+    /// spelling of the key. `None` when that binding records no such
+    /// contact: a lost spelling is not inferred from the key.
     async fn login_mail_destination(
         &self,
         profile: ProfileId,
