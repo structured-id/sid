@@ -261,7 +261,14 @@ pub fn change_context(id: &PasswordOperationId, registration_request: &[u8]) -> 
     context
 }
 
-fn finish_command(id: &PasswordOperationId, method: &'static str, record: &[u8]) -> KeyedCommand {
+/// The durable-result command of operation `id`'s finish of `method` with
+/// `record`: what a host reads to answer a finish already committed when the
+/// operation itself is gone.
+pub fn finish_command(
+    id: &PasswordOperationId,
+    method: &'static str,
+    record: &[u8],
+) -> KeyedCommand {
     let key = OperationKey::parse(&id.to_string()).expect("an operation id is a valid key");
     KeyedCommand::ceremony(RESULT_NAMESPACE, key, method, record.to_vec())
 }
