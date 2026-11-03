@@ -1,0 +1,19 @@
+[package]
+name = "sid-proto-build"
+version.workspace = true
+edition.workspace = true
+description = "Build-time checks and keyed-method bindings of StructuredID proto method declarations"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Reads the compiled descriptors, the retry rule extension included.
+prost-reflect = { workspace = true }
+
+[dev-dependencies]
+# Compiles the test fixtures, held in memory, into descriptor sets.
+protox = "0.9"
+
+[lints.rust]
+unreachable_pub = "warn"

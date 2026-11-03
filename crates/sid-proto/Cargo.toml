@@ -23,5 +23,5 @@ tonic-build = "0.14"
 tonic-prost-build = "0.14"
 prost-build = "0.14"
 glob = "0.3"
-# Reads the compiled descriptors to generate what the proto declares.
-prost-reflect = { workspace = true }
+# Checks every method's retry rule and binds the keyed methods.
+sid-proto-build = { workspace = true }

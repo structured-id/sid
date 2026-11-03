@@ -5789,10 +5789,19 @@ dependencies = [
  "prost-reflect",
  "prost-types",
  "sid-ids-proto",
+ "sid-proto-build",
  "tonic",
  "tonic-build",
  "tonic-prost",
  "tonic-prost-build",
+]
+
+[[package]]
+name = "sid-proto-build"
+version = "0.2.11"
+dependencies = [
+ "prost-reflect",
+ "protox",
 ]
 
 [[package]]
