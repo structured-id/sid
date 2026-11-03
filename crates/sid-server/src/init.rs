@@ -120,6 +120,8 @@ pub struct CeComponents {
     pub magic_link_mail: Option<Arc<crate::auth_mail::MagicLinkMail>>,
     /// Emails requested sign-in codes.
     pub code_mail: Arc<crate::auth_mail::CodeMail>,
+    /// Emails requested password reset links, when an account UI opens them.
+    pub reset_mail: Option<Arc<crate::auth_mail::ResetMail>>,
     /// The directory the SCIM endpoint serves.
     #[cfg(feature = "scim")]
     pub scim_directory: sid_scim::grpc::ScimDirectory,
@@ -196,6 +198,33 @@ pub fn magic_link_mail(
             keys.clone(),
         )),
     ))))
+}
+
+/// Password resets and the mail of their links, when an account UI
+/// (`SID_ACCOUNT_URL`) serves the page a link opens; without one a reset
+/// could never be completed, so none is started.
+pub fn password_resets(
+    account: Option<&sid_authn::system_integration::AccountSettings>,
+    storage: &Arc<dyn StorageBackend>,
+    keys: &Arc<dyn sid_keys::KeyManager>,
+) -> Option<(
+    Arc<sid_authn::password_reset::PasswordResetService>,
+    Arc<crate::auth_mail::ResetMail>,
+)> {
+    let account = account?;
+    let resets = Arc::new(sid_authn::password_reset::PasswordResetService::new(
+        storage.clone(),
+        keys.clone(),
+    ));
+    let mail = Arc::new(crate::auth_mail::ResetMail::new(
+        resets.clone(),
+        account.password_reset_page(),
+        Arc::new(crate::auth_mail::StoredProvider::new(
+            storage.clone(),
+            keys.clone(),
+        )),
+    ));
+    Some((resets, mail))
 }
 
 /// The sign-in page the authorization endpoint sends a user who must sign in
@@ -1000,10 +1029,16 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         Some(source) => auth_svc.with_login_policy(source),
         None => auth_svc,
     };
-    let auth_svc = Arc::new(match &ceremony_page {
+    let auth_svc = match &ceremony_page {
         Some(page) => auth_svc.with_sign_in_page(page),
         None => auth_svc,
-    });
+    };
+    let resets = password_resets(account.as_ref(), &storage, &key_manager);
+    let (auth_svc, reset_mail) = match resets {
+        Some((resets, mail)) => (auth_svc.with_password_resets(resets), Some(mail)),
+        None => (auth_svc, None),
+    };
+    let auth_svc = Arc::new(auth_svc);
     // Sign-in through upstream providers completes as the other ceremonies
     // do: the same sign-in page, cookie, security rules and session policy.
     let upstream_svc = Arc::new(crate::grpc::upstream_service::UpstreamServiceImpl::new(
@@ -1146,6 +1181,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
     Ok(CeComponents {
         magic_link_mail,
         code_mail,
+        reset_mail,
         audit_retention,
         migration_deadline_days,
         issuers,
@@ -1820,6 +1856,9 @@ pub fn spawn_work_runner(
         c.code_mail.clone(),
     ];
     if let Some(mail) = &c.magic_link_mail {
+        handlers.push(mail.clone());
+    }
+    if let Some(mail) = &c.reset_mail {
         handlers.push(mail.clone());
     }
     let worker = format!("sid-server-{}-{}", std::process::id(), uuid::Uuid::now_v7());

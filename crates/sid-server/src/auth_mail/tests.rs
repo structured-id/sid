@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 use super::*;
 use sid_authn::otp::{CodeDelivery, CodeDestination};
-use sid_plugin::WorkStore;
 use sid_plugin::notification::{ChannelHealth, DeliveryReceipt, RenderedMessage};
+use sid_plugin::{StorageBackend, WorkStore};
 
 /// Records every mail instead of sending it.
 #[derive(Default)]
@@ -229,6 +229,160 @@ async fn code_mail_refuses_malformed_work() {
         mail.handle(&work).await,
         WorkOutcome::Permanent(_)
     ));
+}
+
+/// Resets over one in-memory installation with an account to reset, and
+/// the store holding their work.
+async fn resets() -> (
+    Arc<PasswordResetService>,
+    Arc<sid_storage::sqlite::SqliteBackend>,
+    sid_core::models::ProfileId,
+) {
+    let store = Arc::new(
+        sid_storage::sqlite::SqliteBackend::new_in_memory()
+            .await
+            .unwrap(),
+    );
+    let profile = sid_core::models::Profile::new(Some("reset"));
+    store
+        .create_profile(
+            &profile,
+            sid_core::models::AuditEntry::system("test", "profile").into(),
+        )
+        .await
+        .unwrap();
+    let resets = Arc::new(PasswordResetService::new(store.clone(), keys()));
+    (resets, store, profile.id)
+}
+
+/// The reset mails `store` owes now, claimed.
+async fn owed_resets(store: &sid_storage::sqlite::SqliteBackend) -> Vec<ClaimedWork> {
+    store
+        .claim_work(
+            &[WorkKind::new(PASSWORD_RESET_EMAIL_KIND).unwrap()],
+            "test",
+            10,
+            std::time::Duration::from_secs(60),
+        )
+        .await
+        .unwrap()
+}
+
+fn reset_page() -> url::Url {
+    url::Url::parse("https://id.sid.example.com/account/reset/new").unwrap()
+}
+
+/// The token a mailed reset link carries.
+fn link_token(body: &str) -> String {
+    let start = body.find("https://").unwrap();
+    let end = body[start..]
+        .find(|c: char| c.is_whitespace() || c == '"')
+        .map_or(body.len(), |n| start + n);
+    let link = url::Url::parse(&body[start..end]).unwrap();
+    assert_eq!(link.path(), "/account/reset/new");
+    link.query_pairs()
+        .find(|(k, _)| k == "token")
+        .unwrap()
+        .1
+        .into_owned()
+}
+
+/// A requested reset owes one mail whose work names only its session; the
+/// mail goes to the mailbox bound at the request with a link that verifies
+/// against the stored hash, the same link on every attempt.
+#[tokio::test]
+async fn reset_mail_sends_the_bound_link() {
+    let (resets, store, profile) = resets().await;
+    let session = resets
+        .request(profile, "key@sid.example.com", "Key@sid.example.com")
+        .await
+        .unwrap();
+    let work = owed_resets(&store).await.remove(0);
+    assert_eq!(work.payload, session.0.as_bytes().to_vec());
+    let recorded = Arc::new(Recorded::default());
+    let mail = ResetMail::new(
+        resets,
+        reset_page(),
+        Arc::new(Transport(Some(recorded.clone()))),
+    );
+
+    for _ in 0..2 {
+        let outcome = mail.handle(&work).await;
+        assert!(matches!(outcome, WorkOutcome::Done(Some(_))), "{outcome:?}");
+    }
+
+    let stored = store.get_reset_session(session).await.unwrap().unwrap();
+    let sent = recorded.sent.lock().unwrap();
+    assert_eq!(sent.len(), 2);
+    let tokens: Vec<String> = sent.iter().map(|(_, m)| link_token(&m.body)).collect();
+    for (to, _) in sent.iter() {
+        assert_eq!(to, "Key@sid.example.com");
+    }
+    assert_eq!(tokens[0], tokens[1], "a retry sent another link");
+    assert_eq!(
+        sid_authn::password_reset::token_hash(&tokens[0]),
+        stored.token_hash
+    );
+}
+
+/// A verified reset's mail sends nothing: the link was already used.
+#[tokio::test]
+async fn verified_reset_mail_sends_nothing() {
+    let (resets, store, profile) = resets().await;
+    let session = resets
+        .request(profile, "v@sid.example.com", "v@sid.example.com")
+        .await
+        .unwrap();
+    let work = owed_resets(&store).await.remove(0);
+    assert!(
+        store
+            .verify_reset_session(
+                session,
+                sid_core::models::AuditEntry::system("test", "verify").into()
+            )
+            .await
+            .unwrap()
+    );
+    let recorded = Arc::new(Recorded::default());
+    let mail = ResetMail::new(
+        resets,
+        reset_page(),
+        Arc::new(Transport(Some(recorded.clone()))),
+    );
+
+    assert!(matches!(mail.handle(&work).await, WorkOutcome::Done(_)));
+    assert!(recorded.sent.lock().unwrap().is_empty());
+}
+
+/// An expired reset's link is never mailed.
+#[tokio::test]
+async fn expired_reset_is_not_delivered() {
+    let (resets, store, profile) = resets().await;
+    let session = resets
+        .request(profile, "e@sid.example.com", "e@sid.example.com")
+        .await
+        .unwrap();
+    let expires_at = store
+        .get_reset_session(session)
+        .await
+        .unwrap()
+        .unwrap()
+        .expires_at;
+
+    assert!(
+        resets
+            .pending_delivery(session, expires_at)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        resets
+            .pending_delivery(session, expires_at - chrono::Duration::seconds(1))
+            .await
+            .unwrap()
+            .is_some()
+    );
 }
 
 /// The link names its session and carries the token as query parameters of
