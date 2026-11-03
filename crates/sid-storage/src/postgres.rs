@@ -129,7 +129,8 @@ fn key_generation(generation: u32) -> SidResult<i32> {
 use crate::key_versions::{key_derivation_name, key_version_params};
 use sid_core::models::machine_user::MachineUserStatus;
 
-use crate::{CENTRALLY_MANAGED_SQL, OWED_WORK_CAPACITY};
+use crate::CENTRALLY_MANAGED_SQL;
+use sid_plugin::OWED_WORK_CAPACITY;
 
 /// Consumes the admin claim `$2` (sealed) stored as `$1`, only on a
 /// self-managed installation: a centrally managed one consumes no local

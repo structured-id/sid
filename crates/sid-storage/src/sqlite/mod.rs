@@ -225,7 +225,7 @@ impl SqliteBackend {
             .await
             .map_err(|e| SidError::Storage(format!("Audit log failed: {e}")))?;
         for owed in &ctx.work {
-            work::insert_work_in_tx(&mut tx, owed, crate::OWED_WORK_CAPACITY).await?;
+            work::insert_work_in_tx(&mut tx, owed, sid_plugin::OWED_WORK_CAPACITY).await?;
         }
         tx.commit()
             .await

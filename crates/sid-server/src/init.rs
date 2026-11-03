@@ -837,7 +837,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         sid_authn::otp::CodeDelivery {
             keys: key_manager.clone(),
             work: storage.clone(),
-            capacity: sid_storage::OWED_WORK_CAPACITY,
+            capacity: sid_plugin::OWED_WORK_CAPACITY,
         },
     ));
     let code_mail = Arc::new(crate::auth_mail::CodeMail::new(
@@ -1797,12 +1797,12 @@ pub fn spawn_work_runner(
         Arc::new(EventRelayHandler::new(
             c.storage.clone(),
             receivers,
-            sid_storage::OWED_WORK_CAPACITY,
+            sid_plugin::OWED_WORK_CAPACITY,
         )),
         Arc::new(sid_authn::event_relay::EventFanoutHandler::new(
             c.event_bus.clone(),
             c.storage.clone(),
-            sid_storage::OWED_WORK_CAPACITY,
+            sid_plugin::OWED_WORK_CAPACITY,
         )),
         Arc::new(sid_authn::event_relay::EventDeliveryHandler::new(
             c.event_bus.clone(),

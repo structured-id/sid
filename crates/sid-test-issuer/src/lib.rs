@@ -702,7 +702,7 @@ fn auth_service(
             sid_authn::otp::CodeDelivery {
                 keys: keys.clone(),
                 work: storage.clone(),
-                capacity: sid_storage::OWED_WORK_CAPACITY,
+                capacity: sid_plugin::OWED_WORK_CAPACITY,
             },
         )),
         issuers,

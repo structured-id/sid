@@ -677,7 +677,7 @@ pub async fn issue_code(
         sid_authn::otp::CodeDelivery {
             keys: test_key_manager(),
             work: storage.clone(),
-            capacity: sid_storage::OWED_WORK_CAPACITY,
+            capacity: sid_plugin::OWED_WORK_CAPACITY,
         },
     )
     .request_otp(address, sid_authn::otp::CodeDestination::Email(address))
@@ -846,7 +846,7 @@ pub fn auth_service(
         sid_authn::otp::CodeDelivery {
             keys: test_key_manager(),
             work: storage.clone(),
-            capacity: sid_storage::OWED_WORK_CAPACITY,
+            capacity: sid_plugin::OWED_WORK_CAPACITY,
         },
     ));
     let service = AuthServiceImpl::new(
@@ -1673,12 +1673,12 @@ impl TestServices {
         let relay = sid_authn::event_relay::EventRelayHandler::new(
             self.storage.clone(),
             Vec::new(),
-            sid_storage::OWED_WORK_CAPACITY,
+            sid_plugin::OWED_WORK_CAPACITY,
         );
         let fanout = sid_authn::event_relay::EventFanoutHandler::new(
             self.event_bus.clone(),
             self.storage.clone(),
-            sid_storage::OWED_WORK_CAPACITY,
+            sid_plugin::OWED_WORK_CAPACITY,
         );
         let handlers: [&dyn WorkHandler; 3] = [&contest, &relay, &fanout];
         for handler in handlers {

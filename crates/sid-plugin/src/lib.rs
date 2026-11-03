@@ -73,7 +73,7 @@ pub use sid_keys::KeyVersionParams;
 pub use sign_in_history::SignInHistoryStore;
 pub use storage::StorageBackend;
 pub use upstream::{UpstreamAuthState, UpstreamIdpProvider};
-pub use work_store::WorkStore;
+pub use work_store::{OWED_WORK_CAPACITY, WorkStore};
 
 /// Protocol supported by an authentication provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
