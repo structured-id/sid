@@ -105,14 +105,19 @@ impl Host {
         let cache: Arc<dyn CacheBackend> = Arc::new(InMemoryCacheBackend::new());
         let host = Self {
             history: KnownElsewhere,
-            anomaly: AnomalyDetector::ce_default(cache.clone()),
+            anomaly: AnomalyDetector::ce_default(Arc::new(
+                sid_plugin::InProcessCeremonyState::new(),
+            )),
             intelligence: IpIntelligenceAggregator::new(
                 providers,
                 cache.clone(),
                 Duration::from_secs(60),
             ),
             geoip: GeoIpChain::empty(cache.clone()),
-            gate: CaptchaGate::new(cache.clone(), crate::test_support::key_manager()),
+            gate: CaptchaGate::new(
+                Arc::new(sid_plugin::InProcessCeremonyState::new()),
+                crate::test_support::key_manager(),
+            ),
             captcha: SidPowProvider::new([0; 32], 1, 60),
             events: Default::default(),
         };
@@ -441,16 +446,14 @@ async fn a_blocklisted_address_is_refused_whatever_the_evidence() {
 /// Nor a lockout.
 #[tokio::test]
 async fn a_lockout_holds_whatever_the_evidence() {
-    let (host, cache) = Host::new(Vec::new());
+    let (host, _) = Host::new(Vec::new());
     let owner = ProfileId::generate();
-    cache
-        .set(
-            &format!("rate:brute:lockout:{owner}"),
-            b"1",
-            Duration::from_secs(60),
-        )
-        .await
-        .unwrap();
+    for _ in 0..host.anomaly.config().brute_force_max_attempts {
+        host.anomaly
+            .record_failed_attempt(&owner.to_string())
+            .await
+            .unwrap();
+    }
     let evidence = accepted(AuthLevel::Critical, &["pwd", "otp"]);
     let refused = judged(&host, owner, AttemptAuthentication::Accepted(&evidence)).await;
     assert!(matches!(

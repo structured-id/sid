@@ -346,6 +346,39 @@ mod operation_result_store {
     );
 }
 
+// ─── Ceremony state conformance ───
+
+/// Run ceremony state conformance `scenario`; each one uses namespaces of
+/// its own.
+macro_rules! ceremony_state {
+    ($($scenario:ident),* $(,)?) => {$(
+        #[tokio::test]
+        async fn $scenario() {
+            sid_plugin::conformance::ceremony_state::$scenario(&setup().await).await;
+        }
+    )*};
+}
+
+mod ceremony_state {
+    use super::*;
+
+    ceremony_state!(
+        state_is_taken_once,
+        concurrent_takers_get_it_once,
+        expired_state_is_refused_at_use,
+        put_replaces,
+        replace_applies_only_to_what_was_read,
+        concurrent_replacements_apply_once,
+        key_is_admitted_once,
+        concurrent_admissions_succeed_once,
+        events_count_within_their_window,
+        concurrent_events_are_counted_once,
+        counts_are_read_and_cleared,
+        admission_is_confirmed_only_to_its_holder,
+        concurrent_holders_admit_once,
+    );
+}
+
 // ─── Instance secret conformance ───
 
 /// Run instance secret conformance `scenario` against a fresh database.
@@ -1649,6 +1682,55 @@ async fn two_instances() -> (tempfile::TempDir, SqliteBackend, SqliteBackend) {
     let a = SqliteBackend::new(&path).await.unwrap();
     let b = SqliteBackend::new(&path).await.unwrap();
     (dir, a, b)
+}
+
+/// While `holder` keeps the file's write lock past `ttl`, `write` on `waiter`
+/// waits for it; its outcome, evaluated once it holds the lock.
+async fn after_a_held_lock<T>(
+    holder: &SqliteBackend,
+    ttl: std::time::Duration,
+    write: impl std::future::Future<Output = T>,
+) -> T {
+    let held = holder.pool().begin_with("BEGIN IMMEDIATE").await.unwrap();
+    let release = async {
+        tokio::time::sleep(ttl * 3).await;
+        held.commit().await.unwrap();
+    };
+    let (outcome, ()) = tokio::join!(write, release);
+    outcome
+}
+
+/// A ceremony state that expires while its replacement waits for another
+/// process's write lock is not replaced: its expiry is read when the write
+/// holds the lock, not when it was asked for.
+#[tokio::test]
+async fn test_ceremony_state_expiring_behind_a_lock_is_not_replaced() {
+    use sid_plugin::CeremonyStateStore;
+    let (_dir, a, b) = two_instances().await;
+    let ttl = std::time::Duration::from_millis(300);
+    a.put_ceremony_state("lock", "k", b"v1", ttl).await.unwrap();
+    let replaced = after_a_held_lock(
+        &a,
+        ttl,
+        b.replace_ceremony_state("lock", "k", b"v1", b"v2", ttl),
+    )
+    .await
+    .unwrap();
+    assert!(!replaced, "an expired state was advanced");
+}
+
+/// Likewise a count whose window ends while the event waits for the lock
+/// opens a new window instead of adding to the ended one.
+#[tokio::test]
+async fn test_ceremony_count_window_ending_behind_a_lock_restarts() {
+    use sid_plugin::CeremonyStateStore;
+    let (_dir, a, b) = two_instances().await;
+    let window = std::time::Duration::from_millis(300);
+    a.count_in_window("lock", "k", window).await.unwrap();
+    let count = after_a_held_lock(&a, window, b.count_in_window("lock", "k", window))
+        .await
+        .unwrap();
+    assert_eq!(count, 1, "an ended window was added to");
 }
 
 #[tokio::test]

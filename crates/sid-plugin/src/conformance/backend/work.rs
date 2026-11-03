@@ -26,7 +26,12 @@ fn work(kind: &WorkKind) -> NewWork {
 pub async fn test_magic_link_consumed_once(backend: &dyn StorageBackend) {
     use sid_core::models::MagicLinkSession;
 
-    let link = MagicLinkSession::new("once@sid.example.com", "hash-once".into());
+    let mut link = MagicLinkSession::new(
+        "once@sid.example.com",
+        "once@sid.example.com",
+        "hash-once".into(),
+    );
+    link.sealed_token = vec![7, 7, 7];
     backend
         .create_magic_link_session(&link, super::test_audit())
         .await
@@ -34,8 +39,14 @@ pub async fn test_magic_link_consumed_once(backend: &dyn StorageBackend) {
     let first = backend
         .try_consume_magic_link_session(link.id, super::test_audit())
         .await
-        .unwrap();
-    assert_eq!(first.map(|s| s.id), Some(link.id));
+        .unwrap()
+        .expect("the first consumption gets the link");
+    assert_eq!(first.id, link.id);
+    // Consuming drops the token its email kept: nothing is left to send.
+    assert!(
+        first.sealed_token.is_empty(),
+        "a consumed link kept its token"
+    );
     assert!(
         backend
             .try_consume_magic_link_session(link.id, super::test_audit())
@@ -45,7 +56,11 @@ pub async fn test_magic_link_consumed_once(backend: &dyn StorageBackend) {
         "a consumed magic link was consumed again"
     );
 
-    let mut expired = MagicLinkSession::new("late@sid.example.com", "hash-late".into());
+    let mut expired = MagicLinkSession::new(
+        "late@sid.example.com",
+        "late@sid.example.com",
+        "hash-late".into(),
+    );
     expired.expires_at = Utc::now() - Duration::minutes(1);
     backend
         .create_magic_link_session(&expired, super::test_audit())
@@ -60,7 +75,11 @@ pub async fn test_magic_link_consumed_once(backend: &dyn StorageBackend) {
         "an expired magic link was consumed"
     );
 
-    let raced = MagicLinkSession::new("race@sid.example.com", "hash-race".into());
+    let raced = MagicLinkSession::new(
+        "race@sid.example.com",
+        "race@sid.example.com",
+        "hash-race".into(),
+    );
     backend
         .create_magic_link_session(&raced, super::test_audit())
         .await

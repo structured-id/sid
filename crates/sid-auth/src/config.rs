@@ -63,20 +63,15 @@ pub struct ReceiverConfig {
     /// Scheme and authority callers address the service at: the prefix of
     /// every DPoP proof's `htu`.
     pub origin: String,
-    /// The shared cache (Redis/Dragonfly/Valkey URL) recording DPoP proof
-    /// `jti`s across replicas. Unset keeps them in this process, which is
-    /// correct for exactly one replica.
-    #[serde(default)]
-    pub cache_url: Option<String>,
-    /// The service's own client at the authorization API. Its issuer is the
-    /// issuer every admitted token is from.
+    /// The service's own client at the authorization API and the issuer,
+    /// which admits each DPoP proof once. Its issuer is the issuer every
+    /// admitted token is from.
     pub checker: ClientCredentialConfig,
 }
 
 impl ReceiverConfig {
     /// From `SID_GRPC_UPSTREAM`, `SID_ISSUER_URL`, `SID_RECEIVER_RESOURCE`,
-    /// `SID_RECEIVER_ORIGIN`, `SID_CACHE_URL` and `SID_AUTHZ_CHECKER_*`, all
-    /// required but the cache.
+    /// `SID_RECEIVER_ORIGIN` and `SID_AUTHZ_CHECKER_*`, all required.
     pub fn from_env() -> anyhow::Result<Self> {
         Self::from_vars(|name| std::env::var(name).ok().filter(|v| !v.is_empty()))
     }
@@ -88,7 +83,6 @@ impl ReceiverConfig {
             issuer_url: required("SID_ISSUER_URL")?,
             resource: required("SID_RECEIVER_RESOURCE")?,
             origin: required("SID_RECEIVER_ORIGIN")?,
-            cache_url: var("SID_CACHE_URL").or_else(|| var("SID_REDIS_URL")),
             checker: ClientCredentialConfig::from_vars(CHECKER_ENV, &var)?
                 .ok_or_else(|| anyhow::anyhow!("{CHECKER_ENV}_CLIENT_ID is required"))?,
         })

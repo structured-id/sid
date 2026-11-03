@@ -19,7 +19,7 @@ use sid_authn::webauthn::{
 use sid_core::models::{Credential, CredentialType, ProfileId, WebAuthnUserHandle};
 use sid_crypto::RustCryptoPrimitives;
 use sid_keys::{KeyVersionParams, SoftwareKeyManager};
-use sid_plugin::cache::InMemoryCacheBackend;
+use sid_plugin::InProcessCeremonyState;
 
 /// Counts allocations so a ceremony's allocation total can be reported.
 struct Counting;
@@ -56,7 +56,7 @@ fn server() -> WebAuthnServer {
     WebAuthnServer::new(
         RP,
         &url::Url::parse(ORIGIN).unwrap(),
-        Arc::new(InMemoryCacheBackend::new()),
+        Arc::new(InProcessCeremonyState::new()),
         keys,
     )
     .unwrap()
@@ -69,7 +69,11 @@ async fn register(
 ) -> (Duration, u64, Vec<u8>) {
     let (t0, a0) = (Instant::now(), ALLOCATIONS.load(Ordering::Relaxed));
     let start = server
-        .registration_start(WebAuthnUserHandle([1; 16]), "alice", &[])
+        .registration_start::<sid_core::models::ProfileId>(
+            WebAuthnUserHandle([1; 16]),
+            "alice",
+            &[],
+        )
         .await
         .unwrap();
     let (mut spent, mut allocs) = (t0.elapsed(), ALLOCATIONS.load(Ordering::Relaxed) - a0);

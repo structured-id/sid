@@ -8,6 +8,7 @@ use sid_authn::issuer_directory::{
     IssuerRecord, IssuerSource, RegistryUnavailable, ResourceRecord,
 };
 use sid_plugin::cache::{CacheBackend, CacheError, CacheResult, InMemoryCacheBackend};
+use sid_plugin::{CeremonyStateStore, InProcessCeremonyState, SingleUseAdmissions};
 
 use super::*;
 
@@ -33,8 +34,63 @@ impl IssuerSource for NoIssuers {
     }
 }
 
-/// A cache whose every call fails, as an unreachable store does.
+/// A store and a cache whose every call fails, as an unreachable one does.
 struct Down;
+
+fn down() -> sid_core::Error {
+    sid_core::Error::Storage("down".into())
+}
+
+#[async_trait::async_trait]
+impl SingleUseAdmissions for Down {
+    async fn admit_once(&self, _: &str, _: &str, _: Duration) -> sid_core::Result<bool> {
+        Err(down())
+    }
+    async fn admit_for(&self, _: &str, _: &str, _: &[u8], _: Duration) -> sid_core::Result<bool> {
+        Err(down())
+    }
+}
+
+#[async_trait::async_trait]
+impl CeremonyStateStore for Down {
+    async fn put_ceremony_state(
+        &self,
+        _: &str,
+        _: &str,
+        _: &[u8],
+        _: Duration,
+    ) -> sid_core::Result<()> {
+        Err(down())
+    }
+    async fn take_ceremony_state(&self, _: &str, _: &str) -> sid_core::Result<Option<Vec<u8>>> {
+        Err(down())
+    }
+    async fn read_ceremony_state(&self, _: &str, _: &str) -> sid_core::Result<Option<Vec<u8>>> {
+        Err(down())
+    }
+    async fn replace_ceremony_state(
+        &self,
+        _: &str,
+        _: &str,
+        _: &[u8],
+        _: &[u8],
+        _: Duration,
+    ) -> sid_core::Result<bool> {
+        Err(down())
+    }
+    async fn count_in_window(&self, _: &str, _: &str, _: Duration) -> sid_core::Result<u64> {
+        Err(down())
+    }
+    async fn read_count(&self, _: &str, _: &str) -> sid_core::Result<u64> {
+        Err(down())
+    }
+    async fn clear_count(&self, _: &str, _: &str) -> sid_core::Result<()> {
+        Err(down())
+    }
+    async fn purge_expired_ceremony_state(&self) -> sid_core::Result<u64> {
+        Err(down())
+    }
+}
 
 #[async_trait::async_trait]
 impl CacheBackend for Down {
@@ -94,9 +150,18 @@ pub(crate) struct Fixture {
     revocation: Arc<RevocationCache>,
 }
 
-/// An adapter over `cache`, with the connection delivered or, when
+/// An adapter over `store`, with the connection delivered or, when
 /// `delivered` is false, to be asked of an issuer that never answers.
-pub(crate) fn fixture(cache: Arc<dyn CacheBackend>, delivered: bool) -> Fixture {
+pub(crate) fn fixture(store: Arc<dyn CeremonyStateStore>, delivered: bool) -> Fixture {
+    fixture_with(store, Arc::new(InMemoryCacheBackend::new()), delivered)
+}
+
+/// [`fixture`] with revocation notices over `cache`.
+fn fixture_with(
+    store: Arc<dyn CeremonyStateStore>,
+    cache: Arc<dyn CacheBackend>,
+    delivered: bool,
+) -> Fixture {
     let key = ClientKey::generate_ed25519().unwrap().0;
     let client = if delivered {
         RpClient::delivered(key, INSTALLATION.into(), unreachable(), connection())
@@ -104,7 +169,7 @@ pub(crate) fn fixture(cache: Arc<dyn CacheBackend>, delivered: bool) -> Fixture 
         RpClient::new(key, INSTALLATION.into(), unreachable())
     }
     .unwrap();
-    let sessions = Arc::new(BffSessionStore::new(cache.clone(), LONG, LONG, LONG));
+    let sessions = Arc::new(BffSessionStore::new(store, LONG, LONG, LONG));
     let revocation = Arc::new(RevocationCache::new(LONG, cache));
     Fixture {
         adapter: ApplicationSessions::new(
@@ -119,8 +184,8 @@ pub(crate) fn fixture(cache: Arc<dyn CacheBackend>, delivered: bool) -> Fixture 
     }
 }
 
-pub(crate) fn memory() -> Arc<dyn CacheBackend> {
-    Arc::new(InMemoryCacheBackend::new())
+pub(crate) fn memory() -> Arc<dyn CeremonyStateStore> {
+    Arc::new(InProcessCeremonyState::new())
 }
 
 fn claims() -> SessionClaims {
@@ -921,13 +986,15 @@ async fn a_refresh_ends_within_its_claim() {
             .unwrap();
     let key = ClientKey::generate_ed25519().unwrap().0;
     let client = RpClient::delivered(key, INSTALLATION.into(), channel, connection()).unwrap();
-    let cache = memory();
-    let sessions = Arc::new(BffSessionStore::new(cache.clone(), LONG, LONG, LONG));
+    let sessions = Arc::new(BffSessionStore::new(memory(), LONG, LONG, LONG));
     let adapter = ApplicationSessions::new(
         Arc::new(client),
         Arc::new(IssuerDirectory::new(INSTALLATION, Arc::new(SlowIssuers))),
         sessions.clone(),
-        Arc::new(RevocationCache::new(LONG, cache)),
+        Arc::new(RevocationCache::new(
+            LONG,
+            Arc::new(InMemoryCacheBackend::new()),
+        )),
         COOKIE.into(),
     );
     let mut expired = claims();
@@ -976,7 +1043,8 @@ async fn a_revoked_issuer_session_ends_the_application_session() {
     assert!(f.sessions.get_session(&id).await.unwrap().is_none());
 }
 
-/// A store that cannot be read is an outage, never a signed-out user.
+/// A store that cannot be read is an outage, never a signed-out user: the
+/// browser keeps its cookie for when the store is back.
 #[tokio::test]
 async fn an_unreachable_store_is_unavailable_not_signed_out() {
     let f = fixture(Arc::new(Down), true);
@@ -991,6 +1059,25 @@ async fn an_unreachable_store_is_unavailable_not_signed_out() {
         .unwrap_err();
     assert_eq!(refused.code(), Code::Unavailable);
     assert_eq!(reason(&refused), "DEPENDENCY_UNAVAILABLE");
+    assert!(refused.metadata().get("set-cookie").is_none());
+}
+
+/// The cache only brings revocation notices sooner: with it unreachable, a
+/// session in the store is still served, and its calls are admitted by
+/// their issuer as always.
+#[tokio::test]
+async fn a_session_is_served_with_the_cache_down() {
+    let f = fixture_with(memory(), Arc::new(Down), true);
+    let (id, _) = signed_in(&f, false).await;
+    let session = f
+        .adapter
+        .get_application_session(with_cookie(
+            GetApplicationSessionRequest {},
+            &format!("{COOKIE}={id}"),
+            None,
+        ))
+        .await;
+    assert!(session.is_ok(), "{session:?}");
 }
 
 /// Sign-out needs the session's CSRF token: without it, or with another,

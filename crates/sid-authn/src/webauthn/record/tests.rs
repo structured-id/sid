@@ -3,7 +3,7 @@ use crate::test_support::key_manager;
 use crate::webauthn::soft_authenticator::SoftAuthenticator;
 use crate::webauthn::{RegistrationResponse, WebAuthnServer};
 use sid_core::models::WebAuthnUserHandle;
-use sid_plugin::cache::InMemoryCacheBackend;
+use sid_plugin::InProcessCeremonyState;
 use std::sync::Arc;
 
 /// The record of a passkey registered through a real ceremony.
@@ -11,12 +11,16 @@ async fn record_bytes() -> Vec<u8> {
     let server = WebAuthnServer::new(
         "sid.example.com",
         &url::Url::parse("https://sid.example.com").unwrap(),
-        Arc::new(InMemoryCacheBackend::new()),
+        Arc::new(InProcessCeremonyState::new()),
         key_manager(),
     )
     .unwrap();
     let start = server
-        .registration_start(WebAuthnUserHandle([3; 16]), "alice", &[])
+        .registration_start::<sid_core::models::ProfileId>(
+            WebAuthnUserHandle([3; 16]),
+            "alice",
+            &[],
+        )
         .await
         .unwrap();
     let mut key = SoftAuthenticator::new("https://sid.example.com", "sid.example.com");

@@ -9,11 +9,16 @@ on:
 permissions:
   contents: read
 
+# The host builds link with mold, installed by each job's first step (see
+# ci.yml). The bare-metal job builds for its own target only and keeps it.
 jobs:
   archive:
     name: Crypto (fresh archive consumers)
     runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C linker-features=-lld -C link-arg=-fuse-ld=mold
     steps:
+      - uses: rui314/setup-mold@v1
       - uses: actions/checkout@v7
         with:
           submodules: recursive
@@ -43,7 +48,10 @@ jobs:
             flags: --no-default-features --features std,jwt-rustcrypto
           - profile: combined
             flags: --no-default-features --features std,primitives,aws-lc,jwt,jwt-rustcrypto,tls-rustcrypto,tls-aws-lc,tls12
+    env:
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C linker-features=-lld -C link-arg=-fuse-ld=mold
     steps:
+      - uses: rui314/setup-mold@v1
       - uses: actions/checkout@v7
         with:
           submodules: recursive

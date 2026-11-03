@@ -28,6 +28,11 @@ fn no_cache() -> Arc<dyn sid_plugin::cache::CacheBackend> {
     Arc::new(NoCacheBackend)
 }
 
+/// A fresh store for a detector's attempt counters and lockouts.
+fn counters() -> Arc<dyn sid_plugin::CeremonyStateStore> {
+    Arc::new(sid_plugin::InProcessCeremonyState::new())
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // End-to-end: TorExitProvider → Aggregator → AnomalyDetector
 // ═══════════════════════════════════════════════════════════════════
@@ -49,7 +54,7 @@ async fn test_e2e_tor_exit_ip_triggers_block() {
         block_tor: true,
         ..NetworkPolicy::default()
     };
-    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, no_cache());
+    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, counters());
 
     // Test: Tor exit IP → classify → enrich LoginContext → evaluate.
     let tor_ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1));
@@ -107,7 +112,7 @@ async fn test_e2e_normal_ip_allows() {
         block_tor: true,
         ..NetworkPolicy::default()
     };
-    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, no_cache());
+    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, counters());
 
     // Non-Tor IP.
     let normal_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100));
@@ -151,7 +156,7 @@ async fn test_e2e_tor_exit_allows_when_policy_disabled() {
     ));
 
     // block_tor = false (default) — Tor detection active but not enforced.
-    let detector = AnomalyDetector::ce_default(no_cache());
+    let detector = AnomalyDetector::ce_default(counters());
 
     let tor_ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1));
     let classification = aggregator.classify(tor_ip).await.unwrap();
@@ -239,11 +244,7 @@ async fn test_e2e_blocklisted_ip_hard_no_overrides_all() {
         ..NetworkPolicy::default()
     };
     // The lockout lives in the shared cache only, so it must keep the attempts.
-    let detector = AnomalyDetector::new(
-        config,
-        policy,
-        Arc::new(sid_plugin::cache::InMemoryCacheBackend::new()),
-    );
+    let detector = AnomalyDetector::new(config, policy, counters());
 
     // Trigger brute force lockout.
     for _ in 0..2 {
@@ -360,7 +361,7 @@ async fn test_e2e_tor_higher_priority_than_datacenter_in_anomaly() {
         block_datacenter_ips: true,
         ..NetworkPolicy::default()
     };
-    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, no_cache());
+    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, counters());
 
     let ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1));
     let classification = aggregator.classify(ip).await.unwrap();
@@ -517,7 +518,7 @@ async fn test_e2e_allowlist_overrides_tor_and_blocklist() {
         block_tor: true,
         ..NetworkPolicy::default()
     };
-    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, no_cache());
+    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, counters());
 
     let ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1));
     let classification = aggregator.classify(ip).await.unwrap();
@@ -582,7 +583,7 @@ async fn test_e2e_cloud_range_ip_triggers_step_up() {
         violation_reaction: NetworkViolationReaction::StepUp,
         ..NetworkPolicy::default()
     };
-    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, no_cache());
+    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, counters());
 
     // IP in AWS range.
     let ip = "3.5.1.1".parse::<IpAddr>().unwrap();
@@ -631,7 +632,7 @@ async fn test_e2e_cloud_range_allows_when_policy_disabled() {
     ));
 
     // block_datacenter_ips = false (default).
-    let detector = AnomalyDetector::ce_default(no_cache());
+    let detector = AnomalyDetector::ce_default(counters());
 
     let ip = "3.5.1.1".parse::<IpAddr>().unwrap();
     let classification = aggregator.classify(ip).await.unwrap();
@@ -676,7 +677,7 @@ async fn test_e2e_firehol_blocklisted_ip_hard_no() {
         Duration::from_secs(60),
     ));
 
-    let detector = AnomalyDetector::ce_default(no_cache());
+    let detector = AnomalyDetector::ce_default(counters());
 
     // IP in FireHOL blocklist.
     let ip = "45.95.147.10".parse::<IpAddr>().unwrap();
@@ -741,7 +742,7 @@ async fn test_e2e_full_pipeline_all_three_providers() {
         violation_reaction: NetworkViolationReaction::StepUp,
         ..NetworkPolicy::default()
     };
-    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, no_cache());
+    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, counters());
 
     // Tor IP → StepUp (shares violation_reaction with datacenter).
     let tor_ip = "198.51.100.1".parse::<IpAddr>().unwrap();
@@ -865,7 +866,7 @@ async fn test_e2e_cloud_range_ipv6_triggers_step_up() {
         violation_reaction: NetworkViolationReaction::StepUp,
         ..NetworkPolicy::default()
     };
-    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, no_cache());
+    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, counters());
 
     // IPv6 inside GCP range.
     let ip: IpAddr = "2600:1900::1".parse().unwrap();
@@ -931,7 +932,7 @@ async fn test_e2e_blocklist_beats_datacenter_priority() {
         violation_reaction: NetworkViolationReaction::StepUp,
         ..NetworkPolicy::default()
     };
-    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, no_cache());
+    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, counters());
 
     let ip = "45.95.147.10".parse::<IpAddr>().unwrap();
     let classification = aggregator.classify(ip).await.unwrap();
@@ -995,7 +996,7 @@ async fn test_e2e_empty_providers_allow_all() {
         block_datacenter_ips: true,
         ..NetworkPolicy::default()
     };
-    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, no_cache());
+    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, counters());
 
     // Any IP should be allowed — empty providers have no opinion.
     for ip_str in &["198.51.100.1", "3.5.1.1", "45.95.147.10", "8.8.8.8"] {

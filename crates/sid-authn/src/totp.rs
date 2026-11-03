@@ -8,7 +8,6 @@ use hmac::{Hmac, KeyInit, Mac};
 use rand::Rng;
 use sha1::Sha1;
 use sid_core::models::{CredentialId, MfaEnrollment, MfaMethod, ProfileId};
-use sid_plugin::cache::CacheBackend;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -111,27 +110,20 @@ const TOTP_USED_TTL: Duration = Duration::from_secs(TOTP_PERIOD * (2 * TOTP_SKEW
 /// the first). The record lives in the shared cache, so a code accepted by
 /// one replica is refused by every other.
 pub struct TotpReplayGuard {
-    cache: Arc<dyn CacheBackend>,
+    admissions: Arc<dyn sid_plugin::SingleUseAdmissions>,
 }
 
 impl TotpReplayGuard {
-    pub fn new(cache: Arc<dyn CacheBackend>) -> Self {
-        Self { cache }
+    pub fn new(admissions: Arc<dyn sid_plugin::SingleUseAdmissions>) -> Self {
+        Self { admissions }
     }
 
-    /// Record the use of the code at `step` for `profile_id`. `false` when
-    /// it was already used; an unreachable cache is an error, never a pass.
-    pub async fn first_use(
-        &self,
-        profile_id: ProfileId,
-        step: u64,
-    ) -> sid_plugin::cache::CacheResult<bool> {
-        self.cache
-            .set_nx(
-                &format!("totp:used:{profile_id}:{step}"),
-                b"1",
-                TOTP_USED_TTL,
-            )
+    /// Record the use of the code at `step` for `profile_id`, once across
+    /// every replica. `false` when it was already used; an unreachable store
+    /// is an error, never a pass.
+    pub async fn first_use(&self, profile_id: ProfileId, step: u64) -> sid_core::Result<bool> {
+        self.admissions
+            .admit_once("totp-used", &format!("{profile_id}:{step}"), TOTP_USED_TTL)
             .await
     }
 }

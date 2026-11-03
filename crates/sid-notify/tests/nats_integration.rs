@@ -302,11 +302,60 @@ async fn test_standalone_notify_without_sid_server() {
     drop_topology(&t).await;
 }
 
+/// A notifier bound to the identity and the platform source takes the work
+/// owed to it on each into its one job store, under the same receiver, and
+/// settles it there only: a trial activation owed on the platform bus is
+/// accepted although the identity bus never carries it.
+#[tokio::test]
+async fn test_both_sources_are_accepted() {
+    let store = job_store().await;
+    let (identity, identity_bus) = topology().await;
+    let platform = identity
+        .clone()
+        .for_family(sid_core::models::event::EventFamily::Platform);
+    let platform_bus = NatsEventBus::connect(&nats_url(), platform.clone(), TopologyRole::Own)
+        .await
+        .expect("test NATS unreachable; start docker-compose.test.yml");
+    let session = Event::new("sid-test", event_types::SESSION_REVOKED);
+    let trial = Event::new("sid-ee-saas", event_types::ORG_TRIAL_ACTIVATED);
+    owe(&identity_bus, &session).await;
+    owe(&platform_bus, &trial).await;
+
+    let identity_bus = Arc::new(identity_bus);
+    let platform_bus = Arc::new(platform_bus);
+    let (stop_identity, identity_run) = run_notify(identity_bus, store.clone(), 1_000);
+    let (stop_platform, platform_run) = run_notify(platform_bus, store.clone(), 1_000);
+    assert!(accepted(&store, &session, Duration::from_secs(10)).await);
+    assert!(accepted(&store, &trial, Duration::from_secs(10)).await);
+    stop_identity.send(()).unwrap();
+    stop_platform.send(()).unwrap();
+    identity_run.await.unwrap();
+    platform_run.await.unwrap();
+
+    // Each source's work was settled once accepted.
+    assert_eq!(stored(&identity.work_stream()).await, 0);
+    assert_eq!(stored(&platform.work_stream()).await, 0);
+    drop_topology(&identity).await;
+    drop_topology(&platform).await;
+}
+
 /// The service starts with its database and the configured channels.
 #[tokio::test]
 async fn test_notify_server_init() {
+    let issuer = sid_test_issuer::TestIssuer::start(sid_test_issuer::Setup {
+        resources: vec!["https://sid.example.com/api".into()],
+        checkers: vec![sid_test_issuer::Checker {
+            client_id: "sid-notify".into(),
+            secret: "notify-checker-secret".into(),
+            confirms_proofs: false,
+        }],
+    })
+    .await;
+    let secret = std::env::temp_dir().join(format!("sid-notify-init-{}", uuid::Uuid::now_v7()));
+    std::fs::write(&secret, "notify-checker-secret").unwrap();
     let config = NotifyConfig {
         nats_url: nats_url(),
+        platform_nats_url: None,
         grpc_bind: "127.0.0.1:0".parse().unwrap(),
         receiver: receiver(),
         event_receivers: Vec::new(),
@@ -317,14 +366,16 @@ async fn test_notify_server_init() {
         database_url: database_url(),
         job_capacity: sid_notify::config::DEFAULT_JOB_CAPACITY,
         identity_grpc_address: None,
-        jwt_public_key_path: Some(format!(
-            "{}/../sid-authn/tests/fixtures/test_ed25519_public.pem",
-            env!("CARGO_MANIFEST_DIR")
-        )),
-        jwt_issuer: "https://sid.example.com".into(),
+        api: issuer.receiver_config(
+            "https://sid.example.com/api",
+            "https://sid.example.com",
+            "sid-notify",
+            &secret,
+        ),
     };
 
     let server = NotifyServer::new(config).await.unwrap();
+    std::fs::remove_file(&secret).ok();
     let channels = server.dispatcher().channel_ids();
     assert!(channels.contains(&"email".to_string()));
     assert!(!channels.contains(&"webhook".to_string()));

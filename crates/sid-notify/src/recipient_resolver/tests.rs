@@ -91,11 +91,12 @@ async fn test_resolver_without_identity_uses_event_data() {
     assert_eq!(r.phone.as_deref(), Some("+380501234567"));
 }
 
-/// Without an identity service no profile's addresses are known.
+/// Without an identity service no caller's addresses are known.
 #[tokio::test]
-async fn test_contact_without_identity_is_none() {
+async fn test_current_contact_without_identity_is_none() {
     let resolver = RecipientResolver::without_identity();
-    assert_eq!(resolver.contact("any-profile").await, Ok(None));
+    let bearer = "Bearer any-token".parse().unwrap();
+    assert_eq!(resolver.current_contact(&bearer).await, Ok(None));
 }
 
 #[tokio::test]

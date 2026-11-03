@@ -22,7 +22,7 @@ async fn a_receiver_is_admitted_through_the_test_issuer() {
     std::fs::write(&secret, "ops-receiver-secret").unwrap();
     let receiver = sid_auth::receiver::Receiver::connect(
         "ops",
-        &issuer.receiver_config(RESOURCE, ORIGIN, "ops-receiver", &secret, None),
+        &issuer.receiver_config(RESOURCE, ORIGIN, "ops-receiver", &secret),
     )
     .await
     .unwrap();
@@ -173,7 +173,7 @@ async fn a_split_history_evaluator_takes_preparation_internally_only() {
     let cache: Arc<dyn CacheBackend> = Arc::new(sid_plugin::cache::InMemoryCacheBackend::new());
     let evaluation = Arc::new(HistoryEvaluation::new(
         issuer.history_keys.clone(),
-        Arc::new(sid_plugin::cache::InMemoryCacheBackend::new()),
+        Arc::new(sid_plugin::InProcessCeremonyState::new()),
         manager(0x11),
     ));
     let (internal_url, stop_internal, serving_internal) =

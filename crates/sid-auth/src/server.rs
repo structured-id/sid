@@ -77,9 +77,11 @@ impl AuthServer {
                 Arc::new(GrpcIssuerSource::new(issuer.clone())),
             )),
             applications: Arc::new(applications),
-            revocation: crate::revocation_view(cache.clone()),
-            dpop: Arc::new(sid_authn::dpop::DPopValidator::new(cache)),
+            revocation: crate::revocation_view(cache),
             authz: upstream,
+            token_state: checker
+                .clone()
+                .map(|checker| checker as Arc<dyn sid_authn::issuer_state::IssuerState>),
             checker,
             login_url: config.login_url.clone(),
         });
@@ -133,7 +135,7 @@ impl AuthServer {
     /// process's drain interval.
     pub async fn serve(self, shutdown: impl Future<Output = ()>) -> anyhow::Result<()> {
         // Revocations made anywhere reach this process before it answers.
-        self.pdp.revocation.listen().await?;
+        self.pdp.revocation.listen().await;
         let drain = sid_serve::shutdown::drain_interval_from_env()?;
         let listener = tokio::net::TcpListener::bind(&self.config.grpc_listen).await?;
         let grpc_addr = listener.local_addr()?;

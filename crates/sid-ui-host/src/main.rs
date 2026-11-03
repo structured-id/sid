@@ -22,9 +22,14 @@
 //! - `SID_UI_SESSION_COOKIE`: the session cookie's `__Host-` name;
 //! - `SID_UI_API_UPSTREAM`: the gRPC address of the application's API; unset,
 //!   the page calls only the adapter;
-//! - `SID_CACHE_URL`: the cache the replicas share sessions through;
-//!   required, as a host behind a load balancer completes sign-ins another
-//!   replica started.
+//! - `SID_UI_API_ROUTES`: services of that API's resource served by processes
+//!   of their own (`sid.v1.admin.NotificationTemplateService=http://sid-notify:9040`,
+//!   comma separated), called with the same session token;
+//! - `SID_UI_DATABASE_URL`: the application's database, where sessions and
+//!   started sign-ins live: `postgres://` for replicas behind a load
+//!   balancer (one completes a sign-in another started), `sqlite:` for a
+//!   single instance;
+//! - `SID_CACHE_URL`: optional; brings revocation notices sooner.
 //!
 //! `sid-ui-host keygen <private-key.pem> <public-jwks.json>` writes a new
 //! client key and the JWK Set the installation registers for it.
@@ -46,9 +51,7 @@ use sid_authn::revocation_cache::RevocationCache;
 use sid_infra::issuer_client::{RpClient, load_connection};
 use sid_infra::issuer_registry::GrpcIssuerSource;
 use sid_ui_host::application_session::{ApplicationSessions, FORWARDED_HEADERS};
-use sid_ui_host::host::{
-    ADAPTER_PROTO, HostUpstream, asset_routes, issuer_channel, required_shared_cache,
-};
+use sid_ui_host::host::{ADAPTER_PROTO, HostUpstream, asset_routes, issuer_channel};
 use sid_ui_host::{GrpcSettingsSource, Retry, UiBundle, follow, standalone};
 use tracing_subscriber::EnvFilter;
 
@@ -60,6 +63,8 @@ const SESSION_IDLE: Duration = Duration::from_secs(3600);
 const SIGN_IN_TTL: Duration = Duration::from_secs(300);
 /// Calls in flight at shutdown get this long to finish.
 const DRAIN: Duration = Duration::from_secs(20);
+/// How often expired sessions and sign-ins are removed from the store.
+const PURGE_INTERVAL: Duration = Duration::from_secs(60);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -133,8 +138,38 @@ async fn main() -> anyhow::Result<()> {
         // The hosted API speaks gRPC; the page calls it over gRPC-Web.
         .with_grpc_web_translation(true)
         .with_extra_routes(asset_routes(app));
+    let mut host = HostUpstream::new(sessions, api);
+    for (service, upstream) in api_routes()? {
+        tracing::info!(%service, %upstream, "service served by a process of its own");
+        host = host.with_service(
+            &service,
+            tonic::transport::Endpoint::from_shared(upstream.clone())
+                .with_context(|| format!("SID_UI_API_ROUTES {service}={upstream}"))?
+                .connect_lazy(),
+        );
+    }
     tracing::info!(%addr, bundle = %dir.display(), %mount, "sid-ui-host listening with its browser adapter");
-    sid_infra::http::serve(&proxy, HostUpstream::new(sessions, api), shutdown(), DRAIN).await
+    sid_infra::http::serve(&proxy, host, shutdown(), DRAIN).await
+}
+
+/// `SID_UI_API_ROUTES`: services of the API's resource served by processes
+/// of their own, as `package.Service=grpc-address` pairs separated by
+/// commas; unset, every call goes to `SID_UI_API_UPSTREAM`.
+fn api_routes() -> anyhow::Result<Vec<(String, String)>> {
+    let Ok(routes) = std::env::var("SID_UI_API_ROUTES") else {
+        return Ok(Vec::new());
+    };
+    routes
+        .split(',')
+        .map(str::trim)
+        .filter(|route| !route.is_empty())
+        .map(|route| {
+            let (service, upstream) = route.split_once('=').with_context(|| {
+                format!("SID_UI_API_ROUTES {route:?} is not package.Service=address")
+            })?;
+            Ok((service.trim().to_owned(), upstream.trim().to_owned()))
+        })
+        .collect()
 }
 
 /// The browser adapter the environment configures, with the client key at
@@ -173,15 +208,25 @@ async fn adapter(key_file: &str) -> anyhow::Result<ApplicationSessions> {
         Err(_) => RpClient::new(key, installation.clone(), channel.clone())?,
     };
 
-    let cache_url = required_shared_cache(sid_infra::cache_url_from_env())?;
-    let cache = sid_infra::shared_cache(Some(&cache_url)).await?;
+    let database = required("SID_UI_DATABASE_URL")?;
+    let store = sid_storage::application_store::ceremony_store(&database)
+        .await
+        .context("SID_UI_DATABASE_URL")?;
+    tokio::spawn(sid_storage::application_store::purge_expired(
+        store.clone(),
+        PURGE_INTERVAL,
+    ));
+    // The cache only brings revocation notices sooner; without one, this
+    // process learns of none, and every call it forwards is still admitted
+    // by its issuer.
+    let cache = sid_infra::shared_cache(sid_infra::cache_url_from_env().as_deref()).await?;
     let lifetime = sid_authn::jwt::AccessTokenTtl::MAX
         .duration()
         .to_std()
         .context("the longest access-token lifetime is positive")?;
-    let revocation = Arc::new(RevocationCache::new(lifetime, cache.clone()));
+    let revocation = Arc::new(RevocationCache::new(lifetime, cache));
     // Revocations made anywhere reach this process before it answers.
-    revocation.listen().await?;
+    revocation.listen().await;
     Ok(ApplicationSessions::new(
         Arc::new(client),
         Arc::new(IssuerDirectory::new(
@@ -189,7 +234,7 @@ async fn adapter(key_file: &str) -> anyhow::Result<ApplicationSessions> {
             Arc::new(GrpcIssuerSource::new(channel)),
         )),
         Arc::new(BffSessionStore::new(
-            cache,
+            store,
             SESSION_MAX_AGE,
             SESSION_IDLE,
             SIGN_IN_TTL,

@@ -26,15 +26,13 @@ pub use postgres::{PgHistoryKeyStore, PgWorkStore, PostgresBackend};
 pub use postgres_blob::PostgresBlobStore;
 
 #[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
+pub mod application_store;
+#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
 mod directory_query;
 #[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
 mod key_versions;
 #[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
 mod policy_evidence;
-
-/// Open work per kind a mutation may still add; beyond it the mutation is
-/// refused rather than accepted without its obligation.
-pub const OWED_WORK_CAPACITY: u64 = 100_000;
 
 /// Whether the installation is centrally managed (`bootstrap_policy` holds
 /// its row).

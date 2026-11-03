@@ -7,7 +7,7 @@ keywords = ["oprf"]
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/structured-id/sid"
-version = "0.6.1"
+version = "0.6.2"
 edition = "2024"
 rust-version = "1.87"
 
@@ -15,6 +15,9 @@ rust-version = "1.87"
 alloc = []
 danger = []
 default = ["ristretto255-ciphersuite", "dep:serde"]
+# The Pallas group and suite, with the Poseidon hash-to-curve a Halo2 circuit
+# recomputes.
+pallas = ["alloc", "dep:pasta_curves", "dep:ff", "dep:group", "dep:halo2_gadgets", "dep:sha2"]
 ristretto255 = ["dep:curve25519-dalek"]
 ristretto255-ciphersuite = ["ristretto255", "dep:sha2"]
 serde = ["curve25519-dalek?/serde", "hybrid-array/serde", "dep:serde"]
@@ -26,6 +29,10 @@ derive-where = { version = "1.7", features = ["zeroize-on-drop"] }
 digest = "0.11"
 displaydoc = { version = "0.2", default-features = false }
 elliptic-curve = { version = "0.14.3", features = ["sec1"] }
+ff = { version = "0.14", optional = true }
+group = { version = "0.14", optional = true }
+halo2_gadgets = { version = "0.6", optional = true }
+pasta_curves = { version = "0.6", optional = true }
 # Element and scalar lengths are also `generic_array` lengths, so protocols
 # built on top can serialize messages longer than hybrid-array's sizes.
 generic-array = "1"

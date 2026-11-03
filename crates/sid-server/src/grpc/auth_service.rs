@@ -198,17 +198,7 @@ impl LoginMethod {
     }
 }
 
-/// `amr` values of a passkey assertion: the key (`hwk`/`swk`, RFC 8176 §2),
-/// proof of possession (`pop`, OpenID EAP ACR Values 1.0), and `mfa` when the
-/// authenticator verified the user. WebAuthn reports only that the user was
-/// verified, not how, so no biometric or PIN value is claimed.
-fn passkey_amr(key_amr: &'static str, user_verified: bool) -> Vec<&'static str> {
-    if user_verified {
-        vec![key_amr, "pop", "mfa"]
-    } else {
-        vec![key_amr, "pop"]
-    }
-}
+use sid_authn::webauthn::passkey_amr;
 
 /// Parse space-separated acr_values string into the highest requested AuthLevel.
 ///
@@ -424,7 +414,18 @@ fn otp_refusal(e: sid_authn::otp::OtpError) -> Status {
         .with_quota_violation("email_codes", "codes requested per address")
         .with_retry_after(std::time::Duration::from_secs(wait_seconds))
         .into(),
-        sid_authn::otp::OtpError::Internal(msg) => internal("request email code", msg),
+        // The installation's bound of owed mails: the request is not
+        // accepted rather than answered with a code nobody will send.
+        sid_authn::otp::OtpError::Busy(_) => ApiError::new(
+            ErrorReason::QuotaExceeded,
+            "too many codes are waiting for delivery; try again shortly",
+        )
+        .with_quota_violation("email_deliveries", "codes waiting for delivery")
+        .with_retry_after(std::time::Duration::from_secs(60))
+        .into(),
+        e @ (sid_authn::otp::OtpError::Internal(_) | sid_authn::otp::OtpError::Sealed(_)) => {
+            internal("request email code", e)
+        }
     }
 }
 
@@ -584,7 +585,7 @@ pub struct AuthServiceImpl {
     /// them, which is the default.
     pub(crate) magic_link: Option<Arc<MagicLinkService>>,
     /// OTP passwordless authentication (email/phone code).
-    pub(crate) otp: OtpService,
+    pub(crate) otp: Arc<OtpService>,
     /// DPoP proof validator (RFC 9449).
     pub(crate) dpop_validator: DPopValidator,
     /// The OIDC issuers whose endpoints the OAuth requests arrive at, and
@@ -599,7 +600,7 @@ pub struct AuthServiceImpl {
     /// proof names, never taken from a request.
     public_origin: String,
     /// RFC 7523: assertion JTI replay prevention cache.
-    assertion_jti_cache: Arc<sid_authn::client_assertion::AssertionJtiCache>,
+    assertion_jti_log: Arc<sid_authn::client_assertion::AssertionJtiLog>,
     /// Per-client rate limiter for machine user requests.
     rate_limiter: Arc<crate::rate_limit::RateLimiter>,
     /// Distributed rate limit stats for admin dashboard.
@@ -704,7 +705,7 @@ impl AuthServiceImpl {
         revocation_cache: Arc<RevocationCache>,
         feature_flags: FeatureFlagService,
         magic_link: Option<Arc<MagicLinkService>>,
-        otp: OtpService,
+        otp: Arc<OtpService>,
         issuers: Arc<sid_authn::issuer::IssuerRegistry>,
         installation_org: sid_core::models::OrgId,
         issuer: String,
@@ -718,12 +719,13 @@ impl AuthServiceImpl {
         password_history: sid_authn::password_operation::PasswordHistoryAuthority,
     ) -> Self {
         let ttl = std::time::Duration::from_secs(300); // 5 minutes
+        let ceremonies: Arc<dyn sid_plugin::CeremonyStateStore> = storage.clone();
         let captcha_gate =
-            sid_authn::captcha::CaptchaGate::new(cache_backend.clone(), key_manager.clone());
+            sid_authn::captcha::CaptchaGate::new(ceremonies.clone(), key_manager.clone());
         let (password_ops, history_evaluation) =
             super::password_operation::PasswordOperations::with_authority(
                 storage.clone(),
-                cache_backend.clone(),
+                ceremonies.clone(),
                 key_manager.clone(),
                 installation_org,
                 password_history,
@@ -739,7 +741,7 @@ impl AuthServiceImpl {
             revocation_cache,
             feature_flags,
             login_state: ChallengeStore::new(
-                cache_backend.clone(),
+                ceremonies.clone(),
                 key_manager.clone(),
                 "opaque-login",
                 ttl,
@@ -747,50 +749,50 @@ impl AuthServiceImpl {
             password_ops,
             history_evaluation,
             webauthn_state: ChallengeStore::new(
-                cache_backend.clone(),
+                ceremonies.clone(),
                 key_manager.clone(),
                 "webauthn-binding",
                 ttl,
             ),
             step_up_state: ChallengeStore::new(
-                cache_backend.clone(),
+                ceremonies.clone(),
                 key_manager.clone(),
                 "webauthn-step-up",
                 ttl,
             ),
             migration_state: ChallengeStore::new(
-                cache_backend.clone(),
+                ceremonies.clone(),
                 key_manager.clone(),
                 "legacy-migration",
                 ttl,
             ),
             totp_enrollment: ChallengeStore::new(
-                cache_backend.clone(),
+                ceremonies.clone(),
                 key_manager.clone(),
                 "totp-enrollment",
                 ttl,
             ),
             first_factor_proofs: ChallengeStore::new(
-                cache_backend.clone(),
+                ceremonies.clone(),
                 key_manager.clone(),
                 "first-factor-proof",
                 ttl,
             ),
             continuations: ChallengeStore::new(
-                cache_backend.clone(),
+                ceremonies.clone(),
                 key_manager.clone(),
                 "authorize-continuation",
                 authorize::CONTINUATION_TTL,
             ),
             logout_confirmations: ChallengeStore::new(
-                cache_backend.clone(),
+                ceremonies.clone(),
                 key_manager.clone(),
                 "logout-confirmation",
                 end_session::CONFIRMATION_TTL,
             ),
             magic_link,
             otp,
-            dpop_validator: DPopValidator::new(cache_backend.clone()),
+            dpop_validator: DPopValidator::new(ceremonies.clone()),
             issuers,
             installation_org,
             public_origin: url::Url::parse(&issuer)
@@ -798,15 +800,15 @@ impl AuthServiceImpl {
                 .origin()
                 .ascii_serialization(),
             issuer,
-            assertion_jti_cache: Arc::new(sid_authn::client_assertion::AssertionJtiCache::new(
-                cache_backend.clone(),
+            assertion_jti_log: Arc::new(sid_authn::client_assertion::AssertionJtiLog::new(
+                ceremonies.clone(),
             )),
             rate_limiter: Arc::new(crate::rate_limit::RateLimiter::new(cache_backend.clone())),
             rate_limit_stats: Arc::new(crate::rate_limit::RateLimitStats::new(
                 cache_backend.clone(),
             )),
-            totp_replay: sid_authn::TotpReplayGuard::new(cache_backend.clone()),
-            anomaly_detector: Arc::new(AnomalyDetector::ce_default(cache_backend)),
+            totp_replay: sid_authn::TotpReplayGuard::new(ceremonies.clone()),
+            anomaly_detector: Arc::new(AnomalyDetector::ce_default(ceremonies.clone())),
             ip_intelligence,
             geoip,
             security_policy: SecurityPolicy::ce_default(),
@@ -1484,8 +1486,8 @@ impl AuthServiceImpl {
             .map_err(|e| match e {
                 // An unreachable replay record cannot rule out a replay; the
                 // client retries the same request.
-                sid_authn::dpop::DPopError::ReplayCacheUnavailable => {
-                    dependency_unavailable("DPoP replay record", "replay cache unreachable")
+                sid_authn::dpop::DPopError::ReplayStoreUnavailable => {
+                    dependency_unavailable("DPoP replay record", "replay store unreachable")
                 }
                 other => {
                     warn!("DPoP proof validation failed: {}", other);
@@ -1566,7 +1568,7 @@ impl AuthServiceImpl {
             client,
             &issuer.canonical_url,
             &self.oauth2,
-            &self.assertion_jti_cache,
+            &self.assertion_jti_log,
         )
         .await
         .map_err(|refusal| match refusal {
@@ -1645,7 +1647,7 @@ impl AuthServiceImpl {
                         &audience,
                         &cred.credential_data,
                         alg,
-                        &self.assertion_jti_cache,
+                        &self.assertion_jti_log,
                     )
                     .await
                     {
@@ -1841,6 +1843,38 @@ impl AuthServiceImpl {
             Err(s) if s.code() == tonic::Code::Unauthenticated => Ok(None),
             Err(s) => Err(s),
         }
+    }
+
+    /// The mailbox login mail for the email key `key` goes to on `profile`,
+    /// the account it routes to: the address in the spelling that profile
+    /// bound it with (its binding's contact, which registration, import and
+    /// directory provisioning each record with the binding), never another
+    /// spelling of the key. `None` when that binding records no such
+    /// contact: a lost spelling is not inferred from the key.
+    async fn login_mail_destination(
+        &self,
+        profile: ProfileId,
+        key: &str,
+    ) -> Result<Option<String>, Status> {
+        let principals = self
+            .storage
+            .get_principals_by_profile(profile)
+            .await
+            .map_err(storage_failure)?;
+        let Some(contact) = principals
+            .iter()
+            .find(|p| p.principal_type == PrincipalType::Email && p.value == key)
+            .and_then(|p| p.source_email_id)
+        else {
+            return Ok(None);
+        };
+        Ok(self
+            .storage
+            .get_profile_email(contact)
+            .await
+            .map_err(storage_failure)?
+            .filter(|email| email.profile_id == profile)
+            .map(|email| email.email))
     }
 
     /// Decide what a registration started for `principal` may commit. The
@@ -2276,71 +2310,20 @@ impl AuthServiceImpl {
             .collect())
     }
 
-    /// Record a successful assertion on the passkey that made it: its new
-    /// signature counter and backup state, and when it was used. The counter
-    /// is what later assertions are checked against, so a copy of the key is
-    /// noticed; the write is a compare-and-swap on the credential, so of two
-    /// assertions racing on one key only one is recorded and the other
-    /// sign-in fails, as it does when the credential was revoked meanwhile.
-    /// Returns the RFC 8176 method of the key that asserted.
+    /// Record a successful assertion on the passkey that made it (see
+    /// [`sid_authn::webauthn::record_passkey_use`]): a lost race or a revoked
+    /// passkey fails the sign-in. Returns the RFC 8176 method of the key and
+    /// the fence that proved this sign-in's first factor.
     async fn record_passkey_use(
         &self,
         passkeys: &[Credential],
         verified: &VerifiedAssertion,
-    ) -> Result<&'static str, Status> {
-        let credential = passkeys
-            .iter()
-            .find(|c| c.id == verified.credential)
-            .ok_or_else(authentication_failed)?;
-        let audit = || {
-            MutationContext::from(AuditEntry::user(
-                credential.profile_id.to_string(),
-                "credential.passkey_used",
-                credential.id.0.to_string(),
-            ))
-        };
-        let recorded = match &verified.updated_data {
-            Some(updated) => {
-                self.storage
-                    .replace_credential_data(
-                        credential.id,
-                        credential.data.expose(),
-                        updated,
-                        audit(),
-                    )
-                    .await
-            }
-            None => {
-                self.storage
-                    .mark_credential_used(credential.id, audit())
-                    .await
-            }
-        }
-        .map_err(storage_failure)?;
-        if recorded {
-            Ok(verified.key_amr)
-        } else {
-            Err(authentication_failed())
-        }
-    }
-
-    /// The fence of the passkey that made `verified`, holding what its
-    /// recorded use stored: what proved this sign-in's first factor.
-    fn passkey_fence(
-        passkeys: &[Credential],
-        verified: &VerifiedAssertion,
-    ) -> Result<sid_core::models::CredentialFence, Status> {
-        let credential = passkeys
-            .iter()
-            .find(|c| c.id == verified.credential)
-            .ok_or_else(authentication_failed)?;
-        Ok(sid_core::models::CredentialFence {
-            id: credential.id,
-            data: match &verified.updated_data {
-                Some(updated) => CredentialData::new(updated.clone()),
-                None => credential.data.clone(),
-            },
-        })
+    ) -> Result<(&'static str, sid_core::models::CredentialFence), Status> {
+        sid_authn::webauthn::record_passkey_use(self.storage.as_ref(), passkeys, verified)
+            .await
+            .map_err(storage_failure)?
+            .map(|fence| (verified.key_amr, fence))
+            .ok_or_else(authentication_failed)
     }
 
     /// The result of a passkey assertion finish: a refused assertion counts
@@ -4052,8 +4035,7 @@ impl AuthService for AuthServiceImpl {
                 .await;
             let verified = self.passkey_outcome(finished, p.id, client_ip).await?;
             user_verified = verified.user_verified;
-            key_amr = self.record_passkey_use(&passkeys, &verified).await?;
-            proved_by = Self::passkey_fence(&passkeys, &verified)?;
+            (key_amr, proved_by) = self.record_passkey_use(&passkeys, &verified).await?;
 
             p
         } else {
@@ -4088,8 +4070,7 @@ impl AuthService for AuthServiceImpl {
                 .await;
             let verified = self.passkey_outcome(finished, p.id, client_ip).await?;
             user_verified = verified.user_verified;
-            key_amr = self.record_passkey_use(&passkeys, &verified).await?;
-            proved_by = Self::passkey_fence(&passkeys, &verified)?;
+            (key_amr, proved_by) = self.record_passkey_use(&passkeys, &verified).await?;
 
             p
         };
@@ -4463,20 +4444,37 @@ impl AuthService for AuthServiceImpl {
             return unsent();
         }
         let profile = self.resolve_profile_optional(&address).await?;
-        if !profile.is_some_and(|p| p.profile_type == ProfileType::Corporate) {
+        let Some(profile) = profile.filter(|p| p.profile_type == ProfileType::Corporate) else {
             return unsent();
-        }
+        };
+        // The link goes to the mailbox the account bound the address with,
+        // never the key or the caller's spelling of it.
+        let Some(destination) = self.login_mail_destination(profile.id, &address).await? else {
+            info!("magic link requested for an account with no login mailbox: no link sent");
+            return unsent();
+        };
 
-        // The token leaves this service only inside the email delivery; it is
-        // never logged or put into an event.
-        let (result, _token) = match magic_link.request_magic_link(&address).await {
+        // The session and the work emailing its link commit together; the
+        // token leaves this service only inside that email, never logged or
+        // put into an event.
+        let (result, _token) = match magic_link.request_magic_link(&address, &destination).await {
             Ok(sent) => sent,
             Err(sid_authn::magic_link::MagicLinkError::RateLimited { .. }) => {
                 info!("Magic link request past the per-address limit: no link sent");
                 return unsent();
             }
-            Err(sid_authn::magic_link::MagicLinkError::Internal(msg)) => {
-                return Err(internal("request magic link", msg));
+            // A full email queue refuses only real accounts' requests; it
+            // answers as an unknown address does, so a backlog never tells the
+            // caller which addresses have accounts.
+            Err(sid_authn::magic_link::MagicLinkError::DeliveryBacklog(why)) => {
+                warn!(%why, "magic link email queue full: no link sent");
+                return unsent();
+            }
+            Err(
+                e @ (sid_authn::magic_link::MagicLinkError::Internal(_)
+                | sid_authn::magic_link::MagicLinkError::Sealed(_)),
+            ) => {
+                return Err(internal("request magic link", e));
             }
         };
 
@@ -5574,13 +5572,27 @@ impl AuthService for AuthServiceImpl {
             sid_plugin::otp::mask_target(&email.delivery, sid_plugin::otp::OtpChannel::Email);
 
         // Every address gets a real pending code, whether or not it routes to
-        // an account: the same work, and resend and verify answer alike, so no
-        // step tells whether the account exists. The code leaves this service
-        // only inside the delivery to the target; it is never logged or put
+        // an account, and resend and verify answer alike, so no answer tells
+        // whether the account exists. Only an account's code is emailed, to
+        // the mailbox its assignment was bound with, fixed now: neither the
+        // resolution key nor a caller's equivalent spelling (another mailbox
+        // where the key folds dots or tags) ever receives it. The code leaves
+        // this service only inside that email; it is never logged or put
         // into an event.
+        let destination = match self.resolve_profile_optional(normalized).await? {
+            Some(account) => self.login_mail_destination(account.id, normalized).await?,
+            None => None,
+        };
+        if destination.is_none() {
+            tracing::debug!("email code requested for an address with no login mailbox: no mail");
+        }
+        let destination = match destination.as_deref() {
+            Some(mailbox) => sid_authn::otp::CodeDestination::Email(mailbox),
+            None => sid_authn::otp::CodeDestination::None,
+        };
         let (result, _code) = self
             .otp
-            .request_otp(normalized)
+            .request_otp(normalized, destination)
             .await
             .map_err(otp_refusal)?;
 
@@ -5702,14 +5714,14 @@ impl AuthService for AuthServiceImpl {
 
         let session_id = parse_otp_session(req.session_id.as_deref())?;
 
-        let target = self
+        // A new code in the same session, the one the client verifies
+        // against, sent to the mailbox bound at the request.
+        let (result, _code) = self
             .otp
-            .get_session_target(&session_id)
+            .resend_otp(&session_id)
             .await
-            .map_err(|e| internal("read email code session", e))?
+            .map_err(otp_refusal)?
             .ok_or_else(|| ceremony_expired("email code"))?;
-
-        let (result, _code) = self.otp.request_otp(&target).await.map_err(otp_refusal)?;
 
         info!(session_id = %result.session_id, "OTP code resent");
 
@@ -6105,7 +6117,7 @@ impl AuthService for AuthServiceImpl {
                         }
                         other => internal("finish passkey step-up", other),
                     })?;
-                let key_amr = self.record_passkey_use(&passkeys, &verified).await?;
+                let (key_amr, _) = self.record_passkey_use(&passkeys, &verified).await?;
 
                 // Determine target level based on user_verified.
                 // user_verified=true → Elevated (phishing-resistant, 2 NIST factors).

@@ -436,6 +436,25 @@ async fn test_relay_refuses_what_is_not_an_identity_fact() {
     }
 }
 
+/// A platform producer's relay plans platform facts to its required
+/// receivers and refuses identity facts, as the identity relay refuses
+/// platform ones: each family's facts travel only on their own bus.
+#[tokio::test]
+async fn test_platform_relay_plans_platform_facts_only() {
+    let store = Arc::new(RecordingStore::default());
+    let platform = relay(store.clone()).for_family(EventFamily::Platform);
+
+    let trial = Event::new("sid-ee-saas", event_types::ORG_TRIAL_ACTIVATED);
+    let outcome = platform.handle(&claimed(trial.relay())).await;
+    assert!(matches!(outcome, WorkOutcome::Done(_)), "{outcome:?}");
+    let planned: EventFanout = serde_json::from_slice(&plan_of(&store, &trial).payload).unwrap();
+    assert_eq!(planned.receivers, [recipient("sid-notify")]);
+
+    let identity = Event::new("src", event_types::SESSION_REVOKED);
+    let outcome = platform.handle(&claimed(identity.relay())).await;
+    assert!(matches!(outcome, WorkOutcome::Permanent(_)), "{outcome:?}");
+}
+
 /// A plan that is not one can never be carried out.
 #[tokio::test]
 async fn test_fanout_malformed_plan_is_permanent() {
@@ -535,7 +554,7 @@ async fn test_observed_event_uses_the_observation_capacity() {
     assert_eq!(stored, [(event.relay().id, OBSERVED_EVENT_CAPACITY)]);
     const {
         assert!(
-            OBSERVED_EVENT_CAPACITY < sid_storage::OWED_WORK_CAPACITY,
+            OBSERVED_EVENT_CAPACITY < sid_plugin::OWED_WORK_CAPACITY,
             "observations may crowd out owed events"
         )
     };

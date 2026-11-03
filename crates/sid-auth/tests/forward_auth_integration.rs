@@ -257,7 +257,81 @@ impl OidcIssuerService for MockIssuers {
             _ => Err(Status::not_found("no resource")),
         }
     }
+
+    /// This issuer admits no proof: a bound token gets no verdict here.
+    /// Admission is exercised against the real issuer in the server's tests.
+    async fn admit_sender_proof(
+        &self,
+        _: TonicRequest<sid_proto::sid::v1::authn::AdmitSenderProofRequest>,
+    ) -> Result<TonicResponse<()>, Status> {
+        Err(Status::unimplemented("no proof admission here"))
+    }
 }
+
+/// The issuer's introspection endpoint (RFC 7662), the one AuthService
+/// method the decision calls: every token is reported `active` as set, to
+/// the decision's own client only. Every other method is unimplemented.
+#[derive(Clone)]
+struct Introspection {
+    active: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl tonic::server::NamedService for Introspection {
+    const NAME: &'static str = "sid.v1.authn.AuthService";
+}
+
+impl tower::Service<http::Request<tonic::body::Body>> for Introspection {
+    type Response = http::Response<tonic::body::Body>;
+    type Error = std::convert::Infallible;
+    type Future = std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
+    >;
+
+    fn poll_ready(
+        &mut self,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, request: http::Request<tonic::body::Body>) -> Self::Future {
+        if request.uri().path() != "/sid.v1.authn.AuthService/OAuth2Introspect" {
+            return Box::pin(async { Ok(Status::unimplemented("").into_http()) });
+        }
+        let answer = Answer(self.active.clone());
+        Box::pin(async move {
+            let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
+            Ok(grpc.unary(answer, request).await)
+        })
+    }
+}
+
+struct Answer(Arc<std::sync::atomic::AtomicBool>);
+
+impl tonic::server::UnaryService<sid_proto::sid::v1::OAuth2IntrospectRequest> for Answer {
+    type Response = sid_proto::sid::v1::OAuth2IntrospectResponse;
+    type Future = std::future::Ready<Result<TonicResponse<Self::Response>, Status>>;
+
+    fn call(
+        &mut self,
+        request: TonicRequest<sid_proto::sid::v1::OAuth2IntrospectRequest>,
+    ) -> Self::Future {
+        let request = request.into_inner();
+        let ours = request.issuer_handle == HANDLE
+            && request.client_id.as_deref() == Some(CHECKER)
+            && request.client_secret.as_deref() == Some(CHECKER_SECRET);
+        std::future::ready(Ok(TonicResponse::new(
+            sid_proto::sid::v1::OAuth2IntrospectResponse {
+                active: ours && self.0.load(std::sync::atomic::Ordering::SeqCst),
+                ..Default::default()
+            },
+        )))
+    }
+}
+
+/// The decision's own client at the issuer.
+const CHECKER: &str = "forward-auth";
+const CHECKER_SECRET: &str = "forward-auth-secret";
 
 // ── Harness ──
 
@@ -298,26 +372,36 @@ struct Harness {
     /// the service's own gRPC services, called in process.
     http: structured_proxy::ProxyService<tonic::service::Routes>,
     cache: Arc<dyn sid_plugin::cache::CacheBackend>,
+    /// Whether the issuer reports the tokens active.
+    active: Arc<std::sync::atomic::AtomicBool>,
 }
 
 async fn harness_with(authz: MockAuthz, registry_down: bool) -> Harness {
     let (key, public_key) = issuer_key();
+    let active = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let upstream = serve(
-        tonic::service::Routes::new(AuthzServiceServer::new(authz)).add_service(
-            OidcIssuerServiceServer::new(MockIssuers {
+        tonic::service::Routes::new(AuthzServiceServer::new(authz))
+            .add_service(OidcIssuerServiceServer::new(MockIssuers {
                 public_key,
                 unavailable: registry_down,
+            }))
+            .add_service(Introspection {
+                active: active.clone(),
             }),
-        ),
     )
     .await;
+    let secret = std::env::temp_dir().join(format!("sid-auth-checker-{}", uuid::Uuid::now_v7()));
+    std::fs::write(&secret, CHECKER_SECRET).unwrap();
     let config: sid_auth::config::AuthConfig = serde_saphyr::from_str(&format!(
         "upstream: http://{upstream}\n\
          issuer_url: https://sid.example.com\n\
          login_url: https://sid.example.com/auth/login\n\
          route_policy_path: {}/tests/fixtures/routes.yaml\n\
-         http:\n  listen: {{ http: \"127.0.0.1:0\" }}\n",
-        env!("CARGO_MANIFEST_DIR")
+         http:\n  listen: {{ http: \"127.0.0.1:0\" }}\n\
+         authz_checker:\n  issuer: {ISSUER}\n  client_id: {CHECKER}\n  \
+         authentication: {{ method: client_secret_post, secret_file: {} }}\n",
+        env!("CARGO_MANIFEST_DIR"),
+        secret.display(),
     ))
     .unwrap();
     let cache: Arc<dyn sid_plugin::cache::CacheBackend> =
@@ -335,6 +419,7 @@ async fn harness_with(authz: MockAuthz, registry_down: bool) -> Harness {
         grpc,
         http,
         cache,
+        active,
     }
 }
 
@@ -407,6 +492,28 @@ async fn http_allows_a_token_for_the_target() {
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()["x-forwarded-user"], SUBJECT);
+}
+
+/// A valid token its issuer reports inactive (revoked, its session ended)
+/// is refused over HTTP: the decision asks the issuer, not only its own
+/// revocation view.
+#[tokio::test]
+async fn http_refuses_a_token_inactive_at_its_issuer() {
+    let h = harness().await;
+    h.active.store(false, std::sync::atomic::Ordering::SeqCst);
+    let bearer = format!(
+        "Bearer {}",
+        access_token(&h.key, ORDERS, serde_json::json!({}))
+    );
+    let response = http(
+        &h.http,
+        "GET",
+        "orders",
+        &[("authorization", &bearer), ("x-original-uri", "/items")],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(response.headers().get("x-forwarded-user").is_none());
 }
 
 /// The sub-request arrives with the original request's method: the rule binds
@@ -567,9 +674,11 @@ fn dpop_proof(htu: &str, token: &str) -> String {
     encode(&header, &payload, &key).unwrap()
 }
 
-/// A bound token under the DPoP scheme with a proof for the request at the
-/// configured origin passes once; the same proof again is a replay; the
-/// token as a bearer token is refused with the DPoP challenge.
+/// A bound token under the DPoP scheme with a valid proof is admitted only
+/// once its issuer admitted the proof: an issuer that does not answer the
+/// admission leaves it without a verdict, and the service never admits the
+/// proof itself. The token as a bearer token is refused with the DPoP
+/// challenge.
 #[tokio::test]
 async fn http_dpop_bound_token() {
     let h = harness().await;
@@ -582,13 +691,9 @@ async fn http_dpop_bound_token() {
         ("x-original-uri", "/items"),
         ("x-original-method", "GET"),
     ];
-    assert_eq!(
+    assert_ne!(
         http(&h.http, "GET", "orders", &request).await.status(),
         StatusCode::OK
-    );
-    assert_eq!(
-        http(&h.http, "GET", "orders", &request).await.status(),
-        StatusCode::UNAUTHORIZED
     );
 
     let bearer = format!("Bearer {token}");

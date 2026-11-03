@@ -62,7 +62,32 @@ Environment variables:
 | `SID_ZKPP_POLICY_VERSION` | `1` | Accepted compiled password policy; an unknown or malformed version stops startup |
 | `SID_PASSWORD_HISTORY_EPOCH_NOT_BEFORE` | - | RFC 3339 instant: no history entry is written under a key created before it (a suspected key compromise), and such keys are replaced at their owner's next password operation. Raised at start into this server's history store and the in-process evaluator's; an older or unset value lowers nothing. A malformed or future value stops startup |
 | `SID_PASSWORD_HISTORY_EVALUATOR` | - | gRPC address of a separately deployed password-history evaluator's internal listener, which the deployment keeps reachable by this server alone over its protected internal transport; unset runs the evaluator in this server (see below) |
+| `SID_NATS_URL` | `embedded` | Event bus: `embedded` runs a bundled NATS server under the data directory, a `nats://` or `tls://` URL connects to an external cluster, `in-process` runs without a broker (see below) |
+| `SID_EVENT_RECEIVERS` | none on `embedded` and `in-process`; required on an external bus | Comma-separated receivers every committed fact is owed to (for example `sid-notify`), or `none` |
+| `SID_ACCOUNT_URL` | - | Public URL of the account UI, set together with `SID_ACCOUNT_CLIENT_JWKS` (a file holding its BFF's public JWK Set); its `/login` page runs browser sign-in and its `/verify` page opens emailed sign-in links |
+| `SID_MAGIC_LINKS_ENABLED` | `false` | Email sign-in links to Corporate accounts; requires `SID_ACCOUNT_URL` |
 | `RUST_LOG` | `sid=info` | Log level |
+
+### Event delivery without a broker
+
+With `SID_NATS_URL=in-process` the server needs no NATS: every replica's work
+runner claims the work committed in the shared database under leases, so
+several replicas over one PostgreSQL database each take part and every piece of
+work is done once. The bus then only wakes this process's workers and feeds its
+live event streams, which see only the facts this replica handled; there are no
+addressed receivers and no historical replay. A SQLite file serves one process
+in this mode. An installation that ever owed work to a receiver over a durable
+bus cannot switch to it: that work may still wait in the old bus.
+
+### Authentication mail
+
+Sign-in links and one-time codes are emailed through the email provider an
+administrator configures (`RealmService.UpdateEmailSettings`, tested with
+`TestEmailConnection`). Each request commits durable work naming only its
+link or code session; the token or code stays sealed in that session and is
+sent to the address bound at the request. Until a provider is configured the
+mail waits and is retried; it is never sent after the link or code was used,
+expired or replaced, and a resent code goes out in the same session.
 
 Malformed explicit ZKPP settings stop startup. Optional proof setup still verifies
 every submitted proof; it never accepts an invalid proof as policy-unverified.

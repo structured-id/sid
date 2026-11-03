@@ -13,6 +13,11 @@ use sid_core::models::{
     ClaimedWork, NewWork, WorkFailure, WorkId, WorkKind, WorkRecord, WorkSnapshot,
 };
 
+/// Open work per kind a mutation may still add in its own transaction, in
+/// every backend; beyond it the mutation is refused (`ResourceExhausted`)
+/// rather than accepted without its obligation.
+pub const OWED_WORK_CAPACITY: u64 = 100_000;
+
 #[async_trait]
 pub trait WorkStore: Send + Sync {
     /// Store `work`. Returns `false`, writing nothing, when work with its id

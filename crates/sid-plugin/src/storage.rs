@@ -32,8 +32,8 @@ use sid_core::models::{
 use uuid::Uuid;
 
 use crate::{
-    ClientResourceRegistry, CredentialStore, GrantStore, InstanceSecretStore, IssuerStore,
-    OperationResultStore, PrincipalStore, SignInHistoryStore, WorkStore,
+    CeremonyStateStore, ClientResourceRegistry, CredentialStore, GrantStore, InstanceSecretStore,
+    IssuerStore, OperationResultStore, PrincipalStore, SignInHistoryStore, WorkStore,
 };
 
 /// The right to run one background job, exclusive across every instance on
@@ -81,6 +81,7 @@ pub trait StorageBackend:
     + SignInHistoryStore<Owner = ProfileId>
     + InstanceSecretStore
     + OperationResultStore
+    + CeremonyStateStore
     + Send
     + Sync
     + 'static

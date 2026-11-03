@@ -95,12 +95,16 @@ async fn passkey_record(key: &mut SoftAuthenticator) -> Vec<u8> {
     let server = WebAuthnServer::new(
         "sid.example.com",
         &url::Url::parse("https://sid.example.com").unwrap(),
-        std::sync::Arc::new(sid_plugin::cache::InMemoryCacheBackend::new()),
+        std::sync::Arc::new(sid_plugin::InProcessCeremonyState::new()),
         keys,
     )
     .unwrap();
     let start = server
-        .registration_start(sid_core::models::WebAuthnUserHandle([1; 16]), "alice", &[])
+        .registration_start::<sid_core::models::ProfileId>(
+            sid_core::models::WebAuthnUserHandle([1; 16]),
+            "alice",
+            &[],
+        )
         .await
         .unwrap();
     let response = RegistrationResponse::parse(&key.register(&start.options)).unwrap();

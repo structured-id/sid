@@ -1,46 +1,63 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::*;
-use sid_plugin::cache::{CacheError, CacheResult, InMemoryCacheBackend};
-use tokio::sync::mpsc;
+use sid_storage::sqlite::SqliteBackend;
 
-fn shared() -> Arc<dyn CacheBackend> {
-    Arc::new(InMemoryCacheBackend::new())
+/// One installation's shared store: its ceremony state and its durable
+/// work, as every replica sees them.
+async fn store() -> Arc<SqliteBackend> {
+    Arc::new(
+        SqliteBackend::new_in_memory()
+            .await
+            .expect("in-memory SQLite"),
+    )
 }
 
-fn service() -> OtpService {
-    OtpService::new(shared())
+/// A replica's OTP service over `store`, owing at most `capacity` mails.
+fn replica_with(store: &Arc<SqliteBackend>, capacity: u64) -> OtpService {
+    OtpService::new(
+        store.clone(),
+        CodeDelivery {
+            keys: crate::test_support::key_manager(),
+            work: store.clone(),
+            capacity,
+        },
+    )
 }
 
-/// A cache that cannot answer anything.
-struct DownCache;
+fn replica(store: &Arc<SqliteBackend>) -> OtpService {
+    replica_with(store, 1000)
+}
 
-#[async_trait::async_trait]
-impl CacheBackend for DownCache {
-    async fn get(&self, _: &str) -> CacheResult<Option<Vec<u8>>> {
-        Err(CacheError::Connection("down".into()))
-    }
-    async fn set(&self, _: &str, _: &[u8], _: Duration) -> CacheResult<()> {
-        Err(CacheError::Connection("down".into()))
-    }
-    async fn delete(&self, _: &str) -> CacheResult<()> {
-        Err(CacheError::Connection("down".into()))
-    }
-    async fn take(&self, _: &str) -> CacheResult<Option<Vec<u8>>> {
-        Err(CacheError::Connection("down".into()))
-    }
-    async fn incr(&self, _: &str, _: Duration) -> CacheResult<u64> {
-        Err(CacheError::Connection("down".into()))
-    }
-    async fn publish(&self, _: &str, _: &[u8]) -> CacheResult<()> {
-        Err(CacheError::Connection("down".into()))
-    }
-    async fn subscribe(&self, _: &str) -> CacheResult<mpsc::UnboundedReceiver<Vec<u8>>> {
-        Err(CacheError::Connection("down".into()))
-    }
-    async fn health_check(&self) -> CacheResult<()> {
-        Err(CacheError::Connection("down".into()))
-    }
+async fn service() -> OtpService {
+    replica(&store().await)
+}
+
+/// A code for an account at `target`, emailed there.
+async fn request(
+    service: &OtpService,
+    target: &str,
+) -> Result<(OtpRequestResult, String), OtpError> {
+    service
+        .request_otp(target, CodeDestination::Email(target))
+        .await
+}
+
+fn email_kind() -> WorkKind {
+    WorkKind::new(OTP_EMAIL_KIND).unwrap()
+}
+
+/// The code mails `store` owes now, claimed.
+async fn owed_mails(store: &Arc<SqliteBackend>) -> Vec<sid_core::models::ClaimedWork> {
+    store
+        .claim_work(&[email_kind()], "test", 100, Duration::from_secs(60))
+        .await
+        .unwrap()
+}
+
+/// The issue a mail's payload names.
+fn issue_of(work: &sid_core::models::ClaimedWork) -> Uuid {
+    Uuid::from_slice(&work.payload[16..]).unwrap()
 }
 
 #[test]
@@ -77,8 +94,8 @@ fn test_otp_code_zero_padded() {
 
 #[tokio::test]
 async fn test_request_otp_returns_code_and_session() {
-    let service = service();
-    let (result, code) = service.request_otp("alice@example.com").await.unwrap();
+    let service = service().await;
+    let (result, code) = request(&service, "alice@example.com").await.unwrap();
 
     assert_eq!(code.len(), 8);
     assert_eq!(result.code_length, 8);
@@ -88,8 +105,8 @@ async fn test_request_otp_returns_code_and_session() {
 
 #[tokio::test]
 async fn test_verify_otp_success_consumes_the_code() {
-    let service = service();
-    let (result, code) = service.request_otp("alice@example.com").await.unwrap();
+    let service = service().await;
+    let (result, code) = request(&service, "alice@example.com").await.unwrap();
 
     match service.verify_otp(&result.session_id, &code).await.unwrap() {
         OtpVerifyResult::Success { target } => assert_eq!(target, "alice@example.com"),
@@ -103,8 +120,8 @@ async fn test_verify_otp_success_consumes_the_code() {
 
 #[tokio::test]
 async fn test_verify_otp_wrong_code_then_limit() {
-    let service = service();
-    let (result, code) = service.request_otp("alice@example.com").await.unwrap();
+    let service = service().await;
+    let (result, code) = request(&service, "alice@example.com").await.unwrap();
 
     for expected in (1..=4).rev() {
         match service
@@ -136,6 +153,7 @@ async fn test_verify_otp_wrong_code_then_limit() {
 async fn test_verify_otp_session_not_found() {
     assert!(matches!(
         service()
+            .await
             .verify_otp(&Uuid::now_v7(), "12345678")
             .await
             .unwrap(),
@@ -148,10 +166,9 @@ async fn test_verify_otp_session_not_found() {
 /// replica once kept its own count, allowing five guesses per replica).
 #[tokio::test]
 async fn attempt_limit_holds_across_replicas() {
-    let cache = shared();
-    let a = OtpService::new(cache.clone());
-    let b = OtpService::new(cache);
-    let (result, code) = a.request_otp("x@example.com").await.unwrap();
+    let store = store().await;
+    let (a, b) = (replica(&store), replica(&store));
+    let (result, code) = request(&a, "x@example.com").await.unwrap();
     for _ in 0..4 {
         a.verify_otp(&result.session_id, "00000000").await.unwrap();
     }
@@ -171,14 +188,9 @@ async fn attempt_limit_holds_across_replicas() {
 /// A code requested on one replica is verified on another.
 #[tokio::test]
 async fn code_verifies_on_another_replica() {
-    let cache = shared();
-    let a = OtpService::new(cache.clone());
-    let b = OtpService::new(cache);
-    let (result, code) = a.request_otp("y@example.com").await.unwrap();
-    assert_eq!(
-        b.get_session_target(&result.session_id).await.unwrap(),
-        Some("y@example.com".to_string())
-    );
+    let store = store().await;
+    let (a, b) = (replica(&store), replica(&store));
+    let (result, code) = request(&a, "y@example.com").await.unwrap();
     assert!(matches!(
         b.verify_otp(&result.session_id, &code).await.unwrap(),
         OtpVerifyResult::Success { .. }
@@ -188,10 +200,9 @@ async fn code_verifies_on_another_replica() {
 /// Of concurrent verifications of the right code, exactly one signs in.
 #[tokio::test]
 async fn right_code_signs_in_once_under_concurrency() {
-    let cache = shared();
-    let a = Arc::new(OtpService::new(cache.clone()));
-    let b = Arc::new(OtpService::new(cache));
-    let (result, code) = a.request_otp("z@example.com").await.unwrap();
+    let store = store().await;
+    let (a, b) = (Arc::new(replica(&store)), Arc::new(replica(&store)));
+    let (result, code) = request(&a, "z@example.com").await.unwrap();
     let (ra, rb) = tokio::join!(
         a.verify_otp(&result.session_id, &code),
         b.verify_otp(&result.session_id, &code)
@@ -203,21 +214,36 @@ async fn right_code_signs_in_once_under_concurrency() {
     assert_eq!(successes, 1);
 }
 
+/// Age `session_id`'s stored session past its expiry.
+async fn expire(store: &Arc<SqliteBackend>, session_id: Uuid) {
+    let key = session_id.to_string();
+    let mut session: StoredOtpSession = serde_json::from_slice(
+        &store
+            .read_ceremony_state(SESSIONS, &key)
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    session.expires_at = Utc::now() - chrono::Duration::seconds(1);
+    store
+        .put_ceremony_state(
+            SESSIONS,
+            &key,
+            &serde_json::to_vec(&session).unwrap(),
+            OTP_RETENTION,
+        )
+        .await
+        .unwrap();
+}
+
 /// An expired code is reported as expired and ends its session.
 #[tokio::test]
 async fn expired_code_is_refused() {
-    let cache = shared();
-    let service = OtpService::new(cache.clone());
-    let (result, code) = service.request_otp("old@example.com").await.unwrap();
-    // Age the stored session past its expiry.
-    let key = session_key(&result.session_id);
-    let mut session: CachedOtpSession =
-        serde_json::from_slice(&cache.get(&key).await.unwrap().unwrap()).unwrap();
-    session.expires_at = Utc::now() - chrono::Duration::seconds(1);
-    cache
-        .set(&key, &serde_json::to_vec(&session).unwrap(), OTP_RETENTION)
-        .await
-        .unwrap();
+    let store = store().await;
+    let service = replica(&store);
+    let (result, code) = request(&service, "old@example.com").await.unwrap();
+    expire(&store, result.session_id).await;
 
     assert!(matches!(
         service.verify_otp(&result.session_id, &code).await.unwrap(),
@@ -229,13 +255,21 @@ async fn expired_code_is_refused() {
     ));
 }
 
-/// Without a cache nothing passes: requests and verifications are errors, so
-/// neither the request limit nor the attempt limit can fail open.
+/// Without the store nothing passes: requests and verifications are errors,
+/// so neither the request limit nor the attempt limit can fail open.
 #[tokio::test]
-async fn unreachable_cache_fails_closed() {
-    let service = OtpService::new(Arc::new(DownCache));
+async fn unreachable_store_fails_closed() {
+    let store = store().await;
+    let service = OtpService::new(
+        Arc::new(crate::test_support::DownCeremonies),
+        CodeDelivery {
+            keys: crate::test_support::key_manager(),
+            work: store,
+            capacity: 10,
+        },
+    );
     assert!(matches!(
-        service.request_otp("down@example.com").await,
+        request(&service, "down@example.com").await,
         Err(OtpError::Internal(_))
     ));
     assert!(matches!(
@@ -246,12 +280,12 @@ async fn unreachable_cache_fails_closed() {
 
 #[tokio::test]
 async fn test_rate_limiting() {
-    let service = service();
+    let service = service().await;
     let target = "ratelimit@example.com";
     for _ in 0..3 {
-        assert!(service.request_otp(target).await.is_ok());
+        assert!(request(&service, target).await.is_ok());
     }
-    match service.request_otp(target).await {
+    match request(&service, target).await {
         Err(OtpError::RateLimited { wait_seconds }) => {
             assert!(wait_seconds > 0);
             assert!(wait_seconds <= 900);
@@ -264,32 +298,378 @@ async fn test_rate_limiting() {
 /// together.
 #[tokio::test]
 async fn rate_limit_holds_across_replicas() {
-    let cache = shared();
-    let a = OtpService::new(cache.clone());
-    let b = OtpService::new(cache);
+    let store = store().await;
+    let (a, b) = (replica(&store), replica(&store));
     let target = "spread@example.com";
-    a.request_otp(target).await.unwrap();
-    b.request_otp(target).await.unwrap();
-    a.request_otp(target).await.unwrap();
+    request(&a, target).await.unwrap();
+    request(&b, target).await.unwrap();
+    request(&a, target).await.unwrap();
     assert!(matches!(
-        b.request_otp(target).await,
+        request(&b, target).await,
         Err(OtpError::RateLimited { .. })
     ));
 }
 
 #[tokio::test]
 async fn test_different_targets_independent_rate_limits() {
-    let service = service();
+    let service = service().await;
     for _ in 0..3 {
-        assert!(service.request_otp("a@example.com").await.is_ok());
+        assert!(request(&service, "a@example.com").await.is_ok());
     }
-    assert!(service.request_otp("b@example.com").await.is_ok());
+    assert!(request(&service, "b@example.com").await.is_ok());
 }
 
+/// A store that, while a verification counts its attempt (after it read the
+/// session, before it ends it), resends the session's code through another
+/// replica: the interleaving of a concurrent resend.
+struct ResendDuringVerify {
+    inner: Arc<SqliteBackend>,
+    resend: tokio::sync::Mutex<Option<(OtpService, Uuid)>>,
+    resent: tokio::sync::Mutex<Option<String>>,
+}
+
+#[async_trait::async_trait]
+impl sid_plugin::SingleUseAdmissions for ResendDuringVerify {
+    async fn admit_once(&self, n: &str, k: &str, ttl: Duration) -> sid_core::Result<bool> {
+        self.inner.admit_once(n, k, ttl).await
+    }
+    async fn admit_for(&self, n: &str, k: &str, v: &[u8], ttl: Duration) -> sid_core::Result<bool> {
+        self.inner.admit_for(n, k, v, ttl).await
+    }
+}
+
+#[async_trait::async_trait]
+impl CeremonyStateStore for ResendDuringVerify {
+    async fn put_ceremony_state(
+        &self,
+        n: &str,
+        k: &str,
+        v: &[u8],
+        ttl: Duration,
+    ) -> sid_core::Result<()> {
+        self.inner.put_ceremony_state(n, k, v, ttl).await
+    }
+    async fn take_ceremony_state(&self, n: &str, k: &str) -> sid_core::Result<Option<Vec<u8>>> {
+        self.inner.take_ceremony_state(n, k).await
+    }
+    async fn read_ceremony_state(&self, n: &str, k: &str) -> sid_core::Result<Option<Vec<u8>>> {
+        self.inner.read_ceremony_state(n, k).await
+    }
+    async fn replace_ceremony_state(
+        &self,
+        n: &str,
+        k: &str,
+        expected: &[u8],
+        v: &[u8],
+        ttl: Duration,
+    ) -> sid_core::Result<bool> {
+        self.inner
+            .replace_ceremony_state(n, k, expected, v, ttl)
+            .await
+    }
+    async fn count_in_window(&self, n: &str, k: &str, window: Duration) -> sid_core::Result<u64> {
+        if n == ATTEMPTS
+            && let Some((other, session)) = self.resend.lock().await.take()
+        {
+            let (_, code) = other.resend_otp(&session).await.unwrap().unwrap();
+            *self.resent.lock().await = Some(code);
+        }
+        self.inner.count_in_window(n, k, window).await
+    }
+    async fn read_count(&self, n: &str, k: &str) -> sid_core::Result<u64> {
+        self.inner.read_count(n, k).await
+    }
+    async fn clear_count(&self, n: &str, k: &str) -> sid_core::Result<()> {
+        self.inner.clear_count(n, k).await
+    }
+    async fn purge_expired_ceremony_state(&self) -> sid_core::Result<u64> {
+        self.inner.purge_expired_ceremony_state().await
+    }
+}
+
+/// A code replaced by a resend while it was being verified does not sign
+/// in, and the resent code still does. Verification once took whatever the
+/// session held after checking the code it had read, so the replaced code
+/// signed in and spent the new one.
 #[tokio::test]
-async fn test_get_session_target_not_found() {
-    assert_eq!(
-        service().get_session_target(&Uuid::now_v7()).await.unwrap(),
-        None
+async fn code_replaced_during_its_verification_does_not_sign_in() {
+    let inner = store().await;
+    let racing = Arc::new(ResendDuringVerify {
+        inner: inner.clone(),
+        resend: tokio::sync::Mutex::new(None),
+        resent: tokio::sync::Mutex::new(None),
+    });
+    let verifier = OtpService::new(
+        racing.clone(),
+        CodeDelivery {
+            keys: crate::test_support::key_manager(),
+            work: inner.clone(),
+            capacity: 100,
+        },
     );
+    let (result, old) = request(&verifier, "race@example.com").await.unwrap();
+    *racing.resend.lock().await = Some((replica(&inner), result.session_id));
+
+    let outcome = verifier.verify_otp(&result.session_id, &old).await.unwrap();
+
+    assert!(
+        !matches!(outcome, OtpVerifyResult::Success { .. }),
+        "the replaced code signed in: {outcome:?}"
+    );
+    let resent = racing.resent.lock().await.clone().expect("the resend ran");
+    assert!(matches!(
+        verifier
+            .verify_otp(&result.session_id, &resent)
+            .await
+            .unwrap(),
+        OtpVerifyResult::Success { .. }
+    ));
+}
+
+// ── Delivery of the code ────────────────────────────────────────────────────
+
+/// A requested code is owed one email naming its session and issue, which
+/// expires with the code: neither the work nor the stored session holds the
+/// code in the clear, and the mail's read gives the code and the mailbox
+/// bound at the request.
+#[tokio::test]
+async fn requested_code_owes_its_email() {
+    let store = store().await;
+    let service = replica(&store);
+    let (result, code) = request(&service, "mail@example.com").await.unwrap();
+
+    let owed = owed_mails(&store).await;
+    assert_eq!(owed.len(), 1, "one email is owed per requested code");
+    assert_eq!(&owed[0].payload[..16], result.session_id.as_bytes());
+    let stored = store
+        .read_ceremony_state(SESSIONS, &result.session_id.to_string())
+        .await
+        .unwrap()
+        .unwrap();
+    for bytes in [&owed[0].payload, &stored] {
+        assert!(
+            !bytes.windows(code.len()).any(|w| w == code.as_bytes()),
+            "the code is stored in the clear"
+        );
+    }
+    let session: StoredOtpSession = serde_json::from_slice(&stored).unwrap();
+    assert_eq!(owed[0].expires_at, Some(session.expires_at));
+
+    let pending = service
+        .pending_delivery(result.session_id, issue_of(&owed[0]), Utc::now())
+        .await
+        .unwrap()
+        .expect("the code is waiting for its email");
+    assert_eq!(pending.destination, "mail@example.com");
+    assert_eq!(secrecy::ExposeSecret::expose_secret(&pending.code), code);
+}
+
+/// An address that routes to no account gets a session and a mail work like
+/// any other, so neither tells the two apart, but the work sends nothing:
+/// there is no mailbox to send it to.
+#[tokio::test]
+async fn code_for_no_account_sends_nothing() {
+    let store = store().await;
+    let service = replica(&store);
+    let (result, _code) = service
+        .request_otp("nobody@example.com", CodeDestination::None)
+        .await
+        .unwrap();
+
+    let owed = owed_mails(&store).await;
+    assert_eq!(owed.len(), 1, "an unknown address owes the same work");
+    assert_eq!(owed[0].payload.len(), 32);
+    assert!(
+        service
+            .pending_delivery(result.session_id, issue_of(&owed[0]), Utc::now())
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// A full delivery queue refuses an address with no account exactly as one
+/// with an account, so the refusal tells nothing about either (it once let
+/// the unknown address through while refusing the known one).
+#[tokio::test]
+async fn full_queue_refuses_every_address_alike() {
+    let store = store().await;
+    let service = replica_with(&store, 1);
+    request(&service, "first@example.com").await.unwrap();
+
+    let unknown = service
+        .request_otp("nobody@example.com", CodeDestination::None)
+        .await;
+    let known = request(&service, "known@example.com").await;
+
+    assert!(matches!(unknown, Err(OtpError::Busy(_))), "{unknown:?}");
+    assert!(matches!(known, Err(OtpError::Busy(_))), "{known:?}");
+}
+
+/// A used or expired code has nothing left to send.
+#[tokio::test]
+async fn used_or_expired_code_sends_nothing() {
+    let store = store().await;
+    let service = replica(&store);
+    let (used, code) = request(&service, "used@example.com").await.unwrap();
+    let (old, _) = request(&service, "expired@example.com").await.unwrap();
+    let owed = owed_mails(&store).await;
+    let issue = |session: Uuid| {
+        issue_of(
+            owed.iter()
+                .find(|w| w.payload[..16] == *session.as_bytes())
+                .unwrap(),
+        )
+    };
+    service.verify_otp(&used.session_id, &code).await.unwrap();
+    expire(&store, old.session_id).await;
+
+    for session in [used.session_id, old.session_id] {
+        assert!(
+            service
+                .pending_delivery(session, issue(session), Utc::now())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+/// A resent code replaces the current one in the same session (the one the
+/// client verifies against), to the same mailbox: the replaced code no
+/// longer signs in and its email is superseded, the new one is owed its own
+/// email, and the session keeps its attempt count. A resend once started a
+/// new session the client never learned, so the resent code could not be
+/// used.
+#[tokio::test]
+async fn resent_code_replaces_the_current_one() {
+    let store = store().await;
+    let service = replica(&store);
+    let (result, first) = request(&service, "again@example.com").await.unwrap();
+    let first_issue = issue_of(&owed_mails(&store).await[0]);
+    service
+        .verify_otp(&result.session_id, "00000000")
+        .await
+        .unwrap();
+
+    let (resent, second) = service
+        .resend_otp(&result.session_id)
+        .await
+        .unwrap()
+        .expect("the session is live");
+
+    assert_eq!(resent.session_id, result.session_id);
+    let owed = owed_mails(&store).await;
+    assert_eq!(owed.len(), 1, "the resent code is owed its email");
+    let second_issue = issue_of(&owed[0]);
+    assert_ne!(second_issue, first_issue);
+    assert!(
+        service
+            .pending_delivery(result.session_id, first_issue, Utc::now())
+            .await
+            .unwrap()
+            .is_none(),
+        "the replaced code's email is superseded"
+    );
+    let pending = service
+        .pending_delivery(result.session_id, second_issue, Utc::now())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending.destination, "again@example.com");
+    if first != second {
+        assert!(matches!(
+            service
+                .verify_otp(&result.session_id, &first)
+                .await
+                .unwrap(),
+            OtpVerifyResult::InvalidCode {
+                remaining_attempts: 3
+            }
+        ));
+    }
+    assert!(matches!(
+        service
+            .verify_otp(&result.session_id, &second)
+            .await
+            .unwrap(),
+        OtpVerifyResult::Success { .. }
+    ));
+}
+
+/// A resend counts as a request against its address's limit.
+#[tokio::test]
+async fn resend_counts_against_the_request_limit() {
+    let service = service().await;
+    let (result, _) = request(&service, "resend@example.com").await.unwrap();
+    service.resend_otp(&result.session_id).await.unwrap();
+    service.resend_otp(&result.session_id).await.unwrap();
+
+    assert!(matches!(
+        service.resend_otp(&result.session_id).await,
+        Err(OtpError::RateLimited { .. })
+    ));
+}
+
+/// A resend for a session that ended has nothing to replace.
+#[tokio::test]
+async fn resend_of_an_ended_session_is_none() {
+    let service = service().await;
+    assert!(service.resend_otp(&Uuid::now_v7()).await.unwrap().is_none());
+}
+
+/// When the bound of owed mails is reached the request is refused rather
+/// than answered with a code nobody will send, and its session is gone.
+#[tokio::test]
+async fn full_delivery_queue_refuses_the_request() {
+    let store = store().await;
+    let service = replica_with(&store, 1);
+    request(&service, "first@example.com").await.unwrap();
+
+    let refused = request(&service, "second@example.com").await;
+
+    assert!(matches!(refused, Err(OtpError::Busy(_))), "{refused:?}");
+    assert_eq!(owed_mails(&store).await.len(), 1);
+}
+
+/// A code sealed to another issue is never sent as this one: reading it
+/// fails for good instead of yielding a code that is not its own.
+#[tokio::test]
+async fn code_sealed_to_another_issue_is_refused() {
+    let store = store().await;
+    let service = replica(&store);
+    let (result, _) = request(&service, "foreign@example.com").await.unwrap();
+    let issue = issue_of(&owed_mails(&store).await[0]);
+    let key = result.session_id.to_string();
+    let mut session: StoredOtpSession = serde_json::from_slice(
+        &store
+            .read_ceremony_state(SESSIONS, &key)
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    session.sealed_code = crate::sealed_secret::seal(
+        crate::test_support::key_manager().as_ref(),
+        &sealing_context(result.session_id, Uuid::now_v7()),
+        b"12345678",
+    )
+    .await
+    .unwrap();
+    store
+        .put_ceremony_state(
+            SESSIONS,
+            &key,
+            &serde_json::to_vec(&session).unwrap(),
+            OTP_RETENTION,
+        )
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        service
+            .pending_delivery(result.session_id, issue, Utc::now())
+            .await,
+        Err(OtpError::Sealed(_))
+    ));
 }

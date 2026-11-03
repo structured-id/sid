@@ -227,11 +227,22 @@ impl IdentityService for MockIdentityService {
     ) -> Result<tonic::Response<GetExportStatusResponse>, tonic::Status> {
         Err(tonic::Status::unimplemented("stub"))
     }
+    /// The caller of `CALLER_TOKEN` only, as the identity service resolves
+    /// the Profile a token stands for.
     async fn get_current_profile(
         &self,
-        _r: tonic::Request<GetCurrentProfileRequest>,
+        r: tonic::Request<GetCurrentProfileRequest>,
     ) -> Result<tonic::Response<GetProfileResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("stub"))
+        let presented = r
+            .metadata()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok());
+        if presented != Some(&format!("Bearer {CALLER_TOKEN}")) {
+            return Err(tonic::Status::unauthenticated("authentication required"));
+        }
+        Ok(tonic::Response::new(GetProfileResponse {
+            profile: Some(mock_profile("caller-profile", "caller@sid.example.com")),
+        }))
     }
     async fn list_devices(
         &self,
@@ -323,25 +334,35 @@ async fn test_grpc_resolve_profile_with_email_and_phone() {
     assert_eq!(r.phone.as_deref(), Some("+380501234567"));
 }
 
-/// A profile's addresses come from the identity service: the email of the
-/// profile and its verified phone. This is what a test send defaults to.
+/// The access token the mock identity service resolves to its caller.
+const CALLER_TOKEN: &str = "caller-token";
+
+/// The caller's own Profile and addresses come from the identity service,
+/// asked with the caller's own token: the Profile's email and its verified
+/// phone. This is what a test send defaults to; another token learns
+/// nothing.
 #[tokio::test]
-async fn test_grpc_contact_returns_email_and_verified_phone() {
+async fn test_grpc_current_contact_is_the_callers_own() {
     let url = start_mock_server().await;
     let resolver = RecipientResolver::with_identity(&url).await.unwrap();
 
-    let contact = resolver.contact("admin-profile").await.unwrap();
+    let bearer = format!("Bearer {CALLER_TOKEN}").parse().unwrap();
+    let contact = resolver.current_contact(&bearer).await.unwrap();
     assert_eq!(
         contact,
-        Some(Contact {
-            email: Some("alice@sid.example.com".into()),
-            phone: Some("+380501234567".into()),
-        })
+        Some((
+            "caller-profile".to_string(),
+            Contact {
+                email: Some("caller@sid.example.com".into()),
+                phone: Some("+380501234567".into()),
+            }
+        ))
     );
-    assert_eq!(
-        resolver.contact("not-found").await,
-        Err(ResolveError::ProfileGone("not-found".into()))
-    );
+    let other = "Bearer someone-else".parse().unwrap();
+    assert!(matches!(
+        resolver.current_contact(&other).await,
+        Err(ResolveError::Unavailable(_))
+    ));
 }
 
 #[tokio::test]

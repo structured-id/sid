@@ -8,7 +8,7 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::Deserialize;
 use sid_core::models::ClientKeySet;
 use sid_core::{Error as SidError, Result as SidResult};
-use sid_plugin::cache::{CacheBackend, CacheError};
+use sid_plugin::SingleUseAdmissions;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -56,25 +56,26 @@ impl AssertionAud {
     }
 }
 
-/// Seen assertion JTIs (RFC 7523 §3 item 7), in the cache every replica shares.
-pub struct AssertionJtiCache {
+/// Seen assertion JTIs (RFC 7523 §3 item 7), in the single-use admissions
+/// every replica shares.
+pub struct AssertionJtiLog {
     ttl: Duration,
-    cache: Arc<dyn CacheBackend>,
+    admissions: Arc<dyn SingleUseAdmissions>,
 }
 
-impl AssertionJtiCache {
-    pub fn new(cache: Arc<dyn CacheBackend>) -> Self {
+impl AssertionJtiLog {
+    pub fn new(admissions: Arc<dyn SingleUseAdmissions>) -> Self {
         Self {
             ttl: Duration::from_secs(MAX_ASSERTION_LIFETIME_SECS * 2),
-            cache,
+            admissions,
         }
     }
 
     /// Record a JTI: `Ok(false)` if it was already used (replay). An
-    /// unreachable cache is an error, so a replay is never let through.
-    pub async fn check_and_record(&self, jti: &str) -> Result<bool, CacheError> {
-        self.cache
-            .set_nx(&format!("jti:assertion:{jti}"), b"1", self.ttl)
+    /// unreachable store is an error, so a replay is never let through.
+    pub async fn check_and_record(&self, jti: &str) -> SidResult<bool> {
+        self.admissions
+            .admit_once("client-assertion-jti", jti, self.ttl)
             .await
     }
 }
@@ -102,14 +103,14 @@ fn parse_algorithm(alg: &str) -> SidResult<Algorithm> {
 /// - `token_endpoint_url`: expected audience
 /// - `public_key_pem`: PEM-encoded public key from credential
 /// - `algorithm`: signing algorithm (RS256, ES256, EdDSA)
-/// - `jti_cache`: replay prevention cache
+/// - `jti_log`: the seen JTIs, for replay prevention
 pub async fn validate_client_assertion(
     assertion: &str,
     client_id: &str,
     token_endpoint_url: &str,
     public_key_pem: &str,
     algorithm: &str,
-    jti_cache: &AssertionJtiCache,
+    jti_log: &AssertionJtiLog,
 ) -> SidResult<AssertionClaims> {
     // Parse header to verify algorithm matches.
     let header = decode_header(assertion)
@@ -131,7 +132,7 @@ pub async fn validate_client_assertion(
         token_endpoint_url,
         &decoding_key,
         expected_alg,
-        jti_cache,
+        jti_log,
     )
     .await
 }
@@ -144,7 +145,7 @@ pub async fn validate_client_assertion_with_keys(
     client_id: &str,
     token_endpoint_url: &str,
     keys: &ClientKeySet,
-    jti_cache: &AssertionJtiCache,
+    jti_log: &AssertionJtiLog,
 ) -> SidResult<AssertionClaims> {
     let refused = |why: &str| SidError::AuthenticationFailed(why.to_owned());
     let header = decode_header(assertion)
@@ -175,7 +176,7 @@ pub async fn validate_client_assertion_with_keys(
         token_endpoint_url,
         &decoding_key,
         header.alg,
-        jti_cache,
+        jti_log,
     )
     .await
 }
@@ -189,13 +190,13 @@ pub async fn validate_key_proof(
     proof: &str,
     audience: &str,
     keys: &ClientKeySet,
-    jti_cache: &AssertionJtiCache,
+    jti_log: &AssertionJtiLog,
 ) -> SidResult<()> {
     let kid = decode_header(proof)
         .map_err(|e| SidError::AuthenticationFailed(format!("invalid key proof: {e}")))?
         .kid
         .ok_or_else(|| SidError::AuthenticationFailed("key proof names no key".into()))?;
-    validate_client_assertion_with_keys(proof, &kid, audience, keys, jti_cache)
+    validate_client_assertion_with_keys(proof, &kid, audience, keys, jti_log)
         .await
         .map(|_| ())
 }
@@ -251,7 +252,7 @@ async fn verify(
     token_endpoint_url: &str,
     decoding_key: &DecodingKey,
     expected_alg: Algorithm,
-    jti_cache: &AssertionJtiCache,
+    jti_log: &AssertionJtiLog,
 ) -> SidResult<AssertionClaims> {
     // Validate signature and claims.
     let mut validation = Validation::new(expected_alg);
@@ -310,9 +311,9 @@ async fn verify(
             "assertion jti is empty".into(),
         ));
     }
-    let first_use = jti_cache.check_and_record(&claims.jti).await.map_err(|e| {
-        tracing::error!(error = %e, "assertion replay cache unavailable");
-        SidError::Internal("assertion replay cache unavailable".into())
+    let first_use = jti_log.check_and_record(&claims.jti).await.map_err(|e| {
+        tracing::error!(error = %e, "assertion replay store unavailable");
+        SidError::Internal("assertion replay store unavailable".into())
     })?;
     if !first_use {
         return Err(SidError::AuthenticationFailed(

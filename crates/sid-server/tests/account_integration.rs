@@ -62,7 +62,7 @@ fn audience() -> String {
 }
 
 fn service(svc: &TestServices) -> SystemIntegrationServiceImpl {
-    SystemIntegrationServiceImpl::new(svc.storage.clone(), INSTALLATION.into(), svc.cache.clone())
+    SystemIntegrationServiceImpl::new(svc.storage.clone(), INSTALLATION.into())
 }
 
 async fn provisioned() -> TestServices {

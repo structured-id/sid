@@ -118,6 +118,9 @@ fn test_create_user_email_keeps_its_spelling() {
         .unwrap();
     assert_eq!(email.value, "alicesmith@acme.com");
     assert_eq!(mapping.emails[0].email, "Alice.Smith+HR@acme.com");
+    // The login handle names that contact as its mailbox: sign-in mail goes
+    // to the directory's spelling (it once named none, so no mail went).
+    assert_eq!(email.source_email_id, Some(mapping.emails[0].id));
 }
 
 /// A malformed SCIM email is refused, not stored as a login handle.

@@ -7,7 +7,7 @@ use secrecy::SecretBox;
 use sid_core::models::{OAuth2Client, TokenEndpointAuthMethod};
 
 use crate::client_assertion::{
-    AssertionJtiCache, JWT_BEARER_ASSERTION_TYPE, validate_client_assertion_with_keys,
+    AssertionJtiLog, JWT_BEARER_ASSERTION_TYPE, validate_client_assertion_with_keys,
 };
 use crate::oauth2::{OAuth2Server, TokenError};
 
@@ -143,7 +143,7 @@ impl ClientAuthentication {
         client: &OAuth2Client,
         issuer_url: &str,
         oauth2: &OAuth2Server,
-        jti_cache: &AssertionJtiCache,
+        jti_log: &AssertionJtiLog,
     ) -> Result<(), ClientRefusal> {
         if !client.active || client.client_id != self.client_id() {
             return Err(ClientRefusal::Refused);
@@ -164,7 +164,7 @@ impl ClientAuthentication {
                 &client.client_id,
                 &crate::issuer::token_endpoint(issuer_url),
                 keys,
-                jti_cache,
+                jti_log,
             )
             .await
             {

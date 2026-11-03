@@ -15,10 +15,13 @@ use crate::challenge_store::ChallengeStore;
 use base64::Engine;
 use core::borrow::Borrow;
 use serde::{Deserialize, Serialize};
-use sid_core::models::{Credential, CredentialId as SidCredentialId, WebAuthnUserHandle};
+use sid_core::models::{
+    AuditEntry, Credential, CredentialData, CredentialFence, CredentialId as SidCredentialId,
+    MutationContext, WebAuthnUserHandle,
+};
 use sid_core::{Error as SidError, Result as SidResult};
 use sid_keys::KeyManager;
-use sid_plugin::cache::CacheBackend;
+use sid_plugin::{CeremonyStateStore, CredentialStore};
 use std::sync::Arc;
 use std::time::Duration;
 use structured_webauthn::bin::{Decode, Encode};
@@ -206,12 +209,12 @@ pub struct WebAuthnServer {
 
 impl WebAuthnServer {
     /// A relying party `rp_id` serving `rp_origin`, whose host must be the RP
-    /// ID or a subdomain of it (WebAuthn Level 3 §5.1.4.1). `cache` and `keys`
-    /// hold ceremony state shared between replicas and seal it there.
+    /// ID or a subdomain of it (WebAuthn Level 3 §5.1.4.1). `ceremonies` and
+    /// `keys` hold ceremony state shared between replicas and seal it there.
     pub fn new(
         rp_id: &str,
         rp_origin: &Url,
-        cache: Arc<dyn CacheBackend>,
+        ceremonies: Arc<dyn CeremonyStateStore>,
         keys: Arc<dyn KeyManager>,
     ) -> SidResult<Self> {
         let host = rp_origin
@@ -227,7 +230,7 @@ impl WebAuthnServer {
         Ok(Self {
             rp_id: RpId::Domain(domain),
             origin: rp_origin.origin().ascii_serialization(),
-            ceremonies: ChallengeStore::new(cache, keys, "webauthn", CEREMONY_TTL),
+            ceremonies: ChallengeStore::new(ceremonies, keys, "webauthn", CEREMONY_TTL),
         })
     }
 
@@ -257,11 +260,11 @@ impl WebAuthnServer {
     /// Start registering a passkey for the account whose handle at this RP is
     /// `user_handle`. `existing` are its passkeys, excluded so an
     /// authenticator does not register twice.
-    pub async fn registration_start(
+    pub async fn registration_start<O>(
         &self,
         user_handle: WebAuthnUserHandle,
         username: &str,
-        existing: &[Credential],
+        existing: &[Credential<O>],
     ) -> SidResult<CeremonyStart> {
         let handle = UserHandle16::decode(user_handle.0).unwrap_or_else(|never| match never {});
         let exclude = existing
@@ -321,10 +324,10 @@ impl WebAuthnServer {
     }
 
     /// Start an assertion ceremony for an account whose `passkeys` are known.
-    pub async fn authentication_start<'p>(
+    pub async fn authentication_start<'p, O: 'p>(
         &self,
         purpose: AssertionPurpose,
-        passkeys: impl IntoIterator<Item = &'p Credential>,
+        passkeys: impl IntoIterator<Item = &'p Credential<O>>,
     ) -> SidResult<CeremonyStart> {
         let allowed: AllowedCredentials = passkeys
             .into_iter()
@@ -372,11 +375,11 @@ impl WebAuthnServer {
 
     /// Verify an assertion for a ceremony of `purpose` against the account's
     /// `passkeys` (WebAuthn Level 3 §7.2).
-    pub async fn authentication_finish(
+    pub async fn authentication_finish<O>(
         &self,
         purpose: AssertionPurpose,
         response: &AssertionResponse,
-        passkeys: &[Credential],
+        passkeys: &[Credential<O>],
     ) -> SidResult<VerifiedAssertion> {
         let state = self.take(&response.state_key()?, purpose.into()).await?;
         let server = NonDiscoverableAuthenticationServerState::decode(&state)
@@ -391,11 +394,11 @@ impl WebAuthnServer {
     /// Verify a discoverable assertion. `user_handle` is the stored handle of
     /// the account the response's handle resolved to: the asserting passkey
     /// must belong to that account and carry that handle.
-    pub async fn discoverable_authentication_finish(
+    pub async fn discoverable_authentication_finish<O>(
         &self,
         response: &DiscoverableAssertionResponse,
         user_handle: WebAuthnUserHandle,
-        passkeys: &[Credential],
+        passkeys: &[Credential<O>],
     ) -> SidResult<VerifiedAssertion> {
         let state = self
             .take(&response.state_key()?, Purpose::Discoverable)
@@ -442,8 +445,8 @@ fn owned_id(id: CredentialId<&[u8]>) -> SidResult<CredentialId<Box<[u8]>>> {
 
 /// Find the stored passkey `raw_id` names, check it carries `user_handle`
 /// when one is required, and run `verify` on it.
-fn verify_with(
-    passkeys: &[Credential],
+fn verify_with<O>(
+    passkeys: &[Credential<O>],
     raw_id: CredentialId<&[u8]>,
     user_handle: Option<WebAuthnUserHandle>,
     verify: impl FnOnce(
@@ -494,6 +497,62 @@ fn verify_with(
         user_verified: true,
         key_amr: method_of(transports, dynamic.backup),
     })
+}
+
+/// `amr` values of a passkey assertion: the key (`hwk`/`swk`, RFC 8176 §2),
+/// proof of possession (`pop`, OpenID EAP ACR Values 1.0), and `mfa` when the
+/// authenticator verified the user. WebAuthn reports only that the user was
+/// verified, not how, so no biometric or PIN value is claimed.
+pub fn passkey_amr(key_amr: &'static str, user_verified: bool) -> Vec<&'static str> {
+    if user_verified {
+        vec![key_amr, "pop", "mfa"]
+    } else {
+        vec![key_amr, "pop"]
+    }
+}
+
+/// Record `verified` on the passkey among `passkeys` that made it: its new
+/// signature counter and backup state, or only its use. Later assertions are
+/// checked against that counter, so a copy of the key is noticed. The write
+/// is a compare-and-swap on the credential: of two assertions racing on one
+/// key only one is recorded. Returns the fence of the passkey as stored, which
+/// the sign-in's session commits under, or `None`, writing nothing, when the
+/// passkey is not among `passkeys`, was revoked meanwhile or another
+/// assertion of it was recorded first.
+pub async fn record_passkey_use<O>(
+    store: &dyn CredentialStore<Owner = O>,
+    passkeys: &[Credential<O>],
+    verified: &VerifiedAssertion,
+) -> SidResult<Option<CredentialFence>>
+where
+    O: core::fmt::Display + Send + Sync,
+{
+    let Some(credential) = passkeys.iter().find(|c| c.id == verified.credential) else {
+        return Ok(None);
+    };
+    let audit = || {
+        MutationContext::from(AuditEntry::user(
+            credential.profile_id.to_string(),
+            "credential.passkey_used",
+            credential.id.0.to_string(),
+        ))
+    };
+    let (recorded, data) = match &verified.updated_data {
+        Some(updated) => (
+            store
+                .replace_credential_data(credential.id, credential.data.expose(), updated, audit())
+                .await?,
+            CredentialData::new(updated.clone()),
+        ),
+        None => (
+            store.mark_credential_used(credential.id, audit()).await?,
+            credential.data.clone(),
+        ),
+    };
+    Ok(recorded.then_some(CredentialFence {
+        id: credential.id,
+        data,
+    }))
 }
 
 /// The RFC 8176 §2 method a sign-in with a passkey records: `hwk` only with

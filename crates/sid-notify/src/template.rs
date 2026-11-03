@@ -254,6 +254,23 @@ impl TemplateEngine {
             default_priority: NotificationPriority::Transactional,
         });
 
+        // A sign-in link the producer builds when it delivers, like the
+        // reset link: no event carries it, the link's own delivery work
+        // renders it.
+        engine.register(NotificationTemplate {
+            name: "magic_link".into(),
+            subject: Some("Your sign-in link".into()),
+            body_html: "<h2>Sign in</h2>\
+                <p>A sign-in link was requested for your account.</p>\
+                <p><a href=\"{{data.link}}\">Sign in</a></p>\
+                <p>The link works once and expires in {{data.expires_minutes}} minutes. If you did not ask for it, ignore this message.</p>".into(),
+            body_text: "Sign in\n\n\
+                A sign-in link was requested for your account.\n\
+                Sign in: {{data.link}}\n\n\
+                The link works once and expires in {{data.expires_minutes}} minutes. If you did not ask for it, ignore this message.".into(),
+            default_priority: NotificationPriority::Transactional,
+        });
+
         // A one-time code the producer generated for the flow that asked for
         // it; `purpose` names that flow so the recipient knows what the code
         // does. Rendered by the flow's own delivery work, never by an event

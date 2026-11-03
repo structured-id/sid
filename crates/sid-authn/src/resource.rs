@@ -11,7 +11,7 @@
 #[cfg(feature = "grpc")]
 use tonic::Request;
 
-use crate::dpop::{DPopError, DPopValidator};
+use crate::dpop::{DPopError, DPopValidator, VerifiedProof};
 
 /// The authorization scheme a token was presented under.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +72,34 @@ pub async fn check_sender(
             dpop.validate_for_resource(proof, method, uri, token, jkt)
                 .await?;
             Ok(())
+        }
+        (Some(_), Scheme::Bearer) => Err(SenderError::ProofRequired),
+    }
+}
+
+/// The checks of [`check_sender`] for a verifier outside the token's issuer:
+/// the proof is checked, not admitted, and returned for the issuer to admit
+/// once (RFC 9449 §11.1). `None` for an unbound token presented as Bearer.
+pub fn verify_sender(
+    scheme: Scheme,
+    token: &str,
+    bound_jkt: Option<&str>,
+    proofs: &[&str],
+    method: &str,
+    uri: Option<&str>,
+) -> Result<Option<VerifiedProof>, SenderError> {
+    match (bound_jkt, scheme) {
+        (None, Scheme::DPoP) => Err(SenderError::NotBound),
+        (None, Scheme::Bearer) => Ok(None),
+        (Some(jkt), Scheme::DPoP) => {
+            // Exactly one proof (RFC 9449 §4.3 step 1).
+            let [proof] = proofs else {
+                return Err(SenderError::ProofRequired);
+            };
+            let uri = uri.ok_or(SenderError::UriUnknown)?;
+            Ok(Some(DPopValidator::verify_for_resource(
+                proof, method, uri, token, jkt,
+            )?))
         }
         (Some(_), Scheme::Bearer) => Err(SenderError::ProofRequired),
     }

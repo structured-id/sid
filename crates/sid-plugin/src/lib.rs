@@ -16,6 +16,7 @@ pub mod audit;
 pub mod auth;
 pub mod blob_store;
 pub mod cache;
+pub mod ceremony_state;
 pub mod client_registry;
 #[cfg(feature = "conformance")]
 pub mod conformance;
@@ -43,6 +44,7 @@ pub use audit::{AuditLog, VerifyResult};
 pub use auth::{AuthContext, AuthProvider, AuthResult};
 pub use blob_store::BlobStore;
 pub use cache::{CacheBackend, CacheError, CacheResult, NoCacheBackend};
+pub use ceremony_state::{CeremonyStateStore, InProcessCeremonyState, SingleUseAdmissions};
 pub use client_registry::ClientResourceRegistry;
 pub use credential_store::CredentialStore;
 pub use crypto::{
@@ -71,7 +73,7 @@ pub use sid_keys::KeyVersionParams;
 pub use sign_in_history::SignInHistoryStore;
 pub use storage::StorageBackend;
 pub use upstream::{UpstreamAuthState, UpstreamIdpProvider};
-pub use work_store::WorkStore;
+pub use work_store::{OWED_WORK_CAPACITY, WorkStore};
 
 /// Protocol supported by an authentication provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

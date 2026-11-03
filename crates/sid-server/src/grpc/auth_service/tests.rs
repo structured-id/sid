@@ -150,17 +150,6 @@ fn test_implied_auth_level_webauthn_basic_when_not_user_verified() {
     );
 }
 
-/// A passkey records its key and proof of possession; `mfa` only when the
-/// authenticator verified the user, and never a biometric/PIN method, which
-/// WebAuthn does not reveal (RFC 8176 §2 lists methods actually used).
-#[test]
-fn test_passkey_amr_adds_mfa_only_with_user_verification() {
-    assert_eq!(super::passkey_amr("swk", true), ["swk", "pop", "mfa"]);
-    assert_eq!(super::passkey_amr("hwk", true), ["hwk", "pop", "mfa"]);
-    assert_eq!(super::passkey_amr("swk", false), ["swk", "pop"]);
-    assert_eq!(super::passkey_amr("hwk", false), ["hwk", "pop"]);
-}
-
 #[test]
 fn test_implied_auth_level_webauthn_basic_when_passkey_not_satisfies_mfa() {
     // passkey_satisfies_mfa=false → Basic regardless of user_verified.
@@ -200,10 +189,14 @@ use sid_authn::anomaly::{AnomalyConfig, AnomalyDetector, LoginContext, RuleReact
 use sid_core::models::security_policy::SecurityPolicy;
 use sid_plugin::cache::NoCacheBackend;
 
+/// The store holding the detector's attempt counters and lockouts.
+fn anomaly_store() -> std::sync::Arc<dyn sid_plugin::CeremonyStateStore> {
+    std::sync::Arc::new(sid_plugin::InProcessCeremonyState::new())
+}
+
 #[test]
 fn test_anomaly_allow_reaction_for_clean_context() {
-    let cache = std::sync::Arc::new(NoCacheBackend);
-    let detector = AnomalyDetector::ce_default(cache);
+    let detector = AnomalyDetector::ce_default(anomaly_store());
 
     let ctx = LoginContext {
         identity: "test-user".to_string(),
@@ -231,8 +224,7 @@ fn test_anomaly_allow_reaction_for_clean_context() {
 
 #[test]
 fn test_anomaly_block_for_tor_exit() {
-    let cache = std::sync::Arc::new(NoCacheBackend);
-    let detector = AnomalyDetector::ce_default(cache);
+    let detector = AnomalyDetector::ce_default(anomaly_store());
 
     let ctx = LoginContext {
         identity: "test-user".to_string(),
@@ -265,8 +257,7 @@ fn test_anomaly_block_for_tor_exit() {
 
 #[test]
 fn test_anomaly_step_up_for_new_device_and_ip() {
-    let cache = std::sync::Arc::new(NoCacheBackend);
-    let detector = AnomalyDetector::ce_default(cache);
+    let detector = AnomalyDetector::ce_default(anomaly_store());
 
     // A profile that has signed in before, now from a new device and address.
     let ctx = LoginContext {
@@ -295,8 +286,6 @@ fn test_anomaly_step_up_for_new_device_and_ip() {
 
 #[tokio::test]
 async fn test_brute_force_detection_after_failures() {
-    // Attempts are counted in the shared cache only, so it must keep them.
-    let cache = std::sync::Arc::new(sid_plugin::cache::InMemoryCacheBackend::new());
     let config = AnomalyConfig {
         brute_force_max_attempts: 3,
         brute_force_window_secs: 300,
@@ -305,7 +294,7 @@ async fn test_brute_force_detection_after_failures() {
         ..Default::default()
     };
     let policy = sid_core::models::security_policy::NetworkPolicy::default();
-    let detector = AnomalyDetector::new(config, policy, cache);
+    let detector = AnomalyDetector::new(config, policy, anomaly_store());
 
     let identity = "brute-force-victim";
 
@@ -924,7 +913,7 @@ async fn test_geoip_country_feeds_country_restriction_block() {
         countries: vec!["CN".to_string(), "KP".to_string()],
         ..Default::default()
     };
-    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, cache.clone());
+    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, anomaly_store());
 
     // Build IP intelligence (empty — no Tor/blocklist providers).
     let ip_intel = IpIntelligenceAggregator::new(vec![], cache.clone(), Duration::from_secs(60));
@@ -985,7 +974,7 @@ async fn test_geoip_country_feeds_country_restriction_allow() {
         countries: vec!["US".to_string(), "DE".to_string()],
         ..Default::default()
     };
-    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, cache.clone());
+    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, anomaly_store());
 
     let client_ip: std::net::IpAddr = "8.8.8.8".parse().unwrap();
     let geo_location = geoip.resolve(client_ip).await;
@@ -1030,7 +1019,7 @@ async fn test_geoip_not_found_skips_country_rule() {
         countries: vec!["US".to_string()], // Only US allowed — but country=None → skip rule
         ..Default::default()
     };
-    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, cache.clone());
+    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, anomaly_store());
 
     let client_ip: std::net::IpAddr = "10.0.0.1".parse().unwrap();
     let geo_location = geoip.resolve(client_ip).await;
@@ -1080,7 +1069,7 @@ async fn test_geoip_chain_with_ip_intelligence_combined() {
         block_tor: true,
         ..Default::default()
     };
-    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, cache.clone());
+    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, anomaly_store());
 
     let client_ip: std::net::IpAddr = "1.2.3.4".parse().unwrap();
     let geo_location = geoip.resolve(client_ip).await;

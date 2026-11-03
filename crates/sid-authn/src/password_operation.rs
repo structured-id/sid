@@ -83,7 +83,7 @@ use sid_core::models::{
 use sid_ids::PasswordOperationId;
 use sid_pake_core::prover::BoundProof;
 use sid_pake_core::types::ZkppProof;
-use sid_plugin::cache::CacheBackend;
+use sid_plugin::CeremonyStateStore;
 use sid_plugin::crypto::{CurveId, LoginState};
 use sid_plugin::history_keys::HistoryKeyStore;
 use sid_plugin::{CredentialStore, OperationResultStore, WorkStore};
@@ -689,7 +689,7 @@ where
     /// operation records.
     pub fn with_authority(
         storage: Arc<S>,
-        cache: Arc<dyn CacheBackend>,
+        ceremonies: Arc<dyn CeremonyStateStore>,
         field_keys: Arc<dyn sid_keys::KeyManager>,
         installation: impl Into<HistoryScope>,
         authority: PasswordHistoryAuthority,
@@ -699,15 +699,24 @@ where
                 store,
                 history_keys,
             } => {
-                let evaluation =
-                    Arc::new(HistoryEvaluation::new(store, cache.clone(), history_keys));
-                let ops = Self::new(storage, cache, field_keys, installation, evaluation.clone());
+                let evaluation = Arc::new(HistoryEvaluation::new(
+                    store,
+                    ceremonies.clone(),
+                    history_keys,
+                ));
+                let ops = Self::new(
+                    storage,
+                    ceremonies,
+                    field_keys,
+                    installation,
+                    evaluation.clone(),
+                );
                 (ops, Some(evaluation))
             }
             PasswordHistoryAuthority::Remote(evaluator) => (
                 Self::new(
                     storage,
-                    cache,
+                    ceremonies,
                     field_keys,
                     installation,
                     Arc::new(evaluator),
@@ -722,7 +731,7 @@ where
     /// `installation` scopes the owners' history domains.
     pub fn new(
         storage: Arc<S>,
-        cache: Arc<dyn CacheBackend>,
+        ceremonies: Arc<dyn CeremonyStateStore>,
         operation_keys: Arc<dyn sid_keys::KeyManager>,
         installation: impl Into<HistoryScope>,
         evaluator: Arc<dyn HistoryPreparation>,
@@ -739,7 +748,12 @@ where
                     .expect("password verification requires a known CPU capacity")
                     .get(),
             )),
-            ops: ChallengeStore::new(cache, operation_keys, "password-operation", OPERATION_TTL),
+            ops: ChallengeStore::new(
+                ceremonies,
+                operation_keys,
+                "password-operation",
+                OPERATION_TTL,
+            ),
             installation: installation.into().0,
             depth: DEFAULT_HISTORY_DEPTH,
             enrollment_capacity: ENROLLMENT_CAPACITY,
@@ -1397,7 +1411,7 @@ impl EvaluatorOperation {
 /// owner by history input domain and reads no entry, tag or credential.
 pub struct HistoryEvaluation {
     keys: Arc<dyn HistoryKeyStore>,
-    cache: Arc<dyn CacheBackend>,
+    ceremonies: Arc<dyn CeremonyStateStore>,
     evaluator: HistoryEvaluator,
     ops: ChallengeStore<EvaluatorOperation>,
     /// The KSF new epochs are made with; an active epoch under another one
@@ -1411,15 +1425,15 @@ impl HistoryEvaluation {
     /// credential service's in a split deployment.
     pub fn new(
         keys: Arc<dyn HistoryKeyStore>,
-        cache: Arc<dyn CacheBackend>,
+        ceremonies: Arc<dyn CeremonyStateStore>,
         history_keys: Arc<dyn sid_keys::KeyManager>,
     ) -> Self {
         Self {
             keys,
-            cache: cache.clone(),
+            ceremonies: ceremonies.clone(),
             evaluator: HistoryEvaluator::new(history_keys.clone()),
             ops: ChallengeStore::new(
-                cache,
+                ceremonies,
                 history_keys,
                 "password-history-evaluation",
                 OPERATION_TTL,
@@ -1761,9 +1775,10 @@ impl HistoryEvaluation {
             };
         }
         let charged = self
-            .cache
-            .incr(
-                &format!("password-history-evaluations:{}", record.charge_key),
+            .ceremonies
+            .count_in_window(
+                "password-history-evaluations",
+                &record.charge_key.to_string(),
                 EVALUATION_WINDOW,
             )
             .await
