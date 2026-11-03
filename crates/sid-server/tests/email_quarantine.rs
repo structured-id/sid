@@ -74,10 +74,7 @@ async fn email_code_refuses_a_quarantined_handle() {
     let svc = TestServices::new(MockStorage::new().with_system_project());
     let profile = quarantined(&svc, "bea@sid.example.com").await;
 
-    let (pending, code) = sid_authn::otp::OtpService::new(svc.storage.clone())
-        .request_otp("bea@sid.example.com")
-        .await
-        .unwrap();
+    let (pending, code) = common::issue_code(&svc.storage, "bea@sid.example.com").await;
     let verified = svc
         .auth
         .verify_otp(Request::new(VerifyOtpRequest {

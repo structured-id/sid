@@ -414,7 +414,18 @@ fn otp_refusal(e: sid_authn::otp::OtpError) -> Status {
         .with_quota_violation("email_codes", "codes requested per address")
         .with_retry_after(std::time::Duration::from_secs(wait_seconds))
         .into(),
-        sid_authn::otp::OtpError::Internal(msg) => internal("request email code", msg),
+        // The installation's bound of owed mails: the request is not
+        // accepted rather than answered with a code nobody will send.
+        sid_authn::otp::OtpError::Busy(_) => ApiError::new(
+            ErrorReason::QuotaExceeded,
+            "too many codes are waiting for delivery; try again shortly",
+        )
+        .with_quota_violation("email_deliveries", "codes waiting for delivery")
+        .with_retry_after(std::time::Duration::from_secs(60))
+        .into(),
+        e @ (sid_authn::otp::OtpError::Internal(_) | sid_authn::otp::OtpError::Sealed(_)) => {
+            internal("request email code", e)
+        }
     }
 }
 
@@ -574,7 +585,7 @@ pub struct AuthServiceImpl {
     /// them, which is the default.
     pub(crate) magic_link: Option<Arc<MagicLinkService>>,
     /// OTP passwordless authentication (email/phone code).
-    pub(crate) otp: OtpService,
+    pub(crate) otp: Arc<OtpService>,
     /// DPoP proof validator (RFC 9449).
     pub(crate) dpop_validator: DPopValidator,
     /// The OIDC issuers whose endpoints the OAuth requests arrive at, and
@@ -694,7 +705,7 @@ impl AuthServiceImpl {
         revocation_cache: Arc<RevocationCache>,
         feature_flags: FeatureFlagService,
         magic_link: Option<Arc<MagicLinkService>>,
-        otp: OtpService,
+        otp: Arc<OtpService>,
         issuers: Arc<sid_authn::issuer::IssuerRegistry>,
         installation_org: sid_core::models::OrgId,
         issuer: String,
@@ -5516,13 +5527,20 @@ impl AuthService for AuthServiceImpl {
             sid_plugin::otp::mask_target(&email.delivery, sid_plugin::otp::OtpChannel::Email);
 
         // Every address gets a real pending code, whether or not it routes to
-        // an account: the same work, and resend and verify answer alike, so no
-        // step tells whether the account exists. The code leaves this service
-        // only inside the delivery to the target; it is never logged or put
+        // an account, and resend and verify answer alike, so no answer tells
+        // whether the account exists. Only an account's code is emailed, to
+        // the stored address of the assignment it routes to, bound now: a
+        // caller's equivalent spelling never retargets it. The code leaves
+        // this service only inside that email; it is never logged or put
         // into an event.
+        let account = self.resolve_profile_optional(normalized).await?;
+        let destination = match account {
+            Some(_) => sid_authn::otp::CodeDestination::Email(normalized),
+            None => sid_authn::otp::CodeDestination::None,
+        };
         let (result, _code) = self
             .otp
-            .request_otp(normalized)
+            .request_otp(normalized, destination)
             .await
             .map_err(otp_refusal)?;
 
@@ -5644,14 +5662,14 @@ impl AuthService for AuthServiceImpl {
 
         let session_id = parse_otp_session(req.session_id.as_deref())?;
 
-        let target = self
+        // A new code in the same session, the one the client verifies
+        // against, sent to the mailbox bound at the request.
+        let (result, _code) = self
             .otp
-            .get_session_target(&session_id)
+            .resend_otp(&session_id)
             .await
-            .map_err(|e| internal("read email code session", e))?
+            .map_err(otp_refusal)?
             .ok_or_else(|| ceremony_expired("email code"))?;
-
-        let (result, _code) = self.otp.request_otp(&target).await.map_err(otp_refusal)?;
 
         info!(session_id = %result.session_id, "OTP code resent");
 

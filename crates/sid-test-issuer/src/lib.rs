@@ -697,7 +697,14 @@ fn auth_service(
         revocation,
         sid_server::feature_flags::FeatureFlagService::disabled(),
         None,
-        sid_authn::otp::OtpService::new(storage.clone()),
+        Arc::new(sid_authn::otp::OtpService::new(
+            storage.clone(),
+            sid_authn::otp::CodeDelivery {
+                keys: keys.clone(),
+                work: storage.clone(),
+                capacity: sid_storage::OWED_WORK_CAPACITY,
+            },
+        )),
         issuers,
         org,
         INSTALLATION.to_string(),

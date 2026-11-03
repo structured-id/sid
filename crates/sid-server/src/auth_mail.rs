@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Mail of the authentication messages this server issues. The delivery
-//! work names only its link session; the handler reads that session when it
-//! runs, so the token, its link and the mail exist only in the attempt. A
-//! link no longer usable (consumed, expired) sends nothing; every retry of a
-//! usable one sends the same link to the address bound at the request.
+//! Mail of the authentication messages this server issues: sign-in links
+//! and codes. The delivery work names only its session (and a code's issue);
+//! the handler reads that session when it runs, so the token or code and the
+//! mail exist only in the attempt. A link or code no longer usable
+//! (consumed, expired, replaced) sends nothing; every retry of a usable one
+//! sends the same secret to the address bound at the request.
 //!
 //! The email provider is read from the installation's stored settings at
 //! every attempt, so all replicas send alike and a change applies to the
@@ -15,6 +16,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use secrecy::ExposeSecret;
 use sid_authn::magic_link::{MagicLinkError, MagicLinkService};
+use sid_authn::otp::{OTP_EMAIL_KIND, OtpError, OtpService};
 use sid_authn::work_runner::{RetrySchedule, WorkHandler, WorkOutcome};
 use sid_core::models::event::{Event, event_types};
 use sid_core::models::{ClaimedWork, MAGIC_LINK_EMAIL_KIND, NewWork, WorkKind};
@@ -168,6 +170,99 @@ impl WorkHandler for MagicLinkMail {
         let recipient = Recipient {
             profile_id: String::new(),
             email: Some(pending.email),
+            phone: None,
+            push_endpoint: None,
+            device_token: None,
+            locale: "en".into(),
+        };
+        match channel.deliver(&recipient, &message).await {
+            Ok(receipt) => WorkOutcome::Done(Some(receipt.message_id)),
+            Err(e) => outcome_of(e),
+        }
+    }
+}
+
+/// The template a sign-in code mail renders with.
+const CODE_TEMPLATE: &str = "otp";
+
+/// Emails requested sign-in codes to the mailbox each was bound to.
+pub struct CodeMail {
+    kind: WorkKind,
+    codes: Arc<OtpService>,
+    transport: Arc<dyn MailTransport>,
+    templates: TemplateEngine,
+}
+
+impl CodeMail {
+    pub fn new(codes: Arc<OtpService>, transport: Arc<dyn MailTransport>) -> Self {
+        Self {
+            kind: WorkKind::new(OTP_EMAIL_KIND).expect("a valid work kind"),
+            codes,
+            transport,
+            templates: TemplateEngine::with_default_ce_templates(),
+        }
+    }
+}
+
+#[async_trait]
+impl WorkHandler for CodeMail {
+    fn kind(&self) -> &WorkKind {
+        &self.kind
+    }
+
+    fn retry_schedule(&self) -> RetrySchedule {
+        RETRIES
+    }
+
+    fn on_dead(&self, _work: &ClaimedWork, _error: &str) -> Option<NewWork> {
+        None
+    }
+
+    async fn handle(&self, work: &ClaimedWork) -> WorkOutcome {
+        let (Some(session), Some(issue)) = (
+            work.payload
+                .get(..16)
+                .and_then(|b| uuid::Uuid::from_slice(b).ok()),
+            work.payload
+                .get(16..)
+                .and_then(|b| uuid::Uuid::from_slice(b).ok()),
+        ) else {
+            return WorkOutcome::Permanent("the work does not name a code".into());
+        };
+        let pending = match self
+            .codes
+            .pending_delivery(session, issue, Utc::now())
+            .await
+        {
+            Ok(Some(pending)) => pending,
+            Ok(None) => return WorkOutcome::Done(Some("the code is no longer current".into())),
+            Err(e @ OtpError::Sealed(_)) => return WorkOutcome::Permanent(e.to_string()),
+            Err(e) => return WorkOutcome::Retry(format!("read the code: {e}")),
+        };
+        let minutes = (pending.expires_at - Utc::now()).num_minutes().max(1);
+        // Rendered here and dropped with the attempt: no copy of the code
+        // is stored anywhere but its sealed session.
+        let event =
+            Event::new("sid-identity", event_types::OTP_REQUESTED).with_data(serde_json::json!({
+                "code": pending.code.expose_secret(),
+                "expires_minutes": minutes,
+                "purpose": "sign in",
+            }));
+        let message =
+            match self
+                .templates
+                .render(CODE_TEMPLATE, &event, NotificationPriority::Transactional)
+            {
+                Ok(message) => message,
+                Err(e) => return WorkOutcome::Permanent(format!("render the code mail: {e}")),
+            };
+        let channel = match self.transport.channel().await {
+            Ok(channel) => channel,
+            Err(e) => return WorkOutcome::Retry(e),
+        };
+        let recipient = Recipient {
+            profile_id: String::new(),
+            email: Some(pending.destination),
             phone: None,
             push_endpoint: None,
             device_token: None,

@@ -118,6 +118,8 @@ pub struct CeComponents {
     pub organization: sid_core::models::Organization,
     /// Emails requested sign-in links, when magic links are enabled.
     pub magic_link_mail: Option<Arc<crate::auth_mail::MagicLinkMail>>,
+    /// Emails requested sign-in codes.
+    pub code_mail: Arc<crate::auth_mail::CodeMail>,
     /// The directory the SCIM endpoint serves.
     #[cfg(feature = "scim")]
     pub scim_directory: sid_scim::grpc::ScimDirectory,
@@ -829,7 +831,21 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         data_export,
     ));
 
-    let otp_service = OtpService::new(storage.clone());
+    let otp_service = Arc::new(OtpService::new(
+        storage.clone(),
+        sid_authn::otp::CodeDelivery {
+            keys: key_manager.clone(),
+            work: storage.clone(),
+            capacity: sid_storage::OWED_WORK_CAPACITY,
+        },
+    ));
+    let code_mail = Arc::new(crate::auth_mail::CodeMail::new(
+        otp_service.clone(),
+        Arc::new(crate::auth_mail::StoredProvider::new(
+            storage.clone(),
+            key_manager.clone(),
+        )),
+    ));
 
     // ── IP Intelligence: configurable provider chain ──
     // SID_IPINTEL_PROVIDERS: comma-separated list of enabled providers.
@@ -1128,6 +1144,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
 
     Ok(CeComponents {
         magic_link_mail,
+        code_mail,
         audit_retention,
         migration_deadline_days,
         issuers,
@@ -1798,6 +1815,7 @@ pub fn spawn_work_runner(
         ),
         c.auth_svc.enrollment_handler(),
         c.auth_svc.owner_purge_handler(),
+        c.code_mail.clone(),
     ];
     if let Some(mail) = &c.magic_link_mail {
         handlers.push(mail.clone());
