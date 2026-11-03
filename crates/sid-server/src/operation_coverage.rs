@@ -20,6 +20,25 @@ pub enum Coverage {
 
 /// Every mutating CE method and its coverage, by full method name.
 pub const COVERAGE: &[(&str, Coverage)] = &[
+    (
+        "sid.v1.admin.AdminService/AdminUpdateProfile",
+        Coverage::Keyed,
+    ),
+    (
+        "sid.v1.admin.AdminService/ClaimInstance",
+        Coverage::Ceremony(
+            "the installation claim is single-use: its token opens only an \
+             unclaimed installation, so a repeat is refused and changes nothing",
+        ),
+    ),
+    (
+        "sid.v1.admin.AdminService/DeleteProfileMetadata",
+        Coverage::Keyed,
+    ),
+    (
+        "sid.v1.admin.AdminService/SetProfileMetadata",
+        Coverage::Keyed,
+    ),
     ("sid.v1.account.AccountService/AddEmail", Coverage::Keyed),
     ("sid.v1.account.AccountService/AddPhone", Coverage::Keyed),
     (

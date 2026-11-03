@@ -288,6 +288,66 @@ async fn test_create_application_retry_answers_without_its_secret() {
     );
 }
 
+/// A suspension completes, the profile is reactivated, then the suspension's
+/// lost response is retried: the retry answers as the suspension did and
+/// neither suspends the profile again nor ends its new access.
+#[tokio::test]
+async fn test_admin_suspension_retry_keeps_a_later_reactivation() {
+    use sid_proto::sid::v1::admin_service_server::AdminService;
+    let user = sid_core::models::Profile::new(Some("suspended_retry"));
+    let svc = TestServices::new(MockStorage::new().with_profile(user.clone()));
+    let token = issue_admin_token(&svc.jwt, ProfileId::generate());
+    let status = |s: sid_proto::sid::v1::ProfileStatus| AdminUpdateProfileRequest {
+        profile_id: user.id.to_string(),
+        profile_status: s as i32,
+        ..Default::default()
+    };
+    let stored = || async {
+        svc.storage
+            .get_profile(user.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status
+    };
+
+    let first = svc
+        .admin
+        .admin_update_profile(keyed(
+            status(sid_proto::sid::v1::ProfileStatus::Suspended),
+            &token,
+            Some("op-suspend"),
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    svc.admin
+        .admin_update_profile(keyed(
+            status(sid_proto::sid::v1::ProfileStatus::Active),
+            &token,
+            Some("op-activate"),
+        ))
+        .await
+        .unwrap();
+    let retry = svc
+        .admin
+        .admin_update_profile(keyed(
+            status(sid_proto::sid::v1::ProfileStatus::Suspended),
+            &token,
+            Some("op-suspend"),
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(retry, first);
+    assert_eq!(
+        stored().await,
+        sid_core::models::ProfileStatus::Active,
+        "the retry suspended the profile again"
+    );
+}
+
 /// An edit without a key cannot promise a safe retry and changes nothing.
 #[tokio::test]
 async fn test_update_project_without_key_is_refused() {

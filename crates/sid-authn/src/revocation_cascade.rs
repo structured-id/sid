@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use sid_core::Result as SidResult;
 use sid_core::models::{
-    AuditEntry, CascadeTier, MachineUserId, PatId, ProfileId, RevocationReason, RevocationRequest,
-    RevocationTarget, SessionEnd, SessionId,
+    AuditEntry, CascadeTier, MachineUserId, MutationContext, PatId, ProfileId, RevocationReason,
+    RevocationRequest, RevocationTarget, SessionEnd, SessionId,
 };
 use sid_plugin::StorageBackend;
 use sid_plugin::cache::CacheError;
@@ -181,7 +181,7 @@ impl RevocationCascadeService {
         profile_id: ProfileId,
         reason: RevocationReason,
         initiated_by: &str,
-        audit: AuditEntry,
+        ctx: MutationContext,
     ) -> SidResult<RevocationRequest> {
         let mut req = RevocationRequest::new(
             RevocationTarget::Profile,
@@ -190,7 +190,7 @@ impl RevocationCascadeService {
             initiated_by,
         );
         let end = SessionEnd::new(reason, initiated_by);
-        let unpropagated = self.end_sessions(&mut req, profile_id, &end, audit).await?;
+        let unpropagated = self.end_sessions(&mut req, profile_id, &end, ctx).await?;
         propagated(unpropagated)?;
         req.complete();
         Ok(req)
@@ -205,11 +205,11 @@ impl RevocationCascadeService {
         req: &mut RevocationRequest,
         profile_id: ProfileId,
         end: &SessionEnd,
-        audit: AuditEntry,
+        ctx: impl Into<MutationContext>,
     ) -> SidResult<Option<CacheError>> {
         let sessions = self
             .storage
-            .delete_sessions_by_profile(profile_id, end, audit.into())
+            .delete_sessions_by_profile(profile_id, end, ctx.into())
             .await?;
 
         let mut unpropagated = None;

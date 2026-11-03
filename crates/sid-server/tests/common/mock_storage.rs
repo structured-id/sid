@@ -2136,6 +2136,8 @@ impl StorageBackend for MockStorage {
         let mut next = profile.clone();
         next.created_at = stored.created_at;
         next.revision += 1;
+        // A completed command commits nothing, as the stores refuse it.
+        inner.owe(&ctx)?;
         inner.profiles.insert(profile.id, next);
         if let Some(old) = old_username {
             inner.profiles_by_username.remove(&old);
@@ -2145,7 +2147,6 @@ impl StorageBackend for MockStorage {
                 .profiles_by_username
                 .insert(username.clone(), profile.id);
         }
-        inner.owe(&ctx)?;
         Ok(true)
     }
 
@@ -4210,29 +4211,24 @@ impl StorageBackend for MockStorage {
     async fn set_profile_metadata(
         &self,
         metadata: &ProfileMetadata,
-        _audit: MutationContext,
+        audit: MutationContext,
     ) -> SidResult<()> {
-        if !self
-            .inner
-            .lock()
-            .unwrap()
-            .profiles
-            .contains_key(&metadata.profile_id)
-        {
+        let mut inner = self.inner.lock().unwrap();
+        if !inner.profiles.contains_key(&metadata.profile_id) {
             return Err(sid_core::Error::NotFound(format!(
                 "profile {}",
                 metadata.profile_id
             )));
         }
-        Ok(())
+        inner.owe(&audit)
     }
     async fn delete_profile_metadata(
         &self,
         _profile_id: ProfileId,
         _key: &str,
-        _audit: MutationContext,
+        audit: MutationContext,
     ) -> SidResult<()> {
-        Ok(())
+        self.inner.lock().unwrap().owe(&audit)
     }
     async fn list_profile_metadata(
         &self,

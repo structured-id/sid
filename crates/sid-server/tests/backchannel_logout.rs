@@ -328,7 +328,7 @@ async fn test_revoked_session_logout_is_owed_and_delivered() {
             profile_id(),
             RevocationReason::Admin,
             "admin",
-            AuditEntry::system("test", "revoke all"),
+            AuditEntry::system("test", "revoke all").into(),
         )
         .await
         .unwrap();
