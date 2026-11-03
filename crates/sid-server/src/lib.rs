@@ -14,6 +14,7 @@ pub mod grpc;
 pub mod init;
 #[cfg(feature = "telemetry")]
 pub mod metrics;
+pub mod operation_coverage;
 pub mod rate_limit;
 pub mod serve;
 pub mod state;
