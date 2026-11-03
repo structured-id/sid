@@ -79,6 +79,35 @@ async fn test_completed_resolves_retry_and_refuses_reuse() {
     assert_eq!(other_actor.completed(&storage).await.unwrap(), None);
 }
 
+/// A command named by its method's own canonical inputs is the same command
+/// for the same inputs and conflicts with other ones, and its completion
+/// names the method and the period like any keyed command's.
+#[tokio::test]
+async fn test_a_command_of_canonical_inputs_resolves_like_any_keyed_command() {
+    let storage = SqliteBackend::new_in_memory().await.unwrap();
+    let period = period(&storage).await;
+    let context = OperationContext::new(OperationKey::parse("k-inputs").unwrap(), period);
+    let command =
+        KeyedCommand::of_inputs::<CreateProject>("profile:a", context.clone(), b"set:a,b".to_vec());
+    let completion = command.completion(Vec::new());
+    assert_eq!(completion.method, CreateProject::METHOD);
+    assert_eq!(completion.period, Some(period));
+    assert_eq!(command.completed(&storage).await.unwrap(), None);
+
+    commit(&storage, &command, b"done").await;
+    let retry =
+        KeyedCommand::of_inputs::<CreateProject>("profile:a", context.clone(), b"set:a,b".to_vec());
+    assert_eq!(
+        retry.completed(&storage).await.unwrap().as_deref(),
+        Some(&b"done"[..])
+    );
+    let other = KeyedCommand::of_inputs::<CreateProject>("profile:a", context, b"set:c".to_vec());
+    assert!(matches!(
+        other.completed(&storage).await,
+        Err(OperationError::KeyConflict)
+    ));
+}
+
 /// The same request decoded twice names the same command: a map field's
 /// entries are encoded in one order, so a retry of a request carrying
 /// metadata is not mistaken for another command.

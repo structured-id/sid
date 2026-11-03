@@ -65,6 +65,23 @@ impl KeyedCommand {
         }
     }
 
+    /// [`Self::of`] for a method whose significant inputs are not its
+    /// request's encoding: `inputs`, its own canonical encoding of them (a
+    /// set given in any order is one command).
+    pub fn of_inputs<M: KeyedMethod>(
+        namespace: impl Into<String>,
+        context: OperationContext,
+        inputs: Vec<u8>,
+    ) -> Self {
+        Self {
+            namespace: namespace.into(),
+            key: context.key,
+            period: Some(context.period),
+            method: M::METHOD,
+            inputs,
+        }
+    }
+
     /// [`Self::of`] for `profile`: one key namespace per authenticated
     /// Profile, whatever service it calls.
     pub fn by_profile<M: KeyedMethod>(
