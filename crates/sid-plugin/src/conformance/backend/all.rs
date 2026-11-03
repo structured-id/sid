@@ -159,6 +159,7 @@ macro_rules! storage_conformance {
                 test_concurrent_duplicate_operation_commits_once
                 test_operation_results_travel_between_stores
                 test_terminal_abort_races_the_commit
+                test_unchanged_mutation_records_its_completion
                 test_failed_mutation_records_no_completion
             );
             $crate::__storage_scenarios!($setup, organization:

@@ -2315,6 +2315,11 @@ async fn test_terminal_abort_races_the_commit() {
 }
 
 #[tokio::test]
+async fn test_unchanged_mutation_records_its_completion() {
+    common::operation::test_unchanged_mutation_records_its_completion(&setup().await).await;
+}
+
+#[tokio::test]
 async fn test_operation_results_travel_between_stores() {
     common::operation::test_operation_results_travel_between_stores(&setup().await).await;
 }

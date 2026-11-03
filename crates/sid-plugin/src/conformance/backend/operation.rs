@@ -264,6 +264,94 @@ pub async fn test_terminal_abort_races_the_commit(backend: &dyn StorageBackend) 
     }
 }
 
+/// A keyed claim decision already in effect changes nothing and owes no
+/// work, yet commits its completion: a retry after a later opposite decision
+/// must find it completed rather than apply it over that decision.
+pub async fn test_unchanged_mutation_records_its_completion(backend: &dyn StorageBackend) {
+    use sid_core::models::Profile;
+    use sid_core::models::consent::{ClaimDecision, ClaimGrantChange, ClaimType, ConsentRecord};
+    let profile = Profile::new(Some(&format!(
+        "unchanged{}",
+        &Uuid::now_v7().simple().to_string()[16..]
+    )));
+    backend
+        .create_profile(&profile, test_audit())
+        .await
+        .unwrap();
+    let mut consent = ConsentRecord::new(profile.id, &format!("app_{}", Uuid::now_v7().simple()));
+    consent.grant_claim("phone", ClaimType::Data);
+    if let Some(requested) = consent.as_requested() {
+        requested.grant();
+    }
+    backend
+        .create_consent(&consent, test_audit())
+        .await
+        .unwrap();
+
+    let (ns, key) = (namespace(), key());
+    let owed = sid_core::models::NewWork::new(
+        sid_core::models::WorkKind::new("test.claim_event").unwrap(),
+        vec![1],
+    );
+    let decide = || {
+        test_audit()
+            .with_operation(OperationCompletion::new(
+                &ns,
+                key.clone(),
+                "sid.v1.account.AccountService/UpdateClaimConsent",
+                b"grant phone",
+                Vec::new(),
+            ))
+            .with_work(owed.clone())
+    };
+    let change = backend
+        .change_claim_grant(
+            consent.id,
+            "phone",
+            ClaimDecision::Grant(ClaimType::Data),
+            decide(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(change, ClaimGrantChange::Unchanged);
+    assert!(
+        backend
+            .get_operation_result(&ns, &key)
+            .await
+            .unwrap()
+            .is_some(),
+        "an unchanged keyed decision recorded no completion"
+    );
+    assert!(
+        backend.get_work(owed.id).await.unwrap().is_none(),
+        "a decision that changed nothing owed its event"
+    );
+
+    // A later opposite decision, then the retry: it commits nothing.
+    backend
+        .change_claim_grant(consent.id, "phone", ClaimDecision::Revoke, test_audit())
+        .await
+        .unwrap();
+    let err = backend
+        .change_claim_grant(
+            consent.id,
+            "phone",
+            ClaimDecision::Grant(ClaimType::Data),
+            decide(),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::OperationCompleted(_)), "{err:?}");
+    let stored = backend.get_consent(consent.id).await.unwrap().unwrap();
+    assert!(
+        !stored
+            .grants
+            .iter()
+            .any(|g| g.claim_name == "phone" && g.is_active()),
+        "the retry applied the decision over a later one"
+    );
+}
+
 /// A mutation that fails records no completion: the key stays free.
 pub async fn test_failed_mutation_records_no_completion(backend: &dyn StorageBackend) {
     backend.ensure_system_project(test_audit()).await.unwrap();
