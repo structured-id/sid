@@ -24,6 +24,25 @@ const OFF: Coverage = Coverage::NotServed;
 /// Every mutating CE method and its coverage, by full method name.
 pub const COVERAGE: &[(&str, Coverage)] = &[
     (
+        "sid.v1.admin.EnrollmentService/BulkCreateInvites",
+        Coverage::Keyed,
+    ),
+    (
+        "sid.v1.admin.EnrollmentService/CreateInvite",
+        Coverage::Keyed,
+    ),
+    (
+        "sid.v1.admin.EnrollmentService/RevokeInvite",
+        Coverage::Natural(
+            "a revoked invite stays revoked: a repeat finds it revoked and answers as \
+             the first",
+        ),
+    ),
+    (
+        "sid.v1.admin.EnrollmentService/UpdateEnrollmentPolicy",
+        Coverage::Keyed,
+    ),
+    (
         "sid.v1.admin.BrandingService/CreateBrandingConfig",
         Coverage::Keyed,
     ),

@@ -857,7 +857,10 @@ pub async fn test_invite_list_pages_cover_each_invite_once(backend: &dyn Storage
     for _ in 0..7 {
         let mut invite = test_invite(admin.id, 1);
         invite.created_at = created_at;
-        backend.create_invite(&invite, test_audit()).await.unwrap();
+        backend
+            .create_invites(std::slice::from_ref(&invite), test_audit())
+            .await
+            .unwrap();
         ids.insert(invite.id.0);
     }
 
@@ -894,7 +897,10 @@ pub async fn test_invite_lifecycle(backend: &dyn StorageBackend) {
     backend.create_profile(&admin, test_audit()).await.unwrap();
 
     let twice = test_invite(admin.id, 2);
-    backend.create_invite(&twice, test_audit()).await.unwrap();
+    backend
+        .create_invites(std::slice::from_ref(&twice), test_audit())
+        .await
+        .unwrap();
     let stored = backend.get_invite(twice.id).await.unwrap().expect("stored");
     assert_eq!(stored.code, twice.code);
     assert_eq!(stored.metadata, twice.metadata);
@@ -924,7 +930,10 @@ pub async fn test_invite_lifecycle(backend: &dyn StorageBackend) {
 
     let mut expired = test_invite(admin.id, 0);
     expired.expires_at = Some(Utc::now() - Duration::minutes(1));
-    backend.create_invite(&expired, test_audit()).await.unwrap();
+    backend
+        .create_invites(std::slice::from_ref(&expired), test_audit())
+        .await
+        .unwrap();
     assert!(
         backend
             .try_use_invite(expired.id, test_audit())
@@ -934,14 +943,17 @@ pub async fn test_invite_lifecycle(backend: &dyn StorageBackend) {
     );
 
     let revoked = test_invite(admin.id, 0);
-    backend.create_invite(&revoked, test_audit()).await.unwrap();
+    backend
+        .create_invites(std::slice::from_ref(&revoked), test_audit())
+        .await
+        .unwrap();
     backend
         .revoke_invite(revoked.id, test_audit())
         .await
         .unwrap();
     // Sending the same invite again never reactivates it.
     let err = backend
-        .create_invite(&revoked, test_audit())
+        .create_invites(std::slice::from_ref(&revoked), test_audit())
         .await
         .expect_err("a create over a revoked invite");
     assert!(matches!(err, sid_core::Error::Conflict(_)), "{err:?}");
@@ -956,7 +968,10 @@ pub async fn test_invite_lifecycle(backend: &dyn StorageBackend) {
     // The newest invite is active: a filter applied after paging would
     // return an empty first page of revoked invites.
     let newest = test_invite(admin.id, 0);
-    backend.create_invite(&newest, test_audit()).await.unwrap();
+    backend
+        .create_invites(std::slice::from_ref(&newest), test_audit())
+        .await
+        .unwrap();
     let revoked_only = InviteFilter {
         status: Some(InviteStatus::Revoked),
         search: None,
@@ -991,9 +1006,14 @@ pub async fn test_invite_search(backend: &dyn StorageBackend) {
     wild.created_by_name = format!("50%_{tag}");
     let mut revoked = test_invite(admin.id, 1);
     revoked.created_by_name = format!("Grace {tag} Revoked");
-    for invite in [&by_name, &wild, &revoked] {
-        backend.create_invite(invite, test_audit()).await.unwrap();
-    }
+    // Several invites in one commit.
+    backend
+        .create_invites(
+            &[by_name.clone(), wild.clone(), revoked.clone()],
+            test_audit(),
+        )
+        .await
+        .unwrap();
     backend
         .revoke_invite(revoked.id, test_audit())
         .await
@@ -2160,7 +2180,10 @@ pub async fn test_invite_single_use_under_concurrency(backend: &dyn StorageBacke
     let admin = create_test_profile("inviter_race");
     backend.create_profile(&admin, test_audit()).await.unwrap();
     let once = test_invite(admin.id, 1);
-    backend.create_invite(&once, test_audit()).await.unwrap();
+    backend
+        .create_invites(std::slice::from_ref(&once), test_audit())
+        .await
+        .unwrap();
 
     let (a, b, c, d) = tokio::join!(
         backend.try_use_invite(once.id, test_audit()),

@@ -8093,9 +8093,10 @@ impl StorageBackend for PostgresBackend {
 
     // === INVITE OPERATIONS ===
 
-    async fn create_invite(&self, invite: &Invite, audit: MutationContext) -> SidResult<()> {
-        let metadata = serde_json::to_value(&invite.metadata)
-            .map_err(|e| SidError::Validation(format!("invite metadata: {e}")))?;
+    async fn create_invites(&self, invites: &[Invite], audit: MutationContext) -> SidResult<()> {
+        let Some(first) = invites.first() else {
+            return Ok(());
+        };
         let count = |what: &str, n: u32| {
             i32::try_from(n).map_err(|e| SidError::Validation(format!("invite {what}: {e}")))
         };
@@ -8104,29 +8105,33 @@ impl StorageBackend for PostgresBackend {
             .begin()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
-        let (by_profile, by_machine) = match invite.created_by {
-            sid_core::models::InviteCreator::Profile(id) => (Some(id), None),
-            sid_core::models::InviteCreator::MachineUser(id) => (None, Some(id)),
-        };
-        sqlx::query(
-            "INSERT INTO invites (id, code, created_by, created_by_machine, created_by_name, metadata, max_uses, use_count, expires_at, active, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
-        )
-        .bind(invite.id.0)
-        .bind(&invite.code)
-        .bind(by_profile)
-        .bind(by_machine)
-        .bind(&invite.created_by_name)
-        .bind(metadata)
-        .bind(count("max uses", invite.max_uses)?)
-        .bind(count("use count", invite.use_count)?)
-        .bind(invite.expires_at)
-        .bind(invite.active)
-        .bind(invite.created_at)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| insert_error("invite", e))?;
-        Self::audit_in_tx(&mut tx, &format!("invite:{}", invite.id.0), audit).await?;
+        for invite in invites {
+            let metadata = serde_json::to_value(&invite.metadata)
+                .map_err(|e| SidError::Validation(format!("invite metadata: {e}")))?;
+            let (by_profile, by_machine) = match invite.created_by {
+                sid_core::models::InviteCreator::Profile(id) => (Some(id), None),
+                sid_core::models::InviteCreator::MachineUser(id) => (None, Some(id)),
+            };
+            sqlx::query(
+                "INSERT INTO invites (id, code, created_by, created_by_machine, created_by_name, metadata, max_uses, use_count, expires_at, active, created_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+            )
+            .bind(invite.id.0)
+            .bind(&invite.code)
+            .bind(by_profile)
+            .bind(by_machine)
+            .bind(&invite.created_by_name)
+            .bind(metadata)
+            .bind(count("max uses", invite.max_uses)?)
+            .bind(count("use count", invite.use_count)?)
+            .bind(invite.expires_at)
+            .bind(invite.active)
+            .bind(invite.created_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| insert_error("invite", e))?;
+        }
+        Self::audit_in_tx(&mut tx, &format!("invite:{}", first.id.0), audit).await?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;

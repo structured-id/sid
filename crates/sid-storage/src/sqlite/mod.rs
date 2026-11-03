@@ -3002,12 +3002,12 @@ impl StorageBackend for SqliteBackend {
         self.delete_branding_config_impl(id, ctx).await
     }
     // === INVITE OPERATIONS ===
-    async fn create_invite(
+    async fn create_invites(
         &self,
-        invite: &sid_core::models::Invite,
+        invites: &[sid_core::models::Invite],
         audit: MutationContext,
     ) -> SidResult<()> {
-        self.create_invite_impl(invite, audit).await
+        self.create_invites_impl(invites, audit).await
     }
     async fn get_invite(
         &self,

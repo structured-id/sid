@@ -1975,9 +1975,10 @@ pub trait StorageBackend:
 
     // === INVITE OPERATIONS ===
 
-    /// Store a new invite; an existing id or code is `Conflict`, so a revoked
-    /// or used-up invite is never reactivated by a repeated create.
-    async fn create_invite(&self, invite: &Invite, ctx: MutationContext) -> Result<()>;
+    /// Store new invites, all in one commit under `ctx` or none; an existing
+    /// id or code is `Conflict`, so a revoked or used-up invite is never
+    /// reactivated by a repeated create.
+    async fn create_invites(&self, invites: &[Invite], ctx: MutationContext) -> Result<()>;
 
     /// Get an invite by ID.
     async fn get_invite(&self, id: InviteId) -> Result<Option<Invite>>;

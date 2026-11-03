@@ -2200,7 +2200,11 @@ impl sid_plugin::StorageBackend for MockStorage {
     }
 
     // ── Invite operations ──
-    async fn create_invite(&self, _: &sid_core::models::Invite, _: MutationContext) -> Result<()> {
+    async fn create_invites(
+        &self,
+        _: &[sid_core::models::Invite],
+        _: MutationContext,
+    ) -> Result<()> {
         Ok(())
     }
     async fn get_invite(

@@ -110,37 +110,42 @@ pub(super) async fn insert_registration_source(
 }
 
 impl SqliteBackend {
-    pub(crate) async fn create_invite_impl(
+    pub(crate) async fn create_invites_impl(
         &self,
-        invite: &Invite,
+        invites: &[Invite],
         audit: MutationContext,
     ) -> SidResult<()> {
-        let metadata = serde_json::to_string(&invite.metadata)
-            .map_err(|e| SidError::Storage(format!("invite metadata: {e}")))?;
-        let (by_profile, by_machine) = match invite.created_by {
-            InviteCreator::Profile(id) => (Some(id), None),
-            InviteCreator::MachineUser(id) => (None, Some(id)),
+        let Some(first) = invites.first() else {
+            return Ok(());
         };
         let mut tx = self.begin_write().await?;
-        sqlx::query(
-            "INSERT INTO invites (id, code, created_by, created_by_machine, created_by_name, metadata, max_uses, use_count, expires_at, active, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(invite.id.0.to_string())
-        .bind(&invite.code)
-        .bind(by_profile)
-        .bind(by_machine)
-        .bind(&invite.created_by_name)
-        .bind(metadata)
-        .bind(i64::from(invite.max_uses))
-        .bind(i64::from(invite.use_count))
-        .bind(fmt_dt_opt(invite.expires_at))
-        .bind(invite.active)
-        .bind(fmt_dt(&invite.created_at))
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| insert_error("invite", e))?;
-        Self::commit_mutation(tx, &format!("invite:{}", invite.id.0), audit).await
+        for invite in invites {
+            let metadata = serde_json::to_string(&invite.metadata)
+                .map_err(|e| SidError::Storage(format!("invite metadata: {e}")))?;
+            let (by_profile, by_machine) = match invite.created_by {
+                InviteCreator::Profile(id) => (Some(id), None),
+                InviteCreator::MachineUser(id) => (None, Some(id)),
+            };
+            sqlx::query(
+                "INSERT INTO invites (id, code, created_by, created_by_machine, created_by_name, metadata, max_uses, use_count, expires_at, active, created_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(invite.id.0.to_string())
+            .bind(&invite.code)
+            .bind(by_profile)
+            .bind(by_machine)
+            .bind(&invite.created_by_name)
+            .bind(metadata)
+            .bind(i64::from(invite.max_uses))
+            .bind(i64::from(invite.use_count))
+            .bind(fmt_dt_opt(invite.expires_at))
+            .bind(invite.active)
+            .bind(fmt_dt(&invite.created_at))
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| insert_error("invite", e))?;
+        }
+        Self::commit_mutation(tx, &format!("invite:{}", first.id.0), audit).await
     }
 
     pub(crate) async fn get_invite_impl(&self, id: InviteId) -> SidResult<Option<Invite>> {

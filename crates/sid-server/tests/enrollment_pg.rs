@@ -71,10 +71,16 @@ async fn setup_named(
     (svc, bearer, username)
 }
 
+/// `msg` as one new command of `token`'s (a method that promises a safe
+/// retry takes an operation key).
 fn authed_request<T>(msg: T, token: &str) -> Request<T> {
     let mut req = Request::new(msg);
     req.metadata_mut()
         .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    req.metadata_mut().insert(
+        sid_authn::operation::OPERATION_KEY_HEADER,
+        uuid::Uuid::new_v4().to_string().parse().unwrap(),
+    );
     req
 }
 
@@ -309,6 +315,40 @@ async fn test_pg_enrollment_bulk_create_persists() {
             "bulk-created invite {} should appear in list",
             inv.code
         );
+    }
+}
+
+/// A bulk creation's response is lost and retried: the retry answers with
+/// the invites the first commit created and creates no others.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_pg_enrollment_bulk_create_retry_creates_once() {
+    let storage = setup_pg_storage().await;
+    let (svc, bearer) = setup_service_with_auth(storage.clone()).await;
+    let key = uuid::Uuid::new_v4().to_string();
+    let bulk = || {
+        let mut req = authed_request(
+            sid_proto::sid::v1::admin::BulkCreateInvitesRequest {
+                count: 3,
+                max_uses: 2,
+                never_expires: true,
+                ..Default::default()
+            },
+            &bearer,
+        );
+        req.metadata_mut().insert(
+            sid_authn::operation::OPERATION_KEY_HEADER,
+            key.parse().unwrap(),
+        );
+        req
+    };
+
+    let first = svc.bulk_create_invites(bulk()).await.unwrap().into_inner();
+    let retry = svc.bulk_create_invites(bulk()).await.unwrap().into_inner();
+
+    assert_eq!(retry, first, "the retry created other invites");
+    for invite in &first.invites {
+        let id = sid_core::models::InviteId(uuid::Uuid::parse_str(&invite.id).unwrap());
+        assert!(storage.get_invite(id).await.unwrap().is_some());
     }
 }
 

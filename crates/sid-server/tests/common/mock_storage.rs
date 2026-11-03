@@ -5622,12 +5622,14 @@ impl StorageBackend for MockStorage {
     ) -> SidResult<bool> {
         Ok(false)
     }
-    async fn create_invite(
+    async fn create_invites(
         &self,
-        invite: &sid_core::models::Invite,
-        _: MutationContext,
+        invites: &[sid_core::models::Invite],
+        ctx: MutationContext,
     ) -> SidResult<()> {
-        self.inner.lock().unwrap().invites.push(invite.clone());
+        let mut inner = self.inner.lock().unwrap();
+        inner.owe(&ctx)?;
+        inner.invites.extend_from_slice(invites);
         Ok(())
     }
     async fn get_invite(
