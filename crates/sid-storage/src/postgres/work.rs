@@ -44,6 +44,15 @@ impl PgWorkStore {
         tx.commit().await.map_err(schema_error)?;
         Ok(())
     }
+
+    /// Store `works`, owed by a state change of this database's owner,
+    /// inside that change's transaction `tx`: they commit with it or not at
+    /// all, admitted under each kind's lock up to
+    /// [`OWED_WORK_CAPACITY`](sid_plugin::OWED_WORK_CAPACITY) open items.
+    /// For a host whose own tables live beside this work table.
+    pub async fn owe_in_tx(tx: &mut PgConnection, works: &[NewWork]) -> SidResult<()> {
+        insert_owed_work_in_tx(tx, works, sid_plugin::OWED_WORK_CAPACITY).await
+    }
 }
 
 /// Store `work` inside `tx`, which holds its kind's admission lock

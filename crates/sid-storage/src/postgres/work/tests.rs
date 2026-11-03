@@ -70,6 +70,30 @@ async fn owed_work_of_concurrent_mutations_respects_its_capacity() {
     assert_eq!(open, 1);
 }
 
+/// A host's own state change and the work it owes commit together through
+/// `owe_in_tx`: rolled back, neither is stored; committed, the work is.
+#[tokio::test]
+async fn owed_work_commits_with_the_host_transaction() {
+    let pool = pool().await;
+    let kind = fresh_kind();
+    let dropped = NewWork::new(kind.clone(), vec![1]);
+    let mut tx = pool.begin().await.unwrap();
+    PgWorkStore::owe_in_tx(&mut tx, std::slice::from_ref(&dropped))
+        .await
+        .unwrap();
+    tx.rollback().await.unwrap();
+    let kept = NewWork::new(kind, vec![2]);
+    let mut tx = pool.begin().await.unwrap();
+    PgWorkStore::owe_in_tx(&mut tx, std::slice::from_ref(&kept))
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let store = PgWorkStore::new(pool);
+    assert!(store.get_work(dropped.id).await.unwrap().is_none());
+    assert!(store.get_work(kept.id).await.unwrap().is_some());
+}
+
 /// A mutation owing work of several kinds takes their admission locks in one
 /// order, so two mutations owing the same kinds in opposite orders both
 /// commit instead of deadlocking.
