@@ -676,6 +676,152 @@ async fn test_closure_request_retry_answers_with_its_closure() {
     assert_eq!(retry, first);
 }
 
+/// A machine user with one active client secret, stored for the tests below.
+async fn machine_user_with_secret(
+    svc: &TestServices,
+    token: &str,
+) -> (sid_core::models::MachineUserId, String) {
+    use sid_proto::sid::v1::machine_user_service_server::MachineUserService;
+    let created = svc
+        .machine_user
+        .create_machine_user(keyed(
+            CreateMachineUserRequest {
+                project_id: sid_core::models::ProjectId::system().0.to_string(),
+                display_name: "ci".into(),
+                ..Default::default()
+            },
+            token,
+            Some(&uuid::Uuid::new_v4().to_string()),
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .machine_user
+        .unwrap();
+    let id = sid_core::models::MachineUserId::parse(&created.id).unwrap();
+    let added = svc
+        .machine_user
+        .add_machine_credential(keyed(
+            AddMachineCredentialRequest {
+                machine_user_id: created.id.clone(),
+                credential_type: MachineCredentialType::ClientSecret as i32,
+                ..Default::default()
+            },
+            token,
+            Some(&uuid::Uuid::new_v4().to_string()),
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    (id, added.credential.unwrap().kid)
+}
+
+/// A rotation's response is lost and retried: the retry answers with the
+/// credentials it left, the new secret empty since only its verifier is
+/// kept, and rotates nothing again.
+#[tokio::test]
+async fn test_machine_credential_rotation_retry_rotates_once() {
+    use sid_proto::sid::v1::machine_user_service_server::MachineUserService;
+    let svc = TestServices::new(MockStorage::new());
+    let token = issue_admin_token(&svc.jwt, ProfileId::generate());
+    let (id, kid) = machine_user_with_secret(&svc, &token).await;
+    let rotate = || {
+        keyed(
+            RotateMachineCredentialRequest {
+                machine_user_id: id.to_string(),
+                kid: kid.clone(),
+                ..Default::default()
+            },
+            &token,
+            Some("op-rotate"),
+        )
+    };
+
+    let first = svc
+        .machine_user
+        .rotate_machine_credential(rotate())
+        .await
+        .unwrap()
+        .into_inner();
+    let retry = svc
+        .machine_user
+        .rotate_machine_credential(rotate())
+        .await
+        .expect("the retry answers with the rotation it made")
+        .into_inner();
+
+    assert!(!first.client_secret.is_empty());
+    assert!(
+        retry.client_secret.is_empty(),
+        "the retry disclosed the secret again"
+    );
+    assert_eq!(retry.new_credential, first.new_credential);
+    assert_eq!(
+        svc.storage
+            .list_machine_credentials_by_user(id)
+            .await
+            .unwrap()
+            .len(),
+        2,
+        "the retry added another credential"
+    );
+}
+
+/// A machine user is suspended, reactivated, then the suspension's lost
+/// response is retried: the retry answers as the suspension did and the
+/// machine user stays active.
+#[tokio::test]
+async fn test_machine_user_suspension_retry_keeps_a_later_reactivation() {
+    use sid_proto::sid::v1::machine_user_service_server::MachineUserService;
+    let svc = TestServices::new(MockStorage::new());
+    let token = issue_admin_token(&svc.jwt, ProfileId::generate());
+    let (id, _) = machine_user_with_secret(&svc, &token).await;
+    let suspend = || {
+        keyed(
+            SuspendMachineUserRequest {
+                machine_user_id: id.to_string(),
+            },
+            &token,
+            Some("op-suspend-mu"),
+        )
+    };
+
+    let first = svc
+        .machine_user
+        .suspend_machine_user(suspend())
+        .await
+        .unwrap()
+        .into_inner();
+    svc.machine_user
+        .reactivate_machine_user(keyed(
+            ReactivateMachineUserRequest {
+                machine_user_id: id.to_string(),
+            },
+            &token,
+            Some("op-reactivate-mu"),
+        ))
+        .await
+        .unwrap();
+    let retry = svc
+        .machine_user
+        .suspend_machine_user(suspend())
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(retry, first);
+    assert_eq!(
+        svc.storage
+            .get_machine_user(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        sid_core::models::machine_user::MachineUserStatus::Active,
+        "the retry suspended the machine user again"
+    );
+}
+
 /// An edit without a key cannot promise a safe retry and changes nothing.
 #[tokio::test]
 async fn test_update_project_without_key_is_refused() {

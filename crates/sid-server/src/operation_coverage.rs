@@ -24,6 +24,49 @@ const OFF: Coverage = Coverage::NotServed;
 /// Every mutating CE method and its coverage, by full method name.
 pub const COVERAGE: &[(&str, Coverage)] = &[
     (
+        "sid.v1.machine.MachineUserService/AddMachineCredential",
+        Coverage::Keyed,
+    ),
+    (
+        "sid.v1.machine.MachineUserService/CreateMachineUser",
+        Coverage::Keyed,
+    ),
+    (
+        "sid.v1.machine.MachineUserService/DeleteMachineUser",
+        Coverage::Keyed,
+    ),
+    (
+        "sid.v1.machine.MachineUserService/GrantImpersonation",
+        Coverage::Keyed,
+    ),
+    (
+        "sid.v1.machine.MachineUserService/ReactivateMachineUser",
+        Coverage::Keyed,
+    ),
+    (
+        "sid.v1.machine.MachineUserService/RevokeImpersonation",
+        Coverage::Keyed,
+    ),
+    (
+        "sid.v1.machine.MachineUserService/RevokeMachineCredential",
+        Coverage::Natural(
+            "a revoked credential stays revoked: a repeat finds it revoked, answers \
+             as the first and stops its tokens again",
+        ),
+    ),
+    (
+        "sid.v1.machine.MachineUserService/RotateMachineCredential",
+        Coverage::Keyed,
+    ),
+    (
+        "sid.v1.machine.MachineUserService/SuspendMachineUser",
+        Coverage::Keyed,
+    ),
+    (
+        "sid.v1.machine.MachineUserService/UpdateMachineUser",
+        Coverage::Keyed,
+    ),
+    (
         "sid.v1.machine.PatService/AdminRevokePat",
         Coverage::Natural(
             "a revoked token stays revoked: a repeat finds it revoked and answers \

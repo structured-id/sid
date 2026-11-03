@@ -4734,6 +4734,7 @@ impl StorageBackend for MockStorage {
                 "machine user already exists".into(),
             ));
         }
+        inner.owe(&audit)?;
         inner.machine_users.insert(mu.id, mu.clone());
         inner.machine_user_audits.push(audit.audit);
         Ok(())
@@ -4741,15 +4742,17 @@ impl StorageBackend for MockStorage {
     async fn update_machine_user(
         &self,
         mu: &MachineUser,
-        _audit: MutationContext,
+        audit: MutationContext,
     ) -> SidResult<bool> {
         let mut inner = self.inner.lock().unwrap();
-        let Some(stored) = inner.machine_users.get_mut(&mu.id) else {
-            return Ok(false);
-        };
-        if stored.status == sid_core::models::machine_user::MachineUserStatus::Deleted {
+        let live = inner.machine_users.get(&mu.id).is_some_and(|m| {
+            m.status != sid_core::models::machine_user::MachineUserStatus::Deleted
+        });
+        if !live {
             return Ok(false);
         }
+        inner.owe(&audit)?;
+        let stored = inner.machine_users.get_mut(&mu.id).expect("read above");
         let status = stored.status;
         *stored = mu.clone();
         stored.status = status;
@@ -4761,17 +4764,21 @@ impl StorageBackend for MockStorage {
         id: MachineUserId,
         from: sid_core::models::machine_user::MachineUserStatus,
         to: sid_core::models::machine_user::MachineUserStatus,
-        _audit: MutationContext,
+        audit: MutationContext,
     ) -> SidResult<bool> {
         let mut inner = self.inner.lock().unwrap();
-        match inner.machine_users.get_mut(&id) {
-            Some(stored) if stored.status == from => {
-                stored.status = to;
-                stored.updated_at = chrono::Utc::now();
-                Ok(true)
-            }
-            _ => Ok(false),
+        if !inner
+            .machine_users
+            .get(&id)
+            .is_some_and(|m| m.status == from)
+        {
+            return Ok(false);
         }
+        inner.owe(&audit)?;
+        let stored = inner.machine_users.get_mut(&id).expect("read above");
+        stored.status = to;
+        stored.updated_at = chrono::Utc::now();
+        Ok(true)
     }
     async fn delete_machine_user(
         &self,
@@ -5073,7 +5080,7 @@ impl StorageBackend for MockStorage {
         &self,
         cred: &MachineUserCredential,
         active_limit: Option<u64>,
-        _audit: MutationContext,
+        audit: MutationContext,
     ) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
         if inner.machine_credentials.iter().any(|c| c.kid == cred.kid) {
@@ -5091,6 +5098,7 @@ impl StorageBackend for MockStorage {
                 "too many machine credentials".into(),
             ));
         }
+        inner.owe(&audit)?;
         inner.machine_credentials.push(cred.clone());
         Ok(())
     }
@@ -5100,16 +5108,23 @@ impl StorageBackend for MockStorage {
         old_kid: &str,
         new: &MachineUserCredential,
         grace_until: chrono::DateTime<chrono::Utc>,
-        _audit: MutationContext,
+        audit: MutationContext,
     ) -> SidResult<bool> {
         let mut inner = self.inner.lock().unwrap();
-        let Some(old) = inner.machine_credentials.iter_mut().find(|c| {
+        let rotates = |c: &MachineUserCredential| {
             c.kid == old_kid
                 && c.machine_user_id == machine_user_id
                 && c.status == sid_core::models::CredentialStatus::Active
-        }) else {
-            return Ok(false);
         };
+        if !inner.machine_credentials.iter().any(rotates) {
+            return Ok(false);
+        }
+        inner.owe(&audit)?;
+        let old = inner
+            .machine_credentials
+            .iter_mut()
+            .find(|c| rotates(c))
+            .expect("read above");
         old.status = sid_core::models::CredentialStatus::GracePeriod;
         old.expires_at = Some(
             old.expires_at
