@@ -278,7 +278,7 @@ pub async fn test_unchanged_mutation_records_its_completion(backend: &dyn Storag
         .create_profile(&profile, test_audit())
         .await
         .unwrap();
-    let mut consent = ConsentRecord::new(profile.id, &format!("app_{}", Uuid::now_v7().simple()));
+    let mut consent = ConsentRecord::new(profile.id, format!("app_{}", Uuid::now_v7().simple()));
     consent.grant_claim("phone", ClaimType::Data);
     if let Some(requested) = consent.as_requested() {
         requested.grant();
@@ -349,6 +349,61 @@ pub async fn test_unchanged_mutation_records_its_completion(backend: &dyn Storag
             .iter()
             .any(|g| g.claim_name == "phone" && g.is_active()),
         "the retry applied the decision over a later one"
+    );
+}
+
+/// A keyed device trust change records the device as its transaction left
+/// it, also when the device already had that trust and nothing changed, so a
+/// retry answers with that device rather than a later state.
+pub async fn test_device_trust_records_the_device_it_left(backend: &dyn StorageBackend) {
+    use sid_core::models::{Device, DeviceTrustChange, DeviceType, Profile};
+    let profile = Profile::new(Some(&format!(
+        "trusting{}",
+        &Uuid::now_v7().simple().to_string()[16..]
+    )));
+    backend
+        .create_profile(&profile, test_audit())
+        .await
+        .unwrap();
+    let device = Device::new(profile.id, DeviceType::Desktop);
+    backend.create_device(&device, test_audit()).await.unwrap();
+    let trust = |ns: &str, key: &OperationKey| {
+        test_audit().with_operation(OperationCompletion::new(
+            ns,
+            key.clone(),
+            "sid.v1.identity.IdentityService/TrustDevice",
+            b"trust",
+            Vec::new(),
+        ))
+    };
+    let recorded = |ns: String, key: OperationKey| async move {
+        let record = backend
+            .get_operation_result(&ns, &key)
+            .await
+            .unwrap()
+            .expect("recorded");
+        serde_json::from_slice::<Device>(&record.completion.result).unwrap()
+    };
+
+    let (ns, first) = (namespace(), key());
+    let change = backend
+        .set_device_trust(device.id, true, 5, trust(&ns, &first))
+        .await
+        .unwrap();
+    assert_eq!(change, DeviceTrustChange::Changed);
+    let left = recorded(ns, first).await;
+    assert_eq!(left.id, device.id);
+    assert!(left.trusted, "the record is not the trusted device");
+
+    let (ns, again) = (namespace(), key());
+    let change = backend
+        .set_device_trust(device.id, true, 5, trust(&ns, &again))
+        .await
+        .unwrap();
+    assert_eq!(change, DeviceTrustChange::Unchanged);
+    assert!(
+        recorded(ns, again).await.trusted,
+        "an unchanged trust recorded no device"
     );
 }
 

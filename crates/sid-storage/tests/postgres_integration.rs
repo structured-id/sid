@@ -2327,6 +2327,11 @@ async fn test_unchanged_mutation_records_its_completion() {
 }
 
 #[tokio::test]
+async fn test_device_trust_records_the_device_it_left() {
+    common::operation::test_device_trust_records_the_device_it_left(&setup().await).await;
+}
+
+#[tokio::test]
 async fn test_operation_results_travel_between_stores() {
     common::operation::test_operation_results_travel_between_stores(&setup().await).await;
 }

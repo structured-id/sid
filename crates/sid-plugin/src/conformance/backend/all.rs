@@ -160,6 +160,7 @@ macro_rules! storage_conformance {
                 test_operation_results_travel_between_stores
                 test_terminal_abort_races_the_commit
                 test_unchanged_mutation_records_its_completion
+                test_device_trust_records_the_device_it_left
                 test_failed_mutation_records_no_completion
             );
             $crate::__storage_scenarios!($setup, organization:

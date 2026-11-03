@@ -2554,12 +2554,34 @@ impl StorageBackend for MockStorage {
             .flatten())
     }
 
-    async fn save_principal(&self, principal: &Principal, ctx: MutationContext) -> SidResult<()> {
+    async fn save_principal(
+        &self,
+        principal: &Principal,
+        mut ctx: MutationContext,
+    ) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
         // A refused bind commits nothing, owed work included.
         inner.check_login_handle(principal)?;
-        inner.owe(&ctx)?;
-        inner.bind_principal(principal)
+        let before = inner.principals.clone();
+        inner.bind_principal(principal)?;
+        if ctx.operation.is_some() {
+            let stored = inner
+                .principals
+                .values()
+                .find(|p| {
+                    p.profile_id == principal.profile_id
+                        && p.principal_type == principal.principal_type
+                        && p.value == principal.value
+                })
+                .cloned()
+                .expect("bound above");
+            ctx.record_effect(&stored)?;
+        }
+        if let Err(e) = inner.owe(&ctx) {
+            inner.principals = before;
+            return Err(e);
+        }
+        Ok(())
     }
 
     async fn get_principal_by_value(
@@ -4293,13 +4315,16 @@ impl StorageBackend for MockStorage {
         &self,
         id: DeviceId,
         display_name: Option<&str>,
-        audit: MutationContext,
+        mut audit: MutationContext,
     ) -> SidResult<bool> {
         let mut inner = self.inner.lock().unwrap();
-        let Some(device) = inner.devices.get_mut(&id) else {
+        let Some(mut device) = inner.devices.get(&id).cloned() else {
             return Ok(false);
         };
         device.display_name = display_name.map(str::to_owned);
+        audit.record_effect(&device)?;
+        inner.owe(&audit)?;
+        inner.devices.insert(id, device);
         inner.device_audits.push(audit.audit);
         Ok(true)
     }
@@ -4308,14 +4333,16 @@ impl StorageBackend for MockStorage {
         id: DeviceId,
         trusted: bool,
         max_trusted: usize,
-        audit: MutationContext,
+        mut audit: MutationContext,
     ) -> SidResult<sid_core::models::DeviceTrustChange> {
         use sid_core::models::DeviceTrustChange;
         let mut inner = self.inner.lock().unwrap();
-        let Some(device) = inner.devices.get(&id).cloned() else {
+        let Some(mut device) = inner.devices.get(&id).cloned() else {
             return Ok(DeviceTrustChange::NotFound);
         };
         if device.trusted == trusted {
+            audit.record_effect(&device)?;
+            inner.complete(&audit)?;
             return Ok(DeviceTrustChange::Unchanged);
         }
         let already_trusted = inner
@@ -4326,7 +4353,10 @@ impl StorageBackend for MockStorage {
         if trusted && already_trusted >= max_trusted {
             return Ok(DeviceTrustChange::LimitReached);
         }
-        inner.devices.get_mut(&id).expect("read above").trusted = trusted;
+        device.trusted = trusted;
+        audit.record_effect(&device)?;
+        inner.owe(&audit)?;
+        inner.devices.insert(id, device);
         inner.device_audits.push(audit.audit);
         Ok(DeviceTrustChange::Changed)
     }
@@ -4346,6 +4376,7 @@ impl StorageBackend for MockStorage {
     }
     async fn delete_device(&self, id: DeviceId, audit: MutationContext) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
+        inner.owe(&audit)?;
         inner.devices.remove(&id);
         inner.device_audits.push(audit.audit);
         Ok(())
@@ -5248,13 +5279,14 @@ impl StorageBackend for MockStorage {
     }
 
     // === DATA EXPORT ===
-    async fn create_export_job(&self, job: &ExportJob, _: MutationContext) -> SidResult<()> {
+    async fn create_export_job(&self, job: &ExportJob, ctx: MutationContext) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
         if inner.export_jobs.contains_key(&job.id) {
             return Err(sid_core::Error::Conflict(
                 "export job already exists".into(),
             ));
         }
+        inner.owe(&ctx)?;
         inner.export_jobs.insert(job.id, job.clone());
         Ok(())
     }
@@ -5262,18 +5294,20 @@ impl StorageBackend for MockStorage {
         &self,
         id: Uuid,
         at: chrono::DateTime<chrono::Utc>,
-        _: MutationContext,
+        ctx: MutationContext,
     ) -> SidResult<bool> {
         let mut inner = self.inner.lock().unwrap();
-        match inner.export_jobs.get_mut(&id) {
-            Some(job)
-                if job.status == ExportStatus::Ready && job.expires_at.is_some_and(|e| e > at) =>
-            {
-                job.status = ExportStatus::Downloaded;
-                Ok(true)
-            }
-            _ => Ok(false),
+        let ready = inner.export_jobs.get(&id).is_some_and(|job| {
+            job.status == ExportStatus::Ready && job.expires_at.is_some_and(|e| e > at)
+        });
+        if !ready {
+            return Ok(false);
         }
+        inner.owe(&ctx)?;
+        if let Some(job) = inner.export_jobs.get_mut(&id) {
+            job.status = ExportStatus::Downloaded;
+        }
+        Ok(true)
     }
     async fn expire_export_job(
         &self,

@@ -623,7 +623,7 @@ impl AccountService for AccountServiceImpl {
                     id: sid_core::models::profile_phone::ProfilePhoneId::new(),
                     profile_id,
                     e164: req.e164,
-                    extension: req.extension.clone(),
+                    extension: req.extension,
                     label: proto_phone_label(req.label),
                     custom_label: req.custom_label.clone().filter(|s| !s.is_empty()),
                     is_primary: req.is_primary,

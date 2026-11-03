@@ -437,6 +437,245 @@ async fn test_create_profile_retry_answers_with_its_account() {
     assert_eq!(svc.mock_storage.profile_count(), before + 1);
 }
 
+/// A credential is renamed, renamed again, then the first rename's lost
+/// response is retried: the retry answers as the first rename did and the
+/// later label stays.
+#[tokio::test]
+async fn test_credential_rename_retry_keeps_a_later_label() {
+    use sid_proto::sid::v1::identity_service_server::IdentityService;
+    let profile = sid_core::models::Profile::new(Some("relabel_retry"));
+    let cred = sid_core::models::Credential::new(
+        profile.id,
+        sid_core::models::CredentialType::Totp,
+        vec![1],
+        Some("old".into()),
+    );
+    let svc = TestServices::new(
+        MockStorage::new()
+            .with_profile(profile.clone())
+            .with_credential(cred.clone()),
+    );
+    let token = common::fresh_token(&svc, &profile).await;
+    let rename = |label: &str, key: &str| {
+        keyed(
+            UpdateCredentialRequest {
+                credential_id: cred.id.0.to_string(),
+                label: Some(label.to_string()),
+            },
+            &token,
+            Some(key),
+        )
+    };
+
+    let first = svc
+        .identity
+        .update_credential(rename("phone", "op-a"))
+        .await
+        .unwrap()
+        .into_inner();
+    svc.identity
+        .update_credential(rename("laptop", "op-b"))
+        .await
+        .unwrap();
+    let retry = svc
+        .identity
+        .update_credential(rename("phone", "op-a"))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(retry, first);
+    let stored = svc.storage.get_credential(cred.id).await.unwrap().unwrap();
+    assert_eq!(
+        stored.label.as_deref(),
+        Some("laptop"),
+        "the retry wrote its label over a later rename"
+    );
+}
+
+/// A device is trusted, then distrusted, then the trust's lost response is
+/// retried: the retry answers as the trust did and the device stays
+/// distrusted.
+#[tokio::test]
+async fn test_device_trust_retry_keeps_a_later_distrust() {
+    use sid_proto::sid::v1::identity_service_server::IdentityService;
+    let profile = sid_core::models::Profile::new(Some("trust_retry"));
+    let svc = TestServices::new(MockStorage::new().with_profile(profile.clone()));
+    let device = sid_core::models::Device::new(profile.id, sid_core::models::DeviceType::Desktop);
+    svc.storage
+        .create_device(
+            &device,
+            sid_core::models::AuditEntry::system("test", "device").into(),
+        )
+        .await
+        .unwrap();
+    let token = common::issue_token(&svc.jwt, &profile, &["openid".to_string()]);
+    let id = device.id.to_string();
+
+    let first = svc
+        .identity
+        .trust_device(keyed(
+            TrustDeviceRequest {
+                device_id: id.clone(),
+            },
+            &token,
+            Some("op-trust"),
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    svc.identity
+        .revoke_device_trust(keyed(
+            RevokeDeviceTrustRequest {
+                device_id: id.clone(),
+            },
+            &token,
+            Some("op-distrust"),
+        ))
+        .await
+        .unwrap();
+    let retry = svc
+        .identity
+        .trust_device(keyed(
+            TrustDeviceRequest { device_id: id },
+            &token,
+            Some("op-trust"),
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert!(first.trusted);
+    assert_eq!(retry, first);
+    assert!(
+        !svc.storage
+            .get_device(device.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .trusted,
+        "the retry trusted the device again"
+    );
+}
+
+/// A handle is removed, then the removal's lost response is retried: the
+/// retry answers as the removal did, not as a principal not found.
+#[tokio::test]
+async fn test_principal_removal_retry_answers_as_the_removal() {
+    use sid_proto::sid::v1::identity_service_server::IdentityService;
+    let profile = sid_core::models::Profile::new(Some("unbind_retry"));
+    let svc = TestServices::new(MockStorage::new().with_profile(profile.clone()));
+    let token = common::fresh_token(&svc, &profile).await;
+    let added = svc
+        .identity
+        .add_principal(keyed(
+            AddPrincipalRequest {
+                profile_id: profile.id.to_string(),
+                r#type: PrincipalType::Username as i32,
+                value: "unbind_retry_handle".to_string(),
+            },
+            &token,
+            Some("op-add"),
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .principal
+        .unwrap();
+    let remove = || {
+        keyed(
+            RemovePrincipalRequest {
+                principal_id: added.id.clone(),
+            },
+            &token,
+            Some("op-remove"),
+        )
+    };
+
+    let first = svc
+        .identity
+        .remove_principal(remove())
+        .await
+        .unwrap()
+        .into_inner();
+    let retry = svc
+        .identity
+        .remove_principal(remove())
+        .await
+        .expect("the retry answers as the removal did")
+        .into_inner();
+
+    assert_eq!(retry, first);
+}
+
+/// The passkey prompt is dismissed and the response lost: the retry answers
+/// with the same prompt state and counts one skip, not two.
+#[tokio::test]
+async fn test_passkey_prompt_dismissal_retry_counts_one_skip() {
+    use sid_proto::sid::v1::identity_service_server::IdentityService;
+    let profile = sid_core::models::Profile::new(Some("dismiss_retry"));
+    let svc = TestServices::new(MockStorage::new().with_profile(profile.clone()));
+    let token = common::issue_token(&svc.jwt, &profile, &["openid".to_string()]);
+    let dismiss = || {
+        keyed(
+            RecordPasskeyPromptDismissalRequest::default(),
+            &token,
+            Some("op-dismiss"),
+        )
+    };
+
+    let first = svc
+        .identity
+        .record_passkey_prompt_dismissal(dismiss())
+        .await
+        .unwrap()
+        .into_inner();
+    let retry = svc
+        .identity
+        .record_passkey_prompt_dismissal(dismiss())
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(first.state.as_ref().unwrap().skip_count, 1);
+    assert_eq!(retry, first, "the retry counted a second skip");
+}
+
+/// A closure request's response is lost: the retry answers with the closure
+/// it started and its grace period, not as a profile already closing.
+#[tokio::test]
+async fn test_closure_request_retry_answers_with_its_closure() {
+    use sid_proto::sid::v1::identity_service_server::IdentityService;
+    let profile = sid_core::models::Profile::new(Some("closure_retry"));
+    let svc = TestServices::new(MockStorage::new().with_profile(profile.clone()));
+    let token = common::issue_token(&svc.jwt, &profile, &["openid".to_string()]);
+    let request = || {
+        keyed(
+            RequestClosureRequest {
+                mode: ClosureMode::Voluntary as i32,
+                ..Default::default()
+            },
+            &token,
+            Some("op-close"),
+        )
+    };
+
+    let first = svc
+        .identity
+        .request_closure(request())
+        .await
+        .unwrap()
+        .into_inner();
+    let retry = svc
+        .identity
+        .request_closure(request())
+        .await
+        .expect("the retry answers with the closure it started")
+        .into_inner();
+
+    assert_eq!(retry, first);
+}
+
 /// An edit without a key cannot promise a safe retry and changes nothing.
 #[tokio::test]
 async fn test_update_project_without_key_is_refused() {

@@ -14,10 +14,16 @@ use sid_proto::sid::v1::auth_service_server::AuthService;
 use sid_proto::sid::v1::*;
 use tonic::{Code, Request, Status};
 
+/// `msg` as one new command of `bearer`'s (a method that promises a safe
+/// retry takes an operation key).
 fn authed<T>(msg: T, bearer: &str) -> Request<T> {
     let mut req = Request::new(msg);
     req.metadata_mut()
         .insert("authorization", format!("Bearer {bearer}").parse().unwrap());
+    req.metadata_mut().insert(
+        sid_authn::operation::OPERATION_KEY_HEADER,
+        uuid::Uuid::new_v4().to_string().parse().unwrap(),
+    );
     req
 }
 

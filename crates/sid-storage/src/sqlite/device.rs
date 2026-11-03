@@ -87,22 +87,31 @@ impl SqliteBackend {
         &self,
         id: DeviceId,
         display_name: Option<&str>,
-        audit: MutationContext,
+        mut audit: MutationContext,
     ) -> SidResult<bool> {
         let mut tx = self.begin_write().await?;
-        let renamed = sqlx::query("UPDATE devices SET display_name = ? WHERE id = ?")
+        let renamed = sqlx::query("UPDATE devices SET display_name = ? WHERE id = ? RETURNING *")
             .bind(display_name)
             .bind(id)
-            .execute(&mut *tx)
+            .fetch_optional(&mut *tx)
             .await
-            .map_err(|e| SidError::Storage(format!("rename device: {e}")))?
-            .rows_affected()
-            == 1;
-        if !renamed {
+            .map_err(|e| SidError::Storage(format!("rename device: {e}")))?;
+        let Some(renamed) = renamed else {
             return Ok(false);
-        }
+        };
+        audit.record_effect(&row_to_device(&renamed)?)?;
         Self::commit_mutation(tx, &format!("device:{id}"), audit).await?;
         Ok(true)
+    }
+
+    /// Device `id` as the transaction leaves it.
+    async fn device_in_tx(tx: &mut super::WriteTx, id: DeviceId) -> SidResult<Device> {
+        let row = sqlx::query("SELECT * FROM devices WHERE id = ?")
+            .bind(id)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(|e| SidError::Storage(format!("read device: {e}")))?;
+        row_to_device(&row)
     }
 
     /// `BEGIN IMMEDIATE` orders the count with every other write, so
@@ -112,7 +121,7 @@ impl SqliteBackend {
         id: DeviceId,
         trusted: bool,
         max_trusted: usize,
-        audit: MutationContext,
+        mut audit: MutationContext,
     ) -> SidResult<DeviceTrustChange> {
         let storage = |e: sqlx::Error| SidError::Storage(format!("set device trust: {e}"));
         let mut tx = self.begin_write().await?;
@@ -126,6 +135,8 @@ impl SqliteBackend {
             return Ok(DeviceTrustChange::NotFound);
         };
         if was_trusted == trusted {
+            audit.record_effect(&Self::device_in_tx(&mut tx, id).await?)?;
+            Self::commit_unchanged(tx, &audit).await?;
             return Ok(DeviceTrustChange::Unchanged);
         }
         let now = fmt_dt(&chrono::Utc::now());
@@ -159,6 +170,7 @@ impl SqliteBackend {
         .execute(&mut *tx)
         .await
         .map_err(storage)?;
+        audit.record_effect(&Self::device_in_tx(&mut tx, id).await?)?;
         Self::commit_mutation(tx, &format!("device:{id}"), audit).await?;
         Ok(DeviceTrustChange::Changed)
     }

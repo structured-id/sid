@@ -17,7 +17,8 @@ use sha2::{Digest, Sha256};
 
 use sid_core::models::{
     AuditEntry, ClosureMode, ClosureRequest, IDENTIFIER_QUARANTINE_DAYS,
-    MAX_CANCEL_CYCLES_PER_YEAR, ProfileId, ProfileStatus, RevocationReason,
+    MAX_CANCEL_CYCLES_PER_YEAR, MutationContext, OperationCompletion, ProfileId, ProfileStatus,
+    RevocationReason,
 };
 use sid_core::{Error as SidError, Result as SidResult};
 use sid_plugin::StorageBackend;
@@ -47,12 +48,14 @@ impl AccountClosureService {
     ///
     /// Validates that the profile is in a closable state (Active or Suspended),
     /// checks cancel cycle limits, transitions profile status to ClosureRequested,
-    /// and creates a closure request with the appropriate grace period.
+    /// and creates a closure request with the appropriate grace period. A
+    /// keyed command's `completion` of the request commits with it.
     pub async fn request_closure(
         &self,
         profile_id: ProfileId,
         mode: ClosureMode,
         requested_by: ProfileId,
+        completion: impl FnOnce(&ClosureRequest) -> Option<OperationCompletion>,
     ) -> SidResult<ClosureRequest> {
         // 1. Validate profile exists and is in valid state.
         let profile = self
@@ -101,18 +104,17 @@ impl AccountClosureService {
             closure_req.cancel_count = previous.cancel_count;
             closure_req.legal_hold = previous.legal_hold;
         }
+        let mut ctx = MutationContext::from(AuditEntry::user(
+            requested_by.to_string(),
+            "closure.requested",
+            profile_id.to_string(),
+        ));
+        if let Some(completion) = completion(&closure_req) {
+            ctx = ctx.with_operation(completion);
+        }
         if !self
             .storage
-            .request_profile_closure(
-                &profile,
-                &closure_req,
-                AuditEntry::user(
-                    requested_by.to_string(),
-                    "closure.requested",
-                    profile_id.to_string(),
-                )
-                .into(),
-            )
+            .request_profile_closure(&profile, &closure_req, ctx)
             .await?
         {
             return Err(SidError::InvalidState(
@@ -137,6 +139,7 @@ impl AccountClosureService {
         &self,
         profile_id: ProfileId,
         requested_by: ProfileId,
+        completion: Option<OperationCompletion>,
     ) -> SidResult<()> {
         let profile = self
             .storage
@@ -175,19 +178,15 @@ impl AccountClosureService {
         // Over the revision read above, with the cancellation counted in the
         // same write: once the closure has executed (Closed stored), the
         // cancellation no longer applies.
-        if !self
-            .storage
-            .cancel_profile_closure(
-                &profile,
-                AuditEntry::user(
-                    requested_by.to_string(),
-                    "closure.cancelled",
-                    profile_id.to_string(),
-                )
-                .into(),
-            )
-            .await?
-        {
+        let mut ctx = MutationContext::from(AuditEntry::user(
+            requested_by.to_string(),
+            "closure.cancelled",
+            profile_id.to_string(),
+        ));
+        if let Some(completion) = completion {
+            ctx = ctx.with_operation(completion);
+        }
+        if !self.storage.cancel_profile_closure(&profile, ctx).await? {
             return Err(SidError::InvalidState(
                 "profile changed while its closure was cancelled".into(),
             ));

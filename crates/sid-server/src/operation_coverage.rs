@@ -21,8 +21,20 @@ pub enum Coverage {
 /// Every mutating CE method and its coverage, by full method name.
 pub const COVERAGE: &[(&str, Coverage)] = &[
     (
+        "sid.v1.identity.IdentityService/AcknowledgeExport",
+        Coverage::Keyed,
+    ),
+    (
         "sid.v1.identity.IdentityService/AddCredential",
         Coverage::NotServed,
+    ),
+    (
+        "sid.v1.identity.IdentityService/AddPrincipal",
+        Coverage::Keyed,
+    ),
+    (
+        "sid.v1.identity.IdentityService/CancelClosure",
+        Coverage::Keyed,
     ),
     (
         "sid.v1.identity.IdentityService/CreateProfile",
@@ -30,6 +42,60 @@ pub const COVERAGE: &[(&str, Coverage)] = &[
     ),
     (
         "sid.v1.identity.IdentityService/DeleteProfile",
+        Coverage::Keyed,
+    ),
+    (
+        "sid.v1.identity.IdentityService/PrepareExport",
+        Coverage::Keyed,
+    ),
+    (
+        "sid.v1.identity.IdentityService/RecordPasskeyPromptDismissal",
+        Coverage::Keyed,
+    ),
+    (
+        "sid.v1.identity.IdentityService/RemoveDevice",
+        Coverage::Keyed,
+    ),
+    (
+        "sid.v1.identity.IdentityService/RemovePrincipal",
+        Coverage::Keyed,
+    ),
+    (
+        "sid.v1.identity.IdentityService/RequestClosure",
+        Coverage::Keyed,
+    ),
+    (
+        "sid.v1.identity.IdentityService/RevokeCredential",
+        Coverage::Keyed,
+    ),
+    (
+        "sid.v1.identity.IdentityService/RevokeDeviceTrust",
+        Coverage::Keyed,
+    ),
+    (
+        "sid.v1.identity.IdentityService/RevokeProfile",
+        Coverage::Natural(
+            "every cascade step ends only what is still active: a repeat ends what \
+             an interrupted attempt left and nothing else, and counts what it ended",
+        ),
+    ),
+    (
+        "sid.v1.identity.IdentityService/RevokeSession",
+        Coverage::Natural(
+            "an ended session stays ended: a repeat finds none and answers as the \
+             first, disclosing nothing",
+        ),
+    ),
+    (
+        "sid.v1.identity.IdentityService/TrustDevice",
+        Coverage::Keyed,
+    ),
+    (
+        "sid.v1.identity.IdentityService/UpdateCredential",
+        Coverage::Keyed,
+    ),
+    (
+        "sid.v1.identity.IdentityService/UpdateDevice",
         Coverage::Keyed,
     ),
     (

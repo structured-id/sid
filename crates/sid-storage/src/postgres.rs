@@ -474,6 +474,19 @@ impl PostgresBackend {
             .map_err(|e| SidError::Storage(format!("commit a completion: {e}")))
     }
 
+    /// Device `id` as the transaction leaves it.
+    async fn device_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        id: CoreDeviceId,
+    ) -> SidResult<CoreDevice> {
+        sqlx::query_as::<_, crate::pg_row::DeviceRow>("SELECT * FROM devices WHERE id = $1")
+            .bind(id)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(|e| SidError::Storage(format!("read device: {e}")))?
+            .into_domain()
+    }
+
     /// Lock `profile_id`'s row for a session commit and refuse an owner that
     /// can no longer authenticate.
     ///
@@ -2757,13 +2770,35 @@ impl StorageBackend for PostgresBackend {
         row.map(|r| r.into_domain()).transpose()
     }
 
-    async fn save_principal(&self, p: &Principal, audit: MutationContext) -> SidResult<()> {
+    async fn save_principal(&self, p: &Principal, mut audit: MutationContext) -> SidResult<()> {
         let mut tx = self
             .pool
             .begin()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
         directory::bind_principal(&mut tx, p).await?;
+        if audit.operation.is_some() {
+            // The holder's claim as stored: its id is the principal's, which
+            // an earlier holder may have created.
+            let stored = sqlx::query_as::<_, crate::pg_row::PrincipalRow>(
+                "SELECT p.id, p.principal_type, p.value, p.verified, p.verified_at,
+                        p.verification_expires, p.assigned_profile_id, p.assignment_revision,
+                        p.email_policy_revision, p.created_at, p.updated_at,
+                        pb.id AS binding_id, pb.profile_id,
+                        pb.is_primary, pb.source_field, pb.source_email_id, pb.source_phone_id
+                 FROM principals p
+                 JOIN principal_bindings pb ON pb.principal_id = p.id
+                 WHERE pb.profile_id = $1 AND p.principal_type = $2 AND p.value = $3",
+            )
+            .bind(p.profile_id)
+            .bind(p.principal_type.as_str())
+            .bind(&p.value)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| SidError::Storage(format!("read the stored principal: {e}")))?
+            .into_domain()?;
+            audit.record_effect(&stored)?;
+        }
         Self::audit_in_tx(
             &mut tx,
             &format!("principal:profile:{}", p.profile_id),
@@ -5018,24 +5053,25 @@ impl StorageBackend for PostgresBackend {
         &self,
         id: CoreDeviceId,
         display_name: Option<&str>,
-        audit: MutationContext,
+        mut audit: MutationContext,
     ) -> SidResult<bool> {
         let mut tx = self
             .pool
             .begin()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
-        let renamed = sqlx::query("UPDATE devices SET display_name = $2 WHERE id = $1")
-            .bind(id)
-            .bind(display_name)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| SidError::Storage(format!("rename device: {e}")))?
-            .rows_affected()
-            == 1;
-        if !renamed {
+        let renamed = sqlx::query_as::<_, crate::pg_row::DeviceRow>(
+            "UPDATE devices SET display_name = $2 WHERE id = $1 RETURNING *",
+        )
+        .bind(id)
+        .bind(display_name)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("rename device: {e}")))?;
+        let Some(renamed) = renamed else {
             return Ok(false);
-        }
+        };
+        audit.record_effect(&renamed.into_domain()?)?;
         Self::audit_in_tx(&mut tx, &format!("device:{id}"), audit).await?;
         tx.commit()
             .await
@@ -5048,7 +5084,7 @@ impl StorageBackend for PostgresBackend {
         id: CoreDeviceId,
         trusted: bool,
         max_trusted: usize,
-        audit: MutationContext,
+        mut audit: MutationContext,
     ) -> SidResult<sid_core::models::DeviceTrustChange> {
         use sid_core::models::DeviceTrustChange;
         let storage = |e: sqlx::Error| SidError::Storage(format!("set device trust: {e}"));
@@ -5082,6 +5118,8 @@ impl StorageBackend for PostgresBackend {
             return Ok(DeviceTrustChange::NotFound);
         };
         if was_trusted == trusted {
+            audit.record_effect(&Self::device_in_tx(&mut tx, id).await?)?;
+            Self::unchanged_in_tx(tx, &audit).await?;
             return Ok(DeviceTrustChange::Unchanged);
         }
         if trusted {
@@ -5114,6 +5152,7 @@ impl StorageBackend for PostgresBackend {
         .execute(&mut *tx)
         .await
         .map_err(storage)?;
+        audit.record_effect(&Self::device_in_tx(&mut tx, id).await?)?;
         Self::audit_in_tx(&mut tx, &format!("device:{id}"), audit).await?;
         tx.commit().await.map_err(storage)?;
         Ok(DeviceTrustChange::Changed)

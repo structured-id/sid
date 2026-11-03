@@ -18,11 +18,17 @@ use tonic::Request;
 
 type PrincipalType = sid_core::models::PrincipalType;
 
+/// `msg` as one new command of `token`'s (a method that promises a safe
+/// retry takes an operation key).
 fn authed<T>(msg: T, token: &str) -> Request<T> {
     let mut request = Request::new(msg);
     request
         .metadata_mut()
         .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    request.metadata_mut().insert(
+        sid_authn::operation::OPERATION_KEY_HEADER,
+        uuid::Uuid::new_v4().to_string().parse().unwrap(),
+    );
     request
 }
 
