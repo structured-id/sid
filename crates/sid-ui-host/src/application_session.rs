@@ -116,7 +116,10 @@ impl ApplicationSessions {
             return Err(unauthenticated());
         }
         // An issuer session ended elsewhere (sign-out on another device, an
-        // administrator's kill) ends this one with it.
+        // administrator's kill) and known here ends this one with it. The
+        // notices only arrive sooner than the issuer's own answer: without
+        // them every call this session makes is still admitted by its
+        // issuer, which refuses an ended session.
         match self
             .revocation
             .is_revoked(&session.claims.jti, &session.claims.sid)
@@ -129,7 +132,10 @@ impl ApplicationSessions {
                 }
                 Err(unauthenticated())
             }
-            Err(e) => Err(refuse::dependency_unavailable("revocation state", e)),
+            Err(e) => {
+                tracing::warn!(error = %e, "revocation notices unavailable");
+                Ok((id, session))
+            }
         }
     }
 
