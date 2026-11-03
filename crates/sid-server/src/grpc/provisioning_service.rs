@@ -12,7 +12,8 @@ use secrecy::ExposeSecret;
 use sid_authn::bearer_secret;
 use sid_authn::caller::{Caller, authenticate};
 use sid_authn::jwt::JwtService;
-use sid_authn::operation::{KeyedCommand, required_key};
+use sid_authn::operation::KeyedCommand;
+use sid_authn::operation::grpc::context;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_core::Error as SidError;
 use sid_core::grpc_error::refuse::{
@@ -27,15 +28,12 @@ use sid_core::models::{
     ProvisioningCredentialId, ProvisioningDirection,
 };
 use sid_plugin::StorageBackend;
+use sid_proto::keyed::admin::provisioning_service as keyed;
 use sid_proto::sid::v1::admin::{self as pb, provisioning_service_server::ProvisioningService};
 use sid_proto::sid::v1::ids;
 use tonic::{Request, Response, Status};
 
 use super::convert::to_timestamp;
-
-const CREATE_INBOUND_CONNECTOR: &str = "ProvisioningService/CreateInboundConnector";
-const CREATE_CONNECTOR_CREDENTIAL: &str = "ProvisioningService/CreateConnectorCredential";
-const ROTATE_CONNECTOR_CREDENTIAL: &str = "ProvisioningService/RotateConnectorCredential";
 
 /// The organization's provisioning connectors, managed by its
 /// administrators.
@@ -328,16 +326,15 @@ impl ProvisioningService for ProvisioningServiceImpl {
         request: Request<pb::CreateInboundConnectorRequest>,
     ) -> Result<Response<pb::ProvisioningConnector>, Status> {
         let caller = self.admin(&request).await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
         let name = display_name(&req.display_name)?;
 
         // A retry of a completed create returns the connector it created.
-        let command = KeyedCommand::new(
+        let command = KeyedCommand::of::<keyed::CreateInboundConnector>(
             format!("profile:{}", caller.profile_id),
-            key,
-            CREATE_INBOUND_CONNECTOR,
-            req.encode_to_vec(),
+            operation,
+            &req,
         );
         if let Some(result) = command.completed(&*self.storage).await? {
             return Ok(Response::new(replayed_connector(&result)?));
@@ -423,7 +420,19 @@ impl ProvisioningService for ProvisioningServiceImpl {
         request: Request<pb::ChangeProvisioningConnectorStateRequest>,
     ) -> Result<Response<pb::ProvisioningConnector>, Status> {
         let caller = self.admin(&request).await?;
+        let operation = context(&request)?;
         let req = request.into_inner();
+        // A retry of a completed change answers with the connector as that
+        // change left it, and never moves it again after a later change (a
+        // suspension retried after a reactivation).
+        let command = KeyedCommand::of::<keyed::ChangeProvisioningConnectorState>(
+            format!("profile:{}", caller.profile_id),
+            operation,
+            &req,
+        );
+        if let Some(result) = command.completed(&*self.storage).await? {
+            return Ok(Response::new(replayed_connector(&result)?));
+        }
         let id = connector_id(req.connector_id.as_ref())?;
         let target = state_from_proto(req.state)?;
         let current = self.connector(id).await?;
@@ -437,30 +446,49 @@ impl ProvisioningService for ProvisioningServiceImpl {
                 &format!("made {}", target.as_str()),
             ));
         }
-        let moved = self
+        // The connector as the transition leaves it.
+        let mut moved = current.clone();
+        moved.state = target;
+        moved.revision += 1;
+        moved.updated_at = chrono::Utc::now();
+        let response = connector_to_proto(&moved);
+        let ctx: MutationContext = AuditEntry::admin(
+            caller.profile_id.to_string(),
+            "provisioning_connector.state",
+            id.to_string(),
+        )
+        .with_metadata(serde_json::json!({
+            "from": current.state.as_str(),
+            "to": target.as_str(),
+        }))
+        .into();
+        match self
             .storage
             .transition_provisioning_connector(
                 id,
                 current.state,
                 target,
-                AuditEntry::admin(
-                    caller.profile_id.to_string(),
-                    "provisioning_connector.state",
-                    id.to_string(),
-                )
-                .with_metadata(serde_json::json!({
-                    "from": current.state.as_str(),
-                    "to": target.as_str(),
-                }))
-                .into(),
+                ctx.with_operation(command.completion(response.encode_to_vec())),
             )
             .await
-            .map_err(storage_failure)?;
-        let after = self.connector(id).await?;
-        if !moved && after.state != target {
-            return Err(changed_concurrently());
+        {
+            Ok(true) => Ok(Response::new(response)),
+            // Another change came first; the connector is answered as it is
+            // when that change already made it the target.
+            Ok(false) => {
+                let after = self.connector(id).await?;
+                if after.state != target {
+                    return Err(changed_concurrently());
+                }
+                Ok(Response::new(connector_to_proto(&after)))
+            }
+            // A concurrent attempt of this command committed first.
+            Err(SidError::OperationCompleted(_)) => {
+                let result = command.committed_elsewhere(&*self.storage).await?;
+                Ok(Response::new(replayed_connector(&result)?))
+            }
+            Err(e) => Err(storage_failure(e)),
         }
-        Ok(Response::new(connector_to_proto(&after)))
     }
 
     async fn get_scim_inbound_config(
@@ -506,17 +534,16 @@ impl ProvisioningService for ProvisioningServiceImpl {
         request: Request<pb::CreateConnectorCredentialRequest>,
     ) -> Result<Response<pb::IssuedConnectorCredential>, Status> {
         let caller = self.admin(&request).await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
         let id = connector_id(req.connector_id.as_ref())?;
         let expires_at = future_expiry(req.expires_at)?;
         let kind = kind_from_proto(req.kind)?;
 
-        let command = KeyedCommand::new(
+        let command = KeyedCommand::of::<keyed::CreateConnectorCredential>(
             format!("profile:{}", caller.profile_id),
-            key,
-            CREATE_CONNECTOR_CREDENTIAL,
-            req.encode_to_vec(),
+            operation,
+            &req,
         );
         if let Some(result) = command.completed(&*self.storage).await? {
             return Ok(Response::new(replayed_issue(&result)?));
@@ -565,16 +592,15 @@ impl ProvisioningService for ProvisioningServiceImpl {
         request: Request<pb::RotateConnectorCredentialRequest>,
     ) -> Result<Response<pb::IssuedConnectorCredential>, Status> {
         let caller = self.admin(&request).await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
         let id = connector_id(req.connector_id.as_ref())?;
         let old = credential_id(req.credential_id.as_ref())?;
 
-        let command = KeyedCommand::new(
+        let command = KeyedCommand::of::<keyed::RotateConnectorCredential>(
             format!("profile:{}", caller.profile_id),
-            key,
-            ROTATE_CONNECTOR_CREDENTIAL,
-            req.encode_to_vec(),
+            operation,
+            &req,
         );
         if let Some(result) = command.completed(&*self.storage).await? {
             return Ok(Response::new(replayed_issue(&result)?));

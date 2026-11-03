@@ -665,14 +665,26 @@ CREATE TABLE IF NOT EXISTS key_versions (
 -- durable_work (required work committed with its state change; fenced claims)
 --------------------------------------------------------------------------------
 
--- The periods keyed commands are named with: issued in increasing order at
--- issued_at_ms, accepting new commands until accepted_until_ms (Unix
--- milliseconds), and once retired never admitted again.
+-- The last period issued (every period through it was issued, and one with
+-- no row in operation_periods is retired and never admitted again) and the
+-- policy every replica issues and retires periods under: how long a period
+-- accepts new commands, and how long its commands are kept for retries
+-- after that.
+CREATE TABLE IF NOT EXISTS operation_period_state (
+    id                 INTEGER PRIMARY KEY CHECK (id = 1),
+    issued_through     INTEGER NOT NULL DEFAULT 0 CHECK (issued_through >= 0),
+    acceptance_seconds INTEGER NOT NULL DEFAULT 3600 CHECK (acceptance_seconds > 0),
+    retention_seconds  INTEGER NOT NULL DEFAULT 86400 CHECK (retention_seconds >= 0)
+);
+INSERT OR IGNORE INTO operation_period_state (id) VALUES (1);
+
+-- The periods keyed commands are admitted under: issued in increasing order
+-- at issued_at_ms, accepting new commands until accepted_until_ms (Unix
+-- milliseconds).
 CREATE TABLE IF NOT EXISTS operation_periods (
     period            INTEGER PRIMARY KEY CHECK (period > 0),
     issued_at_ms      INTEGER NOT NULL,
-    accepted_until_ms INTEGER NOT NULL,
-    retired           INTEGER NOT NULL DEFAULT 0
+    accepted_until_ms INTEGER NOT NULL
 );
 
 -- The completion of a caller's keyed command, committed with its effect.

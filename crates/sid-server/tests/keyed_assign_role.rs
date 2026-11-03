@@ -13,7 +13,6 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use common::test_jwt;
-use sid_authn::operation::OPERATION_KEY_HEADER;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authz::cedar::CedarService;
 use sid_authz::grpc::AuthzServiceImpl;
@@ -37,6 +36,7 @@ struct Harness {
 }
 
 async fn harness(storage: Arc<dyn StorageBackend>) -> Harness {
+    common::adopt_operation_period(storage.as_ref()).await;
     let jwt = test_jwt();
     let svc = AuthzServiceImpl::new(
         Arc::new(sid_authz::CeAuthzEngine::new(storage.clone())),
@@ -85,8 +85,7 @@ fn call<T>(msg: T, token: &str, key: Option<&str>) -> Request<T> {
     req.metadata_mut()
         .insert("authorization", format!("Bearer {token}").parse().unwrap());
     if let Some(key) = key {
-        req.metadata_mut()
-            .insert(OPERATION_KEY_HEADER, key.parse().unwrap());
+        common::name_command(req.metadata_mut(), key);
     }
     req
 }

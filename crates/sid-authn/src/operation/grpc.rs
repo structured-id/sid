@@ -6,7 +6,7 @@
 use std::task::{Context, Poll};
 
 use sid_core::grpc_error::{ApiError, ErrorReason};
-use sid_core::models::{OperationContext, OperationKey, OperationPeriod, OperationPeriodRefusal};
+use sid_core::models::{OperationContext, OperationKey, OperationPeriod};
 use tonic::Status;
 use tonic::metadata::MetadataMap;
 
@@ -19,10 +19,41 @@ pub const OPERATION_KEY_HEADER: &str = "idempotency-key";
 
 /// The metadata carrying the period the command was named with
 /// (`SID-Operation-Period` in HTTP): one canonical unsigned decimal.
-pub const OPERATION_PERIOD_HEADER: &str = "sid-operation-period";
+pub const OPERATION_PERIOD_HEADER: &str = sid_core::grpc_error::refuse::OPERATION_PERIOD_FIELD;
 
 /// A keyed command's effect that did not commit, refused with a status.
 pub type Effect = super::Effect<Status>;
+
+impl super::KeyedCommand {
+    /// [`super::KeyedCommand::execute`] for a method refusing with a status.
+    pub async fn run<T, F, Fut>(
+        &self,
+        storage: &(impl sid_plugin::OperationResultStore + ?Sized),
+        effect: F,
+    ) -> Result<T, Status>
+    where
+        T: prost::Message + Default,
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<T, Effect>>,
+    {
+        self.execute(storage, effect).await
+    }
+
+    /// [`super::KeyedCommand::execute_recorded`] for a method refusing with
+    /// a status.
+    pub async fn run_recorded<T, F, Fut>(
+        &self,
+        storage: &(impl sid_plugin::OperationResultStore + ?Sized),
+        effect: F,
+    ) -> Result<T, Status>
+    where
+        T: serde::de::DeserializeOwned,
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<T, Effect>>,
+    {
+        self.execute_recorded(storage, effect).await
+    }
+}
 
 impl From<Status> for super::Effect<Status> {
     fn from(status: Status) -> Self {
@@ -38,17 +69,9 @@ impl From<OperationError> for Status {
                 "the operation key already names another command",
             )
             .into(),
-            OperationError::PeriodRefused(OperationPeriodRefusal::Retired) => ApiError::new(
-                ErrorReason::OperationExpired,
-                "the operation period is retired; resolve the command through its resource",
-            )
-            .into(),
-            OperationError::PeriodRefused(OperationPeriodRefusal::NotIssued) => ApiError::new(
-                ErrorReason::InvalidFieldValue,
-                "the operation period was not issued by this server",
-            )
-            .with_field_violation(OPERATION_PERIOD_HEADER, "not issued")
-            .into(),
+            OperationError::PeriodRefused(refusal) => {
+                sid_core::grpc_error::refuse::operation_period_refused(refusal)
+            }
             OperationError::OutcomeUnknown => ApiError::new(
                 ErrorReason::OperationOutcomeUnknown,
                 "retry the operation with the same key",
@@ -72,6 +95,24 @@ pub fn context<T>(request: &tonic::Request<T>) -> Result<OperationContext, Statu
         Some(context) => Ok(context.clone()),
         None => metadata_context(request.metadata()),
     }
+}
+
+/// `metadata` naming the command by `context`, as a client sends it: the key
+/// as a Structured Field String and the period as its decimal, replacing
+/// any earlier values.
+pub fn insert_context(metadata: &mut MetadataMap, context: &OperationContext) {
+    let key = context
+        .key
+        .to_header()
+        .parse()
+        .expect("a Structured Field String of printable ASCII is a metadata value");
+    let period = context
+        .period
+        .to_string()
+        .parse()
+        .expect("a decimal is a metadata value");
+    metadata.insert(OPERATION_KEY_HEADER, key);
+    metadata.insert(OPERATION_PERIOD_HEADER, period);
 }
 
 /// The operation context `metadata` carries.

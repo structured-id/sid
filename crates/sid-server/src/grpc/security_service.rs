@@ -8,7 +8,8 @@
 use sid_admin::integrity::{IntegrityCheckRequest, IntegrityService, VerificationLayer};
 use sid_authn::caller::authenticate;
 use sid_authn::jwt::JwtService;
-use sid_authn::operation::{KeyedCommand, required_key};
+use sid_authn::operation::KeyedCommand;
+use sid_authn::operation::grpc::context;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_core::models::security_policy::{
     CE_PASSWORD_MAX_AGE_DAYS, CE_PASSWORD_MIN_DIGITS, CE_PASSWORD_MIN_LENGTH,
@@ -19,6 +20,7 @@ use sid_core::models::security_policy::{
 use sid_core::models::{AuditEntry, MutationContext};
 use sid_plugin::audit::AuditLog;
 use sid_plugin::storage::StorageBackend;
+use sid_proto::keyed::admin::security_service as keyed;
 use sid_proto::sid::v1::admin::{self as pb, security_service_server::SecurityService};
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
@@ -811,7 +813,7 @@ impl SecurityService for SecurityServiceImpl {
         request: Request<pb::AddIpAllowlistEntryRequest>,
     ) -> Result<Response<pb::IpAllowlistResponse>, Status> {
         let admin = self.admin(&request).await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
 
         if req.cidr.is_empty() {
@@ -832,7 +834,8 @@ impl SecurityService for SecurityServiceImpl {
 
         // A retry of a completed addition answers with the allowlist as it
         // left it and never adds back an entry removed since.
-        let command = KeyedCommand::by_profile(admin, key, ADD_IP_ALLOWLIST_ENTRY, &req);
+        let command =
+            KeyedCommand::by_profile::<keyed::AddIpAllowlistEntry>(admin, operation, &req);
         let left = command
             .run_recorded(&*self.storage, || async {
                 let ctx = MutationContext::from(AuditEntry::admin(
@@ -856,7 +859,7 @@ impl SecurityService for SecurityServiceImpl {
         request: Request<pb::RemoveIpAllowlistEntryRequest>,
     ) -> Result<Response<pb::IpAllowlistResponse>, Status> {
         let admin = self.admin(&request).await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
 
         if req.cidr.is_empty() {
@@ -865,7 +868,8 @@ impl SecurityService for SecurityServiceImpl {
 
         // A retry of a completed removal answers with the allowlist as it
         // left it and never removes an entry added again since.
-        let command = KeyedCommand::by_profile(admin, key, REMOVE_IP_ALLOWLIST_ENTRY, &req);
+        let command =
+            KeyedCommand::by_profile::<keyed::RemoveIpAllowlistEntry>(admin, operation, &req);
         let left = command
             .run_recorded(&*self.storage, || async {
                 let ctx = MutationContext::from(AuditEntry::admin(
@@ -886,9 +890,6 @@ impl SecurityService for SecurityServiceImpl {
 
 /// An IP allowlist entry as stored: CIDR, description and creation time.
 type AllowlistEntry = (String, String, chrono::DateTime<chrono::Utc>);
-
-const ADD_IP_ALLOWLIST_ENTRY: &str = "sid.v1.admin.SecurityService/AddIpAllowlistEntry";
-const REMOVE_IP_ALLOWLIST_ENTRY: &str = "sid.v1.admin.SecurityService/RemoveIpAllowlistEntry";
 
 /// The answer listing `entries`.
 fn allowlist_response(entries: Vec<AllowlistEntry>) -> pb::IpAllowlistResponse {

@@ -38,7 +38,7 @@ use sid_proto::sid::v1::{
     identity_service_server::IdentityServiceServer,
     oidc_issuer_service_server::OidcIssuerServiceServer,
     oidc_provider_service_server::OidcProviderServiceServer,
-    project_service_server::ProjectServiceServer,
+    operation_service_server::OperationServiceServer, project_service_server::ProjectServiceServer,
     system_integration_service_server::SystemIntegrationServiceServer,
     upstream_service_server::UpstreamServiceServer,
 };
@@ -154,6 +154,10 @@ impl CeServices {
                     c.revocation_cache.clone(),
                     c.key_manager.clone(),
                 ),
+            ))
+            .await
+            .add(OperationServiceServer::new(
+                crate::grpc::operation_service::OperationServiceImpl::new(c.storage.clone()),
             ))
             .await;
 
@@ -364,6 +368,7 @@ pub async fn serve(
         .accept_http1(true)
         .layer(tower::util::option_layer(grpc_edge))
         .layer(tonic_web::GrpcWebLayer::new())
+        .layer(sid_authn::operation::grpc::OperationContextLayer)
         .add_routes(routes)
         .serve_with_shutdown(c.grpc_addr, stopped.wait());
     info!("gRPC listening on {}", c.grpc_addr);
@@ -424,6 +429,7 @@ pub fn transcoder_upstream(
             browser_route::BrowserRoute::new(inner, issuers.clone())
         }))
         .map_request(transcoded_request)
+        .layer(sid_authn::operation::grpc::OperationContextLayer)
         .service(routes)
 }
 
@@ -447,9 +453,9 @@ fn transcoded_request<B>(mut request: http::Request<B>) -> http::Request<B> {
 }
 
 /// Request headers the annotated RPCs read as metadata: credentials, DPoP
-/// proofs, idempotency keys, client address and locale.
+/// proofs, operation contexts, client address and locale.
 #[cfg(feature = "http")]
-pub const HTTP_FORWARDED_HEADERS: [&str; 12] = [
+pub const HTTP_FORWARDED_HEADERS: [&str; 13] = [
     "authorization",
     // The IdP session cookie, read by the authorization and end-session
     // endpoints, and the origin a ceremony that sets it must come from.
@@ -464,7 +470,8 @@ pub const HTTP_FORWARDED_HEADERS: [&str; 12] = [
     "x-real-ip",
     "accept-language",
     "user-agent",
-    "idempotency-key",
+    sid_authn::operation::grpc::OPERATION_KEY_HEADER,
+    sid_authn::operation::grpc::OPERATION_PERIOD_HEADER,
 ];
 
 /// The embedded transcoder serving this server's annotated RPCs over HTTP:

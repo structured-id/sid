@@ -191,7 +191,8 @@ pub use oauth2_client::{
 pub use oidc_issuer::{IssuerAuthority, IssuerHandle, IssuerId, IssuerSigningKey, OidcIssuer};
 pub use operation::{
     IssuedOperationPeriod, OperationCompletion, OperationContext, OperationKey, OperationPeriod,
-    OperationPeriodRecord, OperationPeriodRefusal, OperationRecord,
+    OperationPeriodPolicy, OperationPeriodRecord, OperationPeriodRefusal, OperationPeriodState,
+    OperationRecord,
 };
 pub use organization::{OrgId, OrgStatus, OrgType, Organization};
 pub use password_history::{

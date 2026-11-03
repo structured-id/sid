@@ -10,7 +10,8 @@ use prost::Message;
 use sid_authn::caller::{Caller, authenticate};
 use sid_authn::challenge_store::ChallengeStore;
 use sid_authn::jwt::JwtService;
-use sid_authn::operation::{KeyedCommand, required_key};
+use sid_authn::operation::KeyedCommand;
+use sid_authn::operation::grpc::context;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::upstream::oidc::OidcProviderClient;
 use sid_core::models::upstream_provider::ProviderTrustCategory;
@@ -23,6 +24,7 @@ use sid_keys::KeyManager;
 use sid_plugin::UpstreamIdpProvider;
 use sid_plugin::storage::StorageBackend;
 use sid_plugin::upstream::UpstreamAuthState;
+use sid_proto::keyed::federation::upstream_service as keyed;
 use sid_proto::sid::v1::upstream_service_server::UpstreamService;
 use sid_proto::sid::v1::{
     self, CreateUpstreamProviderRequest, DeleteUpstreamProviderRequest,
@@ -47,9 +49,6 @@ use sid_core::grpc_error::refuse::{
     changed_concurrently, dependency_unavailable, internal, invalid_field, missing_field,
     not_found, storage_failure,
 };
-
-const CREATE_UPSTREAM_PROVIDER: &str = "sid.v1.federation.UpstreamService/CreateUpstreamProvider";
-const UPDATE_UPSTREAM_PROVIDER: &str = "sid.v1.federation.UpstreamService/UpdateUpstreamProvider";
 
 /// The answer another attempt of the same command recorded.
 #[allow(clippy::result_large_err)]
@@ -261,7 +260,7 @@ impl UpstreamService for UpstreamServiceImpl {
         request: Request<CreateUpstreamProviderRequest>,
     ) -> Result<Response<UpstreamProviderResponse>, Status> {
         let caller = self.admin(&request).await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
 
         if req.name.is_empty() {
@@ -282,10 +281,9 @@ impl UpstreamService for UpstreamServiceImpl {
             client_secret: String::new(),
             ..req.clone()
         };
-        let command = KeyedCommand::by_profile(
+        let command = KeyedCommand::by_profile::<keyed::CreateUpstreamProvider>(
             caller.profile_id,
-            key,
-            CREATE_UPSTREAM_PROVIDER,
+            operation,
             &fingerprinted,
         );
         if let Some(recorded) = command.replay(&*self.storage).await? {
@@ -381,7 +379,7 @@ impl UpstreamService for UpstreamServiceImpl {
         request: Request<UpdateUpstreamProviderRequest>,
     ) -> Result<Response<UpstreamProviderResponse>, Status> {
         let caller = self.admin(&request).await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
         let provider_id = Self::parse_provider_id(&req.provider_id)?;
         // A retry of a completed edit answers with the provider as that edit
@@ -391,10 +389,9 @@ impl UpstreamService for UpstreamServiceImpl {
             client_secret: req.client_secret.as_ref().map(|_| String::new()),
             ..req.clone()
         };
-        let command = KeyedCommand::by_profile(
+        let command = KeyedCommand::by_profile::<keyed::UpdateUpstreamProvider>(
             caller.profile_id,
-            key,
-            UPDATE_UPSTREAM_PROVIDER,
+            operation,
             &fingerprinted,
         );
         if let Some(recorded) = command.replay(&*self.storage).await? {

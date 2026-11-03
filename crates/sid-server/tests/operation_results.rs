@@ -6,7 +6,6 @@ mod common;
 
 use common::mock_storage::MockStorage;
 use common::{TestServices, issue_admin_token};
-use sid_authn::operation::OPERATION_KEY_HEADER;
 use sid_core::grpc_error::extract_error_info;
 use sid_core::models::ProfileId;
 use sid_proto::sid::v1::project_service_server::ProjectService;
@@ -18,8 +17,7 @@ fn keyed<T>(msg: T, token: &str, key: Option<&str>) -> Request<T> {
     req.metadata_mut()
         .insert("authorization", format!("Bearer {token}").parse().unwrap());
     if let Some(key) = key {
-        req.metadata_mut()
-            .insert(OPERATION_KEY_HEADER, key.parse().unwrap());
+        common::name_command(req.metadata_mut(), key);
     }
     req
 }
@@ -104,6 +102,89 @@ async fn test_create_project_without_key_is_refused() {
         .await
         .unwrap_err();
     assert_eq!(err.code(), Code::InvalidArgument);
+    assert_eq!(projects_named(&svc, &token, "billing").await, 0);
+}
+
+/// `msg` from the bearer of `token` named by `key` under `period`.
+fn in_period<T>(msg: T, token: &str, key: &str, period: u64) -> Request<T> {
+    let mut req = keyed(msg, token, None);
+    sid_authn::operation::grpc::insert_context(
+        req.metadata_mut(),
+        &sid_core::models::OperationContext::new(
+            sid_core::models::OperationKey::parse(key).unwrap(),
+            sid_core::models::OperationPeriod::new(period),
+        ),
+    );
+    req
+}
+
+/// A period the store issues after the test's own, far in the future so the
+/// test can retire everything before it.
+async fn later_period(svc: &TestServices) -> sid_core::models::IssuedOperationPeriod {
+    let later = chrono::DateTime::<chrono::Utc>::MAX_UTC - chrono::Duration::days(1);
+    svc.storage
+        .current_operation_period(later, chrono::Duration::hours(1))
+        .await
+        .unwrap()
+}
+
+/// The same key under another period is not a retry of the command: it is
+/// refused as a conflict and creates nothing.
+#[tokio::test]
+async fn test_same_key_under_another_period_conflicts() {
+    let svc = TestServices::new(MockStorage::new());
+    let token = issue_admin_token(&svc.jwt, ProfileId::generate());
+    svc.project
+        .create_project(keyed(create("billing"), &token, Some("op-p")))
+        .await
+        .unwrap();
+    let other = later_period(&svc).await.period.get();
+    let err = svc
+        .project
+        .create_project(in_period(create("billing"), &token, "op-p", other))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        extract_error_info(&err).expect("ErrorInfo").0,
+        "OPERATION_KEY_CONFLICT"
+    );
+    assert_eq!(projects_named(&svc, &token, "billing").await, 1);
+}
+
+/// A command named with a retired period is refused as expired and creates
+/// nothing, never executed as a new command; one with a period the server
+/// never issued is refused as malformed.
+#[tokio::test]
+async fn test_retired_or_unissued_period_is_refused_before_effects() {
+    let svc = TestServices::new(MockStorage::new());
+    let token = issue_admin_token(&svc.jwt, ProfileId::generate());
+    let issued = later_period(&svc).await;
+    svc.storage
+        .retire_operation_periods(issued.accepted_until + chrono::Duration::seconds(1))
+        .await
+        .unwrap();
+
+    let expired = svc
+        .project
+        .create_project(in_period(
+            create("billing"),
+            &token,
+            "op-r",
+            issued.period.get(),
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        extract_error_info(&expired).expect("ErrorInfo").0,
+        "OPERATION_EXPIRED"
+    );
+
+    let unissued = svc
+        .project
+        .create_project(in_period(create("billing"), &token, "op-u", u64::MAX))
+        .await
+        .unwrap_err();
+    assert_eq!(unissued.code(), Code::InvalidArgument);
     assert_eq!(projects_named(&svc, &token, "billing").await, 0);
 }
 

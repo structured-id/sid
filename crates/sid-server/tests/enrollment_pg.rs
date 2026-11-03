@@ -25,6 +25,7 @@ async fn setup_pg_storage() -> Arc<dyn StorageBackend> {
     sid_storage::migrator::run_migrations(backend.pool(), None)
         .await
         .expect("Failed to run migrations");
+    common::adopt_operation_period(&backend).await;
     Arc::new(backend)
 }
 
@@ -77,10 +78,7 @@ fn authed_request<T>(msg: T, token: &str) -> Request<T> {
     let mut req = Request::new(msg);
     req.metadata_mut()
         .insert("authorization", format!("Bearer {token}").parse().unwrap());
-    req.metadata_mut().insert(
-        sid_authn::operation::OPERATION_KEY_HEADER,
-        uuid::Uuid::new_v4().to_string().parse().unwrap(),
-    );
+    common::name_new_command(req.metadata_mut());
     req
 }
 
@@ -335,10 +333,7 @@ async fn test_pg_enrollment_bulk_create_retry_creates_once() {
             },
             &bearer,
         );
-        req.metadata_mut().insert(
-            sid_authn::operation::OPERATION_KEY_HEADER,
-            key.parse().unwrap(),
-        );
+        common::name_command(req.metadata_mut(), &key);
         req
     };
 

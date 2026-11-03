@@ -309,6 +309,27 @@ pub async fn purge_ceremony_state(store: &dyn sid_plugin::CeremonyStateStore) ->
     }
 }
 
+// ─── Operation period retirement ────────────────────────────────
+
+/// Retire the operation periods whose retention after their acceptance end
+/// passed, under the store's persisted policy. Returns how many.
+pub async fn retire_operation_periods(store: &dyn sid_plugin::OperationResultStore) -> u64 {
+    let retired = async {
+        let policy = store.operation_period_policy().await?;
+        let before = chrono::Utc::now()
+            .checked_sub_signed(policy.retention)
+            .ok_or_else(|| sid_core::Error::Internal("operation period retention".into()))?;
+        store.retire_operation_periods(before).await
+    };
+    match retired.await {
+        Ok(n) => n,
+        Err(e) => {
+            warn!("operation period retirement failed: {}", e);
+            0
+        }
+    }
+}
+
 // ─── Audit partition auto-management ─────────────────────────────
 
 /// One run of audit storage maintenance at `now`: the current and next

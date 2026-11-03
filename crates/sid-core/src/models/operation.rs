@@ -145,12 +145,29 @@ pub struct IssuedOperationPeriod {
     pub accepted_until: DateTime<Utc>,
 }
 
-/// A period as its store holds it, carried between stores.
+/// The policy a store issues and retires periods under, the same for every
+/// replica: a period accepts new commands for `acceptance` from its issue,
+/// and its commands are kept for retries `retention` past that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OperationPeriodPolicy {
+    pub acceptance: chrono::Duration,
+    pub retention: chrono::Duration,
+}
+
+/// A period still admitted, as its store holds it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperationPeriodRecord {
     pub issued: IssuedOperationPeriod,
     pub issued_at: DateTime<Utc>,
-    pub retired: bool,
+}
+
+/// A store's periods, carried between stores with its completions: every
+/// period through `issued_through` (`0` before the first) was issued, and
+/// those not `active` are retired.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperationPeriodState {
+    pub issued_through: OperationPeriod,
+    pub active: Vec<OperationPeriodRecord>,
 }
 
 /// Why a store does not admit the period a keyed command names.

@@ -14,7 +14,8 @@ use secrecy::{ExposeSecret, SecretBox};
 use sid_authn::caller::{Caller, authenticate};
 use sid_authn::dcr;
 use sid_authn::jwt::JwtService;
-use sid_authn::operation::{Effect, KeyedCommand, required_key};
+use sid_authn::operation::KeyedCommand;
+use sid_authn::operation::grpc::{Effect, context};
 use sid_authn::revocation_cache::RevocationCache;
 use sid_core::Error as SidError;
 use sid_core::grpc_error::{ApiError, ErrorReason};
@@ -24,6 +25,7 @@ use sid_core::models::{
     ProjectId, ResourceId, ResourceIndicator, ResourceState, Role, RoleId,
 };
 use sid_plugin::storage::StorageBackend;
+use sid_proto::keyed::projects::project_service as keyed;
 use sid_proto::sid::v1::project_service_server::ProjectService;
 use sid_proto::sid::v1::*;
 use std::sync::Arc;
@@ -600,44 +602,6 @@ fn role_to_proto(r: &Role) -> sid_proto::sid::v1::Role {
     }
 }
 
-/// The canonical method name keyed CreateProject commands are recorded under.
-const CREATE_PROJECT: &str = "sid.v1.ProjectService/CreateProject";
-
-/// The canonical method name keyed UpdateProject commands are recorded under.
-const UPDATE_PROJECT: &str = "sid.v1.ProjectService/UpdateProject";
-
-/// The canonical method name keyed DeleteProject commands are recorded under.
-const DELETE_PROJECT: &str = "sid.v1.ProjectService/DeleteProject";
-
-/// The canonical method name keyed UpdateApplication commands are recorded
-/// under.
-const UPDATE_APPLICATION: &str = "sid.v1.ProjectService/UpdateApplication";
-
-/// The canonical method names the other keyed ProjectService commands are
-/// recorded under.
-const DELETE_APPLICATION: &str = "sid.v1.ProjectService/DeleteApplication";
-const UPDATE_CLIENT_ROLE: &str = "sid.v1.ProjectService/UpdateClientRole";
-const CREATE_APPLICATION: &str = "sid.v1.ProjectService/CreateApplication";
-const CREATE_INITIAL_ACCESS_TOKEN: &str = "sid.v1.ProjectService/CreateInitialAccessToken";
-const REVOKE_INITIAL_ACCESS_TOKEN: &str = "sid.v1.ProjectService/RevokeInitialAccessToken";
-const ADD_CLIENT_ROLE: &str = "sid.v1.ProjectService/AddClientRole";
-const ADD_RESOURCE_ROLE: &str = "sid.v1.ProjectService/AddResourceRole";
-const UPDATE_RESOURCE_ROLE: &str = "sid.v1.ProjectService/UpdateResourceRole";
-const SET_RESOURCE_ACCESS: &str = "sid.v1.ProjectService/SetResourceAccess";
-const REMOVE_RESOURCE_ACCESS: &str = "sid.v1.ProjectService/RemoveResourceAccess";
-const ADD_ROLE: &str = "sid.v1.ProjectService/AddRole";
-const REMOVE_ROLE: &str = "sid.v1.ProjectService/RemoveRole";
-
-/// `caller`'s command `method` with `req`'s inputs under `key`.
-fn keyed(
-    caller: &Caller,
-    key: sid_core::models::OperationKey,
-    method: &'static str,
-    req: &impl Message,
-) -> KeyedCommand {
-    KeyedCommand::by_profile(caller.profile_id, key, method, req)
-}
-
 /// The audit of `caller`'s administrative `action` on `target`.
 fn admin_ctx(caller: &Caller, action: &str, target: String) -> MutationContext {
     AuditEntry::admin(caller.profile_id.to_string(), action, target).into()
@@ -761,7 +725,7 @@ impl ProjectService for ProjectServiceImpl {
     ) -> Result<Response<sid_proto::sid::v1::Project>, Status> {
         let caller = self.admin(&request).await?;
         self.check_maintenance().await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
 
         if req.name.is_empty() {
@@ -769,11 +733,10 @@ impl ProjectService for ProjectServiceImpl {
         }
 
         // A retry of a completed create returns the project it created.
-        let command = KeyedCommand::new(
+        let command = KeyedCommand::of::<keyed::CreateProject>(
             format!("profile:{}", caller.profile_id),
-            key,
-            CREATE_PROJECT,
-            req.encode_to_vec(),
+            operation,
+            &req,
         );
         if let Some(result) = command.completed(&*self.storage).await? {
             return Ok(Response::new(decode_result(&result)?));
@@ -868,7 +831,7 @@ impl ProjectService for ProjectServiceImpl {
     ) -> Result<Response<sid_proto::sid::v1::Project>, Status> {
         let caller = self.admin(&request).await?;
         self.check_maintenance().await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
         let project_id = parse_project_id(&req.id)?;
 
@@ -878,11 +841,10 @@ impl ProjectService for ProjectServiceImpl {
 
         // A retry of a completed edit returns the project as that edit left
         // it, and never writes its fields again over a later edit.
-        let command = KeyedCommand::new(
+        let command = KeyedCommand::of::<keyed::UpdateProject>(
             format!("profile:{}", caller.profile_id),
-            key,
-            UPDATE_PROJECT,
-            req.encode_to_vec(),
+            operation,
+            &req,
         );
         let change = ProjectChange {
             name: req.name,
@@ -918,7 +880,7 @@ impl ProjectService for ProjectServiceImpl {
     ) -> Result<Response<()>, Status> {
         let caller = self.admin(&request).await?;
         self.check_maintenance().await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
         let project_id = parse_project_id(&req.id)?;
 
@@ -928,11 +890,10 @@ impl ProjectService for ProjectServiceImpl {
 
         // A retry of a completed deletion answers as the deletion did, not
         // with the absence it left.
-        let command = KeyedCommand::new(
+        let command = KeyedCommand::of::<keyed::DeleteProject>(
             format!("profile:{}", caller.profile_id),
-            key,
-            DELETE_PROJECT,
-            req.encode_to_vec(),
+            operation,
+            &req,
         );
         command
             .run(&*self.storage, || async {
@@ -965,13 +926,17 @@ impl ProjectService for ProjectServiceImpl {
     ) -> Result<Response<CreateApplicationResponse>, Status> {
         let caller = self.admin(&request).await?;
         self.check_maintenance().await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
 
         // A retry of a completed creation answers with the application it
         // created, without the client secret: SID keeps only its hash, and a
         // retry creates no second application.
-        let command = keyed(&caller, key, CREATE_APPLICATION, &req);
+        let command = KeyedCommand::by_profile::<keyed::CreateApplication>(
+            caller.profile_id,
+            operation,
+            &req,
+        );
         let mut issued = None;
         let mut response = command
             .run(&*self.storage, || async {
@@ -1037,16 +1002,15 @@ impl ProjectService for ProjectServiceImpl {
     ) -> Result<Response<Application>, Status> {
         let caller = self.admin(&request).await?;
         self.check_maintenance().await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
 
         // A retry of a completed edit returns the application as that edit
         // left it, and never renames it again over a later edit.
-        let command = KeyedCommand::new(
+        let command = KeyedCommand::of::<keyed::UpdateApplication>(
             format!("profile:{}", caller.profile_id),
-            key,
-            UPDATE_APPLICATION,
-            req.encode_to_vec(),
+            operation,
+            &req,
         );
         let view = command
             .run(&*self.storage, || async {
@@ -1091,12 +1055,13 @@ impl ProjectService for ProjectServiceImpl {
     ) -> Result<Response<Application>, Status> {
         let caller = self.admin(&request).await?;
         self.check_maintenance().await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
 
         // A retry of a completed edit answers with the application as that
         // edit left it, and never applies the edit again over a later one.
-        let command = keyed(&caller, key, UPDATE_CLIENT_ROLE, &req);
+        let command =
+            KeyedCommand::by_profile::<keyed::UpdateClientRole>(caller.profile_id, operation, &req);
         let view = command
             .run(&*self.storage, || {
                 self.edit_client(&caller, &command, req.clone())
@@ -1113,7 +1078,7 @@ impl ProjectService for ProjectServiceImpl {
     ) -> Result<Response<()>, Status> {
         let caller = self.admin(&request).await?;
         self.check_maintenance().await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
 
         let id =
@@ -1130,7 +1095,11 @@ impl ProjectService for ProjectServiceImpl {
             return Err(system_managed(id, "it cannot be deleted"));
         }
         // A retry of a completed deletion answers as the deletion did.
-        let command = keyed(&caller, key, DELETE_APPLICATION, &req);
+        let command = KeyedCommand::by_profile::<keyed::DeleteApplication>(
+            caller.profile_id,
+            operation,
+            &req,
+        );
         command
             .run(&*self.storage, || async {
                 let ctx = admin_ctx(&caller, "application.delete", id.to_string())
@@ -1153,13 +1122,14 @@ impl ProjectService for ProjectServiceImpl {
     ) -> Result<Response<CreateApplicationResponse>, Status> {
         let caller = self.admin(&request).await?;
         self.check_maintenance().await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
 
         // A retry of a completed addition answers with the application and
         // its client, without the secret: SID keeps only its hash, and a retry
         // issues nothing new.
-        let command = keyed(&caller, key, ADD_CLIENT_ROLE, &req);
+        let command =
+            KeyedCommand::by_profile::<keyed::AddClientRole>(caller.profile_id, operation, &req);
         let mut issued = None;
         let mut response = command
             .run(&*self.storage, || async {
@@ -1217,12 +1187,13 @@ impl ProjectService for ProjectServiceImpl {
     ) -> Result<Response<Application>, Status> {
         let caller = self.admin(&request).await?;
         self.check_maintenance().await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
 
         // A retry of a completed addition answers with the application as it
         // left it, and never adds a second resource.
-        let command = keyed(&caller, key, ADD_RESOURCE_ROLE, &req);
+        let command =
+            KeyedCommand::by_profile::<keyed::AddResourceRole>(caller.profile_id, operation, &req);
         let view = command
             .run(&*self.storage, || async {
                 let app = self
@@ -1263,12 +1234,16 @@ impl ProjectService for ProjectServiceImpl {
     ) -> Result<Response<sid_proto::sid::v1::ProtectedResource>, Status> {
         let caller = self.admin(&request).await?;
         self.check_maintenance().await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
 
         // A retry of a completed edit answers with the resource as that edit
         // left it, and never applies it again over a later edit.
-        let command = keyed(&caller, key, UPDATE_RESOURCE_ROLE, &req);
+        let command = KeyedCommand::by_profile::<keyed::UpdateResourceRole>(
+            caller.profile_id,
+            operation,
+            &req,
+        );
         let view = command
             .run(&*self.storage, || {
                 self.edit_resource(&caller, &command, req.clone())
@@ -1284,12 +1259,16 @@ impl ProjectService for ProjectServiceImpl {
     ) -> Result<Response<sid_proto::sid::v1::ResourceAccess>, Status> {
         let caller = self.admin(&request).await?;
         self.check_maintenance().await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
 
         // A retry of a completed grant answers with the access it set, and
         // never sets those scopes again over a later change.
-        let command = keyed(&caller, key, SET_RESOURCE_ACCESS, &req);
+        let command = KeyedCommand::by_profile::<keyed::SetResourceAccess>(
+            caller.profile_id,
+            operation,
+            &req,
+        );
         let access = command
             .run(&*self.storage, || {
                 self.grant_access(&caller, &command, req.clone())
@@ -1305,7 +1284,7 @@ impl ProjectService for ProjectServiceImpl {
     ) -> Result<Response<()>, Status> {
         let caller = self.admin(&request).await?;
         self.check_maintenance().await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
 
         if req.client_id.is_empty() {
@@ -1320,7 +1299,11 @@ impl ProjectService for ProjectServiceImpl {
             ));
         }
         // A retry of a completed removal never removes a grant made after it.
-        let command = keyed(&caller, key, REMOVE_RESOURCE_ACCESS, &req);
+        let command = KeyedCommand::by_profile::<keyed::RemoveResourceAccess>(
+            caller.profile_id,
+            operation,
+            &req,
+        );
         command
             .run(&*self.storage, || async {
                 let ctx = admin_ctx(
@@ -1387,7 +1370,7 @@ impl ProjectService for ProjectServiceImpl {
     ) -> Result<Response<sid_proto::sid::v1::Role>, Status> {
         let caller = self.admin(&request).await?;
         self.check_maintenance().await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
 
         let project_id = parse_project_id(&req.project_id)?;
@@ -1401,7 +1384,8 @@ impl ProjectService for ProjectServiceImpl {
 
         // A retry of a completed addition answers with the role it added,
         // never as a conflict with that role.
-        let command = keyed(&caller, key, ADD_ROLE, &req);
+        let command =
+            KeyedCommand::by_profile::<keyed::AddRole>(caller.profile_id, operation, &req);
         let role = command
             .run(&*self.storage, || async {
                 self.storage
@@ -1448,7 +1432,7 @@ impl ProjectService for ProjectServiceImpl {
     ) -> Result<Response<()>, Status> {
         let caller = self.admin(&request).await?;
         self.check_maintenance().await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
 
         let role_id = uuid::Uuid::parse_str(&req.role_id)
@@ -1457,7 +1441,8 @@ impl ProjectService for ProjectServiceImpl {
         let role_not_found = || not_found(ErrorReason::RoleNotFound, "Role", req.role_id.clone());
 
         // A retry of a completed removal answers as the removal did.
-        let command = keyed(&caller, key, REMOVE_ROLE, &req);
+        let command =
+            KeyedCommand::by_profile::<keyed::RemoveRole>(caller.profile_id, operation, &req);
         command
             .run(&*self.storage, || async {
                 // Verify role exists and belongs to the specified project
@@ -1802,7 +1787,7 @@ impl ProjectService for ProjectServiceImpl {
     ) -> Result<Response<CreateInitialAccessTokenResponse>, Status> {
         let caller = self.admin(&request).await?;
         self.check_maintenance().await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
 
         let project_id = parse_project_id(&req.project_id)?;
@@ -1810,7 +1795,11 @@ impl ProjectService for ProjectServiceImpl {
         // A retry of a completed creation answers with the token it created,
         // without its value: SID keeps only its hash, and a retry creates no
         // second token.
-        let command = keyed(&caller, key, CREATE_INITIAL_ACCESS_TOKEN, &req);
+        let command = KeyedCommand::by_profile::<keyed::CreateInitialAccessToken>(
+            caller.profile_id,
+            operation,
+            &req,
+        );
         let mut issued = None;
         let mut response = command
             .run(&*self.storage, || async {
@@ -1893,7 +1882,7 @@ impl ProjectService for ProjectServiceImpl {
     ) -> Result<Response<()>, Status> {
         let caller = self.admin(&request).await?;
         self.check_maintenance().await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
 
         let token_id = uuid::Uuid::parse_str(&req.id)
@@ -1901,7 +1890,11 @@ impl ProjectService for ProjectServiceImpl {
             .map_err(|_| invalid_field("id", "not an initial access token identifier"))?;
 
         // A retry of a completed revocation answers as the revocation did.
-        let command = keyed(&caller, key, REVOKE_INITIAL_ACCESS_TOKEN, &req);
+        let command = KeyedCommand::by_profile::<keyed::RevokeInitialAccessToken>(
+            caller.profile_id,
+            operation,
+            &req,
+        );
         command
             .run(&*self.storage, || async {
                 self.storage

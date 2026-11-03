@@ -30,15 +30,16 @@ async fn postgres() -> Arc<dyn StorageBackend> {
     sid_storage::migrator::run_migrations(backend.pool(), None)
         .await
         .expect("migrations");
+    common::adopt_operation_period(&backend).await;
     Arc::new(backend)
 }
 
 async fn sqlite() -> Arc<dyn StorageBackend> {
-    Arc::new(
-        sid_storage::sqlite::SqliteBackend::new_in_memory()
-            .await
-            .expect("in-memory SQLite"),
-    )
+    let backend = sid_storage::sqlite::SqliteBackend::new_in_memory()
+        .await
+        .expect("in-memory SQLite");
+    common::adopt_operation_period(&backend).await;
+    Arc::new(backend)
 }
 
 struct Harness {
@@ -87,10 +88,7 @@ impl Harness {
             format!("Bearer {}", self.token).parse().unwrap(),
         );
         // Each call is its own provisioning command, under its own key.
-        request.metadata_mut().insert(
-            sid_authn::operation::OPERATION_KEY_HEADER,
-            uuid::Uuid::new_v4().to_string().parse().unwrap(),
-        );
+        common::name_new_command(request.metadata_mut());
         self.identity.create_profile(request).await
     }
 }

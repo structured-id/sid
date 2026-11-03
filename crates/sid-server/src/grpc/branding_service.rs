@@ -7,7 +7,8 @@
 use prost::Message;
 use sid_authn::caller::authenticate;
 use sid_authn::jwt::JwtService;
-use sid_authn::operation::{KeyedCommand, required_key};
+use sid_authn::operation::KeyedCommand;
+use sid_authn::operation::grpc::context;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_core::grpc_error::refuse::{
     changed_concurrently, invalid_field, not_found, storage_failure,
@@ -19,16 +20,13 @@ use sid_core::models::{
     ProjectId,
 };
 use sid_plugin::storage::StorageBackend;
+use sid_proto::keyed::admin::branding_service as keyed;
 use sid_proto::sid::v1::branding_service_server::BrandingService;
 use sid_proto::sid::v1::{self as pb};
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 use tracing::instrument;
 use uuid::Uuid;
-
-const CREATE_BRANDING_CONFIG: &str = "sid.v1.admin.BrandingService/CreateBrandingConfig";
-const UPDATE_BRANDING_CONFIG: &str = "sid.v1.admin.BrandingService/UpdateBrandingConfig";
-const PUBLISH_BRANDING_CONFIG: &str = "sid.v1.admin.BrandingService/PublishBrandingConfig";
 
 /// BRANDING_NOT_FOUND for `name` (a config id, or a project without
 /// published branding).
@@ -77,18 +75,18 @@ impl BrandingServiceImpl {
         Ok(caller.profile_id.to_string())
     }
 
-    /// `method` of `req` under `key`, in the administrator's own namespace.
+    /// Command `M` of `req` under `context`, in the administrator's own
+    /// namespace.
     #[allow(clippy::result_large_err)]
-    fn command(
+    fn command<M: sid_proto::KeyedMethod>(
         &self,
         admin_sub: &str,
-        key: sid_core::models::OperationKey,
-        method: &'static str,
-        req: &impl Message,
+        context: sid_core::models::OperationContext,
+        req: &M::Request,
     ) -> Result<KeyedCommand, Status> {
         let admin = sid_core::models::ProfileId::parse(admin_sub)
             .map_err(|e| sid_core::grpc_error::refuse::internal("read the caller", e))?;
-        Ok(KeyedCommand::by_profile(admin, key, method, req))
+        Ok(KeyedCommand::by_profile::<M>(admin, context, req))
     }
 
     #[allow(clippy::result_large_err)]
@@ -368,11 +366,11 @@ impl BrandingService for BrandingServiceImpl {
         request: Request<pb::CreateBrandingConfigRequest>,
     ) -> Result<Response<pb::BrandingConfig>, Status> {
         let admin_sub = self.require_admin(&request).await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
         let project_id = Self::parse_project_id(&req.project_id)?;
         let now = chrono::Utc::now();
-        let command = self.command(&admin_sub, key, CREATE_BRANDING_CONFIG, &req)?;
+        let command = self.command::<keyed::CreateBrandingConfig>(&admin_sub, operation, &req)?;
 
         let config = BrandingConfig {
             id: BrandingConfigId::new(),
@@ -424,13 +422,13 @@ impl BrandingService for BrandingServiceImpl {
         request: Request<pb::UpdateBrandingConfigRequest>,
     ) -> Result<Response<pb::BrandingConfig>, Status> {
         let admin_sub = self.require_admin(&request).await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
         let config_id = Self::parse_config_id(&req.config_id)?;
 
         // A retry of a completed edit answers with the draft as that edit
         // left it and never writes it over a later edit.
-        let command = self.command(&admin_sub, key, UPDATE_BRANDING_CONFIG, &req)?;
+        let command = self.command::<keyed::UpdateBrandingConfig>(&admin_sub, operation, &req)?;
         let response = command
             .run(&*self.storage, || async {
                 let mut config = self
@@ -482,7 +480,7 @@ impl BrandingService for BrandingServiceImpl {
         request: Request<pb::PublishBrandingConfigRequest>,
     ) -> Result<Response<pb::BrandingConfig>, Status> {
         let admin_sub = self.require_admin(&request).await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
         let config_id = Self::parse_config_id(&req.config_id)?;
         let project_id = Self::parse_project_id(&req.project_id)?;
@@ -490,7 +488,7 @@ impl BrandingService for BrandingServiceImpl {
         // A retry of a completed publication answers as it did, not as a
         // config no longer a draft, and never publishes it again over a
         // later one.
-        let command = self.command(&admin_sub, key, PUBLISH_BRANDING_CONFIG, &req)?;
+        let command = self.command::<keyed::PublishBrandingConfig>(&admin_sub, operation, &req)?;
         let response = command
             .run(&*self.storage, || async {
                 let mut config = self

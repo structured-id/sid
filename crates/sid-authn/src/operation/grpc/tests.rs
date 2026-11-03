@@ -26,6 +26,19 @@ fn test_context_reads_both_values() {
     assert_eq!(context.period, OperationPeriod::new(42));
 }
 
+/// What a client inserts is what the server reads, quotes and backslashes
+/// in the key included.
+#[test]
+fn test_inserted_context_round_trips() {
+    let context = OperationContext::new(
+        OperationKey::parse(r#"a "quoted" \ key"#).unwrap(),
+        OperationPeriod::new(7),
+    );
+    let mut map = MetadataMap::new();
+    insert_context(&mut map, &context);
+    assert_eq!(metadata_context(&map).unwrap(), context);
+}
+
 /// A missing, malformed or repeated value is refused, never replaced with a
 /// new key or the current period.
 #[test]

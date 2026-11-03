@@ -145,8 +145,9 @@ impl KeyedCommand {
     /// result; otherwise `effect` commits the mutation with
     /// [`Self::completion`] of its response, and a concurrent attempt that
     /// committed first answers with that attempt's result. Retries never
-    /// apply the effect again.
-    pub async fn run<T, E, F, Fut>(
+    /// apply the effect again. A refusal `E` is answered as is; `run` in
+    /// [`grpc`] is this with a status.
+    pub async fn execute<T, E, F, Fut>(
         &self,
         storage: &(impl OperationResultStore + ?Sized),
         effect: F,
@@ -160,11 +161,11 @@ impl KeyedCommand {
         self.run_with(storage, decode, effect).await
     }
 
-    /// [`Self::run`] for a mutation whose store records the state it leaves
-    /// ([`sid_core::models::MutationContext::record_effect`]): `effect`
+    /// [`Self::execute`] for a mutation whose store records the state it
+    /// leaves ([`sid_core::models::MutationContext::record_effect`]): `effect`
     /// passes the completion from [`Self::effect_completion`] and returns
     /// that state; a retry returns the state the first commit left.
-    pub async fn run_recorded<T, E, F, Fut>(
+    pub async fn execute_recorded<T, E, F, Fut>(
         &self,
         storage: &(impl OperationResultStore + ?Sized),
         effect: F,

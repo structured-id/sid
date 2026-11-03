@@ -440,9 +440,6 @@ fn require_totp_code_format(code: &str) -> Result<(), Status> {
     }
 }
 
-const GENERATE_RECOVERY_CODES: &str = "sid.v1.authn.AuthService/GenerateRecoveryCodes";
-const DELETE_MFA_CREDENTIAL: &str = "sid.v1.authn.AuthService/DeleteMfaCredential";
-
 /// A retried GenerateRecoveryCodes whose set was issued: the codes were shown
 /// once and only their hashes are kept, so the answer names the set
 /// (`recorded`, its credential id) instead of codes. Replacing the set is a
@@ -3031,6 +3028,8 @@ impl AuthServiceImpl {
         if !record.matches(
             super::sign_in_session::ADMITTED_METHOD,
             &super::sign_in_session::admitted_inputs(assignment),
+            // The sign-in ceremony's own record, under no period.
+            None,
         ) {
             return Err(authentication_failed());
         }
@@ -4744,9 +4743,10 @@ impl AuthService for AuthServiceImpl {
             }
         }
         let (user_code, raw_device_code) = issued.ok_or_else(|| {
-            storage_failure(format!(
-                "no free device user code after {CODE_ATTEMPTS} attempts"
-            ))
+            sid_core::grpc_error::refuse::internal(
+                "storage",
+                format!("no free device user code after {CODE_ATTEMPTS} attempts"),
+            )
         })?;
 
         // Build verification URIs
@@ -5478,13 +5478,10 @@ impl AuthService for AuthServiceImpl {
         // New codes step up to Standard, so issuing them is an enrollment.
         self.require_enrollment_authority(&caller, profile_id, CredentialType::Recovery)
             .await?;
-        let key = sid_authn::operation::required_key(request.metadata())?;
-        let command = sid_authn::operation::KeyedCommand::by_profile(
-            profile_id,
-            key,
-            GENERATE_RECOVERY_CODES,
-            request.get_ref(),
-        );
+        let context = sid_authn::operation::grpc::context(&request)?;
+        let command = sid_authn::operation::KeyedCommand::by_profile::<
+            sid_proto::keyed::authn::auth_service::GenerateRecoveryCodes,
+        >(profile_id, context, request.get_ref());
         // SID keeps only the codes' hashes: a retry of a completed generation
         // names the set it issued and issues no other, so the codes already
         // delivered stay valid until a new command replaces them.
@@ -6258,7 +6255,7 @@ impl AuthService for AuthServiceImpl {
 
         let profile_id = verified.caller.profile_id;
 
-        let key = sid_authn::operation::required_key(request.metadata())?;
+        let context = sid_authn::operation::grpc::context(&request)?;
         let req = request.into_inner();
         let credential_id = sid_core::models::CredentialId(
             uuid::Uuid::parse_str(&req.credential_id)
@@ -6267,12 +6264,9 @@ impl AuthService for AuthServiceImpl {
 
         // A retry of a completed deletion answers as it did, not as a
         // credential no longer there, and owes no second event.
-        let command = sid_authn::operation::KeyedCommand::by_profile(
-            profile_id,
-            key,
-            DELETE_MFA_CREDENTIAL,
-            &req,
-        );
+        let command = sid_authn::operation::KeyedCommand::by_profile::<
+            sid_proto::keyed::authn::auth_service::DeleteMfaCredential,
+        >(profile_id, context, &req);
         let response = command
             .run(&*self.storage, || async {
                 // Load credential and verify ownership + type.
@@ -6825,9 +6819,12 @@ impl AuthServiceImpl {
             .resume_target(&issuer, &client, code.resource, &req.resource)
             .await?;
 
-        let profile_id = code
-            .authorized_by
-            .ok_or_else(|| storage_failure("an approved device code has no approver"))?;
+        let profile_id = code.authorized_by.ok_or_else(|| {
+            sid_core::grpc_error::refuse::internal(
+                "storage",
+                "an approved device code has no approver",
+            )
+        })?;
         let profile = self
             .storage
             .get_profile(profile_id)

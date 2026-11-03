@@ -30,8 +30,6 @@ use sid_core::grpc_error::{ApiError, ErrorReason};
 use super::convert;
 use sid_core::grpc_error::refuse::{invalid_field, missing_field, not_found, storage_failure};
 
-const CREATE_PAT: &str = "sid.v1.machine.PatService/CreatePat";
-
 /// Proto `PatStatus` enum alias to avoid collision with domain type.
 type ProtoPatStatus = v1::PatStatus;
 
@@ -167,10 +165,11 @@ impl PatService for PatServiceImpl {
         request: Request<CreatePatRequest>,
     ) -> Result<Response<CreatePatResponse>, Status> {
         let profile_id = self.token_owner(&request).await?;
-        let key = sid_authn::operation::required_key(request.metadata())?;
+        let context = sid_authn::operation::grpc::context(&request)?;
         let req = request.into_inner();
-        let command =
-            sid_authn::operation::KeyedCommand::by_profile(profile_id, key, CREATE_PAT, &req);
+        let command = sid_authn::operation::KeyedCommand::by_profile::<
+            sid_proto::keyed::machine::pat_service::CreatePat,
+        >(profile_id, context, &req);
         // SID keeps only the token's hash: a retry of a completed creation
         // answers with the token it created, its value empty, and creates no
         // second token.

@@ -8,18 +8,21 @@ use prost::Message;
 use sid_authn::account_roles::ADMIN_ROLE_CLAIM;
 use sid_authn::caller::authenticate;
 use sid_authn::jwt::JwtService;
-use sid_authn::operation::{Effect, KeyedCommand, required_key};
+use sid_authn::operation::KeyedCommand;
+use sid_authn::operation::grpc::{Effect, context};
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::revocation_cascade::RevocationCascadeService;
 use sid_core::grpc_error::refuse::{
     changed_concurrently, internal, invalid_field, not_found, storage_failure,
 };
 use sid_core::grpc_error::{ApiError, ErrorReason};
+use sid_core::models::OperationContext;
 use sid_core::models::event::{Event, event_types};
 use sid_core::models::{
     AuditEntry, MutationContext, ProfileId, ProfileMetadata, ProfileStatus, RevocationReason,
 };
 use sid_plugin::storage::StorageBackend;
+use sid_proto::keyed::admin::admin_service as keyed;
 use sid_proto::sid::v1::admin_service_server::AdminService;
 use sid_proto::sid::v1::*;
 use std::sync::Arc;
@@ -172,20 +175,14 @@ impl AdminServiceImpl {
     }
 }
 
-const ADMIN_UPDATE_PROFILE: &str = "sid.v1.admin.AdminService/AdminUpdateProfile";
-const SET_PROFILE_METADATA: &str = "sid.v1.admin.AdminService/SetProfileMetadata";
-const DELETE_PROFILE_METADATA: &str = "sid.v1.admin.AdminService/DeleteProfileMetadata";
-const REVOKE_ALL_SESSIONS: &str = "sid.v1.admin.AdminService/RevokeAllSessions";
-
-/// The administrator `actor`'s command `method` with `req`'s inputs under
-/// `key`.
-fn admin_command(
+/// The administrator `actor`'s command `M` with `req`'s inputs under
+/// `context`.
+fn admin_command<M: sid_proto::KeyedMethod>(
     actor: &str,
-    key: sid_core::models::OperationKey,
-    method: &'static str,
-    req: &impl Message,
+    context: OperationContext,
+    req: &M::Request,
 ) -> KeyedCommand {
-    KeyedCommand::new(format!("profile:{actor}"), key, method, req.encode_to_vec())
+    KeyedCommand::of::<M>(format!("profile:{actor}"), context, req)
 }
 
 #[tonic::async_trait]
@@ -237,14 +234,14 @@ impl AdminService for AdminServiceImpl {
         request: Request<AdminUpdateProfileRequest>,
     ) -> Result<Response<AdminUpdateProfileResponse>, Status> {
         let actor = self.require_admin(&request).await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
 
         let req = request.into_inner();
         let profile_id = parse_profile_id(&req.profile_id)?;
 
         // A retry of a completed update answers as it did and never writes
         // its copy again over a later change.
-        let command = admin_command(&actor, key, ADMIN_UPDATE_PROFILE, &req);
+        let command = admin_command::<keyed::AdminUpdateProfile>(&actor, operation, &req);
         let response = command
             .run(&*self.storage, || {
                 self.update_profile(&actor, &command, profile_id, req.clone())
@@ -281,7 +278,7 @@ impl AdminService for AdminServiceImpl {
         request: Request<RevokeAllSessionsRequest>,
     ) -> Result<Response<RevokeAllSessionsResponse>, Status> {
         let actor = self.require_admin(&request).await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
 
         let req = request.into_inner();
         let profile_id = parse_profile_id(&req.profile_id)?;
@@ -289,7 +286,7 @@ impl AdminService for AdminServiceImpl {
         // A retry of a completed revocation answers with the count it ended
         // and never ends sessions signed in after it. The store records that
         // count with the deletion.
-        let command = admin_command(&actor, key, REVOKE_ALL_SESSIONS, &req);
+        let command = admin_command::<keyed::RevokeAllSessions>(&actor, operation, &req);
         let ended: usize = command
             .run_recorded(&*self.storage, || async {
                 // Through the cascade: the sessions' tokens stop in every
@@ -372,14 +369,14 @@ impl AdminService for AdminServiceImpl {
         request: Request<SetProfileMetadataRequest>,
     ) -> Result<Response<ProfileMetadataEntry>, Status> {
         let actor = self.require_admin(&request).await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
 
         let req = request.into_inner();
         let profile_id = parse_profile_id(&req.profile_id)?;
 
         // A retry of a completed write answers with the entry it wrote and
         // never writes it again over a later value.
-        let command = admin_command(&actor, key, SET_PROFILE_METADATA, &req);
+        let command = admin_command::<keyed::SetProfileMetadata>(&actor, operation, &req);
         let entry = command
             .run(&*self.storage, || async {
                 let json_value = req
@@ -414,14 +411,14 @@ impl AdminService for AdminServiceImpl {
         request: Request<DeleteProfileMetadataRequest>,
     ) -> Result<Response<()>, Status> {
         let actor = self.require_admin(&request).await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
 
         let req = request.into_inner();
         let profile_id = parse_profile_id(&req.profile_id)?;
 
         // A retry of a completed deletion answers as it did and never
         // deletes a value written after it.
-        let command = admin_command(&actor, key, DELETE_PROFILE_METADATA, &req);
+        let command = admin_command::<keyed::DeleteProfileMetadata>(&actor, operation, &req);
         command
             .run(&*self.storage, || async {
                 let ctx = MutationContext::from(AuditEntry::admin(

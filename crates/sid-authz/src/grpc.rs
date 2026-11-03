@@ -12,7 +12,8 @@ use crate::engine::CeAuthzEngine;
 use prost::Message;
 use sid_authn::caller::{Caller, authenticate};
 use sid_authn::jwt::JwtService;
-use sid_authn::operation::{KeyedCommand, required_key};
+use sid_authn::operation::grpc::metadata_context;
+use sid_authn::operation::{KeyedCommand, OperationError};
 use sid_authn::resource_token::ResourceTokenVerifier;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::service_auth::authenticate_service;
@@ -31,6 +32,8 @@ use sid_core::models::{
 };
 use sid_plugin::StorageBackend;
 use sid_plugin::audit::AuditLog;
+use sid_proto::KeyedMethod;
+use sid_proto::keyed::authz::authz_service as keyed;
 use sid_proto::sid::v1::authn::{RequestConfirmation, SenderProofProfile};
 use sid_proto::sid::v1::authz::*;
 use sid_proto::sid::v1::authz_service_server::AuthzService;
@@ -222,9 +225,6 @@ fn group_to_proto(g: &Group) -> sid_proto::sid::v1::Group {
     }
 }
 
-/// The keyed command name of AssignRole.
-const ASSIGN_ROLE: &str = "authz.assign_role";
-
 /// A recorded AssignRole answer, as a retry of its command gets it.
 #[allow(clippy::result_large_err)]
 fn decode_assigned(result: &[u8]) -> Result<Response<AssignRoleResponse>, Status> {
@@ -236,33 +236,18 @@ fn decode_assigned(result: &[u8]) -> Result<Response<AssignRoleResponse>, Status
         })
 }
 
-const CREATE_ROLE: &str = "authz.create_role";
-const UPDATE_ROLE: &str = "authz.update_role";
-const DELETE_ROLE: &str = "authz.delete_role";
-const REVOKE_ROLE: &str = "authz.revoke_role";
-const CREATE_GROUP: &str = "authz.create_group";
-const UPDATE_GROUP: &str = "authz.update_group";
-const DELETE_GROUP: &str = "authz.delete_group";
-const ADD_TO_GROUP: &str = "authz.add_to_group";
-const REMOVE_FROM_GROUP: &str = "authz.remove_from_group";
-const CREATE_POLICY: &str = "authz.create_policy";
-const UPDATE_POLICY: &str = "authz.update_policy";
-const DELETE_POLICY: &str = "authz.delete_policy";
-
-/// One administrative command of the engine subject `subject` under the
-/// request's operation key.
+/// One administrative command `M` of the engine subject `subject` under the
+/// request's operation context.
 #[allow(clippy::result_large_err)]
-fn command(
+fn command<M: KeyedMethod>(
     metadata: &tonic::metadata::MetadataMap,
     subject: impl std::fmt::Display,
-    method: &'static str,
-    req: &impl prost::Message,
+    req: &M::Request,
 ) -> Result<KeyedCommand, Status> {
-    Ok(KeyedCommand::new(
+    Ok(KeyedCommand::of::<M>(
         format!("authz:{subject}"),
-        required_key(metadata)?,
-        method,
-        req.encode_to_vec(),
+        metadata_context(metadata)?,
+        req,
     ))
 }
 
@@ -286,6 +271,9 @@ async fn settled<T: prost::Message + Default>(
                     tracing::warn!(error = %e, "recorded authorization answer unreadable");
                     Status::from(sid_core::grpc_error::ApiError::internal())
                 })
+        }
+        Err(sid_core::Error::OperationPeriodRefused(refusal)) => {
+            Err(OperationError::PeriodRefused(refusal).into())
         }
         Err(e) => Err(refuse(e)),
     }
@@ -1754,12 +1742,8 @@ impl AuthzService for AuthzServiceImpl {
         let (metadata, _, req) = request.into_parts();
         // A retry of a completed creation answers with the role it created,
         // not "name taken" by that very role.
-        let command = command(
-            &metadata,
-            format!("user:{}", caller.profile_id),
-            CREATE_ROLE,
-            &req,
-        )?;
+        let command =
+            command::<keyed::CreateRole>(&metadata, format!("user:{}", caller.profile_id), &req)?;
         if let Some(recorded) = command.replay(&*self.storage).await? {
             return Ok(Response::new(recorded));
         }
@@ -1846,7 +1830,7 @@ impl AuthzService for AuthzServiceImpl {
         let (metadata, _, req) = request.into_parts();
         // A retry of a completed edit answers with the role as that edit left
         // it, and never writes it over a later edit.
-        let command = command(&metadata, asker.own_subject(), UPDATE_ROLE, &req)?;
+        let command = command::<keyed::UpdateRole>(&metadata, asker.own_subject(), &req)?;
         if let Some(recorded) = command.replay(&*self.storage).await? {
             return Ok(Response::new(recorded));
         }
@@ -1913,12 +1897,8 @@ impl AuthzService for AuthzServiceImpl {
         let (metadata, _, req) = request.into_parts();
         // A retry of a completed deletion answers as the first, not "not
         // found" for the role it deleted.
-        let command = command(
-            &metadata,
-            format!("user:{}", caller.profile_id),
-            DELETE_ROLE,
-            &req,
-        )?;
+        let command =
+            command::<keyed::DeleteRole>(&metadata, format!("user:{}", caller.profile_id), &req)?;
         if let Some(recorded) = command.replay(&*self.storage).await? {
             return Ok(Response::new(recorded));
         }
@@ -1984,7 +1964,7 @@ impl AuthzService for AuthzServiceImpl {
         // A retry gets the recorded answer: the assignment the first call
         // made, whether or not it is still in force, and never a second one.
         let (metadata, _, req) = request.into_parts();
-        let command = command(&metadata, administrator.subject(), ASSIGN_ROLE, &req)?;
+        let command = command::<keyed::AssignRole>(&metadata, administrator.subject(), &req)?;
         if let Some(result) = command.completed(&*self.storage).await? {
             return decode_assigned(&result);
         }
@@ -2115,7 +2095,7 @@ impl AuthzService for AuthzServiceImpl {
         let (metadata, _, req) = request.into_parts();
         // A retry of a completed revocation answers as the first, not "not
         // found" for the assignment it removed.
-        let command = command(&metadata, administrator.subject(), REVOKE_ROLE, &req)?;
+        let command = command::<keyed::RevokeRole>(&metadata, administrator.subject(), &req)?;
         if let Some(recorded) = command.replay(&*self.storage).await? {
             return Ok(Response::new(recorded));
         }
@@ -2206,12 +2186,8 @@ impl AuthzService for AuthzServiceImpl {
         let (metadata, _, req) = request.into_parts();
         // A retry of a completed creation answers with the group it created,
         // not "name taken" by that very group.
-        let command = command(
-            &metadata,
-            format!("user:{}", caller.profile_id),
-            CREATE_GROUP,
-            &req,
-        )?;
+        let command =
+            command::<keyed::CreateGroup>(&metadata, format!("user:{}", caller.profile_id), &req)?;
         if let Some(recorded) = command.replay(&*self.storage).await? {
             return Ok(Response::new(recorded));
         }
@@ -2300,12 +2276,8 @@ impl AuthzService for AuthzServiceImpl {
         let (metadata, _, req) = request.into_parts();
         // A retry of a completed edit answers with the group as that edit
         // left it.
-        let command = command(
-            &metadata,
-            format!("user:{}", caller.profile_id),
-            UPDATE_GROUP,
-            &req,
-        )?;
+        let command =
+            command::<keyed::UpdateGroup>(&metadata, format!("user:{}", caller.profile_id), &req)?;
         if let Some(recorded) = command.replay(&*self.storage).await? {
             return Ok(Response::new(recorded));
         }
@@ -2360,12 +2332,8 @@ impl AuthzService for AuthzServiceImpl {
         let (metadata, _, req) = request.into_parts();
         // A retry of a completed deletion answers as the first, not "not
         // found" for the group it deleted.
-        let command = command(
-            &metadata,
-            format!("user:{}", caller.profile_id),
-            DELETE_GROUP,
-            &req,
-        )?;
+        let command =
+            command::<keyed::DeleteGroup>(&metadata, format!("user:{}", caller.profile_id), &req)?;
         if let Some(recorded) = command.replay(&*self.storage).await? {
             return Ok(Response::new(recorded));
         }
@@ -2424,12 +2392,8 @@ impl AuthzService for AuthzServiceImpl {
         let (metadata, _, req) = request.into_parts();
         // A retry of a completed addition answers as the first and never
         // adds the member back after a later removal.
-        let command = command(
-            &metadata,
-            format!("user:{}", caller.profile_id),
-            ADD_TO_GROUP,
-            &req,
-        )?;
+        let command =
+            command::<keyed::AddToGroup>(&metadata, format!("user:{}", caller.profile_id), &req)?;
         if let Some(recorded) = command.replay(&*self.storage).await? {
             return Ok(Response::new(recorded));
         }
@@ -2477,10 +2441,9 @@ impl AuthzService for AuthzServiceImpl {
         let (metadata, _, req) = request.into_parts();
         // A retry of a completed removal answers as the first and never
         // removes the member again after a later addition.
-        let command = command(
+        let command = command::<keyed::RemoveFromGroup>(
             &metadata,
             format!("user:{}", caller.profile_id),
-            REMOVE_FROM_GROUP,
             &req,
         )?;
         if let Some(recorded) = command.replay(&*self.storage).await? {
@@ -2538,7 +2501,7 @@ impl AuthzService for AuthzServiceImpl {
         let (metadata, _, req) = request.into_parts();
         // A retry of a completed creation answers with the policy it created,
         // not "name taken" by that very policy.
-        let command = command(&metadata, asker.own_subject(), CREATE_POLICY, &req)?;
+        let command = command::<keyed::CreatePolicy>(&metadata, asker.own_subject(), &req)?;
         if let Some(recorded) = command.replay(&*self.storage).await? {
             return Ok(Response::new(recorded));
         }
@@ -2609,7 +2572,7 @@ impl AuthzService for AuthzServiceImpl {
         let (metadata, _, req) = request.into_parts();
         // A retry of a completed edit answers with the policy as that edit
         // left it, and never writes it over a later edit.
-        let command = command(&metadata, asker.own_subject(), UPDATE_POLICY, &req)?;
+        let command = command::<keyed::UpdatePolicy>(&metadata, asker.own_subject(), &req)?;
         if let Some(recorded) = command.replay(&*self.storage).await? {
             return Ok(Response::new(recorded));
         }
@@ -2658,7 +2621,7 @@ impl AuthzService for AuthzServiceImpl {
         let (metadata, _, req) = request.into_parts();
         // A retry of a completed deletion answers as the first, not "not
         // found" for the policy it deleted.
-        let command = command(&metadata, asker.own_subject(), DELETE_POLICY, &req)?;
+        let command = command::<keyed::DeletePolicy>(&metadata, asker.own_subject(), &req)?;
         if let Some(recorded) = command.replay(&*self.storage).await? {
             return Ok(Response::new(recorded));
         }
@@ -2924,7 +2887,7 @@ impl AuthzService for AuthzServiceImpl {
         let result = simulator
             .simulate(project_id, &changes, &subjects, &actions, &resource)
             .await
-            .map_err(storage_failure)?;
+            .map_err(|e| sid_core::grpc_error::refuse::internal("simulate", e))?;
 
         info!(
             project_id = %project_id.0,

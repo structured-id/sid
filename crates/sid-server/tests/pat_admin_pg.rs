@@ -74,10 +74,7 @@ fn keyed<T>(msg: T, token: Option<&str>, key: &str) -> Request<T> {
         req.metadata_mut()
             .insert("authorization", format!("Bearer {token}").parse().unwrap());
     }
-    req.metadata_mut().insert(
-        sid_authn::operation::OPERATION_KEY_HEADER,
-        key.parse().unwrap(),
-    );
+    common::name_command(req.metadata_mut(), key);
     req
 }
 

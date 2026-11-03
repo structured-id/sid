@@ -21,9 +21,37 @@ pub fn internal(operation: &'static str, cause: impl std::fmt::Display) -> Statu
 }
 
 /// A storage failure, for `map_err(storage_failure)`: logged with its cause,
-/// answered with a generic INTERNAL_ERROR.
-pub fn storage_failure(cause: impl std::fmt::Display) -> Status {
-    internal("storage", cause)
+/// answered with a generic INTERNAL_ERROR. A keyed command's commit the
+/// store refused for its period is the caller's to resolve, and answered as
+/// [`operation_period_refused`] says.
+pub fn storage_failure(cause: crate::Error) -> Status {
+    match cause {
+        crate::Error::OperationPeriodRefused(refusal) => operation_period_refused(refusal),
+        cause => internal("storage", cause),
+    }
+}
+
+/// The metadata (`SID-Operation-Period` in HTTP) naming the period a keyed
+/// command was created under.
+pub const OPERATION_PERIOD_FIELD: &str = "sid-operation-period";
+
+/// A keyed command whose period the store does not admit: a retired one is
+/// OPERATION_EXPIRED (resolve the command through its resource, never by a
+/// new key), one the store never issued is a malformed context.
+pub fn operation_period_refused(refusal: crate::models::OperationPeriodRefusal) -> Status {
+    match refusal {
+        crate::models::OperationPeriodRefusal::Retired => ApiError::new(
+            ErrorReason::OperationExpired,
+            "the operation period is retired; resolve the command through its resource",
+        )
+        .into(),
+        crate::models::OperationPeriodRefusal::NotIssued => ApiError::new(
+            ErrorReason::InvalidFieldValue,
+            "the operation period was not issued by this server",
+        )
+        .with_field_violation(OPERATION_PERIOD_FIELD, "not issued")
+        .into(),
+    }
 }
 
 /// REQUIRED_FIELD_MISSING for `field`.

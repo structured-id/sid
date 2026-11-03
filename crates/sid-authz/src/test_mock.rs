@@ -298,6 +298,9 @@ impl sid_plugin::InstanceSecretStore for MockStorage {
 
 #[async_trait::async_trait]
 impl sid_plugin::OperationResultStore for MockStorage {
+    async fn operation_period_policy(&self) -> Result<sid_core::models::OperationPeriodPolicy> {
+        unimplemented!()
+    }
     async fn current_operation_period(
         &self,
         _: chrono::DateTime<chrono::Utc>,
@@ -308,14 +311,12 @@ impl sid_plugin::OperationResultStore for MockStorage {
     async fn retire_operation_periods(&self, _: chrono::DateTime<chrono::Utc>) -> Result<u64> {
         unimplemented!()
     }
-    async fn export_operation_periods(
-        &self,
-    ) -> Result<Vec<sid_core::models::OperationPeriodRecord>> {
+    async fn export_operation_periods(&self) -> Result<sid_core::models::OperationPeriodState> {
         unimplemented!()
     }
-    async fn import_operation_period(
+    async fn import_operation_periods(
         &self,
-        _: &sid_core::models::OperationPeriodRecord,
+        _: &sid_core::models::OperationPeriodState,
     ) -> Result<()> {
         unimplemented!()
     }

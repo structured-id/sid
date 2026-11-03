@@ -55,10 +55,7 @@ fn admin_request<T>(svc: &TestServices, msg: T) -> Request<T> {
 
 /// `req` as one new keyed command (methods that promise safe retry take a key).
 fn new_command<T>(mut req: Request<T>) -> Request<T> {
-    req.metadata_mut().insert(
-        sid_authn::operation::OPERATION_KEY_HEADER,
-        Uuid::new_v4().to_string().parse().unwrap(),
-    );
+    common::name_new_command(req.metadata_mut());
     req
 }
 

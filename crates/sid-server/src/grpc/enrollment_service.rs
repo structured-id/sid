@@ -6,7 +6,8 @@
 use prost::Message;
 use sid_authn::caller::{Caller, authenticate};
 use sid_authn::jwt::JwtService;
-use sid_authn::operation::{KeyedCommand, required_key};
+use sid_authn::operation::KeyedCommand;
+use sid_authn::operation::grpc::context;
 use sid_authn::resource_token::ResourceTokenVerifier;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::service_auth::{AuthenticatedService, ServiceCaller, authenticate_service};
@@ -21,6 +22,7 @@ use sid_core::models::{
     generate_invite_code,
 };
 use sid_plugin::storage::StorageBackend;
+use sid_proto::keyed::admin::enrollment_service as keyed;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 use tracing::info;
@@ -119,26 +121,19 @@ impl InviteActor {
         }
     }
 
-    /// This actor's command `method` of `req` under `key`: an administrator's
+    /// This actor's command `M` of `req` under `context`: an administrator's
     /// in its Profile's namespace, a machine user's in its own.
-    fn command(
+    fn command<M: sid_proto::KeyedMethod>(
         self,
-        key: sid_core::models::OperationKey,
-        method: &'static str,
-        req: &impl prost::Message,
+        context: sid_core::models::OperationContext,
+        req: &M::Request,
     ) -> KeyedCommand {
         match self {
-            Self::Admin(id) => KeyedCommand::by_profile(id, key, method, req),
-            Self::Machine(id) => {
-                KeyedCommand::new(format!("machine:{id}"), key, method, req.encode_to_vec())
-            }
+            Self::Admin(id) => KeyedCommand::by_profile::<M>(id, context, req),
+            Self::Machine(id) => KeyedCommand::of::<M>(format!("machine:{id}"), context, req),
         }
     }
 }
-
-const CREATE_INVITE: &str = "sid.v1.admin.EnrollmentService/CreateInvite";
-const BULK_CREATE_INVITES: &str = "sid.v1.admin.EnrollmentService/BulkCreateInvites";
-const UPDATE_ENROLLMENT_POLICY: &str = "sid.v1.admin.EnrollmentService/UpdateEnrollmentPolicy";
 
 fn denied() -> Status {
     ApiError::new(
@@ -410,12 +405,15 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
     ) -> Result<Response<ProtoEnrollmentPolicy>, Status> {
         use crate::enrollment::Refusal;
         let caller = self.admin(&request).await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
         // A retry of a completed update answers with the policy it put in
         // force and never writes it over a later update.
-        let command =
-            KeyedCommand::by_profile(caller.profile_id, key, UPDATE_ENROLLMENT_POLICY, &req);
+        let command = KeyedCommand::by_profile::<keyed::UpdateEnrollmentPolicy>(
+            caller.profile_id,
+            operation,
+            &req,
+        );
         if let Some(recorded) = command.replay(&*self.storage).await? {
             return Ok(Response::new(recorded));
         }
@@ -498,12 +496,12 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
         request: Request<sid_proto::sid::v1::admin::CreateInviteRequest>,
     ) -> Result<Response<ProtoInvite>, Status> {
         let actor = self.invite_actor(&request, INVITE_CREATE).await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
 
         // A retry of a completed creation answers with the invite it created
         // and creates no second one.
-        let command = actor.command(key, CREATE_INVITE, &req);
+        let command = actor.command::<keyed::CreateInvite>(operation, &req);
         let response = command
             .run(&*self.storage, || async {
                 let (max_uses, expires_at) = self
@@ -678,7 +676,7 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
         request: Request<sid_proto::sid::v1::admin::BulkCreateInvitesRequest>,
     ) -> Result<Response<sid_proto::sid::v1::admin::BulkCreateInvitesResponse>, Status> {
         let actor = self.invite_actor(&request, INVITE_CREATE).await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
 
         // A request for more is refused, never quietly cut to the limit.
@@ -696,7 +694,7 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
         // All the invites commit together or none do, once per key: a retry
         // answers with the invites the first commit created and creates no
         // others.
-        let command = actor.command(key, BULK_CREATE_INVITES, &req);
+        let command = actor.command::<keyed::BulkCreateInvites>(operation, &req);
         let response = command
             .run(&*self.storage, || async {
                 let (max_uses, expires_at) = self

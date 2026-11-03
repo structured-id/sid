@@ -6,7 +6,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use sid_core::models::{
     IssuedOperationPeriod, MutationContext, OperationCompletion, OperationKey, OperationPeriod,
-    OperationPeriodRecord, OperationPeriodRefusal, OperationRecord,
+    OperationPeriodPolicy, OperationPeriodRecord, OperationPeriodRefusal, OperationPeriodState,
+    OperationRecord,
 };
 use sid_core::{Error as SidError, Result as SidResult};
 use sid_plugin::OperationResultStore;
@@ -25,24 +26,19 @@ pub(super) async fn record_in_tx(
 ) -> SidResult<()> {
     let period = operation.period.map(column).transpose()?;
     if let Some(period) = period {
-        let retired: Option<bool> =
-            sqlx::query_scalar("SELECT retired FROM operation_periods WHERE period = ?")
+        let admitted: Option<i64> =
+            sqlx::query_scalar("SELECT period FROM operation_periods WHERE period = ?")
                 .bind(period)
                 .fetch_optional(&mut **tx)
                 .await
                 .map_err(|e| SidError::Storage(format!("operation period: {e}")))?;
-        match retired {
-            None => {
-                return Err(SidError::OperationPeriodRefused(
-                    OperationPeriodRefusal::NotIssued,
-                ));
-            }
-            Some(true) => {
-                return Err(SidError::OperationPeriodRefused(
-                    OperationPeriodRefusal::Retired,
-                ));
-            }
-            Some(false) => {}
+        if admitted.is_none() {
+            let refusal = if period <= issued_through(tx).await? {
+                OperationPeriodRefusal::Retired
+            } else {
+                OperationPeriodRefusal::NotIssued
+            };
+            return Err(SidError::OperationPeriodRefused(refusal));
         }
     }
     let now = Utc::now();
@@ -225,11 +221,57 @@ fn issued((period, accepted_until): PeriodRow) -> SidResult<IssuedOperationPerio
     })
 }
 
-/// period, issued_at_ms, accepted_until_ms, retired
-type PeriodRecordRow = (i64, i64, i64, bool);
+/// period, issued_at_ms, accepted_until_ms
+type PeriodRecordRow = (i64, i64, i64);
+
+/// The last period issued; a store without the record has lost its period
+/// state and admits nothing rather than starting over.
+async fn issued_through(conn: &mut sqlx::SqliteConnection) -> SidResult<i64> {
+    sqlx::query_scalar("SELECT issued_through FROM operation_period_state WHERE id = 1")
+        .fetch_optional(conn)
+        .await
+        .map_err(|e| SidError::Storage(format!("operation period boundary: {e}")))?
+        .ok_or_else(|| SidError::Storage("operation period boundary missing".into()))
+}
+
+/// Retire `period`: its completions and its row go together.
+async fn retire(conn: &mut sqlx::SqliteConnection, period: i64) -> SidResult<()> {
+    sqlx::query("DELETE FROM operation_results WHERE period = ?")
+        .bind(period)
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| SidError::Storage(format!("retire operation results: {e}")))?;
+    sqlx::query("DELETE FROM operation_periods WHERE period = ?")
+        .bind(period)
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| SidError::Storage(format!("retire operation periods: {e}")))?;
+    Ok(())
+}
+
+/// A stored policy duration; a negative or out-of-range one is an error.
+fn seconds(column: &str, value: i64) -> SidResult<Duration> {
+    Duration::try_seconds(value)
+        .filter(|d| *d >= Duration::zero())
+        .ok_or_else(|| SidError::Storage(format!("column {column}: {value}")))
+}
 
 #[async_trait]
 impl OperationResultStore for SqliteBackend {
+    async fn operation_period_policy(&self) -> SidResult<OperationPeriodPolicy> {
+        let (acceptance, retention): (i64, i64) = sqlx::query_as(
+            "SELECT acceptance_seconds, retention_seconds FROM operation_period_state WHERE id = 1",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(format!("operation period policy: {e}")))?
+        .ok_or_else(|| SidError::Storage("operation period state missing".into()))?;
+        Ok(OperationPeriodPolicy {
+            acceptance: seconds("acceptance_seconds", acceptance)?,
+            retention: seconds("retention_seconds", retention)?,
+        })
+    }
+
     async fn current_operation_period(
         &self,
         now: DateTime<Utc>,
@@ -242,7 +284,7 @@ impl OperationResultStore for SqliteBackend {
         let mut tx = self.begin_write().await?;
         let current: Option<PeriodRow> = sqlx::query_as(
             "SELECT period, accepted_until_ms FROM operation_periods
-             WHERE retired = 0 AND issued_at_ms <= ?1 AND accepted_until_ms > ?1
+             WHERE issued_at_ms <= ?1 AND accepted_until_ms > ?1
              ORDER BY period DESC LIMIT 1",
         )
         .bind(now.timestamp_millis())
@@ -251,18 +293,30 @@ impl OperationResultStore for SqliteBackend {
         .map_err(|e| SidError::Storage(format!("operation period: {e}")))?;
         let row = match current {
             Some(current) => current,
-            // The next period follows every one ever issued, retired ones
-            // included, so a retired number is never admitted again.
-            None => sqlx::query_as(
-                "INSERT INTO operation_periods (period, issued_at_ms, accepted_until_ms)
-                 SELECT COALESCE(MAX(period), 0) + 1, ?, ? FROM operation_periods
-                 RETURNING period, accepted_until_ms",
-            )
-            .bind(now.timestamp_millis())
-            .bind(until.timestamp_millis())
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(|e| SidError::Storage(format!("issue operation period: {e}")))?,
+            // The next period follows every one ever issued, so a retired
+            // number is never admitted again.
+            None => {
+                let next = issued_through(&mut tx)
+                    .await?
+                    .checked_add(1)
+                    .ok_or_else(|| SidError::Storage("operation periods exhausted".into()))?;
+                sqlx::query("UPDATE operation_period_state SET issued_through = ? WHERE id = 1")
+                    .bind(next)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| SidError::Storage(format!("operation period boundary: {e}")))?;
+                sqlx::query_as(
+                    "INSERT INTO operation_periods (period, issued_at_ms, accepted_until_ms)
+                     VALUES (?, ?, ?)
+                     RETURNING period, accepted_until_ms",
+                )
+                .bind(next)
+                .bind(now.timestamp_millis())
+                .bind(until.timestamp_millis())
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| SidError::Storage(format!("issue operation period: {e}")))?
+            }
         };
         tx.commit()
             .await
@@ -271,63 +325,93 @@ impl OperationResultStore for SqliteBackend {
     }
 
     async fn retire_operation_periods(&self, before: DateTime<Utc>) -> SidResult<u64> {
+        // The write transaction serializes this with every admitted commit.
         let mut tx = self.begin_write().await?;
-        let retired: Vec<i64> = sqlx::query_scalar(
-            "UPDATE operation_periods SET retired = 1
-             WHERE retired = 0 AND accepted_until_ms < ?
-             RETURNING period",
-        )
-        .bind(before.timestamp_millis())
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(|e| SidError::Storage(format!("retire operation periods: {e}")))?;
-        for period in &retired {
-            sqlx::query("DELETE FROM operation_results WHERE period = ?")
-                .bind(period)
-                .execute(&mut *tx)
+        let ended: Vec<i64> =
+            sqlx::query_scalar("SELECT period FROM operation_periods WHERE accepted_until_ms < ?")
+                .bind(before.timestamp_millis())
+                .fetch_all(&mut *tx)
                 .await
-                .map_err(|e| SidError::Storage(format!("retire operation results: {e}")))?;
+                .map_err(|e| SidError::Storage(format!("operation periods: {e}")))?;
+        for &period in &ended {
+            retire(&mut tx, period).await?;
         }
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(format!("commit: {e}")))?;
-        Ok(retired.len() as u64)
+        Ok(ended.len() as u64)
     }
 
-    async fn export_operation_periods(&self) -> SidResult<Vec<OperationPeriodRecord>> {
+    async fn export_operation_periods(&self) -> SidResult<OperationPeriodState> {
+        let mut tx = self.begin_write().await?;
+        let last = issued_through(&mut tx).await?;
         let rows: Vec<PeriodRecordRow> = sqlx::query_as(
-            "SELECT period, issued_at_ms, accepted_until_ms, retired FROM operation_periods
+            "SELECT period, issued_at_ms, accepted_until_ms FROM operation_periods
              ORDER BY period",
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("operation periods: {e}")))?;
-        rows.into_iter()
-            .map(|(period, issued_at, accepted_until, retired)| {
-                Ok(OperationPeriodRecord {
-                    issued: issued((period, accepted_until))?,
-                    issued_at: instant("issued_at_ms", issued_at)?,
-                    retired,
+        tx.commit()
+            .await
+            .map_err(|e| SidError::Storage(format!("commit: {e}")))?;
+        Ok(OperationPeriodState {
+            issued_through: period_of(last)?,
+            active: rows
+                .into_iter()
+                .map(|(period, issued_at, accepted_until)| {
+                    Ok(OperationPeriodRecord {
+                        issued: issued((period, accepted_until))?,
+                        issued_at: instant("issued_at_ms", issued_at)?,
+                    })
                 })
-            })
-            .collect()
+                .collect::<SidResult<_>>()?,
+        })
     }
 
-    async fn import_operation_period(&self, record: &OperationPeriodRecord) -> SidResult<()> {
+    async fn import_operation_periods(&self, state: &OperationPeriodState) -> SidResult<()> {
         let mut tx = self.begin_write().await?;
+        let last = issued_through(&mut tx).await?;
+        let source_last = column(state.issued_through)?;
+        let source_active = state
+            .active
+            .iter()
+            .map(|p| column(p.issued.period))
+            .collect::<SidResult<Vec<i64>>>()?;
+        // Retired at the source: issued there, no longer admitted there.
+        let local: Vec<i64> = sqlx::query_scalar("SELECT period FROM operation_periods")
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| SidError::Storage(format!("operation periods: {e}")))?;
+        for period in local {
+            if period <= source_last && !source_active.contains(&period) {
+                retire(&mut tx, period).await?;
+            }
+        }
+        for (record, &period) in state.active.iter().zip(&source_active) {
+            // A period this store issued and no longer holds is retired here.
+            if period <= last {
+                continue;
+            }
+            sqlx::query(
+                "INSERT INTO operation_periods (period, issued_at_ms, accepted_until_ms)
+                 VALUES (?, ?, ?)",
+            )
+            .bind(period)
+            .bind(record.issued_at.timestamp_millis())
+            .bind(record.issued.accepted_until.timestamp_millis())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| SidError::Storage(format!("operation period import: {e}")))?;
+        }
         sqlx::query(
-            "INSERT INTO operation_periods (period, issued_at_ms, accepted_until_ms, retired)
-             VALUES (?, ?, ?, ?)
-             ON CONFLICT (period) DO UPDATE SET retired = 1
-             WHERE excluded.retired = 1 AND operation_periods.retired = 0",
+            "UPDATE operation_period_state SET issued_through = MAX(issued_through, ?)
+             WHERE id = 1",
         )
-        .bind(column(record.issued.period)?)
-        .bind(record.issued_at.timestamp_millis())
-        .bind(record.issued.accepted_until.timestamp_millis())
-        .bind(record.retired)
+        .bind(source_last)
         .execute(&mut *tx)
         .await
-        .map_err(|e| SidError::Storage(format!("operation period import: {e}")))?;
+        .map_err(|e| SidError::Storage(format!("operation period boundary: {e}")))?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(format!("commit: {e}")))?;

@@ -113,6 +113,8 @@ pub struct MockStorageInner {
     operations: HashMap<(String, String), OperationRecord>,
     /// The periods keyed commands are admitted under, by number.
     operation_periods: std::collections::BTreeMap<u64, sid_core::models::OperationPeriodRecord>,
+    /// The last period issued.
+    operation_periods_issued: u64,
     export_jobs: HashMap<Uuid, ExportJob>,
     /// Password histories by owner, as the checker reads them.
     histories: HashMap<ProfileId, PasswordHistory>,
@@ -346,9 +348,24 @@ impl MockStorage {
 
     /// A fresh installation without an administrator: registration then
     /// requires the instance claim.
+    /// It has issued period 1, accepting commands for as long as a test runs:
+    /// the period test clients name their commands with.
     pub fn unclaimed() -> Self {
+        let mut inner = MockStorageInner::default();
+        let epoch = chrono::DateTime::<chrono::Utc>::UNIX_EPOCH;
+        inner.operation_periods_issued = 1;
+        inner.operation_periods.insert(
+            1,
+            sid_core::models::OperationPeriodRecord {
+                issued: sid_core::models::IssuedOperationPeriod {
+                    period: sid_core::models::OperationPeriod::new(1),
+                    accepted_until: epoch + chrono::Duration::days(365 * 1000),
+                },
+                issued_at: epoch,
+            },
+        );
         Self {
-            inner: Mutex::new(MockStorageInner::default()),
+            inner: Mutex::new(inner),
             ceremonies: sid_plugin::InProcessCeremonyState::new(),
             unrecordable_admissions: Mutex::new(None),
         }
@@ -1553,31 +1570,37 @@ impl sid_plugin::CeremonyStateStore for MockStorage {
 
 #[async_trait]
 impl sid_plugin::OperationResultStore for MockStorage {
+    async fn operation_period_policy(&self) -> SidResult<sid_core::models::OperationPeriodPolicy> {
+        Ok(sid_core::models::OperationPeriodPolicy {
+            acceptance: chrono::Duration::hours(1),
+            retention: chrono::Duration::days(1),
+        })
+    }
     async fn current_operation_period(
         &self,
         now: chrono::DateTime<chrono::Utc>,
         acceptance: chrono::Duration,
     ) -> SidResult<sid_core::models::IssuedOperationPeriod> {
         let mut inner = self.inner.lock().unwrap();
-        let periods = &mut inner.operation_periods;
-        if let Some(current) = periods
+        if let Some(current) = inner
+            .operation_periods
             .values()
             .rev()
-            .find(|p| !p.retired && p.issued_at <= now && p.issued.accepted_until > now)
+            .find(|p| p.issued_at <= now && p.issued.accepted_until > now)
         {
             return Ok(current.issued);
         }
-        let next = periods.keys().next_back().map_or(1, |last| last + 1);
+        inner.operation_periods_issued += 1;
+        let next = inner.operation_periods_issued;
         let issued = sid_core::models::IssuedOperationPeriod {
             period: sid_core::models::OperationPeriod::new(next),
             accepted_until: now + acceptance,
         };
-        periods.insert(
+        inner.operation_periods.insert(
             next,
             sid_core::models::OperationPeriodRecord {
                 issued,
                 issued_at: now,
-                retired: false,
             },
         );
         Ok(issued)
@@ -1587,40 +1610,45 @@ impl sid_plugin::OperationResultStore for MockStorage {
         before: chrono::DateTime<chrono::Utc>,
     ) -> SidResult<u64> {
         let mut inner = self.inner.lock().unwrap();
-        let mut retired = Vec::new();
-        for p in inner.operation_periods.values_mut() {
-            if !p.retired && p.issued.accepted_until < before {
-                p.retired = true;
-                retired.push(p.issued.period);
-            }
-        }
-        inner
-            .operations
-            .retain(|_, r| r.completion.period.is_none_or(|p| !retired.contains(&p)));
-        Ok(retired.len() as u64)
-    }
-    async fn export_operation_periods(
-        &self,
-    ) -> SidResult<Vec<sid_core::models::OperationPeriodRecord>> {
-        Ok(self
-            .inner
-            .lock()
-            .unwrap()
+        let ended: Vec<u64> = inner
             .operation_periods
-            .values()
-            .copied()
-            .collect())
+            .iter()
+            .filter(|(_, p)| p.issued.accepted_until < before)
+            .map(|(&period, _)| period)
+            .collect();
+        inner.retire_operation_periods(&ended);
+        Ok(ended.len() as u64)
     }
-    async fn import_operation_period(
+    async fn export_operation_periods(&self) -> SidResult<sid_core::models::OperationPeriodState> {
+        let inner = self.inner.lock().unwrap();
+        Ok(sid_core::models::OperationPeriodState {
+            issued_through: sid_core::models::OperationPeriod::new(inner.operation_periods_issued),
+            active: inner.operation_periods.values().copied().collect(),
+        })
+    }
+    async fn import_operation_periods(
         &self,
-        record: &sid_core::models::OperationPeriodRecord,
+        state: &sid_core::models::OperationPeriodState,
     ) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
-        let held = inner
+        let last = inner.operation_periods_issued;
+        let source_last = state.issued_through.get();
+        let admitted = |period: u64| state.active.iter().any(|a| a.issued.period.get() == period);
+        let retired: Vec<u64> = inner
             .operation_periods
-            .entry(record.issued.period.get())
-            .or_insert(*record);
-        held.retired |= record.retired;
+            .keys()
+            .copied()
+            .filter(|&period| period <= source_last && !admitted(period))
+            .collect();
+        inner.retire_operation_periods(&retired);
+        for record in &state.active {
+            if record.issued.period.get() > last {
+                inner
+                    .operation_periods
+                    .insert(record.issued.period.get(), *record);
+            }
+        }
+        inner.operation_periods_issued = last.max(source_last);
         Ok(())
     }
     async fn record_outcome(&self, ctx: MutationContext) -> SidResult<()> {
@@ -6247,24 +6275,31 @@ impl MockStorageInner {
         Ok(())
     }
 
+    /// Retire `periods` with the completions named with them.
+    fn retire_operation_periods(&mut self, periods: &[u64]) {
+        for period in periods {
+            self.operation_periods.remove(period);
+        }
+        self.operations.retain(|_, r| {
+            r.completion
+                .period
+                .is_none_or(|p| !periods.contains(&p.get()))
+        });
+    }
+
     /// Record a keyed command's completion, as a mutation that changed
     /// nothing still does; refused when another commit completed it.
     fn complete(&mut self, ctx: &MutationContext) -> SidResult<()> {
         if let Some(operation) = &ctx.operation {
             if let Some(period) = operation.period {
                 use sid_core::models::OperationPeriodRefusal;
-                match self.operation_periods.get(&period.get()) {
-                    None => {
-                        return Err(sid_core::Error::OperationPeriodRefused(
-                            OperationPeriodRefusal::NotIssued,
-                        ));
-                    }
-                    Some(p) if p.retired => {
-                        return Err(sid_core::Error::OperationPeriodRefused(
-                            OperationPeriodRefusal::Retired,
-                        ));
-                    }
-                    Some(_) => {}
+                if !self.operation_periods.contains_key(&period.get()) {
+                    let refusal = if period.get() <= self.operation_periods_issued {
+                        OperationPeriodRefusal::Retired
+                    } else {
+                        OperationPeriodRefusal::NotIssued
+                    };
+                    return Err(sid_core::Error::OperationPeriodRefused(refusal));
                 }
             }
             let slot = (

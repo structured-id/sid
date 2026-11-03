@@ -10,7 +10,8 @@ use secrecy::{ExposeSecret, SecretBox};
 use sha2::{Digest, Sha256};
 use sid_authn::caller::{Caller, authenticate};
 use sid_authn::jwt::JwtService;
-use sid_authn::operation::{KeyedCommand, required_key};
+use sid_authn::operation::KeyedCommand;
+use sid_authn::operation::grpc::context;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_core::models::{
     AuditEntry, ImpersonationGrant, ImpersonationTargetType as DomainImpersonationTargetType,
@@ -20,6 +21,7 @@ use sid_core::models::{
     machine_user::CredentialStatus as DomainCredentialStatus,
 };
 use sid_plugin::storage::StorageBackend;
+use sid_proto::keyed::machine::machine_user_service as keyed;
 use sid_proto::sid::v1::{
     self, AddMachineCredentialRequest, AddMachineCredentialResponse, CreateMachineUserRequest,
     CreateMachineUserResponse, DeleteMachineUserRequest, DeleteMachineUserResponse,
@@ -43,16 +45,6 @@ use super::convert;
 use sid_core::grpc_error::refuse::{
     changed_concurrently, invalid_field, missing_field, not_found, storage_failure,
 };
-
-const CREATE_MACHINE_USER: &str = "sid.v1.machine.MachineUserService/CreateMachineUser";
-const UPDATE_MACHINE_USER: &str = "sid.v1.machine.MachineUserService/UpdateMachineUser";
-const DELETE_MACHINE_USER: &str = "sid.v1.machine.MachineUserService/DeleteMachineUser";
-const SUSPEND_MACHINE_USER: &str = "sid.v1.machine.MachineUserService/SuspendMachineUser";
-const REACTIVATE_MACHINE_USER: &str = "sid.v1.machine.MachineUserService/ReactivateMachineUser";
-const ADD_MACHINE_CREDENTIAL: &str = "sid.v1.machine.MachineUserService/AddMachineCredential";
-const ROTATE_MACHINE_CREDENTIAL: &str = "sid.v1.machine.MachineUserService/RotateMachineCredential";
-const GRANT_IMPERSONATION: &str = "sid.v1.machine.MachineUserService/GrantImpersonation";
-const REVOKE_IMPERSONATION: &str = "sid.v1.machine.MachineUserService/RevokeImpersonation";
 
 /// The answer another attempt of the same command recorded.
 #[allow(clippy::result_large_err)]
@@ -391,7 +383,7 @@ impl MachineUserService for MachineUserServiceImpl {
         request: Request<CreateMachineUserRequest>,
     ) -> Result<Response<CreateMachineUserResponse>, Status> {
         let caller = self.admin(&request).await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
 
         if req.display_name.is_empty() {
@@ -401,7 +393,11 @@ impl MachineUserService for MachineUserServiceImpl {
         let project_id = parse_project_id(&req.project_id)?;
         // A retry of a completed creation answers with the machine user it
         // created and creates no second one.
-        let command = KeyedCommand::by_profile(caller.profile_id, key, CREATE_MACHINE_USER, &req);
+        let command = KeyedCommand::by_profile::<keyed::CreateMachineUser>(
+            caller.profile_id,
+            operation,
+            &req,
+        );
 
         // Generate client_id.
         let client_id = generate_client_id();
@@ -485,13 +481,17 @@ impl MachineUserService for MachineUserServiceImpl {
         request: Request<UpdateMachineUserRequest>,
     ) -> Result<Response<MachineUserResponse>, Status> {
         let caller = self.admin(&request).await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
         let id = parse_machine_user_id(&req.machine_user_id)?;
 
         // A retry of a completed edit answers with the machine user as that
         // edit left it and never writes its settings over a later edit.
-        let command = KeyedCommand::by_profile(caller.profile_id, key, UPDATE_MACHINE_USER, &req);
+        let command = KeyedCommand::by_profile::<keyed::UpdateMachineUser>(
+            caller.profile_id,
+            operation,
+            &req,
+        );
         let response = command
             .run(&*self.storage, || async {
                 let mut mu = self
@@ -554,12 +554,16 @@ impl MachineUserService for MachineUserServiceImpl {
         request: Request<DeleteMachineUserRequest>,
     ) -> Result<Response<DeleteMachineUserResponse>, Status> {
         let caller = self.admin(&request).await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
         let id = parse_machine_user_id(&req.machine_user_id)?;
 
         // A retry of a completed deletion answers as it did.
-        let command = KeyedCommand::by_profile(caller.profile_id, key, DELETE_MACHINE_USER, &req);
+        let command = KeyedCommand::by_profile::<keyed::DeleteMachineUser>(
+            caller.profile_id,
+            operation,
+            &req,
+        );
         let response = command
             .run(&*self.storage, || async {
                 let response = DeleteMachineUserResponse {};
@@ -605,13 +609,17 @@ impl MachineUserService for MachineUserServiceImpl {
         request: Request<SuspendMachineUserRequest>,
     ) -> Result<Response<MachineUserResponse>, Status> {
         let caller = self.admin(&request).await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
         let id = parse_machine_user_id(&req.machine_user_id)?;
 
         // A retry of a completed suspension answers as it did and never
         // suspends again a machine user reactivated since.
-        let command = KeyedCommand::by_profile(caller.profile_id, key, SUSPEND_MACHINE_USER, &req);
+        let command = KeyedCommand::by_profile::<keyed::SuspendMachineUser>(
+            caller.profile_id,
+            operation,
+            &req,
+        );
         let response = command
             .run(&*self.storage, || async {
                 let mut mu = self
@@ -673,14 +681,17 @@ impl MachineUserService for MachineUserServiceImpl {
         request: Request<ReactivateMachineUserRequest>,
     ) -> Result<Response<MachineUserResponse>, Status> {
         let caller = self.admin(&request).await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
         let id = parse_machine_user_id(&req.machine_user_id)?;
 
         // A retry of a completed reactivation answers as it did and never
         // reactivates a machine user suspended since.
-        let command =
-            KeyedCommand::by_profile(caller.profile_id, key, REACTIVATE_MACHINE_USER, &req);
+        let command = KeyedCommand::by_profile::<keyed::ReactivateMachineUser>(
+            caller.profile_id,
+            operation,
+            &req,
+        );
         let response = command
             .run(&*self.storage, || async {
                 let mut mu = self
@@ -741,15 +752,18 @@ impl MachineUserService for MachineUserServiceImpl {
         request: Request<AddMachineCredentialRequest>,
     ) -> Result<Response<AddMachineCredentialResponse>, Status> {
         let caller = self.admin(&request).await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
         let mu_id = parse_machine_user_id(&req.machine_user_id)?;
         let cred_type = proto_to_credential_type(req.credential_type)?;
         // A secret is shown once and only its verifier is kept: a retry of a
         // completed addition answers with the credential it added, its secret
         // empty, and adds no second one.
-        let command =
-            KeyedCommand::by_profile(caller.profile_id, key, ADD_MACHINE_CREDENTIAL, &req);
+        let command = KeyedCommand::by_profile::<keyed::AddMachineCredential>(
+            caller.profile_id,
+            operation,
+            &req,
+        );
         if let Some(recorded) = command.replay(&*self.storage).await? {
             return Ok(Response::new(recorded));
         }
@@ -914,7 +928,7 @@ impl MachineUserService for MachineUserServiceImpl {
         request: Request<RotateMachineCredentialRequest>,
     ) -> Result<Response<RotateMachineCredentialResponse>, Status> {
         let caller = self.admin(&request).await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
         let mu_id = parse_machine_user_id(&req.machine_user_id)?;
 
@@ -924,8 +938,11 @@ impl MachineUserService for MachineUserServiceImpl {
         // A retry of a completed rotation answers with the credentials it left,
         // the new secret empty, and rotates nothing again: the old credential
         // is no longer active, so it would otherwise be refused.
-        let command =
-            KeyedCommand::by_profile(caller.profile_id, key, ROTATE_MACHINE_CREDENTIAL, &req);
+        let command = KeyedCommand::by_profile::<keyed::RotateMachineCredential>(
+            caller.profile_id,
+            operation,
+            &req,
+        );
         if let Some(recorded) = command.replay(&*self.storage).await? {
             return Ok(Response::new(recorded));
         }
@@ -1044,7 +1061,7 @@ impl MachineUserService for MachineUserServiceImpl {
         request: Request<GrantImpersonationRequest>,
     ) -> Result<Response<GrantImpersonationResponse>, Status> {
         let caller = self.admin(&request).await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
         let mu_id = parse_machine_user_id(&req.machine_user_id)?;
         let target_type = proto_to_impersonation_target(req.target_type)?;
@@ -1055,7 +1072,11 @@ impl MachineUserService for MachineUserServiceImpl {
 
         // A retry of a completed grant answers as it did and never grants
         // again what was revoked since.
-        let command = KeyedCommand::by_profile(caller.profile_id, key, GRANT_IMPERSONATION, &req);
+        let command = KeyedCommand::by_profile::<keyed::GrantImpersonation>(
+            caller.profile_id,
+            operation,
+            &req,
+        );
         let response = command
             .run(&*self.storage, || async {
                 let mu = self
@@ -1105,7 +1126,7 @@ impl MachineUserService for MachineUserServiceImpl {
         request: Request<RevokeImpersonationRequest>,
     ) -> Result<Response<RevokeImpersonationResponse>, Status> {
         let caller = self.admin(&request).await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
         let mu_id = parse_machine_user_id(&req.machine_user_id)?;
 
@@ -1118,7 +1139,11 @@ impl MachineUserService for MachineUserServiceImpl {
 
         // A retry of a completed revocation answers as it did and never
         // removes a grant made again since.
-        let command = KeyedCommand::by_profile(caller.profile_id, key, REVOKE_IMPERSONATION, &req);
+        let command = KeyedCommand::by_profile::<keyed::RevokeImpersonation>(
+            caller.profile_id,
+            operation,
+            &req,
+        );
         command
             .run(&*self.storage, || async {
                 let response = RevokeImpersonationResponse {};

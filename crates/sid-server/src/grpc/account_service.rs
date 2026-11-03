@@ -8,10 +8,12 @@
 use prost::Message;
 use sid_authn::caller::authenticate;
 use sid_authn::jwt::JwtService;
-use sid_authn::operation::{Effect, KeyedCommand, required_key};
+use sid_authn::operation::KeyedCommand;
+use sid_authn::operation::grpc::{Effect, context};
 use sid_authn::revocation_cache::RevocationCache;
 use sid_core::models::{AuditEntry, MutationContext, ProfileId};
 use sid_plugin::storage::StorageBackend;
+use sid_proto::keyed::account::account_service as keyed;
 use sid_proto::sid::v1::account::account_service_server::AccountService;
 use sid_proto::sid::v1::account::*;
 use std::sync::Arc;
@@ -172,17 +174,6 @@ fn proto_email_label(v: i32) -> sid_core::models::profile_email::EmailLabel {
         _ => EmailLabel::Personal, // default
     }
 }
-
-const UPDATE_CLAIM_CONSENT: &str = "sid.v1.account.AccountService/UpdateClaimConsent";
-const DISCONNECT_SITE: &str = "sid.v1.account.AccountService/DisconnectSite";
-const ADD_PHONE: &str = "sid.v1.account.AccountService/AddPhone";
-const REMOVE_PHONE: &str = "sid.v1.account.AccountService/RemovePhone";
-const UPDATE_PHONE: &str = "sid.v1.account.AccountService/UpdatePhone";
-const SET_PRIMARY_PHONE: &str = "sid.v1.account.AccountService/SetPrimaryPhone";
-const ADD_EMAIL: &str = "sid.v1.account.AccountService/AddEmail";
-const REMOVE_EMAIL: &str = "sid.v1.account.AccountService/RemoveEmail";
-const UPDATE_EMAIL: &str = "sid.v1.account.AccountService/UpdateEmail";
-const SET_PRIMARY_EMAIL: &str = "sid.v1.account.AccountService/SetPrimaryEmail";
 
 /// The audit of `profile_id`'s own `action` on `target`.
 fn own_ctx(profile_id: ProfileId, action: &str, target: String) -> MutationContext {
@@ -532,7 +523,7 @@ impl AccountService for AccountServiceImpl {
         request: Request<UpdateClaimConsentRequest>,
     ) -> Result<Response<()>, Status> {
         let profile_id = self.extract_profile_id(&request).await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
 
         if req.site_id.is_empty() {
@@ -544,7 +535,8 @@ impl AccountService for AccountServiceImpl {
 
         // A retry of a completed decision answers as it did, and never
         // applies it again over a later decision on the same claim.
-        let command = KeyedCommand::by_profile(profile_id, key, UPDATE_CLAIM_CONSENT, &req);
+        let command =
+            KeyedCommand::by_profile::<keyed::UpdateClaimConsent>(profile_id, operation, &req);
         command
             .run(&*self.storage, || async {
                 self.decide_claim(profile_id, &command, &req).await?;
@@ -559,14 +551,15 @@ impl AccountService for AccountServiceImpl {
         request: Request<DisconnectSiteRequest>,
     ) -> Result<Response<()>, Status> {
         let profile_id = self.extract_profile_id(&request).await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
         if req.site_id.is_empty() {
             return Err(missing_field("site_id"));
         }
 
         // A retry of a completed disconnect answers as it did.
-        let command = KeyedCommand::by_profile(profile_id, key, DISCONNECT_SITE, &req);
+        let command =
+            KeyedCommand::by_profile::<keyed::DisconnectSite>(profile_id, operation, &req);
         command
             .run(&*self.storage, || async {
                 let site_id = &req.site_id;
@@ -606,7 +599,7 @@ impl AccountService for AccountServiceImpl {
         request: Request<AddPhoneRequest>,
     ) -> Result<Response<sid_proto::sid::v1::ProfilePhone>, Status> {
         let profile_id = self.extract_profile_id(&request).await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
 
         if req.e164 == 0 {
@@ -615,7 +608,7 @@ impl AccountService for AccountServiceImpl {
 
         // A retry of a completed addition answers with the phone it added and
         // adds no second one.
-        let command = KeyedCommand::by_profile(profile_id, key, ADD_PHONE, &req);
+        let command = KeyedCommand::by_profile::<keyed::AddPhone>(profile_id, operation, &req);
         let added = command
             .run(&*self.storage, || async {
                 let now = chrono::Utc::now();
@@ -653,12 +646,12 @@ impl AccountService for AccountServiceImpl {
         request: Request<RemovePhoneRequest>,
     ) -> Result<Response<()>, Status> {
         let profile_id = self.extract_profile_id(&request).await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
         let phone_id = parse_phone_id(&req.phone_id)?;
 
         // A retry of a completed removal answers as it did.
-        let command = KeyedCommand::by_profile(profile_id, key, REMOVE_PHONE, &req);
+        let command = KeyedCommand::by_profile::<keyed::RemovePhone>(profile_id, operation, &req);
         command
             .run(&*self.storage, || async {
                 // Another profile's phone is not found, as one that does not
@@ -678,7 +671,7 @@ impl AccountService for AccountServiceImpl {
         request: Request<UpdatePhoneRequest>,
     ) -> Result<Response<sid_proto::sid::v1::ProfilePhone>, Status> {
         let profile_id = self.extract_profile_id(&request).await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
         let phone_id = parse_phone_id(&req.phone_id)?;
 
@@ -696,7 +689,7 @@ impl AccountService for AccountServiceImpl {
         };
         // A retry of a completed edit answers with the phone as that edit
         // left it, and never writes it again over a later edit.
-        let command = KeyedCommand::by_profile(profile_id, key, UPDATE_PHONE, &req);
+        let command = KeyedCommand::by_profile::<keyed::UpdatePhone>(profile_id, operation, &req);
         let view = command
             .run(&*self.storage, || async {
                 let now = chrono::Utc::now();
@@ -724,13 +717,14 @@ impl AccountService for AccountServiceImpl {
         request: Request<SetPrimaryPhoneRequest>,
     ) -> Result<Response<sid_proto::sid::v1::ProfilePhone>, Status> {
         let profile_id = self.extract_profile_id(&request).await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
         let phone_id = parse_phone_id(&req.phone_id)?;
 
         // A retry of a completed move answers with the phone as it left it,
         // and never moves the flag back over a later move.
-        let command = KeyedCommand::by_profile(profile_id, key, SET_PRIMARY_PHONE, &req);
+        let command =
+            KeyedCommand::by_profile::<keyed::SetPrimaryPhone>(profile_id, operation, &req);
         let view = command
             .run(&*self.storage, || async {
                 let now = chrono::Utc::now();
@@ -778,7 +772,7 @@ impl AccountService for AccountServiceImpl {
         request: Request<AddEmailRequest>,
     ) -> Result<Response<sid_proto::sid::v1::ProfileEmail>, Status> {
         let profile_id = self.extract_profile_id(&request).await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
 
         if req.email.is_empty() {
@@ -793,7 +787,7 @@ impl AccountService for AccountServiceImpl {
 
         // A retry of a completed addition answers with the email it added and
         // adds no second one.
-        let command = KeyedCommand::by_profile(profile_id, key, ADD_EMAIL, &req);
+        let command = KeyedCommand::by_profile::<keyed::AddEmail>(profile_id, operation, &req);
         let added = command
             .run(&*self.storage, || async {
                 let now = chrono::Utc::now();
@@ -827,12 +821,12 @@ impl AccountService for AccountServiceImpl {
         request: Request<RemoveEmailRequest>,
     ) -> Result<Response<()>, Status> {
         let profile_id = self.extract_profile_id(&request).await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
         let email_id = parse_email_id(&req.email_id)?;
 
         // A retry of a completed removal answers as it did.
-        let command = KeyedCommand::by_profile(profile_id, key, REMOVE_EMAIL, &req);
+        let command = KeyedCommand::by_profile::<keyed::RemoveEmail>(profile_id, operation, &req);
         command
             .run(&*self.storage, || async {
                 // Another profile's email is not found, as one that does not
@@ -852,7 +846,7 @@ impl AccountService for AccountServiceImpl {
         request: Request<UpdateEmailRequest>,
     ) -> Result<Response<sid_proto::sid::v1::ProfileEmail>, Status> {
         let profile_id = self.extract_profile_id(&request).await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
         let email_id = parse_email_id(&req.email_id)?;
 
@@ -867,7 +861,7 @@ impl AccountService for AccountServiceImpl {
         };
         // A retry of a completed edit answers with the email as that edit
         // left it, and never writes it again over a later edit.
-        let command = KeyedCommand::by_profile(profile_id, key, UPDATE_EMAIL, &req);
+        let command = KeyedCommand::by_profile::<keyed::UpdateEmail>(profile_id, operation, &req);
         let view = command
             .run(&*self.storage, || async {
                 let now = chrono::Utc::now();
@@ -895,13 +889,14 @@ impl AccountService for AccountServiceImpl {
         request: Request<SetPrimaryEmailRequest>,
     ) -> Result<Response<sid_proto::sid::v1::ProfileEmail>, Status> {
         let profile_id = self.extract_profile_id(&request).await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
         let email_id = parse_email_id(&req.email_id)?;
 
         // A retry of a completed move answers with the email as it left it,
         // and never moves the flag back over a later move.
-        let command = KeyedCommand::by_profile(profile_id, key, SET_PRIMARY_EMAIL, &req);
+        let command =
+            KeyedCommand::by_profile::<keyed::SetPrimaryEmail>(profile_id, operation, &req);
         let view = command
             .run(&*self.storage, || async {
                 let now = chrono::Utc::now();

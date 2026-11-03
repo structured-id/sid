@@ -19,10 +19,7 @@ fn authed<T>(msg: T, token: &str) -> Request<T> {
     let mut req = Request::new(msg);
     req.metadata_mut()
         .insert("authorization", format!("Bearer {token}").parse().unwrap());
-    req.metadata_mut().insert(
-        sid_authn::operation::OPERATION_KEY_HEADER,
-        uuid::Uuid::new_v4().to_string().parse().unwrap(),
-    );
+    common::name_new_command(req.metadata_mut());
     req
 }
 
@@ -139,10 +136,7 @@ async fn test_project_rpcs_allow_an_administrator() {
         },
         &token,
     );
-    create.metadata_mut().insert(
-        sid_authn::operation::OPERATION_KEY_HEADER,
-        "create-billing".parse().unwrap(),
-    );
+    common::name_command(create.metadata_mut(), "create-billing");
     svc.project
         .create_project(create)
         .await

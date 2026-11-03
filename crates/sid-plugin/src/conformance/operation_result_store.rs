@@ -249,13 +249,17 @@ pub async fn a_result_is_kept_no_longer_than_its_retention(store: &dyn Operation
 /// - Retiring a period races a commit under it: the commit is either refused
 ///   or dropped with the period, never left behind; a retired period refuses
 ///   every later commit and is never issued again.
-/// - Periods leave in the export and an imported state never un-retires one.
+/// - Periods leave in the export; an import never un-retires a period, and
+///   a period its source retired is retired here with its completions.
 pub async fn operation_periods_bound_admission(store: &dyn OperationResultStore) {
     use chrono::{Duration, Utc};
     use sid_core::models::{
         IssuedOperationPeriod, OperationPeriod, OperationPeriodRecord, OperationPeriodRefusal,
+        OperationPeriodState,
     };
 
+    let policy = store.operation_period_policy().await.unwrap();
+    assert!(policy.acceptance > Duration::zero() && policy.retention >= Duration::zero());
     let acceptance = Duration::hours(1);
     // After every period an earlier run of this scenario left, and well
     // before any period a caller with a real clock is issued.
@@ -264,6 +268,7 @@ pub async fn operation_periods_bound_admission(store: &dyn OperationResultStore)
         .export_operation_periods()
         .await
         .unwrap()
+        .active
         .iter()
         .map(|p| p.issued.accepted_until)
         .filter(|until| *until < horizon)
@@ -320,7 +325,7 @@ pub async fn operation_periods_bound_admission(store: &dyn OperationResultStore)
     assert!(record.matches("keyed", b"inputs", Some(first.period)));
     assert!(!record.matches("keyed", b"inputs", Some(next.period)));
 
-    let unissued = OperationPeriod::new(next.period.get() + 1_000_000);
+    let unissued = OperationPeriod::new(i64::MAX as u64);
     let stray = key();
     assert_eq!(
         refused(store.record_outcome(keyed(&stray, unissued)).await),
@@ -367,38 +372,71 @@ pub async fn operation_periods_bound_admission(store: &dyn OperationResultStore)
         "a retired period is never current again"
     );
 
-    // Periods travel with their state; an import never un-retires one.
+    // Periods travel with their state. The export holds the admitted ones
+    // and the last issued; a retired one is neither.
     let exported = store.export_operation_periods().await.unwrap();
-    let first_record = exported
-        .iter()
-        .find(|p| p.issued.period == first.period)
-        .expect("exported");
-    assert!(first_record.retired);
+    let held = |state: &OperationPeriodState, period: OperationPeriod| {
+        state.active.iter().any(|p| p.issued.period == period)
+    };
+    assert!(exported.issued_through >= reissued.period);
+    assert!(!held(&exported, first.period));
+    assert!(held(&exported, next.period) && held(&exported, reissued.period));
+
+    // An import that names a period this store retired as admitted leaves
+    // it retired; one whose source retired `next` retires it here, with its
+    // completions; a period issued only at the source is admitted.
+    let pending = key();
     store
-        .import_operation_period(&OperationPeriodRecord {
-            retired: false,
-            ..*first_record
+        .record_outcome(keyed(&pending, next.period))
+        .await
+        .unwrap();
+    let source_record =
+        |period: OperationPeriod, until: chrono::DateTime<Utc>| OperationPeriodRecord {
+            issued: IssuedOperationPeriod {
+                period,
+                accepted_until: until,
+            },
+            issued_at: t0,
+        };
+    // The number right after the last issued: a caller that takes it here
+    // meanwhile keeps it, as the import names it admitted.
+    let foreign = OperationPeriod::new(exported.issued_through.get() + 1);
+    let mut active: Vec<OperationPeriodRecord> = exported
+        .active
+        .iter()
+        .filter(|p| p.issued.period != next.period)
+        .copied()
+        .collect();
+    active.push(source_record(first.period, first.accepted_until));
+    active.push(source_record(foreign, t0 + Duration::minutes(10)));
+    store
+        .import_operation_periods(&OperationPeriodState {
+            issued_through: foreign,
+            active,
         })
         .await
         .unwrap();
-    let foreign = OperationPeriodRecord {
-        issued: IssuedOperationPeriod {
-            period: OperationPeriod::new(reissued.period.get() + 2_000_000),
-            accepted_until: t0 - Duration::days(1),
-        },
-        issued_at: t0 - Duration::days(2),
-        retired: false,
-    };
-    store.import_operation_period(&foreign).await.unwrap();
     let after = store.export_operation_periods().await.unwrap();
-    let state = |period: OperationPeriod| {
-        after
-            .iter()
-            .find(|p| p.issued.period == period)
-            .map(|p| p.retired)
-    };
-    assert_eq!(state(first.period), Some(true), "still retired");
-    assert_eq!(state(foreign.issued.period), Some(false), "imported");
+    assert!(
+        !held(&after, first.period),
+        "a retired period stays retired"
+    );
+    assert!(!held(&after, next.period), "retired with the source");
+    assert!(
+        store
+            .get_operation_result(&ns, &pending)
+            .await
+            .unwrap()
+            .is_none(),
+        "with its completions"
+    );
+    assert_eq!(
+        refused(store.record_outcome(keyed(&key(), next.period)).await),
+        OperationPeriodRefusal::Retired
+    );
+    assert!(held(&after, foreign) && held(&after, reissued.period));
+    assert!(after.issued_through >= foreign);
+    store.record_outcome(keyed(&key(), foreign)).await.unwrap();
 }
 
 /// Completions of one method in one namespace are dropped once older than

@@ -114,9 +114,7 @@ impl Fixture {
 
     fn keyed<T>(&self, message: T, key: &str) -> Request<T> {
         let mut request = self.admin(message);
-        request
-            .metadata_mut()
-            .insert("idempotency-key", key.parse().unwrap());
+        common::name_command(request.metadata_mut(), key);
         request
     }
 
@@ -244,11 +242,12 @@ impl Fixture {
         state: pb::ProvisioningConnectorState,
     ) -> Result<pb::ProvisioningConnector, tonic::Status> {
         self.provisioning
-            .change_provisioning_connector_state(self.admin(
+            .change_provisioning_connector_state(self.keyed(
                 pb::ChangeProvisioningConnectorStateRequest {
                     connector_id: connector.id.clone(),
                     state: state.into(),
                 },
+                &uuid::Uuid::new_v4().to_string(),
             ))
             .await
             .map(|r| r.into_inner())

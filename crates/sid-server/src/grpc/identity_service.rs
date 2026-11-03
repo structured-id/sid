@@ -10,7 +10,8 @@ use sid_authn::account_closure::AccountClosureService;
 use sid_authn::caller::{Caller, authenticate};
 use sid_authn::data_export::DataExportService;
 use sid_authn::jwt::JwtService;
-use sid_authn::operation::{Effect, KeyedCommand, required_key};
+use sid_authn::operation::KeyedCommand;
+use sid_authn::operation::grpc::{Effect, context};
 use sid_authn::passkey_prompt;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::revocation_cascade::RevocationCascadeService;
@@ -24,6 +25,7 @@ use sid_core::models::{
 };
 use sid_core::models::{ContestCheck, MutationContext, NewRegistration};
 use sid_plugin::storage::StorageBackend;
+use sid_proto::keyed::identity::identity_service as keyed;
 use sid_proto::sid::v1::identity_service_server::IdentityService;
 use sid_proto::sid::v1::*;
 use std::sync::Arc;
@@ -39,22 +41,6 @@ use sid_core::grpc_error::refuse::{
 /// Profiles per ListProfiles page when the request names no size.
 const DEFAULT_PROFILE_PAGE: u64 = 50;
 
-const CREATE_PROFILE: &str = "sid.v1.identity.IdentityService/CreateProfile";
-const UPDATE_PROFILE: &str = "sid.v1.identity.IdentityService/UpdateProfile";
-const DELETE_PROFILE: &str = "sid.v1.identity.IdentityService/DeleteProfile";
-const UPDATE_CREDENTIAL: &str = "sid.v1.identity.IdentityService/UpdateCredential";
-const REVOKE_CREDENTIAL: &str = "sid.v1.identity.IdentityService/RevokeCredential";
-const ADD_PRINCIPAL: &str = "sid.v1.identity.IdentityService/AddPrincipal";
-const REMOVE_PRINCIPAL: &str = "sid.v1.identity.IdentityService/RemovePrincipal";
-const DISMISS_PASSKEY_PROMPT: &str = "sid.v1.identity.IdentityService/RecordPasskeyPromptDismissal";
-const REQUEST_CLOSURE: &str = "sid.v1.identity.IdentityService/RequestClosure";
-const CANCEL_CLOSURE: &str = "sid.v1.identity.IdentityService/CancelClosure";
-const PREPARE_EXPORT: &str = "sid.v1.identity.IdentityService/PrepareExport";
-const ACKNOWLEDGE_EXPORT: &str = "sid.v1.identity.IdentityService/AcknowledgeExport";
-const UPDATE_DEVICE: &str = "sid.v1.identity.IdentityService/UpdateDevice";
-const REMOVE_DEVICE: &str = "sid.v1.identity.IdentityService/RemoveDevice";
-const TRUST_DEVICE: &str = "sid.v1.identity.IdentityService/TrustDevice";
-const REVOKE_DEVICE_TRUST: &str = "sid.v1.identity.IdentityService/RevokeDeviceTrust";
 /// The largest ListProfiles page; a bigger request gets this many.
 const MAX_PROFILE_PAGE: i32 = 500;
 
@@ -373,22 +359,18 @@ impl IdentityServiceImpl {
     /// a retry answers with the device as the first commit left it and never
     /// undoes a later change. The trusted-device limit is checked by the store
     /// in the same transaction as the change.
-    async fn change_device_trust<T>(
+    async fn change_device_trust<M: sid_proto::KeyedMethod>(
         &self,
-        request: Request<T>,
-        method: &'static str,
+        request: Request<M::Request>,
         trusted: bool,
-        device_id: impl FnOnce(&T) -> Result<DeviceId, Status>,
-    ) -> Result<Response<sid_proto::sid::v1::Device>, Status>
-    where
-        T: prost::Message,
-    {
+        device_id: impl FnOnce(&M::Request) -> Result<DeviceId, Status>,
+    ) -> Result<Response<sid_proto::sid::v1::Device>, Status> {
         use sid_core::models::{DeviceTrustChange, device::MAX_TRUSTED_DEVICES};
         let caller_id = self.caller(&request).await?.profile_id;
-        let key = required_key(request.metadata());
+        let context = context(&request);
         let req = request.into_inner();
         let device_id = device_id(&req)?;
-        let command = KeyedCommand::by_profile(caller_id, key?, method, &req);
+        let command = KeyedCommand::by_profile::<M>(caller_id, context?, &req);
         let action = if trusted {
             "device.trust"
         } else {
@@ -551,9 +533,10 @@ impl IdentityService for IdentityServiceImpl {
 
         use sid_core::models::PrincipalType;
 
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
-        let command = KeyedCommand::by_profile(caller.profile_id, key, CREATE_PROFILE, &req);
+        let command =
+            KeyedCommand::by_profile::<keyed::CreateProfile>(caller.profile_id, operation, &req);
         // A completed creation answers before the checks below, which its own
         // account would now fail (its handles are taken).
         if let Some(response) = command.replay(&*self.storage).await? {
@@ -807,17 +790,18 @@ impl IdentityService for IdentityServiceImpl {
         if self.feature_flags.is_maintenance_mode().await {
             return Err(maintenance());
         }
-        // The key is read after the caller is authorized for the target: a
-        // refused caller learns nothing more than without one.
-        let key = required_key(request.metadata());
+        // The context is checked after the caller is authorized for the
+        // target: a refused caller learns nothing more than without one.
+        let operation = context(&request);
         let req = request.into_inner();
         let pid = convert::parse_profile_id(&req.id)?;
         caller.require_self_or_admin(pid)?;
-        let key = key?;
+        let operation = operation?;
 
         // A retry of a completed edit answers with the profile as that edit
         // left it and never writes its names again over a later edit.
-        let command = KeyedCommand::by_profile(caller.profile_id, key, UPDATE_PROFILE, &req);
+        let command =
+            KeyedCommand::by_profile::<keyed::UpdateProfile>(caller.profile_id, operation, &req);
         let response = command
             .run(&*self.storage, || async {
                 let mut profile = self
@@ -895,13 +879,14 @@ impl IdentityService for IdentityServiceImpl {
         if self.feature_flags.is_maintenance_mode().await {
             return Err(maintenance());
         }
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
         let pid = convert::parse_profile_id(&req.id)?;
 
         // A retry of a completed deletion answers as it did and owes its
         // events and purge only once.
-        let command = KeyedCommand::by_profile(caller.profile_id, key, DELETE_PROFILE, &req);
+        let command =
+            KeyedCommand::by_profile::<keyed::DeleteProfile>(caller.profile_id, operation, &req);
         let response = command
             .run(&*self.storage, || async {
                 let response = DeleteProfileResponse {};
@@ -1052,7 +1037,7 @@ impl IdentityService for IdentityServiceImpl {
         if self.feature_flags.is_maintenance_mode().await {
             return Err(maintenance());
         }
-        let key = required_key(request.metadata());
+        let operation = context(&request);
         let req = request.into_inner();
         let cred_id = parse_credential_id(&req.credential_id)?;
         let Some(label) = req.label.clone() else {
@@ -1063,7 +1048,11 @@ impl IdentityService for IdentityServiceImpl {
 
         // A retry of a completed rename answers with the credential as that
         // rename left it and never writes its label over a later one.
-        let command = KeyedCommand::by_profile(caller.profile_id, key?, UPDATE_CREDENTIAL, &req);
+        let command = KeyedCommand::by_profile::<keyed::UpdateCredential>(
+            caller.profile_id,
+            operation?,
+            &req,
+        );
         let response = command
             .run(&*self.storage, || async {
                 let mut cred = self.visible_credential(&caller, cred_id).await?;
@@ -1101,13 +1090,14 @@ impl IdentityService for IdentityServiceImpl {
         if self.feature_flags.is_maintenance_mode().await {
             return Err(maintenance());
         }
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
         let cred_id = parse_credential_id(&req.credential_id)?;
 
         // A retry of a completed revocation answers as it did, not as a
         // credential not found.
-        let command = KeyedCommand::by_profile(caller.profile_id, key, REVOKE_CREDENTIAL, &req);
+        let command =
+            KeyedCommand::by_profile::<keyed::RevokeCredential>(caller.profile_id, operation, &req);
         let response = command
             .run(&*self.storage, || async {
                 let credential = self.visible_credential(&caller, cred_id).await?;
@@ -1153,11 +1143,11 @@ impl IdentityService for IdentityServiceImpl {
         if self.feature_flags.is_maintenance_mode().await {
             return Err(maintenance());
         }
-        let key = required_key(request.metadata());
+        let operation = context(&request);
         let req = request.into_inner();
         let pid = convert::parse_profile_id(&req.profile_id)?;
         caller.require_self_or_admin(pid)?;
-        let key = key?;
+        let operation = operation?;
 
         let principal_type = match req.r#type() {
             sid_proto::sid::v1::PrincipalType::Email => sid_core::models::PrincipalType::Email,
@@ -1176,7 +1166,8 @@ impl IdentityService for IdentityServiceImpl {
         // One claim per operation key: a retry answers with the claim as its
         // first commit stored it, never as a handle taken by itself, owes no
         // second contestation check and never adds back a claim removed since.
-        let command = KeyedCommand::by_profile(caller.profile_id, key, ADD_PRINCIPAL, &req);
+        let command =
+            KeyedCommand::by_profile::<keyed::AddPrincipal>(caller.profile_id, operation, &req);
         let stored: sid_core::models::Principal = command
             .run_recorded(&*self.storage, || async {
                 self.storage
@@ -1283,7 +1274,7 @@ impl IdentityService for IdentityServiceImpl {
         if self.feature_flags.is_maintenance_mode().await {
             return Err(maintenance());
         }
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
         let principal_id = uuid::Uuid::parse_str(&req.principal_id)
             .map(sid_core::models::PrincipalId)
@@ -1291,7 +1282,8 @@ impl IdentityService for IdentityServiceImpl {
 
         // A retry of a completed removal answers as it did, not as a principal
         // not found, and never removes a binding made again since.
-        let command = KeyedCommand::by_profile(caller.profile_id, key, REMOVE_PRINCIPAL, &req);
+        let command =
+            KeyedCommand::by_profile::<keyed::RemovePrincipal>(caller.profile_id, operation, &req);
         let response = command
             .run(&*self.storage, || async {
                 // A principal can be held by several accounts (contestation),
@@ -1463,14 +1455,16 @@ impl IdentityService for IdentityServiceImpl {
         request: Request<RecordPasskeyPromptDismissalRequest>,
     ) -> Result<Response<RecordPasskeyPromptDismissalResponse>, Status> {
         let profile_id = self.caller(&request).await?.profile_id;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
 
         let policy = SecurityPolicy::ce_default();
 
         // One dismissal per operation key: a retry answers with the prompt as
         // the first commit left it and counts no second skip.
-        let command = KeyedCommand::by_profile(profile_id, key, DISMISS_PASSKEY_PROMPT, &req);
+        let command = KeyedCommand::by_profile::<keyed::RecordPasskeyPromptDismissal>(
+            profile_id, operation, &req,
+        );
         let response = command
             .run(&*self.storage, || async {
                 let updated = passkey_prompt::record_dismissal(
@@ -1570,7 +1564,7 @@ impl IdentityService for IdentityServiceImpl {
             return Err(maintenance());
         }
 
-        let key = required_key(request.metadata());
+        let operation = context(&request);
         let req = request.into_inner();
 
         // The user closes their own account, voluntarily or as a GDPR Art. 17
@@ -1588,7 +1582,7 @@ impl IdentityService for IdentityServiceImpl {
             ClosureMode::Unspecified => return Err(missing_field("mode")),
         };
 
-        let key = key?;
+        let operation = operation?;
         let answer = |closure: &sid_core::models::ClosureRequest| RequestClosureResponse {
             profile_id: closure.profile_id.to_string(),
             mode: req.mode,
@@ -1598,7 +1592,7 @@ impl IdentityService for IdentityServiceImpl {
         // A retry of a completed request answers with the closure it started,
         // its grace period unchanged, and is never refused as a profile
         // already closing.
-        let command = KeyedCommand::by_profile(caller_id, key, REQUEST_CLOSURE, &req);
+        let command = KeyedCommand::by_profile::<keyed::RequestClosure>(caller_id, operation, &req);
         let response = command
             .run(&*self.storage, || async {
                 let closure = self
@@ -1625,12 +1619,12 @@ impl IdentityService for IdentityServiceImpl {
         if self.feature_flags.is_maintenance_mode().await {
             return Err(maintenance());
         }
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
 
         // A retry of a completed cancellation answers as it did and never
         // cancels a closure requested again since.
-        let command = KeyedCommand::by_profile(caller_id, key, CANCEL_CLOSURE, &req);
+        let command = KeyedCommand::by_profile::<keyed::CancelClosure>(caller_id, operation, &req);
         let response = command
             .run(&*self.storage, || async {
                 let response = CancelClosureResponse {};
@@ -1699,7 +1693,7 @@ impl IdentityService for IdentityServiceImpl {
         request: Request<PrepareExportRequest>,
     ) -> Result<Response<PrepareExportResponse>, Status> {
         let caller_id = self.caller(&request).await?.profile_id;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
         // CE only supports JSON.
         let format = sid_core::models::ExportFormat::Json;
@@ -1710,7 +1704,7 @@ impl IdentityService for IdentityServiceImpl {
 
         // A retry of a completed preparation answers with the export it
         // created and prepares no other.
-        let command = KeyedCommand::by_profile(caller_id, key, PREPARE_EXPORT, &req);
+        let command = KeyedCommand::by_profile::<keyed::PrepareExport>(caller_id, operation, &req);
         let response = command
             .run(&*self.storage, || async {
                 let job = self
@@ -1815,12 +1809,13 @@ impl IdentityService for IdentityServiceImpl {
         request: Request<AcknowledgeExportRequest>,
     ) -> Result<Response<()>, Status> {
         let caller_id = self.caller(&request).await?.profile_id;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
 
         // A retry of a completed acknowledgement answers as it did, not as an
         // export no longer ready.
-        let command = KeyedCommand::by_profile(caller_id, key, ACKNOWLEDGE_EXPORT, &req);
+        let command =
+            KeyedCommand::by_profile::<keyed::AcknowledgeExport>(caller_id, operation, &req);
         command
             .run(&*self.storage, || async {
                 self.data_export
@@ -1891,7 +1886,7 @@ impl IdentityService for IdentityServiceImpl {
         request: Request<UpdateDeviceRequest>,
     ) -> Result<Response<sid_proto::sid::v1::Device>, Status> {
         let caller_id = self.caller(&request).await?.profile_id;
-        let key = required_key(request.metadata());
+        let operation = context(&request);
         let req = request.into_inner();
         let device_id = parse_device_id(&req.device_id)?;
         let Some(name) = req.display_name.clone() else {
@@ -1903,7 +1898,7 @@ impl IdentityService for IdentityServiceImpl {
         // Only the name is written: a trust change or removal made meanwhile
         // is never undone by this copy, nor a later rename by a retry, which
         // answers with the device as the first commit left it.
-        let command = KeyedCommand::by_profile(caller_id, key?, UPDATE_DEVICE, &req);
+        let command = KeyedCommand::by_profile::<keyed::UpdateDevice>(caller_id, operation?, &req);
         let device: sid_core::models::Device = command
             .run_recorded(&*self.storage, || async {
                 self.owned_device(caller_id, device_id).await?;
@@ -1933,13 +1928,13 @@ impl IdentityService for IdentityServiceImpl {
         request: Request<RemoveDeviceRequest>,
     ) -> Result<Response<()>, Status> {
         let caller_id = self.caller(&request).await?.profile_id;
-        let key = required_key(request.metadata());
+        let operation = context(&request);
         let req = request.into_inner();
         let device_id = parse_device_id(&req.device_id)?;
 
         // A retry of a completed removal answers as it did, not as a device
         // not found.
-        let command = KeyedCommand::by_profile(caller_id, key?, REMOVE_DEVICE, &req);
+        let command = KeyedCommand::by_profile::<keyed::RemoveDevice>(caller_id, operation?, &req);
         command
             .run(&*self.storage, || async {
                 self.owned_device(caller_id, device_id).await?;
@@ -1965,7 +1960,7 @@ impl IdentityService for IdentityServiceImpl {
         &self,
         request: Request<TrustDeviceRequest>,
     ) -> Result<Response<sid_proto::sid::v1::Device>, Status> {
-        self.change_device_trust(request, TRUST_DEVICE, true, |r| {
+        self.change_device_trust::<keyed::TrustDevice>(request, true, |r| {
             parse_device_id(&r.device_id)
         })
         .await
@@ -1977,7 +1972,7 @@ impl IdentityService for IdentityServiceImpl {
         &self,
         request: Request<RevokeDeviceTrustRequest>,
     ) -> Result<Response<sid_proto::sid::v1::Device>, Status> {
-        self.change_device_trust(request, REVOKE_DEVICE_TRUST, false, |r| {
+        self.change_device_trust::<keyed::RevokeDeviceTrust>(request, false, |r| {
             parse_device_id(&r.device_id)
         })
         .await

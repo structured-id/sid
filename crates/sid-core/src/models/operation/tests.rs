@@ -98,10 +98,12 @@ fn test_operation_period_parses_canonical_decimal_only() {
     assert_eq!(OperationPeriod::new(7).to_string(), "7");
 }
 
-/// A record matches only the same method with the same inputs.
+/// A record matches only the same method with the same inputs under the
+/// same period.
 #[test]
 fn test_record_matches_same_call_only() {
     let key = OperationKey::parse("k1").unwrap();
+    let period = Some(OperationPeriod::new(3));
     let record = OperationRecord {
         completion: OperationCompletion::new(
             "profile:p",
@@ -109,10 +111,17 @@ fn test_record_matches_same_call_only() {
             "sid.v1.ProjectService/CreateProject",
             b"inputs",
             b"result".to_vec(),
-        ),
+        )
+        .in_period(OperationPeriod::new(3)),
         completed_at: Utc::now(),
     };
-    assert!(record.matches("sid.v1.ProjectService/CreateProject", b"inputs"));
-    assert!(!record.matches("sid.v1.ProjectService/CreateProject", b"other"));
-    assert!(!record.matches("sid.v1.ProjectService/DeleteProject", b"inputs"));
+    assert!(record.matches("sid.v1.ProjectService/CreateProject", b"inputs", period));
+    assert!(!record.matches("sid.v1.ProjectService/CreateProject", b"other", period));
+    assert!(!record.matches("sid.v1.ProjectService/DeleteProject", b"inputs", period));
+    assert!(!record.matches(
+        "sid.v1.ProjectService/CreateProject",
+        b"inputs",
+        Some(OperationPeriod::new(4))
+    ));
+    assert!(!record.matches("sid.v1.ProjectService/CreateProject", b"inputs", None));
 }

@@ -60,10 +60,7 @@ async fn as_admin<T>(svc: &TestServices, message: T) -> Request<T> {
     request
         .metadata_mut()
         .insert("authorization", format!("Bearer {token}").parse().unwrap());
-    request.metadata_mut().insert(
-        sid_authn::operation::OPERATION_KEY_HEADER,
-        uuid::Uuid::new_v4().to_string().parse().unwrap(),
-    );
+    common::name_new_command(request.metadata_mut());
     request
 }
 
@@ -518,10 +515,7 @@ fn bearing<T>(token: &str, message: T) -> Request<T> {
     request
         .metadata_mut()
         .insert("authorization", format!("Bearer {token}").parse().unwrap());
-    request.metadata_mut().insert(
-        sid_authn::operation::OPERATION_KEY_HEADER,
-        uuid::Uuid::new_v4().to_string().parse().unwrap(),
-    );
+    common::name_new_command(request.metadata_mut());
     request
 }
 
