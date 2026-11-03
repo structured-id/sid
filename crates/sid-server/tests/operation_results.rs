@@ -187,6 +187,50 @@ async fn test_delete_project_retry_answers_as_the_deletion() {
     assert_eq!(err.code(), Code::NotFound);
 }
 
+/// A creation that issues a one-time secret, retried after its response was
+/// lost, answers with the token it created and no value (SID keeps only its
+/// hash) and creates no second token.
+#[tokio::test]
+async fn test_initial_access_token_retry_answers_without_its_value() {
+    let svc = TestServices::new(MockStorage::new().with_system_project());
+    let token = issue_admin_token(&svc.jwt, ProfileId::generate());
+    let create = || CreateInitialAccessTokenRequest {
+        project_id: sid_core::models::ProjectId::system().0.to_string(),
+        max_clients: 1,
+        ..Default::default()
+    };
+
+    let first = svc
+        .project
+        .create_initial_access_token(keyed(create(), &token, Some("op-iat")))
+        .await
+        .unwrap()
+        .into_inner();
+    let retry = svc
+        .project
+        .create_initial_access_token(keyed(create(), &token, Some("op-iat")))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert!(!first.token_value.is_empty());
+    assert!(retry.token_value.is_empty());
+    assert_eq!(retry.token, first.token);
+    let listed = svc
+        .project
+        .list_initial_access_tokens(keyed(
+            ListInitialAccessTokensRequest {
+                project_id: sid_core::models::ProjectId::system().0.to_string(),
+            },
+            &token,
+            None,
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(listed.tokens.len(), 1);
+}
+
 /// An edit without a key cannot promise a safe retry and changes nothing.
 #[tokio::test]
 async fn test_update_project_without_key_is_refused() {

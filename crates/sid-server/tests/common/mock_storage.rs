@@ -3418,9 +3418,10 @@ impl StorageBackend for MockStorage {
     async fn create_initial_access_token(
         &self,
         token: &InitialAccessToken,
-        _audit: MutationContext,
+        audit: MutationContext,
     ) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
+        inner.owe(&audit)?;
         inner
             .initial_access_tokens
             .insert(token.id.0, token.clone());
@@ -3757,9 +3758,10 @@ impl StorageBackend for MockStorage {
     async fn revoke_initial_access_token(
         &self,
         id: InitialAccessTokenId,
-        _audit: MutationContext,
+        audit: MutationContext,
     ) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
+        inner.owe(&audit)?;
         if let Some(iat) = inner.initial_access_tokens.get_mut(&id.0) {
             iat.revoked = true;
         }

@@ -617,6 +617,8 @@ const UPDATE_APPLICATION: &str = "sid.v1.ProjectService/UpdateApplication";
 /// recorded under.
 const DELETE_APPLICATION: &str = "sid.v1.ProjectService/DeleteApplication";
 const UPDATE_CLIENT_ROLE: &str = "sid.v1.ProjectService/UpdateClientRole";
+const CREATE_INITIAL_ACCESS_TOKEN: &str = "sid.v1.ProjectService/CreateInitialAccessToken";
+const REVOKE_INITIAL_ACCESS_TOKEN: &str = "sid.v1.ProjectService/RevokeInitialAccessToken";
 const ADD_CLIENT_ROLE: &str = "sid.v1.ProjectService/AddClientRole";
 const ADD_RESOURCE_ROLE: &str = "sid.v1.ProjectService/AddResourceRole";
 const UPDATE_RESOURCE_ROLE: &str = "sid.v1.ProjectService/UpdateResourceRole";
@@ -1868,65 +1870,66 @@ impl ProjectService for ProjectServiceImpl {
     ) -> Result<Response<CreateInitialAccessTokenResponse>, Status> {
         let caller = self.admin(&request).await?;
         self.check_maintenance().await?;
+        let key = required_key(request.metadata())?;
         let req = request.into_inner();
 
         let project_id = parse_project_id(&req.project_id)?;
 
-        // Verify project exists
-        self.storage
-            .get_project(project_id)
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(|| project_not_found(project_id))?;
+        // A retry of a completed creation answers with the token it created,
+        // without its value: SID keeps only its hash, and a retry creates no
+        // second token.
+        let command = keyed(&caller, key, CREATE_INITIAL_ACCESS_TOKEN, &req);
+        let mut issued = None;
+        let mut response = command
+            .run(&*self.storage, || async {
+                self.storage
+                    .get_project(project_id)
+                    .await?
+                    .ok_or_else(|| project_not_found(project_id))?;
 
-        let expires_in = if req.expires_in_seconds > 0 {
-            chrono::Duration::seconds(req.expires_in_seconds)
-        } else {
-            chrono::Duration::hours(24) // default 24h
-        };
-
-        // Generate token value
-        let token_value = generate_client_secret();
-        let token_hash = sha256_hash(token_value.expose_secret().as_bytes());
-        let now = chrono::Utc::now();
-
-        let token = InitialAccessToken {
-            id: InitialAccessTokenId::new(),
-            token_hash,
-            project_id,
-            max_clients: req.max_clients,
-            clients_registered: 0,
-            allowed_scopes: req.allowed_scopes,
-            allowed_grant_types: req.allowed_grant_types,
-            allowed_redirect_patterns: req.allowed_redirect_patterns,
-            expires_at: now + expires_in,
-            created_at: now,
-            created_by: caller.profile_id.to_string(),
-            revoked: false,
-        };
-
-        self.storage
-            .create_initial_access_token(
-                &token,
-                AuditEntry::admin(
-                    caller.profile_id.to_string(),
-                    "iat.create",
-                    token.id.0.to_string(),
-                )
-                .into(),
-            )
-            .await
-            .map_err(storage_failure)?;
-
-        info!(
-            "Created IAT {} for project {} (max_clients: {}, expires: {})",
-            token.id.0, project_id.0, token.max_clients, token.expires_at
-        );
-
-        Ok(Response::new(CreateInitialAccessTokenResponse {
-            token: Some(iat_to_proto(&token)),
-            token_value: token_value.expose_secret().clone(),
-        }))
+                let expires_in = if req.expires_in_seconds > 0 {
+                    chrono::Duration::seconds(req.expires_in_seconds)
+                } else {
+                    chrono::Duration::hours(24) // default 24h
+                };
+                let token_value = generate_client_secret();
+                let token_hash = sha256_hash(token_value.expose_secret().as_bytes());
+                let now = chrono::Utc::now();
+                let token = InitialAccessToken {
+                    id: InitialAccessTokenId::new(),
+                    token_hash,
+                    project_id,
+                    max_clients: req.max_clients,
+                    clients_registered: 0,
+                    allowed_scopes: req.allowed_scopes.clone(),
+                    allowed_grant_types: req.allowed_grant_types.clone(),
+                    allowed_redirect_patterns: req.allowed_redirect_patterns.clone(),
+                    expires_at: now + expires_in,
+                    created_at: now,
+                    created_by: caller.profile_id.to_string(),
+                    revoked: false,
+                };
+                let recorded = CreateInitialAccessTokenResponse {
+                    token: Some(iat_to_proto(&token)),
+                    token_value: String::new(),
+                };
+                let ctx = admin_ctx(&caller, "iat.create", token.id.0.to_string())
+                    .with_operation(command.completion(recorded.encode_to_vec()));
+                self.storage
+                    .create_initial_access_token(&token, ctx)
+                    .await?;
+                info!(
+                    "Created IAT {} for project {} (max_clients: {}, expires: {})",
+                    token.id.0, project_id.0, token.max_clients, token.expires_at
+                );
+                issued = Some(token_value);
+                Ok(recorded)
+            })
+            .await?;
+        if let Some(value) = issued {
+            response.token_value = value.expose_secret().clone();
+        }
+        Ok(Response::new(response))
     }
 
     #[tracing::instrument(skip_all, fields(rpc = "list_initial_access_tokens"))]
@@ -1958,33 +1961,30 @@ impl ProjectService for ProjectServiceImpl {
     ) -> Result<Response<()>, Status> {
         let caller = self.admin(&request).await?;
         self.check_maintenance().await?;
+        let key = required_key(request.metadata())?;
         let req = request.into_inner();
 
         let token_id = uuid::Uuid::parse_str(&req.id)
             .map(InitialAccessTokenId)
             .map_err(|_| invalid_field("id", "not an initial access token identifier"))?;
 
-        // Verify token exists
-        self.storage
-            .get_initial_access_token(token_id)
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(|| iat_not_found(&req.id))?;
-
-        self.storage
-            .revoke_initial_access_token(
-                token_id,
-                AuditEntry::admin(
-                    caller.profile_id.to_string(),
-                    "iat.revoke",
-                    token_id.0.to_string(),
-                )
-                .into(),
-            )
-            .await
-            .map_err(storage_failure)?;
-
-        info!("Revoked IAT {}", token_id.0);
+        // A retry of a completed revocation answers as the revocation did.
+        let command = keyed(&caller, key, REVOKE_INITIAL_ACCESS_TOKEN, &req);
+        command
+            .run(&*self.storage, || async {
+                self.storage
+                    .get_initial_access_token(token_id)
+                    .await?
+                    .ok_or_else(|| iat_not_found(&req.id))?;
+                let ctx = admin_ctx(&caller, "iat.revoke", token_id.0.to_string())
+                    .with_operation(command.completion(().encode_to_vec()));
+                self.storage
+                    .revoke_initial_access_token(token_id, ctx)
+                    .await?;
+                info!("Revoked IAT {}", token_id.0);
+                Ok(())
+            })
+            .await?;
 
         Ok(Response::new(()))
     }
