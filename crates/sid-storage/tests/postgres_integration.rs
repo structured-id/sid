@@ -3209,6 +3209,7 @@ async fn test_reset_session_save_get_update() {
     let session = sid_core::models::PasswordResetSession::new(
         profile.id,
         "reset@sid.example.com".into(),
+        "reset@sid.example.com".into(),
         "sha256hash123".into(),
     );
     backend

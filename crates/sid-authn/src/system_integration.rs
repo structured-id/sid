@@ -31,6 +31,9 @@ pub const SIGN_IN_PATH: &str = "/login";
 /// The path under the account URL of the page an emailed sign-in link opens.
 pub const MAGIC_LINK_PATH: &str = "/verify";
 
+/// The path under the account URL of the page an emailed reset link opens.
+pub const PASSWORD_RESET_PATH: &str = "/reset/new";
+
 /// Attempts at storing a changed client before giving up to a concurrent
 /// writer that keeps changing it.
 const UPDATE_ATTEMPTS: usize = 3;
@@ -94,6 +97,11 @@ impl AccountSettings {
     /// trusted URL as the sign-in page, never a request's Host.
     pub fn magic_link_page(&self) -> url::Url {
         self.page(MAGIC_LINK_PATH)
+    }
+
+    /// The account UI's page an emailed password reset link opens.
+    pub fn password_reset_page(&self) -> url::Url {
+        self.page(PASSWORD_RESET_PATH)
     }
 
     fn page(&self, path: &str) -> url::Url {

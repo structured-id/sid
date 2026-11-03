@@ -200,7 +200,8 @@ pub use password_history::{
     cleanup_successor, history_key_context,
 };
 pub use password_reset::{
-    PasswordResetSession, RESET_SESSION_TTL_SECS, ResetSessionId, ResetSessionStatus,
+    PASSWORD_RESET_EMAIL_KIND, PasswordResetSession, RESET_SESSION_TTL_SECS, ResetSessionId,
+    ResetSessionStatus, password_reset_sealing_context,
 };
 pub use pat::{PatId, PatModel, PatStatus, PersonalAccessToken};
 pub use principal::{

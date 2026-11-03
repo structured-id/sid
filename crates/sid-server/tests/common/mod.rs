@@ -697,6 +697,71 @@ pub fn test_key_manager() -> Arc<dyn sid_keys::KeyManager> {
     )
 }
 
+/// Store an email provider without credentials, as an administrator
+/// configures one: authentication mail is offered only with a provider.
+#[allow(dead_code)]
+pub async fn configure_email_provider(storage: &dyn StorageBackend) {
+    storage
+        .upsert_email_provider_config(
+            &sid_core::models::EmailProviderConfig {
+                smtp_host: "smtp.sid.example.com".into(),
+                smtp_port: 25,
+                from_address: "noreply@sid.example.com".into(),
+                from_display_name: String::new(),
+                reply_to: String::new(),
+                encryption: sid_core::models::SmtpEncryption::None,
+                auth_type: sid_core::models::SmtpAuthMethod::None,
+                username: String::new(),
+                password: secrecy::SecretBox::new(Box::new(String::new())),
+                xoauth2: None,
+            },
+            sid_core::models::AuditEntry::system("test", "email").into(),
+        )
+        .await
+        .unwrap();
+}
+
+/// Bind the email key `key` to `holder` as registration does: with the
+/// contact holding `mailbox`, the spelling login and reset mail goes to.
+#[allow(dead_code)]
+pub async fn bind_mailbox(
+    storage: &dyn StorageBackend,
+    holder: ProfileId,
+    key: &str,
+    mailbox: &str,
+) {
+    let now = chrono::Utc::now();
+    let contact = sid_core::models::ProfileEmail {
+        id: sid_core::models::ProfileEmailId::new(),
+        profile_id: holder,
+        email: mailbox.to_string(),
+        label: sid_core::models::EmailLabel::Work,
+        custom_label: None,
+        is_primary: true,
+        verified: true,
+        verified_at: Some(now),
+        created_at: now,
+        updated_at: now,
+    };
+    storage
+        .create_profile_email(
+            &contact,
+            sid_core::models::AuditEntry::system("test", "contact").into(),
+        )
+        .await
+        .unwrap();
+    let mut principal =
+        sid_core::models::Principal::new(holder, sid_core::models::PrincipalType::Email, key);
+    principal.source_email_id = Some(contact.id);
+    storage
+        .save_principal(
+            &principal,
+            sid_core::models::AuditEntry::system("test", "principal").into(),
+        )
+        .await
+        .unwrap();
+}
+
 /// A TOTP seed in the form the server stores it for `profile_id`.
 #[allow(dead_code)]
 pub async fn sealed_totp_seed(profile_id: ProfileId, seed: &[u8]) -> Vec<u8> {
@@ -849,6 +914,10 @@ pub fn auth_service(
             capacity: sid_plugin::OWED_WORK_CAPACITY,
         },
     ));
+    let resets = Arc::new(sid_authn::password_reset::PasswordResetService::new(
+        storage.clone(),
+        test_key_manager(),
+    ));
     let service = AuthServiceImpl::new(
         storage.clone(),
         oauth2,
@@ -881,7 +950,8 @@ pub fn auth_service(
         },
     )
     .with_enrollment_pin(enrollment_pin)
-    .with_browser_cookie(browser_cookie.unwrap_or_default());
+    .with_browser_cookie(browser_cookie.unwrap_or_default())
+    .with_password_resets(resets);
     let service = if without_sign_in_page {
         service
     } else {

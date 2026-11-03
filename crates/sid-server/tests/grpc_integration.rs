@@ -5706,6 +5706,7 @@ async fn test_magic_link_verify_rejects_personal_profile() {
 async fn test_password_reset_event_carries_no_secret() {
     let email = "reset-event@sid.example.com";
     let svc = TestServices::new(MockStorage::new());
+    common::configure_email_provider(svc.storage.as_ref()).await;
     account_with_email(&svc, email, sid_core::models::ProfileType::Personal).await;
     let mut events = svc
         .event_bus
@@ -9523,6 +9524,7 @@ async fn test_expired_proof_keeps_route() {
 #[tokio::test]
 async fn test_request_password_reset_anti_enumeration() {
     let svc = TestServices::new(MockStorage::new());
+    common::configure_email_provider(svc.storage.as_ref()).await;
     // Non-existent user → still returns success (anti-enumeration)
     let req = Request::new(RequestPasswordResetRequest {
         principal: "nonexistent@sid.example.com".to_string(),
@@ -9536,22 +9538,51 @@ async fn test_request_password_reset_anti_enumeration() {
     assert!(msg.contains("If an account exists"));
 }
 
-/// Services with a profile that holds `alice@sid.example.com`.
+/// Services with an email provider and a profile that holds
+/// `alice@sid.example.com`, with its login mailbox.
 async fn reset_services(storage: MockStorage) -> TestServices {
     let profile = test_profile();
     let svc = TestServices::new(storage.with_profile(profile.clone()));
-    svc.storage
-        .save_principal(
-            &sid_core::models::Principal::new(
-                profile.id,
-                sid_core::models::PrincipalType::Email,
-                "alice@sid.example.com",
-            ),
-            sid_core::models::AuditEntry::system("test", "principal").into(),
-        )
-        .await
-        .unwrap();
+    common::configure_email_provider(svc.storage.as_ref()).await;
+    common::bind_mailbox(
+        svc.storage.as_ref(),
+        profile.id,
+        "alice@sid.example.com",
+        "Alice@sid.example.com",
+    )
+    .await;
     svc
+}
+
+/// Without an email provider no reset could reach anyone: every address is
+/// refused alike as not configured, and nothing is stored.
+#[tokio::test]
+async fn test_request_password_reset_without_mail_is_not_configured() {
+    let profile = test_profile();
+    let svc = TestServices::new(MockStorage::new().with_profile(profile.clone()));
+    common::bind_mailbox(
+        svc.storage.as_ref(),
+        profile.id,
+        "alice@sid.example.com",
+        "alice@sid.example.com",
+    )
+    .await;
+    for principal in ["alice@sid.example.com", "nobody@sid.example.com"] {
+        let err = svc
+            .auth
+            .request_password_reset(Request::new(RequestPasswordResetRequest {
+                principal: principal.to_string(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition, "{principal}");
+        assert_eq!(
+            common::error_reason(&err).as_deref(),
+            Some("FEATURE_NOT_CONFIGURED")
+        );
+    }
+    assert_eq!(svc.mock_storage.stored_reset_sessions(), 0);
 }
 
 /// A reset for an address a profile holds stores one reset session.
@@ -9567,6 +9598,74 @@ async fn test_request_password_reset_creates_session() {
     let resp = svc.auth.request_password_reset(req).await;
     assert!(resp.is_ok());
     assert_eq!(svc.mock_storage.stored_reset_sessions(), 1);
+    // Its link is owed a mail to the bound mailbox, by reference only.
+    let owed = owed_reset_mails(&svc).await;
+    assert_eq!(owed.len(), 1);
+    let session = sid_core::models::ResetSessionId(Uuid::from_slice(&owed[0].payload).unwrap());
+    let stored = svc
+        .storage
+        .get_reset_session(session)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.destination, "Alice@sid.example.com");
+}
+
+/// The reset mails the storage owes now.
+async fn owed_reset_mails(svc: &TestServices) -> Vec<sid_core::models::ClaimedWork> {
+    svc.storage
+        .claim_work(
+            &[
+                sid_core::models::WorkKind::new(sid_core::models::PASSWORD_RESET_EMAIL_KIND)
+                    .unwrap(),
+            ],
+            "test",
+            100,
+            std::time::Duration::from_secs(60),
+        )
+        .await
+        .unwrap()
+}
+
+/// An address nobody holds, and one held by an account without a login
+/// mailbox, are answered as a held one and start nothing: no session, no
+/// mail.
+#[tokio::test]
+async fn test_request_password_reset_unknown_address_stores_nothing() {
+    let svc = reset_services(MockStorage::new()).await;
+    for principal in ["nobody@sid.example.com", "alice"] {
+        let resp = svc
+            .auth
+            .request_password_reset(Request::new(RequestPasswordResetRequest {
+                principal: principal.to_string(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+        assert!(resp.into_inner().message.contains("If an account exists"));
+    }
+    assert_eq!(svc.mock_storage.stored_reset_sessions(), 0);
+    assert!(owed_reset_mails(&svc).await.is_empty());
+}
+
+/// Past three live resets of an account a request starts no further one,
+/// and is answered alike.
+#[tokio::test]
+async fn test_request_password_reset_limit_applies() {
+    let svc = reset_services(MockStorage::new()).await;
+    for _ in 0..4 {
+        let resp = svc
+            .auth
+            .request_password_reset(Request::new(RequestPasswordResetRequest {
+                principal: "alice@sid.example.com".to_string(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+        assert!(resp.into_inner().message.contains("If an account exists"));
+    }
+    assert_eq!(svc.mock_storage.stored_reset_sessions(), 3);
+    assert_eq!(owed_reset_mails(&svc).await.len(), 3);
 }
 
 /// When the active-reset count cannot be read, no reset is started: the
@@ -9628,6 +9727,7 @@ async fn test_verify_password_reset_wrong_token() {
     let session = sid_core::models::PasswordResetSession::new(
         profile.id,
         "alice@sid.example.com".into(),
+        "alice@sid.example.com".into(),
         token_hash,
     );
     let session_id = session.id;
@@ -9662,6 +9762,7 @@ async fn test_verify_password_reset_correct_token() {
         .collect();
     let session = sid_core::models::PasswordResetSession::new(
         profile.id,
+        "alice@sid.example.com".into(),
         "alice@sid.example.com".into(),
         token_hash,
     );
@@ -9700,6 +9801,7 @@ async fn test_verify_password_reset_already_consumed() {
         .collect();
     let session = sid_core::models::PasswordResetSession::new(
         profile.id,
+        "alice@sid.example.com".into(),
         "alice@sid.example.com".into(),
         token_hash,
     );
@@ -9772,6 +9874,7 @@ async fn test_complete_password_reset_ends_earlier_sessions() {
         .collect();
     let reset = sid_core::models::PasswordResetSession::new(
         profile.id,
+        "alice@sid.example.com".into(),
         "alice@sid.example.com".into(),
         token_hash,
     );
