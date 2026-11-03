@@ -67,13 +67,19 @@ pub async fn test_restore_returns_the_backed_up_state<B, L, Bk, BkF, P, Rs, RsF>
         .await
         .unwrap();
     let project = Project::new(format!("backup_{tag}"), None);
+    let period = live
+        .current_operation_period(chrono::Utc::now(), chrono::Duration::hours(1))
+        .await
+        .unwrap()
+        .period;
     let completion = OperationCompletion::new(
         &namespace,
         key.clone(),
         METHOD,
         b"inputs",
         b"result".to_vec(),
-    );
+    )
+    .in_period(period);
     live.create_project(&project, test_audit().with_operation(completion))
         .await
         .unwrap();
@@ -116,7 +122,18 @@ pub async fn test_restore_returns_the_backed_up_state<B, L, Bk, BkF, P, Rs, RsF>
         .await
         .unwrap()
         .expect("the stored outcome came back");
-    assert!(record.matches(METHOD, b"inputs"));
+    assert!(record.matches(METHOD, b"inputs", Some(period)));
+    // The period it was named with came back admitted with it.
+    let next = OperationKey::parse(&Uuid::new_v4().to_string()).unwrap();
+    restored
+        .record_outcome(
+            test_audit().with_operation(
+                OperationCompletion::new(&namespace, next, METHOD, b"inputs", Vec::new())
+                    .in_period(period),
+            ),
+        )
+        .await
+        .unwrap();
     assert!(restored.get_project(project.id).await.unwrap().is_some());
     assert!(
         restored.get_project(later.id).await.unwrap().is_none(),
