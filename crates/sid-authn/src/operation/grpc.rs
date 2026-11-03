@@ -61,6 +61,12 @@ impl From<Status> for super::Effect<Status> {
     }
 }
 
+impl From<OperationError> for super::Effect<Status> {
+    fn from(e: OperationError) -> Self {
+        Self::Refused(e.into())
+    }
+}
+
 impl From<OperationError> for Status {
     fn from(e: OperationError) -> Self {
         match e {

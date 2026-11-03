@@ -2,8 +2,6 @@
 //! Flow actions: created once, listed per hook point in execution order, and
 //! updated only over the revision they were read at.
 
-use std::collections::HashMap;
-
 use chrono::Utc;
 use sid_core::models::{
     ActionConfig, ActionId, ActionOnError, ActionPoint, ActionType, FlowAction, FlowType, Project,
@@ -36,7 +34,7 @@ fn action(project_id: ProjectId, point: ActionPoint, order: i32) -> FlowAction {
             url: "https://hooks.sid.example.com/login".into(),
             timeout_seconds: 5,
             retry_count: 0,
-            headers: HashMap::new(),
+            headers: Default::default(),
         },
         order,
         on_error: ActionOnError::Continue,
@@ -111,7 +109,7 @@ pub async fn test_flow_action_write_contract(backend: &dyn StorageBackend) {
         url: "https://attacker.sid.example.com".into(),
         timeout_seconds: 5,
         retry_count: 0,
-        headers: HashMap::new(),
+        headers: Default::default(),
     };
     assert!(matches!(
         backend.create_flow_action(&takeover, test_audit()).await,

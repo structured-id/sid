@@ -363,6 +363,24 @@ pub async fn operation_periods_bound_admission(store: &dyn OperationResultStore)
         refused(store.record_outcome(keyed(&key(), first.period)).await),
         OperationPeriodRefusal::Retired
     );
+    // A completion carried from another store under a period retired here
+    // is not taken: its command is refused here anyway.
+    let carried = sid_core::models::OperationRecord {
+        completion: OperationCompletion::new(&ns, key(), "keyed", b"inputs", b"done".to_vec())
+            .in_period(first.period),
+        completed_at: Utc::now(),
+    };
+    assert!(!store.import_operation_result(&carried).await.unwrap());
+    // Asked before a command's first effect, the store answers the same.
+    store.admit_operation_period(next.period).await.unwrap();
+    assert_eq!(
+        refused(store.admit_operation_period(first.period).await),
+        OperationPeriodRefusal::Retired
+    );
+    assert_eq!(
+        refused(store.admit_operation_period(unissued).await),
+        OperationPeriodRefusal::NotIssued
+    );
     let reissued = store
         .current_operation_period(t0 + Duration::minutes(30), acceptance)
         .await

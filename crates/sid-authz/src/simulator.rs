@@ -9,7 +9,6 @@
 //! The simulation stays limited to the explicit check set; it never scans the
 //! population.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::cedar::CedarService;
@@ -158,7 +157,7 @@ impl<S: StorageBackend + ?Sized + 'static> PolicySimulator<S> {
                     subject: subject.clone(),
                     action: action.clone(),
                     resource: resource.to_string(),
-                    context: HashMap::new(),
+                    context: Default::default(),
                 };
                 // Both states by the engine itself, the proposed one under
                 // the changed policy set: the same roles, the same

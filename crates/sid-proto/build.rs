@@ -45,6 +45,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_prost_build::configure()
         .build_server(true)
         .build_client(true)
+        // Map entries encode in key order, so equal messages encode equally
+        // and a retried keyed command keeps its fingerprint.
+        .btree_map(".")
         // The identifier messages are owned by `sid-ids-proto` (with their
         // validated conversions); one Rust type per identifier kind.
         .extern_path(".sid.v1.ids", "::sid_ids_proto::sid::v1::ids")

@@ -188,6 +188,63 @@ async fn test_retired_or_unissued_period_is_refused_before_effects() {
     assert_eq!(projects_named(&svc, &token, "billing").await, 0);
 }
 
+/// A command named with a retired period is refused before any of its
+/// effects, those before its commit included: adding an email principal
+/// creates no contact for it.
+#[tokio::test]
+async fn test_retired_period_leaves_no_effect_before_the_commit() {
+    let svc = TestServices::new(MockStorage::new());
+    let profile = common::test_profile();
+    svc.storage
+        .create_profile(
+            &profile,
+            sid_core::models::AuditEntry::system("test", "setup").into(),
+        )
+        .await
+        .unwrap();
+    let token = common::issue_token(&svc.jwt, &profile, &["openid".to_string()]);
+    let issued = later_period(&svc).await;
+    svc.storage
+        .retire_operation_periods(issued.accepted_until + chrono::Duration::seconds(1))
+        .await
+        .unwrap();
+    let before = svc
+        .storage
+        .list_profile_emails(profile.id)
+        .await
+        .unwrap()
+        .len();
+
+    use sid_proto::sid::v1::identity_service_server::IdentityService;
+    let err = svc
+        .identity
+        .add_principal(in_period(
+            AddPrincipalRequest {
+                profile_id: profile.id.to_string(),
+                r#type: PrincipalType::Email.into(),
+                value: "fresh@sid.example.com".into(),
+            },
+            &token,
+            "op-email",
+            issued.period.get(),
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        extract_error_info(&err).expect("ErrorInfo").0,
+        "OPERATION_EXPIRED"
+    );
+    assert_eq!(
+        svc.storage
+            .list_profile_emails(profile.id)
+            .await
+            .unwrap()
+            .len(),
+        before,
+        "the refused command created a contact"
+    );
+}
+
 fn rename(id: &str, name: &str) -> UpdateProjectRequest {
     UpdateProjectRequest {
         id: id.to_string(),

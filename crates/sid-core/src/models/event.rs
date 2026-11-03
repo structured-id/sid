@@ -814,7 +814,7 @@ pub struct EventFilter {
     pub event_types: Vec<String>,
 
     /// Attribute filters (key=value pairs). All must match.
-    pub attributes: std::collections::HashMap<String, String>,
+    pub attributes: std::collections::BTreeMap<String, String>,
 }
 
 impl EventFilter {

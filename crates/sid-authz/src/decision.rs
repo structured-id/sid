@@ -2,7 +2,7 @@
 //! A permission check and its decision, as [`crate::CeAuthzEngine`] takes
 //! and answers them.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use thiserror::Error;
 
@@ -38,7 +38,7 @@ pub struct AuthzCheckRequest {
     /// The resource, `project:<uuid>` or `<type>:<id>`.
     pub resource: String,
     /// Attributes for the Cedar policies (IP, device, time, custom).
-    pub context: HashMap<String, String>,
+    pub context: BTreeMap<String, String>,
 }
 
 /// The decision, with its reason.

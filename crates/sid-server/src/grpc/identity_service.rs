@@ -177,8 +177,9 @@ fn account_refusal(
 }
 
 /// A keyed closure or export command's failure: a commit another attempt of
-/// it completed answers with that attempt's result; anything else is refused
-/// as [`account_refusal`].
+/// it completed answers with that attempt's result, and one its period no
+/// longer admits is answered as such; anything else is refused as
+/// [`account_refusal`].
 fn account_effect(
     operation: &'static str,
     record: AccountRecord,
@@ -186,8 +187,27 @@ fn account_effect(
     e: sid_core::Error,
 ) -> Effect {
     match e {
-        sid_core::Error::OperationCompleted(_) => Effect::Store(e),
+        sid_core::Error::OperationCompleted(_) | sid_core::Error::OperationPeriodRefused(_) => {
+            Effect::Store(e)
+        }
         e => Effect::Refused(account_refusal(operation, record, owner, e)),
+    }
+}
+
+/// A handle `command`'s commit found taken: by another attempt of this very
+/// command that committed first, which answers with that attempt's result,
+/// or by someone else.
+async fn taken_unless_completed(
+    command: &KeyedCommand,
+    storage: &dyn StorageBackend,
+    principal_type: sid_core::models::PrincipalType,
+) -> Effect {
+    match command.completed(storage).await {
+        Ok(Some(_)) => Effect::Store(sid_core::Error::OperationCompleted(
+            "committed by another attempt".into(),
+        )),
+        Ok(None) => contact_taken(principal_type).into(),
+        Err(e) => Effect::Refused(e.into()),
     }
 }
 
@@ -411,7 +431,8 @@ impl IdentityServiceImpl {
                         ));
                     }
                 }
-                Ok(self.owned_device(caller_id, device_id).await?)
+                // The device as this commit left it, whatever changed since.
+                Ok(command.recorded_effect(&*self.storage).await?)
             })
             .await?;
         Ok(Response::new(convert::device_to_proto(&device)))
@@ -719,7 +740,12 @@ impl IdentityService for IdentityServiceImpl {
                 match self.storage.register_profile(&registration, ctx).await {
                     Ok(()) => {}
                     Err(sid_core::Error::Conflict(_)) => {
-                        return Err(contact_taken(principal_type).into());
+                        return Err(taken_unless_completed(
+                            &command,
+                            &*self.storage,
+                            principal_type,
+                        )
+                        .await);
                     }
                     Err(e) => return Err(e.into()),
                 }
@@ -1211,7 +1237,12 @@ impl IdentityService for IdentityServiceImpl {
                     Ok(()) => {}
                     // Only a login handle is unique; a contact channel is shared.
                     Err(sid_core::Error::Conflict(_)) => {
-                        return Err(contact_taken(principal_type).into());
+                        return Err(taken_unless_completed(
+                            &command,
+                            &*self.storage,
+                            principal_type,
+                        )
+                        .await);
                     }
                     Err(e) => return Err(e.into()),
                 }
@@ -1915,7 +1946,8 @@ impl IdentityService for IdentityServiceImpl {
                 {
                     return Err(device_not_found(device_id).into());
                 }
-                Ok(self.owned_device(caller_id, device_id).await?)
+                // The device as this commit left it, whatever changed since.
+                Ok(command.recorded_effect(&*self.storage).await?)
             })
             .await?;
         Ok(Response::new(convert::device_to_proto(&device)))

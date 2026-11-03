@@ -27,20 +27,7 @@ pub(super) async fn record_in_tx(
 ) -> SidResult<()> {
     let period = operation.period.map(column).transpose()?;
     if let Some(period) = period {
-        let admitted: Option<i64> =
-            sqlx::query_scalar("SELECT period FROM operation_periods WHERE period = $1 FOR SHARE")
-                .bind(period)
-                .fetch_optional(&mut **tx)
-                .await
-                .map_err(|e| SidError::Storage(format!("operation period: {e}")))?;
-        if admitted.is_none() {
-            let refusal = if period <= issued_through(tx).await? {
-                OperationPeriodRefusal::Retired
-            } else {
-                OperationPeriodRefusal::NotIssued
-            };
-            return Err(SidError::OperationPeriodRefused(refusal));
-        }
+        admit(tx, period, true).await?;
     }
     let inserted = sqlx::query(
         "INSERT INTO operation_results
@@ -67,6 +54,31 @@ pub(super) async fn record_in_tx(
         return Err(SidError::OperationCompleted(operation.key.as_str().into()));
     }
     Ok(())
+}
+
+/// Admit `period` on `conn`: refused when it has no row, as retired when
+/// its number was issued, else as never issued. A commit under it holds its
+/// row shared (`for_commit`) until its transaction ends.
+async fn admit(conn: &mut sqlx::PgConnection, period: i64, for_commit: bool) -> SidResult<()> {
+    let sql = if for_commit {
+        "SELECT period FROM operation_periods WHERE period = $1 FOR SHARE"
+    } else {
+        "SELECT period FROM operation_periods WHERE period = $1"
+    };
+    let admitted: Option<i64> = sqlx::query_scalar(sql)
+        .bind(period)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(|e| SidError::Storage(format!("operation period: {e}")))?;
+    if admitted.is_some() {
+        return Ok(());
+    }
+    let refusal = if period <= issued_through(conn).await? {
+        OperationPeriodRefusal::Retired
+    } else {
+        OperationPeriodRefusal::NotIssued
+    };
+    Err(SidError::OperationPeriodRefused(refusal))
 }
 
 /// `period` as its `bigint` column.
@@ -136,8 +148,21 @@ pub(super) async fn export(pool: &PgPool) -> SidResult<Vec<OperationRecord>> {
         .collect()
 }
 
+/// Store an exported completion; one named with a period this store does
+/// not admit is not taken, as its command is refused here anyway.
 pub(super) async fn import(pool: &PgPool, record: &OperationRecord) -> SidResult<bool> {
     let c = &record.completion;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| SidError::Storage(format!("begin: {e}")))?;
+    if let Some(period) = c.period {
+        match admit(&mut tx, column(period)?, true).await {
+            Ok(()) => {}
+            Err(SidError::OperationPeriodRefused(_)) => return Ok(false),
+            Err(e) => return Err(e),
+        }
+    }
     let inserted = sqlx::query(
         "INSERT INTO operation_results
              (namespace, op_key, method, fingerprint, result, completed_at, period, retain_until)
@@ -152,10 +177,13 @@ pub(super) async fn import(pool: &PgPool, record: &OperationRecord) -> SidResult
     .bind(record.completed_at)
     .bind(c.period.map(column).transpose()?)
     .bind(c.retain_until)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(|e| SidError::Storage(format!("operation result import: {e}")))?
     .rows_affected();
+    tx.commit()
+        .await
+        .map_err(|e| SidError::Storage(format!("commit: {e}")))?;
     Ok(inserted == 1)
 }
 
@@ -441,6 +469,15 @@ impl OperationResultStore for PostgresBackend {
         acceptance: Duration,
     ) -> SidResult<IssuedOperationPeriod> {
         current_period(&self.pool, now, acceptance).await
+    }
+
+    async fn admit_operation_period(&self, period: OperationPeriod) -> SidResult<()> {
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|e| SidError::Storage(format!("operation period: {e}")))?;
+        admit(&mut conn, column(period)?, false).await
     }
 
     async fn retire_operation_periods(&self, before: DateTime<Utc>) -> SidResult<u64> {

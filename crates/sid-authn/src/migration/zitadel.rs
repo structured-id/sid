@@ -6,7 +6,6 @@
 
 use super::{ImportedUser, MigrationAdapter, MigrationImportError};
 use serde::Deserialize;
-use std::collections::HashMap;
 
 /// Zitadel JSON export adapter.
 pub struct ZitadelAdapter;
@@ -86,7 +85,7 @@ fn convert_zitadel_user(z: &ZitadelUser) -> ImportedUser {
         roles: Vec::new(),
         groups: Vec::new(),
         external_id: z.id.clone().unwrap_or_default(),
-        attributes: HashMap::new(),
+        attributes: Default::default(),
     }
 }
 

@@ -104,7 +104,22 @@ impl KeyedCommand {
             .await
             .map_err(OperationError::Store)?;
         match record {
-            None => Ok(None),
+            // A new command: its period is admitted before any effect, those
+            // a method makes before its commit included.
+            None => {
+                if let Some(period) = self.period {
+                    storage
+                        .admit_operation_period(period)
+                        .await
+                        .map_err(|e| match e {
+                            sid_core::Error::OperationPeriodRefused(refusal) => {
+                                OperationError::PeriodRefused(refusal)
+                            }
+                            e => OperationError::Store(e),
+                        })?;
+                }
+                Ok(None)
+            }
             Some(record) if record.matches(self.method, &self.inputs, self.period) => {
                 Ok(Some(record.completion.result))
             }
@@ -177,6 +192,16 @@ impl KeyedCommand {
         Fut: std::future::Future<Output = Result<T, Effect<E>>>,
     {
         self.run_with(storage, decode_recorded, effect).await
+    }
+
+    /// After this command's commit, the state its store recorded in that
+    /// commit ([`sid_core::models::MutationContext::record_effect`]): the
+    /// answer, never a state read before or after it.
+    pub async fn recorded_effect<T: serde::de::DeserializeOwned>(
+        &self,
+        storage: &(impl OperationResultStore + ?Sized),
+    ) -> Result<T, OperationError> {
+        decode_recorded(&self.committed_elsewhere(storage).await?)
     }
 
     /// The completion of a mutation whose store records its effect as the

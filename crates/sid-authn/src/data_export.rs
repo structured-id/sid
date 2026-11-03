@@ -38,8 +38,9 @@ impl DataExportService {
     ///
     /// Collects profile data, identifiers, credentials metadata, sessions,
     /// and metadata into a JSON archive. Returns the export job for tracking.
-    /// A keyed command's `completion` of a new job commits with it; a ready
-    /// export reused as is changes nothing.
+    /// A keyed command's `completion` of a new job commits with it; of a
+    /// ready export reused as is, it is recorded alone, so a retry answers
+    /// with that export after it is acknowledged or expires.
     pub async fn prepare_export(
         &self,
         profile_id: ProfileId,
@@ -55,6 +56,15 @@ impl DataExportService {
                 }
                 // Re-use existing ready export if not expired.
                 ExportStatus::Ready if !existing.is_expired() => {
+                    if let Some(completion) = completion(&existing) {
+                        let ctx = MutationContext::from(AuditEntry::user(
+                            initiated_by,
+                            "export.reused",
+                            profile_id.to_string(),
+                        ))
+                        .with_operation(completion);
+                        self.storage.record_outcome(ctx).await?;
+                    }
                     return Ok(existing);
                 }
                 // Expired Ready or other statuses — fall through to create new.

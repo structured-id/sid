@@ -587,7 +587,7 @@ const PERMISSION_CHECK_AUDIT: &str = "authz.permission_check";
 #[derive(Clone)]
 struct RequestEvidence {
     subject: String,
-    context: std::collections::HashMap<String, String>,
+    context: std::collections::BTreeMap<String, String>,
     /// The token is key-bound and no proof was confirmed.
     missing: bool,
     /// Who the token says acts for the subject (RFC 8693 §4.1 `act`).
@@ -1092,7 +1092,7 @@ impl AuthzServiceImpl {
         };
         // The object is part of the question, in the application's own
         // namespace; policies may name it.
-        let mut context = std::collections::HashMap::new();
+        let mut context = std::collections::BTreeMap::new();
         if !target.object.is_empty() {
             context.insert("object".to_owned(), target.object.clone());
         }
@@ -1395,7 +1395,7 @@ impl AuthzServiceImpl {
                 false
             }
         };
-        let mut context = std::collections::HashMap::new();
+        let mut context = std::collections::BTreeMap::new();
         context.insert("acr".to_owned(), claims.acr.clone());
         context.insert("amr".to_owned(), claims.amr.join(" "));
         context.insert("auth_time".to_owned(), claims.auth_time.to_string());

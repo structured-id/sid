@@ -5,7 +5,7 @@
 //! Applied via CSS custom properties — no rebuild required to change branding.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use uuid::Uuid;
 
 use super::project::ProjectId;
@@ -179,7 +179,7 @@ pub struct DesignTokens {
 
     /// Additional custom tokens (for extensibility).
     #[serde(default)]
-    pub custom: HashMap<String, String>,
+    pub custom: BTreeMap<String, String>,
 }
 
 impl Default for DesignTokens {
@@ -196,7 +196,7 @@ impl Default for DesignTokens {
             border_radius: defaults::border_radius(),
             spacing_unit: defaults::spacing_unit(),
             button_style: ButtonStyle::default(),
-            custom: HashMap::new(),
+            custom: BTreeMap::new(),
         }
     }
 }
@@ -237,7 +237,7 @@ pub struct DarkModeTokens {
     pub color_error: Option<String>,
     /// Additional custom dark mode tokens.
     #[serde(default)]
-    pub custom: HashMap<String, String>,
+    pub custom: BTreeMap<String, String>,
 }
 
 /// Configurable text for login/consent UI.

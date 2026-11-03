@@ -26,20 +26,7 @@ pub(super) async fn record_in_tx(
 ) -> SidResult<()> {
     let period = operation.period.map(column).transpose()?;
     if let Some(period) = period {
-        let admitted: Option<i64> =
-            sqlx::query_scalar("SELECT period FROM operation_periods WHERE period = ?")
-                .bind(period)
-                .fetch_optional(&mut **tx)
-                .await
-                .map_err(|e| SidError::Storage(format!("operation period: {e}")))?;
-        if admitted.is_none() {
-            let refusal = if period <= issued_through(tx).await? {
-                OperationPeriodRefusal::Retired
-            } else {
-                OperationPeriodRefusal::NotIssued
-            };
-            return Err(SidError::OperationPeriodRefused(refusal));
-        }
+        admit(tx, period).await?;
     }
     let now = Utc::now();
     let inserted = sqlx::query(
@@ -70,6 +57,26 @@ pub(super) async fn record_in_tx(
         return Err(SidError::OperationCompleted(operation.key.as_str().into()));
     }
     Ok(())
+}
+
+/// Admit `period` on `conn`: refused when it has no row, as retired when
+/// its number was issued, else as never issued.
+async fn admit(conn: &mut sqlx::SqliteConnection, period: i64) -> SidResult<()> {
+    let admitted: Option<i64> =
+        sqlx::query_scalar("SELECT period FROM operation_periods WHERE period = ?")
+            .bind(period)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(|e| SidError::Storage(format!("operation period: {e}")))?;
+    if admitted.is_some() {
+        return Ok(());
+    }
+    let refusal = if period <= issued_through(conn).await? {
+        OperationPeriodRefusal::Retired
+    } else {
+        OperationPeriodRefusal::NotIssued
+    };
+    Err(SidError::OperationPeriodRefused(refusal))
 }
 
 /// `period` as its INTEGER column.
@@ -187,8 +194,21 @@ pub(super) async fn export(pool: &SqlitePool) -> SidResult<Vec<OperationRecord>>
         .collect()
 }
 
+/// Store an exported completion; one named with a period this store does
+/// not admit is not taken, as its command is refused here anyway.
 pub(super) async fn import(pool: &SqlitePool, record: &OperationRecord) -> SidResult<bool> {
     let c = &record.completion;
+    if let Some(period) = c.period {
+        let mut conn = pool
+            .acquire()
+            .await
+            .map_err(|e| SidError::Storage(format!("operation period: {e}")))?;
+        match admit(&mut conn, column(period)?).await {
+            Ok(()) => {}
+            Err(SidError::OperationPeriodRefused(_)) => return Ok(false),
+            Err(e) => return Err(e),
+        }
+    }
     let inserted = sqlx::query(
         "INSERT INTO operation_results
              (namespace, op_key, method, fingerprint, result, completed_at, period,
@@ -322,6 +342,15 @@ impl OperationResultStore for SqliteBackend {
             .await
             .map_err(|e| SidError::Storage(format!("commit: {e}")))?;
         issued(row)
+    }
+
+    async fn admit_operation_period(&self, period: OperationPeriod) -> SidResult<()> {
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|e| SidError::Storage(format!("operation period: {e}")))?;
+        admit(&mut conn, column(period)?).await
     }
 
     async fn retire_operation_periods(&self, before: DateTime<Utc>) -> SidResult<u64> {

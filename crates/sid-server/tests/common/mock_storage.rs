@@ -1605,6 +1605,12 @@ impl sid_plugin::OperationResultStore for MockStorage {
         );
         Ok(issued)
     }
+    async fn admit_operation_period(
+        &self,
+        period: sid_core::models::OperationPeriod,
+    ) -> SidResult<()> {
+        self.inner.lock().unwrap().admit_operation_period(period)
+    }
     async fn retire_operation_periods(
         &self,
         before: chrono::DateTime<chrono::Utc>,
@@ -1707,7 +1713,12 @@ impl sid_plugin::OperationResultStore for MockStorage {
             record.completion.key.as_str().to_string(),
         );
         let mut inner = self.inner.lock().unwrap();
-        if inner.operations.contains_key(&slot) {
+        if inner.operations.contains_key(&slot)
+            || record
+                .completion
+                .period
+                .is_some_and(|p| inner.admit_operation_period(p).is_err())
+        {
             return Ok(false);
         }
         inner.operations.insert(slot, record.clone());
@@ -6275,6 +6286,21 @@ impl MockStorageInner {
         Ok(())
     }
 
+    /// Refuse `period` when it has no record: retired when its number was
+    /// issued, else never issued.
+    fn admit_operation_period(&self, period: sid_core::models::OperationPeriod) -> SidResult<()> {
+        use sid_core::models::OperationPeriodRefusal;
+        if self.operation_periods.contains_key(&period.get()) {
+            return Ok(());
+        }
+        let refusal = if period.get() <= self.operation_periods_issued {
+            OperationPeriodRefusal::Retired
+        } else {
+            OperationPeriodRefusal::NotIssued
+        };
+        Err(sid_core::Error::OperationPeriodRefused(refusal))
+    }
+
     /// Retire `periods` with the completions named with them.
     fn retire_operation_periods(&mut self, periods: &[u64]) {
         for period in periods {
@@ -6292,15 +6318,7 @@ impl MockStorageInner {
     fn complete(&mut self, ctx: &MutationContext) -> SidResult<()> {
         if let Some(operation) = &ctx.operation {
             if let Some(period) = operation.period {
-                use sid_core::models::OperationPeriodRefusal;
-                if !self.operation_periods.contains_key(&period.get()) {
-                    let refusal = if period.get() <= self.operation_periods_issued {
-                        OperationPeriodRefusal::Retired
-                    } else {
-                        OperationPeriodRefusal::NotIssued
-                    };
-                    return Err(sid_core::Error::OperationPeriodRefused(refusal));
-                }
+                self.admit_operation_period(period)?;
             }
             let slot = (
                 operation.namespace.clone(),

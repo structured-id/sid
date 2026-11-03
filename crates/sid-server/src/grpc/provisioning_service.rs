@@ -95,6 +95,42 @@ impl ProvisioningServiceImpl {
             .ok_or_else(|| connector_not_found(id))
     }
 
+    /// A state change `command` that found `connector` already in its target
+    /// state: the connector as it is now is the command's outcome, recorded
+    /// so a retry after a later change answers the same and moves nothing.
+    /// A concurrent attempt that recorded first answers with its outcome.
+    async fn already_in_effect(
+        &self,
+        command: &KeyedCommand,
+        caller: &Caller,
+        id: ProvisioningConnectorId,
+        connector: &ProvisioningConnector,
+    ) -> Result<Response<pb::ProvisioningConnector>, Status> {
+        let response = connector_to_proto(connector);
+        let ctx: MutationContext = AuditEntry::admin(
+            caller.profile_id.to_string(),
+            "provisioning_connector.state",
+            id.to_string(),
+        )
+        .with_metadata(serde_json::json!({
+            "from": connector.state.as_str(),
+            "to": connector.state.as_str(),
+        }))
+        .into();
+        match self
+            .storage
+            .record_outcome(ctx.with_operation(command.completion(response.encode_to_vec())))
+            .await
+        {
+            Ok(()) => Ok(Response::new(response)),
+            Err(SidError::OperationCompleted(_)) => {
+                let result = command.committed_elsewhere(&*self.storage).await?;
+                Ok(Response::new(replayed_connector(&result)?))
+            }
+            Err(e) => Err(storage_failure(e)),
+        }
+    }
+
     /// The connector `id`, which must be inbound: only an inbound connector
     /// has credentials SID issues.
     async fn inbound(&self, id: ProvisioningConnectorId) -> Result<ProvisioningConnector, Status> {
@@ -437,7 +473,9 @@ impl ProvisioningService for ProvisioningServiceImpl {
         let target = state_from_proto(req.state)?;
         let current = self.connector(id).await?;
         if current.state == target {
-            return Ok(Response::new(connector_to_proto(&current)));
+            return self
+                .already_in_effect(&command, &caller, id, &current)
+                .await;
         }
         if !current.state.may_become(target) {
             return Err(connector_state(
@@ -480,7 +518,7 @@ impl ProvisioningService for ProvisioningServiceImpl {
                 if after.state != target {
                     return Err(changed_concurrently());
                 }
-                Ok(Response::new(connector_to_proto(&after)))
+                self.already_in_effect(&command, &caller, id, &after).await
             }
             // A concurrent attempt of this command committed first.
             Err(SidError::OperationCompleted(_)) => {

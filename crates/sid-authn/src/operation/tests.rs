@@ -79,6 +79,34 @@ async fn test_completed_resolves_retry_and_refuses_reuse() {
     assert_eq!(other_actor.completed(&storage).await.unwrap(), None);
 }
 
+/// The same request decoded twice names the same command: a map field's
+/// entries are encoded in one order, so a retry of a request carrying
+/// metadata is not mistaken for another command.
+#[test]
+fn test_equal_requests_with_maps_have_one_fingerprint() {
+    use prost::Message;
+    use sid_proto::keyed::admin::enrollment_service::CreateInvite;
+    use sid_proto::sid::v1::admin::CreateInviteRequest;
+    let request = CreateInviteRequest {
+        metadata: (0..16)
+            .map(|i| (format!("key-{i}"), format!("value-{i}")))
+            .collect(),
+        ..Default::default()
+    };
+    let wire = request.encode_to_vec();
+    let context = OperationContext::new(OperationKey::parse("k").unwrap(), OperationPeriod::new(1));
+    let fingerprint = || {
+        let decoded = CreateInviteRequest::decode(wire.as_slice()).unwrap();
+        KeyedCommand::of::<CreateInvite>("profile:a", context.clone(), &decoded)
+            .completion(Vec::new())
+            .fingerprint
+    };
+    let first = fingerprint();
+    for _ in 0..8 {
+        assert_eq!(fingerprint(), first);
+    }
+}
+
 /// A command named with a period the store never issued commits nothing.
 #[tokio::test]
 async fn test_commit_under_unissued_period_is_refused() {

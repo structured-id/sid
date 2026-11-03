@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use sid_core::Result;
 use sid_core::models::{
-    IssuedOperationPeriod, MutationContext, OperationKey, OperationPeriodPolicy,
+    IssuedOperationPeriod, MutationContext, OperationKey, OperationPeriod, OperationPeriodPolicy,
     OperationPeriodState, OperationRecord,
 };
 
@@ -28,6 +28,12 @@ pub trait OperationResultStore: Send + Sync {
         now: DateTime<Utc>,
         acceptance: Duration,
     ) -> Result<IssuedOperationPeriod>;
+
+    /// Whether the store admits a command named with `period`, asked before
+    /// a command's first effect: `Error::OperationPeriodRefused` when it is
+    /// retired or never issued. The commit decides again in its own
+    /// transaction.
+    async fn admit_operation_period(&self, period: OperationPeriod) -> Result<()>;
 
     /// Retire every period whose acceptance ended before `before`, dropping
     /// the completions named with it in the same commit: from then on a

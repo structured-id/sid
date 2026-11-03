@@ -116,7 +116,7 @@ fn test_flow_action_proto_roundtrip() {
             url: "https://api.sid.example.com/hooks/welcome".into(),
             timeout_seconds: 5,
             retry_count: 1,
-            headers: HashMap::from([("X-Secret".into(), "abc".into())]),
+            headers: std::collections::BTreeMap::from([("X-Secret".into(), "abc".into())]),
         },
         order: 1,
         on_error: ActionOnError::Continue,
@@ -154,7 +154,7 @@ fn test_proto_webhook_to_domain() {
         url: "https://sid.example.com/hook".into(),
         timeout_seconds: 10,
         retry_count: 2,
-        headers: HashMap::new(),
+        headers: Default::default(),
     };
     let config = proto_webhook_to_domain(&wh);
     match config {

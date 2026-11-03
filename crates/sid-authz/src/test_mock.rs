@@ -308,6 +308,9 @@ impl sid_plugin::OperationResultStore for MockStorage {
     ) -> Result<sid_core::models::IssuedOperationPeriod> {
         unimplemented!()
     }
+    async fn admit_operation_period(&self, _: sid_core::models::OperationPeriod) -> Result<()> {
+        unimplemented!()
+    }
     async fn retire_operation_periods(&self, _: chrono::DateTime<chrono::Utc>) -> Result<u64> {
         unimplemented!()
     }
