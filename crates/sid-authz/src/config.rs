@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Configuration for sid-authz standalone binary.
+//! Configuration of an authorization service built on this library.
 
 use std::net::SocketAddr;
 

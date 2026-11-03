@@ -26,11 +26,9 @@ use sid_core::{
         UpstreamIdentityId, UpstreamLogin, UpstreamProvider, UpstreamProviderId,
     },
 };
-use sid_plugin::audit::AuditLog;
 use sid_plugin::storage::StorageBackend;
 use sid_plugin::{ClientResourceRegistry, GrantStore, IssuerStore};
 use sqlx::PgPool;
-use std::sync::Arc;
 use uuid::Uuid;
 
 /// Map an insert failure: a unique-key violation means the row (account, identifier,
@@ -277,7 +275,6 @@ pub struct PostgresBackend {
     pool: PgPool,
     #[allow(dead_code)]
     schema: Option<String>,
-    audit_log: Option<Arc<dyn AuditLog>>,
 }
 
 /// The columns an invite row is read with.
@@ -402,20 +399,7 @@ impl PostgresBackend {
         let pool =
             pool_opts.map_err(|e| SidError::Storage(format!("Failed to connect (sqlx): {}", e)))?;
 
-        Ok(Self {
-            pool,
-            schema,
-            audit_log: None,
-        })
-    }
-
-    /// Set the audit log backend for tamper-evident logging.
-    ///
-    /// When set, all write operations (save, delete) will log an audit record
-    /// alongside the data mutation. Audit failures cause the operation to fail.
-    pub fn with_audit_log(mut self, audit_log: Arc<dyn AuditLog>) -> Self {
-        self.audit_log = Some(audit_log);
-        self
+        Ok(Self { pool, schema })
     }
 
     /// Write the mutation's audit record and the work it owes inside its
@@ -8605,14 +8589,16 @@ impl StorageBackend for PostgresBackend {
             .map_err(|e| SidError::Storage(e.to_string()))?;
         sqlx::query(
             "INSERT INTO password_reset_sessions
-                (id, profile_id, email, token_hash, status,
+                (id, profile_id, email, destination, token_hash, sealed_token, status,
                  created_at, expires_at, verified_at, completed_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
         )
         .bind(session.id.0)
         .bind(session.profile_id)
         .bind(&session.email)
+        .bind(&session.destination)
         .bind(&session.token_hash)
+        .bind(&session.sealed_token)
         .bind(session.status.as_str())
         .bind(session.created_at)
         .bind(session.expires_at)
@@ -8653,7 +8639,8 @@ impl StorageBackend for PostgresBackend {
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
         let verified = sqlx::query(
-            "UPDATE password_reset_sessions SET status = 'verified', verified_at = NOW()
+            "UPDATE password_reset_sessions
+             SET status = 'verified', verified_at = NOW(), sealed_token = ''::bytea
              WHERE id = $1 AND status = 'pending' AND expires_at > NOW()",
         )
         .bind(id.0)

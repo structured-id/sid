@@ -26,7 +26,33 @@ git_release_enable = true
 git_tag_enable = true
 git_tag_name = "v{{ version }}"
 git_release_name = "v{{ version }}"
-changelog_update = false
+# Its v{{ version }} release is the whole community edition: the entries
+# also list the product's crates that have no release of their own, since a
+# commit is attributed to the package whose directory it touches.
+changelog_update = true
+changelog_path = "CHANGELOG.md"
+changelog_include = [
+  "sid-admin",
+  "sid-attestation",
+  "sid-auth",
+  "sid-auth-proxy",
+  "sid-authn",
+  "sid-authz",
+  "sid-core",
+  "sid-fed",
+  "sid-i18n",
+  "sid-infra",
+  "sid-keys",
+  "sid-migrate",
+  "sid-notify",
+  "sid-org-crypto",
+  "sid-plugin",
+  "sid-proto",
+  "sid-scim",
+  "sid-serve",
+  "sid-storage",
+  "sid-ui-host",
+]
 
 [[package]]
 name = "sid-crypto"

@@ -74,3 +74,5 @@ futures = { workspace = true }
 # History epochs carry real Pallas public keys, as the archive checks.
 pasta_curves = { workspace = true }
 group = { workspace = true }
+# The restore scenario names another database on the configured server.
+url = { workspace = true }

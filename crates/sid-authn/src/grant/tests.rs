@@ -315,6 +315,8 @@ struct Host {
     gone: Vec<Account>,
     /// Sessions ended as compromised, with the replay that ended them.
     ended: Mutex<Vec<(SessionId, &'static str)>>,
+    /// The DPoP key the request proves, if any.
+    proof: Mutex<Option<DPopBinding>>,
 }
 
 impl Host {
@@ -339,7 +341,13 @@ impl Host {
             target,
             gone: vec![],
             ended: Mutex::new(vec![]),
+            proof: Mutex::new(None),
         }
+    }
+
+    /// The requests that follow prove the DPoP key `jkt`, or none.
+    fn proving(&self, jkt: Option<&str>) {
+        *self.proof.lock().unwrap() = jkt.map(DPopBinding::new);
     }
 
     /// A code `account` authorized for the cabinet, issued as an
@@ -417,7 +425,7 @@ impl GrantHost for Host {
     }
 
     async fn proof(&self) -> Result<Option<DPopBinding>, &'static str> {
-        Ok(None)
+        Ok(self.proof.lock().unwrap().clone())
     }
 
     async fn account(&self, owner: &Account) -> Result<Option<Account>, &'static str> {
@@ -639,6 +647,54 @@ async fn test_reused_refresh_token_ends_family_and_session() {
             .unwrap_err(),
     );
     assert_eq!(error, TokenError::InvalidGrant, "the family is revoked");
+}
+
+// A copied key-bound refresh token presented without proof of its key is
+// refused before anything else: it cannot rotate, and a retired one cannot
+// end its family and session, so token-only theft is no sign-out primitive.
+#[tokio::test]
+async fn test_a_bound_token_without_its_key_ends_nothing() {
+    let host = Host::new().await;
+    let code = host.authorize(Account(7));
+    host.proving(Some("key-1"));
+    let first = redeem_code(&host, code_grant(&code)).await.unwrap();
+    // Bound as a public native client's token is (the fixture client is
+    // confidential, whose tokens issuance leaves unbound).
+    let bind = |host: &Host| {
+        host.grants.with(|g| {
+            for token in &mut g.refresh {
+                token.dpop_jkt = Some("key-1".into());
+            }
+        })
+    };
+    bind(&host);
+    let presented = first.refresh_token.unwrap();
+    let second = refresh(&host, Some(&presented)).await.unwrap();
+    bind(&host);
+    host.grants.with(|g| {
+        for token in &mut g.refresh {
+            if token.replaced_by.is_some() {
+                token.grace_expires_at = Some(Utc::now() - Duration::seconds(1));
+            }
+        }
+    });
+
+    for key in [None, Some("key-2")] {
+        host.proving(key);
+        let failure = refresh(&host, Some(&presented)).await.unwrap_err();
+        assert!(
+            matches!(failure, GrantFailure::ProofMismatch),
+            "{failure:?}"
+        );
+    }
+    assert!(host.ended().is_empty(), "a session ended without the key");
+    host.proving(Some("key-1"));
+    assert!(
+        refresh(&host, second.refresh_token.as_deref())
+            .await
+            .is_ok(),
+        "the family was revoked without the key"
+    );
 }
 
 // A refresh whose session has ended is refused.

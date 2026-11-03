@@ -171,6 +171,7 @@ async fn magic_link_refuses_a_quarantined_handle() {
 #[tokio::test]
 async fn password_reset_refuses_a_quarantined_handle() {
     let svc = TestServices::new(MockStorage::new().with_system_project());
+    common::configure_email_provider(svc.storage.as_ref()).await;
     let profile = quarantined(&svc, "cid@sid.example.com").await;
 
     let reset = |principal: &str| {

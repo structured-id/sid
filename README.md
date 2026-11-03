@@ -64,7 +64,7 @@ Environment variables:
 | `SID_PASSWORD_HISTORY_EVALUATOR` | - | gRPC address of a separately deployed password-history evaluator's internal listener, which the deployment keeps reachable by this server alone over its protected internal transport; unset runs the evaluator in this server (see below) |
 | `SID_NATS_URL` | `embedded` | Event bus: `embedded` runs a bundled NATS server under the data directory, a `nats://` or `tls://` URL connects to an external cluster, `in-process` runs without a broker (see below) |
 | `SID_EVENT_RECEIVERS` | none on `embedded` and `in-process`; required on an external bus | Comma-separated receivers every committed fact is owed to (for example `sid-notify`), or `none` |
-| `SID_ACCOUNT_URL` | - | Public URL of the account UI, set together with `SID_ACCOUNT_CLIENT_JWKS` (a file holding its BFF's public JWK Set); its `/login` page runs browser sign-in and its `/verify` page opens emailed sign-in links |
+| `SID_ACCOUNT_URL` | - | Public URL of the account UI, set together with `SID_ACCOUNT_CLIENT_JWKS` (a file holding its BFF's public JWK Set); its `/login` page runs browser sign-in, its `/verify` page opens emailed sign-in links and its `/reset/new` page emailed password reset links. Without it, and without an email provider configured by an administrator, password reset requests are refused as not configured |
 | `SID_MAGIC_LINKS_ENABLED` | `false` | Email sign-in links to Corporate accounts; requires `SID_ACCOUNT_URL` |
 | `RUST_LOG` | `sid=info` | Log level |
 
@@ -188,7 +188,7 @@ and prover; it does not replace them with reduced-cost fixtures.
 
 ## License
 
-AGPL-3.0-only, see [LICENSE](LICENSE) for details.
+AGPL-3.0-only, see [LICENSE](LICENSE). Copyright 2026 Dmitry Prudnikov, see [NOTICE](NOTICE). Each crate's `Cargo.toml` names its license: `sid-crypto` and `sid-keys` are Apache-2.0 primitives and carry their own license file.
 
 > Proto definitions (`proto/`) are licensed separately under Apache 2.0 to allow unrestricted integration by third parties.
 
