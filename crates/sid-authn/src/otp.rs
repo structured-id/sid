@@ -23,7 +23,7 @@ use argon2::{
     Argon2,
     password_hash::{PasswordHasher, PasswordVerifier, phc::PasswordHash},
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SubsecRound, Utc};
 use rand::RngExt;
 use sid_core::models::{NewWork, WorkKind};
 use sid_plugin::{CeremonyStateStore, WorkStore};
@@ -368,7 +368,9 @@ impl OtpService {
             StoredOtpSession {
                 code_hash,
                 target: target.to_string(),
-                expires_at: Utc::now() + expiry,
+                // At the precision every store keeps a deadline, so the
+                // code and the work mailing it expire at the same instant.
+                expires_at: (Utc::now() + expiry).trunc_subsecs(6),
                 issue,
                 destination,
                 sealed_code,
