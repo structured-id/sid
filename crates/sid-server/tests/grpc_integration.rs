@@ -3750,13 +3750,13 @@ async fn test_admin_update_application() {
         .with_client(client.clone());
     let svc = TestServices::new(storage);
 
-    let req = admin_request(
+    let req = new_command(admin_request(
         &svc,
         UpdateApplicationRequest {
             id: client.application_id.to_string(),
             name: Some("Updated App Name".to_string()),
         },
-    );
+    ));
 
     let app = svc
         .project
@@ -3768,15 +3768,19 @@ async fn test_admin_update_application() {
     assert_eq!(app.revision, 1);
     assert_eq!(app.client.unwrap().name, "Test App");
 
-    let empty = admin_request(
+    let empty = new_command(admin_request(
         &svc,
         UpdateApplicationRequest {
             id: client.application_id.to_string(),
             name: Some(String::new()),
         },
-    );
+    ));
     let err = svc.project.update_application(empty).await.unwrap_err();
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert_eq!(
+        common::error_reason(&err).as_deref(),
+        Some("REQUIRED_FIELD_MISSING")
+    );
 }
 
 #[tokio::test]
@@ -4478,13 +4482,13 @@ async fn test_e2e_admin_project_and_application_flow() {
     // Step 5: Update the application and its client role
     let resp = svc
         .project
-        .update_application(admin_request(
+        .update_application(new_command(admin_request(
             &svc,
             UpdateApplicationRequest {
                 id: app_id.clone(),
                 name: Some("E2E App v2".to_string()),
             },
-        ))
+        )))
         .await
         .unwrap();
     assert_eq!(resp.into_inner().name, "E2E App v2");

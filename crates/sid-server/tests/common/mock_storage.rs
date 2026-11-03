@@ -3051,13 +3051,9 @@ impl StorageBackend for MockStorage {
             .collect())
     }
 
-    async fn update_application(
-        &self,
-        app: &Application,
-        _ctx: MutationContext,
-    ) -> SidResult<bool> {
+    async fn update_application(&self, app: &Application, ctx: MutationContext) -> SidResult<bool> {
         let mut inner = self.inner.lock().unwrap();
-        let Some(stored) = inner.applications.get_mut(&app.id) else {
+        let Some(stored) = inner.applications.get(&app.id) else {
             return Ok(false);
         };
         if stored.revision != app.revision
@@ -3066,6 +3062,8 @@ impl StorageBackend for MockStorage {
         {
             return Ok(false);
         }
+        inner.owe(&ctx)?;
+        let stored = inner.applications.get_mut(&app.id).expect("checked above");
         stored.name = app.name.clone();
         stored.updated_at = app.updated_at;
         stored.revision += 1;

@@ -609,6 +609,10 @@ const UPDATE_PROJECT: &str = "sid.v1.ProjectService/UpdateProject";
 /// The canonical method name keyed DeleteProject commands are recorded under.
 const DELETE_PROJECT: &str = "sid.v1.ProjectService/DeleteProject";
 
+/// The canonical method name keyed UpdateApplication commands are recorded
+/// under.
+const UPDATE_APPLICATION: &str = "sid.v1.ProjectService/UpdateApplication";
+
 /// The project a completed CreateProject recorded as its result.
 #[allow(clippy::result_large_err)]
 fn decode_result(result: &[u8]) -> Result<sid_proto::sid::v1::Project, Status> {
@@ -1067,39 +1071,51 @@ impl ProjectService for ProjectServiceImpl {
     ) -> Result<Response<Application>, Status> {
         let caller = self.admin(&request).await?;
         self.check_maintenance().await?;
+        let key = required_key(request.metadata())?;
         let req = request.into_inner();
 
-        let mut app = self.load_application("id", &req.id).await?;
-        if let Some(name) = req.name {
-            if name.is_empty() {
-                return Err(missing_field("name"));
-            }
-            app.name = name;
-        }
-        app.updated_at = chrono::Utc::now();
-        let updated = self
-            .storage
-            .update_application(
-                &app,
-                AuditEntry::admin(
+        // A retry of a completed edit returns the application as that edit
+        // left it, and never renames it again over a later edit.
+        let command = KeyedCommand::new(
+            format!("profile:{}", caller.profile_id),
+            key,
+            UPDATE_APPLICATION,
+            req.encode_to_vec(),
+        );
+        let view = command
+            .run(&*self.storage, || async {
+                let mut app = self.load_application("id", &req.id).await?;
+                if let Some(name) = req.name.clone() {
+                    if name.is_empty() {
+                        return Err(missing_field("name").into());
+                    }
+                    app.name = name;
+                }
+                app.updated_at = chrono::Utc::now();
+                // The application as this edit leaves it: the store applies
+                // the edit only to the revision it was read at.
+                let mut left = app.clone();
+                left.revision += 1;
+                let view = self.application_view(&left).await?;
+                let ctx = MutationContext::from(AuditEntry::admin(
                     caller.profile_id.to_string(),
                     "application.update",
                     app.id.to_string(),
-                )
-                .into(),
-            )
-            .await
-            .map_err(storage_failure)?;
-        if !updated {
-            // Deleted meanwhile, or changed since it was read.
-            return Err(match self.storage.get_application(app.id).await {
-                Ok(None) => application_not_found(&req.id),
-                Ok(Some(_)) => changed_concurrently(),
-                Err(e) => storage_failure(e),
-            });
-        }
-        app.revision += 1;
-        Ok(Response::new(self.application_view(&app).await?))
+                ))
+                .with_operation(command.completion(view.encode_to_vec()));
+                if !self.storage.update_application(&app, ctx).await? {
+                    // Deleted meanwhile, or changed since it was read.
+                    return Err(match self.storage.get_application(app.id).await {
+                        Ok(None) => application_not_found(&req.id),
+                        Ok(Some(_)) => changed_concurrently(),
+                        Err(e) => storage_failure(e),
+                    }
+                    .into());
+                }
+                Ok(view)
+            })
+            .await?;
+        Ok(Response::new(view))
     }
 
     #[instrument(skip_all, fields(method = "update_client_role"))]
