@@ -803,21 +803,22 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         sid_infra::TopologyRole::from_env(sid_infra::TopologyRole::Own)?,
     )
     .await?;
-    // PostgreSQL may be shared by several replicas; a SQLite file may be
-    // opened by several processes, so the in-process bus locks it and takes
-    // over no addressed work it could never hand on.
-    bus_fits_storage(&nats_mode, cfg!(feature = "storage-pg"))?;
+    // Without a broker, replicas sharing PostgreSQL claim committed work from
+    // that database under fenced leases; the in-process bus only wakes their
+    // workers and feeds this process's live views, which may miss facts
+    // another replica handled. A SQLite file serves one engine process, so
+    // the in-process bus locks it. Either way it takes over no addressed work
+    // it could never hand on.
     let in_process = nats_mode == crate::embedded_nats::EventBusMode::InProcess;
+    // The file lock comes first, so no process on another bus can address
+    // work between the check and the lock.
     let database_lock = match sqlite_file.as_deref() {
-        Some(database) => {
-            let lock = hold_database(database, in_process)?;
-            if in_process {
-                refuse_addressed_history(storage.as_ref()).await?;
-            }
-            Some(Arc::new(lock))
-        }
+        Some(database) => Some(Arc::new(hold_database(database, in_process)?)),
         None => None,
     };
+    if in_process {
+        refuse_addressed_history(storage.as_ref()).await?;
+    }
     let required_receivers =
         required_receivers(&nats_mode, env_setting("SID_EVENT_RECEIVERS")?.as_deref())?;
 
@@ -1660,23 +1661,6 @@ pub(crate) fn required_receivers(
         );
     }
     Ok(receivers)
-}
-
-/// The in-process bus reaches only this process's subscribers. Over storage
-/// several replicas can share (`shared_storage`), the replica that claims a
-/// fact's fan-out would publish it to its own subscribers alone, so others
-/// would silently miss live events: that pairing stops startup.
-pub(crate) fn bus_fits_storage(
-    mode: &crate::embedded_nats::EventBusMode,
-    shared_storage: bool,
-) -> anyhow::Result<()> {
-    if shared_storage && *mode == crate::embedded_nats::EventBusMode::InProcess {
-        anyhow::bail!(
-            "the in-process bus serves one process, but this storage can be shared by \
-             several replicas: set SID_NATS_URL to `embedded` or a NATS URL"
-        );
-    }
-    Ok(())
 }
 
 /// An installation that ever addressed work to a receiver cannot move to the
