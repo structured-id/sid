@@ -666,6 +666,25 @@ pub async fn administrator_token(
     issue_admin_token(jwt, profile.id)
 }
 
+/// A sign-in code for the account at `address` in `storage`, issued the way
+/// RequestOtp issues it (emailed to that address), and its plaintext.
+pub async fn issue_code(
+    storage: &Arc<dyn StorageBackend>,
+    address: &str,
+) -> (sid_authn::otp::OtpRequestResult, String) {
+    sid_authn::otp::OtpService::new(
+        storage.clone(),
+        sid_authn::otp::CodeDelivery {
+            keys: test_key_manager(),
+            work: storage.clone(),
+            capacity: sid_plugin::OWED_WORK_CAPACITY,
+        },
+    )
+    .request_otp(address, sid_authn::otp::CodeDestination::Email(address))
+    .await
+    .expect("issue a sign-in code")
+}
+
 /// The field-encryption key manager every test server uses.
 pub fn test_key_manager() -> Arc<dyn sid_keys::KeyManager> {
     Arc::new(
@@ -822,7 +841,14 @@ pub fn auth_service(
     let opaque_zkpp: Arc<arc_swap::ArcSwap<Option<Arc<ZkppOpaqueServer>>>> =
         Arc::new(arc_swap::ArcSwap::from_pointee(Some(zkpp)));
 
-    let otp_service = sid_authn::otp::OtpService::new(storage.clone());
+    let otp_service = Arc::new(sid_authn::otp::OtpService::new(
+        storage.clone(),
+        sid_authn::otp::CodeDelivery {
+            keys: test_key_manager(),
+            work: storage.clone(),
+            capacity: sid_plugin::OWED_WORK_CAPACITY,
+        },
+    ));
     let service = AuthServiceImpl::new(
         storage.clone(),
         oauth2,
@@ -1492,7 +1518,8 @@ impl TestServices {
             cache_backend.clone(),
             storage.clone(),
         ));
-        let magic_link = magic_links.then(|| Arc::new(MagicLinkService::new(storage.clone())));
+        let magic_link = magic_links
+            .then(|| Arc::new(MagicLinkService::new(storage.clone(), test_key_manager())));
         let event_bus: Arc<dyn sid_plugin::event_bus::EventBus> =
             Arc::new(InProcessEventBus::new());
         let cascade_service = Arc::new(RevocationCascadeService::new(
@@ -1646,12 +1673,12 @@ impl TestServices {
         let relay = sid_authn::event_relay::EventRelayHandler::new(
             self.storage.clone(),
             Vec::new(),
-            sid_storage::OWED_WORK_CAPACITY,
+            sid_plugin::OWED_WORK_CAPACITY,
         );
         let fanout = sid_authn::event_relay::EventFanoutHandler::new(
             self.event_bus.clone(),
             self.storage.clone(),
-            sid_storage::OWED_WORK_CAPACITY,
+            sid_plugin::OWED_WORK_CAPACITY,
         );
         let handlers: [&dyn WorkHandler; 3] = [&contest, &relay, &fanout];
         for handler in handlers {

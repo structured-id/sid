@@ -30,8 +30,8 @@ use uuid::Uuid;
 use crate::filter;
 use crate::mapping::{
     CreateUserMapping, MappingError, ScimOrgContext, check_single_primary, corporate_contact,
-    email_contact, email_key, email_principal, phone_contact, phone_digits,
-    scim_create_group_to_sid, scim_create_user_to_sid, sid_to_scim_group, sid_to_scim_user,
+    email_binding, email_key, phone_contact, phone_digits, scim_create_group_to_sid,
+    scim_create_user_to_sid, sid_to_scim_group, sid_to_scim_user,
 };
 use crate::patch;
 use crate::refusal;
@@ -425,13 +425,15 @@ impl ScimService for ScimServiceImpl {
             .into_iter()
             .map(|e| e.id)
             .collect();
-        write.add_emails = req
+        // Each email's login handle and its contact, linked.
+        let email_bindings: Vec<(Principal, sid_core::models::ProfileEmail)> = req
             .emails
             .iter()
             .filter(|e| !e.value.is_empty())
-            .map(|e| email_contact(profile_id, e, now))
+            .map(|e| email_binding(profile_id, e, now))
             .collect::<Result<_, _>>()
             .map_err(refusal::mapping)?;
+        write.add_emails = email_bindings.iter().map(|(_, c)| c.clone()).collect();
         write.remove_phones = self
             .storage
             .list_profile_phones(profile_id)
@@ -496,15 +498,9 @@ impl ScimService for ScimServiceImpl {
             })
             .map(|i| i.id)
             .collect();
-        let new_emails: Vec<Principal> = req
-            .emails
-            .iter()
-            .filter(|e| !e.value.is_empty())
-            .map(|e| email_principal(profile_id, e))
-            .collect::<Result<_, _>>()
-            .map_err(refusal::mapping)?;
-        let new_identifiers: Vec<Principal> = new_emails
+        let new_identifiers: Vec<Principal> = email_bindings
             .into_iter()
+            .map(|(principal, _)| principal)
             .chain(
                 req.phone_numbers
                     .iter()
@@ -736,12 +732,10 @@ impl ScimService for ScimServiceImpl {
                         r#type: "work".into(),
                         primary: pi.is_primary,
                     };
-                    write
-                        .bind
-                        .push(email_principal(profile_id, &email).map_err(refusal::mapping)?);
-                    write
-                        .add_emails
-                        .push(email_contact(profile_id, &email, now).map_err(refusal::mapping)?);
+                    let (principal, contact) =
+                        email_binding(profile_id, &email, now).map_err(refusal::mapping)?;
+                    write.bind.push(principal);
+                    write.add_emails.push(contact);
                 }
                 PrincipalType::Phone => {
                     write.bind.push(corporate_contact(

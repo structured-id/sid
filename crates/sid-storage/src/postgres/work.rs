@@ -44,12 +44,22 @@ impl PgWorkStore {
         tx.commit().await.map_err(schema_error)?;
         Ok(())
     }
+
+    /// Store `works`, owed by a state change of this database's owner,
+    /// inside that change's transaction `tx`: they commit with it or not at
+    /// all, admitted under each kind's lock up to
+    /// [`OWED_WORK_CAPACITY`](sid_plugin::OWED_WORK_CAPACITY) open items.
+    /// For a host whose own tables live beside this work table.
+    pub async fn owe_in_tx(tx: &mut PgConnection, works: &[NewWork]) -> SidResult<()> {
+        insert_owed_work_in_tx(tx, works, sid_plugin::OWED_WORK_CAPACITY).await
+    }
 }
 
-/// Store `work` inside `tx`, the transaction of the state change that owes
-/// it. Returns `false` when work with its id already exists; refuses with
-/// `ResourceExhausted` when `capacity` open items of its kind are stored.
-pub(crate) async fn insert_work_in_tx(
+/// Store `work` inside `tx`, which holds its kind's admission lock
+/// ([`lock_kind`]). Returns `false` when work with its id already exists;
+/// refuses with `ResourceExhausted` when `capacity` open items of its kind
+/// are stored.
+async fn insert_work_in_tx(
     tx: &mut PgConnection,
     work: &NewWork,
     capacity: u64,
@@ -99,18 +109,46 @@ pub(crate) async fn insert_work_in_tx(
     Ok(inserted)
 }
 
-async fn enqueue(pool: &PgPool, work: &NewWork, capacity: u64) -> SidResult<bool> {
-    let storage = |e: sqlx::Error| SidError::Storage(format!("enqueue work: {e}"));
-    let mut tx = pool.begin().await.map_err(storage)?;
-    // Count and insert as one step per kind: replicas enqueuing together
-    // would otherwise each see room and pass the capacity between them.
+/// Hold the admission lock of `kind` until the transaction ends: count and
+/// insert are one step per kind, so writers enqueuing together, standalone
+/// or with a mutation, never each see room and pass the capacity between
+/// them.
+async fn lock_kind(tx: &mut PgConnection, kind: &WorkKind) -> SidResult<()> {
     sqlx::query(
         "SELECT pg_advisory_xact_lock(hashtextextended('sid.durable_work.capacity:' || $1, 0))",
     )
-    .bind(work.kind.as_str())
+    .bind(kind.as_str())
     .execute(&mut *tx)
     .await
-    .map_err(storage)?;
+    .map_err(|e| SidError::Storage(format!("lock work kind: {e}")))?;
+    Ok(())
+}
+
+/// Store the work a business mutation owes inside its transaction `tx`,
+/// under the admission lock of each kind. The kinds are locked in their
+/// order, so two mutations owing the same kinds never wait on each other in
+/// a cycle.
+pub(crate) async fn insert_owed_work_in_tx(
+    tx: &mut PgConnection,
+    works: &[NewWork],
+    capacity: u64,
+) -> SidResult<()> {
+    let mut kinds: Vec<&WorkKind> = works.iter().map(|w| &w.kind).collect();
+    kinds.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
+    kinds.dedup();
+    for kind in kinds {
+        lock_kind(tx, kind).await?;
+    }
+    for work in works {
+        insert_work_in_tx(tx, work, capacity).await?;
+    }
+    Ok(())
+}
+
+async fn enqueue(pool: &PgPool, work: &NewWork, capacity: u64) -> SidResult<bool> {
+    let storage = |e: sqlx::Error| SidError::Storage(format!("enqueue work: {e}"));
+    let mut tx = pool.begin().await.map_err(storage)?;
+    lock_kind(&mut tx, &work.kind).await?;
     let inserted = insert_work_in_tx(&mut tx, work, capacity).await?;
     tx.commit().await.map_err(storage)?;
     Ok(inserted)
@@ -427,3 +465,6 @@ where
 fn count(value: i32) -> SidResult<u32> {
     u32::try_from(value).map_err(|_| SidError::Storage(format!("negative count: {value}")))
 }
+
+#[cfg(test)]
+mod tests;

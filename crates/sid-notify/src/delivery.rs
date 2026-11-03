@@ -3,12 +3,15 @@
 //!
 //! Every committed fact is owed to this service as addressed work; an
 //! inbound event is accepted by storing a routing job before it is settled.
-//! The routing job resolves the recipient and stores one delivery job per
-//! (template, channel), each with a stable id so a repeated fan-out creates
-//! nothing twice. Delivery jobs record receipts, ambiguous attempts and
-//! failures; work that ends failed commits, in the same transaction, the
-//! relay of its `sid.notify.dlq.v1` fact, which is owed and published as
-//! every fact is.
+//! The routing job resolves the recipient and the matching rules once and
+//! stores them whole as the event's plan, under an id of the event alone:
+//! the store keeps the first plan, so a retried routing under changed rules
+//! owes the same deliveries. The plan job then stores one delivery job per
+//! planned (template, channel), each with a stable id so a repeated fan-out
+//! creates nothing twice, and stays owed until every one is stored. Delivery
+//! jobs record receipts, ambiguous attempts and failures; work that ends
+//! failed commits, in the same transaction, the relay of its
+//! `sid.notify.dlq.v1` fact, which is owed and published as every fact is.
 
 use crate::dispatcher::NotificationDispatcher;
 use crate::recipient_resolver::{RecipientResolver, ResolveError};
@@ -29,8 +32,11 @@ use uuid::Uuid;
 /// Namespace of the stable ids this service derives for its jobs.
 const ID_NAMESPACE: Uuid = Uuid::from_u128(0x5f0d_2c8e_6a41_4b7c_9e13_7d2a_0c64_b1f9);
 
-/// Routing job: the inbound event, owned until its deliveries are stored.
+/// Routing job: the inbound event, owned until its plan is stored.
 pub const ROUTE: &str = "notify.route";
+/// Plan job: the deliveries an event's routing fixed, owned until each is
+/// stored.
+pub const PLAN: &str = "notify.plan";
 /// One delivery: an event rendered through one template to one channel.
 pub const DELIVER: &str = "notify.deliver";
 
@@ -59,6 +65,12 @@ fn stable_id(name: &str) -> WorkId {
 /// `(source, id)`.
 pub fn route_job_id(event: &Event) -> WorkId {
     stable_id(&format!("route:{}", event.relay_id()))
+}
+
+/// The plan job of `event`: one per event `(source, id)`, whatever routing
+/// attempt stored it.
+pub fn plan_job_id(event: &Event) -> WorkId {
+    stable_id(&format!("plan:{}", event.relay_id()))
 }
 
 /// The delivery job of `event` through `template` to `channel`: one per event
@@ -148,6 +160,23 @@ struct DeliveryJob {
     recipient: Recipient,
 }
 
+/// An event's fixed plan: the recipient resolved and the deliveries the
+/// rules matched when it was first stored.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RoutePlan {
+    event: Event,
+    recipient: Recipient,
+    deliveries: Vec<PlannedDelivery>,
+}
+
+/// One planned delivery: a template rendered at a priority to a channel.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PlannedDelivery {
+    template: String,
+    priority: NotificationPriority,
+    channel: String,
+}
+
 /// The relay of the dead-letter fact for `work`, one per failed job: its
 /// event id follows from the job, so a repeated failure owes nothing new.
 fn dead_letter(work: &ClaimedWork, error: &str) -> Option<NewWork> {
@@ -232,32 +261,99 @@ impl WorkHandler for RouteHandler {
             Err(e @ ResolveError::ProfileGone(_)) => return WorkOutcome::Permanent(e.to_string()),
             Err(e @ ResolveError::Unavailable(_)) => return WorkOutcome::Retry(e.to_string()),
         };
-
-        let mut stored = 0usize;
-        for rule in rules {
-            for channel in &rule.channels {
-                let job = DeliveryJob {
-                    event: event.clone(),
+        let deliveries: Vec<PlannedDelivery> = rules
+            .iter()
+            .flat_map(|rule| {
+                rule.channels.iter().map(|channel| PlannedDelivery {
                     template: rule.template.clone(),
                     priority: rule.priority,
                     channel: channel.clone(),
-                    recipient: recipient.clone(),
-                };
-                let payload = match serde_json::to_vec(&job) {
-                    Ok(payload) => payload,
-                    Err(e) => return WorkOutcome::Permanent(format!("delivery job: {e}")),
-                };
-                let mut delivery = NewWork::new(kind(DELIVER), payload);
-                delivery.id = delivery_job_id(&event, &rule.template, channel);
-                delivery.max_attempts = MAX_ATTEMPTS;
-                // A delivery stored by an earlier attempt is kept as it is.
-                if let Err(e) = self.store.enqueue_work(&delivery, self.capacity).await {
-                    return WorkOutcome::Retry(format!("storing delivery: {e}"));
-                }
-                stored += 1;
+                })
+            })
+            .collect();
+        let planned = deliveries.len();
+        let plan = RoutePlan {
+            event,
+            recipient,
+            deliveries,
+        };
+        let payload = match serde_json::to_vec(&plan) {
+            Ok(payload) => payload,
+            Err(e) => return WorkOutcome::Permanent(format!("route plan: {e}")),
+        };
+        // Stored whole, under an id of the event alone: the store keeps the
+        // first plan, so this event's deliveries are fixed when this first
+        // succeeds and a retry under other rules owes the same.
+        let mut job = NewWork::new(kind(PLAN), payload);
+        job.id = plan_job_id(&plan.event);
+        job.max_attempts = MAX_ATTEMPTS;
+        match self.store.enqueue_work(&job, self.capacity).await {
+            Ok(_) => WorkOutcome::Done(Some(format!("{planned} deliveries planned"))),
+            Err(e) => WorkOutcome::Retry(format!("storing the plan: {e}")),
+        }
+    }
+}
+
+/// Stores the delivery jobs of an event's fixed plan.
+pub struct PlanHandler {
+    kind: WorkKind,
+    store: Arc<dyn WorkStore>,
+    capacity: u64,
+}
+
+impl PlanHandler {
+    pub(crate) fn new(store: Arc<dyn WorkStore>, capacity: u64) -> Self {
+        Self {
+            kind: kind(PLAN),
+            store,
+            capacity,
+        }
+    }
+}
+
+#[async_trait]
+impl WorkHandler for PlanHandler {
+    fn kind(&self) -> &WorkKind {
+        &self.kind
+    }
+
+    fn retry_schedule(&self) -> RetrySchedule {
+        RETRY
+    }
+
+    /// The failed plan is the durable record of an event whose deliveries
+    /// were not all stored.
+    fn on_dead(&self, work: &ClaimedWork, error: &str) -> Option<NewWork> {
+        dead_letter(work, error)
+    }
+
+    async fn handle(&self, work: &ClaimedWork) -> WorkOutcome {
+        let plan: RoutePlan = match serde_json::from_slice(&work.payload) {
+            Ok(plan) => plan,
+            Err(e) => return WorkOutcome::Permanent(format!("malformed plan: {e}")),
+        };
+        for planned in &plan.deliveries {
+            let job = DeliveryJob {
+                event: plan.event.clone(),
+                template: planned.template.clone(),
+                priority: planned.priority,
+                channel: planned.channel.clone(),
+                recipient: plan.recipient.clone(),
+            };
+            let payload = match serde_json::to_vec(&job) {
+                Ok(payload) => payload,
+                Err(e) => return WorkOutcome::Permanent(format!("delivery job: {e}")),
+            };
+            let mut delivery = NewWork::new(kind(DELIVER), payload);
+            delivery.id = delivery_job_id(&plan.event, &planned.template, &planned.channel);
+            delivery.max_attempts = MAX_ATTEMPTS;
+            // A delivery stored by an earlier attempt is kept as it is, with
+            // its own outcome; the plan stays owed until the rest are stored.
+            if let Err(e) = self.store.enqueue_work(&delivery, self.capacity).await {
+                return WorkOutcome::Retry(format!("storing delivery: {e}"));
             }
         }
-        WorkOutcome::Done(Some(format!("{stored} deliveries")))
+        WorkOutcome::Done(Some(format!("{} deliveries", plan.deliveries.len())))
     }
 }
 

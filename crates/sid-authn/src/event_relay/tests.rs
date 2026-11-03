@@ -554,7 +554,7 @@ async fn test_observed_event_uses_the_observation_capacity() {
     assert_eq!(stored, [(event.relay().id, OBSERVED_EVENT_CAPACITY)]);
     const {
         assert!(
-            OBSERVED_EVENT_CAPACITY < sid_storage::OWED_WORK_CAPACITY,
+            OBSERVED_EVENT_CAPACITY < sid_plugin::OWED_WORK_CAPACITY,
             "observations may crowd out owed events"
         )
     };

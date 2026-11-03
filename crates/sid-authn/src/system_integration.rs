@@ -28,6 +28,9 @@ pub const CALLBACK_PATH: &str = "/auth/callback";
 /// The path under the account URL of the account UI's sign-in page.
 pub const SIGN_IN_PATH: &str = "/login";
 
+/// The path under the account URL of the page an emailed sign-in link opens.
+pub const MAGIC_LINK_PATH: &str = "/verify";
+
 /// Attempts at storing a changed client before giving up to a concurrent
 /// writer that keeps changing it.
 const UPDATE_ATTEMPTS: usize = 3;
@@ -84,8 +87,18 @@ impl AccountSettings {
     /// The account UI's sign-in route, where the issuer sends a user who
     /// must sign in.
     pub fn sign_in_page(&self) -> url::Url {
+        self.page(SIGN_IN_PATH)
+    }
+
+    /// The account UI's page an emailed sign-in link opens, on the same
+    /// trusted URL as the sign-in page, never a request's Host.
+    pub fn magic_link_page(&self) -> url::Url {
+        self.page(MAGIC_LINK_PATH)
+    }
+
+    fn page(&self, path: &str) -> url::Url {
         let mut page = self.account_url.clone();
-        let path = format!("{}{SIGN_IN_PATH}", page.path().trim_end_matches('/'));
+        let path = format!("{}{path}", page.path().trim_end_matches('/'));
         page.set_path(&path);
         page
     }

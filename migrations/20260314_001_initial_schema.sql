@@ -396,7 +396,9 @@ CREATE TABLE login_policy_epoch (
 CREATE TABLE magic_link_sessions (
     id uuid NOT NULL,
     email text NOT NULL,
+    destination text NOT NULL,
     token_hash text NOT NULL,
+    sealed_token bytea NOT NULL,
     consumed boolean DEFAULT false NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     expires_at timestamp with time zone NOT NULL,

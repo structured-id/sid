@@ -101,8 +101,9 @@ pub fn scim_create_user_to_sid(
 
     // emails → Principal(Email) + ProfileEmail
     for email in req.emails.iter().filter(|e| !e.value.is_empty()) {
-        principals.push(email_principal(profile_id, email)?);
-        emails.push(email_contact(profile_id, email, now)?);
+        let (principal, contact) = email_binding(profile_id, email, now)?;
+        principals.push(principal);
+        emails.push(contact);
     }
 
     // phoneNumbers → Principal(Phone) + ProfilePhone
@@ -176,29 +177,20 @@ pub fn email_key(address: &str) -> Option<String> {
         .map(|handle| handle.key)
 }
 
-/// The login handle of a SCIM email: the installation's principal, keyed
-/// under its current email policy revision.
-pub fn email_principal(
-    profile_id: ProfileId,
-    email: &proto::ScimEmail,
-) -> Result<Principal, MappingError> {
-    let handle = scim_email(email)?;
-    let mut principal =
-        corporate_contact(profile_id, PrincipalType::Email, handle.key, email.primary);
-    principal.email_policy_revision = Some(handle.revision);
-    Ok(principal)
-}
-
-/// The contact record of a SCIM email, keeping the spelling given.
-pub fn email_contact(
+/// A SCIM email as the account keeps it: the login handle (the
+/// installation's principal, keyed under its current email policy revision)
+/// and the contact holding the spelling given, the principal naming that
+/// contact as the mailbox its login mail goes to.
+pub fn email_binding(
     profile_id: ProfileId,
     email: &proto::ScimEmail,
     now: DateTime<Utc>,
-) -> Result<ProfileEmail, MappingError> {
-    Ok(ProfileEmail {
+) -> Result<(Principal, ProfileEmail), MappingError> {
+    let handle = scim_email(email)?;
+    let contact = ProfileEmail {
         id: ProfileEmailId::new(),
         profile_id,
-        email: scim_email(email)?.delivery,
+        email: handle.delivery,
         label: scim_email_type_to_label(&email.r#type),
         custom_label: None,
         is_primary: email.primary,
@@ -206,7 +198,12 @@ pub fn email_contact(
         verified_at: None,
         created_at: now,
         updated_at: now,
-    })
+    };
+    let mut principal =
+        corporate_contact(profile_id, PrincipalType::Email, handle.key, email.primary);
+    principal.email_policy_revision = Some(handle.revision);
+    principal.source_email_id = Some(contact.id);
+    Ok((principal, contact))
 }
 
 /// The contact record of a SCIM phone number.
@@ -393,7 +390,7 @@ pub fn corporate_contact(
         verification_expires: None,
         assigned_profile_id: None,
         assignment_revision: 0,
-        // An email key's revision is set by `email_principal`, which derives it.
+        // An email key's revision is set by `email_binding`, which derives it.
         email_policy_revision: None,
         is_primary,
         source_field,

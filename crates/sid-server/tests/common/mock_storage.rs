@@ -103,6 +103,8 @@ pub struct MockStorageInner {
     profile_reads_fail: bool,
     /// Consuming a magic link session fails as a storage fault would.
     magic_link_consume_fails: bool,
+    /// Owing new work fails as a full queue refuses it.
+    owed_work_full: bool,
     /// Durable work items with their payload and lease deadline.
     work: HashMap<WorkId, StoredWork>,
     /// Completions of keyed commands by (namespace, key).
@@ -442,6 +444,13 @@ impl MockStorage {
     #[allow(dead_code)]
     pub fn fail_profile_reads(&self) {
         self.inner.lock().unwrap().profile_reads_fail = true;
+    }
+
+    /// From now on, every queue of owed work is full: a mutation that owes
+    /// work is refused as the store refuses it past its capacity.
+    #[allow(dead_code)]
+    pub fn fill_owed_work(&self) {
+        self.inner.lock().unwrap().owed_work_full = true;
     }
 
     /// From now on, reading a magic link session fails.
@@ -6072,14 +6081,14 @@ impl MockStorageInner {
         Ok(())
     }
 
-    /// Commit the work a mutation owes, as a backend does in its transaction.
     /// Commit what `ctx` carries besides the mutation. Called before the
     /// mutation's own change: a keyed command already completed commits
     /// nothing.
     fn owe(&mut self, ctx: &MutationContext) -> SidResult<()> {
         self.complete(ctx)?;
+        let capacity = if self.owed_work_full { 0 } else { u64::MAX };
         for owed in &ctx.work {
-            self.enqueue(owed, u64::MAX)?;
+            self.enqueue(owed, capacity)?;
         }
         Ok(())
     }

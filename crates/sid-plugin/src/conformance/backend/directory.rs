@@ -67,13 +67,13 @@ async fn provision(backend: &dyn StorageBackend) -> (Profile, Principal, NewWork
     let login = Principal::new_username(profile.id, format!("dir{}#acme.example.com", tag()));
     let mut write = DirectoryUserWrite::new(DirectoryWriteMode::Create, profile.clone());
     write.bind.push(login.clone());
-    write.bind.push(Principal::new_email(
-        profile.id,
-        format!("dir{}@sid.example.com", tag()),
-    ));
-    write
-        .add_emails
-        .push(email(profile.id, "work@sid.example.com"));
+    // The email login handle names the contact written in the same request
+    // as its mailbox.
+    let contact = email(profile.id, "work@sid.example.com");
+    let mut handle = Principal::new_email(profile.id, format!("dir{}@sid.example.com", tag()));
+    handle.source_email_id = Some(contact.id);
+    write.bind.push(handle);
+    write.add_emails.push(contact);
     write.add_phones.push(phone(profile.id));
     write.set_metadata.push(ProfileMetadata::new(
         profile.id,
@@ -95,10 +95,14 @@ pub async fn test_directory_user_create_stores_everything(backend: &dyn StorageB
     let principals = backend.get_principals_by_profile(profile.id).await.unwrap();
     assert_eq!(principals.len(), 2);
     assert!(principals.iter().any(|p| p.value == login.value));
-    assert_eq!(
-        backend.list_profile_emails(profile.id).await.unwrap().len(),
-        1
-    );
+    let emails = backend.list_profile_emails(profile.id).await.unwrap();
+    assert_eq!(emails.len(), 1);
+    // The handle's link to its contact is kept: login mail goes there.
+    let handle = principals
+        .iter()
+        .find(|p| p.principal_type == PrincipalType::Email)
+        .unwrap();
+    assert_eq!(handle.source_email_id, Some(emails[0].id));
     assert_eq!(
         backend.list_profile_phones(profile.id).await.unwrap().len(),
         1
@@ -194,12 +198,14 @@ pub async fn test_directory_user_update_applies_every_change(backend: &dyn Stora
     profile.given_name = Some("Renamed".to_string());
     let mut write = DirectoryUserWrite::new(DirectoryWriteMode::Update, profile.clone());
     write.unbind.push(old_contact.id);
-    let new_contact = Principal::new_email(profile.id, format!("new{}@sid.example.com", tag()));
+    // A replacement handle names the replacement contact, written in the same
+    // request after the old one is removed.
+    let new_email = email(profile.id, "new@sid.example.com");
+    let mut new_contact = Principal::new_email(profile.id, format!("new{}@sid.example.com", tag()));
+    new_contact.source_email_id = Some(new_email.id);
     write.bind.push(new_contact.clone());
     write.remove_emails.push(old_email);
-    write
-        .add_emails
-        .push(email(profile.id, "new@sid.example.com"));
+    write.add_emails.push(new_email.clone());
     write.remove_phones.push(old_phone);
     write.remove_metadata.push("department".to_string());
     write.set_metadata.push(ProfileMetadata::new(
@@ -227,6 +233,14 @@ pub async fn test_directory_user_update_applies_every_change(backend: &dyn Stora
     let emails = backend.list_profile_emails(profile.id).await.unwrap();
     assert_eq!(emails.len(), 1);
     assert_eq!(emails[0].email, "new@sid.example.com");
+    let linked = backend
+        .get_principals_by_profile(profile.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|p| p.value == new_contact.value)
+        .unwrap();
+    assert_eq!(linked.source_email_id, Some(new_email.id));
     assert!(
         backend
             .list_profile_phones(profile.id)
