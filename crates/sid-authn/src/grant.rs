@@ -291,6 +291,17 @@ pub async fn refresh<H: GrantHost>(
         .map_err(GrantFailure::Storage)?
         .ok_or_else(|| GrantFailure::invalid_grant("refresh token not found"))?;
 
+    // A key-bound refresh token is used only with a proof for its key
+    // (RFC 9449 §5), checked before its rotation state: without the key a
+    // copied token neither rotates nor, when retired, ends its family and
+    // session, so token-only theft is no sign-out primitive.
+    let proof = host.proof().await.map_err(GrantFailure::Host)?;
+    if let Some(bound) = presented.dpop_jkt.as_deref()
+        && proof.as_ref().map(|b| b.jkt.as_str()) != Some(bound)
+    {
+        return Err(GrantFailure::ProofMismatch);
+    }
+
     let validated = match host.oauth2().validate_refresh(presented, &client) {
         Ok(validated) => validated,
         Err(RefreshRefusal::Reused {
@@ -338,15 +349,6 @@ pub async fn refresh<H: GrantHost>(
         .map_err(GrantFailure::Storage)?
         .filter(|session| !session.is_expired())
         .ok_or_else(|| GrantFailure::invalid_grant("session ended"))?;
-
-    let proof = host.proof().await.map_err(GrantFailure::Host)?;
-    // A key-bound refresh token is used only with a proof for its key
-    // (RFC 9449 §5).
-    if let Some(bound) = validated.dpop_jkt()
-        && proof.as_ref().map(|b| b.jkt.as_str()) != Some(bound)
-    {
-        return Err(GrantFailure::ProofMismatch);
-    }
 
     let claims = host
         .claims(&account, &issuer, &client, validated.scopes())
