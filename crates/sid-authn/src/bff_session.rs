@@ -3,19 +3,20 @@
 //! its issuer gave it, held server-side under an opaque cookie value, and the
 //! sign-ins it has started and not yet completed.
 //!
-//! Sessions live in a [`CacheBackend`] rather than in the process, because
-//! the adapter runs behind a load balancer: a sign-in that lands on one
-//! replica is completed by a request that lands on another, and a rolling
-//! update replaces every replica while sessions are open. The cache is the
-//! shared state, not an optimization: an unreachable cache is reported, never
-//! read as "no session" (every user would be signed out) or as an unused
-//! sign-in (its `state` could be replayed).
+//! These records belong to the relying party, so they live in its
+//! authoritative store ([`CeremonyStateStore`]: the application's PostgreSQL
+//! for shared replicas, SQLite for a single instance), never in a cache alone:
+//! the adapter runs behind a load balancer, a sign-in that lands on one
+//! replica is completed by a request that lands on another, a rolling update
+//! replaces every replica while sessions are open, and a cache restart loses
+//! nothing. An unreachable store is reported, never read as "no session"
+//! (every user would be signed out) or as an unused sign-in (its `state`
+//! could be replayed).
 //!
 //! Timestamps are absolute (`DateTime<Utc>`), not `Instant`, because a
 //! monotonic clock means nothing to the process that reads the value back.
-//! Expiry is the store's, not a sweeper's: the cache holds each entry for the
-//! idle window and the absolute deadline is checked against `created_at` on
-//! read.
+//! Expiry is checked at use: the store refuses each entry past its idle
+//! window, and the absolute deadline is checked against `created_at` on read.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,24 +25,23 @@ use chrono::{DateTime, Utc};
 use rand::TryRng;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
-use sid_plugin::cache::{CacheBackend, CacheError};
+use sid_plugin::CeremonyStateStore;
 
 use crate::jwt::AccessTokenClaims;
 
-/// Key prefix for sessions. Separate from `pending` so one cannot be read as
-/// the other, and from every other user of the same cache. The prefixes of
-/// both records name their shape: a change of shape takes a new prefix, so
-/// replicas of different versions over one cache never read each other's
-/// records, and the old ones expire unread. While a rollout that changes the
-/// shape is in progress a browser may be asked to sign in again on a replica
-/// of the other version; reading both shapes would keep every former shape
-/// alive in the code.
-const SESSION_PREFIX: &str = "bff:sess:3:";
-/// Key prefix for pending sign-ins, followed by the digest of the sign-in
-/// binding they were started under.
-const PENDING_PREFIX: &str = "bff:pending:4:";
-/// Key prefix for the claim on a session's refresh.
-const REFRESH_PREFIX: &str = "bff:refresh:";
+/// Namespace of sessions. Separate from pending sign-ins so one cannot be
+/// read as the other. The namespaces of both records name their shape: a
+/// change of shape takes a new namespace, so replicas of different versions
+/// over one store never read each other's records, and the old ones expire
+/// unread. While a rollout that changes the shape is in progress a browser
+/// may be asked to sign in again on a replica of the other version; reading
+/// both shapes would keep every former shape alive in the code.
+const SESSIONS: &str = "bff_session_3";
+/// Namespace of pending sign-ins, keyed by the digest of the sign-in binding
+/// they were started under and their `state`.
+const PENDING: &str = "bff_pending_4";
+/// Namespace of refresh claims, keyed by session and refresh token version.
+const REFRESH: &str = "bff_refresh_1";
 /// How many times a token replacement is applied again over concurrent idle
 /// pushes before it is reported: each push is one write per half idle window
 /// per replica, so a few attempts outlast any real interleaving.
@@ -52,7 +52,7 @@ const REPLACE_ATTEMPTS: usize = 4;
 #[derive(Debug, thiserror::Error)]
 pub enum SessionStoreError {
     #[error("session store unavailable: {0}")]
-    Backend(#[from] CacheError),
+    Backend(#[from] sid_core::Error),
 
     #[error("stored session is unreadable: {0}")]
     Corrupt(#[from] serde_json::Error),
@@ -177,9 +177,9 @@ impl std::fmt::Debug for BffSession {
     }
 }
 
-/// Session store over a shared cache.
+/// Session store over the application's authoritative store.
 pub struct BffSessionStore {
-    cache: Arc<dyn CacheBackend>,
+    store: Arc<dyn CeremonyStateStore>,
     /// Absolute lifetime: a session is gone this long after it was created,
     /// however active it has been.
     max_age: Duration,
@@ -191,15 +191,15 @@ pub struct BffSessionStore {
 }
 
 impl BffSessionStore {
-    /// A store over `cache`, with the deployment's session lifetimes.
+    /// A store over `store`, with the deployment's session lifetimes.
     pub fn new(
-        cache: Arc<dyn CacheBackend>,
+        store: Arc<dyn CeremonyStateStore>,
         max_age: Duration,
         idle_timeout: Duration,
         pending_ttl: Duration,
     ) -> Self {
         Self {
-            cache,
+            store,
             max_age,
             idle_timeout,
             pending_ttl,
@@ -238,25 +238,25 @@ impl BffSessionStore {
     }
 
     /// The session `id` names, its idle window pushed out. `None` for a
-    /// session that never existed, that the cache dropped, or that has
-    /// outlived `max_age`.
+    /// session that never existed, that ended, or that has outlived
+    /// `max_age`.
     pub async fn get_session(&self, id: &str) -> SessionResult<Option<BffSession>> {
         // The id arrives in a cookie, so it is whatever the client sent. Only
-        // the shape the store issues can name a session, and anything else
-        // stays out of the key space of a cache shared with everything else.
+        // the shape the store issues can name a session; anything else never
+        // reaches the store.
         if !is_issued_shape(id) {
             return Ok(None);
         }
-        let Some(raw) = self.cache.get(&session_key(id)).await? else {
+        let Some(raw) = self.store.read_ceremony_state(SESSIONS, id).await? else {
             return Ok(None);
         };
         let mut session: BffSession = serde_json::from_slice(&raw)?;
 
-        // The idle window is the cache's TTL, the absolute deadline is not:
-        // every access pushes the TTL out, so without this check an active
-        // session would never reach max_age.
+        // The idle window is the entry's lifetime, the absolute deadline is
+        // not: every access pushes the lifetime out, so without this check an
+        // active session would never reach max_age.
         if age(session.created_at) >= self.max_age {
-            self.cache.delete(&session_key(id)).await?;
+            self.store.take_ceremony_state(SESSIONS, id).await?;
             return Ok(None);
         }
 
@@ -278,7 +278,7 @@ impl BffSessionStore {
     /// The session as it is now, read again after a write lost to another
     /// replica's, without pushing its window again: that replica just wrote it.
     async fn read_current(&self, id: &str) -> SessionResult<Option<BffSession>> {
-        let Some(raw) = self.cache.get(&session_key(id)).await? else {
+        let Some(raw) = self.store.read_ceremony_state(SESSIONS, id).await? else {
             return Ok(None);
         };
         let session: BffSession = serde_json::from_slice(&raw)?;
@@ -290,7 +290,7 @@ impl BffSessionStore {
 
     /// Destroy a session. No-op if it is not there.
     pub async fn destroy_session(&self, id: &str) -> SessionResult<()> {
-        self.cache.delete(&session_key(id)).await?;
+        self.store.take_ceremony_state(SESSIONS, id).await?;
         Ok(())
     }
 
@@ -333,52 +333,32 @@ impl BffSessionStore {
                 _ => return Ok(RefreshClaim::Claimed(Box::new(session))),
             }
         }
-        Err(SessionStoreError::Backend(CacheError::Other(format!(
-            "session {id} kept changing while its refresh was claimed"
-        ))))
+        Err(SessionStoreError::Backend(sid_core::Error::Storage(
+            format!("session {id} kept changing while its refresh was claimed"),
+        )))
     }
 
     /// Claim the refresh of version `from` of session `id`: `true` for exactly
-    /// one caller.
+    /// one caller while the claim lives.
     ///
-    /// The claim names the version it refreshes. A claim left by the refresh
-    /// of an earlier version, which completed since (the session holds `from`
-    /// now), does not hold this one: a returned token may itself be near its
-    /// end, capped by an approaching step-up or issuer-session expiry. It is
-    /// taken over atomically, so one caller wins. A claim of the version the
-    /// session holds is in flight and is never taken over, whatever version
-    /// the caller read.
+    /// Each version has a claim of its own. A claim left by the refresh of an
+    /// earlier version does not hold the next one: a returned token may itself
+    /// be near its end, capped by an approaching step-up or issuer-session
+    /// expiry. A claim of a version in flight is never taken over, whatever
+    /// version the caller read.
     ///
-    /// The claim is never released, only outlived or taken over by the next
-    /// version: a release could delete a later holder's claim after this one
-    /// expired. `hold` outlasts a token endpoint call.
+    /// The claim is never released, only outlived: a release could free a
+    /// version that a later caller would then present again. `hold` outlasts
+    /// a token endpoint call.
     async fn claim_version(
         &self,
         id: &str,
         from: &SecretString,
         hold: Duration,
     ) -> SessionResult<bool> {
-        let key = refresh_key(id);
-        let mine = refresh_version(from);
-        if self.cache.set_nx(&key, mine.as_bytes(), hold).await? {
-            return Ok(true);
-        }
-        let Some(held) = self.cache.get(&key).await? else {
-            // The claim expired between the two calls.
-            return Ok(self.cache.set_nx(&key, mine.as_bytes(), hold).await?);
-        };
-        if held == mine.as_bytes() {
-            return Ok(false);
-        }
-        // Another version's claim: only a completed refresh's, when the
-        // session already holds the version this caller refreshes.
-        let current = self.read_current(id).await?;
-        if !current.is_some_and(|session| session.holds_refresh_token(from)) {
-            return Ok(false);
-        }
         Ok(self
-            .cache
-            .compare_and_set(&key, &held, mine.as_bytes(), hold)
+            .store
+            .admit_once(REFRESH, &refresh_key(id, from), hold)
             .await?)
     }
 
@@ -401,7 +381,7 @@ impl BffSessionStore {
         // makes the write miss and it is applied again over that push; a
         // sign-out or a newer refresh ends the attempt.
         for _ in 0..REPLACE_ATTEMPTS {
-            let Some(raw) = self.cache.get(&session_key(id)).await? else {
+            let Some(raw) = self.store.read_ceremony_state(SESSIONS, id).await? else {
                 return Ok(TokenReplacement::Ended);
             };
             let mut session: BffSession = serde_json::from_slice(&raw)?;
@@ -415,9 +395,9 @@ impl BffSessionStore {
                 return Ok(TokenReplacement::Replaced);
             }
         }
-        Err(SessionStoreError::Backend(CacheError::Other(format!(
-            "session {id} kept changing while its tokens were replaced"
-        ))))
+        Err(SessionStoreError::Backend(sid_core::Error::Storage(
+            format!("session {id} kept changing while its tokens were replaced"),
+        )))
     }
 
     /// Replace the stored form `read` of session `id` with `session`, under
@@ -425,9 +405,10 @@ impl BffSessionStore {
     /// since `read`.
     async fn rewrite(&self, id: &str, read: &[u8], session: &BffSession) -> SessionResult<bool> {
         Ok(self
-            .cache
-            .compare_and_set(
-                &session_key(id),
+            .store
+            .replace_ceremony_state(
+                SESSIONS,
+                id,
                 read,
                 &serde_json::to_vec(session)?,
                 self.idle_timeout,
@@ -451,8 +432,9 @@ impl BffSessionStore {
             redirect_url,
             created_at: Utc::now(),
         };
-        self.cache
-            .set(
+        self.store
+            .put_ceremony_state(
+                PENDING,
                 &pending_key(connection, &state),
                 &serde_json::to_vec(&pending)?,
                 self.pending_ttl,
@@ -466,9 +448,9 @@ impl BffSessionStore {
     ///
     /// A read followed by a delete would let two callbacks carrying the same
     /// `state` both succeed, which is the replay `state` exists to prevent;
-    /// the cache's atomic take gives the value to one of them only. One
+    /// the store's atomic take gives the value to one of them only. One
     /// started under another binding is not found and stays for a replica of
-    /// that binding, which shares the cache during a rollout.
+    /// that binding, which shares the store during a rollout.
     pub async fn take_pending(
         &self,
         state: &str,
@@ -477,7 +459,11 @@ impl BffSessionStore {
         if !is_issued_shape(state) {
             return Ok(None);
         }
-        let Some(raw) = self.cache.take(&pending_key(connection, state)).await? else {
+        let Some(raw) = self
+            .store
+            .take_ceremony_state(PENDING, &pending_key(connection, state))
+            .await?
+        else {
             return Ok(None);
         };
         Ok(Some(serde_json::from_slice(&raw)?))
@@ -485,9 +471,10 @@ impl BffSessionStore {
 
     /// Write a session under its current idle window.
     async fn write(&self, id: &str, session: &BffSession) -> SessionResult<()> {
-        self.cache
-            .set(
-                &session_key(id),
+        self.store
+            .put_ceremony_state(
+                SESSIONS,
+                id,
                 &serde_json::to_vec(session)?,
                 self.idle_timeout,
             )
@@ -496,7 +483,7 @@ impl BffSessionStore {
     }
 }
 
-/// Written out rather than derived: a cache handle has nothing readable to
+/// Written out rather than derived: a store handle has nothing readable to
 /// print, and the state that holds this store derives `Debug`.
 impl std::fmt::Debug for BffSessionStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -541,10 +528,6 @@ mod secret_opt {
     }
 }
 
-fn session_key(id: &str) -> String {
-    format!("{SESSION_PREFIX}{id}")
-}
-
 /// The key of a pending sign-in: its sign-in binding's SHA-256, so the key
 /// stays short and carries no URL, then its state.
 fn pending_key(connection: &str, state: &str) -> String {
@@ -552,20 +535,17 @@ fn pending_key(connection: &str, state: &str) -> String {
     use sha2::Digest as _;
     let digest = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .encode(sha2::Sha256::digest(connection.as_bytes()));
-    format!("{PENDING_PREFIX}{digest}:{state}")
+    format!("{digest}:{state}")
 }
 
-fn refresh_key(id: &str) -> String {
-    format!("{REFRESH_PREFIX}{id}")
-}
-
-/// The version of a refresh token a refresh claim names: a digest, so the
-/// claim key never holds the token itself.
-fn refresh_version(token: &SecretString) -> String {
+/// The key of the claim on the refresh of version `token` of session `id`:
+/// the token's digest, so the key never holds the token itself.
+fn refresh_key(id: &str, token: &SecretString) -> String {
     use base64::Engine as _;
     use sha2::Digest as _;
-    base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .encode(sha2::Sha256::digest(token.expose_secret().as_bytes()))
+    let version = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(sha2::Sha256::digest(token.expose_secret().as_bytes()));
+    format!("{id}:{version}")
 }
 
 /// Elapsed time since `then`, zero for a clock that moved back: a timestamp

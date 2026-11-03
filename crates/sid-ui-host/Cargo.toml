@@ -31,8 +31,12 @@ anyhow = { workspace = true }
 sid-proto = { workspace = true }
 tonic = { workspace = true }
 # The browser adapter of the hosted application: its client at the issuer,
-# the issuer directory, the shared session store and revocations.
+# the issuer directory, the session store and revocations.
 sid-authn = { workspace = true }
+# The application's own database, where the adapter's sessions live:
+# PostgreSQL for shared replicas, SQLite for a single instance.
+sid-storage = { workspace = true, features = ["storage-pg", "storage-sqlite"] }
+sid-plugin = { workspace = true }
 sid-infra = { workspace = true, features = ["issuer-client", "redis", "http"] }
 # The process's JWT signature provider, installed at startup.
 sid-crypto = { workspace = true, features = ["jwt"] }
@@ -54,7 +58,6 @@ url = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 bytes = "1"
-sid-plugin = { workspace = true }
 # Key files are written into a scratch directory; an assertion the new key
 # signs is verified with its JWK Set.
 tempfile = "3"

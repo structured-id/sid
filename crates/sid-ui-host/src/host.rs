@@ -54,17 +54,6 @@ fn bounded_channel(address: &str, timeout: Duration) -> anyhow::Result<IssuerCha
     Ok(sid_infra::deadline::bounded_channel(address, timeout)?)
 }
 
-/// The shared cache a host with a browser adapter must name. Sessions,
-/// started sign-ins and revocations are shared state: a host behind a load
-/// balancer completes a sign-in another replica started, and a store of its
-/// own process would answer every other replica "no such sign-in", so there
-/// is no default to fall back to.
-pub fn required_shared_cache(configured: Option<String>) -> anyhow::Result<String> {
-    configured.ok_or_else(|| {
-        anyhow::anyhow!("the browser adapter needs the shared cache: set SID_CACHE_URL")
-    })
-}
-
 /// The gRPC services of one hosted application. `A` is its API: a remote
 /// [`tonic::transport::Channel`] in a deployment.
 #[derive(Clone)]
