@@ -537,12 +537,14 @@ impl PostgresBackend {
                 .await
                 .map_err(failed("remove resource access"))?
                 .rows_affected();
-        if deleted != 1 {
+        // A keyed removal of access the client no longer has still records
+        // its completion: a retry after a later grant must not remove that.
+        if deleted != 1 && ctx.operation.is_none() {
             return Ok(false);
         }
         Self::audit_in_tx(&mut tx, &format!("oauth2_client:{client_id}"), ctx).await?;
         Self::commit(tx).await?;
-        Ok(true)
+        Ok(deleted == 1)
     }
 
     pub(super) async fn resource_access_impl(

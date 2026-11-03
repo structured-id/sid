@@ -41,9 +41,14 @@ fn authed_request<T>(msg: T, token: &str) -> Request<T> {
     req
 }
 
-/// A request made by an instance administrator (management RPCs require one).
+/// A request made by an instance administrator (management RPCs require one),
+/// as one new command: its client names it by a fresh operation key, as the
+/// account UIs' transports do.
 fn admin_request<T>(svc: &TestServices, msg: T) -> Request<T> {
-    authed_request(msg, &issue_admin_token(&svc.jwt, ProfileId::generate()))
+    new_command(authed_request(
+        msg,
+        &issue_admin_token(&svc.jwt, ProfileId::generate()),
+    ))
 }
 
 /// `req` as one new keyed command (methods that promise safe retry take a key).

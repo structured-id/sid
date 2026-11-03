@@ -2920,10 +2920,11 @@ impl StorageBackend for MockStorage {
     async fn create_oauth2_client(
         &self,
         client: &OAuth2Client,
-        _audit: MutationContext,
+        audit: MutationContext,
     ) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
         inner.check_new_client(client)?;
+        inner.owe(&audit)?;
         inner
             .oauth2_clients
             .insert(client.client_id.clone(), client.clone());
@@ -3070,15 +3071,13 @@ impl StorageBackend for MockStorage {
         Ok(true)
     }
 
-    async fn delete_application(
-        &self,
-        id: ApplicationId,
-        _ctx: MutationContext,
-    ) -> SidResult<bool> {
+    async fn delete_application(&self, id: ApplicationId, ctx: MutationContext) -> SidResult<bool> {
         let mut inner = self.inner.lock().unwrap();
-        if inner.applications.remove(&id).is_none() {
+        if !inner.applications.contains_key(&id) {
             return Ok(false);
         }
+        inner.owe(&ctx)?;
+        inner.applications.remove(&id);
         let removed: Vec<String> = inner
             .oauth2_clients
             .values()
@@ -3121,7 +3120,7 @@ impl StorageBackend for MockStorage {
     async fn create_protected_resource(
         &self,
         resource: &ProtectedResource,
-        _ctx: MutationContext,
+        ctx: MutationContext,
     ) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
         if resource
@@ -3133,6 +3132,7 @@ impl StorageBackend for MockStorage {
             ));
         }
         inner.check_new_resource(resource)?;
+        inner.owe(&ctx)?;
         inner.resources.insert(resource.id, resource.clone());
         Ok(())
     }
@@ -3188,13 +3188,13 @@ impl StorageBackend for MockStorage {
     async fn update_protected_resource(
         &self,
         resource: &ProtectedResource,
-        _ctx: MutationContext,
+        ctx: MutationContext,
     ) -> SidResult<bool> {
         if resource.state == ResourceState::Retired {
             return Ok(false);
         }
         let mut inner = self.inner.lock().unwrap();
-        let Some(stored) = inner.resources.get_mut(&resource.id) else {
+        let Some(stored) = inner.resources.get(&resource.id) else {
             return Ok(false);
         };
         let same = stored.revision == resource.revision
@@ -3206,6 +3206,11 @@ impl StorageBackend for MockStorage {
         if !same {
             return Ok(false);
         }
+        inner.owe(&ctx)?;
+        let stored = inner
+            .resources
+            .get_mut(&resource.id)
+            .expect("checked above");
         stored.scopes = resource.scopes.clone();
         stored.state = resource.state;
         stored.updated_at = resource.updated_at;
@@ -3216,7 +3221,7 @@ impl StorageBackend for MockStorage {
     async fn set_resource_access(
         &self,
         access: &ResourceAccess,
-        _ctx: MutationContext,
+        ctx: MutationContext,
     ) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
         match inner.resources.get(&access.resource_id) {
@@ -3237,6 +3242,7 @@ impl StorageBackend for MockStorage {
                 access.client_id
             )));
         }
+        inner.owe(&ctx)?;
         match inner
             .resource_access
             .iter_mut()
@@ -3252,9 +3258,10 @@ impl StorageBackend for MockStorage {
         &self,
         client_id: &str,
         resource: ResourceId,
-        _ctx: MutationContext,
+        ctx: MutationContext,
     ) -> SidResult<bool> {
         let mut inner = self.inner.lock().unwrap();
+        inner.owe(&ctx)?;
         let before = inner.resource_access.len();
         inner
             .resource_access
@@ -3865,7 +3872,7 @@ impl StorageBackend for MockStorage {
             .find(|r| r.project_id == p && r.name == n)
             .cloned())
     }
-    async fn create_role(&self, r: &Role, _audit: MutationContext) -> SidResult<()> {
+    async fn create_role(&self, r: &Role, audit: MutationContext) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
         // A project holds one role per key and per name; a role is never replaced.
         if inner.roles.contains_key(&r.id)
@@ -3876,6 +3883,7 @@ impl StorageBackend for MockStorage {
         {
             return Err(sid_core::Error::Conflict(format!("role {}", r.key)));
         }
+        inner.owe(&audit)?;
         inner.roles.insert(r.id, r.clone());
         Ok(())
     }
@@ -3917,7 +3925,7 @@ impl StorageBackend for MockStorage {
         }
         self.update_role(r, audit).await
     }
-    async fn delete_role(&self, id: RoleId, _audit: MutationContext) -> SidResult<()> {
+    async fn delete_role(&self, id: RoleId, audit: MutationContext) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
         // As the backends: the administrator role goes only once unassigned.
         if inner
@@ -3929,6 +3937,7 @@ impl StorageBackend for MockStorage {
                 "the installation administrator role cannot be deleted while it is assigned".into(),
             ));
         }
+        inner.owe(&audit)?;
         inner.roles.remove(&id);
         inner.role_assignments.retain(|a| a.role_id != id);
         Ok(())

@@ -14,7 +14,7 @@ use secrecy::{ExposeSecret, SecretBox};
 use sid_authn::caller::{Caller, authenticate};
 use sid_authn::dcr;
 use sid_authn::jwt::JwtService;
-use sid_authn::operation::{KeyedCommand, required_key};
+use sid_authn::operation::{Effect, KeyedCommand, required_key};
 use sid_authn::revocation_cache::RevocationCache;
 use sid_core::Error as SidError;
 use sid_core::grpc_error::{ApiError, ErrorReason};
@@ -612,6 +612,37 @@ const DELETE_PROJECT: &str = "sid.v1.ProjectService/DeleteProject";
 /// The canonical method name keyed UpdateApplication commands are recorded
 /// under.
 const UPDATE_APPLICATION: &str = "sid.v1.ProjectService/UpdateApplication";
+
+/// The canonical method names the other keyed ProjectService commands are
+/// recorded under.
+const DELETE_APPLICATION: &str = "sid.v1.ProjectService/DeleteApplication";
+const ADD_CLIENT_ROLE: &str = "sid.v1.ProjectService/AddClientRole";
+const ADD_RESOURCE_ROLE: &str = "sid.v1.ProjectService/AddResourceRole";
+const UPDATE_RESOURCE_ROLE: &str = "sid.v1.ProjectService/UpdateResourceRole";
+const SET_RESOURCE_ACCESS: &str = "sid.v1.ProjectService/SetResourceAccess";
+const REMOVE_RESOURCE_ACCESS: &str = "sid.v1.ProjectService/RemoveResourceAccess";
+const ADD_ROLE: &str = "sid.v1.ProjectService/AddRole";
+const REMOVE_ROLE: &str = "sid.v1.ProjectService/RemoveRole";
+
+/// `caller`'s command `method` with `req`'s inputs under `key`.
+fn keyed(
+    caller: &Caller,
+    key: sid_core::models::OperationKey,
+    method: &'static str,
+    req: &impl Message,
+) -> KeyedCommand {
+    KeyedCommand::new(
+        format!("profile:{}", caller.profile_id),
+        key,
+        method,
+        req.encode_to_vec(),
+    )
+}
+
+/// The audit of `caller`'s administrative `action` on `target`.
+fn admin_ctx(caller: &Caller, action: &str, target: String) -> MutationContext {
+    AuditEntry::admin(caller.profile_id.to_string(), action, target).into()
+}
 
 /// The project a completed CreateProject recorded as its result.
 #[allow(clippy::result_large_err)]
@@ -1234,6 +1265,7 @@ impl ProjectService for ProjectServiceImpl {
     ) -> Result<Response<()>, Status> {
         let caller = self.admin(&request).await?;
         self.check_maintenance().await?;
+        let key = required_key(request.metadata())?;
         let req = request.into_inner();
 
         let id =
@@ -1249,24 +1281,19 @@ impl ProjectService for ProjectServiceImpl {
         {
             return Err(system_managed(id, "it cannot be deleted"));
         }
-        let deleted = self
-            .storage
-            .delete_application(
-                id,
-                AuditEntry::admin(
-                    caller.profile_id.to_string(),
-                    "application.delete",
-                    id.to_string(),
-                )
-                .into(),
-            )
-            .await
-            .map_err(storage_failure)?;
-        if !deleted {
-            return Err(application_not_found(&req.id));
-        }
-
-        info!("Deleted application {}", id);
+        // A retry of a completed deletion answers as the deletion did.
+        let command = keyed(&caller, key, DELETE_APPLICATION, &req);
+        command
+            .run(&*self.storage, || async {
+                let ctx = admin_ctx(&caller, "application.delete", id.to_string())
+                    .with_operation(command.completion(().encode_to_vec()));
+                if !self.storage.delete_application(id, ctx).await? {
+                    return Err(application_not_found(&req.id).into());
+                }
+                info!("Deleted application {}", id);
+                Ok(())
+            })
+            .await?;
 
         Ok(Response::new(()))
     }
@@ -1278,46 +1305,61 @@ impl ProjectService for ProjectServiceImpl {
     ) -> Result<Response<CreateApplicationResponse>, Status> {
         let caller = self.admin(&request).await?;
         self.check_maintenance().await?;
+        let key = required_key(request.metadata())?;
         let req = request.into_inner();
 
-        let app = self
-            .load_application("application_id", &req.application_id)
+        // A retry of a completed addition answers with the application and
+        // its client, without the secret: SID keeps only its hash, and a retry
+        // issues nothing new.
+        let command = keyed(&caller, key, ADD_CLIENT_ROLE, &req);
+        let mut issued = None;
+        let mut response = command
+            .run(&*self.storage, || async {
+                let app = self
+                    .load_application("application_id", &req.application_id)
+                    .await?;
+                let settings = req
+                    .settings
+                    .clone()
+                    .ok_or_else(|| missing_field("settings"))?;
+                let (client, client_secret) = self.new_client(&app, settings)?;
+                // The application as this addition leaves it: its stored
+                // roles and the new client.
+                let mut view = self.application_view(&app).await?;
+                view.client = Some(self.client_view(&client)?);
+                let recorded = CreateApplicationResponse {
+                    application: Some(view),
+                    client_secret: String::new(),
+                };
+                let ctx = admin_ctx(&caller, "client.create", client.client_id.clone())
+                    .with_operation(command.completion(recorded.encode_to_vec()));
+                self.storage
+                    .create_oauth2_client(&client, ctx)
+                    .await
+                    .map_err(|e| match e {
+                        // The client id is freshly generated: the role is taken.
+                        SidError::Conflict(_) => Status::from(
+                            ApiError::new(
+                                ErrorReason::ApplicationRoleExists,
+                                "the application already has a client role",
+                            )
+                            .with_resource("Application", app.id.to_string()),
+                        )
+                        .into(),
+                        e => Effect::from(e),
+                    })?;
+                info!(
+                    "Added client role {} to application {}",
+                    client.client_id, app.id
+                );
+                issued = client_secret;
+                Ok(recorded)
+            })
             .await?;
-        let settings = req.settings.ok_or_else(|| missing_field("settings"))?;
-        let (client, client_secret) = self.new_client(&app, settings)?;
-        self.storage
-            .create_oauth2_client(
-                &client,
-                AuditEntry::admin(
-                    caller.profile_id.to_string(),
-                    "client.create",
-                    client.client_id.clone(),
-                )
-                .into(),
-            )
-            .await
-            .map_err(|e| match e {
-                // The client id is freshly generated: the role is taken.
-                SidError::Conflict(_) => Status::from(
-                    ApiError::new(
-                        ErrorReason::ApplicationRoleExists,
-                        "the application already has a client role",
-                    )
-                    .with_resource("Application", app.id.to_string()),
-                ),
-                e => storage_failure(e),
-            })?;
-
-        info!(
-            "Added client role {} to application {}",
-            client.client_id, app.id
-        );
-        Ok(Response::new(CreateApplicationResponse {
-            application: Some(self.application_view(&app).await?),
-            client_secret: client_secret
-                .map(|secret| secret.expose_secret().clone())
-                .unwrap_or_default(),
-        }))
+        if let Some(secret) = issued {
+            response.client_secret = secret.expose_secret().clone();
+        }
+        Ok(Response::new(response))
     }
 
     #[instrument(skip_all, fields(method = "add_resource_role"))]
@@ -1327,37 +1369,43 @@ impl ProjectService for ProjectServiceImpl {
     ) -> Result<Response<Application>, Status> {
         let caller = self.admin(&request).await?;
         self.check_maintenance().await?;
+        let key = required_key(request.metadata())?;
         let req = request.into_inner();
 
-        let app = self
-            .load_application("application_id", &req.application_id)
+        // A retry of a completed addition answers with the application as it
+        // left it, and never adds a second resource.
+        let command = keyed(&caller, key, ADD_RESOURCE_ROLE, &req);
+        let view = command
+            .run(&*self.storage, || async {
+                let app = self
+                    .load_application("application_id", &req.application_id)
+                    .await?;
+                let settings = req
+                    .settings
+                    .clone()
+                    .ok_or_else(|| missing_field("settings"))?;
+                let resource = self.new_resource(&app, ADD_RESOURCE_FIELDS, settings)?;
+                let mut view = self.application_view(&app).await?;
+                view.resource = Some(self.resource_view(&resource)?);
+                let ctx = admin_ctx(&caller, "resource.create", resource.id.to_string())
+                    .with_operation(command.completion(view.encode_to_vec()));
+                if let Err(e) = self.storage.create_protected_resource(&resource, ctx).await {
+                    return Err(match e {
+                        SidError::Conflict(_) => self
+                            .resource_conflict(app.id, &resource.indicator)
+                            .await
+                            .into(),
+                        e => e.into(),
+                    });
+                }
+                info!(
+                    "Added resource role {} ({}) to application {}",
+                    resource.id, resource.indicator, app.id
+                );
+                Ok(view)
+            })
             .await?;
-        let settings = req.settings.ok_or_else(|| missing_field("settings"))?;
-        let resource = self.new_resource(&app, ADD_RESOURCE_FIELDS, settings)?;
-        if let Err(e) = self
-            .storage
-            .create_protected_resource(
-                &resource,
-                AuditEntry::admin(
-                    caller.profile_id.to_string(),
-                    "resource.create",
-                    resource.id.to_string(),
-                )
-                .into(),
-            )
-            .await
-        {
-            return Err(match e {
-                SidError::Conflict(_) => self.resource_conflict(app.id, &resource.indicator).await,
-                e => storage_failure(e),
-            });
-        }
-
-        info!(
-            "Added resource role {} ({}) to application {}",
-            resource.id, resource.indicator, app.id
-        );
-        Ok(Response::new(self.application_view(&app).await?))
+        Ok(Response::new(view))
     }
 
     #[instrument(skip_all, fields(method = "update_resource_role"))]
@@ -1367,71 +1415,18 @@ impl ProjectService for ProjectServiceImpl {
     ) -> Result<Response<sid_proto::sid::v1::ProtectedResource>, Status> {
         let caller = self.admin(&request).await?;
         self.check_maintenance().await?;
+        let key = required_key(request.metadata())?;
         let req = request.into_inner();
 
-        let mut resource = self.load_resource("resource_id", &req.resource_id).await?;
-        if resource.state == ResourceState::Retired {
-            return Err(resource_retired(&resource));
-        }
-        // An integration's API is deactivated, never reshaped by hand.
-        if req.scopes.is_some()
-            && let Some(app) = resource.application_id
-            && self.is_system(app).await?
-        {
-            return Err(system_managed(app, "only its resource's state may change"));
-        }
-        if let Some(list) = req.scopes {
-            resource.scopes =
-                model::scope_list(&list.scopes).map_err(|e| invalid_field("scopes", e))?;
-        }
-        if let Some(state) = req.state {
-            resource.state = match sid_proto::sid::v1::ResourceState::try_from(state) {
-                Ok(sid_proto::sid::v1::ResourceState::Active) => ResourceState::Active,
-                Ok(sid_proto::sid::v1::ResourceState::Inactive) => ResourceState::Inactive,
-                // A resource is retired only by removing its application.
-                Ok(sid_proto::sid::v1::ResourceState::Retired) => {
-                    return Err(ApiError::new(
-                        ErrorReason::ResourceRetired,
-                        "a resource is retired only by removing its application",
-                    )
-                    .with_precondition(
-                        "APPLICATION_REMOVED",
-                        resource.id.to_string(),
-                        "remove the application to retire its resource",
-                    )
-                    .into());
-                }
-                _ => return Err(invalid_field("state", "state must be ACTIVE or INACTIVE")),
-            };
-        }
-        resource.updated_at = chrono::Utc::now();
-        let updated = self
-            .storage
-            .update_protected_resource(
-                &resource,
-                AuditEntry::admin(
-                    caller.profile_id.to_string(),
-                    "resource.update",
-                    resource.id.to_string(),
-                )
-                .into(),
-            )
-            .await
-            .map_err(storage_failure)?;
-        if !updated {
-            // Retired or changed since it was read.
-            return Err(
-                match self.storage.get_protected_resource(resource.id).await {
-                    Ok(Some(stored)) if stored.state == ResourceState::Retired => {
-                        resource_retired(&stored)
-                    }
-                    Ok(_) => changed_concurrently(),
-                    Err(e) => storage_failure(e),
-                },
-            );
-        }
-        resource.revision += 1;
-        Ok(Response::new(self.resource_view(&resource)?))
+        // A retry of a completed edit answers with the resource as that edit
+        // left it, and never applies it again over a later edit.
+        let command = keyed(&caller, key, UPDATE_RESOURCE_ROLE, &req);
+        let view = command
+            .run(&*self.storage, || {
+                self.edit_resource(&caller, &command, req.clone())
+            })
+            .await?;
+        Ok(Response::new(view))
     }
 
     #[instrument(skip_all, fields(method = "set_resource_access"))]
@@ -1441,76 +1436,18 @@ impl ProjectService for ProjectServiceImpl {
     ) -> Result<Response<sid_proto::sid::v1::ResourceAccess>, Status> {
         let caller = self.admin(&request).await?;
         self.check_maintenance().await?;
+        let key = required_key(request.metadata())?;
         let req = request.into_inner();
 
-        if let Some(app) = self.system_client(&req.client_id).await? {
-            return Err(system_managed(
-                app,
-                "its client's access follows the integration",
-            ));
-        }
-        let served = self.requester_served(&req.client_id).await?;
-        let resource = self.load_resource("resource_id", &req.resource_id).await?;
-        if resource.state == ResourceState::Retired {
-            return Err(resource_retired(&resource));
-        }
-        // Access never bridges issuers: the client's tokens come from the
-        // issuer whose tokens the resource accepts.
-        if !(served && resource.issuer_id == self.issuer.id) {
-            return Err(ApiError::new(
-                ErrorReason::IssuerMismatch,
-                "the client and the resource belong to different issuers",
-            )
-            .with_precondition(
-                "SAME_ISSUER",
-                resource.id.to_string(),
-                "grant access only within one issuer",
-            )
-            .into());
-        }
-        let scopes = model::scope_list(&req.scopes).map_err(|e| invalid_field("scopes", e))?;
-        if let Some(unknown) = scopes.iter().find(|s| !resource.scopes.contains(s)) {
-            return Err(invalid_field(
-                "scopes",
-                format!("{unknown:?} is not a scope of the resource"),
-            ));
-        }
-        let access = model::ResourceAccess {
-            client_id: req.client_id.clone(),
-            resource_id: resource.id,
-            scopes,
-            created_at: chrono::Utc::now(),
-        };
-        self.storage
-            .set_resource_access(
-                &access,
-                AuditEntry::admin(
-                    caller.profile_id.to_string(),
-                    "resource_access.set",
-                    format!("{}:{}", access.client_id, access.resource_id),
-                )
-                .into(),
-            )
-            .await
-            .map_err(|e| match e {
-                // Retired or gone between the check above and the write.
-                SidError::InvalidState(_) => resource_retired(&resource),
-                SidError::NotFound(_) => ApiError::new(
-                    ErrorReason::ResourceNotFound,
-                    "no protected resource has this identifier",
-                )
-                .with_resource("ProtectedResource", req.resource_id.clone())
-                .into(),
-                e => storage_failure(e),
-            })?;
-        // The stored access keeps its first creation time.
-        let stored = self
-            .storage
-            .resource_access(&access.client_id, access.resource_id)
-            .await
-            .map_err(storage_failure)?
-            .unwrap_or(access);
-        Ok(Response::new(access_to_proto(&stored)))
+        // A retry of a completed grant answers with the access it set, and
+        // never sets those scopes again over a later change.
+        let command = keyed(&caller, key, SET_RESOURCE_ACCESS, &req);
+        let access = command
+            .run(&*self.storage, || {
+                self.grant_access(&caller, &command, req.clone())
+            })
+            .await?;
+        Ok(Response::new(access))
     }
 
     #[instrument(skip_all, fields(method = "remove_resource_access"))]
@@ -1520,6 +1457,7 @@ impl ProjectService for ProjectServiceImpl {
     ) -> Result<Response<()>, Status> {
         let caller = self.admin(&request).await?;
         self.check_maintenance().await?;
+        let key = required_key(request.metadata())?;
         let req = request.into_inner();
 
         if req.client_id.is_empty() {
@@ -1533,20 +1471,24 @@ impl ProjectService for ProjectServiceImpl {
                 "its client's access follows the integration",
             ));
         }
-        // Removing access the client does not have leaves the state asked for.
-        self.storage
-            .remove_resource_access(
-                &req.client_id,
-                resource,
-                AuditEntry::admin(
-                    caller.profile_id.to_string(),
+        // A retry of a completed removal never removes a grant made after it.
+        let command = keyed(&caller, key, REMOVE_RESOURCE_ACCESS, &req);
+        command
+            .run(&*self.storage, || async {
+                let ctx = admin_ctx(
+                    &caller,
                     "resource_access.remove",
                     format!("{}:{}", req.client_id, resource),
                 )
-                .into(),
-            )
-            .await
-            .map_err(storage_failure)?;
+                .with_operation(command.completion(().encode_to_vec()));
+                // Removing access the client does not have leaves the state
+                // asked for.
+                self.storage
+                    .remove_resource_access(&req.client_id, resource, ctx)
+                    .await?;
+                Ok(())
+            })
+            .await?;
         Ok(Response::new(()))
     }
 
@@ -1597,6 +1539,7 @@ impl ProjectService for ProjectServiceImpl {
     ) -> Result<Response<sid_proto::sid::v1::Role>, Status> {
         let caller = self.admin(&request).await?;
         self.check_maintenance().await?;
+        let key = required_key(request.metadata())?;
         let req = request.into_inner();
 
         let project_id = parse_project_id(&req.project_id)?;
@@ -1608,44 +1551,45 @@ impl ProjectService for ProjectServiceImpl {
             return Err(missing_field("display_name"));
         }
 
-        // Verify project exists
-        self.storage
-            .get_project(project_id)
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(|| project_not_found(project_id))?;
+        // A retry of a completed addition answers with the role it added,
+        // never as a conflict with that role.
+        let command = keyed(&caller, key, ADD_ROLE, &req);
+        let role = command
+            .run(&*self.storage, || async {
+                self.storage
+                    .get_project(project_id)
+                    .await?
+                    .ok_or_else(|| project_not_found(project_id))?;
 
-        let mut role = Role::new(project_id, &req.key, &req.display_name);
-        role.description = req.description;
-        role.group = req.group;
-        role.permissions = req.permissions;
+                let mut role = Role::new(project_id, &req.key, &req.display_name);
+                role.description = req.description.clone();
+                role.group = req.group.clone();
+                role.permissions = req.permissions.clone();
+                let view = role_to_proto(&role);
+                let ctx = admin_ctx(&caller, "role.create", role.id.0.to_string())
+                    .with_operation(command.completion(view.encode_to_vec()));
 
-        // The store rejects a second role with this key or display name.
-        self.storage
-            .create_role(
-                &role,
-                AuditEntry::admin(
-                    caller.profile_id.to_string(),
-                    "role.create",
-                    role.id.0.to_string(),
-                )
-                .into(),
-            )
-            .await
-            .map_err(|e| match e {
-                sid_core::Error::Conflict(_) => Status::from(
-                    ApiError::new(
-                        ErrorReason::RoleAlreadyExists,
-                        "the project already has a role with this key or display name",
-                    )
-                    .with_resource("Role", req.key.clone()),
-                ),
-                other => storage_failure(other),
-            })?;
+                // The store rejects a second role with this key or display name.
+                self.storage
+                    .create_role(&role, ctx)
+                    .await
+                    .map_err(|e| match e {
+                        sid_core::Error::Conflict(_) => Status::from(
+                            ApiError::new(
+                                ErrorReason::RoleAlreadyExists,
+                                "the project already has a role with this key or display name",
+                            )
+                            .with_resource("Role", req.key.clone()),
+                        )
+                        .into(),
+                        other => Effect::from(other),
+                    })?;
+                info!("Added role '{}' to project {}", role.key, project_id.0);
+                Ok(view)
+            })
+            .await?;
 
-        info!("Added role '{}' to project {}", role.key, project_id.0);
-
-        Ok(Response::new(role_to_proto(&role)))
+        Ok(Response::new(role))
     }
 
     #[tracing::instrument(skip_all, fields(rpc = "remove_role"))]
@@ -1656,6 +1600,7 @@ impl ProjectService for ProjectServiceImpl {
     ) -> Result<Response<()>, Status> {
         let caller = self.admin(&request).await?;
         self.check_maintenance().await?;
+        let key = required_key(request.metadata())?;
         let req = request.into_inner();
 
         let role_id = uuid::Uuid::parse_str(&req.role_id)
@@ -1663,38 +1608,32 @@ impl ProjectService for ProjectServiceImpl {
             .map_err(|_| invalid_field("role_id", "not a role identifier"))?;
         let role_not_found = || not_found(ErrorReason::RoleNotFound, "Role", req.role_id.clone());
 
-        // Verify role exists and belongs to the specified project
-        let role = self
-            .storage
-            .get_role(role_id)
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(role_not_found)?;
-
-        if !req.project_id.is_empty() {
-            let project_id = parse_project_id(&req.project_id)?;
-            if role.project_id != project_id {
-                return Err(role_not_found());
-            }
-        }
-
-        self.storage
-            .delete_role(
-                role_id,
-                AuditEntry::admin(
-                    caller.profile_id.to_string(),
-                    "role.delete",
-                    role_id.0.to_string(),
-                )
-                .into(),
-            )
-            .await
-            .map_err(storage_failure)?;
-
-        info!(
-            "Removed role {} from project {}",
-            role_id.0, role.project_id.0
-        );
+        // A retry of a completed removal answers as the removal did.
+        let command = keyed(&caller, key, REMOVE_ROLE, &req);
+        command
+            .run(&*self.storage, || async {
+                // Verify role exists and belongs to the specified project
+                let role = self
+                    .storage
+                    .get_role(role_id)
+                    .await?
+                    .ok_or_else(role_not_found)?;
+                if !req.project_id.is_empty() {
+                    let project_id = parse_project_id(&req.project_id)?;
+                    if role.project_id != project_id {
+                        return Err(role_not_found().into());
+                    }
+                }
+                let ctx = admin_ctx(&caller, "role.delete", role_id.0.to_string())
+                    .with_operation(command.completion(().encode_to_vec()));
+                self.storage.delete_role(role_id, ctx).await?;
+                info!(
+                    "Removed role {} from project {}",
+                    role_id.0, role.project_id.0
+                );
+                Ok(())
+            })
+            .await?;
 
         Ok(Response::new(()))
     }
@@ -2163,6 +2102,161 @@ fn iat_to_proto(t: &InitialAccessToken) -> sid_proto::sid::v1::InitialAccessToke
         created_at: Some(convert::to_timestamp(t.created_at)),
         created_by: t.created_by.clone(),
         revoked: t.revoked,
+    }
+}
+
+/// The bodies of keyed ProjectService commands, run once under their keys.
+impl ProjectServiceImpl {
+    /// Apply an UpdateResourceRole edit to the revision it read, recording
+    /// the resource as the edit leaves it.
+    async fn edit_resource(
+        &self,
+        caller: &Caller,
+        command: &KeyedCommand,
+        req: UpdateResourceRoleRequest,
+    ) -> Result<sid_proto::sid::v1::ProtectedResource, Effect> {
+        let mut resource = self.load_resource("resource_id", &req.resource_id).await?;
+        if resource.state == ResourceState::Retired {
+            return Err(resource_retired(&resource).into());
+        }
+        // An integration's API is deactivated, never reshaped by hand.
+        if req.scopes.is_some()
+            && let Some(app) = resource.application_id
+            && self.is_system(app).await?
+        {
+            return Err(system_managed(app, "only its resource's state may change").into());
+        }
+        if let Some(list) = req.scopes {
+            resource.scopes =
+                model::scope_list(&list.scopes).map_err(|e| invalid_field("scopes", e))?;
+        }
+        if let Some(state) = req.state {
+            resource.state = match sid_proto::sid::v1::ResourceState::try_from(state) {
+                Ok(sid_proto::sid::v1::ResourceState::Active) => ResourceState::Active,
+                Ok(sid_proto::sid::v1::ResourceState::Inactive) => ResourceState::Inactive,
+                // A resource is retired only by removing its application.
+                Ok(sid_proto::sid::v1::ResourceState::Retired) => {
+                    return Err(Status::from(
+                        ApiError::new(
+                            ErrorReason::ResourceRetired,
+                            "a resource is retired only by removing its application",
+                        )
+                        .with_precondition(
+                            "APPLICATION_REMOVED",
+                            resource.id.to_string(),
+                            "remove the application to retire its resource",
+                        ),
+                    )
+                    .into());
+                }
+                _ => {
+                    return Err(invalid_field("state", "state must be ACTIVE or INACTIVE").into());
+                }
+            };
+        }
+        resource.updated_at = chrono::Utc::now();
+        // The resource as this edit leaves it: the store applies the edit
+        // only to the revision it was read at.
+        let mut left = resource.clone();
+        left.revision += 1;
+        let view = self.resource_view(&left)?;
+        let ctx = admin_ctx(caller, "resource.update", resource.id.to_string())
+            .with_operation(command.completion(view.encode_to_vec()));
+        if !self
+            .storage
+            .update_protected_resource(&resource, ctx)
+            .await?
+        {
+            // Retired or changed since it was read.
+            return Err(
+                match self.storage.get_protected_resource(resource.id).await {
+                    Ok(Some(stored)) if stored.state == ResourceState::Retired => {
+                        resource_retired(&stored)
+                    }
+                    Ok(_) => changed_concurrently(),
+                    Err(e) => storage_failure(e),
+                }
+                .into(),
+            );
+        }
+        Ok(view)
+    }
+
+    /// Set a SetResourceAccess grant, recording the access as it is stored.
+    async fn grant_access(
+        &self,
+        caller: &Caller,
+        command: &KeyedCommand,
+        req: SetResourceAccessRequest,
+    ) -> Result<sid_proto::sid::v1::ResourceAccess, Effect> {
+        if let Some(app) = self.system_client(&req.client_id).await? {
+            return Err(system_managed(app, "its client's access follows the integration").into());
+        }
+        let served = self.requester_served(&req.client_id).await?;
+        let resource = self.load_resource("resource_id", &req.resource_id).await?;
+        if resource.state == ResourceState::Retired {
+            return Err(resource_retired(&resource).into());
+        }
+        // Access never bridges issuers: the client's tokens come from the
+        // issuer whose tokens the resource accepts.
+        if !(served && resource.issuer_id == self.issuer.id) {
+            return Err(Status::from(
+                ApiError::new(
+                    ErrorReason::IssuerMismatch,
+                    "the client and the resource belong to different issuers",
+                )
+                .with_precondition(
+                    "SAME_ISSUER",
+                    resource.id.to_string(),
+                    "grant access only within one issuer",
+                ),
+            )
+            .into());
+        }
+        let scopes = model::scope_list(&req.scopes).map_err(|e| invalid_field("scopes", e))?;
+        if let Some(unknown) = scopes.iter().find(|s| !resource.scopes.contains(s)) {
+            return Err(invalid_field(
+                "scopes",
+                format!("{unknown:?} is not a scope of the resource"),
+            )
+            .into());
+        }
+        // The stored access keeps its first creation time.
+        let first = self
+            .storage
+            .resource_access(&req.client_id, resource.id)
+            .await?
+            .map(|existing| existing.created_at);
+        let access = model::ResourceAccess {
+            client_id: req.client_id.clone(),
+            resource_id: resource.id,
+            scopes,
+            created_at: first.unwrap_or_else(chrono::Utc::now),
+        };
+        let view = access_to_proto(&access);
+        let ctx = admin_ctx(
+            caller,
+            "resource_access.set",
+            format!("{}:{}", access.client_id, access.resource_id),
+        )
+        .with_operation(command.completion(view.encode_to_vec()));
+        self.storage
+            .set_resource_access(&access, ctx)
+            .await
+            .map_err(|e| match e {
+                // Retired or gone between the check above and the write.
+                SidError::InvalidState(_) => resource_retired(&resource).into(),
+                SidError::NotFound(_) => Status::from(
+                    ApiError::new(
+                        ErrorReason::ResourceNotFound,
+                        "no protected resource has this identifier",
+                    )
+                    .with_resource("ProtectedResource", req.resource_id.clone()),
+                )
+                .into(),
+                e => Effect::from(e),
+            })?;
+        Ok(view)
     }
 }
 
