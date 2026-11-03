@@ -461,6 +461,32 @@ fn test_password_reset_template_places_the_link() {
     assert_eq!(msg.priority, NotificationPriority::Transactional);
 }
 
+// The sign-in link mail places the link its producer built and the link's
+// lifetime, in both bodies, exactly as given: the template builds no URL.
+#[test]
+fn test_magic_link_template_places_the_link() {
+    let engine = TemplateEngine::with_default_ce_templates();
+    let link = "https://id.sid.example.com/account/verify?session=s-1&token=t-2";
+    let event = Event::new("sid-identity", event_types::MAGIC_LINK_REQUESTED)
+        .with_data(serde_json::json!({ "link": link, "expires_minutes": 15 }));
+
+    let msg = engine
+        .render("magic_link", &event, NotificationPriority::Transactional)
+        .unwrap();
+
+    assert_eq!(msg.subject.as_deref(), Some("Your sign-in link"));
+    assert!(
+        msg.body.contains(&format!("href=\"{link}\"")),
+        "{}",
+        msg.body
+    );
+    for body in [msg.body.as_str(), msg.body_text.as_deref().unwrap()] {
+        assert!(body.contains(link), "{body}");
+        assert!(body.contains("15 minutes"), "{body}");
+    }
+    assert_eq!(msg.priority, NotificationPriority::Transactional);
+}
+
 // The one-time code mail places the code its producer generated and the
 // code's lifetime, in both bodies, and says what the code is for; it is
 // transactional (notifications.md, template management: otp is a CE default).

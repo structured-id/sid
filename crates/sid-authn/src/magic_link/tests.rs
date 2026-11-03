@@ -27,7 +27,11 @@ fn test_error_display() {
 
 #[test]
 fn test_magic_link_session_model() {
-    let session = MagicLinkSession::new("alice@sid.example.com", "hash".to_string());
+    let session = MagicLinkSession::new(
+        "alice@sid.example.com",
+        "alice@sid.example.com",
+        "hash".to_string(),
+    );
     assert_eq!(session.email, "alice@sid.example.com");
     assert!(!session.consumed);
     assert!(!session.is_expired());
