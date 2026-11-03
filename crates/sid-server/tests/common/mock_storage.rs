@@ -2976,7 +2976,7 @@ impl StorageBackend for MockStorage {
         app: &Application,
         client: Option<&OAuth2Client>,
         resource: Option<&ProtectedResource>,
-        _ctx: MutationContext,
+        ctx: MutationContext,
     ) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
         if client.is_some_and(|c| c.application_id != app.id || c.project_id != app.project_id)
@@ -3004,7 +3004,8 @@ impl StorageBackend for MockStorage {
                     inner.resources.insert(r.id, r.clone());
                 }
                 client.map(|c| inner.check_new_client(c)).transpose()
-            });
+            })
+            .and_then(|_| inner.owe(&ctx));
         if let Err(e) = checked {
             inner.applications.remove(&app.id);
             if let Some(r) = resource {

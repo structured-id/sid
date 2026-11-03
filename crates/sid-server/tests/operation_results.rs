@@ -231,6 +231,63 @@ async fn test_initial_access_token_retry_answers_without_its_value() {
     assert_eq!(listed.tokens.len(), 1);
 }
 
+/// An application whose client gets a one-time secret, retried after its
+/// response was lost, answers with the application it created and no secret,
+/// and creates no second application.
+#[tokio::test]
+async fn test_create_application_retry_answers_without_its_secret() {
+    let svc = TestServices::new(MockStorage::new().with_system_project());
+    let token = issue_admin_token(&svc.jwt, ProfileId::generate());
+    let create = || CreateApplicationRequest {
+        project_id: sid_core::models::ProjectId::system().0.to_string(),
+        name: "billing".to_string(),
+        client: Some(ClientRoleSettings {
+            // A web client (the unspecified type) gets a secret.
+            redirect_uris: vec!["https://app.sid.example.com/cb".to_string()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let first = svc
+        .project
+        .create_application(keyed(create(), &token, Some("op-app")))
+        .await
+        .unwrap()
+        .into_inner();
+    let retry = svc
+        .project
+        .create_application(keyed(create(), &token, Some("op-app")))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert!(!first.client_secret.is_empty());
+    assert!(retry.client_secret.is_empty());
+    assert_eq!(retry.application, first.application);
+    let listed = svc
+        .project
+        .list_applications(keyed(
+            ListApplicationsRequest {
+                project_id: sid_core::models::ProjectId::system().0.to_string(),
+                ..Default::default()
+            },
+            &token,
+            None,
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        listed
+            .applications
+            .iter()
+            .filter(|a| a.name == "billing")
+            .count(),
+        1
+    );
+}
+
 /// An edit without a key cannot promise a safe retry and changes nothing.
 #[tokio::test]
 async fn test_update_project_without_key_is_refused() {

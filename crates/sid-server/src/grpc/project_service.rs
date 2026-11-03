@@ -617,6 +617,7 @@ const UPDATE_APPLICATION: &str = "sid.v1.ProjectService/UpdateApplication";
 /// recorded under.
 const DELETE_APPLICATION: &str = "sid.v1.ProjectService/DeleteApplication";
 const UPDATE_CLIENT_ROLE: &str = "sid.v1.ProjectService/UpdateClientRole";
+const CREATE_APPLICATION: &str = "sid.v1.ProjectService/CreateApplication";
 const CREATE_INITIAL_ACCESS_TOKEN: &str = "sid.v1.ProjectService/CreateInitialAccessToken";
 const REVOKE_INITIAL_ACCESS_TOKEN: &str = "sid.v1.ProjectService/RevokeInitialAccessToken";
 const ADD_CLIENT_ROLE: &str = "sid.v1.ProjectService/AddClientRole";
@@ -969,90 +970,26 @@ impl ProjectService for ProjectServiceImpl {
     ) -> Result<Response<CreateApplicationResponse>, Status> {
         let caller = self.admin(&request).await?;
         self.check_maintenance().await?;
+        let key = required_key(request.metadata())?;
         let req = request.into_inner();
 
-        let project_id = parse_project_id(&req.project_id)?;
-
-        // Verify project exists
-        self.storage
-            .get_project(project_id)
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(|| project_not_found(project_id))?;
-
-        // Every application belongs to the installation's organization; a
-        // request naming another one names an organization that is not here.
-        if let Some(requested) = req.org_id.as_deref().filter(|o| !o.is_empty())
-            && model::OrgId::parse(requested).ok() != Some(self.org)
-        {
-            return Err(invalid_field(
-                "org_id",
-                format!("organization {requested} is not this installation's"),
-            ));
+        // A retry of a completed creation answers with the application it
+        // created, without the client secret: SID keeps only its hash, and a
+        // retry creates no second application.
+        let command = keyed(&caller, key, CREATE_APPLICATION, &req);
+        let mut issued = None;
+        let mut response = command
+            .run(&*self.storage, || async {
+                let (recorded, secret) =
+                    self.new_application(&caller, &command, req.clone()).await?;
+                issued = secret;
+                Ok(recorded)
+            })
+            .await?;
+        if let Some(secret) = issued {
+            response.client_secret = secret.expose_secret().clone();
         }
-        if req.name.is_empty() {
-            return Err(missing_field("name"));
-        }
-        // An application is a client, a protected resource, or both.
-        if req.client.is_none() && req.resource.is_none() {
-            return Err(ApiError::new(
-                ErrorReason::RequiredFieldMissing,
-                "an application needs a client role, a resource role, or both",
-            )
-            .with_field_violation("client", "required without resource")
-            .with_field_violation("resource", "required without client")
-            .into());
-        }
-
-        let now = chrono::Utc::now();
-        let app = model::Application {
-            id: ApplicationId::generate(),
-            project_id,
-            name: req.name,
-            system: None,
-            revision: 0,
-            created_at: now,
-            updated_at: now,
-        };
-        let resource = req
-            .resource
-            .map(|settings| self.new_resource(&app, CREATE_RESOURCE_FIELDS, settings))
-            .transpose()?;
-        let (client, client_secret) = match req.client {
-            Some(settings) => {
-                let (client, secret) = self.new_client(&app, settings)?;
-                (Some(client), secret)
-            }
-            None => (None, None),
-        };
-
-        self.storage
-            .create_application(
-                &app,
-                client.as_ref(),
-                resource.as_ref(),
-                AuditEntry::admin(
-                    caller.profile_id.to_string(),
-                    "application.create",
-                    app.id.to_string(),
-                )
-                .into(),
-            )
-            .await
-            .map_err(|e| match (e, &resource) {
-                // Every other key is freshly generated: the indicator is taken.
-                (SidError::Conflict(_), Some(resource)) => indicator_taken(&resource.indicator),
-                (e, _) => storage_failure(e),
-            })?;
-
-        info!("Created application {} in project {}", app.id, project_id.0);
-
-        Ok(Response::new(CreateApplicationResponse {
-            application: Some(self.application_with(&app, client.as_ref(), resource.as_ref())?),
-            client_secret: client_secret
-                .map(|secret| secret.expose_secret().clone())
-                .unwrap_or_default(),
-        }))
+        Ok(Response::new(response))
     }
 
     #[tracing::instrument(skip_all, fields(rpc = "get_application"))]
@@ -2021,6 +1958,90 @@ fn iat_to_proto(t: &InitialAccessToken) -> sid_proto::sid::v1::InitialAccessToke
 
 /// The bodies of keyed ProjectService commands, run once under their keys.
 impl ProjectServiceImpl {
+    /// Create the application CreateApplication describes, recording it
+    /// without its client secret; the secret is returned beside the record.
+    async fn new_application(
+        &self,
+        caller: &Caller,
+        command: &KeyedCommand,
+        req: CreateApplicationRequest,
+    ) -> Result<(CreateApplicationResponse, Option<SecretBox<String>>), Effect> {
+        let project_id = parse_project_id(&req.project_id)?;
+        self.storage
+            .get_project(project_id)
+            .await?
+            .ok_or_else(|| project_not_found(project_id))?;
+
+        // Every application belongs to the installation's organization; a
+        // request naming another one names an organization that is not here.
+        if let Some(requested) = req.org_id.as_deref().filter(|o| !o.is_empty())
+            && model::OrgId::parse(requested).ok() != Some(self.org)
+        {
+            return Err(invalid_field(
+                "org_id",
+                format!("organization {requested} is not this installation's"),
+            )
+            .into());
+        }
+        if req.name.is_empty() {
+            return Err(missing_field("name").into());
+        }
+        // An application is a client, a protected resource, or both.
+        if req.client.is_none() && req.resource.is_none() {
+            return Err(Status::from(
+                ApiError::new(
+                    ErrorReason::RequiredFieldMissing,
+                    "an application needs a client role, a resource role, or both",
+                )
+                .with_field_violation("client", "required without resource")
+                .with_field_violation("resource", "required without client"),
+            )
+            .into());
+        }
+
+        let now = chrono::Utc::now();
+        let app = model::Application {
+            id: ApplicationId::generate(),
+            project_id,
+            name: req.name,
+            system: None,
+            revision: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        let resource = req
+            .resource
+            .map(|settings| self.new_resource(&app, CREATE_RESOURCE_FIELDS, settings))
+            .transpose()?;
+        let (client, client_secret) = match req.client {
+            Some(settings) => {
+                let (client, secret) = self.new_client(&app, settings)?;
+                (Some(client), secret)
+            }
+            None => (None, None),
+        };
+
+        let recorded = CreateApplicationResponse {
+            application: Some(self.application_with(&app, client.as_ref(), resource.as_ref())?),
+            client_secret: String::new(),
+        };
+        let ctx = admin_ctx(caller, "application.create", app.id.to_string())
+            .with_operation(command.completion(recorded.encode_to_vec()));
+        self.storage
+            .create_application(&app, client.as_ref(), resource.as_ref(), ctx)
+            .await
+            .map_err(|e| match (e, &resource) {
+                // Every other key is freshly generated: the indicator is taken.
+                (SidError::Conflict(_), Some(resource)) => {
+                    Effect::from(indicator_taken(&resource.indicator))
+                }
+                (e, _) => Effect::from(e),
+            })?;
+
+        info!("Created application {} in project {}", app.id, project_id.0);
+        Ok((recorded, client_secret))
+    }
+
     /// Apply an UpdateClientRole edit to the revision it read, recording the
     /// application as the edit leaves it.
     async fn edit_client(
