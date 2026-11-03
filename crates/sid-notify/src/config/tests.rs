@@ -24,6 +24,7 @@ fn test_api() -> sid_auth::config::ReceiverConfig {
 fn test_config_struct_defaults() {
     let config = NotifyConfig {
         nats_url: "nats://127.0.0.1:4222".into(),
+        platform_nats_url: None,
         grpc_bind: "0.0.0.0:9040".parse().unwrap(),
         receiver: WorkRecipient::new(DEFAULT_RECEIVER).unwrap(),
         event_receivers: Vec::new(),
@@ -51,6 +52,7 @@ fn test_config_struct_defaults() {
 fn test_config_with_vapid() {
     let config = NotifyConfig {
         nats_url: "nats://127.0.0.1:4222".into(),
+        platform_nats_url: None,
         grpc_bind: "0.0.0.0:9040".parse().unwrap(),
         receiver: WorkRecipient::new(DEFAULT_RECEIVER).unwrap(),
         event_receivers: Vec::new(),
@@ -105,6 +107,7 @@ fn test_config_error_display() {
 fn test_config_disabled_channels() {
     let config = NotifyConfig {
         nats_url: "nats://127.0.0.1:4222".into(),
+        platform_nats_url: None,
         grpc_bind: "0.0.0.0:9040".parse().unwrap(),
         receiver: WorkRecipient::new(DEFAULT_RECEIVER).unwrap(),
         event_receivers: Vec::new(),

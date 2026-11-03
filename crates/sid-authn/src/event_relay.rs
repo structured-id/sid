@@ -72,18 +72,29 @@ pub struct EventRelayHandler {
     work: Arc<dyn WorkStore>,
     receivers: Vec<RequiredReceiver>,
     capacity: u64,
+    /// The family of the facts this producer relays; its bus carries no
+    /// other.
+    family: EventFamily,
 }
 
 impl EventRelayHandler {
-    /// A relay owing facts to the `receivers` that require their types, as a
-    /// plan stored in `work`, each kind holding at most `capacity` open items.
+    /// A relay owing identity facts to the `receivers` that require their
+    /// types, as a plan stored in `work`, each kind holding at most
+    /// `capacity` open items.
     pub fn new(work: Arc<dyn WorkStore>, receivers: Vec<RequiredReceiver>, capacity: u64) -> Self {
         Self {
             kind: WorkKind::new(EVENT_RELAY_KIND).expect("the relay kind is valid"),
             work,
             receivers,
             capacity,
+            family: EventFamily::Identity,
         }
+    }
+
+    /// The same relay for the facts of `family` (a private platform
+    /// producer relays platform facts on its own platform bus).
+    pub fn for_family(self, family: EventFamily) -> Self {
+        Self { family, ..self }
     }
 }
 
@@ -108,10 +119,11 @@ impl WorkHandler for EventRelayHandler {
             Ok(event) => event,
             Err(e) => return WorkOutcome::Permanent(format!("malformed relayed event: {e}")),
         };
-        if event_route(&event.event_type) != Some(EventRoute::Fact(EventFamily::Identity)) {
+        if event_route(&event.event_type) != Some(EventRoute::Fact(self.family)) {
             return WorkOutcome::Permanent(format!(
-                "{} is not a registered identity fact",
-                event.event_type
+                "{} is not a registered {} fact",
+                event.event_type,
+                self.family.as_str()
             ));
         }
         // The plan is stored whole, under an id of the event alone: the store
