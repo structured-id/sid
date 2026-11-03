@@ -140,6 +140,17 @@ struct StoredOtpSession {
     destination: Option<String>,
     /// The current code sealed to its issue, for its email.
     sealed_code: Vec<u8>,
+    /// Used, expired or out of attempts: no code of it signs in, resends or
+    /// is mailed. Ending is a compare-and-set from the exact state read, so
+    /// a verification never ends a code other than the one it checked.
+    ended: bool,
+}
+
+/// A stored session as read: its bytes (the expected value of a
+/// compare-and-set) and its contents.
+struct Read {
+    bytes: Vec<u8>,
+    session: StoredOtpSession,
 }
 
 /// The sealing context of the code of `session`'s issue `issue`.
@@ -200,12 +211,45 @@ impl OtpService {
         if let Err(e) = self.owe_email(session_id, &session).await {
             // Not answered as requested, so its session must not linger as
             // a code nobody was sent.
-            if let Err(end) = self.end(&key).await {
+            let read = Read {
+                bytes: data,
+                session,
+            };
+            if let Err(end) = self.end(&key, &read).await {
                 tracing::warn!(session_id = %session_id, "an unsent code's session stays until it expires: {end}");
             }
             return Err(e);
         }
         Ok((Self::requested(session_id), code))
+    }
+
+    /// The live session under `key`: `None` when it is gone or ended.
+    async fn live(&self, key: &str) -> Result<Option<Read>, OtpError> {
+        let Some(bytes) = self
+            .ceremonies
+            .read_ceremony_state(SESSIONS, key)
+            .await
+            .map_err(store_error("read session"))?
+        else {
+            return Ok(None);
+        };
+        let session: StoredOtpSession =
+            serde_json::from_slice(&bytes).map_err(|e| OtpError::Internal(e.to_string()))?;
+        Ok((!session.ended).then_some(Read { bytes, session }))
+    }
+
+    /// End the session under `key` if it still holds exactly `read`:
+    /// `false`, changing nothing, when it was replaced or ended meanwhile.
+    /// Its code is gone either way only for the state this caller saw.
+    async fn end(&self, key: &str, read: &Read) -> Result<bool, OtpError> {
+        let mut ended = read.session.clone();
+        ended.ended = true;
+        ended.sealed_code.clear();
+        let data = serde_json::to_vec(&ended).map_err(|e| OtpError::Internal(e.to_string()))?;
+        self.ceremonies
+            .replace_ceremony_state(SESSIONS, key, &read.bytes, &data, OTP_RETENTION)
+            .await
+            .map_err(store_error("end session"))
     }
 
     /// Send session `session_id` a new code in place of its current one, to
@@ -217,24 +261,18 @@ impl OtpService {
         session_id: &Uuid,
     ) -> Result<Option<(OtpRequestResult, String)>, OtpError> {
         let key = session_id.to_string();
-        let Some(current) = self
-            .ceremonies
-            .read_ceremony_state(SESSIONS, &key)
-            .await
-            .map_err(store_error("read session"))?
-        else {
+        let Some(current) = self.live(&key).await? else {
             return Ok(None);
         };
-        let previous: StoredOtpSession =
-            serde_json::from_slice(&current).map_err(|e| OtpError::Internal(e.to_string()))?;
+        let previous = &current.session;
         self.admit_request(&previous.target).await?;
         let (session, code) = self
-            .issue(*session_id, &previous.target, previous.destination)
+            .issue(*session_id, &previous.target, previous.destination.clone())
             .await?;
         let data = serde_json::to_vec(&session).map_err(|e| OtpError::Internal(e.to_string()))?;
         if !self
             .ceremonies
-            .replace_ceremony_state(SESSIONS, &key, &current, &data, OTP_RETENTION)
+            .replace_ceremony_state(SESSIONS, &key, &current.bytes, &data, OTP_RETENTION)
             .await
             .map_err(store_error("replace session"))?
         {
@@ -255,16 +293,9 @@ impl OtpService {
         issue: Uuid,
         now: DateTime<Utc>,
     ) -> Result<Option<PendingCode>, OtpError> {
-        let Some(data) = self
-            .ceremonies
-            .read_ceremony_state(SESSIONS, &session_id.to_string())
-            .await
-            .map_err(store_error("read session"))?
-        else {
+        let Some(Read { session, .. }) = self.live(&session_id.to_string()).await? else {
             return Ok(None);
         };
-        let session: StoredOtpSession =
-            serde_json::from_slice(&data).map_err(|e| OtpError::Internal(e.to_string()))?;
         let Some(destination) = session.destination else {
             return Ok(None);
         };
@@ -341,6 +372,7 @@ impl OtpService {
                 issue,
                 destination,
                 sealed_code,
+                ended: false,
             },
             code,
         ))
@@ -393,19 +425,14 @@ impl OtpService {
         code: &str,
     ) -> Result<OtpVerifyResult, OtpError> {
         let key = session_id.to_string();
-        let Some(data) = self
-            .ceremonies
-            .read_ceremony_state(SESSIONS, &key)
-            .await
-            .map_err(store_error("read session"))?
-        else {
+        let Some(read) = self.live(&key).await? else {
             return Ok(OtpVerifyResult::SessionNotFound);
         };
-        let session: StoredOtpSession =
-            serde_json::from_slice(&data).map_err(|e| OtpError::Internal(e.to_string()))?;
 
-        if Utc::now() >= session.expires_at {
-            self.end(&key).await?;
+        // Ending a session ends only the state read here: a code resent in
+        // the meantime stays usable.
+        if Utc::now() >= read.session.expires_at {
+            self.end(&key, &read).await?;
             return Ok(OtpVerifyResult::Expired);
         }
 
@@ -415,14 +442,14 @@ impl OtpService {
             .await
             .map_err(store_error("count attempt"))?;
         if attempt > MAX_ATTEMPTS {
-            self.end(&key).await?;
+            self.end(&key, &read).await?;
             return Ok(OtpVerifyResult::MaxAttempts);
         }
 
-        if !verify_code(code, &session.code_hash) {
-            let remaining = MAX_ATTEMPTS - attempt;
+        let remaining = MAX_ATTEMPTS - attempt;
+        if !verify_code(code, &read.session.code_hash) {
             if remaining == 0 {
-                self.end(&key).await?;
+                self.end(&key, &read).await?;
                 return Ok(OtpVerifyResult::MaxAttempts);
             }
             return Ok(OtpVerifyResult::InvalidCode {
@@ -430,28 +457,21 @@ impl OtpService {
             });
         }
 
-        // Of concurrent correct verifications, only the one that takes the
-        // session signs in.
-        match self
-            .ceremonies
-            .take_ceremony_state(SESSIONS, &key)
-            .await
-            .map_err(store_error("consume session"))?
-        {
-            Some(_) => Ok(OtpVerifyResult::Success {
-                target: session.target,
+        // Signs in only by ending exactly the code checked: of concurrent
+        // correct verifications one wins, and a code replaced by a resend
+        // meanwhile is a wrong code, not a sign-in that spends the new one.
+        if self.end(&key, &read).await? {
+            return Ok(OtpVerifyResult::Success {
+                target: read.session.target,
+            });
+        }
+        match self.live(&key).await? {
+            Some(_) if remaining > 0 => Ok(OtpVerifyResult::InvalidCode {
+                remaining_attempts: remaining as u32,
             }),
+            Some(_) => Ok(OtpVerifyResult::MaxAttempts),
             None => Ok(OtpVerifyResult::SessionNotFound),
         }
-    }
-
-    /// End a session: its code is gone, and no verification takes it.
-    async fn end(&self, key: &str) -> Result<(), OtpError> {
-        self.ceremonies
-            .take_ceremony_state(SESSIONS, key)
-            .await
-            .map(|_| ())
-            .map_err(store_error("end session"))
     }
 }
 

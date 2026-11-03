@@ -319,6 +319,113 @@ async fn test_different_targets_independent_rate_limits() {
     assert!(request(&service, "b@example.com").await.is_ok());
 }
 
+/// A store that, while a verification counts its attempt (after it read the
+/// session, before it ends it), resends the session's code through another
+/// replica: the interleaving of a concurrent resend.
+struct ResendDuringVerify {
+    inner: Arc<SqliteBackend>,
+    resend: tokio::sync::Mutex<Option<(OtpService, Uuid)>>,
+    resent: tokio::sync::Mutex<Option<String>>,
+}
+
+#[async_trait::async_trait]
+impl sid_plugin::SingleUseAdmissions for ResendDuringVerify {
+    async fn admit_once(&self, n: &str, k: &str, ttl: Duration) -> sid_core::Result<bool> {
+        self.inner.admit_once(n, k, ttl).await
+    }
+    async fn admit_for(&self, n: &str, k: &str, v: &[u8], ttl: Duration) -> sid_core::Result<bool> {
+        self.inner.admit_for(n, k, v, ttl).await
+    }
+}
+
+#[async_trait::async_trait]
+impl CeremonyStateStore for ResendDuringVerify {
+    async fn put_ceremony_state(
+        &self,
+        n: &str,
+        k: &str,
+        v: &[u8],
+        ttl: Duration,
+    ) -> sid_core::Result<()> {
+        self.inner.put_ceremony_state(n, k, v, ttl).await
+    }
+    async fn take_ceremony_state(&self, n: &str, k: &str) -> sid_core::Result<Option<Vec<u8>>> {
+        self.inner.take_ceremony_state(n, k).await
+    }
+    async fn read_ceremony_state(&self, n: &str, k: &str) -> sid_core::Result<Option<Vec<u8>>> {
+        self.inner.read_ceremony_state(n, k).await
+    }
+    async fn replace_ceremony_state(
+        &self,
+        n: &str,
+        k: &str,
+        expected: &[u8],
+        v: &[u8],
+        ttl: Duration,
+    ) -> sid_core::Result<bool> {
+        self.inner
+            .replace_ceremony_state(n, k, expected, v, ttl)
+            .await
+    }
+    async fn count_in_window(&self, n: &str, k: &str, window: Duration) -> sid_core::Result<u64> {
+        if n == ATTEMPTS
+            && let Some((other, session)) = self.resend.lock().await.take()
+        {
+            let (_, code) = other.resend_otp(&session).await.unwrap().unwrap();
+            *self.resent.lock().await = Some(code);
+        }
+        self.inner.count_in_window(n, k, window).await
+    }
+    async fn read_count(&self, n: &str, k: &str) -> sid_core::Result<u64> {
+        self.inner.read_count(n, k).await
+    }
+    async fn clear_count(&self, n: &str, k: &str) -> sid_core::Result<()> {
+        self.inner.clear_count(n, k).await
+    }
+    async fn purge_expired_ceremony_state(&self) -> sid_core::Result<u64> {
+        self.inner.purge_expired_ceremony_state().await
+    }
+}
+
+/// A code replaced by a resend while it was being verified does not sign
+/// in, and the resent code still does. Verification once took whatever the
+/// session held after checking the code it had read, so the replaced code
+/// signed in and spent the new one.
+#[tokio::test]
+async fn code_replaced_during_its_verification_does_not_sign_in() {
+    let inner = store().await;
+    let racing = Arc::new(ResendDuringVerify {
+        inner: inner.clone(),
+        resend: tokio::sync::Mutex::new(None),
+        resent: tokio::sync::Mutex::new(None),
+    });
+    let verifier = OtpService::new(
+        racing.clone(),
+        CodeDelivery {
+            keys: crate::test_support::key_manager(),
+            work: inner.clone(),
+            capacity: 100,
+        },
+    );
+    let (result, old) = request(&verifier, "race@example.com").await.unwrap();
+    *racing.resend.lock().await = Some((replica(&inner), result.session_id));
+
+    let outcome = verifier.verify_otp(&result.session_id, &old).await.unwrap();
+
+    assert!(
+        !matches!(outcome, OtpVerifyResult::Success { .. }),
+        "the replaced code signed in: {outcome:?}"
+    );
+    let resent = racing.resent.lock().await.clone().expect("the resend ran");
+    assert!(matches!(
+        verifier
+            .verify_otp(&result.session_id, &resent)
+            .await
+            .unwrap(),
+        OtpVerifyResult::Success { .. }
+    ));
+}
+
 // ── Delivery of the code ────────────────────────────────────────────────────
 
 /// A requested code is owed one email naming its session and issue, which
