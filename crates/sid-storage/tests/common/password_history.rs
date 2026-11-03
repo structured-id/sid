@@ -407,7 +407,12 @@ pub async fn test_history_age_retention(backend: &dyn StorageBackend) {
 pub async fn test_reset_history_is_compare_and_swap(backend: &dyn StorageBackend) {
     let (owner, old) = profile_with_password(backend, "hist_reset").await;
     let epoch = descriptor(8);
-    let reset = PasswordResetSession::new(owner, "h@sid.example.com".into(), "hash".into());
+    let reset = PasswordResetSession::new(
+        owner,
+        "h@sid.example.com".into(),
+        "h@sid.example.com".into(),
+        "hash".into(),
+    );
     backend
         .create_reset_session(&reset, test_audit())
         .await
@@ -508,7 +513,12 @@ pub async fn test_history_write_cutoff_fences_registration_and_reset(backend: &d
 
     // And a reset: it stays verified, the old password stays.
     let (reset_owner, reset_password) = profile_with_password(backend, "hist_cutoff_reset").await;
-    let reset = PasswordResetSession::new(reset_owner, "c@sid.example.com".into(), "hash".into());
+    let reset = PasswordResetSession::new(
+        reset_owner,
+        "c@sid.example.com".into(),
+        "c@sid.example.com".into(),
+        "hash".into(),
+    );
     backend
         .create_reset_session(&reset, test_audit())
         .await

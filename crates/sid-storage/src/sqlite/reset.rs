@@ -23,7 +23,9 @@ fn row_to_reset_session(row: &sqlx::sqlite::SqliteRow) -> SidResult<PasswordRese
         ),
         profile_id: col(row, "profile_id")?,
         email: col(row, "email")?,
+        destination: col(row, "destination")?,
         token_hash: col(row, "token_hash")?,
+        sealed_token: col(row, "sealed_token")?,
         status: col::<String>(row, "status")?
             .parse()
             .map_err(SidError::Storage)?,
@@ -43,13 +45,16 @@ impl SqliteBackend {
         let mut tx = self.begin_write().await?;
         sqlx::query(
             "INSERT INTO password_reset_sessions \
-                (id, profile_id, email, token_hash, status, created_at, expires_at, verified_at, completed_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (id, profile_id, email, destination, token_hash, sealed_token, status, \
+                 created_at, expires_at, verified_at, completed_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(session.id.0.to_string())
         .bind(session.profile_id)
         .bind(&session.email)
+        .bind(&session.destination)
         .bind(&session.token_hash)
+        .bind(&session.sealed_token)
         .bind(session.status.as_str())
         .bind(fmt_dt(&session.created_at))
         .bind(fmt_dt(&session.expires_at))
@@ -66,7 +71,8 @@ impl SqliteBackend {
         id: ResetSessionId,
     ) -> SidResult<Option<PasswordResetSession>> {
         let row = sqlx::query(
-            "SELECT id, profile_id, email, token_hash, status, created_at, expires_at, verified_at, completed_at \
+            "SELECT id, profile_id, email, destination, token_hash, sealed_token, status, \
+                    created_at, expires_at, verified_at, completed_at \
              FROM password_reset_sessions WHERE id = ?",
         )
         .bind(id.0.to_string())
@@ -84,7 +90,8 @@ impl SqliteBackend {
         let now = fmt_dt(&chrono::Utc::now());
         let mut tx = self.begin_write().await?;
         let verified = sqlx::query(
-            "UPDATE password_reset_sessions SET status = 'verified', verified_at = ?1 \
+            "UPDATE password_reset_sessions \
+             SET status = 'verified', verified_at = ?1, sealed_token = X'' \
              WHERE id = ?2 AND status = 'pending' AND expires_at > ?1",
         )
         .bind(&now)

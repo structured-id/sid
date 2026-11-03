@@ -13,6 +13,15 @@ use super::ProfileId;
 /// Password reset session TTL: 30 minutes.
 pub const RESET_SESSION_TTL_SECS: i64 = 1800;
 
+/// The work that emails a requested reset link; its payload is the session id.
+pub const PASSWORD_RESET_EMAIL_KIND: &str = "auth.password_reset.email";
+
+/// The sealing context of reset session `id`'s token: sealed for one
+/// session, it is never opened as another's.
+pub fn password_reset_sealing_context(id: ResetSessionId) -> String {
+    format!("password_reset:{}", id.0)
+}
+
 /// Unique identifier for a password reset session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ResetSessionId(pub Uuid);
@@ -85,9 +94,17 @@ impl std::fmt::Display for ResetSessionStatus {
 pub struct PasswordResetSession {
     pub id: ResetSessionId,
     pub profile_id: ProfileId,
+    /// The email resolution key the reset was requested by.
     pub email: String,
-    /// Argon2 hash of the magic link token.
+    /// The mailbox the link is sent to, bound at the request: the address as
+    /// the account bound `email`, never another spelling of it.
+    pub destination: String,
+    /// SHA-256 of the link's token.
     pub token_hash: String,
+    /// The token sealed to this session, kept only for its email delivery
+    /// and its retries: emptied when the link is verified, gone with the
+    /// session.
+    pub sealed_token: Vec<u8>,
     pub status: ResetSessionStatus,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
@@ -96,13 +113,24 @@ pub struct PasswordResetSession {
 }
 
 impl PasswordResetSession {
-    pub fn new(profile_id: ProfileId, email: String, token_hash: String) -> Self {
-        let now = Utc::now();
+    /// A reset of `profile_id` requested by the key `email`, mailed to
+    /// `destination`. Its deadline has the precision every store keeps, so
+    /// the link and the work mailing it expire at the same instant.
+    pub fn new(
+        profile_id: ProfileId,
+        email: String,
+        destination: String,
+        token_hash: String,
+    ) -> Self {
+        use chrono::SubsecRound;
+        let now = Utc::now().trunc_subsecs(6);
         Self {
             id: ResetSessionId::new(),
             profile_id,
             email,
+            destination,
             token_hash,
+            sealed_token: Vec::new(),
             status: ResetSessionStatus::Pending,
             created_at: now,
             expires_at: now + Duration::seconds(RESET_SESSION_TTL_SECS),

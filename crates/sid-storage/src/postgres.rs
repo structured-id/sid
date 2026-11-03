@@ -8493,14 +8493,16 @@ impl StorageBackend for PostgresBackend {
             .map_err(|e| SidError::Storage(e.to_string()))?;
         sqlx::query(
             "INSERT INTO password_reset_sessions
-                (id, profile_id, email, token_hash, status,
+                (id, profile_id, email, destination, token_hash, sealed_token, status,
                  created_at, expires_at, verified_at, completed_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
         )
         .bind(session.id.0)
         .bind(session.profile_id)
         .bind(&session.email)
+        .bind(&session.destination)
         .bind(&session.token_hash)
+        .bind(&session.sealed_token)
         .bind(session.status.as_str())
         .bind(session.created_at)
         .bind(session.expires_at)
@@ -8541,7 +8543,8 @@ impl StorageBackend for PostgresBackend {
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
         let verified = sqlx::query(
-            "UPDATE password_reset_sessions SET status = 'verified', verified_at = NOW()
+            "UPDATE password_reset_sessions
+             SET status = 'verified', verified_at = NOW(), sealed_token = ''::bytea
              WHERE id = $1 AND status = 'pending' AND expires_at > NOW()",
         )
         .bind(id.0)

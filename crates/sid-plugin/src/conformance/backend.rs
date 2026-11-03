@@ -1748,7 +1748,13 @@ pub async fn test_password_reset_completes_once(backend: &dyn StorageBackend) {
         .await
         .unwrap();
 
-    let reset = PasswordResetSession::new(profile.id, "r@sid.example.com".into(), "hash".into());
+    let mut reset = PasswordResetSession::new(
+        profile.id,
+        "r@sid.example.com".into(),
+        "R@sid.example.com".into(),
+        "hash".into(),
+    );
+    reset.sealed_token = b"sealed".to_vec();
     backend
         .create_reset_session(&reset, test_audit())
         .await
@@ -1760,6 +1766,12 @@ pub async fn test_password_reset_completes_once(backend: &dyn StorageBackend) {
             .unwrap(),
         1
     );
+    // The mailbox and the sealed token are kept for the link's delivery,
+    // and the deadline exactly, so the link and its mail expire together.
+    let stored = backend.get_reset_session(reset.id).await.unwrap().unwrap();
+    assert_eq!(stored.destination, "R@sid.example.com");
+    assert_eq!(stored.sealed_token, b"sealed");
+    assert_eq!(stored.expires_at, reset.expires_at);
 
     // Not verified yet: nothing to complete.
     assert!(
@@ -1781,6 +1793,16 @@ pub async fn test_password_reset_completes_once(backend: &dyn StorageBackend) {
         backend.verify_reset_session(reset.id, test_audit()),
     );
     assert!(v1.unwrap() ^ v2.unwrap(), "the token is verified once");
+    // A verified link is never mailed again: its sealed token is gone.
+    assert!(
+        backend
+            .get_reset_session(reset.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .sealed_token
+            .is_empty()
+    );
 
     let first = opaque_password(profile.id, 1);
     let second = opaque_password(profile.id, 2);
@@ -1812,8 +1834,12 @@ pub async fn test_password_reset_completes_once(backend: &dyn StorageBackend) {
         ResetSessionStatus::Completed
     );
 
-    let mut expired =
-        PasswordResetSession::new(profile.id, "r@sid.example.com".into(), "hash2".into());
+    let mut expired = PasswordResetSession::new(
+        profile.id,
+        "r@sid.example.com".into(),
+        "r@sid.example.com".into(),
+        "hash2".into(),
+    );
     expired.expires_at = Utc::now() - Duration::seconds(1);
     backend
         .create_reset_session(&expired, test_audit())
@@ -3338,7 +3364,12 @@ pub async fn test_reset_session_create_never_replaces(backend: &dyn StorageBacke
         .create_profile(&profile, test_audit())
         .await
         .unwrap();
-    let reset = PasswordResetSession::new(profile.id, "r@sid.example.com".into(), "h".into());
+    let reset = PasswordResetSession::new(
+        profile.id,
+        "r@sid.example.com".into(),
+        "r@sid.example.com".into(),
+        "h".into(),
+    );
     backend
         .create_reset_session(&reset, test_audit())
         .await

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Mail of the authentication messages this server issues: sign-in links
-//! and codes. The delivery work names only its session (and a code's issue);
+//! Mail of the authentication messages this server issues: sign-in links,
+//! codes and password reset links. The delivery work names only its session
+//! (and a code's issue);
 //! the handler reads that session when it runs, so the token or code and the
 //! mail exist only in the attempt. A link or code no longer usable
 //! (consumed, expired, replaced) sends nothing; every retry of a usable one
@@ -17,9 +18,13 @@ use chrono::Utc;
 use secrecy::ExposeSecret;
 use sid_authn::magic_link::{MagicLinkError, MagicLinkService};
 use sid_authn::otp::{OTP_EMAIL_KIND, OtpError, OtpService};
+use sid_authn::password_reset::{PasswordResetError, PasswordResetService};
 use sid_authn::work_runner::{RetrySchedule, WorkHandler, WorkOutcome};
 use sid_core::models::event::{Event, event_types};
-use sid_core::models::{ClaimedWork, MAGIC_LINK_EMAIL_KIND, NewWork, WorkKind};
+use sid_core::models::{
+    ClaimedWork, MAGIC_LINK_EMAIL_KIND, NewWork, PASSWORD_RESET_EMAIL_KIND, ResetSessionId,
+    WorkKind,
+};
 use sid_notify::TemplateEngine;
 use sid_plugin::notification::{
     DeliveryError, NotificationChannel, NotificationPriority, Recipient,
@@ -145,40 +150,59 @@ impl WorkHandler for MagicLinkMail {
             Err(e) => return WorkOutcome::Retry(format!("read the link: {e}")),
         };
         let link = link(&self.page, id, pending.token.expose_secret());
-        let minutes = (pending.expires_at - Utc::now()).num_minutes().max(1);
+        let data = serde_json::json!({
+            "link": link.as_str(),
+            "expires_minutes": minutes_left(pending.expires_at),
+        });
+        send(
+            &self.templates,
+            TEMPLATE,
+            event_types::MAGIC_LINK_REQUESTED,
+            data,
+            self.transport.as_ref(),
+            pending.destination,
+        )
+        .await
+    }
+}
 
-        // Rendered here and dropped with the attempt: no copy of the link is
-        // stored anywhere.
-        let event = Event::new("sid-identity", event_types::MAGIC_LINK_REQUESTED).with_data(
-            serde_json::json!({
-                "link": link.as_str(),
-                "expires_minutes": minutes,
-            }),
-        );
-        let message =
-            match self
-                .templates
-                .render(TEMPLATE, &event, NotificationPriority::Transactional)
-            {
-                Ok(message) => message,
-                Err(e) => return WorkOutcome::Permanent(format!("render the link mail: {e}")),
-            };
-        let channel = match self.transport.channel().await {
-            Ok(channel) => channel,
-            Err(e) => return WorkOutcome::Retry(e),
-        };
-        let recipient = Recipient {
-            profile_id: String::new(),
-            email: Some(pending.destination),
-            phone: None,
-            push_endpoint: None,
-            device_token: None,
-            locale: "en".into(),
-        };
-        match channel.deliver(&recipient, &message).await {
-            Ok(receipt) => WorkOutcome::Done(Some(receipt.message_id)),
-            Err(e) => outcome_of(e),
-        }
+/// Whole minutes until `expires_at`, at least one: what a mail tells about
+/// the secret it carries.
+fn minutes_left(expires_at: chrono::DateTime<Utc>) -> i64 {
+    (expires_at - Utc::now()).num_minutes().max(1)
+}
+
+/// Render `template` with `data` and mail it to `destination`. Rendered here
+/// and dropped with the attempt: no copy of the secret in `data` is stored
+/// anywhere but its sealed session.
+async fn send(
+    templates: &TemplateEngine,
+    template: &str,
+    event_type: &str,
+    data: serde_json::Value,
+    transport: &dyn MailTransport,
+    destination: String,
+) -> WorkOutcome {
+    let event = Event::new("sid-identity", event_type).with_data(data);
+    let message = match templates.render(template, &event, NotificationPriority::Transactional) {
+        Ok(message) => message,
+        Err(e) => return WorkOutcome::Permanent(format!("render the {template} mail: {e}")),
+    };
+    let channel = match transport.channel().await {
+        Ok(channel) => channel,
+        Err(e) => return WorkOutcome::Retry(e),
+    };
+    let recipient = Recipient {
+        profile_id: String::new(),
+        email: Some(destination),
+        phone: None,
+        push_endpoint: None,
+        device_token: None,
+        locale: "en".into(),
+    };
+    match channel.deliver(&recipient, &message).await {
+        Ok(receipt) => WorkOutcome::Done(Some(receipt.message_id)),
+        Err(e) => outcome_of(e),
     }
 }
 
@@ -196,7 +220,11 @@ pub async fn purge_ended_mail(
 ) -> sid_core::Result<u64> {
     let before = now - MAIL_RECORD_RETENTION;
     let mut dropped = 0;
-    for kind in [MAGIC_LINK_EMAIL_KIND, OTP_EMAIL_KIND] {
+    for kind in [
+        MAGIC_LINK_EMAIL_KIND,
+        OTP_EMAIL_KIND,
+        PASSWORD_RESET_EMAIL_KIND,
+    ] {
         let kind = WorkKind::new(kind).expect("the mail kinds are valid");
         dropped += store.purge_ended_work(&kind, before).await?;
     }
@@ -260,39 +288,94 @@ impl WorkHandler for CodeMail {
             Err(e @ OtpError::Sealed(_)) => return WorkOutcome::Permanent(e.to_string()),
             Err(e) => return WorkOutcome::Retry(format!("read the code: {e}")),
         };
-        let minutes = (pending.expires_at - Utc::now()).num_minutes().max(1);
-        // Rendered here and dropped with the attempt: no copy of the code
-        // is stored anywhere but its sealed session.
-        let event =
-            Event::new("sid-identity", event_types::OTP_REQUESTED).with_data(serde_json::json!({
-                "code": pending.code.expose_secret(),
-                "expires_minutes": minutes,
-                "purpose": "sign in",
-            }));
-        let message =
-            match self
-                .templates
-                .render(CODE_TEMPLATE, &event, NotificationPriority::Transactional)
-            {
-                Ok(message) => message,
-                Err(e) => return WorkOutcome::Permanent(format!("render the code mail: {e}")),
-            };
-        let channel = match self.transport.channel().await {
-            Ok(channel) => channel,
-            Err(e) => return WorkOutcome::Retry(e),
-        };
-        let recipient = Recipient {
-            profile_id: String::new(),
-            email: Some(pending.destination),
-            phone: None,
-            push_endpoint: None,
-            device_token: None,
-            locale: "en".into(),
-        };
-        match channel.deliver(&recipient, &message).await {
-            Ok(receipt) => WorkOutcome::Done(Some(receipt.message_id)),
-            Err(e) => outcome_of(e),
+        let data = serde_json::json!({
+            "code": pending.code.expose_secret(),
+            "expires_minutes": minutes_left(pending.expires_at),
+            "purpose": "sign in",
+        });
+        send(
+            &self.templates,
+            CODE_TEMPLATE,
+            event_types::OTP_REQUESTED,
+            data,
+            self.transport.as_ref(),
+            pending.destination,
+        )
+        .await
+    }
+}
+
+/// The template a password reset link mail renders with.
+const RESET_TEMPLATE: &str = "password_reset";
+
+/// Emails requested password reset links to the mailbox each was bound to.
+pub struct ResetMail {
+    kind: WorkKind,
+    resets: Arc<PasswordResetService>,
+    /// The account UI page the link opens.
+    page: url::Url,
+    transport: Arc<dyn MailTransport>,
+    templates: TemplateEngine,
+}
+
+impl ResetMail {
+    pub fn new(
+        resets: Arc<PasswordResetService>,
+        page: url::Url,
+        transport: Arc<dyn MailTransport>,
+    ) -> Self {
+        Self {
+            kind: WorkKind::new(PASSWORD_RESET_EMAIL_KIND).expect("a valid work kind"),
+            resets,
+            page,
+            transport,
+            templates: TemplateEngine::with_default_ce_templates(),
         }
+    }
+}
+
+#[async_trait]
+impl WorkHandler for ResetMail {
+    fn kind(&self) -> &WorkKind {
+        &self.kind
+    }
+
+    fn retry_schedule(&self) -> RetrySchedule {
+        RETRIES
+    }
+
+    fn on_dead(&self, _work: &ClaimedWork, _error: &str) -> Option<NewWork> {
+        None
+    }
+
+    async fn handle(&self, work: &ClaimedWork) -> WorkOutcome {
+        let Ok(id) = uuid::Uuid::from_slice(&work.payload) else {
+            return WorkOutcome::Permanent("the work does not name a reset session".into());
+        };
+        let pending = match self
+            .resets
+            .pending_delivery(ResetSessionId(id), Utc::now())
+            .await
+        {
+            Ok(Some(pending)) => pending,
+            Ok(None) => return WorkOutcome::Done(Some("the link is no longer usable".into())),
+            Err(e @ PasswordResetError::Sealed(_)) => return WorkOutcome::Permanent(e.to_string()),
+            Err(e) => return WorkOutcome::Retry(format!("read the reset: {e}")),
+        };
+        let link = link(&self.page, id, pending.token.expose_secret());
+        let data = serde_json::json!({
+            "link": link.as_str(),
+            "expires_minutes": minutes_left(pending.expires_at),
+        });
+        send(
+            &self.templates,
+            RESET_TEMPLATE,
+            event_types::PASSWORD_RESET_REQUESTED,
+            data,
+            self.transport.as_ref(),
+            pending.destination,
+        )
+        .await
     }
 }
 

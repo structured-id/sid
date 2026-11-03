@@ -3,10 +3,13 @@ use super::*;
 #[test]
 fn new_reset_session_defaults() {
     let pid = ProfileId::generate();
-    let session = PasswordResetSession::new(pid, "a@b.com".into(), "hash123".into());
+    let session =
+        PasswordResetSession::new(pid, "a@b.com".into(), "A@b.com".into(), "hash123".into());
 
     assert_eq!(session.profile_id, pid);
     assert_eq!(session.email, "a@b.com");
+    assert_eq!(session.destination, "A@b.com");
+    assert!(session.sealed_token.is_empty());
     assert_eq!(session.status, ResetSessionStatus::Pending);
     assert!(!session.is_expired());
     assert!(session.verified_at.is_none());

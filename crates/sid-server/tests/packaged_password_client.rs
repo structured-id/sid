@@ -531,6 +531,7 @@ async fn password_lifecycle(adapter: &str) {
     let reset = PasswordResetSession::new(
         profile_id,
         principal.clone(),
+        principal.clone(),
         Sha256::digest(reset_secret)
             .iter()
             .map(|b| format!("{b:02x}"))
