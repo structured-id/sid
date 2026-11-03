@@ -17,11 +17,19 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+# The jobs that build Rust link the host target with mold, installed by
+# their first step: fewer threads and less disk work than the bundled
+# rust-lld. Opting out of rust-lld is stable only on the x86_64 Linux target,
+# so the flags are that target's. A build with `--target` (musl through zig)
+# keeps its own linkers: Cargo gives host flags to no build of it.
 jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C linker-features=-lld -C link-arg=-fuse-ld=mold
     steps:
+      - uses: rui314/setup-mold@v1
       - uses: actions/checkout@v7
         with:
           submodules: recursive
@@ -38,7 +46,10 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C linker-features=-lld -C link-arg=-fuse-ld=mold
     steps:
+      - uses: rui314/setup-mold@v1
       - uses: actions/checkout@v7
         with:
           submodules: recursive
@@ -80,7 +91,10 @@ jobs:
   dependency-isolation:
     name: Dependency isolation
     runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C linker-features=-lld -C link-arg=-fuse-ld=mold
     steps:
+      - uses: rui314/setup-mold@v1
       - uses: actions/checkout@v7
         with:
           submodules: recursive
