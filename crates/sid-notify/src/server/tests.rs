@@ -63,6 +63,7 @@ fn test_config(api: sid_auth::config::ReceiverConfig) -> NotifyConfig {
     crate::test_crypto::install_tls();
     NotifyConfig {
         nats_url: "nats://127.0.0.1:4222".into(),
+        platform_nats_url: None,
         grpc_bind: "127.0.0.1:0".parse().unwrap(),
         receiver: sid_core::models::WorkRecipient::new(crate::config::DEFAULT_RECEIVER).unwrap(),
         event_receivers: Vec::new(),

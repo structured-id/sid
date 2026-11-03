@@ -155,10 +155,35 @@ impl NotifyServer {
         );
         info!(url = %self.config.nats_url, receiver = %self.config.receiver, "Connected to NATS");
         // A consumer that cannot be opened stops startup: serving without it
-        // would look healthy while owed work piles up.
-        let deliveries = delivery::open_work(bus.as_ref(), self.config.receiver.clone())
-            .await
-            .map_err(|e| anyhow::anyhow!("notification work consumer: {e}"))?;
+        // would look healthy while owed work piles up. The same holds for
+        // each bound source.
+        let mut sources = vec![
+            delivery::open_work(bus.as_ref(), self.config.receiver.clone())
+                .await
+                .map_err(|e| anyhow::anyhow!("notification work consumer: {e}"))?,
+        ];
+        // The platform source, bound only where the composition permits it:
+        // its own streams, prepared by the platform deployment.
+        let platform = match &self.config.platform_nats_url {
+            Some(url) => {
+                let platform = sid_infra::NatsEventBus::connect(
+                    url,
+                    sid_infra::Topology::from_env()?
+                        .for_family(sid_core::models::event::EventFamily::Platform),
+                    sid_infra::TopologyRole::Verify,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("platform event source: {e}"))?;
+                sources.push(
+                    delivery::open_work(&platform, self.config.receiver.clone())
+                        .await
+                        .map_err(|e| anyhow::anyhow!("platform work consumer: {e}"))?,
+                );
+                info!(url = %url, "Bound to the platform event source");
+                Some(platform)
+            }
+            None => None,
+        };
 
         // Delivery jobs run in this process under leases shared with every replica.
         let handlers: Vec<Arc<dyn WorkHandler>> = vec![
@@ -204,20 +229,26 @@ impl NotifyServer {
         // Every fact is owed to this service as addressed work, kept by the
         // bus until settled; an event is settled only once its routing job is
         // stored, and stays with the bus otherwise.
-        let jobs = Arc::clone(&self.jobs);
-        let capacity = self.config.job_capacity;
-        let consumer_stopped = stopped.clone().wait();
-        let consumer_handle = tokio::spawn(async move {
-            delivery::accept_work(
-                deliveries,
-                jobs.as_ref(),
-                capacity,
-                || waker.wake(),
-                consumer_stopped,
-            )
-            .await;
-            info!("notification work consumer stopped");
-        });
+        let consumer_handles: Vec<_> = sources
+            .into_iter()
+            .map(|deliveries| {
+                let jobs = Arc::clone(&self.jobs);
+                let capacity = self.config.job_capacity;
+                let consumer_stopped = stopped.clone().wait();
+                let waker = waker.clone();
+                tokio::spawn(async move {
+                    delivery::accept_work(
+                        deliveries,
+                        jobs.as_ref(),
+                        capacity,
+                        || waker.wake(),
+                        consumer_stopped,
+                    )
+                    .await;
+                    info!("notification work consumer stopped");
+                })
+            })
+            .collect();
 
         // gRPC reflection service.
         let reflection_svc = tonic_reflection::server::Builder::configure()
@@ -257,10 +288,17 @@ impl NotifyServer {
         stopper.stop();
 
         // Stop accepting, then let delivery attempts in flight record their outcome.
-        let consumed = consumer_handle.await;
+        let mut consumed = Vec::with_capacity(consumer_handles.len());
+        for handle in consumer_handles {
+            consumed.push(handle.await);
+        }
         let ran = runner_handle.await;
+        // The platform source's connection lives until its consumer stopped.
+        drop(platform);
         served?;
-        consumed.map_err(|e| anyhow::anyhow!("NATS consumer task failed: {e}"))?;
+        for result in consumed {
+            result.map_err(|e| anyhow::anyhow!("NATS consumer task failed: {e}"))?;
+        }
         ran.map_err(|e| anyhow::anyhow!("delivery runner task failed: {e}"))?;
 
         info!("sid-notify shutdown complete");

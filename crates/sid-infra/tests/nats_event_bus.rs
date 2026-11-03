@@ -500,6 +500,57 @@ async fn test_unroutable_types_are_refused() {
     drop_topology(&t).await;
 }
 
+/// The platform family has streams of its own beside the identity ones on
+/// one server: a platform bus keeps platform facts in platform history and
+/// hands them to a required receiver as platform work, which that
+/// receiver's consumer gets; it refuses identity types, and the identity
+/// streams never see a platform event (the transport once carried only the
+/// identity family, so a platform fact had no durable route).
+#[tokio::test]
+async fn test_platform_family_has_its_own_streams() {
+    let identity = topology();
+    let platform = identity
+        .clone()
+        .for_family(sid_core::models::event::EventFamily::Platform);
+    assert_ne!(platform.history_stream(), identity.history_stream());
+    assert_ne!(platform.work_stream(), identity.work_stream());
+    let identity_bus = owner(&identity).await;
+    let platform_bus = owner(&platform).await;
+    let receiver = recipient("sid-notify");
+
+    let trial = Event::new("sid-test", event_types::ORG_TRIAL_ACTIVATED);
+    platform_bus.publish(trial.clone()).await.unwrap();
+    platform_bus
+        .deliver(&receiver, trial.delivery_id(&receiver), &trial)
+        .await
+        .unwrap();
+    let identity_fact = Event::new("sid-test", event_types::USER_CREATED);
+    assert!(matches!(
+        platform_bus.publish(identity_fact.clone()).await,
+        Err(EventBusError::Unroutable(_))
+    ));
+    assert!(matches!(
+        identity_bus.publish(trial.clone()).await,
+        Err(EventBusError::Unroutable(_))
+    ));
+
+    assert_eq!(stored(&platform.history_stream()).await, 1);
+    assert_eq!(stored(&platform.work_stream()).await, 1);
+    assert_eq!(stored(&identity.history_stream()).await, 0);
+    assert_eq!(stored(&identity.work_stream()).await, 0);
+
+    let mut deliveries = platform_bus
+        .consume(consumer_of("sid-notify"))
+        .await
+        .unwrap();
+    let delivery = next(&mut deliveries).await;
+    assert_eq!(delivery.event.event_type, event_types::ORG_TRIAL_ACTIVATED);
+    delivery.settle(Settlement::Done);
+    drop(deliveries);
+    drop_topology(&identity).await;
+    drop_topology(&platform).await;
+}
+
 /// Replay reads facts only: work handed to a receiver is never replayed,
 /// and replaying hands nobody anything.
 #[tokio::test]

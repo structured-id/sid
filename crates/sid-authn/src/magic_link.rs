@@ -68,6 +68,9 @@ pub enum MagicLinkVerifyResult {
 pub enum MagicLinkError {
     #[error("rate limited: try again in {wait_seconds} seconds")]
     RateLimited { wait_seconds: u64 },
+    /// The queue of link emails is at its capacity: no session was created.
+    #[error("delivery backlog: {0}")]
+    DeliveryBacklog(String),
     /// The stored token is not sealed to its session: it can never be sent.
     #[error("sealed token: {0}")]
     Sealed(String),
@@ -160,7 +163,10 @@ impl MagicLinkService {
         self.storage
             .create_magic_link_session(&session, audit)
             .await
-            .map_err(|e| MagicLinkError::Internal(e.to_string()))?;
+            .map_err(|e| match e {
+                sid_core::Error::ResourceExhausted(why) => MagicLinkError::DeliveryBacklog(why),
+                other => MagicLinkError::Internal(other.to_string()),
+            })?;
 
         let result = MagicLinkRequestResult {
             session_id,

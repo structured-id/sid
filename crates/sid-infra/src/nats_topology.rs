@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! JetStream topology of the identity family: a retained history of facts
-//! and the addressed work of required receivers, on disjoint subjects.
+//! JetStream topology of one transport family (identity or platform): a
+//! retained history of facts and the addressed work of required receivers,
+//! on disjoint subjects. The families never share a stream or a subject.
 //!
-//! - History (`<root>.events.identity.>`): `Limits` retention bounded by age,
+//! - History (`<root>.events.<family>.>`): `Limits` retention bounded by age,
 //!   read by observers and replay. It is never the last copy of an obligation.
-//! - Work (`<root>.work.identity.<recipient>.>`): file-backed `WorkQueue`
+//! - Work (`<root>.work.<family>.<recipient>.>`): file-backed `WorkQueue`
 //!   with no age limit and bounded bytes and messages; a full queue refuses
 //!   the publication (`DiscardNew`), so the producer keeps its obligation.
 //!   A message stays until its receiver's consumer settles it, whether or
@@ -18,7 +19,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use async_nats::jetstream::{self, stream};
-use sid_core::models::event::WorkRecipient;
+use sid_core::models::event::{EventFamily, WorkRecipient};
 
 /// Version of the stream definitions below. An owner refuses to touch a
 /// stream that a newer version defined.
@@ -42,12 +43,14 @@ pub enum TopologyRole {
     Verify,
 }
 
-/// Bounds and placement of the identity streams.
+/// Bounds and placement of one family's streams.
 #[derive(Debug, Clone)]
 pub struct Topology {
     /// First subject token and stream-name prefix: `sid`. Isolated
     /// topologies sharing one server (the test suite) use another.
     root: String,
+    /// The family whose events these streams carry.
+    family: EventFamily,
     /// How long a fact stays in history.
     pub history_max_age: Duration,
     /// Messages the work stream holds before refusing new work.
@@ -65,6 +68,7 @@ impl Default for Topology {
     fn default() -> Self {
         Self {
             root: "sid".into(),
+            family: EventFamily::Identity,
             history_max_age: Duration::from_secs(7 * 24 * 60 * 60),
             work_max_messages: 1_000_000,
             work_max_bytes: 1 << 30,
@@ -165,26 +169,44 @@ impl Topology {
         })
     }
 
+    /// The same bounds and placement for the streams of `family`.
+    pub fn for_family(self, family: EventFamily) -> Self {
+        Self { family, ..self }
+    }
+
+    /// The family whose events these streams carry.
+    pub fn family(&self) -> EventFamily {
+        self.family
+    }
+
     fn stream_prefix(&self) -> String {
-        self.root.to_ascii_uppercase().replace('-', "_")
+        format!(
+            "{}_{}",
+            self.root.to_ascii_uppercase().replace('-', "_"),
+            self.family.as_str().to_ascii_uppercase()
+        )
     }
 
     /// The retained history stream.
     pub fn history_stream(&self) -> String {
-        format!("{}_IDENTITY_EVENTS", self.stream_prefix())
+        format!("{}_EVENTS", self.stream_prefix())
     }
 
     /// The addressed work stream.
     pub fn work_stream(&self) -> String {
-        format!("{}_IDENTITY_WORK", self.stream_prefix())
+        format!("{}_WORK", self.stream_prefix())
     }
 
     fn history_prefix(&self) -> String {
-        format!("{}.events.identity", self.root)
+        format!("{}.events.{}", self.root, self.family.as_str())
+    }
+
+    fn work_root(&self) -> String {
+        format!("{}.work.{}", self.root, self.family.as_str())
     }
 
     fn work_prefix(&self, recipient: &WorkRecipient) -> String {
-        format!("{}.work.identity.{recipient}", self.root)
+        format!("{}.{recipient}", self.work_root())
     }
 
     /// The history subject of `event_type`; `None` for a type outside the
@@ -242,7 +264,7 @@ impl Topology {
     pub fn work_config(&self) -> stream::Config {
         stream::Config {
             name: self.work_stream(),
-            subjects: vec![format!("{}.work.identity.>", self.root)],
+            subjects: vec![format!("{}.>", self.work_root())],
             retention: stream::RetentionPolicy::WorkQueue,
             storage: stream::StorageType::File,
             // Age never removes work; only its receiver's settlement does.

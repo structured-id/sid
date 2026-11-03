@@ -534,25 +534,32 @@ async fn test_ceremony_count_window_ending_behind_a_row_lock_restarts() {
 
 /// An admission taken over after waiting on the row lock past the old one's
 /// expiry is live afterwards: its deadline counts from when it was taken.
+///
+/// The lock is held 1.5 s; the takeover lives 2 s. Checked 1.2 s after the
+/// takeover, a deadline counted from when its statement began has passed by
+/// about 0.7 s, one counted from when the row was reached has about 0.8 s
+/// left, so a slow runner shifts neither across.
 #[tokio::test]
 async fn test_admission_taken_behind_a_row_lock_stays_live() {
     use sid_plugin::SingleUseAdmissions;
     let backend = setup().await;
-    let ttl = std::time::Duration::from_millis(300);
+    let first = std::time::Duration::from_millis(500);
+    let takeover = std::time::Duration::from_secs(2);
     let namespace = format!("lock-{}", uuid::Uuid::now_v7());
-    assert!(backend.admit_once(&namespace, "k", ttl).await.unwrap());
+    assert!(backend.admit_once(&namespace, "k", first).await.unwrap());
     let taken = after_a_held_row_lock(
         &backend,
         LOCK_STATE,
         &namespace,
-        ttl,
-        backend.admit_once(&namespace, "k", ttl),
+        first,
+        backend.admit_once(&namespace, "k", takeover),
     )
     .await
     .unwrap();
     assert!(taken, "the lapsed admission was not taken over");
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
     assert!(
-        !backend.admit_once(&namespace, "k", ttl).await.unwrap(),
+        !backend.admit_once(&namespace, "k", takeover).await.unwrap(),
         "the admission taken over had already lapsed"
     );
 }

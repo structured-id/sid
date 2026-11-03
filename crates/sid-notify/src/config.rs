@@ -2,7 +2,8 @@
 //! Configuration for sid-notify standalone binary.
 //!
 //! Reads from environment variables:
-//! - `SID_NATS_URL` — NATS server URL (required, e.g., `nats://127.0.0.1:4222`)
+//! - `SID_NATS_URL` — NATS server URL of the identity source (required, e.g., `nats://127.0.0.1:4222`)
+//! - `SID_NOTIFY_PLATFORM_NATS_URL` — NATS URL of the private platform source, bound only where the composition permits it (optional); its work is consumed under the same receiver
 //! - `SID_NOTIFY_BIND` — gRPC bind address (default: `0.0.0.0:9040`)
 //! - `SID_NOTIFY_RECEIVER` — the receiver facts are owed to; replicas share it (default: `sid-notify`)
 //! - `SID_EVENT_RECEIVERS` — the deployment's required receivers, as producers list them (required; `none` for none); this service owes its own facts to all but itself
@@ -36,8 +37,12 @@ use crate::channels::web_push::VapidConfig;
 /// sid-notify configuration.
 #[derive(Debug, Clone)]
 pub struct NotifyConfig {
-    /// NATS server URL.
+    /// NATS server URL of the identity source.
     pub nats_url: String,
+
+    /// NATS server URL of the platform source, when this deployment is
+    /// bound to one: its platform facts are owed to `receiver` there too.
+    pub platform_nats_url: Option<String>,
 
     /// gRPC server bind address.
     pub grpc_bind: SocketAddr,
@@ -86,6 +91,10 @@ impl NotifyConfig {
     pub fn from_env() -> Result<Self, ConfigError> {
         let nats_url =
             std::env::var("SID_NATS_URL").map_err(|_| ConfigError::Missing("SID_NATS_URL"))?;
+
+        let platform_nats_url = std::env::var("SID_NOTIFY_PLATFORM_NATS_URL")
+            .ok()
+            .filter(|s| !s.trim().is_empty());
 
         let grpc_bind: SocketAddr = std::env::var("SID_NOTIFY_BIND")
             .unwrap_or_else(|_| "0.0.0.0:9040".into())
@@ -207,6 +216,7 @@ impl NotifyConfig {
 
         Ok(Self {
             nats_url,
+            platform_nats_url,
             grpc_bind,
             receiver,
             event_receivers,
