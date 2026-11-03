@@ -55,7 +55,12 @@ async fn verified_reset(svc: &TestServices, profile: &Profile) -> (String, Passw
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
-    let reset = PasswordResetSession::new(profile.id, "alice@sid.example.com".into(), token_hash);
+    let reset = PasswordResetSession::new(
+        profile.id,
+        "alice@sid.example.com".into(),
+        "alice@sid.example.com".into(),
+        token_hash,
+    );
     svc.storage
         .create_reset_session(&reset, AuditEntry::system("test", "setup").into())
         .await

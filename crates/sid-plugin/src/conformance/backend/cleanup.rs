@@ -186,10 +186,17 @@ pub async fn test_delete_expired_reset_sessions(backend: &dyn StorageBackend) {
         .create_profile(&profile, test_audit())
         .await
         .unwrap();
-    let mut expired =
-        PasswordResetSession::new(profile.id, "r@sid.example.com".into(), "h1".into());
+    let reset = |hash: &str| {
+        PasswordResetSession::new(
+            profile.id,
+            "r@sid.example.com".into(),
+            "r@sid.example.com".into(),
+            hash.into(),
+        )
+    };
+    let mut expired = reset("h1");
     expired.expires_at = Utc::now() - Duration::minutes(5);
-    let live = PasswordResetSession::new(profile.id, "r@sid.example.com".into(), "h2".into());
+    let live = reset("h2");
     for r in [&expired, &live] {
         backend.create_reset_session(r, test_audit()).await.unwrap();
     }

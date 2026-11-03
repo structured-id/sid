@@ -586,6 +586,9 @@ pub struct AuthServiceImpl {
     pub(crate) magic_link: Option<Arc<MagicLinkService>>,
     /// OTP passwordless authentication (email/phone code).
     pub(crate) otp: Arc<OtpService>,
+    /// Password resets by emailed link; `None` without the account UI page
+    /// the links open.
+    password_resets: Option<Arc<sid_authn::password_reset::PasswordResetService>>,
     /// DPoP proof validator (RFC 9449).
     pub(crate) dpop_validator: DPopValidator,
     /// The OIDC issuers whose endpoints the OAuth requests arrive at, and
@@ -792,6 +795,7 @@ impl AuthServiceImpl {
             ),
             magic_link,
             otp,
+            password_resets: None,
             dpop_validator: DPopValidator::new(ceremonies.clone()),
             issuers,
             installation_org,
@@ -828,6 +832,16 @@ impl AuthServiceImpl {
     /// `sign_in` runs.
     pub fn with_sign_in_page(mut self, sign_in: &url::Url) -> Self {
         self.sign_in_origin = Some(sign_in.origin());
+        self
+    }
+
+    /// Start password resets through `resets`, whose links the account UI
+    /// opens.
+    pub fn with_password_resets(
+        mut self,
+        resets: Arc<sid_authn::password_reset::PasswordResetService>,
+    ) -> Self {
+        self.password_resets = Some(resets);
         self
     }
 
@@ -6289,6 +6303,22 @@ impl AuthService for AuthServiceImpl {
         &self,
         request: Request<RequestPasswordResetRequest>,
     ) -> Result<Response<RequestPasswordResetResponse>, Status> {
+        // Refused alike for every address, before any lookup: without the
+        // page a link opens, or a provider to mail it, a reset could never
+        // reach anyone.
+        let resets = self
+            .password_resets
+            .as_deref()
+            .ok_or_else(|| not_configured("password_reset"))?;
+        if self
+            .storage
+            .get_email_provider_config()
+            .await
+            .map_err(storage_failure)?
+            .is_none()
+        {
+            return Err(not_configured("email_provider"));
+        }
         let req = request.into_inner();
 
         // Anti-enumeration: always return success shape
@@ -6296,11 +6326,23 @@ impl AuthService for AuthServiceImpl {
             message: "If an account exists, a reset email has been sent.".to_string(),
         });
 
+        // A reset link goes to an email assignment's stored mailbox, so it is
+        // requested by an email address, under its normalized key.
+        let (principal_type, address) = parse_principal(&req.principal)?;
+        if principal_type != PrincipalType::Email {
+            return Ok(anti_enum_response);
+        }
         // Resolve profile (silently fail for non-existent)
-        let profile = self.resolve_profile_optional(&req.principal).await?;
+        let profile = self.resolve_profile_optional(&address).await?;
         let profile = match profile {
             Some(p) => p,
             None => return Ok(anti_enum_response),
+        };
+        // The link goes to the mailbox the account bound the address with,
+        // never the key or the caller's spelling of it.
+        let Some(destination) = self.login_mail_destination(profile.id, &address).await? else {
+            info!("password reset requested for an account with no login mailbox: none started");
+            return Ok(anti_enum_response);
         };
 
         // Rate limit: max 3 active reset sessions per profile. A count that
@@ -6318,54 +6360,14 @@ impl AuthService for AuthServiceImpl {
             return Ok(anti_enum_response);
         }
 
-        // Generate reset token (256-bit, hex-encoded)
-        use sha2::{Digest, Sha256};
-        let mut token_bytes = [0u8; 32];
-        rand::TryRng::try_fill_bytes(&mut rand::rngs::SysRng, &mut token_bytes)
-            .map_err(|_| Status::internal("operating system random source unavailable"))?;
-        let token = token_bytes
-            .iter()
-            .map(|b| format!("{:02x}", b))
-            .collect::<String>();
-
-        // Hash token with SHA-256
-        let hash_bytes = Sha256::digest(token.as_bytes());
-        let token_hash = hash_bytes
-            .iter()
-            .map(|b| format!("{:02x}", b))
-            .collect::<String>();
-
-        // Create reset session
-        let session = sid_core::models::PasswordResetSession::new(
-            profile.id,
-            req.principal.clone(),
-            token_hash,
-        );
-
-        // The event names only the reset session: the event stream is read beyond
-        // the notification service, so it never carries the token, a link or an
-        // address. It is owed by the commit that stores the reset session.
-        let requested = sid_core::models::event::Event::new(
-            format!("profile/{}", profile.id),
-            sid_core::models::event::event_types::PASSWORD_RESET_REQUESTED,
-        )
-        .with_data(serde_json::json!({
-            "reset_session_id": session.id.to_string(),
-        }));
-        let ctx = MutationContext::from(AuditEntry::user(
-            profile.id.to_string(),
-            "password_reset.request",
-            session.id.to_string(),
-        ))
-        .with_work(requested.relay());
-        // A failure answers like an unknown address: an error only for held
-        // addresses would tell which accounts exist.
-        if let Err(e) = self.storage.create_reset_session(&session, ctx).await {
-            tracing::error!(error = %e, "reset session not stored; no reset started");
-            return Ok(anti_enum_response);
+        // The session and the work mailing its link commit together; the
+        // token leaves this service only inside that mail. A failure answers
+        // like an unknown address: an error only for held addresses would
+        // tell which accounts exist.
+        match resets.request(profile.id, &address, &destination).await {
+            Ok(session) => info!(reset_session = %session, "password reset requested"),
+            Err(e) => tracing::error!(error = %e, "reset session not stored; no reset started"),
         }
-
-        info!("Password reset requested for profile {}", profile.id);
 
         Ok(anti_enum_response)
     }
@@ -6400,10 +6402,8 @@ impl AuthService for AuthServiceImpl {
         }
 
         // Verify token (SHA-256, constant-time comparison)
-        use sha2::{Digest, Sha256};
         use subtle::ConstantTimeEq;
-        let hash_bytes = Sha256::digest(req.token.as_bytes());
-        let computed_hash: String = hash_bytes.iter().map(|b| format!("{:02x}", b)).collect();
+        let computed_hash = sid_authn::password_reset::token_hash(&req.token);
         let ct_ok: bool = computed_hash
             .as_bytes()
             .ct_eq(session.token_hash.as_bytes())
