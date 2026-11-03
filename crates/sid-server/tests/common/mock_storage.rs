@@ -2899,10 +2899,10 @@ impl StorageBackend for MockStorage {
     async fn update_oauth2_client(
         &self,
         client: &OAuth2Client,
-        _audit: MutationContext,
+        audit: MutationContext,
     ) -> SidResult<bool> {
         let mut inner = self.inner.lock().unwrap();
-        let Some(stored) = inner.oauth2_clients.get_mut(&client.client_id) else {
+        let Some(stored) = inner.oauth2_clients.get(&client.client_id) else {
             return Ok(false);
         };
         let same_origin = stored.revision == client.revision
@@ -2912,6 +2912,11 @@ impl StorageBackend for MockStorage {
         if !same_origin {
             return Ok(false);
         }
+        inner.owe(&audit)?;
+        let stored = inner
+            .oauth2_clients
+            .get_mut(&client.client_id)
+            .expect("checked above");
         *stored = client.clone();
         stored.revision += 1;
         Ok(true)

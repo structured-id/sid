@@ -616,6 +616,7 @@ const UPDATE_APPLICATION: &str = "sid.v1.ProjectService/UpdateApplication";
 /// The canonical method names the other keyed ProjectService commands are
 /// recorded under.
 const DELETE_APPLICATION: &str = "sid.v1.ProjectService/DeleteApplication";
+const UPDATE_CLIENT_ROLE: &str = "sid.v1.ProjectService/UpdateClientRole";
 const ADD_CLIENT_ROLE: &str = "sid.v1.ProjectService/AddClientRole";
 const ADD_RESOURCE_ROLE: &str = "sid.v1.ProjectService/AddResourceRole";
 const UPDATE_RESOURCE_ROLE: &str = "sid.v1.ProjectService/UpdateResourceRole";
@@ -1156,105 +1157,18 @@ impl ProjectService for ProjectServiceImpl {
     ) -> Result<Response<Application>, Status> {
         let caller = self.admin(&request).await?;
         self.check_maintenance().await?;
+        let key = required_key(request.metadata())?;
         let req = request.into_inner();
 
-        let mut client = self.load_client(&req.client_id).await?;
-        // Only the activity of an integration's client is the administrator's.
-        let edits_settings = req.default_resource_id.is_some()
-            || req.name.is_some()
-            || !req.redirect_uris.is_empty()
-            || !req.allowed_scopes.is_empty()
-            || !req.grant_types.is_empty()
-            || req.subject_type.is_some()
-            || req.post_logout_redirect_uris.is_some();
-        if edits_settings && self.is_system(client.application_id).await? {
-            return Err(system_managed(
-                client.application_id,
-                "only its client's activity may change",
-            ));
-        }
-
-        // A default target is one this client already has access to: a
-        // default never grants access by itself.
-        if let Some(requested) = req.default_resource_id.as_deref() {
-            client.default_resource = if requested.is_empty() {
-                None
-            } else {
-                let resource = self.load_resource("default_resource_id", requested).await?;
-                let access = self
-                    .storage
-                    .resource_access(&client.client_id, resource.id)
-                    .await
-                    .map_err(storage_failure)?;
-                if access.is_none() {
-                    return Err(invalid_field(
-                        "default_resource_id",
-                        "the client has no access to this resource",
-                    ));
-                }
-                Some(resource.id)
-            };
-        }
-
-        if let Some(name) = req.name {
-            client.client_name = name;
-        }
-        if !req.redirect_uris.is_empty() {
-            client.redirect_uris = req.redirect_uris;
-        }
-        if !req.allowed_scopes.is_empty() {
-            client.allowed_scopes = req.allowed_scopes;
-        }
-        if !req.grant_types.is_empty() {
-            client.grant_types = req.grant_types;
-        }
-        if let Some(active) = req.active {
-            client.active = active;
-        }
-        if let Some(list) = req.post_logout_redirect_uris {
-            dcr::validate_post_logout_redirect_uris(&list.uris, client.application_type)
-                .map_err(|e| invalid_field("post_logout_redirect_uris", e.to_string()))?;
-            client.post_logout_redirect_uris = list.uris;
-        }
-        // Registration metadata A: only `public` is a supported value, and a
-        // settings edit never changes an application's subjects; that is an
-        // explicit identity migration (pairwise-binding.md, migration path).
-        if let Some(ref requested) = req.subject_type {
-            use sid_core::models::oauth2_client::SubjectType;
-            if requested != "public" {
-                return Err(metadata_refusal(
-                    "subject_type",
-                    "subject_type is not supported by this issuer. Supported value: 'public'.",
-                ));
-            }
-            if client.subject_type != SubjectType::Public {
-                return Err(subject_migration_required(&client.client_id));
-            }
-        }
-
-        let updated = self
-            .storage
-            .update_oauth2_client(
-                &client,
-                AuditEntry::admin(
-                    caller.profile_id.to_string(),
-                    "client.update",
-                    client.client_id.clone(),
-                )
-                .into(),
-            )
-            .await
-            .map_err(storage_failure)?;
-        if !updated {
-            return Err(self.client_update_refused(&client.client_id).await);
-        }
-        let app = self
-            .storage
-            .get_application(client.application_id)
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(|| application_not_found(&client.application_id.to_string()))?;
-        Ok(Response::new(self.application_view(&app).await?))
+        // A retry of a completed edit answers with the application as that
+        // edit left it, and never applies the edit again over a later one.
+        let command = keyed(&caller, key, UPDATE_CLIENT_ROLE, &req);
+        let view = command
+            .run(&*self.storage, || {
+                self.edit_client(&caller, &command, req.clone())
+            })
+            .await?;
+        Ok(Response::new(view))
     }
 
     #[tracing::instrument(skip_all, fields(rpc = "delete_application"))]
@@ -2107,6 +2021,109 @@ fn iat_to_proto(t: &InitialAccessToken) -> sid_proto::sid::v1::InitialAccessToke
 
 /// The bodies of keyed ProjectService commands, run once under their keys.
 impl ProjectServiceImpl {
+    /// Apply an UpdateClientRole edit to the revision it read, recording the
+    /// application as the edit leaves it.
+    async fn edit_client(
+        &self,
+        caller: &Caller,
+        command: &KeyedCommand,
+        req: UpdateClientRoleRequest,
+    ) -> Result<Application, Effect> {
+        let mut client = self.load_client(&req.client_id).await?;
+        // Only the activity of an integration's client is the administrator's.
+        let edits_settings = req.default_resource_id.is_some()
+            || req.name.is_some()
+            || !req.redirect_uris.is_empty()
+            || !req.allowed_scopes.is_empty()
+            || !req.grant_types.is_empty()
+            || req.subject_type.is_some()
+            || req.post_logout_redirect_uris.is_some();
+        if edits_settings && self.is_system(client.application_id).await? {
+            return Err(system_managed(
+                client.application_id,
+                "only its client's activity may change",
+            )
+            .into());
+        }
+
+        // A default target is one this client already has access to: a
+        // default never grants access by itself.
+        if let Some(requested) = req.default_resource_id.as_deref() {
+            client.default_resource = if requested.is_empty() {
+                None
+            } else {
+                let resource = self.load_resource("default_resource_id", requested).await?;
+                let access = self
+                    .storage
+                    .resource_access(&client.client_id, resource.id)
+                    .await?;
+                if access.is_none() {
+                    return Err(invalid_field(
+                        "default_resource_id",
+                        "the client has no access to this resource",
+                    )
+                    .into());
+                }
+                Some(resource.id)
+            };
+        }
+
+        if let Some(name) = req.name {
+            client.client_name = name;
+        }
+        if !req.redirect_uris.is_empty() {
+            client.redirect_uris = req.redirect_uris;
+        }
+        if !req.allowed_scopes.is_empty() {
+            client.allowed_scopes = req.allowed_scopes;
+        }
+        if !req.grant_types.is_empty() {
+            client.grant_types = req.grant_types;
+        }
+        if let Some(active) = req.active {
+            client.active = active;
+        }
+        if let Some(list) = req.post_logout_redirect_uris {
+            dcr::validate_post_logout_redirect_uris(&list.uris, client.application_type)
+                .map_err(|e| invalid_field("post_logout_redirect_uris", e.to_string()))?;
+            client.post_logout_redirect_uris = list.uris;
+        }
+        // Registration metadata A: only `public` is a supported value, and a
+        // settings edit never changes an application's subjects; that is an
+        // explicit identity migration (pairwise-binding.md, migration path).
+        if let Some(ref requested) = req.subject_type {
+            use sid_core::models::oauth2_client::SubjectType;
+            if requested != "public" {
+                return Err(metadata_refusal(
+                    "subject_type",
+                    "subject_type is not supported by this issuer. Supported value: 'public'.",
+                )
+                .into());
+            }
+            if client.subject_type != SubjectType::Public {
+                return Err(subject_migration_required(&client.client_id).into());
+            }
+        }
+
+        // The application as this edit leaves it: the store applies the edit
+        // only to the revision it was read at.
+        let app = self
+            .storage
+            .get_application(client.application_id)
+            .await?
+            .ok_or_else(|| application_not_found(&client.application_id.to_string()))?;
+        let mut left = client.clone();
+        left.revision += 1;
+        let mut view = self.application_view(&app).await?;
+        view.client = Some(self.client_view(&left)?);
+        let ctx = admin_ctx(caller, "client.update", client.client_id.clone())
+            .with_operation(command.completion(view.encode_to_vec()));
+        if !self.storage.update_oauth2_client(&client, ctx).await? {
+            return Err(self.client_update_refused(&client.client_id).await.into());
+        }
+        Ok(view)
+    }
+
     /// Apply an UpdateResourceRole edit to the revision it read, recording
     /// the resource as the edit leaves it.
     async fn edit_resource(
