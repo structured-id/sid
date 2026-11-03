@@ -421,15 +421,13 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
                 s
             );
         }
-        let storage_backend = sid_storage::PostgresBackend::new(&database_url, schema.clone())
+        let backend = sid_storage::PostgresBackend::new(&database_url, schema.clone())
             .await
             .expect("Failed to connect to database");
 
         let audit_log: Arc<dyn sid_plugin::audit::AuditLog> = Arc::new(
-            sid_storage::audit_log::PostgresAuditLog::new(storage_backend.pool().clone()),
+            sid_storage::audit_log::PostgresAuditLog::new(backend.pool().clone()),
         );
-
-        let backend = storage_backend.with_audit_log(audit_log.clone());
 
         // A refused migration changed nothing; its reason is the error's cause.
         sid_storage::migrator::run_migrations(backend.pool(), schema.as_deref())
