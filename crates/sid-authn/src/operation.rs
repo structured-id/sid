@@ -64,6 +64,22 @@ impl KeyedCommand {
         }
     }
 
+    /// The command `method` of `profile` with `req`'s inputs under `key`: one
+    /// key namespace per authenticated Profile, whatever service it calls.
+    pub fn by_profile(
+        profile: sid_core::models::ProfileId,
+        key: OperationKey,
+        method: &'static str,
+        req: &impl prost::Message,
+    ) -> Self {
+        Self::new(
+            format!("profile:{profile}"),
+            key,
+            method,
+            req.encode_to_vec(),
+        )
+    }
+
     /// The recorded result when this command already completed. The same key
     /// used for another method or other inputs is a conflict: a new command
     /// needs a new key.
@@ -89,6 +105,19 @@ impl KeyedCommand {
             )
             .into()),
         }
+    }
+
+    /// The response a completed command recorded, for a method whose checks
+    /// before the effect would refuse its own retry (a creation whose new
+    /// record now holds the name it checks).
+    pub async fn replay<T: prost::Message + Default>(
+        &self,
+        storage: &(impl OperationResultStore + ?Sized),
+    ) -> Result<Option<T>, Status> {
+        self.completed(storage)
+            .await?
+            .map(|result| decode(&result))
+            .transpose()
     }
 
     /// The completion to commit with the effect, answering retries with

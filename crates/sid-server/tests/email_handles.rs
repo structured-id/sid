@@ -86,6 +86,11 @@ impl Harness {
             "authorization",
             format!("Bearer {}", self.token).parse().unwrap(),
         );
+        // Each call is its own provisioning command, under its own key.
+        request.metadata_mut().insert(
+            sid_authn::operation::OPERATION_KEY_HEADER,
+            uuid::Uuid::new_v4().to_string().parse().unwrap(),
+        );
         self.identity.create_profile(request).await
     }
 }

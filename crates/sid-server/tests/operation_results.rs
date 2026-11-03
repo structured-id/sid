@@ -406,6 +406,37 @@ async fn test_revoke_all_sessions_retry_keeps_a_later_session() {
     );
 }
 
+/// An administrator's provisioning whose response was lost is retried: the
+/// retry answers with the account it created, not with "username taken" by
+/// that very account, and no second account exists.
+#[tokio::test]
+async fn test_create_profile_retry_answers_with_its_account() {
+    use sid_proto::sid::v1::identity_service_server::IdentityService;
+    let svc = TestServices::new(MockStorage::new());
+    let token = issue_admin_token(&svc.jwt, ProfileId::generate());
+    let create = || CreateProfileRequest {
+        username: Some("provisioned_retry".to_string()),
+        ..Default::default()
+    };
+    let before = svc.mock_storage.profile_count();
+
+    let first = svc
+        .identity
+        .create_profile(keyed(create(), &token, Some("op-provision")))
+        .await
+        .unwrap()
+        .into_inner();
+    let retry = svc
+        .identity
+        .create_profile(keyed(create(), &token, Some("op-provision")))
+        .await
+        .expect("the retry answers with the account it created")
+        .into_inner();
+
+    assert_eq!(retry, first);
+    assert_eq!(svc.mock_storage.profile_count(), before + 1);
+}
+
 /// An edit without a key cannot promise a safe retry and changes nothing.
 #[tokio::test]
 async fn test_update_project_without_key_is_refused() {

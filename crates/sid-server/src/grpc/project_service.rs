@@ -635,12 +635,7 @@ fn keyed(
     method: &'static str,
     req: &impl Message,
 ) -> KeyedCommand {
-    KeyedCommand::new(
-        format!("profile:{}", caller.profile_id),
-        key,
-        method,
-        req.encode_to_vec(),
-    )
+    KeyedCommand::by_profile(caller.profile_id, key, method, req)
 }
 
 /// The audit of `caller`'s administrative `action` on `target`.
