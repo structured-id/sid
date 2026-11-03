@@ -4463,6 +4463,13 @@ impl AuthService for AuthServiceImpl {
                 info!("Magic link request past the per-address limit: no link sent");
                 return unsent();
             }
+            // A full email queue refuses only real accounts' requests; it
+            // answers as an unknown address does, so a backlog never tells the
+            // caller which addresses have accounts.
+            Err(sid_authn::magic_link::MagicLinkError::DeliveryBacklog(why)) => {
+                warn!(%why, "magic link email queue full: no link sent");
+                return unsent();
+            }
             Err(
                 e @ (sid_authn::magic_link::MagicLinkError::Internal(_)
                 | sid_authn::magic_link::MagicLinkError::Sealed(_)),
