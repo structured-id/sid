@@ -453,9 +453,7 @@ impl PostgresBackend {
         crate::audit_log::PostgresAuditLog::log_in_conn(tx, chain_id, ctx.audit)
             .await
             .map_err(|e| SidError::Storage(format!("Audit log failed: {}", e)))?;
-        for work in &ctx.work {
-            work::insert_work_in_tx(tx, work, OWED_WORK_CAPACITY).await?;
-        }
+        work::insert_owed_work_in_tx(tx, &ctx.work, OWED_WORK_CAPACITY).await?;
         Ok(())
     }
 
