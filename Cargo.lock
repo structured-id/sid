@@ -5393,7 +5393,6 @@ dependencies = [
 name = "sid-authz"
 version = "0.2.10"
 dependencies = [
- "anyhow",
  "async-trait",
  "cedar-policy",
  "chrono",
@@ -5403,7 +5402,6 @@ dependencies = [
  "serde_json",
  "sid-authn",
  "sid-core",
- "sid-crypto",
  "sid-plugin",
  "sid-proto",
  "sid-storage",
@@ -5412,7 +5410,6 @@ dependencies = [
  "tonic",
  "tonic-types",
  "tracing",
- "tracing-subscriber",
  "uuid",
 ]
 

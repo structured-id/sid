@@ -1,4 +1,6 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: MIT
+// The BIP-39 English wordlist, unchanged: BIP-39 by Marek Palatinus, Pavol
+// Rusnak, Aaron Voisine and Sean Bowe, under the MIT License (see NOTICE).
 //! BIP-39 English wordlist (2048 words).
 //! Source: https://github.com/bitcoin/bips/blob/master/bip-0039/english.txt
 

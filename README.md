@@ -188,7 +188,7 @@ and prover; it does not replace them with reduced-cost fixtures.
 
 ## License
 
-AGPL-3.0-only, see [LICENSE](LICENSE) for details.
+AGPL-3.0-only, see [LICENSE](LICENSE). Copyright 2026 Dmitry Prudnikov, see [NOTICE](NOTICE). Each crate's `Cargo.toml` names its license: `sid-crypto` and `sid-keys` are Apache-2.0 primitives and carry their own license file.
 
 > Proto definitions (`proto/`) are licensed separately under Apache 2.0 to allow unrestricted integration by third parties.
 
