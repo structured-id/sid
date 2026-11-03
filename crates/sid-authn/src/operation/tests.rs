@@ -136,6 +136,29 @@ async fn test_commit_under_unissued_period_is_refused() {
     assert_eq!(storage.list_projects(0, 100).await.unwrap().len(), before);
 }
 
+/// An attempt refused because a concurrent attempt of the same command
+/// committed first (a limit counted before the key) answers with that
+/// attempt's recorded result, not with its own refusal.
+#[tokio::test]
+async fn test_a_refusal_after_the_command_completed_answers_its_result() {
+    use prost::Message;
+    let storage = SqliteBackend::new_in_memory().await.unwrap();
+    let context =
+        OperationContext::new(OperationKey::parse("k-4").unwrap(), period(&storage).await);
+    let command = KeyedCommand::of::<CreateProject>("profile:a", context, &create("p"));
+    let winner = create("winner");
+
+    let answered: CreateProjectRequest = command
+        .execute(&storage, || async {
+            // The concurrent attempt commits while this one runs.
+            commit(&storage, &command, &winner.encode_to_vec()).await;
+            Err::<CreateProjectRequest, _>(Effect::Refused(OperationError::OutcomeUnknown))
+        })
+        .await
+        .expect("the completed command's result");
+    assert_eq!(answered, winner);
+}
+
 /// A ceremony's own record carries no period and resolves its own retry.
 #[tokio::test]
 async fn test_ceremony_record_resolves_without_period() {

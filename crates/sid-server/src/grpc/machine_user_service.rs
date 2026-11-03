@@ -859,6 +859,12 @@ impl MachineUserService for MachineUserServiceImpl {
                 return recorded_answer(&command.committed_elsewhere(&*self.storage).await?);
             }
             Err(sid_core::Error::ResourceExhausted(_)) => {
+                // The limit is counted before the key: the slot may be full
+                // with the credential a concurrent attempt of this command
+                // added.
+                if let Some(recorded) = command.completed(&*self.storage).await? {
+                    return recorded_answer(&recorded);
+                }
                 return Err(credential_limit_reached(mu_id));
             }
             Err(e) => return Err(storage_failure(e)),

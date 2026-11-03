@@ -286,7 +286,13 @@ impl KeyedCommand {
             Ok(response) => Ok(response),
             // Another attempt's result is answered as this one's.
             Err(Effect::Store(e)) => Ok(decode(&self.not_committed(storage, e).await?)?),
-            Err(Effect::Refused(refusal)) => Err(refusal),
+            // A refusal caused by a concurrent attempt of this command that
+            // committed first (a limit counted before the key) is that
+            // attempt's result; any other refusal is answered as is.
+            Err(Effect::Refused(refusal)) => match self.completed(storage).await {
+                Ok(Some(result)) => Ok(decode(&result)?),
+                _ => Err(refusal),
+            },
         }
     }
 
