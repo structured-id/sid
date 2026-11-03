@@ -135,17 +135,14 @@ fn test_unsupported_assertion_type_is_invalid_client() {
 
 mod verify {
     use std::sync::Arc;
-    use std::time::Duration;
 
+    use super::*;
+    use crate::client_assertion::AssertionJtiLog;
+    use crate::jwt::JwtService;
+    use crate::oauth2::OAuth2Server;
     use chrono::Utc;
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
     use sid_core::models::*;
-    use sid_plugin::cache::{CacheBackend, CacheError, CacheResult, InMemoryCacheBackend};
-
-    use super::*;
-    use crate::client_assertion::AssertionJtiCache;
-    use crate::jwt::JwtService;
-    use crate::oauth2::OAuth2Server;
 
     const ISSUER: &str = "https://sid.example.com/i/cabinet";
     const CLIENT: &str = "cabinet";
@@ -249,14 +246,14 @@ mod verify {
         }
     }
 
-    fn jti_cache() -> AssertionJtiCache {
-        AssertionJtiCache::new(Arc::new(InMemoryCacheBackend::new()))
+    fn jti_cache() -> AssertionJtiLog {
+        AssertionJtiLog::new(Arc::new(sid_plugin::InProcessCeremonyState::new()))
     }
 
     async fn verify(
         auth: &ClientAuthentication,
         client: &OAuth2Client,
-        cache: &AssertionJtiCache,
+        cache: &AssertionJtiLog,
     ) -> Result<(), ClientRefusal> {
         auth.verify(client, ISSUER, &oauth2(), cache).await
     }
@@ -341,44 +338,11 @@ mod verify {
         ));
     }
 
-    struct Down;
-
-    #[async_trait::async_trait]
-    impl CacheBackend for Down {
-        async fn get(&self, _: &str) -> CacheResult<Option<Vec<u8>>> {
-            Err(CacheError::Connection("down".into()))
-        }
-        async fn set(&self, _: &str, _: &[u8], _: Duration) -> CacheResult<()> {
-            Err(CacheError::Connection("down".into()))
-        }
-        async fn delete(&self, _: &str) -> CacheResult<()> {
-            Err(CacheError::Connection("down".into()))
-        }
-        async fn take(&self, _: &str) -> CacheResult<Option<Vec<u8>>> {
-            Err(CacheError::Connection("down".into()))
-        }
-        async fn set_nx(&self, _: &str, _: &[u8], _: Duration) -> CacheResult<bool> {
-            Err(CacheError::Connection("down".into()))
-        }
-        async fn publish(&self, _: &str, _: &[u8]) -> CacheResult<()> {
-            Err(CacheError::Connection("down".into()))
-        }
-        async fn subscribe(
-            &self,
-            _: &str,
-        ) -> CacheResult<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>> {
-            Err(CacheError::Connection("down".into()))
-        }
-        async fn health_check(&self) -> CacheResult<()> {
-            Err(CacheError::Connection("down".into()))
-        }
-    }
-
     // An unreachable replay record cannot rule out a replay: the assertion is
     // not accepted, and the failure is told apart from a bad credential.
     #[tokio::test]
     async fn test_unreachable_replay_record_is_not_success() {
-        let cache = AssertionJtiCache::new(Arc::new(Down));
+        let cache = AssertionJtiLog::new(Arc::new(crate::test_support::DownCeremonies));
         let auth = assertion(&token_endpoint(), "jti-down");
         assert!(matches!(
             verify(&auth, &client(), &cache).await,

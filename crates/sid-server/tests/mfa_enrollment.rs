@@ -439,7 +439,7 @@ fn enrollment_store(
     ttl: std::time::Duration,
 ) -> sid_authn::challenge_store::ChallengeStore<(ProfileId, Vec<u8>)> {
     sid_authn::challenge_store::ChallengeStore::new(
-        std::sync::Arc::new(sid_plugin::cache::InMemoryCacheBackend::new()),
+        std::sync::Arc::new(sid_plugin::InProcessCeremonyState::new()),
         common::test_key_manager(),
         "totp-enrollment",
         ttl,

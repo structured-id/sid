@@ -90,6 +90,76 @@ pub(crate) fn client_of(
     }
 }
 
+/// A ceremony state store that cannot answer anything: what an unreachable
+/// database is to its callers.
+pub(crate) struct DownCeremonies;
+
+fn down<T>() -> sid_core::Result<T> {
+    Err(sid_core::Error::Storage("down".into()))
+}
+
+#[async_trait::async_trait]
+impl sid_plugin::SingleUseAdmissions for DownCeremonies {
+    async fn admit_once(&self, _: &str, _: &str, _: std::time::Duration) -> sid_core::Result<bool> {
+        down()
+    }
+    async fn admit_for(
+        &self,
+        _: &str,
+        _: &str,
+        _: &[u8],
+        _: std::time::Duration,
+    ) -> sid_core::Result<bool> {
+        down()
+    }
+}
+
+#[async_trait::async_trait]
+impl sid_plugin::CeremonyStateStore for DownCeremonies {
+    async fn put_ceremony_state(
+        &self,
+        _: &str,
+        _: &str,
+        _: &[u8],
+        _: std::time::Duration,
+    ) -> sid_core::Result<()> {
+        down()
+    }
+    async fn take_ceremony_state(&self, _: &str, _: &str) -> sid_core::Result<Option<Vec<u8>>> {
+        down()
+    }
+    async fn read_ceremony_state(&self, _: &str, _: &str) -> sid_core::Result<Option<Vec<u8>>> {
+        down()
+    }
+    async fn replace_ceremony_state(
+        &self,
+        _: &str,
+        _: &str,
+        _: &[u8],
+        _: &[u8],
+        _: std::time::Duration,
+    ) -> sid_core::Result<bool> {
+        down()
+    }
+    async fn count_in_window(
+        &self,
+        _: &str,
+        _: &str,
+        _: std::time::Duration,
+    ) -> sid_core::Result<u64> {
+        down()
+    }
+    async fn read_count(&self, _: &str, _: &str) -> sid_core::Result<u64> {
+        down()
+    }
+    async fn clear_count(&self, _: &str, _: &str) -> sid_core::Result<()> {
+        down()
+    }
+    async fn purge_expired_ceremony_state(&self) -> sid_core::Result<u64> {
+        down()
+    }
+}
+
 fn key_manager_over(master: [u8; 32]) -> Arc<dyn KeyManager> {
     Arc::new(
         SoftwareKeyManager::new(

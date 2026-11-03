@@ -533,7 +533,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
             .await
             .map_err(|e| anyhow::anyhow!("CAPTCHA key: {e}"))?;
 
-    // ── Shared cache: ceremony state, one-time codes, replay and rate state ──
+    // ── Shared cache: one-time codes, replay and rate state ──
     let cache_backend: Arc<dyn CacheBackend> =
         sid_infra::shared_cache(sid_infra::cache_url_from_env().as_deref())
             .await
@@ -549,7 +549,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
     let webauthn = Arc::new(WebAuthnServer::new(
         &rp_id,
         &rp_origin_url,
-        cache_backend.clone(),
+        storage.clone(),
         key_manager.clone(),
     )?);
 
@@ -565,18 +565,17 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
     let opaque_zkpp = init_zkpp(&opaque_router, &zkpp_cache_dir);
 
     // ── Revocation cache ──
-    let revocation_cache = Arc::new(RevocationCache::new(
+    // Revocations are committed in the store; the shared cache carries them
+    // to the other replicas and is not needed to refuse a revoked token.
+    let revocation_cache = Arc::new(RevocationCache::recorded_in(
         access_token_ttl
             .duration()
             .to_std()
             .expect("access token lifetime is positive"),
         cache_backend.clone(),
+        storage.clone(),
     ));
-    // Revocations made on other replicas reach this one through the shared cache.
-    revocation_cache
-        .listen()
-        .await
-        .unwrap_or_else(|e| panic!("Revocation propagation: {e}"));
+    revocation_cache.listen().await;
 
     // ── Feature flags ──
     let feature_flags = init_feature_flags()?;
@@ -830,7 +829,7 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         data_export,
     ));
 
-    let otp_service = OtpService::new(cache_backend.clone());
+    let otp_service = OtpService::new(storage.clone());
 
     // ── IP Intelligence: configurable provider chain ──
     // SID_IPINTEL_PROVIDERS: comma-separated list of enabled providers.
@@ -993,7 +992,6 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
     let upstream_svc = Arc::new(crate::grpc::upstream_service::UpstreamServiceImpl::new(
         storage.clone(),
         key_manager.clone(),
-        cache_backend.clone(),
         jwt.clone(),
         revocation_cache.clone(),
         auth_svc.clone(),
@@ -1302,6 +1300,21 @@ pub fn spawn_ce_background_tasks(c: &CeComponents) {
                 {
                     tracing::warn!("operation result expiry failed: {}", e);
                 }
+            }
+        });
+    }
+
+    // Ceremony state past its deadline (every minute): one-time proofs,
+    // codes and counts leave rows behind, which no database expires by
+    // itself. Idempotent like the purge above, so no job lock.
+    {
+        let storage = c.storage.clone();
+        tokio::spawn(async move {
+            let every = std::time::Duration::from_secs(60);
+            let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+            loop {
+                interval.tick().await;
+                crate::background_tasks::purge_ceremony_state(storage.as_ref()).await;
             }
         });
     }

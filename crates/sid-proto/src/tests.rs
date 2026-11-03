@@ -87,7 +87,9 @@ const INTERNAL_RPCS: &[&str] = &[
     "sid.v1.authn.AuthService/OAuth2Token",
     "sid.v1.authn.AuthService/StartDeviceAuthorization",
     // The issuer registry the forward-auth decision reads; relying parties
-    // use OidcProviderService.
+    // use OidcProviderService. A resource's configured verifier has its
+    // sender proofs admitted by the issuer over the same integration.
+    "sid.v1.authn.OidcIssuerService/AdmitSenderProof",
     "sid.v1.authn.OidcIssuerService/GetOidcIssuer",
     "sid.v1.authn.OidcIssuerService/GetProtectedResource",
     // Called only by the credential service, under its own service

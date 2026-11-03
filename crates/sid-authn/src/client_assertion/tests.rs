@@ -1,8 +1,7 @@
 use super::*;
-use sid_plugin::cache::InMemoryCacheBackend;
 
-fn test_cache() -> Arc<dyn CacheBackend> {
-    Arc::new(InMemoryCacheBackend::new())
+fn test_store() -> Arc<dyn SingleUseAdmissions> {
+    Arc::new(sid_plugin::InProcessCeremonyState::new())
 }
 
 #[test]
@@ -20,30 +19,31 @@ fn test_parse_algorithm_invalid() {
 
 #[tokio::test]
 async fn test_jti_cache_first_use_succeeds() {
-    let cache = AssertionJtiCache::new(test_cache());
+    let cache = AssertionJtiLog::new(test_store());
     assert!(cache.check_and_record("jti-001").await.unwrap());
 }
 
 #[tokio::test]
 async fn test_jti_cache_replay_detected() {
-    let cache = AssertionJtiCache::new(test_cache());
+    let cache = AssertionJtiLog::new(test_store());
     assert!(cache.check_and_record("jti-002").await.unwrap());
     assert!(!cache.check_and_record("jti-002").await.unwrap());
 }
 
-/// Two replicas sharing the cache: an assertion used on one is a replay on the other.
+/// Two replicas sharing the store: an assertion used on one is a replay on
+/// the other.
 #[tokio::test]
 async fn test_jti_replay_caught_across_replicas() {
-    let shared = test_cache();
-    let a = AssertionJtiCache::new(shared.clone());
-    let b = AssertionJtiCache::new(shared);
+    let shared = test_store();
+    let a = AssertionJtiLog::new(shared.clone());
+    let b = AssertionJtiLog::new(shared);
     assert!(a.check_and_record("jti-shared").await.unwrap());
     assert!(!b.check_and_record("jti-shared").await.unwrap());
 }
 
 #[tokio::test]
 async fn test_jti_cache_different_jtis_both_succeed() {
-    let cache = AssertionJtiCache::new(test_cache());
+    let cache = AssertionJtiLog::new(test_store());
     assert!(cache.check_and_record("jti-a").await.unwrap());
     assert!(cache.check_and_record("jti-b").await.unwrap());
 }
@@ -68,7 +68,7 @@ fn test_assertion_aud_multiple() {
 
 #[tokio::test]
 async fn test_validate_missing_assertion_jwt() {
-    let cache = AssertionJtiCache::new(test_cache());
+    let cache = AssertionJtiLog::new(test_store());
     let result = validate_client_assertion(
         "not-a-jwt",
         "client_id",
@@ -146,7 +146,7 @@ fn sign_jwt(claims: &TestClaims, alg: Algorithm, private_pem: &str) -> String {
 
 #[tokio::test]
 async fn test_rs256_valid_assertion() {
-    let cache = AssertionJtiCache::new(test_cache());
+    let cache = AssertionJtiLog::new(test_store());
     let claims = valid_claims("rs256-jti-001");
     let jwt = sign_jwt(&claims, Algorithm::RS256, RSA_PRIVATE_PEM);
 
@@ -169,7 +169,7 @@ async fn test_rs256_valid_assertion() {
 
 #[tokio::test]
 async fn test_es256_valid_assertion() {
-    let cache = AssertionJtiCache::new(test_cache());
+    let cache = AssertionJtiLog::new(test_store());
     let claims = valid_claims("es256-jti-001");
     let jwt = sign_jwt(&claims, Algorithm::ES256, EC_PRIVATE_PEM);
 
@@ -193,7 +193,7 @@ async fn test_es256_valid_assertion() {
 
 #[tokio::test]
 async fn test_eddsa_valid_assertion() {
-    let cache = AssertionJtiCache::new(test_cache());
+    let cache = AssertionJtiLog::new(test_store());
     let claims = valid_claims("eddsa-jti-001");
     let jwt = sign_jwt(&claims, Algorithm::EdDSA, ED_PRIVATE_PEM);
 
@@ -217,7 +217,7 @@ async fn test_eddsa_valid_assertion() {
 
 #[tokio::test]
 async fn test_expired_assertion_rejected() {
-    let cache = AssertionJtiCache::new(test_cache());
+    let cache = AssertionJtiLog::new(test_store());
     let mut claims = valid_claims("expired-jti");
     claims.exp = now_secs() - 120; // Expired 2 minutes ago (beyond 60s leeway).
     let jwt = sign_jwt(&claims, Algorithm::RS256, RSA_PRIVATE_PEM);
@@ -245,7 +245,7 @@ async fn test_expired_assertion_rejected() {
 
 #[tokio::test]
 async fn test_wrong_issuer_rejected() {
-    let cache = AssertionJtiCache::new(test_cache());
+    let cache = AssertionJtiLog::new(test_store());
     let mut claims = valid_claims("wrong-iss-jti");
     claims.iss = "wrong-client-id".into();
     let jwt = sign_jwt(&claims, Algorithm::RS256, RSA_PRIVATE_PEM);
@@ -267,7 +267,7 @@ async fn test_wrong_issuer_rejected() {
 
 #[tokio::test]
 async fn test_wrong_subject_rejected() {
-    let cache = AssertionJtiCache::new(test_cache());
+    let cache = AssertionJtiLog::new(test_store());
     let mut claims = valid_claims("wrong-sub-jti");
     claims.sub = "wrong-subject".into();
     let jwt = sign_jwt(&claims, Algorithm::RS256, RSA_PRIVATE_PEM);
@@ -289,7 +289,7 @@ async fn test_wrong_subject_rejected() {
 
 #[tokio::test]
 async fn test_wrong_audience_rejected() {
-    let cache = AssertionJtiCache::new(test_cache());
+    let cache = AssertionJtiLog::new(test_store());
     let mut claims = valid_claims("wrong-aud-jti");
     claims.aud = "https://wrong.example.com/token".into();
     let jwt = sign_jwt(&claims, Algorithm::RS256, RSA_PRIVATE_PEM);
@@ -311,7 +311,7 @@ async fn test_wrong_audience_rejected() {
 
 #[tokio::test]
 async fn test_algorithm_mismatch_rejected() {
-    let cache = AssertionJtiCache::new(test_cache());
+    let cache = AssertionJtiLog::new(test_store());
     let claims = valid_claims("alg-mismatch-jti");
     // Sign with ES256 but present RS256 public key.
     let jwt = sign_jwt(&claims, Algorithm::ES256, EC_PRIVATE_PEM);
@@ -338,7 +338,7 @@ async fn test_algorithm_mismatch_rejected() {
 
 #[tokio::test]
 async fn test_jti_replay_with_signed_jwt() {
-    let cache = AssertionJtiCache::new(test_cache());
+    let cache = AssertionJtiLog::new(test_store());
     let claims = valid_claims("replay-jti-001");
     let jwt = sign_jwt(&claims, Algorithm::RS256, RSA_PRIVATE_PEM);
 
@@ -372,7 +372,7 @@ async fn test_jti_replay_with_signed_jwt() {
 
 #[tokio::test]
 async fn test_empty_jti_rejected() {
-    let cache = AssertionJtiCache::new(test_cache());
+    let cache = AssertionJtiLog::new(test_store());
     let claims = valid_claims(""); // Empty JTI.
     let jwt = sign_jwt(&claims, Algorithm::RS256, RSA_PRIVATE_PEM);
 
@@ -393,7 +393,7 @@ async fn test_empty_jti_rejected() {
 
 #[tokio::test]
 async fn test_invalid_rsa_key_rejected() {
-    let cache = AssertionJtiCache::new(test_cache());
+    let cache = AssertionJtiLog::new(test_store());
     let claims = valid_claims("bad-key-jti");
     let jwt = sign_jwt(&claims, Algorithm::RS256, RSA_PRIVATE_PEM);
 
@@ -414,7 +414,7 @@ async fn test_invalid_rsa_key_rejected() {
 
 #[tokio::test]
 async fn test_wrong_key_signature_fails() {
-    let cache = AssertionJtiCache::new(test_cache());
+    let cache = AssertionJtiLog::new(test_store());
     // Sign with RSA, verify with EC public key (type mismatch → key parsing error).
     let claims = valid_claims("wrong-key-jti");
     let jwt = sign_jwt(&claims, Algorithm::RS256, RSA_PRIVATE_PEM);
@@ -435,7 +435,7 @@ async fn test_wrong_key_signature_fails() {
 
 #[tokio::test]
 async fn test_key_rotation_old_key_fails_new_key_succeeds() {
-    let cache = AssertionJtiCache::new(test_cache());
+    let cache = AssertionJtiLog::new(test_store());
 
     // Sign assertion with EC private key.
     let claims = valid_claims("rotation-jti-001");
@@ -477,7 +477,7 @@ async fn test_key_rotation_old_key_fails_new_key_succeeds() {
 
 #[tokio::test]
 async fn test_tampered_jwt_rejected() {
-    let cache = AssertionJtiCache::new(test_cache());
+    let cache = AssertionJtiLog::new(test_store());
     let claims = valid_claims("tampered-jti");
     let jwt = sign_jwt(&claims, Algorithm::RS256, RSA_PRIVATE_PEM);
 
@@ -553,7 +553,7 @@ fn sign_with_kid(claims: &TestClaims, alg: Algorithm, private_pem: &str, kid: &s
 /// client registered: rotation keeps the old and the next key side by side.
 #[tokio::test]
 async fn a_registered_key_named_by_kid_verifies() {
-    let cache = AssertionJtiCache::new(test_cache());
+    let cache = AssertionJtiLog::new(test_store());
     let keys = key_set(&[ed_jwk("old"), ec_jwk("next")]);
     for (alg, pem, kid) in [
         (Algorithm::EdDSA, ED_PRIVATE_PEM, "old"),
@@ -576,7 +576,7 @@ async fn a_registered_key_named_by_kid_verifies() {
 /// registered kid, authenticates nobody.
 #[tokio::test]
 async fn an_unregistered_key_is_refused() {
-    let cache = AssertionJtiCache::new(test_cache());
+    let cache = AssertionJtiLog::new(test_store());
     let keys = key_set(&[ed_jwk("mine")]);
     let unknown = sign_with_kid(
         &valid_claims("unknown"),
@@ -617,7 +617,7 @@ async fn an_unregistered_key_is_refused() {
 /// Without a kid the key is known only when the client registered one.
 #[tokio::test]
 async fn a_missing_kid_is_accepted_only_for_a_single_key() {
-    let cache = AssertionJtiCache::new(test_cache());
+    let cache = AssertionJtiLog::new(test_store());
     let jwt = sign_jwt(&valid_claims("single"), Algorithm::EdDSA, ED_PRIVATE_PEM);
     let single = key_set(&[ed_jwk("only")]);
     validate_client_assertion_with_keys(&jwt, TEST_CLIENT_ID, TEST_TOKEN_ENDPOINT, &single, &cache)
@@ -641,7 +641,7 @@ async fn a_missing_kid_is_accepted_only_for_a_single_key() {
 /// The claims checks apply to key-set assertions too: a replay is refused.
 #[tokio::test]
 async fn a_key_set_assertion_is_used_once() {
-    let cache = AssertionJtiCache::new(test_cache());
+    let cache = AssertionJtiLog::new(test_store());
     let keys = key_set(&[ed_jwk("k")]);
     let jwt = sign_with_kid(&valid_claims("once"), Algorithm::EdDSA, ED_PRIVATE_PEM, "k");
     validate_client_assertion_with_keys(&jwt, TEST_CLIENT_ID, TEST_TOKEN_ENDPOINT, &keys, &cache)
@@ -664,7 +664,7 @@ async fn a_key_set_assertion_is_used_once() {
 /// its jti is forgotten, so an `exp` beyond the accepted lifetime is refused.
 #[tokio::test]
 async fn an_assertion_expiring_too_late_is_refused() {
-    let cache = AssertionJtiCache::new(test_cache());
+    let cache = AssertionJtiLog::new(test_store());
     let mut claims = valid_claims("far-future");
     claims.exp = now_secs() + 3600;
     let jwt = sign_jwt(&claims, Algorithm::EdDSA, ED_PRIVATE_PEM);
@@ -688,7 +688,7 @@ const EC384_PRIVATE_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMIG2AgEAMBAGByqGSM
 /// and Ed25519. A key registered for one algorithm refuses another.
 #[tokio::test]
 async fn every_offered_algorithm_verifies_with_its_registered_key() {
-    let cache = AssertionJtiCache::new(test_cache());
+    let cache = AssertionJtiLog::new(test_store());
     let cases = [
         (
             Algorithm::RS256,
@@ -766,7 +766,7 @@ async fn every_offered_algorithm_verifies_with_its_registered_key() {
 /// `kid`, the audience is the one asked for, and it is used once.
 #[tokio::test]
 async fn a_key_proof_proves_the_named_key() {
-    let cache = AssertionJtiCache::new(test_cache());
+    let cache = AssertionJtiLog::new(test_store());
     let keys = key_set(&[ed_jwk("bff")]);
     let claims = |jti: &str, iss: &str| TestClaims {
         iss: iss.into(),
@@ -852,7 +852,7 @@ fn sign_value(claims: &serde_json::Value, kid: Option<&str>) -> String {
 }
 
 /// Verify an assertion through the PEM entry point.
-async fn verify_pem(jwt: &str, cache: &AssertionJtiCache) -> SidResult<AssertionClaims> {
+async fn verify_pem(jwt: &str, cache: &AssertionJtiLog) -> SidResult<AssertionClaims> {
     validate_client_assertion(
         jwt,
         TEST_CLIENT_ID,
@@ -868,7 +868,7 @@ async fn verify_pem(jwt: &str, cache: &AssertionJtiCache) -> SidResult<Assertion
 /// verifier with `nbf` checking off lets through.
 #[tokio::test]
 async fn an_assertion_not_yet_valid_is_refused() {
-    let cache = AssertionJtiCache::new(test_cache());
+    let cache = AssertionJtiLog::new(test_store());
     let now = now_secs();
     let jwt = sign_value(
         &claims_with_nbf("nbf-future", now, Some((now + 180).into())),
@@ -884,7 +884,7 @@ async fn an_assertion_not_yet_valid_is_refused() {
 /// is why the check is not simply retried until it passes.
 async fn pinned_outcome(offset: u64) -> bool {
     for attempt in 0..3 {
-        let cache = AssertionJtiCache::new(test_cache());
+        let cache = AssertionJtiLog::new(test_store());
         let before = now_secs();
         let jwt = sign_value(
             &claims_with_nbf(
@@ -915,7 +915,7 @@ async fn the_not_before_allowance_is_sixty_seconds() {
 /// `nbf` is optional: absent or already passed, the assertion is valid.
 #[tokio::test]
 async fn an_absent_or_past_not_before_is_accepted() {
-    let cache = AssertionJtiCache::new(test_cache());
+    let cache = AssertionJtiLog::new(test_store());
     let now = now_secs();
     let absent = sign_value(&claims_with_nbf("nbf-absent", now, None), None);
     verify_pem(&absent, &cache).await.unwrap();
@@ -940,7 +940,7 @@ async fn an_absent_or_past_not_before_is_accepted() {
 /// is a malformed claim, not an absent one.
 #[tokio::test]
 async fn a_malformed_not_before_is_refused() {
-    let cache = AssertionJtiCache::new(test_cache());
+    let cache = AssertionJtiLog::new(test_store());
     let now = now_secs();
     for (name, nbf) in [
         ("null", serde_json::Value::Null),
@@ -957,12 +957,12 @@ async fn a_malformed_not_before_is_refused() {
 
 /// A premature assertion is refused before its `jti` is recorded: the same
 /// `jti` in a time-valid assertion is then admitted, on any replica sharing
-/// the cache, exactly once.
+/// the store, exactly once.
 #[tokio::test]
 async fn a_premature_assertion_leaves_its_jti_unused() {
-    let shared = test_cache();
-    let a = AssertionJtiCache::new(shared.clone());
-    let b = AssertionJtiCache::new(shared);
+    let shared = test_store();
+    let a = AssertionJtiLog::new(shared.clone());
+    let b = AssertionJtiLog::new(shared);
     let now = now_secs();
     let early = sign_value(
         &claims_with_nbf("nbf-shared", now, Some((now + 180).into())),
@@ -978,7 +978,7 @@ async fn a_premature_assertion_leaves_its_jti_unused() {
 /// The registered-key and key-proof entry points run the same check.
 #[tokio::test]
 async fn every_entry_point_refuses_a_premature_assertion() {
-    let cache = AssertionJtiCache::new(test_cache());
+    let cache = AssertionJtiLog::new(test_store());
     let keys = key_set(&[ed_jwk("k1")]);
     let now = now_secs();
     let early = sign_value(

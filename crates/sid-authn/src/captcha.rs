@@ -9,7 +9,7 @@
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 use sid_keys::KeyManager;
-use sid_plugin::cache::CacheBackend;
+use sid_plugin::CeremonyStateStore;
 use std::net::IpAddr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -510,7 +510,7 @@ pub struct CaptchaSubject {
 }
 
 /// Binds CAPTCHA challenges and the passes they earn to one sign-in, in the
-/// shared cache so any replica can answer each step.
+/// authoritative ceremony state so any replica can answer each step.
 ///
 /// A challenge is recorded when it is asked, solved once into a pass, and the
 /// pass satisfies one CAPTCHA requirement of the same profile from the same
@@ -527,15 +527,15 @@ pub const CAPTCHA_PASS_TTL: Duration = Duration::from_secs(60);
 pub const CAPTCHA_CHALLENGE_TTL: Duration = Duration::from_secs(300);
 
 impl CaptchaGate {
-    pub fn new(cache: Arc<dyn CacheBackend>, keys: Arc<dyn KeyManager>) -> Self {
+    pub fn new(ceremonies: Arc<dyn CeremonyStateStore>, keys: Arc<dyn KeyManager>) -> Self {
         Self {
             challenges: ChallengeStore::new(
-                cache.clone(),
+                ceremonies.clone(),
                 keys.clone(),
                 "captcha-challenge",
                 CAPTCHA_CHALLENGE_TTL,
             ),
-            passes: ChallengeStore::new(cache, keys, "captcha-pass", CAPTCHA_PASS_TTL),
+            passes: ChallengeStore::new(ceremonies, keys, "captcha-pass", CAPTCHA_PASS_TTL),
         }
     }
 

@@ -1,44 +1,8 @@
 use super::*;
-use sid_plugin::cache::InMemoryCacheBackend;
 use std::net::Ipv4Addr;
-use tokio::sync::mpsc;
 
-fn test_cache() -> Arc<dyn CacheBackend> {
-    Arc::new(InMemoryCacheBackend::new())
-}
-
-/// A cache that answers nothing: every operation fails.
-struct DownCache;
-
-#[async_trait::async_trait]
-impl CacheBackend for DownCache {
-    async fn get(&self, _key: &str) -> CacheResult<Option<Vec<u8>>> {
-        Err(CacheError::Timeout)
-    }
-    async fn set(&self, _key: &str, _value: &[u8], _ttl: Duration) -> CacheResult<()> {
-        Err(CacheError::Timeout)
-    }
-    async fn delete(&self, _key: &str) -> CacheResult<()> {
-        Err(CacheError::Timeout)
-    }
-    async fn take(&self, _key: &str) -> CacheResult<Option<Vec<u8>>> {
-        Err(CacheError::Timeout)
-    }
-    async fn exists(&self, _key: &str) -> CacheResult<bool> {
-        Err(CacheError::Timeout)
-    }
-    async fn incr(&self, _key: &str, _ttl: Duration) -> CacheResult<u64> {
-        Err(CacheError::Timeout)
-    }
-    async fn publish(&self, _channel: &str, _message: &[u8]) -> CacheResult<()> {
-        Err(CacheError::Timeout)
-    }
-    async fn subscribe(&self, _channel: &str) -> CacheResult<mpsc::UnboundedReceiver<Vec<u8>>> {
-        Err(CacheError::Timeout)
-    }
-    async fn health_check(&self) -> CacheResult<()> {
-        Err(CacheError::Timeout)
-    }
+fn test_store() -> Arc<dyn CeremonyStateStore> {
+    Arc::new(sid_plugin::InProcessCeremonyState::new())
 }
 
 fn default_context() -> LoginContext {
@@ -69,7 +33,7 @@ fn default_context() -> LoginContext {
 // yet, so nothing about it is new; the next sign-in from elsewhere is.
 #[tokio::test]
 async fn test_new_device_ip_needs_a_previous_sign_in() {
-    let detector = AnomalyDetector::ce_default(test_cache());
+    let detector = AnomalyDetector::ce_default(test_store());
     let first = LoginContext {
         new_device: true,
         new_ip: true,
@@ -91,16 +55,16 @@ async fn test_new_device_ip_needs_a_previous_sign_in() {
 // ── Shared state and failure (multi-instance) ──
 
 /// A lockout reached on one replica holds on every replica sharing the
-/// cache; the lockout used to live in each process's own memory.
+/// store.
 #[tokio::test]
 async fn test_lockout_holds_on_every_replica() {
-    let cache = test_cache();
+    let store = test_store();
     let config = AnomalyConfig {
         brute_force_max_attempts: 3,
         ..AnomalyConfig::default()
     };
-    let a = AnomalyDetector::new(config.clone(), NetworkPolicy::default(), cache.clone());
-    let b = AnomalyDetector::new(config, NetworkPolicy::default(), cache);
+    let a = AnomalyDetector::new(config.clone(), NetworkPolicy::default(), store.clone());
+    let b = AnomalyDetector::new(config, NetworkPolicy::default(), store);
 
     a.record_failed_attempt("shared@sid.example.com")
         .await
@@ -121,11 +85,11 @@ async fn test_lockout_holds_on_every_replica() {
     assert!(b.lockout_active("shared@sid.example.com").await.unwrap());
 }
 
-/// A cache that cannot answer fails the check and the count instead of
+/// A store that cannot answer fails the check and the count instead of
 /// reading as "no attempts" and admitting a guessing attacker.
 #[tokio::test]
-async fn test_cache_failure_fails_closed() {
-    let detector = AnomalyDetector::ce_default(Arc::new(DownCache));
+async fn test_store_failure_fails_closed() {
+    let detector = AnomalyDetector::ce_default(Arc::new(crate::test_support::DownCeremonies));
     let mut ctx = default_context();
     ctx.failed = true;
     assert!(detector.evaluate(&ctx).await.is_err());
@@ -149,28 +113,9 @@ async fn test_cache_failure_fails_closed() {
     );
 }
 
-/// A counter that is not a number is a fault, not zero attempts.
-#[tokio::test]
-async fn test_unreadable_counter_is_an_error() {
-    let cache = test_cache();
-    cache
-        .set(
-            "rate:brute:garbled@sid.example.com",
-            b"lots",
-            Duration::from_secs(60),
-        )
-        .await
-        .unwrap();
-    let detector = AnomalyDetector::ce_default(cache);
-    let mut ctx = default_context();
-    ctx.identity = "garbled@sid.example.com".into();
-    ctx.failed = true;
-    assert!(detector.evaluate(&ctx).await.is_err());
-}
-
 #[tokio::test]
 async fn test_no_anomalies_allows() {
-    let detector = AnomalyDetector::ce_default(test_cache());
+    let detector = AnomalyDetector::ce_default(test_store());
     let result = detector.evaluate(&default_context()).await.unwrap();
     assert_eq!(result.reaction, RuleReaction::Allow);
     assert_eq!(result.rule, "none");
@@ -178,7 +123,7 @@ async fn test_no_anomalies_allows() {
 
 #[tokio::test]
 async fn test_new_device_and_ip_triggers_step_up() {
-    let detector = AnomalyDetector::ce_default(test_cache());
+    let detector = AnomalyDetector::ce_default(test_store());
     // A profile that has signed in before, now from a new device and address.
     let mut ctx = default_context();
     ctx.prev_login_at = Some(chrono::Utc::now() - chrono::Duration::days(1));
@@ -192,7 +137,7 @@ async fn test_new_device_and_ip_triggers_step_up() {
 
 #[tokio::test]
 async fn test_new_device_only_allows() {
-    let detector = AnomalyDetector::ce_default(test_cache());
+    let detector = AnomalyDetector::ce_default(test_store());
     let mut ctx = default_context();
     ctx.new_device = true;
     ctx.new_ip = false;
@@ -210,7 +155,7 @@ async fn test_brute_force_lockout() {
         credential_stuffing_threshold: 10,
         ..Default::default()
     };
-    let detector = AnomalyDetector::new(config, NetworkPolicy::default(), test_cache());
+    let detector = AnomalyDetector::new(config, NetworkPolicy::default(), test_store());
 
     for _ in 0..3 {
         detector
@@ -237,7 +182,7 @@ async fn test_count_attempt_permits_up_to_the_limit() {
         brute_force_lockout_secs: 60,
         ..Default::default()
     };
-    let detector = AnomalyDetector::new(config, NetworkPolicy::default(), test_cache());
+    let detector = AnomalyDetector::new(config, NetworkPolicy::default(), test_store());
     let identity = "change:alice";
     for attempt in 1..=3 {
         assert!(detector.count_attempt(identity).await.unwrap(), "{attempt}");
@@ -253,7 +198,7 @@ fn test_lockout_duration_is_the_configured_lockout() {
         brute_force_lockout_secs: 60,
         ..Default::default()
     };
-    let detector = AnomalyDetector::new(config, NetworkPolicy::default(), test_cache());
+    let detector = AnomalyDetector::new(config, NetworkPolicy::default(), test_store());
     assert_eq!(detector.lockout_duration(), Duration::from_secs(60));
 }
 
@@ -266,7 +211,7 @@ async fn test_brute_force_clear_lockout() {
         credential_stuffing_threshold: 10,
         ..Default::default()
     };
-    let detector = AnomalyDetector::new(config, NetworkPolicy::default(), test_cache());
+    let detector = AnomalyDetector::new(config, NetworkPolicy::default(), test_store());
 
     for _ in 0..3 {
         detector
@@ -294,7 +239,7 @@ async fn test_credential_stuffing_captcha() {
         credential_stuffing_threshold: 3,
         ..Default::default()
     };
-    let detector = AnomalyDetector::new(config, NetworkPolicy::default(), test_cache());
+    let detector = AnomalyDetector::new(config, NetworkPolicy::default(), test_store());
 
     let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     for _ in 0..3 {
@@ -310,7 +255,7 @@ async fn test_credential_stuffing_captcha() {
 
 #[tokio::test]
 async fn test_credential_stuffing_below_threshold() {
-    let detector = AnomalyDetector::ce_default(test_cache());
+    let detector = AnomalyDetector::ce_default(test_store());
     let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     detector.record_ip_attempt(ip).await.unwrap();
 
@@ -322,7 +267,7 @@ async fn test_credential_stuffing_below_threshold() {
 
 #[tokio::test]
 async fn test_no_ip_skips_credential_stuffing() {
-    let detector = AnomalyDetector::ce_default(test_cache());
+    let detector = AnomalyDetector::ce_default(test_store());
     let mut ctx = default_context();
     ctx.ip = None;
     let result = detector.evaluate(&ctx).await.unwrap();
@@ -338,7 +283,7 @@ async fn test_lockout_takes_priority_over_new_device() {
         credential_stuffing_threshold: 10,
         ..Default::default()
     };
-    let detector = AnomalyDetector::new(config, NetworkPolicy::default(), test_cache());
+    let detector = AnomalyDetector::new(config, NetworkPolicy::default(), test_store());
 
     for _ in 0..2 {
         detector
@@ -384,7 +329,7 @@ async fn test_multiple_identities_independent() {
         credential_stuffing_threshold: 10,
         ..Default::default()
     };
-    let detector = AnomalyDetector::new(config, NetworkPolicy::default(), test_cache());
+    let detector = AnomalyDetector::new(config, NetworkPolicy::default(), test_store());
 
     for _ in 0..2 {
         detector
@@ -424,7 +369,7 @@ async fn test_country_allow_list_permits_listed() {
         countries: vec!["US".into(), "DE".into()],
         ..NetworkPolicy::default()
     };
-    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_cache());
+    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_store());
     let mut ctx = default_context();
     ctx.country = Some("US".into());
     let result = detector.evaluate(&ctx).await.unwrap();
@@ -438,7 +383,7 @@ async fn test_country_allow_list_blocks_unlisted() {
         countries: vec!["US".into(), "DE".into()],
         ..NetworkPolicy::default()
     };
-    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_cache());
+    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_store());
     let mut ctx = default_context();
     ctx.country = Some("RU".into());
     let result = detector.evaluate(&ctx).await.unwrap();
@@ -453,7 +398,7 @@ async fn test_country_block_list_blocks_listed() {
         countries: vec!["CN".into(), "KP".into()],
         ..NetworkPolicy::default()
     };
-    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_cache());
+    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_store());
     let mut ctx = default_context();
     ctx.country = Some("CN".into());
     let result = detector.evaluate(&ctx).await.unwrap();
@@ -468,7 +413,7 @@ async fn test_country_block_list_allows_unlisted() {
         countries: vec!["CN".into(), "KP".into()],
         ..NetworkPolicy::default()
     };
-    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_cache());
+    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_store());
     let mut ctx = default_context();
     ctx.country = Some("US".into());
     let result = detector.evaluate(&ctx).await.unwrap();
@@ -482,7 +427,7 @@ async fn test_country_mode_none_allows_all() {
         countries: vec!["CN".into()],
         ..NetworkPolicy::default()
     };
-    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_cache());
+    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_store());
     let mut ctx = default_context();
     ctx.country = Some("CN".into());
     let result = detector.evaluate(&ctx).await.unwrap();
@@ -496,7 +441,7 @@ async fn test_country_case_insensitive() {
         countries: vec!["us".into()],
         ..NetworkPolicy::default()
     };
-    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_cache());
+    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_store());
     let mut ctx = default_context();
     ctx.country = Some("US".into());
     let result = detector.evaluate(&ctx).await.unwrap();
@@ -510,7 +455,7 @@ async fn test_country_no_country_skips_rule() {
         countries: vec!["US".into()],
         ..NetworkPolicy::default()
     };
-    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_cache());
+    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_store());
     let ctx = default_context(); // country = None
     let result = detector.evaluate(&ctx).await.unwrap();
     assert_eq!(result.reaction, RuleReaction::Allow);
@@ -524,7 +469,7 @@ async fn test_country_violation_reaction_step_up() {
         violation_reaction: NetworkViolationReaction::StepUp,
         ..NetworkPolicy::default()
     };
-    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_cache());
+    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_store());
     let mut ctx = default_context();
     ctx.country = Some("CN".into());
     let result = detector.evaluate(&ctx).await.unwrap();
@@ -540,7 +485,7 @@ async fn test_tor_exit_blocks_when_enabled() {
         block_tor: true,
         ..NetworkPolicy::default()
     };
-    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_cache());
+    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_store());
     let mut ctx = default_context();
     ctx.is_tor_exit = true;
     let result = detector.evaluate(&ctx).await.unwrap();
@@ -554,7 +499,7 @@ async fn test_tor_exit_allows_when_disabled() {
         block_tor: false,
         ..NetworkPolicy::default()
     };
-    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_cache());
+    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_store());
     let mut ctx = default_context();
     ctx.is_tor_exit = true;
     let result = detector.evaluate(&ctx).await.unwrap();
@@ -567,7 +512,7 @@ async fn test_tor_exit_allows_non_tor() {
         block_tor: true,
         ..NetworkPolicy::default()
     };
-    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_cache());
+    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_store());
     let ctx = default_context(); // is_tor_exit = false
     let result = detector.evaluate(&ctx).await.unwrap();
     assert_eq!(result.reaction, RuleReaction::Allow);
@@ -581,7 +526,7 @@ async fn test_datacenter_ip_blocks_when_enabled() {
         block_datacenter_ips: true,
         ..NetworkPolicy::default()
     };
-    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_cache());
+    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_store());
     let mut ctx = default_context();
     ctx.is_datacenter_ip = true;
     let result = detector.evaluate(&ctx).await.unwrap();
@@ -595,7 +540,7 @@ async fn test_datacenter_ip_allows_when_disabled() {
         block_datacenter_ips: false,
         ..NetworkPolicy::default()
     };
-    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_cache());
+    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_store());
     let mut ctx = default_context();
     ctx.is_datacenter_ip = true;
     let result = detector.evaluate(&ctx).await.unwrap();
@@ -608,7 +553,7 @@ async fn test_datacenter_ip_allows_non_datacenter() {
         block_datacenter_ips: true,
         ..NetworkPolicy::default()
     };
-    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_cache());
+    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_store());
     let ctx = default_context(); // is_datacenter_ip = false
     let result = detector.evaluate(&ctx).await.unwrap();
     assert_eq!(result.reaction, RuleReaction::Allow);
@@ -624,7 +569,7 @@ async fn test_country_takes_priority_over_tor() {
         block_tor: true,
         ..NetworkPolicy::default()
     };
-    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_cache());
+    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_store());
     let mut ctx = default_context();
     ctx.country = Some("CN".into());
     ctx.is_tor_exit = true;
@@ -640,7 +585,7 @@ async fn test_tor_takes_priority_over_datacenter() {
         block_datacenter_ips: true,
         ..NetworkPolicy::default()
     };
-    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_cache());
+    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_store());
     let mut ctx = default_context();
     ctx.is_tor_exit = true;
     ctx.is_datacenter_ip = true;
@@ -653,7 +598,7 @@ async fn test_tor_takes_priority_over_datacenter() {
 
 #[tokio::test]
 async fn test_blocklisted_ip_hard_no() {
-    let detector = AnomalyDetector::ce_default(test_cache());
+    let detector = AnomalyDetector::ce_default(test_store());
     let mut ctx = default_context();
     ctx.is_blocklisted = true;
     let result = detector.evaluate(&ctx).await.unwrap();
@@ -678,7 +623,7 @@ async fn test_blocklist_takes_priority_over_everything() {
         countries: vec!["CN".into()],
         ..NetworkPolicy::default()
     };
-    let detector = AnomalyDetector::new(config, policy, test_cache());
+    let detector = AnomalyDetector::new(config, policy, test_store());
 
     for _ in 0..2 {
         detector
@@ -702,7 +647,7 @@ async fn test_blocklist_takes_priority_over_everything() {
 
 #[tokio::test]
 async fn test_non_blocklisted_allows() {
-    let detector = AnomalyDetector::ce_default(test_cache());
+    let detector = AnomalyDetector::ce_default(test_store());
     let ctx = default_context(); // is_blocklisted = false
     let result = detector.evaluate(&ctx).await.unwrap();
     assert_eq!(result.reaction, RuleReaction::Allow);
@@ -758,7 +703,7 @@ async fn test_an_answered_step_up_leaves_the_later_rules_in_force() {
         violation_reaction: NetworkViolationReaction::Block,
         ..NetworkPolicy::default()
     };
-    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_cache());
+    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_store());
     let mut ctx = default_context();
     ctx.latitude = Some(40.71);
     ctx.longitude = Some(-74.01);
@@ -791,7 +736,7 @@ async fn test_an_answered_step_up_leaves_the_later_rules_in_force() {
 /// sign-in that meets every requirement was refused for good on that browser.
 #[tokio::test]
 async fn test_the_requirements_state_the_new_device_reaction() {
-    let detector = AnomalyDetector::ce_default(test_cache());
+    let detector = AnomalyDetector::ce_default(test_store());
     let mut ctx = default_context();
     ctx.prev_login_at = Some(chrono::Utc::now() - chrono::Duration::days(1));
     ctx.new_device = true;
@@ -820,7 +765,7 @@ async fn test_passing_a_new_device_leaves_the_other_rules_in_force() {
         violation_reaction: NetworkViolationReaction::Block,
         ..NetworkPolicy::default()
     };
-    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_cache());
+    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_store());
     let mut ctx = default_context();
     ctx.prev_login_at = Some(chrono::Utc::now() - chrono::Duration::days(1));
     ctx.new_device = true;
@@ -852,7 +797,7 @@ async fn test_suppressed_travel_leaves_the_later_rules_in_force() {
         violation_reaction: NetworkViolationReaction::Block,
         ..NetworkPolicy::default()
     };
-    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_cache());
+    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_store());
     let mut ctx = default_context();
     ctx.latitude = Some(40.71);
     ctx.longitude = Some(-74.01);
@@ -881,15 +826,11 @@ async fn test_a_solved_captcha_leaves_the_later_rules_in_force() {
         violation_reaction: NetworkViolationReaction::Block,
         ..NetworkPolicy::default()
     };
-    let cache = test_cache();
-    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, cache.clone());
+    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_store());
     let mut ctx = default_context();
     ctx.failed = true;
     for _ in 0..4 {
-        cache
-            .incr(&attempts_key(&ctx.identity), Duration::from_secs(300))
-            .await
-            .unwrap();
+        detector.record_failed_attempt(&ctx.identity).await.unwrap();
     }
     let solved = Answered {
         step_up: false,
@@ -921,7 +862,7 @@ async fn test_a_solved_captcha_leaves_the_later_rules_in_force() {
 #[tokio::test]
 async fn test_impossible_travel_triggers_step_up() {
     // Berlin → New York in 45 min = ~8533 km/h (> 900 km/h threshold)
-    let detector = AnomalyDetector::ce_default(test_cache());
+    let detector = AnomalyDetector::ce_default(test_store());
     let mut ctx = default_context();
     ctx.latitude = Some(40.71); // New York (current)
     ctx.longitude = Some(-74.01);
@@ -942,7 +883,7 @@ async fn test_impossible_travel_triggers_step_up() {
 #[tokio::test]
 async fn test_impossible_travel_allows_slow_travel() {
     // Berlin → Paris (344 km) in 2 hours = 172 km/h (< 900 threshold)
-    let detector = AnomalyDetector::ce_default(test_cache());
+    let detector = AnomalyDetector::ce_default(test_store());
     let mut ctx = default_context();
     ctx.latitude = Some(48.86); // Paris (current)
     ctx.longitude = Some(2.35);
@@ -958,7 +899,7 @@ async fn test_impossible_travel_allows_slow_travel() {
 #[tokio::test]
 async fn test_impossible_travel_allows_long_time() {
     // Berlin → New York (6385 km) in 10 hours = 639 km/h (< 900 threshold)
-    let detector = AnomalyDetector::ce_default(test_cache());
+    let detector = AnomalyDetector::ce_default(test_store());
     let mut ctx = default_context();
     ctx.latitude = Some(40.71);
     ctx.longitude = Some(-74.01);
@@ -973,7 +914,7 @@ async fn test_impossible_travel_allows_long_time() {
 #[tokio::test]
 async fn test_impossible_travel_skipped_when_no_geo() {
     // No current geo → rule skipped.
-    let detector = AnomalyDetector::ce_default(test_cache());
+    let detector = AnomalyDetector::ce_default(test_store());
     let mut ctx = default_context();
     ctx.prev_latitude = Some(52.52);
     ctx.prev_longitude = Some(13.40);
@@ -987,7 +928,7 @@ async fn test_impossible_travel_skipped_when_no_geo() {
 #[tokio::test]
 async fn test_impossible_travel_skipped_when_no_previous() {
     // No previous session → rule skipped (first login).
-    let detector = AnomalyDetector::ce_default(test_cache());
+    let detector = AnomalyDetector::ce_default(test_store());
     let mut ctx = default_context();
     ctx.latitude = Some(40.71);
     ctx.longitude = Some(-74.01);
@@ -1005,7 +946,7 @@ async fn test_impossible_travel_priority_below_country() {
         countries: vec!["US".into()],
         ..NetworkPolicy::default()
     };
-    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_cache());
+    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_store());
     let mut ctx = default_context();
     ctx.country = Some("US".into());
     ctx.latitude = Some(40.71);
@@ -1027,7 +968,7 @@ async fn test_impossible_travel_priority_below_country() {
 async fn test_impossible_travel_suppressed_when_both_designated() {
     // Roaming scenario: Kyiv (UA) → Bucharest (RO) in 5 seconds.
     // Both countries are designated → location_switch (Allow), not StepUp.
-    let detector = AnomalyDetector::ce_default(test_cache());
+    let detector = AnomalyDetector::ce_default(test_store());
     let mut ctx = default_context();
     ctx.latitude = Some(44.43); // Bucharest (current)
     ctx.longitude = Some(26.10);
@@ -1064,7 +1005,7 @@ async fn test_impossible_travel_suppressed_when_both_designated() {
 async fn test_impossible_travel_not_suppressed_when_current_not_designated() {
     // Kyiv (UA, designated) → São Paulo (BR, NOT designated) in 5 seconds.
     // Only one is designated → StepUp.
-    let detector = AnomalyDetector::ce_default(test_cache());
+    let detector = AnomalyDetector::ce_default(test_store());
     let mut ctx = default_context();
     ctx.latitude = Some(-23.55); // São Paulo (current)
     ctx.longitude = Some(-46.63);
@@ -1086,7 +1027,7 @@ async fn test_impossible_travel_not_suppressed_when_current_not_designated() {
 #[tokio::test]
 async fn test_impossible_travel_not_suppressed_when_no_designated() {
     // No designated locations at all → standard impossible travel.
-    let detector = AnomalyDetector::ce_default(test_cache());
+    let detector = AnomalyDetector::ce_default(test_store());
     let mut ctx = default_context();
     ctx.latitude = Some(44.43);
     ctx.longitude = Some(26.10);
@@ -1105,7 +1046,7 @@ async fn test_impossible_travel_not_suppressed_when_no_designated() {
 #[tokio::test]
 async fn test_impossible_travel_not_suppressed_when_no_country() {
     // Country not resolved (GeoIP failed) → no suppression, standard impossible travel.
-    let detector = AnomalyDetector::ce_default(test_cache());
+    let detector = AnomalyDetector::ce_default(test_store());
     let mut ctx = default_context();
     ctx.latitude = Some(44.43);
     ctx.longitude = Some(26.10);
@@ -1134,7 +1075,7 @@ async fn test_brute_force_captcha_at_threshold() {
         brute_force_lockout_secs: 900,
         ..AnomalyConfig::default()
     };
-    let detector = AnomalyDetector::new(config, NetworkPolicy::default(), test_cache());
+    let detector = AnomalyDetector::new(config, NetworkPolicy::default(), test_store());
 
     // Record 3 failed attempts (below 80% threshold of 5 = 4).
     for _ in 0..3 {
@@ -1169,7 +1110,7 @@ async fn test_brute_force_captcha_at_threshold() {
 
 #[tokio::test]
 async fn test_brute_force_captcha_not_for_successful_login() {
-    let detector = AnomalyDetector::ce_default(test_cache());
+    let detector = AnomalyDetector::ce_default(test_store());
 
     // Record 4 failed attempts (above threshold).
     for _ in 0..4 {
@@ -1191,113 +1132,95 @@ async fn test_brute_force_captcha_not_for_successful_login() {
     );
 }
 
-// ── Shared cache behavior ──
+// ── Shared store behavior ──
 
+/// Two replicas' detectors over one store.
+fn replicas(config: AnomalyConfig) -> (AnomalyDetector, AnomalyDetector) {
+    let store = test_store();
+    (
+        AnomalyDetector::new(config.clone(), NetworkPolicy::default(), store.clone()),
+        AnomalyDetector::new(config, NetworkPolicy::default(), store),
+    )
+}
+
+/// A lockout started by failures on one replica blocks the sign-in on
+/// another.
 #[tokio::test]
 async fn test_distributed_brute_force_lockout() {
-    let cache = Arc::new(InMemoryCacheBackend::new());
-    let config = AnomalyConfig {
+    let (a, b) = replicas(AnomalyConfig {
         brute_force_max_attempts: 3,
         brute_force_window_secs: 300,
         brute_force_lockout_secs: 900,
         ..AnomalyConfig::default()
-    };
-    let detector = AnomalyDetector::new(config, NetworkPolicy::default(), cache.clone());
-
-    // Record failures → triggers lockout.
+    });
     for _ in 0..3 {
-        detector
-            .record_failed_attempt("dist-lockout-user")
-            .await
-            .unwrap();
+        a.record_failed_attempt("dist-lockout-user").await.unwrap();
     }
 
-    // Lockout should be visible via distributed cache.
-    let lockout_key = "rate:brute:lockout:dist-lockout-user";
-    let exists = cache.exists(lockout_key).await.unwrap();
-    assert!(exists, "lockout should be written to distributed cache");
-
-    // Evaluate should return Block from distributed lockout.
     let mut ctx = default_context();
     ctx.identity = "dist-lockout-user".into();
-    let result = detector.evaluate(&ctx).await.unwrap();
+    let result = b.evaluate(&ctx).await.unwrap();
     assert_eq!(result.reaction, RuleReaction::Block);
     assert_eq!(result.rule, "brute_force");
 }
 
+/// The CAPTCHA threshold counts the failures every replica recorded.
 #[tokio::test]
 async fn test_distributed_brute_force_captcha_threshold() {
-    let cache = Arc::new(InMemoryCacheBackend::new());
-    let config = AnomalyConfig {
+    let (a, b) = replicas(AnomalyConfig {
         brute_force_max_attempts: 5,
         brute_force_window_secs: 300,
         brute_force_lockout_secs: 900,
         ..AnomalyConfig::default()
-    };
-
-    // Simulate: another instance recorded 3 failures in cache.
-    cache
-        .set(
-            "rate:brute:dist-captcha-user",
-            b"3",
-            Duration::from_secs(300),
-        )
-        .await
-        .unwrap();
-
-    let detector = AnomalyDetector::new(config, NetworkPolicy::default(), cache.clone());
-
+    });
+    for _ in 0..3 {
+        a.record_failed_attempt("dist-captcha-user").await.unwrap();
+    }
     let mut ctx = default_context();
     ctx.identity = "dist-captcha-user".into();
     ctx.failed = true;
 
     // 3 < 4 (80% of 5) → no CAPTCHA.
-    let result = detector.evaluate(&ctx).await.unwrap();
+    let result = b.evaluate(&ctx).await.unwrap();
     assert_ne!(result.reaction, RuleReaction::RequireCaptcha);
 
-    // Set cache to 4 (threshold hit).
-    cache
-        .set(
-            "rate:brute:dist-captcha-user",
-            b"4",
-            Duration::from_secs(300),
-        )
-        .await
-        .unwrap();
-
-    let result = detector.evaluate(&ctx).await.unwrap();
+    b.record_failed_attempt("dist-captcha-user").await.unwrap();
+    let result = a.evaluate(&ctx).await.unwrap();
     assert_eq!(result.reaction, RuleReaction::RequireCaptcha);
     assert!(result.reason.contains("failed attempts"));
 }
 
+/// A lockout lifted on one replica is lifted on every replica, and its
+/// failures are forgotten.
 #[tokio::test]
 async fn test_distributed_lockout_clear() {
-    let cache = Arc::new(InMemoryCacheBackend::new());
-    let config = AnomalyConfig {
+    let (a, b) = replicas(AnomalyConfig {
         brute_force_max_attempts: 3,
         brute_force_window_secs: 300,
         brute_force_lockout_secs: 900,
         ..AnomalyConfig::default()
-    };
-    let detector = AnomalyDetector::new(config, NetworkPolicy::default(), cache.clone());
-
-    // Create lockout.
+    });
     for _ in 0..3 {
-        detector.record_failed_attempt("clear-user").await.unwrap();
+        a.record_failed_attempt("clear-user").await.unwrap();
     }
-
-    // Verify locked.
     let mut ctx = default_context();
     ctx.identity = "clear-user".into();
-    let result = detector.evaluate(&ctx).await.unwrap();
-    assert_eq!(result.reaction, RuleReaction::Block);
+    assert_eq!(
+        b.evaluate(&ctx).await.unwrap().reaction,
+        RuleReaction::Block
+    );
 
-    // Clear lockout.
-    detector.clear_lockout("clear-user").await.unwrap();
+    a.clear_lockout("clear-user").await.unwrap();
 
-    let result = detector.evaluate(&ctx).await.unwrap();
-    assert_eq!(result.reaction, RuleReaction::Allow);
-    assert!(!cache.exists("rate:brute:lockout:clear-user").await.unwrap());
+    assert_eq!(
+        b.evaluate(&ctx).await.unwrap().reaction,
+        RuleReaction::Allow
+    );
+    assert!(!b.lockout_active("clear-user").await.unwrap());
+    assert!(
+        b.count_attempt("clear-user").await.unwrap(),
+        "the failures before the lift are forgotten"
+    );
 }
 
 // ── Alert reaction variant ──
@@ -1310,7 +1233,7 @@ async fn test_country_violation_alert_allows() {
         violation_reaction: NetworkViolationReaction::Alert,
         ..NetworkPolicy::default()
     };
-    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_cache());
+    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_store());
     let mut ctx = default_context();
     ctx.country = Some("CN".into());
 
@@ -1327,7 +1250,7 @@ async fn test_tor_violation_alert_allows() {
         violation_reaction: NetworkViolationReaction::Alert,
         ..NetworkPolicy::default()
     };
-    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_cache());
+    let detector = AnomalyDetector::new(AnomalyConfig::default(), policy, test_store());
     let mut ctx = default_context();
     ctx.is_tor_exit = true;
 
@@ -1340,7 +1263,7 @@ async fn test_tor_violation_alert_allows() {
 
 #[tokio::test]
 async fn test_new_ip_only_without_device_allows() {
-    let detector = AnomalyDetector::ce_default(test_cache());
+    let detector = AnomalyDetector::ce_default(test_store());
     let mut ctx = default_context();
     ctx.new_ip = true;
     ctx.new_device = false;
@@ -1353,39 +1276,29 @@ async fn test_new_ip_only_without_device_allows() {
     );
 }
 
-// ── Credential stuffing via shared cache ──
+// ── Credential stuffing via the shared store ──
 
+/// The per-address threshold counts the attempts every replica recorded.
 #[tokio::test]
 async fn test_distributed_credential_stuffing() {
-    let cache = Arc::new(InMemoryCacheBackend::new());
-    let config = AnomalyConfig {
+    let (a, b) = replicas(AnomalyConfig {
         credential_stuffing_threshold: 10,
         ..AnomalyConfig::default()
-    };
-
-    // Simulate: another instance recorded 9 attempts for this IP.
+    });
     let ip: IpAddr = "10.0.0.1".parse().unwrap();
-    cache
-        .set(&format!("rate:ip:{ip}"), b"9", Duration::from_secs(60))
-        .await
-        .unwrap();
-
-    let detector = AnomalyDetector::new(config, NetworkPolicy::default(), cache.clone());
+    for _ in 0..9 {
+        a.record_ip_attempt(ip).await.unwrap();
+    }
     let mut ctx = default_context();
     ctx.ip = Some(ip);
     ctx.failed = true;
 
     // 9 < 10 → no CAPTCHA yet.
-    let result = detector.evaluate(&ctx).await.unwrap();
+    let result = b.evaluate(&ctx).await.unwrap();
     assert_ne!(result.reaction, RuleReaction::RequireCaptcha);
 
-    // Set to 10 → threshold hit.
-    cache
-        .set(&format!("rate:ip:{ip}"), b"10", Duration::from_secs(60))
-        .await
-        .unwrap();
-
-    let result = detector.evaluate(&ctx).await.unwrap();
+    b.record_ip_attempt(ip).await.unwrap();
+    let result = a.evaluate(&ctx).await.unwrap();
     assert_eq!(result.reaction, RuleReaction::RequireCaptcha);
     assert_eq!(result.rule, "credential_stuffing");
 }

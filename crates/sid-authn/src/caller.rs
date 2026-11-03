@@ -18,7 +18,7 @@ use crate::account_roles::ADMIN_ROLE_CLAIM;
 /// carries no resource-bound grant, so it is never an installation caller.
 const ACR_PAT: &str = "urn:sid:acr:pat";
 /// `acr` of an impersonation token (RFC 8693 token exchange).
-const ACR_IMPERSONATION: &str = "urn:sid:acr:impersonation";
+pub const ACR_IMPERSONATION: &str = "urn:sid:acr:impersonation";
 
 /// What kind of session the caller's token stands for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +108,55 @@ fn unauthenticated() -> Status {
     ApiError::new(ErrorReason::TokenInvalid, "authentication required").into()
 }
 
+/// Where a verifier learns whether a validly signed token can still act.
+#[async_trait::async_trait]
+pub trait CurrentToken: Send + Sync {
+    /// Whether `token`, verified as `claims`, can no longer act. A source
+    /// that cannot answer refuses the request as unavailable.
+    async fn ended(&self, token: &str, claims: &AccessTokenClaims) -> Result<bool, Status>;
+}
+
+/// In the issuer's own process: its revocation record.
+#[async_trait::async_trait]
+impl CurrentToken for RevocationCache {
+    async fn ended(&self, _token: &str, claims: &AccessTokenClaims) -> Result<bool, Status> {
+        check_revocation(self, claims).await
+    }
+}
+
+#[async_trait::async_trait]
+impl<T: CurrentToken + ?Sized> CurrentToken for std::sync::Arc<T> {
+    async fn ended(&self, token: &str, claims: &AccessTokenClaims) -> Result<bool, Status> {
+        (**self).ended(token, claims).await
+    }
+}
+
+/// A resource apart from its issuer: a revocation its local view already
+/// knows refuses at once; every other token is asked of the exact issuer,
+/// whose answer alone admits it (resource-sdk.md token-state freshness). The
+/// view's silence or failure proves nothing either way.
+pub struct AtIssuer {
+    pub known: std::sync::Arc<RevocationCache>,
+    pub issuer: std::sync::Arc<dyn crate::issuer_state::IssuerState>,
+}
+
+#[async_trait::async_trait]
+impl CurrentToken for AtIssuer {
+    async fn ended(&self, token: &str, claims: &AccessTokenClaims) -> Result<bool, Status> {
+        if claims.iss != self.issuer.issuer() {
+            return Ok(true);
+        }
+        if let Ok(true) = self.known.is_revoked(&claims.jti, &claims.sid).await {
+            return Ok(true);
+        }
+        let active =
+            self.issuer.active(token).await.map_err(|e| {
+                sid_core::grpc_error::refuse::dependency_unavailable("token state", e)
+            })?;
+        Ok(!active)
+    }
+}
+
 /// The bearer access token of `request`.
 ///
 /// A `DPoP` authorization scheme is refused: these services do not verify
@@ -170,7 +219,7 @@ impl Verified {
 pub async fn verify_request<T>(
     request: &Request<T>,
     verifier: &TokenVerifier,
-    revocation: &RevocationCache,
+    current: &(impl CurrentToken + ?Sized),
 ) -> Result<Verified, Status> {
     let token = bearer_token(request)?;
     let (claims, caller, source) = match verifier
@@ -190,7 +239,7 @@ pub async fn verify_request<T>(
     if claims.cnf.is_some() {
         return Err(unauthenticated());
     }
-    if check_revocation(revocation, &claims).await? {
+    if current.ended(token, &claims).await? {
         return Err(unauthenticated());
     }
     Ok(Verified {
@@ -216,16 +265,16 @@ pub enum FactorToken {
 pub async fn verify_factor_request<T>(
     request: &Request<T>,
     verifier: &TokenVerifier,
-    revocation: &RevocationCache,
+    current: &(impl CurrentToken + ?Sized),
 ) -> Result<FactorToken, Status> {
     let token = bearer_token(request)?;
     if let Ok(claims) = verifier.validate_pending_access_token(token) {
-        if claims.cnf.is_some() || check_revocation(revocation, &claims).await? {
+        if claims.cnf.is_some() || current.ended(token, &claims).await? {
             return Err(unauthenticated());
         }
         return Ok(FactorToken::Pending(claims));
     }
-    verify_request(request, verifier, revocation)
+    verify_request(request, verifier, current)
         .await
         .map(FactorToken::Session)
 }
@@ -237,7 +286,7 @@ pub async fn verify_factor_request<T>(
 pub async fn verify_token(
     token: &str,
     verifier: &TokenVerifier,
-    revocation: &RevocationCache,
+    current: &(impl CurrentToken + ?Sized),
 ) -> Result<AccessTokenClaims, Status> {
     let claims = verifier
         .validate_access_token(token)
@@ -245,7 +294,7 @@ pub async fn verify_token(
     if claims.cnf.is_some() {
         return Err(unauthenticated());
     }
-    if check_revocation(revocation, &claims).await? {
+    if current.ended(token, &claims).await? {
         return Err(unauthenticated());
     }
     Ok(claims)
@@ -272,9 +321,9 @@ pub async fn check_revocation(
 pub async fn authenticate<T>(
     request: &Request<T>,
     verifier: &TokenVerifier,
-    revocation: &RevocationCache,
+    current: &(impl CurrentToken + ?Sized),
 ) -> Result<Caller, Status> {
-    Ok(verify_request(request, verifier, revocation).await?.caller)
+    Ok(verify_request(request, verifier, current).await?.caller)
 }
 
 impl Caller {

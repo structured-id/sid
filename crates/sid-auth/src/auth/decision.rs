@@ -11,8 +11,9 @@
 //! 2. Match its route policy for the original path and method
 //! 3. auth: none → allow, no identity
 //! 4. Resolve the registered target, then validate the token for it
-//! 5. Revocation and sender constraint
-//! 6. Required roles and, when configured, sid-authz
+//! 5. Known revocation and sender constraint
+//! 6. Required roles, then the token's current state at its issuer: in the
+//!    sid-authz question, the proof's admission, or introspection
 //! 7. Identity headers
 
 use std::sync::Arc;
@@ -28,6 +29,16 @@ use super::policy::{AuthRequirement, PolicyEngine};
 use super::sender::check_sender;
 use sid_authn::issuer_directory::IssuerDirectory;
 
+/// 401 with the DPoP `challenge` (RFC 9449 §7.1), without a login redirect:
+/// signing in again does not supply a proof.
+fn proof_refused(challenge: &'static str) -> Verdict {
+    let mut refusal = Verdict::bare(StatusCode::UNAUTHORIZED);
+    refusal
+        .headers
+        .insert(WWW_AUTHENTICATE, HeaderValue::from_static(challenge));
+    refusal
+}
+
 /// What forward auth needs to decide.
 pub struct Pdp {
     /// The installation's issuers and registered resources.
@@ -36,13 +47,16 @@ pub struct Pdp {
     pub applications: Arc<PolicyEngine>,
     /// Revoked tokens and sessions, as every SID process records them.
     pub revocation: Arc<sid_authn::revocation_cache::RevocationCache>,
-    /// DPoP proof checks; proof `jti`s are recorded in the shared cache.
-    pub dpop: Arc<sid_authn::dpop::DPopValidator>,
-    /// Channel to sid-authz for routes that ask it.
+    /// Channel to the SID server: sid-authz for routes that ask it, and the
+    /// issuer, which admits each DPoP proof once.
     pub authz: tonic::transport::Channel,
-    /// This service's own credential for the authorization API; routes that
-    /// ask sid-authz have no verdict without it.
+    /// This service's own credential for the authorization API and the
+    /// issuer; routes that ask sid-authz, and DPoP-bound tokens, have no
+    /// verdict without it.
     pub checker: Option<Arc<sid_infra::client_credential::ClientCredential>>,
+    /// The tokens' current state at their issuer, for routes that ask no
+    /// permission question; such a route has no verdict without it.
+    pub token_state: Option<Arc<dyn sid_authn::issuer_state::IssuerState>>,
     /// Where a 401 sends a browser to sign in; empty for none.
     pub login_url: String,
 }
@@ -149,42 +163,50 @@ impl Pdp {
             }
         };
 
-        // A revoked token or session opens nothing; an unanswerable check
-        // refuses rather than admits.
+        // A revocation this service already knows refuses at once. A miss is
+        // no evidence that the token is still active, and an unanswerable
+        // view stops nothing: the token's current state comes from its
+        // issuer below, on every route.
         match self.revocation.is_revoked(&claims.jti, &claims.sid).await {
             Ok(false) => {}
             Ok(true) => {
                 tracing::debug!(sid = %claims.sid, "token or session revoked");
                 return Ok(anonymous_or(self.unauthorized(request.path)));
             }
-            Err(e) => {
-                tracing::error!(error = %e, "revocation check unavailable");
-                return Err(DecisionError::Unavailable("revocation check"));
-            }
+            Err(e) => tracing::warn!(error = %e, "revocation view unavailable, asking the issuer"),
         }
 
         // A key-bound token needs its proof for this request (RFC 9449 §7.1),
         // checked against the configured origin of the application, not
         // against a forwarded host the client could have set.
         let uri = format!("{}{}", app.origin, request.path);
-        if let Err(e) = check_sender(
-            &self.dpop,
+        let proof = match check_sender(
             presented,
             &claims,
             request.headers,
             request.method.as_str(),
             Some(&uri),
-        )
-        .await
-        {
-            tracing::debug!(error = %e, "sender constraint not met");
-            let mut refusal = Verdict::bare(StatusCode::UNAUTHORIZED);
-            // No login redirect: signing in again does not supply a proof.
-            refusal
-                .headers
-                .insert(WWW_AUTHENTICATE, HeaderValue::from_static(e.challenge()));
-            return Ok(anonymous_or(refusal));
-        }
+        ) {
+            Ok(proof) => proof,
+            Err(e) => {
+                tracing::debug!(error = %e, "sender constraint not met");
+                return Ok(anonymous_or(proof_refused(e.challenge())));
+            }
+        };
+        // The proof's confirmation, made once for this request: the issuer
+        // admits the proof once, within the permission question when the
+        // route asks one, on its own otherwise.
+        let confirmation = match (&proof, &claims.cnf) {
+            (Some(proof), Some(cnf)) => Some(super::permission::dpop_confirmation(
+                &cnf.jkt,
+                request.method.as_str(),
+                &uri,
+                claims.exp,
+                proof,
+                chrono::Utc::now(),
+            )),
+            _ => None,
+        };
 
         if !policy.required_roles.is_empty() && !has_any_role(&claims, &policy.required_roles) {
             tracing::debug!(
@@ -196,6 +218,59 @@ impl Pdp {
             return Ok(Verdict::bare(StatusCode::FORBIDDEN));
         }
 
+        // A route that asks no permission question gets the token's current
+        // state from its issuer otherwise: the admission of its proof, which
+        // checks it, or the issuer's introspection of a bearer token.
+        if policy.authz_action.is_none() && confirmation.is_none() {
+            // The token goes only to its own issuer, the one that knows it.
+            let Some(state) = self
+                .token_state
+                .as_deref()
+                .filter(|state| state.issuer() == app.target.issuer)
+            else {
+                tracing::error!(
+                    application,
+                    "no credential at the token's issuer for its state"
+                );
+                return Err(DecisionError::Unavailable("token state"));
+            };
+            match state.active(presented.token()).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::debug!(sid = %claims.sid, "token not active at its issuer");
+                    return Ok(anonymous_or(self.unauthorized(request.path)));
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "token state unavailable");
+                    return Err(DecisionError::Unavailable("token state"));
+                }
+            }
+        }
+
+        if policy.authz_action.is_none()
+            && let Some(confirmation) = &confirmation
+        {
+            match super::permission::admit(
+                self.checker.as_deref(),
+                &self.authz,
+                application,
+                &app.target.issuer,
+                presented.token(),
+                resource,
+                confirmation,
+            )
+            .await
+            .map_err(|_| DecisionError::Unavailable("sender proof admission"))?
+            {
+                true => {}
+                false => {
+                    return Ok(anonymous_or(proof_refused(
+                        r#"DPoP error="invalid_dpop_proof""#,
+                    )));
+                }
+            }
+        }
+
         if let Some(action) = &policy.authz_action {
             let question = super::permission::Question {
                 asking: application,
@@ -205,8 +280,7 @@ impl Pdp {
                 object: "",
                 token: presented.token(),
                 claims: &claims,
-                method: request.method.as_str(),
-                uri: &uri,
+                confirmation: confirmation.as_ref(),
             };
             use super::permission::Permission;
             match super::permission::ask(self.checker.as_deref(), &self.authz, question)

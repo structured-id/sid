@@ -11,7 +11,7 @@ use sid_opaque_ke::{
     ClientLogin, ClientLoginFinishParameters, ClientRegistration,
     ClientRegistrationFinishParameters,
 };
-use sid_plugin::cache::{CacheBackend, InMemoryCacheBackend};
+use sid_plugin::{CeremonyStateStore, InProcessCeremonyState};
 use sid_plugin::{CurveId, OpaqueOperations, StorageBackend};
 use sid_storage::sqlite::SqliteBackend;
 
@@ -47,8 +47,8 @@ struct Host {
     /// Opening a password writes it back in this new stored form, as a
     /// reseal under a newer key version does.
     reseal_to: Mutex<Option<Vec<u8>>>,
-    /// The shared cache the sign-in states live in.
-    cache: Arc<dyn CacheBackend>,
+    /// The ceremony state store the sign-in states live in.
+    ceremonies: Arc<dyn CeremonyStateStore>,
 }
 
 #[async_trait]
@@ -129,12 +129,12 @@ async fn host() -> Host {
     let setup = primary.create_setup(None).unwrap();
     let mut verifiers: HashMap<CurveId, Box<dyn OpaqueOperations>> = HashMap::new();
     verifiers.insert(CurveId::Ristretto255, Box::new(RistrettoOpaque::new()));
-    let cache: Arc<dyn CacheBackend> = Arc::new(InMemoryCacheBackend::new());
+    let ceremonies: Arc<dyn CeremonyStateStore> = Arc::new(InProcessCeremonyState::new());
     Host {
         store: SqliteBackend::new_in_memory().await.unwrap(),
         router: OpaqueRouter::new(primary, verifiers, setup),
         pending: ChallengeStore::new(
-            cache.clone(),
+            ceremonies.clone(),
             key_manager(),
             "sign-in",
             Duration::from_secs(60),
@@ -144,7 +144,7 @@ async fn host() -> Host {
         failures: Mutex::default(),
         gone: Mutex::default(),
         reseal_to: Mutex::default(),
-        cache,
+        ceremonies,
     }
 }
 
@@ -261,7 +261,7 @@ async fn an_unreadable_state_is_an_expired_sign_in() {
     let owner = account(&h, "upgraded").await;
     let password = with_password(&h, owner).await;
     let earlier: ChallengeStore<serde_json::Value> = ChallengeStore::new(
-        h.cache.clone(),
+        h.ceremonies.clone(),
         key_manager(),
         "sign-in",
         Duration::from_secs(60),
@@ -607,7 +607,7 @@ fn a_fenced_state_is_unreadable_to_an_unfenced_build() {
 async fn an_earlier_decoy_state_is_an_expired_sign_in() {
     let h = host().await;
     let earlier: ChallengeStore<serde_json::Value> = ChallengeStore::new(
-        h.cache.clone(),
+        h.ceremonies.clone(),
         key_manager(),
         "sign-in",
         Duration::from_secs(60),

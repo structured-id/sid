@@ -338,15 +338,13 @@ async fn a_proof_is_admitted_once_across_replicas() {
 #[tokio::test]
 async fn without_the_replay_record_the_token_endpoint_is_unavailable() {
     let profile = test_profile();
-    let svc = TestServices::with_cache(
+    let svc = TestServices::new(
         MockStorage::new()
             .with_client(test_client())
             .with_profile(profile.clone()),
-        std::sync::Arc::new(common::NoReplayRecord(std::sync::Arc::new(
-            sid_plugin::cache::InMemoryCacheBackend::new(),
-        ))),
     );
     let code = authorize_code(&svc, &profile).await;
+    svc.mock_storage.fail_admissions("dpop-jti");
     let err = svc
         .auth
         .o_auth2_token(with_dpop(code_exchange(&svc, &code), &proof(&token_rpc())))

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::*;
-use sid_plugin::cache::InMemoryCacheBackend;
 use std::sync::Arc;
 #[cfg(feature = "grpc")]
 use tonic::metadata::MetadataValue;
@@ -12,7 +11,7 @@ const TOKEN: &str = "eyJ.bound.token";
 const FIXTURE_JKT: &str = "IzldvVrK202QRbmgX2y6_CaeNdfk9cCd6-2B-mLPdBA";
 
 fn validator() -> DPopValidator {
-    DPopValidator::new(Arc::new(InMemoryCacheBackend::new()))
+    DPopValidator::new(Arc::new(sid_plugin::InProcessCeremonyState::new()))
 }
 
 /// A proof by the fixture key for `GET htu`, naming `token`.

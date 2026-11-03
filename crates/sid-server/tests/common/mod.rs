@@ -88,65 +88,6 @@ impl AuditLog for NoOpAuditLog {
     }
 }
 
-/// A shared cache whose DPoP replay records cannot be written, every other
-/// key served by the cache it wraps: a proof's single use cannot be recorded.
-#[allow(dead_code)]
-pub struct NoReplayRecord(pub Arc<dyn sid_plugin::cache::CacheBackend>);
-
-#[async_trait::async_trait]
-impl sid_plugin::cache::CacheBackend for NoReplayRecord {
-    async fn get(&self, key: &str) -> sid_plugin::cache::CacheResult<Option<Vec<u8>>> {
-        self.0.get(key).await
-    }
-    async fn set(
-        &self,
-        key: &str,
-        value: &[u8],
-        ttl: std::time::Duration,
-    ) -> sid_plugin::cache::CacheResult<()> {
-        self.0.set(key, value, ttl).await
-    }
-    async fn delete(&self, key: &str) -> sid_plugin::cache::CacheResult<()> {
-        self.0.delete(key).await
-    }
-    async fn take(&self, key: &str) -> sid_plugin::cache::CacheResult<Option<Vec<u8>>> {
-        self.0.take(key).await
-    }
-    async fn exists(&self, key: &str) -> sid_plugin::cache::CacheResult<bool> {
-        self.0.exists(key).await
-    }
-    async fn set_nx(
-        &self,
-        key: &str,
-        value: &[u8],
-        ttl: std::time::Duration,
-    ) -> sid_plugin::cache::CacheResult<bool> {
-        if key.starts_with("jti:dpop:") {
-            return Err(sid_plugin::cache::CacheError::Connection("down".into()));
-        }
-        self.0.set_nx(key, value, ttl).await
-    }
-    async fn incr(
-        &self,
-        key: &str,
-        ttl: std::time::Duration,
-    ) -> sid_plugin::cache::CacheResult<u64> {
-        self.0.incr(key, ttl).await
-    }
-    async fn publish(&self, channel: &str, message: &[u8]) -> sid_plugin::cache::CacheResult<()> {
-        self.0.publish(channel, message).await
-    }
-    async fn subscribe(
-        &self,
-        channel: &str,
-    ) -> sid_plugin::cache::CacheResult<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>> {
-        self.0.subscribe(channel).await
-    }
-    async fn health_check(&self) -> sid_plugin::cache::CacheResult<()> {
-        self.0.health_check().await
-    }
-}
-
 /// The shared cache of the test stack (Redis 63799).
 #[allow(dead_code)]
 pub async fn test_redis() -> Arc<dyn sid_plugin::cache::CacheBackend> {
@@ -258,11 +199,12 @@ pub fn test_revocation() -> Arc<RevocationCache> {
     ))
 }
 
-/// A WebAuthn server keeping its ceremony state in `cache`.
-pub fn test_webauthn(cache: Arc<dyn sid_plugin::cache::CacheBackend>) -> Arc<WebAuthnServer> {
+/// A WebAuthn server keeping its ceremony state in `storage`, as a server
+/// does.
+pub fn test_webauthn(storage: Arc<dyn StorageBackend>) -> Arc<WebAuthnServer> {
     let origin = Url::parse("https://sid.example.com").unwrap();
     Arc::new(
-        WebAuthnServer::new("sid.example.com", &origin, cache, test_key_manager())
+        WebAuthnServer::new("sid.example.com", &origin, storage, test_key_manager())
             .expect("WebAuthn creation failed"),
     )
 }
@@ -880,7 +822,7 @@ pub fn auth_service(
     let opaque_zkpp: Arc<arc_swap::ArcSwap<Option<Arc<ZkppOpaqueServer>>>> =
         Arc::new(arc_swap::ArcSwap::from_pointee(Some(zkpp)));
 
-    let otp_service = sid_authn::otp::OtpService::new(cache.clone());
+    let otp_service = sid_authn::otp::OtpService::new(storage.clone());
     let service = AuthServiceImpl::new(
         storage.clone(),
         oauth2,
@@ -960,6 +902,47 @@ pub fn auth_service_under(
         login_policy,
         test_revocation(),
     )
+}
+
+/// A shared cache that cannot be reached: every operation fails.
+#[allow(dead_code)]
+pub struct DownCache;
+
+fn down() -> sid_plugin::cache::CacheError {
+    sid_plugin::cache::CacheError::Connection("down".into())
+}
+
+#[async_trait::async_trait]
+impl sid_plugin::cache::CacheBackend for DownCache {
+    async fn get(&self, _: &str) -> sid_plugin::cache::CacheResult<Option<Vec<u8>>> {
+        Err(down())
+    }
+    async fn set(
+        &self,
+        _: &str,
+        _: &[u8],
+        _: std::time::Duration,
+    ) -> sid_plugin::cache::CacheResult<()> {
+        Err(down())
+    }
+    async fn delete(&self, _: &str) -> sid_plugin::cache::CacheResult<()> {
+        Err(down())
+    }
+    async fn take(&self, _: &str) -> sid_plugin::cache::CacheResult<Option<Vec<u8>>> {
+        Err(down())
+    }
+    async fn publish(&self, _: &str, _: &[u8]) -> sid_plugin::cache::CacheResult<()> {
+        Err(down())
+    }
+    async fn subscribe(
+        &self,
+        _: &str,
+    ) -> sid_plugin::cache::CacheResult<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>> {
+        Err(down())
+    }
+    async fn health_check(&self) -> sid_plugin::cache::CacheResult<()> {
+        Err(down())
+    }
 }
 
 /// A shared cache whose session revocations fail while `down` is set, every
@@ -1044,7 +1027,7 @@ pub fn auth_service_revoking(
             opaque_router: test_opaque_router(),
             oauth2: Arc::new(OAuth2Server::new(jwt.clone())),
             jwt,
-            webauthn: test_webauthn(cache),
+            webauthn: test_webauthn(storage.clone()),
             revocation_cache: revocation_cache.clone(),
             feature_flags: FeatureFlagService::disabled(),
             magic_link: None,
@@ -1095,6 +1078,9 @@ pub struct TestServices {
     pub account: sid_server::grpc::account_service::AccountServiceImpl,
     pub storage: Arc<dyn StorageBackend>,
     pub mock_storage: Arc<MockStorage>,
+    /// The authorization service, with no configured verifier.
+    #[allow(dead_code)]
+    pub authz: Arc<sid_authz::grpc::AuthzServiceImpl>,
     #[allow(dead_code)]
     pub cache: Arc<dyn sid_plugin::cache::CacheBackend>,
     pub jwt: Arc<JwtService>,
@@ -1381,6 +1367,27 @@ impl TestServices {
         (a, b)
     }
 
+    /// Two replicas over one database, each with its own view of the shared
+    /// cache: one may see it down while the other runs without it.
+    #[allow(dead_code)]
+    pub async fn replicas_seeing(
+        storage: MockStorage,
+        a: Arc<dyn sid_plugin::cache::CacheBackend>,
+        b: Arc<dyn sid_plugin::cache::CacheBackend>,
+    ) -> (Self, Self) {
+        let storage = Arc::new(storage);
+        let first = Self::replica(storage.clone(), a).await;
+        let second = Self::replica(storage, b).await;
+        (first, second)
+    }
+
+    /// Another replica over this one's database with `cache`, started now:
+    /// a cache that restarted empty, or one this replica cannot reach.
+    #[allow(dead_code)]
+    pub async fn restarted_with(&self, cache: Arc<dyn sid_plugin::cache::CacheBackend>) -> Self {
+        Self::replica(self.mock_storage.clone(), cache).await
+    }
+
     /// Another replica over this one's database and cache, started now: a
     /// restart, or a replica added later.
     #[allow(dead_code)]
@@ -1410,11 +1417,7 @@ impl TestServices {
                 login_policy: None,
             },
         );
-        replica
-            .revocation_cache
-            .listen()
-            .await
-            .expect("revocation listener");
+        replica.revocation_cache.listen().await;
         replica
     }
 
@@ -1483,10 +1486,11 @@ impl TestServices {
             .expect("account API verifier");
         let jwt = Arc::new(test_jwt_service().with_account_api(Arc::new(account_api)));
         let oauth2 = Arc::new(OAuth2Server::new(jwt.clone()));
-        let webauthn = test_webauthn(cache_backend.clone());
-        let revocation_cache = Arc::new(RevocationCache::new(
+        let webauthn = test_webauthn(storage.clone());
+        let revocation_cache = Arc::new(RevocationCache::recorded_in(
             std::time::Duration::from_secs(900),
             cache_backend.clone(),
+            storage.clone(),
         ));
         let magic_link = magic_links
             .then(|| Arc::new(MagicLinkService::new(storage.clone(), test_key_manager())));
@@ -1571,9 +1575,22 @@ impl TestServices {
             jwt.clone(),
             revocation_cache.clone(),
         );
+        // The authorization service as a server composes it, without a
+        // configured verifier: no proof admission is trusted until a test
+        // configures one.
+        let authz = Arc::new(sid_authz::grpc::AuthzServiceImpl::new(
+            Arc::new(sid_authz::CeAuthzEngine::new(storage.clone())),
+            storage.clone(),
+            sid_authz::cedar::CedarService::new(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            jwt.clone(),
+            revocation_cache.clone(),
+            RecordingAuditLog::shared(),
+        ));
         let oidc_issuer = sid_server::grpc::oidc_issuer_service::OidcIssuerServiceImpl::new(
             issuers.clone(),
             storage.clone(),
+            authz.clone(),
         );
         let evaluator = auth
             .history_evaluator()
@@ -1587,7 +1604,6 @@ impl TestServices {
         let upstream = sid_server::grpc::upstream_service::UpstreamServiceImpl::new(
             storage.clone(),
             test_key_manager(),
-            cache_backend.clone(),
             jwt.clone(),
             revocation_cache.clone(),
             auth.clone(),
@@ -1607,6 +1623,7 @@ impl TestServices {
             account,
             storage,
             mock_storage,
+            authz,
             cache: cache_backend,
             jwt,
             event_bus,

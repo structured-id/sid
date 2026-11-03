@@ -9,7 +9,6 @@ mod common;
 use sid_authn::anomaly::{AnomalyDetector, LoginContext, RuleReaction};
 use sid_core::models::session::Session;
 use sid_core::models::{AuditEntry, ProfileId};
-use sid_plugin::cache::NoCacheBackend;
 use sid_plugin::storage::StorageBackend;
 use std::sync::Arc;
 use std::time::Duration;
@@ -141,8 +140,7 @@ async fn test_has_recent_session_different_profiles_independent() {
 async fn test_new_ip_true_triggers_step_up_with_new_device() {
     // new_device_ip rule requires BOTH new_device=true AND new_ip=true, for a
     // profile that has signed in before (prev_login_at).
-    let cache = Arc::new(NoCacheBackend);
-    let detector = AnomalyDetector::ce_default(cache);
+    let detector = AnomalyDetector::ce_default(Arc::new(sid_plugin::InProcessCeremonyState::new()));
 
     let ctx = LoginContext {
         identity: "test-user".to_string(),
@@ -171,8 +169,7 @@ async fn test_new_ip_true_triggers_step_up_with_new_device() {
 #[tokio::test]
 async fn test_new_ip_true_but_known_device_allows() {
     // new_device=false, new_ip=true → rule does NOT fire (needs both).
-    let cache = Arc::new(NoCacheBackend);
-    let detector = AnomalyDetector::ce_default(cache);
+    let detector = AnomalyDetector::ce_default(Arc::new(sid_plugin::InProcessCeremonyState::new()));
 
     let ctx = LoginContext {
         identity: "test-user".to_string(),
@@ -200,8 +197,7 @@ async fn test_new_ip_true_but_known_device_allows() {
 #[tokio::test]
 async fn test_known_ip_allows() {
     // Both false → no anomaly.
-    let cache = Arc::new(NoCacheBackend);
-    let detector = AnomalyDetector::ce_default(cache);
+    let detector = AnomalyDetector::ce_default(Arc::new(sid_plugin::InProcessCeremonyState::new()));
 
     let ctx = LoginContext {
         identity: "test-user".to_string(),

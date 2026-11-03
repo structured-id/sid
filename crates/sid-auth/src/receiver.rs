@@ -52,11 +52,9 @@ pub struct Receiver {
     /// Scheme and authority of this service as its callers address it, the
     /// prefix of every proof's `htu`; never taken from the request.
     origin: String,
-    /// Proof checks; `jti`s are recorded where every replica of this
-    /// resource records them, so a proof is accepted once.
-    dpop: Arc<sid_authn::dpop::DPopValidator>,
     checker: Arc<ClientCredential>,
-    /// Channel to the issuer's authorization API.
+    /// Channel to the issuer: its authorization API, and its admission of
+    /// each DPoP proof once across every replica (RFC 9449 §11.1).
     authz: tonic::transport::Channel,
 }
 
@@ -88,13 +86,17 @@ enum Decision {
 }
 
 /// What an object action's question is asked with once its object is known:
-/// the call's verified token, action and request, and who asks.
+/// the call's verified token, action and proof confirmation, and who asks.
 struct PendingQuestion {
     receiver: Arc<Receiver>,
     action: &'static str,
     token: secrecy::SecretString,
-    method: String,
-    uri: String,
+    /// The confirmation of the call's proof, already admitted by the issuer;
+    /// the question carries it again and the issuer confirms that admission.
+    confirmation: Option<sid_proto::sid::v1::authn::RequestConfirmation>,
+    /// The issuer reported the token active at admission: its owner may be
+    /// let through without a question ([`allow_owner`]).
+    current: bool,
 }
 
 impl std::fmt::Debug for PendingQuestion {
@@ -114,6 +116,14 @@ pub enum Action {
     /// On one object the request names, decided by the handler with that
     /// object ([`authorize_object`]) before its effect.
     OnObject(&'static str),
+    /// On one object the request names that its owner acts on by the
+    /// service's own rule: the handler lets the owner through
+    /// ([`allow_owner`]) and has any other caller decided for that object
+    /// ([`authorize_object`]). No permission question is asked of the
+    /// owner, so the token's current state is the issuer's answer to this
+    /// service's inspection of it at admission; the service's credential
+    /// holds the inspection permission on its resource for that.
+    OwnedObject(&'static str),
 }
 
 /// A call whose token and proof are verified for this resource: what its
@@ -122,7 +132,9 @@ struct Verified<'a> {
     claims: ForwardAuthClaims,
     resource: sid_core::models::ResourceId,
     presented: crate::auth::jwt::Presented<'a>,
-    uri: String,
+    /// The confirmation of the call's proof, made once for the call; `None`
+    /// for a token bound to no key.
+    confirmation: Option<sid_proto::sid::v1::authn::RequestConfirmation>,
 }
 
 impl Receiver {
@@ -143,7 +155,6 @@ impl Receiver {
             sid_infra::deadline::Deadline::new(upstream.clone(), std::time::Duration::from_secs(5));
         let checker =
             ClientCredential::checker(&config.checker, &config.issuer_url, issuer.clone())?;
-        let cache = crate::shared_cache(config.cache_url.as_deref()).await?;
         Ok(Self::new(
             name,
             Arc::new(IssuerDirectory::new(
@@ -155,7 +166,6 @@ impl Receiver {
                 resource: config.resource.clone(),
             },
             &config.origin,
-            Arc::new(sid_authn::dpop::DPopValidator::new(cache)),
             Arc::new(checker),
             upstream,
         ))
@@ -167,7 +177,6 @@ impl Receiver {
         issuers: Arc<IssuerDirectory>,
         target: Target,
         origin: &str,
-        dpop: Arc<sid_authn::dpop::DPopValidator>,
         checker: Arc<ClientCredential>,
         authz: tonic::transport::Channel,
     ) -> Self {
@@ -176,7 +185,6 @@ impl Receiver {
             issuers,
             target,
             origin: origin.trim_end_matches('/').to_owned(),
-            dpop,
             checker,
             authz,
         }
@@ -193,7 +201,9 @@ impl Receiver {
         action: &str,
     ) -> Result<Admitted, Status> {
         let verified = self.verify(method, path, headers).await?;
-        self.decide(&verified, method, action, "").await?;
+        // The question admits the call's proof at the issuer within its own
+        // exchange.
+        self.decide(&verified, action, "").await?;
         Ok(Admitted {
             claims: verified.claims,
             resource: verified.resource,
@@ -211,14 +221,50 @@ impl Receiver {
         path: &str,
         headers: &HeaderMap,
         action: &'static str,
+        owned: bool,
     ) -> Result<Admitted, Status> {
         let verified = self.verify(method, path, headers).await?;
+        // An owner is let through without a question, so whether the token is
+        // still current is asked of its issuer now (RFC 7662 §2.2).
+        if owned {
+            match self.checker.introspect(verified.presented.token()).await {
+                Ok(true) => {}
+                Ok(false) => return Err(unauthenticated()),
+                Err(e) => {
+                    return Err(sid_core::grpc_error::refuse::dependency_unavailable(
+                        "token state",
+                        e,
+                    ));
+                }
+            }
+        }
+        // No question is asked before the handler names the object, so the
+        // issuer admits the call's proof now: a replayed proof reaches no
+        // handler.
+        if let Some(confirmation) = &verified.confirmation {
+            match crate::auth::permission::admit(
+                Some(&self.checker),
+                &self.authz,
+                &self.name,
+                &self.target.issuer,
+                verified.presented.token(),
+                verified.resource,
+                confirmation,
+            )
+            .await
+            .map_err(|e| {
+                sid_core::grpc_error::refuse::dependency_unavailable("sender proof admission", e)
+            })? {
+                true => {}
+                false => return Err(unauthenticated()),
+            }
+        }
         let pending = PendingQuestion {
             receiver: self.clone(),
             action,
             token: verified.presented.token().into(),
-            method: method.as_str().to_owned(),
-            uri: verified.uri,
+            confirmation: verified.confirmation,
+            current: owned,
         };
         Ok(Admitted {
             claims: verified.claims,
@@ -228,11 +274,10 @@ impl Receiver {
     }
 
     /// The issuer's decision on `verified`'s subject performing `action` on
-    /// `object` (empty: the resource itself), made with `method`.
+    /// `object` (empty: the resource itself).
     async fn decide(
         &self,
         verified: &Verified<'_>,
-        method: &http::Method,
         action: &str,
         object: &str,
     ) -> Result<(), Status> {
@@ -240,8 +285,7 @@ impl Receiver {
             verified.presented.token(),
             &verified.claims,
             verified.resource,
-            method.as_str(),
-            &verified.uri,
+            verified.confirmation.as_ref(),
             action,
             object,
         )
@@ -249,16 +293,14 @@ impl Receiver {
     }
 
     /// Ask the issuer whether the subject of `token` (verified as `claims`
-    /// for `resource`, its request `method` and `uri`) may perform `action`
-    /// on `object`.
-    #[allow(clippy::too_many_arguments)]
+    /// for `resource`, its proof confirmed by `confirmation`) may perform
+    /// `action` on `object`.
     async fn ask(
         &self,
         token: &str,
         claims: &ForwardAuthClaims,
         resource: sid_core::models::ResourceId,
-        method: &str,
-        uri: &str,
+        confirmation: Option<&sid_proto::sid::v1::authn::RequestConfirmation>,
         action: &str,
         object: &str,
     ) -> Result<(), Status> {
@@ -270,8 +312,7 @@ impl Receiver {
             object,
             token,
             claims,
-            method,
-            uri,
+            confirmation,
         };
         use crate::auth::permission::Permission;
         match crate::auth::permission::ask(Some(&self.checker), &self.authz, question)
@@ -333,24 +374,35 @@ impl Receiver {
             }
         };
         let uri = format!("{}{path}", self.origin);
-        if let Err(e) = crate::auth::sender::check_sender(
-            &self.dpop,
+        let proof = crate::auth::sender::check_sender(
             presented,
             &claims,
             headers,
             method.as_str(),
             Some(&uri),
         )
-        .await
-        {
+        .map_err(|e| {
             tracing::debug!(receiver = self.name, error = %e, "sender constraint not met");
-            return Err(unauthenticated());
-        }
+            unauthenticated()
+        })?;
+        // Made once for the call: every question about it carries the same
+        // request identifier, so the issuer admits its proof once.
+        let confirmation = match (&proof, &claims.cnf) {
+            (Some(proof), Some(cnf)) => Some(crate::auth::permission::dpop_confirmation(
+                &cnf.jkt,
+                method.as_str(),
+                &uri,
+                claims.exp,
+                proof,
+                chrono::Utc::now(),
+            )),
+            _ => None,
+        };
         Ok(Verified {
             claims,
             resource,
             presented,
-            uri,
+            confirmation,
         })
     }
 }
@@ -428,7 +480,12 @@ where
                 }
                 Action::OnObject(action) => {
                     receiver
-                        .admit_pending(request.method(), &path, request.headers(), action)
+                        .admit_pending(request.method(), &path, request.headers(), action, false)
+                        .await
+                }
+                Action::OwnedObject(action) => {
+                    receiver
+                        .admit_pending(request.method(), &path, request.headers(), action, true)
                         .await
                 }
             };
@@ -493,8 +550,7 @@ pub async fn authorize_object<T>(
                 pending.token.expose_secret(),
                 &admitted.claims,
                 admitted.resource,
-                &pending.method,
-                &pending.uri,
+                pending.confirmation.as_ref(),
                 pending.action,
                 object,
             )
@@ -506,6 +562,39 @@ pub async fn authorize_object<T>(
         .ok_or_else(unauthenticated)?;
     admitted.decision = Decision::Allowed;
     Ok(())
+}
+
+/// The verified claims of an owned-object action not yet decided, for the
+/// handler to establish by its own rule whether the caller owns the object
+/// the request names; nothing else is decided from them. Any other call is
+/// refused: its claims are given out only through [`admitted`].
+pub fn owner_claims<T>(request: &tonic::Request<T>) -> Result<&ForwardAuthClaims, Status> {
+    let admitted = request
+        .extensions()
+        .get::<Admitted>()
+        .ok_or_else(unauthenticated)?;
+    match &admitted.decision {
+        Decision::Pending(pending) if pending.current => Ok(&admitted.claims),
+        _ => Err(undecided()),
+    }
+}
+
+/// Admit the call of an owned-object action ([`Action::OwnedObject`]) for
+/// its owner, as the handler established by its own rule: the issuer found
+/// the token current at admission. Any other call is a wiring fault and is
+/// refused: an object action of another kind never established that state.
+pub fn allow_owner<T>(request: &mut tonic::Request<T>) -> Result<(), Status> {
+    let admitted = request
+        .extensions_mut()
+        .get_mut::<Admitted>()
+        .ok_or_else(unauthenticated)?;
+    match &admitted.decision {
+        Decision::Pending(pending) if pending.current => {
+            admitted.decision = Decision::Allowed;
+            Ok(())
+        }
+        _ => Err(undecided()),
+    }
 }
 
 fn undecided() -> Status {

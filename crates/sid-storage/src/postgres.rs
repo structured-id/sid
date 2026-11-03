@@ -8819,6 +8819,7 @@ impl AccessRequestRow {
 mod application;
 mod audit_retention;
 mod binding;
+mod ceremony_state;
 mod closure;
 mod contact;
 mod credentials;

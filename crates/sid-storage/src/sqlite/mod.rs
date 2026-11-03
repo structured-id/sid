@@ -21,6 +21,7 @@ mod audit_retention;
 mod auth;
 mod binding;
 mod branding;
+mod ceremony_state;
 mod consent;
 mod contact;
 mod device;

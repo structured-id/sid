@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use sid_core::models::AuthLevel;
 use sid_core::models::session::AcceptedEvidence;
 use sid_keys::KeyManager;
-use sid_plugin::cache::CacheBackend;
+use sid_plugin::CeremonyStateStore;
 
 use crate::browser_session::{BrowserCookie, BrowserSecret};
 use crate::challenge_store::{ChallengeStore, ChallengeStoreError};
@@ -206,19 +206,19 @@ pub struct FederatedEntry {
 
 impl FederatedEntry {
     /// The relying party of `trusted`, reaching it over `http`, its pending
-    /// entries in `cache` sealed under `keys`, for the authority whose
+    /// entries in `ceremonies` sealed under `keys`, for the authority whose
     /// browser-session cookie is `cookie`.
     pub fn new(
         trusted: TrustedIssuer,
         http: Client,
-        cache: Arc<dyn CacheBackend>,
+        ceremonies: Arc<dyn CeremonyStateStore>,
         keys: Arc<dyn KeyManager>,
         cookie: BrowserCookie,
     ) -> Self {
         Self {
             trusted,
             http,
-            pending: ChallengeStore::new(cache, keys, NAMESPACE, PENDING_TTL),
+            pending: ChallengeStore::new(ceremonies, keys, NAMESPACE, PENDING_TTL),
             cookie,
         }
     }

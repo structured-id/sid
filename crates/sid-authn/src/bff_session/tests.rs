@@ -720,18 +720,19 @@ async fn test_a_read_within_half_the_window_writes_nothing() {
 }
 
 /// Past the threshold the window is pushed out, or a session in steady use
-/// would expire mid-use.
+/// would expire mid-use. A 2 s window read at 1.2 s leaves 800 ms for a
+/// loaded test host to oversleep: a 100 ms window expired there.
 #[tokio::test]
 async fn test_a_read_past_half_the_window_refreshes_it() {
     let cache = Arc::new(CountingCache::new());
-    let s = build(cache.clone(), LONG, Duration::from_millis(100));
+    let s = build(cache.clone(), LONG, Duration::from_secs(2));
     let (id, _) = s
         .create_session("access".into(), None, test_claims(), CONN)
         .await
         .unwrap();
     let after_create = cache.writes();
 
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    tokio::time::sleep(Duration::from_millis(1200)).await;
     assert!(s.get_session(&id).await.unwrap().is_some());
     assert_eq!(
         cache.writes(),
@@ -740,7 +741,7 @@ async fn test_a_read_past_half_the_window_refreshes_it() {
     );
 
     // And the session outlives the original window because of it.
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    tokio::time::sleep(Duration::from_millis(1200)).await;
     assert!(s.get_session(&id).await.unwrap().is_some());
 }
 

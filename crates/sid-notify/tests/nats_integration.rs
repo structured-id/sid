@@ -305,6 +305,17 @@ async fn test_standalone_notify_without_sid_server() {
 /// The service starts with its database and the configured channels.
 #[tokio::test]
 async fn test_notify_server_init() {
+    let issuer = sid_test_issuer::TestIssuer::start(sid_test_issuer::Setup {
+        resources: vec!["https://sid.example.com/api".into()],
+        checkers: vec![sid_test_issuer::Checker {
+            client_id: "sid-notify".into(),
+            secret: "notify-checker-secret".into(),
+            confirms_proofs: false,
+        }],
+    })
+    .await;
+    let secret = std::env::temp_dir().join(format!("sid-notify-init-{}", uuid::Uuid::now_v7()));
+    std::fs::write(&secret, "notify-checker-secret").unwrap();
     let config = NotifyConfig {
         nats_url: nats_url(),
         grpc_bind: "127.0.0.1:0".parse().unwrap(),
@@ -317,14 +328,16 @@ async fn test_notify_server_init() {
         database_url: database_url(),
         job_capacity: sid_notify::config::DEFAULT_JOB_CAPACITY,
         identity_grpc_address: None,
-        jwt_public_key_path: Some(format!(
-            "{}/../sid-authn/tests/fixtures/test_ed25519_public.pem",
-            env!("CARGO_MANIFEST_DIR")
-        )),
-        jwt_issuer: "https://sid.example.com".into(),
+        api: issuer.receiver_config(
+            "https://sid.example.com/api",
+            "https://sid.example.com",
+            "sid-notify",
+            &secret,
+        ),
     };
 
     let server = NotifyServer::new(config).await.unwrap();
+    std::fs::remove_file(&secret).ok();
     let channels = server.dispatcher().channel_ids();
     assert!(channels.contains(&"email".to_string()));
     assert!(!channels.contains(&"webhook".to_string()));

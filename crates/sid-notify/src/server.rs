@@ -16,17 +16,14 @@ use crate::routing::RoutingTable;
 use crate::template::TemplateEngine;
 use crate::template_store::TemplateStore;
 
-use sid_authn::caller::{Caller, authenticate};
+use sid_auth::receiver::Receiver;
 use sid_authn::event_relay::{EventDeliveryHandler, EventFanoutHandler, EventRelayHandler};
-use sid_authn::jwt::TokenVerifier;
-use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::work_runner::{RunnerConfig, WorkHandler, WorkRunner};
 use sid_core::grpc_error::ErrorReason;
 use sid_core::grpc_error::refuse::{
     dependency_unavailable, internal, invalid_field, missing_field, not_configured, not_found,
     storage_failure,
 };
-use sid_core::models::ProfileId;
 use sid_plugin::WorkStore;
 use sid_plugin::notification::NotificationChannel;
 use sid_storage::PgWorkStore;
@@ -44,7 +41,8 @@ pub struct NotifyServer {
     jobs: Arc<dyn WorkStore>,
     store: Arc<TemplateStore>,
     resolver: Arc<RecipientResolver>,
-    verifier: Arc<TokenVerifier>,
+    /// Admits the template API's calls (`crate::access`).
+    receiver: Arc<Receiver>,
 }
 
 impl NotifyServer {
@@ -120,20 +118,11 @@ impl NotifyServer {
             Arc::new(RecipientResolver::without_identity())
         };
 
-        // The template API serves administrators only, so a token verifier is
-        // required: without one the server does not start. Only the public key
-        // is loaded; this service never issues tokens.
-        let Some(pub_path) = &config.jwt_public_key_path else {
-            anyhow::bail!(
-                "SID_JWT_PUBLIC_KEY_PATH is required: the template API authenticates administrators"
-            );
-        };
-        let pub_pem = std::fs::read(pub_path)
-            .map_err(|e| anyhow::anyhow!("failed to read JWT public key {pub_path}: {e}"))?;
-        let verifier = Arc::new(
-            TokenVerifier::new(&pub_pem, config.jwt_issuer.clone())
-                .map_err(|e| anyhow::anyhow!("token verifier init failed: {e}"))?,
-        );
+        // Every template call is decided by the issuer for its caller; a
+        // receiver that cannot authenticate there stops the start rather than
+        // leaving every call without a decision. It holds public trust
+        // material and its own checker credential only.
+        let receiver = Arc::new(Receiver::connect("sid-notify", &config.api).await?);
 
         Ok(Self {
             config,
@@ -142,7 +131,7 @@ impl NotifyServer {
             jobs,
             store,
             resolver,
-            verifier,
+            receiver,
         })
     }
 
@@ -231,30 +220,19 @@ impl NotifyServer {
             .register_encoded_file_descriptor_set(sid_proto::FILE_DESCRIPTOR_SET)
             .build_v1()?;
 
-        // Revocations made by any SID service apply here too.
-        let shared_cache =
-            sid_infra::shared_cache(sid_infra::cache_url_from_env().as_deref()).await?;
-        let revocation = Arc::new(RevocationCache::new(
-            std::time::Duration::from_secs(900),
-            shared_cache,
-        ));
-        // Runs until the cache connection closes with the process.
-        let _revocation_listener = revocation.listen().await?;
-
         // Build gRPC server.
         let template_svc = NotificationTemplateServiceImpl::new(
             self.dispatcher.clone(),
             self.store.clone(),
             self.resolver.clone(),
-            self.verifier.clone(),
-            revocation,
         );
         let mut services = sid_serve::Services::new();
         services
             .route(reflection_svc)
-            .add(
+            .add(crate::access::guarded(
                 sid_proto::sid::v1::admin::notification_template_service_server::NotificationTemplateServiceServer::new(template_svc),
-            )
+                &self.receiver,
+            ))
             .await;
         let (routes, health) = services.into_parts();
         let grpc_server = TonicServer::builder()
@@ -291,17 +269,16 @@ impl NotifyServer {
     }
 }
 
-/// gRPC implementation of NotificationTemplateService.
+/// gRPC implementation of NotificationTemplateService. It is served only
+/// behind its receiver (`crate::access`), which admits each call for its
+/// method's action before it reaches a handler.
 ///
 /// Provides template listing, preview, update, reset, and test send.
 pub struct NotificationTemplateServiceImpl {
     dispatcher: Arc<NotificationDispatcher>,
     store: Arc<crate::template_store::TemplateStore>,
-    /// The requesting administrator's own address for a test send.
+    /// The caller's own address for a test send.
     resolver: Arc<RecipientResolver>,
-    verifier: Arc<TokenVerifier>,
-    /// Revocations made anywhere in the deployment (see [`RevocationCache::listen`]).
-    revocation: Arc<RevocationCache>,
 }
 
 impl NotificationTemplateServiceImpl {
@@ -309,36 +286,36 @@ impl NotificationTemplateServiceImpl {
         dispatcher: Arc<NotificationDispatcher>,
         store: Arc<crate::template_store::TemplateStore>,
         resolver: Arc<RecipientResolver>,
-        verifier: Arc<TokenVerifier>,
-        revocation: Arc<RevocationCache>,
     ) -> Self {
         Self {
             dispatcher,
             store,
             resolver,
-            verifier,
-            revocation,
         }
     }
 
-    /// Authenticate the caller and require the administrator role.
-    #[allow(clippy::result_large_err)]
-    async fn require_admin<T>(&self, req: &tonic::Request<T>) -> Result<Caller, tonic::Status> {
-        let caller = authenticate(req, &self.verifier, &self.revocation).await?;
-        caller.require_admin()?;
-        Ok(caller)
-    }
-
-    /// The administrator's own address on `channel`, the default recipient
-    /// of a test send. Without one the request names a recipient.
+    /// The Profile and own address on `channel` of the caller whose token is
+    /// `authorization`, the default recipient of a test send. Without one
+    /// (no identity service, no such address, or a sender-bound token that
+    /// only its holder can present) the request names a recipient.
     async fn own_address(
         &self,
-        profile_id: ProfileId,
+        authorization: Option<&tonic::metadata::AsciiMetadataValue>,
         channel: Channel,
-    ) -> Result<String, tonic::Status> {
+    ) -> Result<(String, String), tonic::Status> {
+        // A DPoP-bound token is presented with its holder's proof for this
+        // call only; it cannot be presented again to another service.
+        let Some(bearer) = authorization.filter(|value| {
+            value.to_str().is_ok_and(|v| {
+                v.get(..7)
+                    .is_some_and(|s| s.eq_ignore_ascii_case("bearer "))
+            })
+        }) else {
+            return Err(missing_field("recipient"));
+        };
         let contact = self
             .resolver
-            .contact(&profile_id.to_string())
+            .current_contact(bearer)
             .await
             .map_err(|e| match e {
                 ResolveError::ProfileGone(id) => {
@@ -349,10 +326,13 @@ impl NotificationTemplateServiceImpl {
                 }
             })?;
         contact
-            .and_then(|c| match channel {
-                Channel::Email => c.email,
-                Channel::Sms => c.phone,
-                Channel::Push => None,
+            .and_then(|(profile, c)| {
+                match channel {
+                    Channel::Email => c.email,
+                    Channel::Sms => c.phone,
+                    Channel::Push => None,
+                }
+                .map(|address| (profile, address))
             })
             .ok_or_else(|| missing_field("recipient"))
     }
@@ -444,7 +424,6 @@ impl sid_proto::sid::v1::admin::notification_template_service_server::Notificati
         request: tonic::Request<sid_proto::sid::v1::admin::ListTemplatesRequest>,
     ) -> Result<tonic::Response<sid_proto::sid::v1::admin::ListTemplatesResponse>, tonic::Status>
     {
-        self.require_admin(&request).await?;
         let req = request.into_inner();
         let channel_filter = if req.channel == 0 {
             None
@@ -483,7 +462,6 @@ impl sid_proto::sid::v1::admin::notification_template_service_server::Notificati
         request: tonic::Request<sid_proto::sid::v1::admin::GetTemplateRequest>,
     ) -> Result<tonic::Response<sid_proto::sid::v1::admin::NotificationTemplate>, tonic::Status>
     {
-        self.require_admin(&request).await?;
         let req = request.into_inner();
         let channel = if req.channel == 0 {
             Channel::Email
@@ -519,7 +497,6 @@ impl sid_proto::sid::v1::admin::notification_template_service_server::Notificati
         request: tonic::Request<sid_proto::sid::v1::admin::UpdateTemplateRequest>,
     ) -> Result<tonic::Response<sid_proto::sid::v1::admin::NotificationTemplate>, tonic::Status>
     {
-        self.require_admin(&request).await?;
         let req = request.into_inner();
         let proto_content = req.content.ok_or_else(|| missing_field("content"))?;
 
@@ -570,7 +547,6 @@ impl sid_proto::sid::v1::admin::notification_template_service_server::Notificati
         request: tonic::Request<sid_proto::sid::v1::admin::ResetTemplateRequest>,
     ) -> Result<tonic::Response<sid_proto::sid::v1::admin::NotificationTemplate>, tonic::Status>
     {
-        self.require_admin(&request).await?;
         let req = request.into_inner();
         let channel = if req.channel == 0 {
             Channel::Email
@@ -612,7 +588,6 @@ impl sid_proto::sid::v1::admin::notification_template_service_server::Notificati
         request: tonic::Request<sid_proto::sid::v1::admin::PreviewTemplateRequest>,
     ) -> Result<tonic::Response<sid_proto::sid::v1::admin::PreviewTemplateResponse>, tonic::Status>
     {
-        self.require_admin(&request).await?;
         let req = request.into_inner();
         let channel = if req.channel == 0 {
             Channel::Email
@@ -657,7 +632,10 @@ impl sid_proto::sid::v1::admin::notification_template_service_server::Notificati
         &self,
         request: tonic::Request<sid_proto::sid::v1::admin::SendTestNotificationRequest>,
     ) -> Result<tonic::Response<()>, tonic::Status> {
-        let caller = self.require_admin(&request).await?;
+        // The call is admitted: its verified subject names the test's
+        // recipient when no Profile can be learned for it.
+        let subject = sid_auth::receiver::admitted(&request)?.claims.sub.clone();
+        let authorization = request.metadata().get("authorization").cloned();
         let req = request.into_inner();
         let channel = if req.channel == 0 {
             Channel::Email
@@ -702,14 +680,14 @@ impl sid_proto::sid::v1::admin::notification_template_service_server::Notificati
             return Err(not_configured(channel_id));
         }
 
-        // The named recipient, or the administrator's own address.
-        let address = if req.recipient.is_empty() {
-            self.own_address(caller.profile_id, channel).await?
+        // The named recipient, or the caller's own address.
+        let (profile_id, address) = if req.recipient.is_empty() {
+            self.own_address(authorization.as_ref(), channel).await?
         } else {
-            req.recipient
+            (subject, req.recipient)
         };
         let recipient = sid_plugin::notification::Recipient {
-            profile_id: caller.profile_id.to_string(),
+            profile_id,
             email: (channel == Channel::Email).then(|| address.clone()),
             phone: (channel == Channel::Sms).then(|| address.clone()),
             push_endpoint: (channel == Channel::Push).then_some(address),
