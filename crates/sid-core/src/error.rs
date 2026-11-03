@@ -34,6 +34,11 @@ pub enum Error {
     #[error("Operation already completed: {0}")]
     OperationCompleted(String),
 
+    /// The period a keyed command names is not admitted by the store that
+    /// owns it: the command committed nothing.
+    #[error("Operation period not admitted: {0}")]
+    OperationPeriodRefused(crate::models::OperationPeriodRefusal),
+
     /// The authority a mutation was authorized under changed before it
     /// committed (a connector disabled, a grant or credential revoked): the
     /// mutation committed nothing and is decided again from the start.
@@ -104,6 +109,7 @@ impl Error {
                 | Self::AuthorizationDenied(_)
                 | Self::Conflict(_)
                 | Self::OperationCompleted(_)
+                | Self::OperationPeriodRefused(_)
                 | Self::Fenced(_)
                 | Self::Expired(_)
                 | Self::Revoked(_)

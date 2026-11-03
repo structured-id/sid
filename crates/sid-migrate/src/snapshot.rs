@@ -11,10 +11,10 @@ use sid_core::models::{Application, ProtectedResource, ResourceAccess};
 use sid_core::models::{
     BrandingConfig, CedarPolicy, ClosureRequest, Credential, Device, DeviceAuthorizationCode,
     ExportJob, Group, GroupMember, ImpersonationGrant, InitialAccessToken, MachineUser,
-    MachineUserCredential, MagicLinkSession, OAuth2Client, OperationRecord, OutboundDlqEntry,
-    PersonalAccessToken, Principal, Profile, ProfileGrant, ProfileMetadata, Project, RefreshToken,
-    Role, RoleAssignment, ScimOutboundRecord, ScimOutboundTarget, ServiceBinding, Session,
-    SodConflictRule, UpstreamIdentity, UpstreamProvider, WorkSnapshot,
+    MachineUserCredential, MagicLinkSession, OAuth2Client, OperationPeriodRecord, OperationRecord,
+    OutboundDlqEntry, PersonalAccessToken, Principal, Profile, ProfileGrant, ProfileMetadata,
+    Project, RefreshToken, Role, RoleAssignment, ScimOutboundRecord, ScimOutboundTarget,
+    ServiceBinding, Session, SodConflictRule, UpstreamIdentity, UpstreamProvider, WorkSnapshot,
 };
 
 /// Data snapshot from a SID instance.
@@ -162,6 +162,10 @@ pub struct Snapshot {
     #[serde(default)]
     pub durable_work: Vec<WorkSnapshot>,
 
+    /// The periods keyed commands are admitted under, retired ones included:
+    /// a period retired before the move is never admitted after it.
+    pub operation_periods: Vec<OperationPeriodRecord>,
+
     /// Completions of keyed commands with their results, so a retry after
     /// the move resolves to its recorded result.
     pub operation_results: Vec<OperationRecord>,
@@ -260,6 +264,7 @@ impl Snapshot {
             closure_requests: Vec::new(),
             export_jobs: Vec::new(),
             durable_work: Vec::new(),
+            operation_periods: Vec::new(),
             operation_results: Vec::new(),
             magic_link_sessions: Vec::new(),
             scim_outbound_targets: Vec::new(),
@@ -313,6 +318,7 @@ impl Snapshot {
         count += self.closure_requests.len() as u64;
         count += self.export_jobs.len() as u64;
         count += self.durable_work.len() as u64;
+        count += self.operation_periods.len() as u64;
         count += self.operation_results.len() as u64;
         count += self.magic_link_sessions.len() as u64;
         count += self.scim_outbound_targets.len() as u64;

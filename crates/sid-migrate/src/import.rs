@@ -758,7 +758,17 @@ pub async fn import_snapshot(
         }
     }
 
-    // 26b. Completed keyed commands (their results answer retries)
+    // 26b. The periods keyed commands are admitted under, before the
+    // completions named with them.
+    info!(
+        count = snapshot.operation_periods.len(),
+        "importing operation periods..."
+    );
+    for period in &snapshot.operation_periods {
+        backend.import_operation_period(period).await?;
+    }
+
+    // 26c. Completed keyed commands (their results answer retries)
     info!(
         count = snapshot.operation_results.len(),
         "importing operation results..."

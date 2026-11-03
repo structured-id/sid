@@ -34,23 +34,156 @@ impl From<OperationKey> for String {
 }
 
 impl OperationKey {
-    /// A key of 1 to 255 visible ASCII characters (the header value of
-    /// draft-ietf-httpapi-idempotency-key-header §2, as an RFC 8941 string
-    /// without quotes).
+    /// A key as its logical value: 1 to 255 characters a Structured Field
+    /// String carries (RFC 9651 §3.3.3: printable ASCII, space included).
     pub fn parse(value: &str) -> Result<Self> {
         if value.is_empty()
             || value.len() > MAX_OPERATION_KEY_LEN
-            || !value.bytes().all(|b| b.is_ascii_graphic())
+            || !value.bytes().all(|b| (0x20..=0x7e).contains(&b))
         {
             return Err(Error::Validation(format!(
-                "an operation key is 1 to {MAX_OPERATION_KEY_LEN} visible ASCII characters"
+                "an operation key is 1 to {MAX_OPERATION_KEY_LEN} printable ASCII characters"
             )));
         }
         Ok(Self(value.to_string()))
     }
 
+    /// The key an `Idempotency-Key` header value encodes: a Structured Field
+    /// String (draft-ietf-httpapi-idempotency-key-header-08 §2.1, RFC 9651
+    /// §4.2.5), the same encoded value in HTTP and gRPC metadata.
+    pub fn from_header(value: &str) -> Result<Self> {
+        let malformed = || {
+            Error::Validation(
+                "an Idempotency-Key is a Structured Field String (RFC 9651 §3.3.3)".into(),
+            )
+        };
+        let inner = value
+            .strip_prefix('"')
+            .and_then(|rest| rest.strip_suffix('"'))
+            .ok_or_else(malformed)?;
+        let mut logical = String::with_capacity(inner.len());
+        let mut chars = inner.chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' => match chars.next() {
+                    Some(escaped @ ('"' | '\\')) => logical.push(escaped),
+                    _ => return Err(malformed()),
+                },
+                '"' => return Err(malformed()),
+                c => logical.push(c),
+            }
+        }
+        Self::parse(&logical)
+    }
+
+    /// This key as an `Idempotency-Key` header value (a Structured Field
+    /// String, RFC 9651 §4.1.6).
+    pub fn to_header(&self) -> String {
+        let mut encoded = String::with_capacity(self.0.len() + 2);
+        encoded.push('"');
+        for c in self.0.chars() {
+            if matches!(c, '"' | '\\') {
+                encoded.push('\\');
+            }
+            encoded.push(c);
+        }
+        encoded.push('"');
+        encoded
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+/// A period the owning operation store issued: an unsigned epoch bounding
+/// when a keyed command is admitted, not a timestamp. Constructing one checks
+/// its representation only; whether the store issued it and still admits it
+/// is the store's decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct OperationPeriod(u64);
+
+impl OperationPeriod {
+    pub const fn new(epoch: u64) -> Self {
+        Self(epoch)
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    /// The period a `sid-operation-period` value names: one canonical
+    /// unsigned decimal integer, no sign and no leading zero except `0`.
+    pub fn parse(value: &str) -> Result<Self> {
+        let canonical = !value.is_empty()
+            && value.bytes().all(|b| b.is_ascii_digit())
+            && (value == "0" || !value.starts_with('0'));
+        canonical
+            .then(|| value.parse::<u64>().ok())
+            .flatten()
+            .map(Self)
+            .ok_or_else(|| {
+                Error::Validation(
+                    "an operation period is one canonical unsigned decimal integer".into(),
+                )
+            })
+    }
+}
+
+impl std::fmt::Display for OperationPeriod {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// A period as its store issued it: new commands named with it are admitted
+/// until `accepted_until`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssuedOperationPeriod {
+    pub period: OperationPeriod,
+    pub accepted_until: DateTime<Utc>,
+}
+
+/// A period as its store holds it, carried between stores.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperationPeriodRecord {
+    pub issued: IssuedOperationPeriod,
+    pub issued_at: DateTime<Utc>,
+    pub retired: bool,
+}
+
+/// Why a store does not admit the period a keyed command names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperationPeriodRefusal {
+    /// The store never issued it.
+    NotIssued,
+    /// The store retired it: its commands are no longer told apart from new
+    /// ones, so none is admitted under it again.
+    Retired,
+}
+
+impl std::fmt::Display for OperationPeriodRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::NotIssued => "not issued",
+            Self::Retired => "retired",
+        })
+    }
+}
+
+/// The context naming one logical keyed command: the caller's key and the
+/// period it was created under, kept together across every retry and every
+/// transport. It carries no authority.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OperationContext {
+    pub key: OperationKey,
+    pub period: OperationPeriod,
+}
+
+impl OperationContext {
+    pub fn new(key: OperationKey, period: OperationPeriod) -> Self {
+        Self { key, period }
     }
 }
 
@@ -65,6 +198,10 @@ pub struct OperationCompletion {
     pub method: String,
     pub fingerprint: Vec<u8>,
     pub result: Vec<u8>,
+    /// The period a caller's keyed command was named with: the commit is
+    /// admitted only while the store has not retired it, and the record goes
+    /// with it. `None` for the record a ceremony keeps of its own operation.
+    pub period: Option<OperationPeriod>,
     /// When the completion stops being kept: past it the key resolves to
     /// nothing and the record is dropped. `None` keeps it until its owner
     /// purges it.
@@ -87,8 +224,16 @@ impl OperationCompletion {
             method: method.into(),
             fingerprint: fingerprint(inputs),
             result,
+            period: None,
             retain_until: None,
         }
+    }
+
+    /// The same completion, of a keyed command named with `period`.
+    #[must_use]
+    pub fn in_period(mut self, period: OperationPeriod) -> Self {
+        self.period = Some(period);
+        self
     }
 
     /// The same completion, kept no longer than `until`.
@@ -108,9 +253,12 @@ pub struct OperationRecord {
 
 impl OperationRecord {
     /// Whether this record is the completion of the call `method` with
-    /// `inputs`: a retry. Anything else under the same key is a conflict.
-    pub fn matches(&self, method: &str, inputs: &[u8]) -> bool {
-        self.completion.method == method && self.completion.fingerprint == fingerprint(inputs)
+    /// `inputs` named with `period`: a retry. Anything else under the same
+    /// key is a conflict, a different period included.
+    pub fn matches(&self, method: &str, inputs: &[u8], period: Option<OperationPeriod>) -> bool {
+        self.completion.method == method
+            && self.completion.period == period
+            && self.completion.fingerprint == fingerprint(inputs)
     }
 }
 

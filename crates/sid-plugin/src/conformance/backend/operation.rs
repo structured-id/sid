@@ -45,8 +45,8 @@ pub async fn test_operation_completion_commits_with_effect(backend: &dyn Storage
         .await
         .unwrap()
         .expect("recorded");
-    assert!(record.matches(METHOD, b"inputs"));
-    assert!(!record.matches(METHOD, b"other"));
+    assert!(record.matches(METHOD, b"inputs", None));
+    assert!(!record.matches(METHOD, b"other", None));
     assert_eq!(record.completion.result, b"inputs");
     assert!(project_exists(backend, &project).await);
 }

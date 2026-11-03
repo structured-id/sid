@@ -405,6 +405,15 @@ CREATE TABLE magic_link_sessions (
     CONSTRAINT magic_link_sessions_pkey PRIMARY KEY (id)
 );
 
+CREATE TABLE operation_periods (
+    period bigint NOT NULL,
+    issued_at timestamp with time zone DEFAULT now() NOT NULL,
+    accepted_until timestamp with time zone NOT NULL,
+    retired boolean DEFAULT false NOT NULL,
+    CONSTRAINT operation_periods_pkey PRIMARY KEY (period),
+    CONSTRAINT operation_periods_period_check CHECK (period > 0)
+);
+
 CREATE TABLE operation_results (
     namespace text NOT NULL,
     op_key text NOT NULL,
@@ -412,8 +421,10 @@ CREATE TABLE operation_results (
     fingerprint bytea NOT NULL,
     result bytea NOT NULL,
     completed_at timestamp with time zone DEFAULT now() NOT NULL,
+    period bigint,
     retain_until timestamp with time zone,
-    CONSTRAINT operation_results_pkey PRIMARY KEY (namespace, op_key)
+    CONSTRAINT operation_results_pkey PRIMARY KEY (namespace, op_key),
+    CONSTRAINT operation_results_period_fkey FOREIGN KEY (period) REFERENCES operation_periods(period)
 );
 
 CREATE TABLE organizations (

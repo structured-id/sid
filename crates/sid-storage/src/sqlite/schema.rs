@@ -665,6 +665,16 @@ CREATE TABLE IF NOT EXISTS key_versions (
 -- durable_work (required work committed with its state change; fenced claims)
 --------------------------------------------------------------------------------
 
+-- The periods keyed commands are named with: issued in increasing order at
+-- issued_at_ms, accepting new commands until accepted_until_ms (Unix
+-- milliseconds), and once retired never admitted again.
+CREATE TABLE IF NOT EXISTS operation_periods (
+    period            INTEGER PRIMARY KEY CHECK (period > 0),
+    issued_at_ms      INTEGER NOT NULL,
+    accepted_until_ms INTEGER NOT NULL,
+    retired           INTEGER NOT NULL DEFAULT 0
+);
+
 -- The completion of a caller's keyed command, committed with its effect.
 CREATE TABLE IF NOT EXISTS operation_results (
     namespace    TEXT NOT NULL,
@@ -673,6 +683,9 @@ CREATE TABLE IF NOT EXISTS operation_results (
     fingerprint  BLOB NOT NULL,
     result       BLOB NOT NULL,
     completed_at TEXT NOT NULL,
+    -- The period a keyed command was named with; NULL for the record a
+    -- ceremony keeps of its own operation.
+    period       INTEGER REFERENCES operation_periods (period),
     -- Unix milliseconds past which the completion is not kept; NULL keeps it
     -- until its owner purges it.
     retain_until_ms INTEGER,

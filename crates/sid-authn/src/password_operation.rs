@@ -263,7 +263,7 @@ pub fn change_context(id: &PasswordOperationId, registration_request: &[u8]) -> 
 
 fn finish_command(id: &PasswordOperationId, method: &'static str, record: &[u8]) -> KeyedCommand {
     let key = OperationKey::parse(&id.to_string()).expect("an operation id is a valid key");
-    KeyedCommand::new(RESULT_NAMESPACE, key, method, record.to_vec())
+    KeyedCommand::ceremony(RESULT_NAMESPACE, key, method, record.to_vec())
 }
 
 /// Who owns the password an operation installs.

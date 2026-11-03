@@ -111,6 +111,8 @@ pub struct MockStorageInner {
     work: HashMap<WorkId, StoredWork>,
     /// Completions of keyed commands by (namespace, key).
     operations: HashMap<(String, String), OperationRecord>,
+    /// The periods keyed commands are admitted under, by number.
+    operation_periods: std::collections::BTreeMap<u64, sid_core::models::OperationPeriodRecord>,
     export_jobs: HashMap<Uuid, ExportJob>,
     /// Password histories by owner, as the checker reads them.
     histories: HashMap<ProfileId, PasswordHistory>,
@@ -1551,6 +1553,76 @@ impl sid_plugin::CeremonyStateStore for MockStorage {
 
 #[async_trait]
 impl sid_plugin::OperationResultStore for MockStorage {
+    async fn current_operation_period(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+        acceptance: chrono::Duration,
+    ) -> SidResult<sid_core::models::IssuedOperationPeriod> {
+        let mut inner = self.inner.lock().unwrap();
+        let periods = &mut inner.operation_periods;
+        if let Some(current) = periods
+            .values()
+            .rev()
+            .find(|p| !p.retired && p.issued_at <= now && p.issued.accepted_until > now)
+        {
+            return Ok(current.issued);
+        }
+        let next = periods.keys().next_back().map_or(1, |last| last + 1);
+        let issued = sid_core::models::IssuedOperationPeriod {
+            period: sid_core::models::OperationPeriod::new(next),
+            accepted_until: now + acceptance,
+        };
+        periods.insert(
+            next,
+            sid_core::models::OperationPeriodRecord {
+                issued,
+                issued_at: now,
+                retired: false,
+            },
+        );
+        Ok(issued)
+    }
+    async fn retire_operation_periods(
+        &self,
+        before: chrono::DateTime<chrono::Utc>,
+    ) -> SidResult<u64> {
+        let mut inner = self.inner.lock().unwrap();
+        let mut retired = Vec::new();
+        for p in inner.operation_periods.values_mut() {
+            if !p.retired && p.issued.accepted_until < before {
+                p.retired = true;
+                retired.push(p.issued.period);
+            }
+        }
+        inner
+            .operations
+            .retain(|_, r| r.completion.period.is_none_or(|p| !retired.contains(&p)));
+        Ok(retired.len() as u64)
+    }
+    async fn export_operation_periods(
+        &self,
+    ) -> SidResult<Vec<sid_core::models::OperationPeriodRecord>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .operation_periods
+            .values()
+            .copied()
+            .collect())
+    }
+    async fn import_operation_period(
+        &self,
+        record: &sid_core::models::OperationPeriodRecord,
+    ) -> SidResult<()> {
+        let mut inner = self.inner.lock().unwrap();
+        let held = inner
+            .operation_periods
+            .entry(record.issued.period.get())
+            .or_insert(*record);
+        held.retired |= record.retired;
+        Ok(())
+    }
     async fn record_outcome(&self, ctx: MutationContext) -> SidResult<()> {
         self.inner.lock().unwrap().owe(&ctx)
     }
@@ -6179,6 +6251,22 @@ impl MockStorageInner {
     /// nothing still does; refused when another commit completed it.
     fn complete(&mut self, ctx: &MutationContext) -> SidResult<()> {
         if let Some(operation) = &ctx.operation {
+            if let Some(period) = operation.period {
+                use sid_core::models::OperationPeriodRefusal;
+                match self.operation_periods.get(&period.get()) {
+                    None => {
+                        return Err(sid_core::Error::OperationPeriodRefused(
+                            OperationPeriodRefusal::NotIssued,
+                        ));
+                    }
+                    Some(p) if p.retired => {
+                        return Err(sid_core::Error::OperationPeriodRefused(
+                            OperationPeriodRefusal::Retired,
+                        ));
+                    }
+                    Some(_) => {}
+                }
+            }
             let slot = (
                 operation.namespace.clone(),
                 operation.key.as_str().to_string(),
