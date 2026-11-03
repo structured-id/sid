@@ -1301,6 +1301,24 @@ pub fn spawn_ce_background_tasks(c: &CeComponents) {
         });
     }
 
+    // Ended authentication mail records (hourly). Idempotent, so no job lock.
+    {
+        let storage = c.storage.clone();
+        tokio::spawn(async move {
+            let every = std::time::Duration::from_secs(3600);
+            let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+            loop {
+                interval.tick().await;
+                match crate::auth_mail::purge_ended_mail(storage.as_ref(), chrono::Utc::now()).await
+                {
+                    Ok(0) => {}
+                    Ok(n) => info!("Dropped {} ended authentication mail records", n),
+                    Err(e) => tracing::warn!("authentication mail purge failed: {}", e),
+                }
+            }
+        });
+    }
+
     // Operation results past their retention (every minute): a retained
     // sign-in delivery is dropped within a minute of its operation's end.
     // The purge is idempotent, so replicas running it at once only repeat

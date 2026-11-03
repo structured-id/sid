@@ -1540,6 +1540,7 @@ impl ClosureRequestRow {
 pub struct MagicLinkRow {
     pub id: Uuid,
     pub email: String,
+    pub destination: String,
     pub token_hash: String,
     pub sealed_token: Vec<u8>,
     pub consumed: bool,
@@ -1552,6 +1553,7 @@ impl MagicLinkRow {
         MagicLinkSession {
             id: self.id,
             email: self.email,
+            destination: self.destination,
             token_hash: self.token_hash,
             sealed_token: self.sealed_token,
             consumed: self.consumed,

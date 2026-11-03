@@ -5512,7 +5512,7 @@ async fn test_magic_link_follows_the_principal_assignment() {
         svc.storage.clone(),
         common::test_key_manager(),
     )
-    .request_magic_link(email)
+    .request_magic_link(email, email)
     .await
     .unwrap();
     let err = svc
@@ -5542,7 +5542,7 @@ async fn test_magic_link_verify_issues_provisional_session() {
         svc.storage.clone(),
         common::test_key_manager(),
     )
-    .request_magic_link(email)
+    .request_magic_link(email, email)
     .await
     .unwrap();
 
@@ -5588,7 +5588,7 @@ async fn test_magic_link_verify_unreadable_session_is_reported() {
         svc.storage.clone(),
         common::test_key_manager(),
     )
-    .request_magic_link(email)
+    .request_magic_link(email, email)
     .await
     .unwrap();
     svc.mock_storage.fail_magic_link_reads();
@@ -5615,7 +5615,7 @@ async fn test_magic_link_verify_unrecorded_consumption_is_reported() {
         svc.storage.clone(),
         common::test_key_manager(),
     )
-    .request_magic_link(email)
+    .request_magic_link(email, email)
     .await
     .unwrap();
     svc.mock_storage.fail_magic_link_consume();
@@ -5642,7 +5642,7 @@ async fn test_magic_link_verify_rejects_personal_profile() {
         svc.storage.clone(),
         common::test_key_manager(),
     )
-    .request_magic_link(email)
+    .request_magic_link(email, email)
     .await
     .unwrap();
 

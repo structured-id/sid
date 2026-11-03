@@ -103,8 +103,8 @@ pub enum OtpError {
 }
 
 /// Where a requested code goes: the account's stored mailbox it was bound
-/// to, or nowhere for an address that routes to no account (its session
-/// exists only so that no answer tells the two apart).
+/// to, or nowhere for an address that routes to no account (its session and
+/// its unsent mail work exist only so that no answer tells the two apart).
 #[derive(Debug, Clone, Copy)]
 pub enum CodeDestination<'a> {
     Email(&'a str),
@@ -346,16 +346,15 @@ impl OtpService {
         ))
     }
 
-    /// Store the work emailing `session`'s current code, when it has a
-    /// destination.
+    /// Store the work emailing `session`'s current code. A session with no
+    /// destination owes the same work, which sends nothing: admission, its
+    /// refusal at capacity and its cost are alike for every address, so none
+    /// of them tells whether an account exists.
     async fn owe_email(
         &self,
         session_id: Uuid,
         session: &StoredOtpSession,
     ) -> Result<(), OtpError> {
-        if session.destination.is_none() {
-            return Ok(());
-        }
         let mut payload = session_id.as_bytes().to_vec();
         payload.extend_from_slice(session.issue.as_bytes());
         let mut email = NewWork::new(

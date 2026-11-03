@@ -120,7 +120,7 @@ async fn magic_link_refuses_a_quarantined_handle() {
         svc.storage.clone(),
         common::test_key_manager(),
     )
-    .request_magic_link(address)
+    .request_magic_link(address, address)
     .await
     .unwrap();
     svc.mock_storage.quarantine_email_key(address);

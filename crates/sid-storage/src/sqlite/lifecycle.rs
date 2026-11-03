@@ -93,6 +93,7 @@ fn row_to_magic_link(row: &sqlx::sqlite::SqliteRow) -> SidResult<MagicLinkSessio
         id: uuid::Uuid::parse_str(&id)
             .map_err(|e| SidError::Storage(format!("column id: bad magic link id {id}: {e}")))?,
         email: col(row, "email")?,
+        destination: col(row, "destination")?,
         token_hash: col(row, "token_hash")?,
         sealed_token: col(row, "sealed_token")?,
         consumed: col(row, "consumed")?,
@@ -591,11 +592,12 @@ impl SqliteBackend {
         let mut tx = self.begin_write().await?;
         sqlx::query(
             "INSERT INTO magic_link_sessions
-                 (id, email, token_hash, sealed_token, consumed, created_at, expires_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+                 (id, email, destination, token_hash, sealed_token, consumed, created_at, expires_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(session.id.to_string())
         .bind(&session.email)
+        .bind(&session.destination)
         .bind(&session.token_hash)
         .bind(&session.sealed_token)
         .bind(session.consumed)

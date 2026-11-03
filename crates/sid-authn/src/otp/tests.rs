@@ -357,11 +357,11 @@ async fn requested_code_owes_its_email() {
     assert_eq!(secrecy::ExposeSecret::expose_secret(&pending.code), code);
 }
 
-/// An address that routes to no account gets a session like any other, so
-/// no answer tells the two apart, but no email: there is no mailbox to send
-/// it to.
+/// An address that routes to no account gets a session and a mail work like
+/// any other, so neither tells the two apart, but the work sends nothing:
+/// there is no mailbox to send it to.
 #[tokio::test]
-async fn code_for_no_account_owes_no_email() {
+async fn code_for_no_account_sends_nothing() {
     let store = store().await;
     let service = replica(&store);
     let (result, _code) = service
@@ -369,14 +369,34 @@ async fn code_for_no_account_owes_no_email() {
         .await
         .unwrap();
 
-    assert!(owed_mails(&store).await.is_empty());
+    let owed = owed_mails(&store).await;
+    assert_eq!(owed.len(), 1, "an unknown address owes the same work");
+    assert_eq!(owed[0].payload.len(), 32);
     assert!(
         service
-            .pending_delivery(result.session_id, Uuid::now_v7(), Utc::now())
+            .pending_delivery(result.session_id, issue_of(&owed[0]), Utc::now())
             .await
             .unwrap()
             .is_none()
     );
+}
+
+/// A full delivery queue refuses an address with no account exactly as one
+/// with an account, so the refusal tells nothing about either (it once let
+/// the unknown address through while refusing the known one).
+#[tokio::test]
+async fn full_queue_refuses_every_address_alike() {
+    let store = store().await;
+    let service = replica_with(&store, 1);
+    request(&service, "first@example.com").await.unwrap();
+
+    let unknown = service
+        .request_otp("nobody@example.com", CodeDestination::None)
+        .await;
+    let known = request(&service, "known@example.com").await;
+
+    assert!(matches!(unknown, Err(OtpError::Busy(_))), "{unknown:?}");
+    assert!(matches!(known, Err(OtpError::Busy(_))), "{known:?}");
 }
 
 /// A used or expired code has nothing left to send.

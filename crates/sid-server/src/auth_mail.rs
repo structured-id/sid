@@ -169,7 +169,7 @@ impl WorkHandler for MagicLinkMail {
         };
         let recipient = Recipient {
             profile_id: String::new(),
-            email: Some(pending.email),
+            email: Some(pending.destination),
             phone: None,
             push_endpoint: None,
             device_token: None,
@@ -180,6 +180,27 @@ impl WorkHandler for MagicLinkMail {
             Err(e) => outcome_of(e),
         }
     }
+}
+
+/// How long an ended authentication mail keeps its record (its outcome, a
+/// failure to review): the record holds only session and issue ids, and its
+/// session is long gone by then.
+const MAIL_RECORD_RETENTION: chrono::Duration = chrono::Duration::days(7);
+
+/// Drop the authentication mails that ended (sent, failed, expired) more than
+/// [`MAIL_RECORD_RETENTION`] before `now`; open ones are untouched. Returns
+/// how many records were dropped. Idempotent, so replicas may run it at once.
+pub async fn purge_ended_mail(
+    store: &dyn sid_plugin::WorkStore,
+    now: chrono::DateTime<Utc>,
+) -> sid_core::Result<u64> {
+    let before = now - MAIL_RECORD_RETENTION;
+    let mut dropped = 0;
+    for kind in [MAGIC_LINK_EMAIL_KIND, OTP_EMAIL_KIND] {
+        let kind = WorkKind::new(kind).expect("the mail kinds are valid");
+        dropped += store.purge_ended_work(&kind, before).await?;
+    }
+    Ok(dropped)
 }
 
 /// The template a sign-in code mail renders with.

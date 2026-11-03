@@ -3252,6 +3252,8 @@ pub async fn test_magic_link_crud(backend: &dyn StorageBackend) {
     let session = MagicLinkSession {
         id,
         email: email.clone(),
+        // A spelling the key folds: the stored one is kept as given.
+        destination: format!("M.L+{}@sid.example.com", id.simple()),
         token_hash: format!("hash_{}", id),
         sealed_token: vec![0xA5, 0x00, 0x5A],
         consumed: false,
@@ -3270,8 +3272,10 @@ pub async fn test_magic_link_crud(backend: &dyn StorageBackend) {
         .unwrap()
         .expect("the stored link");
     assert!(!retrieved.consumed);
-    // The sealed token the link's email needs is kept byte for byte.
+    // What the link's email needs is kept as given: the sealed token byte
+    // for byte and the mailbox in its spelling.
     assert_eq!(retrieved.sealed_token, session.sealed_token);
+    assert_eq!(retrieved.destination, session.destination);
 
     backend
         .consume_magic_link_session(id, test_audit())

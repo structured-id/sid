@@ -138,6 +138,7 @@ pub async fn test_delete_expired_magic_link_sessions(backend: &dyn StorageBacken
         MagicLinkSession {
             id,
             email: format!("ml-{}@sid.example.com", id.simple()),
+            destination: format!("ml-{}@sid.example.com", id.simple()),
             token_hash: format!("hash_{id}"),
             sealed_token: vec![1],
             consumed: false,

@@ -25,6 +25,29 @@ fn unique_email(tag: &str) -> String {
     format!("{tag}-{}@sid.example.com", uuid::Uuid::now_v7().simple())
 }
 
+/// A link for an account whose mailbox is spelled as its key.
+trait RequestOwn {
+    async fn request_own(
+        &self,
+        email: &str,
+    ) -> Result<
+        (sid_authn::magic_link::MagicLinkRequestResult, String),
+        sid_authn::magic_link::MagicLinkError,
+    >;
+}
+
+impl RequestOwn for MagicLinkService {
+    async fn request_own(
+        &self,
+        email: &str,
+    ) -> Result<
+        (sid_authn::magic_link::MagicLinkRequestResult, String),
+        sid_authn::magic_link::MagicLinkError,
+    > {
+        self.request_magic_link(email, email).await
+    }
+}
+
 async fn setup() -> (MagicLinkService, Arc<dyn StorageBackend>) {
     let backend = PostgresBackend::new(&database_url(), None)
         .await
@@ -46,7 +69,7 @@ async fn test_magic_link_happy_path() {
 
     // Generate magic link.
     let (result, token) = service
-        .request_magic_link(&email)
+        .request_own(&email)
         .await
         .expect("request_magic_link should succeed");
 
@@ -75,7 +98,7 @@ async fn test_magic_link_single_use_enforcement() {
     let (service, _storage) = setup().await;
 
     let (result, token) = service
-        .request_magic_link(&unique_email("bob-ml-single"))
+        .request_own(&unique_email("bob-ml-single"))
         .await
         .unwrap();
 
@@ -106,7 +129,7 @@ async fn test_magic_link_invalid_token() {
     let (service, _storage) = setup().await;
 
     let (result, _token) = service
-        .request_magic_link(&unique_email("carol-ml-invalid"))
+        .request_own(&unique_email("carol-ml-invalid"))
         .await
         .unwrap();
 
@@ -147,6 +170,7 @@ async fn test_magic_link_expired() {
     let expired_session = MagicLinkSession {
         id: uuid::Uuid::now_v7(),
         email: "dave-ml-expired@sid.example.com".to_string(),
+        destination: "dave-ml-expired@sid.example.com".to_string(),
         token_hash: "$argon2id$v=19$m=19456,t=2,p=1$fake$fakehash".to_string(),
         sealed_token: Vec::new(),
         consumed: false,
@@ -182,7 +206,7 @@ async fn test_magic_link_rate_limiting() {
 
     // Request 3 magic links (should succeed — rate limit is 3).
     for i in 0..3 {
-        let result = service.request_magic_link(&email).await;
+        let result = service.request_own(&email).await;
         assert!(
             result.is_ok(),
             "request {} should succeed, got {:?}",
@@ -192,7 +216,7 @@ async fn test_magic_link_rate_limiting() {
     }
 
     // 4th request should be rate-limited.
-    let fourth = service.request_magic_link(&email).await;
+    let fourth = service.request_own(&email).await;
     assert!(
         fourth.is_err(),
         "4th request should be rate-limited, got Ok"
@@ -242,6 +266,7 @@ async fn cleanup_removes_expired(storage: Arc<dyn StorageBackend>) {
     let expired = MagicLinkSession {
         id: uuid::Uuid::now_v7(),
         email: "frank-ml-cleanup@sid.example.com".to_string(),
+        destination: "frank-ml-cleanup@sid.example.com".to_string(),
         token_hash: "hash".to_string(),
         sealed_token: Vec::new(),
         consumed: false,
@@ -275,11 +300,11 @@ async fn test_magic_link_token_uniqueness() {
     let (service, _storage) = setup().await;
 
     let (_, token1) = service
-        .request_magic_link(&unique_email("grace-ml-unique1"))
+        .request_own(&unique_email("grace-ml-unique1"))
         .await
         .unwrap();
     let (_, token2) = service
-        .request_magic_link(&unique_email("grace-ml-unique2"))
+        .request_own(&unique_email("grace-ml-unique2"))
         .await
         .unwrap();
 
@@ -393,7 +418,7 @@ async fn test_requested_link_owes_its_email() {
 async fn requested_link_owes_its_email(storage: Arc<dyn StorageBackend>) {
     let service = MagicLinkService::new(storage.clone(), common::test_key_manager());
     let (result, token) = service
-        .request_magic_link(&unique_email("henry-ml-owed"))
+        .request_own(&unique_email("henry-ml-owed"))
         .await
         .unwrap();
 
@@ -420,15 +445,17 @@ async fn requested_link_owes_its_email(storage: Arc<dyn StorageBackend>) {
     }
 }
 
-/// The mail goes to the address bound at the request with the link to the
-/// account UI page, and a repeated attempt sends that same link again, so a
-/// lost send is retried without a new token.
+/// The mail goes to the mailbox bound at the request (here spelled unlike
+/// its key), never to the key, with the link to the account UI page, and a
+/// repeated attempt sends that same link again, so a lost send is retried
+/// without a new token.
 #[tokio::test]
 async fn test_link_mail_sends_the_same_link_on_every_attempt() {
     let (service, _storage) = setup().await;
     let service = Arc::new(service);
-    let email = unique_email("iris-ml-mail");
-    let (result, token) = service.request_magic_link(&email).await.unwrap();
+    let key = unique_email("irismlmail");
+    let email = key.replacen("irismlmail", "Iris.ML.Mail+login", 1);
+    let (result, token) = service.request_magic_link(&key, &email).await.unwrap();
     let recorded = Arc::new(Recorded::default());
     let mail = MagicLinkMail::new(
         service.clone(),
@@ -462,7 +489,7 @@ async fn test_link_mail_sends_nothing_once_consumed() {
     let (service, storage) = setup().await;
     let service = Arc::new(service);
     let (result, token) = service
-        .request_magic_link(&unique_email("jack-ml-consumed"))
+        .request_own(&unique_email("jack-ml-consumed"))
         .await
         .unwrap();
     assert!(matches!(
@@ -497,7 +524,8 @@ async fn test_link_mail_sends_nothing_once_expired() {
     let (service, storage) = setup().await;
     let service = Arc::new(service);
     let keys = common::test_key_manager();
-    let mut expired = MagicLinkSession::new(unique_email("kate-ml-expired"), "hash".into());
+    let email = unique_email("kate-ml-expired");
+    let mut expired = MagicLinkSession::new(email.clone(), email, "hash".into());
     expired.expires_at = chrono::Utc::now() - chrono::Duration::seconds(1);
     expired.sealed_token = sid_authn::sealed_secret::seal(
         keys.as_ref(),
@@ -526,7 +554,7 @@ async fn test_link_mail_waits_for_a_provider() {
     let (service, _storage) = setup().await;
     let service = Arc::new(service);
     let (result, _token) = service
-        .request_magic_link(&unique_email("liam-ml-provider"))
+        .request_own(&unique_email("liam-ml-provider"))
         .await
         .unwrap();
     let mail = MagicLinkMail::new(service.clone(), page(), Arc::new(Transport(None)));
@@ -550,7 +578,8 @@ async fn test_link_mail_refuses_a_token_sealed_to_another_session() {
     let (service, storage) = setup().await;
     let service = Arc::new(service);
     let keys = common::test_key_manager();
-    let mut session = MagicLinkSession::new(unique_email("mia-ml-foreign"), "hash".into());
+    let email = unique_email("mia-ml-foreign");
+    let mut session = MagicLinkSession::new(email.clone(), email, "hash".into());
     session.sealed_token = sid_authn::sealed_secret::seal(
         keys.as_ref(),
         &sid_core::models::magic_link_sealing_context(uuid::Uuid::now_v7()),

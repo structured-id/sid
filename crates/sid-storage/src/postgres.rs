@@ -7155,11 +7155,12 @@ impl StorageBackend for PostgresBackend {
             .map_err(|e| SidError::Storage(e.to_string()))?;
         sqlx::query(
             "INSERT INTO magic_link_sessions
-                 (id, email, token_hash, sealed_token, consumed, created_at, expires_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                 (id, email, destination, token_hash, sealed_token, consumed, created_at, expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind(session.id)
         .bind(&session.email)
+        .bind(&session.destination)
         .bind(&session.token_hash)
         .bind(&session.sealed_token)
         .bind(session.consumed)

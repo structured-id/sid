@@ -1845,6 +1845,37 @@ impl AuthServiceImpl {
         }
     }
 
+    /// The mailbox login mail for the email key `key` goes to on `profile`,
+    /// the account it routes to: the address in the spelling that profile
+    /// bound it with (its binding's contact), never another spelling of the
+    /// key. `None` when that binding records no such contact: a lost
+    /// spelling is not inferred from the key.
+    async fn login_mail_destination(
+        &self,
+        profile: ProfileId,
+        key: &str,
+    ) -> Result<Option<String>, Status> {
+        let principals = self
+            .storage
+            .get_principals_by_profile(profile)
+            .await
+            .map_err(storage_failure)?;
+        let Some(contact) = principals
+            .iter()
+            .find(|p| p.principal_type == PrincipalType::Email && p.value == key)
+            .and_then(|p| p.source_email_id)
+        else {
+            return Ok(None);
+        };
+        Ok(self
+            .storage
+            .get_profile_email(contact)
+            .await
+            .map_err(storage_failure)?
+            .filter(|email| email.profile_id == profile)
+            .map(|email| email.email))
+    }
+
     /// Decide what a registration started for `principal` may commit. The
     /// server decides new registration versus existing account; a client
     /// cannot claim an identifier that already belongs to someone. A held
@@ -4412,14 +4443,20 @@ impl AuthService for AuthServiceImpl {
             return unsent();
         }
         let profile = self.resolve_profile_optional(&address).await?;
-        if !profile.is_some_and(|p| p.profile_type == ProfileType::Corporate) {
+        let Some(profile) = profile.filter(|p| p.profile_type == ProfileType::Corporate) else {
             return unsent();
-        }
+        };
+        // The link goes to the mailbox the account bound the address with,
+        // never the key or the caller's spelling of it.
+        let Some(destination) = self.login_mail_destination(profile.id, &address).await? else {
+            info!("magic link requested for an account with no login mailbox: no link sent");
+            return unsent();
+        };
 
         // The session and the work emailing its link commit together; the
         // token leaves this service only inside that email, never logged or
         // put into an event.
-        let (result, _token) = match magic_link.request_magic_link(&address).await {
+        let (result, _token) = match magic_link.request_magic_link(&address, &destination).await {
             Ok(sent) => sent,
             Err(sid_authn::magic_link::MagicLinkError::RateLimited { .. }) => {
                 info!("Magic link request past the per-address limit: no link sent");
@@ -5529,13 +5566,20 @@ impl AuthService for AuthServiceImpl {
         // Every address gets a real pending code, whether or not it routes to
         // an account, and resend and verify answer alike, so no answer tells
         // whether the account exists. Only an account's code is emailed, to
-        // the stored address of the assignment it routes to, bound now: a
-        // caller's equivalent spelling never retargets it. The code leaves
+        // the mailbox its assignment was bound with, fixed now: neither the
+        // resolution key nor a caller's equivalent spelling (another mailbox
+        // where the key folds dots or tags) ever receives it. The code leaves
         // this service only inside that email; it is never logged or put
         // into an event.
-        let account = self.resolve_profile_optional(normalized).await?;
-        let destination = match account {
-            Some(_) => sid_authn::otp::CodeDestination::Email(normalized),
+        let destination = match self.resolve_profile_optional(normalized).await? {
+            Some(account) => self.login_mail_destination(account.id, normalized).await?,
+            None => None,
+        };
+        if destination.is_none() {
+            tracing::debug!("email code requested for an address with no login mailbox: no mail");
+        }
+        let destination = match destination.as_deref() {
+            Some(mailbox) => sid_authn::otp::CodeDestination::Email(mailbox),
             None => sid_authn::otp::CodeDestination::None,
         };
         let (result, _code) = self

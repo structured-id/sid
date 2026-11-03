@@ -75,11 +75,11 @@ pub enum MagicLinkError {
     Internal(String),
 }
 
-/// A link still waiting for its email: the address bound at the request,
+/// A link still waiting for its email: the mailbox bound at the request,
 /// the token, and until when the link works.
 pub struct PendingLink {
     pub session_id: uuid::Uuid,
-    pub email: String,
+    pub destination: String,
     pub token: secrecy::SecretString,
     pub expires_at: chrono::DateTime<chrono::Utc>,
 }
@@ -111,6 +111,7 @@ impl MagicLinkService {
     pub async fn request_magic_link(
         &self,
         email: &str,
+        destination: &str,
     ) -> Result<(MagicLinkRequestResult, String), MagicLinkError> {
         // Check rate limit via storage
         let active_count = self
@@ -134,7 +135,7 @@ impl MagicLinkService {
                 .map_err(|e| MagicLinkError::Internal(format!("hash failed: {}", e)))?
                 .to_string();
 
-        let mut session = MagicLinkSession::new(email, token_hash);
+        let mut session = MagicLinkSession::new(email, destination, token_hash);
         let session_id = session.id;
         let expires_in = sid_core::models::MAGIC_LINK_EXPIRY_SECS as u32;
         session.sealed_token = crate::sealed_secret::seal(
@@ -274,7 +275,7 @@ impl MagicLinkService {
             .map_err(|_| MagicLinkError::Sealed("the sealed token is not text".into()))?;
         Ok(Some(PendingLink {
             session_id: id,
-            email: session.email,
+            destination: session.destination,
             token: secrecy::SecretString::from(token),
             expires_at: session.expires_at,
         }))

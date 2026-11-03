@@ -171,6 +171,45 @@ async fn code_mail_waits_for_a_provider() {
     assert!(matches!(mail.handle(&work).await, WorkOutcome::Retry(_)));
 }
 
+/// Ended mail records go after their retention; open mails and recent
+/// records stay, and other kinds of work are untouched.
+#[tokio::test]
+async fn ended_mail_records_are_dropped_after_retention() {
+    let (codes, store) = codes().await;
+    codes
+        .request_otp(
+            "p@sid.example.com",
+            CodeDestination::Email("p@sid.example.com"),
+        )
+        .await
+        .unwrap();
+    let ended = owed(&store).await.remove(0);
+    store
+        .complete_work(ended.id, ended.generation, None)
+        .await
+        .unwrap();
+    codes
+        .request_otp(
+            "q@sid.example.com",
+            CodeDestination::Email("q@sid.example.com"),
+        )
+        .await
+        .unwrap();
+    let other = NewWork::new(WorkKind::new("test.other").unwrap(), vec![]);
+    store.enqueue_work(&other, 10).await.unwrap();
+
+    assert_eq!(
+        purge_ended_mail(store.as_ref(), Utc::now()).await.unwrap(),
+        0
+    );
+    let later = Utc::now() + MAIL_RECORD_RETENTION + chrono::Duration::minutes(1);
+    assert_eq!(purge_ended_mail(store.as_ref(), later).await.unwrap(), 1);
+
+    assert!(store.get_work(ended.id).await.unwrap().is_none());
+    assert_eq!(owed(&store).await.len(), 1, "an open mail was dropped");
+    assert!(store.get_work(other.id).await.unwrap().is_some());
+}
+
 /// Work that does not name a code fails for good.
 #[tokio::test]
 async fn code_mail_refuses_malformed_work() {

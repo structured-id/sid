@@ -327,10 +327,11 @@ impl NotificationChannel for SmtpChannel {
             .build_message(email_addr, message, &message_id)
             .map_err(|e| DeliveryError::InvalidRecipient(e.to_string()))?;
 
+        // No subject: rendered content (a sign-in code in the otp subject)
+        // never reaches the logs.
         tracing::debug!(
             channel = "email",
             to = email_addr,
-            subject = message.subject.as_deref().unwrap_or("(no subject)"),
             from = %self.config.from_address,
             host = %self.config.host,
             message_id,
@@ -567,6 +568,57 @@ mod tests {
             matches!(result.unwrap_err(), DeliveryError::Failed(_)),
             "expected DeliveryError::Failed for connection error"
         );
+    }
+
+    /// Captures everything logged while it is the default subscriber.
+    #[derive(Clone, Default)]
+    pub(crate) struct CapturedLog(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLog {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl CapturedLog {
+        /// Log at debug level into this capture while the guard lives.
+        pub(crate) fn install(&self) -> tracing::subscriber::DefaultGuard {
+            let writer = self.clone();
+            tracing::subscriber::set_default(
+                tracing_subscriber::fmt()
+                    .with_max_level(tracing::Level::DEBUG)
+                    .with_writer(move || writer.clone())
+                    .finish(),
+            )
+        }
+
+        pub(crate) fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
+
+    /// A subject can carry a sign-in code (the otp template puts it there),
+    /// so sending logs no subject at any level: a log reader never sees the
+    /// code. Sending once logged the whole subject at debug level.
+    #[tokio::test]
+    async fn test_smtp_deliver_logs_no_subject() {
+        let log = CapturedLog::default();
+        let _guard = log.install();
+        let channel = SmtpChannel::new(unreachable_config()).unwrap();
+        let message = RenderedMessage {
+            subject: Some("Your code: 31415926".into()),
+            ..test_message()
+        };
+
+        let _ = channel.deliver(&test_recipient(), &message).await;
+
+        let text = log.text();
+        assert!(text.contains("sending email via SMTP"), "{text}");
+        assert!(!text.contains("31415926"), "the code was logged: {text}");
     }
 
     // ── health: unreachable server ────────────────────────────────────────────
