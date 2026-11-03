@@ -687,29 +687,30 @@ impl AccountService for AccountServiceImpl {
             can_receive_fax: req.can_receive_fax,
             can_receive_voice: req.can_receive_voice,
         };
-        // A retry of a completed edit answers with the phone as that edit
-        // left it, and never writes it again over a later edit.
+        // A retry of a completed edit answers with the phone as that edit's
+        // commit left it, and never writes it again over a later edit.
         let command = KeyedCommand::by_profile::<keyed::UpdatePhone>(profile_id, operation, &req);
-        let view = command
-            .run(&*self.storage, || async {
-                let now = chrono::Utc::now();
-                let mut phone = self.owned_phone(profile_id, phone_id).await?;
-                settings.apply_to(&mut phone);
-                phone.updated_at = now;
-                let view = super::convert::phone_to_proto(&phone);
+        let phone: sid_core::models::ProfilePhone = command
+            .run_recorded(&*self.storage, || async {
                 let ctx = own_ctx(profile_id, "phone.updated", phone_id.0.to_string())
-                    .with_operation(command.completion(view.encode_to_vec()));
+                    .with_operation(command.effect_completion());
                 if !self
                     .storage
-                    .update_profile_phone_settings(profile_id, phone_id, &settings, now, ctx)
+                    .update_profile_phone_settings(
+                        profile_id,
+                        phone_id,
+                        &settings,
+                        chrono::Utc::now(),
+                        ctx,
+                    )
                     .await?
                 {
                     return Err(phone_not_found(phone_id).into());
                 }
-                Ok(view)
+                Ok(command.recorded_effect(&*self.storage).await?)
             })
             .await?;
-        Ok(Response::new(view))
+        Ok(Response::new(super::convert::phone_to_proto(&phone)))
     }
 
     async fn set_primary_phone(
@@ -721,31 +722,26 @@ impl AccountService for AccountServiceImpl {
         let req = request.into_inner();
         let phone_id = parse_phone_id(&req.phone_id)?;
 
-        // A retry of a completed move answers with the phone as it left it,
-        // and never moves the flag back over a later move.
+        // A retry of a completed move answers with the phone as that move's
+        // commit left it, and never moves the flag back over a later move.
         let command =
             KeyedCommand::by_profile::<keyed::SetPrimaryPhone>(profile_id, operation, &req);
-        let view = command
-            .run(&*self.storage, || async {
-                let now = chrono::Utc::now();
-                let mut phone = self.owned_phone(profile_id, phone_id).await?;
-                phone.is_primary = true;
-                phone.updated_at = now;
-                let view = super::convert::phone_to_proto(&phone);
+        let phone: sid_core::models::ProfilePhone = command
+            .run_recorded(&*self.storage, || async {
                 // The flag moves from the current primary in one write.
                 let ctx = own_ctx(profile_id, "phone.primary_set", phone_id.0.to_string())
-                    .with_operation(command.completion(view.encode_to_vec()));
+                    .with_operation(command.effect_completion());
                 if !self
                     .storage
-                    .set_primary_profile_phone(profile_id, phone_id, now, ctx)
+                    .set_primary_profile_phone(profile_id, phone_id, chrono::Utc::now(), ctx)
                     .await?
                 {
                     return Err(phone_not_found(phone_id).into());
                 }
-                Ok(view)
+                Ok(command.recorded_effect(&*self.storage).await?)
             })
             .await?;
-        Ok(Response::new(view))
+        Ok(Response::new(super::convert::phone_to_proto(&phone)))
     }
 
     async fn list_phones(
@@ -859,29 +855,30 @@ impl AccountService for AccountServiceImpl {
                 .clone()
                 .map(|s| Some(s).filter(|s| !s.is_empty())),
         };
-        // A retry of a completed edit answers with the email as that edit
-        // left it, and never writes it again over a later edit.
+        // A retry of a completed edit answers with the email as that edit's
+        // commit left it, and never writes it again over a later edit.
         let command = KeyedCommand::by_profile::<keyed::UpdateEmail>(profile_id, operation, &req);
-        let view = command
-            .run(&*self.storage, || async {
-                let now = chrono::Utc::now();
-                let mut email = self.owned_email(profile_id, email_id).await?;
-                settings.apply_to(&mut email);
-                email.updated_at = now;
-                let view = super::convert::email_to_proto(&email);
+        let email: sid_core::models::ProfileEmail = command
+            .run_recorded(&*self.storage, || async {
                 let ctx = own_ctx(profile_id, "email.updated", email_id.0.to_string())
-                    .with_operation(command.completion(view.encode_to_vec()));
+                    .with_operation(command.effect_completion());
                 if !self
                     .storage
-                    .update_profile_email_settings(profile_id, email_id, &settings, now, ctx)
+                    .update_profile_email_settings(
+                        profile_id,
+                        email_id,
+                        &settings,
+                        chrono::Utc::now(),
+                        ctx,
+                    )
                     .await?
                 {
                     return Err(email_not_found(email_id).into());
                 }
-                Ok(view)
+                Ok(command.recorded_effect(&*self.storage).await?)
             })
             .await?;
-        Ok(Response::new(view))
+        Ok(Response::new(super::convert::email_to_proto(&email)))
     }
 
     async fn set_primary_email(
@@ -893,31 +890,26 @@ impl AccountService for AccountServiceImpl {
         let req = request.into_inner();
         let email_id = parse_email_id(&req.email_id)?;
 
-        // A retry of a completed move answers with the email as it left it,
-        // and never moves the flag back over a later move.
+        // A retry of a completed move answers with the email as that move's
+        // commit left it, and never moves the flag back over a later move.
         let command =
             KeyedCommand::by_profile::<keyed::SetPrimaryEmail>(profile_id, operation, &req);
-        let view = command
-            .run(&*self.storage, || async {
-                let now = chrono::Utc::now();
-                let mut email = self.owned_email(profile_id, email_id).await?;
-                email.is_primary = true;
-                email.updated_at = now;
-                let view = super::convert::email_to_proto(&email);
+        let email: sid_core::models::ProfileEmail = command
+            .run_recorded(&*self.storage, || async {
                 // The flag moves from the current primary in one write.
                 let ctx = own_ctx(profile_id, "email.primary_set", email_id.0.to_string())
-                    .with_operation(command.completion(view.encode_to_vec()));
+                    .with_operation(command.effect_completion());
                 if !self
                     .storage
-                    .set_primary_profile_email(profile_id, email_id, now, ctx)
+                    .set_primary_profile_email(profile_id, email_id, chrono::Utc::now(), ctx)
                     .await?
                 {
                     return Err(email_not_found(email_id).into());
                 }
-                Ok(view)
+                Ok(command.recorded_effect(&*self.storage).await?)
             })
             .await?;
-        Ok(Response::new(view))
+        Ok(Response::new(super::convert::email_to_proto(&email)))
     }
 
     async fn list_emails(

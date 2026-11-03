@@ -164,8 +164,9 @@ pub trait StorageBackend:
     /// takes the flag from the profile's current primary in the same write.
     async fn create_profile_phone(&self, phone: &ProfilePhone, ctx: MutationContext) -> Result<()>;
 
-    /// Apply the owner's settings to `profile_id`'s phone `id`; `false` when
-    /// the profile has no such phone.
+    /// Apply the owner's settings to `profile_id`'s phone `id`, recording the
+    /// phone as the write leaves it ([`MutationContext::record_effect`]);
+    /// `false` when the profile has no such phone.
     async fn update_profile_phone_settings(
         &self,
         profile_id: ProfileId,
@@ -176,7 +177,8 @@ pub trait StorageBackend:
     ) -> Result<bool>;
 
     /// Make `profile_id`'s phone `id` its primary phone, taking the flag from
-    /// the current one in the same write; `false` when there is no such phone.
+    /// the current one in the same write and recording the phone as it leaves
+    /// it; `false` when there is no such phone.
     async fn set_primary_profile_phone(
         &self,
         profile_id: ProfileId,
@@ -206,8 +208,9 @@ pub trait StorageBackend:
     /// takes the flag from the profile's current primary in the same write.
     async fn create_profile_email(&self, email: &ProfileEmail, ctx: MutationContext) -> Result<()>;
 
-    /// Apply the owner's label to `profile_id`'s email `id`; `false` when the
-    /// profile has no such email.
+    /// Apply the owner's label to `profile_id`'s email `id`, recording the
+    /// email as the write leaves it ([`MutationContext::record_effect`]);
+    /// `false` when the profile has no such email.
     async fn update_profile_email_settings(
         &self,
         profile_id: ProfileId,
@@ -218,7 +221,8 @@ pub trait StorageBackend:
     ) -> Result<bool>;
 
     /// Make `profile_id`'s email `id` its primary email, taking the flag from
-    /// the current one in the same write; `false` when there is no such email.
+    /// the current one in the same write and recording the email as it leaves
+    /// it; `false` when there is no such email.
     async fn set_primary_profile_email(
         &self,
         profile_id: ProfileId,
@@ -1940,7 +1944,9 @@ pub trait StorageBackend:
     ) -> Result<bool>;
 
     /// Publish a draft of `project_id` and archive the project's published
-    /// config in one transaction; `false` when `id` is not a draft of that project.
+    /// config in one transaction, recording the config as it publishes it
+    /// ([`MutationContext::record_effect`]); `false` when `id` is not a draft
+    /// of that project.
     async fn publish_branding_config(
         &self,
         id: sid_core::models::BrandingConfigId,

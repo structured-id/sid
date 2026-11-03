@@ -1059,7 +1059,14 @@ impl MachineUserService for MachineUserServiceImpl {
             .await
         {
             Ok(true) => {}
-            Ok(false) => return Err(changed_concurrently()),
+            // Rotated since it was read: by a concurrent attempt of this
+            // command, whose answer is this one's, or by another.
+            Ok(false) => {
+                if let Some(recorded) = command.completed(&*self.storage).await? {
+                    return recorded_answer(&recorded);
+                }
+                return Err(changed_concurrently());
+            }
             Err(sid_core::Error::OperationCompleted(_)) => {
                 return recorded_answer(&command.committed_elsewhere(&*self.storage).await?);
             }

@@ -314,7 +314,9 @@ impl KeyedCommand {
     }
 
     /// Why a commit of this command failed in its store: an already
-    /// completed key resolves to the result another attempt committed.
+    /// completed key resolves to the result another attempt committed, and so
+    /// does any other failure that attempt's effect caused before the key was
+    /// reached (a unique value it took, a revision it moved on).
     async fn not_committed(
         &self,
         storage: &(impl OperationResultStore + ?Sized),
@@ -325,10 +327,13 @@ impl KeyedCommand {
             sid_core::Error::OperationPeriodRefused(refusal) => {
                 Err(OperationError::PeriodRefused(refusal))
             }
-            e => {
-                tracing::warn!(method = self.method, error = %e, "keyed command not committed");
-                Err(OperationError::Store(e))
-            }
+            e => match self.completed(storage).await {
+                Ok(Some(result)) => Ok(result),
+                _ => {
+                    tracing::warn!(method = self.method, error = %e, "keyed command not committed");
+                    Err(OperationError::Store(e))
+                }
+            },
         }
     }
 

@@ -87,6 +87,9 @@ pub struct MockStorageInner {
     /// Reading a profile's primary contacts and metadata fails as a storage
     /// fault would.
     contact_reads_fail: bool,
+    /// The next contact settings edit finds its contact made primary by a
+    /// move committed after the editor read it.
+    primary_moved_before_contact_edit: bool,
     /// Listing a profile's credentials fails as a storage fault would.
     credential_reads_fail: bool,
     /// Reading an OAuth2 client fails as a storage fault would.
@@ -504,6 +507,13 @@ impl MockStorage {
     #[allow(dead_code)]
     pub fn fail_contact_reads(&self) {
         self.inner.lock().unwrap().contact_reads_fail = true;
+    }
+
+    /// The next contact settings edit finds its contact made primary since
+    /// the editor read it, as a concurrent move committed in between.
+    #[allow(dead_code)]
+    pub fn move_primary_before_next_contact_edit(&self) {
+        self.inner.lock().unwrap().primary_moved_before_contact_edit = true;
     }
 
     /// From now on, listing a profile's credentials fails.
@@ -2443,21 +2453,21 @@ impl StorageBackend for MockStorage {
         id: ProfilePhoneId,
         settings: &sid_core::models::PhoneSettings,
         at: chrono::DateTime<chrono::Utc>,
-        audit: MutationContext,
+        mut audit: MutationContext,
     ) -> SidResult<bool> {
         let mut inner = self.inner.lock().unwrap();
-        if !inner
+        if std::mem::take(&mut inner.primary_moved_before_contact_edit) {
+            for p in inner.profile_phones.values_mut() {
+                if p.profile_id == profile_id {
+                    p.is_primary = p.id == id;
+                }
+            }
+        }
+        let Some(mut phone) = inner
             .profile_phones
             .get(&id.0)
-            .is_some_and(|p| p.profile_id == profile_id)
-        {
-            return Ok(false);
-        }
-        inner.owe(&audit)?;
-        let Some(phone) = inner
-            .profile_phones
-            .get_mut(&id.0)
             .filter(|p| p.profile_id == profile_id)
+            .cloned()
         else {
             return Ok(false);
         };
@@ -2477,29 +2487,37 @@ impl StorageBackend for MockStorage {
             phone.can_receive_voice = v;
         }
         phone.updated_at = at;
+        audit.record_effect(&phone)?;
+        inner.owe(&audit)?;
+        inner.profile_phones.insert(id.0, phone);
         Ok(true)
     }
     async fn set_primary_profile_phone(
         &self,
         profile_id: ProfileId,
         id: ProfilePhoneId,
-        _at: chrono::DateTime<chrono::Utc>,
-        audit: MutationContext,
+        at: chrono::DateTime<chrono::Utc>,
+        mut audit: MutationContext,
     ) -> SidResult<bool> {
         let mut inner = self.inner.lock().unwrap();
-        if !inner
+        let Some(mut phone) = inner
             .profile_phones
             .get(&id.0)
-            .is_some_and(|p| p.profile_id == profile_id)
-        {
+            .filter(|p| p.profile_id == profile_id)
+            .cloned()
+        else {
             return Ok(false);
-        }
+        };
+        phone.is_primary = true;
+        phone.updated_at = at;
+        audit.record_effect(&phone)?;
         inner.owe(&audit)?;
         for p in inner.profile_phones.values_mut() {
             if p.profile_id == profile_id {
                 p.is_primary = p.id == id;
             }
         }
+        inner.profile_phones.insert(id.0, phone);
         Ok(true)
     }
     async fn delete_profile_phone(
@@ -2570,21 +2588,21 @@ impl StorageBackend for MockStorage {
         id: ProfileEmailId,
         settings: &sid_core::models::EmailSettings,
         at: chrono::DateTime<chrono::Utc>,
-        audit: MutationContext,
+        mut audit: MutationContext,
     ) -> SidResult<bool> {
         let mut inner = self.inner.lock().unwrap();
-        if !inner
+        if std::mem::take(&mut inner.primary_moved_before_contact_edit) {
+            for e in inner.profile_emails.values_mut() {
+                if e.profile_id == profile_id {
+                    e.is_primary = e.id == id;
+                }
+            }
+        }
+        let Some(mut email) = inner
             .profile_emails
             .get(&id.0)
-            .is_some_and(|e| e.profile_id == profile_id)
-        {
-            return Ok(false);
-        }
-        inner.owe(&audit)?;
-        let Some(email) = inner
-            .profile_emails
-            .get_mut(&id.0)
             .filter(|e| e.profile_id == profile_id)
+            .cloned()
         else {
             return Ok(false);
         };
@@ -2595,29 +2613,37 @@ impl StorageBackend for MockStorage {
             email.custom_label = custom.clone();
         }
         email.updated_at = at;
+        audit.record_effect(&email)?;
+        inner.owe(&audit)?;
+        inner.profile_emails.insert(id.0, email);
         Ok(true)
     }
     async fn set_primary_profile_email(
         &self,
         profile_id: ProfileId,
         id: ProfileEmailId,
-        _at: chrono::DateTime<chrono::Utc>,
-        audit: MutationContext,
+        at: chrono::DateTime<chrono::Utc>,
+        mut audit: MutationContext,
     ) -> SidResult<bool> {
         let mut inner = self.inner.lock().unwrap();
-        if !inner
+        let Some(mut email) = inner
             .profile_emails
             .get(&id.0)
-            .is_some_and(|e| e.profile_id == profile_id)
-        {
+            .filter(|e| e.profile_id == profile_id)
+            .cloned()
+        else {
             return Ok(false);
-        }
+        };
+        email.is_primary = true;
+        email.updated_at = at;
+        audit.record_effect(&email)?;
         inner.owe(&audit)?;
         for e in inner.profile_emails.values_mut() {
             if e.profile_id == profile_id {
                 e.is_primary = e.id == id;
             }
         }
+        inner.profile_emails.insert(id.0, email);
         Ok(true)
     }
     async fn delete_profile_email(

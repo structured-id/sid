@@ -12,7 +12,28 @@ use sid_core::{
     },
 };
 
-use super::{SqliteBackend, fmt_dt, fmt_dt_opt, insert_error};
+use super::profile::{row_to_profile_email, row_to_profile_phone};
+use super::{SqliteBackend, WriteTx, fmt_dt, fmt_dt_opt, insert_error};
+
+/// Phone `id` as the transaction leaves it.
+async fn phone_in_tx(tx: &mut WriteTx, id: ProfilePhoneId) -> SidResult<ProfilePhone> {
+    let row = sqlx::query("SELECT * FROM profile_phones WHERE id = ?")
+        .bind(id.0.to_string())
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("read phone: {e}")))?;
+    row_to_profile_phone(&row)
+}
+
+/// Email `id` as the transaction leaves it.
+async fn email_in_tx(tx: &mut WriteTx, id: ProfileEmailId) -> SidResult<ProfileEmail> {
+    let row = sqlx::query("SELECT * FROM profile_emails WHERE id = ?")
+        .bind(id.0.to_string())
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("read email: {e}")))?;
+    row_to_profile_email(&row)
+}
 
 impl SqliteBackend {
     pub(crate) async fn create_profile_phone_impl(
@@ -65,7 +86,7 @@ impl SqliteBackend {
         id: ProfilePhoneId,
         settings: &PhoneSettings,
         at: DateTime<Utc>,
-        ctx: MutationContext,
+        mut ctx: MutationContext,
     ) -> SidResult<bool> {
         let mut tx = self.begin_write().await?;
         let updated = sqlx::query(
@@ -94,6 +115,7 @@ impl SqliteBackend {
         if !updated {
             return Ok(false);
         }
+        ctx.record_effect(&phone_in_tx(&mut tx, id).await?)?;
         Self::commit_mutation(tx, &format!("profile_phone:{}", id.0), ctx).await?;
         Ok(true)
     }
@@ -103,7 +125,7 @@ impl SqliteBackend {
         profile_id: ProfileId,
         id: ProfilePhoneId,
         at: DateTime<Utc>,
-        ctx: MutationContext,
+        mut ctx: MutationContext,
     ) -> SidResult<bool> {
         let at = fmt_dt(&at);
         let mut tx = self.begin_write().await?;
@@ -133,6 +155,7 @@ impl SqliteBackend {
             .execute(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(format!("set primary phone: {e}")))?;
+        ctx.record_effect(&phone_in_tx(&mut tx, id).await?)?;
         Self::commit_mutation(tx, &format!("profile_phone:{}", id.0), ctx).await?;
         Ok(true)
     }
@@ -182,7 +205,7 @@ impl SqliteBackend {
         id: ProfileEmailId,
         settings: &EmailSettings,
         at: DateTime<Utc>,
-        ctx: MutationContext,
+        mut ctx: MutationContext,
     ) -> SidResult<bool> {
         let mut tx = self.begin_write().await?;
         let updated = sqlx::query(
@@ -205,6 +228,7 @@ impl SqliteBackend {
         if !updated {
             return Ok(false);
         }
+        ctx.record_effect(&email_in_tx(&mut tx, id).await?)?;
         Self::commit_mutation(tx, &format!("profile_email:{}", id.0), ctx).await?;
         Ok(true)
     }
@@ -214,7 +238,7 @@ impl SqliteBackend {
         profile_id: ProfileId,
         id: ProfileEmailId,
         at: DateTime<Utc>,
-        ctx: MutationContext,
+        mut ctx: MutationContext,
     ) -> SidResult<bool> {
         let at = fmt_dt(&at);
         let mut tx = self.begin_write().await?;
@@ -244,6 +268,7 @@ impl SqliteBackend {
             .execute(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(format!("set primary email: {e}")))?;
+        ctx.record_effect(&email_in_tx(&mut tx, id).await?)?;
         Self::commit_mutation(tx, &format!("profile_email:{}", id.0), ctx).await?;
         Ok(true)
     }

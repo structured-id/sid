@@ -489,9 +489,9 @@ impl BrandingService for BrandingServiceImpl {
         // config no longer a draft, and never publishes it again over a
         // later one.
         let command = self.command::<keyed::PublishBrandingConfig>(&admin_sub, operation, &req)?;
-        let response = command
-            .run(&*self.storage, || async {
-                let mut config = self
+        let published: sid_core::models::BrandingConfig = command
+            .run_recorded(&*self.storage, || async {
+                let config = self
                     .storage
                     .get_branding_config(config_id)
                     .await?
@@ -506,32 +506,28 @@ impl BrandingService for BrandingServiceImpl {
                     return Err(not_a_draft(config_id).into());
                 }
 
-                // The config as the publication leaves it.
-                let at = chrono::Utc::now();
-                config.status = BrandingStatus::Published;
-                config.updated_at = at;
-                let response = domain_to_proto(&config);
                 // Archiving the published config and publishing the draft is
-                // one write.
+                // one write; the answer is the config as that write
+                // publishes it, an edit made since this read included.
                 let audit = MutationContext::from(AuditEntry::admin(
                     &admin_sub,
                     "branding.publish",
                     config.id.to_string(),
                 ))
-                .with_operation(command.completion(response.encode_to_vec()));
+                .with_operation(command.effect_completion());
                 if !self
                     .storage
-                    .publish_branding_config(config_id, project_id, at, audit)
+                    .publish_branding_config(config_id, project_id, chrono::Utc::now(), audit)
                     .await?
                 {
-                    // Published, edited or deleted since it was read.
+                    // Published or deleted since it was read.
                     return Err(not_a_draft(config_id).into());
                 }
-                Ok(response)
+                Ok(command.recorded_effect(&*self.storage).await?)
             })
             .await?;
 
-        Ok(Response::new(response))
+        Ok(Response::new(domain_to_proto(&published)))
     }
 
     #[instrument(skip_all, name = "branding.delete")]

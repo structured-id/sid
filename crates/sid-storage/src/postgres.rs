@@ -493,6 +493,36 @@ impl PostgresBackend {
             .into_domain()
     }
 
+    /// Phone `id` as the transaction leaves it.
+    async fn phone_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        id: ProfilePhoneId,
+    ) -> SidResult<ProfilePhone> {
+        sqlx::query_as::<_, crate::pg_row::ProfilePhoneRow>(
+            "SELECT * FROM profile_phones WHERE id = $1",
+        )
+        .bind(id.0)
+        .fetch_one(&mut **tx)
+        .await
+        .map(crate::pg_row::ProfilePhoneRow::into_domain)
+        .map_err(|e| SidError::Storage(format!("read phone: {e}")))
+    }
+
+    /// Email `id` as the transaction leaves it.
+    async fn email_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        id: ProfileEmailId,
+    ) -> SidResult<ProfileEmail> {
+        sqlx::query_as::<_, crate::pg_row::ProfileEmailRow>(
+            "SELECT * FROM profile_emails WHERE id = $1",
+        )
+        .bind(id.0)
+        .fetch_one(&mut **tx)
+        .await
+        .map(crate::pg_row::ProfileEmailRow::into_domain)
+        .map_err(|e| SidError::Storage(format!("read email: {e}")))
+    }
+
     /// Lock `profile_id`'s row for a session commit and refuse an owner that
     /// can no longer authenticate.
     ///
@@ -2489,7 +2519,7 @@ impl StorageBackend for PostgresBackend {
         id: ProfilePhoneId,
         settings: &PhoneSettings,
         at: chrono::DateTime<chrono::Utc>,
-        audit: MutationContext,
+        mut audit: MutationContext,
     ) -> SidResult<bool> {
         let mut tx = self
             .pool
@@ -2522,6 +2552,7 @@ impl StorageBackend for PostgresBackend {
         if !updated {
             return Ok(false);
         }
+        audit.record_effect(&Self::phone_in_tx(&mut tx, id).await?)?;
         Self::audit_in_tx(&mut tx, &format!("profile_phone:{}", id.0), audit).await?;
         tx.commit()
             .await
@@ -2534,7 +2565,7 @@ impl StorageBackend for PostgresBackend {
         profile_id: ProfileId,
         id: ProfilePhoneId,
         at: chrono::DateTime<chrono::Utc>,
-        audit: MutationContext,
+        mut audit: MutationContext,
     ) -> SidResult<bool> {
         let mut tx = self
             .pool
@@ -2544,6 +2575,7 @@ impl StorageBackend for PostgresBackend {
         if !contact::make_primary(&mut tx, contact::Contacts::Phones, profile_id, id.0, at).await? {
             return Ok(false);
         }
+        audit.record_effect(&Self::phone_in_tx(&mut tx, id).await?)?;
         Self::audit_in_tx(&mut tx, &format!("profile_phone:{}", id.0), audit).await?;
         tx.commit()
             .await
@@ -2639,7 +2671,7 @@ impl StorageBackend for PostgresBackend {
         id: ProfileEmailId,
         settings: &EmailSettings,
         at: chrono::DateTime<chrono::Utc>,
-        audit: MutationContext,
+        mut audit: MutationContext,
     ) -> SidResult<bool> {
         let mut tx = self
             .pool
@@ -2666,6 +2698,7 @@ impl StorageBackend for PostgresBackend {
         if !updated {
             return Ok(false);
         }
+        audit.record_effect(&Self::email_in_tx(&mut tx, id).await?)?;
         Self::audit_in_tx(&mut tx, &format!("profile_email:{}", id.0), audit).await?;
         tx.commit()
             .await
@@ -2678,7 +2711,7 @@ impl StorageBackend for PostgresBackend {
         profile_id: ProfileId,
         id: ProfileEmailId,
         at: chrono::DateTime<chrono::Utc>,
-        audit: MutationContext,
+        mut audit: MutationContext,
     ) -> SidResult<bool> {
         let mut tx = self
             .pool
@@ -2688,6 +2721,7 @@ impl StorageBackend for PostgresBackend {
         if !contact::make_primary(&mut tx, contact::Contacts::Emails, profile_id, id.0, at).await? {
             return Ok(false);
         }
+        audit.record_effect(&Self::email_in_tx(&mut tx, id).await?)?;
         Self::audit_in_tx(&mut tx, &format!("profile_email:{}", id.0), audit).await?;
         tx.commit()
             .await
@@ -7964,7 +7998,7 @@ impl StorageBackend for PostgresBackend {
         id: sid_core::models::BrandingConfigId,
         project_id: ProjectId,
         at: chrono::DateTime<chrono::Utc>,
-        audit: MutationContext,
+        mut audit: MutationContext,
     ) -> SidResult<bool> {
         let mut tx = self
             .pool
@@ -8011,6 +8045,15 @@ impl StorageBackend for PostgresBackend {
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("published branding", e))?;
+        let published = sqlx::query_as::<_, BrandingRow>(
+            "SELECT status, revision, updated_at, data FROM branding_configs WHERE id = $1",
+        )
+        .bind(id.0)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("read published branding: {e}")))?
+        .into_domain()?;
+        audit.record_effect(&published)?;
         Self::audit_in_tx(&mut tx, &format!("branding:{}", id.0), audit).await?;
         tx.commit()
             .await

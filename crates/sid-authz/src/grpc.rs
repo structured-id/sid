@@ -286,6 +286,20 @@ async fn settled<T: prost::Message + Default>(
     }
 }
 
+/// The answer to `command` when its conditional write found the record
+/// changed or gone: the recorded answer when a concurrent attempt of this
+/// command made that change first, otherwise `refusal`.
+async fn not_written<T: prost::Message + Default>(
+    storage: &dyn StorageBackend,
+    command: &KeyedCommand,
+    refusal: Status,
+) -> Result<Response<T>, Status> {
+    match command.replay::<T>(storage).await? {
+        Some(recorded) => Ok(Response::new(recorded)),
+        None => Err(refusal),
+    }
+}
+
 fn assignment_to_proto(a: &RoleAssignment) -> sid_proto::sid::v1::RoleAssignment {
     let principal = match &a.principal {
         RoleAssignmentPrincipal::Profile(pid) => {
@@ -1880,7 +1894,9 @@ impl AuthzService for AuthzServiceImpl {
         {
             // Deleted or changed since it was read: never recreated or
             // overwritten.
-            Ok(false) => return Err(changed_concurrently()),
+            Ok(false) => {
+                return not_written(&*self.storage, &command, changed_concurrently()).await;
+            }
             Ok(true) => Ok(()),
             Err(e) => Err(e),
         };
@@ -2629,7 +2645,9 @@ impl AuthzService for AuthzServiceImpl {
         let committed = match self.storage.update_cedar_policy(&policy, ctx).await {
             // Deleted or changed since it was read: never recreated or
             // overwritten.
-            Ok(false) => return Err(changed_concurrently()),
+            Ok(false) => {
+                return not_written(&*self.storage, &command, changed_concurrently()).await;
+            }
             Ok(true) => Ok(()),
             Err(e) => Err(e),
         };

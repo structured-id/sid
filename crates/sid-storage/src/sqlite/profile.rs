@@ -315,7 +315,7 @@ fn row_to_profile_metadata(row: &sqlx::sqlite::SqliteRow) -> SidResult<ProfileMe
     })
 }
 
-fn row_to_profile_phone(row: &sqlx::sqlite::SqliteRow) -> SidResult<ProfilePhone> {
+pub(super) fn row_to_profile_phone(row: &sqlx::sqlite::SqliteRow) -> SidResult<ProfilePhone> {
     let id_str: String = row.get("id");
     Ok(ProfilePhone {
         id: ProfilePhoneId(uuid::Uuid::parse_str(&id_str).unwrap_or_default()),
@@ -339,7 +339,7 @@ fn row_to_profile_phone(row: &sqlx::sqlite::SqliteRow) -> SidResult<ProfilePhone
     })
 }
 
-fn row_to_profile_email(row: &sqlx::sqlite::SqliteRow) -> SidResult<ProfileEmail> {
+pub(super) fn row_to_profile_email(row: &sqlx::sqlite::SqliteRow) -> SidResult<ProfileEmail> {
     let id_str: String = row.get("id");
     Ok(ProfileEmail {
         id: ProfileEmailId(uuid::Uuid::parse_str(&id_str).unwrap_or_default()),

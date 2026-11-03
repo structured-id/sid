@@ -541,6 +541,98 @@ async fn policy_edit_answers_its_stored_revision(h: Harness) {
     assert_eq!(retried, edited);
 }
 
+/// The policy every concurrent-edit scenario edits.
+async fn policy(h: &Harness) -> sid_proto::sid::v1::Policy {
+    use sid_proto::sid::v1::authz::CreatePolicyRequest;
+    h.storage
+        .ensure_system_project(AuditEntry::system("test", "policy").into())
+        .await
+        .unwrap();
+    h.svc
+        .create_policy(call(
+            CreatePolicyRequest {
+                scope: Some(sid_proto::sid::v1::PolicyScope {
+                    scope: Some(sid_proto::sid::v1::policy_scope::Scope::ProjectId(
+                        ProjectId::system().0.to_string(),
+                    )),
+                }),
+                name: format!("p{}", tag()),
+                policy_text: "permit(principal, action, resource);".into(),
+                effect: sid_proto::sid::v1::PolicyEffect::Permit as i32,
+                enabled: true,
+                ..Default::default()
+            },
+            &h.token,
+            Some(&format!("k-{}", tag())),
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .policy
+        .unwrap()
+}
+
+/// Regression guard: concurrent attempts of one policy edit read the same
+/// revision; the losers' revision-conditional writes find it moved on by
+/// the winner, and still answer with the winner's recorded edit rather than
+/// "changed concurrently".
+async fn concurrent_policy_edits_with_one_key_answer_one_edit(h: Harness) {
+    use sid_proto::sid::v1::authz::UpdatePolicyRequest;
+    let created = policy(&h).await;
+    let key = format!("k-{}", tag());
+    let calls = (0..4).map(|_| {
+        let svc = h.svc.clone();
+        let request = call(
+            UpdatePolicyRequest {
+                id: created.id.clone(),
+                description: Some("edited".into()),
+                ..Default::default()
+            },
+            &h.token,
+            Some(&key),
+        );
+        async move { svc.update_policy(request).await }
+    });
+    let answers: Vec<_> = futures::future::join_all(calls)
+        .await
+        .into_iter()
+        .map(|r| r.expect("every attempt answers").into_inner())
+        .collect();
+    assert!(answers.iter().all(|a| *a == answers[0]), "{answers:?}");
+    assert_eq!(
+        answers[0].policy.as_ref().unwrap().revision,
+        created.revision + 1,
+        "one edit was made"
+    );
+}
+
+/// Regression guard: concurrent attempts of one role edit all answer with
+/// the edit the winner recorded.
+async fn concurrent_role_edits_with_one_key_answer_one_edit(h: Harness) {
+    use sid_proto::sid::v1::authz::UpdateRoleRequest;
+    let role = role(&h).await;
+    let key = format!("k-{}", tag());
+    let calls = (0..4).map(|_| {
+        let svc = h.svc.clone();
+        let request = call(
+            UpdateRoleRequest {
+                id: role.id.0.to_string(),
+                description: Some("edited".into()),
+                ..Default::default()
+            },
+            &h.token,
+            Some(&key),
+        );
+        async move { svc.update_role(request).await }
+    });
+    let answers: Vec<_> = futures::future::join_all(calls)
+        .await
+        .into_iter()
+        .map(|r| r.expect("every attempt answers").into_inner())
+        .collect();
+    assert!(answers.iter().all(|a| *a == answers[0]), "{answers:?}");
+}
+
 macro_rules! on_both_engines {
     ($($scenario:ident),* $(,)?) => {
         mod pg {
@@ -574,4 +666,6 @@ on_both_engines!(
     concurrent_group_creations_with_one_key_answer_one_group,
     group_edit_without_a_description_is_recorded,
     policy_edit_answers_its_stored_revision,
+    concurrent_policy_edits_with_one_key_answer_one_edit,
+    concurrent_role_edits_with_one_key_answer_one_edit,
 );

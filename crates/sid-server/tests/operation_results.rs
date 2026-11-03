@@ -631,6 +631,80 @@ async fn test_credential_rename_retry_keeps_a_later_label() {
     );
 }
 
+/// Regression guard: a contact's label edit answers with the contact as its
+/// own commit left it. A primary move committed between the edit's read and
+/// its write makes the email primary; the edit, which writes only the label,
+/// answers primary (as it does on a retry), not the flag it read.
+#[tokio::test]
+async fn test_a_contact_edit_answers_with_what_its_commit_left() {
+    use sid_proto::sid::v1::account_service_server::AccountService;
+    let profile = sid_core::models::Profile::new(Some("contact_edit"));
+    let svc = TestServices::new(MockStorage::new().with_profile(profile.clone()));
+    let token = common::fresh_token(&svc, &profile).await;
+    let email = svc
+        .account
+        .add_email(keyed(
+            AddEmailRequest {
+                email: "second@sid.example.com".into(),
+                ..Default::default()
+            },
+            &token,
+            Some("op-email"),
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!email.is_primary);
+    let phone = svc
+        .account
+        .add_phone(keyed(
+            AddPhoneRequest {
+                e164: 380_501_234_567,
+                ..Default::default()
+            },
+            &token,
+            Some("op-phone"),
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!phone.is_primary);
+
+    svc.mock_storage.move_primary_before_next_contact_edit();
+    let edited = svc
+        .account
+        .update_email(keyed(
+            UpdateEmailRequest {
+                email_id: email.id,
+                label: Some(EmailLabel::Work as i32),
+                ..Default::default()
+            },
+            &token,
+            Some("op-email-label"),
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(edited.is_primary, "the edit answered the flag it read");
+
+    svc.mock_storage.move_primary_before_next_contact_edit();
+    let edited = svc
+        .account
+        .update_phone(keyed(
+            UpdatePhoneRequest {
+                phone_id: phone.id,
+                label: Some(PhoneLabel::Work as i32),
+                ..Default::default()
+            },
+            &token,
+            Some("op-phone-label"),
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(edited.is_primary, "the edit answered the flag it read");
+}
+
 /// A device is trusted, then distrusted, then the trust's lost response is
 /// retried: the retry answers as the trust did and the device stays
 /// distrusted.

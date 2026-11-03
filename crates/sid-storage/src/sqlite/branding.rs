@@ -85,7 +85,7 @@ impl SqliteBackend {
         id: BrandingConfigId,
         project_id: ProjectId,
         at: DateTime<Utc>,
-        ctx: MutationContext,
+        mut ctx: MutationContext,
     ) -> SidResult<bool> {
         let at = fmt_dt(&at);
         // `BEGIN IMMEDIATE`: a concurrent publish waits for this one.
@@ -121,6 +121,14 @@ impl SqliteBackend {
         .execute(&mut *tx)
         .await
         .map_err(|e| super::insert_error("published branding", e))?;
+        let published = sqlx::query(
+            "SELECT status, revision, updated_at, data FROM branding_configs WHERE id = ?",
+        )
+        .bind(id.0.to_string())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("read published branding: {e}")))?;
+        ctx.record_effect(&row_to_branding(&published)?)?;
         Self::commit_mutation(tx, &format!("branding:{}", id.0), ctx).await?;
         Ok(true)
     }

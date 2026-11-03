@@ -335,7 +335,12 @@ impl UpstreamService for UpstreamServiceImpl {
             Err(sid_core::Error::OperationCompleted(_)) => {
                 return recorded_answer(&command.committed_elsewhere(&*self.storage).await?);
             }
+            // The name is taken: by a concurrent attempt of this command,
+            // whose answer is this one's, or by another provider.
             Err(sid_core::Error::Conflict(_)) => {
+                if let Some(recorded) = command.completed(&*self.storage).await? {
+                    return recorded_answer(&recorded);
+                }
                 return Err(ApiError::new(
                     ErrorReason::UpstreamProviderAlreadyExists,
                     "an upstream provider with this name already exists",
@@ -468,8 +473,14 @@ impl UpstreamService for UpstreamServiceImpl {
         match self.storage.update_upstream_provider(&provider, ctx).await {
             Ok(true) => {}
             // Deleted or changed since it was read: never recreated or
-            // overwritten.
-            Ok(false) => return Err(changed_concurrently()),
+            // overwritten. A concurrent attempt of this command that made the
+            // change answers for this one.
+            Ok(false) => {
+                if let Some(recorded) = command.completed(&*self.storage).await? {
+                    return recorded_answer(&recorded);
+                }
+                return Err(changed_concurrently());
+            }
             Err(sid_core::Error::OperationCompleted(_)) => {
                 return recorded_answer(&command.committed_elsewhere(&*self.storage).await?);
             }
