@@ -155,6 +155,22 @@ service OutsideService {
 message ChangeRequest { string id = 1; }
 "#;
 
+/// A keyed request whose proto name is not prost's Rust name.
+const ACRONYM: &str = r#"
+syntax = "proto3";
+package acme.v1.ca;
+import "sid/v1/common/operation.proto";
+
+service CaService {
+  rpc RotateCA(RotateCARequest) returns (RotateCARequest) {
+    option idempotency_level = IDEMPOTENT;
+    option (sid.v1.common.retry) = { keyed: true };
+  }
+}
+
+message RotateCARequest { string id = 1; }
+"#;
+
 /// A file without the retry option among its imports.
 const NO_OPTION: &str = r#"
 syntax = "proto3";
@@ -178,6 +194,7 @@ impl FileResolver for Fixtures {
             "acmeish/v1/unmapped.proto" => UNMAPPED,
             "beta/v1/outside.proto" => OUTSIDE,
             "acme/v1/plain/plain.proto" => NO_OPTION,
+            "acme/v1/ca/ca.proto" => ACRONYM,
             _ => return Err(protox::Error::file_not_found(name)),
         };
         File::from_source(name, source)
@@ -363,6 +380,20 @@ fn test_descriptors_without_the_retry_option_are_refused() {
     assert!(
         lines[0].contains("define no sid.v1.common.retry"),
         "{lines:?}"
+    );
+}
+
+/// Regression guard: a request is named by the type prost generates for it
+/// (`RotateCARequest` is `RotateCaRequest` in Rust), so the binding compiles.
+#[test]
+fn test_a_request_is_named_as_prost_names_it() {
+    let file = "acme/v1/ca/ca.proto";
+    let code = bindings()
+        .generate(&descriptors(&[file]), &[file])
+        .expect("binds");
+    assert!(
+        code.contains("type Request = crate::acme::v1::ca::RotateCaRequest;"),
+        "{code}"
     );
 }
 

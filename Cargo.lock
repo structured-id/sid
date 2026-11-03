@@ -5800,6 +5800,7 @@ dependencies = [
 name = "sid-proto-build"
 version = "0.2.11"
 dependencies = [
+ "heck",
  "prost-reflect",
  "protox",
 ]

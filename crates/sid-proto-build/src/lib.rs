@@ -232,7 +232,12 @@ impl KeyedBindings {
             path.push_str("::");
             path.push_str(segment);
         }
-        Ok(format!("{path}::{local}"))
+        // prost names a message's type as prost-build's `to_upper_camel`
+        // does: `RotateCARequest` is `RotateCaRequest`.
+        Ok(format!(
+            "{path}::{}",
+            heck::ToUpperCamelCase::to_upper_camel_case(local)
+        ))
     }
 
     /// The bindings of `keyed`, by module.

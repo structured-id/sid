@@ -10,6 +10,8 @@ authors.workspace = true
 [dependencies]
 # Reads the compiled descriptors, the retry rule extension included.
 prost-reflect = { workspace = true }
+# The case conversion prost-build names message types with.
+heck = "0.5"
 
 [dev-dependencies]
 # Compiles the test fixtures, held in memory, into descriptor sets.
