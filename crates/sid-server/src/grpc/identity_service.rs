@@ -1066,12 +1066,6 @@ impl IdentityService for IdentityServiceImpl {
         let operation = context(&request);
         let req = request.into_inner();
         let cred_id = parse_credential_id(&req.credential_id)?;
-        let Some(label) = req.label.clone() else {
-            // Nothing to write: the credential as it is.
-            let cred = self.visible_credential(&caller, cred_id).await?;
-            return Ok(Response::new(credential_response(cred)?));
-        };
-
         // A retry of a completed rename answers with the credential as that
         // rename left it and never writes its label over a later one.
         let command = KeyedCommand::by_profile::<keyed::UpdateCredential>(
@@ -1079,6 +1073,21 @@ impl IdentityService for IdentityServiceImpl {
             operation?,
             &req,
         );
+        let Some(label) = req.label.clone() else {
+            // Nothing to write: the credential as it is, this command's
+            // outcome.
+            let audit = AuditEntry::user(
+                caller.profile_id.to_string(),
+                "credential.update",
+                cred_id.0.to_string(),
+            );
+            let response = command
+                .unchanged(&*self.storage, audit, || async {
+                    credential_response(self.visible_credential(&caller, cred_id).await?)
+                })
+                .await?;
+            return Ok(Response::new(response));
+        };
         let response = command
             .run(&*self.storage, || async {
                 let mut cred = self.visible_credential(&caller, cred_id).await?;
@@ -1246,18 +1255,8 @@ impl IdentityService for IdentityServiceImpl {
                     }
                     Err(e) => return Err(e.into()),
                 }
-                self.storage
-                    .get_principals_by_profile(pid)
-                    .await?
-                    .into_iter()
-                    .find(|p| p.principal_type == principal_type && p.value == value)
-                    .ok_or_else(|| {
-                        internal(
-                            "add principal",
-                            format!("principal {} missing after save", principal.id.0),
-                        )
-                        .into()
-                    })
+                // The claim as this commit stored it, whatever changed since.
+                Ok(command.recorded_effect(&*self.storage).await?)
             })
             .await?;
 
@@ -1920,16 +1919,26 @@ impl IdentityService for IdentityServiceImpl {
         let operation = context(&request);
         let req = request.into_inner();
         let device_id = parse_device_id(&req.device_id)?;
+        let command = KeyedCommand::by_profile::<keyed::UpdateDevice>(caller_id, operation?, &req);
         let Some(name) = req.display_name.clone() else {
-            // Nothing to write: the device as it is.
-            let device = self.owned_device(caller_id, device_id).await?;
+            // Nothing to write: the device as it is, recorded as this
+            // command's outcome so its retry answers the same.
+            let audit = AuditEntry::user(
+                caller_id.to_string(),
+                "device.update",
+                device_id.to_string(),
+            );
+            let device: sid_core::models::Device = command
+                .unchanged_recorded(&*self.storage, audit, || {
+                    self.owned_device(caller_id, device_id)
+                })
+                .await?;
             return Ok(Response::new(convert::device_to_proto(&device)));
         };
 
         // Only the name is written: a trust change or removal made meanwhile
         // is never undone by this copy, nor a later rename by a retry, which
         // answers with the device as the first commit left it.
-        let command = KeyedCommand::by_profile::<keyed::UpdateDevice>(caller_id, operation?, &req);
         let device: sid_core::models::Device = command
             .run_recorded(&*self.storage, || async {
                 self.owned_device(caller_id, device_id).await?;

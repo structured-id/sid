@@ -124,6 +124,50 @@ async fn test_create_retry_answers_with_its_token_without_the_value() {
     );
 }
 
+/// Concurrent attempts of one creation that fills the user's last slot: the
+/// store counts the limit before it sees the key, so an attempt that lost
+/// the race must answer with the token the winner created, not with
+/// QUOTA_EXCEEDED, and the user holds one token more, not a refusal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_concurrent_attempts_at_the_limit_answer_with_one_token() {
+    use sid_core::models::pat::PAT_MAX_ACTIVE_PER_USER;
+
+    let storage = pg_storage().await;
+    let owner = profile(&storage, &[]).await;
+    for _ in 1..PAT_MAX_ACTIVE_PER_USER {
+        pat(&storage, owner.id).await;
+    }
+    let (svc, jwt) = service(storage.clone()).await;
+    let token = common::issue_token(&jwt, &owner, &["openid".to_string()]);
+    let expires = (chrono::Utc::now() + chrono::Duration::days(1)).timestamp();
+    let create = || {
+        keyed(
+            sid_proto::sid::v1::CreatePatRequest {
+                name: "last".into(),
+                scopes: vec!["repos:read".into()],
+                expires_at: Some(prost_types::Timestamp {
+                    seconds: expires,
+                    nanos: 0,
+                }),
+                ..Default::default()
+            },
+            Some(&token),
+            "op-last-slot",
+        )
+    };
+
+    let attempts = futures::future::join_all((0..8).map(|_| svc.create_pat(create()))).await;
+    let ids: std::collections::BTreeSet<String> = attempts
+        .into_iter()
+        .map(|a| a.expect("every attempt answers").into_inner().pat_id)
+        .collect();
+    assert_eq!(ids.len(), 1, "the attempts answered with different tokens");
+    assert_eq!(
+        storage.list_pats_by_profile(owner.id).await.unwrap().len(),
+        PAT_MAX_ACTIVE_PER_USER
+    );
+}
+
 async fn service(
     storage: Arc<dyn StorageBackend>,
 ) -> (PatServiceImpl, Arc<sid_authn::jwt::JwtService>) {

@@ -253,6 +253,15 @@ impl PatService for PatServiceImpl {
                     });
             }
             Err(sid_core::Error::ResourceExhausted(_)) => {
+                // The limit is counted before the key: the slot may be full
+                // with the token a concurrent attempt of this command made.
+                if let Some(recorded) = command.completed(&*self.storage).await? {
+                    return prost::Message::decode(recorded.as_slice())
+                        .map(Response::new)
+                        .map_err(|e| {
+                            sid_core::grpc_error::refuse::internal("read a recorded token", e)
+                        });
+                }
                 return Err(ApiError::new(
                     ErrorReason::QuotaExceeded,
                     "the limit of active personal access tokens is reached",

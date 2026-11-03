@@ -194,6 +194,64 @@ impl KeyedCommand {
         self.run_with(storage, decode_recorded, effect).await
     }
 
+    /// This command when it changes nothing: the response `current` reads is
+    /// its outcome, recorded alone with `audit`, so a retry after a later
+    /// change answers the same and changes nothing. A completed command
+    /// answers with its recorded result before anything is read, a
+    /// concurrent attempt that recorded first with that attempt's, and a key
+    /// or period the rules refuse is refused here too.
+    pub async fn unchanged<T, E, F, Fut>(
+        &self,
+        storage: &(impl OperationResultStore + ?Sized),
+        audit: sid_core::models::AuditEntry,
+        current: F,
+    ) -> Result<T, E>
+    where
+        T: prost::Message + Default,
+        E: From<OperationError>,
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<T, E>>,
+    {
+        if let Some(result) = self.completed(storage).await? {
+            return Ok(decode(&result)?);
+        }
+        let response = current().await?;
+        let ctx = sid_core::models::MutationContext::from(audit)
+            .with_operation(self.completion(response.encode_to_vec()));
+        match storage.record_outcome(ctx).await {
+            Ok(()) => Ok(response),
+            Err(e) => Ok(decode(&self.not_committed(storage, e).await?)?),
+        }
+    }
+
+    /// [`Self::unchanged`] for a method answering with the state its store
+    /// records ([`Self::execute_recorded`]): the state `current` reads is
+    /// recorded as is.
+    pub async fn unchanged_recorded<T, E, F, Fut>(
+        &self,
+        storage: &(impl OperationResultStore + ?Sized),
+        audit: sid_core::models::AuditEntry,
+        current: F,
+    ) -> Result<T, E>
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned,
+        E: From<OperationError>,
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<T, E>>,
+    {
+        if let Some(result) = self.completed(storage).await? {
+            return Ok(decode_recorded(&result)?);
+        }
+        let state = current().await?;
+        let mut ctx =
+            sid_core::models::MutationContext::from(audit).with_operation(self.effect_completion());
+        ctx.record_effect(&state).map_err(OperationError::Store)?;
+        match storage.record_outcome(ctx).await {
+            Ok(()) => Ok(state),
+            Err(e) => Ok(decode_recorded(&self.not_committed(storage, e).await?)?),
+        }
+    }
+
     /// After this command's commit, the state its store recorded in that
     /// commit ([`sid_core::models::MutationContext::record_effect`]): the
     /// answer, never a state read before or after it.

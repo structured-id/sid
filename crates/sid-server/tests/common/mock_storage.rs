@@ -2688,6 +2688,7 @@ impl StorageBackend for MockStorage {
                         && p.value == principal.value
                 })
                 .cloned()
+                .map(Principal::as_seen_by_subject)
                 .expect("bound above");
             ctx.record_effect(&stored)?;
         }

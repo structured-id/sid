@@ -106,8 +106,7 @@ impl ProvisioningServiceImpl {
         id: ProvisioningConnectorId,
         connector: &ProvisioningConnector,
     ) -> Result<Response<pb::ProvisioningConnector>, Status> {
-        let response = connector_to_proto(connector);
-        let ctx: MutationContext = AuditEntry::admin(
+        let audit = AuditEntry::admin(
             caller.profile_id.to_string(),
             "provisioning_connector.state",
             id.to_string(),
@@ -115,20 +114,13 @@ impl ProvisioningServiceImpl {
         .with_metadata(serde_json::json!({
             "from": connector.state.as_str(),
             "to": connector.state.as_str(),
-        }))
-        .into();
-        match self
-            .storage
-            .record_outcome(ctx.with_operation(command.completion(response.encode_to_vec())))
-            .await
-        {
-            Ok(()) => Ok(Response::new(response)),
-            Err(SidError::OperationCompleted(_)) => {
-                let result = command.committed_elsewhere(&*self.storage).await?;
-                Ok(Response::new(replayed_connector(&result)?))
-            }
-            Err(e) => Err(storage_failure(e)),
-        }
+        }));
+        let response = command
+            .unchanged(&*self.storage, audit, || async {
+                Ok::<_, Status>(connector_to_proto(connector))
+            })
+            .await?;
+        Ok(Response::new(response))
     }
 
     /// The connector `id`, which must be inbound: only an inbound connector
