@@ -253,7 +253,9 @@ fn command<M: KeyedMethod>(
 
 /// The answer to `command` once its commit returned `committed`: `answer`
 /// when this attempt committed, the recorded answer when a concurrent
-/// attempt committed first, otherwise the failure as `refuse` maps it.
+/// attempt committed first (also when its effect made this attempt fail a
+/// check before the key, a unique name), otherwise the failure as `refuse`
+/// maps it.
 async fn settled<T: prost::Message + Default>(
     storage: &dyn StorageBackend,
     command: &KeyedCommand,
@@ -261,21 +263,26 @@ async fn settled<T: prost::Message + Default>(
     answer: T,
     refuse: impl FnOnce(sid_core::Error) -> Status,
 ) -> Result<Response<T>, Status> {
+    let decode = |recorded: Vec<u8>| {
+        T::decode(recorded.as_slice())
+            .map(Response::new)
+            .map_err(|e| {
+                tracing::warn!(error = %e, "recorded authorization answer unreadable");
+                Status::from(sid_core::grpc_error::ApiError::internal())
+            })
+    };
     match committed {
         Ok(()) => Ok(Response::new(answer)),
         Err(sid_core::Error::OperationCompleted(_)) => {
-            let recorded = command.committed_elsewhere(storage).await?;
-            T::decode(recorded.as_slice())
-                .map(Response::new)
-                .map_err(|e| {
-                    tracing::warn!(error = %e, "recorded authorization answer unreadable");
-                    Status::from(sid_core::grpc_error::ApiError::internal())
-                })
+            decode(command.committed_elsewhere(storage).await?)
         }
         Err(sid_core::Error::OperationPeriodRefused(refusal)) => {
             Err(OperationError::PeriodRefused(refusal).into())
         }
-        Err(e) => Err(refuse(e)),
+        Err(e) => match command.completed(storage).await {
+            Ok(Some(recorded)) => decode(recorded),
+            _ => Err(refuse(e)),
+        },
     }
 }
 
@@ -2283,19 +2290,35 @@ impl AuthzService for AuthzServiceImpl {
         }
         let group_id = parse_group_id(&req.id)?;
 
+        // Without a description nothing is written: the group as it is,
+        // recorded as this command's outcome so its retry answers the same.
+        let Some(desc) = req.description.clone() else {
+            let audit = AuditEntry::admin(
+                caller.profile_id.to_string(),
+                "group.update",
+                group_id.0.to_string(),
+            );
+            let answer = command
+                .unchanged(&*self.storage, audit, || async {
+                    let group = self
+                        .storage
+                        .get_group(group_id)
+                        .await
+                        .map_err(storage_failure)?
+                        .ok_or_else(|| group_not_found(group_id.0.to_string()))?;
+                    Ok::<_, Status>(UpdateGroupResponse {
+                        group: Some(group_to_proto(&group)),
+                    })
+                })
+                .await?;
+            return Ok(Response::new(answer));
+        };
         let mut group = self
             .storage
             .get_group(group_id)
             .await
             .map_err(storage_failure)?
             .ok_or_else(|| group_not_found(group_id.0.to_string()))?;
-        // Without a description nothing is written, so there is nothing to
-        // repeat.
-        let Some(desc) = req.description else {
-            return Ok(Response::new(UpdateGroupResponse {
-                group: Some(group_to_proto(&group)),
-            }));
-        };
         group.description = Some(desc);
         group.updated_at = chrono::Utc::now();
 
@@ -2596,9 +2619,11 @@ impl AuthzService for AuthzServiceImpl {
         }
         policy.updated_at = chrono::Utc::now();
 
-        let answer = UpdatePolicyResponse {
-            policy: Some(policy_to_proto(&policy)),
-        };
+        // The store writes over the revision just read and moves it on; the
+        // answer is the policy as that commit leaves it.
+        let mut left = policy_to_proto(&policy);
+        left.revision = policy.revision + 1;
+        let answer = UpdatePolicyResponse { policy: Some(left) };
         let ctx = policy_mutation(&asker, "policy.update", policy.id, fence)
             .with_operation(command.completion(answer.encode_to_vec()));
         let committed = match self.storage.update_cedar_policy(&policy, ctx).await {

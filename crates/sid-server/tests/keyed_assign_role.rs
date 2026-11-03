@@ -368,6 +368,179 @@ async fn membership_removal_retry_keeps_a_later_addition(h: Harness) {
     );
 }
 
+/// Concurrent attempts of one group creation: the losers meet the group's
+/// unique name before the key, and still answer with the group the winner
+/// created, not "name taken" by it.
+async fn concurrent_group_creations_with_one_key_answer_one_group(h: Harness) {
+    h.storage
+        .ensure_system_project(AuditEntry::system("test", "group").into())
+        .await
+        .unwrap();
+    let key = format!("k-{}", tag());
+    let name = format!("g{}", tag_of(&key));
+    let calls = (0..4).map(|_| {
+        let svc = h.svc.clone();
+        let request = call(
+            CreateGroupRequest {
+                project_id: ProjectId::system().0.to_string(),
+                name: name.clone(),
+                description: None,
+            },
+            &h.token,
+            Some(&key),
+        );
+        async move { svc.create_group(request).await }
+    });
+    let ids: std::collections::BTreeSet<String> = futures::future::join_all(calls)
+        .await
+        .into_iter()
+        .map(|r| {
+            r.expect("every attempt answers")
+                .into_inner()
+                .group
+                .unwrap()
+                .id
+        })
+        .collect();
+    assert_eq!(ids.len(), 1, "{ids:?}");
+}
+
+/// An edit that names no description changes nothing and is still its
+/// command's outcome: retried after a later edit it answers as it did.
+async fn group_edit_without_a_description_is_recorded(h: Harness) {
+    use sid_proto::sid::v1::authz::UpdateGroupRequest;
+    h.storage
+        .ensure_system_project(AuditEntry::system("test", "group").into())
+        .await
+        .unwrap();
+    let group = h
+        .svc
+        .create_group(call(
+            CreateGroupRequest {
+                project_id: ProjectId::system().0.to_string(),
+                name: format!("g{}", tag()),
+                description: Some("first".into()),
+            },
+            &h.token,
+            Some(&format!("k-{}", tag())),
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .group
+        .unwrap()
+        .id;
+    let edit = |description: Option<&str>, key: &str| {
+        call(
+            UpdateGroupRequest {
+                id: group.clone(),
+                description: description.map(str::to_owned),
+            },
+            &h.token,
+            Some(key),
+        )
+    };
+    let key = format!("k-{}", tag());
+    let first = h
+        .svc
+        .update_group(edit(None, &key))
+        .await
+        .unwrap()
+        .into_inner();
+    h.svc
+        .update_group(edit(Some("later"), &format!("k-{}", tag())))
+        .await
+        .unwrap();
+    let retried = h
+        .svc
+        .update_group(edit(None, &key))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(retried, first, "the retry answers as the first attempt");
+}
+
+/// A policy edit answers with the revision its commit stored, as a read of
+/// the policy shows it and as its retry repeats it.
+async fn policy_edit_answers_its_stored_revision(h: Harness) {
+    use sid_proto::sid::v1::authz::{CreatePolicyRequest, GetPolicyRequest, UpdatePolicyRequest};
+    h.storage
+        .ensure_system_project(AuditEntry::system("test", "policy").into())
+        .await
+        .unwrap();
+    let created = h
+        .svc
+        .create_policy(call(
+            CreatePolicyRequest {
+                scope: Some(sid_proto::sid::v1::PolicyScope {
+                    scope: Some(sid_proto::sid::v1::policy_scope::Scope::ProjectId(
+                        ProjectId::system().0.to_string(),
+                    )),
+                }),
+                name: format!("p{}", tag()),
+                policy_text: "permit(principal, action, resource);".into(),
+                effect: sid_proto::sid::v1::PolicyEffect::Permit as i32,
+                enabled: true,
+                ..Default::default()
+            },
+            &h.token,
+            Some(&format!("k-{}", tag())),
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .policy
+        .unwrap();
+    let key = format!("k-{}", tag());
+    let edit = || {
+        call(
+            UpdatePolicyRequest {
+                id: created.id.clone(),
+                description: Some("edited".into()),
+                ..Default::default()
+            },
+            &h.token,
+            Some(&key),
+        )
+    };
+    let edited = h
+        .svc
+        .update_policy(edit())
+        .await
+        .unwrap()
+        .into_inner()
+        .policy
+        .unwrap();
+    let stored = h
+        .svc
+        .get_policy(call(
+            GetPolicyRequest {
+                id: created.id.clone(),
+            },
+            &h.token,
+            None,
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .policy
+        .unwrap();
+    assert_eq!(
+        edited.revision, stored.revision,
+        "the answer shows the stored revision"
+    );
+    assert_eq!(edited.revision, created.revision + 1);
+    let retried = h
+        .svc
+        .update_policy(edit())
+        .await
+        .unwrap()
+        .into_inner()
+        .policy
+        .unwrap();
+    assert_eq!(retried, edited);
+}
+
 macro_rules! on_both_engines {
     ($($scenario:ident),* $(,)?) => {
         mod pg {
@@ -398,4 +571,7 @@ on_both_engines!(
     without_a_key_nothing_is_assigned,
     role_creation_retry_answers_with_its_role,
     membership_removal_retry_keeps_a_later_addition,
+    concurrent_group_creations_with_one_key_answer_one_group,
+    group_edit_without_a_description_is_recorded,
+    policy_edit_answers_its_stored_revision,
 );
