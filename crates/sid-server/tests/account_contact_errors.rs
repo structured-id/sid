@@ -13,10 +13,16 @@ use sid_proto::sid::v1::account::*;
 use tonic::{Code, Request};
 use tonic_types::StatusExt;
 
+/// `msg` from the bearer of `token` as one new command: its client names it
+/// by a fresh operation key, as the account UI's transport does.
 fn authed_request<T>(msg: T, token: &str) -> Request<T> {
     let mut req = Request::new(msg);
     req.metadata_mut()
         .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    req.metadata_mut().insert(
+        sid_authn::operation::OPERATION_KEY_HEADER,
+        uuid::Uuid::new_v4().to_string().parse().unwrap(),
+    );
     req
 }
 

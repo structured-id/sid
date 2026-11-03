@@ -153,6 +153,7 @@ impl SqliteBackend {
         .rows_affected()
             == 1;
         if !changed {
+            Self::commit_unchanged(tx, &audit).await?;
             return Ok(ClaimGrantChange::Unchanged);
         }
         sqlx::query("UPDATE consents SET updated_at = ? WHERE id = ?")

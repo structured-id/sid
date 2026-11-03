@@ -232,6 +232,19 @@ impl SqliteBackend {
             .map_err(|e| SidError::Storage(format!("commit: {e}")))
     }
 
+    /// Finish a mutation that changed nothing: a keyed command still commits
+    /// its completion, so a retry after a later change does not apply it
+    /// then; there is no audit or owed work for a change that did not happen.
+    pub async fn commit_unchanged(mut tx: WriteTx, ctx: &MutationContext) -> SidResult<()> {
+        let Some(operation) = &ctx.operation else {
+            return Ok(());
+        };
+        operation::record_in_tx(&mut tx, operation).await?;
+        tx.commit()
+            .await
+            .map_err(|e| SidError::Storage(format!("commit a completion: {e}")))
+    }
+
     /// Commit a bulk mutation that changed `rows` rows. One that changed
     /// nothing and owes nothing records nothing (its transaction is dropped).
     async fn commit_bulk(

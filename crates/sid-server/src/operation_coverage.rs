@@ -14,10 +14,66 @@ pub enum Coverage {
     /// The effect is the same however often it is applied, for the reason
     /// named.
     Natural(&'static str),
+    /// This build refuses every call of the method before any effect.
+    NotServed,
 }
 
 /// Every mutating CE method and its coverage, by full method name.
 pub const COVERAGE: &[(&str, Coverage)] = &[
+    ("sid.v1.account.AccountService/AddEmail", Coverage::Keyed),
+    ("sid.v1.account.AccountService/AddPhone", Coverage::Keyed),
+    (
+        "sid.v1.account.AccountService/DisablePasswordless",
+        Coverage::NotServed,
+    ),
+    (
+        "sid.v1.account.AccountService/DisconnectSite",
+        Coverage::Keyed,
+    ),
+    (
+        "sid.v1.account.AccountService/EnablePasswordless",
+        Coverage::NotServed,
+    ),
+    (
+        "sid.v1.account.AccountService/LaunchApp",
+        Coverage::NotServed,
+    ),
+    (
+        "sid.v1.account.AccountService/LinkAccount",
+        Coverage::NotServed,
+    ),
+    (
+        "sid.v1.account.AccountService/ReauthenticateLink",
+        Coverage::NotServed,
+    ),
+    ("sid.v1.account.AccountService/RemoveEmail", Coverage::Keyed),
+    ("sid.v1.account.AccountService/RemovePhone", Coverage::Keyed),
+    (
+        "sid.v1.account.AccountService/ReportSuspiciousEvent",
+        Coverage::NotServed,
+    ),
+    (
+        "sid.v1.account.AccountService/SetPrimaryEmail",
+        Coverage::Keyed,
+    ),
+    (
+        "sid.v1.account.AccountService/SetPrimaryPhone",
+        Coverage::Keyed,
+    ),
+    (
+        "sid.v1.account.AccountService/UnlinkAccount",
+        Coverage::NotServed,
+    ),
+    (
+        "sid.v1.account.AccountService/UpdateClaimConsent",
+        Coverage::Keyed,
+    ),
+    ("sid.v1.account.AccountService/UpdateEmail", Coverage::Keyed),
+    (
+        "sid.v1.account.AccountService/UpdateNotificationPreferences",
+        Coverage::NotServed,
+    ),
+    ("sid.v1.account.AccountService/UpdatePhone", Coverage::Keyed),
     (
         "sid.v1.projects.ProjectService/AddClientRole",
         Coverage::Keyed,

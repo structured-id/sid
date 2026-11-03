@@ -69,6 +69,18 @@ pub struct EmailSettings {
     pub custom_label: Option<Option<String>>,
 }
 
+impl EmailSettings {
+    /// Write the settings given onto `email`, as the store writes them.
+    pub fn apply_to(&self, email: &mut ProfileEmail) {
+        if let Some(label) = &self.label {
+            email.label = label.clone();
+        }
+        if let Some(custom_label) = &self.custom_label {
+            email.custom_label = custom_label.clone();
+        }
+    }
+}
+
 /// Predefined email label types (matches SCIM `type` + vCard `TYPE`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

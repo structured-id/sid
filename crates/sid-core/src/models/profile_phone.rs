@@ -84,6 +84,27 @@ pub struct PhoneSettings {
     pub can_receive_voice: Option<bool>,
 }
 
+impl PhoneSettings {
+    /// Write the settings given onto `phone`, as the store writes them.
+    pub fn apply_to(&self, phone: &mut ProfilePhone) {
+        if let Some(label) = &self.label {
+            phone.label = label.clone();
+        }
+        if let Some(custom_label) = &self.custom_label {
+            phone.custom_label = custom_label.clone();
+        }
+        if let Some(sms) = self.can_receive_sms {
+            phone.can_receive_sms = sms;
+        }
+        if let Some(fax) = self.can_receive_fax {
+            phone.can_receive_fax = fax;
+        }
+        if let Some(voice) = self.can_receive_voice {
+            phone.can_receive_voice = voice;
+        }
+    }
+}
+
 impl ProfilePhone {
     /// Format the phone number for OIDC `phone_number` claim (E.164 with optional extension).
     ///

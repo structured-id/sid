@@ -459,6 +459,22 @@ impl PostgresBackend {
         Ok(())
     }
 
+    /// Finish a mutation that changed nothing: a keyed command still commits
+    /// its completion, so a retry after a later change does not apply it
+    /// then; there is no audit or owed work for a change that did not happen.
+    pub async fn unchanged_in_tx(
+        mut tx: sqlx::Transaction<'_, sqlx::Postgres>,
+        ctx: &MutationContext,
+    ) -> SidResult<()> {
+        let Some(operation) = &ctx.operation else {
+            return Ok(());
+        };
+        operation::record_in_tx(&mut tx, operation).await?;
+        tx.commit()
+            .await
+            .map_err(|e| SidError::Storage(format!("commit a completion: {e}")))
+    }
+
     /// Lock `profile_id`'s row for a session commit and refuse an owner that
     /// can no longer authenticate.
     ///
@@ -6483,6 +6499,7 @@ impl StorageBackend for PostgresBackend {
         .rows_affected()
             == 1;
         if !changed {
+            Self::unchanged_in_tx(tx, &audit).await?;
             return Ok(ClaimGrantChange::Unchanged);
         }
         sqlx::query("UPDATE consents SET updated_at = NOW() WHERE id = $1")

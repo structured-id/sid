@@ -2288,12 +2288,13 @@ impl StorageBackend for MockStorage {
     async fn create_profile_phone(
         &self,
         phone: &ProfilePhone,
-        _audit: MutationContext,
+        audit: MutationContext,
     ) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
         if inner.profile_phones.contains_key(&phone.id.0) {
             return Err(sid_core::Error::Conflict("phone already exists".into()));
         }
+        inner.owe(&audit)?;
         if phone.is_primary {
             for p in inner.profile_phones.values_mut() {
                 if p.profile_id == phone.profile_id {
@@ -2310,9 +2311,17 @@ impl StorageBackend for MockStorage {
         id: ProfilePhoneId,
         settings: &sid_core::models::PhoneSettings,
         at: chrono::DateTime<chrono::Utc>,
-        _audit: MutationContext,
+        audit: MutationContext,
     ) -> SidResult<bool> {
         let mut inner = self.inner.lock().unwrap();
+        if !inner
+            .profile_phones
+            .get(&id.0)
+            .is_some_and(|p| p.profile_id == profile_id)
+        {
+            return Ok(false);
+        }
+        inner.owe(&audit)?;
         let Some(phone) = inner
             .profile_phones
             .get_mut(&id.0)
@@ -2343,7 +2352,7 @@ impl StorageBackend for MockStorage {
         profile_id: ProfileId,
         id: ProfilePhoneId,
         _at: chrono::DateTime<chrono::Utc>,
-        _audit: MutationContext,
+        audit: MutationContext,
     ) -> SidResult<bool> {
         let mut inner = self.inner.lock().unwrap();
         if !inner
@@ -2353,6 +2362,7 @@ impl StorageBackend for MockStorage {
         {
             return Ok(false);
         }
+        inner.owe(&audit)?;
         for p in inner.profile_phones.values_mut() {
             if p.profile_id == profile_id {
                 p.is_primary = p.id == id;
@@ -2363,9 +2373,10 @@ impl StorageBackend for MockStorage {
     async fn delete_profile_phone(
         &self,
         id: ProfilePhoneId,
-        _audit: MutationContext,
+        audit: MutationContext,
     ) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
+        inner.owe(&audit)?;
         inner.profile_phones.remove(&id.0);
         Ok(())
     }
@@ -2401,12 +2412,13 @@ impl StorageBackend for MockStorage {
     async fn create_profile_email(
         &self,
         email: &ProfileEmail,
-        _audit: MutationContext,
+        audit: MutationContext,
     ) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
         if inner.profile_emails.contains_key(&email.id.0) {
             return Err(sid_core::Error::Conflict("email already exists".into()));
         }
+        inner.owe(&audit)?;
         if email.is_primary {
             for e in inner.profile_emails.values_mut() {
                 if e.profile_id == email.profile_id {
@@ -2426,9 +2438,17 @@ impl StorageBackend for MockStorage {
         id: ProfileEmailId,
         settings: &sid_core::models::EmailSettings,
         at: chrono::DateTime<chrono::Utc>,
-        _audit: MutationContext,
+        audit: MutationContext,
     ) -> SidResult<bool> {
         let mut inner = self.inner.lock().unwrap();
+        if !inner
+            .profile_emails
+            .get(&id.0)
+            .is_some_and(|e| e.profile_id == profile_id)
+        {
+            return Ok(false);
+        }
+        inner.owe(&audit)?;
         let Some(email) = inner
             .profile_emails
             .get_mut(&id.0)
@@ -2450,7 +2470,7 @@ impl StorageBackend for MockStorage {
         profile_id: ProfileId,
         id: ProfileEmailId,
         _at: chrono::DateTime<chrono::Utc>,
-        _audit: MutationContext,
+        audit: MutationContext,
     ) -> SidResult<bool> {
         let mut inner = self.inner.lock().unwrap();
         if !inner
@@ -2460,6 +2480,7 @@ impl StorageBackend for MockStorage {
         {
             return Ok(false);
         }
+        inner.owe(&audit)?;
         for e in inner.profile_emails.values_mut() {
             if e.profile_id == profile_id {
                 e.is_primary = e.id == id;
@@ -2470,9 +2491,10 @@ impl StorageBackend for MockStorage {
     async fn delete_profile_email(
         &self,
         id: ProfileEmailId,
-        _audit: MutationContext,
+        audit: MutationContext,
     ) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
+        inner.owe(&audit)?;
         inner.profile_emails.remove(&id.0);
         Ok(())
     }
@@ -2723,6 +2745,7 @@ impl StorageBackend for MockStorage {
                 .any(|g| g.claim_name == claim_name && g.is_active())
         };
         if active_of(consent) == active_of(&changed) {
+            inner.complete(&ctx)?;
             return Ok(ClaimGrantChange::Unchanged);
         }
         inner.owe(&ctx)?;
@@ -6056,6 +6079,16 @@ impl MockStorageInner {
     /// mutation's own change: a keyed command already completed commits
     /// nothing.
     fn owe(&mut self, ctx: &MutationContext) -> SidResult<()> {
+        self.complete(ctx)?;
+        for owed in &ctx.work {
+            self.enqueue(owed, u64::MAX)?;
+        }
+        Ok(())
+    }
+
+    /// Record a keyed command's completion, as a mutation that changed
+    /// nothing still does; refused when another commit completed it.
+    fn complete(&mut self, ctx: &MutationContext) -> SidResult<()> {
         if let Some(operation) = &ctx.operation {
             let slot = (
                 operation.namespace.clone(),
@@ -6077,9 +6110,6 @@ impl MockStorageInner {
                     completed_at: chrono::Utc::now(),
                 },
             );
-        }
-        for owed in &ctx.work {
-            self.enqueue(owed, u64::MAX)?;
         }
         Ok(())
     }

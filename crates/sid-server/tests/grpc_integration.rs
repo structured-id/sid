@@ -32,13 +32,15 @@ use uuid::Uuid;
 
 // ─── Helper: create gRPC request with bearer token ───
 
+/// `msg` from the bearer of `token` as one new command: its client names it
+/// by a fresh operation key, as the account UIs' transports do.
 fn authed_request<T>(msg: T, token: &str) -> Request<T> {
     let mut req = Request::new(msg);
     req.metadata_mut().insert(
         "authorization",
         format!("Bearer {}", token).parse().unwrap(),
     );
-    req
+    new_command(req)
 }
 
 /// A request made by an instance administrator (management RPCs require one),
