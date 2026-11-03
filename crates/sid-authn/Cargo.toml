@@ -105,9 +105,11 @@ sid-proto = { workspace = true, optional = true }
 sid-ids = { workspace = true, features = ["std", "serde"], optional = true }
 sid-ids-proto = { workspace = true, optional = true }
 prost-types = { workspace = true, optional = true }
+# A keyed command's recorded response (optional)
+prost = { workspace = true, optional = true }
 
 [features]
-grpc = ["dep:tonic", "sid-core/grpc"]
+grpc = ["dep:tonic", "dep:prost", "sid-core/grpc"]
 # The HTTP form of an issuer's OAuth endpoints over `google.api.HttpBody`.
 oauth-http = ["grpc", "dep:sid-proto"]
 # The password-installing operation (registration, change, reset) with its

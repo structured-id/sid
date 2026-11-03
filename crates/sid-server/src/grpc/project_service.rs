@@ -603,6 +603,9 @@ fn role_to_proto(r: &Role) -> sid_proto::sid::v1::Role {
 /// The canonical method name keyed CreateProject commands are recorded under.
 const CREATE_PROJECT: &str = "sid.v1.ProjectService/CreateProject";
 
+/// The canonical method name keyed UpdateProject commands are recorded under.
+const UPDATE_PROJECT: &str = "sid.v1.ProjectService/UpdateProject";
+
 /// The project a completed CreateProject recorded as its result.
 #[allow(clippy::result_large_err)]
 fn decode_result(result: &[u8]) -> Result<sid_proto::sid::v1::Project, Status> {
@@ -828,6 +831,7 @@ impl ProjectService for ProjectServiceImpl {
     ) -> Result<Response<sid_proto::sid::v1::Project>, Status> {
         let caller = self.admin(&request).await?;
         self.check_maintenance().await?;
+        let key = required_key(request.metadata())?;
         let req = request.into_inner();
         let project_id = parse_project_id(&req.id)?;
 
@@ -835,28 +839,36 @@ impl ProjectService for ProjectServiceImpl {
             return Err(system_project("update"));
         }
 
+        // A retry of a completed edit returns the project as that edit left
+        // it, and never writes its fields again over a later edit.
+        let command = KeyedCommand::new(
+            format!("profile:{}", caller.profile_id),
+            key,
+            UPDATE_PROJECT,
+            req.encode_to_vec(),
+        );
         let change = ProjectChange {
             name: req.name,
             description: req.description,
             updated_at: chrono::Utc::now(),
         };
-        // Only the fields given are written: an edit racing a deletion never
-        // recreates the project, and two edits of different fields keep both.
-        let project = self
-            .storage
-            .update_project(
-                project_id,
-                &change,
-                AuditEntry::admin(
+        let project: Project = command
+            .run_recorded(&*self.storage, || async {
+                let ctx = MutationContext::from(AuditEntry::admin(
                     caller.profile_id.to_string(),
                     "project.update",
                     project_id.0.to_string(),
-                )
-                .into(),
-            )
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(|| project_not_found(project_id))?;
+                ))
+                .with_operation(command.effect_completion());
+                // Only the fields given are written: an edit racing a deletion
+                // never recreates the project, and two edits of different
+                // fields keep both.
+                self.storage
+                    .update_project(project_id, &change, ctx)
+                    .await?
+                    .ok_or_else(|| project_not_found(project_id).into())
+            })
+            .await?;
 
         Ok(Response::new(project_to_proto(&project)))
     }

@@ -3087,11 +3087,14 @@ impl StorageBackend for PostgresBackend {
         let Some(row) = row else {
             return Ok(None);
         };
+        let project = row.into_domain();
+        let mut audit = audit;
+        audit.record_effect(&project)?;
         Self::audit_in_tx(&mut tx, &format!("project:{}", id.0), audit).await?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
-        Ok(Some(row.into_domain()))
+        Ok(Some(project))
     }
 
     async fn delete_project(&self, id: ProjectId, audit: MutationContext) -> SidResult<()> {

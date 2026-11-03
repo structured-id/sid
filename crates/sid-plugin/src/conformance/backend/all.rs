@@ -154,6 +154,7 @@ macro_rules! storage_conformance {
             );
             $crate::__storage_scenarios!($setup, operation:
                 test_operation_completion_commits_with_effect
+                test_update_records_the_state_it_left
                 test_completed_operation_commits_nothing
                 test_concurrent_duplicate_operation_commits_once
                 test_operation_results_travel_between_stores

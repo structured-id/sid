@@ -5353,6 +5353,7 @@ dependencies = [
  "pasta_curves",
  "pbkdf2",
  "phonenumber",
+ "prost",
  "prost-types",
  "psl",
  "rand 0.10.3",

@@ -63,6 +63,18 @@ impl MutationContext {
         self.operation = Some(operation);
         self
     }
+
+    /// Record `effect`, the state the mutation leaves as its store reads it
+    /// inside the transaction, as the keyed command's result: a retry then
+    /// returns exactly what this commit made, never a state read before or
+    /// after it. Nothing to record without a keyed command.
+    pub fn record_effect<T: serde::Serialize>(&mut self, effect: &T) -> crate::Result<()> {
+        if let Some(operation) = &mut self.operation {
+            operation.result = serde_json::to_vec(effect)
+                .map_err(|e| crate::Error::Storage(format!("operation result: {e}")))?;
+        }
+        Ok(())
+    }
 }
 
 /// A mutation that owes no asynchronous work.

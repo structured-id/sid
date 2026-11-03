@@ -3779,11 +3779,9 @@ impl StorageBackend for MockStorage {
         ctx: MutationContext,
     ) -> SidResult<Option<Project>> {
         let mut inner = self.inner.lock().unwrap();
-        if !inner.projects.get(&id.0).is_some_and(|p| !p.is_system) {
+        let Some(mut project) = inner.projects.get(&id.0).filter(|p| !p.is_system).cloned() else {
             return Ok(None);
-        }
-        inner.owe(&ctx)?;
-        let project = inner.projects.get_mut(&id.0).expect("checked above");
+        };
         if let Some(name) = &change.name {
             project.name = name.clone();
         }
@@ -3791,7 +3789,11 @@ impl StorageBackend for MockStorage {
             project.description = description.clone();
         }
         project.updated_at = change.updated_at;
-        Ok(Some(project.clone()))
+        let mut ctx = ctx;
+        ctx.record_effect(&project)?;
+        inner.owe(&ctx)?;
+        inner.projects.insert(id.0, project.clone());
+        Ok(Some(project))
     }
 
     async fn delete_project(&self, id: ProjectId, _audit: MutationContext) -> SidResult<()> {

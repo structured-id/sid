@@ -103,6 +103,73 @@ impl KeyedCommand {
         )
     }
 
+    /// Run this command once: a completed one answers with its recorded
+    /// result; otherwise `effect` commits the mutation with
+    /// [`Self::completion`] of its response, and a concurrent attempt that
+    /// committed first answers with that attempt's result. Retries never
+    /// apply the effect again.
+    pub async fn run<T, F, Fut>(
+        &self,
+        storage: &(impl OperationResultStore + ?Sized),
+        effect: F,
+    ) -> Result<T, Status>
+    where
+        T: prost::Message + Default,
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<T, Effect>>,
+    {
+        self.run_with(storage, decode, effect).await
+    }
+
+    /// [`Self::run`] for a mutation whose store records the state it leaves
+    /// ([`sid_core::models::MutationContext::record_effect`]): `effect`
+    /// passes the completion from [`Self::effect_completion`] and returns
+    /// that state; a retry returns the state the first commit left.
+    pub async fn run_recorded<T, F, Fut>(
+        &self,
+        storage: &(impl OperationResultStore + ?Sized),
+        effect: F,
+    ) -> Result<T, Status>
+    where
+        T: serde::de::DeserializeOwned,
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<T, Effect>>,
+    {
+        self.run_with(storage, decode_recorded, effect).await
+    }
+
+    /// The completion of a mutation whose store records its effect as the
+    /// result.
+    pub fn effect_completion(&self) -> OperationCompletion {
+        self.completion(Vec::new())
+    }
+
+    async fn run_with<T, F, Fut>(
+        &self,
+        storage: &(impl OperationResultStore + ?Sized),
+        decode: fn(&[u8]) -> Result<T, Status>,
+        effect: F,
+    ) -> Result<T, Status>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<T, Effect>>,
+    {
+        if let Some(result) = self.completed(storage).await? {
+            return decode(&result);
+        }
+        match effect().await {
+            Ok(response) => Ok(response),
+            Err(Effect::Store(sid_core::Error::OperationCompleted(_))) => {
+                decode(&self.committed_elsewhere(storage).await?)
+            }
+            Err(Effect::Store(e)) => {
+                tracing::warn!(method = self.method, error = %e, "keyed command not committed");
+                Err(ApiError::internal().into())
+            }
+            Err(Effect::Refused(status)) => Err(status),
+        }
+    }
+
     /// After a commit refused as already completed: the result another
     /// attempt of this command committed.
     pub async fn committed_elsewhere(
@@ -117,6 +184,45 @@ impl KeyedCommand {
             .into()
         })
     }
+}
+
+/// Why a keyed command's effect did not commit.
+pub enum Effect {
+    /// Refused before or by the commit, answered as is.
+    Refused(Status),
+    /// The store's failure; an already completed key is resolved to its
+    /// recorded result.
+    Store(sid_core::Error),
+}
+
+impl From<Status> for Effect {
+    fn from(status: Status) -> Self {
+        Self::Refused(status)
+    }
+}
+
+impl From<sid_core::Error> for Effect {
+    fn from(e: sid_core::Error) -> Self {
+        Self::Store(e)
+    }
+}
+
+/// A recorded result, decoded as the method's response.
+#[allow(clippy::result_large_err)]
+fn decode<T: prost::Message + Default>(result: &[u8]) -> Result<T, Status> {
+    T::decode(result).map_err(|e| {
+        tracing::error!(error = %e, "recorded operation result unreadable");
+        Status::from(ApiError::internal())
+    })
+}
+
+/// A result its store recorded from the effect, decoded.
+#[allow(clippy::result_large_err)]
+fn decode_recorded<T: serde::de::DeserializeOwned>(result: &[u8]) -> Result<T, Status> {
+    serde_json::from_slice(result).map_err(|e| {
+        tracing::error!(error = %e, "recorded operation result unreadable");
+        Status::from(ApiError::internal())
+    })
 }
 
 #[cfg(test)]

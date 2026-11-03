@@ -51,6 +51,47 @@ pub async fn test_operation_completion_commits_with_effect(backend: &dyn Storage
     assert!(project_exists(backend, &project).await);
 }
 
+/// An update's completion records the state the update left, read inside its
+/// transaction, so a retry answers with exactly what that commit made.
+pub async fn test_update_records_the_state_it_left(backend: &dyn StorageBackend) {
+    let (ns, key) = (namespace(), key());
+    let project = Project::new(format!("op_{}", Uuid::now_v7().simple()), None);
+    backend
+        .create_project(&project, test_audit())
+        .await
+        .unwrap();
+    let change = sid_core::models::ProjectChange {
+        name: Some(format!("renamed_{}", Uuid::now_v7().simple())),
+        description: None,
+        updated_at: chrono::Utc::now(),
+    };
+    let updated = backend
+        .update_project(
+            project.id,
+            &change,
+            test_audit().with_operation(OperationCompletion::new(
+                &ns,
+                key.clone(),
+                "sid.v1.ProjectService/UpdateProject",
+                b"edit",
+                Vec::new(),
+            )),
+        )
+        .await
+        .unwrap()
+        .expect("updated");
+
+    let record = backend
+        .get_operation_result(&ns, &key)
+        .await
+        .unwrap()
+        .expect("recorded");
+    let recorded: Project = serde_json::from_slice(&record.completion.result).unwrap();
+    assert_eq!(recorded.name, updated.name);
+    assert_eq!(recorded.name, change.name.unwrap());
+    assert_eq!(recorded.description, project.description);
+}
+
 /// A second commit under a completed key commits nothing, whatever it
 /// carries, and says so; the same key in another namespace is its own.
 pub async fn test_completed_operation_commits_nothing(backend: &dyn StorageBackend) {

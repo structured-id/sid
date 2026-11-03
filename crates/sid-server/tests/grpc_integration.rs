@@ -2737,14 +2737,14 @@ async fn test_admin_update_project() {
     let storage = MockStorage::new().with_project(custom);
     let svc = TestServices::new(storage);
 
-    let req = admin_request(
+    let req = new_command(admin_request(
         &svc,
         UpdateProjectRequest {
             id: project_id.0.to_string(),
             name: Some("Updated Name".to_string()),
             description: Some("new desc".to_string()),
         },
-    );
+    ));
 
     let resp = svc.project.update_project(req).await.unwrap();
     let project = resp.into_inner();
