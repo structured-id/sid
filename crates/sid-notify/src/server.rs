@@ -402,7 +402,7 @@ fn template_not_found(template_id: &str) -> tonic::Status {
 fn store_refusal(e: TemplateStoreError) -> tonic::Status {
     match e {
         TemplateStoreError::NotFound(id) => template_not_found(&id),
-        TemplateStoreError::Database(cause) => storage_failure(cause),
+        TemplateStoreError::Database(cause) => storage_failure(sid_core::Error::Storage(cause)),
     }
 }
 

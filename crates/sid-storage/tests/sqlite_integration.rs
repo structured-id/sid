@@ -343,6 +343,7 @@ mod operation_result_store {
         results_travel_between_stores,
         results_are_purged_by_method,
         a_result_is_kept_no_longer_than_its_retention,
+        operation_periods_bound_admission,
     );
 }
 
@@ -1595,6 +1596,16 @@ async fn test_concurrent_duplicate_operation_commits_once() {
 #[tokio::test]
 async fn test_terminal_abort_races_the_commit() {
     common::operation::test_terminal_abort_races_the_commit(&setup().await).await;
+}
+
+#[tokio::test]
+async fn test_unchanged_mutation_records_its_completion() {
+    common::operation::test_unchanged_mutation_records_its_completion(&setup().await).await;
+}
+
+#[tokio::test]
+async fn test_device_trust_records_the_device_it_left() {
+    common::operation::test_device_trust_records_the_device_it_left(&setup().await).await;
 }
 
 #[tokio::test]

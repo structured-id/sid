@@ -442,6 +442,8 @@ fn admin<T>(svc: &TestServices, msg: T) -> Request<T> {
     request
         .metadata_mut()
         .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    // One new command, named by a fresh operation key.
+    common::name_new_command(request.metadata_mut());
     request
 }
 

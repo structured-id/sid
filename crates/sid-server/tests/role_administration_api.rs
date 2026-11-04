@@ -69,10 +69,13 @@ async fn harness() -> Harness {
     }
 }
 
+/// `msg` as one new command of `token`'s (a method that promises a safe
+/// retry takes an operation key).
 fn authed<T>(msg: T, token: &str) -> Request<T> {
     let mut req = Request::new(msg);
     req.metadata_mut()
         .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    common::name_new_command(req.metadata_mut());
     req
 }
 

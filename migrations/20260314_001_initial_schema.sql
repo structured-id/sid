@@ -405,6 +405,28 @@ CREATE TABLE magic_link_sessions (
     CONSTRAINT magic_link_sessions_pkey PRIMARY KEY (id)
 );
 
+CREATE TABLE operation_period_state (
+    id boolean DEFAULT true NOT NULL,
+    issued_through bigint DEFAULT 0 NOT NULL,
+    acceptance_seconds bigint DEFAULT 3600 NOT NULL,
+    retention_seconds bigint DEFAULT 86400 NOT NULL,
+    CONSTRAINT operation_period_state_pkey PRIMARY KEY (id),
+    CONSTRAINT operation_period_state_id_check CHECK (id),
+    CONSTRAINT operation_period_state_issued_through_check CHECK (issued_through >= 0),
+    CONSTRAINT operation_period_state_acceptance_check CHECK (acceptance_seconds > 0),
+    CONSTRAINT operation_period_state_retention_check CHECK (retention_seconds >= 0)
+);
+
+INSERT INTO operation_period_state (id) VALUES (true);
+
+CREATE TABLE operation_periods (
+    period bigint NOT NULL,
+    issued_at timestamp with time zone DEFAULT now() NOT NULL,
+    accepted_until timestamp with time zone NOT NULL,
+    CONSTRAINT operation_periods_pkey PRIMARY KEY (period),
+    CONSTRAINT operation_periods_period_check CHECK (period > 0)
+);
+
 CREATE TABLE operation_results (
     namespace text NOT NULL,
     op_key text NOT NULL,
@@ -412,8 +434,10 @@ CREATE TABLE operation_results (
     fingerprint bytea NOT NULL,
     result bytea NOT NULL,
     completed_at timestamp with time zone DEFAULT now() NOT NULL,
+    period bigint,
     retain_until timestamp with time zone,
-    CONSTRAINT operation_results_pkey PRIMARY KEY (namespace, op_key)
+    CONSTRAINT operation_results_pkey PRIMARY KEY (namespace, op_key),
+    CONSTRAINT operation_results_period_fkey FOREIGN KEY (period) REFERENCES operation_periods(period)
 );
 
 CREATE TABLE organizations (

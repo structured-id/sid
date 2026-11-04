@@ -40,6 +40,7 @@ async fn harness() -> Harness {
         .await
         .expect("Failed to run migrations");
     let storage: Arc<dyn StorageBackend> = Arc::new(backend);
+    common::adopt_operation_period(storage.as_ref()).await;
     let jwt = test_jwt();
     let svc = AuthzServiceImpl::new(
         Arc::new(sid_authz::CeAuthzEngine::new(storage.clone())),
@@ -56,10 +57,13 @@ async fn harness() -> Harness {
     Harness { svc, storage, jwt }
 }
 
+/// `msg` as one new command of `token`'s (a method that promises a safe
+/// retry takes an operation key).
 fn authed<T>(msg: T, token: &str) -> Request<T> {
     let mut req = Request::new(msg);
     req.metadata_mut()
         .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    common::name_new_command(req.metadata_mut());
     req
 }
 

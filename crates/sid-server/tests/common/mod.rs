@@ -88,6 +88,45 @@ impl AuditLog for NoOpAuditLog {
     }
 }
 
+/// The period this test's keyed commands are named with, once a store
+/// issued it ([`adopt_operation_period`]); a [`MockStorage`] issues period 1.
+static OPERATION_PERIOD: std::sync::OnceLock<sid_core::models::OperationPeriod> =
+    std::sync::OnceLock::new();
+
+/// Take the period `storage` issues as the one this test's commands carry,
+/// as a client obtains it before its first submission. Each test runs in
+/// its own process, so one test adopts one period.
+pub async fn adopt_operation_period(storage: &dyn sid_plugin::OperationResultStore) {
+    let period = storage
+        .current_operation_period(Utc::now(), Duration::hours(1))
+        .await
+        .expect("the store issues a period")
+        .period;
+    assert_eq!(*OPERATION_PERIOD.get_or_init(|| period), period);
+}
+
+/// A new command's operation context: a fresh key under the adopted period.
+pub fn new_operation_context() -> sid_core::models::OperationContext {
+    let period = *OPERATION_PERIOD.get_or_init(|| sid_core::models::OperationPeriod::new(1));
+    sid_core::models::OperationContext::new(
+        sid_core::models::OperationKey::parse(&uuid::Uuid::new_v4().to_string()).unwrap(),
+        period,
+    )
+}
+
+/// `metadata` naming one new command: a fresh key under the adopted period.
+pub fn name_new_command(metadata: &mut tonic::metadata::MetadataMap) {
+    sid_authn::operation::grpc::insert_context(metadata, &new_operation_context());
+}
+
+/// `metadata` naming the command `key` under the adopted period: the same
+/// key names a retry of it.
+pub fn name_command(metadata: &mut tonic::metadata::MetadataMap, key: &str) {
+    let mut context = new_operation_context();
+    context.key = sid_core::models::OperationKey::parse(key).unwrap();
+    sid_authn::operation::grpc::insert_context(metadata, &context);
+}
+
 /// The shared cache of the test stack (Redis 63799).
 #[allow(dead_code)]
 pub async fn test_redis() -> Arc<dyn sid_plugin::cache::CacheBackend> {

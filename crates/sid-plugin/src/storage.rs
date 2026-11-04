@@ -164,8 +164,9 @@ pub trait StorageBackend:
     /// takes the flag from the profile's current primary in the same write.
     async fn create_profile_phone(&self, phone: &ProfilePhone, ctx: MutationContext) -> Result<()>;
 
-    /// Apply the owner's settings to `profile_id`'s phone `id`; `false` when
-    /// the profile has no such phone.
+    /// Apply the owner's settings to `profile_id`'s phone `id`, recording the
+    /// phone as the write leaves it ([`MutationContext::record_effect`]);
+    /// `false` when the profile has no such phone.
     async fn update_profile_phone_settings(
         &self,
         profile_id: ProfileId,
@@ -176,7 +177,8 @@ pub trait StorageBackend:
     ) -> Result<bool>;
 
     /// Make `profile_id`'s phone `id` its primary phone, taking the flag from
-    /// the current one in the same write; `false` when there is no such phone.
+    /// the current one in the same write and recording the phone as it leaves
+    /// it; `false` when there is no such phone.
     async fn set_primary_profile_phone(
         &self,
         profile_id: ProfileId,
@@ -206,8 +208,9 @@ pub trait StorageBackend:
     /// takes the flag from the profile's current primary in the same write.
     async fn create_profile_email(&self, email: &ProfileEmail, ctx: MutationContext) -> Result<()>;
 
-    /// Apply the owner's label to `profile_id`'s email `id`; `false` when the
-    /// profile has no such email.
+    /// Apply the owner's label to `profile_id`'s email `id`, recording the
+    /// email as the write leaves it ([`MutationContext::record_effect`]);
+    /// `false` when the profile has no such email.
     async fn update_profile_email_settings(
         &self,
         profile_id: ProfileId,
@@ -218,7 +221,8 @@ pub trait StorageBackend:
     ) -> Result<bool>;
 
     /// Make `profile_id`'s email `id` its primary email, taking the flag from
-    /// the current one in the same write; `false` when there is no such email.
+    /// the current one in the same write and recording the email as it leaves
+    /// it; `false` when there is no such email.
     async fn set_primary_profile_email(
         &self,
         profile_id: ProfileId,
@@ -294,9 +298,11 @@ pub trait StorageBackend:
     /// key under the active rules is the principal's value. In one
     /// transaction the contact is stored, the key moves to the active
     /// revision, `profile_id`'s claim links to the contact and the key's
-    /// disposition becomes migrated for `reason`. `false`, and nothing
-    /// written, when the key is no longer quarantined or no longer assigned
-    /// to `profile_id`.
+    /// disposition becomes migrated for `reason`; a keyed command's `ctx`
+    /// records the claim as `profile_id` holds it after that commit
+    /// ([`MutationContext::record_effect`]). `false`, and nothing written,
+    /// when the key is no longer quarantined or no longer assigned to
+    /// `profile_id`.
     async fn reconcile_email_key(
         &self,
         principal_id: PrincipalId,
@@ -419,11 +425,19 @@ pub trait StorageBackend:
 
     // === IP ALLOWLIST ===
 
-    /// Add a CIDR to the admin-configured IP allowlist.
-    async fn add_ip_allowlist_entry(&self, cidr: &str, description: &str) -> Result<()>;
+    /// Add a CIDR to the admin-configured IP allowlist, or relabel it, under
+    /// `ctx`. A keyed command records the allowlist the change left
+    /// ([`MutationContext::record_effect`]).
+    async fn add_ip_allowlist_entry(
+        &self,
+        cidr: &str,
+        description: &str,
+        ctx: MutationContext,
+    ) -> Result<()>;
 
-    /// Remove a CIDR from the IP allowlist.
-    async fn remove_ip_allowlist_entry(&self, cidr: &str) -> Result<()>;
+    /// Remove a CIDR from the IP allowlist under `ctx`; a keyed command
+    /// records the allowlist the change left.
+    async fn remove_ip_allowlist_entry(&self, cidr: &str, ctx: MutationContext) -> Result<()>;
 
     /// List all IP allowlist entries.
     async fn list_ip_allowlist_entries(
@@ -455,7 +469,9 @@ pub trait StorageBackend:
     /// owes what [`SessionEnd::owed`] names under `end` (its client's
     /// back-channel logout, the revoked event); that work commits in the same
     /// transaction as the deletion, so a session created concurrently is either
-    /// kept or ended with what it owes, never ended without it.
+    /// kept or ended with what it owes, never ended without it. A keyed
+    /// command records the number of sessions it ended as its result
+    /// ([`MutationContext::record_effect`]).
     async fn delete_sessions_by_profile(
         &self,
         profile_id: ProfileId,
@@ -1928,7 +1944,9 @@ pub trait StorageBackend:
     ) -> Result<bool>;
 
     /// Publish a draft of `project_id` and archive the project's published
-    /// config in one transaction; `false` when `id` is not a draft of that project.
+    /// config in one transaction, recording the config as it publishes it
+    /// ([`MutationContext::record_effect`]); `false` when `id` is not a draft
+    /// of that project.
     async fn publish_branding_config(
         &self,
         id: sid_core::models::BrandingConfigId,
@@ -1965,9 +1983,10 @@ pub trait StorageBackend:
 
     // === INVITE OPERATIONS ===
 
-    /// Store a new invite; an existing id or code is `Conflict`, so a revoked
-    /// or used-up invite is never reactivated by a repeated create.
-    async fn create_invite(&self, invite: &Invite, ctx: MutationContext) -> Result<()>;
+    /// Store new invites, all in one commit under `ctx` or none; an existing
+    /// id or code is `Conflict`, so a revoked or used-up invite is never
+    /// reactivated by a repeated create.
+    async fn create_invites(&self, invites: &[Invite], ctx: MutationContext) -> Result<()>;
 
     /// Get an invite by ID.
     async fn get_invite(&self, id: InviteId) -> Result<Option<Invite>>;

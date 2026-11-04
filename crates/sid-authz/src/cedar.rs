@@ -7,7 +7,7 @@
 use cedar_policy::{
     Authorizer, Context, Decision, Entities, EntityUid, Policy, PolicyId, PolicySet, Request,
 };
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::str::FromStr;
 
 /// Result of Cedar policy evaluation.
@@ -116,7 +116,7 @@ impl CedarService {
         subject: &str,
         action: &str,
         resource: &str,
-        context: &HashMap<String, String>,
+        context: &BTreeMap<String, String>,
     ) -> Result<CedarEvalResult, CedarError> {
         let entity = |field: &'static str, uid: &str| {
             EntityUid::from_str(uid).map_err(|e| CedarError::InvalidEntity {
@@ -156,7 +156,7 @@ impl CedarService {
         principal: EntityUid,
         action_uid: EntityUid,
         resource_uid: EntityUid,
-        context: &HashMap<String, String>,
+        context: &BTreeMap<String, String>,
     ) -> Result<CedarEvalResult, CedarError> {
         // Build PolicySet.
         let mut policy_set = PolicySet::new();
@@ -290,7 +290,7 @@ mod tests {
                 r#"User::"alice""#,
                 r#"Action::"read""#,
                 r#"Resource::"doc_1""#,
-                &HashMap::new(),
+                &BTreeMap::new(),
             )
             .unwrap();
 
@@ -308,7 +308,7 @@ mod tests {
                 r#"User::"alice""#,
                 r#"Action::"read""#,
                 r#"Resource::"doc_1""#,
-                &HashMap::new(),
+                &BTreeMap::new(),
             )
             .unwrap();
 
@@ -335,7 +335,7 @@ mod tests {
                 r#"User::"alice""#,
                 r#"Action::"read""#,
                 r#"Resource::"doc_1""#,
-                &HashMap::new(),
+                &BTreeMap::new(),
             )
             .unwrap();
         assert!(result.allowed);
@@ -347,7 +347,7 @@ mod tests {
                 r#"User::"bob""#,
                 r#"Action::"read""#,
                 r#"Resource::"doc_1""#,
-                &HashMap::new(),
+                &BTreeMap::new(),
             )
             .unwrap();
         assert!(!result.allowed);
@@ -374,7 +374,7 @@ mod tests {
                 r#"User::"alice""#,
                 r#"Action::"read""#,
                 r#"Resource::"doc_1""#,
-                &HashMap::new(),
+                &BTreeMap::new(),
             )
             .unwrap();
         assert!(result.allowed);
@@ -386,7 +386,7 @@ mod tests {
                 r#"User::"alice""#,
                 r#"Action::"delete""#,
                 r#"Resource::"doc_1""#,
-                &HashMap::new(),
+                &BTreeMap::new(),
             )
             .unwrap();
         assert!(!result.allowed);
@@ -408,7 +408,7 @@ mod tests {
         )];
 
         // With matching department → allowed.
-        let mut ctx = HashMap::new();
+        let mut ctx = BTreeMap::new();
         ctx.insert("department".to_string(), "engineering".to_string());
         let result = svc
             .evaluate(
@@ -443,7 +443,7 @@ mod tests {
             "not_a_valid_entity",
             r#"Action::"read""#,
             r#"Resource::"doc""#,
-            &HashMap::new(),
+            &BTreeMap::new(),
         );
         assert!(result.is_err());
     }
@@ -457,7 +457,7 @@ mod tests {
             r#"User::"alice""#,
             r#"Action::"read""#,
             r#"Resource::"doc""#,
-            &HashMap::new(),
+            &BTreeMap::new(),
         );
         assert!(result.is_err());
     }

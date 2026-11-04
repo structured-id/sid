@@ -52,12 +52,15 @@ fn authz_recording(svc: &TestServices, audit: Arc<common::RecordingAuditLog>) ->
     )
 }
 
+/// `message` as one new command of the administrator's (a method that
+/// promises a safe retry takes an operation key).
 async fn as_admin<T>(svc: &TestServices, message: T) -> Request<T> {
     let token = common::administrator_token(&svc.jwt, svc.storage.as_ref()).await;
     let mut request = Request::new(message);
     request
         .metadata_mut()
         .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    common::name_new_command(request.metadata_mut());
     request
 }
 
@@ -505,11 +508,14 @@ fn question(action: &str, resource: &Resource, evaluation: Evaluation) -> CheckP
     }
 }
 
+/// `message` as one new command of `token`'s (a method that promises a safe
+/// retry takes an operation key).
 fn bearing<T>(token: &str, message: T) -> Request<T> {
     let mut request = Request::new(message);
     request
         .metadata_mut()
         .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    common::name_new_command(request.metadata_mut());
     request
 }
 

@@ -19,6 +19,8 @@ fn create(svc: &TestServices, msg: CreateProfileRequest) -> Request<CreateProfil
     request
         .metadata_mut()
         .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    // One new provisioning command, named by a fresh operation key.
+    common::name_new_command(request.metadata_mut());
     request
 }
 

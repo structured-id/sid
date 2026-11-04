@@ -99,6 +99,29 @@ pub mod google {
     }
 }
 
+/// A method the proto declares `(sid.v1.common.retry) = { keyed: true }`:
+/// its command is named by an operation context. The build generates one
+/// type per such method, in [`keyed`], and no other.
+pub trait KeyedMethod {
+    /// The method, as `package.Service/Method`.
+    const METHOD: &'static str;
+    /// Its request message.
+    type Request: prost::Message;
+}
+
+/// The keyed methods, by package below `sid.v1` and service:
+/// `keyed::account::account_service::AddEmail`.
+pub mod keyed {
+    include!(concat!(env!("OUT_DIR"), "/keyed.rs"));
+
+    /// Whether the gRPC request `path` (`/package.Service/Method`) calls a
+    /// keyed method.
+    pub fn is_keyed_path(path: &str) -> bool {
+        path.strip_prefix('/')
+            .is_some_and(|method| METHODS.binary_search(&method).is_ok())
+    }
+}
+
 /// Encoded `FileDescriptorSet` for proto3 JSON transcoding via `prost-reflect`.
 pub const FILE_DESCRIPTOR_SET: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/proto_descriptor.bin"));

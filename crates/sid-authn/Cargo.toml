@@ -105,9 +105,25 @@ sid-proto = { workspace = true, optional = true }
 sid-ids = { workspace = true, features = ["std", "serde"], optional = true }
 sid-ids-proto = { workspace = true, optional = true }
 prost-types = { workspace = true, optional = true }
+# A keyed command's recorded response (optional)
+prost = { workspace = true, optional = true }
+# The operation context read at the gRPC boundary (optional)
+http = { workspace = true, optional = true }
+tower = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
 
 [features]
-grpc = ["dep:tonic", "sid-core/grpc"]
+# Keyed commands, transport-free: their identity comes from the proto.
+keyed = ["dep:sid-proto", "dep:prost"]
+grpc = [
+    "keyed",
+    "dep:tonic",
+    "dep:http",
+    "dep:tower",
+    "dep:futures",
+    "dep:prost-types",
+    "sid-core/grpc",
+]
 # The HTTP form of an issuer's OAuth endpoints over `google.api.HttpBody`.
 oauth-http = ["grpc", "dep:sid-proto"]
 # The password-installing operation (registration, change, reset) with its

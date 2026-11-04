@@ -1353,10 +1353,10 @@ pub fn spawn_ce_background_tasks(c: &CeComponents) {
         });
     }
 
-    // Operation results past their retention (every minute): a retained
-    // sign-in delivery is dropped within a minute of its operation's end.
-    // The purge is idempotent, so replicas running it at once only repeat
-    // it and no job lock holds a connection for it.
+    // Operation results and periods past their retention (every minute): a
+    // retained sign-in delivery is dropped within a minute of its
+    // operation's end, and a period that stopped accepting new commands is
+    // retired with its completions once its retention passed.
     {
         let storage = c.storage.clone();
         tokio::spawn(async move {
@@ -1364,12 +1364,7 @@ pub fn spawn_ce_background_tasks(c: &CeComponents) {
             let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
             loop {
                 interval.tick().await;
-                if let Err(e) = storage
-                    .purge_expired_operation_results(chrono::Utc::now())
-                    .await
-                {
-                    tracing::warn!("operation result expiry failed: {}", e);
-                }
+                sid_authn::operation::upkeep(storage.as_ref(), chrono::Utc::now()).await;
             }
         });
     }

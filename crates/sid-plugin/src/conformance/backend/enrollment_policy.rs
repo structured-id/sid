@@ -143,7 +143,10 @@ pub async fn test_admission_records_its_source(backend: &dyn StorageBackend) {
     let admin = create_test_profile(&format!("srcadm_{}", &tag[..12]));
     backend.create_profile(&admin, test_audit()).await.unwrap();
     let invite = test_invite(admin.id, 5);
-    backend.create_invite(&invite, test_audit()).await.unwrap();
+    backend
+        .create_invites(std::slice::from_ref(&invite), test_audit())
+        .await
+        .unwrap();
     let mut tracked = policy(EnrollmentMode::InviteOnly, &[]);
     tracked.track_source = true;
     backend
@@ -257,7 +260,10 @@ pub async fn test_invite_spent_once_by_concurrent_registrations(
     let admin = create_test_profile(&format!("inviter_{}", &tag[..12]));
     backend.create_profile(&admin, test_audit()).await.unwrap();
     let invite = test_invite(admin.id, 1);
-    backend.create_invite(&invite, test_audit()).await.unwrap();
+    backend
+        .create_invites(std::slice::from_ref(&invite), test_audit())
+        .await
+        .unwrap();
     backend
         .set_enrollment_policy(
             &policy(EnrollmentMode::InviteOnly, &[]),
@@ -338,7 +344,10 @@ pub async fn test_invite_creator_and_redemptions(backend: &dyn StorageBackend) {
     let machine = super::machine::stored_machine_user(backend).await;
     let mut invite = test_invite(sid_core::models::ProfileId::generate(), 3);
     invite.created_by = InviteCreator::MachineUser(machine.id);
-    backend.create_invite(&invite, test_audit()).await.unwrap();
+    backend
+        .create_invites(std::slice::from_ref(&invite), test_audit())
+        .await
+        .unwrap();
     let read = backend.get_invite(invite.id).await.unwrap().unwrap();
     assert_eq!(read.created_by, InviteCreator::MachineUser(machine.id));
     assert!(

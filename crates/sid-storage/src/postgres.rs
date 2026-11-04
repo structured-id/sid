@@ -442,6 +442,87 @@ impl PostgresBackend {
         Ok(())
     }
 
+    /// Finish a mutation that changed nothing: a keyed command still commits
+    /// its completion, so a retry after a later change does not apply it
+    /// then; there is no audit or owed work for a change that did not happen.
+    pub async fn unchanged_in_tx(
+        mut tx: sqlx::Transaction<'_, sqlx::Postgres>,
+        ctx: &MutationContext,
+    ) -> SidResult<()> {
+        let Some(operation) = &ctx.operation else {
+            return Ok(());
+        };
+        operation::record_in_tx(&mut tx, operation).await?;
+        tx.commit()
+            .await
+            .map_err(|e| SidError::Storage(format!("commit a completion: {e}")))
+    }
+
+    /// Commit an allowlist change under `ctx`, recording for a keyed command
+    /// the allowlist the transaction leaves.
+    async fn commit_allowlist_change(
+        mut tx: sqlx::Transaction<'_, sqlx::Postgres>,
+        mut ctx: MutationContext,
+    ) -> SidResult<()> {
+        if ctx.operation.is_some() {
+            let left: Vec<(String, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+                "SELECT cidr, description, created_at FROM ip_allowlist_entries \
+                 ORDER BY created_at",
+            )
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| SidError::Storage(format!("read the allowlist: {e}")))?;
+            ctx.record_effect(&left)?;
+        }
+        Self::audit_in_tx(&mut tx, "ip_allowlist", ctx).await?;
+        tx.commit()
+            .await
+            .map_err(|e| SidError::Storage(format!("commit an allowlist change: {e}")))
+    }
+
+    /// Device `id` as the transaction leaves it.
+    async fn device_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        id: CoreDeviceId,
+    ) -> SidResult<CoreDevice> {
+        sqlx::query_as::<_, crate::pg_row::DeviceRow>("SELECT * FROM devices WHERE id = $1")
+            .bind(id)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(|e| SidError::Storage(format!("read device: {e}")))?
+            .into_domain()
+    }
+
+    /// Phone `id` as the transaction leaves it.
+    async fn phone_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        id: ProfilePhoneId,
+    ) -> SidResult<ProfilePhone> {
+        sqlx::query_as::<_, crate::pg_row::ProfilePhoneRow>(
+            "SELECT * FROM profile_phones WHERE id = $1",
+        )
+        .bind(id.0)
+        .fetch_one(&mut **tx)
+        .await
+        .map(crate::pg_row::ProfilePhoneRow::into_domain)
+        .map_err(|e| SidError::Storage(format!("read phone: {e}")))
+    }
+
+    /// Email `id` as the transaction leaves it.
+    async fn email_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        id: ProfileEmailId,
+    ) -> SidResult<ProfileEmail> {
+        sqlx::query_as::<_, crate::pg_row::ProfileEmailRow>(
+            "SELECT * FROM profile_emails WHERE id = $1",
+        )
+        .bind(id.0)
+        .fetch_one(&mut **tx)
+        .await
+        .map(crate::pg_row::ProfileEmailRow::into_domain)
+        .map_err(|e| SidError::Storage(format!("read email: {e}")))
+    }
+
     /// Lock `profile_id`'s row for a session commit and refuse an owner that
     /// can no longer authenticate.
     ///
@@ -2438,7 +2519,7 @@ impl StorageBackend for PostgresBackend {
         id: ProfilePhoneId,
         settings: &PhoneSettings,
         at: chrono::DateTime<chrono::Utc>,
-        audit: MutationContext,
+        mut audit: MutationContext,
     ) -> SidResult<bool> {
         let mut tx = self
             .pool
@@ -2471,6 +2552,7 @@ impl StorageBackend for PostgresBackend {
         if !updated {
             return Ok(false);
         }
+        audit.record_effect(&Self::phone_in_tx(&mut tx, id).await?)?;
         Self::audit_in_tx(&mut tx, &format!("profile_phone:{}", id.0), audit).await?;
         tx.commit()
             .await
@@ -2483,7 +2565,7 @@ impl StorageBackend for PostgresBackend {
         profile_id: ProfileId,
         id: ProfilePhoneId,
         at: chrono::DateTime<chrono::Utc>,
-        audit: MutationContext,
+        mut audit: MutationContext,
     ) -> SidResult<bool> {
         let mut tx = self
             .pool
@@ -2493,6 +2575,7 @@ impl StorageBackend for PostgresBackend {
         if !contact::make_primary(&mut tx, contact::Contacts::Phones, profile_id, id.0, at).await? {
             return Ok(false);
         }
+        audit.record_effect(&Self::phone_in_tx(&mut tx, id).await?)?;
         Self::audit_in_tx(&mut tx, &format!("profile_phone:{}", id.0), audit).await?;
         tx.commit()
             .await
@@ -2588,7 +2671,7 @@ impl StorageBackend for PostgresBackend {
         id: ProfileEmailId,
         settings: &EmailSettings,
         at: chrono::DateTime<chrono::Utc>,
-        audit: MutationContext,
+        mut audit: MutationContext,
     ) -> SidResult<bool> {
         let mut tx = self
             .pool
@@ -2615,6 +2698,7 @@ impl StorageBackend for PostgresBackend {
         if !updated {
             return Ok(false);
         }
+        audit.record_effect(&Self::email_in_tx(&mut tx, id).await?)?;
         Self::audit_in_tx(&mut tx, &format!("profile_email:{}", id.0), audit).await?;
         tx.commit()
             .await
@@ -2627,7 +2711,7 @@ impl StorageBackend for PostgresBackend {
         profile_id: ProfileId,
         id: ProfileEmailId,
         at: chrono::DateTime<chrono::Utc>,
-        audit: MutationContext,
+        mut audit: MutationContext,
     ) -> SidResult<bool> {
         let mut tx = self
             .pool
@@ -2637,6 +2721,7 @@ impl StorageBackend for PostgresBackend {
         if !contact::make_primary(&mut tx, contact::Contacts::Emails, profile_id, id.0, at).await? {
             return Ok(false);
         }
+        audit.record_effect(&Self::email_in_tx(&mut tx, id).await?)?;
         Self::audit_in_tx(&mut tx, &format!("profile_email:{}", id.0), audit).await?;
         tx.commit()
             .await
@@ -2725,13 +2810,35 @@ impl StorageBackend for PostgresBackend {
         row.map(|r| r.into_domain()).transpose()
     }
 
-    async fn save_principal(&self, p: &Principal, audit: MutationContext) -> SidResult<()> {
+    async fn save_principal(&self, p: &Principal, mut audit: MutationContext) -> SidResult<()> {
         let mut tx = self
             .pool
             .begin()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
         directory::bind_principal(&mut tx, p).await?;
+        if audit.operation.is_some() {
+            // The holder's claim as stored: its id is the principal's, which
+            // an earlier holder may have created.
+            let stored = sqlx::query_as::<_, crate::pg_row::PrincipalRow>(
+                "SELECT p.id, p.principal_type, p.value, p.verified, p.verified_at,
+                        p.verification_expires, p.assigned_profile_id, p.assignment_revision,
+                        p.email_policy_revision, p.created_at, p.updated_at,
+                        pb.id AS binding_id, pb.profile_id,
+                        pb.is_primary, pb.source_field, pb.source_email_id, pb.source_phone_id
+                 FROM principals p
+                 JOIN principal_bindings pb ON pb.principal_id = p.id
+                 WHERE pb.profile_id = $1 AND p.principal_type = $2 AND p.value = $3",
+            )
+            .bind(p.profile_id)
+            .bind(p.principal_type.as_str())
+            .bind(&p.value)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| SidError::Storage(format!("read the stored principal: {e}")))?
+            .into_domain()?;
+            audit.record_effect(&stored)?;
+        }
         Self::audit_in_tx(
             &mut tx,
             &format!("principal:profile:{}", p.profile_id),
@@ -2837,7 +2944,7 @@ impl StorageBackend for PostgresBackend {
         profile_id: ProfileId,
         contact: &ProfileEmail,
         reason: &str,
-        audit: MutationContext,
+        mut audit: MutationContext,
     ) -> SidResult<bool> {
         if contact.profile_id != profile_id {
             return Err(SidError::Validation(
@@ -2897,6 +3004,26 @@ impl StorageBackend for PostgresBackend {
         .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("record reconciliation: {e}")))?;
+        if audit.operation.is_some() {
+            // The claim as the profile holds it after this commit.
+            let held = sqlx::query_as::<_, crate::pg_row::PrincipalRow>(
+                "SELECT p.id, p.principal_type, p.value, p.verified, p.verified_at,
+                        p.verification_expires, p.assigned_profile_id, p.assignment_revision,
+                        p.email_policy_revision, p.created_at, p.updated_at,
+                        pb.id AS binding_id, pb.profile_id,
+                        pb.is_primary, pb.source_field, pb.source_email_id, pb.source_phone_id
+                 FROM principals p
+                 JOIN principal_bindings pb ON pb.principal_id = p.id
+                 WHERE p.id = $1 AND pb.profile_id = $2",
+            )
+            .bind(principal_id.0)
+            .bind(profile_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| SidError::Storage(format!("read the reconciled principal: {e}")))?
+            .into_domain()?;
+            audit.record_effect(&held)?;
+        }
         Self::audit_in_tx(&mut tx, &format!("principal:profile:{profile_id}"), audit).await?;
         tx.commit()
             .await
@@ -2997,6 +3124,7 @@ impl StorageBackend for PostgresBackend {
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
         let sessions = directory::end_sessions(&mut tx, profile_id, end, &mut ctx).await?;
+        ctx.record_effect(&sessions.len())?;
         Self::audit_in_tx(&mut tx, &format!("profile:{profile_id}:sessions"), ctx).await?;
         tx.commit()
             .await
@@ -3070,11 +3198,14 @@ impl StorageBackend for PostgresBackend {
         let Some(row) = row else {
             return Ok(None);
         };
+        let project = row.into_domain();
+        let mut audit = audit;
+        audit.record_effect(&project)?;
         Self::audit_in_tx(&mut tx, &format!("project:{}", id.0), audit).await?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
-        Ok(Some(row.into_domain()))
+        Ok(Some(project))
     }
 
     async fn delete_project(&self, id: ProjectId, audit: MutationContext) -> SidResult<()> {
@@ -4250,7 +4381,7 @@ impl StorageBackend for PostgresBackend {
         &self,
         id: GroupId,
         description: Option<&str>,
-        audit: MutationContext,
+        mut audit: MutationContext,
     ) -> SidResult<bool> {
         let mut tx = self
             .pool
@@ -4269,6 +4400,15 @@ impl StorageBackend for PostgresBackend {
         if !updated {
             return Ok(false);
         }
+        // The group as this write leaves it, read under the row lock it holds.
+        let group =
+            sqlx::query_as::<_, crate::pg_row::GroupRow>("SELECT * FROM groups WHERE id = $1")
+                .bind(id.0)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| SidError::Storage(format!("read updated group: {e}")))?
+                .into_domain();
+        audit.record_effect(&group)?;
         Self::audit_in_tx(&mut tx, &format!("group:{}", id.0), audit).await?;
         tx.commit()
             .await
@@ -4982,24 +5122,25 @@ impl StorageBackend for PostgresBackend {
         &self,
         id: CoreDeviceId,
         display_name: Option<&str>,
-        audit: MutationContext,
+        mut audit: MutationContext,
     ) -> SidResult<bool> {
         let mut tx = self
             .pool
             .begin()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
-        let renamed = sqlx::query("UPDATE devices SET display_name = $2 WHERE id = $1")
-            .bind(id)
-            .bind(display_name)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| SidError::Storage(format!("rename device: {e}")))?
-            .rows_affected()
-            == 1;
-        if !renamed {
+        let renamed = sqlx::query_as::<_, crate::pg_row::DeviceRow>(
+            "UPDATE devices SET display_name = $2 WHERE id = $1 RETURNING *",
+        )
+        .bind(id)
+        .bind(display_name)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("rename device: {e}")))?;
+        let Some(renamed) = renamed else {
             return Ok(false);
-        }
+        };
+        audit.record_effect(&renamed.into_domain()?)?;
         Self::audit_in_tx(&mut tx, &format!("device:{id}"), audit).await?;
         tx.commit()
             .await
@@ -5012,7 +5153,7 @@ impl StorageBackend for PostgresBackend {
         id: CoreDeviceId,
         trusted: bool,
         max_trusted: usize,
-        audit: MutationContext,
+        mut audit: MutationContext,
     ) -> SidResult<sid_core::models::DeviceTrustChange> {
         use sid_core::models::DeviceTrustChange;
         let storage = |e: sqlx::Error| SidError::Storage(format!("set device trust: {e}"));
@@ -5046,6 +5187,8 @@ impl StorageBackend for PostgresBackend {
             return Ok(DeviceTrustChange::NotFound);
         };
         if was_trusted == trusted {
+            audit.record_effect(&Self::device_in_tx(&mut tx, id).await?)?;
+            Self::unchanged_in_tx(tx, &audit).await?;
             return Ok(DeviceTrustChange::Unchanged);
         }
         if trusted {
@@ -5078,6 +5221,7 @@ impl StorageBackend for PostgresBackend {
         .execute(&mut *tx)
         .await
         .map_err(storage)?;
+        audit.record_effect(&Self::device_in_tx(&mut tx, id).await?)?;
         Self::audit_in_tx(&mut tx, &format!("device:{id}"), audit).await?;
         tx.commit().await.map_err(storage)?;
         Ok(DeviceTrustChange::Changed)
@@ -6463,6 +6607,7 @@ impl StorageBackend for PostgresBackend {
         .rows_affected()
             == 1;
         if !changed {
+            Self::unchanged_in_tx(tx, &audit).await?;
             return Ok(ClaimGrantChange::Unchanged);
         }
         sqlx::query("UPDATE consents SET updated_at = NOW() WHERE id = $1")
@@ -6736,7 +6881,14 @@ impl StorageBackend for PostgresBackend {
 
     // === IP ALLOWLIST ===
 
-    async fn add_ip_allowlist_entry(&self, cidr: &str, description: &str) -> SidResult<()> {
+    async fn add_ip_allowlist_entry(
+        &self,
+        cidr: &str,
+        description: &str,
+        ctx: MutationContext,
+    ) -> SidResult<()> {
+        let storage = |e: sqlx::Error| SidError::Storage(format!("add_ip_allowlist_entry: {e}"));
+        let mut tx = self.pool.begin().await.map_err(storage)?;
         sqlx::query(
             "INSERT INTO ip_allowlist_entries (cidr, description)
              VALUES ($1, $2)
@@ -6744,19 +6896,21 @@ impl StorageBackend for PostgresBackend {
         )
         .bind(cidr)
         .bind(description)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
-        .map_err(|e| sid_core::Error::Storage(format!("add_ip_allowlist_entry: {e}")))?;
-        Ok(())
+        .map_err(storage)?;
+        Self::commit_allowlist_change(tx, ctx).await
     }
 
-    async fn remove_ip_allowlist_entry(&self, cidr: &str) -> SidResult<()> {
+    async fn remove_ip_allowlist_entry(&self, cidr: &str, ctx: MutationContext) -> SidResult<()> {
+        let storage = |e: sqlx::Error| SidError::Storage(format!("remove_ip_allowlist_entry: {e}"));
+        let mut tx = self.pool.begin().await.map_err(storage)?;
         sqlx::query("DELETE FROM ip_allowlist_entries WHERE cidr = $1")
             .bind(cidr)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
-            .map_err(|e| sid_core::Error::Storage(format!("remove_ip_allowlist_entry: {e}")))?;
-        Ok(())
+            .map_err(storage)?;
+        Self::commit_allowlist_change(tx, ctx).await
     }
 
     async fn list_ip_allowlist_entries(
@@ -7853,7 +8007,7 @@ impl StorageBackend for PostgresBackend {
         id: sid_core::models::BrandingConfigId,
         project_id: ProjectId,
         at: chrono::DateTime<chrono::Utc>,
-        audit: MutationContext,
+        mut audit: MutationContext,
     ) -> SidResult<bool> {
         let mut tx = self
             .pool
@@ -7900,6 +8054,15 @@ impl StorageBackend for PostgresBackend {
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("published branding", e))?;
+        let published = sqlx::query_as::<_, BrandingRow>(
+            "SELECT status, revision, updated_at, data FROM branding_configs WHERE id = $1",
+        )
+        .bind(id.0)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| SidError::Storage(format!("read published branding: {e}")))?
+        .into_domain()?;
+        audit.record_effect(&published)?;
         Self::audit_in_tx(&mut tx, &format!("branding:{}", id.0), audit).await?;
         tx.commit()
             .await
@@ -7986,9 +8149,10 @@ impl StorageBackend for PostgresBackend {
 
     // === INVITE OPERATIONS ===
 
-    async fn create_invite(&self, invite: &Invite, audit: MutationContext) -> SidResult<()> {
-        let metadata = serde_json::to_value(&invite.metadata)
-            .map_err(|e| SidError::Validation(format!("invite metadata: {e}")))?;
+    async fn create_invites(&self, invites: &[Invite], audit: MutationContext) -> SidResult<()> {
+        let Some(first) = invites.first() else {
+            return Ok(());
+        };
         let count = |what: &str, n: u32| {
             i32::try_from(n).map_err(|e| SidError::Validation(format!("invite {what}: {e}")))
         };
@@ -7997,29 +8161,33 @@ impl StorageBackend for PostgresBackend {
             .begin()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
-        let (by_profile, by_machine) = match invite.created_by {
-            sid_core::models::InviteCreator::Profile(id) => (Some(id), None),
-            sid_core::models::InviteCreator::MachineUser(id) => (None, Some(id)),
-        };
-        sqlx::query(
-            "INSERT INTO invites (id, code, created_by, created_by_machine, created_by_name, metadata, max_uses, use_count, expires_at, active, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
-        )
-        .bind(invite.id.0)
-        .bind(&invite.code)
-        .bind(by_profile)
-        .bind(by_machine)
-        .bind(&invite.created_by_name)
-        .bind(metadata)
-        .bind(count("max uses", invite.max_uses)?)
-        .bind(count("use count", invite.use_count)?)
-        .bind(invite.expires_at)
-        .bind(invite.active)
-        .bind(invite.created_at)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| insert_error("invite", e))?;
-        Self::audit_in_tx(&mut tx, &format!("invite:{}", invite.id.0), audit).await?;
+        for invite in invites {
+            let metadata = serde_json::to_value(&invite.metadata)
+                .map_err(|e| SidError::Validation(format!("invite metadata: {e}")))?;
+            let (by_profile, by_machine) = match invite.created_by {
+                sid_core::models::InviteCreator::Profile(id) => (Some(id), None),
+                sid_core::models::InviteCreator::MachineUser(id) => (None, Some(id)),
+            };
+            sqlx::query(
+                "INSERT INTO invites (id, code, created_by, created_by_machine, created_by_name, metadata, max_uses, use_count, expires_at, active, created_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+            )
+            .bind(invite.id.0)
+            .bind(&invite.code)
+            .bind(by_profile)
+            .bind(by_machine)
+            .bind(&invite.created_by_name)
+            .bind(metadata)
+            .bind(count("max uses", invite.max_uses)?)
+            .bind(count("use count", invite.use_count)?)
+            .bind(invite.expires_at)
+            .bind(invite.active)
+            .bind(invite.created_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| insert_error("invite", e))?;
+        }
+        Self::audit_in_tx(&mut tx, &format!("invite:{}", first.id.0), audit).await?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -8821,6 +8989,7 @@ mod job_lock;
 mod login_policy;
 mod machine_credential;
 mod operation;
+pub use operation::PgOperationStore;
 mod password_history;
 mod principal_store;
 mod provisioning_connector;

@@ -18,11 +18,14 @@ use tonic::Request;
 
 type PrincipalType = sid_core::models::PrincipalType;
 
+/// `msg` as one new command of `token`'s (a method that promises a safe
+/// retry takes an operation key).
 fn authed<T>(msg: T, token: &str) -> Request<T> {
     let mut request = Request::new(msg);
     request
         .metadata_mut()
         .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    common::name_new_command(request.metadata_mut());
     request
 }
 
@@ -257,6 +260,61 @@ async fn administrator_repairs_a_quarantined_handle() {
     let shown = listed(admin).await;
     assert!(!shown.needs_address_confirmation);
     assert_eq!(shown.source_email_id, Some(contact.id.0.to_string()));
+}
+
+/// The repair is its command's outcome, committed with it: retried after the
+/// handle was removed, it answers as it did and does not add the handle
+/// back.
+#[tokio::test]
+async fn a_repair_retried_after_a_removal_adds_nothing_back() {
+    let svc = TestServices::new(MockStorage::new().with_system_project());
+    let profile = quarantined(&svc, "fay@sid.example.com").await;
+    let admin = issue_admin_token(&svc.jwt, sid_core::models::ProfileId::generate());
+    let repair = || {
+        let mut request = Request::new(add_email(profile, "fay@sid.example.com"));
+        request
+            .metadata_mut()
+            .insert("authorization", format!("Bearer {admin}").parse().unwrap());
+        common::name_command(request.metadata_mut(), "k-repair");
+        request
+    };
+    let first = svc
+        .identity
+        .add_principal(repair())
+        .await
+        .expect("repaired")
+        .into_inner();
+    let held = |svc: &TestServices| {
+        let storage = svc.storage.clone();
+        async move {
+            storage
+                .get_principals_by_profile(profile)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|p| p.value == "fay@sid.example.com")
+        }
+    };
+    let claim = held(&svc).await.expect("held");
+    assert!(
+        svc.storage
+            .unbind_principal(
+                claim.id,
+                profile,
+                sid_core::models::AuditEntry::system("test", "remove").into(),
+            )
+            .await
+            .unwrap()
+    );
+
+    let retried = svc
+        .identity
+        .add_principal(repair())
+        .await
+        .expect("answered")
+        .into_inner();
+    assert_eq!(retried, first, "the retry answers as the repair did");
+    assert!(held(&svc).await.is_none(), "the handle came back");
 }
 
 /// The owner adding the address again does not repair the handle: an

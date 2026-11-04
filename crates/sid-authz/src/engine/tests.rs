@@ -2,7 +2,6 @@ use super::*;
 use crate::test_mock::MockStorage;
 use sid_core::models::machine_user::MachineUserId;
 use sid_core::models::*;
-use std::collections::HashMap;
 
 fn create_test_role(project_id: ProjectId, key: &str, permissions: &[&str]) -> Role {
     let mut role = Role::new(project_id, key, key);
@@ -102,7 +101,7 @@ async fn test_check_no_roles_denies() {
             subject: format!("user:{profile_id}"),
             action: "profiles:read".into(),
             resource: format!("project:{}", project_id.0),
-            context: HashMap::new(),
+            context: Default::default(),
         })
         .await
         .unwrap();
@@ -132,7 +131,7 @@ async fn test_check_rbac_allows() {
             subject: format!("user:{profile_id}"),
             action: "profiles:read".into(),
             resource: format!("project:{}", project_id.0),
-            context: HashMap::new(),
+            context: Default::default(),
         })
         .await
         .unwrap();
@@ -169,7 +168,7 @@ async fn test_check_rbac_wrong_permission_denies() {
             subject: format!("user:{profile_id}"),
             action: "profiles:delete".into(),
             resource: format!("project:{}", project_id.0),
-            context: HashMap::new(),
+            context: Default::default(),
         })
         .await
         .unwrap();
@@ -212,7 +211,7 @@ async fn test_check_via_group_allows() {
             subject: format!("user:{profile_id}"),
             action: "docs:write".into(),
             resource: format!("project:{}", project_id.0),
-            context: HashMap::new(),
+            context: Default::default(),
         })
         .await
         .unwrap();
@@ -243,7 +242,7 @@ async fn test_check_expired_role_denies() {
             subject: format!("user:{profile_id}"),
             action: "profiles:read".into(),
             resource: format!("project:{}", project_id.0),
-            context: HashMap::new(),
+            context: Default::default(),
         })
         .await
         .unwrap();
@@ -260,7 +259,7 @@ async fn test_check_invalid_subject() {
             subject: "not-a-uuid".into(),
             action: "read".into(),
             resource: format!("project:{}", project_id.0),
-            context: HashMap::new(),
+            context: Default::default(),
         })
         .await;
 
@@ -277,7 +276,7 @@ async fn test_check_invalid_resource() {
             subject: format!("user:{profile_id}"),
             action: "read".into(),
             resource: "not-a-uuid".into(),
-            context: HashMap::new(),
+            context: Default::default(),
         })
         .await;
 
@@ -308,7 +307,7 @@ async fn test_check_cedar_permits_when_rbac_denies() {
             subject: format!("user:{profile_id}"),
             action: "profiles:read".into(),
             resource: format!("project:{}", project_id.0),
-            context: HashMap::new(),
+            context: Default::default(),
         })
         .await
         .unwrap();
@@ -344,7 +343,7 @@ async fn test_check_disabled_cedar_policy_ignored() {
             subject: format!("user:{profile_id}"),
             action: "profiles:read".into(),
             resource: format!("project:{}", project_id.0),
-            context: HashMap::new(),
+            context: Default::default(),
         })
         .await
         .unwrap();
@@ -378,7 +377,7 @@ async fn test_explicit_forbid_overrides_a_role_grant() {
         subject: format!("user:{profile_id}"),
         action: action.into(),
         resource: format!("project:{}", project_id.0),
-        context: HashMap::new(),
+        context: Default::default(),
     };
     assert!(
         engine
@@ -450,7 +449,7 @@ async fn test_an_unevaluable_policy_set_denies_a_role_grant() {
             subject: format!("user:{profile_id}"),
             action: "profiles:write".into(),
             resource: format!("project:{}", project_id.0),
-            context: HashMap::new(),
+            context: Default::default(),
         })
         .await
         .unwrap();
@@ -478,13 +477,13 @@ async fn test_batch_check() {
             subject: format!("user:{profile_id}"),
             action: "profiles:read".into(),
             resource: format!("project:{}", project_id.0),
-            context: HashMap::new(),
+            context: Default::default(),
         },
         AuthzCheckRequest {
             subject: format!("user:{profile_id}"),
             action: "profiles:delete".into(),
             resource: format!("project:{}", project_id.0),
-            context: HashMap::new(),
+            context: Default::default(),
         },
     ];
 
@@ -524,7 +523,7 @@ async fn test_service_principals_hold_project_roles() {
         subject,
         action: action.into(),
         resource: format!("project:{}", project_id.0),
-        context: HashMap::new(),
+        context: Default::default(),
     };
 
     for subject in [format!("machine:{machine}"), "oauth_client:ci".into()] {
@@ -583,7 +582,7 @@ async fn test_resource_role_is_not_a_project_role() {
         subject: "oauth_client:pdp".into(),
         action: TOKEN_INTROSPECT.into(),
         resource: format!("project:{}", ProjectId::system().0),
-        context: HashMap::new(),
+        context: Default::default(),
     };
     assert!(!engine.check(&project_wide).await.unwrap().is_allowed());
 }
@@ -619,7 +618,7 @@ async fn test_service_actions_are_held_by_services_only() {
         subject,
         action: action.into(),
         resource: format!("oauth_resource:{resource}"),
-        context: HashMap::new(),
+        context: Default::default(),
     };
     for action in [TOKEN_INTROSPECT, AUTHZ_CHECK] {
         assert!(
@@ -676,7 +675,7 @@ async fn test_invite_actions_are_held_by_machine_users_only() {
         subject,
         action: action.into(),
         resource: format!("oauth_resource:{resource}"),
-        context: HashMap::new(),
+        context: Default::default(),
     };
     for action in INVITE_ACTIONS {
         for refused in [format!("user:{profile}"), "oauth_client:onboarding".into()] {
@@ -707,7 +706,7 @@ fn inspect(subject: String, resource: ResourceId) -> AuthzCheckRequest {
         subject,
         action: TOKEN_INTROSPECT.into(),
         resource: format!("oauth_resource:{resource}"),
-        context: HashMap::new(),
+        context: Default::default(),
     }
 }
 
@@ -863,7 +862,7 @@ fn scim(subject: String, action: &str, resource: String) -> AuthzCheckRequest {
         subject,
         action: action.into(),
         resource,
-        context: HashMap::new(),
+        context: Default::default(),
     }
 }
 
@@ -1040,7 +1039,7 @@ async fn test_unreachable_storage_never_allows() {
         subject: format!("user:{profile_id}"),
         action: "profiles:read".into(),
         resource: format!("project:{}", project_id.0),
-        context: HashMap::new(),
+        context: Default::default(),
     };
     assert!(engine.check(&request).await.unwrap().is_allowed());
 
@@ -1065,7 +1064,7 @@ async fn test_a_role_grants_only_in_its_project() {
             subject: format!("user:{profile_id}"),
             action: "profiles:read".into(),
             resource: format!("project:{}", other.0),
-            context: HashMap::new(),
+            context: Default::default(),
         })
         .await
         .unwrap();
@@ -1113,7 +1112,7 @@ async fn test_a_forbid_failing_at_runtime_denies_a_role_grant() {
             subject: format!("user:{profile_id}"),
             action: "profiles:write".into(),
             resource: format!("project:{}", project_id.0),
-            context: HashMap::new(),
+            context: Default::default(),
         })
         .await
         .unwrap();
@@ -1154,7 +1153,7 @@ async fn test_identifiers_with_quotes_reach_the_policies_intact() {
             subject: format!("oauth_client:{client}"),
             action: action.into(),
             resource: format!("project:{}", project_id.0),
-            context: HashMap::new(),
+            context: Default::default(),
         })
         .await
         .unwrap();
@@ -1218,7 +1217,7 @@ impl Granted {
     }
 
     async fn decide(&self, user: ProfileId, object: &str) -> bool {
-        let mut context = HashMap::new();
+        let mut context = std::collections::BTreeMap::new();
         if !object.is_empty() {
             context.insert("object".to_owned(), object.to_owned());
         }
@@ -1348,7 +1347,7 @@ async fn a_broad_permit_does_not_replace_a_mandatory_assignment() {
                 subject: "oauth_client:anyone".into(),
                 action: action.into(),
                 resource: format!("oauth_resource:{}", g.resource),
-                context: HashMap::new(),
+                context: Default::default(),
             })
             .await
             .unwrap()
@@ -1381,7 +1380,7 @@ async fn a_resource_without_a_consistent_registration_refuses_the_decision() {
         subject: format!("user:{}", g.user),
         action: "orders.cancel".into(),
         resource: format!("oauth_resource:{resource}"),
-        context: HashMap::new(),
+        context: Default::default(),
     };
     assert!(matches!(
         g.engine.check(&ask(ResourceId::generate())).await,
@@ -1445,7 +1444,7 @@ impl Administered {
                 subject: format!("user:{user}"),
                 action: action.into(),
                 resource: format!("project:{}", self.project.0),
-                context: HashMap::new(),
+                context: Default::default(),
             })
             .await
             .unwrap()
@@ -1458,7 +1457,7 @@ impl Administered {
                 subject: format!("user:{user}"),
                 action: action.into(),
                 resource: format!("oauth_resource:{}", self.resource),
-                context: HashMap::new(),
+                context: Default::default(),
             })
             .await
             .unwrap()
@@ -1573,7 +1572,7 @@ async fn test_engine_over_a_dyn_store() {
             subject: format!("user:{profile_id}"),
             action: "read".into(),
             resource: format!("project:{}", project_id.0),
-            context: HashMap::new(),
+            context: Default::default(),
         })
         .await
         .unwrap();

@@ -468,7 +468,7 @@ async fn test_grpc_reset_nonexistent_fails() {
 #[tokio::test]
 async fn test_grpc_preview_with_sample_data() {
     let svc = test_grpc_service().await;
-    let mut sample_data = std::collections::HashMap::new();
+    let mut sample_data = std::collections::BTreeMap::new();
     sample_data.insert(
         "event_type".to_string(),
         "sid.security.brute_force.v1".to_string(),

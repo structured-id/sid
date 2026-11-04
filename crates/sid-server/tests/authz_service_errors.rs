@@ -42,6 +42,7 @@ async fn harness() -> Harness {
         .await
         .expect("Failed to run migrations");
     let storage: Arc<dyn StorageBackend> = Arc::new(backend);
+    common::adopt_operation_period(storage.as_ref()).await;
     let jwt = test_jwt();
     let token = common::administrator_token(&jwt, storage.as_ref()).await;
     let svc = AuthzServiceImpl::new(
@@ -100,12 +101,15 @@ impl Harness {
         }
     }
 
+    /// `msg` as one new command of the administrator's (a method that
+    /// promises a safe retry takes an operation key).
     fn authed<T>(&self, msg: T) -> Request<T> {
         let mut req = Request::new(msg);
         req.metadata_mut().insert(
             "authorization",
             format!("Bearer {}", self.token).parse().unwrap(),
         );
+        common::name_new_command(req.metadata_mut());
         req
     }
 }

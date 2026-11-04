@@ -213,6 +213,8 @@ impl SqliteBackend {
         let Some(project) = row.as_ref().map(row_to_project).transpose()? else {
             return Ok(None);
         };
+        let mut audit = audit;
+        audit.record_effect(&project)?;
         Self::commit_mutation(tx, &format!("project:{}", id.0), audit).await?;
         Ok(Some(project))
     }

@@ -3,8 +3,11 @@
 //!
 //! Manages enrollment policy, invite codes, and registration statistics.
 
+use prost::Message;
 use sid_authn::caller::{Caller, authenticate};
 use sid_authn::jwt::JwtService;
+use sid_authn::operation::KeyedCommand;
+use sid_authn::operation::grpc::context;
 use sid_authn::resource_token::ResourceTokenVerifier;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::service_auth::{AuthenticatedService, ServiceCaller, authenticate_service};
@@ -15,9 +18,11 @@ use sid_core::grpc_error::refuse::{
 use sid_core::grpc_error::{ApiError, ErrorReason};
 use sid_core::models::{
     AuditEntry, INVITE_CREATE, INVITE_READ, INVITE_REVOKE, Invite, InviteCreator, InviteFilter,
-    InviteId, InviteStatus, ModeWrite, ProfileId, ResourceId, generate_invite_code,
+    InviteId, InviteStatus, ModeWrite, MutationContext, ProfileId, ResourceId,
+    generate_invite_code,
 };
 use sid_plugin::storage::StorageBackend;
+use sid_proto::keyed::admin::enrollment_service as keyed;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 use tracing::info;
@@ -113,6 +118,19 @@ impl InviteActor {
         match self {
             Self::Admin(id) => AuditEntry::admin(id.to_string(), action, resource),
             Self::Machine(id) => AuditEntry::machine(id.to_string(), action, resource),
+        }
+    }
+
+    /// This actor's command `M` of `req` under `context`: an administrator's
+    /// in its Profile's namespace, a machine user's in its own.
+    fn command<M: sid_proto::KeyedMethod>(
+        self,
+        context: sid_core::models::OperationContext,
+        req: &M::Request,
+    ) -> KeyedCommand {
+        match self {
+            Self::Admin(id) => KeyedCommand::by_profile::<M>(id, context, req),
+            Self::Machine(id) => KeyedCommand::of::<M>(format!("machine:{id}"), context, req),
         }
     }
 }
@@ -387,8 +405,19 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
     ) -> Result<Response<ProtoEnrollmentPolicy>, Status> {
         use crate::enrollment::Refusal;
         let caller = self.admin(&request).await?;
-        let policy = request
-            .into_inner()
+        let operation = context(&request)?;
+        let req = request.into_inner();
+        // A retry of a completed update answers with the policy it put in
+        // force and never writes it over a later update.
+        let command = KeyedCommand::by_profile::<keyed::UpdateEnrollmentPolicy>(
+            caller.profile_id,
+            operation,
+            &req,
+        );
+        if let Some(recorded) = command.replay(&*self.storage).await? {
+            return Ok(Response::new(recorded));
+        }
+        let policy = req
             .policy
             .ok_or_else(|| missing_field("policy"))
             .and_then(enrollment_policy_from_proto)?;
@@ -424,28 +453,41 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
             Some(_) => ModeWrite::KeepStored,
             None => ModeWrite::Replace,
         };
-        self.storage
-            .set_enrollment_policy(
-                &policy,
-                mode_write,
-                AuditEntry::admin(
-                    caller.profile_id.to_string(),
-                    "enrollment_policy.update",
-                    "installation".to_string(),
-                )
-                .into(),
-            )
+        // The policy in force once stored: a pinned mode overrides the
+        // stored one, as `policy_in_force` reads it.
+        let mut in_force = policy.clone();
+        if let Some(mode) = self.pinned_mode {
+            in_force.mode = mode;
+        }
+        let mut response = enrollment_policy_to_proto(&in_force);
+        response.mode_pinned = self.pinned_mode.is_some();
+        let ctx = MutationContext::from(AuditEntry::admin(
+            caller.profile_id.to_string(),
+            "enrollment_policy.update",
+            "installation".to_string(),
+        ))
+        .with_operation(command.completion(response.encode_to_vec()));
+        match self
+            .storage
+            .set_enrollment_policy(&policy, mode_write, ctx)
             .await
-            .map_err(|e| match e {
-                // The stored mode, kept under a pin, is domain-restricted
-                // and the update leaves it without a domain.
-                sid_core::Error::Validation(message) => {
-                    invalid_field("policy.allowed_domains", message)
-                }
-                e => storage_failure(e),
-            })?;
+        {
+            Ok(_) => {}
+            Err(sid_core::Error::OperationCompleted(_)) => {
+                let recorded = command.committed_elsewhere(&*self.storage).await?;
+                return ProtoEnrollmentPolicy::decode(recorded.as_slice())
+                    .map(Response::new)
+                    .map_err(|e| internal("read a recorded policy", e));
+            }
+            // The stored mode, kept under a pin, is domain-restricted and
+            // the update leaves it without a domain.
+            Err(sid_core::Error::Validation(message)) => {
+                return Err(invalid_field("policy.allowed_domains", message));
+            }
+            Err(e) => return Err(storage_failure(e)),
+        }
         info!(mode = %policy.mode, "enrollment policy updated");
-        self.policy_in_force().await.map(Response::new)
+        Ok(Response::new(response))
     }
 
     #[tracing::instrument(skip_all, fields(rpc = "create_invite"))]
@@ -454,40 +496,48 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
         request: Request<sid_proto::sid::v1::admin::CreateInviteRequest>,
     ) -> Result<Response<ProtoInvite>, Status> {
         let actor = self.invite_actor(&request, INVITE_CREATE).await?;
+        let operation = context(&request)?;
         let req = request.into_inner();
 
-        let (max_uses, expires_at) = self
-            .invite_terms(
-                req.max_uses,
-                req.unlimited_uses,
-                req.expires_at,
-                req.never_expires,
-            )
+        // A retry of a completed creation answers with the invite it created
+        // and creates no second one.
+        let command = actor.command::<keyed::CreateInvite>(operation, &req);
+        let response = command
+            .run(&*self.storage, || async {
+                let (max_uses, expires_at) = self
+                    .invite_terms(
+                        req.max_uses,
+                        req.unlimited_uses,
+                        req.expires_at,
+                        req.never_expires,
+                    )
+                    .await?;
+
+                let invite = Invite {
+                    id: InviteId::new(),
+                    code: generate_invite_code(),
+                    created_by: actor.creator(),
+                    created_by_name: self.invite_creator_name(actor).await?,
+                    metadata: req.metadata.clone().into_iter().collect(),
+                    max_uses,
+                    use_count: 0,
+                    expires_at,
+                    active: true,
+                    created_at: chrono::Utc::now(),
+                };
+                let response = invite_to_proto(&invite);
+                let ctx =
+                    MutationContext::from(actor.audit("invite.create", invite.id.0.to_string()))
+                        .with_operation(command.completion(response.encode_to_vec()));
+                self.storage
+                    .create_invites(std::slice::from_ref(&invite), ctx)
+                    .await?;
+                info!("Created invite {}", invite.id.0);
+                Ok(response)
+            })
             .await?;
 
-        let invite = Invite {
-            id: InviteId::new(),
-            code: generate_invite_code(),
-            created_by: actor.creator(),
-            created_by_name: self.invite_creator_name(actor).await?,
-            metadata: req.metadata.into_iter().collect(),
-            max_uses,
-            use_count: 0,
-            expires_at,
-            active: true,
-            created_at: chrono::Utc::now(),
-        };
-
-        self.storage
-            .create_invite(
-                &invite,
-                actor.audit("invite.create", invite.id.0.to_string()).into(),
-            )
-            .await
-            .map_err(storage_failure)?;
-
-        info!("Created invite {}", invite.id.0);
-        Ok(Response::new(invite_to_proto(&invite)))
+        Ok(Response::new(response))
     }
 
     #[tracing::instrument(skip_all, fields(rpc = "get_invite"))]
@@ -626,6 +676,7 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
         request: Request<sid_proto::sid::v1::admin::BulkCreateInvitesRequest>,
     ) -> Result<Response<sid_proto::sid::v1::admin::BulkCreateInvitesResponse>, Status> {
         let actor = self.invite_actor(&request, INVITE_CREATE).await?;
+        let operation = context(&request)?;
         let req = request.into_inner();
 
         // A request for more is refused, never quietly cut to the limit.
@@ -640,50 +691,50 @@ impl sid_proto::sid::v1::admin::enrollment_service_server::EnrollmentService
             ));
         }
 
-        let (max_uses, expires_at) = self
-            .invite_terms(
-                req.max_uses,
-                req.unlimited_uses,
-                req.expires_at,
-                req.never_expires,
-            )
+        // All the invites commit together or none do, once per key: a retry
+        // answers with the invites the first commit created and creates no
+        // others.
+        let command = actor.command::<keyed::BulkCreateInvites>(operation, &req);
+        let response = command
+            .run(&*self.storage, || async {
+                let (max_uses, expires_at) = self
+                    .invite_terms(
+                        req.max_uses,
+                        req.unlimited_uses,
+                        req.expires_at,
+                        req.never_expires,
+                    )
+                    .await?;
+                let created_by_name = self.invite_creator_name(actor).await?;
+
+                let now = chrono::Utc::now();
+                let invites: Vec<Invite> = (0..count)
+                    .map(|_| Invite {
+                        id: InviteId::new(),
+                        code: generate_invite_code(),
+                        created_by: actor.creator(),
+                        created_by_name: created_by_name.clone(),
+                        metadata: req.metadata.clone().into_iter().collect(),
+                        max_uses,
+                        use_count: 0,
+                        expires_at,
+                        active: true,
+                        created_at: now,
+                    })
+                    .collect();
+                let response = sid_proto::sid::v1::admin::BulkCreateInvitesResponse {
+                    invites: invites.iter().map(invite_to_proto).collect(),
+                };
+                let ids: Vec<String> = invites.iter().map(|i| i.id.0.to_string()).collect();
+                let ctx = MutationContext::from(actor.audit("invite.bulk_create", ids.join(",")))
+                    .with_operation(command.completion(response.encode_to_vec()));
+                self.storage.create_invites(&invites, ctx).await?;
+                info!("Bulk created {} invites", invites.len());
+                Ok(response)
+            })
             .await?;
-        let created_by_name = self.invite_creator_name(actor).await?;
 
-        let mut invites = Vec::with_capacity(count as usize);
-        for _ in 0..count {
-            let invite = Invite {
-                id: InviteId::new(),
-                code: generate_invite_code(),
-                created_by: actor.creator(),
-                created_by_name: created_by_name.clone(),
-                metadata: req.metadata.clone().into_iter().collect(),
-                max_uses,
-                use_count: 0,
-                expires_at,
-                active: true,
-                created_at: chrono::Utc::now(),
-            };
-
-            self.storage
-                .create_invite(
-                    &invite,
-                    actor
-                        .audit("invite.bulk_create", invite.id.0.to_string())
-                        .into(),
-                )
-                .await
-                .map_err(storage_failure)?;
-
-            invites.push(invite);
-        }
-
-        info!("Bulk created {} invites", invites.len());
-        Ok(Response::new(
-            sid_proto::sid::v1::admin::BulkCreateInvitesResponse {
-                invites: invites.iter().map(invite_to_proto).collect(),
-            },
-        ))
+        Ok(Response::new(response))
     }
 
     #[tracing::instrument(skip_all, fields(rpc = "get_registration_stats"))]

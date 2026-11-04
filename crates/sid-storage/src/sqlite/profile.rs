@@ -315,7 +315,7 @@ fn row_to_profile_metadata(row: &sqlx::sqlite::SqliteRow) -> SidResult<ProfileMe
     })
 }
 
-fn row_to_profile_phone(row: &sqlx::sqlite::SqliteRow) -> SidResult<ProfilePhone> {
+pub(super) fn row_to_profile_phone(row: &sqlx::sqlite::SqliteRow) -> SidResult<ProfilePhone> {
     let id_str: String = row.get("id");
     Ok(ProfilePhone {
         id: ProfilePhoneId(uuid::Uuid::parse_str(&id_str).unwrap_or_default()),
@@ -339,7 +339,7 @@ fn row_to_profile_phone(row: &sqlx::sqlite::SqliteRow) -> SidResult<ProfilePhone
     })
 }
 
-fn row_to_profile_email(row: &sqlx::sqlite::SqliteRow) -> SidResult<ProfileEmail> {
+pub(super) fn row_to_profile_email(row: &sqlx::sqlite::SqliteRow) -> SidResult<ProfileEmail> {
     let id_str: String = row.get("id");
     Ok(ProfileEmail {
         id: ProfileEmailId(uuid::Uuid::parse_str(&id_str).unwrap_or_default()),
@@ -788,10 +788,30 @@ impl SqliteBackend {
     pub(crate) async fn save_principal_impl(
         &self,
         p: &Principal,
-        audit: MutationContext,
+        mut audit: MutationContext,
     ) -> SidResult<()> {
         let mut tx = self.begin_write().await?;
         super::directory::bind_principal(&mut tx, p).await?;
+        if audit.operation.is_some() {
+            // The holder's claim as stored: its id is the principal's, which
+            // an earlier holder may have created.
+            let row = sqlx::query(
+                "SELECT pr.*,
+                        pb.profile_id AS pb_profile_id,
+                        pb.is_primary AS pb_is_primary, pb.source_field AS pb_source_field,
+                        pb.source_email_id AS pb_source_email_id, pb.source_phone_id AS pb_source_phone_id
+                 FROM principals pr
+                 INNER JOIN principal_bindings pb ON pr.id = pb.principal_id
+                 WHERE pb.profile_id = ? AND pr.principal_type = ? AND pr.value = ?",
+            )
+            .bind(p.profile_id)
+            .bind(p.principal_type.as_str())
+            .bind(&p.value)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| SidError::Storage(format!("read the stored principal: {e}")))?;
+            audit.record_effect(&row_to_principal(&row)?)?;
+        }
         Self::commit_mutation(tx, &format!("principal:{}", p.id.0), audit).await
     }
 
@@ -895,7 +915,7 @@ impl SqliteBackend {
         profile_id: ProfileId,
         contact: &ProfileEmail,
         reason: &str,
-        audit: MutationContext,
+        mut audit: MutationContext,
     ) -> SidResult<bool> {
         if contact.profile_id != profile_id {
             return Err(SidError::Validation(
@@ -948,6 +968,24 @@ impl SqliteBackend {
         .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("record reconciliation: {e}")))?;
+        if audit.operation.is_some() {
+            // The claim as the profile holds it after this commit.
+            let row = sqlx::query(
+                "SELECT pr.*,
+                        pb.profile_id AS pb_profile_id,
+                        pb.is_primary AS pb_is_primary, pb.source_field AS pb_source_field,
+                        pb.source_email_id AS pb_source_email_id, pb.source_phone_id AS pb_source_phone_id
+                 FROM principals pr
+                 INNER JOIN principal_bindings pb ON pr.id = pb.principal_id
+                 WHERE pr.id = ? AND pb.profile_id = ?",
+            )
+            .bind(principal_id.0.to_string())
+            .bind(profile_id.to_string())
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| SidError::Storage(format!("read the reconciled principal: {e}")))?;
+            audit.record_effect(&row_to_principal(&row)?)?;
+        }
         Self::commit_mutation(tx, &format!("principal:{}", principal_id.0), audit).await?;
         Ok(true)
     }

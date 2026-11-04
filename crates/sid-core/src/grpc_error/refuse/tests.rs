@@ -17,9 +17,32 @@ fn internal_hides_the_cause() {
 /// A storage failure is an internal failure that hides its cause too.
 #[test]
 fn storage_failure_hides_the_cause() {
-    let status = storage_failure("connection reset by peer");
+    let status = storage_failure(crate::Error::Storage("connection reset by peer".into()));
     assert_eq!(status.code(), Code::Internal);
     assert!(!status.message().contains("reset"));
+}
+
+/// A commit refused for its period is the caller's to resolve, not an
+/// internal failure: retired is OPERATION_EXPIRED, never issued names the
+/// period field.
+#[test]
+fn storage_failure_answers_a_refused_period() {
+    use crate::models::OperationPeriodRefusal;
+    let retired = storage_failure(crate::Error::OperationPeriodRefused(
+        OperationPeriodRefusal::Retired,
+    ));
+    assert_eq!(
+        retired.get_error_details().error_info().unwrap().reason,
+        "OPERATION_EXPIRED"
+    );
+    let unissued = storage_failure(crate::Error::OperationPeriodRefused(
+        OperationPeriodRefusal::NotIssued,
+    ));
+    assert_eq!(unissued.code(), Code::InvalidArgument);
+    assert_eq!(
+        unissued.get_details_bad_request().unwrap().field_violations[0].field,
+        OPERATION_PERIOD_FIELD
+    );
 }
 
 /// Field refusals name the field in BadRequest, not the submitted value.

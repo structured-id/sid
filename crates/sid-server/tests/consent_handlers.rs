@@ -17,12 +17,20 @@ use sid_proto::sid::v1::account::*;
 use tonic::Request;
 use tonic_types::StatusExt;
 
+/// `msg` from the bearer of `token` as one new command: its client names it
+/// by a fresh operation key, as the account UI's transport does.
 fn authed_request<T>(msg: T, token: &str) -> Request<T> {
+    keyed_request(msg, token, &uuid::Uuid::new_v4().to_string())
+}
+
+/// `msg` from the bearer of `token` as the command named `key`.
+fn keyed_request<T>(msg: T, token: &str, key: &str) -> Request<T> {
     let mut req = Request::new(msg);
     req.metadata_mut().insert(
         "authorization",
         format!("Bearer {}", token).parse().unwrap(),
     );
+    common::name_command(req.metadata_mut(), key);
     req
 }
 
@@ -601,6 +609,84 @@ async fn test_update_claim_consent_revoke() {
     let active: Vec<_> = updated.grants.iter().filter(|g| g.is_active()).collect();
     assert_eq!(active.len(), 1);
     assert_eq!(active[0].claim_name, "email");
+}
+
+/// Decision A (revoke) completes, a later decision B (grant) completes, then
+/// A's lost response is retried: the retry answers as A did and leaves the
+/// claim as B left it. Without the recorded completion the retry would revoke
+/// the claim again over B. A repeat of a decision already in effect still
+/// records its completion, so it holds as well.
+#[tokio::test]
+async fn test_update_claim_consent_retry_keeps_a_later_decision() {
+    let svc = TestServices::new(MockStorage::new());
+    let profile = test_profile();
+    svc.storage
+        .create_profile(&profile, AuditEntry::system("test", "setup").into())
+        .await
+        .unwrap();
+    let mut consent = ConsentRecord::new(profile.id, "retry-app");
+    consent.grant_claim("phone", ClaimType::Data);
+    if let Some(requested) = consent.as_requested() {
+        requested.grant();
+    }
+    svc.storage
+        .create_consent(&consent, AuditEntry::system("test", "setup").into())
+        .await
+        .unwrap();
+    let token = issue_token(&svc.jwt, &profile, &["openid".to_string()]);
+    let decide = |grant: bool, key: &str| {
+        keyed_request(
+            UpdateClaimConsentRequest {
+                site_id: "retry-app".to_string(),
+                claim_name: "phone".to_string(),
+                grant,
+            },
+            &token,
+            key,
+        )
+    };
+    let phone_active = || async {
+        svc.storage
+            .get_consent_by_client(profile.id, "retry-app")
+            .await
+            .unwrap()
+            .unwrap()
+            .grants
+            .iter()
+            .any(|g| g.claim_name == "phone" && g.is_active())
+    };
+
+    svc.account
+        .update_claim_consent(decide(false, "op-a"))
+        .await
+        .unwrap();
+    svc.account
+        .update_claim_consent(decide(true, "op-b"))
+        .await
+        .unwrap();
+    svc.account
+        .update_claim_consent(decide(false, "op-a"))
+        .await
+        .expect("the retry answers as the first attempt did");
+    assert!(phone_active().await, "the retry undid a later decision");
+
+    // A decision already in effect, then the opposite one, then its retry.
+    svc.account
+        .update_claim_consent(decide(true, "op-c"))
+        .await
+        .unwrap();
+    svc.account
+        .update_claim_consent(decide(false, "op-d"))
+        .await
+        .unwrap();
+    svc.account
+        .update_claim_consent(decide(true, "op-c"))
+        .await
+        .unwrap();
+    assert!(
+        !phone_active().await,
+        "an unchanged decision's retry applied it"
+    );
 }
 
 #[tokio::test]

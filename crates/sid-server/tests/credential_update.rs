@@ -12,10 +12,13 @@ use sid_proto::sid::v1::UpdateCredentialRequest;
 use sid_proto::sid::v1::identity_service_server::IdentityService;
 use tonic::{Code, Request};
 
+/// `msg` as one new command of `token`'s (a method that promises a safe
+/// retry takes an operation key).
 fn authed<T>(msg: T, token: &str) -> Request<T> {
     let mut req = Request::new(msg);
     req.metadata_mut()
         .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    common::name_new_command(req.metadata_mut());
     req
 }
 
@@ -27,6 +30,54 @@ fn rename(credential: &Credential, label: &str, token: &str) -> Request<UpdateCr
         },
         token,
     )
+}
+
+/// An update that names no label changes nothing and is still its command's
+/// outcome: a retry of it after a rename answers as the first did, and a
+/// key already used for another command is a conflict on it too.
+#[tokio::test]
+async fn test_an_update_without_a_label_is_recorded_for_its_retry() {
+    let profile = Profile::new(Some("unchanged"));
+    let credential = Credential::new(profile.id, CredentialType::Totp, vec![1], Some("a".into()));
+    let svc = TestServices::new(
+        MockStorage::new()
+            .with_profile(profile.clone())
+            .with_credential(credential.clone()),
+    );
+    let token = fresh_token(&svc, &profile).await;
+    let keyed = |label: Option<&str>, key: &str| {
+        let mut req = Request::new(UpdateCredentialRequest {
+            credential_id: credential.id.0.to_string(),
+            label: label.map(str::to_owned),
+        });
+        req.metadata_mut()
+            .insert("authorization", format!("Bearer {token}").parse().unwrap());
+        common::name_command(req.metadata_mut(), key);
+        req
+    };
+    let first = svc
+        .identity
+        .update_credential(keyed(None, "k-nothing"))
+        .await
+        .unwrap()
+        .into_inner();
+    svc.identity
+        .update_credential(keyed(Some("renamed"), "k-rename"))
+        .await
+        .unwrap();
+    let retried = svc
+        .identity
+        .update_credential(keyed(None, "k-nothing"))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(retried, first, "the retry answers as the first attempt");
+    let reused = svc
+        .identity
+        .update_credential(keyed(None, "k-rename"))
+        .await
+        .unwrap_err();
+    assert_eq!(reused.code(), Code::AlreadyExists, "{reused:?}");
 }
 
 /// The owner renames an active credential; renaming a revoked one is refused

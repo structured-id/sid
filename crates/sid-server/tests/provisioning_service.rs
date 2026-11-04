@@ -114,9 +114,7 @@ impl Fixture {
 
     fn keyed<T>(&self, message: T, key: &str) -> Request<T> {
         let mut request = self.admin(message);
-        request
-            .metadata_mut()
-            .insert("idempotency-key", key.parse().unwrap());
+        common::name_command(request.metadata_mut(), key);
         request
     }
 
@@ -144,16 +142,19 @@ impl Fixture {
             .find(|r| r.key == SCIM_PROVISIONER_ROLE)
             .unwrap();
         self.authz
-            .assign_role(self.admin(AssignRoleRequest {
-                principal: Some(Principal::ProvisioningConnectorId(
-                    connector.id.clone().unwrap(),
-                )),
-                role_id: role.id.0.to_string(),
-                scope: Some(format!("oauth_resource:{}", self.directory.id)),
-                expires_at: None,
-                admin: None,
-                policy_admin: None,
-            }))
+            .assign_role(self.keyed(
+                AssignRoleRequest {
+                    principal: Some(Principal::ProvisioningConnectorId(
+                        connector.id.clone().unwrap(),
+                    )),
+                    role_id: role.id.0.to_string(),
+                    scope: Some(format!("oauth_resource:{}", self.directory.id)),
+                    expires_at: None,
+                    admin: None,
+                    policy_admin: None,
+                },
+                &uuid::Uuid::new_v4().to_string(),
+            ))
             .await
             .unwrap();
     }
@@ -241,11 +242,12 @@ impl Fixture {
         state: pb::ProvisioningConnectorState,
     ) -> Result<pb::ProvisioningConnector, tonic::Status> {
         self.provisioning
-            .change_provisioning_connector_state(self.admin(
+            .change_provisioning_connector_state(self.keyed(
                 pb::ChangeProvisioningConnectorStateRequest {
                     connector_id: connector.id.clone(),
                     state: state.into(),
                 },
+                &uuid::Uuid::new_v4().to_string(),
             ))
             .await
             .map(|r| r.into_inner())
@@ -473,6 +475,56 @@ async fn a_connector_provisions_with_an_oauth_token() {
         Code::Unauthenticated
     );
     assert_eq!(f.scim_code(&bearer).await, Code::Ok);
+}
+
+/// A state change that found its target already made is still its command's
+/// outcome: a retry of it after a later change answers as the first did and
+/// moves nothing.
+#[tokio::test]
+async fn a_state_change_already_in_effect_is_recorded_for_its_retry() {
+    let f = fixture().await;
+    let connector = f.create("HR sync", "k-noop-create").await;
+    let change = |state: pb::ProvisioningConnectorState, key: &str| {
+        f.provisioning.change_provisioning_connector_state(f.keyed(
+            pb::ChangeProvisioningConnectorStateRequest {
+                connector_id: connector.id.clone(),
+                state: state.into(),
+            },
+            key,
+        ))
+    };
+    let disabled = pb::ProvisioningConnectorState::Disabled;
+    change(disabled, "k-disable").await.unwrap();
+    // Already disabled: this command changes nothing and succeeds.
+    let noop = change(disabled, "k-disable-again")
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(noop.state, i32::from(disabled));
+    change(pb::ProvisioningConnectorState::Active, "k-activate")
+        .await
+        .unwrap();
+
+    let retried = change(disabled, "k-disable-again")
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(retried, noop, "the retry answers as the first attempt");
+    let now = f
+        .provisioning
+        .list_provisioning_connectors(f.admin(pb::ListProvisioningConnectorsRequest {}))
+        .await
+        .unwrap()
+        .into_inner()
+        .connectors
+        .into_iter()
+        .find(|c| c.id == connector.id)
+        .unwrap();
+    assert_eq!(
+        now.state,
+        i32::from(pb::ProvisioningConnectorState::Active),
+        "the retry undid the later activation"
+    );
 }
 
 /// A retried create returns the same connector; a retried issue returns the

@@ -16,12 +16,15 @@ use tonic::{Code, Request};
 use uuid::Uuid;
 
 /// `msg` with `token` as its bearer, or without credentials.
+/// `msg` as one new command, of `token`'s when given (a method that promises
+/// a safe retry takes an operation key).
 fn req<T>(msg: T, token: Option<&str>) -> Request<T> {
     let mut req = Request::new(msg);
     if let Some(token) = token {
         req.metadata_mut()
             .insert("authorization", format!("Bearer {token}").parse().unwrap());
     }
+    common::name_new_command(req.metadata_mut());
     req
 }
 

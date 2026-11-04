@@ -18,10 +18,13 @@ const ORIGIN: &str = "https://sid.example.com";
 const RP: &str = "sid.example.com";
 const EMAIL: &str = "passkey@sid.example.com";
 
+/// `msg` as one new command of `bearer`'s (a method that promises a safe
+/// retry takes an operation key).
 fn authed<T>(msg: T, bearer: &str) -> Request<T> {
     let mut req = Request::new(msg);
     req.metadata_mut()
         .insert("authorization", format!("Bearer {bearer}").parse().unwrap());
+    common::name_new_command(req.metadata_mut());
     req
 }
 

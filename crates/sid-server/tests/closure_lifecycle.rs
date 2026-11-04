@@ -66,7 +66,7 @@ async fn closing_profile(
         .await
         .unwrap();
     closures
-        .request_closure(profile.id, ClosureMode::Voluntary, profile.id)
+        .request_closure(profile.id, ClosureMode::Voluntary, profile.id, |_| None)
         .await
         .unwrap();
     (profile.id, email, session)
@@ -232,7 +232,7 @@ async fn executed_closure_cannot_be_cancelled() {
     set_grace_end(&pool, pid, Utc::now() - Duration::minutes(1)).await;
     closures.execute_closure(pid).await.unwrap();
 
-    let err = closures.cancel_closure(pid, pid).await.unwrap_err();
+    let err = closures.cancel_closure(pid, pid, None).await.unwrap_err();
     assert!(matches!(err, sid_core::Error::InvalidState(_)), "{err:?}");
     assert_eq!(status(&storage, pid).await, ProfileStatus::Closed);
 }
@@ -246,11 +246,11 @@ async fn cancel_limit_survives_new_requests() {
     for cycle in 0..sid_core::models::MAX_CANCEL_CYCLES_PER_YEAR {
         if cycle > 0 {
             closures
-                .request_closure(pid, ClosureMode::Voluntary, pid)
+                .request_closure(pid, ClosureMode::Voluntary, pid, |_| None)
                 .await
                 .unwrap();
         }
-        closures.cancel_closure(pid, pid).await.unwrap();
+        closures.cancel_closure(pid, pid, None).await.unwrap();
     }
     assert_eq!(
         storage
@@ -262,7 +262,7 @@ async fn cancel_limit_survives_new_requests() {
         sid_core::models::MAX_CANCEL_CYCLES_PER_YEAR
     );
     let err = closures
-        .request_closure(pid, ClosureMode::Voluntary, pid)
+        .request_closure(pid, ClosureMode::Voluntary, pid, |_| None)
         .await
         .expect_err("a request past the cancel limit");
     assert!(matches!(err, sid_core::Error::RateLimited(_)), "{err:?}");

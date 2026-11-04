@@ -6,7 +6,7 @@
 //! steps, set policies, and attach actions (webhook hooks), but cannot change flow structure.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use uuid::Uuid;
 
 use super::project::ProjectId;
@@ -315,7 +315,7 @@ pub enum ActionConfig {
 
         /// Additional headers to send with the webhook request.
         #[serde(default)]
-        headers: HashMap<String, String>,
+        headers: BTreeMap<String, String>,
     },
 }
 
@@ -439,7 +439,7 @@ mod tests {
                 url: "https://risk.example.com/evaluate".into(),
                 timeout_seconds: 3,
                 retry_count: 1,
-                headers: HashMap::new(),
+                headers: BTreeMap::new(),
             },
             order: 1,
             on_error: ActionOnError::Continue,
@@ -462,7 +462,7 @@ mod tests {
             url: "https://example.com/hook".into(),
             timeout_seconds: 5,
             retry_count: 1,
-            headers: HashMap::new(),
+            headers: BTreeMap::new(),
         };
         assert!(config.validate().is_ok());
     }
@@ -473,7 +473,7 @@ mod tests {
             url: "".into(),
             timeout_seconds: 5,
             retry_count: 0,
-            headers: HashMap::new(),
+            headers: BTreeMap::new(),
         };
         assert!(config.validate().is_err());
     }
@@ -484,7 +484,7 @@ mod tests {
             url: "ftp://example.com".into(),
             timeout_seconds: 5,
             retry_count: 0,
-            headers: HashMap::new(),
+            headers: BTreeMap::new(),
         };
         assert!(config.validate().unwrap_err().contains("http"));
     }
@@ -495,7 +495,7 @@ mod tests {
             url: "https://example.com".into(),
             timeout_seconds: 0,
             retry_count: 0,
-            headers: HashMap::new(),
+            headers: BTreeMap::new(),
         };
         assert!(config.validate().is_err());
     }
@@ -506,7 +506,7 @@ mod tests {
             url: "https://example.com".into(),
             timeout_seconds: 31,
             retry_count: 0,
-            headers: HashMap::new(),
+            headers: BTreeMap::new(),
         };
         assert!(config.validate().is_err());
     }
@@ -517,7 +517,7 @@ mod tests {
             url: "https://example.com".into(),
             timeout_seconds: 5,
             retry_count: 4,
-            headers: HashMap::new(),
+            headers: BTreeMap::new(),
         };
         assert!(config.validate().is_err());
     }

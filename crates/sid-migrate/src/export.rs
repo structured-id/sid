@@ -309,8 +309,10 @@ pub async fn export_snapshot(
     // Durable work: owed deliveries and the failed ones kept as dead letters.
     snapshot.durable_work = backend.export_work().await?;
 
-    // Completed keyed commands: a retry that arrives after the move must
-    // still find its result instead of executing again.
+    // Completed keyed commands and the periods they were named with: a retry
+    // that arrives after the move must still find its result instead of
+    // executing again, and a retired period stays retired.
+    snapshot.operation_periods = backend.export_operation_periods().await?;
     snapshot.operation_results = backend.export_operation_results().await?;
 
     // 6. Audit log (optional)

@@ -545,11 +545,14 @@ impl SqliteBackend {
                 .await
                 .map_err(storage)?
                 .rows_affected();
+        // A keyed removal of access the client no longer has still records
+        // its completion: a retry after a later grant must not remove that.
         if deleted != 1 {
+            Self::commit_unchanged(tx, &ctx).await?;
             return Ok(false);
         }
         Self::commit_mutation(tx, &format!("oauth2_client:{client_id}"), ctx).await?;
-        Ok(true)
+        Ok(deleted == 1)
     }
 
     pub(crate) async fn resource_access_impl(

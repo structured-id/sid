@@ -13,11 +13,62 @@ use sid_proto::sid::v1::identity_service_server::IdentityService;
 use tonic::{Code, Request};
 use tonic_types::StatusExt;
 
+/// `msg` as one new command of `token`'s (a method that promises a safe
+/// retry takes an operation key).
 fn authed<T>(msg: T, token: &str) -> Request<T> {
     let mut req = Request::new(msg);
     req.metadata_mut()
         .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    common::name_new_command(req.metadata_mut());
     req
+}
+
+/// A preparation that reused the ready export is that command's outcome: a
+/// retry of it after the export was acknowledged answers with the same
+/// export and prepares no other.
+#[tokio::test]
+async fn a_reused_export_is_recorded_for_the_retry() {
+    let owner = test_profile();
+    let svc = TestServices::new(MockStorage::new().with_profile(owner.clone()));
+    let token = issue_token(&svc.jwt, &owner, &["openid".to_string()]);
+    let keyed = |key: &str| {
+        let mut req = Request::new(sid_proto::sid::v1::PrepareExportRequest::default());
+        req.metadata_mut()
+            .insert("authorization", format!("Bearer {token}").parse().unwrap());
+        common::name_command(req.metadata_mut(), key);
+        req
+    };
+    let first = svc
+        .identity
+        .prepare_export(keyed("k-prepare"))
+        .await
+        .unwrap()
+        .into_inner();
+    let reused = svc
+        .identity
+        .prepare_export(keyed("k-prepare-again"))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        reused.export_id, first.export_id,
+        "the ready export is reused"
+    );
+    svc.identity
+        .acknowledge_export(authed(AcknowledgeExportRequest {}, &token))
+        .await
+        .unwrap();
+
+    let retried = svc
+        .identity
+        .prepare_export(keyed("k-prepare-again"))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        retried.export_id, reused.export_id,
+        "the retry prepared another export"
+    );
 }
 
 #[tokio::test]

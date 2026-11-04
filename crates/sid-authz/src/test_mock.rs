@@ -298,6 +298,31 @@ impl sid_plugin::InstanceSecretStore for MockStorage {
 
 #[async_trait::async_trait]
 impl sid_plugin::OperationResultStore for MockStorage {
+    async fn operation_period_policy(&self) -> Result<sid_core::models::OperationPeriodPolicy> {
+        unimplemented!()
+    }
+    async fn current_operation_period(
+        &self,
+        _: chrono::DateTime<chrono::Utc>,
+        _: chrono::Duration,
+    ) -> Result<sid_core::models::IssuedOperationPeriod> {
+        unimplemented!()
+    }
+    async fn admit_operation_period(&self, _: sid_core::models::OperationPeriod) -> Result<()> {
+        unimplemented!()
+    }
+    async fn retire_operation_periods(&self, _: chrono::DateTime<chrono::Utc>) -> Result<u64> {
+        unimplemented!()
+    }
+    async fn export_operation_periods(&self) -> Result<sid_core::models::OperationPeriodState> {
+        unimplemented!()
+    }
+    async fn import_operation_periods(
+        &self,
+        _: &sid_core::models::OperationPeriodState,
+    ) -> Result<()> {
+        unimplemented!()
+    }
     async fn record_outcome(&self, _: MutationContext) -> Result<()> {
         unimplemented!()
     }
@@ -753,10 +778,10 @@ impl sid_plugin::StorageBackend for MockStorage {
     async fn decay_ip_reputation(&self, _: std::time::Duration) -> Result<u64> {
         Ok(0)
     }
-    async fn add_ip_allowlist_entry(&self, _: &str, _: &str) -> Result<()> {
+    async fn add_ip_allowlist_entry(&self, _: &str, _: &str, _: MutationContext) -> Result<()> {
         Ok(())
     }
-    async fn remove_ip_allowlist_entry(&self, _: &str) -> Result<()> {
+    async fn remove_ip_allowlist_entry(&self, _: &str, _: MutationContext) -> Result<()> {
         Ok(())
     }
     async fn list_ip_allowlist_entries(
@@ -2200,7 +2225,11 @@ impl sid_plugin::StorageBackend for MockStorage {
     }
 
     // ── Invite operations ──
-    async fn create_invite(&self, _: &sid_core::models::Invite, _: MutationContext) -> Result<()> {
+    async fn create_invites(
+        &self,
+        _: &[sid_core::models::Invite],
+        _: MutationContext,
+    ) -> Result<()> {
         Ok(())
     }
     async fn get_invite(

@@ -37,12 +37,15 @@ fn authz(svc: &TestServices) -> AuthzServiceImpl {
     )
 }
 
+/// `message` as one new command of the administrator's (a method that
+/// promises a safe retry takes an operation key).
 async fn as_admin<T>(svc: &TestServices, message: T) -> Request<T> {
     let token = common::administrator_token(&svc.jwt, svc.storage.as_ref()).await;
     let mut request = Request::new(message);
     request
         .metadata_mut()
         .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    common::name_new_command(request.metadata_mut());
     request
 }
 

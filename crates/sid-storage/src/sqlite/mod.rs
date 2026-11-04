@@ -232,6 +232,19 @@ impl SqliteBackend {
             .map_err(|e| SidError::Storage(format!("commit: {e}")))
     }
 
+    /// Finish a mutation that changed nothing: a keyed command still commits
+    /// its completion, so a retry after a later change does not apply it
+    /// then; there is no audit or owed work for a change that did not happen.
+    pub async fn commit_unchanged(mut tx: WriteTx, ctx: &MutationContext) -> SidResult<()> {
+        let Some(operation) = &ctx.operation else {
+            return Ok(());
+        };
+        operation::record_in_tx(&mut tx, operation).await?;
+        tx.commit()
+            .await
+            .map_err(|e| SidError::Storage(format!("commit a completion: {e}")))
+    }
+
     /// Commit a bulk mutation that changed `rows` rows. One that changed
     /// nothing and owes nothing records nothing (its transaction is dropped).
     async fn commit_bulk(
@@ -1212,11 +1225,17 @@ impl StorageBackend for SqliteBackend {
         self.decay_ip_reputation_impl(older_than).await
     }
 
-    async fn add_ip_allowlist_entry(&self, cidr: &str, description: &str) -> SidResult<()> {
-        self.add_ip_allowlist_entry_impl(cidr, description).await
+    async fn add_ip_allowlist_entry(
+        &self,
+        cidr: &str,
+        description: &str,
+        ctx: MutationContext,
+    ) -> SidResult<()> {
+        self.add_ip_allowlist_entry_impl(cidr, description, ctx)
+            .await
     }
-    async fn remove_ip_allowlist_entry(&self, cidr: &str) -> SidResult<()> {
-        self.remove_ip_allowlist_entry_impl(cidr).await
+    async fn remove_ip_allowlist_entry(&self, cidr: &str, ctx: MutationContext) -> SidResult<()> {
+        self.remove_ip_allowlist_entry_impl(cidr, ctx).await
     }
     async fn list_ip_allowlist_entries(
         &self,
@@ -2983,12 +3002,12 @@ impl StorageBackend for SqliteBackend {
         self.delete_branding_config_impl(id, ctx).await
     }
     // === INVITE OPERATIONS ===
-    async fn create_invite(
+    async fn create_invites(
         &self,
-        invite: &sid_core::models::Invite,
+        invites: &[sid_core::models::Invite],
         audit: MutationContext,
     ) -> SidResult<()> {
-        self.create_invite_impl(invite, audit).await
+        self.create_invites_impl(invites, audit).await
     }
     async fn get_invite(
         &self,

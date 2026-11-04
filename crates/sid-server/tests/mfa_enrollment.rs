@@ -572,12 +572,20 @@ fn test_recovery_code_case_insensitive_match() {
 // Handler-level tests (AuthService trait, MockStorage + real JWT)
 // ═══════════════════════════════════════════════════════════════════
 
+/// `msg` as one new command of `token`'s (a method that promises a safe
+/// retry takes an operation key).
 fn authed_request<T>(msg: T, token: &str) -> Request<T> {
+    keyed_request(msg, token, &uuid::Uuid::new_v4().to_string())
+}
+
+/// `msg` of `token`'s under the operation key `key`.
+fn keyed_request<T>(msg: T, token: &str, key: &str) -> Request<T> {
     let mut req = Request::new(msg);
     req.metadata_mut().insert(
         "authorization",
         format!("Bearer {}", token).parse().unwrap(),
     );
+    common::name_command(req.metadata_mut(), key);
     req
 }
 
@@ -814,6 +822,50 @@ async fn test_handler_generate_recovery_codes_revokes_old() {
     assert_eq!(creds.len(), 1, "the old set is gone: {creds:?}");
     assert_ne!(creds[0].id, first[0].id);
     assert!(creds[0].status.is_active());
+}
+
+/// The codes' response is lost and the generation retried: the retry issues
+/// no second set (the delivered codes stay valid) and names the set it issued
+/// with OPERATION_RESULT_UNAVAILABLE, never an empty or different code list.
+#[tokio::test]
+async fn test_recovery_code_retry_keeps_the_issued_set() {
+    let svc = TestServices::new(MockStorage::new());
+    let profile = test_profile();
+    svc.storage
+        .create_profile(&profile, AuditEntry::system("test", "setup").into())
+        .await
+        .unwrap();
+    let session = common::authenticated_session(&profile, AuthLevel::Standard, 0);
+    let token = common::stored_session_token(&svc, &profile, session).await;
+    let generate = || keyed_request(GenerateRecoveryCodesRequest {}, &token, "op-codes");
+
+    svc.auth.generate_recovery_codes(generate()).await.unwrap();
+    let issued = svc
+        .storage
+        .get_credentials_by_profile(profile.id, Some(CredentialType::Recovery))
+        .await
+        .unwrap();
+    let err = svc
+        .auth
+        .generate_recovery_codes(generate())
+        .await
+        .expect_err("a retry delivers no codes");
+
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        common::error_reason(&err).as_deref(),
+        Some("OPERATION_RESULT_UNAVAILABLE")
+    );
+    let after = svc
+        .storage
+        .get_credentials_by_profile(profile.id, Some(CredentialType::Recovery))
+        .await
+        .unwrap();
+    assert_eq!(after.len(), 1);
+    assert_eq!(
+        after[0].id, issued[0].id,
+        "the retry replaced the issued set"
+    );
 }
 
 #[tokio::test]

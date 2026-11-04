@@ -4,6 +4,7 @@ members = [
     "crates/sid-keys",
     "crates/sid-core",
     "crates/sid-proto",
+    "crates/sid-proto-build",
     "crates/sid-plugin",
     "crates/sid-authn",
     "crates/sid-authz",
@@ -76,6 +77,8 @@ serde-saphyr = "2.0"
 
 # Protobuf reflection (REST↔gRPC transcoding)
 prost-reflect = { version = "0.16", features = ["serde"] }
+# Checks proto method declarations and binds keyed methods at build time.
+sid-proto-build = { path = "crates/sid-proto-build", version = "0.2" }
 
 # Database
 # No default features: the drivers and helpers are named explicitly, so the

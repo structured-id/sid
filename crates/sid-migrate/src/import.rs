@@ -154,8 +154,9 @@ pub async fn import_snapshot(
     snapshot: &Snapshot,
 ) -> anyhow::Result<ImportResult> {
     anyhow::ensure!(
-        snapshot.metadata.version == 5,
-        "unsupported snapshot format: export a new snapshot with password history keys, write cutoffs and OPAQUE setup"
+        snapshot.metadata.version == crate::snapshot::FORMAT_VERSION,
+        "unsupported snapshot format {}: export a new snapshot with this build",
+        snapshot.metadata.version
     );
     anyhow::ensure!(
         snapshot.metadata.installation_org == backend.instance_organization().await?.map(|o| o.id),
@@ -758,7 +759,17 @@ pub async fn import_snapshot(
         }
     }
 
-    // 26b. Completed keyed commands (their results answer retries)
+    // 26b. The periods keyed commands are admitted under, before the
+    // completions named with them.
+    info!(
+        count = snapshot.operation_periods.active.len(),
+        "importing operation periods..."
+    );
+    backend
+        .import_operation_periods(&snapshot.operation_periods)
+        .await?;
+
+    // 26c. Completed keyed commands (their results answer retries)
     info!(
         count = snapshot.operation_results.len(),
         "importing operation results..."

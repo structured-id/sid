@@ -5,10 +5,13 @@
 //! storage backend and business logic.
 
 use crate::feature_flags::FeatureFlagService;
+use prost::Message;
 use sid_authn::account_closure::AccountClosureService;
 use sid_authn::caller::{Caller, authenticate};
 use sid_authn::data_export::DataExportService;
 use sid_authn::jwt::JwtService;
+use sid_authn::operation::KeyedCommand;
+use sid_authn::operation::grpc::{Effect, context};
 use sid_authn::passkey_prompt;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::revocation_cascade::RevocationCascadeService;
@@ -22,11 +25,12 @@ use sid_core::models::{
 };
 use sid_core::models::{ContestCheck, MutationContext, NewRegistration};
 use sid_plugin::storage::StorageBackend;
+use sid_proto::keyed::identity::identity_service as keyed;
 use sid_proto::sid::v1::identity_service_server::IdentityService;
 use sid_proto::sid::v1::*;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
-use tracing::{info, instrument, warn};
+use tracing::{info, instrument};
 
 use super::convert;
 use sid_core::grpc_error::refuse::{
@@ -36,6 +40,7 @@ use sid_core::grpc_error::refuse::{
 
 /// Profiles per ListProfiles page when the request names no size.
 const DEFAULT_PROFILE_PAGE: u64 = 50;
+
 /// The largest ListProfiles page; a bigger request gets this many.
 const MAX_PROFILE_PAGE: i32 = 500;
 
@@ -171,6 +176,41 @@ fn account_refusal(
     }
 }
 
+/// A keyed closure or export command's failure: a commit another attempt of
+/// it completed answers with that attempt's result, and one its period no
+/// longer admits is answered as such; anything else is refused as
+/// [`account_refusal`].
+fn account_effect(
+    operation: &'static str,
+    record: AccountRecord,
+    owner: ProfileId,
+    e: sid_core::Error,
+) -> Effect {
+    match e {
+        sid_core::Error::OperationCompleted(_) | sid_core::Error::OperationPeriodRefused(_) => {
+            Effect::Store(e)
+        }
+        e => Effect::Refused(account_refusal(operation, record, owner, e)),
+    }
+}
+
+/// A handle `command`'s commit found taken: by another attempt of this very
+/// command that committed first, which answers with that attempt's result,
+/// or by someone else.
+async fn taken_unless_completed(
+    command: &KeyedCommand,
+    storage: &dyn StorageBackend,
+    principal_type: sid_core::models::PrincipalType,
+) -> Effect {
+    match command.completed(storage).await {
+        Ok(Some(_)) => Effect::Store(sid_core::Error::OperationCompleted(
+            "committed by another attempt".into(),
+        )),
+        Ok(None) => contact_taken(principal_type).into(),
+        Err(e) => Effect::Refused(e.into()),
+    }
+}
+
 pub struct IdentityServiceImpl {
     pub(crate) storage: Arc<dyn StorageBackend>,
     pub(crate) jwt: Arc<JwtService>,
@@ -251,9 +291,12 @@ impl IdentityServiceImpl {
     /// `email` the caller gives. Only an administrator's assertion, within
     /// the installation's authority over its managed accounts, establishes
     /// the address here; the owner confirms it instead, so an owner gets
-    /// FAILED_PRECONDITION. `None` when the key is not such a key.
+    /// FAILED_PRECONDITION. The repair commits `command`'s completion and
+    /// answers with the claim that commit recorded. `None` when the key is
+    /// not such a key.
     async fn repair_quarantined_email(
         &self,
+        command: &KeyedCommand,
         caller: &Caller,
         profile_id: ProfileId,
         key: &str,
@@ -294,26 +337,27 @@ impl IdentityServiceImpl {
                 profile_id,
                 &contact,
                 "administrator_asserted",
-                AuditEntry::user(
+                MutationContext::from(AuditEntry::user(
                     caller.profile_id.to_string(),
                     "principal.email_repaired",
                     existing.id.0.to_string(),
-                )
-                .into(),
+                ))
+                .with_operation(command.effect_completion()),
             )
             .await
             .map_err(storage_failure)?;
         if !repaired {
-            return Err(changed_concurrently());
+            // Another attempt of this command may have made the repair.
+            return match command.recorded_effect(&*self.storage).await {
+                Ok(held) => Ok(Some(held)),
+                Err(sid_authn::operation::OperationError::OutcomeUnknown) => {
+                    Err(changed_concurrently())
+                }
+                Err(e) => Err(e.into()),
+            };
         }
-        self.storage
-            .get_principals_by_profile(profile_id)
-            .await
-            .map_err(storage_failure)?
-            .into_iter()
-            .find(|p| p.principal_type == PrincipalType::Email && p.value == key)
-            .map(Some)
-            .ok_or_else(|| internal("repair email", "repaired principal missing"))
+        // The claim as this commit left it, whatever changed since.
+        Ok(Some(command.recorded_effect(&*self.storage).await?))
     }
 
     /// A profile's primary email and phone for a profile read; a failed read
@@ -335,76 +379,66 @@ impl IdentityServiceImpl {
         Ok((email, phone))
     }
 
-    /// The contacts echoed after a write that has already committed: a failed
-    /// read leaves them out of the response (logged) instead of reporting the
-    /// committed write as failed, which a retry would then repeat.
-    async fn contacts_after_write(
+    /// Trust or distrust one of the caller's devices, once per operation key:
+    /// a retry answers with the device as the first commit left it and never
+    /// undoes a later change. The trusted-device limit is checked by the store
+    /// in the same transaction as the change.
+    async fn change_device_trust<M: sid_proto::KeyedMethod>(
         &self,
-        profile_id: ProfileId,
-    ) -> (Option<ProfileEmail>, Option<ProfilePhone>) {
-        let email = self
-            .storage
-            .get_primary_profile_email(profile_id)
-            .await
-            .unwrap_or_else(|e| {
-                warn!(profile = %profile_id, error = %e, "primary email left out of the response");
-                None
-            });
-        let phone = self
-            .storage
-            .get_primary_profile_phone(profile_id)
-            .await
-            .unwrap_or_else(|e| {
-                warn!(profile = %profile_id, error = %e, "primary phone left out of the response");
-                None
-            });
-        (email, phone)
-    }
-
-    /// Trust or distrust one of the caller's devices. The trusted-device limit
-    /// is checked by the store in the same transaction as the change.
-    async fn change_device_trust(
-        &self,
-        caller_id: ProfileId,
-        device_id: sid_core::models::DeviceId,
+        request: Request<M::Request>,
         trusted: bool,
+        device_id: impl FnOnce(&M::Request) -> Result<DeviceId, Status>,
     ) -> Result<Response<sid_proto::sid::v1::Device>, Status> {
         use sid_core::models::{DeviceTrustChange, device::MAX_TRUSTED_DEVICES};
-        self.owned_device(caller_id, device_id).await?;
+        let caller_id = self.caller(&request).await?.profile_id;
+        let context = context(&request);
+        let req = request.into_inner();
+        let device_id = device_id(&req)?;
+        let command = KeyedCommand::by_profile::<M>(caller_id, context?, &req);
         let action = if trusted {
             "device.trust"
         } else {
             "device.revoke_trust"
         };
-        match self
-            .storage
-            .set_device_trust(
-                device_id,
-                trusted,
-                MAX_TRUSTED_DEVICES,
-                AuditEntry::user(caller_id.to_string(), action, device_id.to_string()).into(),
-            )
-            .await
-            .map_err(storage_failure)?
-        {
-            DeviceTrustChange::Changed => {
-                info!(device_id = %device_id, trusted, "Device trust changed")
-            }
-            DeviceTrustChange::Unchanged => {}
-            DeviceTrustChange::NotFound => return Err(device_not_found(device_id)),
-            DeviceTrustChange::LimitReached => {
-                return Err(ApiError::new(
-                    ErrorReason::QuotaExceeded,
-                    "the limit of trusted devices is reached",
-                )
-                .with_quota_violation(
-                    "trusted_devices",
-                    format!("at most {MAX_TRUSTED_DEVICES} trusted devices per profile"),
-                )
-                .into());
-            }
-        }
-        let device = self.owned_device(caller_id, device_id).await?;
+        let device: sid_core::models::Device = command
+            .run_recorded(&*self.storage, || async {
+                self.owned_device(caller_id, device_id).await?;
+                let ctx = MutationContext::from(AuditEntry::user(
+                    caller_id.to_string(),
+                    action,
+                    device_id.to_string(),
+                ))
+                .with_operation(command.effect_completion());
+                match self
+                    .storage
+                    .set_device_trust(device_id, trusted, MAX_TRUSTED_DEVICES, ctx)
+                    .await?
+                {
+                    DeviceTrustChange::Changed => {
+                        info!(device_id = %device_id, trusted, "Device trust changed")
+                    }
+                    DeviceTrustChange::Unchanged => {}
+                    DeviceTrustChange::NotFound => return Err(device_not_found(device_id).into()),
+                    DeviceTrustChange::LimitReached => {
+                        return Err(Effect::Refused(
+                            ApiError::new(
+                                ErrorReason::QuotaExceeded,
+                                "the limit of trusted devices is reached",
+                            )
+                            .with_quota_violation(
+                                "trusted_devices",
+                                format!(
+                                    "at most {MAX_TRUSTED_DEVICES} trusted devices per profile"
+                                ),
+                            )
+                            .into(),
+                        ));
+                    }
+                }
+                // The device as this commit left it, whatever changed since.
+                Ok(command.recorded_effect(&*self.storage).await?)
+            })
+            .await?;
         Ok(Response::new(convert::device_to_proto(&device)))
     }
 
@@ -442,6 +476,31 @@ impl IdentityServiceImpl {
         &self,
         profile_id: ProfileId,
     ) -> Result<sid_proto::sid::v1::PasskeyPromptState, Status> {
+        let stored_state = self.stored_passkey_prompt(profile_id).await?;
+        self.passkey_prompt_state(profile_id, stored_state).await
+    }
+
+    /// The profile's stored passkey prompt state.
+    async fn stored_passkey_prompt(
+        &self,
+        profile_id: ProfileId,
+    ) -> Result<Option<passkey_prompt::PasskeyPromptState>, Status> {
+        Ok(self
+            .storage
+            .get_profile_metadata(profile_id, passkey_prompt::PROFILE_METADATA_KEY)
+            .await
+            .map_err(storage_failure)?
+            .and_then(|m| {
+                serde_json::from_value::<passkey_prompt::PasskeyPromptState>(m.value).ok()
+            }))
+    }
+
+    /// The prompt as `stored_state` leaves it for `profile_id`.
+    async fn passkey_prompt_state(
+        &self,
+        profile_id: ProfileId,
+        stored_state: Option<passkey_prompt::PasskeyPromptState>,
+    ) -> Result<sid_proto::sid::v1::PasskeyPromptState, Status> {
         let policy = SecurityPolicy::ce_default();
         let config = &policy.passkey_prompt;
 
@@ -453,16 +512,6 @@ impl IdentityServiceImpl {
             .await
             .map_err(storage_failure)?
             .is_empty();
-
-        // Load prompt state from ProfileMetadata.
-        let stored_state = self
-            .storage
-            .get_profile_metadata(profile_id, passkey_prompt::PROFILE_METADATA_KEY)
-            .await
-            .map_err(storage_failure)?
-            .and_then(|m| {
-                serde_json::from_value::<passkey_prompt::PasskeyPromptState>(m.value).ok()
-            });
 
         let decision = passkey_prompt::decide(config, stored_state.as_ref(), has_passkey);
 
@@ -509,187 +558,216 @@ impl IdentityService for IdentityServiceImpl {
 
         use sid_core::models::PrincipalType;
 
+        let operation = context(&request)?;
         let req = request.into_inner();
-
-        // Administrator provisioning is allowed in every enrollment mode: the
-        // mode governs self-registration only, and no invite is spent here.
-        //
-        // D013: one signup principal, the username when given, else the
-        // email, else the phone; the other contacts are stored unverified.
-        // Username is a VALUABLE identity — never auto-generated.
-        // Each given contact as the login handle it would be: the key a
-        // principal stores and lookups use, and for an email the validated
-        // address its contact stores.
-        let provided_username = req
-            .username
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .map(|s| login_handle("username", s, PrincipalType::Username))
-            .transpose()?;
-        let provided_email = req
-            .email
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .map(|s| login_handle("email", s, PrincipalType::Email))
-            .transpose()?;
-        let provided_phone = req
-            .phone
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .map(|s| login_handle("phone", s, PrincipalType::Phone))
-            .transpose()?;
-        let signup = match (&provided_username, &provided_email, &provided_phone) {
-            (Some(username), _, _) => username,
-            (None, Some(email), _) => email,
-            (None, None, Some(phone)) => phone,
-            (None, None, None) => {
-                return Err(ApiError::new(
-                    ErrorReason::RequiredFieldMissing,
-                    "a username, email or phone is required",
-                )
-                .with_field_violation("username", "one of username, email, phone is required")
-                .with_field_violation("email", "one of username, email, phone is required")
-                .with_field_violation("phone", "one of username, email, phone is required")
-                .into());
-            }
-        };
-
-        // Contacts already on another account are refused with the reason the
-        // UI shows; the principal's unique key settles a race below.
-        // A username is also the profile's own name: held either way.
-        if let Some(username) = &provided_username
-            && self
-                .storage
-                .get_profile_by_username(&username.normalized)
-                .await
-                .map_err(storage_failure)?
-                .is_some()
-        {
-            return Err(contact_taken(PrincipalType::Username));
+        let command =
+            KeyedCommand::by_profile::<keyed::CreateProfile>(caller.profile_id, operation, &req);
+        // A completed creation answers before the checks below, which its own
+        // account would now fail (its handles are taken).
+        if let Some(response) = command.replay(&*self.storage).await? {
+            return Ok(Response::new(response));
         }
-        for handle in [&provided_username, &provided_email, &provided_phone]
-            .into_iter()
-            .flatten()
-        {
-            let principal_type = handle.principal_type.to_principal_type();
-            if self
-                .storage
-                .get_principal_by_value(principal_type, &handle.normalized)
-                .await
-                .map_err(storage_failure)?
-                .is_some()
-            {
-                return Err(contact_taken(principal_type));
-            }
-        }
-
-        let mut profile = Profile::new(provided_username.as_ref().map(|u| u.normalized.as_str()));
-        profile.given_name = req.given_name;
-        profile.family_name = req.family_name;
-        profile.middle_name = req.middle_name;
-        profile.honorific_prefix = req.honorific_prefix;
-        profile.honorific_suffix = req.honorific_suffix;
-
-        let principal_type = signup.principal_type.to_principal_type();
-        let principal_field = match principal_type {
-            PrincipalType::Username => "username",
-            PrincipalType::Email => "email",
-            _ => "phone",
-        };
-        let identifier = super::auth_service::signup_identifier(
-            principal_type,
-            &signup.normalized,
-            signup.email.as_ref(),
-        )?;
-        let mut registration = NewRegistration::new(profile, identifier, None)
-            .map_err(|e| invalid_field(principal_field, e.to_string()))?;
-        if let Some(email) = &provided_email
-            && principal_type != PrincipalType::Email
-        {
-            let address = email
+        // A refusal a concurrent attempt of this command caused (the handles
+        // its account took) is that attempt's answer.
+        let answer: Result<CreateProfileResponse, Status> = async {
+            // Administrator provisioning is allowed in every enrollment mode: the
+            // mode governs self-registration only, and no invite is spent here.
+            //
+            // D013: one signup principal, the username when given, else the
+            // email, else the phone; the other contacts are stored unverified.
+            // Username is a VALUABLE identity — never auto-generated.
+            // Each given contact as the login handle it would be: the key a
+            // principal stores and lookups use, and for an email the validated
+            // address its contact stores.
+            let provided_username = req
+                .username
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(|s| login_handle("username", s, PrincipalType::Username))
+                .transpose()?;
+            let provided_email = req
                 .email
-                .as_ref()
-                .map(|handle| handle.delivery.as_str())
-                .ok_or_else(|| internal("create profile", "an email without its address"))?;
-            registration = registration.with_email(address);
-        }
-        if let Some(phone) = &provided_phone
-            && principal_type != PrincipalType::Phone
-        {
-            registration = registration.with_phone(
-                parse_e164(&phone.normalized).map_err(|e| invalid_field("phone", e.to_string()))?,
-            );
-        }
-        // Where the account came from is stored with it while the policy in
-        // force when it commits tracks sources: the storage decides in the
-        // account's transaction.
-        {
-            let mut source = RegistrationSource::admin_created(caller.profile_id);
-            if let Some(referrer) = &req.referrer_id {
-                let rid = ProfileId::parse(referrer)
-                    .map_err(|_| invalid_field("referrer_id", "not a profile identifier"))?;
-                if self
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(|s| login_handle("email", s, PrincipalType::Email))
+                .transpose()?;
+            let provided_phone = req
+                .phone
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(|s| login_handle("phone", s, PrincipalType::Phone))
+                .transpose()?;
+            let signup = match (&provided_username, &provided_email, &provided_phone) {
+                (Some(username), _, _) => username,
+                (None, Some(email), _) => email,
+                (None, None, Some(phone)) => phone,
+                (None, None, None) => {
+                    return Err(ApiError::new(
+                        ErrorReason::RequiredFieldMissing,
+                        "a username, email or phone is required",
+                    )
+                    .with_field_violation("username", "one of username, email, phone is required")
+                    .with_field_violation("email", "one of username, email, phone is required")
+                    .with_field_violation("phone", "one of username, email, phone is required")
+                    .into());
+                }
+            };
+
+            // Contacts already on another account are refused with the reason the
+            // UI shows; the principal's unique key settles a race below.
+            // A username is also the profile's own name: held either way.
+            if let Some(username) = &provided_username
+                && self
                     .storage
-                    .get_profile(rid)
+                    .get_profile_by_username(&username.normalized)
                     .await
                     .map_err(storage_failure)?
-                    .is_none()
+                    .is_some()
+            {
+                return Err(contact_taken(PrincipalType::Username));
+            }
+            for handle in [&provided_username, &provided_email, &provided_phone]
+                .into_iter()
+                .flatten()
+            {
+                let principal_type = handle.principal_type.to_principal_type();
+                if self
+                    .storage
+                    .get_principal_by_value(principal_type, &handle.normalized)
+                    .await
+                    .map_err(storage_failure)?
+                    .is_some()
                 {
-                    return Err(invalid_field("referrer_id", "names no profile"));
+                    return Err(contact_taken(principal_type));
                 }
-                source.referrer_id = Some(rid);
             }
-            if let Some(utm) = &req.utm {
-                source.utm = sid_core::models::UtmParams {
-                    source: utm.source.clone().unwrap_or_default(),
-                    medium: utm.medium.clone().unwrap_or_default(),
-                    campaign: utm.campaign.clone().unwrap_or_default(),
-                    term: utm.term.clone().unwrap_or_default(),
-                    content: utm.content.clone().unwrap_or_default(),
-                };
+
+            let mut profile =
+                Profile::new(provided_username.as_ref().map(|u| u.normalized.as_str()));
+            profile.given_name = req.given_name;
+            profile.family_name = req.family_name;
+            profile.middle_name = req.middle_name;
+            profile.honorific_prefix = req.honorific_prefix;
+            profile.honorific_suffix = req.honorific_suffix;
+
+            let principal_type = signup.principal_type.to_principal_type();
+            let principal_field = match principal_type {
+                PrincipalType::Username => "username",
+                PrincipalType::Email => "email",
+                _ => "phone",
+            };
+            let identifier = super::auth_service::signup_identifier(
+                principal_type,
+                &signup.normalized,
+                signup.email.as_ref(),
+            )?;
+            let mut registration = NewRegistration::new(profile, identifier, None)
+                .map_err(|e| invalid_field(principal_field, e.to_string()))?;
+            if let Some(email) = &provided_email
+                && principal_type != PrincipalType::Email
+            {
+                let address = email
+                    .email
+                    .as_ref()
+                    .map(|handle| handle.delivery.as_str())
+                    .ok_or_else(|| internal("create profile", "an email without its address"))?;
+                registration = registration.with_email(address);
             }
-            registration = registration
-                .with_source(source)
-                .recording_source_while_tracked();
+            if let Some(phone) = &provided_phone
+                && principal_type != PrincipalType::Phone
+            {
+                registration = registration.with_phone(
+                    parse_e164(&phone.normalized)
+                        .map_err(|e| invalid_field("phone", e.to_string()))?,
+                );
+            }
+            // Where the account came from is stored with it while the policy in
+            // force when it commits tracks sources: the storage decides in the
+            // account's transaction.
+            {
+                let mut source = RegistrationSource::admin_created(caller.profile_id);
+                if let Some(referrer) = &req.referrer_id {
+                    let rid = ProfileId::parse(referrer)
+                        .map_err(|_| invalid_field("referrer_id", "not a profile identifier"))?;
+                    if self
+                        .storage
+                        .get_profile(rid)
+                        .await
+                        .map_err(storage_failure)?
+                        .is_none()
+                    {
+                        return Err(invalid_field("referrer_id", "names no profile"));
+                    }
+                    source.referrer_id = Some(rid);
+                }
+                if let Some(utm) = &req.utm {
+                    source.utm = sid_core::models::UtmParams {
+                        source: utm.source.clone().unwrap_or_default(),
+                        medium: utm.medium.clone().unwrap_or_default(),
+                        campaign: utm.campaign.clone().unwrap_or_default(),
+                        term: utm.term.clone().unwrap_or_default(),
+                        content: utm.content.clone().unwrap_or_default(),
+                    };
+                }
+                registration = registration
+                    .with_source(source)
+                    .recording_source_while_tracked();
+            }
+            let profile = registration.profile.clone();
+
+            // A retry of a completed creation answers with the account it
+            // created, as its commit stored it, and creates no second one. The
+            // account's id is new on every attempt, so the key alone says it is
+            // the same command.
+            let response = CreateProfileResponse {
+                profile: Some(convert::profile_to_proto_with_contacts(
+                    &profile,
+                    registration.email.as_ref(),
+                    None,
+                )),
+            };
+            // USER_CREATED is owed by the commit that stores the account.
+            let created = sid_core::models::event::Event::new(
+                "sid-identity",
+                sid_core::models::event::event_types::USER_CREATED,
+            )
+            .with_subject(format!("profile/{}", profile.id))
+            .with_data(serde_json::json!({
+                "profile_id": profile.id.to_string(),
+                "username": profile.username,
+            }));
+            command
+                .run(&*self.storage, || async {
+                    let ctx = MutationContext::from(AuditEntry::user(
+                        caller.profile_id.to_string(),
+                        "profile.create",
+                        profile.id.to_string(),
+                    ))
+                    .with_work(created.relay())
+                    .with_operation(command.completion(response.encode_to_vec()));
+                    match self.storage.register_profile(&registration, ctx).await {
+                        Ok(()) => {}
+                        Err(sid_core::Error::Conflict(_)) => {
+                            return Err(taken_unless_completed(
+                                &command,
+                                &*self.storage,
+                                principal_type,
+                            )
+                            .await);
+                        }
+                        Err(e) => return Err(e.into()),
+                    }
+                    info!(
+                        "Created profile {} ({})",
+                        profile.username.as_deref().unwrap_or("<no username>"),
+                        profile.id
+                    );
+                    Ok(response.clone())
+                })
+                .await
         }
-        let profile = registration.profile.clone();
-
-        // USER_CREATED is owed by the commit that stores the account.
-        let created = sid_core::models::event::Event::new(
-            "sid-identity",
-            sid_core::models::event::event_types::USER_CREATED,
-        )
-        .with_subject(format!("profile/{}", profile.id))
-        .with_data(serde_json::json!({
-            "profile_id": profile.id.to_string(),
-            "username": profile.username,
-        }));
-        let ctx = MutationContext::from(AuditEntry::user(
-            caller.profile_id.to_string(),
-            "profile.create",
-            profile.id.to_string(),
-        ))
-        .with_work(created.relay());
-        match self.storage.register_profile(&registration, ctx).await {
-            Ok(()) => {}
-            Err(sid_core::Error::Conflict(_)) => return Err(contact_taken(principal_type)),
-            Err(e) => return Err(storage_failure(e)),
-        }
-
-        info!(
-            "Created profile {} ({})",
-            profile.username.as_deref().unwrap_or("<no username>"),
-            profile.id
-        );
-
-        let (primary_email, _) = self.contacts_after_write(profile.id).await;
-        Ok(Response::new(CreateProfileResponse {
-            profile: Some(convert::profile_to_proto_with_contacts(
-                &profile,
-                primary_email.as_ref(),
-                None,
-            )),
-        }))
+        .await;
+        Ok(Response::new(command.settle(&*self.storage, answer).await?))
     }
 
     #[tracing::instrument(skip_all, fields(rpc = "get_profile"))]
@@ -748,68 +826,80 @@ impl IdentityService for IdentityServiceImpl {
         if self.feature_flags.is_maintenance_mode().await {
             return Err(maintenance());
         }
+        // The context is checked after the caller is authorized for the
+        // target: a refused caller learns nothing more than without one.
+        let operation = context(&request);
         let req = request.into_inner();
         let pid = convert::parse_profile_id(&req.id)?;
         caller.require_self_or_admin(pid)?;
+        let operation = operation?;
 
-        let mut profile = self
-            .storage
-            .get_profile(pid)
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(|| profile_not_found(req.id.clone()))?;
+        // A retry of a completed edit answers with the profile as that edit
+        // left it and never writes its names again over a later edit.
+        let command =
+            KeyedCommand::by_profile::<keyed::UpdateProfile>(caller.profile_id, operation, &req);
+        let response = command
+            .run(&*self.storage, || async {
+                let mut profile = self
+                    .storage
+                    .get_profile(pid)
+                    .await?
+                    .ok_or_else(|| profile_not_found(req.id.clone()))?;
+                let req = req.clone();
+                if let Some(v) = req.given_name {
+                    profile.given_name = Some(v);
+                }
+                if let Some(v) = req.family_name {
+                    profile.family_name = Some(v);
+                }
+                if let Some(v) = req.middle_name {
+                    profile.middle_name = Some(v);
+                }
+                if let Some(v) = req.honorific_prefix {
+                    profile.honorific_prefix = Some(v);
+                }
+                if let Some(v) = req.honorific_suffix {
+                    profile.honorific_suffix = Some(v);
+                }
+                profile.updated_at = chrono::Utc::now();
 
-        if let Some(v) = req.given_name {
-            profile.given_name = Some(v);
-        }
-        if let Some(v) = req.family_name {
-            profile.family_name = Some(v);
-        }
-        if let Some(v) = req.middle_name {
-            profile.middle_name = Some(v);
-        }
-        if let Some(v) = req.honorific_prefix {
-            profile.honorific_prefix = Some(v);
-        }
-        if let Some(v) = req.honorific_suffix {
-            profile.honorific_suffix = Some(v);
-        }
-        profile.updated_at = chrono::Utc::now();
-
-        let changed = sid_core::models::event::Event::new(
-            "sid-identity",
-            sid_core::models::event::event_types::PROFILE_CLAIM_CHANGED,
-        )
-        .with_subject(format!("profile/{}", profile.id))
-        .with_data(serde_json::json!({
-            "profile_id": profile.id.to_string(),
-        }));
-        let ctx = MutationContext::from(AuditEntry::user(
-            caller.profile_id.to_string(),
-            "profile.update",
-            profile.id.to_string(),
-        ))
-        .with_work(changed.relay());
-        // Over the revision read above, so the names written here never carry
-        // back a status or role changed meanwhile (a suspension stays).
-        let updated = self
-            .storage
-            .update_profile(&profile, ctx)
-            .await
-            .map_err(storage_failure)?;
-        if !updated {
-            return Err(changed_concurrently());
-        }
-        profile.revision += 1;
-
-        let (primary_email, primary_phone) = self.contacts_after_write(profile.id).await;
-        Ok(Response::new(UpdateProfileResponse {
-            profile: Some(convert::profile_to_proto_with_contacts(
-                &profile,
-                primary_email.as_ref(),
-                primary_phone.as_ref(),
-            )),
-        }))
+                // The profile as this edit leaves it, with the contacts it
+                // has: the edit changes no contact.
+                let (primary_email, primary_phone) = self.primary_contacts(pid).await?;
+                let mut left = profile.clone();
+                left.revision += 1;
+                let response = UpdateProfileResponse {
+                    profile: Some(convert::profile_to_proto_with_contacts(
+                        &left,
+                        primary_email.as_ref(),
+                        primary_phone.as_ref(),
+                    )),
+                };
+                let changed = sid_core::models::event::Event::new(
+                    "sid-identity",
+                    sid_core::models::event::event_types::PROFILE_CLAIM_CHANGED,
+                )
+                .with_subject(format!("profile/{}", profile.id))
+                .with_data(serde_json::json!({
+                    "profile_id": profile.id.to_string(),
+                }));
+                let ctx = MutationContext::from(AuditEntry::user(
+                    caller.profile_id.to_string(),
+                    "profile.update",
+                    profile.id.to_string(),
+                ))
+                .with_work(changed.relay())
+                .with_operation(command.completion(response.encode_to_vec()));
+                // Over the revision read above, so the names written here never
+                // carry back a status or role changed meanwhile (a suspension
+                // stays).
+                if !self.storage.update_profile(&profile, ctx).await? {
+                    return Err(changed_concurrently().into());
+                }
+                Ok(response)
+            })
+            .await?;
+        Ok(Response::new(response))
     }
 
     #[tracing::instrument(skip_all, fields(rpc = "delete_profile"))]
@@ -825,36 +915,44 @@ impl IdentityService for IdentityServiceImpl {
         if self.feature_flags.is_maintenance_mode().await {
             return Err(maintenance());
         }
+        let operation = context(&request)?;
         let req = request.into_inner();
         let pid = convert::parse_profile_id(&req.id)?;
 
-        let deleted = sid_core::models::event::Event::new(
-            "sid-identity",
-            sid_core::models::event::event_types::USER_DELETED,
-        )
-        .with_subject(format!("profile/{}", pid))
-        .with_data(serde_json::json!({
-            "profile_id": pid.to_string(),
-        }));
-        let mut ctx = MutationContext::from(AuditEntry::admin(
-            caller.profile_id.to_string(),
-            "profile.delete",
-            pid.to_string(),
-        ))
-        .with_work(deleted.relay());
-        // The owner's history keys go with it, owed in the same transaction.
-        if let Some(purge) = super::password_operation::owner_purge(self.storage.as_ref(), pid)
-            .await
-            .map_err(storage_failure)?
-        {
-            ctx = ctx.with_work(purge);
-        }
-        self.storage
-            .delete_profile(pid, ctx)
-            .await
-            .map_err(storage_failure)?;
-
-        Ok(Response::new(DeleteProfileResponse {}))
+        // A retry of a completed deletion answers as it did and owes its
+        // events and purge only once.
+        let command =
+            KeyedCommand::by_profile::<keyed::DeleteProfile>(caller.profile_id, operation, &req);
+        let response = command
+            .run(&*self.storage, || async {
+                let response = DeleteProfileResponse {};
+                let deleted = sid_core::models::event::Event::new(
+                    "sid-identity",
+                    sid_core::models::event::event_types::USER_DELETED,
+                )
+                .with_subject(format!("profile/{}", pid))
+                .with_data(serde_json::json!({
+                    "profile_id": pid.to_string(),
+                }));
+                let mut ctx = MutationContext::from(AuditEntry::admin(
+                    caller.profile_id.to_string(),
+                    "profile.delete",
+                    pid.to_string(),
+                ))
+                .with_work(deleted.relay())
+                .with_operation(command.completion(response.encode_to_vec()));
+                // The owner's history keys go with it, owed in the same
+                // transaction.
+                if let Some(purge) =
+                    super::password_operation::owner_purge(self.storage.as_ref(), pid).await?
+                {
+                    ctx = ctx.with_work(purge);
+                }
+                self.storage.delete_profile(pid, ctx).await?;
+                Ok(response)
+            })
+            .await?;
+        Ok(Response::new(response))
     }
 
     #[tracing::instrument(skip_all, fields(rpc = "list_profiles"))]
@@ -975,54 +1073,55 @@ impl IdentityService for IdentityServiceImpl {
         if self.feature_flags.is_maintenance_mode().await {
             return Err(maintenance());
         }
+        let operation = context(&request);
         let req = request.into_inner();
         let cred_id = parse_credential_id(&req.credential_id)?;
-        let mut cred = self.visible_credential(&caller, cred_id).await?;
-
-        if let Some(label) = req.label {
-            // A revoked credential is gone for its owner: renaming it neither
-            // succeeds nor revives it.
-            let renamed = self
-                .storage
-                .set_credential_label(
-                    cred.id,
-                    Some(&label),
-                    AuditEntry::user(
-                        caller.profile_id.to_string(),
-                        "credential.update",
-                        cred.id.0.to_string(),
-                    )
-                    .into(),
-                )
-                .await
-                .map_err(storage_failure)?;
-            if !renamed {
-                return Err(credential_not_found(cred.id));
-            }
-            cred.label = Some(label);
-        }
-        let info = convert::credential_info(&cred)?;
-
-        Ok(Response::new(UpdateCredentialResponse {
-            credential: Some(Credential {
-                id: cred.id.0.to_string(),
-                profile_id: cred.profile_id.to_string(),
-                r#type: match cred.credential_type {
-                    sid_core::models::CredentialType::Opaque => CredentialType::Opaque.into(),
-                    sid_core::models::CredentialType::WebAuthn => CredentialType::Webauthn.into(),
-                    sid_core::models::CredentialType::Totp => CredentialType::Totp.into(),
-                    sid_core::models::CredentialType::Recovery => CredentialType::Recovery.into(),
-                    sid_core::models::CredentialType::LegacyHash => {
-                        CredentialType::LegacyHash.into()
-                    }
-                },
-                data: vec![],
-                label: cred.label,
-                created_at: Some(convert::to_timestamp(cred.created_at)),
-                last_used_at: cred.last_used_at.map(convert::to_timestamp),
-                info,
-            }),
-        }))
+        // A retry of a completed rename answers with the credential as that
+        // rename left it and never writes its label over a later one.
+        let command = KeyedCommand::by_profile::<keyed::UpdateCredential>(
+            caller.profile_id,
+            operation?,
+            &req,
+        );
+        let Some(label) = req.label.clone() else {
+            // Nothing to write: the credential as it is, this command's
+            // outcome.
+            let audit = AuditEntry::user(
+                caller.profile_id.to_string(),
+                "credential.update",
+                cred_id.0.to_string(),
+            );
+            let response = command
+                .unchanged(&*self.storage, audit, || async {
+                    credential_response(self.visible_credential(&caller, cred_id).await?)
+                })
+                .await?;
+            return Ok(Response::new(response));
+        };
+        let response = command
+            .run(&*self.storage, || async {
+                let mut cred = self.visible_credential(&caller, cred_id).await?;
+                cred.label = Some(label.clone());
+                let response = credential_response(cred)?;
+                let ctx = MutationContext::from(AuditEntry::user(
+                    caller.profile_id.to_string(),
+                    "credential.update",
+                    cred_id.0.to_string(),
+                ))
+                .with_operation(command.completion(response.encode_to_vec()));
+                // A revoked credential is gone for its owner: renaming it
+                // neither succeeds nor revives it.
+                if !self
+                    .storage
+                    .set_credential_label(cred_id, Some(&label), ctx)
+                    .await?
+                {
+                    return Err(credential_not_found(cred_id).into());
+                }
+                Ok(response)
+            })
+            .await?;
+        Ok(Response::new(response))
     }
 
     #[tracing::instrument(skip_all, fields(rpc = "revoke_credential"))]
@@ -1036,39 +1135,46 @@ impl IdentityService for IdentityServiceImpl {
         if self.feature_flags.is_maintenance_mode().await {
             return Err(maintenance());
         }
+        let operation = context(&request)?;
         let req = request.into_inner();
         let cred_id = parse_credential_id(&req.credential_id)?;
-        let credential = self.visible_credential(&caller, cred_id).await?;
-        // Removing protection takes the authority adding it would: otherwise
-        // a weaker session revokes the strong factor, then adds its own.
-        if caller.profile_id == credential.profile_id {
-            sid_authn::credential_enrollment::authorize(
-                self.storage.as_ref(),
-                &caller,
-                credential.credential_type,
-                SecurityPolicy::ce_default().auth.passkey_satisfies_mfa,
-            )
-            .await?;
-        }
 
-        // Revoked, not deleted; the profile keeps one active primary
-        // credential, checked in the same step as the revocation.
-        let outcome = self
-            .storage
-            .revoke_credential(
-                cred_id,
-                AuditEntry::user(
+        // A retry of a completed revocation answers as it did, not as a
+        // credential not found.
+        let command =
+            KeyedCommand::by_profile::<keyed::RevokeCredential>(caller.profile_id, operation, &req);
+        let response = command
+            .run(&*self.storage, || async {
+                let credential = self.visible_credential(&caller, cred_id).await?;
+                // Removing protection takes the authority adding it would:
+                // otherwise a weaker session revokes the strong factor, then
+                // adds its own.
+                if caller.profile_id == credential.profile_id {
+                    sid_authn::credential_enrollment::authorize(
+                        self.storage.as_ref(),
+                        &caller,
+                        credential.credential_type,
+                        SecurityPolicy::ce_default().auth.passkey_satisfies_mfa,
+                    )
+                    .await?;
+                }
+
+                // Revoked, not deleted; the profile keeps one active primary
+                // credential, checked in the same step as the revocation.
+                let response = RevokeCredentialResponse {};
+                let ctx = MutationContext::from(AuditEntry::user(
                     caller.profile_id.to_string(),
                     "credential.revoke",
                     cred_id.0.to_string(),
-                )
-                .into(),
-            )
-            .await
-            .map_err(storage_failure)?;
-        refuse_last_primary(outcome, cred_id)?;
+                ))
+                .with_operation(command.completion(response.encode_to_vec()));
+                let outcome = self.storage.revoke_credential(cred_id, ctx).await?;
+                refuse_last_primary(outcome, cred_id)?;
+                Ok(response)
+            })
+            .await?;
 
-        Ok(Response::new(RevokeCredentialResponse {}))
+        Ok(Response::new(response))
     }
 
     #[tracing::instrument(skip_all, fields(rpc = "add_principal"))]
@@ -1082,16 +1188,11 @@ impl IdentityService for IdentityServiceImpl {
         if self.feature_flags.is_maintenance_mode().await {
             return Err(maintenance());
         }
+        let operation = context(&request);
         let req = request.into_inner();
         let pid = convert::parse_profile_id(&req.profile_id)?;
         caller.require_self_or_admin(pid)?;
-
-        // Verify profile exists
-        self.storage
-            .get_profile(pid)
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(|| profile_not_found(req.profile_id.clone()))?;
+        let operation = operation?;
 
         let principal_type = match req.r#type() {
             sid_proto::sid::v1::PrincipalType::Email => sid_core::models::PrincipalType::Email,
@@ -1107,62 +1208,71 @@ impl IdentityService for IdentityServiceImpl {
         };
         let (value, email) = stored_principal_value(principal_type, &req.value)?;
 
-        let mut principal = sid_core::models::Principal::new(pid, principal_type, &value);
-        if let Some(email) = &email {
-            principal.email_policy_revision = Some(email.revision);
-            if let Some(repaired) = self
-                .repair_quarantined_email(&caller, pid, &value, email)
-                .await?
-            {
-                return Ok(Response::new(AddPrincipalResponse {
-                    principal: convert::principal_to_proto(&repaired),
-                }));
-            }
-            // The handle's delivery address: the profile's contact with this
-            // exact spelling, else a new unverified one.
-            let contact = self.email_contact(pid, &email.delivery).await?;
-            principal.source_field = Some("email".into());
-            principal.source_email_id = Some(contact.id);
-        }
+        // One claim per operation key: a retry answers with the claim as its
+        // first commit stored it, never as a handle taken by itself, owes no
+        // second contestation check and never adds back a claim removed since.
+        let command =
+            KeyedCommand::by_profile::<keyed::AddPrincipal>(caller.profile_id, operation, &req);
+        let stored: sid_core::models::Principal = command
+            .run_recorded(&*self.storage, || async {
+                self.storage
+                    .get_profile(pid)
+                    .await?
+                    .ok_or_else(|| profile_not_found(req.profile_id.clone()))?;
 
-        // A shared contact channel owes the contestation check: once the
-        // claim commits, every other holder is told. A login handle is never
-        // shared, so it owes none.
-        let mut ctx = MutationContext::from(AuditEntry::user(
-            caller.profile_id.to_string(),
-            "principal.create",
-            principal.id.0.to_string(),
-        ));
-        if principal_type.is_contestable() {
-            ctx = ctx.with_work(ContestCheck::new(principal_type, &value, pid).work());
-        }
-        self.storage
-            .save_principal(&principal, ctx)
-            .await
-            .map_err(|e| match e {
-                // Only a login handle is unique; a contact channel is shared.
-                sid_core::Error::Conflict(_) => contact_taken(principal_type),
-                e => storage_failure(e),
-            })?;
+                let mut principal = sid_core::models::Principal::new(pid, principal_type, &value);
+                if let Some(email) = &email {
+                    principal.email_policy_revision = Some(email.revision);
+                    if let Some(repaired) = self
+                        .repair_quarantined_email(&command, &caller, pid, &value, email)
+                        .await?
+                    {
+                        // The repair is complete as written: a retry finds
+                        // the key on the current revision and claims it as is.
+                        return Ok(repaired);
+                    }
+                    // The handle's delivery address: the profile's contact
+                    // with this exact spelling, else a new unverified one.
+                    let contact = self.email_contact(pid, &email.delivery).await?;
+                    principal.source_field = Some("email".into());
+                    principal.source_email_id = Some(contact.id);
+                }
 
-        // The stored claim: its id is the principal's, which an earlier holder
-        // may have created, and its proof is shown only to the holder.
-        let stored = self
-            .storage
-            .get_principals_by_profile(pid)
-            .await
-            .map_err(storage_failure)?
-            .into_iter()
-            .find(|p| p.principal_type == principal_type && p.value == value)
-            .ok_or_else(|| {
-                internal(
-                    "add principal",
-                    format!("principal {} missing after save", principal.id.0),
-                )
-            })?;
+                // A shared contact channel owes the contestation check: once
+                // the claim commits, every other holder is told. A login handle
+                // is never shared, so it owes none. The store records the claim
+                // as stored: its id is the principal's, which an earlier holder
+                // may have created.
+                let mut ctx = MutationContext::from(AuditEntry::user(
+                    caller.profile_id.to_string(),
+                    "principal.create",
+                    principal.id.0.to_string(),
+                ))
+                .with_operation(command.effect_completion());
+                if principal_type.is_contestable() {
+                    ctx = ctx.with_work(ContestCheck::new(principal_type, &value, pid).work());
+                }
+                match self.storage.save_principal(&principal, ctx).await {
+                    Ok(()) => {}
+                    // Only a login handle is unique; a contact channel is shared.
+                    Err(sid_core::Error::Conflict(_)) => {
+                        return Err(taken_unless_completed(
+                            &command,
+                            &*self.storage,
+                            principal_type,
+                        )
+                        .await);
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+                // The claim as this commit stored it, whatever changed since.
+                Ok(command.recorded_effect(&*self.storage).await?)
+            })
+            .await?;
 
         info!("Added {} principal for profile {}", principal_type, pid);
 
+        // Its proof is shown only to the holder.
         Ok(Response::new(AddPrincipalResponse {
             principal: convert::principal_to_proto(&stored),
         }))
@@ -1204,68 +1314,78 @@ impl IdentityService for IdentityServiceImpl {
         if self.feature_flags.is_maintenance_mode().await {
             return Err(maintenance());
         }
+        let operation = context(&request)?;
         let req = request.into_inner();
         let principal_id = uuid::Uuid::parse_str(&req.principal_id)
             .map(sid_core::models::PrincipalId)
             .map_err(|_| invalid_field("principal_id", "not a principal identifier"))?;
 
-        // A principal can be held by several accounts (contestation), so the
-        // request removes one holder's binding: the caller's own, or for an
-        // administrator the only holder's. The request names no account, so
-        // an administrator cannot pick among several holders.
-        let bindings = self
-            .storage
-            .get_principal_bindings(principal_id)
-            .await
-            .map_err(storage_failure)?;
-        let principal_not_found = || {
-            not_found(
-                ErrorReason::PrincipalNotFound,
-                "Principal",
-                principal_id.0.to_string(),
-            )
-        };
-        if bindings.is_empty() {
-            return Err(principal_not_found());
-        }
-        let holder = match bindings.iter().find(|b| b.profile_id == caller.profile_id) {
-            Some(own) => own.profile_id,
-            // Held only by others: not found for a user, as an unknown one.
-            None => {
-                caller.require_admin().map_err(|_| principal_not_found())?;
-                match bindings.as_slice() {
-                    [only] => only.profile_id,
-                    _ => {
-                        return Err(ApiError::new(
-                            ErrorReason::InvalidState,
-                            "the principal has several holders; remove it from a specific account",
-                        )
-                        .with_precondition(
-                            "PRINCIPAL_HOLDERS",
-                            principal_id.0.to_string(),
-                            "several",
-                        )
-                        .into());
-                    }
+        // A retry of a completed removal answers as it did, not as a principal
+        // not found, and never removes a binding made again since.
+        let command =
+            KeyedCommand::by_profile::<keyed::RemovePrincipal>(caller.profile_id, operation, &req);
+        let response = command
+            .run(&*self.storage, || async {
+                // A principal can be held by several accounts (contestation),
+                // so the request removes one holder's binding: the caller's
+                // own, or for an administrator the only holder's. The request
+                // names no account, so an administrator cannot pick among
+                // several holders.
+                let bindings = self.storage.get_principal_bindings(principal_id).await?;
+                let principal_not_found = || {
+                    not_found(
+                        ErrorReason::PrincipalNotFound,
+                        "Principal",
+                        principal_id.0.to_string(),
+                    )
+                };
+                if bindings.is_empty() {
+                    return Err(principal_not_found().into());
                 }
-            }
-        };
+                let holder = match bindings.iter().find(|b| b.profile_id == caller.profile_id) {
+                    Some(own) => own.profile_id,
+                    // Held only by others: not found for a user, as an unknown one.
+                    None => {
+                        caller.require_admin().map_err(|_| principal_not_found())?;
+                        match bindings.as_slice() {
+                            [only] => only.profile_id,
+                            _ => {
+                                return Err(Effect::Refused(
+                                    ApiError::new(
+                                        ErrorReason::InvalidState,
+                                        "the principal has several holders; remove it from a specific account",
+                                    )
+                                    .with_precondition(
+                                        "PRINCIPAL_HOLDERS",
+                                        principal_id.0.to_string(),
+                                        "several",
+                                    )
+                                    .into(),
+                                ));
+                            }
+                        }
+                    }
+                };
 
-        self.storage
-            .unbind_principal(
-                principal_id,
-                holder,
-                AuditEntry::user(
+                let response = RemovePrincipalResponse {};
+                let ctx = MutationContext::from(AuditEntry::user(
                     caller.profile_id.to_string(),
                     "principal.delete",
                     principal_id.0.to_string(),
-                )
-                .into(),
-            )
-            .await
-            .map_err(storage_failure)?;
-
-        Ok(Response::new(RemovePrincipalResponse {}))
+                ))
+                .with_operation(command.completion(response.encode_to_vec()));
+                // A binding released meanwhile is no longer there to remove.
+                if !self
+                    .storage
+                    .unbind_principal(principal_id, holder, ctx)
+                    .await?
+                {
+                    return Err(principal_not_found().into());
+                }
+                Ok(response)
+            })
+            .await?;
+        Ok(Response::new(response))
     }
 
     #[tracing::instrument(skip_all, fields(rpc = "list_sessions"))]
@@ -1375,51 +1495,43 @@ impl IdentityService for IdentityServiceImpl {
         request: Request<RecordPasskeyPromptDismissalRequest>,
     ) -> Result<Response<RecordPasskeyPromptDismissalResponse>, Status> {
         let profile_id = self.caller(&request).await?.profile_id;
+        let operation = context(&request)?;
+        let req = request.into_inner();
 
         let policy = SecurityPolicy::ce_default();
 
-        // Load current state.
-        let current_state = self
-            .storage
-            .get_profile_metadata(profile_id, passkey_prompt::PROFILE_METADATA_KEY)
-            .await
-            .map_err(storage_failure)?
-            .and_then(|m| {
-                serde_json::from_value::<passkey_prompt::PasskeyPromptState>(m.value).ok()
-            });
-
-        // Record dismissal.
-        let updated = passkey_prompt::record_dismissal(
-            current_state,
-            policy.passkey_prompt.skip_cooldown_days,
+        // One dismissal per operation key: a retry answers with the prompt as
+        // the first commit left it and counts no second skip.
+        let command = KeyedCommand::by_profile::<keyed::RecordPasskeyPromptDismissal>(
+            profile_id, operation, &req,
         );
-
-        // Persist updated state.
-        let metadata = ProfileMetadata::new(
-            profile_id,
-            passkey_prompt::PROFILE_METADATA_KEY,
-            serde_json::to_value(&updated)
-                .map_err(|e| internal("serialize passkey prompt state", e))?,
-        );
-        self.storage
-            .set_profile_metadata(
-                &metadata,
-                AuditEntry::user(
+        let response = command
+            .run(&*self.storage, || async {
+                let updated = passkey_prompt::record_dismissal(
+                    self.stored_passkey_prompt(profile_id).await?,
+                    policy.passkey_prompt.skip_cooldown_days,
+                );
+                let metadata = ProfileMetadata::new(
+                    profile_id,
+                    passkey_prompt::PROFILE_METADATA_KEY,
+                    serde_json::to_value(&updated)
+                        .map_err(|e| internal("serialize passkey prompt state", e))?,
+                );
+                let response = RecordPasskeyPromptDismissalResponse {
+                    state: Some(self.passkey_prompt_state(profile_id, Some(updated)).await?),
+                };
+                let ctx = MutationContext::from(AuditEntry::user(
                     profile_id.to_string(),
                     "passkey_prompt.dismiss",
                     profile_id.to_string(),
-                )
-                .into(),
-            )
-            .await
-            .map_err(storage_failure)?;
+                ))
+                .with_operation(command.completion(response.encode_to_vec()));
+                self.storage.set_profile_metadata(&metadata, ctx).await?;
+                Ok(response)
+            })
+            .await?;
 
-        // Build response with updated state.
-        let state = self.build_passkey_prompt_state(profile_id).await?;
-
-        Ok(Response::new(RecordPasskeyPromptDismissalResponse {
-            state: Some(state),
-        }))
+        Ok(Response::new(response))
     }
 
     // ── Revocation Cascade ──
@@ -1492,6 +1604,7 @@ impl IdentityService for IdentityServiceImpl {
             return Err(maintenance());
         }
 
+        let operation = context(&request);
         let req = request.into_inner();
 
         // The user closes their own account, voluntarily or as a GDPR Art. 17
@@ -1509,17 +1622,31 @@ impl IdentityService for IdentityServiceImpl {
             ClosureMode::Unspecified => return Err(missing_field("mode")),
         };
 
-        let closure_req = self
-            .closure_service
-            .request_closure(caller_id, mode, caller_id)
-            .await
-            .map_err(|e| account_refusal("request closure", CLOSURE, caller_id, e))?;
-
-        Ok(Response::new(RequestClosureResponse {
-            profile_id: closure_req.profile_id.to_string(),
+        let operation = operation?;
+        let answer = |closure: &sid_core::models::ClosureRequest| RequestClosureResponse {
+            profile_id: closure.profile_id.to_string(),
             mode: req.mode,
-            grace_period_end: closure_req.grace_period_end.map(convert::to_timestamp),
-        }))
+            grace_period_end: closure.grace_period_end.map(convert::to_timestamp),
+        };
+
+        // A retry of a completed request answers with the closure it started,
+        // its grace period unchanged, and is never refused as a profile
+        // already closing.
+        let command = KeyedCommand::by_profile::<keyed::RequestClosure>(caller_id, operation, &req);
+        let response = command
+            .run(&*self.storage, || async {
+                let closure = self
+                    .closure_service
+                    .request_closure(caller_id, mode, caller_id, |closure| {
+                        Some(command.completion(answer(closure).encode_to_vec()))
+                    })
+                    .await
+                    .map_err(|e| account_effect("request closure", CLOSURE, caller_id, e))?;
+                Ok(answer(&closure))
+            })
+            .await?;
+
+        Ok(Response::new(response))
     }
 
     #[tracing::instrument(skip_all, fields(rpc = "cancel_closure"))]
@@ -1532,13 +1659,30 @@ impl IdentityService for IdentityServiceImpl {
         if self.feature_flags.is_maintenance_mode().await {
             return Err(maintenance());
         }
+        let operation = context(&request)?;
+        let req = request.into_inner();
 
-        self.closure_service
-            .cancel_closure(caller_id, caller_id)
-            .await
-            .map_err(|e| account_refusal("cancel closure", CLOSURE_TO_CANCEL, caller_id, e))?;
+        // A retry of a completed cancellation answers as it did and never
+        // cancels a closure requested again since.
+        let command = KeyedCommand::by_profile::<keyed::CancelClosure>(caller_id, operation, &req);
+        let response = command
+            .run(&*self.storage, || async {
+                let response = CancelClosureResponse {};
+                self.closure_service
+                    .cancel_closure(
+                        caller_id,
+                        caller_id,
+                        Some(command.completion(response.encode_to_vec())),
+                    )
+                    .await
+                    .map_err(|e| {
+                        account_effect("cancel closure", CLOSURE_TO_CANCEL, caller_id, e)
+                    })?;
+                Ok(response)
+            })
+            .await?;
 
-        Ok(Response::new(CancelClosureResponse {}))
+        Ok(Response::new(response))
     }
 
     #[tracing::instrument(skip_all, fields(rpc = "get_closure_status"))]
@@ -1589,21 +1733,32 @@ impl IdentityService for IdentityServiceImpl {
         request: Request<PrepareExportRequest>,
     ) -> Result<Response<PrepareExportResponse>, Status> {
         let caller_id = self.caller(&request).await?.profile_id;
-
-        let _format_proto = request.into_inner().format();
+        let operation = context(&request)?;
+        let req = request.into_inner();
         // CE only supports JSON.
         let format = sid_core::models::ExportFormat::Json;
-
-        let job = self
-            .data_export
-            .prepare_export(caller_id, format, &caller_id.to_string())
-            .await
-            .map_err(|e| account_refusal("prepare export", NEW_EXPORT, caller_id, e))?;
-
-        Ok(Response::new(PrepareExportResponse {
+        let answer = |job: &sid_core::models::ExportJob| PrepareExportResponse {
             export_id: job.id.to_string(),
             estimated_ready: Some(convert::to_timestamp(job.created_at)),
-        }))
+        };
+
+        // A retry of a completed preparation answers with the export it
+        // created and prepares no other.
+        let command = KeyedCommand::by_profile::<keyed::PrepareExport>(caller_id, operation, &req);
+        let response = command
+            .run(&*self.storage, || async {
+                let job = self
+                    .data_export
+                    .prepare_export(caller_id, format, &caller_id.to_string(), |job| {
+                        Some(command.completion(answer(job).encode_to_vec()))
+                    })
+                    .await
+                    .map_err(|e| account_effect("prepare export", NEW_EXPORT, caller_id, e))?;
+                Ok(answer(&job))
+            })
+            .await?;
+
+        Ok(Response::new(response))
     }
 
     #[tracing::instrument(skip_all, fields(rpc = "get_export_status"))]
@@ -1694,11 +1849,25 @@ impl IdentityService for IdentityServiceImpl {
         request: Request<AcknowledgeExportRequest>,
     ) -> Result<Response<()>, Status> {
         let caller_id = self.caller(&request).await?.profile_id;
+        let operation = context(&request)?;
+        let req = request.into_inner();
 
-        self.data_export
-            .acknowledge_export(caller_id, &caller_id.to_string())
-            .await
-            .map_err(|e| account_refusal("acknowledge export", EXPORT, caller_id, e))?;
+        // A retry of a completed acknowledgement answers as it did, not as an
+        // export no longer ready.
+        let command =
+            KeyedCommand::by_profile::<keyed::AcknowledgeExport>(caller_id, operation, &req);
+        command
+            .run(&*self.storage, || async {
+                self.data_export
+                    .acknowledge_export(
+                        caller_id,
+                        &caller_id.to_string(),
+                        Some(command.completion(().encode_to_vec())),
+                    )
+                    .await
+                    .map_err(|e| account_effect("acknowledge export", EXPORT, caller_id, e))
+            })
+            .await?;
 
         Ok(Response::new(()))
     }
@@ -1757,32 +1926,49 @@ impl IdentityService for IdentityServiceImpl {
         request: Request<UpdateDeviceRequest>,
     ) -> Result<Response<sid_proto::sid::v1::Device>, Status> {
         let caller_id = self.caller(&request).await?.profile_id;
+        let operation = context(&request);
         let req = request.into_inner();
         let device_id = parse_device_id(&req.device_id)?;
-        self.owned_device(caller_id, device_id).await?;
+        let command = KeyedCommand::by_profile::<keyed::UpdateDevice>(caller_id, operation?, &req);
+        let Some(name) = req.display_name.clone() else {
+            // Nothing to write: the device as it is, recorded as this
+            // command's outcome so its retry answers the same.
+            let audit = AuditEntry::user(
+                caller_id.to_string(),
+                "device.update",
+                device_id.to_string(),
+            );
+            let device: sid_core::models::Device = command
+                .unchanged_recorded(&*self.storage, audit, || {
+                    self.owned_device(caller_id, device_id)
+                })
+                .await?;
+            return Ok(Response::new(convert::device_to_proto(&device)));
+        };
 
         // Only the name is written: a trust change or removal made meanwhile
-        // is never undone by this copy.
-        if let Some(name) = req.display_name.as_deref()
-            && !self
-                .storage
-                .rename_device(
-                    device_id,
-                    Some(name),
-                    AuditEntry::user(
-                        caller_id.to_string(),
-                        "device.update",
-                        device_id.to_string(),
-                    )
-                    .into(),
-                )
-                .await
-                .map_err(storage_failure)?
-        {
-            return Err(device_not_found(device_id));
-        }
-
-        let device = self.owned_device(caller_id, device_id).await?;
+        // is never undone by this copy, nor a later rename by a retry, which
+        // answers with the device as the first commit left it.
+        let device: sid_core::models::Device = command
+            .run_recorded(&*self.storage, || async {
+                self.owned_device(caller_id, device_id).await?;
+                let ctx = MutationContext::from(AuditEntry::user(
+                    caller_id.to_string(),
+                    "device.update",
+                    device_id.to_string(),
+                ))
+                .with_operation(command.effect_completion());
+                if !self
+                    .storage
+                    .rename_device(device_id, Some(&name), ctx)
+                    .await?
+                {
+                    return Err(device_not_found(device_id).into());
+                }
+                // The device as this commit left it, whatever changed since.
+                Ok(command.recorded_effect(&*self.storage).await?)
+            })
+            .await?;
         Ok(Response::new(convert::device_to_proto(&device)))
     }
 
@@ -1793,22 +1979,27 @@ impl IdentityService for IdentityServiceImpl {
         request: Request<RemoveDeviceRequest>,
     ) -> Result<Response<()>, Status> {
         let caller_id = self.caller(&request).await?.profile_id;
-        let device_id = parse_device_id(&request.into_inner().device_id)?;
-        self.owned_device(caller_id, device_id).await?;
+        let operation = context(&request);
+        let req = request.into_inner();
+        let device_id = parse_device_id(&req.device_id)?;
 
-        // The audit names the user who removed it, not the system.
-        self.storage
-            .delete_device(
-                device_id,
-                AuditEntry::user(
+        // A retry of a completed removal answers as it did, not as a device
+        // not found.
+        let command = KeyedCommand::by_profile::<keyed::RemoveDevice>(caller_id, operation?, &req);
+        command
+            .run(&*self.storage, || async {
+                self.owned_device(caller_id, device_id).await?;
+                // The audit names the user who removed it, not the system.
+                let ctx = MutationContext::from(AuditEntry::user(
                     caller_id.to_string(),
                     "device.remove",
                     device_id.to_string(),
-                )
-                .into(),
-            )
-            .await
-            .map_err(storage_failure)?;
+                ))
+                .with_operation(command.completion(().encode_to_vec()));
+                self.storage.delete_device(device_id, ctx).await?;
+                Ok(())
+            })
+            .await?;
 
         info!(device_id = %device_id, "Device removed");
         Ok(Response::new(()))
@@ -1820,9 +2011,10 @@ impl IdentityService for IdentityServiceImpl {
         &self,
         request: Request<TrustDeviceRequest>,
     ) -> Result<Response<sid_proto::sid::v1::Device>, Status> {
-        let caller_id = self.caller(&request).await?.profile_id;
-        let device_id = parse_device_id(&request.into_inner().device_id)?;
-        self.change_device_trust(caller_id, device_id, true).await
+        self.change_device_trust::<keyed::TrustDevice>(request, true, |r| {
+            parse_device_id(&r.device_id)
+        })
+        .await
     }
 
     #[tracing::instrument(skip_all, fields(rpc = "revoke_device_trust"))]
@@ -1831,9 +2023,10 @@ impl IdentityService for IdentityServiceImpl {
         &self,
         request: Request<RevokeDeviceTrustRequest>,
     ) -> Result<Response<sid_proto::sid::v1::Device>, Status> {
-        let caller_id = self.caller(&request).await?.profile_id;
-        let device_id = parse_device_id(&request.into_inner().device_id)?;
-        self.change_device_trust(caller_id, device_id, false).await
+        self.change_device_trust::<keyed::RevokeDeviceTrust>(request, false, |r| {
+            parse_device_id(&r.device_id)
+        })
+        .await
     }
 
     #[tracing::instrument(skip_all, fields(rpc = "get_current_profile"))]
@@ -1860,6 +2053,32 @@ impl IdentityService for IdentityServiceImpl {
             )),
         }))
     }
+}
+
+/// UpdateCredential's answer: `cred` without its secret material.
+#[allow(clippy::result_large_err)]
+fn credential_response(
+    cred: sid_core::models::Credential,
+) -> Result<UpdateCredentialResponse, Status> {
+    let info = convert::credential_info(&cred)?;
+    Ok(UpdateCredentialResponse {
+        credential: Some(Credential {
+            id: cred.id.0.to_string(),
+            profile_id: cred.profile_id.to_string(),
+            r#type: match cred.credential_type {
+                sid_core::models::CredentialType::Opaque => CredentialType::Opaque.into(),
+                sid_core::models::CredentialType::WebAuthn => CredentialType::Webauthn.into(),
+                sid_core::models::CredentialType::Totp => CredentialType::Totp.into(),
+                sid_core::models::CredentialType::Recovery => CredentialType::Recovery.into(),
+                sid_core::models::CredentialType::LegacyHash => CredentialType::LegacyHash.into(),
+            },
+            data: vec![],
+            label: cred.label,
+            created_at: Some(convert::to_timestamp(cred.created_at)),
+            last_used_at: cred.last_used_at.map(convert::to_timestamp),
+            info,
+        }),
+    })
 }
 
 /// A revocation refused because the credential is the profile's last way to

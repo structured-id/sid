@@ -63,6 +63,8 @@ async fn update(
     request
         .metadata_mut()
         .insert("authorization", format!("Bearer {bearer}").parse().unwrap());
+    // One new command: the update takes an operation key.
+    common::name_new_command(request.metadata_mut());
     service
         .update_enrollment_policy(request)
         .await
@@ -402,6 +404,8 @@ async fn create_invite(
     request
         .metadata_mut()
         .insert("authorization", format!("Bearer {bearer}").parse().unwrap());
+    // One new command: the creation takes an operation key.
+    common::name_new_command(request.metadata_mut());
     service.create_invite(request).await.map(|r| r.into_inner())
 }
 

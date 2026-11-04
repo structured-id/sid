@@ -39,6 +39,11 @@ async fn create_storage() -> Arc<dyn StorageBackend> {
     Arc::new(backend)
 }
 
+/// The audit of a test's own allowlist change.
+fn setup() -> sid_core::models::MutationContext {
+    sid_core::models::AuditEntry::system("test.setup", "ip_allowlist").into()
+}
+
 /// Two random octets, so concurrently running tests pick different networks
 /// (the leading bytes of a UUIDv7 are a timestamp every test shares).
 fn random_octets() -> (u8, u8) {
@@ -59,11 +64,11 @@ async fn test_pg_allowlist_add_and_list() {
     let cidr1 = format!("10.{a}.{b}.0/24");
     let cidr2 = format!("10.{a}.{b}.128/25");
     storage
-        .add_ip_allowlist_entry(&cidr1, "Office VPN")
+        .add_ip_allowlist_entry(&cidr1, "Office VPN", setup())
         .await
         .unwrap();
     storage
-        .add_ip_allowlist_entry(&cidr2, "Home network")
+        .add_ip_allowlist_entry(&cidr2, "Home network", setup())
         .await
         .unwrap();
 
@@ -93,11 +98,11 @@ async fn test_pg_allowlist_upsert_updates_description() {
     // Use unique CIDR to avoid parallel test interference
     let cidr = "192.168.200.0/24";
     storage
-        .add_ip_allowlist_entry(cidr, "Old description")
+        .add_ip_allowlist_entry(cidr, "Old description", setup())
         .await
         .unwrap();
     storage
-        .add_ip_allowlist_entry(cidr, "New description")
+        .add_ip_allowlist_entry(cidr, "New description", setup())
         .await
         .unwrap();
 
@@ -114,13 +119,19 @@ async fn test_pg_allowlist_remove() {
     // Use unique CIDRs to avoid parallel test interference
     let keep = "192.168.201.0/24";
     let remove = "192.168.202.0/24";
-    storage.add_ip_allowlist_entry(remove, "VPN").await.unwrap();
     storage
-        .add_ip_allowlist_entry(keep, "Internal")
+        .add_ip_allowlist_entry(remove, "VPN", setup())
+        .await
+        .unwrap();
+    storage
+        .add_ip_allowlist_entry(keep, "Internal", setup())
         .await
         .unwrap();
 
-    storage.remove_ip_allowlist_entry(remove).await.unwrap();
+    storage
+        .remove_ip_allowlist_entry(remove, setup())
+        .await
+        .unwrap();
 
     let entries = storage.list_ip_allowlist_entries().await.unwrap();
     assert!(
@@ -147,11 +158,11 @@ async fn test_pg_allowlist_provider_refresh_and_classify() {
     let single_ip = format!("198.51.{a}.{b}");
 
     storage
-        .add_ip_allowlist_entry(&cidr, "Office")
+        .add_ip_allowlist_entry(&cidr, "Office", setup())
         .await
         .unwrap();
     storage
-        .add_ip_allowlist_entry(&single_ip, "Admin workstation")
+        .add_ip_allowlist_entry(&single_ip, "Admin workstation", setup())
         .await
         .unwrap();
 
@@ -198,7 +209,7 @@ async fn test_pg_allowlist_overrides_tor_in_pipeline() {
     tor.load_from_text("10.0.0.1\n");
 
     storage
-        .add_ip_allowlist_entry("10.0.0.0/8", "Trusted VPN")
+        .add_ip_allowlist_entry("10.0.0.0/8", "Trusted VPN", setup())
         .await
         .unwrap();
     let allowlist = Arc::new(AllowlistProvider::new(storage.clone()));

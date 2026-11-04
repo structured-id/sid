@@ -1,39 +1,24 @@
 use super::*;
-use sid_core::grpc_error::extract_error_info;
+use chrono::{Duration, Utc};
 use sid_core::models::{AuditEntry, MutationContext, Project};
 use sid_plugin::StorageBackend;
+use sid_proto::keyed::projects::project_service::{CreateProject, DeleteProject};
+use sid_proto::sid::v1::projects::{CreateProjectRequest, DeleteProjectRequest};
 use sid_storage::sqlite::SqliteBackend;
 
-const METHOD: &str = "sid.v1.ProjectService/CreateProject";
+async fn period(storage: &SqliteBackend) -> OperationPeriod {
+    storage
+        .current_operation_period(Utc::now(), Duration::hours(1))
+        .await
+        .unwrap()
+        .period
+}
 
-fn metadata(value: Option<&str>) -> MetadataMap {
-    let mut map = MetadataMap::new();
-    if let Some(v) = value {
-        map.insert(OPERATION_KEY_HEADER, v.parse().unwrap());
+fn create(name: &str) -> CreateProjectRequest {
+    CreateProjectRequest {
+        name: name.into(),
+        ..Default::default()
     }
-    map
-}
-
-fn reason(status: &Status) -> String {
-    extract_error_info(status).expect("ErrorInfo").0
-}
-
-#[test]
-fn test_required_key_reads_header() {
-    let key = required_key(&metadata(Some("k-1"))).unwrap();
-    assert_eq!(key.as_str(), "k-1");
-}
-
-/// A missing key is refused before any effect, as is a malformed one.
-#[test]
-fn test_required_key_refuses_missing_and_malformed() {
-    let missing = required_key(&metadata(None)).unwrap_err();
-    assert_eq!(missing.code(), tonic::Code::InvalidArgument);
-    assert_eq!(reason(&missing), "REQUIRED_FIELD_MISSING");
-
-    let long = "k".repeat(300);
-    let malformed = required_key(&metadata(Some(&long))).unwrap_err();
-    assert_eq!(reason(&malformed), "INVALID_FIELD_VALUE");
 }
 
 async fn commit(storage: &SqliteBackend, command: &KeyedCommand, result: &[u8]) {
@@ -47,13 +32,16 @@ async fn commit(storage: &SqliteBackend, command: &KeyedCommand, result: &[u8]) 
         .unwrap();
 }
 
-/// A completed command answers its retry with the recorded result; the
-/// same key with other inputs or another method is a conflict.
+/// A completed command answers its retry with the recorded result; the same
+/// key with other inputs, another method or another period is a conflict,
+/// and another actor's namespace does not see the record.
 #[tokio::test]
 async fn test_completed_resolves_retry_and_refuses_reuse() {
     let storage = SqliteBackend::new_in_memory().await.unwrap();
+    let period = period(&storage).await;
     let key = OperationKey::parse("k-2").unwrap();
-    let command = KeyedCommand::new("profile:a", key.clone(), METHOD, b"inputs".to_vec());
+    let context = OperationContext::new(key.clone(), period);
+    let command = KeyedCommand::of::<CreateProject>("profile:a", context.clone(), &create("p"));
     assert_eq!(command.completed(&storage).await.unwrap(), None);
 
     commit(&storage, &command, b"result").await;
@@ -62,20 +50,219 @@ async fn test_completed_resolves_retry_and_refuses_reuse() {
         Some(&b"result"[..])
     );
 
-    let other_inputs = KeyedCommand::new("profile:a", key.clone(), METHOD, b"other".to_vec());
-    let conflict = other_inputs.completed(&storage).await.unwrap_err();
-    assert_eq!(conflict.code(), tonic::Code::AlreadyExists);
-    assert_eq!(reason(&conflict), "OPERATION_KEY_CONFLICT");
+    let other_inputs =
+        KeyedCommand::of::<CreateProject>("profile:a", context.clone(), &create("q"));
+    assert!(matches!(
+        other_inputs.completed(&storage).await,
+        Err(OperationError::KeyConflict)
+    ));
 
-    let other_method = KeyedCommand::new(
+    let other_method = KeyedCommand::of::<DeleteProject>(
         "profile:a",
-        key.clone(),
-        "sid.v1.ProjectService/DeleteProject",
-        b"inputs".to_vec(),
+        context.clone(),
+        &DeleteProjectRequest::default(),
     );
-    assert!(other_method.completed(&storage).await.is_err());
+    assert!(matches!(
+        other_method.completed(&storage).await,
+        Err(OperationError::KeyConflict)
+    ));
 
-    // Another actor's namespace does not see the record.
-    let other_actor = KeyedCommand::new("profile:b", key, METHOD, b"inputs".to_vec());
+    // The same key under another period is not a retry of this command.
+    let later = OperationContext::new(key.clone(), OperationPeriod::new(period.get() + 1));
+    let other_period = KeyedCommand::of::<CreateProject>("profile:a", later, &create("p"));
+    assert!(matches!(
+        other_period.completed(&storage).await,
+        Err(OperationError::KeyConflict)
+    ));
+
+    let other_actor = KeyedCommand::of::<CreateProject>("profile:b", context, &create("p"));
     assert_eq!(other_actor.completed(&storage).await.unwrap(), None);
+}
+
+/// A command named by its method's own canonical inputs is the same command
+/// for the same inputs and conflicts with other ones, and its completion
+/// names the method and the period like any keyed command's.
+#[tokio::test]
+async fn test_a_command_of_canonical_inputs_resolves_like_any_keyed_command() {
+    let storage = SqliteBackend::new_in_memory().await.unwrap();
+    let period = period(&storage).await;
+    let context = OperationContext::new(OperationKey::parse("k-inputs").unwrap(), period);
+    let command =
+        KeyedCommand::of_inputs::<CreateProject>("profile:a", context.clone(), b"set:a,b".to_vec());
+    let completion = command.completion(Vec::new());
+    assert_eq!(completion.method, CreateProject::METHOD);
+    assert_eq!(completion.period, Some(period));
+    assert_eq!(command.completed(&storage).await.unwrap(), None);
+
+    commit(&storage, &command, b"done").await;
+    let retry =
+        KeyedCommand::of_inputs::<CreateProject>("profile:a", context.clone(), b"set:a,b".to_vec());
+    assert_eq!(
+        retry.completed(&storage).await.unwrap().as_deref(),
+        Some(&b"done"[..])
+    );
+    let other = KeyedCommand::of_inputs::<CreateProject>("profile:a", context, b"set:c".to_vec());
+    assert!(matches!(
+        other.completed(&storage).await,
+        Err(OperationError::KeyConflict)
+    ));
+}
+
+/// The same request decoded twice names the same command: a map field's
+/// entries are encoded in one order, so a retry of a request carrying
+/// metadata is not mistaken for another command.
+#[test]
+fn test_equal_requests_with_maps_have_one_fingerprint() {
+    use prost::Message;
+    use sid_proto::keyed::admin::enrollment_service::CreateInvite;
+    use sid_proto::sid::v1::admin::CreateInviteRequest;
+    let request = CreateInviteRequest {
+        metadata: (0..16)
+            .map(|i| (format!("key-{i}"), format!("value-{i}")))
+            .collect(),
+        ..Default::default()
+    };
+    let wire = request.encode_to_vec();
+    let context = OperationContext::new(OperationKey::parse("k").unwrap(), OperationPeriod::new(1));
+    let fingerprint = || {
+        let decoded = CreateInviteRequest::decode(wire.as_slice()).unwrap();
+        KeyedCommand::of::<CreateInvite>("profile:a", context.clone(), &decoded)
+            .completion(Vec::new())
+            .fingerprint
+    };
+    let first = fingerprint();
+    for _ in 0..8 {
+        assert_eq!(fingerprint(), first);
+    }
+}
+
+/// Upkeep retires a period once its retention after its acceptance end
+/// passed, under the persisted policy, with its completions: a retry of a
+/// command completed in it is refused, never answered or executed again.
+/// Before that point the period and its completion stay.
+#[tokio::test]
+async fn test_upkeep_retires_periods_past_their_retention() {
+    let storage = SqliteBackend::new_in_memory().await.unwrap();
+    let policy = storage.operation_period_policy().await.unwrap();
+    let issued = storage
+        .current_operation_period(Utc::now(), policy.acceptance)
+        .await
+        .unwrap();
+    let context = OperationContext::new(OperationKey::parse("k-upkeep").unwrap(), issued.period);
+    let command = KeyedCommand::of::<CreateProject>("profile:a", context, &create("p"));
+    commit(&storage, &command, b"done").await;
+
+    assert_eq!(upkeep(&storage, issued.accepted_until).await, 0);
+    assert_eq!(
+        command.completed(&storage).await.unwrap().as_deref(),
+        Some(&b"done"[..])
+    );
+
+    let past = issued.accepted_until + policy.retention + Duration::seconds(1);
+    assert_eq!(upkeep(&storage, past).await, 1);
+    assert!(
+        matches!(
+            command.completed(&storage).await,
+            Err(OperationError::PeriodRefused(
+                OperationPeriodRefusal::Retired
+            ))
+        ),
+        "the retired period admits nothing"
+    );
+}
+
+/// Every attempt of one command names the same created identifier; another
+/// key, period, caller or method names another one.
+#[test]
+fn test_created_id_is_the_commands_own() {
+    let context = |key: &str, period| {
+        OperationContext::new(
+            OperationKey::parse(key).unwrap(),
+            OperationPeriod::new(period),
+        )
+    };
+    let id = |namespace: &str, context, request: &CreateProjectRequest| {
+        KeyedCommand::of::<CreateProject>(namespace, context, request).created_id()
+    };
+    let first = id("profile:a", context("k", 1), &create("p"));
+    assert_eq!(first, id("profile:a", context("k", 1), &create("p")));
+    // The inputs are not part of it: a retry with other inputs conflicts on
+    // its key rather than creating something else under another identifier.
+    assert_eq!(first, id("profile:a", context("k", 1), &create("q")));
+    assert_ne!(first, id("profile:a", context("k2", 1), &create("p")));
+    assert_ne!(first, id("profile:a", context("k", 2), &create("p")));
+    assert_ne!(first, id("profile:b", context("k", 1), &create("p")));
+    let other_method = KeyedCommand::of::<DeleteProject>(
+        "profile:a",
+        context("k", 1),
+        &DeleteProjectRequest::default(),
+    );
+    assert_ne!(first, other_method.created_id());
+    assert_eq!(first.get_version_num(), 5);
+}
+
+/// A command named with a period the store never issued commits nothing.
+#[tokio::test]
+async fn test_commit_under_unissued_period_is_refused() {
+    let storage = SqliteBackend::new_in_memory().await.unwrap();
+    let issued = period(&storage).await;
+    let context = OperationContext::new(
+        OperationKey::parse("k-3").unwrap(),
+        OperationPeriod::new(issued.get() + 7),
+    );
+    let command = KeyedCommand::of::<CreateProject>("profile:a", context, &create("p"));
+    let ctx: MutationContext = AuditEntry::system("test", "project").into();
+    let before = storage.list_projects(0, 100).await.unwrap().len();
+    let err = storage
+        .create_project(
+            &Project::new("p", None),
+            ctx.with_operation(command.completion(Vec::new())),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            sid_core::Error::OperationPeriodRefused(OperationPeriodRefusal::NotIssued)
+        ),
+        "{err:?}"
+    );
+    assert_eq!(storage.list_projects(0, 100).await.unwrap().len(), before);
+}
+
+/// An attempt refused because a concurrent attempt of the same command
+/// committed first (a limit counted before the key) answers with that
+/// attempt's recorded result, not with its own refusal.
+#[tokio::test]
+async fn test_a_refusal_after_the_command_completed_answers_its_result() {
+    use prost::Message;
+    let storage = SqliteBackend::new_in_memory().await.unwrap();
+    let context =
+        OperationContext::new(OperationKey::parse("k-4").unwrap(), period(&storage).await);
+    let command = KeyedCommand::of::<CreateProject>("profile:a", context, &create("p"));
+    let winner = create("winner");
+
+    let answered: CreateProjectRequest = command
+        .execute(&storage, || async {
+            // The concurrent attempt commits while this one runs.
+            commit(&storage, &command, &winner.encode_to_vec()).await;
+            Err::<CreateProjectRequest, _>(Effect::Refused(OperationError::OutcomeUnknown))
+        })
+        .await
+        .expect("the completed command's result");
+    assert_eq!(answered, winner);
+}
+
+/// A ceremony's own record carries no period and resolves its own retry.
+#[tokio::test]
+async fn test_ceremony_record_resolves_without_period() {
+    let storage = SqliteBackend::new_in_memory().await.unwrap();
+    let key = OperationKey::parse("op-1").unwrap();
+    let command = KeyedCommand::ceremony("password", key, "finish", b"record".to_vec());
+    assert_eq!(command.completion(Vec::new()).period, None);
+    commit(&storage, &command, b"done").await;
+    assert_eq!(
+        command.completed(&storage).await.unwrap().as_deref(),
+        Some(&b"done"[..])
+    );
 }

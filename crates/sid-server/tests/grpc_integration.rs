@@ -32,26 +32,30 @@ use uuid::Uuid;
 
 // ─── Helper: create gRPC request with bearer token ───
 
+/// `msg` from the bearer of `token` as one new command: its client names it
+/// by a fresh operation key, as the account UIs' transports do.
 fn authed_request<T>(msg: T, token: &str) -> Request<T> {
     let mut req = Request::new(msg);
     req.metadata_mut().insert(
         "authorization",
         format!("Bearer {}", token).parse().unwrap(),
     );
-    req
+    new_command(req)
 }
 
-/// A request made by an instance administrator (management RPCs require one).
+/// A request made by an instance administrator (management RPCs require one),
+/// as one new command: its client names it by a fresh operation key, as the
+/// account UIs' transports do.
 fn admin_request<T>(svc: &TestServices, msg: T) -> Request<T> {
-    authed_request(msg, &issue_admin_token(&svc.jwt, ProfileId::generate()))
+    new_command(authed_request(
+        msg,
+        &issue_admin_token(&svc.jwt, ProfileId::generate()),
+    ))
 }
 
 /// `req` as one new keyed command (methods that promise safe retry take a key).
 fn new_command<T>(mut req: Request<T>) -> Request<T> {
-    req.metadata_mut().insert(
-        sid_authn::operation::OPERATION_KEY_HEADER,
-        Uuid::new_v4().to_string().parse().unwrap(),
-    );
+    common::name_new_command(req.metadata_mut());
     req
 }
 
@@ -2737,14 +2741,14 @@ async fn test_admin_update_project() {
     let storage = MockStorage::new().with_project(custom);
     let svc = TestServices::new(storage);
 
-    let req = admin_request(
+    let req = new_command(admin_request(
         &svc,
         UpdateProjectRequest {
             id: project_id.0.to_string(),
             name: Some("Updated Name".to_string()),
             description: Some("new desc".to_string()),
         },
-    );
+    ));
 
     let resp = svc.project.update_project(req).await.unwrap();
     let project = resp.into_inner();
@@ -2759,12 +2763,12 @@ async fn test_admin_delete_project() {
     let storage = MockStorage::new().with_project(custom);
     let svc = TestServices::new(storage);
 
-    let req = admin_request(
+    let req = new_command(admin_request(
         &svc,
         DeleteProjectRequest {
             id: project_id.0.to_string(),
         },
-    );
+    ));
 
     let resp = svc.project.delete_project(req).await;
     assert!(resp.is_ok());
@@ -2786,12 +2790,12 @@ async fn test_admin_delete_system_project_forbidden() {
     let svc = TestServices::new(storage);
 
     let system_id = sid_core::models::ProjectId::system();
-    let req = admin_request(
+    let req = new_command(admin_request(
         &svc,
         DeleteProjectRequest {
             id: system_id.0.to_string(),
         },
-    );
+    ));
 
     let err = svc.project.delete_project(req).await.unwrap_err();
     // SID provisions and keeps the system project: the administrator has the
@@ -3750,13 +3754,13 @@ async fn test_admin_update_application() {
         .with_client(client.clone());
     let svc = TestServices::new(storage);
 
-    let req = admin_request(
+    let req = new_command(admin_request(
         &svc,
         UpdateApplicationRequest {
             id: client.application_id.to_string(),
             name: Some("Updated App Name".to_string()),
         },
-    );
+    ));
 
     let app = svc
         .project
@@ -3768,15 +3772,19 @@ async fn test_admin_update_application() {
     assert_eq!(app.revision, 1);
     assert_eq!(app.client.unwrap().name, "Test App");
 
-    let empty = admin_request(
+    let empty = new_command(admin_request(
         &svc,
         UpdateApplicationRequest {
             id: client.application_id.to_string(),
             name: Some(String::new()),
         },
-    );
+    ));
     let err = svc.project.update_application(empty).await.unwrap_err();
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert_eq!(
+        common::error_reason(&err).as_deref(),
+        Some("REQUIRED_FIELD_MISSING")
+    );
 }
 
 #[tokio::test]
@@ -4478,13 +4486,13 @@ async fn test_e2e_admin_project_and_application_flow() {
     // Step 5: Update the application and its client role
     let resp = svc
         .project
-        .update_application(admin_request(
+        .update_application(new_command(admin_request(
             &svc,
             UpdateApplicationRequest {
                 id: app_id.clone(),
                 name: Some("E2E App v2".to_string()),
             },
-        ))
+        )))
         .await
         .unwrap();
     assert_eq!(resp.into_inner().name, "E2E App v2");
@@ -4516,7 +4524,10 @@ async fn test_e2e_admin_project_and_application_flow() {
     // Step 7: Delete project
     let resp = svc
         .project
-        .delete_project(admin_request(&svc, DeleteProjectRequest { id: project_id }))
+        .delete_project(new_command(admin_request(
+            &svc,
+            DeleteProjectRequest { id: project_id },
+        )))
         .await;
     assert!(resp.is_ok());
 

@@ -3,7 +3,7 @@
 
 use sid_core::{
     Error as SidError, Result as SidResult,
-    models::{AnomalyEventId, AnomalyEventRecord},
+    models::{AnomalyEventId, AnomalyEventRecord, MutationContext},
 };
 use sqlx::Row;
 use uuid::Uuid;
@@ -163,7 +163,9 @@ impl SqliteBackend {
         &self,
         cidr: &str,
         description: &str,
+        ctx: MutationContext,
     ) -> SidResult<()> {
+        let mut tx = self.begin_write().await?;
         sqlx::query(
             "INSERT INTO ip_allowlist_entries (cidr, description, created_at) VALUES (?, ?, ?) \
              ON CONFLICT(cidr) DO UPDATE SET description = excluded.description",
@@ -171,19 +173,42 @@ impl SqliteBackend {
         .bind(cidr)
         .bind(description)
         .bind(fmt_dt(&chrono::Utc::now()))
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("add_ip_allowlist_entry: {e}")))?;
-        Ok(())
+        Self::commit_allowlist_change(tx, ctx).await
     }
 
-    pub(crate) async fn remove_ip_allowlist_entry_impl(&self, cidr: &str) -> SidResult<()> {
+    pub(crate) async fn remove_ip_allowlist_entry_impl(
+        &self,
+        cidr: &str,
+        ctx: MutationContext,
+    ) -> SidResult<()> {
+        let mut tx = self.begin_write().await?;
         sqlx::query("DELETE FROM ip_allowlist_entries WHERE cidr = ?")
             .bind(cidr)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(format!("remove_ip_allowlist_entry: {e}")))?;
-        Ok(())
+        Self::commit_allowlist_change(tx, ctx).await
+    }
+
+    /// Commit an allowlist change under `ctx`, recording for a keyed command
+    /// the allowlist the transaction leaves.
+    async fn commit_allowlist_change(
+        mut tx: super::WriteTx,
+        mut ctx: MutationContext,
+    ) -> SidResult<()> {
+        if ctx.operation.is_some() {
+            let rows = sqlx::query(
+                "SELECT cidr, description, created_at FROM ip_allowlist_entries ORDER BY created_at",
+            )
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| SidError::Storage(format!("read the allowlist: {e}")))?;
+            ctx.record_effect(&allowlist_rows(&rows)?)?;
+        }
+        Self::commit_mutation(tx, "ip_allowlist", ctx).await
     }
 
     pub(crate) async fn list_ip_allowlist_entries_impl(
@@ -195,14 +220,21 @@ impl SqliteBackend {
         .fetch_all(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("list_ip_allowlist_entries: {e}")))?;
-        rows.iter()
-            .map(|row| {
-                Ok((
-                    col(row, "cidr")?,
-                    col(row, "description")?,
-                    parse_dt(&row.get::<String, _>("created_at")),
-                ))
-            })
-            .collect()
+        allowlist_rows(&rows)
     }
+}
+
+/// The allowlist entries of `rows`.
+fn allowlist_rows(
+    rows: &[sqlx::sqlite::SqliteRow],
+) -> SidResult<Vec<(String, String, chrono::DateTime<chrono::Utc>)>> {
+    rows.iter()
+        .map(|row| {
+            Ok((
+                col(row, "cidr")?,
+                col(row, "description")?,
+                parse_dt(&row.get::<String, _>("created_at")),
+            ))
+        })
+        .collect()
 }

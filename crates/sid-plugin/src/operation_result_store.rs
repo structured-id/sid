@@ -3,12 +3,55 @@
 //! commands, so a retried command resolves to its original outcome.
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use sid_core::Result;
-use sid_core::models::{MutationContext, OperationKey, OperationRecord};
+use sid_core::models::{
+    IssuedOperationPeriod, MutationContext, OperationKey, OperationPeriod, OperationPeriodPolicy,
+    OperationPeriodState, OperationRecord,
+};
 
+/// A keyed command's completion is admitted only under a period this store
+/// issued and has not retired; a commit under any other refuses with
+/// `Error::OperationPeriodRefused` and writes nothing.
 #[async_trait]
 pub trait OperationResultStore: Send + Sync {
+    /// The persisted policy every replica issues and retires periods under.
+    async fn operation_period_policy(&self) -> Result<OperationPeriodPolicy>;
+
+    /// The period new keyed commands are named with: the latest issued one
+    /// still accepting at `now`, else a new one, later than every period
+    /// ever issued (retired ones included), accepting until
+    /// `now + acceptance`. Every replica gets the same answer from the shared
+    /// state.
+    async fn current_operation_period(
+        &self,
+        now: DateTime<Utc>,
+        acceptance: Duration,
+    ) -> Result<IssuedOperationPeriod>;
+
+    /// Whether the store admits a command named with `period`, asked before
+    /// a command's first effect: `Error::OperationPeriodRefused` when it is
+    /// retired or never issued. The commit decides again in its own
+    /// transaction.
+    async fn admit_operation_period(&self, period: OperationPeriod) -> Result<()>;
+
+    /// Retire every period whose acceptance ended before `before`, dropping
+    /// the completions named with it in the same commit: from then on a
+    /// command of that period is refused, never executed as new. A commit
+    /// admitted under the period either finishes before the retirement or is
+    /// refused. Returns how many periods were retired.
+    async fn retire_operation_periods(&self, before: DateTime<Utc>) -> Result<u64>;
+
+    /// The last period issued and the periods still admitted, to carry to
+    /// another store with the completions named with them.
+    async fn export_operation_periods(&self) -> Result<OperationPeriodState>;
+
+    /// Take an exported period state: a period either store retired stays
+    /// retired here, with its local completions dropped; an exported period
+    /// still admitted at the source and not retired here is admitted; the
+    /// last issued period moves to the later of the two.
+    async fn import_operation_periods(&self, state: &OperationPeriodState) -> Result<()>;
+
     /// Commit `ctx` alone: its keyed command's completion, its audit entry
     /// and the work it owes, with no other state. A command that ends
     /// without changing anything else (a terminal abort) is recorded this

@@ -65,7 +65,7 @@ pub mod oauth2;
 pub mod oauth_http;
 pub mod opaque;
 pub mod opaque_zkpp;
-#[cfg(feature = "grpc")]
+#[cfg(feature = "keyed")]
 pub mod operation;
 pub mod otp;
 pub mod passkey_prompt;

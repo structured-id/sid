@@ -12,7 +12,8 @@ use secrecy::ExposeSecret;
 use sid_authn::bearer_secret;
 use sid_authn::caller::{Caller, authenticate};
 use sid_authn::jwt::JwtService;
-use sid_authn::operation::{KeyedCommand, required_key};
+use sid_authn::operation::KeyedCommand;
+use sid_authn::operation::grpc::context;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_core::Error as SidError;
 use sid_core::grpc_error::refuse::{
@@ -27,15 +28,12 @@ use sid_core::models::{
     ProvisioningCredentialId, ProvisioningDirection,
 };
 use sid_plugin::StorageBackend;
+use sid_proto::keyed::admin::provisioning_service as keyed;
 use sid_proto::sid::v1::admin::{self as pb, provisioning_service_server::ProvisioningService};
 use sid_proto::sid::v1::ids;
 use tonic::{Request, Response, Status};
 
 use super::convert::to_timestamp;
-
-const CREATE_INBOUND_CONNECTOR: &str = "ProvisioningService/CreateInboundConnector";
-const CREATE_CONNECTOR_CREDENTIAL: &str = "ProvisioningService/CreateConnectorCredential";
-const ROTATE_CONNECTOR_CREDENTIAL: &str = "ProvisioningService/RotateConnectorCredential";
 
 /// The organization's provisioning connectors, managed by its
 /// administrators.
@@ -95,6 +93,34 @@ impl ProvisioningServiceImpl {
             .map_err(storage_failure)?
             .filter(|c| c.org_id == self.org)
             .ok_or_else(|| connector_not_found(id))
+    }
+
+    /// A state change `command` that found `connector` already in its target
+    /// state: the connector as it is now is the command's outcome, recorded
+    /// so a retry after a later change answers the same and moves nothing.
+    /// A concurrent attempt that recorded first answers with its outcome.
+    async fn already_in_effect(
+        &self,
+        command: &KeyedCommand,
+        caller: &Caller,
+        id: ProvisioningConnectorId,
+        connector: &ProvisioningConnector,
+    ) -> Result<Response<pb::ProvisioningConnector>, Status> {
+        let audit = AuditEntry::admin(
+            caller.profile_id.to_string(),
+            "provisioning_connector.state",
+            id.to_string(),
+        )
+        .with_metadata(serde_json::json!({
+            "from": connector.state.as_str(),
+            "to": connector.state.as_str(),
+        }));
+        let response = command
+            .unchanged(&*self.storage, audit, || async {
+                Ok::<_, Status>(connector_to_proto(connector))
+            })
+            .await?;
+        Ok(Response::new(response))
     }
 
     /// The connector `id`, which must be inbound: only an inbound connector
@@ -328,16 +354,15 @@ impl ProvisioningService for ProvisioningServiceImpl {
         request: Request<pb::CreateInboundConnectorRequest>,
     ) -> Result<Response<pb::ProvisioningConnector>, Status> {
         let caller = self.admin(&request).await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
         let name = display_name(&req.display_name)?;
 
         // A retry of a completed create returns the connector it created.
-        let command = KeyedCommand::new(
+        let command = KeyedCommand::of::<keyed::CreateInboundConnector>(
             format!("profile:{}", caller.profile_id),
-            key,
-            CREATE_INBOUND_CONNECTOR,
-            req.encode_to_vec(),
+            operation,
+            &req,
         );
         if let Some(result) = command.completed(&*self.storage).await? {
             return Ok(Response::new(replayed_connector(&result)?));
@@ -351,7 +376,7 @@ impl ProvisioningService for ProvisioningServiceImpl {
             connector.id.to_string(),
         )
         .into();
-        match self
+        let answer = match self
             .storage
             .create_provisioning_connector(
                 &connector,
@@ -359,14 +384,13 @@ impl ProvisioningService for ProvisioningServiceImpl {
             )
             .await
         {
-            Ok(()) => Ok(Response::new(response)),
-            // A concurrent attempt of this command committed first.
-            Err(SidError::OperationCompleted(_)) => {
-                let result = command.committed_elsewhere(&*self.storage).await?;
-                Ok(Response::new(replayed_connector(&result)?))
-            }
+            Ok(()) => Ok(response),
+            // A concurrent attempt of this command committed first, or its
+            // connector took a value this one needs: its answer is this one's.
+            Err(SidError::OperationCompleted(_)) => Err(changed_concurrently()),
             Err(e) => Err(storage_failure(e)),
-        }
+        };
+        Ok(Response::new(command.settle(&*self.storage, answer).await?))
     }
 
     async fn get_provisioning_connector(
@@ -423,12 +447,26 @@ impl ProvisioningService for ProvisioningServiceImpl {
         request: Request<pb::ChangeProvisioningConnectorStateRequest>,
     ) -> Result<Response<pb::ProvisioningConnector>, Status> {
         let caller = self.admin(&request).await?;
+        let operation = context(&request)?;
         let req = request.into_inner();
+        // A retry of a completed change answers with the connector as that
+        // change left it, and never moves it again after a later change (a
+        // suspension retried after a reactivation).
+        let command = KeyedCommand::of::<keyed::ChangeProvisioningConnectorState>(
+            format!("profile:{}", caller.profile_id),
+            operation,
+            &req,
+        );
+        if let Some(result) = command.completed(&*self.storage).await? {
+            return Ok(Response::new(replayed_connector(&result)?));
+        }
         let id = connector_id(req.connector_id.as_ref())?;
         let target = state_from_proto(req.state)?;
         let current = self.connector(id).await?;
         if current.state == target {
-            return Ok(Response::new(connector_to_proto(&current)));
+            return self
+                .already_in_effect(&command, &caller, id, &current)
+                .await;
         }
         if !current.state.may_become(target) {
             return Err(connector_state(
@@ -437,30 +475,49 @@ impl ProvisioningService for ProvisioningServiceImpl {
                 &format!("made {}", target.as_str()),
             ));
         }
-        let moved = self
+        // The connector as the transition leaves it.
+        let mut moved = current.clone();
+        moved.state = target;
+        moved.revision += 1;
+        moved.updated_at = chrono::Utc::now();
+        let response = connector_to_proto(&moved);
+        let ctx: MutationContext = AuditEntry::admin(
+            caller.profile_id.to_string(),
+            "provisioning_connector.state",
+            id.to_string(),
+        )
+        .with_metadata(serde_json::json!({
+            "from": current.state.as_str(),
+            "to": target.as_str(),
+        }))
+        .into();
+        match self
             .storage
             .transition_provisioning_connector(
                 id,
                 current.state,
                 target,
-                AuditEntry::admin(
-                    caller.profile_id.to_string(),
-                    "provisioning_connector.state",
-                    id.to_string(),
-                )
-                .with_metadata(serde_json::json!({
-                    "from": current.state.as_str(),
-                    "to": target.as_str(),
-                }))
-                .into(),
+                ctx.with_operation(command.completion(response.encode_to_vec())),
             )
             .await
-            .map_err(storage_failure)?;
-        let after = self.connector(id).await?;
-        if !moved && after.state != target {
-            return Err(changed_concurrently());
+        {
+            Ok(true) => Ok(Response::new(response)),
+            // Another change came first; the connector is answered as it is
+            // when that change already made it the target.
+            Ok(false) => {
+                let after = self.connector(id).await?;
+                if after.state != target {
+                    return Err(changed_concurrently());
+                }
+                self.already_in_effect(&command, &caller, id, &after).await
+            }
+            // A concurrent attempt of this command committed first.
+            Err(SidError::OperationCompleted(_)) => {
+                let result = command.committed_elsewhere(&*self.storage).await?;
+                Ok(Response::new(replayed_connector(&result)?))
+            }
+            Err(e) => Err(storage_failure(e)),
         }
-        Ok(Response::new(connector_to_proto(&after)))
     }
 
     async fn get_scim_inbound_config(
@@ -506,58 +563,60 @@ impl ProvisioningService for ProvisioningServiceImpl {
         request: Request<pb::CreateConnectorCredentialRequest>,
     ) -> Result<Response<pb::IssuedConnectorCredential>, Status> {
         let caller = self.admin(&request).await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
         let id = connector_id(req.connector_id.as_ref())?;
         let expires_at = future_expiry(req.expires_at)?;
         let kind = kind_from_proto(req.kind)?;
 
-        let command = KeyedCommand::new(
+        let command = KeyedCommand::of::<keyed::CreateConnectorCredential>(
             format!("profile:{}", caller.profile_id),
-            key,
-            CREATE_CONNECTOR_CREDENTIAL,
-            req.encode_to_vec(),
+            operation,
+            &req,
         );
         if let Some(result) = command.completed(&*self.storage).await? {
             return Ok(Response::new(replayed_issue(&result)?));
         }
-        let connector = self.inbound(id).await?;
-        if connector.state != ConnectorState::Active {
-            return Err(connector_state(id, connector.state, "given a credential"));
-        }
+        // A refusal a concurrent attempt of this command caused (the slot its
+        // credential took) is that attempt's answer.
+        let answer: Result<pb::IssuedConnectorCredential, Status> = async {
+            let connector = self.inbound(id).await?;
+            if connector.state != ConnectorState::Active {
+                return Err(connector_state(id, connector.state, "given a credential"));
+            }
 
-        let (credential, secret, recorded) = issue(id, kind, expires_at);
-        let ctx: MutationContext = AuditEntry::admin(
-            caller.profile_id.to_string(),
-            "provisioning_credential.create",
-            credential.id.to_string(),
-        )
-        .with_metadata(serde_json::json!({ "connector_id": id.to_string() }))
-        .into();
-        match self
-            .storage
-            .add_provisioning_credential(
-                &credential,
-                ctx.with_operation(command.completion(recorded.encode_to_vec())),
+            let (credential, secret, recorded) = issue(id, kind, expires_at);
+            let ctx: MutationContext = AuditEntry::admin(
+                caller.profile_id.to_string(),
+                "provisioning_credential.create",
+                credential.id.to_string(),
             )
-            .await
-        {
-            Ok(true) => {}
-            Ok(false) => {
-                let now = self.connector(id).await?;
-                return Err(connector_state(id, now.state, "given a credential"));
+            .with_metadata(serde_json::json!({ "connector_id": id.to_string() }))
+            .into();
+            match self
+                .storage
+                .add_provisioning_credential(
+                    &credential,
+                    ctx.with_operation(command.completion(recorded.encode_to_vec())),
+                )
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    let now = self.connector(id).await?;
+                    return Err(connector_state(id, now.state, "given a credential"));
+                }
+                Err(SidError::ResourceExhausted(_)) => return Err(quota_reached(id)),
+                Err(SidError::OperationCompleted(_)) => return Err(changed_concurrently()),
+                Err(e) => return Err(storage_failure(e)),
             }
-            Err(SidError::ResourceExhausted(_)) => return Err(quota_reached(id)),
-            Err(SidError::OperationCompleted(_)) => {
-                let result = command.committed_elsewhere(&*self.storage).await?;
-                return Ok(Response::new(replayed_issue(&result)?));
-            }
-            Err(e) => return Err(storage_failure(e)),
+            Ok(pb::IssuedConnectorCredential {
+                credential: recorded.credential,
+                secret,
+            })
         }
-        Ok(Response::new(pb::IssuedConnectorCredential {
-            credential: recorded.credential,
-            secret,
-        }))
+        .await;
+        Ok(Response::new(command.settle(&*self.storage, answer).await?))
     }
 
     async fn rotate_connector_credential(
@@ -565,83 +624,85 @@ impl ProvisioningService for ProvisioningServiceImpl {
         request: Request<pb::RotateConnectorCredentialRequest>,
     ) -> Result<Response<pb::IssuedConnectorCredential>, Status> {
         let caller = self.admin(&request).await?;
-        let key = required_key(request.metadata())?;
+        let operation = context(&request)?;
         let req = request.into_inner();
         let id = connector_id(req.connector_id.as_ref())?;
         let old = credential_id(req.credential_id.as_ref())?;
 
-        let command = KeyedCommand::new(
+        let command = KeyedCommand::of::<keyed::RotateConnectorCredential>(
             format!("profile:{}", caller.profile_id),
-            key,
-            ROTATE_CONNECTOR_CREDENTIAL,
-            req.encode_to_vec(),
+            operation,
+            &req,
         );
         if let Some(result) = command.completed(&*self.storage).await? {
             return Ok(Response::new(replayed_issue(&result)?));
         }
-        let connector = self.inbound(id).await?;
-        if connector.state != ConnectorState::Active {
-            return Err(connector_state(id, connector.state, "given a credential"));
-        }
+        // A refusal a concurrent attempt of this command caused (the
+        // credential it rotated is no longer active) is that attempt's answer.
+        let answer: Result<pb::IssuedConnectorCredential, Status> = async {
+            let connector = self.inbound(id).await?;
+            if connector.state != ConnectorState::Active {
+                return Err(connector_state(id, connector.state, "given a credential"));
+            }
 
-        // The replacement is of the kind it replaces.
-        let replaced = self
-            .storage
-            .list_provisioning_credentials(id)
-            .await
-            .map_err(storage_failure)?
-            .into_iter()
-            .find(|c| c.id == old)
-            .ok_or_else(|| credential_not_found(old))?;
-        let (credential, secret, recorded) = issue(id, replaced.kind, None);
-        let ctx: MutationContext = AuditEntry::admin(
-            caller.profile_id.to_string(),
-            "provisioning_credential.rotate",
-            old.to_string(),
-        )
-        .with_metadata(serde_json::json!({
-            "connector_id": id.to_string(),
-            "replacement": credential.id.to_string(),
-        }))
-        .into();
-        match self
-            .storage
-            .rotate_provisioning_credential(
-                id,
-                old,
-                &credential,
-                Utc::now() + rotation_grace(),
-                ctx.with_operation(command.completion(recorded.encode_to_vec())),
+            // The replacement is of the kind it replaces.
+            let replaced = self
+                .storage
+                .list_provisioning_credentials(id)
+                .await
+                .map_err(storage_failure)?
+                .into_iter()
+                .find(|c| c.id == old)
+                .ok_or_else(|| credential_not_found(old))?;
+            let (credential, secret, recorded) = issue(id, replaced.kind, None);
+            let ctx: MutationContext = AuditEntry::admin(
+                caller.profile_id.to_string(),
+                "provisioning_credential.rotate",
+                old.to_string(),
             )
-            .await
-        {
-            Ok(true) => {}
-            Ok(false) => {
-                let held = self
-                    .storage
-                    .list_provisioning_credentials(id)
-                    .await
-                    .map_err(storage_failure)?;
-                return Err(match held.iter().find(|c| c.id == old) {
-                    None => credential_not_found(old),
-                    Some(c) => ApiError::new(
-                        ErrorReason::InvalidState,
-                        "only an active credential is rotated",
-                    )
-                    .with_precondition("CREDENTIAL_STATUS", old.to_string(), c.status.as_str())
-                    .into(),
-                });
+            .with_metadata(serde_json::json!({
+                "connector_id": id.to_string(),
+                "replacement": credential.id.to_string(),
+            }))
+            .into();
+            match self
+                .storage
+                .rotate_provisioning_credential(
+                    id,
+                    old,
+                    &credential,
+                    Utc::now() + rotation_grace(),
+                    ctx.with_operation(command.completion(recorded.encode_to_vec())),
+                )
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    let held = self
+                        .storage
+                        .list_provisioning_credentials(id)
+                        .await
+                        .map_err(storage_failure)?;
+                    return Err(match held.iter().find(|c| c.id == old) {
+                        None => credential_not_found(old),
+                        Some(c) => ApiError::new(
+                            ErrorReason::InvalidState,
+                            "only an active credential is rotated",
+                        )
+                        .with_precondition("CREDENTIAL_STATUS", old.to_string(), c.status.as_str())
+                        .into(),
+                    });
+                }
+                Err(SidError::OperationCompleted(_)) => return Err(changed_concurrently()),
+                Err(e) => return Err(storage_failure(e)),
             }
-            Err(SidError::OperationCompleted(_)) => {
-                let result = command.committed_elsewhere(&*self.storage).await?;
-                return Ok(Response::new(replayed_issue(&result)?));
-            }
-            Err(e) => return Err(storage_failure(e)),
+            Ok(pb::IssuedConnectorCredential {
+                credential: recorded.credential,
+                secret,
+            })
         }
-        Ok(Response::new(pb::IssuedConnectorCredential {
-            credential: recorded.credential,
-            secret,
-        }))
+        .await;
+        Ok(Response::new(command.settle(&*self.storage, answer).await?))
     }
 
     async fn revoke_connector_credential(

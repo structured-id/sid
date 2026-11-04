@@ -106,6 +106,7 @@ async fn installation(engine: Engine) -> Installation {
             (Arc::new(backend), Arc::new(keys))
         }
     };
+    common::adopt_operation_period(storage.as_ref()).await;
     storage
         .ensure_system_project(AuditEntry::system("project.ensure_system", "system").into())
         .await
@@ -309,10 +310,7 @@ fn admin<T>(message: T) -> Request<T> {
 
 fn keyed<T>(message: T) -> Request<T> {
     let mut request = admin(message);
-    request.metadata_mut().insert(
-        "idempotency-key",
-        Uuid::now_v7().simple().to_string().parse().unwrap(),
-    );
+    common::name_new_command(request.metadata_mut());
     request
 }
 
@@ -357,7 +355,7 @@ impl Replica {
             .find(|r| r.key == SCIM_PROVISIONER_ROLE)
             .unwrap();
         self.authz
-            .assign_role(admin(AssignRoleRequest {
+            .assign_role(keyed(AssignRoleRequest {
                 principal: Some(Principal::ProvisioningConnectorId(
                     connector.proto.id.clone().unwrap(),
                 )),
@@ -387,7 +385,7 @@ impl Replica {
 
     async fn set_state(&self, connector: &Connector, state: pb::ProvisioningConnectorState) {
         self.provisioning
-            .change_provisioning_connector_state(admin(
+            .change_provisioning_connector_state(keyed(
                 pb::ChangeProvisioningConnectorStateRequest {
                     connector_id: connector.proto.id.clone(),
                     state: state.into(),

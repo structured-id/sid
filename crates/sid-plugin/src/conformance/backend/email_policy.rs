@@ -237,6 +237,11 @@ pub async fn stale_keys_are_reconciled(
     let (value, holder) = key(0);
     let principal = entity(value).await;
     let contact = evidence(holder, &value.replacen('a', "A", 1));
+    // Under a keyed command, which records the claim as the holder has it.
+    let (namespace, operation) = (
+        format!("profile:{}", uuid::Uuid::now_v7()),
+        sid_core::models::OperationKey::parse(&uuid::Uuid::new_v4().to_string()).unwrap(),
+    );
     assert!(
         backend
             .reconcile_email_key(
@@ -244,7 +249,13 @@ pub async fn stale_keys_are_reconciled(
                 holder,
                 &contact,
                 "admin_reconciled",
-                test_audit()
+                test_audit().with_operation(sid_core::models::OperationCompletion::new(
+                    &namespace,
+                    operation.clone(),
+                    "sid.v1.IdentityService/AddPrincipal",
+                    b"repair",
+                    Vec::new(),
+                ))
             )
             .await
             .unwrap()
@@ -263,6 +274,18 @@ pub async fn stale_keys_are_reconciled(
         .find(|p| p.value == value)
         .unwrap();
     assert_eq!(claim.source_email_id, Some(contact.id));
+    let recorded = backend
+        .get_operation_result(&namespace, &operation)
+        .await
+        .unwrap()
+        .expect("the completion commits with the repair");
+    let recorded: sid_core::models::Principal =
+        serde_json::from_slice(&recorded.completion.result).unwrap();
+    assert_eq!(recorded.id, claim.id);
+    assert_eq!(recorded.profile_id, holder);
+    assert_eq!(recorded.email_policy_revision, CURRENT);
+    assert_eq!(recorded.source_email_id, Some(contact.id));
+    assert_eq!(recorded.verified, claim.verified);
     assert!(
         backend
             .list_profile_emails(holder)

@@ -48,6 +48,7 @@ changelog_include = [
   "sid-org-crypto",
   "sid-plugin",
   "sid-proto",
+  "sid-proto-build",
   "sid-scim",
   "sid-serve",
   "sid-storage",

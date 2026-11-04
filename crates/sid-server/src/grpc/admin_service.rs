@@ -4,20 +4,25 @@
 //! Privileged operations: bootstrap, admin profile update,
 //! bulk session revocation, profile metadata CRUD.
 
+use prost::Message;
 use sid_authn::account_roles::ADMIN_ROLE_CLAIM;
 use sid_authn::caller::authenticate;
 use sid_authn::jwt::JwtService;
+use sid_authn::operation::KeyedCommand;
+use sid_authn::operation::grpc::{Effect, context};
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::revocation_cascade::RevocationCascadeService;
 use sid_core::grpc_error::refuse::{
     changed_concurrently, internal, invalid_field, not_found, storage_failure,
 };
 use sid_core::grpc_error::{ApiError, ErrorReason};
+use sid_core::models::OperationContext;
 use sid_core::models::event::{Event, event_types};
 use sid_core::models::{
     AuditEntry, MutationContext, ProfileId, ProfileMetadata, ProfileStatus, RevocationReason,
 };
 use sid_plugin::storage::StorageBackend;
+use sid_proto::keyed::admin::admin_service as keyed;
 use sid_proto::sid::v1::admin_service_server::AdminService;
 use sid_proto::sid::v1::*;
 use std::sync::Arc;
@@ -32,15 +37,6 @@ fn parse_profile_id(id: &str) -> Result<ProfileId, Status> {
 
 fn profile_not_found(id: ProfileId) -> Status {
     not_found(ErrorReason::ProfileNotFound, "Profile", id.to_string())
-}
-
-/// A storage refusal of a profile write: a profile that does not exist is
-/// not found, anything else is internal.
-fn profile_write(id: ProfileId, e: sid_core::Error) -> Status {
-    match e {
-        sid_core::Error::NotFound(_) => profile_not_found(id),
-        other => storage_failure(other),
-    }
 }
 
 pub struct AdminServiceImpl {
@@ -77,6 +73,116 @@ impl AdminServiceImpl {
         caller.require_admin()?;
         Ok(caller.profile_id.to_string())
     }
+
+    /// Apply an AdminUpdateProfile request over the revision it read,
+    /// recording its answer with the commit.
+    async fn update_profile(
+        &self,
+        actor: &str,
+        command: &KeyedCommand,
+        profile_id: ProfileId,
+        req: AdminUpdateProfileRequest,
+    ) -> Result<AdminUpdateProfileResponse, Effect> {
+        let mut profile = self
+            .storage
+            .get_profile(profile_id)
+            .await?
+            .ok_or_else(|| profile_not_found(profile_id))?;
+        let old_status = profile.status;
+
+        // A value the enum does not define is refused, never read as "no
+        // change" while the rest of the request applies.
+        let not_settable = || {
+            invalid_field(
+                "profile_status",
+                "an administrator sets ACTIVE or SUSPENDED only",
+            )
+        };
+        let requested_status = sid_proto::sid::v1::ProfileStatus::try_from(req.profile_status)
+            .map_err(|_| not_settable())?;
+        if requested_status != sid_proto::sid::v1::ProfileStatus::Unspecified {
+            let target = match requested_status {
+                sid_proto::sid::v1::ProfileStatus::Active => ProfileStatus::Active,
+                sid_proto::sid::v1::ProfileStatus::Suspended => ProfileStatus::Suspended,
+                _ => return Err(not_settable().into()),
+            };
+            // Activation and suspension move an account between its ordinary
+            // states only: a closing, held, closed or purged account is never
+            // reopened by setting a status.
+            if !matches!(
+                profile.status,
+                ProfileStatus::Provisioned | ProfileStatus::Active | ProfileStatus::Suspended
+            ) || profile.transition_status(target).is_err()
+            {
+                return Err(Status::from(
+                    ApiError::new(
+                        ErrorReason::InvalidState,
+                        "the profile's status cannot be changed by an administrator",
+                    )
+                    .with_precondition(
+                        "PROFILE_STATUS",
+                        profile_id.to_string(),
+                        "not changeable",
+                    ),
+                )
+                .into());
+            }
+        }
+        if !req.roles.is_empty() {
+            // Administering the installation is a role assignment, never a
+            // label on the Profile.
+            if req.roles.iter().any(|r| r == ADMIN_ROLE_CLAIM) {
+                return Err(invalid_field(
+                    "roles",
+                    "installation administration is granted by role assignment",
+                )
+                .into());
+            }
+            profile.roles = req.roles;
+        }
+
+        // A status change owes its event in the same commit.
+        let response = AdminUpdateProfileResponse {
+            profile_id: profile.id.to_string(),
+        };
+        let mut ctx = MutationContext::from(AuditEntry::admin(
+            actor.to_owned(),
+            "profile.admin_update",
+            profile.id.to_string(),
+        ))
+        .with_operation(command.completion(response.encode_to_vec()));
+        let status_event = match (old_status == profile.status, profile.status) {
+            (false, ProfileStatus::Suspended) => Some(event_types::USER_DEACTIVATED),
+            (false, ProfileStatus::Active) => Some(event_types::USER_UNLOCKED),
+            _ => None,
+        };
+        if let Some(event_type) = status_event {
+            let event = Event::new("sid-admin", event_type)
+                .with_subject(format!("profile/{}", profile.id))
+                .with_data(serde_json::json!({
+                    "profile_id": profile.id.to_string(),
+                    "old_status": format!("{:?}", old_status),
+                    "new_status": format!("{:?}", profile.status),
+                }));
+            ctx = ctx.with_work(event.relay());
+        }
+        // Over the revision read above: a concurrent change (a closure, the
+        // owner's own edit) is never overwritten with this copy.
+        if !self.storage.update_profile(&profile, ctx).await? {
+            return Err(changed_concurrently().into());
+        }
+        Ok(response)
+    }
+}
+
+/// The administrator `actor`'s command `M` with `req`'s inputs under
+/// `context`.
+fn admin_command<M: sid_proto::KeyedMethod>(
+    actor: &str,
+    context: OperationContext,
+    req: &M::Request,
+) -> KeyedCommand {
+    KeyedCommand::of::<M>(format!("profile:{actor}"), context, req)
 }
 
 #[tonic::async_trait]
@@ -128,113 +234,42 @@ impl AdminService for AdminServiceImpl {
         request: Request<AdminUpdateProfileRequest>,
     ) -> Result<Response<AdminUpdateProfileResponse>, Status> {
         let actor = self.require_admin(&request).await?;
+        let operation = context(&request)?;
 
         let req = request.into_inner();
         let profile_id = parse_profile_id(&req.profile_id)?;
 
-        let mut profile = self
-            .storage
-            .get_profile(profile_id)
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(|| profile_not_found(profile_id))?;
-
-        // Capture old status for event emission.
-        let old_status = profile.status;
-
-        // Apply admin-only fields
-        // A value the enum does not define is refused, never read as "no
-        // change" while the rest of the request applies.
-        let not_settable = || {
-            invalid_field(
-                "profile_status",
-                "an administrator sets ACTIVE or SUSPENDED only",
-            )
-        };
-        let requested_status = sid_proto::sid::v1::ProfileStatus::try_from(req.profile_status)
-            .map_err(|_| not_settable())?;
-        if requested_status != sid_proto::sid::v1::ProfileStatus::Unspecified {
-            let target = match requested_status {
-                sid_proto::sid::v1::ProfileStatus::Active => ProfileStatus::Active,
-                sid_proto::sid::v1::ProfileStatus::Suspended => ProfileStatus::Suspended,
-                _ => return Err(not_settable()),
-            };
-            // Activation and suspension move an account between its ordinary
-            // states only: a closing, held, closed or purged account is never
-            // reopened by setting a status.
-            if !matches!(
-                profile.status,
-                ProfileStatus::Provisioned | ProfileStatus::Active | ProfileStatus::Suspended
-            ) || profile.transition_status(target).is_err()
-            {
-                return Err(ApiError::new(
-                    ErrorReason::InvalidState,
-                    "the profile's status cannot be changed by an administrator",
-                )
-                .with_precondition("PROFILE_STATUS", profile_id.to_string(), "not changeable")
-                .into());
-            }
-        }
-        if !req.roles.is_empty() {
-            // Administering the installation is a role assignment, never a
-            // label on the Profile.
-            if req.roles.iter().any(|r| r == ADMIN_ROLE_CLAIM) {
-                return Err(invalid_field(
-                    "roles",
-                    "installation administration is granted by role assignment",
-                ));
-            }
-            profile.roles = req.roles;
-        }
-        // email_verified now managed via profile_emails table
-
-        // A status change owes its event in the same commit.
-        let mut ctx = MutationContext::from(AuditEntry::admin(
-            actor.clone(),
-            "profile.admin_update",
-            profile.id.to_string(),
-        ));
-        let status_event = match (old_status == profile.status, profile.status) {
-            (false, ProfileStatus::Suspended) => Some(event_types::USER_DEACTIVATED),
-            (false, ProfileStatus::Active) => Some(event_types::USER_UNLOCKED),
-            _ => None,
-        };
-        if let Some(event_type) = status_event {
-            let event = Event::new("sid-admin", event_type)
-                .with_subject(format!("profile/{}", profile.id))
-                .with_data(serde_json::json!({
-                    "profile_id": profile.id.to_string(),
-                    "old_status": format!("{:?}", old_status),
-                    "new_status": format!("{:?}", profile.status),
-                }));
-            ctx = ctx.with_work(event.relay());
-        }
-        // Over the revision read above: a concurrent change (a closure, the
-        // owner's own edit) is never overwritten with this copy.
-        if !self
-            .storage
-            .update_profile(&profile, ctx)
-            .await
-            .map_err(storage_failure)?
-        {
-            return Err(changed_concurrently());
-        }
+        // A retry of a completed update answers as it did and never writes
+        // its copy again over a later change.
+        let command = admin_command::<keyed::AdminUpdateProfile>(&actor, operation, &req);
+        let response = command
+            .run(&*self.storage, || {
+                self.update_profile(&actor, &command, profile_id, req.clone())
+            })
+            .await?;
 
         // A suspended profile loses every live sign-in: sessions (their
         // tokens stop in every process, RPs are owed a logout) and PATs.
         // Credentials are kept so reactivation works. A failure fails the
-        // request; the suspension is stored, so a retry ends the rest.
-        if profile.status == ProfileStatus::Suspended {
+        // request; the suspension is stored, so a retry, recorded or not,
+        // ends the rest, unless the profile was reactivated meanwhile.
+        let suspends = req.profile_status == sid_proto::sid::v1::ProfileStatus::Suspended as i32;
+        if suspends
+            && self
+                .storage
+                .get_profile(profile_id)
+                .await
+                .map_err(storage_failure)?
+                .is_some_and(|p| p.status == ProfileStatus::Suspended)
+        {
             self.cascade
-                .end_access(profile.id, RevocationReason::Admin, &actor)
+                .end_access(profile_id, RevocationReason::Admin, &actor)
                 .await
                 .map_err(storage_failure)?;
         }
 
-        info!("Admin: updated profile {}", profile.id);
-        Ok(Response::new(AdminUpdateProfileResponse {
-            profile_id: profile.id.to_string(),
-        }))
+        info!("Admin: updated profile {}", profile_id);
+        Ok(Response::new(response))
     }
 
     #[instrument(skip_all, name = "admin.revoke_all_sessions")]
@@ -243,25 +278,34 @@ impl AdminService for AdminServiceImpl {
         request: Request<RevokeAllSessionsRequest>,
     ) -> Result<Response<RevokeAllSessionsResponse>, Status> {
         let actor = self.require_admin(&request).await?;
+        let operation = context(&request)?;
 
         let req = request.into_inner();
         let profile_id = parse_profile_id(&req.profile_id)?;
 
-        // Through the cascade: the sessions' tokens stop in every process and
-        // each RP they signed in to is owed a back-channel logout.
-        let revoked = self
-            .cascade
-            .revoke_sessions(
-                profile_id,
-                RevocationReason::Admin,
-                &actor,
-                AuditEntry::admin(actor.clone(), "session.revoke_all", profile_id.to_string()),
-            )
-            .await
-            .map_err(storage_failure)?;
-        // Each ended session's revoked event is committed with its deletion.
-        let count =
-            u64::try_from(revoked.cascade_entries.len()).expect("a session count fits in u64");
+        // A retry of a completed revocation answers with the count it ended
+        // and never ends sessions signed in after it. The store records that
+        // count with the deletion.
+        let command = admin_command::<keyed::RevokeAllSessions>(&actor, operation, &req);
+        let ended: usize = command
+            .run_recorded(&*self.storage, || async {
+                // Through the cascade: the sessions' tokens stop in every
+                // process and each RP they signed in to is owed a back-channel
+                // logout; each revoked event commits with its deletion.
+                let ctx = MutationContext::from(AuditEntry::admin(
+                    actor.clone(),
+                    "session.revoke_all",
+                    profile_id.to_string(),
+                ))
+                .with_operation(command.effect_completion());
+                let revoked = self
+                    .cascade
+                    .revoke_sessions(profile_id, RevocationReason::Admin, &actor, ctx)
+                    .await?;
+                Ok(revoked.cascade_entries.len())
+            })
+            .await?;
+        let count = u64::try_from(ended).expect("a session count fits in u64");
 
         info!(
             "Admin: revoked {} sessions for profile {}",
@@ -325,31 +369,40 @@ impl AdminService for AdminServiceImpl {
         request: Request<SetProfileMetadataRequest>,
     ) -> Result<Response<ProfileMetadataEntry>, Status> {
         let actor = self.require_admin(&request).await?;
+        let operation = context(&request)?;
 
         let req = request.into_inner();
         let profile_id = parse_profile_id(&req.profile_id)?;
 
-        let json_value = req
-            .value
-            .map(pbjson_value_to_json)
-            .unwrap_or(serde_json::Value::Null);
-
-        let metadata = ProfileMetadata::new(profile_id, req.key, json_value);
-
-        self.storage
-            .set_profile_metadata(
-                &metadata,
-                AuditEntry::admin(
-                    actor,
+        // A retry of a completed write answers with the entry it wrote and
+        // never writes it again over a later value.
+        let command = admin_command::<keyed::SetProfileMetadata>(&actor, operation, &req);
+        let entry = command
+            .run(&*self.storage, || async {
+                let json_value = req
+                    .value
+                    .clone()
+                    .map(pbjson_value_to_json)
+                    .unwrap_or(serde_json::Value::Null);
+                let metadata = ProfileMetadata::new(profile_id, req.key.clone(), json_value);
+                let entry = to_proto_metadata(metadata.clone());
+                let ctx = MutationContext::from(AuditEntry::admin(
+                    actor.clone(),
                     "metadata.set",
                     format!("{}:{}", profile_id, metadata.key),
-                )
-                .into(),
-            )
-            .await
-            .map_err(|e| profile_write(profile_id, e))?;
-
-        Ok(Response::new(to_proto_metadata(metadata)))
+                ))
+                .with_operation(command.completion(entry.encode_to_vec()));
+                self.storage
+                    .set_profile_metadata(&metadata, ctx)
+                    .await
+                    .map_err(|e| match e {
+                        sid_core::Error::NotFound(_) => Effect::from(profile_not_found(profile_id)),
+                        other => Effect::from(other),
+                    })?;
+                Ok(entry)
+            })
+            .await?;
+        Ok(Response::new(entry))
     }
 
     #[instrument(skip_all, name = "admin.delete_profile_metadata")]
@@ -358,23 +411,28 @@ impl AdminService for AdminServiceImpl {
         request: Request<DeleteProfileMetadataRequest>,
     ) -> Result<Response<()>, Status> {
         let actor = self.require_admin(&request).await?;
+        let operation = context(&request)?;
 
         let req = request.into_inner();
         let profile_id = parse_profile_id(&req.profile_id)?;
 
-        self.storage
-            .delete_profile_metadata(
-                profile_id,
-                &req.key,
-                AuditEntry::admin(
-                    actor,
+        // A retry of a completed deletion answers as it did and never
+        // deletes a value written after it.
+        let command = admin_command::<keyed::DeleteProfileMetadata>(&actor, operation, &req);
+        command
+            .run(&*self.storage, || async {
+                let ctx = MutationContext::from(AuditEntry::admin(
+                    actor.clone(),
                     "metadata.delete",
                     format!("{}:{}", profile_id, req.key),
-                )
-                .into(),
-            )
-            .await
-            .map_err(storage_failure)?;
+                ))
+                .with_operation(command.completion(().encode_to_vec()));
+                self.storage
+                    .delete_profile_metadata(profile_id, &req.key, ctx)
+                    .await?;
+                Ok(())
+            })
+            .await?;
 
         info!(
             "Admin: deleted metadata key '{}' for profile {}",

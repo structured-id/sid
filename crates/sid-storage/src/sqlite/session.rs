@@ -383,6 +383,7 @@ impl SqliteBackend {
     ) -> SidResult<Vec<Session>> {
         let mut tx = self.begin_write().await?;
         let sessions = super::directory::end_sessions(&mut tx, profile_id, end, &mut ctx).await?;
+        ctx.record_effect(&sessions.len())?;
         Self::commit_mutation(tx, &format!("profile:{profile_id}"), ctx).await?;
         Ok(sessions)
     }

@@ -45,11 +45,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_prost_build::configure()
         .build_server(true)
         .build_client(true)
+        // Map entries encode in key order, so equal messages encode equally
+        // and a retried keyed command keeps its fingerprint.
+        .btree_map(".")
         // The identifier messages are owned by `sid-ids-proto` (with their
         // validated conversions); one Rust type per identifier kind.
         .extern_path(".sid.v1.ids", "::sid_ids_proto::sid::v1::ids")
         .file_descriptor_set_path(&descriptor_path)
         .compile_protos(&protos, &include_paths)?;
+    // The descriptor set names each file relative to its include root.
+    let files: Vec<&str> = protos
+        .iter()
+        .map(|proto| {
+            proto
+                .strip_prefix(proto_dir)
+                .ok()
+                .and_then(|name| name.to_str())
+                .expect("a proto below the proto directory")
+        })
+        .collect();
+    sid_proto_build::KeyedBindings::new("crate::KeyedMethod", "sid.v1")
+        .types("google.protobuf", "::prost_types")
+        .types("sid.v1.ids", "::sid_ids_proto::sid::v1::ids")
+        .types("sid", "crate::sid")
+        .write(&descriptor_path, &files, &out_dir.join("keyed.rs"))?;
 
     // Rerun if any proto file changes.
     for proto in &protos {

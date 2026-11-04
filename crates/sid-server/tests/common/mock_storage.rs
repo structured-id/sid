@@ -87,6 +87,9 @@ pub struct MockStorageInner {
     /// Reading a profile's primary contacts and metadata fails as a storage
     /// fault would.
     contact_reads_fail: bool,
+    /// The next contact settings edit finds its contact made primary by a
+    /// move committed after the editor read it.
+    primary_moved_before_contact_edit: bool,
     /// Listing a profile's credentials fails as a storage fault would.
     credential_reads_fail: bool,
     /// Reading an OAuth2 client fails as a storage fault would.
@@ -101,14 +104,22 @@ pub struct MockStorageInner {
     magic_link_reads_fail: bool,
     /// Reading a profile by id fails as a storage fault would.
     profile_reads_fail: bool,
+    /// Listing the IP allowlist fails as a storage fault would.
+    allowlist_reads_fail: bool,
     /// Consuming a magic link session fails as a storage fault would.
     magic_link_consume_fails: bool,
     /// Owing new work fails as a full queue refuses it.
     owed_work_full: bool,
+    /// The admin IP allowlist: CIDR, description and creation time.
+    ip_allowlist: Vec<(String, String, chrono::DateTime<chrono::Utc>)>,
     /// Durable work items with their payload and lease deadline.
     work: HashMap<WorkId, StoredWork>,
     /// Completions of keyed commands by (namespace, key).
     operations: HashMap<(String, String), OperationRecord>,
+    /// The periods keyed commands are admitted under, by number.
+    operation_periods: std::collections::BTreeMap<u64, sid_core::models::OperationPeriodRecord>,
+    /// The last period issued.
+    operation_periods_issued: u64,
     export_jobs: HashMap<Uuid, ExportJob>,
     /// Password histories by owner, as the checker reads them.
     histories: HashMap<ProfileId, PasswordHistory>,
@@ -342,9 +353,24 @@ impl MockStorage {
 
     /// A fresh installation without an administrator: registration then
     /// requires the instance claim.
+    /// It has issued period 1, accepting commands for as long as a test runs:
+    /// the period test clients name their commands with.
     pub fn unclaimed() -> Self {
+        let mut inner = MockStorageInner::default();
+        let epoch = chrono::DateTime::<chrono::Utc>::UNIX_EPOCH;
+        inner.operation_periods_issued = 1;
+        inner.operation_periods.insert(
+            1,
+            sid_core::models::OperationPeriodRecord {
+                issued: sid_core::models::IssuedOperationPeriod {
+                    period: sid_core::models::OperationPeriod::new(1),
+                    accepted_until: epoch + chrono::Duration::days(365 * 1000),
+                },
+                issued_at: epoch,
+            },
+        );
         Self {
-            inner: Mutex::new(MockStorageInner::default()),
+            inner: Mutex::new(inner),
             ceremonies: sid_plugin::InProcessCeremonyState::new(),
             unrecordable_admissions: Mutex::new(None),
         }
@@ -465,6 +491,12 @@ impl MockStorage {
         self.inner.lock().unwrap().magic_link_consume_fails = true;
     }
 
+    /// From now on, listing the IP allowlist fails.
+    #[allow(dead_code)]
+    pub fn fail_allowlist_reads(&self) {
+        self.inner.lock().unwrap().allowlist_reads_fail = true;
+    }
+
     /// From now on, listing a profile's principals fails.
     #[allow(dead_code)]
     pub fn fail_principal_reads(&self) {
@@ -475,6 +507,13 @@ impl MockStorage {
     #[allow(dead_code)]
     pub fn fail_contact_reads(&self) {
         self.inner.lock().unwrap().contact_reads_fail = true;
+    }
+
+    /// The next contact settings edit finds its contact made primary since
+    /// the editor read it, as a concurrent move committed in between.
+    #[allow(dead_code)]
+    pub fn move_primary_before_next_contact_edit(&self) {
+        self.inner.lock().unwrap().primary_moved_before_contact_edit = true;
     }
 
     /// From now on, listing a profile's credentials fails.
@@ -1549,6 +1588,93 @@ impl sid_plugin::CeremonyStateStore for MockStorage {
 
 #[async_trait]
 impl sid_plugin::OperationResultStore for MockStorage {
+    async fn operation_period_policy(&self) -> SidResult<sid_core::models::OperationPeriodPolicy> {
+        Ok(sid_core::models::OperationPeriodPolicy {
+            acceptance: chrono::Duration::hours(1),
+            retention: chrono::Duration::days(1),
+        })
+    }
+    async fn current_operation_period(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+        acceptance: chrono::Duration,
+    ) -> SidResult<sid_core::models::IssuedOperationPeriod> {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(current) = inner
+            .operation_periods
+            .values()
+            .rev()
+            .find(|p| p.issued_at <= now && p.issued.accepted_until > now)
+        {
+            return Ok(current.issued);
+        }
+        inner.operation_periods_issued += 1;
+        let next = inner.operation_periods_issued;
+        let issued = sid_core::models::IssuedOperationPeriod {
+            period: sid_core::models::OperationPeriod::new(next),
+            accepted_until: now + acceptance,
+        };
+        inner.operation_periods.insert(
+            next,
+            sid_core::models::OperationPeriodRecord {
+                issued,
+                issued_at: now,
+            },
+        );
+        Ok(issued)
+    }
+    async fn admit_operation_period(
+        &self,
+        period: sid_core::models::OperationPeriod,
+    ) -> SidResult<()> {
+        self.inner.lock().unwrap().admit_operation_period(period)
+    }
+    async fn retire_operation_periods(
+        &self,
+        before: chrono::DateTime<chrono::Utc>,
+    ) -> SidResult<u64> {
+        let mut inner = self.inner.lock().unwrap();
+        let ended: Vec<u64> = inner
+            .operation_periods
+            .iter()
+            .filter(|(_, p)| p.issued.accepted_until < before)
+            .map(|(&period, _)| period)
+            .collect();
+        inner.retire_operation_periods(&ended);
+        Ok(ended.len() as u64)
+    }
+    async fn export_operation_periods(&self) -> SidResult<sid_core::models::OperationPeriodState> {
+        let inner = self.inner.lock().unwrap();
+        Ok(sid_core::models::OperationPeriodState {
+            issued_through: sid_core::models::OperationPeriod::new(inner.operation_periods_issued),
+            active: inner.operation_periods.values().copied().collect(),
+        })
+    }
+    async fn import_operation_periods(
+        &self,
+        state: &sid_core::models::OperationPeriodState,
+    ) -> SidResult<()> {
+        let mut inner = self.inner.lock().unwrap();
+        let last = inner.operation_periods_issued;
+        let source_last = state.issued_through.get();
+        let admitted = |period: u64| state.active.iter().any(|a| a.issued.period.get() == period);
+        let retired: Vec<u64> = inner
+            .operation_periods
+            .keys()
+            .copied()
+            .filter(|&period| period <= source_last && !admitted(period))
+            .collect();
+        inner.retire_operation_periods(&retired);
+        for record in &state.active {
+            if record.issued.period.get() > last {
+                inner
+                    .operation_periods
+                    .insert(record.issued.period.get(), *record);
+            }
+        }
+        inner.operation_periods_issued = last.max(source_last);
+        Ok(())
+    }
     async fn record_outcome(&self, ctx: MutationContext) -> SidResult<()> {
         self.inner.lock().unwrap().owe(&ctx)
     }
@@ -1605,7 +1731,12 @@ impl sid_plugin::OperationResultStore for MockStorage {
             record.completion.key.as_str().to_string(),
         );
         let mut inner = self.inner.lock().unwrap();
-        if inner.operations.contains_key(&slot) {
+        if inner.operations.contains_key(&slot)
+            || record
+                .completion
+                .period
+                .is_some_and(|p| inner.admit_operation_period(p).is_err())
+        {
             return Ok(false);
         }
         inner.operations.insert(slot, record.clone());
@@ -1949,7 +2080,7 @@ impl CredentialStore for MockStorage {
     async fn replace_credential(
         &self,
         credential: &Credential,
-        _audit: MutationContext,
+        ctx: MutationContext,
     ) -> SidResult<()> {
         let replaced = credential.credential_type.replaces();
         if replaced.is_empty() {
@@ -1958,6 +2089,7 @@ impl CredentialStore for MockStorage {
             ));
         }
         let mut inner = self.inner.lock().unwrap();
+        inner.owe(&ctx)?;
         inner.credentials.retain(|_, c| {
             c.profile_id != credential.profile_id || !replaced.contains(&c.credential_type)
         });
@@ -2145,6 +2277,8 @@ impl StorageBackend for MockStorage {
         let mut next = profile.clone();
         next.created_at = stored.created_at;
         next.revision += 1;
+        // A completed command commits nothing, as the stores refuse it.
+        inner.owe(&ctx)?;
         inner.profiles.insert(profile.id, next);
         if let Some(old) = old_username {
             inner.profiles_by_username.remove(&old);
@@ -2154,7 +2288,6 @@ impl StorageBackend for MockStorage {
                 .profiles_by_username
                 .insert(username.clone(), profile.id);
         }
-        inner.owe(&ctx)?;
         Ok(true)
     }
 
@@ -2297,12 +2430,13 @@ impl StorageBackend for MockStorage {
     async fn create_profile_phone(
         &self,
         phone: &ProfilePhone,
-        _audit: MutationContext,
+        audit: MutationContext,
     ) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
         if inner.profile_phones.contains_key(&phone.id.0) {
             return Err(sid_core::Error::Conflict("phone already exists".into()));
         }
+        inner.owe(&audit)?;
         if phone.is_primary {
             for p in inner.profile_phones.values_mut() {
                 if p.profile_id == phone.profile_id {
@@ -2319,13 +2453,21 @@ impl StorageBackend for MockStorage {
         id: ProfilePhoneId,
         settings: &sid_core::models::PhoneSettings,
         at: chrono::DateTime<chrono::Utc>,
-        _audit: MutationContext,
+        mut audit: MutationContext,
     ) -> SidResult<bool> {
         let mut inner = self.inner.lock().unwrap();
-        let Some(phone) = inner
+        if std::mem::take(&mut inner.primary_moved_before_contact_edit) {
+            for p in inner.profile_phones.values_mut() {
+                if p.profile_id == profile_id {
+                    p.is_primary = p.id == id;
+                }
+            }
+        }
+        let Some(mut phone) = inner
             .profile_phones
-            .get_mut(&id.0)
+            .get(&id.0)
             .filter(|p| p.profile_id == profile_id)
+            .cloned()
         else {
             return Ok(false);
         };
@@ -2345,36 +2487,46 @@ impl StorageBackend for MockStorage {
             phone.can_receive_voice = v;
         }
         phone.updated_at = at;
+        audit.record_effect(&phone)?;
+        inner.owe(&audit)?;
+        inner.profile_phones.insert(id.0, phone);
         Ok(true)
     }
     async fn set_primary_profile_phone(
         &self,
         profile_id: ProfileId,
         id: ProfilePhoneId,
-        _at: chrono::DateTime<chrono::Utc>,
-        _audit: MutationContext,
+        at: chrono::DateTime<chrono::Utc>,
+        mut audit: MutationContext,
     ) -> SidResult<bool> {
         let mut inner = self.inner.lock().unwrap();
-        if !inner
+        let Some(mut phone) = inner
             .profile_phones
             .get(&id.0)
-            .is_some_and(|p| p.profile_id == profile_id)
-        {
+            .filter(|p| p.profile_id == profile_id)
+            .cloned()
+        else {
             return Ok(false);
-        }
+        };
+        phone.is_primary = true;
+        phone.updated_at = at;
+        audit.record_effect(&phone)?;
+        inner.owe(&audit)?;
         for p in inner.profile_phones.values_mut() {
             if p.profile_id == profile_id {
                 p.is_primary = p.id == id;
             }
         }
+        inner.profile_phones.insert(id.0, phone);
         Ok(true)
     }
     async fn delete_profile_phone(
         &self,
         id: ProfilePhoneId,
-        _audit: MutationContext,
+        audit: MutationContext,
     ) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
+        inner.owe(&audit)?;
         inner.profile_phones.remove(&id.0);
         Ok(())
     }
@@ -2410,12 +2562,13 @@ impl StorageBackend for MockStorage {
     async fn create_profile_email(
         &self,
         email: &ProfileEmail,
-        _audit: MutationContext,
+        audit: MutationContext,
     ) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
         if inner.profile_emails.contains_key(&email.id.0) {
             return Err(sid_core::Error::Conflict("email already exists".into()));
         }
+        inner.owe(&audit)?;
         if email.is_primary {
             for e in inner.profile_emails.values_mut() {
                 if e.profile_id == email.profile_id {
@@ -2435,13 +2588,21 @@ impl StorageBackend for MockStorage {
         id: ProfileEmailId,
         settings: &sid_core::models::EmailSettings,
         at: chrono::DateTime<chrono::Utc>,
-        _audit: MutationContext,
+        mut audit: MutationContext,
     ) -> SidResult<bool> {
         let mut inner = self.inner.lock().unwrap();
-        let Some(email) = inner
+        if std::mem::take(&mut inner.primary_moved_before_contact_edit) {
+            for e in inner.profile_emails.values_mut() {
+                if e.profile_id == profile_id {
+                    e.is_primary = e.id == id;
+                }
+            }
+        }
+        let Some(mut email) = inner
             .profile_emails
-            .get_mut(&id.0)
+            .get(&id.0)
             .filter(|e| e.profile_id == profile_id)
+            .cloned()
         else {
             return Ok(false);
         };
@@ -2452,36 +2613,46 @@ impl StorageBackend for MockStorage {
             email.custom_label = custom.clone();
         }
         email.updated_at = at;
+        audit.record_effect(&email)?;
+        inner.owe(&audit)?;
+        inner.profile_emails.insert(id.0, email);
         Ok(true)
     }
     async fn set_primary_profile_email(
         &self,
         profile_id: ProfileId,
         id: ProfileEmailId,
-        _at: chrono::DateTime<chrono::Utc>,
-        _audit: MutationContext,
+        at: chrono::DateTime<chrono::Utc>,
+        mut audit: MutationContext,
     ) -> SidResult<bool> {
         let mut inner = self.inner.lock().unwrap();
-        if !inner
+        let Some(mut email) = inner
             .profile_emails
             .get(&id.0)
-            .is_some_and(|e| e.profile_id == profile_id)
-        {
+            .filter(|e| e.profile_id == profile_id)
+            .cloned()
+        else {
             return Ok(false);
-        }
+        };
+        email.is_primary = true;
+        email.updated_at = at;
+        audit.record_effect(&email)?;
+        inner.owe(&audit)?;
         for e in inner.profile_emails.values_mut() {
             if e.profile_id == profile_id {
                 e.is_primary = e.id == id;
             }
         }
+        inner.profile_emails.insert(id.0, email);
         Ok(true)
     }
     async fn delete_profile_email(
         &self,
         id: ProfileEmailId,
-        _audit: MutationContext,
+        audit: MutationContext,
     ) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
+        inner.owe(&audit)?;
         inner.profile_emails.remove(&id.0);
         Ok(())
     }
@@ -2531,12 +2702,35 @@ impl StorageBackend for MockStorage {
             .flatten())
     }
 
-    async fn save_principal(&self, principal: &Principal, ctx: MutationContext) -> SidResult<()> {
+    async fn save_principal(
+        &self,
+        principal: &Principal,
+        mut ctx: MutationContext,
+    ) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
         // A refused bind commits nothing, owed work included.
         inner.check_login_handle(principal)?;
-        inner.owe(&ctx)?;
-        inner.bind_principal(principal)
+        let before = inner.principals.clone();
+        inner.bind_principal(principal)?;
+        if ctx.operation.is_some() {
+            let stored = inner
+                .principals
+                .values()
+                .find(|p| {
+                    p.profile_id == principal.profile_id
+                        && p.principal_type == principal.principal_type
+                        && p.value == principal.value
+                })
+                .cloned()
+                .map(Principal::as_seen_by_subject)
+                .expect("bound above");
+            ctx.record_effect(&stored)?;
+        }
+        if let Err(e) = inner.owe(&ctx) {
+            inner.principals = before;
+            return Err(e);
+        }
+        Ok(())
     }
 
     async fn get_principal_by_value(
@@ -2606,7 +2800,7 @@ impl StorageBackend for MockStorage {
         profile_id: ProfileId,
         contact: &ProfileEmail,
         _reason: &str,
-        ctx: MutationContext,
+        mut ctx: MutationContext,
     ) -> SidResult<bool> {
         if contact.profile_id != profile_id {
             return Err(sid_core::Error::Validation(
@@ -2614,13 +2808,26 @@ impl StorageBackend for MockStorage {
             ));
         }
         let mut inner = self.inner.lock().unwrap();
-        let quarantined = inner.principals.values().any(|p| {
-            p.id == principal_id
-                && p.email_policy_revision == Some(0)
-                && p.assigned_profile_id == Some(profile_id)
-        });
-        if !quarantined {
+        let Some(held) = inner
+            .principals
+            .values()
+            .find(|p| {
+                p.id == principal_id
+                    && p.profile_id == profile_id
+                    && p.email_policy_revision == Some(0)
+                    && p.assigned_profile_id == Some(profile_id)
+            })
+            .cloned()
+        else {
             return Ok(false);
+        };
+        if ctx.operation.is_some() {
+            // The claim as the profile holds it after this commit.
+            let mut held = held;
+            held.email_policy_revision = Some(sid_core::models::INSTALLATION_EMAIL_POLICY_REVISION);
+            held.source_field = Some("email".into());
+            held.source_email_id = Some(contact.id);
+            ctx.record_effect(&held.as_seen_by_subject())?;
         }
         inner.owe(&ctx)?;
         inner.profile_emails.insert(contact.id.0, contact.clone());
@@ -2732,6 +2939,7 @@ impl StorageBackend for MockStorage {
                 .any(|g| g.claim_name == claim_name && g.is_active())
         };
         if active_of(consent) == active_of(&changed) {
+            inner.complete(&ctx)?;
             return Ok(ClaimGrantChange::Unchanged);
         }
         inner.owe(&ctx)?;
@@ -2836,16 +3044,48 @@ impl StorageBackend for MockStorage {
         Ok(0)
     }
 
-    async fn add_ip_allowlist_entry(&self, _cidr: &str, _description: &str) -> SidResult<()> {
+    async fn add_ip_allowlist_entry(
+        &self,
+        cidr: &str,
+        description: &str,
+        mut ctx: MutationContext,
+    ) -> SidResult<()> {
+        let mut inner = self.inner.lock().unwrap();
+        let mut left = inner.ip_allowlist.clone();
+        match left.iter_mut().find(|(c, _, _)| c == cidr) {
+            Some(entry) => entry.1 = description.to_string(),
+            None => left.push((
+                cidr.to_string(),
+                description.to_string(),
+                chrono::Utc::now(),
+            )),
+        }
+        ctx.record_effect(&left)?;
+        inner.owe(&ctx)?;
+        inner.ip_allowlist = left;
         Ok(())
     }
-    async fn remove_ip_allowlist_entry(&self, _cidr: &str) -> SidResult<()> {
+    async fn remove_ip_allowlist_entry(
+        &self,
+        cidr: &str,
+        mut ctx: MutationContext,
+    ) -> SidResult<()> {
+        let mut inner = self.inner.lock().unwrap();
+        let mut left = inner.ip_allowlist.clone();
+        left.retain(|(c, _, _)| c != cidr);
+        ctx.record_effect(&left)?;
+        inner.owe(&ctx)?;
+        inner.ip_allowlist = left;
         Ok(())
     }
     async fn list_ip_allowlist_entries(
         &self,
     ) -> SidResult<Vec<(String, String, chrono::DateTime<chrono::Utc>)>> {
-        Ok(vec![])
+        let inner = self.inner.lock().unwrap();
+        if inner.allowlist_reads_fail {
+            return Err(sid_core::Error::Storage("list the allowlist".into()));
+        }
+        Ok(inner.ip_allowlist.clone())
     }
 
     async fn create_session(&self, session: &Session, audit: MutationContext) -> SidResult<()> {
@@ -2897,21 +3137,23 @@ impl StorageBackend for MockStorage {
             .filter(|s| s.profile_id == profile_id)
             .cloned()
             .collect();
-        inner.sessions.retain(|_, s| s.profile_id != profile_id);
         for session in &ended {
             ctx.work.extend(end.owed_by(session));
         }
+        ctx.record_effect(&ended.len())?;
+        // A completed command commits nothing, as the stores refuse it.
         inner.owe(&ctx)?;
+        inner.sessions.retain(|_, s| s.profile_id != profile_id);
         Ok(ended)
     }
 
     async fn update_oauth2_client(
         &self,
         client: &OAuth2Client,
-        _audit: MutationContext,
+        audit: MutationContext,
     ) -> SidResult<bool> {
         let mut inner = self.inner.lock().unwrap();
-        let Some(stored) = inner.oauth2_clients.get_mut(&client.client_id) else {
+        let Some(stored) = inner.oauth2_clients.get(&client.client_id) else {
             return Ok(false);
         };
         let same_origin = stored.revision == client.revision
@@ -2921,6 +3163,11 @@ impl StorageBackend for MockStorage {
         if !same_origin {
             return Ok(false);
         }
+        inner.owe(&audit)?;
+        let stored = inner
+            .oauth2_clients
+            .get_mut(&client.client_id)
+            .expect("checked above");
         *stored = client.clone();
         stored.revision += 1;
         Ok(true)
@@ -2929,10 +3176,11 @@ impl StorageBackend for MockStorage {
     async fn create_oauth2_client(
         &self,
         client: &OAuth2Client,
-        _audit: MutationContext,
+        audit: MutationContext,
     ) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
         inner.check_new_client(client)?;
+        inner.owe(&audit)?;
         inner
             .oauth2_clients
             .insert(client.client_id.clone(), client.clone());
@@ -2979,7 +3227,7 @@ impl StorageBackend for MockStorage {
         app: &Application,
         client: Option<&OAuth2Client>,
         resource: Option<&ProtectedResource>,
-        _ctx: MutationContext,
+        ctx: MutationContext,
     ) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
         if client.is_some_and(|c| c.application_id != app.id || c.project_id != app.project_id)
@@ -3007,7 +3255,8 @@ impl StorageBackend for MockStorage {
                     inner.resources.insert(r.id, r.clone());
                 }
                 client.map(|c| inner.check_new_client(c)).transpose()
-            });
+            })
+            .and_then(|_| inner.owe(&ctx));
         if let Err(e) = checked {
             inner.applications.remove(&app.id);
             if let Some(r) = resource {
@@ -3060,13 +3309,9 @@ impl StorageBackend for MockStorage {
             .collect())
     }
 
-    async fn update_application(
-        &self,
-        app: &Application,
-        _ctx: MutationContext,
-    ) -> SidResult<bool> {
+    async fn update_application(&self, app: &Application, ctx: MutationContext) -> SidResult<bool> {
         let mut inner = self.inner.lock().unwrap();
-        let Some(stored) = inner.applications.get_mut(&app.id) else {
+        let Some(stored) = inner.applications.get(&app.id) else {
             return Ok(false);
         };
         if stored.revision != app.revision
@@ -3075,21 +3320,21 @@ impl StorageBackend for MockStorage {
         {
             return Ok(false);
         }
+        inner.owe(&ctx)?;
+        let stored = inner.applications.get_mut(&app.id).expect("checked above");
         stored.name = app.name.clone();
         stored.updated_at = app.updated_at;
         stored.revision += 1;
         Ok(true)
     }
 
-    async fn delete_application(
-        &self,
-        id: ApplicationId,
-        _ctx: MutationContext,
-    ) -> SidResult<bool> {
+    async fn delete_application(&self, id: ApplicationId, ctx: MutationContext) -> SidResult<bool> {
         let mut inner = self.inner.lock().unwrap();
-        if inner.applications.remove(&id).is_none() {
+        if !inner.applications.contains_key(&id) {
             return Ok(false);
         }
+        inner.owe(&ctx)?;
+        inner.applications.remove(&id);
         let removed: Vec<String> = inner
             .oauth2_clients
             .values()
@@ -3132,7 +3377,7 @@ impl StorageBackend for MockStorage {
     async fn create_protected_resource(
         &self,
         resource: &ProtectedResource,
-        _ctx: MutationContext,
+        ctx: MutationContext,
     ) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
         if resource
@@ -3144,6 +3389,7 @@ impl StorageBackend for MockStorage {
             ));
         }
         inner.check_new_resource(resource)?;
+        inner.owe(&ctx)?;
         inner.resources.insert(resource.id, resource.clone());
         Ok(())
     }
@@ -3199,13 +3445,13 @@ impl StorageBackend for MockStorage {
     async fn update_protected_resource(
         &self,
         resource: &ProtectedResource,
-        _ctx: MutationContext,
+        ctx: MutationContext,
     ) -> SidResult<bool> {
         if resource.state == ResourceState::Retired {
             return Ok(false);
         }
         let mut inner = self.inner.lock().unwrap();
-        let Some(stored) = inner.resources.get_mut(&resource.id) else {
+        let Some(stored) = inner.resources.get(&resource.id) else {
             return Ok(false);
         };
         let same = stored.revision == resource.revision
@@ -3217,6 +3463,11 @@ impl StorageBackend for MockStorage {
         if !same {
             return Ok(false);
         }
+        inner.owe(&ctx)?;
+        let stored = inner
+            .resources
+            .get_mut(&resource.id)
+            .expect("checked above");
         stored.scopes = resource.scopes.clone();
         stored.state = resource.state;
         stored.updated_at = resource.updated_at;
@@ -3227,7 +3478,7 @@ impl StorageBackend for MockStorage {
     async fn set_resource_access(
         &self,
         access: &ResourceAccess,
-        _ctx: MutationContext,
+        ctx: MutationContext,
     ) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
         match inner.resources.get(&access.resource_id) {
@@ -3248,6 +3499,7 @@ impl StorageBackend for MockStorage {
                 access.client_id
             )));
         }
+        inner.owe(&ctx)?;
         match inner
             .resource_access
             .iter_mut()
@@ -3263,9 +3515,10 @@ impl StorageBackend for MockStorage {
         &self,
         client_id: &str,
         resource: ResourceId,
-        _ctx: MutationContext,
+        ctx: MutationContext,
     ) -> SidResult<bool> {
         let mut inner = self.inner.lock().unwrap();
+        inner.owe(&ctx)?;
         let before = inner.resource_access.len();
         inner
             .resource_access
@@ -3417,9 +3670,10 @@ impl StorageBackend for MockStorage {
     async fn create_initial_access_token(
         &self,
         token: &InitialAccessToken,
-        _audit: MutationContext,
+        audit: MutationContext,
     ) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
+        inner.owe(&audit)?;
         inner
             .initial_access_tokens
             .insert(token.id.0, token.clone());
@@ -3756,9 +4010,10 @@ impl StorageBackend for MockStorage {
     async fn revoke_initial_access_token(
         &self,
         id: InitialAccessTokenId,
-        _audit: MutationContext,
+        audit: MutationContext,
     ) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
+        inner.owe(&audit)?;
         if let Some(iat) = inner.initial_access_tokens.get_mut(&id.0) {
             iat.revoked = true;
         }
@@ -3788,11 +4043,9 @@ impl StorageBackend for MockStorage {
         ctx: MutationContext,
     ) -> SidResult<Option<Project>> {
         let mut inner = self.inner.lock().unwrap();
-        if !inner.projects.get(&id.0).is_some_and(|p| !p.is_system) {
+        let Some(mut project) = inner.projects.get(&id.0).filter(|p| !p.is_system).cloned() else {
             return Ok(None);
-        }
-        inner.owe(&ctx)?;
-        let project = inner.projects.get_mut(&id.0).expect("checked above");
+        };
         if let Some(name) = &change.name {
             project.name = name.clone();
         }
@@ -3800,10 +4053,14 @@ impl StorageBackend for MockStorage {
             project.description = description.clone();
         }
         project.updated_at = change.updated_at;
-        Ok(Some(project.clone()))
+        let mut ctx = ctx;
+        ctx.record_effect(&project)?;
+        inner.owe(&ctx)?;
+        inner.projects.insert(id.0, project.clone());
+        Ok(Some(project))
     }
 
-    async fn delete_project(&self, id: ProjectId, _audit: MutationContext) -> SidResult<()> {
+    async fn delete_project(&self, id: ProjectId, ctx: MutationContext) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
         if let Some(project) = inner.projects.get(&id.0)
             && project.is_system
@@ -3812,6 +4069,7 @@ impl StorageBackend for MockStorage {
                 "Cannot delete system project".into(),
             ));
         }
+        inner.owe(&ctx)?;
         inner.projects.remove(&id.0);
         Ok(())
     }
@@ -3873,7 +4131,7 @@ impl StorageBackend for MockStorage {
             .find(|r| r.project_id == p && r.name == n)
             .cloned())
     }
-    async fn create_role(&self, r: &Role, _audit: MutationContext) -> SidResult<()> {
+    async fn create_role(&self, r: &Role, audit: MutationContext) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
         // A project holds one role per key and per name; a role is never replaced.
         if inner.roles.contains_key(&r.id)
@@ -3884,6 +4142,7 @@ impl StorageBackend for MockStorage {
         {
             return Err(sid_core::Error::Conflict(format!("role {}", r.key)));
         }
+        inner.owe(&audit)?;
         inner.roles.insert(r.id, r.clone());
         Ok(())
     }
@@ -3925,7 +4184,7 @@ impl StorageBackend for MockStorage {
         }
         self.update_role(r, audit).await
     }
-    async fn delete_role(&self, id: RoleId, _audit: MutationContext) -> SidResult<()> {
+    async fn delete_role(&self, id: RoleId, audit: MutationContext) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
         // As the backends: the administrator role goes only once unassigned.
         if inner
@@ -3937,6 +4196,7 @@ impl StorageBackend for MockStorage {
                 "the installation administrator role cannot be deleted while it is assigned".into(),
             ));
         }
+        inner.owe(&audit)?;
         inner.roles.remove(&id);
         inner.role_assignments.retain(|a| a.role_id != id);
         Ok(())
@@ -4178,29 +4438,24 @@ impl StorageBackend for MockStorage {
     async fn set_profile_metadata(
         &self,
         metadata: &ProfileMetadata,
-        _audit: MutationContext,
+        audit: MutationContext,
     ) -> SidResult<()> {
-        if !self
-            .inner
-            .lock()
-            .unwrap()
-            .profiles
-            .contains_key(&metadata.profile_id)
-        {
+        let mut inner = self.inner.lock().unwrap();
+        if !inner.profiles.contains_key(&metadata.profile_id) {
             return Err(sid_core::Error::NotFound(format!(
                 "profile {}",
                 metadata.profile_id
             )));
         }
-        Ok(())
+        inner.owe(&audit)
     }
     async fn delete_profile_metadata(
         &self,
         _profile_id: ProfileId,
         _key: &str,
-        _audit: MutationContext,
+        audit: MutationContext,
     ) -> SidResult<()> {
-        Ok(())
+        self.inner.lock().unwrap().owe(&audit)
     }
     async fn list_profile_metadata(
         &self,
@@ -4254,13 +4509,16 @@ impl StorageBackend for MockStorage {
         &self,
         id: DeviceId,
         display_name: Option<&str>,
-        audit: MutationContext,
+        mut audit: MutationContext,
     ) -> SidResult<bool> {
         let mut inner = self.inner.lock().unwrap();
-        let Some(device) = inner.devices.get_mut(&id) else {
+        let Some(mut device) = inner.devices.get(&id).cloned() else {
             return Ok(false);
         };
         device.display_name = display_name.map(str::to_owned);
+        audit.record_effect(&device)?;
+        inner.owe(&audit)?;
+        inner.devices.insert(id, device);
         inner.device_audits.push(audit.audit);
         Ok(true)
     }
@@ -4269,14 +4527,16 @@ impl StorageBackend for MockStorage {
         id: DeviceId,
         trusted: bool,
         max_trusted: usize,
-        audit: MutationContext,
+        mut audit: MutationContext,
     ) -> SidResult<sid_core::models::DeviceTrustChange> {
         use sid_core::models::DeviceTrustChange;
         let mut inner = self.inner.lock().unwrap();
-        let Some(device) = inner.devices.get(&id).cloned() else {
+        let Some(mut device) = inner.devices.get(&id).cloned() else {
             return Ok(DeviceTrustChange::NotFound);
         };
         if device.trusted == trusted {
+            audit.record_effect(&device)?;
+            inner.complete(&audit)?;
             return Ok(DeviceTrustChange::Unchanged);
         }
         let already_trusted = inner
@@ -4287,7 +4547,10 @@ impl StorageBackend for MockStorage {
         if trusted && already_trusted >= max_trusted {
             return Ok(DeviceTrustChange::LimitReached);
         }
-        inner.devices.get_mut(&id).expect("read above").trusted = trusted;
+        device.trusted = trusted;
+        audit.record_effect(&device)?;
+        inner.owe(&audit)?;
+        inner.devices.insert(id, device);
         inner.device_audits.push(audit.audit);
         Ok(DeviceTrustChange::Changed)
     }
@@ -4307,6 +4570,7 @@ impl StorageBackend for MockStorage {
     }
     async fn delete_device(&self, id: DeviceId, audit: MutationContext) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
+        inner.owe(&audit)?;
         inner.devices.remove(&id);
         inner.device_audits.push(audit.audit);
         Ok(())
@@ -4520,9 +4784,9 @@ impl StorageBackend for MockStorage {
         provider: &UpstreamProvider,
         audit: MutationContext,
     ) -> SidResult<()> {
-        self.inner
-            .lock()
-            .unwrap()
+        let mut inner = self.inner.lock().unwrap();
+        inner.owe(&audit)?;
+        inner
             .upstream_creations
             .push((provider.clone(), audit.audit));
         Ok(())
@@ -4596,9 +4860,9 @@ impl StorageBackend for MockStorage {
         &self,
         _pat: &PersonalAccessToken,
         _active_limit: Option<u64>,
-        _audit: MutationContext,
+        audit: MutationContext,
     ) -> SidResult<()> {
-        Ok(())
+        self.inner.lock().unwrap().owe(&audit)
     }
     async fn record_pat_use(
         &self,
@@ -4663,6 +4927,7 @@ impl StorageBackend for MockStorage {
                 "machine user already exists".into(),
             ));
         }
+        inner.owe(&audit)?;
         inner.machine_users.insert(mu.id, mu.clone());
         inner.machine_user_audits.push(audit.audit);
         Ok(())
@@ -4670,15 +4935,17 @@ impl StorageBackend for MockStorage {
     async fn update_machine_user(
         &self,
         mu: &MachineUser,
-        _audit: MutationContext,
+        audit: MutationContext,
     ) -> SidResult<bool> {
         let mut inner = self.inner.lock().unwrap();
-        let Some(stored) = inner.machine_users.get_mut(&mu.id) else {
-            return Ok(false);
-        };
-        if stored.status == sid_core::models::machine_user::MachineUserStatus::Deleted {
+        let live = inner.machine_users.get(&mu.id).is_some_and(|m| {
+            m.status != sid_core::models::machine_user::MachineUserStatus::Deleted
+        });
+        if !live {
             return Ok(false);
         }
+        inner.owe(&audit)?;
+        let stored = inner.machine_users.get_mut(&mu.id).expect("read above");
         let status = stored.status;
         *stored = mu.clone();
         stored.status = status;
@@ -4690,17 +4957,21 @@ impl StorageBackend for MockStorage {
         id: MachineUserId,
         from: sid_core::models::machine_user::MachineUserStatus,
         to: sid_core::models::machine_user::MachineUserStatus,
-        _audit: MutationContext,
+        audit: MutationContext,
     ) -> SidResult<bool> {
         let mut inner = self.inner.lock().unwrap();
-        match inner.machine_users.get_mut(&id) {
-            Some(stored) if stored.status == from => {
-                stored.status = to;
-                stored.updated_at = chrono::Utc::now();
-                Ok(true)
-            }
-            _ => Ok(false),
+        if !inner
+            .machine_users
+            .get(&id)
+            .is_some_and(|m| m.status == from)
+        {
+            return Ok(false);
         }
+        inner.owe(&audit)?;
+        let stored = inner.machine_users.get_mut(&id).expect("read above");
+        stored.status = to;
+        stored.updated_at = chrono::Utc::now();
+        Ok(true)
     }
     async fn delete_machine_user(
         &self,
@@ -5002,7 +5273,7 @@ impl StorageBackend for MockStorage {
         &self,
         cred: &MachineUserCredential,
         active_limit: Option<u64>,
-        _audit: MutationContext,
+        audit: MutationContext,
     ) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
         if inner.machine_credentials.iter().any(|c| c.kid == cred.kid) {
@@ -5020,6 +5291,7 @@ impl StorageBackend for MockStorage {
                 "too many machine credentials".into(),
             ));
         }
+        inner.owe(&audit)?;
         inner.machine_credentials.push(cred.clone());
         Ok(())
     }
@@ -5029,16 +5301,23 @@ impl StorageBackend for MockStorage {
         old_kid: &str,
         new: &MachineUserCredential,
         grace_until: chrono::DateTime<chrono::Utc>,
-        _audit: MutationContext,
+        audit: MutationContext,
     ) -> SidResult<bool> {
         let mut inner = self.inner.lock().unwrap();
-        let Some(old) = inner.machine_credentials.iter_mut().find(|c| {
+        let rotates = |c: &MachineUserCredential| {
             c.kid == old_kid
                 && c.machine_user_id == machine_user_id
                 && c.status == sid_core::models::CredentialStatus::Active
-        }) else {
-            return Ok(false);
         };
+        if !inner.machine_credentials.iter().any(rotates) {
+            return Ok(false);
+        }
+        inner.owe(&audit)?;
+        let old = inner
+            .machine_credentials
+            .iter_mut()
+            .find(|c| rotates(c))
+            .expect("read above");
         old.status = sid_core::models::CredentialStatus::GracePeriod;
         old.expires_at = Some(
             old.expires_at
@@ -5209,13 +5488,14 @@ impl StorageBackend for MockStorage {
     }
 
     // === DATA EXPORT ===
-    async fn create_export_job(&self, job: &ExportJob, _: MutationContext) -> SidResult<()> {
+    async fn create_export_job(&self, job: &ExportJob, ctx: MutationContext) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
         if inner.export_jobs.contains_key(&job.id) {
             return Err(sid_core::Error::Conflict(
                 "export job already exists".into(),
             ));
         }
+        inner.owe(&ctx)?;
         inner.export_jobs.insert(job.id, job.clone());
         Ok(())
     }
@@ -5223,18 +5503,20 @@ impl StorageBackend for MockStorage {
         &self,
         id: Uuid,
         at: chrono::DateTime<chrono::Utc>,
-        _: MutationContext,
+        ctx: MutationContext,
     ) -> SidResult<bool> {
         let mut inner = self.inner.lock().unwrap();
-        match inner.export_jobs.get_mut(&id) {
-            Some(job)
-                if job.status == ExportStatus::Ready && job.expires_at.is_some_and(|e| e > at) =>
-            {
-                job.status = ExportStatus::Downloaded;
-                Ok(true)
-            }
-            _ => Ok(false),
+        let ready = inner.export_jobs.get(&id).is_some_and(|job| {
+            job.status == ExportStatus::Ready && job.expires_at.is_some_and(|e| e > at)
+        });
+        if !ready {
+            return Ok(false);
         }
+        inner.owe(&ctx)?;
+        if let Some(job) = inner.export_jobs.get_mut(&id) {
+            job.status = ExportStatus::Downloaded;
+        }
+        Ok(true)
     }
     async fn expire_export_job(
         &self,
@@ -5503,12 +5785,14 @@ impl StorageBackend for MockStorage {
     ) -> SidResult<bool> {
         Ok(false)
     }
-    async fn create_invite(
+    async fn create_invites(
         &self,
-        invite: &sid_core::models::Invite,
-        _: MutationContext,
+        invites: &[sid_core::models::Invite],
+        ctx: MutationContext,
     ) -> SidResult<()> {
-        self.inner.lock().unwrap().invites.push(invite.clone());
+        let mut inner = self.inner.lock().unwrap();
+        inner.owe(&ctx)?;
+        inner.invites.extend_from_slice(invites);
         Ok(())
     }
     async fn get_invite(
@@ -6042,12 +6326,52 @@ impl MockStorageInner {
         Ok(())
     }
 
-    /// Commit the work a mutation owes, as a backend does in its transaction.
     /// Commit what `ctx` carries besides the mutation. Called before the
     /// mutation's own change: a keyed command already completed commits
     /// nothing.
     fn owe(&mut self, ctx: &MutationContext) -> SidResult<()> {
+        self.complete(ctx)?;
+        let capacity = if self.owed_work_full { 0 } else { u64::MAX };
+        for owed in &ctx.work {
+            self.enqueue(owed, capacity)?;
+        }
+        Ok(())
+    }
+
+    /// Refuse `period` when it has no record: retired when its number was
+    /// issued, else never issued.
+    fn admit_operation_period(&self, period: sid_core::models::OperationPeriod) -> SidResult<()> {
+        use sid_core::models::OperationPeriodRefusal;
+        if self.operation_periods.contains_key(&period.get()) {
+            return Ok(());
+        }
+        let refusal = if period.get() <= self.operation_periods_issued {
+            OperationPeriodRefusal::Retired
+        } else {
+            OperationPeriodRefusal::NotIssued
+        };
+        Err(sid_core::Error::OperationPeriodRefused(refusal))
+    }
+
+    /// Retire `periods` with the completions named with them.
+    fn retire_operation_periods(&mut self, periods: &[u64]) {
+        for period in periods {
+            self.operation_periods.remove(period);
+        }
+        self.operations.retain(|_, r| {
+            r.completion
+                .period
+                .is_none_or(|p| !periods.contains(&p.get()))
+        });
+    }
+
+    /// Record a keyed command's completion, as a mutation that changed
+    /// nothing still does; refused when another commit completed it.
+    fn complete(&mut self, ctx: &MutationContext) -> SidResult<()> {
         if let Some(operation) = &ctx.operation {
+            if let Some(period) = operation.period {
+                self.admit_operation_period(period)?;
+            }
             let slot = (
                 operation.namespace.clone(),
                 operation.key.as_str().to_string(),
@@ -6068,10 +6392,6 @@ impl MockStorageInner {
                     completed_at: chrono::Utc::now(),
                 },
             );
-        }
-        let capacity = if self.owed_work_full { 0 } else { u64::MAX };
-        for owed in &ctx.work {
-            self.enqueue(owed, capacity)?;
         }
         Ok(())
     }

@@ -17,7 +17,7 @@ fn test_authz_check_response_is_allowed() {
 
 #[test]
 fn test_authz_check_request_with_context() {
-    let mut context = HashMap::new();
+    let mut context = BTreeMap::new();
     context.insert("ip".into(), "192.168.1.1".into());
     context.insert("device_id".into(), "dev_abc".into());
 

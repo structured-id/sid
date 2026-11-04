@@ -189,7 +189,11 @@ pub use oauth2_client::{
     OAuth2Client, RegistrationPolicy, SubjectType, TokenEndpointAuthMethod,
 };
 pub use oidc_issuer::{IssuerAuthority, IssuerHandle, IssuerId, IssuerSigningKey, OidcIssuer};
-pub use operation::{OperationCompletion, OperationKey, OperationRecord};
+pub use operation::{
+    IssuedOperationPeriod, OperationCompletion, OperationContext, OperationKey, OperationPeriod,
+    OperationPeriodPolicy, OperationPeriodRecord, OperationPeriodRefusal, OperationPeriodState,
+    OperationRecord,
+};
 pub use organization::{OrgId, OrgStatus, OrgType, Organization};
 pub use password_history::{
     CLEANUP_SETTLED_NAMESPACE, CleanupSettled, ENROLLMENT_ADMISSION_KIND, EnrollmentAdmission,

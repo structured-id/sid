@@ -5338,10 +5338,12 @@ dependencies = [
  "dashmap",
  "ed25519-dalek 3.0.0",
  "ff",
+ "futures",
  "group",
  "halo2_proofs",
  "hex",
  "hmac",
+ "http",
  "hybrid-array",
  "idna",
  "ipnet",
@@ -5353,6 +5355,7 @@ dependencies = [
  "pasta_curves",
  "pbkdf2",
  "phonenumber",
+ "prost",
  "prost-types",
  "psl",
  "rand 0.10.3",
@@ -5381,6 +5384,7 @@ dependencies = [
  "tokio",
  "tonic",
  "tonic-types",
+ "tower",
  "tracing",
  "unicode-normalization",
  "unicode-security",
@@ -5785,10 +5789,20 @@ dependencies = [
  "prost-reflect",
  "prost-types",
  "sid-ids-proto",
+ "sid-proto-build",
  "tonic",
  "tonic-build",
  "tonic-prost",
  "tonic-prost-build",
+]
+
+[[package]]
+name = "sid-proto-build"
+version = "0.2.11"
+dependencies = [
+ "heck",
+ "prost-reflect",
+ "protox",
 ]
 
 [[package]]

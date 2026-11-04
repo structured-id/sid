@@ -15,10 +15,13 @@ use sid_proto::sid::v1::identity_service_server::IdentityService;
 use sid_proto::sid::v1::*;
 use tonic::{Code, Request};
 
+/// `msg` from the bearer of `token` as one new command: its client names it
+/// by a fresh operation key, as the account UIs' transports do.
 fn authed<T>(msg: T, token: &str) -> Request<T> {
     let mut req = Request::new(msg);
     req.metadata_mut()
         .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    common::name_new_command(req.metadata_mut());
     req
 }
 

@@ -16,7 +16,7 @@ fn sample_user(email: &str) -> ImportedUser {
         roles: vec!["user".to_string()],
         groups: vec![],
         external_id: "ext-123".to_string(),
-        attributes: std::collections::HashMap::new(),
+        attributes: Default::default(),
     }
 }
 

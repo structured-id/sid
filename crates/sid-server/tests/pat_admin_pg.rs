@@ -61,13 +61,111 @@ async fn pat(storage: &Arc<dyn StorageBackend>, owner: ProfileId) -> PersonalAcc
     pat
 }
 
+/// `msg` as one new command, of `token`'s when given (a method that promises
+/// a safe retry takes an operation key).
 fn req<T>(msg: T, token: Option<&str>) -> Request<T> {
+    keyed(msg, token, &Uuid::new_v4().to_string())
+}
+
+/// `msg` under the operation key `key`.
+fn keyed<T>(msg: T, token: Option<&str>, key: &str) -> Request<T> {
     let mut req = Request::new(msg);
     if let Some(token) = token {
         req.metadata_mut()
             .insert("authorization", format!("Bearer {token}").parse().unwrap());
     }
+    common::name_command(req.metadata_mut(), key);
     req
+}
+
+/// The creation's response is lost and retried: the retry answers with the
+/// token it created, without its value (only its hash is kept), and the
+/// user holds one token, not two.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_create_retry_answers_with_its_token_without_the_value() {
+    let storage = pg_storage().await;
+    let owner = profile(&storage, &[]).await;
+    let (svc, jwt) = service(storage.clone()).await;
+    let token = common::issue_token(&jwt, &owner, &["openid".to_string()]);
+    // One command: the retry repeats the same inputs.
+    let expires = (chrono::Utc::now() + chrono::Duration::days(1)).timestamp();
+    let create = || {
+        keyed(
+            sid_proto::sid::v1::CreatePatRequest {
+                name: "ci".into(),
+                scopes: vec!["repos:read".into()],
+                expires_at: Some(prost_types::Timestamp {
+                    seconds: expires,
+                    nanos: 0,
+                }),
+                ..Default::default()
+            },
+            Some(&token),
+            "op-create-pat",
+        )
+    };
+
+    let first = svc.create_pat(create()).await.unwrap().into_inner();
+    let retry = svc.create_pat(create()).await.unwrap().into_inner();
+
+    assert!(!first.token.is_empty());
+    assert_eq!(
+        retry.pat_id, first.pat_id,
+        "the retry created another token"
+    );
+    assert!(
+        retry.token.is_empty(),
+        "the retry disclosed the value again"
+    );
+    assert_eq!(retry.metadata, first.metadata);
+    assert_eq!(
+        storage.list_pats_by_profile(owner.id).await.unwrap().len(),
+        1
+    );
+}
+
+/// Concurrent attempts of one creation that fills the user's last slot: the
+/// store counts the limit before it sees the key, so an attempt that lost
+/// the race must answer with the token the winner created, not with
+/// QUOTA_EXCEEDED, and the user holds one token more, not a refusal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_concurrent_attempts_at_the_limit_answer_with_one_token() {
+    use sid_core::models::pat::PAT_MAX_ACTIVE_PER_USER;
+
+    let storage = pg_storage().await;
+    let owner = profile(&storage, &[]).await;
+    for _ in 1..PAT_MAX_ACTIVE_PER_USER {
+        pat(&storage, owner.id).await;
+    }
+    let (svc, jwt) = service(storage.clone()).await;
+    let token = common::issue_token(&jwt, &owner, &["openid".to_string()]);
+    let expires = (chrono::Utc::now() + chrono::Duration::days(1)).timestamp();
+    let create = || {
+        keyed(
+            sid_proto::sid::v1::CreatePatRequest {
+                name: "last".into(),
+                scopes: vec!["repos:read".into()],
+                expires_at: Some(prost_types::Timestamp {
+                    seconds: expires,
+                    nanos: 0,
+                }),
+                ..Default::default()
+            },
+            Some(&token),
+            "op-last-slot",
+        )
+    };
+
+    let attempts = futures::future::join_all((0..8).map(|_| svc.create_pat(create()))).await;
+    let ids: std::collections::BTreeSet<String> = attempts
+        .into_iter()
+        .map(|a| a.expect("every attempt answers").into_inner().pat_id)
+        .collect();
+    assert_eq!(ids.len(), 1, "the attempts answered with different tokens");
+    assert_eq!(
+        storage.list_pats_by_profile(owner.id).await.unwrap().len(),
+        PAT_MAX_ACTIVE_PER_USER
+    );
 }
 
 async fn service(

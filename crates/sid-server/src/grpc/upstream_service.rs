@@ -6,14 +6,17 @@
 //! Supports provider CRUD, upstream auth initiation, and callback handling
 //! with account resolution (returning user, linking, JIT provisioning).
 
+use prost::Message;
 use sid_authn::caller::{Caller, authenticate};
 use sid_authn::challenge_store::ChallengeStore;
 use sid_authn::jwt::JwtService;
+use sid_authn::operation::KeyedCommand;
+use sid_authn::operation::grpc::context;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::upstream::oidc::OidcProviderClient;
 use sid_core::models::upstream_provider::ProviderTrustCategory;
 use sid_core::models::{
-    AuditEntry, Profile, UpstreamIdentity, UpstreamLogin,
+    AuditEntry, MutationContext, Profile, UpstreamIdentity, UpstreamLogin,
     UpstreamProtocol as DomainUpstreamProtocol, UpstreamProvider as DomainUpstreamProvider,
     UpstreamProviderId,
 };
@@ -21,6 +24,7 @@ use sid_keys::KeyManager;
 use sid_plugin::UpstreamIdpProvider;
 use sid_plugin::storage::StorageBackend;
 use sid_plugin::upstream::UpstreamAuthState;
+use sid_proto::keyed::federation::upstream_service as keyed;
 use sid_proto::sid::v1::upstream_service_server::UpstreamService;
 use sid_proto::sid::v1::{
     self, CreateUpstreamProviderRequest, DeleteUpstreamProviderRequest,
@@ -248,6 +252,7 @@ impl UpstreamService for UpstreamServiceImpl {
         request: Request<CreateUpstreamProviderRequest>,
     ) -> Result<Response<UpstreamProviderResponse>, Status> {
         let caller = self.admin(&request).await?;
+        let operation = context(&request)?;
         let req = request.into_inner();
 
         if req.name.is_empty() {
@@ -259,68 +264,89 @@ impl UpstreamService for UpstreamServiceImpl {
         if req.client_secret.is_empty() {
             return Err(missing_field("client_secret"));
         }
-
-        let protocol = Self::proto_to_domain_protocol(req.protocol)?;
-        let trust_category = Self::proto_to_domain_trust(req.trust_category);
-
-        // Generate a new provider ID for context-bound encryption.
-        let provider_id = UpstreamProviderId::new();
-
-        // Encrypt client_secret with context binding to this provider.
-        let encrypted_secret = self
-            .key_manager
-            .encrypt(
-                req.client_secret.as_bytes(),
-                &provider_id.client_secret_context(),
-            )
-            .await
-            .map_err(|e| internal("encrypt upstream client secret", e))?;
-
-        let mut provider =
-            DomainUpstreamProvider::new(&req.name, protocol, &req.client_id, encrypted_secret);
-        provider.id = provider_id;
-        provider.trust_category = trust_category;
-        provider.discovery_url = Self::optional_string(&req.discovery_url);
-        provider.authorization_endpoint = Self::optional_string(&req.authorization_endpoint);
-        provider.token_endpoint = Self::optional_string(&req.token_endpoint);
-        provider.userinfo_endpoint = Self::optional_string(&req.userinfo_endpoint);
-        if !req.scopes.is_empty() {
-            provider.scopes = req.scopes;
+        // A retry of a completed creation answers with the provider it
+        // created and creates no second one. The command's fingerprint, an
+        // unsalted digest stored with its result, leaves the secret out: a
+        // reader of the database without the key manager's keys could
+        // otherwise test guesses of the upstream secret against it.
+        let fingerprinted = CreateUpstreamProviderRequest {
+            client_secret: String::new(),
+            ..req.clone()
+        };
+        let command = KeyedCommand::by_profile::<keyed::CreateUpstreamProvider>(
+            caller.profile_id,
+            operation,
+            &fingerprinted,
+        );
+        if let Some(recorded) = command.replay(&*self.storage).await? {
+            return Ok(Response::new(recorded));
         }
-        provider.show_on_login = req.show_on_login;
-        provider.display_order = req.display_order;
-        provider.logo_url = Self::optional_string(&req.logo_url);
+        // A refusal a concurrent attempt of this command caused (the name its
+        // provider took) is that attempt's answer.
+        let answer: Result<UpstreamProviderResponse, Status> = async {
+            let protocol = Self::proto_to_domain_protocol(req.protocol)?;
+            let trust_category = Self::proto_to_domain_trust(req.trust_category);
 
-        self.storage
-            .create_upstream_provider(
-                &provider,
-                AuditEntry::admin(
-                    caller.profile_id.to_string(),
-                    "upstream_provider.create",
-                    provider.id.0.to_string(),
+            // Generate a new provider ID for context-bound encryption.
+            let provider_id = UpstreamProviderId::new();
+
+            // Encrypt client_secret with context binding to this provider.
+            let encrypted_secret = self
+                .key_manager
+                .encrypt(
+                    req.client_secret.as_bytes(),
+                    &provider_id.client_secret_context(),
                 )
-                .into(),
-            )
-            .await
-            .map_err(|e| match e {
-                sid_core::Error::Conflict(_) => Status::from(
-                    ApiError::new(
+                .await
+                .map_err(|e| internal("encrypt upstream client secret", e))?;
+
+            let mut provider =
+                DomainUpstreamProvider::new(&req.name, protocol, &req.client_id, encrypted_secret);
+            provider.id = provider_id;
+            provider.trust_category = trust_category;
+            provider.discovery_url = Self::optional_string(&req.discovery_url);
+            provider.authorization_endpoint = Self::optional_string(&req.authorization_endpoint);
+            provider.token_endpoint = Self::optional_string(&req.token_endpoint);
+            provider.userinfo_endpoint = Self::optional_string(&req.userinfo_endpoint);
+            if !req.scopes.is_empty() {
+                provider.scopes = req.scopes;
+            }
+            provider.show_on_login = req.show_on_login;
+            provider.display_order = req.display_order;
+            provider.logo_url = Self::optional_string(&req.logo_url);
+
+            let response = UpstreamProviderResponse {
+                provider: Some(Self::provider_to_proto(&provider)),
+            };
+            let ctx = MutationContext::from(AuditEntry::admin(
+                caller.profile_id.to_string(),
+                "upstream_provider.create",
+                provider.id.0.to_string(),
+            ))
+            .with_operation(command.completion(response.encode_to_vec()));
+            match self.storage.create_upstream_provider(&provider, ctx).await {
+                Ok(_) => {}
+                Err(sid_core::Error::OperationCompleted(_)) => return Err(changed_concurrently()),
+                Err(sid_core::Error::Conflict(_)) => {
+                    return Err(ApiError::new(
                         ErrorReason::UpstreamProviderAlreadyExists,
                         "an upstream provider with this name already exists",
                     )
-                    .with_resource("UpstreamProvider", provider.name.clone()),
-                ),
-                other => storage_failure(other),
-            })?;
+                    .with_resource("UpstreamProvider", provider.name.clone())
+                    .into());
+                }
+                Err(other) => return Err(storage_failure(other)),
+            }
 
-        info!(
-            "Created upstream provider {} ({})",
-            provider.name, provider.id
-        );
+            info!(
+                "Created upstream provider {} ({})",
+                provider.name, provider.id
+            );
 
-        Ok(Response::new(UpstreamProviderResponse {
-            provider: Some(Self::provider_to_proto(&provider)),
-        }))
+            Ok(response)
+        }
+        .await;
+        Ok(Response::new(command.settle(&*self.storage, answer).await?))
     }
 
     async fn get_upstream_provider(
@@ -348,94 +374,113 @@ impl UpstreamService for UpstreamServiceImpl {
         request: Request<UpdateUpstreamProviderRequest>,
     ) -> Result<Response<UpstreamProviderResponse>, Status> {
         let caller = self.admin(&request).await?;
+        let operation = context(&request)?;
         let req = request.into_inner();
         let provider_id = Self::parse_provider_id(&req.provider_id)?;
-
-        let mut provider = self
-            .storage
-            .get_upstream_provider(provider_id)
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(|| Self::provider_not_found(provider_id))?;
-
-        // Apply optional field updates.
-        if let Some(name) = req.name {
-            provider.name = name;
-        }
-        if let Some(proto) = req.protocol {
-            provider.protocol = Self::proto_to_domain_protocol(proto)?;
-        }
-        if let Some(tc) = req.trust_category {
-            provider.trust_category = Self::proto_to_domain_trust(tc);
-        }
-        if let Some(enabled) = req.enabled {
-            provider.enabled = enabled;
-        }
-        if let Some(client_id) = req.client_id {
-            provider.client_id = client_id;
-        }
-        // Re-encrypt client_secret if provided.
-        if let Some(ref secret) = req.client_secret {
-            provider.client_secret = self
-                .key_manager
-                .encrypt(secret.as_bytes(), &provider_id.client_secret_context())
-                .await
-                .map_err(|e| internal("encrypt upstream client secret", e))?;
-        }
-        if let Some(url) = req.discovery_url {
-            provider.discovery_url = if url.is_empty() { None } else { Some(url) };
-        }
-        if let Some(ep) = req.authorization_endpoint {
-            provider.authorization_endpoint = if ep.is_empty() { None } else { Some(ep) };
-        }
-        if let Some(ep) = req.token_endpoint {
-            provider.token_endpoint = if ep.is_empty() { None } else { Some(ep) };
-        }
-        if let Some(ep) = req.userinfo_endpoint {
-            provider.userinfo_endpoint = if ep.is_empty() { None } else { Some(ep) };
-        }
-        if !req.scopes.is_empty() {
-            provider.scopes = req.scopes;
-        }
-        if let Some(sol) = req.show_on_login {
-            provider.show_on_login = sol;
-        }
-        if let Some(order) = req.display_order {
-            provider.display_order = order;
-        }
-        if let Some(logo) = req.logo_url {
-            provider.logo_url = if logo.is_empty() { None } else { Some(logo) };
-        }
-
-        provider.updated_at = chrono::Utc::now();
-
-        let updated = self
-            .storage
-            .update_upstream_provider(
-                &provider,
-                AuditEntry::admin(
-                    caller.profile_id.to_string(),
-                    "upstream_provider.update",
-                    provider.id.0.to_string(),
-                )
-                .into(),
-            )
-            .await
-            .map_err(storage_failure)?;
-        if !updated {
-            // Deleted or changed since it was read: never recreated or overwritten.
-            return Err(changed_concurrently());
-        }
-        provider.revision += 1;
-
-        info!(
-            "Updated upstream provider {} ({})",
-            provider.name, provider.id
+        // A retry of a completed edit answers with the provider as that edit
+        // left it and never writes it over a later edit. The fingerprint
+        // leaves a new secret out, as for a creation.
+        let fingerprinted = UpdateUpstreamProviderRequest {
+            client_secret: req.client_secret.as_ref().map(|_| String::new()),
+            ..req.clone()
+        };
+        let command = KeyedCommand::by_profile::<keyed::UpdateUpstreamProvider>(
+            caller.profile_id,
+            operation,
+            &fingerprinted,
         );
+        if let Some(recorded) = command.replay(&*self.storage).await? {
+            return Ok(Response::new(recorded));
+        }
+        // A refusal a concurrent attempt of this command caused (the
+        // revision its edit moved on) is that attempt's answer.
+        let answer: Result<UpstreamProviderResponse, Status> = async {
+            let mut provider = self
+                .storage
+                .get_upstream_provider(provider_id)
+                .await
+                .map_err(storage_failure)?
+                .ok_or_else(|| Self::provider_not_found(provider_id))?;
 
-        Ok(Response::new(UpstreamProviderResponse {
-            provider: Some(Self::provider_to_proto(&provider)),
-        }))
+            // Apply optional field updates.
+            if let Some(name) = req.name {
+                provider.name = name;
+            }
+            if let Some(proto) = req.protocol {
+                provider.protocol = Self::proto_to_domain_protocol(proto)?;
+            }
+            if let Some(tc) = req.trust_category {
+                provider.trust_category = Self::proto_to_domain_trust(tc);
+            }
+            if let Some(enabled) = req.enabled {
+                provider.enabled = enabled;
+            }
+            if let Some(client_id) = req.client_id {
+                provider.client_id = client_id;
+            }
+            // Re-encrypt client_secret if provided.
+            if let Some(ref secret) = req.client_secret {
+                provider.client_secret = self
+                    .key_manager
+                    .encrypt(secret.as_bytes(), &provider_id.client_secret_context())
+                    .await
+                    .map_err(|e| internal("encrypt upstream client secret", e))?;
+            }
+            if let Some(url) = req.discovery_url {
+                provider.discovery_url = if url.is_empty() { None } else { Some(url) };
+            }
+            if let Some(ep) = req.authorization_endpoint {
+                provider.authorization_endpoint = if ep.is_empty() { None } else { Some(ep) };
+            }
+            if let Some(ep) = req.token_endpoint {
+                provider.token_endpoint = if ep.is_empty() { None } else { Some(ep) };
+            }
+            if let Some(ep) = req.userinfo_endpoint {
+                provider.userinfo_endpoint = if ep.is_empty() { None } else { Some(ep) };
+            }
+            if !req.scopes.is_empty() {
+                provider.scopes = req.scopes;
+            }
+            if let Some(sol) = req.show_on_login {
+                provider.show_on_login = sol;
+            }
+            if let Some(order) = req.display_order {
+                provider.display_order = order;
+            }
+            if let Some(logo) = req.logo_url {
+                provider.logo_url = if logo.is_empty() { None } else { Some(logo) };
+            }
+
+            provider.updated_at = chrono::Utc::now();
+
+            let response = UpstreamProviderResponse {
+                provider: Some(Self::provider_to_proto(&provider)),
+            };
+            let ctx = MutationContext::from(AuditEntry::admin(
+                caller.profile_id.to_string(),
+                "upstream_provider.update",
+                provider.id.0.to_string(),
+            ))
+            .with_operation(command.completion(response.encode_to_vec()));
+            match self.storage.update_upstream_provider(&provider, ctx).await {
+                Ok(true) => {}
+                // Deleted or changed since it was read: never recreated or
+                // overwritten.
+                Ok(false) | Err(sid_core::Error::OperationCompleted(_)) => {
+                    return Err(changed_concurrently());
+                }
+                Err(e) => return Err(storage_failure(e)),
+            }
+
+            info!(
+                "Updated upstream provider {} ({})",
+                provider.name, provider.id
+            );
+
+            Ok(response)
+        }
+        .await;
+        Ok(Response::new(command.settle(&*self.storage, answer).await?))
     }
 
     async fn delete_upstream_provider(

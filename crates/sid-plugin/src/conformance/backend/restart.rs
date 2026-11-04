@@ -33,13 +33,19 @@ where
     let work = NewWork::new(kind.clone(), b"payload".to_vec());
 
     let before = open().await;
+    let period = before
+        .current_operation_period(chrono::Utc::now(), chrono::Duration::hours(1))
+        .await
+        .unwrap()
+        .period;
     let completion = OperationCompletion::new(
         &namespace,
         key.clone(),
         METHOD,
         b"inputs",
         b"result".to_vec(),
-    );
+    )
+    .in_period(period);
     before
         .create_project(&project, test_audit().with_operation(completion))
         .await
@@ -58,8 +64,19 @@ where
         .await
         .unwrap()
         .expect("a lost reply resolves by its key");
-    assert!(record.matches(METHOD, b"inputs"));
+    assert!(record.matches(METHOD, b"inputs", Some(period)));
     assert_eq!(record.completion.result, b"result");
+    // The period the command was named with still admits after the restart.
+    let next = OperationKey::parse(&Uuid::new_v4().to_string()).unwrap();
+    after
+        .record_outcome(
+            test_audit().with_operation(
+                OperationCompletion::new(&namespace, next, METHOD, b"inputs", Vec::new())
+                    .in_period(period),
+            ),
+        )
+        .await
+        .unwrap();
     assert!(after.get_project(project.id).await.unwrap().is_some());
 
     tokio::time::sleep(PAST_LEASE).await;

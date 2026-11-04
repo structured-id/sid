@@ -5,11 +5,15 @@
 //! - Consent management (4 RPCs) — claim-level consent control
 //! - Activity history, linked accounts, app launcher, notification prefs, passwordless — TODO
 
+use prost::Message;
 use sid_authn::caller::authenticate;
 use sid_authn::jwt::JwtService;
+use sid_authn::operation::KeyedCommand;
+use sid_authn::operation::grpc::{Effect, context};
 use sid_authn::revocation_cache::RevocationCache;
 use sid_core::models::{AuditEntry, MutationContext, ProfileId};
 use sid_plugin::storage::StorageBackend;
+use sid_proto::keyed::account::account_service as keyed;
 use sid_proto::sid::v1::account::account_service_server::AccountService;
 use sid_proto::sid::v1::account::*;
 use std::sync::Arc;
@@ -171,6 +175,11 @@ fn proto_email_label(v: i32) -> sid_core::models::profile_email::EmailLabel {
     }
 }
 
+/// The audit of `profile_id`'s own `action` on `target`.
+fn own_ctx(profile_id: ProfileId, action: &str, target: String) -> MutationContext {
+    AuditEntry::user(profile_id.to_string(), action, target).into()
+}
+
 /// Parse a phone ID string into `ProfilePhoneId`.
 fn parse_phone_id(id: &str) -> Result<sid_core::models::profile_phone::ProfilePhoneId, Status> {
     uuid::Uuid::parse_str(id)
@@ -238,6 +247,93 @@ impl AccountServiceImpl {
             .map_err(storage_failure)?
             .filter(|e| e.profile_id == profile_id)
             .ok_or_else(|| email_not_found(id))
+    }
+
+    /// Apply one claim decision of `profile_id`'s consent under `command`.
+    async fn decide_claim(
+        &self,
+        profile_id: ProfileId,
+        command: &KeyedCommand,
+        req: &UpdateClaimConsentRequest,
+    ) -> Result<(), Effect> {
+        use sid_core::models::consent::{ClaimDecision, ClaimGrantChange, ClaimType};
+        let record = self
+            .storage
+            .get_consent_by_client(profile_id, &req.site_id)
+            .await?
+            .ok_or_else(|| consent_not_found(&req.site_id))?;
+
+        // A claim granted again keeps what it was shared as.
+        let decision = if req.grant {
+            ClaimDecision::Grant(
+                record
+                    .grants
+                    .iter()
+                    .find(|g| g.claim_name == req.claim_name)
+                    .map_or(ClaimType::Data, |g| g.claim_type),
+            )
+        } else {
+            ClaimDecision::Revoke
+        };
+
+        // The event is owed by the same commit that changes the consent; a
+        // decision already in effect commits only its completion.
+        let consent_event_type = if req.grant {
+            sid_core::models::event::event_types::CONSENT_GRANTED
+        } else {
+            sid_core::models::event::event_types::CONSENT_REVOKED
+        };
+        let event = sid_core::models::event::Event::new("sid-account", consent_event_type)
+            .with_subject(format!("profile/{}", profile_id))
+            .with_data(serde_json::json!({
+                "profile_id": profile_id.to_string(),
+                "site_id": req.site_id,
+                "claim_name": req.claim_name,
+            }));
+        let action = if req.grant {
+            "consent.claim_granted"
+        } else {
+            "consent.claim_revoked"
+        };
+        let ctx = own_ctx(
+            profile_id,
+            action,
+            format!("{}:{}", req.site_id, req.claim_name),
+        )
+        .with_work(event.relay())
+        .with_operation(command.completion(().encode_to_vec()));
+        match self
+            .storage
+            .change_claim_grant(record.id, &req.claim_name, decision, ctx)
+            .await?
+        {
+            ClaimGrantChange::Changed => {}
+            // Already as asked: nothing changed, nothing announced.
+            ClaimGrantChange::Unchanged => return Ok(()),
+            ClaimGrantChange::ConsentNotActive => {
+                return Err(Status::from(
+                    ApiError::new(
+                        ErrorReason::InvalidState,
+                        "an inactive consent takes no claim changes",
+                    )
+                    .with_precondition(
+                        "CONSENT_STATE",
+                        req.site_id.clone(),
+                        "inactive",
+                    ),
+                )
+                .into());
+            }
+        }
+
+        info!(
+            "Consent claim {} {} for profile {} site {}",
+            req.claim_name,
+            if req.grant { "granted" } else { "revoked" },
+            profile_id,
+            req.site_id
+        );
+        Ok(())
     }
 }
 
@@ -427,6 +523,7 @@ impl AccountService for AccountServiceImpl {
         request: Request<UpdateClaimConsentRequest>,
     ) -> Result<Response<()>, Status> {
         let profile_id = self.extract_profile_id(&request).await?;
+        let operation = context(&request)?;
         let req = request.into_inner();
 
         if req.site_id.is_empty() {
@@ -436,77 +533,16 @@ impl AccountService for AccountServiceImpl {
             return Err(missing_field("claim_name"));
         }
 
-        use sid_core::models::consent::{ClaimDecision, ClaimGrantChange, ClaimType};
-        let record = self
-            .storage
-            .get_consent_by_client(profile_id, &req.site_id)
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(|| consent_not_found(&req.site_id))?;
-
-        // A claim granted again keeps what it was shared as.
-        let decision = if req.grant {
-            ClaimDecision::Grant(
-                record
-                    .grants
-                    .iter()
-                    .find(|g| g.claim_name == req.claim_name)
-                    .map_or(ClaimType::Data, |g| g.claim_type),
-            )
-        } else {
-            ClaimDecision::Revoke
-        };
-
-        // The event is owed by the same commit that changes the consent.
-        let consent_event_type = if req.grant {
-            sid_core::models::event::event_types::CONSENT_GRANTED
-        } else {
-            sid_core::models::event::event_types::CONSENT_REVOKED
-        };
-        let event = sid_core::models::event::Event::new("sid-account", consent_event_type)
-            .with_subject(format!("profile/{}", profile_id))
-            .with_data(serde_json::json!({
-                "profile_id": profile_id.to_string(),
-                "site_id": req.site_id,
-                "claim_name": req.claim_name,
-            }));
-        let ctx = MutationContext::from(AuditEntry::user(
-            profile_id.to_string(),
-            if req.grant {
-                "consent.claim_granted"
-            } else {
-                "consent.claim_revoked"
-            },
-            format!("{}:{}", req.site_id, req.claim_name),
-        ))
-        .with_work(event.relay());
-        let change = self
-            .storage
-            .change_claim_grant(record.id, &req.claim_name, decision, ctx)
-            .await
-            .map_err(storage_failure)?;
-        match change {
-            ClaimGrantChange::Changed => {}
-            // Already as asked: nothing changed, nothing announced.
-            ClaimGrantChange::Unchanged => return Ok(Response::new(())),
-            ClaimGrantChange::ConsentNotActive => {
-                return Err(ApiError::new(
-                    ErrorReason::InvalidState,
-                    "an inactive consent takes no claim changes",
-                )
-                .with_precondition("CONSENT_STATE", req.site_id.clone(), "inactive")
-                .into());
-            }
-        }
-
-        info!(
-            "Consent claim {} {} for profile {} site {}",
-            req.claim_name,
-            if req.grant { "granted" } else { "revoked" },
-            profile_id,
-            req.site_id
-        );
-
+        // A retry of a completed decision answers as it did, and never
+        // applies it again over a later decision on the same claim.
+        let command =
+            KeyedCommand::by_profile::<keyed::UpdateClaimConsent>(profile_id, operation, &req);
+        command
+            .run(&*self.storage, || async {
+                self.decide_claim(profile_id, &command, &req).await?;
+                Ok(())
+            })
+            .await?;
         Ok(Response::new(()))
     }
 
@@ -515,47 +551,44 @@ impl AccountService for AccountServiceImpl {
         request: Request<DisconnectSiteRequest>,
     ) -> Result<Response<()>, Status> {
         let profile_id = self.extract_profile_id(&request).await?;
-        let site_id = request.into_inner().site_id;
-
-        if site_id.is_empty() {
+        let operation = context(&request)?;
+        let req = request.into_inner();
+        if req.site_id.is_empty() {
             return Err(missing_field("site_id"));
         }
 
-        let record = self
-            .storage
-            .get_consent_by_client(profile_id, &site_id)
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(|| consent_not_found(&site_id))?;
-
-        let event = sid_core::models::event::Event::new(
-            "sid-account",
-            sid_core::models::event::event_types::CONSENT_REVOKED,
-        )
-        .with_subject(format!("profile/{}", profile_id))
-        .with_data(serde_json::json!({
-            "profile_id": profile_id.to_string(),
-            "site_id": site_id,
-            "disconnect": true,
-        }));
-        let ctx = MutationContext::from(AuditEntry::user(
-            profile_id.to_string(),
-            "consent.site_disconnected",
-            site_id.clone(),
-        ))
-        .with_work(event.relay());
-        let disconnected = self
-            .storage
-            .delete_consent(record.id, ctx)
-            .await
-            .map_err(storage_failure)?;
-        if !disconnected {
-            // Disconnected meanwhile: that disconnect announced it.
-            return Err(consent_not_found(&site_id));
-        }
-
-        info!("Site {} disconnected for profile {}", site_id, profile_id);
-
+        // A retry of a completed disconnect answers as it did.
+        let command =
+            KeyedCommand::by_profile::<keyed::DisconnectSite>(profile_id, operation, &req);
+        command
+            .run(&*self.storage, || async {
+                let site_id = &req.site_id;
+                let record = self
+                    .storage
+                    .get_consent_by_client(profile_id, site_id)
+                    .await?
+                    .ok_or_else(|| consent_not_found(site_id))?;
+                let event = sid_core::models::event::Event::new(
+                    "sid-account",
+                    sid_core::models::event::event_types::CONSENT_REVOKED,
+                )
+                .with_subject(format!("profile/{}", profile_id))
+                .with_data(serde_json::json!({
+                    "profile_id": profile_id.to_string(),
+                    "site_id": site_id,
+                    "disconnect": true,
+                }));
+                let ctx = own_ctx(profile_id, "consent.site_disconnected", site_id.clone())
+                    .with_work(event.relay())
+                    .with_operation(command.completion(().encode_to_vec()));
+                if !self.storage.delete_consent(record.id, ctx).await? {
+                    // Disconnected meanwhile: that disconnect announced it.
+                    return Err(consent_not_found(site_id).into());
+                }
+                info!("Site {} disconnected for profile {}", site_id, profile_id);
+                Ok(())
+            })
+            .await?;
         Ok(Response::new(()))
     }
 
@@ -566,46 +599,46 @@ impl AccountService for AccountServiceImpl {
         request: Request<AddPhoneRequest>,
     ) -> Result<Response<sid_proto::sid::v1::ProfilePhone>, Status> {
         let profile_id = self.extract_profile_id(&request).await?;
+        let operation = context(&request)?;
         let req = request.into_inner();
 
         if req.e164 == 0 {
             return Err(missing_field("e164"));
         }
 
-        let now = chrono::Utc::now();
-        let phone = sid_core::models::ProfilePhone {
-            id: sid_core::models::profile_phone::ProfilePhoneId::new(),
-            profile_id,
-            e164: req.e164,
-            extension: req.extension,
-            label: proto_phone_label(req.label),
-            custom_label: req.custom_label.filter(|s| !s.is_empty()),
-            is_primary: req.is_primary,
-            can_receive_sms: req.can_receive_sms,
-            can_receive_fax: req.can_receive_fax,
-            can_receive_voice: req.can_receive_voice,
-            verified: false,
-            verified_at: None,
-            created_at: now,
-            updated_at: now,
-        };
-
-        // A primary phone takes the flag from the current one in the same write.
-        self.storage
-            .create_profile_phone(
-                &phone,
-                AuditEntry::user(
-                    profile_id.to_string(),
-                    "phone.added",
-                    phone.id.0.to_string(),
-                )
-                .into(),
-            )
-            .await
-            .map_err(storage_failure)?;
-
-        info!("Phone {} added for profile {}", phone.id.0, profile_id);
-        Ok(Response::new(super::convert::phone_to_proto(&phone)))
+        // A retry of a completed addition answers with the phone it added and
+        // adds no second one.
+        let command = KeyedCommand::by_profile::<keyed::AddPhone>(profile_id, operation, &req);
+        let added = command
+            .run(&*self.storage, || async {
+                let now = chrono::Utc::now();
+                let phone = sid_core::models::ProfilePhone {
+                    id: sid_core::models::profile_phone::ProfilePhoneId::new(),
+                    profile_id,
+                    e164: req.e164,
+                    extension: req.extension,
+                    label: proto_phone_label(req.label),
+                    custom_label: req.custom_label.clone().filter(|s| !s.is_empty()),
+                    is_primary: req.is_primary,
+                    can_receive_sms: req.can_receive_sms,
+                    can_receive_fax: req.can_receive_fax,
+                    can_receive_voice: req.can_receive_voice,
+                    verified: false,
+                    verified_at: None,
+                    created_at: now,
+                    updated_at: now,
+                };
+                let view = super::convert::phone_to_proto(&phone);
+                // A primary phone takes the flag from the current one in the
+                // same write.
+                let ctx = own_ctx(profile_id, "phone.added", phone.id.0.to_string())
+                    .with_operation(command.completion(view.encode_to_vec()));
+                self.storage.create_profile_phone(&phone, ctx).await?;
+                info!("Phone {} added for profile {}", phone.id.0, profile_id);
+                Ok(view)
+            })
+            .await?;
+        Ok(Response::new(added))
     }
 
     async fn remove_phone(
@@ -613,24 +646,23 @@ impl AccountService for AccountServiceImpl {
         request: Request<RemovePhoneRequest>,
     ) -> Result<Response<()>, Status> {
         let profile_id = self.extract_profile_id(&request).await?;
-        let phone_id = parse_phone_id(&request.into_inner().phone_id)?;
+        let operation = context(&request)?;
+        let req = request.into_inner();
+        let phone_id = parse_phone_id(&req.phone_id)?;
 
-        // Another profile's phone is not found, as one that does not exist.
-        self.owned_phone(profile_id, phone_id).await?;
-
-        self.storage
-            .delete_profile_phone(
-                phone_id,
-                AuditEntry::user(
-                    profile_id.to_string(),
-                    "phone.removed",
-                    phone_id.0.to_string(),
-                )
-                .into(),
-            )
-            .await
-            .map_err(storage_failure)?;
-
+        // A retry of a completed removal answers as it did.
+        let command = KeyedCommand::by_profile::<keyed::RemovePhone>(profile_id, operation, &req);
+        command
+            .run(&*self.storage, || async {
+                // Another profile's phone is not found, as one that does not
+                // exist.
+                self.owned_phone(profile_id, phone_id).await?;
+                let ctx = own_ctx(profile_id, "phone.removed", phone_id.0.to_string())
+                    .with_operation(command.completion(().encode_to_vec()));
+                self.storage.delete_profile_phone(phone_id, ctx).await?;
+                Ok(())
+            })
+            .await?;
         Ok(Response::new(()))
     }
 
@@ -639,6 +671,7 @@ impl AccountService for AccountServiceImpl {
         request: Request<UpdatePhoneRequest>,
     ) -> Result<Response<sid_proto::sid::v1::ProfilePhone>, Status> {
         let profile_id = self.extract_profile_id(&request).await?;
+        let operation = context(&request)?;
         let req = request.into_inner();
         let phone_id = parse_phone_id(&req.phone_id)?;
 
@@ -646,32 +679,37 @@ impl AccountService for AccountServiceImpl {
         // number, its verification and the primary flag stay as stored.
         let settings = sid_core::models::PhoneSettings {
             label: req.label.map(proto_phone_label),
-            custom_label: req.custom_label.map(|s| Some(s).filter(|s| !s.is_empty())),
+            custom_label: req
+                .custom_label
+                .clone()
+                .map(|s| Some(s).filter(|s| !s.is_empty())),
             can_receive_sms: req.can_receive_sms,
             can_receive_fax: req.can_receive_fax,
             can_receive_voice: req.can_receive_voice,
         };
-        let updated = self
-            .storage
-            .update_profile_phone_settings(
-                profile_id,
-                phone_id,
-                &settings,
-                chrono::Utc::now(),
-                AuditEntry::user(
-                    profile_id.to_string(),
-                    "phone.updated",
-                    phone_id.0.to_string(),
-                )
-                .into(),
-            )
-            .await
-            .map_err(storage_failure)?;
-        if !updated {
-            return Err(phone_not_found(phone_id));
-        }
-        let phone = self.owned_phone(profile_id, phone_id).await?;
-
+        // A retry of a completed edit answers with the phone as that edit's
+        // commit left it, and never writes it again over a later edit.
+        let command = KeyedCommand::by_profile::<keyed::UpdatePhone>(profile_id, operation, &req);
+        let phone: sid_core::models::ProfilePhone = command
+            .run_recorded(&*self.storage, || async {
+                let ctx = own_ctx(profile_id, "phone.updated", phone_id.0.to_string())
+                    .with_operation(command.effect_completion());
+                if !self
+                    .storage
+                    .update_profile_phone_settings(
+                        profile_id,
+                        phone_id,
+                        &settings,
+                        chrono::Utc::now(),
+                        ctx,
+                    )
+                    .await?
+                {
+                    return Err(phone_not_found(phone_id).into());
+                }
+                Ok(command.recorded_effect(&*self.storage).await?)
+            })
+            .await?;
         Ok(Response::new(super::convert::phone_to_proto(&phone)))
     }
 
@@ -680,29 +718,29 @@ impl AccountService for AccountServiceImpl {
         request: Request<SetPrimaryPhoneRequest>,
     ) -> Result<Response<sid_proto::sid::v1::ProfilePhone>, Status> {
         let profile_id = self.extract_profile_id(&request).await?;
-        let phone_id = parse_phone_id(&request.into_inner().phone_id)?;
+        let operation = context(&request)?;
+        let req = request.into_inner();
+        let phone_id = parse_phone_id(&req.phone_id)?;
 
-        // The flag moves from the current primary in one write.
-        let moved = self
-            .storage
-            .set_primary_profile_phone(
-                profile_id,
-                phone_id,
-                chrono::Utc::now(),
-                AuditEntry::user(
-                    profile_id.to_string(),
-                    "phone.primary_set",
-                    phone_id.0.to_string(),
-                )
-                .into(),
-            )
-            .await
-            .map_err(storage_failure)?;
-        if !moved {
-            return Err(phone_not_found(phone_id));
-        }
-        let phone = self.owned_phone(profile_id, phone_id).await?;
-
+        // A retry of a completed move answers with the phone as that move's
+        // commit left it, and never moves the flag back over a later move.
+        let command =
+            KeyedCommand::by_profile::<keyed::SetPrimaryPhone>(profile_id, operation, &req);
+        let phone: sid_core::models::ProfilePhone = command
+            .run_recorded(&*self.storage, || async {
+                // The flag moves from the current primary in one write.
+                let ctx = own_ctx(profile_id, "phone.primary_set", phone_id.0.to_string())
+                    .with_operation(command.effect_completion());
+                if !self
+                    .storage
+                    .set_primary_profile_phone(profile_id, phone_id, chrono::Utc::now(), ctx)
+                    .await?
+                {
+                    return Err(phone_not_found(phone_id).into());
+                }
+                Ok(command.recorded_effect(&*self.storage).await?)
+            })
+            .await?;
         Ok(Response::new(super::convert::phone_to_proto(&phone)))
     }
 
@@ -730,6 +768,7 @@ impl AccountService for AccountServiceImpl {
         request: Request<AddEmailRequest>,
     ) -> Result<Response<sid_proto::sid::v1::ProfileEmail>, Status> {
         let profile_id = self.extract_profile_id(&request).await?;
+        let operation = context(&request)?;
         let req = request.into_inner();
 
         if req.email.is_empty() {
@@ -742,36 +781,35 @@ impl AccountService for AccountServiceImpl {
                 .map_err(|e| invalid_field("email", e.to_string()))?
                 .delivery;
 
-        let now = chrono::Utc::now();
-        let email = sid_core::models::ProfileEmail {
-            id: sid_core::models::profile_email::ProfileEmailId::new(),
-            profile_id,
-            email: address,
-            label: proto_email_label(req.label),
-            custom_label: req.custom_label.filter(|s| !s.is_empty()),
-            is_primary: req.is_primary,
-            verified: false,
-            verified_at: None,
-            created_at: now,
-            updated_at: now,
-        };
-
-        // A primary email takes the flag from the current one in the same write.
-        self.storage
-            .create_profile_email(
-                &email,
-                AuditEntry::user(
-                    profile_id.to_string(),
-                    "email.added",
-                    email.id.0.to_string(),
-                )
-                .into(),
-            )
-            .await
-            .map_err(storage_failure)?;
-
-        info!("Email {} added for profile {}", email.id.0, profile_id);
-        Ok(Response::new(super::convert::email_to_proto(&email)))
+        // A retry of a completed addition answers with the email it added and
+        // adds no second one.
+        let command = KeyedCommand::by_profile::<keyed::AddEmail>(profile_id, operation, &req);
+        let added = command
+            .run(&*self.storage, || async {
+                let now = chrono::Utc::now();
+                let email = sid_core::models::ProfileEmail {
+                    id: sid_core::models::profile_email::ProfileEmailId::new(),
+                    profile_id,
+                    email: address.clone(),
+                    label: proto_email_label(req.label),
+                    custom_label: req.custom_label.clone().filter(|s| !s.is_empty()),
+                    is_primary: req.is_primary,
+                    verified: false,
+                    verified_at: None,
+                    created_at: now,
+                    updated_at: now,
+                };
+                let view = super::convert::email_to_proto(&email);
+                // A primary email takes the flag from the current one in the
+                // same write.
+                let ctx = own_ctx(profile_id, "email.added", email.id.0.to_string())
+                    .with_operation(command.completion(view.encode_to_vec()));
+                self.storage.create_profile_email(&email, ctx).await?;
+                info!("Email {} added for profile {}", email.id.0, profile_id);
+                Ok(view)
+            })
+            .await?;
+        Ok(Response::new(added))
     }
 
     async fn remove_email(
@@ -779,24 +817,23 @@ impl AccountService for AccountServiceImpl {
         request: Request<RemoveEmailRequest>,
     ) -> Result<Response<()>, Status> {
         let profile_id = self.extract_profile_id(&request).await?;
-        let email_id = parse_email_id(&request.into_inner().email_id)?;
+        let operation = context(&request)?;
+        let req = request.into_inner();
+        let email_id = parse_email_id(&req.email_id)?;
 
-        // Another profile's email is not found, as one that does not exist.
-        self.owned_email(profile_id, email_id).await?;
-
-        self.storage
-            .delete_profile_email(
-                email_id,
-                AuditEntry::user(
-                    profile_id.to_string(),
-                    "email.removed",
-                    email_id.0.to_string(),
-                )
-                .into(),
-            )
-            .await
-            .map_err(storage_failure)?;
-
+        // A retry of a completed removal answers as it did.
+        let command = KeyedCommand::by_profile::<keyed::RemoveEmail>(profile_id, operation, &req);
+        command
+            .run(&*self.storage, || async {
+                // Another profile's email is not found, as one that does not
+                // exist.
+                self.owned_email(profile_id, email_id).await?;
+                let ctx = own_ctx(profile_id, "email.removed", email_id.0.to_string())
+                    .with_operation(command.completion(().encode_to_vec()));
+                self.storage.delete_profile_email(email_id, ctx).await?;
+                Ok(())
+            })
+            .await?;
         Ok(Response::new(()))
     }
 
@@ -805,6 +842,7 @@ impl AccountService for AccountServiceImpl {
         request: Request<UpdateEmailRequest>,
     ) -> Result<Response<sid_proto::sid::v1::ProfileEmail>, Status> {
         let profile_id = self.extract_profile_id(&request).await?;
+        let operation = context(&request)?;
         let req = request.into_inner();
         let email_id = parse_email_id(&req.email_id)?;
 
@@ -812,29 +850,34 @@ impl AccountService for AccountServiceImpl {
         // verification and the primary flag stay as stored.
         let settings = sid_core::models::EmailSettings {
             label: req.label.map(proto_email_label),
-            custom_label: req.custom_label.map(|s| Some(s).filter(|s| !s.is_empty())),
+            custom_label: req
+                .custom_label
+                .clone()
+                .map(|s| Some(s).filter(|s| !s.is_empty())),
         };
-        let updated = self
-            .storage
-            .update_profile_email_settings(
-                profile_id,
-                email_id,
-                &settings,
-                chrono::Utc::now(),
-                AuditEntry::user(
-                    profile_id.to_string(),
-                    "email.updated",
-                    email_id.0.to_string(),
-                )
-                .into(),
-            )
-            .await
-            .map_err(storage_failure)?;
-        if !updated {
-            return Err(email_not_found(email_id));
-        }
-        let email = self.owned_email(profile_id, email_id).await?;
-
+        // A retry of a completed edit answers with the email as that edit's
+        // commit left it, and never writes it again over a later edit.
+        let command = KeyedCommand::by_profile::<keyed::UpdateEmail>(profile_id, operation, &req);
+        let email: sid_core::models::ProfileEmail = command
+            .run_recorded(&*self.storage, || async {
+                let ctx = own_ctx(profile_id, "email.updated", email_id.0.to_string())
+                    .with_operation(command.effect_completion());
+                if !self
+                    .storage
+                    .update_profile_email_settings(
+                        profile_id,
+                        email_id,
+                        &settings,
+                        chrono::Utc::now(),
+                        ctx,
+                    )
+                    .await?
+                {
+                    return Err(email_not_found(email_id).into());
+                }
+                Ok(command.recorded_effect(&*self.storage).await?)
+            })
+            .await?;
         Ok(Response::new(super::convert::email_to_proto(&email)))
     }
 
@@ -843,29 +886,29 @@ impl AccountService for AccountServiceImpl {
         request: Request<SetPrimaryEmailRequest>,
     ) -> Result<Response<sid_proto::sid::v1::ProfileEmail>, Status> {
         let profile_id = self.extract_profile_id(&request).await?;
-        let email_id = parse_email_id(&request.into_inner().email_id)?;
+        let operation = context(&request)?;
+        let req = request.into_inner();
+        let email_id = parse_email_id(&req.email_id)?;
 
-        // The flag moves from the current primary in one write.
-        let moved = self
-            .storage
-            .set_primary_profile_email(
-                profile_id,
-                email_id,
-                chrono::Utc::now(),
-                AuditEntry::user(
-                    profile_id.to_string(),
-                    "email.primary_set",
-                    email_id.0.to_string(),
-                )
-                .into(),
-            )
-            .await
-            .map_err(storage_failure)?;
-        if !moved {
-            return Err(email_not_found(email_id));
-        }
-        let email = self.owned_email(profile_id, email_id).await?;
-
+        // A retry of a completed move answers with the email as that move's
+        // commit left it, and never moves the flag back over a later move.
+        let command =
+            KeyedCommand::by_profile::<keyed::SetPrimaryEmail>(profile_id, operation, &req);
+        let email: sid_core::models::ProfileEmail = command
+            .run_recorded(&*self.storage, || async {
+                // The flag moves from the current primary in one write.
+                let ctx = own_ctx(profile_id, "email.primary_set", email_id.0.to_string())
+                    .with_operation(command.effect_completion());
+                if !self
+                    .storage
+                    .set_primary_profile_email(profile_id, email_id, chrono::Utc::now(), ctx)
+                    .await?
+                {
+                    return Err(email_not_found(email_id).into());
+                }
+                Ok(command.recorded_effect(&*self.storage).await?)
+            })
+            .await?;
         Ok(Response::new(super::convert::email_to_proto(&email)))
     }
 

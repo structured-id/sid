@@ -165,85 +165,117 @@ impl PatService for PatServiceImpl {
         request: Request<CreatePatRequest>,
     ) -> Result<Response<CreatePatResponse>, Status> {
         let profile_id = self.token_owner(&request).await?;
+        let context = sid_authn::operation::grpc::context(&request)?;
         let req = request.into_inner();
-
-        // Validate required fields.
-        if req.name.is_empty() {
-            return Err(missing_field("name"));
+        let command = sid_authn::operation::KeyedCommand::by_profile::<
+            sid_proto::keyed::machine::pat_service::CreatePat,
+        >(profile_id, context, &req);
+        // SID keeps only the token's hash: a retry of a completed creation
+        // answers with the token it created, its value empty, and creates no
+        // second token.
+        if let Some(recorded) = command.replay::<CreatePatResponse>(&*self.storage).await? {
+            return Ok(Response::new(recorded));
         }
-        if req.scopes.is_empty() {
-            return Err(missing_field("scopes"));
-        }
+        // A refusal a concurrent attempt of this command caused (the slot its
+        // token took) is that attempt's answer.
+        let answer: Result<CreatePatResponse, Status> = async {
+            // Validate required fields.
+            if req.name.is_empty() {
+                return Err(missing_field("name"));
+            }
+            if req.scopes.is_empty() {
+                return Err(missing_field("scopes"));
+            }
 
-        // Validate expiration: must be provided and within policy limit.
-        let expires_at_ts = req
-            .expires_at
-            .as_ref()
-            .ok_or_else(|| missing_field("expires_at"))?;
+            // Validate expiration: must be provided and within policy limit.
+            let expires_at_ts = req
+                .expires_at
+                .as_ref()
+                .ok_or_else(|| missing_field("expires_at"))?;
 
-        let expires_at =
-            chrono::DateTime::from_timestamp(expires_at_ts.seconds, expires_at_ts.nanos as u32)
-                .ok_or_else(|| invalid_field("expires_at", "not a representable time"))?;
+            let expires_at =
+                chrono::DateTime::from_timestamp(expires_at_ts.seconds, expires_at_ts.nanos as u32)
+                    .ok_or_else(|| invalid_field("expires_at", "not a representable time"))?;
 
-        let max_expiry =
-            chrono::Utc::now() + chrono::Duration::days(i64::from(PAT_MAX_LIFETIME_DAYS));
-        if expires_at > max_expiry {
-            return Err(invalid_field(
-                "expires_at",
-                format!("at most {PAT_MAX_LIFETIME_DAYS} days ahead"),
-            ));
-        }
-        if expires_at <= chrono::Utc::now() {
-            return Err(invalid_field("expires_at", "must be in the future"));
-        }
+            let max_expiry =
+                chrono::Utc::now() + chrono::Duration::days(i64::from(PAT_MAX_LIFETIME_DAYS));
+            if expires_at > max_expiry {
+                return Err(invalid_field(
+                    "expires_at",
+                    format!("at most {PAT_MAX_LIFETIME_DAYS} days ahead"),
+                ));
+            }
+            if expires_at <= chrono::Utc::now() {
+                return Err(invalid_field("expires_at", "must be in the future"));
+            }
 
-        // Generate token (plaintext shown once, hash stored).
-        let (plaintext, hash, prefix) = generate_pat_token();
+            // Generate token (plaintext shown once, hash stored).
+            let (plaintext, hash, prefix) = generate_pat_token();
 
-        let mut pat =
-            PersonalAccessToken::new(profile_id, &req.name, &hash, &prefix, req.scopes.clone())
-                .with_expires_at(expires_at);
+            let mut pat =
+                PersonalAccessToken::new(profile_id, &req.name, &hash, &prefix, req.scopes.clone())
+                    .with_expires_at(expires_at);
 
-        if !req.description.is_empty() {
-            pat.description = Some(req.description.clone());
-        }
-        if !req.ip_allowlist.is_empty() {
-            pat.ip_allowlist = req.ip_allowlist;
-        }
+            if !req.description.is_empty() {
+                pat.description = Some(req.description.clone());
+            }
+            if !req.ip_allowlist.is_empty() {
+                pat.ip_allowlist = req.ip_allowlist;
+            }
 
-        let audit: MutationContext =
-            AuditEntry::user(profile_id.to_string(), "pat.create", pat.id.0.to_string()).into();
+            let mut response = CreatePatResponse {
+                pat_id: pat.id.0.to_string(),
+                token: String::new(),
+                token_prefix: prefix,
+                metadata: Some(pat_to_proto(&pat)),
+            };
+            let audit = MutationContext::from(AuditEntry::user(
+                profile_id.to_string(),
+                "pat.create",
+                pat.id.0.to_string(),
+            ))
+            .with_operation(command.completion(prost::Message::encode_to_vec(&response)));
 
-        // The per-user limit is checked with the insert, so concurrent creates
-        // cannot exceed it.
-        self.storage
-            .create_pat(&pat, Some(PAT_MAX_ACTIVE_PER_USER as u64), audit)
-            .await
-            .map_err(|e| match e {
-                sid_core::Error::ResourceExhausted(_) => Status::from(
-                    ApiError::new(
+            // The per-user limit is checked with the insert, so concurrent creates
+            // cannot exceed it.
+            match self
+                .storage
+                .create_pat(&pat, Some(PAT_MAX_ACTIVE_PER_USER as u64), audit)
+                .await
+            {
+                Ok(_) => {}
+                // Another attempt of this command committed first: its token is
+                // the created one.
+                Err(sid_core::Error::OperationCompleted(_)) => {
+                    return Err(sid_core::grpc_error::refuse::changed_concurrently());
+                }
+                // The limit is counted before the key: the slot may be full with
+                // the token a concurrent attempt of this command made.
+                Err(sid_core::Error::ResourceExhausted(_)) => {
+                    return Err(ApiError::new(
                         ErrorReason::QuotaExceeded,
                         "the limit of active personal access tokens is reached",
                     )
                     .with_quota_violation(
                         "personal_access_tokens",
                         format!("at most {PAT_MAX_ACTIVE_PER_USER} active tokens per user"),
-                    ),
-                ),
-                e => storage_failure(e),
-            })?;
+                    )
+                    .into());
+                }
+                Err(e) => return Err(storage_failure(e)),
+            }
 
-        info!(
-            "Created PAT {} ({}) for profile {}",
-            pat.id.0, pat.name, pat.profile_id
-        );
+            info!(
+                "Created PAT {} ({}) for profile {}",
+                pat.id.0, pat.name, pat.profile_id
+            );
 
-        Ok(Response::new(CreatePatResponse {
-            pat_id: pat.id.0.to_string(),
-            token: plaintext,
-            token_prefix: prefix,
-            metadata: Some(pat_to_proto(&pat)),
-        }))
+            // The value is shown in this answer only.
+            response.token = plaintext;
+            Ok(response)
+        }
+        .await;
+        Ok(Response::new(command.settle(&*self.storage, answer).await?))
     }
 
     async fn list_pats(

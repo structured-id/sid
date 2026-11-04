@@ -851,7 +851,7 @@ impl SqliteBackend {
         &self,
         id: GroupId,
         description: Option<&str>,
-        audit: MutationContext,
+        mut audit: MutationContext,
     ) -> SidResult<bool> {
         let mut tx = self.begin_write().await?;
         let updated = sqlx::query("UPDATE groups SET description = ?, updated_at = ? WHERE id = ?")
@@ -866,6 +866,13 @@ impl SqliteBackend {
         if !updated {
             return Ok(false);
         }
+        // The group as this write leaves it, read in its transaction.
+        let group = sqlx::query("SELECT * FROM groups WHERE id = ?")
+            .bind(id.0.to_string())
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| SidError::Storage(format!("read updated group: {e}")))?;
+        audit.record_effect(&row_to_group(&group)?)?;
         Self::commit_mutation(tx, &format!("group:{}", id.0), audit).await?;
         Ok(true)
     }

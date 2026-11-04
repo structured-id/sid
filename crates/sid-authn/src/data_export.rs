@@ -13,7 +13,10 @@ use tracing::info;
 
 use sid_core::Error as SidError;
 use sid_core::Result as SidResult;
-use sid_core::models::{AuditEntry, ExportFormat, ExportJob, ExportStatus, ProfileId};
+use sid_core::models::{
+    AuditEntry, ExportFormat, ExportJob, ExportStatus, MutationContext, OperationCompletion,
+    ProfileId,
+};
 use sid_plugin::StorageBackend;
 
 /// Data export service — prepares and manages GDPR Art. 20 export packages.
@@ -35,11 +38,15 @@ impl DataExportService {
     ///
     /// Collects profile data, identifiers, credentials metadata, sessions,
     /// and metadata into a JSON archive. Returns the export job for tracking.
+    /// A keyed command's `completion` of a new job commits with it; of a
+    /// ready export reused as is, it is recorded alone, so a retry answers
+    /// with that export after it is acknowledged or expires.
     pub async fn prepare_export(
         &self,
         profile_id: ProfileId,
         format: ExportFormat,
         initiated_by: &str,
+        completion: impl FnOnce(&ExportJob) -> Option<OperationCompletion>,
     ) -> SidResult<ExportJob> {
         // Check for existing in-progress export.
         if let Some(existing) = self.storage.get_export_job(profile_id).await? {
@@ -49,6 +56,15 @@ impl DataExportService {
                 }
                 // Re-use existing ready export if not expired.
                 ExportStatus::Ready if !existing.is_expired() => {
+                    if let Some(completion) = completion(&existing) {
+                        let ctx = MutationContext::from(AuditEntry::user(
+                            initiated_by,
+                            "export.reused",
+                            profile_id.to_string(),
+                        ))
+                        .with_operation(completion);
+                        self.storage.record_outcome(ctx).await?;
+                    }
                     return Ok(existing);
                 }
                 // Expired Ready or other statuses — fall through to create new.
@@ -84,12 +100,15 @@ impl DataExportService {
         job.mark_ready(archive_path.clone(), size_bytes, checksum);
 
         // Persist the job, created once.
-        self.storage
-            .create_export_job(
-                &job,
-                AuditEntry::user(initiated_by, "export.prepared", profile_id.to_string()).into(),
-            )
-            .await?;
+        let mut ctx = MutationContext::from(AuditEntry::user(
+            initiated_by,
+            "export.prepared",
+            profile_id.to_string(),
+        ));
+        if let Some(completion) = completion(&job) {
+            ctx = ctx.with_operation(completion);
+        }
+        self.storage.create_export_job(&job, ctx).await?;
 
         info!(
             profile_id = %profile_id,
@@ -168,6 +187,7 @@ impl DataExportService {
         &self,
         profile_id: ProfileId,
         initiated_by: &str,
+        completion: Option<OperationCompletion>,
     ) -> SidResult<()> {
         let job = self
             .storage
@@ -175,14 +195,17 @@ impl DataExportService {
             .await?
             .ok_or_else(|| SidError::NotFound("no export available".into()))?;
 
+        let mut ctx = MutationContext::from(AuditEntry::user(
+            initiated_by,
+            "export.acknowledged",
+            profile_id.to_string(),
+        ));
+        if let Some(completion) = completion {
+            ctx = ctx.with_operation(completion);
+        }
         let acknowledged = self
             .storage
-            .acknowledge_export_job(
-                job.id,
-                Utc::now(),
-                AuditEntry::user(initiated_by, "export.acknowledged", profile_id.to_string())
-                    .into(),
-            )
+            .acknowledge_export_job(job.id, Utc::now(), ctx)
             .await?;
         if !acknowledged {
             return Err(SidError::InvalidState(

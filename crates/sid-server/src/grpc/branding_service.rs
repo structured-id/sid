@@ -4,8 +4,11 @@
 //! Per-project branding CRUD: design tokens, assets, text, dark mode.
 //! Draft/published/archived lifecycle. Admin role required.
 
+use prost::Message;
 use sid_authn::caller::authenticate;
 use sid_authn::jwt::JwtService;
+use sid_authn::operation::KeyedCommand;
+use sid_authn::operation::grpc::context;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_core::grpc_error::refuse::{
     changed_concurrently, invalid_field, not_found, storage_failure,
@@ -17,6 +20,7 @@ use sid_core::models::{
     ProjectId,
 };
 use sid_plugin::storage::StorageBackend;
+use sid_proto::keyed::admin::branding_service as keyed;
 use sid_proto::sid::v1::branding_service_server::BrandingService;
 use sid_proto::sid::v1::{self as pb};
 use std::sync::Arc;
@@ -69,6 +73,20 @@ impl BrandingServiceImpl {
         let caller = authenticate(req, self.jwt.verifier(), &self.revocation).await?;
         caller.require_admin()?;
         Ok(caller.profile_id.to_string())
+    }
+
+    /// Command `M` of `req` under `context`, in the administrator's own
+    /// namespace.
+    #[allow(clippy::result_large_err)]
+    fn command<M: sid_proto::KeyedMethod>(
+        &self,
+        admin_sub: &str,
+        context: sid_core::models::OperationContext,
+        req: &M::Request,
+    ) -> Result<KeyedCommand, Status> {
+        let admin = sid_core::models::ProfileId::parse(admin_sub)
+            .map_err(|e| sid_core::grpc_error::refuse::internal("read the caller", e))?;
+        Ok(KeyedCommand::by_profile::<M>(admin, context, req))
     }
 
     #[allow(clippy::result_large_err)]
@@ -348,9 +366,11 @@ impl BrandingService for BrandingServiceImpl {
         request: Request<pb::CreateBrandingConfigRequest>,
     ) -> Result<Response<pb::BrandingConfig>, Status> {
         let admin_sub = self.require_admin(&request).await?;
+        let operation = context(&request)?;
         let req = request.into_inner();
         let project_id = Self::parse_project_id(&req.project_id)?;
         let now = chrono::Utc::now();
+        let command = self.command::<keyed::CreateBrandingConfig>(&admin_sub, operation, &req)?;
 
         let config = BrandingConfig {
             id: BrandingConfigId::new(),
@@ -377,14 +397,23 @@ impl BrandingService for BrandingServiceImpl {
             updated_at: now,
         };
 
-        let audit: MutationContext =
-            AuditEntry::admin(&admin_sub, "branding.create", config.id.to_string()).into();
-        self.storage
-            .create_branding_config(&config, audit)
-            .await
-            .map_err(storage_failure)?;
+        // A retry of a completed creation answers with the config it created
+        // and creates no second one.
+        let response = command
+            .run(&*self.storage, || async {
+                let response = domain_to_proto(&config);
+                let audit = MutationContext::from(AuditEntry::admin(
+                    &admin_sub,
+                    "branding.create",
+                    config.id.to_string(),
+                ))
+                .with_operation(command.completion(response.encode_to_vec()));
+                self.storage.create_branding_config(&config, audit).await?;
+                Ok(response)
+            })
+            .await?;
 
-        Ok(Response::new(domain_to_proto(&config)))
+        Ok(Response::new(response))
     }
 
     #[instrument(skip_all, name = "branding.update")]
@@ -393,49 +422,56 @@ impl BrandingService for BrandingServiceImpl {
         request: Request<pb::UpdateBrandingConfigRequest>,
     ) -> Result<Response<pb::BrandingConfig>, Status> {
         let admin_sub = self.require_admin(&request).await?;
+        let operation = context(&request)?;
         let req = request.into_inner();
         let config_id = Self::parse_config_id(&req.config_id)?;
 
-        let mut config = self
-            .storage
-            .get_branding_config(config_id)
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(|| branding_not_found(config_id.0.to_string()))?;
+        // A retry of a completed edit answers with the draft as that edit
+        // left it and never writes it over a later edit.
+        let command = self.command::<keyed::UpdateBrandingConfig>(&admin_sub, operation, &req)?;
+        let response = command
+            .run(&*self.storage, || async {
+                let mut config = self
+                    .storage
+                    .get_branding_config(config_id)
+                    .await?
+                    .ok_or_else(|| branding_not_found(config_id.0.to_string()))?;
 
-        if let Some(tokens) = &req.tokens {
-            config.tokens = tokens_from_proto(tokens);
-        }
-        if let Some(assets) = &req.assets {
-            config.assets = assets_from_proto(assets);
-        }
-        if let Some(dark_mode) = &req.dark_mode {
-            config.dark_mode = dark_mode_from_proto(dark_mode);
-        }
-        if let Some(text) = &req.text {
-            config.text = text_from_proto(text);
-        }
-        // Only a draft is edited; a published or archived config changes
-        // through a new draft and its publication.
-        if config.status != BrandingStatus::Draft {
-            return Err(not_a_draft(config_id));
-        }
-        config.updated_at = chrono::Utc::now();
+                if let Some(tokens) = &req.tokens {
+                    config.tokens = tokens_from_proto(tokens);
+                }
+                if let Some(assets) = &req.assets {
+                    config.assets = assets_from_proto(assets);
+                }
+                if let Some(dark_mode) = &req.dark_mode {
+                    config.dark_mode = dark_mode_from_proto(dark_mode);
+                }
+                if let Some(text) = &req.text {
+                    config.text = text_from_proto(text);
+                }
+                // Only a draft is edited; a published or archived config
+                // changes through a new draft and its publication.
+                if config.status != BrandingStatus::Draft {
+                    return Err(not_a_draft(config_id).into());
+                }
+                config.updated_at = chrono::Utc::now();
 
-        let audit: MutationContext =
-            AuditEntry::admin(&admin_sub, "branding.update", config.id.to_string()).into();
-        let updated = self
-            .storage
-            .update_branding_draft(&config, audit)
-            .await
-            .map_err(storage_failure)?;
-        if !updated {
-            // Published, deleted or edited since it was read.
-            return Err(changed_concurrently());
-        }
-        config.revision += 1;
+                let response = domain_to_proto(&config);
+                let audit = MutationContext::from(AuditEntry::admin(
+                    &admin_sub,
+                    "branding.update",
+                    config.id.to_string(),
+                ))
+                .with_operation(command.completion(response.encode_to_vec()));
+                if !self.storage.update_branding_draft(&config, audit).await? {
+                    // Published, deleted or edited since it was read.
+                    return Err(changed_concurrently().into());
+                }
+                Ok(response)
+            })
+            .await?;
 
-        Ok(Response::new(domain_to_proto(&config)))
+        Ok(Response::new(response))
     }
 
     #[instrument(skip_all, name = "branding.publish")]
@@ -444,45 +480,54 @@ impl BrandingService for BrandingServiceImpl {
         request: Request<pb::PublishBrandingConfigRequest>,
     ) -> Result<Response<pb::BrandingConfig>, Status> {
         let admin_sub = self.require_admin(&request).await?;
+        let operation = context(&request)?;
         let req = request.into_inner();
         let config_id = Self::parse_config_id(&req.config_id)?;
         let project_id = Self::parse_project_id(&req.project_id)?;
 
-        let config = self
-            .storage
-            .get_branding_config(config_id)
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(|| branding_not_found(config_id.0.to_string()))?;
-        // The draft is published in its own project only: publishing it under
-        // another project would archive that project's branding.
-        if config.project_id != project_id {
-            return Err(branding_not_found(config_id.0.to_string()));
-        }
-        if config.status != BrandingStatus::Draft {
-            return Err(not_a_draft(config_id));
-        }
+        // A retry of a completed publication answers as it did, not as a
+        // config no longer a draft, and never publishes it again over a
+        // later one.
+        let command = self.command::<keyed::PublishBrandingConfig>(&admin_sub, operation, &req)?;
+        let published: sid_core::models::BrandingConfig = command
+            .run_recorded(&*self.storage, || async {
+                let config = self
+                    .storage
+                    .get_branding_config(config_id)
+                    .await?
+                    .ok_or_else(|| branding_not_found(config_id.0.to_string()))?;
+                // The draft is published in its own project only: publishing
+                // it under another project would archive that project's
+                // branding.
+                if config.project_id != project_id {
+                    return Err(branding_not_found(config_id.0.to_string()).into());
+                }
+                if config.status != BrandingStatus::Draft {
+                    return Err(not_a_draft(config_id).into());
+                }
 
-        // Archiving the published config and publishing the draft is one write.
-        let audit: MutationContext =
-            AuditEntry::admin(&admin_sub, "branding.publish", config.id.to_string()).into();
-        let published = self
-            .storage
-            .publish_branding_config(config_id, project_id, chrono::Utc::now(), audit)
-            .await
-            .map_err(storage_failure)?;
-        if !published {
-            // Published, edited or deleted since it was read.
-            return Err(not_a_draft(config_id));
-        }
+                // Archiving the published config and publishing the draft is
+                // one write; the answer is the config as that write
+                // publishes it, an edit made since this read included.
+                let audit = MutationContext::from(AuditEntry::admin(
+                    &admin_sub,
+                    "branding.publish",
+                    config.id.to_string(),
+                ))
+                .with_operation(command.effect_completion());
+                if !self
+                    .storage
+                    .publish_branding_config(config_id, project_id, chrono::Utc::now(), audit)
+                    .await?
+                {
+                    // Published or deleted since it was read.
+                    return Err(not_a_draft(config_id).into());
+                }
+                Ok(command.recorded_effect(&*self.storage).await?)
+            })
+            .await?;
 
-        let stored = self
-            .storage
-            .get_branding_config(config_id)
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(|| branding_not_found(config_id.0.to_string()))?;
-        Ok(Response::new(domain_to_proto(&stored)))
+        Ok(Response::new(domain_to_proto(&published)))
     }
 
     #[instrument(skip_all, name = "branding.delete")]
