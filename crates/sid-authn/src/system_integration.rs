@@ -25,6 +25,10 @@ const CLIENT_SCOPES: [&str; 4] = ["openid", "profile", "email", "account"];
 /// The path under the account URL the BFF receives authorization responses at.
 pub const CALLBACK_PATH: &str = "/auth/callback";
 
+/// The path under the account URL the UI host receives the issuer's
+/// back-channel logouts at (Back-Channel Logout 1.0 §2.2).
+pub const BACKCHANNEL_LOGOUT_PATH: &str = "/auth/backchannel-logout";
+
 /// The path under the account URL of the account UI's sign-in page.
 pub const SIGN_IN_PATH: &str = "/login";
 
@@ -83,6 +87,14 @@ impl AccountSettings {
     pub fn callback(&self) -> String {
         format!(
             "{}{CALLBACK_PATH}",
+            self.account_url.as_str().trim_end_matches('/')
+        )
+    }
+
+    /// The registered back-channel logout URI of the account web client.
+    pub fn backchannel_logout(&self) -> String {
+        format!(
+            "{}{BACKCHANNEL_LOGOUT_PATH}",
             self.account_url.as_str().trim_end_matches('/')
         )
     }
@@ -299,8 +311,9 @@ fn new_integration(
         min_device_assurance: None,
         require_verified_email: None,
         require_verified_phone: None,
-        backchannel_logout_uri: None,
-        backchannel_logout_session_required: false,
+        // Its sessions end with the issuer sessions they were issued under.
+        backchannel_logout_uri: Some(settings.backchannel_logout()),
+        backchannel_logout_session_required: true,
         post_logout_redirect_uris: vec![],
         claim_mappings: vec![],
         login_strategy: LoginStrategy::LocalFirst,
@@ -314,9 +327,9 @@ fn new_integration(
     Ok((app, client, resource))
 }
 
-/// `client` with the callback and keys `settings` name, stored when they
-/// differ. Only those change: its identity, activity and everything else
-/// stay as they are.
+/// `client` with the callback, back-channel logout URI and keys `settings`
+/// name, stored when they differ. Only those change: its identity, activity
+/// and everything else stay as they are.
 async fn keep_client_current(
     storage: &dyn StorageBackend,
     mut client: OAuth2Client,
@@ -324,12 +337,19 @@ async fn keep_client_current(
 ) -> SidResult<OAuth2Client> {
     for _ in 0..UPDATE_ATTEMPTS {
         let callback = vec![settings.callback()];
+        let logout = Some(settings.backchannel_logout());
         let keys = Some(settings.keys.clone());
-        if client.redirect_uris == callback && client.jwks == keys {
+        if client.redirect_uris == callback
+            && client.backchannel_logout_uri == logout
+            && client.backchannel_logout_session_required
+            && client.jwks == keys
+        {
             return Ok(client);
         }
         let mut current = client.clone();
         current.redirect_uris = callback;
+        current.backchannel_logout_uri = logout;
+        current.backchannel_logout_session_required = true;
         current.jwks = keys;
         if storage
             .update_oauth2_client(

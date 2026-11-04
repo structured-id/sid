@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 use sid_authn::bff_session::{
     BffSession, BffSessionStore, PendingSignIn, RefreshClaim, SessionClaims, TokenReplacement,
 };
-use sid_authn::issuer_directory::IssuerDirectory;
+use sid_authn::issuer_directory::{IssuedTokenRefusal, IssuerDirectory};
 use sid_authn::relying_party::Connection;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_core::grpc_error::{ApiError, ErrorReason, refuse};
@@ -28,8 +28,9 @@ use sid_infra::issuer_client::{RpClient, RpClientError};
 use sid_proto::google::api::HttpBody;
 use sid_proto::sid::v1::authn::application_session_service_server::ApplicationSessionService;
 use sid_proto::sid::v1::authn::{
-    ApplicationSession, CompleteSignInRequest, EndApplicationSessionRequest,
-    EndApplicationSessionResponse, GetApplicationSessionRequest, GrantOutcome, StartSignInRequest,
+    ApplicationSession, BackChannelLogoutRequest, CompleteSignInRequest,
+    EndApplicationSessionRequest, EndApplicationSessionResponse, GetApplicationSessionRequest,
+    GrantOutcome, StartSignInRequest,
 };
 use subtle::ConstantTimeEq;
 use tonic::metadata::{MetadataMap, MetadataValue};
@@ -120,21 +121,87 @@ impl ApplicationSessions {
         // notices only arrive sooner than the issuer's own answer: without
         // them every call this session makes is still admitted by its
         // issuer, which refuses an ended session.
-        match self
+        let revoked = match self
             .revocation
             .is_revoked(&session.claims.jti, &session.claims.sid)
             .await
         {
-            Ok(false) => Ok((id, session)),
-            Ok(true) => {
-                if let Err(e) = self.sessions.destroy_session(&id).await {
-                    tracing::error!(error = %e, "cannot destroy a revoked application session");
-                }
-                Err(unauthenticated())
-            }
+            Ok(revoked) => revoked,
             Err(e) => {
                 tracing::warn!(error = %e, "revocation notices unavailable");
-                Ok((id, session))
+                false
+            }
+        };
+        // The issuer's back-channel logout is recorded in the session store
+        // itself, the authority for this session: it reaches every replica
+        // whatever cache the issuer publishes its notices to.
+        let ended = revoked
+            || self
+                .sessions
+                .ended_by_issuer(&session.claims)
+                .await
+                .map_err(|e| refuse::dependency_unavailable("session store", e))?;
+        if ended {
+            if let Err(e) = self.sessions.destroy_session(&id).await {
+                tracing::error!(error = %e, "cannot destroy an ended application session");
+            }
+            return Err(unauthenticated());
+        }
+        Ok((id, session))
+    }
+
+    /// The issuer's back-channel logout (Back-Channel Logout 1.0 §2.5–§2.8):
+    /// the validated logout token's issuer session is recorded as ended
+    /// before 200 is answered; an invalid request is 400
+    /// `invalid_request`, a store that cannot record it 503 so the issuer
+    /// retries.
+    async fn receive_logout(&self, body: HttpBody) -> Response<HttpBody> {
+        // §2.5: an `application/x-www-form-urlencoded` POST.
+        let form = body.content_type.split(';').next().is_some_and(|t| {
+            t.trim()
+                .eq_ignore_ascii_case("application/x-www-form-urlencoded")
+        });
+        if !form {
+            return logout_refused("the logout request is not a form");
+        }
+        let mut tokens = url::form_urlencoded::parse(&body.data)
+            .filter(|(name, _)| name == "logout_token")
+            .map(|(_, value)| value.into_owned());
+        let (Some(token), None) = (tokens.next(), tokens.next()) else {
+            return logout_refused("the form carries no single logout_token");
+        };
+        let connection = match self.connection().await {
+            Ok(connection) => connection,
+            Err(e) => {
+                tracing::error!(error = %e, "no connection to the application's client");
+                return http(503);
+            }
+        };
+        let claims = match self
+            .issuers
+            .issued_logout_token(&connection.issuer, &connection.client_id, &token)
+            .await
+        {
+            Ok(claims) => claims,
+            Err(IssuedTokenRefusal::Invalid(why)) => {
+                tracing::warn!(%why, "back-channel logout token refused");
+                return logout_refused("the logout token is not valid");
+            }
+            Err(IssuedTokenRefusal::Unavailable(e)) => {
+                tracing::warn!(error = %e, "issuer keys unavailable for a logout");
+                return http(503);
+            }
+        };
+        // The client is registered with the session required (§2.2): a logout
+        // naming no session is not one it accepts, never a subject-wide end.
+        let Some(sid) = claims.sid.as_deref() else {
+            return logout_refused("the logout token names no session");
+        };
+        match self.sessions.record_issuer_logout(&claims.iss, sid).await {
+            Ok(()) => http(200),
+            Err(e) => {
+                tracing::error!(error = %e, "cannot record the issuer's logout");
+                http(503)
             }
         }
     }
@@ -507,6 +574,14 @@ impl ApplicationSessionService for ApplicationSessions {
     ) -> Result<Response<EndApplicationSessionResponse>, Status> {
         self.end_session(request).await
     }
+
+    async fn receive_back_channel_logout(
+        &self,
+        request: Request<BackChannelLogoutRequest>,
+    ) -> Result<Response<HttpBody>, Status> {
+        let body = request.into_inner().body.unwrap_or_default();
+        Ok(self.receive_logout(body).await)
+    }
 }
 
 impl ApplicationSessions {
@@ -589,6 +664,19 @@ impl ApplicationSessions {
         claims.email = identity.email;
         claims.name = identity.name;
         claims.preferred_username = identity.preferred_username;
+        // A callback that arrives after the issuer ended this issuer session
+        // opens nothing (Back-Channel Logout 1.0 §2.7).
+        match self.sessions.ended_by_issuer(&claims).await {
+            Ok(false) => {}
+            Ok(true) => {
+                tracing::warn!("sign-in completed for an issuer session already ended");
+                return page(403, "The sign-in was ended at the issuer.");
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "cannot check the issuer's logouts");
+                return page(503, "The sign-in is not available right now.");
+            }
+        }
 
         let (session_id, _csrf) = match self
             .sessions
@@ -803,6 +891,19 @@ fn page(status: u16, text: &str) -> Response<HttpBody> {
     let body = response.get_mut();
     body.content_type = "text/plain; charset=utf-8".into();
     body.data = text.as_bytes().to_vec();
+    response
+}
+
+/// 400 with the JSON error `invalid_request` (Back-Channel Logout 1.0 §2.8).
+fn logout_refused(description: &str) -> Response<HttpBody> {
+    let mut response = http(400);
+    let body = response.get_mut();
+    body.content_type = "application/json".into();
+    body.data = serde_json::to_vec(&serde_json::json!({
+        "error": "invalid_request",
+        "error_description": description,
+    }))
+    .expect("a JSON object encodes");
     response
 }
 

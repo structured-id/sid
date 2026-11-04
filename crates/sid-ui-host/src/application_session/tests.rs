@@ -1187,3 +1187,226 @@ async fn the_session_cookie_is_host_only_and_http_only() {
         format!("{COOKIE}=abc; Path=/; Secure; HttpOnly; SameSite=Lax")
     );
 }
+
+// ── Back-channel logout ──
+
+/// The application's issuer with one signing key, as the registry answers.
+struct KeyedIssuer(IssuerRecord);
+
+#[async_trait::async_trait]
+impl IssuerSource for KeyedIssuer {
+    async fn issuer(&self, _: &str) -> Result<Option<IssuerRecord>, RegistryUnavailable> {
+        Ok(Some(self.0.clone()))
+    }
+    async fn resource(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> Result<Option<ResourceRecord>, RegistryUnavailable> {
+        Ok(None)
+    }
+}
+
+/// An adapter over `store` whose issuer signs with `issuer_key`, which signs
+/// the logout tokens of these tests.
+fn issuing_fixture(store: Arc<dyn CeremonyStateStore>) -> (Fixture, jsonwebtoken::EncodingKey) {
+    let (key, pem) = ClientKey::generate_ed25519().unwrap();
+    let jwk = &key.public_jwks().unwrap()["keys"][0];
+    let public: [u8; 32] = URL_SAFE_NO_PAD
+        .decode(jwk["x"].as_str().unwrap())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let source = KeyedIssuer(IssuerRecord {
+        issuer: ISSUER.into(),
+        keys: vec![("issuer-key-1".into(), public)],
+    });
+    let mut f = fixture(store, true);
+    f.adapter.issuers = Arc::new(IssuerDirectory::new(INSTALLATION, Arc::new(source)));
+    let signing = jsonwebtoken::EncodingKey::from_ed_pem(pem.expose_secret().as_bytes()).unwrap();
+    (f, signing)
+}
+
+/// A logout token of the application's issuer for `client`, typed `typ`,
+/// naming `sid` when given, issued at `iat`.
+fn logout_token(
+    key: &jsonwebtoken::EncodingKey,
+    client: &str,
+    typ: &str,
+    sid: Option<&str>,
+    iat: i64,
+) -> String {
+    let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
+    header.typ = Some(typ.into());
+    header.kid = Some("issuer-key-1".into());
+    let mut claims = serde_json::json!({
+        "iss": ISSUER,
+        "sub": "subject-1",
+        "aud": client,
+        "iat": iat,
+        "exp": chrono::Utc::now().timestamp() + 120,
+        "jti": random_token(),
+        "events": { "http://schemas.openid.net/event/backchannel-logout": {} },
+    });
+    if let Some(sid) = sid {
+        claims["sid"] = sid.into();
+    }
+    jsonwebtoken::encode(&header, &claims, key).unwrap()
+}
+
+/// The issuer's POST of `token`, as the transcoder hands it over.
+fn logout_post(token: &str) -> Request<BackChannelLogoutRequest> {
+    Request::new(BackChannelLogoutRequest {
+        body: Some(HttpBody {
+            content_type: "application/x-www-form-urlencoded".into(),
+            data: format!("logout_token={token}").into_bytes(),
+            extensions: vec![],
+        }),
+    })
+}
+
+async fn session_read(f: &Fixture, id: &str) -> Result<Response<ApplicationSession>, Status> {
+    f.adapter
+        .get_application_session(with_cookie(
+            GetApplicationSessionRequest {},
+            &format!("{COOKIE}={id}"),
+            None,
+        ))
+        .await
+}
+
+/// The issuer ends a session it issued to this client: the logout is
+/// answered 200 once recorded, the application session of that issuer
+/// session is UNAUTHENTICATED on its next use and removed, another one stays;
+/// a repeat, or a new token for the same session, answers 200 again.
+#[tokio::test]
+async fn a_back_channel_logout_ends_the_application_session() {
+    let (f, key) = issuing_fixture(memory());
+    let (ended, _) = signed_in(&f, false).await;
+    let mut other_claims = claims();
+    other_claims.sid = "issuer-session-2".into();
+    let (kept, _) = f
+        .sessions
+        .create_session("access".into(), None, other_claims, &connection().binding())
+        .await
+        .unwrap();
+
+    let now = chrono::Utc::now().timestamp();
+    let token = logout_token(&key, "ops-web", "logout+jwt", Some("issuer-session-1"), now);
+    let answer = f
+        .adapter
+        .receive_back_channel_logout(logout_post(&token))
+        .await
+        .unwrap();
+    assert_eq!(status(&answer), "200");
+    assert_eq!(answer.metadata().get("cache-control").unwrap(), "no-store");
+
+    let refused = session_read(&f, &ended).await.unwrap_err();
+    assert_eq!(refused.code(), Code::Unauthenticated);
+    assert!(f.sessions.get_session(&ended).await.unwrap().is_none());
+    session_read(&f, &kept)
+        .await
+        .expect("another issuer session stays");
+
+    for token in [
+        token.clone(),
+        logout_token(&key, "ops-web", "logout+jwt", Some("issuer-session-1"), now),
+    ] {
+        let again = f
+            .adapter
+            .receive_back_channel_logout(logout_post(&token))
+            .await
+            .unwrap();
+        assert_eq!(status(&again), "200");
+    }
+}
+
+/// The client is registered with the session required (Back-Channel Logout
+/// 1.0 §2.2): a logout naming no session is `invalid_request` and ends
+/// nothing, never a subject-wide end.
+#[tokio::test]
+async fn a_logout_without_its_session_ends_nothing() {
+    let (f, key) = issuing_fixture(memory());
+    let (id, _) = signed_in(&f, false).await;
+    let token = logout_token(
+        &key,
+        "ops-web",
+        "logout+jwt",
+        None,
+        chrono::Utc::now().timestamp(),
+    );
+    let answer = f
+        .adapter
+        .receive_back_channel_logout(logout_post(&token))
+        .await
+        .unwrap();
+    assert_eq!(status(&answer), "400");
+    session_read(&f, &id).await.expect("nothing was ended");
+}
+
+/// A token for another client, of another type, or a request that is not a
+/// single-token form is `invalid_request` (Back-Channel Logout 1.0 §2.8) and
+/// ends nothing.
+#[tokio::test]
+async fn an_invalid_logout_request_ends_nothing() {
+    let (f, key) = issuing_fixture(memory());
+    let (id, _) = signed_in(&f, false).await;
+    let now = chrono::Utc::now().timestamp();
+    let mut requests = vec![
+        logout_post(&logout_token(
+            &key,
+            "another-client",
+            "logout+jwt",
+            Some("issuer-session-1"),
+            now,
+        )),
+        logout_post(&logout_token(
+            &key,
+            "ops-web",
+            "JWT",
+            Some("issuer-session-1"),
+            now,
+        )),
+        logout_post("not-a-token"),
+    ];
+    let valid = logout_token(&key, "ops-web", "logout+jwt", Some("issuer-session-1"), now);
+    let mut json = logout_post(&valid);
+    json.get_mut().body.as_mut().unwrap().content_type = "application/json".into();
+    requests.push(json);
+    let mut twice = logout_post(&valid);
+    twice.get_mut().body.as_mut().unwrap().data =
+        format!("logout_token={valid}&logout_token={valid}").into_bytes();
+    requests.push(twice);
+
+    for request in requests {
+        let answer = f
+            .adapter
+            .receive_back_channel_logout(request)
+            .await
+            .unwrap();
+        assert_eq!(status(&answer), "400");
+        let body: serde_json::Value = serde_json::from_slice(&answer.get_ref().data).unwrap();
+        assert_eq!(body["error"], "invalid_request");
+    }
+    session_read(&f, &id).await.expect("nothing was ended");
+}
+
+/// A store that cannot record the logout is 503: the issuer retries, and
+/// nothing is answered as done that was not recorded.
+#[tokio::test]
+async fn a_logout_the_store_cannot_record_is_retried() {
+    let (f, key) = issuing_fixture(Arc::new(Down));
+    let token = logout_token(
+        &key,
+        "ops-web",
+        "logout+jwt",
+        Some("issuer-session-1"),
+        chrono::Utc::now().timestamp(),
+    );
+    let answer = f
+        .adapter
+        .receive_back_channel_logout(logout_post(&token))
+        .await
+        .unwrap();
+    assert_eq!(status(&answer), "503");
+}

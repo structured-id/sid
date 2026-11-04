@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use dashmap::DashMap;
 
 use crate::issuer::IssuerVerifier;
-use crate::jwt::{AccessTokenClaims, IdTokenClaims};
+use crate::jwt::{AccessTokenClaims, IdTokenClaims, LogoutTokenClaims};
 
 /// How long an answer from the registry is reused. Keys rotate rarely and a
 /// new key is found sooner through the unknown-`kid` refresh.
@@ -306,6 +306,22 @@ impl IssuerDirectory {
             .await?
             .verifier
             .validate_id_token(token, client_id, nonce)
+            .map_err(|e| IssuedTokenRefusal::Invalid(e.to_string()))
+    }
+
+    /// The back-channel logout token `issuer` sent `client_id` (Back-Channel
+    /// Logout 1.0 §2.6): that issuer's exact `iss` and keys only, for that
+    /// client (see [`IssuerVerifier::validate_logout_token`]).
+    pub async fn issued_logout_token(
+        &self,
+        issuer: &str,
+        client_id: &str,
+        token: &str,
+    ) -> Result<LogoutTokenClaims, IssuedTokenRefusal> {
+        self.signer_of(issuer, token)
+            .await?
+            .verifier
+            .validate_logout_token(token, client_id)
             .map_err(|e| IssuedTokenRefusal::Invalid(e.to_string()))
     }
 
