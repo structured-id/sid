@@ -50,8 +50,45 @@ const BACKLOG: usize = 5_000;
 const FAN_OUT: usize = 2;
 /// Room the store and the stream give the work.
 const CAPACITY: u64 = 1_000_000;
-/// How often progress counters are looked at.
-const TICK: Duration = Duration::from_micros(200);
+
+/// Progress counted where it happens: how many, and when the last one was,
+/// stamped by the one that made it, so a sample never includes the time a
+/// waiter takes to wake.
+#[derive(Default)]
+struct Progress {
+    count: AtomicUsize,
+    last: std::sync::Mutex<Option<Instant>>,
+    changed: tokio::sync::Notify,
+}
+
+impl Progress {
+    /// One more, now.
+    fn add(&self) {
+        let now = Instant::now();
+        *self.last.lock().unwrap() = Some(now);
+        self.count.fetch_add(1, Ordering::AcqRel);
+        self.changed.notify_waiters();
+    }
+
+    fn count(&self) -> usize {
+        self.count.load(Ordering::Acquire)
+    }
+
+    /// Wait until the count reaches `target`; when the last one was made.
+    async fn reach(&self, target: usize) -> Instant {
+        loop {
+            let changed = self.changed.notified();
+            if self.count() >= target {
+                return self
+                    .last
+                    .lock()
+                    .unwrap()
+                    .expect("a count above zero was stamped");
+            }
+            changed.await;
+        }
+    }
+}
 
 /// The PostgreSQL server, without a database.
 fn postgres_url() -> String {
@@ -88,7 +125,7 @@ impl RecipientSource for Fixed {
 /// A channel accepting every message at once, counting them in `sent`.
 struct Immediate {
     id: &'static str,
-    sent: Arc<AtomicUsize>,
+    sent: Arc<Progress>,
 }
 
 #[async_trait]
@@ -102,7 +139,7 @@ impl NotificationChannel for Immediate {
         _recipient: &Recipient,
         _message: &RenderedMessage,
     ) -> Result<DeliveryReceipt, DeliveryError> {
-        self.sent.fetch_add(1, Ordering::Release);
+        self.sent.add();
         Ok(DeliveryReceipt {
             message_id: "m".into(),
             channel: self.id.into(),
@@ -141,15 +178,8 @@ fn rate(mode: &str, what: &str, items: usize, took: Duration) {
     );
 }
 
-/// Wait until `counter` reaches `target`.
-async fn reach(counter: &AtomicUsize, target: usize) {
-    while counter.load(Ordering::Acquire) < target {
-        tokio::time::sleep(TICK).await;
-    }
-}
-
 /// A runner over `store` delivering to channels counting into `sent`.
-fn runner(store: &Arc<dyn WorkStore>, sent: &Arc<AtomicUsize>) -> WorkRunner {
+fn runner(store: &Arc<dyn WorkStore>, sent: &Arc<Progress>) -> WorkRunner {
     let mut dispatcher = NotificationDispatcher::new(Arc::new(tokio::sync::RwLock::new(
         TemplateEngine::with_default_ce_templates(),
     )));
@@ -204,24 +234,24 @@ async fn store_modes(mode: &str, store: Arc<dyn WorkStore>) {
             .unwrap();
         owed += 1;
     }
-    let sent = Arc::new(AtomicUsize::new(0));
+    let sent = Arc::new(Progress::default());
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let started = Instant::now();
     let running =
         tokio::spawn(runner(&store, &sent).run(async move { stopped.await.unwrap_or(()) }));
-    reach(&sent, owed * FAN_OUT).await;
+    let done = sent.reach(owed * FAN_OUT).await;
     // The accepted ones of `accept` drain with the backlog.
-    rate(mode, "drain", owed, started.elapsed());
+    rate(mode, "drain", owed, done - started);
 
     let mut samples = Vec::with_capacity(SINGLES);
     for _ in 0..SINGLES {
-        let before = sent.load(Ordering::Acquire);
+        let before = sent.count();
         let started = Instant::now();
         accept_event(store.as_ref(), &event(), CAPACITY)
             .await
             .unwrap();
-        reach(&sent, before + FAN_OUT).await;
-        samples.push(started.elapsed());
+        let delivered = sent.reach(before + FAN_OUT).await;
+        samples.push(delivered - started);
     }
     report(mode, "deliver", samples);
     stop.send(()).unwrap();
@@ -272,7 +302,7 @@ async fn handoff(store: Arc<dyn WorkStore>) {
     }
     report("jetstream", "handoff", samples);
 
-    let accepted = Arc::new(AtomicUsize::new(0));
+    let accepted = Arc::new(Progress::default());
     let started = Instant::now();
     let deliveries = open_work(&bus, receiver).await.unwrap();
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
@@ -283,9 +313,7 @@ async fn handoff(store: Arc<dyn WorkStore>) {
                 deliveries,
                 store.as_ref(),
                 CAPACITY,
-                || {
-                    accepted.fetch_add(1, Ordering::Release);
-                },
+                || accepted.add(),
                 async move {
                     let _ = stopped.await;
                 },
@@ -293,8 +321,8 @@ async fn handoff(store: Arc<dyn WorkStore>) {
             .await;
         })
     };
-    reach(&accepted, BACKLOG).await;
-    rate("jetstream", "drain", BACKLOG, started.elapsed());
+    let done = accepted.reach(BACKLOG).await;
+    rate("jetstream", "drain", BACKLOG, done - started);
     stop.send(()).unwrap();
     consumer.await.unwrap();
 
