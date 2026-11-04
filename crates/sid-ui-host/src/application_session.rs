@@ -428,14 +428,10 @@ impl ApplicationSessions {
         }
     }
 
-    /// The name of the correlation cookie of the sign-in `state` names, beside
-    /// the session cookie under the same `__Host-` prefix: one name per
-    /// sign-in, so sign-ins started together never replace each other's. The
-    /// name is a digest of the state, a fixed short token whatever the
-    /// callback sent.
+    /// The correlation cookie of the sign-in `state` names, beside the session
+    /// cookie under the same `__Host-` prefix.
     fn sign_in_cookie(&self, state: &str) -> String {
-        let digest = Sha256::digest(state.as_bytes());
-        format!("{}-signin-{}", self.cookie, hex::encode(&digest[..8]))
+        sid_authn::relying_party::sign_in_cookie(&self.cookie, state)
     }
 
     /// The `set-cookie` value carrying session `id`: host-only (`__Host-`),
@@ -489,7 +485,7 @@ impl ApplicationSessionService for ApplicationSessions {
                 SecretString::from(verifier),
                 nonce.clone(),
                 return_to,
-                &browser_binding(connection, &secret),
+                &connection.browser_sign_in_binding(&secret),
             )
             .await
         {
@@ -542,7 +538,7 @@ impl ApplicationSessionService for ApplicationSessions {
         // its own browser, or a replica that still holds that connection.
         let pending = match self
             .sessions
-            .take_pending(&params.state, &browser_binding(connection, &secret))
+            .take_pending(&params.state, &connection.browser_sign_in_binding(&secret))
             .await
         {
             Ok(Some(pending)) => pending,
@@ -859,12 +855,6 @@ fn local_path(requested: &str) -> String {
     } else {
         "/".to_owned()
     }
-}
-
-/// What a pending sign-in is bound to: the connection's sign-in binding and
-/// the browser that started it.
-fn browser_binding(connection: &Connection, browser: &str) -> String {
-    format!("{}\n{browser}", connection.sign_in_binding())
 }
 
 /// 256 random bits, base64url: a PKCE verifier (RFC 7636 §4.1) or a nonce.

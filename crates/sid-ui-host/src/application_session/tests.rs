@@ -301,7 +301,10 @@ async fn sign_in_redirects_to_the_issuer() {
         .to_owned();
     let pending = f
         .sessions
-        .take_pending(&query["state"], &browser_binding(&connection(), &secret))
+        .take_pending(
+            &query["state"],
+            &connection().browser_sign_in_binding(&secret),
+        )
         .await
         .unwrap()
         .expect("the sign-in is recorded under its state");
