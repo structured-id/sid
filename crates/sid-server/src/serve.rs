@@ -317,6 +317,22 @@ pub async fn serve(
     services: CeServices,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
+    let listener = tokio::net::TcpListener::bind(c.grpc_addr)
+        .await
+        .map_err(|e| anyhow::anyhow!("bind gRPC on {}: {e}", c.grpc_addr))?;
+    serve_on(listener, c, services, shutdown).await
+}
+
+/// [`serve`] on a listener the caller already holds, so the port it chose
+/// stays reserved from the moment it was opened; `c.grpc_addr` should name
+/// the same address.
+pub async fn serve_on(
+    listener: tokio::net::TcpListener,
+    c: CeComponents,
+    services: CeServices,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> anyhow::Result<()> {
+    let grpc_addr = listener.local_addr()?;
     let drain = sid_serve::shutdown::drain_interval_from_env()?;
     let (stopper, stopped) = sid_serve::stop_signal();
 
@@ -370,8 +386,12 @@ pub async fn serve(
         .layer(tonic_web::GrpcWebLayer::new())
         .layer(sid_authn::operation::grpc::OperationContextLayer)
         .add_routes(routes)
-        .serve_with_shutdown(c.grpc_addr, stopped.wait());
-    info!("gRPC listening on {}", c.grpc_addr);
+        // tonic's own bind sets only TCP_NODELAY (on by default).
+        .serve_with_incoming_shutdown(
+            tonic::transport::server::TcpIncoming::from(listener).with_nodelay(Some(true)),
+            stopped.wait(),
+        );
+    info!("gRPC listening on {grpc_addr}");
 
     let mut http_ended = None;
     // A transcoder that stopped leaves the HTTP form down while gRPC runs
