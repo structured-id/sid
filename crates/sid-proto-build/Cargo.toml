@@ -15,7 +15,7 @@ heck = "0.5"
 
 [dev-dependencies]
 # Compiles the test fixtures, held in memory, into descriptor sets.
-protox = "0.9"
+protox = "0.10"
 
 [lints.rust]
 unreachable_pub = "warn"

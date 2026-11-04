@@ -133,7 +133,7 @@ getrandom = "0.4"
 ed25519-dalek = { version = "3", features = ["rand_core", "alloc"] }
 
 # ZK Proof System (OPAQUE-ZKPP)
-halo2_proofs = { version = "=0.4.0", features = ["batch"] }
+halo2_proofs = { version = "=0.4.1", features = ["batch"] }
 halo2_gadgets = "0.6"
 pasta_curves = "0.6"
 ff = "0.14"
