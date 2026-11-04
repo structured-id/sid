@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.12](https://github.com/structured-id/sid/compare/v0.2.11...v0.2.12) - 2026-11-04
+
+### Added
+
+- *(operation)* keyed commands from proto retry rules under issued periods ([#380](https://github.com/structured-id/sid/pull/380))
+
 ## [0.2.11](https://github.com/structured-id/sid/compare/v0.2.10...v0.2.11) - 2026-11-03
 
 ### Other
