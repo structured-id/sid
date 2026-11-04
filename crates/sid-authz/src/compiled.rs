@@ -39,11 +39,16 @@ impl PolicySets {
                     CedarError::InvalidPolicy(e) => e,
                     other => other.to_string(),
                 });
-        if self.sets.len() >= CAPACITY {
-            // Any set may go: a set asked for again is compiled again.
+        // Any set may go: a set asked for again is compiled again. Every miss
+        // evicts until it is under the bound, so concurrent misses can pass
+        // it only by the misses in flight, and the next miss repairs that.
+        while self.sets.len() >= CAPACITY {
             let evicted = self.sets.iter().next().map(|entry| entry.key().clone());
-            if let Some(evicted) = evicted {
-                self.sets.remove(&evicted);
+            match evicted {
+                Some(evicted) => {
+                    self.sets.remove(&evicted);
+                }
+                None => break,
             }
         }
         self.sets.insert(policies.to_vec(), compiled.clone());

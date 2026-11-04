@@ -66,3 +66,39 @@ fn the_cache_is_bounded() {
     let set = cache.get(&[policy("p0", PERMIT)]).unwrap();
     assert!(set.policy(&cedar_policy::PolicyId::new("p0")).is_some());
 }
+
+/// Regression guard: concurrent misses at capacity may pass the bound for a
+/// moment, by at most the misses in flight, and the next miss brings the
+/// cache back under it.
+#[test]
+fn concurrent_misses_never_keep_the_cache_over_its_bound() {
+    const THREADS: usize = 16;
+    let cache = Arc::new(PolicySets::default());
+    for i in 0..CAPACITY {
+        cache.get(&[policy(&format!("p{i}"), PERMIT)]).unwrap();
+    }
+    for round in 0..8 {
+        let barrier = Arc::new(std::sync::Barrier::new(THREADS));
+        let threads: Vec<_> = (0..THREADS)
+            .map(|t| {
+                let (cache, barrier) = (cache.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    cache
+                        .get(&[policy(&format!("r{round}t{t}"), PERMIT)])
+                        .unwrap();
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert!(
+            cache.sets.len() < CAPACITY + THREADS,
+            "{}",
+            cache.sets.len()
+        );
+    }
+    cache.get(&[policy("after", PERMIT)]).unwrap();
+    assert!(cache.sets.len() <= CAPACITY, "{}", cache.sets.len());
+}
