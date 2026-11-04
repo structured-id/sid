@@ -29,6 +29,15 @@ fn asks_step_up(status: &Status) -> bool {
         .is_some_and(|(reason, _, _)| reason == ErrorReason::StepUpRequired.as_str())
 }
 
+/// The refusal of an `authorization_request` that names no request this
+/// issuer is waiting to complete, the same for every cause.
+fn not_waiting() -> Status {
+    sid_core::grpc_error::refuse::invalid_field(
+        "authorization_request",
+        "not an authorization request this issuer is waiting to complete",
+    )
+}
+
 /// Prefix of the `request_uri` that continues a kept request, the form of
 /// RFC 9126 §2.2.
 pub(crate) const REQUEST_URI_PREFIX: &str = "urn:ietf:params:oauth:request_uri:";
@@ -387,12 +396,41 @@ impl AuthServiceImpl {
         authorization_request: &str,
         addressed: Option<&sid_authn::issuer::AddressedIssuer>,
     ) -> Result<SignInContext, Status> {
-        let refused = || {
-            sid_core::grpc_error::refuse::invalid_field(
-                "authorization_request",
-                "not an authorization request this issuer is waiting to complete",
-            )
-        };
+        let (_, _, client, issuer) = self.kept(authorization_request, addressed).await?;
+        Ok(SignInContext {
+            issuer: issuer.canonical_url,
+            client_name: client.client_name,
+        })
+    }
+
+    /// The authorization response telling the client of the kept request
+    /// `authorization_request` continues that the user declined to sign in
+    /// for it: `access_denied` at its registered redirect URI, with the
+    /// request's `state` and the issuer (RFC 6749 §4.1.2.1, RFC 9207 §2). The
+    /// request is checked as [`Self::sign_in_context`] checks it, and taken:
+    /// it continues no further, and a repeat is refused.
+    pub async fn declined_sign_in(&self, authorization_request: &str) -> Result<url::Url, Status> {
+        let (reference, kept, _, issuer) = self.kept(authorization_request, None).await?;
+        if self.continue_authorization(&reference).await?.is_none() {
+            return Err(not_waiting());
+        }
+        sid_authn::oauth_http::authorization_response_url(
+            kept.redirect_uri(),
+            &issuer.canonical_url,
+            &[("error", "access_denied")],
+            kept.state(),
+        )
+        .ok_or_else(not_waiting)
+    }
+
+    /// The kept request `authorization_request` continues, read, with its
+    /// reference, established client and issuer; see [`Self::sign_in_context`].
+    async fn kept(
+        &self,
+        authorization_request: &str,
+        addressed: Option<&sid_authn::issuer::AddressedIssuer>,
+    ) -> Result<(String, PendingAuthorization, OAuth2Client, OidcIssuer), Status> {
+        let refused = not_waiting;
         let url = url::Url::parse(authorization_request).map_err(|_| refused())?;
         let handle = url
             .path()
@@ -424,10 +462,7 @@ impl AuthServiceImpl {
         if authorization_request.split('?').next() != Some(at.as_str()) {
             return Err(refused());
         }
-        Ok(SignInContext {
-            issuer: issuer.canonical_url,
-            client_name: client.client_name,
-        })
+        Ok((reference.to_owned(), kept, client, issuer))
     }
 
     /// The request kept under `reference`, taken: a reference continues once.

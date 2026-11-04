@@ -1987,6 +1987,60 @@ async fn a_sign_in_context_must_match_the_kept_request() {
     assert!(sign_in_context(svc, &rd, None).await.is_ok());
 }
 
+/// A user who declined to sign in for a kept request sends its client
+/// `access_denied` at the registered redirect URI, with the request's state
+/// and the issuer (RFC 6749 §4.1.2.1, RFC 9207 §2). The request is over: it
+/// is declined once and no longer continues to a code. A request the issuer
+/// does not hold is declined nowhere.
+#[tokio::test]
+async fn a_declined_sign_in_tells_the_client_once() {
+    let mut browser = browser(Some(LOGIN_URL)).await;
+    let response = no_redirects()
+        .get(with_query(
+            &browser.authorize,
+            &authorize_query(REDIRECT_URI),
+        ))
+        .send()
+        .await
+        .unwrap();
+    let rd = redirect_query(&response, LOGIN_URL)["rd"].clone();
+    let svc = &browser.user.svc;
+
+    let declined = svc.auth.declined_sign_in(&rd).await.unwrap();
+    assert!(declined.as_str().starts_with(REDIRECT_URI), "{declined}");
+    let query: std::collections::HashMap<_, _> = declined.query_pairs().into_owned().collect();
+    assert_eq!(query["error"], "access_denied");
+    assert_eq!(query["state"], "xyz");
+    assert_eq!(query["iss"], svc.issuer.canonical_url);
+    assert!(!query.contains_key("code"));
+
+    let again = svc.auth.declined_sign_in(&rd).await.unwrap_err();
+    assert_eq!(again.code(), tonic::Code::InvalidArgument);
+    assert!(sign_in_context(svc, &rd, None).await.is_err());
+    let forged = with_query(
+        &format!("{}/oauth2/authorize", svc.issuer.canonical_url),
+        &[
+            ("client_id", "test-client"),
+            ("request_uri", "urn:ietf:params:oauth:request_uri:forged"),
+        ],
+    );
+    let refused = svc.auth.declined_sign_in(&forged).await.unwrap_err();
+    assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+
+    let back = browser.continuation(&rd);
+    sign_in_again(&mut browser).await;
+    let response = browser.get(&back).await;
+    assert!(
+        !response.status().is_redirection()
+            || !response
+                .headers()
+                .get("location")
+                .and_then(|l| l.to_str().ok())
+                .is_some_and(|l| l.contains("code=")),
+        "a declined request continued to a code"
+    );
+}
+
 async fn browser_without_login() -> Browser {
     browser(None).await
 }
