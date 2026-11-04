@@ -138,6 +138,19 @@ fn test_sign_in_origin_refuses_wildcard_origins() {
     );
 }
 
+/// A native client over HTTP presents its proof and refresh credential as
+/// headers: the transcoder forwards both, so a REST refresh is served and a
+/// REST sign-in that proves its key is not silently made nonrenewable.
+#[cfg(feature = "http")]
+#[test]
+fn test_native_session_headers_reach_the_rpc() {
+    use sid_authn::native_session::{PROOF_METADATA, REFRESH_METADATA};
+
+    for header in [PROOF_METADATA, REFRESH_METADATA] {
+        assert!(super::HTTP_FORWARDED_HEADERS.contains(&header), "{header}");
+    }
+}
+
 /// The sign-in page reads a ceremony's CSRF token from the response and
 /// sends it back on the next step: the transcoder forwards the header to the
 /// RPC and lets the page's script read it, keeping headers a configuration

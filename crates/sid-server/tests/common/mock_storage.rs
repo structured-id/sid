@@ -16,6 +16,9 @@ pub struct MockStorageInner {
     profiles_by_email: HashMap<String, ProfileId>,
     credentials: HashMap<Uuid, Credential>,
     sessions: HashMap<SessionId, Session>,
+    /// Native session generations by id, and their credentials' hashes.
+    native_generations: HashMap<Uuid, NativePresented>,
+    native_credentials: HashMap<Vec<u8>, Uuid>,
     oauth2_clients: HashMap<String, OAuth2Client>,
     applications: HashMap<ApplicationId, Application>,
     roles: HashMap<RoleId, Role>,
@@ -1271,6 +1274,30 @@ impl MockStorageInner {
         self.sessions.insert(session.id, session.clone());
         Ok(evicted)
     }
+
+    /// Whether session `id` is stored and unexpired: what a native
+    /// generation's issue and rotation require of it.
+    fn native_session_live(&self, id: SessionId) -> bool {
+        self.sessions
+            .get(&id)
+            .is_some_and(|s| s.expires_at > chrono::Utc::now())
+    }
+
+    fn insert_native_generation(&mut self, generation: &NativeGeneration) {
+        for hash in &generation.credential_hashes {
+            self.native_credentials.insert(hash.clone(), generation.id);
+        }
+        self.native_generations.insert(
+            generation.id,
+            NativePresented {
+                generation: generation.id,
+                session_id: generation.session_id,
+                key_jkt: generation.key_jkt.clone(),
+                expires_at: generation.expires_at,
+                state: NativeGenerationState::Current,
+            },
+        );
+    }
 }
 
 #[async_trait]
@@ -1377,6 +1404,83 @@ impl GrantStore for MockStorage {
         }
         inner.owe(&ctx)?;
         Ok(ended.into_iter().map(|session| session.id).collect())
+    }
+
+    async fn issue_native_generation(
+        &self,
+        generation: &NativeGeneration,
+        _ctx: MutationContext,
+    ) -> SidResult<()> {
+        let mut inner = self.inner.lock().unwrap();
+        if !inner.native_session_live(generation.session_id) {
+            return Err(sid_core::Error::Fenced(
+                "the session ended before its native generation".into(),
+            ));
+        }
+        inner.insert_native_generation(generation);
+        Ok(())
+    }
+
+    async fn native_generation_by_credential(
+        &self,
+        hash: &[u8],
+    ) -> SidResult<Option<NativePresented>> {
+        let inner = self.inner.lock().unwrap();
+        Ok(inner
+            .native_credentials
+            .get(hash)
+            .and_then(|id| inner.native_generations.get(id))
+            .cloned())
+    }
+
+    async fn rotate_native_generation(
+        &self,
+        rotation: NativeRotation<'_>,
+        _ctx: MutationContext,
+    ) -> SidResult<NativeRotationOutcome> {
+        let mut inner = self.inner.lock().unwrap();
+        let now = chrono::Utc::now();
+        let Some(presented) = inner.native_generations.get(&rotation.presented).cloned() else {
+            return Ok(NativeRotationOutcome::Ended);
+        };
+        if !inner.native_session_live(presented.session_id) {
+            return Ok(NativeRotationOutcome::Ended);
+        }
+        match presented.state {
+            NativeGenerationState::Current => {
+                // Its predecessor's redelivery ends now that this one is used.
+                for generation in inner.native_generations.values_mut() {
+                    if let NativeGenerationState::Rotated {
+                        successor, sealed, ..
+                    } = &mut generation.state
+                        && *successor == rotation.presented
+                    {
+                        *sealed = None;
+                    }
+                }
+                inner
+                    .native_generations
+                    .get_mut(&rotation.presented)
+                    .expect("read above under the same lock")
+                    .state = NativeGenerationState::Rotated {
+                    exchange: rotation.exchange,
+                    successor: rotation.successor.id,
+                    redeliver_until: rotation.redeliver_until,
+                    sealed: Some(rotation.sealed.to_vec()),
+                };
+                inner.insert_native_generation(rotation.successor);
+                Ok(NativeRotationOutcome::Rotated)
+            }
+            NativeGenerationState::Rotated {
+                exchange,
+                redeliver_until,
+                sealed: Some(sealed),
+                ..
+            } if exchange == rotation.exchange && now < redeliver_until => {
+                Ok(NativeRotationOutcome::Redeliver(sealed))
+            }
+            NativeGenerationState::Rotated { .. } => Ok(NativeRotationOutcome::Retired),
+        }
     }
 
     async fn get_refresh_token_by_hash(&self, hash: &[u8]) -> SidResult<Option<RefreshToken>> {

@@ -82,7 +82,7 @@ fn credentials_go_into_sensitive_metadata() {
     let response = SignedIn {
         session_id: "s".into(),
         expires_in: 60,
-        delivery: Delivery::Bearer(SecretString::from("token")),
+        delivery: Delivery::bearer(SecretString::from("token")),
     }
     .respond(|_, _| ())
     .unwrap();
@@ -90,6 +90,44 @@ fn credentials_go_into_sensitive_metadata() {
     assert_eq!(token, "Bearer token");
     assert!(token.is_sensitive());
     assert!(response.metadata().get("set-cookie").is_none());
+    assert!(
+        response
+            .metadata()
+            .get_bin(crate::native_session::CREDENTIALS_METADATA)
+            .is_none()
+    );
+}
+
+/// A native session's refresh generation travels beside its access token in
+/// its own binary metadata, marked sensitive and decodable as sent.
+#[test]
+fn a_refresh_generation_goes_into_its_binary_metadata() {
+    let set = NativeCredentialSet {
+        refresh_credentials: vec!["a".into(), "b".into()],
+        expires_in: 3600,
+        redelivery_window: 30,
+    };
+    let response = SignedIn {
+        session_id: "s".into(),
+        expires_in: 60,
+        delivery: Delivery::Bearer {
+            token: SecretString::from("token"),
+            refresh: Some(set.clone()),
+        },
+    }
+    .respond(|_, _| ())
+    .unwrap();
+    let sent = response
+        .metadata()
+        .get_bin(crate::native_session::CREDENTIALS_METADATA)
+        .unwrap();
+    assert!(sent.is_sensitive());
+    let decoded = NativeCredentialSet::decode(sent.to_bytes().unwrap().as_ref()).unwrap();
+    assert_eq!(decoded, set);
+    assert_eq!(
+        response.metadata().get("authorization").unwrap(),
+        "Bearer token"
+    );
 }
 
 /// The cookie's lifetime is what remains of the session when the credential

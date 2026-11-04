@@ -61,7 +61,9 @@ use std::sync::Arc;
 use tonic::{Code, Request, Response, Status};
 use tracing::{info, instrument, warn};
 
+use super::native_session::NativeProof;
 use super::password_operation::{Finish, OperationPurpose, PendingOperation};
+use sid_authn::native_session::{NativePolicy, PROOF_METADATA, REFRESH_METADATA};
 use sid_authn::password_operation::{
     CurrentPasswordCheck, OperationOwner, change_context, operation_id,
 };
@@ -1501,6 +1503,21 @@ impl AuthServiceImpl {
         &self.public_origin
     }
 
+    /// The application key `proof` binds to the ceremony whose echoed
+    /// reference is `reference`, none without a proof.
+    async fn native_ceremony_key(
+        &self,
+        proof: Option<&NativeProof>,
+        reference: &[u8],
+    ) -> Result<Option<String>, Status> {
+        match proof {
+            Some(proof) => Ok(Some(
+                proof.ceremony_key(&self.dpop_validator, reference).await?,
+            )),
+            None => Ok(None),
+        }
+    }
+
     /// Validate DPoP proof from an OAuth2 token request, if present, against
     /// `target`, the request as it was received (RFC 9449 §4.3).
     /// Returns `Some(DPopBinding)` if proof is valid, `None` if no proof provided.
@@ -2499,6 +2516,7 @@ impl AuthServiceImpl {
         device_id: Option<uuid::Uuid>,
         client_ip: Option<std::net::IpAddr>,
         client: CeremonyClient,
+        native_key: Option<&str>,
         proved_by: Option<&sid_core::models::CredentialFence>,
         policy: Option<sid_core::models::ActorFence>,
     ) -> Result<SignedIn, Status> {
@@ -2508,8 +2526,10 @@ impl AuthServiceImpl {
             method.auth_level(self.security_policy.auth.passkey_satisfies_mfa);
         session.amr = method.amr();
         let proved_by = proved_by.map(sid_core::models::SignInProof::Credential);
-        self.sign_in(profile, session, client, proved_by, policy, None)
-            .await
+        self.sign_in(
+            profile, session, client, native_key, proved_by, policy, None,
+        )
+        .await
     }
 
     /// A full session of `profile_id` from `ip_address`, for the
@@ -2597,12 +2617,14 @@ impl AuthServiceImpl {
     /// Complete `pending` with the verified second factor `method` (RFC 8176):
     /// the current login requirements are met by the completed
     /// authentication, the pending context ends exactly once and the account
-    /// gets its session with a new credential, delivered to `client`.
+    /// gets its session with a new credential, delivered to `client` (with
+    /// the refresh generation bound to `native_key` when it proved one).
     async fn complete_pending_sign_in(
         &self,
         pending: Session,
         method: &str,
         client: CeremonyClient,
+        native_key: Option<&str>,
     ) -> Result<SignedIn, Status> {
         use sid_core::models::session::AuthLevel;
         let profile = self
@@ -2648,6 +2670,7 @@ impl AuthServiceImpl {
                 ),
                 session,
                 client,
+                native_key,
                 proved_by
                     .as_ref()
                     .map(sid_core::models::SignInProof::Credential),
@@ -2671,7 +2694,9 @@ impl AuthServiceImpl {
 
     /// Complete a local first-factor sign-in as `admission` decided: the
     /// session, or its pending context with the second factors that complete
-    /// it and, for a browser, the CSRF token the completion sends.
+    /// it and, for a browser, the CSRF token the completion sends. A session
+    /// of a native client that proved the application key `native_key` gets
+    /// its refresh generation; a pending context gets none.
     #[allow(clippy::too_many_arguments)]
     async fn complete_first_factor(
         &self,
@@ -2680,6 +2705,7 @@ impl AuthServiceImpl {
         device_id: Option<uuid::Uuid>,
         client_ip: Option<std::net::IpAddr>,
         client: CeremonyClient,
+        native_key: Option<&str>,
         proved_by: Option<&sid_core::models::CredentialFence>,
         admission: FirstFactor,
     ) -> Result<FirstFactorSignedIn, Status> {
@@ -2687,7 +2713,8 @@ impl AuthServiceImpl {
             FirstFactor::Admitted(policy) => Ok(FirstFactorSignedIn {
                 signed_in: self
                     .create_session_and_issue_tokens(
-                        profile, method, device_id, client_ip, client, proved_by, policy,
+                        profile, method, device_id, client_ip, client, native_key, proved_by,
+                        policy,
                     )
                     .await?,
                 second_factors: Vec::new(),
@@ -2755,8 +2782,9 @@ impl AuthServiceImpl {
         let mut session = sid_core::models::Session::new_provisional(profile.id, client_ip);
         session.device_id = device_id;
         session.amr = vec![amr.to_string()];
-        // Mailbox possession proves no stored credential.
-        self.sign_in(profile, session, client, None, policy, None)
+        // Mailbox possession proves no stored credential, and a provisional
+        // session is not renewable.
+        self.sign_in(profile, session, client, None, None, policy, None)
             .await
     }
 
@@ -2765,18 +2793,23 @@ impl AuthServiceImpl {
     /// the session stores, and no access token; a native client gets the
     /// session's access token. `proved_by` is what the sign-in proved and
     /// `policy` the login policy it was admitted under; both must still hold
-    /// when the session commits.
+    /// when the session commits. A native client whose ceremony proved the
+    /// application key `native_key` also gets its refresh generation.
+    #[allow(clippy::too_many_arguments)]
     async fn sign_in(
         &self,
         profile: &sid_core::models::Profile,
         session: sid_core::models::Session,
         client: CeremonyClient,
+        native_key: Option<&str>,
         proved_by: Option<sid_core::models::SignInProof<'_>>,
         policy: Option<sid_core::models::ActorFence>,
         retained: Option<super::sign_in_session::RetainedSignIn<'_>>,
     ) -> Result<SignedIn, Status> {
         self.sign_in_sessions()
-            .sign_in(profile, session, client, proved_by, policy, retained)
+            .sign_in(
+                profile, session, client, native_key, proved_by, policy, retained,
+            )
             .await
     }
 
@@ -2788,7 +2821,7 @@ impl AuthServiceImpl {
             revocation: &self.revocation_cache,
             issuer: &self.issuer,
             cookie: &self.browser_cookie,
-            max_concurrent_sessions: self.security_policy.session.max_concurrent_sessions,
+            policy: &self.security_policy.session,
         }
     }
 
@@ -2845,7 +2878,7 @@ impl AuthServiceImpl {
             "profile".to_string(),
             "email".to_string(),
         ];
-        self.sign_in(profile, session, ceremony.client, None, policy, None)
+        self.sign_in(profile, session, ceremony.client, None, None, policy, None)
             .await
     }
 
@@ -2947,6 +2980,7 @@ impl AuthServiceImpl {
                     profile,
                     session,
                     CeremonyClient::Browser,
+                    None,
                     proved_by,
                     policy,
                     None,
@@ -2967,6 +3001,7 @@ impl AuthServiceImpl {
                 profile,
                 session,
                 CeremonyClient::Browser,
+                None,
                 proved_by,
                 policy,
                 Some(retained),
@@ -3370,7 +3405,17 @@ impl AuthService for AuthServiceImpl {
         let client_ip = self.client_ip(&request)?;
         let user_agent = extract_user_agent(request.metadata());
         let captcha_pass = extract_captcha_pass(request.metadata());
+        let native = NativeProof::of(
+            &request,
+            client,
+            self.public_origin(),
+            "/sid.v1.authn.AuthService/OpaqueLoginFinish",
+        )?;
         let req = request.into_inner();
+        // The key is bound to this ceremony, checked before it is consumed.
+        let native_key = self
+            .native_ceremony_key(native.as_ref(), req.server_login_state.as_bytes())
+            .await?;
 
         let host = ProfileSignIn {
             service: self,
@@ -3414,6 +3459,7 @@ impl AuthService for AuthServiceImpl {
                 user_agent.as_deref().map(compute_device_id),
                 client_ip,
                 client,
+                native_key.as_deref(),
                 Some(&verified.proved_by),
                 admission,
             )
@@ -3428,6 +3474,66 @@ impl AuthService for AuthServiceImpl {
             enrollable_factors,
             browser_csrf,
         })
+    }
+
+    /// Renew a native session with one credential of its current generation
+    /// and a fresh proof by its application key, or deliver again the
+    /// generation a lost response of the same exchange carried.
+    #[tracing::instrument(skip_all, fields(rpc = "refresh_native_session"))]
+    async fn refresh_native_session(
+        &self,
+        request: Request<RefreshNativeSessionRequest>,
+    ) -> Result<Response<RefreshNativeSessionResponse>, Status> {
+        self.check_maintenance().await?;
+        // A browser renews by its cookie: it is refused here.
+        let client = self.ceremony_client(request.metadata())?;
+        let proof = NativeProof::of(
+            &request,
+            client,
+            self.public_origin(),
+            "/sid.v1.authn.AuthService/RefreshNativeSession",
+        )?
+        .ok_or_else(|| missing_field(PROOF_METADATA))?;
+        let credential = super::native_session::single_value(request.metadata(), REFRESH_METADATA)?
+            .ok_or_else(|| missing_field(REFRESH_METADATA))?;
+        let req = request.into_inner();
+        let exchange = sid_core::models::NativeExchange::from_bytes(&req.exchange)
+            .ok_or_else(|| invalid_field("exchange", "must be 16 bytes"))?;
+        let policy = NativePolicy::from_session_policy(&self.security_policy.session)
+            .map_err(|e| internal("read the native session policy", e))?;
+
+        let refreshed = sid_authn::native_session::refresh(
+            self.storage.as_ref(),
+            self.key_manager.as_ref(),
+            &self.dpop_validator,
+            &self.revocation_cache,
+            sid_authn::native_session::RefreshRequest {
+                proof: proof.proof(),
+                method: &proof.target().method,
+                url: &proof.target().uri,
+                credential: &credential,
+                exchange,
+            },
+            policy,
+        )
+        .await
+        .map_err(super::native_session::refusal)?;
+        // An account that can no longer authenticate gets no access token,
+        // however its session renewed.
+        let profile = self
+            .storage
+            .get_profile(refreshed.session.profile_id)
+            .await
+            .map_err(storage_failure)?
+            .filter(|p| p.status.can_authenticate())
+            .ok_or_else(session_ended)?;
+        self.sign_in_sessions()
+            .native_access(&profile, &refreshed.session, Some(refreshed.set))
+            .await?
+            .respond(|session_id, expires_in| RefreshNativeSessionResponse {
+                session_id,
+                expires_in,
+            })
     }
 
     // ── OPAQUE-ZKPP ──
@@ -4040,22 +4146,35 @@ impl AuthService for AuthServiceImpl {
         let client_ip = self.client_ip(&request)?;
         let user_agent = extract_user_agent(request.metadata());
         let captcha_pass = extract_captcha_pass(request.metadata());
+        let native = NativeProof::of(
+            &request,
+            client,
+            self.public_origin(),
+            "/sid.v1.authn.AuthService/WebAuthnAuthenticationFinish",
+        )?;
         let req = request.into_inner();
 
         let not_an_assertion = || invalid_field("credential", "not a WebAuthn assertion");
+        let expired = || ceremony_expired("passkey sign-in");
 
         let user_verified;
         let key_amr;
         let proved_by;
+        // The key is bound to the ceremony the assertion answers (its
+        // start's `state_key`, taken from the assertion's own challenge, not
+        // from the request), checked before that ceremony is consumed.
+        let native_key;
         let profile = if let Some(identifier) = &req.principal {
             // ── Identifier-based flow ──
             let credential =
                 AssertionResponse::parse(&req.credential).map_err(|_| not_an_assertion())?;
+            let state_key = credential.state_key().map_err(|_| expired())?;
+            native_key = self
+                .native_ceremony_key(native.as_ref(), state_key.as_bytes())
+                .await?;
             let p = self.resolve_profile(identifier).await?;
 
             // The ceremony the assertion answers, started for this profile.
-            let expired = || ceremony_expired("passkey sign-in");
-            let state_key = credential.state_key().map_err(|_| expired())?;
             let started_for = self
                 .webauthn_state
                 .take(&state_key)
@@ -4081,6 +4200,10 @@ impl AuthService for AuthServiceImpl {
             // the finish below (single use); `req.state_key` is not needed.
             let credential = DiscoverableAssertionResponse::parse(&req.credential)
                 .map_err(|_| not_an_assertion())?;
+            let state_key = credential.state_key().map_err(|_| expired())?;
+            native_key = self
+                .native_ceremony_key(native.as_ref(), state_key.as_bytes())
+                .await?;
 
             // The returned handle names an account only through the stored
             // association at this RP; an unknown one authenticates nobody
@@ -4145,6 +4268,7 @@ impl AuthService for AuthServiceImpl {
                 user_agent.as_deref().map(compute_device_id),
                 client_ip,
                 client,
+                native_key.as_deref(),
                 // The asserting passkey, as it holds after this use, fences
                 // the session's commit (or the pending context's completion).
                 Some(&proved_by),
@@ -5120,6 +5244,7 @@ impl AuthService for AuthServiceImpl {
                 user_agent.as_deref().map(compute_device_id),
                 client_ip,
                 client,
+                None,
                 Some(&sid_core::models::CredentialFence {
                     id: new_credential.id,
                     data: new_credential.data.clone(),
@@ -5349,6 +5474,33 @@ impl AuthService for AuthServiceImpl {
             FactorCaller::Pending(session, _) | FactorCaller::StepUp(session) => session.profile_id,
         };
         let client_ip = self.client_ip(&request)?;
+        // A native completion asking for a renewable session binds its key
+        // to the pending context it presents; a step-up renews nothing.
+        let native = match &caller {
+            FactorCaller::Pending(_, client) => NativeProof::of(
+                &request,
+                *client,
+                self.public_origin(),
+                "/sid.v1.authn.AuthService/VerifyTotp",
+            )?,
+            FactorCaller::StepUp(_) => {
+                if request.metadata().get(PROOF_METADATA).is_some() {
+                    return Err(super::native_session::field_refused(
+                        PROOF_METADATA,
+                        "a step-up renews no session",
+                    ));
+                }
+                None
+            }
+        };
+        let native_key = match &native {
+            Some(_) => {
+                let pending = sid_authn::caller::bearer_token(&request)?.to_owned();
+                self.native_ceremony_key(native.as_ref(), pending.as_bytes())
+                    .await?
+            }
+            None => None,
+        };
 
         let req = request.into_inner();
         require_totp_code_format(&req.code)?;
@@ -5390,7 +5542,7 @@ impl AuthService for AuthServiceImpl {
         let session_id = match caller {
             FactorCaller::Pending(pending, client) => {
                 let signed_in = self
-                    .complete_pending_sign_in(pending, "otp", client)
+                    .complete_pending_sign_in(pending, "otp", client, native_key.as_deref())
                     .await?;
                 info!("TOTP completed the sign-in of profile {}", profile_id);
                 return signed_in.respond(|session_id, expires_in| MfaVerifyResponse {
@@ -5453,7 +5605,7 @@ impl AuthService for AuthServiceImpl {
         SignedIn {
             session_id: session_id.to_string(),
             expires_in: self.jwt.access_token_ttl_secs(),
-            delivery: Delivery::Bearer(access_token.into()),
+            delivery: Delivery::bearer(access_token.into()),
         }
         .respond(|session_id, expires_in| MfaVerifyResponse {
             verified: true,
@@ -6702,6 +6854,7 @@ impl AuthService for AuthServiceImpl {
                 user_agent.as_deref().map(compute_device_id),
                 client_ip,
                 client,
+                None,
                 // Another reset committed meanwhile signs this one in no more.
                 Some(&sid_core::models::CredentialFence {
                     id: new_cred.id,

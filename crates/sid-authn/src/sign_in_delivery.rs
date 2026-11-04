@@ -4,10 +4,12 @@
 //! native client the access token in response metadata, never the message.
 
 use chrono::{DateTime, Utc};
+use prost::Message;
 use secrecy::ExposeSecret;
 use sid_core::grpc_error::refuse::internal;
 use sid_core::grpc_error::{ApiError, ErrorReason};
 use sid_core::models::Session;
+use sid_proto::sid::v1::authn::NativeCredentialSet;
 use tonic::metadata::{MetadataMap, MetadataValue};
 use tonic::{Response, Status};
 
@@ -63,17 +65,33 @@ pub fn ceremony_client(
 pub enum Delivery {
     /// The `Set-Cookie` value of the browser's session cookie.
     Cookie(String),
-    /// The session's access token, sent as `authorization: Bearer`.
-    Bearer(secrecy::SecretString),
+    /// The session's access token, sent as `authorization: Bearer`, with the
+    /// native session's refresh generation when the client proved its key.
+    Bearer {
+        token: secrecy::SecretString,
+        refresh: Option<NativeCredentialSet>,
+    },
 }
 
 impl Delivery {
+    /// A native client's access token without a refresh generation.
+    pub fn bearer(token: secrecy::SecretString) -> Self {
+        Self::Bearer {
+            token,
+            refresh: None,
+        }
+    }
+
     /// Put the credential into `metadata`.
     #[allow(clippy::result_large_err)]
     pub fn deliver(self, metadata: &mut MetadataMap) -> Result<(), Status> {
-        let (name, value) = match self {
-            Self::Cookie(cookie) => ("set-cookie", cookie),
-            Self::Bearer(token) => ("authorization", format!("Bearer {}", token.expose_secret())),
+        let (name, value, refresh) = match self {
+            Self::Cookie(cookie) => ("set-cookie", cookie, None),
+            Self::Bearer { token, refresh } => (
+                "authorization",
+                format!("Bearer {}", token.expose_secret()),
+                refresh,
+            ),
         };
         let mut value: MetadataValue<_> = value
             .parse()
@@ -81,6 +99,11 @@ impl Delivery {
         // A live credential: kept out of debug output and HPACK indexing.
         value.set_sensitive(true);
         metadata.insert(name, value);
+        if let Some(refresh) = refresh {
+            let mut value = MetadataValue::from_bytes(&refresh.encode_to_vec());
+            value.set_sensitive(true);
+            metadata.insert_bin(crate::native_session::CREDENTIALS_METADATA, value);
+        }
         Ok(())
     }
 }

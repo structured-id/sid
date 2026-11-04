@@ -864,6 +864,11 @@ mod grant_store {
         rotate_refresh_token,
         rotate_after_sign_out_is_refused,
         concurrent_rotation,
+        native_generation_issued_for_a_live_session,
+        native_generation_rotates_once,
+        native_redelivery_ends_with_its_window,
+        concurrent_native_rotation,
+        native_generations_end_with_their_session,
     );
 }
 

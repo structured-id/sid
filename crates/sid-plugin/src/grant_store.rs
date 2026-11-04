@@ -8,8 +8,9 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sid_core::Result;
 use sid_core::models::{
-    AuthCodeRedemption, AuthorizationCode, BrowserSecretHash, MutationContext, RefreshToken,
-    Session, SessionEnd, SessionId, SignInProof,
+    AuthCodeRedemption, AuthorizationCode, BrowserSecretHash, MutationContext, NativeGeneration,
+    NativePresented, NativeRotation, NativeRotationOutcome, RefreshToken, Session, SessionEnd,
+    SessionId, SignInProof,
 };
 use uuid::Uuid;
 
@@ -133,6 +134,52 @@ pub trait GrantStore: Send + Sync {
         grace_expires_at: DateTime<Utc>,
         ctx: MutationContext,
     ) -> Result<bool>;
+
+    /// Store the first generation of a native session's refresh credentials,
+    /// bound to its application key, only while that session exists and has
+    /// not expired: otherwise `Error::Fenced` and nothing is stored. An
+    /// existing generation id or credential hash is `Conflict`. A store
+    /// without native sessions refuses with `Error::Unavailable`.
+    async fn issue_native_generation(
+        &self,
+        _generation: &NativeGeneration,
+        _ctx: MutationContext,
+    ) -> Result<()> {
+        Err(sid_core::Error::Unavailable(
+            "native sessions are unsupported by this store".into(),
+        ))
+    }
+
+    /// The generation the credential hashed to `hash` belongs to, whatever
+    /// its state; expiry is the caller's to check.
+    async fn native_generation_by_credential(
+        &self,
+        _hash: &[u8],
+    ) -> Result<Option<NativePresented>> {
+        Err(sid_core::Error::Unavailable(
+            "native sessions are unsupported by this store".into(),
+        ))
+    }
+
+    /// Commit `rotation` in one transaction, serialized against every other
+    /// rotation of the presented generation and against its session's end:
+    /// a current generation of a live session rotates into the successor,
+    /// whose credentials are stored, and keeps the sealed result for a retry
+    /// of the same exchange until `redeliver_until` (`Rotated`). The
+    /// successor rotating in turn drops its predecessor's sealed result.
+    /// A generation this exchange already rotated, inside its window and
+    /// with its successor still current, answers its sealed result
+    /// (`Redeliver`) and writes nothing; any other rotated generation is
+    /// `Retired`; a session ended or expired is `Ended`.
+    async fn rotate_native_generation(
+        &self,
+        _rotation: NativeRotation<'_>,
+        _ctx: MutationContext,
+    ) -> Result<NativeRotationOutcome> {
+        Err(sid_core::Error::Unavailable(
+            "native sessions are unsupported by this store".into(),
+        ))
+    }
 
     /// Insert an authorization code; an existing code hash is `Conflict`.
     async fn create_auth_code(

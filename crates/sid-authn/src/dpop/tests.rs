@@ -701,6 +701,247 @@ async fn test_resource_proof_for_another_token_rejected() {
     assert!(matches!(err, DPopError::AccessTokenHashMismatch));
 }
 
+// ── SID native proofs ──
+
+const NATIVE_REFRESH: &str =
+    "https://sid.example.com/sid.v1.authn.AuthService/RefreshNativeSession";
+
+/// A SID native proof of `typ` for a POST to `htu` with `claims` added.
+fn build_native_proof(typ: &str, htu: &str, jti: &str, claims: serde_json::Value) -> String {
+    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+    let jwk: jsonwebtoken::jwk::Jwk = serde_json::from_value(serde_json::json!({
+        "kty": "EC", "crv": "P-256", "x": TEST_JWK_X, "y": TEST_JWK_Y,
+    }))
+    .unwrap();
+    let mut header = Header::new(Algorithm::ES256);
+    header.typ = Some(typ.to_string());
+    header.jwk = Some(jwk);
+    let mut payload = serde_json::json!({
+        "jti": jti, "htm": "POST", "htu": htu, "iat": chrono::Utc::now().timestamp(),
+    });
+    for (name, value) in claims.as_object().unwrap() {
+        payload[name] = value.clone();
+    }
+    let key = EncodingKey::from_ec_pem(include_bytes!(
+        "../../tests/fixtures/test_es256_private.pem"
+    ))
+    .unwrap();
+    encode(&header, &payload, &key).unwrap()
+}
+
+fn exchange(byte: u8) -> sid_core::models::NativeExchange {
+    sid_core::models::NativeExchange::from_bytes(&[byte; 16]).unwrap()
+}
+
+/// The claims a refresh proof binds: the presented credential's digest and
+/// the exchange.
+fn refresh_claims(
+    credential: &str,
+    exchange: &sid_core::models::NativeExchange,
+) -> serde_json::Value {
+    serde_json::json!({
+        "sid_rt": native_digest(credential.as_bytes()),
+        "sid_ex": URL_SAFE_NO_PAD.encode(exchange.as_bytes()),
+    })
+}
+
+/// A refresh proof for the presented credential and exchange, by the key,
+/// at the endpoint actually called, is accepted and names that key.
+#[tokio::test]
+async fn native_refresh_proof_accepted() {
+    let validator = DPopValidator::new(test_admissions());
+    let x = exchange(1);
+    let proof = build_native_proof(
+        NATIVE_PROOF_TYPE,
+        NATIVE_REFRESH,
+        "n-1",
+        refresh_claims("rt-1", &x),
+    );
+    let binding = validator
+        .validate_native(
+            &proof,
+            "POST",
+            NATIVE_REFRESH,
+            NativeProofBinding::Refresh {
+                credential: "rt-1",
+                exchange: &x,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(binding.jkt, test_key_jkt());
+}
+
+/// The proof binds what it presents: another credential (a stolen one under
+/// the victim's proof), another exchange, or a ceremony proof offered for a
+/// refresh is refused.
+#[tokio::test]
+async fn native_refresh_proof_binds_credential_and_exchange() {
+    let validator = DPopValidator::new(test_admissions());
+    let x = exchange(1);
+    let cases = [
+        (
+            NativeProofBinding::Refresh {
+                credential: "rt-other",
+                exchange: &x,
+            },
+            refresh_claims("rt-1", &x),
+        ),
+        (
+            NativeProofBinding::Refresh {
+                credential: "rt-1",
+                exchange: &exchange(2),
+            },
+            refresh_claims("rt-1", &x),
+        ),
+        (
+            NativeProofBinding::Refresh {
+                credential: "rt-1",
+                exchange: &x,
+            },
+            serde_json::json!({
+                "sid_cer": native_digest(b"ceremony"),
+            }),
+        ),
+    ];
+    for (i, (binding, claims)) in cases.into_iter().enumerate() {
+        let proof = build_native_proof(
+            NATIVE_PROOF_TYPE,
+            NATIVE_REFRESH,
+            &format!("nb-{i}"),
+            claims,
+        );
+        let err = validator
+            .validate_native(&proof, "POST", NATIVE_REFRESH, binding)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, DPopError::NativeBindingMismatch),
+            "case {i}: {err:?}"
+        );
+    }
+}
+
+/// A ceremony proof binds the ceremony it completes and no other.
+#[tokio::test]
+async fn native_ceremony_proof_binds_its_ceremony() {
+    let validator = DPopValidator::new(test_admissions());
+    let url = "https://sid.example.com/sid.v1.authn.AuthService/OpaqueLoginFinish";
+    let claims = serde_json::json!({ "sid_cer": native_digest(b"login-state-1") });
+    let proof = build_native_proof(NATIVE_PROOF_TYPE, url, "nc-1", claims.clone());
+    validator
+        .validate_native(
+            &proof,
+            "POST",
+            url,
+            NativeProofBinding::Ceremony {
+                reference: b"login-state-1",
+            },
+        )
+        .await
+        .unwrap();
+    let proof = build_native_proof(NATIVE_PROOF_TYPE, url, "nc-2", claims);
+    let err = validator
+        .validate_native(
+            &proof,
+            "POST",
+            url,
+            NativeProofBinding::Ceremony {
+                reference: b"login-state-2",
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DPopError::NativeBindingMismatch), "{err:?}");
+}
+
+/// An ordinary OAuth DPoP proof is not a SID native proof, even with the SID
+/// claims, and a native proof is not an OAuth one: the type keeps them apart.
+#[tokio::test]
+async fn native_and_oauth_proofs_do_not_substitute() {
+    let validator = DPopValidator::new(test_admissions());
+    let x = exchange(1);
+    let oauth = build_native_proof(
+        "dpop+jwt",
+        NATIVE_REFRESH,
+        "s-1",
+        refresh_claims("rt-1", &x),
+    );
+    let err = validator
+        .validate_native(
+            &oauth,
+            "POST",
+            NATIVE_REFRESH,
+            NativeProofBinding::Refresh {
+                credential: "rt-1",
+                exchange: &x,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DPopError::InvalidProof(_)), "{err:?}");
+    let native = build_native_proof(
+        NATIVE_PROOF_TYPE,
+        NATIVE_REFRESH,
+        "s-2",
+        refresh_claims("rt-1", &x),
+    );
+    let err = validator
+        .validate(&native, "POST", NATIVE_REFRESH)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DPopError::InvalidProof(_)), "{err:?}");
+}
+
+/// The proof names the endpoint the client called: a direct gRPC call is not
+/// checked against the HTTP alias it did not call, nor the reverse.
+#[tokio::test]
+async fn native_proof_names_the_called_endpoint() {
+    let validator = DPopValidator::new(test_admissions());
+    let x = exchange(1);
+    let http = "https://sid.example.com/v1/auth/native-session/refresh";
+    let proof = build_native_proof(NATIVE_PROOF_TYPE, http, "e-1", refresh_claims("rt-1", &x));
+    let err = validator
+        .validate_native(
+            &proof,
+            "POST",
+            NATIVE_REFRESH,
+            NativeProofBinding::Refresh {
+                credential: "rt-1",
+                exchange: &x,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DPopError::UriMismatch), "{err:?}");
+}
+
+/// A native proof is used once: the same proof again is a replay.
+#[tokio::test]
+async fn native_proof_used_once() {
+    let validator = DPopValidator::new(test_admissions());
+    let x = exchange(1);
+    let proof = build_native_proof(
+        NATIVE_PROOF_TYPE,
+        NATIVE_REFRESH,
+        "once",
+        refresh_claims("rt-1", &x),
+    );
+    let binding = || NativeProofBinding::Refresh {
+        credential: "rt-1",
+        exchange: &x,
+    };
+    validator
+        .validate_native(&proof, "POST", NATIVE_REFRESH, binding())
+        .await
+        .unwrap();
+    let err = validator
+        .validate_native(&proof, "POST", NATIVE_REFRESH, binding())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DPopError::ReplayDetected), "{err:?}");
+}
+
 /// A valid proof by a key other than the token's bound key is refused: a
 /// stolen bound token cannot be used with the thief's own key.
 #[tokio::test]

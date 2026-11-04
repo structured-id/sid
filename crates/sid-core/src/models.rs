@@ -52,6 +52,7 @@ pub mod magic_link;
 pub mod mapped_claims;
 pub mod mfa;
 pub mod mutation;
+pub mod native_session;
 pub mod notification;
 pub mod oauth2_client;
 pub mod oidc_issuer;
@@ -180,6 +181,10 @@ pub use mfa::{
     MfaEnrollment, MfaMethod, PhishingResistance, RecoveryCode, RecoveryCodeSet,
 };
 pub use mutation::{ActorFence, MutationContext};
+pub use native_session::{
+    NATIVE_EXCHANGE_LEN, NATIVE_GENERATION_SIZE_MAX, NativeExchange, NativeGeneration,
+    NativeGenerationState, NativePresented, NativeRotation, NativeRotationOutcome,
+};
 pub use notification::{
     DeliveryResult, DeliveryStatus, NotificationChannel, NotificationId, NotificationPriority,
     NotificationRequest,

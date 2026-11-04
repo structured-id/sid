@@ -43,6 +43,37 @@ pub enum DPopError {
     /// The proof key is not the key the token is bound to (RFC 9449 §7.1).
     #[error("DPoP proof key does not match the token binding")]
     KeyMismatch,
+
+    /// A SID native proof does not bind the credential, exchange or ceremony
+    /// it accompanies.
+    #[error("native proof does not bind this request")]
+    NativeBindingMismatch,
+}
+
+/// JWS `typ` of a SID native proof (native_session.proto): distinct from
+/// `dpop+jwt`, so neither proof is accepted as the other.
+pub const NATIVE_PROOF_TYPE: &str = "sid-native+jwt";
+
+/// JWS `typ` of an OAuth DPoP proof (RFC 9449 §4.2).
+const DPOP_PROOF_TYPE: &str = "dpop+jwt";
+
+/// base64url (no padding) SHA-256 of `bytes`: how a native proof names the
+/// credential or ceremony it binds.
+pub fn native_digest(bytes: &[u8]) -> String {
+    URL_SAFE_NO_PAD.encode(Sha256::digest(bytes))
+}
+
+/// What a SID native proof must bind beyond RFC 9449's claims.
+#[derive(Debug, Clone, Copy)]
+pub enum NativeProofBinding<'a> {
+    /// A refresh: the presented credential (`sid_rt`) and the logical
+    /// exchange (`sid_ex`).
+    Refresh {
+        credential: &'a str,
+        exchange: &'a sid_core::models::NativeExchange,
+    },
+    /// A ceremony completion: the ceremony reference it echoes (`sid_cer`).
+    Ceremony { reference: &'a [u8] },
 }
 
 /// How far ahead of this server's clock a proof's `iat` may be (RFC 9449
@@ -86,6 +117,9 @@ struct CheckedProof {
     iat: i64,
     ath: Option<String>,
     jwk: serde_json::Value,
+    sid_rt: Option<String>,
+    sid_ex: Option<String>,
+    sid_cer: Option<String>,
 }
 
 /// A proof checked at a resource for its bound token, not yet admitted: what
@@ -134,6 +168,12 @@ struct DPopPayload {
     nonce: Option<String>,
     #[serde(default)]
     ath: Option<String>,
+    #[serde(default)]
+    sid_rt: Option<String>,
+    #[serde(default)]
+    sid_ex: Option<String>,
+    #[serde(default)]
+    sid_cer: Option<String>,
 }
 
 impl DPopValidator {
@@ -160,10 +200,48 @@ impl DPopValidator {
         expected_method: &str,
         expected_url: &str,
     ) -> Result<DPopBinding, DPopError> {
-        let proof = Self::check(proof_jwt, expected_method, expected_url)?;
+        let proof = Self::check(proof_jwt, DPOP_PROOF_TYPE, expected_method, expected_url)?;
         let thumbprint = compute_jwk_thumbprint(&proof.jwk)?;
         self.first_use(&thumbprint, expected_url, &proof.jti)
             .await?;
+        Ok(DPopBinding::new(thumbprint))
+    }
+
+    /// Validate a SID native proof (native_session.proto): RFC 9449's
+    /// signature, method, URI and freshness checks under typ
+    /// `sid-native+jwt`, the SID claims `binding` names, and the proof's
+    /// single use. Returns the proving key's thumbprint; that it is the key
+    /// a session is bound to is the caller's check.
+    pub async fn validate_native(
+        &self,
+        proof_jwt: &str,
+        method: &str,
+        url: &str,
+        binding: NativeProofBinding<'_>,
+    ) -> Result<DPopBinding, DPopError> {
+        let proof = Self::check(proof_jwt, NATIVE_PROOF_TYPE, method, url)?;
+        let bound = match binding {
+            NativeProofBinding::Refresh {
+                credential,
+                exchange,
+            } => {
+                proof.sid_cer.is_none()
+                    && proof.sid_rt.as_deref()
+                        == Some(native_digest(credential.as_bytes()).as_str())
+                    && proof.sid_ex.as_deref()
+                        == Some(URL_SAFE_NO_PAD.encode(exchange.as_bytes()).as_str())
+            }
+            NativeProofBinding::Ceremony { reference } => {
+                proof.sid_rt.is_none()
+                    && proof.sid_ex.is_none()
+                    && proof.sid_cer.as_deref() == Some(native_digest(reference).as_str())
+            }
+        };
+        if !bound {
+            return Err(DPopError::NativeBindingMismatch);
+        }
+        let thumbprint = compute_jwk_thumbprint(&proof.jwk)?;
+        self.first_use(&thumbprint, url, &proof.jti).await?;
         Ok(DPopBinding::new(thumbprint))
     }
 
@@ -235,7 +313,7 @@ impl DPopValidator {
         access_token: &str,
         bound_jkt: &str,
     ) -> Result<VerifiedProof, DPopError> {
-        let proof = Self::check(proof_jwt, method, url)?;
+        let proof = Self::check(proof_jwt, DPOP_PROOF_TYPE, method, url)?;
         if proof.ath.as_deref() != Some(access_token_hash(access_token).as_str()) {
             return Err(DPopError::AccessTokenHashMismatch);
         }
@@ -275,6 +353,7 @@ impl DPopValidator {
     /// The checks that need no shared state: form, signature, method, URI, age.
     fn check(
         proof_jwt: &str,
+        typ: &str,
         expected_method: &str,
         expected_url: &str,
     ) -> Result<CheckedProof, DPopError> {
@@ -291,15 +370,12 @@ impl DPopValidator {
         let header: DPopJoseHeader = serde_json::from_slice(&header_bytes)
             .map_err(|e| DPopError::InvalidProof(format!("invalid header JSON: {e}")))?;
 
-        // 3. Verify typ = "dpop+jwt"
-        match header.typ.as_deref() {
-            Some("dpop+jwt") => {}
-            other => {
-                return Err(DPopError::InvalidProof(format!(
-                    "expected typ=dpop+jwt, got {:?}",
-                    other
-                )));
-            }
+        // 3. Verify typ: dpop+jwt, or sid-native+jwt for a native proof
+        if header.typ.as_deref() != Some(typ) {
+            return Err(DPopError::InvalidProof(format!(
+                "expected typ={typ}, got {:?}",
+                header.typ
+            )));
         }
 
         // 4. Parse algorithm (must be asymmetric)
@@ -356,6 +432,9 @@ impl DPopValidator {
             iat: payload.iat,
             ath: payload.ath,
             jwk: header.jwk,
+            sid_rt: payload.sid_rt,
+            sid_ex: payload.sid_ex,
+            sid_cer: payload.sid_cer,
         })
     }
 }
