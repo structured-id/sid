@@ -94,3 +94,7 @@ tempfile = "3"
 sid-serve = { workspace = true, features = ["error-contract"] }
 # A real issuer the template API's receiver asks, over the network.
 sid-test-issuer = { path = "../sid-test-issuer" }
+
+[[bench]]
+name = "durable_delivery"
+harness = false
