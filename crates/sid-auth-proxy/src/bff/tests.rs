@@ -256,14 +256,15 @@ async fn test_login_reports_unavailable_when_the_store_is_down() {
 #[tokio::test]
 async fn test_callback_reports_unavailable_when_the_store_is_down() {
     let app = routes().with_state(broken_store_state());
+    let state = plausible_session_id();
+    // The sign-in's own browser: the store is asked, and cannot answer.
+    let cookie = sid_authn::relying_party::sign_in_cookie("__Host-sid-bff", &state);
     let response = app
         .oneshot(
-            Request::get(format!(
-                "/auth/callback?state={}&code=abc",
-                plausible_session_id()
-            ))
-            .body(Body::empty())
-            .unwrap(),
+            Request::get(format!("/auth/callback?state={state}&code=abc"))
+                .header("cookie", format!("{cookie}=browser"))
+                .body(Body::empty())
+                .unwrap(),
         )
         .await
         .unwrap();
@@ -495,6 +496,67 @@ async fn test_logout_ends_the_session_without_a_connection() {
     assert!(sessions.get_session(&session_id).await.unwrap().is_none());
 }
 
+/// A callback completes only the sign-in of the browser that started it
+/// (RFC 6749 §10.12, RFC 9700 §4.7.1). An attacker who starts a sign-in, signs
+/// in as themselves and sends the callback URL to a victim gets nothing: the
+/// victim's browser lacks the sign-in's correlation cookie, so the sign-in is
+/// refused and stays for its own browser, which still completes it.
+#[tokio::test]
+async fn test_a_callback_from_another_browser_is_refused() {
+    let state = bff_test_state();
+    let login = routes()
+        .with_state(state.clone())
+        .oneshot(Request::get("/auth/login").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let location = url::Url::parse(login.headers()["location"].to_str().unwrap()).unwrap();
+    let state_param = location
+        .query_pairs()
+        .find(|(k, _)| k == "state")
+        .unwrap()
+        .1
+        .into_owned();
+    let correlation = sid_authn::relying_party::sign_in_cookie("__Host-sid-bff", &state_param);
+    let set_cookie = login.headers()["set-cookie"].to_str().unwrap().to_owned();
+    assert!(
+        set_cookie.starts_with(&format!("{correlation}=")),
+        "{set_cookie}"
+    );
+    assert!(set_cookie.contains("HttpOnly"), "{set_cookie}");
+    assert!(set_cookie.contains("SameSite=Lax"), "{set_cookie}");
+    let cookie = set_cookie.split(';').next().unwrap().to_owned();
+
+    // The callback reaches its outcome without the issuer: the authorization
+    // was refused, so no code is redeemed.
+    let callback = format!(
+        "/auth/callback?state={state_param}&error=access_denied&iss={}",
+        urlencode(BFF_ISSUER)
+    );
+    for foreign in [None, Some(format!("{correlation}=another-browsers-secret"))] {
+        let mut request = Request::get(&callback);
+        if let Some(cookie) = &foreign {
+            request = request.header("cookie", cookie);
+        }
+        let response = routes()
+            .with_state(state.clone())
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{foreign:?}");
+    }
+    let own = routes()
+        .with_state(state)
+        .oneshot(
+            Request::get(&callback)
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(own.status(), StatusCode::FORBIDDEN);
+}
+
 /// Login goes to the authorization endpoint of the BFF client's issuer.
 #[tokio::test]
 async fn test_login_goes_to_the_bff_issuer() {
@@ -643,8 +705,22 @@ async fn test_login_with_a_foreign_return_path_returns_to_the_root() {
         .unwrap()
         .1
         .into_owned();
+    // The secret the login gave this browser, in its correlation cookie.
+    let browser = response.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .split_once('=')
+        .unwrap()
+        .1
+        .to_owned();
     let pending = sessions
-        .take_pending(&state_param, &test_connection().sign_in_binding())
+        .take_pending(
+            &state_param,
+            &test_connection().browser_sign_in_binding(&browser),
+        )
         .await
         .unwrap()
         .unwrap();
@@ -675,11 +751,12 @@ async fn test_callback_auth_error_returns_403() {
             "verifier".into(),
             "nonce".into(),
             "/".into(),
-            &test_connection().sign_in_binding(),
+            &test_connection().browser_sign_in_binding("browser"),
         )
         .await
         .unwrap();
     let app = routes().with_state(state);
+    let cookie = sid_authn::relying_party::sign_in_cookie("__Host-sid-bff", &state_param);
 
     let req = Request::builder()
         .uri(format!(
@@ -687,6 +764,7 @@ async fn test_callback_auth_error_returns_403() {
             state_param,
             urlencode(BFF_ISSUER)
         ))
+        .header("cookie", format!("{cookie}=browser"))
         .body(Body::empty())
         .unwrap();
 
