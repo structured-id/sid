@@ -131,6 +131,11 @@ enum Progress {
     /// An exchange may have spent the code without a retained answer: the
     /// entry can only be started again, continuing where it would have.
     Ambiguous { continuation: String },
+    /// Ended before its exchange (an error return, or a return to another
+    /// redirect URI): nothing completes it. Stored in place of the pending
+    /// entry only while that is unchanged, so a concurrent return keeps what
+    /// it made of the entry.
+    Ended,
 }
 
 /// A started entry as the browser receives it.
@@ -356,7 +361,7 @@ impl FederatedEntry {
                 | Progress::Exchanging { pending, .. }
                 | Progress::Received { pending, .. }
                 | Progress::Exchanged { pending, .. } => Some(pending),
-                Progress::Ambiguous { .. } => None,
+                Progress::Ambiguous { .. } | Progress::Ended => None,
             };
             if let Some(pending) = bound {
                 if pending.issuer != self.trusted.issuer
@@ -366,9 +371,12 @@ impl FederatedEntry {
                 }
                 if pending.redirect_uri != redirect_uri {
                     // A return to another redirect URI ends an unexchanged
-                    // entry; an exchanged one keeps what its own return needs.
+                    // entry as it read it; an exchanged one keeps what its
+                    // own return needs.
                     if matches!(read.value, Progress::Pending(_)) {
-                        self.pending.take(&key).await?;
+                        self.pending
+                            .replace(&key, &read, &Progress::Ended, pending.deadline)
+                            .await?;
                     }
                     return Err(EntryError::RedirectMismatch);
                 }
@@ -473,6 +481,7 @@ impl FederatedEntry {
                         continuation: continuation.clone(),
                     });
                 }
+                Progress::Ended => return Err(EntryError::Unknown),
                 Progress::Received { pending, id_token } => {
                     let pending = pending.clone();
                     let (subject, evidence) = match self.validate(id_token, &pending).await {
@@ -529,15 +538,24 @@ impl FederatedEntry {
             .secret(cookies)
             .ok_or(EntryError::OtherBrowser)?;
         let key = self.key(state, &browser);
-        let Some(Progress::Pending(pending)) = self.pending.read(&key).await? else {
+        let Some(read) = self.pending.read_versioned(&key).await? else {
+            return Err(EntryError::Unknown);
+        };
+        let Progress::Pending(pending) = &read.value else {
             return Err(EntryError::Unknown);
         };
         if pending.issuer != self.trusted.issuer || pending.client_id != self.trusted.client_id {
             return Err(EntryError::Unknown);
         }
-        // Whatever the return names, an unexchanged entry it reached is over;
-        // a concurrent return that took it first owns it.
-        if self.pending.take(&key).await?.is_none() {
+        // Whatever the return names, an unexchanged entry it reached is over,
+        // but only as read: a concurrent return that moved it on owns it.
+        let pending = pending.clone();
+        if self
+            .pending
+            .replace(&key, &read, &Progress::Ended, pending.deadline)
+            .await?
+            .is_none()
+        {
             return Err(EntryError::Unknown);
         }
         if pending.redirect_uri != redirect_uri {

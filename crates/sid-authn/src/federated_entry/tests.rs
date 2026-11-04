@@ -631,10 +631,12 @@ async fn a_return_during_a_live_exchange_is_told_to_retry() {
 
 /// A shared store over which another return fences an entry off as soon as
 /// one return took its exchange: the first successful replacement is
-/// followed, before anything else reaches the store, by `interfere`.
+/// followed, before anything else reaches the store, by `interfere`; the
+/// first read, by `after_read`.
 struct FencedOff {
     inner: Arc<dyn CeremonyStateStore>,
     interfere: Mutex<Option<Interference>>,
+    after_read: Mutex<Option<Interference>>,
 }
 
 type Fence = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
@@ -688,7 +690,12 @@ impl CeremonyStateStore for FencedOff {
         namespace: &str,
         key: &str,
     ) -> sid_core::Result<Option<Vec<u8>>> {
-        self.inner.read_ceremony_state(namespace, key).await
+        let read = self.inner.read_ceremony_state(namespace, key).await?;
+        let interfere = self.after_read.lock().unwrap().take();
+        if let Some(interfere) = interfere {
+            interfere(self.inner.clone(), key.to_owned()).await;
+        }
+        Ok(read)
     }
     async fn replace_ceremony_state(
         &self,
@@ -744,6 +751,7 @@ async fn a_fenced_off_exchange_completes_nothing() {
     let fenced = Arc::new(FencedOff {
         inner: inner.clone(),
         interfere: Mutex::new(None),
+        after_read: Mutex::new(None),
     });
     let entry = FederatedEntry::new(
         issuer.trusted(),
@@ -981,6 +989,59 @@ async fn a_declined_entry_ends_and_names_its_continuation() {
         Err(EntryError::Unknown)
     ));
     assert_eq!(issuer.exchanges(), 0);
+}
+
+// Regression guard: a decline racing another return of the same entry ends
+// it only as it read it. When the other return moved the entry on between
+// the decline's read and its removal, the decline ends nothing and the
+// other return keeps what it made of the entry; likewise at another
+// redirect URI.
+#[tokio::test]
+async fn a_decline_never_ends_an_entry_another_return_moved_on() {
+    for redirect in [REDIRECT, "https://elsewhere.example/callback"] {
+        let issuer = TestIssuer::start().await;
+        let inner: Arc<dyn CeremonyStateStore> = Arc::new(InProcessCeremonyState::new());
+        let keys = crate::test_support::key_manager();
+        let fenced = Arc::new(FencedOff {
+            inner: inner.clone(),
+            interfere: Mutex::new(None),
+            after_read: Mutex::new(None),
+        });
+        let entry = FederatedEntry::new(
+            issuer.trusted(),
+            http(),
+            fenced.clone(),
+            keys.clone(),
+            BrowserCookie::new("__Host-sid_platform").unwrap(),
+        );
+        let browser = begin(&entry, &EntryRequest::default()).await;
+        *fenced.after_read.lock().unwrap() = Some(Box::new(move |ceremonies, key| {
+            Box::pin(async move {
+                let store: ChallengeStore<Progress> =
+                    ChallengeStore::new(ceremonies, keys, NAMESPACE, PENDING_TTL);
+                store
+                    .insert(
+                        &key,
+                        &Progress::Ambiguous {
+                            continuation: CONTINUATION.into(),
+                        },
+                    )
+                    .await
+                    .unwrap();
+            })
+        }));
+        let declined = entry
+            .decline(&browser.state(), [browser.cookie.as_str()], redirect)
+            .await;
+        assert!(matches!(declined, Err(EntryError::Unknown)), "{declined:?}");
+        assert!(
+            matches!(
+                browser.complete(&entry, "c", REDIRECT).await,
+                Err(EntryError::Ambiguous { .. })
+            ),
+            "the other return's progress was removed"
+        );
+    }
 }
 
 // Regression guard: only the browser that started an entry declines it, at
