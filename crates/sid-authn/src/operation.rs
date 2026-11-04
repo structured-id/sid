@@ -109,6 +109,27 @@ impl KeyedCommand {
         }
     }
 
+    /// The identifier of what this command creates, the same for every
+    /// attempt of it: a creation committed in several steps (a tenant schema
+    /// beside its record) resumes under it after a lost reply instead of
+    /// creating a second one. A name-based UUID of the command (RFC 9562
+    /// 5.5), so it reveals neither the caller nor the key.
+    pub fn created_id(&self) -> uuid::Uuid {
+        /// The UUID namespace of keyed command names.
+        const COMMANDS: uuid::Uuid = uuid::uuid!("0192f3a4-7c1e-7b2a-9d4e-6b1f0c2d3e4f");
+        let mut name = Vec::new();
+        for part in [
+            self.namespace.as_bytes(),
+            self.key.as_str().as_bytes(),
+            self.method.as_bytes(),
+        ] {
+            name.extend_from_slice(&(part.len() as u64).to_be_bytes());
+            name.extend_from_slice(part);
+        }
+        name.extend_from_slice(&self.period.map_or(0, OperationPeriod::get).to_be_bytes());
+        uuid::Uuid::new_v5(&COMMANDS, &name)
+    }
+
     /// The recorded result when this command already completed. The same key
     /// used for another method, other inputs or another period is a
     /// conflict.
@@ -378,6 +399,35 @@ fn decode_recorded<T: serde::de::DeserializeOwned>(result: &[u8]) -> Result<T, O
         tracing::error!(error = %e, "recorded operation result unreadable");
         OperationError::ResultUnreadable
     })
+}
+
+/// One round of a store's upkeep at `now`: completions past their retention
+/// are dropped, and periods whose retention after their acceptance end
+/// passed, under the store's persisted policy, are retired with their
+/// completions. Both are idempotent and serialized in the store, so every
+/// replica of a host runs this, about once a minute, under no job lock.
+/// Returns how many periods were retired.
+pub async fn upkeep(
+    store: &(impl OperationResultStore + ?Sized),
+    now: chrono::DateTime<chrono::Utc>,
+) -> u64 {
+    if let Err(e) = store.purge_expired_operation_results(now).await {
+        tracing::warn!(error = %e, "operation result expiry failed");
+    }
+    let retired = async {
+        let policy = store.operation_period_policy().await?;
+        let before = now
+            .checked_sub_signed(policy.retention)
+            .ok_or_else(|| sid_core::Error::Internal("operation period retention".into()))?;
+        store.retire_operation_periods(before).await
+    };
+    match retired.await {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!(error = %e, "operation period retirement failed");
+            0
+        }
+    }
 }
 
 #[cfg(test)]

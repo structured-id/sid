@@ -4381,7 +4381,7 @@ impl StorageBackend for PostgresBackend {
         &self,
         id: GroupId,
         description: Option<&str>,
-        audit: MutationContext,
+        mut audit: MutationContext,
     ) -> SidResult<bool> {
         let mut tx = self
             .pool
@@ -4400,6 +4400,15 @@ impl StorageBackend for PostgresBackend {
         if !updated {
             return Ok(false);
         }
+        // The group as this write leaves it, read under the row lock it holds.
+        let group =
+            sqlx::query_as::<_, crate::pg_row::GroupRow>("SELECT * FROM groups WHERE id = $1")
+                .bind(id.0)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| SidError::Storage(format!("read updated group: {e}")))?
+                .into_domain();
+        audit.record_effect(&group)?;
         Self::audit_in_tx(&mut tx, &format!("group:{}", id.0), audit).await?;
         tx.commit()
             .await
@@ -8980,6 +8989,7 @@ mod job_lock;
 mod login_policy;
 mod machine_credential;
 mod operation;
+pub use operation::PgOperationStore;
 mod password_history;
 mod principal_store;
 mod provisioning_connector;

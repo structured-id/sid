@@ -15,6 +15,56 @@ use sqlx::PgPool;
 
 use super::PostgresBackend;
 
+/// The operation tables of a host keeping its own database; the engine's
+/// schema holds the same tables.
+const SCHEMA: &str = include_str!("operations.sql");
+
+/// Keyed command completions and their periods in a PostgreSQL database of
+/// a host apart from the engine backend, whose own tables live beside them
+/// (the SaaS control plane): its mutations record their completion inside
+/// their own transaction ([`Self::record_in_tx`]) and its operation service
+/// issues the periods.
+#[derive(Clone)]
+pub struct PgOperationStore {
+    pool: PgPool,
+}
+
+impl PgOperationStore {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+
+    /// Create the operation tables if they do not exist. Replicas starting
+    /// together take turns under a transaction-scoped advisory lock:
+    /// concurrent `CREATE ... IF NOT EXISTS` of one name collides in the
+    /// catalog.
+    pub async fn ensure_schema(&self) -> SidResult<()> {
+        let schema_error = |e: sqlx::Error| SidError::Storage(format!("operation schema: {e}"));
+        let mut tx = self.pool.begin().await.map_err(schema_error)?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext('sid.operations.schema'))")
+            .execute(&mut *tx)
+            .await
+            .map_err(schema_error)?;
+        sqlx::raw_sql(SCHEMA)
+            .execute(&mut *tx)
+            .await
+            .map_err(schema_error)?;
+        tx.commit().await.map_err(schema_error)?;
+        Ok(())
+    }
+
+    /// Record the completion of the keyed command a host's mutation runs, in
+    /// that mutation's transaction `tx`: under an admitted period, and
+    /// `OperationCompleted` when another commit already completed the key,
+    /// which must then commit nothing.
+    pub async fn record_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        operation: &OperationCompletion,
+    ) -> SidResult<()> {
+        record_in_tx(tx, operation).await
+    }
+}
+
 /// Record `operation` in `tx`. When another transaction already committed
 /// the key, this one must commit nothing: `OperationCompleted`; a completion
 /// past its retention no longer holds the key and is replaced. A concurrent
@@ -447,20 +497,59 @@ fn seconds(column: &str, value: i64) -> SidResult<Duration> {
         .ok_or_else(|| SidError::Storage(format!("column {column}: {value}")))
 }
 
-#[async_trait]
-impl OperationResultStore for PostgresBackend {
-    async fn operation_period_policy(&self) -> SidResult<OperationPeriodPolicy> {
-        let (acceptance, retention): (i64, i64) = sqlx::query_as(
-            "SELECT acceptance_seconds, retention_seconds FROM operation_period_state",
-        )
-        .fetch_optional(&self.pool)
+async fn period_policy(pool: &PgPool) -> SidResult<OperationPeriodPolicy> {
+    let (acceptance, retention): (i64, i64) =
+        sqlx::query_as("SELECT acceptance_seconds, retention_seconds FROM operation_period_state")
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| SidError::Storage(format!("operation period policy: {e}")))?
+            .ok_or_else(|| SidError::Storage("operation period state missing".into()))?;
+    Ok(OperationPeriodPolicy {
+        acceptance: seconds("acceptance_seconds", acceptance)?,
+        retention: seconds("retention_seconds", retention)?,
+    })
+}
+
+async fn admit_period(pool: &PgPool, period: OperationPeriod) -> SidResult<()> {
+    let mut conn = pool
+        .acquire()
         .await
-        .map_err(|e| SidError::Storage(format!("operation period policy: {e}")))?
-        .ok_or_else(|| SidError::Storage("operation period state missing".into()))?;
-        Ok(OperationPeriodPolicy {
-            acceptance: seconds("acceptance_seconds", acceptance)?,
-            retention: seconds("retention_seconds", retention)?,
-        })
+        .map_err(|e| SidError::Storage(format!("operation period: {e}")))?;
+    admit(&mut conn, column(period)?, false).await
+}
+
+async fn purge(
+    pool: &PgPool,
+    namespace: &str,
+    method: &str,
+    before: DateTime<Utc>,
+) -> SidResult<u64> {
+    sqlx::query(
+        "DELETE FROM operation_results
+         WHERE namespace = $1 AND method = $2 AND completed_at < $3",
+    )
+    .bind(namespace)
+    .bind(method)
+    .bind(before)
+    .execute(pool)
+    .await
+    .map(|done| done.rows_affected())
+    .map_err(|e| SidError::Storage(format!("purge operation results: {e}")))
+}
+
+async fn purge_expired(pool: &PgPool, now: DateTime<Utc>) -> SidResult<u64> {
+    sqlx::query("DELETE FROM operation_results WHERE retain_until <= $1")
+        .bind(now)
+        .execute(pool)
+        .await
+        .map(|done| done.rows_affected())
+        .map_err(|e| SidError::Storage(format!("purge expired operation results: {e}")))
+}
+
+#[async_trait]
+impl OperationResultStore for PgOperationStore {
+    async fn operation_period_policy(&self) -> SidResult<OperationPeriodPolicy> {
+        period_policy(&self.pool).await
     }
 
     async fn current_operation_period(
@@ -472,12 +561,86 @@ impl OperationResultStore for PostgresBackend {
     }
 
     async fn admit_operation_period(&self, period: OperationPeriod) -> SidResult<()> {
-        let mut conn = self
+        admit_period(&self.pool, period).await
+    }
+
+    async fn retire_operation_periods(&self, before: DateTime<Utc>) -> SidResult<u64> {
+        retire_periods(&self.pool, before).await
+    }
+
+    async fn export_operation_periods(&self) -> SidResult<OperationPeriodState> {
+        export_periods(&self.pool).await
+    }
+
+    async fn import_operation_periods(&self, state: &OperationPeriodState) -> SidResult<()> {
+        import_periods(&self.pool, state).await
+    }
+
+    /// The completion and the work it owes (beside the host's durable work
+    /// table); the host's own audit records its changes.
+    async fn record_outcome(&self, ctx: MutationContext) -> SidResult<()> {
+        let mut tx = self
             .pool
-            .acquire()
+            .begin()
             .await
-            .map_err(|e| SidError::Storage(format!("operation period: {e}")))?;
-        admit(&mut conn, column(period)?, false).await
+            .map_err(|e| SidError::Storage(format!("begin: {e}")))?;
+        if let Some(operation) = &ctx.operation {
+            record_in_tx(&mut tx, operation).await?;
+        }
+        if !ctx.work.is_empty() {
+            super::work::PgWorkStore::owe_in_tx(&mut tx, &ctx.work).await?;
+        }
+        tx.commit()
+            .await
+            .map_err(|e| SidError::Storage(format!("commit: {e}")))
+    }
+
+    async fn purge_operation_results(
+        &self,
+        namespace: &str,
+        method: &str,
+        before: DateTime<Utc>,
+    ) -> SidResult<u64> {
+        purge(&self.pool, namespace, method, before).await
+    }
+
+    async fn purge_expired_operation_results(&self, now: DateTime<Utc>) -> SidResult<u64> {
+        purge_expired(&self.pool, now).await
+    }
+
+    async fn get_operation_result(
+        &self,
+        namespace: &str,
+        key: &OperationKey,
+    ) -> SidResult<Option<OperationRecord>> {
+        get(&self.pool, namespace, key).await
+    }
+
+    async fn export_operation_results(&self) -> SidResult<Vec<OperationRecord>> {
+        export(&self.pool).await
+    }
+
+    async fn import_operation_result(&self, record: &OperationRecord) -> SidResult<bool> {
+        import(&self.pool, record).await
+    }
+}
+
+#[async_trait]
+impl OperationResultStore for PostgresBackend {
+    async fn operation_period_policy(&self) -> SidResult<OperationPeriodPolicy> {
+        period_policy(&self.pool).await
+    }
+
+    async fn current_operation_period(
+        &self,
+        now: DateTime<Utc>,
+        acceptance: Duration,
+    ) -> SidResult<IssuedOperationPeriod> {
+        current_period(&self.pool, now, acceptance).await
+    }
+
+    async fn admit_operation_period(&self, period: OperationPeriod) -> SidResult<()> {
+        admit_period(&self.pool, period).await
     }
 
     async fn retire_operation_periods(&self, before: DateTime<Utc>) -> SidResult<u64> {
@@ -516,26 +679,11 @@ impl OperationResultStore for PostgresBackend {
         method: &str,
         before: DateTime<Utc>,
     ) -> SidResult<u64> {
-        sqlx::query(
-            "DELETE FROM operation_results
-             WHERE namespace = $1 AND method = $2 AND completed_at < $3",
-        )
-        .bind(namespace)
-        .bind(method)
-        .bind(before)
-        .execute(&self.pool)
-        .await
-        .map(|done| done.rows_affected())
-        .map_err(|e| SidError::Storage(format!("purge operation results: {e}")))
+        purge(&self.pool, namespace, method, before).await
     }
 
     async fn purge_expired_operation_results(&self, now: DateTime<Utc>) -> SidResult<u64> {
-        sqlx::query("DELETE FROM operation_results WHERE retain_until <= $1")
-            .bind(now)
-            .execute(&self.pool)
-            .await
-            .map(|done| done.rows_affected())
-            .map_err(|e| SidError::Storage(format!("purge expired operation results: {e}")))
+        purge_expired(&self.pool, now).await
     }
 
     async fn get_operation_result(

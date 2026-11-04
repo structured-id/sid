@@ -1353,10 +1353,10 @@ pub fn spawn_ce_background_tasks(c: &CeComponents) {
         });
     }
 
-    // Operation results past their retention (every minute): a retained
-    // sign-in delivery is dropped within a minute of its operation's end.
-    // The purge is idempotent, so replicas running it at once only repeat
-    // it and no job lock holds a connection for it.
+    // Operation results and periods past their retention (every minute): a
+    // retained sign-in delivery is dropped within a minute of its
+    // operation's end, and a period that stopped accepting new commands is
+    // retired with its completions once its retention passed.
     {
         let storage = c.storage.clone();
         tokio::spawn(async move {
@@ -1364,29 +1364,7 @@ pub fn spawn_ce_background_tasks(c: &CeComponents) {
             let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
             loop {
                 interval.tick().await;
-                if let Err(e) = storage
-                    .purge_expired_operation_results(chrono::Utc::now())
-                    .await
-                {
-                    tracing::warn!("operation result expiry failed: {}", e);
-                }
-            }
-        });
-    }
-
-    // Operation periods past their retention (every minute): a period stops
-    // accepting new commands at its acceptance end and is retired, with its
-    // commands' completions, once the persisted retention after that passed.
-    // Retiring is idempotent and serialized in the store, so replicas
-    // running it at once only repeat it.
-    {
-        let storage = c.storage.clone();
-        tokio::spawn(async move {
-            let every = std::time::Duration::from_secs(60);
-            let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
-            loop {
-                interval.tick().await;
-                crate::background_tasks::retire_operation_periods(storage.as_ref()).await;
+                sid_authn::operation::upkeep(storage.as_ref(), chrono::Utc::now()).await;
             }
         });
     }

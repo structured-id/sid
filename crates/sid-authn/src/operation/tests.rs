@@ -136,6 +136,71 @@ fn test_equal_requests_with_maps_have_one_fingerprint() {
     }
 }
 
+/// Upkeep retires a period once its retention after its acceptance end
+/// passed, under the persisted policy, with its completions: a retry of a
+/// command completed in it is refused, never answered or executed again.
+/// Before that point the period and its completion stay.
+#[tokio::test]
+async fn test_upkeep_retires_periods_past_their_retention() {
+    let storage = SqliteBackend::new_in_memory().await.unwrap();
+    let policy = storage.operation_period_policy().await.unwrap();
+    let issued = storage
+        .current_operation_period(Utc::now(), policy.acceptance)
+        .await
+        .unwrap();
+    let context = OperationContext::new(OperationKey::parse("k-upkeep").unwrap(), issued.period);
+    let command = KeyedCommand::of::<CreateProject>("profile:a", context, &create("p"));
+    commit(&storage, &command, b"done").await;
+
+    assert_eq!(upkeep(&storage, issued.accepted_until).await, 0);
+    assert_eq!(
+        command.completed(&storage).await.unwrap().as_deref(),
+        Some(&b"done"[..])
+    );
+
+    let past = issued.accepted_until + policy.retention + Duration::seconds(1);
+    assert_eq!(upkeep(&storage, past).await, 1);
+    assert!(
+        matches!(
+            command.completed(&storage).await,
+            Err(OperationError::PeriodRefused(
+                OperationPeriodRefusal::Retired
+            ))
+        ),
+        "the retired period admits nothing"
+    );
+}
+
+/// Every attempt of one command names the same created identifier; another
+/// key, period, caller or method names another one.
+#[test]
+fn test_created_id_is_the_commands_own() {
+    let context = |key: &str, period| {
+        OperationContext::new(
+            OperationKey::parse(key).unwrap(),
+            OperationPeriod::new(period),
+        )
+    };
+    let id = |namespace: &str, context, request: &CreateProjectRequest| {
+        KeyedCommand::of::<CreateProject>(namespace, context, request).created_id()
+    };
+    let first = id("profile:a", context("k", 1), &create("p"));
+    assert_eq!(first, id("profile:a", context("k", 1), &create("p")));
+    // The inputs are not part of it: a retry with other inputs conflicts on
+    // its key rather than creating something else under another identifier.
+    assert_eq!(first, id("profile:a", context("k", 1), &create("q")));
+    assert_ne!(first, id("profile:a", context("k2", 1), &create("p")));
+    assert_ne!(first, id("profile:a", context("k", 2), &create("p")));
+    assert_ne!(first, id("profile:b", context("k", 1), &create("p")));
+    let other_method = KeyedCommand::of::<DeleteProject>(
+        "profile:a",
+        context("k", 1),
+        &DeleteProjectRequest::default(),
+    );
+    assert_ne!(first, other_method.created_id());
+    assert_eq!(first.get_version_num(), 5);
+}
+
 /// A command named with a period the store never issued commits nothing.
 #[tokio::test]
 async fn test_commit_under_unissued_period_is_refused() {

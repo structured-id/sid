@@ -115,7 +115,15 @@ futures = { workspace = true, optional = true }
 [features]
 # Keyed commands, transport-free: their identity comes from the proto.
 keyed = ["dep:sid-proto", "dep:prost"]
-grpc = ["keyed", "dep:tonic", "dep:http", "dep:tower", "dep:futures", "sid-core/grpc"]
+grpc = [
+    "keyed",
+    "dep:tonic",
+    "dep:http",
+    "dep:tower",
+    "dep:futures",
+    "dep:prost-types",
+    "sid-core/grpc",
+]
 # The HTTP form of an issuer's OAuth endpoints over `google.api.HttpBody`.
 oauth-http = ["grpc", "dep:sid-proto"]
 # The password-installing operation (registration, change, reset) with its

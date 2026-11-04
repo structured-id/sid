@@ -220,6 +220,49 @@ fn malformed(name: &'static str, message: &'static str) -> Status {
         .into()
 }
 
+/// `OperationService` over the store that owns its keyed commands: the
+/// period a new command is named with, issued by that store. Open to every
+/// caller: a period conveys no permission, and the store issues at most one
+/// per acceptance interval, however often it is asked.
+pub struct OperationPeriods {
+    store: std::sync::Arc<dyn sid_plugin::OperationResultStore>,
+}
+
+impl OperationPeriods {
+    pub fn new(store: std::sync::Arc<dyn sid_plugin::OperationResultStore>) -> Self {
+        Self { store }
+    }
+}
+
+#[tonic::async_trait]
+impl sid_proto::sid::v1::operation_service_server::OperationService for OperationPeriods {
+    async fn get_operation_period(
+        &self,
+        _: tonic::Request<sid_proto::sid::v1::GetOperationPeriodRequest>,
+    ) -> Result<tonic::Response<sid_proto::sid::v1::OperationPeriod>, Status> {
+        use sid_core::grpc_error::refuse::storage_failure;
+        let policy = self
+            .store
+            .operation_period_policy()
+            .await
+            .map_err(storage_failure)?;
+        let issued = self
+            .store
+            .current_operation_period(chrono::Utc::now(), policy.acceptance)
+            .await
+            .map_err(storage_failure)?;
+        let until = issued.accepted_until;
+        Ok(tonic::Response::new(sid_proto::sid::v1::OperationPeriod {
+            period: issued.period.get(),
+            accepted_until: Some(prost_types::Timestamp {
+                seconds: until.timestamp(),
+                // At most 999_999_999, within an i32.
+                nanos: until.timestamp_subsec_nanos() as i32,
+            }),
+        }))
+    }
+}
+
 /// Decodes the operation context of every call to a keyed method before the
 /// method runs, refusing a call without a valid one, and hands it to the
 /// method in the request extensions. Which methods are keyed is generated

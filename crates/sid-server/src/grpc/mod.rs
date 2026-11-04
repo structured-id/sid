@@ -19,7 +19,6 @@ pub mod identity_service;
 pub mod machine_user_service;
 pub mod oidc_issuer_service;
 pub mod oidc_provider_service;
-pub mod operation_service;
 pub mod password_operation;
 #[allow(dead_code)]
 pub mod pat_service;

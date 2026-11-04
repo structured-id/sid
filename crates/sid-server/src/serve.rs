@@ -157,7 +157,7 @@ impl CeServices {
             ))
             .await
             .add(OperationServiceServer::new(
-                crate::grpc::operation_service::OperationServiceImpl::new(c.storage.clone()),
+                sid_authn::operation::grpc::OperationPeriods::new(c.storage.clone()),
             ))
             .await;
 

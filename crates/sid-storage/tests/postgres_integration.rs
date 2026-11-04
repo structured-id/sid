@@ -406,6 +406,104 @@ mod operation_result_store {
     );
 }
 
+/// A host's operation store in a schema of its own that holds nothing else,
+/// its tables created by its own `ensure_schema`, twice (as replicas starting
+/// together would). Dropped by [`drop_schema`] when the scenario ends.
+async fn host_operation_store() -> (sid_storage::PgOperationStore, String) {
+    let schema = format!("ops_{}", uuid::Uuid::now_v7().simple());
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA \"{schema}\"")))
+        .execute(setup().await.pool())
+        .await
+        .unwrap();
+    let store = sid_storage::PgOperationStore::new(schema_pool(&schema).await);
+    store.ensure_schema().await.unwrap();
+    store.ensure_schema().await.unwrap();
+    (store, schema)
+}
+
+/// A pool whose connections see `schema` only.
+async fn schema_pool(schema: &str) -> sqlx::PgPool {
+    let url = database_url();
+    let separator = if url.contains('?') { '&' } else { '?' };
+    sqlx::PgPool::connect(&format!(
+        "{url}{separator}options=-c%20search_path%3D{schema}"
+    ))
+    .await
+    .unwrap()
+}
+
+/// Run operation result conformance `scenario` against a host's store.
+macro_rules! host_operation_result_store {
+    ($($scenario:ident),* $(,)?) => {$(
+        #[tokio::test]
+        async fn $scenario() {
+            let (store, schema) = host_operation_store().await;
+            let outcome = tokio::spawn(async move {
+                sid_plugin::conformance::operation_result_store::$scenario(&store).await
+            })
+            .await;
+            drop_schema(&schema).await;
+            if let Err(panic) = outcome {
+                std::panic::resume_unwind(panic.into_panic());
+            }
+        }
+    )*};
+}
+
+/// The columns and constraints of the operation tables in the schema the
+/// connection `pool` names first, one line each, sorted.
+async fn operation_tables(pool: &sqlx::PgPool) -> Vec<String> {
+    sqlx::query_scalar(
+        "SELECT format('%s.%s %s %s %s', table_name, column_name, data_type, is_nullable,
+                       coalesce(column_default, ''))
+         FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name IN ('operation_period_state', 'operation_periods', 'operation_results')
+         UNION ALL
+         SELECT format('%s %s %s', c.conrelid::regclass::text, c.conname,
+                       pg_get_constraintdef(c.oid))
+         FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid
+         WHERE t.relnamespace = current_schema()::regnamespace
+           AND t.relname IN ('operation_period_state', 'operation_periods', 'operation_results')
+         UNION ALL
+         SELECT format('%s %s', tablename, regexp_replace(indexdef, ' ON \\S+\\.', ' ON '))
+         FROM pg_indexes
+         WHERE schemaname = current_schema()
+           AND tablename IN ('operation_period_state', 'operation_periods', 'operation_results')
+         ORDER BY 1",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+/// A host's operation tables are the engine's: the same columns, defaults,
+/// constraints and indexes, so a host keeps exactly the guarantees the
+/// conformance suite proves of the engine.
+#[tokio::test]
+async fn host_operation_tables_match_the_engine_schema() {
+    let (_store, schema) = host_operation_store().await;
+    let host = operation_tables(&schema_pool(&schema).await).await;
+    let engine = operation_tables(setup().await.pool()).await;
+    drop_schema(&schema).await;
+    assert!(!engine.is_empty());
+    assert_eq!(host, engine);
+}
+
+mod host_operation_result_store {
+    use super::*;
+
+    host_operation_result_store!(
+        recorded_outcome_resolves,
+        completed_key_records_nothing,
+        concurrent_outcomes_record_once,
+        results_travel_between_stores,
+        results_are_purged_by_method,
+        a_result_is_kept_no_longer_than_its_retention,
+        operation_periods_bound_admission,
+    );
+}
+
 // ─── Ceremony state conformance ───
 
 /// Run ceremony state conformance `scenario`; each one uses namespaces of

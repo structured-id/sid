@@ -2291,71 +2291,57 @@ impl AuthzService for AuthzServiceImpl {
         self.check_maintenance()?;
         let (metadata, _, req) = request.into_parts();
         // A retry of a completed edit answers with the group as that edit
-        // left it.
+        // left it: the state its commit recorded, never one read around it.
         let command =
             command::<keyed::UpdateGroup>(&metadata, format!("user:{}", caller.profile_id), &req)?;
-        if let Some(recorded) = command.replay(&*self.storage).await? {
-            return Ok(Response::new(recorded));
-        }
-        let answer = async {
-            let group_id = parse_group_id(&req.id)?;
-
-            // Without a description nothing is written: the group as it is,
-            // recorded as this command's outcome so its retry answers the same.
-            let Some(desc) = req.description.clone() else {
-                let audit = AuditEntry::admin(
-                    caller.profile_id.to_string(),
-                    "group.update",
-                    group_id.0.to_string(),
-                );
-                let answer = command
-                    .unchanged(&*self.storage, audit, || async {
-                        let group = self
-                            .storage
-                            .get_group(group_id)
-                            .await
-                            .map_err(storage_failure)?
-                            .ok_or_else(|| group_not_found(group_id.0.to_string()))?;
-                        Ok::<_, Status>(UpdateGroupResponse {
-                            group: Some(group_to_proto(&group)),
-                        })
-                    })
-                    .await?;
-                return Ok(Response::new(answer));
-            };
-            let mut group = self
-                .storage
-                .get_group(group_id)
-                .await
-                .map_err(storage_failure)?
-                .ok_or_else(|| group_not_found(group_id.0.to_string()))?;
-            group.description = Some(desc);
-            group.updated_at = chrono::Utc::now();
-
-            // Only the description is written, so a concurrent directory sync of
-            // the name is never reverted and a deleted group is never recreated.
-            let answer = UpdateGroupResponse {
-                group: Some(group_to_proto(&group)),
-            };
-            let ctx = MutationContext::from(AuditEntry::admin(
+        let group_id = parse_group_id(&req.id)?;
+        let audit = || {
+            AuditEntry::admin(
                 caller.profile_id.to_string(),
                 "group.update",
                 group_id.0.to_string(),
-            ))
-            .with_operation(command.completion(answer.encode_to_vec()));
-            let committed = match self
-                .storage
-                .set_group_description(group_id, group.description.as_deref(), ctx)
-                .await
-            {
-                Ok(true) => Ok(()),
-                Ok(false) => return Err(group_not_found(group_id.0.to_string())),
-                Err(e) => Err(e),
-            };
-            settled(committed, answer, storage_failure)
-        }
-        .await;
-        resolved(&*self.storage, &command, answer).await
+            )
+        };
+        let group: Group = match req.description.as_deref() {
+            // Without a description nothing is written: the group as it is,
+            // recorded as this command's outcome so its retry answers the same.
+            None => {
+                command
+                    .unchanged_recorded(&*self.storage, audit(), || async {
+                        self.storage
+                            .get_group(group_id)
+                            .await
+                            .map_err(storage_failure)?
+                            .ok_or_else(|| group_not_found(group_id.0.to_string()))
+                    })
+                    .await?
+            }
+            // Only the description is written, so a concurrent directory sync
+            // of the name is never reverted and a deleted group is never
+            // recreated; the group as that write left it is the answer.
+            Some(desc) => {
+                command
+                    .run_recorded(&*self.storage, || async {
+                        let ctx = MutationContext::from(audit())
+                            .with_operation(command.effect_completion());
+                        match self
+                            .storage
+                            .set_group_description(group_id, Some(desc), ctx)
+                            .await
+                        {
+                            Ok(true) => Ok(command.recorded_effect(&*self.storage).await?),
+                            Ok(false) => Err(sid_authn::operation::grpc::Effect::Refused(
+                                group_not_found(group_id.0.to_string()),
+                            )),
+                            Err(e) => Err(sid_authn::operation::grpc::Effect::Store(e)),
+                        }
+                    })
+                    .await?
+            }
+        };
+        Ok(Response::new(UpdateGroupResponse {
+            group: Some(group_to_proto(&group)),
+        }))
     }
 
     #[instrument(skip_all, fields(method = "delete_group"))]

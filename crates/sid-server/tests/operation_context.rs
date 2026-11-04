@@ -11,8 +11,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::mock_storage::MockStorage;
+use sid_authn::operation::grpc::OperationPeriods;
 use sid_proto::sid::v1::operation_service_server::OperationServiceServer;
-use sid_server::grpc::operation_service::OperationServiceImpl;
 use tonic::codegen::{Bytes, http};
 use tower::ServiceExt;
 
@@ -23,9 +23,9 @@ fn upstream() -> impl tower::Service<
     Response = http::Response<tonic::body::Body>,
     Error = std::convert::Infallible,
 > + Clone {
-    let routes = tonic::service::Routes::new(OperationServiceServer::new(
-        OperationServiceImpl::new(Arc::new(MockStorage::new())),
-    ));
+    let routes = tonic::service::Routes::new(OperationServiceServer::new(OperationPeriods::new(
+        Arc::new(MockStorage::new()),
+    )));
     tower::ServiceBuilder::new()
         .layer(sid_authn::operation::grpc::OperationContextLayer)
         .service(routes)
@@ -99,7 +99,7 @@ async fn over_http() -> String {
         .unwrap()
         .expect("a bind address gives a transcoder");
     let routes = sid_server::serve::transcoder_upstream(
-        tonic::service::Routes::new(OperationServiceServer::new(OperationServiceImpl::new(
+        tonic::service::Routes::new(OperationServiceServer::new(OperationPeriods::new(
             Arc::new(MockStorage::new()),
         ))),
         Arc::new(sid_authn::issuer::IssuerRegistry::new(

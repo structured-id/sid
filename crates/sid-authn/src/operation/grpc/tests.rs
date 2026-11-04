@@ -61,6 +61,34 @@ fn test_context_refuses_missing_malformed_and_repeated() {
     assert_eq!(reason(&two_periods), "INVALID_FIELD_VALUE");
 }
 
+/// An unauthenticated caller gets the current period; asking again within
+/// its acceptance answers the same one, accepting new commands until after
+/// now.
+#[tokio::test]
+async fn test_get_operation_period_answers_the_current_period() {
+    use sid_proto::sid::v1::GetOperationPeriodRequest;
+    use sid_proto::sid::v1::operation_service_server::OperationService;
+    let periods = OperationPeriods::new(std::sync::Arc::new(
+        sid_storage::sqlite::SqliteBackend::new_in_memory()
+            .await
+            .unwrap(),
+    ));
+    let first = periods
+        .get_operation_period(tonic::Request::new(GetOperationPeriodRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+    let again = periods
+        .get_operation_period(tonic::Request::new(GetOperationPeriodRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(first.period > 0);
+    assert_eq!(first, again);
+    let until = first.accepted_until.expect("an acceptance bound");
+    assert!(until.seconds > chrono::Utc::now().timestamp());
+}
+
 /// What the inner service saw of a call.
 #[derive(Clone, Default)]
 struct Seen(std::sync::Arc<std::sync::Mutex<Vec<Option<OperationContext>>>>);

@@ -460,6 +460,64 @@ async fn group_edit_without_a_description_is_recorded(h: Harness) {
     assert_eq!(retried, first, "the retry answers as the first attempt");
 }
 
+/// A description edit answers with the group as its commit left it, as a
+/// read of the group shows it afterwards and as its retry repeats it; never
+/// a group composed before the write, whose name or time the store did not
+/// keep.
+async fn group_edit_answers_the_group_its_commit_left(h: Harness) {
+    use sid_proto::sid::v1::authz::{GetGroupRequest, UpdateGroupRequest, get_group_request};
+    h.storage
+        .ensure_system_project(AuditEntry::system("test", "group").into())
+        .await
+        .unwrap();
+    let group = h
+        .svc
+        .create_group(call(
+            CreateGroupRequest {
+                project_id: ProjectId::system().0.to_string(),
+                name: format!("g{}", tag()),
+                description: Some("first".into()),
+            },
+            &h.token,
+            Some(&format!("k-{}", tag())),
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .group
+        .unwrap()
+        .id;
+    let key = format!("k-{}", tag());
+    let edit = || {
+        call(
+            UpdateGroupRequest {
+                id: group.clone(),
+                description: Some("second".into()),
+            },
+            &h.token,
+            Some(&key),
+        )
+    };
+    let answered = h.svc.update_group(edit()).await.unwrap().into_inner().group;
+    let stored = h
+        .svc
+        .get_group(call(
+            GetGroupRequest {
+                project_id: Some(ProjectId::system().0.to_string()),
+                identifier: Some(get_group_request::Identifier::Id(group.clone())),
+            },
+            &h.token,
+            None,
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .group;
+    assert_eq!(answered, stored);
+    let retried = h.svc.update_group(edit()).await.unwrap().into_inner().group;
+    assert_eq!(retried, answered);
+}
+
 /// A policy edit answers with the revision its commit stored, as a read of
 /// the policy shows it and as its retry repeats it.
 async fn policy_edit_answers_its_stored_revision(h: Harness) {
@@ -687,6 +745,7 @@ on_both_engines!(
     membership_removal_retry_keeps_a_later_addition,
     concurrent_group_creations_with_one_key_answer_one_group,
     group_edit_without_a_description_is_recorded,
+    group_edit_answers_the_group_its_commit_left,
     policy_edit_answers_its_stored_revision,
     concurrent_policy_edits_with_one_key_answer_one_edit,
     concurrent_role_edits_with_one_key_answer_one_edit,
