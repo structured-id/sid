@@ -20,6 +20,7 @@ pub mod channels;
 pub mod config;
 pub mod delivery;
 pub mod dispatcher;
+pub mod recipient;
 pub(crate) mod recipient_resolver;
 pub mod routing;
 pub mod server;
@@ -32,6 +33,7 @@ mod test_crypto;
 
 pub use config::NotifyConfig;
 pub use dispatcher::NotificationDispatcher;
+pub use recipient::{RecipientSource, ResolveError};
 pub use routing::{RoutingRule, RoutingTable};
 pub use server::NotifyServer;
 pub use template::TemplateEngine;
