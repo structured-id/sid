@@ -2633,6 +2633,52 @@ async fn test_job_locks_are_per_job() {
     common::job_lock::test_job_locks_are_per_job(&setup().await, &setup().await).await;
 }
 
+/// A database created from different migration SQL is refused, not reported
+/// up to date: before the first stable release a schema change edits the
+/// initial migration and such a database is recreated. A tracking table
+/// without the recorded digests is refused the same way.
+#[tokio::test]
+async fn test_a_database_from_other_migration_sql_is_refused() {
+    let schema = format!("mig_{}", uuid::Uuid::now_v7().simple());
+    let backend = PostgresBackend::new(&database_url(), Some(schema.clone()))
+        .await
+        .expect("Failed to connect to PostgreSQL. Is the database running?");
+    let pool = backend.pool();
+    sid_storage::migrator::run_migrations(pool, Some(&schema))
+        .await
+        .expect("a fresh database migrates");
+    sid_storage::migrator::run_migrations(pool, Some(&schema))
+        .await
+        .expect("the same SQL again is up to date");
+
+    // As if the initial migration had been applied from an earlier file.
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "UPDATE \"{schema}\"._migrations SET checksum = sha256('earlier'::bytea)"
+    )))
+    .execute(pool)
+    .await
+    .unwrap();
+    let refused = sid_storage::migrator::run_migrations(pool, Some(&schema))
+        .await
+        .expect_err("a database from other SQL is refused");
+    assert!(
+        refused.to_string().contains("20260314_001_initial_schema"),
+        "{refused}"
+    );
+
+    // A tracking table from before the digests were recorded.
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "ALTER TABLE \"{schema}\"._migrations DROP COLUMN checksum"
+    )))
+    .execute(pool)
+    .await
+    .unwrap();
+    let refused = sid_storage::migrator::run_migrations(pool, Some(&schema))
+        .await
+        .expect_err("a database without digests is refused");
+    assert!(refused.to_string().contains("recreated"), "{refused}");
+}
+
 /// Shared-database mode (schema isolation): every migration runs in the
 /// configured schema, which ends with the read-only `profiles_view` the
 /// application reads through, granted to the `<schema>_reader` role.

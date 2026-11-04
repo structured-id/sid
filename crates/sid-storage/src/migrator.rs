@@ -54,24 +54,7 @@ pub async fn run_history_key_migrations(pool: &PgPool) -> SidResult<()> {
         .await
         .map_err(|e| SidError::Storage(format!("Failed to acquire migration lock: {}", e)))?;
     let applied: SidResult<()> = async {
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS _history_key_migrations (
-                name TEXT PRIMARY KEY,
-                applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )",
-        )
-        .execute(&mut *conn)
-        .await
-        .map_err(|e| SidError::Storage(format!("history key migrations table: {e}")))?;
-        let done: Vec<String> =
-            sqlx::query_scalar("SELECT name FROM _history_key_migrations ORDER BY name")
-                .fetch_all(&mut *conn)
-                .await
-                .map_err(|e| SidError::Storage(format!("history key migrations: {e}")))?;
-        for migration in HISTORY_KEY_MIGRATIONS {
-            if done.iter().any(|name| name == migration.name) {
-                continue;
-            }
+        for migration in pending(&mut conn, HISTORY_KEY_TRACKING, HISTORY_KEY_MIGRATIONS).await? {
             info!("Running history key migration: {}", migration.name);
             let fail = |e: sqlx::Error| {
                 SidError::Storage(format!("Migration '{}' failed: {}", migration.name, e))
@@ -81,9 +64,7 @@ pub async fn run_history_key_migrations(pool: &PgPool) -> SidResult<()> {
                 .execute(&mut *tx)
                 .await
                 .map_err(fail)?;
-            sqlx::query("INSERT INTO _history_key_migrations (name) VALUES ($1)")
-                .bind(migration.name)
-                .execute(&mut *tx)
+            record(&mut tx, HISTORY_KEY_TRACKING, migration)
                 .await
                 .map_err(fail)?;
             tx.commit().await.map_err(fail)?;
@@ -236,45 +217,108 @@ async fn migrate(pool: &PgPool, schema: Option<&str>) -> SidResult<()> {
 async fn apply_pending(conn: &mut sqlx::PgConnection) -> SidResult<u32> {
     use sqlx::Connection;
 
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS _migrations (
-            name TEXT PRIMARY KEY,
-            applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )",
-    )
-    .execute(&mut *conn)
-    .await
-    .map_err(|e| SidError::Storage(format!("Failed to create _migrations table: {}", e)))?;
-
-    let applied: Vec<String> =
-        sqlx::query_scalar::<_, String>("SELECT name FROM _migrations ORDER BY name")
-            .fetch_all(&mut *conn)
-            .await
-            .map_err(|e| SidError::Storage(format!("Failed to query _migrations: {}", e)))?;
-
     let mut applied_count = 0u32;
-    for migration in MIGRATIONS {
-        if !applied.iter().any(|name| name == migration.name) {
-            info!("Running migration: {}", migration.name);
+    for migration in pending(conn, ENGINE_TRACKING, MIGRATIONS).await? {
+        info!("Running migration: {}", migration.name);
 
-            let fail = |e: sqlx::Error| {
-                SidError::Storage(format!("Migration '{}' failed: {}", migration.name, e))
-            };
-            let mut tx = conn.begin().await.map_err(fail)?;
-            sqlx::raw_sql(migration.sql)
-                .execute(&mut *tx)
-                .await
-                .map_err(fail)?;
-            sqlx::query("INSERT INTO _migrations (name) VALUES ($1)")
-                .bind(migration.name)
-                .execute(&mut *tx)
-                .await
-                .map_err(fail)?;
-            tx.commit().await.map_err(fail)?;
-            applied_count += 1;
-        }
+        let fail = |e: sqlx::Error| {
+            SidError::Storage(format!("Migration '{}' failed: {}", migration.name, e))
+        };
+        let mut tx = conn.begin().await.map_err(fail)?;
+        sqlx::raw_sql(migration.sql)
+            .execute(&mut *tx)
+            .await
+            .map_err(fail)?;
+        record(&mut tx, ENGINE_TRACKING, migration)
+            .await
+            .map_err(fail)?;
+        tx.commit().await.map_err(fail)?;
+        applied_count += 1;
     }
     Ok(applied_count)
+}
+
+/// The table that records the engine's applied migrations.
+const ENGINE_TRACKING: &str = "_migrations";
+/// The table that records the history evaluator store's applied migrations.
+const HISTORY_KEY_TRACKING: &str = "_history_key_migrations";
+
+/// The migrations of `migrations` not yet applied, after checking that every
+/// applied one was applied from the SQL this build carries: a database
+/// created from other SQL, or recorded before digests were, is refused,
+/// since until the first stable release it is recreated, not migrated.
+/// `table` is one of the tracking constants above, never input.
+async fn pending<'m>(
+    conn: &mut sqlx::PgConnection,
+    table: &str,
+    migrations: &'m [Migration],
+) -> SidResult<Vec<&'m Migration>> {
+    let storage = |e: sqlx::Error| SidError::Storage(format!("{table}: {e}"));
+    sqlx::query(AssertSqlSafe(format!(
+        "CREATE TABLE IF NOT EXISTS {table} (
+            name TEXT PRIMARY KEY,
+            checksum BYTEA NOT NULL,
+            applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )"
+    )))
+    .execute(&mut *conn)
+    .await
+    .map_err(storage)?;
+    let digested: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns
+         WHERE table_schema = current_schema() AND table_name = $1
+           AND column_name = 'checksum')",
+    )
+    .bind(table)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(storage)?;
+    if !digested {
+        return Err(SidError::Storage(format!(
+            "{table} records its migrations without their digest: the database was \
+             created by an earlier build and must be recreated"
+        )));
+    }
+
+    let applied: Vec<(String, bool)> = sqlx::query_as(AssertSqlSafe(format!(
+        "SELECT name, checksum = sha256(convert_to(COALESCE(
+             (SELECT sql FROM unnest($1::text[], $2::text[]) AS m(name, sql)
+              WHERE m.name = {table}.name), ''), 'UTF8'))
+         FROM {table} ORDER BY name"
+    )))
+    .bind(migrations.iter().map(|m| m.name).collect::<Vec<_>>())
+    .bind(migrations.iter().map(|m| m.sql).collect::<Vec<_>>())
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(storage)?;
+    for (name, same) in &applied {
+        if !same {
+            return Err(SidError::Storage(format!(
+                "migration '{name}' was applied from other SQL than this build carries: \
+                 the database must be recreated"
+            )));
+        }
+    }
+    Ok(migrations
+        .iter()
+        .filter(|m| !applied.iter().any(|(name, _)| name == m.name))
+        .collect())
+}
+
+/// Record `migration` as applied, with the digest of its SQL.
+async fn record(
+    tx: &mut sqlx::PgConnection,
+    table: &str,
+    migration: &Migration,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(AssertSqlSafe(format!(
+        "INSERT INTO {table} (name, checksum) VALUES ($1, sha256(convert_to($2, 'UTF8')))"
+    )))
+    .bind(migration.name)
+    .bind(migration.sql)
+    .execute(tx)
+    .await
+    .map(drop)
 }
 
 /// Validate schema name to prevent SQL injection.
