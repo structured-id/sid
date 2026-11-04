@@ -215,6 +215,44 @@ async fn test_redelivery_after_a_stored_job_is_stored_once() {
     drop_topology(&t).await;
 }
 
+/// A relay retrying long after its first handoff (past the broker's duplicate
+/// window) stores the same fact again under a new message id; notify gets both
+/// copies, accepts the fact into one routing job and settles both.
+#[tokio::test]
+async fn test_work_republished_beyond_the_duplicate_window_is_accepted_once() {
+    let store = job_store().await;
+    let (t, bus) = topology().await;
+    let bus = Arc::new(bus);
+    let event = Event::new("sid-test", event_types::SECURITY_SUSPICIOUS_LOGIN);
+    // A message id the window no longer remembers, as for a late retry.
+    for _ in 0..2 {
+        bus.deliver(
+            &receiver(),
+            sid_core::models::WorkId(uuid::Uuid::now_v7()),
+            &event,
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(stored(&t.work_stream()).await, 2, "the broker deduplicated");
+
+    let (stop, handle) = run_notify(bus.clone(), store.clone(), 1_000);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while stored(&t.work_stream()).await > 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "a copy was never settled"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    stop.send(()).unwrap();
+    handle.await.unwrap();
+    let job = store.get_work(route_job_id(&event)).await.unwrap().unwrap();
+    assert_eq!(job.state, WorkState::Pending);
+    assert_eq!(job.attempts, 0, "the second copy replaced the routing job");
+    drop_topology(&t).await;
+}
+
 /// Two notify replicas share the receiver's work: every event is accepted
 /// exactly once between them.
 #[tokio::test]
