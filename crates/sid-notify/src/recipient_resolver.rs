@@ -314,15 +314,32 @@ pub(crate) struct Contact {
     pub(crate) phone: Option<String>,
 }
 
-/// Why a recipient could not be resolved.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum ResolveError {
-    /// The profile no longer exists: nothing can be delivered to it.
-    #[error("profile {0} not found")]
-    ProfileGone(String),
-    /// The identity service did not answer usefully; worth another try.
-    #[error("recipient lookup failed: {0}")]
-    Unavailable(String),
+pub(crate) use crate::recipient::ResolveError;
+
+#[async_trait::async_trait]
+impl crate::recipient::RecipientSource for RecipientResolver {
+    async fn resolve(
+        &self,
+        event: &sid_core::models::event::Event,
+    ) -> Result<Recipient, ResolveError> {
+        RecipientResolver::resolve(self, event).await
+    }
+
+    /// Contact details changed: the cached recipient is stale.
+    async fn observed(&self, event: &sid_core::models::event::Event) {
+        use sid_core::models::event::event_types;
+        if [
+            event_types::PROFILE_EMAIL_CHANGED,
+            event_types::PROFILE_CLAIM_CHANGED,
+            event_types::USER_DELETED,
+        ]
+        .contains(&event.event_type.as_str())
+            && let Some(subject) = &event.subject
+        {
+            self.invalidate(subject.strip_prefix("profile/").unwrap_or(subject))
+                .await;
+        }
+    }
 }
 
 /// Extract profile_id from event subject.

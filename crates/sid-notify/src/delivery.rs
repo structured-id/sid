@@ -14,7 +14,7 @@
 //! `sid.notify.dlq.v1` fact, which is owed and published as every fact is.
 
 use crate::dispatcher::NotificationDispatcher;
-use crate::recipient_resolver::{RecipientResolver, ResolveError};
+use crate::recipient::{RecipientSource, ResolveError};
 use crate::routing::RoutingTable;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -195,15 +195,17 @@ fn dead_letter(work: &ClaimedWork, error: &str) -> Option<NewWork> {
 pub struct RouteHandler {
     kind: WorkKind,
     routing: RoutingTable,
-    resolver: Arc<RecipientResolver>,
+    resolver: Arc<dyn RecipientSource>,
     store: Arc<dyn WorkStore>,
     capacity: u64,
 }
 
 impl RouteHandler {
-    pub(crate) fn new(
+    /// Route accepted events by `routing` to the recipients `resolver`
+    /// names, storing plans in `store` within `capacity` open items.
+    pub fn new(
         routing: RoutingTable,
-        resolver: Arc<RecipientResolver>,
+        resolver: Arc<dyn RecipientSource>,
         store: Arc<dyn WorkStore>,
         capacity: u64,
     ) -> Self {
@@ -239,19 +241,7 @@ impl WorkHandler for RouteHandler {
         if let Err(e) = event.validate() {
             return WorkOutcome::Permanent(format!("invalid CloudEvents envelope: {e}"));
         }
-        // Contact details changed: the cached recipient is stale.
-        if [
-            event_types::PROFILE_EMAIL_CHANGED,
-            event_types::PROFILE_CLAIM_CHANGED,
-            event_types::USER_DELETED,
-        ]
-        .contains(&event.event_type.as_str())
-            && let Some(subject) = &event.subject
-        {
-            self.resolver
-                .invalidate(subject.strip_prefix("profile/").unwrap_or(subject))
-                .await;
-        }
+        self.resolver.observed(&event).await;
         let rules = self.routing.route_all(&event);
         if rules.is_empty() {
             return WorkOutcome::Done(Some("no routing rule".into()));
@@ -302,7 +292,8 @@ pub struct PlanHandler {
 }
 
 impl PlanHandler {
-    pub(crate) fn new(store: Arc<dyn WorkStore>, capacity: u64) -> Self {
+    /// Store planned deliveries in `store` within `capacity` open items.
+    pub fn new(store: Arc<dyn WorkStore>, capacity: u64) -> Self {
         Self {
             kind: kind(PLAN),
             store,
@@ -361,13 +352,20 @@ impl WorkHandler for PlanHandler {
 pub struct DeliverHandler {
     kind: WorkKind,
     dispatcher: Arc<NotificationDispatcher>,
+    recipients: Arc<dyn RecipientSource>,
 }
 
 impl DeliverHandler {
-    pub fn new(dispatcher: Arc<NotificationDispatcher>) -> Self {
+    /// Deliver through `dispatcher`'s channels to recipients `recipients`
+    /// still confirms.
+    pub fn new(
+        dispatcher: Arc<NotificationDispatcher>,
+        recipients: Arc<dyn RecipientSource>,
+    ) -> Self {
         Self {
             kind: kind(DELIVER),
             dispatcher,
+            recipients,
         }
     }
 }
@@ -391,6 +389,20 @@ impl WorkHandler for DeliverHandler {
             Ok(job) => job,
             Err(e) => return WorkOutcome::Permanent(format!("malformed delivery job: {e}")),
         };
+        // Authority that ended since the event was routed delivers nothing;
+        // an unanswered check keeps the delivery owed.
+        match self
+            .recipients
+            .still_recipient(&job.event, &job.recipient)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                return WorkOutcome::Permanent("the recipient may no longer receive it".into());
+            }
+            Err(e @ ResolveError::ProfileGone(_)) => return WorkOutcome::Permanent(e.to_string()),
+            Err(e @ ResolveError::Unavailable(_)) => return WorkOutcome::Retry(e.to_string()),
+        }
         let message = match self
             .dispatcher
             .render(&job.template, &job.event, job.priority)
