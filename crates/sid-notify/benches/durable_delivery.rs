@@ -306,14 +306,44 @@ async fn handoff(store: Arc<dyn WorkStore>) {
     }
 }
 
+/// The modes `SID_BENCH_MODES` names (comma-separated: `sqlite`, `postgres`,
+/// `jetstream`), all of them when unset.
+fn modes() -> Vec<String> {
+    match std::env::var("SID_BENCH_MODES") {
+        Ok(list) => list.split(',').map(|m| m.trim().to_string()).collect(),
+        Err(_) => vec!["sqlite".into(), "postgres".into(), "jetstream".into()],
+    }
+}
+
 #[tokio::main]
 async fn main() {
-    let dir = tempfile::tempdir().unwrap();
-    let file = dir.path().join("work.db");
-    let sqlite = sid_storage::sqlite::SqliteBackend::new(&format!("sqlite:{}", file.display()))
-        .await
-        .unwrap();
-    store_modes("sqlite", Arc::new(sqlite)).await;
-    store_modes("postgres", postgres().await).await;
-    handoff(postgres().await).await;
+    if let Ok(phase) = std::env::var("CXBR_BENCHMARK_PHASE") {
+        // The measurement host's quiet window: everything below is measured.
+        std::process::Command::new(&phase)
+            .arg("begin")
+            .status()
+            .unwrap();
+    }
+    for mode in modes() {
+        match mode.as_str() {
+            "sqlite" => {
+                let dir = tempfile::tempdir().unwrap();
+                let file = dir.path().join("work.db");
+                let sqlite =
+                    sid_storage::sqlite::SqliteBackend::new(&format!("sqlite:{}", file.display()))
+                        .await
+                        .unwrap();
+                store_modes("sqlite", Arc::new(sqlite)).await;
+            }
+            "postgres" => store_modes("postgres", postgres().await).await,
+            "jetstream" => handoff(postgres().await).await,
+            other => panic!("unknown mode {other}: sqlite, postgres or jetstream"),
+        }
+    }
+    if let Ok(phase) = std::env::var("CXBR_BENCHMARK_PHASE") {
+        std::process::Command::new(&phase)
+            .arg("end")
+            .status()
+            .unwrap();
+    }
 }
