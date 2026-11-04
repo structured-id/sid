@@ -5388,6 +5388,7 @@ dependencies = [
  "async-trait",
  "cedar-policy",
  "chrono",
+ "dashmap",
  "prost",
  "prost-types",
  "serde",

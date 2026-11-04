@@ -19,6 +19,8 @@ sid-proto = { workspace = true, optional = true }
 async-trait = { workspace = true }
 cedar-policy = { workspace = true }
 chrono = { workspace = true }
+# The compiled policy sets, shared by concurrent decisions.
+dashmap = { workspace = true }
 prost = { workspace = true, optional = true }
 prost-types = { workspace = true, optional = true }
 serde = { workspace = true }

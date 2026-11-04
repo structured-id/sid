@@ -158,7 +158,18 @@ impl CedarService {
         resource_uid: EntityUid,
         context: &BTreeMap<String, String>,
     ) -> Result<CedarEvalResult, CedarError> {
-        // Build PolicySet.
+        self.evaluate_compiled(
+            &Self::compile(policies)?,
+            principal,
+            action_uid,
+            resource_uid,
+            context,
+        )
+    }
+
+    /// `policies` (id, text) as one policy set; any policy that does not
+    /// parse, or a repeated id, fails the whole set.
+    pub fn compile(policies: &[(String, String)]) -> Result<PolicySet, CedarError> {
         let mut policy_set = PolicySet::new();
         for (id, text) in policies {
             let policy_id = PolicyId::new(id);
@@ -168,7 +179,18 @@ impl CedarService {
                 .add(policy)
                 .map_err(|e| CedarError::InvalidPolicy(format!("duplicate policy {id}: {e}")))?;
         }
+        Ok(policy_set)
+    }
 
+    /// [`Self::evaluate_entities`] under a policy set already compiled.
+    pub fn evaluate_compiled(
+        &self,
+        policy_set: &PolicySet,
+        principal: EntityUid,
+        action_uid: EntityUid,
+        resource_uid: EntityUid,
+        context: &BTreeMap<String, String>,
+    ) -> Result<CedarEvalResult, CedarError> {
         // Build context from key-value pairs.
         let context_pairs: Vec<(String, cedar_policy::RestrictedExpression)> = context
             .iter()
@@ -193,7 +215,7 @@ impl CedarService {
         // Evaluate.
         let response = self
             .authorizer
-            .is_authorized(&request, &policy_set, &entities);
+            .is_authorized(&request, policy_set, &entities);
 
         let allowed = response.decision() == Decision::Allow;
 
