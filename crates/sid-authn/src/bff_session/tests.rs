@@ -1305,3 +1305,33 @@ fn test_refreshed_claims_keep_the_profile() {
     assert_eq!(refreshed.name.as_deref(), Some("Ada"));
     assert_eq!(refreshed.groups, Some(vec!["ops".to_owned()]));
 }
+
+/// A logout of one issuer session ends its sessions on every replica and no
+/// other session; recording it twice changes nothing.
+#[tokio::test]
+async fn test_an_issuer_session_logout_ends_its_sessions_only() {
+    let (a, b) = replica_pair();
+    let claims = test_claims();
+    let other = SessionClaims {
+        sid: "sess_other".into(),
+        ..test_claims()
+    };
+    let other_issuer = SessionClaims {
+        iss: "https://other.sid.example.com".into(),
+        ..test_claims()
+    };
+    // Replicas recording the same logout at once, and a repeat, all leave it
+    // recorded.
+    let (first, second) = tokio::join!(
+        a.record_issuer_logout(&claims.iss, &claims.sid),
+        b.record_issuer_logout(&claims.iss, &claims.sid),
+    );
+    first.unwrap();
+    second.unwrap();
+    a.record_issuer_logout(&claims.iss, &claims.sid)
+        .await
+        .unwrap();
+    assert!(b.ended_by_issuer(&claims).await.unwrap());
+    assert!(!b.ended_by_issuer(&other).await.unwrap());
+    assert!(!b.ended_by_issuer(&other_issuer).await.unwrap());
+}

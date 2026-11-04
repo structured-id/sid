@@ -160,7 +160,7 @@ async fn test_delivery_posts_logout_token_for_the_session() {
     let request = server.await.unwrap();
     assert!(request.starts_with("POST"), "should be POST");
     let claims = verifier
-        .validate_logout_token(&logout_token(&request))
+        .validate_logout_token(&logout_token(&request), "client-456")
         .unwrap();
     assert_eq!(claims.iss, verifier.issuer());
     assert_eq!(claims.sub, profile_id().to_string());
@@ -191,7 +191,9 @@ async fn test_logout_subject_follows_the_hop_not_the_metadata() {
     handler.handle(&claimed(&delivery())).await;
     let token = logout_token(&server.await.unwrap());
 
-    let claims = verifier.validate_logout_token(&token).unwrap();
+    let claims = verifier
+        .validate_logout_token(&token, "client-456")
+        .unwrap();
     assert_eq!(claims.sub, profile_id().to_string());
     assert!(claims.exp > claims.iat, "logout token must expire");
     use base64::Engine;
@@ -367,7 +369,7 @@ async fn test_revoked_session_logout_is_owed_and_delivered() {
         .expect("the RP is sent the logout")
         .unwrap();
     let claims = verifier
-        .validate_logout_token(&logout_token(&request))
+        .validate_logout_token(&logout_token(&request), "client-456")
         .unwrap();
     assert_eq!(claims.sid.as_deref(), Some(session.id.to_string().as_str()));
 

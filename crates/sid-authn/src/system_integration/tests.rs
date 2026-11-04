@@ -84,6 +84,13 @@ async fn the_integration_is_provisioned_in_the_registry() {
         client.redirect_uris,
         ["https://account.sid.example.com/auth/callback"]
     );
+    // The issuer tells the UI host when a session it issued ends
+    // (Back-Channel Logout 1.0 §2.2), naming that session.
+    assert_eq!(
+        client.backchannel_logout_uri.as_deref(),
+        Some("https://account.sid.example.com/auth/backchannel-logout")
+    );
+    assert!(client.backchannel_logout_session_required);
     assert_eq!(client.org_id, Some(issuer.recipient_org));
     assert_eq!(client.default_resource, Some(integration.resource.id));
     assert_eq!(integration.resource.issuer_id, issuer.id);
@@ -144,6 +151,11 @@ async fn settings_changes_keep_the_client_identity() {
         stored.redirect_uris,
         ["https://me.sid.example.com/auth/callback"]
     );
+    assert_eq!(
+        stored.backchannel_logout_uri.as_deref(),
+        Some("https://me.sid.example.com/auth/backchannel-logout")
+    );
+    assert!(stored.backchannel_logout_session_required);
     assert!(stored.jwks.unwrap().key("bff-2").is_some());
 }
 

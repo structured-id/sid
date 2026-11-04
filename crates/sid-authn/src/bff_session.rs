@@ -42,6 +42,8 @@ const SESSIONS: &str = "bff_session_3";
 const PENDING: &str = "bff_pending_4";
 /// Namespace of refresh claims, keyed by session and refresh token version.
 const REFRESH: &str = "bff_refresh_1";
+/// Namespace of the issuer sessions the issuer's back-channel logouts ended.
+const ENDED: &str = "bff_ended_1";
 /// How many times a token replacement is applied again over concurrent idle
 /// pushes before it is reported: each push is one write per half idle window
 /// per replica, so a few attempts outlast any real interleaving.
@@ -469,6 +471,29 @@ impl BffSessionStore {
         Ok(Some(serde_json::from_slice(&raw)?))
     }
 
+    /// Record that the issuer ended its session `sid` of issuer `iss`
+    /// (Back-Channel Logout 1.0 §2.7): every application session of it ends
+    /// at its next use, and a sign-in completing afterwards for it opens
+    /// nothing. The record's presence is all it says, so concurrent and
+    /// repeated logouts all leave the same record. Kept as long as a session
+    /// lives, so no session it ended outlives it.
+    pub async fn record_issuer_logout(&self, iss: &str, sid: &str) -> SessionResult<()> {
+        self.store
+            .put_ceremony_state(ENDED, &ended_key(iss, sid), b"ended", self.max_age)
+            .await?;
+        Ok(())
+    }
+
+    /// Whether the issuer's back-channel logout ended the issuer session of
+    /// `claims`.
+    pub async fn ended_by_issuer(&self, claims: &SessionClaims) -> SessionResult<bool> {
+        Ok(self
+            .store
+            .read_ceremony_state(ENDED, &ended_key(&claims.iss, &claims.sid))
+            .await?
+            .is_some())
+    }
+
     /// Write a session under its current idle window.
     async fn write(&self, id: &str, session: &BffSession) -> SessionResult<()> {
         self.store
@@ -546,6 +571,19 @@ fn refresh_key(id: &str, token: &SecretString) -> String {
     let version = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .encode(sha2::Sha256::digest(token.expose_secret().as_bytes()));
     format!("{id}:{version}")
+}
+
+/// The key of an ended issuer session: a digest of the issuer and the
+/// session, each length prefixed, so no issuer's session names another's.
+fn ended_key(iss: &str, sid: &str) -> String {
+    use base64::Engine as _;
+    use sha2::Digest as _;
+    let mut digest = sha2::Sha256::new();
+    for part in [iss.as_bytes(), sid.as_bytes()] {
+        digest.update((part.len() as u64).to_be_bytes());
+        digest.update(part);
+    }
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest.finalize())
 }
 
 /// Elapsed time since `then`, zero for a clock that moved back: a timestamp
