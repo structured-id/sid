@@ -642,21 +642,51 @@ impl IssuerVerifier {
         self.keys.iter().any(|(id, _)| id == kid)
     }
 
-    /// Validate a back-channel logout token of this issuer, as its relying
-    /// party does: signature, exact `iss`, and the logout event (Back-Channel
-    /// Logout 1.0 §2.6). The audience is the receiving client's to check.
-    pub fn validate_logout_token(&self, token: &str) -> SidResult<LogoutTokenClaims> {
+    /// Validate a back-channel logout token of this issuer as the relying
+    /// party `client_id` receives it (Back-Channel Logout 1.0 §2.6): typed
+    /// `logout+jwt` (§2.4, RFC 8725 §3.11), signed by this issuer with its
+    /// exact `iss`, live, for exactly this client, carrying the logout event
+    /// and no `nonce`, so neither an ID token nor an access token of the same
+    /// key passes as one.
+    pub fn validate_logout_token(
+        &self,
+        token: &str,
+        client_id: &str,
+    ) -> SidResult<LogoutTokenClaims> {
+        /// The claims as received, with the `nonce` a logout token must lack.
+        #[derive(serde::Deserialize)]
+        struct Received {
+            #[serde(flatten)]
+            claims: LogoutTokenClaims,
+            #[serde(default)]
+            nonce: Option<serde_json::Value>,
+        }
+        let refused = |why: &str| SidError::AuthenticationFailed(format!("Invalid token: {why}"));
+        let typ = decode_header(token)
+            .map_err(|e| refused(&e.to_string()))?
+            .typ
+            .unwrap_or_default();
+        let typ = typ.strip_prefix("application/").unwrap_or(&typ);
+        if !typ.eq_ignore_ascii_case("logout+jwt") {
+            return Err(refused("not a logout token"));
+        }
         let mut validation = Validation::new(Algorithm::EdDSA);
         validation.set_issuer(&[&self.issuer]);
-        validation.validate_aud = false;
-        validation.set_required_spec_claims(&["sub", "iss", "iat", "exp", "jti"]);
-        let claims: LogoutTokenClaims = self.decode(token, &validation)?;
-        if claims.events.get(BACKCHANNEL_LOGOUT_EVENT).is_none() {
-            return Err(SidError::AuthenticationFailed(
-                "logout token without the back-channel logout event".into(),
-            ));
+        validation.set_audience(&[client_id]);
+        validation.set_required_spec_claims(&["sub", "iss", "aud", "iat", "exp", "jti"]);
+        let received: Received = self.decode(token, &validation)?;
+        if received.nonce.is_some() {
+            return Err(refused("a logout token carries no nonce"));
         }
-        Ok(claims)
+        if received
+            .claims
+            .events
+            .get(BACKCHANNEL_LOGOUT_EVENT)
+            .is_none()
+        {
+            return Err(refused("no back-channel logout event"));
+        }
+        Ok(received.claims)
     }
 
     /// Decode `token` with the key its `kid` names; a token naming no key, or

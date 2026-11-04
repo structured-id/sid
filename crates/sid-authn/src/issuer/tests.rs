@@ -591,7 +591,7 @@ async fn logout_tokens_are_issued_by_the_issuer() {
     let token =
         crate::jwt::logout_token_signed_by(signer.as_ref(), "subject", "client-1", Some("sid-1"))
             .unwrap();
-    let claims = verifier.validate_logout_token(&token).unwrap();
+    let claims = verifier.validate_logout_token(&token, "client-1").unwrap();
     assert_eq!(claims.iss, issuer.canonical_url);
     assert_eq!(claims.sub, "subject");
     assert_eq!(claims.aud, "client-1");
@@ -604,9 +604,69 @@ async fn logout_tokens_are_issued_by_the_issuer() {
 
     let without_session =
         crate::jwt::logout_token_signed_by(signer.as_ref(), "subject", "client-1", None).unwrap();
-    let other = verifier.validate_logout_token(&without_session).unwrap();
+    let other = verifier
+        .validate_logout_token(&without_session, "client-1")
+        .unwrap();
     assert!(other.sid.is_none());
     assert_ne!(other.jti, claims.jti);
+}
+
+/// A relying party accepts only a logout token for itself, explicitly typed,
+/// without a `nonce` (Back-Channel Logout 1.0 §2.6): another client's token,
+/// an ID token's type or a token carrying a nonce is refused, even when this
+/// issuer signed it.
+#[tokio::test]
+async fn a_logout_token_is_for_its_client_alone() {
+    let (registry, issuer) = registry().await;
+    let signer = registry.signer(&issuer).await.unwrap();
+    let verifier = registry.verifier(&issuer).await.unwrap();
+    let token =
+        crate::jwt::logout_token_signed_by(signer.as_ref(), "subject", "client-1", Some("sid-1"))
+            .unwrap();
+    assert!(verifier.validate_logout_token(&token, "client-2").is_err());
+
+    let now = chrono::Utc::now().timestamp();
+    let claims = |extra: serde_json::Value| {
+        let mut claims = serde_json::json!({
+            "iss": issuer.canonical_url,
+            "sub": "subject",
+            "aud": "client-1",
+            "iat": now,
+            "exp": now + 60,
+            "jti": "jti",
+            "sid": "sid-1",
+            "events": { crate::jwt::BACKCHANNEL_LOGOUT_EVENT: {} },
+        });
+        claims
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        claims
+    };
+    for typ in [None, Some("JWT"), Some("at+jwt")] {
+        let untyped = signer.sign(typ, &claims(serde_json::json!({}))).unwrap();
+        assert!(
+            verifier
+                .validate_logout_token(&untyped, "client-1")
+                .is_err(),
+            "{typ:?}"
+        );
+    }
+    let with_nonce = signer
+        .sign(
+            Some("logout+jwt"),
+            &claims(serde_json::json!({ "nonce": "n" })),
+        )
+        .unwrap();
+    assert!(
+        verifier
+            .validate_logout_token(&with_nonce, "client-1")
+            .is_err()
+    );
+    let plain = signer
+        .sign(Some("logout+jwt"), &claims(serde_json::json!({})))
+        .unwrap();
+    assert!(verifier.validate_logout_token(&plain, "client-1").is_ok());
 }
 
 /// A token without the logout event is not a logout token, even when this
@@ -635,7 +695,7 @@ async fn a_token_without_the_logout_event_is_refused() {
             .verifier(&issuer)
             .await
             .unwrap()
-            .validate_logout_token(&token)
+            .validate_logout_token(&token, "client-1")
             .is_err()
     );
 }

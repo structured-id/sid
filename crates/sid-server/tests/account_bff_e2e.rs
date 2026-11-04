@@ -472,6 +472,87 @@ async fn current_profile(replica: &str, browser: &Browser, csrf: bool) -> (Optio
     )
 }
 
+/// The issuer ends the session it issued to the application (a sign-out at
+/// the issuer, an administrator's kill): the issuer's own delivery posts its
+/// back-channel logout to the host over HTTP, the host answers 200 once the
+/// end is recorded, and the browser's next read on any replica is
+/// UNAUTHENTICATED, the page then sending the user to sign in.
+#[tokio::test]
+async fn the_issuers_back_channel_logout_signs_the_browser_out() {
+    use sid_authn::work_runner::{WorkHandler, WorkOutcome};
+    use sid_core::models::{
+        AuditEntry, ClaimedWork, LogoutDelivery, RevocationReason, SessionEnd, SessionId,
+    };
+
+    let deployment = deploy().await;
+    let first = replica(&deployment).await;
+    let second = replica(&deployment).await;
+    let browser = sign_in(&deployment, &first).await;
+    let storage = deployment.svc.storage.clone();
+
+    // The account client receives its logouts at the second replica.
+    let mut client = sid_authn::system_integration::account_integration(storage.as_ref())
+        .await
+        .unwrap()
+        .unwrap()
+        .client;
+    client.backchannel_logout_uri = Some(format!("{second}/auth/backchannel-logout"));
+    client.backchannel_logout_session_required = true;
+    assert!(
+        storage
+            .update_oauth2_client(&client, AuditEntry::system("test", "logout uri").into())
+            .await
+            .unwrap()
+    );
+
+    // The grant's session, as the host holds it, ends at the issuer.
+    let held = sessions(&deployment)
+        .get_session(browser.cookie.split_once('=').unwrap().1)
+        .await
+        .unwrap()
+        .unwrap();
+    let grant = SessionId::parse(&held.claims.sid).unwrap();
+    let ended = storage.get_session(grant).await.unwrap().unwrap();
+    storage
+        .delete_session(
+            grant,
+            &SessionEnd::new(RevocationReason::UserRequested, "test"),
+            AuditEntry::system("test", "sign out at the issuer").into(),
+        )
+        .await
+        .unwrap();
+
+    let work = LogoutDelivery::for_ended_session(&ended)
+        .expect("a session issued to the client owes it a logout")
+        .work();
+    let handler = common::crypto::with_tls(|| {
+        sid_authn::backchannel_logout::BackChannelLogoutHandler::new(
+            deployment.svc.issuers.clone(),
+            storage.clone(),
+        )
+    });
+    let outcome = handler
+        .handle(&ClaimedWork {
+            id: work.id,
+            kind: work.kind,
+            payload: work.payload,
+            attempt: 1,
+            max_attempts: work.max_attempts,
+            generation: 1,
+            expires_at: None,
+        })
+        .await;
+    assert!(
+        matches!(&outcome, WorkOutcome::Done(Some(r)) if r == "HTTP 200"),
+        "{outcome:?}"
+    );
+
+    // UNAUTHENTICATED on the replica the logout did not reach, too.
+    let (session, status) = read_session(&first, &browser.cookie).await;
+    assert_eq!(status, "16");
+    assert!(session.is_none());
+}
+
 /// Sign-in through one replica, the account API through another: the user
 /// sees their own profile, the page's request without the CSRF token is
 /// refused, and the bundle is served on the same listener.

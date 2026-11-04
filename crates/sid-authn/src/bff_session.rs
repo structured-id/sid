@@ -42,6 +42,11 @@ const SESSIONS: &str = "bff_session_3";
 const PENDING: &str = "bff_pending_4";
 /// Namespace of refresh claims, keyed by session and refresh token version.
 const REFRESH: &str = "bff_refresh_1";
+/// Namespace of what the issuer's back-channel logouts ended: an issuer
+/// session, or a subject's sessions authenticated up to a time.
+const ENDED: &str = "bff_ended_1";
+/// Attempts at raising a subject's logout time over concurrent logouts.
+const ENDED_ATTEMPTS: usize = 4;
 /// How many times a token replacement is applied again over concurrent idle
 /// pushes before it is reported: each push is one write per half idle window
 /// per replica, so a few attempts outlast any real interleaving.
@@ -469,6 +474,75 @@ impl BffSessionStore {
         Ok(Some(serde_json::from_slice(&raw)?))
     }
 
+    /// Record what the issuer's back-channel logout ended (Back-Channel
+    /// Logout 1.0 §2.7), issued at `logged_out_at` (Unix seconds): every
+    /// session of that issuer session, or every session of that subject
+    /// authenticated by then, ends at its next use, and a sign-in completing
+    /// afterwards for it opens nothing. Kept as long as a session lives, so
+    /// no session it ended outlives it. Recorded before the issuer is told the
+    /// logout succeeded; a repeat records nothing new.
+    pub async fn record_issuer_logout(
+        &self,
+        logout: IssuerLogout<'_>,
+        logged_out_at: i64,
+    ) -> SessionResult<()> {
+        let key = logout.key();
+        let at = logged_out_at.to_string();
+        for _ in 0..ENDED_ATTEMPTS {
+            match self.store.read_ceremony_state(ENDED, &key).await? {
+                None => {
+                    self.store
+                        .put_ceremony_state(ENDED, &key, at.as_bytes(), self.max_age)
+                        .await?;
+                }
+                Some(held) => {
+                    if logged_time(&held) >= logged_out_at {
+                        return Ok(());
+                    }
+                    self.store
+                        .replace_ceremony_state(ENDED, &key, &held, at.as_bytes(), self.max_age)
+                        .await?;
+                }
+            }
+            // Another logout may have written meanwhile: done once the record
+            // covers this one.
+            if let Some(held) = self.store.read_ceremony_state(ENDED, &key).await?
+                && logged_time(&held) >= logged_out_at
+            {
+                return Ok(());
+            }
+        }
+        Err(SessionStoreError::Backend(sid_core::Error::Conflict(
+            "the issuer logout record keeps changing concurrently".into(),
+        )))
+    }
+
+    /// Whether the issuer's back-channel logout ended a session of `claims`:
+    /// its issuer session, or its subject since it authenticated.
+    pub async fn ended_by_issuer(&self, claims: &SessionClaims) -> SessionResult<bool> {
+        let session = IssuerLogout::Session {
+            iss: &claims.iss,
+            sid: &claims.sid,
+        };
+        if self
+            .store
+            .read_ceremony_state(ENDED, &session.key())
+            .await?
+            .is_some()
+        {
+            return Ok(true);
+        }
+        let subject = IssuerLogout::Subject {
+            iss: &claims.iss,
+            sub: &claims.sub,
+        };
+        Ok(self
+            .store
+            .read_ceremony_state(ENDED, &subject.key())
+            .await?
+            .is_some_and(|held| logged_time(&held) >= claims.auth_time))
+    }
+
     /// Write a session under its current idle window.
     async fn write(&self, id: &str, session: &BffSession) -> SessionResult<()> {
         self.store
@@ -546,6 +620,43 @@ fn refresh_key(id: &str, token: &SecretString) -> String {
     let version = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .encode(sha2::Sha256::digest(token.expose_secret().as_bytes()));
     format!("{id}:{version}")
+}
+
+/// What an issuer's back-channel logout ends (Back-Channel Logout 1.0 §2.4):
+/// the sessions of one issuer session when it names `sid`, otherwise every
+/// session of the subject.
+#[derive(Debug, Clone, Copy)]
+pub enum IssuerLogout<'a> {
+    Session { iss: &'a str, sid: &'a str },
+    Subject { iss: &'a str, sub: &'a str },
+}
+
+impl IssuerLogout<'_> {
+    /// The record's key: a digest of its kind, issuer and value, each length
+    /// prefixed, so no issuer's value names another's.
+    fn key(&self) -> String {
+        use base64::Engine as _;
+        use sha2::Digest as _;
+        let (kind, iss, value) = match self {
+            Self::Session { iss, sid } => ("sid", iss, sid),
+            Self::Subject { iss, sub } => ("sub", iss, sub),
+        };
+        let mut digest = sha2::Sha256::new();
+        for part in [kind.as_bytes(), iss.as_bytes(), value.as_bytes()] {
+            digest.update((part.len() as u64).to_be_bytes());
+            digest.update(part);
+        }
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest.finalize())
+    }
+}
+
+/// The logout time a record holds; a record that is not one counts as the
+/// latest, so an unreadable record ends sessions rather than keeping them.
+fn logged_time(held: &[u8]) -> i64 {
+    std::str::from_utf8(held)
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(i64::MAX)
 }
 
 /// Elapsed time since `then`, zero for a clock that moved back: a timestamp
