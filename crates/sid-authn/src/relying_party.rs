@@ -136,6 +136,29 @@ impl Connection {
         format!("{}\n{}", self.binding(), self.redirect_uri)
     }
 
+    /// What a browser's pending sign-in is bound to: [`Connection::sign_in_binding`]
+    /// and `browser`, the secret only the browser that started the sign-in
+    /// holds (in [`sign_in_cookie`]). A callback completes only the sign-in of
+    /// that browser (RFC 6749 §10.12, RFC 9700 §4.7.1): otherwise an
+    /// attacker's own unused code, sent to a victim's browser, would sign the
+    /// victim in to the attacker's account.
+    pub fn browser_sign_in_binding(&self, browser: &str) -> String {
+        format!("{}\n{browser}", self.sign_in_binding())
+    }
+}
+
+/// The name of the correlation cookie of the sign-in `state` names, beside
+/// session cookie `cookie` and under its prefix: one name per sign-in, so
+/// sign-ins started together in several tabs never replace each other's.
+/// The name is a digest of the state, a fixed short token whatever the
+/// callback sent.
+pub fn sign_in_cookie(cookie: &str, state: &str) -> String {
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::digest(state.as_bytes());
+    format!("{cookie}-signin-{}", hex::encode(&digest[..8]))
+}
+
+impl Connection {
     /// The issuer's token endpoint, the audience of every client assertion
     /// (RFC 7523 §3).
     pub fn token_endpoint(&self) -> String {
