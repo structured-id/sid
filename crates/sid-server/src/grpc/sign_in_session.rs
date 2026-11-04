@@ -7,10 +7,12 @@
 use chrono::Utc;
 use sid_authn::browser_session::BrowserCsrf;
 use sid_authn::jwt::JwtService;
+use sid_authn::native_session::{self, NativePolicy};
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::sign_in_delivery::{BrowserCredential, CeremonyClient, Delivery, SignedIn};
 use sid_authn::sign_in_refusal::authentication_failed;
 use sid_core::models::event::{Event, event_types};
+use sid_core::models::security_policy::SessionPolicy;
 use sid_core::models::{
     ActorFence, AuditEntry, MutationContext, Profile, Session, SessionEnd, SessionId, SignInProof,
 };
@@ -63,8 +65,9 @@ pub(crate) struct SignInSessions<'a> {
     pub issuer: &'a str,
     /// This authority's IdP session cookie.
     pub cookie: &'a sid_authn::browser_session::BrowserCookie,
-    /// The most sessions a profile keeps; the oldest are ended beyond it.
-    pub max_concurrent_sessions: u32,
+    /// The issuer's session policy: the most sessions a profile keeps (the
+    /// oldest are ended beyond it) and how native sessions renew.
+    pub policy: &'a SessionPolicy,
 }
 
 /// The refusal of a sign-in whose keyed operation already completed.
@@ -85,19 +88,23 @@ impl SignInSessions<'_> {
     /// must still hold when the session commits, and `policy` the login
     /// policy it was admitted under, which must too.
     /// A browser sign-in completing `retained` commits with that operation's
-    /// completion, its sealed delivery.
+    /// completion, its sealed delivery. A native client whose ceremony
+    /// proved the application key `native_key` (its JWK thumbprint) also
+    /// gets the session's first refresh generation, bound to that key.
+    #[allow(clippy::too_many_arguments)]
     pub async fn sign_in(
         &self,
         profile: &Profile,
         session: Session,
         client: CeremonyClient,
+        native_key: Option<&str>,
         proved_by: Option<SignInProof<'_>>,
         policy: Option<ActorFence>,
         retained: Option<RetainedSignIn<'_>>,
     ) -> Result<SignedIn, Status> {
-        let limit = self.max_concurrent_sessions;
+        let limit = self.policy.max_concurrent_sessions;
         self.deliver(
-            profile, session, client, proved_by, policy, limit, None, retained,
+            profile, session, client, native_key, proved_by, policy, limit, None, retained,
         )
         .await
         .map(|(signed_in, _)| signed_in)
@@ -107,20 +114,23 @@ impl SignInSessions<'_> {
     /// completion of the pending second-factor context `pending`: the
     /// context ends (owing what its end names) in the session's own commit,
     /// which applies only while the context exists.
+    #[allow(clippy::too_many_arguments)]
     pub async fn complete_pending(
         &self,
         profile: &Profile,
         pending: (SessionId, &SessionEnd),
         session: Session,
         client: CeremonyClient,
+        native_key: Option<&str>,
         proved_by: Option<SignInProof<'_>>,
         policy: Option<ActorFence>,
     ) -> Result<SignedIn, Status> {
-        let limit = self.max_concurrent_sessions;
+        let limit = self.policy.max_concurrent_sessions;
         self.deliver(
             profile,
             session,
             client,
+            native_key,
             proved_by,
             policy,
             limit,
@@ -134,7 +144,8 @@ impl SignInSessions<'_> {
     /// Store a sign-in's pending second-factor context and deliver its
     /// credential as [`Self::sign_in`] does, with the CSRF token a browser
     /// completes it with. It takes no place under the session limit: the
-    /// session it completes into does.
+    /// session it completes into does. A pending context is never renewable:
+    /// it gets no refresh generation, the session completing it does.
     pub async fn sign_in_pending(
         &self,
         profile: &Profile,
@@ -143,19 +154,23 @@ impl SignInSessions<'_> {
         proved_by: Option<SignInProof<'_>>,
         policy: Option<ActorFence>,
     ) -> Result<(SignedIn, Option<String>), Status> {
-        self.deliver(profile, session, client, proved_by, policy, 0, None, None)
-            .await
+        self.deliver(
+            profile, session, client, None, proved_by, policy, 0, None, None,
+        )
+        .await
     }
 
     /// Store `session` under `limit` (completing `pending` when given, with
     /// `retained`'s completion when given) and deliver its credential, with
-    /// the browser's encoded CSRF token for a browser.
+    /// the browser's encoded CSRF token for a browser and the refresh
+    /// generation bound to `native_key` for a native client that proved one.
     #[allow(clippy::too_many_arguments)]
     async fn deliver(
         &self,
         profile: &Profile,
         mut session: Session,
         client: CeremonyClient,
+        native_key: Option<&str>,
         proved_by: Option<SignInProof<'_>>,
         policy: Option<ActorFence>,
         limit: u32,
@@ -198,39 +213,72 @@ impl SignInSessions<'_> {
                 Ok((credential.signed_in(self.cookie, &session), csrf))
             }
             CeremonyClient::Native => {
+                // Checked before anything commits: a policy that cannot shape
+                // a generation creates no session.
+                let native = native_key
+                    .map(|key| {
+                        NativePolicy::from_session_policy(self.policy)
+                            .map(|policy| (key, policy))
+                            .map_err(|e| internal("read the native session policy", e))
+                    })
+                    .transpose()?;
                 self.persist(profile, &session, proved_by, policy, limit, pending, None)
                     .await?;
-                let sub = profile.id.to_string();
-                let roles = sid_authn::account_roles::account_roles(self.storage, profile)
-                    .await
-                    .map_err(|e| internal("read the account's roles", e))?;
-                let access_token = self
-                    .jwt
-                    .issue_access_token(
-                        &sub,
-                        Some(&sub),
-                        &roles,
-                        &session,
-                        &session.scopes,
-                        None,
-                        None,
-                    )
-                    .map_err(|e| internal("issue access token", e))?;
-                // The token expires with the session when the session is shorter.
-                let expires_in = self
-                    .jwt
-                    .access_token_ttl_secs()
-                    .min((session.expires_at - Utc::now()).num_seconds());
-                Ok((
-                    SignedIn {
-                        session_id: session.id.to_string(),
-                        expires_in,
-                        delivery: Delivery::Bearer(access_token.into()),
-                    },
-                    None,
-                ))
+                // The generation commits after the session it renews, which it
+                // checks is still live. A failure between the two leaves a
+                // session nothing was delivered for, as a lost response does;
+                // it ends with its lifetime.
+                let refresh = match native {
+                    Some((key, policy)) => Some(
+                        native_session::issue(self.storage, &session, key, policy)
+                            .await
+                            .map_err(super::native_session::refusal)?,
+                    ),
+                    None => None,
+                };
+                Ok((self.native_access(profile, &session, refresh).await?, None))
             }
         }
+    }
+
+    /// A native client's access token for the stored `session` of `profile`,
+    /// with `refresh`, the session's refresh generation, beside it when the
+    /// client renews the session with one.
+    pub async fn native_access(
+        &self,
+        profile: &Profile,
+        session: &Session,
+        refresh: Option<sid_proto::sid::v1::authn::NativeCredentialSet>,
+    ) -> Result<SignedIn, Status> {
+        let sub = profile.id.to_string();
+        let roles = sid_authn::account_roles::account_roles(self.storage, profile)
+            .await
+            .map_err(|e| internal("read the account's roles", e))?;
+        let access_token = self
+            .jwt
+            .issue_access_token(
+                &sub,
+                Some(&sub),
+                &roles,
+                session,
+                &session.scopes,
+                None,
+                None,
+            )
+            .map_err(|e| internal("issue access token", e))?;
+        // The token expires with the session when the session is shorter.
+        let expires_in = self
+            .jwt
+            .access_token_ttl_secs()
+            .min((session.expires_at - Utc::now()).num_seconds());
+        Ok(SignedIn {
+            session_id: session.id.to_string(),
+            expires_in,
+            delivery: Delivery::Bearer {
+                token: access_token.into(),
+                refresh,
+            },
+        })
     }
 
     /// Store `session` under the concurrent-session `limit` (0: none) and

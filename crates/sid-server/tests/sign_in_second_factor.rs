@@ -162,6 +162,61 @@ async fn a_password_sign_in_owing_otp_is_completed_by_totp() {
     assert_eq!(svc.mock_storage.sessions_of(profile), 1);
 }
 
+/// A pending context is never renewable: the first factor's proved key gets
+/// it no generation. The TOTP completion proving the key over the pending
+/// context it presents gets the completed session's first generation; a
+/// proof over anything else fails the completion and leaves the context.
+#[tokio::test]
+async fn a_completion_proving_its_key_gets_a_refresh_generation() {
+    use common::native_client::{Binds, generation, proof, rpc_uri};
+    let seed = sid_authn::generate_secret();
+    let (svc, _policy, _profile) = services(Some(&seed)).await;
+
+    let finish = start_login(&svc, PRINCIPAL, PASSWORD).await;
+    let login_proof = proof(
+        &rpc_uri("OpaqueLoginFinish"),
+        Binds::Ceremony(finish.server_login_state.as_bytes()),
+    );
+    let first = svc
+        .auth
+        .opaque_login_finish(common::native_client::with_proof(finish, &login_proof))
+        .await
+        .expect("pending context");
+    assert!(
+        generation(&first).is_none(),
+        "a pending context renews nothing"
+    );
+    let pending_token = bearer(&first);
+
+    let verify = |reference: &[u8]| {
+        let mut request = common::native_client::with_proof(
+            VerifyTotpRequest {
+                code: sid_authn::generate_current_totp(&seed),
+            },
+            &proof(&rpc_uri("VerifyTotp"), Binds::Ceremony(reference)),
+        );
+        request.metadata_mut().insert(
+            "authorization",
+            format!("Bearer {pending_token}").parse().unwrap(),
+        );
+        request
+    };
+    let refused = svc
+        .auth
+        .verify_totp(verify(b"another context"))
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code(), Code::InvalidArgument);
+
+    let completed = svc
+        .auth
+        .verify_totp(verify(pending_token.as_bytes()))
+        .await
+        .expect("completed");
+    let set = generation(&completed).expect("the session's generation");
+    assert_eq!(set.refresh_credentials.len(), 2);
+}
+
 /// `message` arriving over a connection from `ip`.
 fn from_ip<T>(ip: std::net::IpAddr, message: T) -> Request<T> {
     let mut request = Request::new(message);

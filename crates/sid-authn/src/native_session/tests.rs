@@ -102,7 +102,7 @@ async fn present(
     h: &Harness,
     credential: &str,
     exchange: NativeExchange,
-) -> Result<Refreshed, NativeError> {
+) -> Result<Refreshed<sid_core::models::ProfileId>, NativeError> {
     let proof = proof(credential, &exchange);
     refresh(
         &h.store,
@@ -132,7 +132,7 @@ async fn a_refresh_rotates_into_the_next_generation() {
     let next = present(&h, &first.refresh_credentials[0], exchange(1))
         .await
         .unwrap();
-    assert_eq!(next.session_id, s.id);
+    assert_eq!(next.session.id, s.id);
     assert_eq!(next.set.refresh_credentials.len(), 2);
     assert!(
         next.set

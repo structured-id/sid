@@ -7,6 +7,7 @@
 #![allow(dead_code)]
 
 pub mod mock_storage;
+pub mod native_client;
 pub mod oauth_client;
 pub mod opaque_client;
 pub mod zkpp_client;

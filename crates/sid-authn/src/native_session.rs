@@ -13,7 +13,7 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use prost::Message;
 use sid_core::models::{
     AuditEntry, MutationContext, NATIVE_GENERATION_SIZE_MAX, NativeExchange, NativeGeneration,
-    NativeRotation, NativeRotationOutcome, RevocationReason, Session, SessionEnd, SessionId,
+    NativeRotation, NativeRotationOutcome, RevocationReason, Session, SessionEnd,
     security_policy::SessionPolicy,
 };
 use sid_keys::KeyManager;
@@ -172,9 +172,10 @@ pub struct RefreshRequest<'a> {
     pub exchange: NativeExchange,
 }
 
-/// A refreshed (or redelivered) session and the generation to deliver.
-pub struct Refreshed {
-    pub session_id: SessionId,
+/// A refreshed (or redelivered) session, as read live at the rotation, and
+/// the generation to deliver.
+pub struct Refreshed<O> {
+    pub session: Session<O>,
     pub set: NativeCredentialSet,
 }
 
@@ -188,7 +189,7 @@ pub async fn refresh<S>(
     proofs: &DPopValidator,
     request: RefreshRequest<'_>,
     policy: NativePolicy,
-) -> Result<Refreshed, NativeError>
+) -> Result<Refreshed<S::Owner>, NativeError>
 where
     S: GrantStore + ?Sized,
 {
@@ -246,7 +247,7 @@ where
         .await?;
     match outcome {
         NativeRotationOutcome::Rotated => Ok(Refreshed {
-            session_id: session.id,
+            session,
             set: successor.set,
         }),
         NativeRotationOutcome::Redeliver(sealed) => {
@@ -255,10 +256,7 @@ where
                 .map_err(|e| NativeError::Sealing(e.to_string()))?;
             let set = NativeCredentialSet::decode(opened.secret.as_slice())
                 .map_err(|e| NativeError::Sealing(format!("sealed generation: {e}")))?;
-            Ok(Refreshed {
-                session_id: session.id,
-                set,
-            })
+            Ok(Refreshed { session, set })
         }
         NativeRotationOutcome::Retired => {
             // A retired credential with the session's own key: whoever holds
