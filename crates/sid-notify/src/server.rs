@@ -197,7 +197,10 @@ impl NotifyServer {
                 Arc::clone(&self.jobs),
                 self.config.job_capacity,
             )),
-            Arc::new(delivery::DeliverHandler::new(self.dispatcher.clone())),
+            Arc::new(delivery::DeliverHandler::new(
+                self.dispatcher.clone(),
+                self.resolver.clone(),
+            )),
             // This service's own facts (dead-letter alerts) are relayed as
             // every fact is: owed to the other required receivers, then
             // published to history. They replace the `notify.dlq_alert` work

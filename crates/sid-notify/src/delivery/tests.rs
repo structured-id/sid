@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 use super::*;
+use crate::recipient_resolver::RecipientResolver;
 use crate::template::TemplateEngine;
 use chrono::Utc;
 use sid_authn::event_relay::{EventFanoutHandler, EventRelayHandler};
@@ -101,13 +102,77 @@ fn claimed(kind_name: &str, payload: Vec<u8>) -> ClaimedWork {
     }
 }
 
-fn route_handler(store: &Arc<dyn WorkStore>, resolver: RecipientResolver) -> RouteHandler {
+fn route_handler(
+    store: &Arc<dyn WorkStore>,
+    resolver: impl RecipientSource + 'static,
+) -> RouteHandler {
     RouteHandler::new(
         RoutingTable::default_ce_rules(),
         Arc::new(resolver),
         Arc::clone(store),
         1_000,
     )
+}
+
+/// The standalone source, which keeps every routed recipient.
+fn standalone() -> Arc<dyn RecipientSource> {
+    Arc::new(RecipientResolver::without_identity())
+}
+
+fn owner() -> Recipient {
+    Recipient {
+        profile_id: "org/o-1".into(),
+        email: Some("owner@sid.example.com".into()),
+        phone: None,
+        push_endpoint: None,
+        device_token: None,
+        locale: "en".into(),
+    }
+}
+
+/// A host's source: answers resolution and the recheck with fixed results
+/// and counts the rechecks.
+struct HostSource {
+    resolved: Result<Recipient, ResolveError>,
+    still: Result<bool, ResolveError>,
+    rechecks: Mutex<u32>,
+}
+
+impl HostSource {
+    fn new(resolved: Result<Recipient, ResolveError>, still: Result<bool, ResolveError>) -> Self {
+        Self {
+            resolved,
+            still,
+            rechecks: Mutex::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl RecipientSource for HostSource {
+    async fn resolve(&self, _event: &Event) -> Result<Recipient, ResolveError> {
+        self.resolved.clone()
+    }
+
+    async fn still_recipient(
+        &self,
+        _event: &Event,
+        _recipient: &Recipient,
+    ) -> Result<bool, ResolveError> {
+        *self.rechecks.lock().unwrap() += 1;
+        self.still.clone()
+    }
+}
+
+fn delivery_to(recipient: Recipient, channel: &str) -> ClaimedWork {
+    let job = DeliveryJob {
+        event: security_event(),
+        template: "security_alert".into(),
+        priority: NotificationPriority::Critical,
+        channel: channel.into(),
+        recipient,
+    };
+    claimed(DELIVER, serde_json::to_vec(&job).unwrap())
 }
 
 /// Run every plan job `store` holds once with `handler`, returning the
@@ -289,12 +354,7 @@ async fn test_partial_fan_out_finishes_after_a_rule_change() {
 
     // The rules change: routing the event again now matches nothing, and
     // owes nothing new.
-    let silent = RouteHandler::new(
-        RoutingTable::new(),
-        Arc::new(RecipientResolver::without_identity()),
-        Arc::clone(&store),
-        1_000,
-    );
+    let silent = RouteHandler::new(RoutingTable::new(), standalone(), Arc::clone(&store), 1_000);
     assert_eq!(
         silent.handle(&work).await,
         WorkOutcome::Done(Some("no routing rule".into()))
@@ -350,21 +410,14 @@ async fn test_route_outcomes() {
 #[tokio::test]
 async fn test_deliver_outcomes() {
     let job = |channel: &str| {
-        let job = DeliveryJob {
-            event: security_event(),
-            template: "security_alert".into(),
-            priority: NotificationPriority::Critical,
-            channel: channel.into(),
-            recipient: Recipient {
+        delivery_to(
+            Recipient {
                 profile_id: "p-1".into(),
                 email: Some("alice@sid.example.com".into()),
-                phone: None,
-                push_endpoint: None,
-                device_token: None,
-                locale: "en".into(),
+                ..owner()
             },
-        };
-        claimed(DELIVER, serde_json::to_vec(&job).unwrap())
+            channel,
+        )
     };
     let email = ScriptedChannel::new("email", accepted);
     let rejected = ScriptedChannel::new("rejected", || {
@@ -374,7 +427,10 @@ async fn test_deliver_outcomes() {
         Err(DeliveryError::Ambiguous("timed out after DATA".into()))
     });
     let busy = ScriptedChannel::new("busy", || Err(DeliveryError::Failed("421".into())));
-    let handler = DeliverHandler::new(dispatcher(&[Arc::clone(&email), rejected, lost, busy]));
+    let handler = DeliverHandler::new(
+        dispatcher(&[Arc::clone(&email), rejected, lost, busy]),
+        standalone(),
+    );
 
     assert_eq!(
         handler.handle(&job("email")).await,
@@ -400,6 +456,97 @@ async fn test_deliver_outcomes() {
     ));
 }
 
+/// A host's source decides the recipient: the plan carries the recipient the
+/// source resolved, not the address the event's data names, and a source
+/// that cannot answer keeps the routing owed.
+#[tokio::test]
+async fn test_host_source_decides_the_recipient() {
+    let (store, other) = (store().await, store().await);
+    let host = route_handler(&store, HostSource::new(Ok(owner()), Ok(true)));
+    let event = security_event();
+    let work = claimed(ROUTE, serde_json::to_vec(&event).unwrap());
+    assert!(matches!(host.handle(&work).await, WorkOutcome::Done(_)));
+    carry_out_plans(&store, &PlanHandler::new(Arc::clone(&store), 1_000)).await;
+    let deliveries = store
+        .claim_work(&[kind(DELIVER)], "w", 10, Duration::from_secs(30))
+        .await
+        .unwrap();
+    assert_eq!(deliveries.len(), 2);
+    for delivery in &deliveries {
+        let job: DeliveryJob = serde_json::from_slice(&delivery.payload).unwrap();
+        assert_eq!(
+            (
+                job.recipient.profile_id.as_str(),
+                job.recipient.email.as_deref()
+            ),
+            ("org/o-1", Some("owner@sid.example.com")),
+            "the event's own address was used"
+        );
+    }
+
+    let down = route_handler(
+        &other,
+        HostSource::new(
+            Err(ResolveError::Unavailable("lookup down".into())),
+            Ok(true),
+        ),
+    );
+    assert!(matches!(down.handle(&work).await, WorkOutcome::Retry(_)));
+    assert!(
+        other.get_work(plan_job_id(&event)).await.unwrap().is_none(),
+        "a plan was stored without a recipient"
+    );
+    let gone = route_handler(
+        &other,
+        HostSource::new(Err(ResolveError::ProfileGone("no owner".into())), Ok(true)),
+    );
+    assert!(matches!(
+        gone.handle(&work).await,
+        WorkOutcome::Permanent(_)
+    ));
+}
+
+/// Authority is rechecked before every attempt: a recipient that may no
+/// longer receive the event is sent nothing and the delivery ends; a recheck
+/// that cannot be answered sends nothing and keeps the delivery owed.
+#[tokio::test]
+async fn test_delivery_rechecks_the_recipient_before_sending() {
+    let email = ScriptedChannel::new("email", accepted);
+    for (still, ended) in [
+        (Ok(false), true),
+        (Err(ResolveError::ProfileGone("org closed".into())), true),
+        (Err(ResolveError::Unavailable("lookup down".into())), false),
+    ] {
+        let source = Arc::new(HostSource::new(Ok(owner()), still));
+        let handler = DeliverHandler::new(
+            dispatcher(&[Arc::clone(&email)]),
+            Arc::clone(&source) as Arc<dyn RecipientSource>,
+        );
+        let outcome = handler.handle(&delivery_to(owner(), "email")).await;
+        if ended {
+            assert!(matches!(outcome, WorkOutcome::Permanent(_)), "{outcome:?}");
+        } else {
+            assert!(matches!(outcome, WorkOutcome::Retry(_)), "{outcome:?}");
+        }
+        assert_eq!(*source.rechecks.lock().unwrap(), 1);
+    }
+    assert!(
+        email.sent.lock().unwrap().is_empty(),
+        "a recipient without authority was sent the message"
+    );
+
+    let source = Arc::new(HostSource::new(Ok(owner()), Ok(true)));
+    let handler = DeliverHandler::new(
+        dispatcher(&[Arc::clone(&email)]),
+        Arc::clone(&source) as Arc<dyn RecipientSource>,
+    );
+    assert!(matches!(
+        handler.handle(&delivery_to(owner(), "email")).await,
+        WorkOutcome::Done(_)
+    ));
+    assert_eq!(email.sent.lock().unwrap().len(), 1);
+}
+
 /// End to end: an accepted event is routed and delivered by the runner; a
 /// delivery that fails for good ends failed, and its alert is relayed as
 /// every fact is: owed to the deployment's other required receivers and
@@ -422,10 +569,10 @@ async fn test_runner_delivers_and_alerts_dead_letters() {
     let handlers: Vec<Arc<dyn WorkHandler>> = vec![
         Arc::new(route_handler(&store, RecipientResolver::without_identity())),
         Arc::new(PlanHandler::new(Arc::clone(&store), 1_000)),
-        Arc::new(DeliverHandler::new(dispatcher(&[
-            Arc::clone(&email),
-            webhook,
-        ]))),
+        Arc::new(DeliverHandler::new(
+            dispatcher(&[Arc::clone(&email), webhook]),
+            standalone(),
+        )),
         Arc::new(EventRelayHandler::new(
             Arc::clone(&store),
             vec![RequiredReceiver {
