@@ -567,201 +567,207 @@ impl IdentityService for IdentityServiceImpl {
         if let Some(response) = command.replay(&*self.storage).await? {
             return Ok(Response::new(response));
         }
-
-        // Administrator provisioning is allowed in every enrollment mode: the
-        // mode governs self-registration only, and no invite is spent here.
-        //
-        // D013: one signup principal, the username when given, else the
-        // email, else the phone; the other contacts are stored unverified.
-        // Username is a VALUABLE identity — never auto-generated.
-        // Each given contact as the login handle it would be: the key a
-        // principal stores and lookups use, and for an email the validated
-        // address its contact stores.
-        let provided_username = req
-            .username
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .map(|s| login_handle("username", s, PrincipalType::Username))
-            .transpose()?;
-        let provided_email = req
-            .email
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .map(|s| login_handle("email", s, PrincipalType::Email))
-            .transpose()?;
-        let provided_phone = req
-            .phone
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .map(|s| login_handle("phone", s, PrincipalType::Phone))
-            .transpose()?;
-        let signup = match (&provided_username, &provided_email, &provided_phone) {
-            (Some(username), _, _) => username,
-            (None, Some(email), _) => email,
-            (None, None, Some(phone)) => phone,
-            (None, None, None) => {
-                return Err(ApiError::new(
-                    ErrorReason::RequiredFieldMissing,
-                    "a username, email or phone is required",
-                )
-                .with_field_violation("username", "one of username, email, phone is required")
-                .with_field_violation("email", "one of username, email, phone is required")
-                .with_field_violation("phone", "one of username, email, phone is required")
-                .into());
-            }
-        };
-
-        // Contacts already on another account are refused with the reason the
-        // UI shows; the principal's unique key settles a race below.
-        // A username is also the profile's own name: held either way.
-        if let Some(username) = &provided_username
-            && self
-                .storage
-                .get_profile_by_username(&username.normalized)
-                .await
-                .map_err(storage_failure)?
-                .is_some()
-        {
-            return Err(contact_taken(PrincipalType::Username));
-        }
-        for handle in [&provided_username, &provided_email, &provided_phone]
-            .into_iter()
-            .flatten()
-        {
-            let principal_type = handle.principal_type.to_principal_type();
-            if self
-                .storage
-                .get_principal_by_value(principal_type, &handle.normalized)
-                .await
-                .map_err(storage_failure)?
-                .is_some()
-            {
-                return Err(contact_taken(principal_type));
-            }
-        }
-
-        let mut profile = Profile::new(provided_username.as_ref().map(|u| u.normalized.as_str()));
-        profile.given_name = req.given_name;
-        profile.family_name = req.family_name;
-        profile.middle_name = req.middle_name;
-        profile.honorific_prefix = req.honorific_prefix;
-        profile.honorific_suffix = req.honorific_suffix;
-
-        let principal_type = signup.principal_type.to_principal_type();
-        let principal_field = match principal_type {
-            PrincipalType::Username => "username",
-            PrincipalType::Email => "email",
-            _ => "phone",
-        };
-        let identifier = super::auth_service::signup_identifier(
-            principal_type,
-            &signup.normalized,
-            signup.email.as_ref(),
-        )?;
-        let mut registration = NewRegistration::new(profile, identifier, None)
-            .map_err(|e| invalid_field(principal_field, e.to_string()))?;
-        if let Some(email) = &provided_email
-            && principal_type != PrincipalType::Email
-        {
-            let address = email
+        // A refusal a concurrent attempt of this command caused (the handles
+        // its account took) is that attempt's answer.
+        let answer: Result<CreateProfileResponse, Status> = async {
+            // Administrator provisioning is allowed in every enrollment mode: the
+            // mode governs self-registration only, and no invite is spent here.
+            //
+            // D013: one signup principal, the username when given, else the
+            // email, else the phone; the other contacts are stored unverified.
+            // Username is a VALUABLE identity — never auto-generated.
+            // Each given contact as the login handle it would be: the key a
+            // principal stores and lookups use, and for an email the validated
+            // address its contact stores.
+            let provided_username = req
+                .username
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(|s| login_handle("username", s, PrincipalType::Username))
+                .transpose()?;
+            let provided_email = req
                 .email
-                .as_ref()
-                .map(|handle| handle.delivery.as_str())
-                .ok_or_else(|| internal("create profile", "an email without its address"))?;
-            registration = registration.with_email(address);
-        }
-        if let Some(phone) = &provided_phone
-            && principal_type != PrincipalType::Phone
-        {
-            registration = registration.with_phone(
-                parse_e164(&phone.normalized).map_err(|e| invalid_field("phone", e.to_string()))?,
-            );
-        }
-        // Where the account came from is stored with it while the policy in
-        // force when it commits tracks sources: the storage decides in the
-        // account's transaction.
-        {
-            let mut source = RegistrationSource::admin_created(caller.profile_id);
-            if let Some(referrer) = &req.referrer_id {
-                let rid = ProfileId::parse(referrer)
-                    .map_err(|_| invalid_field("referrer_id", "not a profile identifier"))?;
-                if self
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(|s| login_handle("email", s, PrincipalType::Email))
+                .transpose()?;
+            let provided_phone = req
+                .phone
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(|s| login_handle("phone", s, PrincipalType::Phone))
+                .transpose()?;
+            let signup = match (&provided_username, &provided_email, &provided_phone) {
+                (Some(username), _, _) => username,
+                (None, Some(email), _) => email,
+                (None, None, Some(phone)) => phone,
+                (None, None, None) => {
+                    return Err(ApiError::new(
+                        ErrorReason::RequiredFieldMissing,
+                        "a username, email or phone is required",
+                    )
+                    .with_field_violation("username", "one of username, email, phone is required")
+                    .with_field_violation("email", "one of username, email, phone is required")
+                    .with_field_violation("phone", "one of username, email, phone is required")
+                    .into());
+                }
+            };
+
+            // Contacts already on another account are refused with the reason the
+            // UI shows; the principal's unique key settles a race below.
+            // A username is also the profile's own name: held either way.
+            if let Some(username) = &provided_username
+                && self
                     .storage
-                    .get_profile(rid)
+                    .get_profile_by_username(&username.normalized)
                     .await
                     .map_err(storage_failure)?
-                    .is_none()
+                    .is_some()
+            {
+                return Err(contact_taken(PrincipalType::Username));
+            }
+            for handle in [&provided_username, &provided_email, &provided_phone]
+                .into_iter()
+                .flatten()
+            {
+                let principal_type = handle.principal_type.to_principal_type();
+                if self
+                    .storage
+                    .get_principal_by_value(principal_type, &handle.normalized)
+                    .await
+                    .map_err(storage_failure)?
+                    .is_some()
                 {
-                    return Err(invalid_field("referrer_id", "names no profile"));
+                    return Err(contact_taken(principal_type));
                 }
-                source.referrer_id = Some(rid);
             }
-            if let Some(utm) = &req.utm {
-                source.utm = sid_core::models::UtmParams {
-                    source: utm.source.clone().unwrap_or_default(),
-                    medium: utm.medium.clone().unwrap_or_default(),
-                    campaign: utm.campaign.clone().unwrap_or_default(),
-                    term: utm.term.clone().unwrap_or_default(),
-                    content: utm.content.clone().unwrap_or_default(),
-                };
-            }
-            registration = registration
-                .with_source(source)
-                .recording_source_while_tracked();
-        }
-        let profile = registration.profile.clone();
 
-        // A retry of a completed creation answers with the account it
-        // created, as its commit stored it, and creates no second one. The
-        // account's id is new on every attempt, so the key alone says it is
-        // the same command.
-        let response = CreateProfileResponse {
-            profile: Some(convert::profile_to_proto_with_contacts(
-                &profile,
-                registration.email.as_ref(),
-                None,
-            )),
-        };
-        // USER_CREATED is owed by the commit that stores the account.
-        let created = sid_core::models::event::Event::new(
-            "sid-identity",
-            sid_core::models::event::event_types::USER_CREATED,
-        )
-        .with_subject(format!("profile/{}", profile.id))
-        .with_data(serde_json::json!({
-            "profile_id": profile.id.to_string(),
-            "username": profile.username,
-        }));
-        let response = command
-            .run(&*self.storage, || async {
-                let ctx = MutationContext::from(AuditEntry::user(
-                    caller.profile_id.to_string(),
-                    "profile.create",
-                    profile.id.to_string(),
-                ))
-                .with_work(created.relay())
-                .with_operation(command.completion(response.encode_to_vec()));
-                match self.storage.register_profile(&registration, ctx).await {
-                    Ok(()) => {}
-                    Err(sid_core::Error::Conflict(_)) => {
-                        return Err(taken_unless_completed(
-                            &command,
-                            &*self.storage,
-                            principal_type,
-                        )
-                        .await);
-                    }
-                    Err(e) => return Err(e.into()),
-                }
-                info!(
-                    "Created profile {} ({})",
-                    profile.username.as_deref().unwrap_or("<no username>"),
-                    profile.id
+            let mut profile =
+                Profile::new(provided_username.as_ref().map(|u| u.normalized.as_str()));
+            profile.given_name = req.given_name;
+            profile.family_name = req.family_name;
+            profile.middle_name = req.middle_name;
+            profile.honorific_prefix = req.honorific_prefix;
+            profile.honorific_suffix = req.honorific_suffix;
+
+            let principal_type = signup.principal_type.to_principal_type();
+            let principal_field = match principal_type {
+                PrincipalType::Username => "username",
+                PrincipalType::Email => "email",
+                _ => "phone",
+            };
+            let identifier = super::auth_service::signup_identifier(
+                principal_type,
+                &signup.normalized,
+                signup.email.as_ref(),
+            )?;
+            let mut registration = NewRegistration::new(profile, identifier, None)
+                .map_err(|e| invalid_field(principal_field, e.to_string()))?;
+            if let Some(email) = &provided_email
+                && principal_type != PrincipalType::Email
+            {
+                let address = email
+                    .email
+                    .as_ref()
+                    .map(|handle| handle.delivery.as_str())
+                    .ok_or_else(|| internal("create profile", "an email without its address"))?;
+                registration = registration.with_email(address);
+            }
+            if let Some(phone) = &provided_phone
+                && principal_type != PrincipalType::Phone
+            {
+                registration = registration.with_phone(
+                    parse_e164(&phone.normalized)
+                        .map_err(|e| invalid_field("phone", e.to_string()))?,
                 );
-                Ok(response.clone())
-            })
-            .await?;
-        Ok(Response::new(response))
+            }
+            // Where the account came from is stored with it while the policy in
+            // force when it commits tracks sources: the storage decides in the
+            // account's transaction.
+            {
+                let mut source = RegistrationSource::admin_created(caller.profile_id);
+                if let Some(referrer) = &req.referrer_id {
+                    let rid = ProfileId::parse(referrer)
+                        .map_err(|_| invalid_field("referrer_id", "not a profile identifier"))?;
+                    if self
+                        .storage
+                        .get_profile(rid)
+                        .await
+                        .map_err(storage_failure)?
+                        .is_none()
+                    {
+                        return Err(invalid_field("referrer_id", "names no profile"));
+                    }
+                    source.referrer_id = Some(rid);
+                }
+                if let Some(utm) = &req.utm {
+                    source.utm = sid_core::models::UtmParams {
+                        source: utm.source.clone().unwrap_or_default(),
+                        medium: utm.medium.clone().unwrap_or_default(),
+                        campaign: utm.campaign.clone().unwrap_or_default(),
+                        term: utm.term.clone().unwrap_or_default(),
+                        content: utm.content.clone().unwrap_or_default(),
+                    };
+                }
+                registration = registration
+                    .with_source(source)
+                    .recording_source_while_tracked();
+            }
+            let profile = registration.profile.clone();
+
+            // A retry of a completed creation answers with the account it
+            // created, as its commit stored it, and creates no second one. The
+            // account's id is new on every attempt, so the key alone says it is
+            // the same command.
+            let response = CreateProfileResponse {
+                profile: Some(convert::profile_to_proto_with_contacts(
+                    &profile,
+                    registration.email.as_ref(),
+                    None,
+                )),
+            };
+            // USER_CREATED is owed by the commit that stores the account.
+            let created = sid_core::models::event::Event::new(
+                "sid-identity",
+                sid_core::models::event::event_types::USER_CREATED,
+            )
+            .with_subject(format!("profile/{}", profile.id))
+            .with_data(serde_json::json!({
+                "profile_id": profile.id.to_string(),
+                "username": profile.username,
+            }));
+            command
+                .run(&*self.storage, || async {
+                    let ctx = MutationContext::from(AuditEntry::user(
+                        caller.profile_id.to_string(),
+                        "profile.create",
+                        profile.id.to_string(),
+                    ))
+                    .with_work(created.relay())
+                    .with_operation(command.completion(response.encode_to_vec()));
+                    match self.storage.register_profile(&registration, ctx).await {
+                        Ok(()) => {}
+                        Err(sid_core::Error::Conflict(_)) => {
+                            return Err(taken_unless_completed(
+                                &command,
+                                &*self.storage,
+                                principal_type,
+                            )
+                            .await);
+                        }
+                        Err(e) => return Err(e.into()),
+                    }
+                    info!(
+                        "Created profile {} ({})",
+                        profile.username.as_deref().unwrap_or("<no username>"),
+                        profile.id
+                    );
+                    Ok(response.clone())
+                })
+                .await
+        }
+        .await;
+        Ok(Response::new(command.settle(&*self.storage, answer).await?))
     }
 
     #[tracing::instrument(skip_all, fields(rpc = "get_profile"))]

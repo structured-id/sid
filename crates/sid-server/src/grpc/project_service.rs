@@ -741,43 +741,48 @@ impl ProjectService for ProjectServiceImpl {
         if let Some(result) = command.completed(&*self.storage).await? {
             return Ok(Response::new(decode_result(&result)?));
         }
+        // A failure a concurrent attempt of this command caused (a value its
+        // project took) is that attempt's answer.
+        let answer: Result<sid_proto::sid::v1::Project, Status> = async {
+            let owner_id = if req.owner_profile_id.is_empty() {
+                None
+            } else {
+                Some(convert::parse_profile_id(&req.owner_profile_id)?)
+            };
 
-        let owner_id = if req.owner_profile_id.is_empty() {
-            None
-        } else {
-            Some(convert::parse_profile_id(&req.owner_profile_id)?)
-        };
+            let mut project = Project::new(&req.name, owner_id);
+            project.description = req.description;
+            let response = project_to_proto(&project);
 
-        let mut project = Project::new(&req.name, owner_id);
-        project.description = req.description;
-        let response = project_to_proto(&project);
-
-        let ctx: MutationContext = AuditEntry::admin(
-            caller.profile_id.to_string(),
-            "project.create",
-            project.id.0.to_string(),
-        )
-        .into();
-        match self
-            .storage
-            .create_project(
-                &project,
-                ctx.with_operation(command.completion(response.encode_to_vec())),
+            let ctx: MutationContext = AuditEntry::admin(
+                caller.profile_id.to_string(),
+                "project.create",
+                project.id.0.to_string(),
             )
-            .await
-        {
-            Ok(()) => {}
-            // A concurrent attempt of this command committed first.
-            Err(SidError::OperationCompleted(_)) => {
-                let result = command.committed_elsewhere(&*self.storage).await?;
-                return Ok(Response::new(decode_result(&result)?));
+            .into();
+            match self
+                .storage
+                .create_project(
+                    &project,
+                    ctx.with_operation(command.completion(response.encode_to_vec())),
+                )
+                .await
+            {
+                Ok(()) => {}
+                // A concurrent attempt of this command committed first.
+                Err(SidError::OperationCompleted(_)) => {
+                    let result = command.committed_elsewhere(&*self.storage).await?;
+                    return decode_result(&result);
+                }
+                Err(e) => return Err(storage_failure(e)),
             }
-            Err(e) => return Err(storage_failure(e)),
+
+            info!("Created project '{}' ({})", project.name, project.id.0);
+
+            Ok(response)
         }
-
-        info!("Created project '{}' ({})", project.name, project.id.0);
-
-        Ok(Response::new(response))
+        .await;
+        Ok(Response::new(command.settle(&*self.storage, answer).await?))
     }
 
     #[tracing::instrument(skip_all, fields(rpc = "get_project"))]

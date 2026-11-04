@@ -785,98 +785,97 @@ impl MachineUserService for MachineUserServiceImpl {
         if let Some(recorded) = command.replay(&*self.storage).await? {
             return Ok(Response::new(recorded));
         }
+        // A refusal a concurrent attempt of this command caused (the slot its
+        // credential took) is that attempt's answer.
+        let answer: Result<AddMachineCredentialResponse, Status> = async {
+            let mu = self
+                .storage
+                .get_machine_user(mu_id)
+                .await
+                .map_err(storage_failure)?
+                .ok_or_else(|| machine_user_not_found(mu_id))?;
 
-        let mu = self
-            .storage
-            .get_machine_user(mu_id)
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(|| machine_user_not_found(mu_id))?;
-
-        if mu.status == DomainMachineUserStatus::Deleted {
-            return Err(machine_user_state(mu_id, "deleted", "given a credential"));
-        }
-
-        let kid = generate_kid();
-        let mut plaintext_secret: Option<SecretBox<String>> = None;
-
-        let credential_data = match cred_type {
-            DomainCredentialType::ClientSecret => {
-                let issued = sid_authn::bearer_secret::issue(MACHINE_SECRET_PREFIX);
-                plaintext_secret = Some(issued.secret);
-                issued.verifier
+            if mu.status == DomainMachineUserStatus::Deleted {
+                return Err(machine_user_state(mu_id, "deleted", "given a credential"));
             }
-            DomainCredentialType::PrivateKeyJwt => {
-                if req.public_key_pem.is_empty() {
-                    return Err(missing_field("public_key_pem"));
+
+            let kid = generate_kid();
+            let mut plaintext_secret: Option<SecretBox<String>> = None;
+
+            let credential_data = match cred_type {
+                DomainCredentialType::ClientSecret => {
+                    let issued = sid_authn::bearer_secret::issue(MACHINE_SECRET_PREFIX);
+                    plaintext_secret = Some(issued.secret);
+                    issued.verifier
                 }
-                req.public_key_pem.clone()
-            }
-            DomainCredentialType::Mtls => {
-                if req.public_key_pem.is_empty() {
-                    return Err(missing_field("public_key_pem"));
+                DomainCredentialType::PrivateKeyJwt => {
+                    if req.public_key_pem.is_empty() {
+                        return Err(missing_field("public_key_pem"));
+                    }
+                    req.public_key_pem.clone()
                 }
-                // Store certificate fingerprint (SHA-256 of PEM).
-                sha256_hex(req.public_key_pem.as_bytes())
-            }
-            DomainCredentialType::WorkloadIdentity => {
-                // Trust bundle reference — stored as credential_data.
-                req.public_key_pem.clone()
-            }
-        };
-
-        let mut cred = MachineUserCredential::new(mu_id, &kid, cred_type, credential_data);
-
-        if !req.algorithm.is_empty() {
-            cred.algorithm = Some(req.algorithm);
-        }
-        cred.expires_at = parse_optional_timestamp(&req.expires_at)?;
-
-        let mut response = AddMachineCredentialResponse {
-            credential: Some(credential_to_proto(&cred)),
-            client_secret: String::new(),
-        };
-        let audit = MutationContext::from(AuditEntry::admin(
-            caller.profile_id.to_string(),
-            "machine_user.credential.add",
-            format!("{}:{}", mu_id, kid),
-        ))
-        .with_operation(command.completion(response.encode_to_vec()));
-
-        // The limit is checked with the insert, so concurrent adds cannot
-        // exceed it.
-        match self
-            .storage
-            .add_machine_credential(
-                &cred,
-                Some(sid_core::models::machine_user::MAX_ACTIVE_CREDENTIALS as u64),
-                audit,
-            )
-            .await
-        {
-            Ok(_) => {}
-            Err(sid_core::Error::OperationCompleted(_)) => {
-                return recorded_answer(&command.committed_elsewhere(&*self.storage).await?);
-            }
-            Err(sid_core::Error::ResourceExhausted(_)) => {
-                // The limit is counted before the key: the slot may be full
-                // with the credential a concurrent attempt of this command
-                // added.
-                if let Some(recorded) = command.completed(&*self.storage).await? {
-                    return recorded_answer(&recorded);
+                DomainCredentialType::Mtls => {
+                    if req.public_key_pem.is_empty() {
+                        return Err(missing_field("public_key_pem"));
+                    }
+                    // Store certificate fingerprint (SHA-256 of PEM).
+                    sha256_hex(req.public_key_pem.as_bytes())
                 }
-                return Err(credential_limit_reached(mu_id));
+                DomainCredentialType::WorkloadIdentity => {
+                    // Trust bundle reference — stored as credential_data.
+                    req.public_key_pem.clone()
+                }
+            };
+
+            let mut cred = MachineUserCredential::new(mu_id, &kid, cred_type, credential_data);
+
+            if !req.algorithm.is_empty() {
+                cred.algorithm = Some(req.algorithm);
             }
-            Err(e) => return Err(storage_failure(e)),
+            cred.expires_at = parse_optional_timestamp(&req.expires_at)?;
+
+            let mut response = AddMachineCredentialResponse {
+                credential: Some(credential_to_proto(&cred)),
+                client_secret: String::new(),
+            };
+            let audit = MutationContext::from(AuditEntry::admin(
+                caller.profile_id.to_string(),
+                "machine_user.credential.add",
+                format!("{}:{}", mu_id, kid),
+            ))
+            .with_operation(command.completion(response.encode_to_vec()));
+
+            // The limit is checked with the insert, so concurrent adds cannot
+            // exceed it.
+            match self
+                .storage
+                .add_machine_credential(
+                    &cred,
+                    Some(sid_core::models::machine_user::MAX_ACTIVE_CREDENTIALS as u64),
+                    audit,
+                )
+                .await
+            {
+                Ok(_) => {}
+                Err(sid_core::Error::OperationCompleted(_)) => return Err(changed_concurrently()),
+                // The limit is counted before the key: the slot may be full with
+                // the credential a concurrent attempt of this command added.
+                Err(sid_core::Error::ResourceExhausted(_)) => {
+                    return Err(credential_limit_reached(mu_id));
+                }
+                Err(e) => return Err(storage_failure(e)),
+            }
+
+            info!("Added credential {} to machine user {}", kid, mu_id);
+
+            response.client_secret = plaintext_secret
+                .as_ref()
+                .map(|s| s.expose_secret().clone())
+                .unwrap_or_default();
+            Ok(response)
         }
-
-        info!("Added credential {} to machine user {}", kid, mu_id);
-
-        response.client_secret = plaintext_secret
-            .as_ref()
-            .map(|s| s.expose_secret().clone())
-            .unwrap_or_default();
-        Ok(Response::new(response))
+        .await;
+        Ok(Response::new(command.settle(&*self.storage, answer).await?))
     }
 
     async fn revoke_machine_credential(
@@ -970,119 +969,122 @@ impl MachineUserService for MachineUserServiceImpl {
         if let Some(recorded) = command.replay(&*self.storage).await? {
             return Ok(Response::new(recorded));
         }
+        // A refusal a concurrent attempt of this command caused (the
+        // credential it rotated is no longer active) is that attempt's answer.
+        let answer: Result<RotateMachineCredentialResponse, Status> = async {
+            // A kid of another machine user is not found, as one that does not exist.
+            let old_cred = self
+                .storage
+                .get_machine_credential_by_kid(&req.kid)
+                .await
+                .map_err(storage_failure)?
+                .filter(|c| c.machine_user_id == mu_id)
+                .ok_or_else(|| credential_not_found(&req.kid))?;
 
-        // A kid of another machine user is not found, as one that does not exist.
-        let old_cred = self
-            .storage
-            .get_machine_credential_by_kid(&req.kid)
-            .await
-            .map_err(storage_failure)?
-            .filter(|c| c.machine_user_id == mu_id)
-            .ok_or_else(|| credential_not_found(&req.kid))?;
-
-        if old_cred.status != DomainCredentialStatus::Active {
-            return Err(ApiError::new(
-                ErrorReason::InvalidState,
-                "only an active credential can be rotated",
-            )
-            .with_precondition(
-                "MACHINE_CREDENTIAL_STATE",
-                req.kid.clone(),
-                old_cred.status.as_str(),
-            )
-            .into());
-        }
-
-        // Create new credential of same type.
-        let new_kid = generate_kid();
-        let mut plaintext_secret: Option<SecretBox<String>> = None;
-
-        let credential_data = match old_cred.credential_type {
-            DomainCredentialType::ClientSecret => {
-                let issued = sid_authn::bearer_secret::issue(MACHINE_SECRET_PREFIX);
-                plaintext_secret = Some(issued.secret);
-                issued.verifier
+            if old_cred.status != DomainCredentialStatus::Active {
+                return Err(ApiError::new(
+                    ErrorReason::InvalidState,
+                    "only an active credential can be rotated",
+                )
+                .with_precondition(
+                    "MACHINE_CREDENTIAL_STATE",
+                    req.kid.clone(),
+                    old_cred.status.as_str(),
+                )
+                .into());
             }
-            DomainCredentialType::PrivateKeyJwt => {
-                if req.public_key_pem.is_empty() {
-                    return Err(missing_field("public_key_pem"));
+
+            // Create new credential of same type.
+            let new_kid = generate_kid();
+            let mut plaintext_secret: Option<SecretBox<String>> = None;
+
+            let credential_data = match old_cred.credential_type {
+                DomainCredentialType::ClientSecret => {
+                    let issued = sid_authn::bearer_secret::issue(MACHINE_SECRET_PREFIX);
+                    plaintext_secret = Some(issued.secret);
+                    issued.verifier
                 }
-                req.public_key_pem.clone()
-            }
-            DomainCredentialType::Mtls => {
-                if req.public_key_pem.is_empty() {
-                    return Err(missing_field("public_key_pem"));
+                DomainCredentialType::PrivateKeyJwt => {
+                    if req.public_key_pem.is_empty() {
+                        return Err(missing_field("public_key_pem"));
+                    }
+                    req.public_key_pem.clone()
                 }
-                sha256_hex(req.public_key_pem.as_bytes())
-            }
-            DomainCredentialType::WorkloadIdentity => req.public_key_pem.clone(),
-        };
-
-        let mut new_cred =
-            MachineUserCredential::new(mu_id, &new_kid, old_cred.credential_type, credential_data);
-
-        if !req.algorithm.is_empty() {
-            new_cred.algorithm = Some(req.algorithm);
-        } else {
-            new_cred.algorithm = old_cred.algorithm.clone();
-        }
-        new_cred.expires_at = parse_optional_timestamp(&req.expires_at)?;
-
-        // The old credential enters its grace period and the new one is
-        // stored in one step, only if the old one is still active. The grace
-        // ends, at the latest, ROTATION_GRACE_PERIOD_HOURS from now.
-        let grace_until = chrono::Utc::now()
-            + chrono::Duration::hours(i64::from(
-                sid_core::models::machine_user::ROTATION_GRACE_PERIOD_HOURS,
-            ));
-        let mut left = old_cred.clone();
-        left.status = DomainCredentialStatus::GracePeriod;
-        left.expires_at = Some(
-            left.expires_at
-                .map_or(grace_until, |own| own.min(grace_until)),
-        );
-        let mut response = RotateMachineCredentialResponse {
-            old_credential: Some(credential_to_proto(&left)),
-            new_credential: Some(credential_to_proto(&new_cred)),
-            client_secret: String::new(),
-        };
-        let audit_new = MutationContext::from(AuditEntry::admin(
-            caller.profile_id.to_string(),
-            "machine_user.credential.rotate",
-            format!("{}:{}->{}", mu_id, old_cred.kid, new_kid),
-        ))
-        .with_operation(command.completion(response.encode_to_vec()));
-
-        match self
-            .storage
-            .rotate_machine_credential(mu_id, &old_cred.kid, &new_cred, grace_until, audit_new)
-            .await
-        {
-            Ok(true) => {}
-            // Rotated since it was read: by a concurrent attempt of this
-            // command, whose answer is this one's, or by another.
-            Ok(false) => {
-                if let Some(recorded) = command.completed(&*self.storage).await? {
-                    return recorded_answer(&recorded);
+                DomainCredentialType::Mtls => {
+                    if req.public_key_pem.is_empty() {
+                        return Err(missing_field("public_key_pem"));
+                    }
+                    sha256_hex(req.public_key_pem.as_bytes())
                 }
-                return Err(changed_concurrently());
+                DomainCredentialType::WorkloadIdentity => req.public_key_pem.clone(),
+            };
+
+            let mut new_cred = MachineUserCredential::new(
+                mu_id,
+                &new_kid,
+                old_cred.credential_type,
+                credential_data,
+            );
+
+            if !req.algorithm.is_empty() {
+                new_cred.algorithm = Some(req.algorithm);
+            } else {
+                new_cred.algorithm = old_cred.algorithm.clone();
             }
-            Err(sid_core::Error::OperationCompleted(_)) => {
-                return recorded_answer(&command.committed_elsewhere(&*self.storage).await?);
+            new_cred.expires_at = parse_optional_timestamp(&req.expires_at)?;
+
+            // The old credential enters its grace period and the new one is
+            // stored in one step, only if the old one is still active. The grace
+            // ends, at the latest, ROTATION_GRACE_PERIOD_HOURS from now.
+            let grace_until = chrono::Utc::now()
+                + chrono::Duration::hours(i64::from(
+                    sid_core::models::machine_user::ROTATION_GRACE_PERIOD_HOURS,
+                ));
+            let mut left = old_cred.clone();
+            left.status = DomainCredentialStatus::GracePeriod;
+            left.expires_at = Some(
+                left.expires_at
+                    .map_or(grace_until, |own| own.min(grace_until)),
+            );
+            let mut response = RotateMachineCredentialResponse {
+                old_credential: Some(credential_to_proto(&left)),
+                new_credential: Some(credential_to_proto(&new_cred)),
+                client_secret: String::new(),
+            };
+            let audit_new = MutationContext::from(AuditEntry::admin(
+                caller.profile_id.to_string(),
+                "machine_user.credential.rotate",
+                format!("{}:{}->{}", mu_id, old_cred.kid, new_kid),
+            ))
+            .with_operation(command.completion(response.encode_to_vec()));
+
+            match self
+                .storage
+                .rotate_machine_credential(mu_id, &old_cred.kid, &new_cred, grace_until, audit_new)
+                .await
+            {
+                Ok(true) => {}
+                // Rotated since it was read, or the key completed: by a
+                // concurrent attempt of this command or by another.
+                Ok(false) | Err(sid_core::Error::OperationCompleted(_)) => {
+                    return Err(changed_concurrently());
+                }
+                Err(e) => return Err(storage_failure(e)),
             }
-            Err(e) => return Err(storage_failure(e)),
+
+            info!(
+                "Rotated credential {} -> {} for machine user {}",
+                old_cred.kid, new_kid, mu_id
+            );
+
+            response.client_secret = plaintext_secret
+                .as_ref()
+                .map(|s| s.expose_secret().clone())
+                .unwrap_or_default();
+            Ok(response)
         }
-
-        info!(
-            "Rotated credential {} -> {} for machine user {}",
-            old_cred.kid, new_kid, mu_id
-        );
-
-        response.client_secret = plaintext_secret
-            .as_ref()
-            .map(|s| s.expose_secret().clone())
-            .unwrap_or_default();
-        Ok(Response::new(response))
+        .await;
+        Ok(Response::new(command.settle(&*self.storage, answer).await?))
     }
 
     // ── Impersonation ──

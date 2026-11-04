@@ -175,6 +175,80 @@ async fn concurrent_provider_creations_with_one_key_create_one(h: Harness) {
     assert!(answers.iter().all(|a| *a == answers[0]), "{answers:?}");
 }
 
+/// Regression guard: concurrent attempts of one credential rotation all
+/// answer with the rotation the winner made, though the losers may read the
+/// rotated credential already out of its active state.
+async fn concurrent_rotations_with_one_key_rotate_once(h: Harness) {
+    use sid_core::models::machine_user::{MachineCredentialType, MachineUserCredential, OwnerType};
+    use sid_core::models::{MachineUser, ProjectId};
+    use sid_proto::sid::v1::RotateMachineCredentialRequest;
+    use sid_proto::sid::v1::machine_user_service_server::MachineUserService;
+    h.storage
+        .ensure_system_project(AuditEntry::system("test", "machine").into())
+        .await
+        .unwrap();
+    let machine = MachineUser::new(
+        ProjectId::system(),
+        format!("mu_{}", tag()),
+        "Rotated",
+        OwnerType::System,
+        "system",
+    );
+    h.storage
+        .create_machine_user(&machine, AuditEntry::system("test", "machine").into())
+        .await
+        .unwrap();
+    let kid = format!("kid_{}", tag());
+    h.storage
+        .add_machine_credential(
+            &MachineUserCredential::new(
+                machine.id,
+                &kid,
+                MachineCredentialType::ClientSecret,
+                "verifier",
+            ),
+            None,
+            AuditEntry::system("test", "credential").into(),
+        )
+        .await
+        .unwrap();
+    let service = Arc::new(
+        sid_server::grpc::machine_user_service::MachineUserServiceImpl::new(
+            h.storage.clone(),
+            common::test_jwt(),
+            common::test_revocation(),
+            common::test_org(),
+        ),
+    );
+    let token = common::administrator_token(&common::test_jwt(), h.storage.as_ref()).await;
+    let key = format!("k-{}", tag());
+    let calls = (0..4).map(|_| {
+        let service = service.clone();
+        let request = call(
+            RotateMachineCredentialRequest {
+                machine_user_id: machine.id.to_string(),
+                kid: kid.clone(),
+                ..Default::default()
+            },
+            &token,
+            &key,
+        );
+        async move { service.rotate_machine_credential(request).await }
+    });
+    let new_kids: std::collections::BTreeSet<String> = futures::future::join_all(calls)
+        .await
+        .into_iter()
+        .map(|r| {
+            r.expect("every attempt answers")
+                .into_inner()
+                .new_credential
+                .unwrap()
+                .kid
+        })
+        .collect();
+    assert_eq!(new_kids.len(), 1, "{new_kids:?}");
+}
+
 /// Regression guard: a publication answers with the config as its commit
 /// published it, as a read of the config shows it afterwards.
 async fn a_publication_answers_with_the_config_it_published(h: Harness) {
@@ -262,4 +336,5 @@ on_both_engines!(
     concurrent_phone_additions_with_one_key_add_one,
     concurrent_provider_creations_with_one_key_create_one,
     a_publication_answers_with_the_config_it_published,
+    concurrent_rotations_with_one_key_rotate_once,
 );

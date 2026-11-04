@@ -50,14 +50,6 @@ use sid_core::grpc_error::refuse::{
     not_found, storage_failure,
 };
 
-/// The answer another attempt of the same command recorded.
-#[allow(clippy::result_large_err)]
-fn recorded_answer<T: Message + Default>(recorded: &[u8]) -> Result<Response<T>, Status> {
-    T::decode(recorded)
-        .map(Response::new)
-        .map_err(|e| internal("read a recorded result", e))
-}
-
 /// Proto enum types aliased to avoid collision with domain types.
 type ProtoUpstreamProtocol = v1::UpstreamProtocol;
 type ProtoTrustCategory = v1::TrustCategory;
@@ -289,74 +281,72 @@ impl UpstreamService for UpstreamServiceImpl {
         if let Some(recorded) = command.replay(&*self.storage).await? {
             return Ok(Response::new(recorded));
         }
+        // A refusal a concurrent attempt of this command caused (the name its
+        // provider took) is that attempt's answer.
+        let answer: Result<UpstreamProviderResponse, Status> = async {
+            let protocol = Self::proto_to_domain_protocol(req.protocol)?;
+            let trust_category = Self::proto_to_domain_trust(req.trust_category);
 
-        let protocol = Self::proto_to_domain_protocol(req.protocol)?;
-        let trust_category = Self::proto_to_domain_trust(req.trust_category);
+            // Generate a new provider ID for context-bound encryption.
+            let provider_id = UpstreamProviderId::new();
 
-        // Generate a new provider ID for context-bound encryption.
-        let provider_id = UpstreamProviderId::new();
-
-        // Encrypt client_secret with context binding to this provider.
-        let encrypted_secret = self
-            .key_manager
-            .encrypt(
-                req.client_secret.as_bytes(),
-                &provider_id.client_secret_context(),
-            )
-            .await
-            .map_err(|e| internal("encrypt upstream client secret", e))?;
-
-        let mut provider =
-            DomainUpstreamProvider::new(&req.name, protocol, &req.client_id, encrypted_secret);
-        provider.id = provider_id;
-        provider.trust_category = trust_category;
-        provider.discovery_url = Self::optional_string(&req.discovery_url);
-        provider.authorization_endpoint = Self::optional_string(&req.authorization_endpoint);
-        provider.token_endpoint = Self::optional_string(&req.token_endpoint);
-        provider.userinfo_endpoint = Self::optional_string(&req.userinfo_endpoint);
-        if !req.scopes.is_empty() {
-            provider.scopes = req.scopes;
-        }
-        provider.show_on_login = req.show_on_login;
-        provider.display_order = req.display_order;
-        provider.logo_url = Self::optional_string(&req.logo_url);
-
-        let response = UpstreamProviderResponse {
-            provider: Some(Self::provider_to_proto(&provider)),
-        };
-        let ctx = MutationContext::from(AuditEntry::admin(
-            caller.profile_id.to_string(),
-            "upstream_provider.create",
-            provider.id.0.to_string(),
-        ))
-        .with_operation(command.completion(response.encode_to_vec()));
-        match self.storage.create_upstream_provider(&provider, ctx).await {
-            Ok(_) => {}
-            Err(sid_core::Error::OperationCompleted(_)) => {
-                return recorded_answer(&command.committed_elsewhere(&*self.storage).await?);
-            }
-            // The name is taken: by a concurrent attempt of this command,
-            // whose answer is this one's, or by another provider.
-            Err(sid_core::Error::Conflict(_)) => {
-                if let Some(recorded) = command.completed(&*self.storage).await? {
-                    return recorded_answer(&recorded);
-                }
-                return Err(ApiError::new(
-                    ErrorReason::UpstreamProviderAlreadyExists,
-                    "an upstream provider with this name already exists",
+            // Encrypt client_secret with context binding to this provider.
+            let encrypted_secret = self
+                .key_manager
+                .encrypt(
+                    req.client_secret.as_bytes(),
+                    &provider_id.client_secret_context(),
                 )
-                .with_resource("UpstreamProvider", provider.name.clone())
-                .into());
+                .await
+                .map_err(|e| internal("encrypt upstream client secret", e))?;
+
+            let mut provider =
+                DomainUpstreamProvider::new(&req.name, protocol, &req.client_id, encrypted_secret);
+            provider.id = provider_id;
+            provider.trust_category = trust_category;
+            provider.discovery_url = Self::optional_string(&req.discovery_url);
+            provider.authorization_endpoint = Self::optional_string(&req.authorization_endpoint);
+            provider.token_endpoint = Self::optional_string(&req.token_endpoint);
+            provider.userinfo_endpoint = Self::optional_string(&req.userinfo_endpoint);
+            if !req.scopes.is_empty() {
+                provider.scopes = req.scopes;
             }
-            Err(other) => return Err(storage_failure(other)),
+            provider.show_on_login = req.show_on_login;
+            provider.display_order = req.display_order;
+            provider.logo_url = Self::optional_string(&req.logo_url);
+
+            let response = UpstreamProviderResponse {
+                provider: Some(Self::provider_to_proto(&provider)),
+            };
+            let ctx = MutationContext::from(AuditEntry::admin(
+                caller.profile_id.to_string(),
+                "upstream_provider.create",
+                provider.id.0.to_string(),
+            ))
+            .with_operation(command.completion(response.encode_to_vec()));
+            match self.storage.create_upstream_provider(&provider, ctx).await {
+                Ok(_) => {}
+                Err(sid_core::Error::OperationCompleted(_)) => return Err(changed_concurrently()),
+                Err(sid_core::Error::Conflict(_)) => {
+                    return Err(ApiError::new(
+                        ErrorReason::UpstreamProviderAlreadyExists,
+                        "an upstream provider with this name already exists",
+                    )
+                    .with_resource("UpstreamProvider", provider.name.clone())
+                    .into());
+                }
+                Err(other) => return Err(storage_failure(other)),
+            }
+
+            info!(
+                "Created upstream provider {} ({})",
+                provider.name, provider.id
+            );
+
+            Ok(response)
         }
-
-        info!(
-            "Created upstream provider {} ({})",
-            provider.name, provider.id
-        );
-
-        Ok(Response::new(response))
+        .await;
+        Ok(Response::new(command.settle(&*self.storage, answer).await?))
     }
 
     async fn get_upstream_provider(
@@ -402,97 +392,95 @@ impl UpstreamService for UpstreamServiceImpl {
         if let Some(recorded) = command.replay(&*self.storage).await? {
             return Ok(Response::new(recorded));
         }
-
-        let mut provider = self
-            .storage
-            .get_upstream_provider(provider_id)
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(|| Self::provider_not_found(provider_id))?;
-
-        // Apply optional field updates.
-        if let Some(name) = req.name {
-            provider.name = name;
-        }
-        if let Some(proto) = req.protocol {
-            provider.protocol = Self::proto_to_domain_protocol(proto)?;
-        }
-        if let Some(tc) = req.trust_category {
-            provider.trust_category = Self::proto_to_domain_trust(tc);
-        }
-        if let Some(enabled) = req.enabled {
-            provider.enabled = enabled;
-        }
-        if let Some(client_id) = req.client_id {
-            provider.client_id = client_id;
-        }
-        // Re-encrypt client_secret if provided.
-        if let Some(ref secret) = req.client_secret {
-            provider.client_secret = self
-                .key_manager
-                .encrypt(secret.as_bytes(), &provider_id.client_secret_context())
+        // A refusal a concurrent attempt of this command caused (the
+        // revision its edit moved on) is that attempt's answer.
+        let answer: Result<UpstreamProviderResponse, Status> = async {
+            let mut provider = self
+                .storage
+                .get_upstream_provider(provider_id)
                 .await
-                .map_err(|e| internal("encrypt upstream client secret", e))?;
-        }
-        if let Some(url) = req.discovery_url {
-            provider.discovery_url = if url.is_empty() { None } else { Some(url) };
-        }
-        if let Some(ep) = req.authorization_endpoint {
-            provider.authorization_endpoint = if ep.is_empty() { None } else { Some(ep) };
-        }
-        if let Some(ep) = req.token_endpoint {
-            provider.token_endpoint = if ep.is_empty() { None } else { Some(ep) };
-        }
-        if let Some(ep) = req.userinfo_endpoint {
-            provider.userinfo_endpoint = if ep.is_empty() { None } else { Some(ep) };
-        }
-        if !req.scopes.is_empty() {
-            provider.scopes = req.scopes;
-        }
-        if let Some(sol) = req.show_on_login {
-            provider.show_on_login = sol;
-        }
-        if let Some(order) = req.display_order {
-            provider.display_order = order;
-        }
-        if let Some(logo) = req.logo_url {
-            provider.logo_url = if logo.is_empty() { None } else { Some(logo) };
-        }
+                .map_err(storage_failure)?
+                .ok_or_else(|| Self::provider_not_found(provider_id))?;
 
-        provider.updated_at = chrono::Utc::now();
+            // Apply optional field updates.
+            if let Some(name) = req.name {
+                provider.name = name;
+            }
+            if let Some(proto) = req.protocol {
+                provider.protocol = Self::proto_to_domain_protocol(proto)?;
+            }
+            if let Some(tc) = req.trust_category {
+                provider.trust_category = Self::proto_to_domain_trust(tc);
+            }
+            if let Some(enabled) = req.enabled {
+                provider.enabled = enabled;
+            }
+            if let Some(client_id) = req.client_id {
+                provider.client_id = client_id;
+            }
+            // Re-encrypt client_secret if provided.
+            if let Some(ref secret) = req.client_secret {
+                provider.client_secret = self
+                    .key_manager
+                    .encrypt(secret.as_bytes(), &provider_id.client_secret_context())
+                    .await
+                    .map_err(|e| internal("encrypt upstream client secret", e))?;
+            }
+            if let Some(url) = req.discovery_url {
+                provider.discovery_url = if url.is_empty() { None } else { Some(url) };
+            }
+            if let Some(ep) = req.authorization_endpoint {
+                provider.authorization_endpoint = if ep.is_empty() { None } else { Some(ep) };
+            }
+            if let Some(ep) = req.token_endpoint {
+                provider.token_endpoint = if ep.is_empty() { None } else { Some(ep) };
+            }
+            if let Some(ep) = req.userinfo_endpoint {
+                provider.userinfo_endpoint = if ep.is_empty() { None } else { Some(ep) };
+            }
+            if !req.scopes.is_empty() {
+                provider.scopes = req.scopes;
+            }
+            if let Some(sol) = req.show_on_login {
+                provider.show_on_login = sol;
+            }
+            if let Some(order) = req.display_order {
+                provider.display_order = order;
+            }
+            if let Some(logo) = req.logo_url {
+                provider.logo_url = if logo.is_empty() { None } else { Some(logo) };
+            }
 
-        let response = UpstreamProviderResponse {
-            provider: Some(Self::provider_to_proto(&provider)),
-        };
-        let ctx = MutationContext::from(AuditEntry::admin(
-            caller.profile_id.to_string(),
-            "upstream_provider.update",
-            provider.id.0.to_string(),
-        ))
-        .with_operation(command.completion(response.encode_to_vec()));
-        match self.storage.update_upstream_provider(&provider, ctx).await {
-            Ok(true) => {}
-            // Deleted or changed since it was read: never recreated or
-            // overwritten. A concurrent attempt of this command that made the
-            // change answers for this one.
-            Ok(false) => {
-                if let Some(recorded) = command.completed(&*self.storage).await? {
-                    return recorded_answer(&recorded);
+            provider.updated_at = chrono::Utc::now();
+
+            let response = UpstreamProviderResponse {
+                provider: Some(Self::provider_to_proto(&provider)),
+            };
+            let ctx = MutationContext::from(AuditEntry::admin(
+                caller.profile_id.to_string(),
+                "upstream_provider.update",
+                provider.id.0.to_string(),
+            ))
+            .with_operation(command.completion(response.encode_to_vec()));
+            match self.storage.update_upstream_provider(&provider, ctx).await {
+                Ok(true) => {}
+                // Deleted or changed since it was read: never recreated or
+                // overwritten.
+                Ok(false) | Err(sid_core::Error::OperationCompleted(_)) => {
+                    return Err(changed_concurrently());
                 }
-                return Err(changed_concurrently());
+                Err(e) => return Err(storage_failure(e)),
             }
-            Err(sid_core::Error::OperationCompleted(_)) => {
-                return recorded_answer(&command.committed_elsewhere(&*self.storage).await?);
-            }
-            Err(e) => return Err(storage_failure(e)),
+
+            info!(
+                "Updated upstream provider {} ({})",
+                provider.name, provider.id
+            );
+
+            Ok(response)
         }
-
-        info!(
-            "Updated upstream provider {} ({})",
-            provider.name, provider.id
-        );
-
-        Ok(Response::new(response))
+        .await;
+        Ok(Response::new(command.settle(&*self.storage, answer).await?))
     }
 
     async fn delete_upstream_provider(

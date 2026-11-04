@@ -633,6 +633,28 @@ async fn concurrent_role_edits_with_one_key_answer_one_edit(h: Harness) {
     assert!(answers.iter().all(|a| *a == answers[0]), "{answers:?}");
 }
 
+/// Regression guard: concurrent attempts of one policy deletion answer as
+/// the deletion, though the losers find the policy the winner deleted gone.
+async fn concurrent_policy_deletions_with_one_key_answer_one_deletion(h: Harness) {
+    use sid_proto::sid::v1::authz::DeletePolicyRequest;
+    let created = policy(&h).await;
+    let key = format!("k-{}", tag());
+    let calls = (0..4).map(|_| {
+        let svc = h.svc.clone();
+        let request = call(
+            DeletePolicyRequest {
+                id: created.id.clone(),
+            },
+            &h.token,
+            Some(&key),
+        );
+        async move { svc.delete_policy(request).await }
+    });
+    for answer in futures::future::join_all(calls).await {
+        answer.expect("every attempt answers as the deletion");
+    }
+}
+
 macro_rules! on_both_engines {
     ($($scenario:ident),* $(,)?) => {
         mod pg {
@@ -668,4 +690,5 @@ on_both_engines!(
     policy_edit_answers_its_stored_revision,
     concurrent_policy_edits_with_one_key_answer_one_edit,
     concurrent_role_edits_with_one_key_answer_one_edit,
+    concurrent_policy_deletions_with_one_key_answer_one_deletion,
 );

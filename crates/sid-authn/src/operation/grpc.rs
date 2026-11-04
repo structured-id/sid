@@ -39,6 +39,27 @@ impl super::KeyedCommand {
         self.execute(storage, effect).await
     }
 
+    /// `answer`, this command's outcome as a handler reached it after its
+    /// first completion lookup, with a refusal resolved: when a concurrent
+    /// attempt of this command completed meanwhile (its effect being what
+    /// this attempt was refused for: a value it took, a state it moved on, a
+    /// record it removed), that attempt's recorded answer is this one's; when
+    /// another command completed under the key meanwhile, the key conflicts.
+    pub async fn settle<T: prost::Message + Default>(
+        &self,
+        storage: &(impl sid_plugin::OperationResultStore + ?Sized),
+        answer: Result<T, Status>,
+    ) -> Result<T, Status> {
+        match answer {
+            Ok(answer) => Ok(answer),
+            Err(refusal) => match self.replay::<T>(storage).await {
+                Ok(Some(recorded)) => Ok(recorded),
+                Err(OperationError::KeyConflict) => Err(OperationError::KeyConflict.into()),
+                _ => Err(refusal),
+            },
+        }
+    }
+
     /// [`super::KeyedCommand::execute_recorded`] for a method refusing with
     /// a status.
     pub async fn run_recorded<T, F, Fut>(

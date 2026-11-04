@@ -252,51 +252,40 @@ fn command<M: KeyedMethod>(
 }
 
 /// The answer to `command` once its commit returned `committed`: `answer`
-/// when this attempt committed, the recorded answer when a concurrent
-/// attempt committed first (also when its effect made this attempt fail a
-/// check before the key, a unique name), otherwise the failure as `refuse`
-/// maps it.
-async fn settled<T: prost::Message + Default>(
-    storage: &dyn StorageBackend,
-    command: &KeyedCommand,
+/// when this attempt committed, otherwise the failure as `refuse` maps it
+/// (a key another attempt completed as a concurrent change), which
+/// [`resolved`] answers with that attempt's result when it was this
+/// command's.
+fn settled<T>(
     committed: Result<(), sid_core::Error>,
     answer: T,
     refuse: impl FnOnce(sid_core::Error) -> Status,
 ) -> Result<Response<T>, Status> {
-    let decode = |recorded: Vec<u8>| {
-        T::decode(recorded.as_slice())
-            .map(Response::new)
-            .map_err(|e| {
-                tracing::warn!(error = %e, "recorded authorization answer unreadable");
-                Status::from(sid_core::grpc_error::ApiError::internal())
-            })
-    };
     match committed {
         Ok(()) => Ok(Response::new(answer)),
-        Err(sid_core::Error::OperationCompleted(_)) => {
-            decode(command.committed_elsewhere(storage).await?)
-        }
+        Err(sid_core::Error::OperationCompleted(_)) => Err(changed_concurrently()),
         Err(sid_core::Error::OperationPeriodRefused(refusal)) => {
             Err(OperationError::PeriodRefused(refusal).into())
         }
-        Err(e) => match command.completed(storage).await {
-            Ok(Some(recorded)) => decode(recorded),
-            _ => Err(refuse(e)),
-        },
+        Err(e) => Err(refuse(e)),
     }
 }
 
-/// The answer to `command` when its conditional write found the record
-/// changed or gone: the recorded answer when a concurrent attempt of this
-/// command made that change first, otherwise `refusal`.
-async fn not_written<T: prost::Message + Default>(
+/// `answer`, a command's outcome after its first completion lookup, with a
+/// refusal resolved ([`KeyedCommand::settle`]): a concurrent attempt of this
+/// command whose effect it was refused for (a name it took, a record it
+/// removed, a revision it moved on) answers for it.
+async fn resolved<T: prost::Message + Default>(
     storage: &dyn StorageBackend,
     command: &KeyedCommand,
-    refusal: Status,
+    answer: Result<Response<T>, Status>,
 ) -> Result<Response<T>, Status> {
-    match command.replay::<T>(storage).await? {
-        Some(recorded) => Ok(Response::new(recorded)),
-        None => Err(refusal),
+    match answer {
+        Ok(answer) => Ok(answer),
+        Err(refusal) => command
+            .settle(storage, Err::<T, _>(refusal))
+            .await
+            .map(Response::new),
     }
 }
 
@@ -1768,39 +1757,42 @@ impl AuthzService for AuthzServiceImpl {
         if let Some(recorded) = command.replay(&*self.storage).await? {
             return Ok(Response::new(recorded));
         }
-        let project_id = parse_project_id(&req.project_id)?;
+        let answer = async {
+            let project_id = parse_project_id(&req.project_id)?;
 
-        if req.name.is_empty() {
-            return Err(missing_field("name"));
+            if req.name.is_empty() {
+                return Err(missing_field("name"));
+            }
+
+            let mut role = Role::new(project_id, &req.name, &req.name);
+            role.description = req.description;
+            role.permissions = req.permissions;
+
+            let answer = CreateRoleResponse {
+                role: Some(role_to_proto(&role)),
+            };
+            let ctx = MutationContext::from(AuditEntry::admin(
+                caller.profile_id.to_string(),
+                "role.create",
+                role.id.0.to_string(),
+            ))
+            .with_operation(command.completion(answer.encode_to_vec()));
+            let committed = self.storage.create_role(&role, ctx).await;
+            let answer = settled(committed, answer, |e| match e {
+                sid_core::Error::Conflict(_) => ApiError::new(
+                    ErrorReason::RoleAlreadyExists,
+                    "the project already has a role of this name",
+                )
+                .with_resource("Role", req.name.clone())
+                .into(),
+                other => storage_failure(other),
+            })?;
+
+            info!("Created role '{}' in project {}", role.key, project_id.0);
+            Ok(answer)
         }
-
-        let mut role = Role::new(project_id, &req.name, &req.name);
-        role.description = req.description;
-        role.permissions = req.permissions;
-
-        let answer = CreateRoleResponse {
-            role: Some(role_to_proto(&role)),
-        };
-        let ctx = MutationContext::from(AuditEntry::admin(
-            caller.profile_id.to_string(),
-            "role.create",
-            role.id.0.to_string(),
-        ))
-        .with_operation(command.completion(answer.encode_to_vec()));
-        let committed = self.storage.create_role(&role, ctx).await;
-        let answer = settled(&*self.storage, &command, committed, answer, |e| match e {
-            sid_core::Error::Conflict(_) => ApiError::new(
-                ErrorReason::RoleAlreadyExists,
-                "the project already has a role of this name",
-            )
-            .with_resource("Role", req.name.clone())
-            .into(),
-            other => storage_failure(other),
-        })
-        .await?;
-
-        info!("Created role '{}' in project {}", role.key, project_id.0);
-        Ok(answer)
+        .await;
+        resolved(&*self.storage, &command, answer).await
     }
 
     #[instrument(skip_all, fields(method = "get_role"))]
@@ -1855,59 +1847,54 @@ impl AuthzService for AuthzServiceImpl {
         if let Some(recorded) = command.replay(&*self.storage).await? {
             return Ok(Response::new(recorded));
         }
-        let role_id = parse_role_id(&req.id)?;
+        let answer = async {
+            let role_id = parse_role_id(&req.id)?;
 
-        // Only the root learns a role is missing.
-        let mut role = match self
-            .storage
-            .get_role(role_id)
-            .await
-            .map_err(storage_failure)?
-        {
-            Some(role) => role,
-            None => {
-                return Err(match administrator {
-                    crate::admin::Administrator::Root(_) => role_not_found(role_id),
-                    crate::admin::Administrator::Holder(_) => {
-                        administration_refusal(sid_core::Error::AuthorizationDenied(String::new()))
-                    }
-                });
+            // Only the root learns a role is missing.
+            let mut role = match self
+                .storage
+                .get_role(role_id)
+                .await
+                .map_err(storage_failure)?
+            {
+                Some(role) => role,
+                None => {
+                    return Err(match administrator {
+                        crate::admin::Administrator::Root(_) => role_not_found(role_id),
+                        crate::admin::Administrator::Holder(_) => administration_refusal(
+                            sid_core::Error::AuthorizationDenied(String::new()),
+                        ),
+                    });
+                }
+            };
+
+            if let Some(desc) = req.description {
+                role.description = Some(desc);
             }
-        };
-
-        if let Some(desc) = req.description {
-            role.description = Some(desc);
-        }
-        if !req.permissions.is_empty() {
-            role.permissions = req.permissions;
-        }
-        role.updated_at = chrono::Utc::now();
-
-        let answer = UpdateRoleResponse {
-            role: Some(role_to_proto(&role)),
-        };
-        let audit = MutationContext::from(asker.audit("role.update", role.id.0.to_string()))
-            .with_operation(command.completion(answer.encode_to_vec()));
-        let committed = match crate::admin::RoleAdministration::new(self.storage.clone())
-            .edit_role(&administrator, &role, audit)
-            .await
-        {
-            // Deleted or changed since it was read: never recreated or
-            // overwritten.
-            Ok(false) => {
-                return not_written(&*self.storage, &command, changed_concurrently()).await;
+            if !req.permissions.is_empty() {
+                role.permissions = req.permissions;
             }
-            Ok(true) => Ok(()),
-            Err(e) => Err(e),
-        };
-        settled(
-            &*self.storage,
-            &command,
-            committed,
-            answer,
-            administration_refusal,
-        )
-        .await
+            role.updated_at = chrono::Utc::now();
+
+            let answer = UpdateRoleResponse {
+                role: Some(role_to_proto(&role)),
+            };
+            let audit = MutationContext::from(asker.audit("role.update", role.id.0.to_string()))
+                .with_operation(command.completion(answer.encode_to_vec()));
+            let committed = match crate::admin::RoleAdministration::new(self.storage.clone())
+                .edit_role(&administrator, &role, audit)
+                .await
+            {
+                // Deleted or changed since it was read: never recreated or
+                // overwritten.
+                Ok(false) => return Err(changed_concurrently()),
+                Ok(true) => Ok(()),
+                Err(e) => Err(e),
+            };
+            settled(committed, answer, administration_refusal)
+        }
+        .await;
+        resolved(&*self.storage, &command, answer).await
     }
 
     #[instrument(skip_all, fields(method = "delete_role"))]
@@ -1925,32 +1912,35 @@ impl AuthzService for AuthzServiceImpl {
         if let Some(recorded) = command.replay(&*self.storage).await? {
             return Ok(Response::new(recorded));
         }
-        let role_id = parse_role_id(&req.id)?;
+        let answer = async {
+            let role_id = parse_role_id(&req.id)?;
 
-        self.storage
-            .get_role(role_id)
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(|| role_not_found(role_id))?;
+            self.storage
+                .get_role(role_id)
+                .await
+                .map_err(storage_failure)?
+                .ok_or_else(|| role_not_found(role_id))?;
 
-        let answer = DeleteRoleResponse {};
-        let ctx = MutationContext::from(AuditEntry::admin(
-            caller.profile_id.to_string(),
-            "role.delete",
-            role_id.0.to_string(),
-        ))
-        .with_operation(command.completion(answer.encode_to_vec()));
-        let committed = self.storage.delete_role(role_id, ctx).await;
-        let answer = settled(&*self.storage, &command, committed, answer, |e| match e {
-            // The administrator role, still assigned: deleting it would
-            // remove the installation's administrators with it.
-            sid_core::Error::InvalidState(_) => revocation_refusal(e),
-            other => storage_failure(other),
-        })
-        .await?;
+            let answer = DeleteRoleResponse {};
+            let ctx = MutationContext::from(AuditEntry::admin(
+                caller.profile_id.to_string(),
+                "role.delete",
+                role_id.0.to_string(),
+            ))
+            .with_operation(command.completion(answer.encode_to_vec()));
+            let committed = self.storage.delete_role(role_id, ctx).await;
+            let answer = settled(committed, answer, |e| match e {
+                // The administrator role, still assigned: deleting it would
+                // remove the installation's administrators with it.
+                sid_core::Error::InvalidState(_) => revocation_refusal(e),
+                other => storage_failure(other),
+            })?;
 
-        info!("Deleted role {}", role_id.0);
-        Ok(answer)
+            info!("Deleted role {}", role_id.0);
+            Ok(answer)
+        }
+        .await;
+        resolved(&*self.storage, &command, answer).await
     }
 
     #[instrument(skip_all, fields(method = "list_roles"))]
@@ -1991,120 +1981,122 @@ impl AuthzService for AuthzServiceImpl {
         if let Some(result) = command.completed(&*self.storage).await? {
             return decode_assigned(&result);
         }
+        let answer = async {
+            let role_id = parse_role_id(&req.role_id)?;
 
-        let role_id = parse_role_id(&req.role_id)?;
+            // Only the root learns a role is missing; anyone else is refused as
+            // for any change its authority does not cover.
+            let role = match self
+                .storage
+                .get_role(role_id)
+                .await
+                .map_err(storage_failure)?
+            {
+                Some(role) => role,
+                None => {
+                    return Err(match administrator {
+                        crate::admin::Administrator::Root(_) => role_not_found(role_id),
+                        crate::admin::Administrator::Holder(_) => administration_refusal(
+                            sid_core::Error::AuthorizationDenied(String::new()),
+                        ),
+                    });
+                }
+            };
 
-        // Only the root learns a role is missing; anyone else is refused as
-        // for any change its authority does not cover.
-        let role = match self
-            .storage
-            .get_role(role_id)
-            .await
-            .map_err(storage_failure)?
-        {
-            Some(role) => role,
-            None => {
-                return Err(match administrator {
-                    crate::admin::Administrator::Root(_) => role_not_found(role_id),
-                    crate::admin::Administrator::Holder(_) => {
-                        administration_refusal(sid_core::Error::AuthorizationDenied(String::new()))
-                    }
-                });
-            }
-        };
+            let principal = match req.principal {
+                Some(assign_role_request::Principal::ProfileId(id)) => {
+                    let pid = parse_profile_id(&id)?;
+                    RoleAssignmentPrincipal::Profile(pid)
+                }
+                Some(assign_role_request::Principal::GroupId(id)) => {
+                    let gid = parse_group_id(&id)?;
+                    RoleAssignmentPrincipal::Group(gid)
+                }
+                Some(assign_role_request::Principal::MachineUserId(id)) => {
+                    let mid = parse_machine_user_id(&id)?;
+                    RoleAssignmentPrincipal::MachineUser(mid)
+                }
+                Some(assign_role_request::Principal::OauthClientId(client_id)) => {
+                    self.confidential_client(&client_id).await?;
+                    RoleAssignmentPrincipal::OAuthClient(client_id)
+                }
+                Some(assign_role_request::Principal::ProvisioningConnectorId(id)) => {
+                    RoleAssignmentPrincipal::ProvisioningConnector(parse_connector_id(&id)?)
+                }
+                None => return Err(missing_field("principal")),
+            };
 
-        let principal = match req.principal {
-            Some(assign_role_request::Principal::ProfileId(id)) => {
-                let pid = parse_profile_id(&id)?;
-                RoleAssignmentPrincipal::Profile(pid)
-            }
-            Some(assign_role_request::Principal::GroupId(id)) => {
-                let gid = parse_group_id(&id)?;
-                RoleAssignmentPrincipal::Group(gid)
-            }
-            Some(assign_role_request::Principal::MachineUserId(id)) => {
-                let mid = parse_machine_user_id(&id)?;
-                RoleAssignmentPrincipal::MachineUser(mid)
-            }
-            Some(assign_role_request::Principal::OauthClientId(client_id)) => {
-                self.confidential_client(&client_id).await?;
-                RoleAssignmentPrincipal::OAuthClient(client_id)
-            }
-            Some(assign_role_request::Principal::ProvisioningConnectorId(id)) => {
-                RoleAssignmentPrincipal::ProvisioningConnector(parse_connector_id(&id)?)
-            }
-            None => return Err(missing_field("principal")),
-        };
+            // An expiry is a valid timestamp in the future, never replaced by
+            // another value.
+            let expires_at = req
+                .expires_at
+                .map(|ts| {
+                    u32::try_from(ts.nanos)
+                        .ok()
+                        .and_then(|nanos| chrono::DateTime::from_timestamp(ts.seconds, nanos))
+                        .filter(|at| *at > chrono::Utc::now())
+                        .ok_or_else(|| invalid_field("expires_at", "not a timestamp in the future"))
+                })
+                .transpose()?;
 
-        // An expiry is a valid timestamp in the future, never replaced by
-        // another value.
-        let expires_at = req
-            .expires_at
-            .map(|ts| {
-                u32::try_from(ts.nanos)
-                    .ok()
-                    .and_then(|nanos| chrono::DateTime::from_timestamp(ts.seconds, nanos))
-                    .filter(|at| *at > chrono::Utc::now())
-                    .ok_or_else(|| invalid_field("expires_at", "not a timestamp in the future"))
-            })
-            .transpose()?;
+            let mut assignment = RoleAssignment::new(principal, role_id);
+            assignment.scope = req.scope;
+            assignment.expires_at = expires_at;
+            assignment.admin = req.admin.map(envelope_from_proto).transpose()?;
+            assignment.policy_admin = req
+                .policy_admin
+                .map(policy_authority_from_proto)
+                .transpose()?;
+            check_installation_assignment(&role, &assignment)?;
+            if role.has_permission(TOKEN_INTROSPECT) || role.has_permission(AUTHZ_CHECK) {
+                self.check_service_assignment(&assignment).await?;
+            }
+            if role
+                .permissions
+                .iter()
+                .any(|p| sid_core::models::is_invite_action(p))
+            {
+                self.check_invite_assignment(&assignment).await?;
+            }
+            if let RoleAssignmentPrincipal::ProvisioningConnector(connector) = assignment.principal
+            {
+                self.check_connector_assignment(connector, &assignment)
+                    .await?;
+            }
 
-        let mut assignment = RoleAssignment::new(principal, role_id);
-        assignment.scope = req.scope;
-        assignment.expires_at = expires_at;
-        assignment.admin = req.admin.map(envelope_from_proto).transpose()?;
-        assignment.policy_admin = req
-            .policy_admin
-            .map(policy_authority_from_proto)
-            .transpose()?;
-        check_installation_assignment(&role, &assignment)?;
-        if role.has_permission(TOKEN_INTROSPECT) || role.has_permission(AUTHZ_CHECK) {
-            self.check_service_assignment(&assignment).await?;
+            let audit = asker
+                .audit("role.assign", assignment.id.0.to_string())
+                .into();
+            let assigned = crate::admin::RoleAdministration::new(self.storage.clone())
+                .assign_recording(&administrator, assignment, audit, |stored| {
+                    Some(
+                        command.completion(
+                            AssignRoleResponse {
+                                assignment: Some(assignment_to_proto(stored)),
+                            }
+                            .encode_to_vec(),
+                        ),
+                    )
+                })
+                .await;
+            let assignment = match assigned {
+                Ok(assignment) => assignment,
+                // A concurrent call with the same key committed first.
+                Err(sid_core::Error::OperationCompleted(_)) => return Err(changed_concurrently()),
+                Err(e) => return Err(administration_refusal(e)),
+            };
+
+            info!(
+                "Assigned role {} (assignment {})",
+                role_id.0, assignment.id.0
+            );
+
+            Ok(Response::new(AssignRoleResponse {
+                assignment: Some(assignment_to_proto(&assignment)),
+            }))
         }
-        if role
-            .permissions
-            .iter()
-            .any(|p| sid_core::models::is_invite_action(p))
-        {
-            self.check_invite_assignment(&assignment).await?;
-        }
-        if let RoleAssignmentPrincipal::ProvisioningConnector(connector) = assignment.principal {
-            self.check_connector_assignment(connector, &assignment)
-                .await?;
-        }
-
-        let audit = asker
-            .audit("role.assign", assignment.id.0.to_string())
-            .into();
-        let assigned = crate::admin::RoleAdministration::new(self.storage.clone())
-            .assign_recording(&administrator, assignment, audit, |stored| {
-                Some(
-                    command.completion(
-                        AssignRoleResponse {
-                            assignment: Some(assignment_to_proto(stored)),
-                        }
-                        .encode_to_vec(),
-                    ),
-                )
-            })
-            .await;
-        let assignment = match assigned {
-            Ok(assignment) => assignment,
-            // A concurrent call with the same key committed first.
-            Err(sid_core::Error::OperationCompleted(_)) => {
-                return decode_assigned(&command.committed_elsewhere(&*self.storage).await?);
-            }
-            Err(e) => return Err(administration_refusal(e)),
-        };
-
-        info!(
-            "Assigned role {} (assignment {})",
-            role_id.0, assignment.id.0
-        );
-
-        Ok(Response::new(AssignRoleResponse {
-            assignment: Some(assignment_to_proto(&assignment)),
-        }))
+        .await;
+        resolved(&*self.storage, &command, answer).await
     }
 
     #[instrument(skip_all, fields(method = "revoke_role"))]
@@ -2122,27 +2114,25 @@ impl AuthzService for AuthzServiceImpl {
         if let Some(recorded) = command.replay(&*self.storage).await? {
             return Ok(Response::new(recorded));
         }
-        let assignment_id = parse_assignment_id(&req.assignment_id)?;
+        let answer = async {
+            let assignment_id = parse_assignment_id(&req.assignment_id)?;
 
-        let answer = RevokeRoleResponse {};
-        let audit = MutationContext::from(asker.audit("role.revoke", assignment_id.0.to_string()))
-            .with_operation(command.completion(answer.encode_to_vec()));
-        let committed = crate::admin::RoleAdministration::new(self.storage.clone())
-            .revoke(&administrator, assignment_id, audit)
-            .await
-            // `false`: no such assignment to revoke, answered as revoked.
-            .map(|_| ());
-        let answer = settled(
-            &*self.storage,
-            &command,
-            committed,
-            answer,
-            revocation_refusal,
-        )
-        .await?;
+            let answer = RevokeRoleResponse {};
+            let audit =
+                MutationContext::from(asker.audit("role.revoke", assignment_id.0.to_string()))
+                    .with_operation(command.completion(answer.encode_to_vec()));
+            let committed = crate::admin::RoleAdministration::new(self.storage.clone())
+                .revoke(&administrator, assignment_id, audit)
+                .await
+                // `false`: no such assignment to revoke, answered as revoked.
+                .map(|_| ());
+            let answer = settled(committed, answer, revocation_refusal)?;
 
-        info!("Revoked role assignment {}", assignment_id.0);
-        Ok(answer)
+            info!("Revoked role assignment {}", assignment_id.0);
+            Ok(answer)
+        }
+        .await;
+        resolved(&*self.storage, &command, answer).await
     }
 
     #[instrument(skip_all, fields(method = "list_role_assignments"))]
@@ -2214,38 +2204,41 @@ impl AuthzService for AuthzServiceImpl {
         if let Some(recorded) = command.replay(&*self.storage).await? {
             return Ok(Response::new(recorded));
         }
-        let project_id = parse_project_id(&req.project_id)?;
+        let answer = async {
+            let project_id = parse_project_id(&req.project_id)?;
 
-        if req.name.is_empty() {
-            return Err(missing_field("name"));
+            if req.name.is_empty() {
+                return Err(missing_field("name"));
+            }
+
+            let mut group = Group::new(project_id, &req.name);
+            group.description = req.description;
+
+            let answer = CreateGroupResponse {
+                group: Some(group_to_proto(&group)),
+            };
+            let ctx = MutationContext::from(AuditEntry::admin(
+                caller.profile_id.to_string(),
+                "group.create",
+                group.id.0.to_string(),
+            ))
+            .with_operation(command.completion(answer.encode_to_vec()));
+            let committed = self.storage.create_group(&group, ctx).await;
+            let answer = settled(committed, answer, |e| match e {
+                sid_core::Error::Conflict(_) => ApiError::new(
+                    ErrorReason::GroupAlreadyExists,
+                    "the project already has a group of this name",
+                )
+                .with_resource("Group", req.name.clone())
+                .into(),
+                other => storage_failure(other),
+            })?;
+
+            info!("Created group '{}' in project {}", group.name, project_id.0);
+            Ok(answer)
         }
-
-        let mut group = Group::new(project_id, &req.name);
-        group.description = req.description;
-
-        let answer = CreateGroupResponse {
-            group: Some(group_to_proto(&group)),
-        };
-        let ctx = MutationContext::from(AuditEntry::admin(
-            caller.profile_id.to_string(),
-            "group.create",
-            group.id.0.to_string(),
-        ))
-        .with_operation(command.completion(answer.encode_to_vec()));
-        let committed = self.storage.create_group(&group, ctx).await;
-        let answer = settled(&*self.storage, &command, committed, answer, |e| match e {
-            sid_core::Error::Conflict(_) => ApiError::new(
-                ErrorReason::GroupAlreadyExists,
-                "the project already has a group of this name",
-            )
-            .with_resource("Group", req.name.clone())
-            .into(),
-            other => storage_failure(other),
-        })
-        .await?;
-
-        info!("Created group '{}' in project {}", group.name, project_id.0);
-        Ok(answer)
+        .await;
+        resolved(&*self.storage, &command, answer).await
     }
 
     #[instrument(skip_all, fields(method = "get_group"))]
@@ -2304,61 +2297,65 @@ impl AuthzService for AuthzServiceImpl {
         if let Some(recorded) = command.replay(&*self.storage).await? {
             return Ok(Response::new(recorded));
         }
-        let group_id = parse_group_id(&req.id)?;
+        let answer = async {
+            let group_id = parse_group_id(&req.id)?;
 
-        // Without a description nothing is written: the group as it is,
-        // recorded as this command's outcome so its retry answers the same.
-        let Some(desc) = req.description.clone() else {
-            let audit = AuditEntry::admin(
+            // Without a description nothing is written: the group as it is,
+            // recorded as this command's outcome so its retry answers the same.
+            let Some(desc) = req.description.clone() else {
+                let audit = AuditEntry::admin(
+                    caller.profile_id.to_string(),
+                    "group.update",
+                    group_id.0.to_string(),
+                );
+                let answer = command
+                    .unchanged(&*self.storage, audit, || async {
+                        let group = self
+                            .storage
+                            .get_group(group_id)
+                            .await
+                            .map_err(storage_failure)?
+                            .ok_or_else(|| group_not_found(group_id.0.to_string()))?;
+                        Ok::<_, Status>(UpdateGroupResponse {
+                            group: Some(group_to_proto(&group)),
+                        })
+                    })
+                    .await?;
+                return Ok(Response::new(answer));
+            };
+            let mut group = self
+                .storage
+                .get_group(group_id)
+                .await
+                .map_err(storage_failure)?
+                .ok_or_else(|| group_not_found(group_id.0.to_string()))?;
+            group.description = Some(desc);
+            group.updated_at = chrono::Utc::now();
+
+            // Only the description is written, so a concurrent directory sync of
+            // the name is never reverted and a deleted group is never recreated.
+            let answer = UpdateGroupResponse {
+                group: Some(group_to_proto(&group)),
+            };
+            let ctx = MutationContext::from(AuditEntry::admin(
                 caller.profile_id.to_string(),
                 "group.update",
                 group_id.0.to_string(),
-            );
-            let answer = command
-                .unchanged(&*self.storage, audit, || async {
-                    let group = self
-                        .storage
-                        .get_group(group_id)
-                        .await
-                        .map_err(storage_failure)?
-                        .ok_or_else(|| group_not_found(group_id.0.to_string()))?;
-                    Ok::<_, Status>(UpdateGroupResponse {
-                        group: Some(group_to_proto(&group)),
-                    })
-                })
-                .await?;
-            return Ok(Response::new(answer));
-        };
-        let mut group = self
-            .storage
-            .get_group(group_id)
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(|| group_not_found(group_id.0.to_string()))?;
-        group.description = Some(desc);
-        group.updated_at = chrono::Utc::now();
-
-        // Only the description is written, so a concurrent directory sync of
-        // the name is never reverted and a deleted group is never recreated.
-        let answer = UpdateGroupResponse {
-            group: Some(group_to_proto(&group)),
-        };
-        let ctx = MutationContext::from(AuditEntry::admin(
-            caller.profile_id.to_string(),
-            "group.update",
-            group_id.0.to_string(),
-        ))
-        .with_operation(command.completion(answer.encode_to_vec()));
-        let committed = match self
-            .storage
-            .set_group_description(group_id, group.description.as_deref(), ctx)
-            .await
-        {
-            Ok(true) => Ok(()),
-            Ok(false) => return Err(group_not_found(group_id.0.to_string())),
-            Err(e) => Err(e),
-        };
-        settled(&*self.storage, &command, committed, answer, storage_failure).await
+            ))
+            .with_operation(command.completion(answer.encode_to_vec()));
+            let committed = match self
+                .storage
+                .set_group_description(group_id, group.description.as_deref(), ctx)
+                .await
+            {
+                Ok(true) => Ok(()),
+                Ok(false) => return Err(group_not_found(group_id.0.to_string())),
+                Err(e) => Err(e),
+            };
+            settled(committed, answer, storage_failure)
+        }
+        .await;
+        resolved(&*self.storage, &command, answer).await
     }
 
     #[instrument(skip_all, fields(method = "delete_group"))]
@@ -2376,26 +2373,30 @@ impl AuthzService for AuthzServiceImpl {
         if let Some(recorded) = command.replay(&*self.storage).await? {
             return Ok(Response::new(recorded));
         }
-        let group_id = parse_group_id(&req.id)?;
+        let answer = async {
+            let group_id = parse_group_id(&req.id)?;
 
-        self.storage
-            .get_group(group_id)
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(|| group_not_found(group_id.0.to_string()))?;
+            self.storage
+                .get_group(group_id)
+                .await
+                .map_err(storage_failure)?
+                .ok_or_else(|| group_not_found(group_id.0.to_string()))?;
 
-        let answer = DeleteGroupResponse {};
-        let ctx = MutationContext::from(AuditEntry::admin(
-            caller.profile_id.to_string(),
-            "group.delete",
-            group_id.0.to_string(),
-        ))
-        .with_operation(command.completion(answer.encode_to_vec()));
-        let committed = self.storage.delete_group(group_id, ctx).await;
-        let answer = settled(&*self.storage, &command, committed, answer, storage_failure).await?;
+            let answer = DeleteGroupResponse {};
+            let ctx = MutationContext::from(AuditEntry::admin(
+                caller.profile_id.to_string(),
+                "group.delete",
+                group_id.0.to_string(),
+            ))
+            .with_operation(command.completion(answer.encode_to_vec()));
+            let committed = self.storage.delete_group(group_id, ctx).await;
+            let answer = settled(committed, answer, storage_failure)?;
 
-        info!("Deleted group {}", group_id.0);
-        Ok(answer)
+            info!("Deleted group {}", group_id.0);
+            Ok(answer)
+        }
+        .await;
+        resolved(&*self.storage, &command, answer).await
     }
 
     #[instrument(skip_all, fields(method = "list_groups"))]
@@ -2436,38 +2437,41 @@ impl AuthzService for AuthzServiceImpl {
         if let Some(recorded) = command.replay(&*self.storage).await? {
             return Ok(Response::new(recorded));
         }
-        let group_id = parse_group_id(&req.group_id)?;
-        let profile_id = parse_profile_id(&req.profile_id)?;
+        let answer = async {
+            let group_id = parse_group_id(&req.group_id)?;
+            let profile_id = parse_profile_id(&req.profile_id)?;
 
-        self.storage
-            .get_group(group_id)
-            .await
-            .map_err(storage_failure)?
-            .ok_or_else(|| group_not_found(group_id.0.to_string()))?;
+            self.storage
+                .get_group(group_id)
+                .await
+                .map_err(storage_failure)?
+                .ok_or_else(|| group_not_found(group_id.0.to_string()))?;
 
-        let member = GroupMember::new(group_id, profile_id);
-        let answer = AddToGroupResponse {};
-        let ctx = MutationContext::from(AuditEntry::admin(
-            caller.profile_id.to_string(),
-            "group.add_member",
-            format!("{}:{}", group_id.0, profile_id),
-        ))
-        .with_operation(command.completion(answer.encode_to_vec()));
-        let committed = self.storage.add_to_group(&member, ctx).await;
-        let answer = settled(&*self.storage, &command, committed, answer, |e| match e {
-            sid_core::Error::PolicyViolation(why) => Status::from(
-                ApiError::new(
-                    ErrorReason::InvalidState,
-                    "the profile granted this group a role and cannot join it",
-                )
-                .with_precondition("GRANTOR_OUTSIDE_GROUP", "group", why),
-            ),
-            other => storage_failure(other),
-        })
-        .await?;
+            let member = GroupMember::new(group_id, profile_id);
+            let answer = AddToGroupResponse {};
+            let ctx = MutationContext::from(AuditEntry::admin(
+                caller.profile_id.to_string(),
+                "group.add_member",
+                format!("{}:{}", group_id.0, profile_id),
+            ))
+            .with_operation(command.completion(answer.encode_to_vec()));
+            let committed = self.storage.add_to_group(&member, ctx).await;
+            let answer = settled(committed, answer, |e| match e {
+                sid_core::Error::PolicyViolation(why) => Status::from(
+                    ApiError::new(
+                        ErrorReason::InvalidState,
+                        "the profile granted this group a role and cannot join it",
+                    )
+                    .with_precondition("GRANTOR_OUTSIDE_GROUP", "group", why),
+                ),
+                other => storage_failure(other),
+            })?;
 
-        info!("Added profile {} to group {}", profile_id, group_id.0);
-        Ok(answer)
+            info!("Added profile {} to group {}", profile_id, group_id.0);
+            Ok(answer)
+        }
+        .await;
+        resolved(&*self.storage, &command, answer).await
     }
 
     #[instrument(skip_all, fields(method = "remove_from_group"))]
@@ -2488,24 +2492,28 @@ impl AuthzService for AuthzServiceImpl {
         if let Some(recorded) = command.replay(&*self.storage).await? {
             return Ok(Response::new(recorded));
         }
-        let group_id = parse_group_id(&req.group_id)?;
-        let profile_id = parse_profile_id(&req.profile_id)?;
+        let answer = async {
+            let group_id = parse_group_id(&req.group_id)?;
+            let profile_id = parse_profile_id(&req.profile_id)?;
 
-        let answer = RemoveFromGroupResponse {};
-        let ctx = MutationContext::from(AuditEntry::admin(
-            caller.profile_id.to_string(),
-            "group.remove_member",
-            format!("{}:{}", group_id.0, profile_id),
-        ))
-        .with_operation(command.completion(answer.encode_to_vec()));
-        let committed = self
-            .storage
-            .remove_from_group(group_id, profile_id, ctx)
-            .await;
-        let answer = settled(&*self.storage, &command, committed, answer, storage_failure).await?;
+            let answer = RemoveFromGroupResponse {};
+            let ctx = MutationContext::from(AuditEntry::admin(
+                caller.profile_id.to_string(),
+                "group.remove_member",
+                format!("{}:{}", group_id.0, profile_id),
+            ))
+            .with_operation(command.completion(answer.encode_to_vec()));
+            let committed = self
+                .storage
+                .remove_from_group(group_id, profile_id, ctx)
+                .await;
+            let answer = settled(committed, answer, storage_failure)?;
 
-        info!("Removed profile {} from group {}", profile_id, group_id.0);
-        Ok(answer)
+            info!("Removed profile {} from group {}", profile_id, group_id.0);
+            Ok(answer)
+        }
+        .await;
+        resolved(&*self.storage, &command, answer).await
     }
 
     #[instrument(skip_all, fields(method = "list_group_members"))]
@@ -2544,44 +2552,47 @@ impl AuthzService for AuthzServiceImpl {
         if let Some(recorded) = command.replay(&*self.storage).await? {
             return Ok(Response::new(recorded));
         }
-        let scope = policy_scope_from_proto(req.scope.as_ref(), "scope")?;
-        let fence = self
-            .policy_authority(&asker, sid_core::models::PolicyOperation::Edit, scope)
-            .await?;
+        let answer = async {
+            let scope = policy_scope_from_proto(req.scope.as_ref(), "scope")?;
+            let fence = self
+                .policy_authority(&asker, sid_core::models::PolicyOperation::Edit, scope)
+                .await?;
 
-        if req.name.is_empty() {
-            return Err(missing_field("name"));
+            if req.name.is_empty() {
+                return Err(missing_field("name"));
+            }
+            if req.policy_text.is_empty() {
+                return Err(missing_field("policy_text"));
+            }
+            self.check_policy_text(&req.policy_text)?;
+            self.check_scope_target(scope).await?;
+
+            let effect = proto_to_policy_effect(req.effect);
+            let mut policy = CedarPolicy::new(scope, &req.name, &req.policy_text, effect);
+            policy.description = req.description;
+            policy.enabled = req.enabled;
+
+            let answer = CreatePolicyResponse {
+                policy: Some(policy_to_proto(&policy)),
+            };
+            let ctx = policy_mutation(&asker, "policy.create", policy.id, fence)
+                .with_operation(command.completion(answer.encode_to_vec()));
+            let committed = self.storage.create_cedar_policy(&policy, ctx).await;
+            let answer = settled(committed, answer, |e| match e {
+                sid_core::Error::Conflict(_) => ApiError::new(
+                    ErrorReason::PolicyAlreadyExists,
+                    "the scope already has a policy of this name",
+                )
+                .with_resource("Policy", policy.name.clone())
+                .into(),
+                other => storage_failure(other),
+            })?;
+
+            info!("Created policy '{}' in scope {:?}", policy.name, scope);
+            Ok(answer)
         }
-        if req.policy_text.is_empty() {
-            return Err(missing_field("policy_text"));
-        }
-        self.check_policy_text(&req.policy_text)?;
-        self.check_scope_target(scope).await?;
-
-        let effect = proto_to_policy_effect(req.effect);
-        let mut policy = CedarPolicy::new(scope, &req.name, &req.policy_text, effect);
-        policy.description = req.description;
-        policy.enabled = req.enabled;
-
-        let answer = CreatePolicyResponse {
-            policy: Some(policy_to_proto(&policy)),
-        };
-        let ctx = policy_mutation(&asker, "policy.create", policy.id, fence)
-            .with_operation(command.completion(answer.encode_to_vec()));
-        let committed = self.storage.create_cedar_policy(&policy, ctx).await;
-        let answer = settled(&*self.storage, &command, committed, answer, |e| match e {
-            sid_core::Error::Conflict(_) => ApiError::new(
-                ErrorReason::PolicyAlreadyExists,
-                "the scope already has a policy of this name",
-            )
-            .with_resource("Policy", policy.name.clone())
-            .into(),
-            other => storage_failure(other),
-        })
-        .await?;
-
-        info!("Created policy '{}' in scope {:?}", policy.name, scope);
-        Ok(answer)
+        .await;
+        resolved(&*self.storage, &command, answer).await
     }
 
     #[instrument(skip_all, fields(method = "get_policy"))]
@@ -2615,43 +2626,45 @@ impl AuthzService for AuthzServiceImpl {
         if let Some(recorded) = command.replay(&*self.storage).await? {
             return Ok(Response::new(recorded));
         }
-        let policy_id = parse_policy_id(&req.id)?;
-        let (mut policy, fence) = self
-            .policy_for(&asker, policy_id, sid_core::models::PolicyOperation::Edit)
-            .await?;
+        let answer = async {
+            let policy_id = parse_policy_id(&req.id)?;
+            let (mut policy, fence) = self
+                .policy_for(&asker, policy_id, sid_core::models::PolicyOperation::Edit)
+                .await?;
 
-        if let Some(desc) = req.description {
-            policy.description = Some(desc);
-        }
-        if let Some(text) = req.policy_text {
-            self.check_policy_text(&text)?;
-            policy.policy_text = text;
-        }
-        if let Some(effect) = req.effect {
-            policy.effect = proto_to_policy_effect(effect);
-        }
-        if let Some(enabled) = req.enabled {
-            policy.enabled = enabled;
-        }
-        policy.updated_at = chrono::Utc::now();
-
-        // The store writes over the revision just read and moves it on; the
-        // answer is the policy as that commit leaves it.
-        let mut left = policy_to_proto(&policy);
-        left.revision = policy.revision + 1;
-        let answer = UpdatePolicyResponse { policy: Some(left) };
-        let ctx = policy_mutation(&asker, "policy.update", policy.id, fence)
-            .with_operation(command.completion(answer.encode_to_vec()));
-        let committed = match self.storage.update_cedar_policy(&policy, ctx).await {
-            // Deleted or changed since it was read: never recreated or
-            // overwritten.
-            Ok(false) => {
-                return not_written(&*self.storage, &command, changed_concurrently()).await;
+            if let Some(desc) = req.description {
+                policy.description = Some(desc);
             }
-            Ok(true) => Ok(()),
-            Err(e) => Err(e),
-        };
-        settled(&*self.storage, &command, committed, answer, storage_failure).await
+            if let Some(text) = req.policy_text {
+                self.check_policy_text(&text)?;
+                policy.policy_text = text;
+            }
+            if let Some(effect) = req.effect {
+                policy.effect = proto_to_policy_effect(effect);
+            }
+            if let Some(enabled) = req.enabled {
+                policy.enabled = enabled;
+            }
+            policy.updated_at = chrono::Utc::now();
+
+            // The store writes over the revision just read and moves it on; the
+            // answer is the policy as that commit leaves it.
+            let mut left = policy_to_proto(&policy);
+            left.revision = policy.revision + 1;
+            let answer = UpdatePolicyResponse { policy: Some(left) };
+            let ctx = policy_mutation(&asker, "policy.update", policy.id, fence)
+                .with_operation(command.completion(answer.encode_to_vec()));
+            let committed = match self.storage.update_cedar_policy(&policy, ctx).await {
+                // Deleted or changed since it was read: never recreated or
+                // overwritten.
+                Ok(false) => return Err(changed_concurrently()),
+                Ok(true) => Ok(()),
+                Err(e) => Err(e),
+            };
+            settled(committed, answer, storage_failure)
+        }
+        .await;
+        resolved(&*self.storage, &command, answer).await
     }
 
     #[instrument(skip_all, fields(method = "delete_policy"))]
@@ -2668,19 +2681,23 @@ impl AuthzService for AuthzServiceImpl {
         if let Some(recorded) = command.replay(&*self.storage).await? {
             return Ok(Response::new(recorded));
         }
-        let policy_id = parse_policy_id(&req.id)?;
-        let (_, fence) = self
-            .policy_for(&asker, policy_id, sid_core::models::PolicyOperation::Edit)
-            .await?;
+        let answer = async {
+            let policy_id = parse_policy_id(&req.id)?;
+            let (_, fence) = self
+                .policy_for(&asker, policy_id, sid_core::models::PolicyOperation::Edit)
+                .await?;
 
-        let answer = DeletePolicyResponse {};
-        let ctx = policy_mutation(&asker, "policy.delete", policy_id, fence)
-            .with_operation(command.completion(answer.encode_to_vec()));
-        let committed = self.storage.delete_cedar_policy(policy_id, ctx).await;
-        let answer = settled(&*self.storage, &command, committed, answer, storage_failure).await?;
+            let answer = DeletePolicyResponse {};
+            let ctx = policy_mutation(&asker, "policy.delete", policy_id, fence)
+                .with_operation(command.completion(answer.encode_to_vec()));
+            let committed = self.storage.delete_cedar_policy(policy_id, ctx).await;
+            let answer = settled(committed, answer, storage_failure)?;
 
-        info!("Deleted policy {}", policy_id.0);
-        Ok(answer)
+            info!("Deleted policy {}", policy_id.0);
+            Ok(answer)
+        }
+        .await;
+        resolved(&*self.storage, &command, answer).await
     }
 
     #[instrument(skip_all, fields(method = "list_policies"))]
