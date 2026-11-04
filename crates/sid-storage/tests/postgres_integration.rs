@@ -1279,6 +1279,90 @@ mod grant_store {
     );
 }
 
+/// A native generation of session `session` with one credential.
+fn native_generation(session: sid_core::models::SessionId) -> sid_core::models::NativeGeneration {
+    sid_core::models::NativeGeneration {
+        id: uuid::Uuid::now_v7(),
+        session_id: session,
+        key_jkt: "jkt-lock-order".into(),
+        credential_hashes: vec![uuid::Uuid::new_v4().as_bytes().repeat(2)],
+        expires_at: chrono::Utc::now() + chrono::Duration::days(1),
+        created_at: chrono::Utc::now(),
+    }
+}
+
+/// Regression guard: a native rotation waits for its session's end already
+/// in progress instead of deadlocking with it. The end holds the session's
+/// row and deletes it, cascading to the generations; a rotation that locked
+/// its generation before the session would wait on the end while the
+/// cascade waits on the rotation, and PostgreSQL would abort one of them,
+/// leaving a revoked session active.
+#[tokio::test]
+async fn test_native_rotation_waits_for_its_sessions_end() {
+    use sid_core::models::{NativeExchange, NativeRotation, NativeRotationOutcome};
+    use sid_plugin::GrantStore;
+
+    let backend = setup().await;
+    let profile = common::create_test_profile("native-lock");
+    backend
+        .create_profile(&profile, common::test_audit())
+        .await
+        .unwrap();
+    let session = common::create_test_session(profile.id);
+    backend
+        .create_session_atomic(&session, 0, None, common::test_audit())
+        .await
+        .unwrap();
+    let first = native_generation(session.id);
+    backend
+        .issue_native_generation(&first, common::test_audit())
+        .await
+        .unwrap();
+
+    // The end, as the session store runs it: the session's row first.
+    let mut end = backend.pool().begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM sessions WHERE id = $1 FOR UPDATE")
+        .bind(session.id)
+        .execute(&mut *end)
+        .await
+        .unwrap();
+    let rotating = {
+        let backend = backend.clone();
+        let session = session.id;
+        tokio::spawn(async move {
+            let successor = native_generation(session);
+            backend
+                .rotate_native_generation(
+                    NativeRotation {
+                        presented: first.id,
+                        exchange: NativeExchange::from_bytes(uuid::Uuid::new_v4().as_bytes())
+                            .unwrap(),
+                        successor: &successor,
+                        sealed: b"sealed",
+                        redeliver_until: chrono::Utc::now() + chrono::Duration::seconds(30),
+                    },
+                    common::test_audit(),
+                )
+                .await
+        })
+    };
+    // The rotation takes whatever it locks first while the end holds the row.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    sqlx::query("DELETE FROM sessions WHERE id = $1")
+        .bind(session.id)
+        .execute(&mut *end)
+        .await
+        .expect("the session's end is not aborted");
+    end.commit().await.unwrap();
+    assert_eq!(
+        rotating
+            .await
+            .unwrap()
+            .expect("the rotation is not aborted"),
+        NativeRotationOutcome::Ended
+    );
+}
+
 #[tokio::test]
 async fn test_session_delete_by_profile() {
     common::test_session_delete_by_profile(&setup().await).await;

@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Native session generations for the PostgreSQL backend. A rotation locks
-//! its generation's row, so concurrent rotations of one generation commit one
-//! after another, and shares its session's row, so the session cannot end
-//! under it: its end waits for the rotation and then takes the successor too.
+//! Native session generations for the PostgreSQL backend. A rotation shares
+//! its session's row, so the session cannot end under it: its end waits for
+//! the rotation and then takes the successor too. It then locks its
+//! generation's row, so concurrent rotations of one generation commit one
+//! after another.
 
 use sid_core::{
     Error as SidError, Result as SidResult,
@@ -126,19 +127,32 @@ impl PostgresBackend {
         ctx: MutationContext,
     ) -> SidResult<NativeRotationOutcome> {
         let mut tx = self.pool.begin().await.map_err(storage)?;
+        // The session's row is held before the generation's, the order its
+        // end takes them (the session, then the generations by cascade), so
+        // a rotation and an end wait for each other instead of deadlocking.
+        // A generation never changes its session.
+        let session: Option<SessionId> =
+            sqlx::query_scalar("SELECT session_id FROM native_generations WHERE id = $1")
+                .bind(rotation.presented)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(storage)?;
+        let Some(session) = session else {
+            // The generation went with its session.
+            return Ok(NativeRotationOutcome::Ended);
+        };
+        if !hold_live_session(&mut tx, session).await? {
+            return Ok(NativeRotationOutcome::Ended);
+        }
         let Some(row) = sqlx::query("SELECT * FROM native_generations WHERE id = $1 FOR UPDATE")
             .bind(rotation.presented)
             .fetch_optional(&mut *tx)
             .await
             .map_err(storage)?
         else {
-            // The generation went with its session.
             return Ok(NativeRotationOutcome::Ended);
         };
         let presented = presented_row(&row)?;
-        if !hold_live_session(&mut tx, presented.session_id).await? {
-            return Ok(NativeRotationOutcome::Ended);
-        }
         match presented.state {
             NativeGenerationState::Current => {
                 // Its predecessor's redelivery ends now that this one is used.
