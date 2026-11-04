@@ -1,0 +1,38 @@
+name: Bench durable delivery
+
+# Durable delivery cost on Linux against real PostgreSQL and NATS, run on
+# demand: commit, delivery and handoff percentiles and drain rates in every
+# mode (crates/sid-notify/benches/durable_delivery.rs). A hosted runner is a
+# shared machine: its numbers describe this environment, not a dedicated one.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    name: Durable delivery
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C linker-features=-lld -C link-arg=-fuse-ld=mold
+    steps:
+      - uses: rui314/setup-mold@v1
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: Latest stable toolchain
+        run: rustup update stable --no-self-update
+      - name: protoc with the well-known types
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler libprotobuf-dev
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo bench --locked -p sid-notify --bench durable_delivery --no-run
+      - name: Test services
+        run: docker compose -f docker-compose.test.yml up -d --wait postgres-test nats-test
+      - name: Measure
+        run: |
+          git rev-parse HEAD
+          nproc
+          cargo bench --locked -p sid-notify --bench durable_delivery
