@@ -283,6 +283,29 @@ pub fn confirmation_page(
     response
 }
 
+/// A page saying `text` with one link, `label`, to `href`, a target the
+/// caller established (a path of its own origin). It may not be framed and
+/// loads nothing.
+pub fn link_page(status: u16, text: &str, label: &str, href: &str) -> Response<HttpBody> {
+    let html = format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>{}</title></head>\
+         <body><p>{}</p><p><a href=\"{}\">{}</a></p></body></html>",
+        html_attribute(text),
+        html_attribute(text),
+        html_attribute(href),
+        html_attribute(label),
+    );
+    let mut response = raw(status, "text/html; charset=utf-8", html.into_bytes());
+    let metadata = response.metadata_mut();
+    metadata.insert("cache-control", MetadataValue::from_static("no-store"));
+    metadata.insert(
+        "content-security-policy",
+        MetadataValue::from_static("default-src 'none'; frame-ancestors 'none'"),
+    );
+    metadata.insert("x-frame-options", MetadataValue::from_static("DENY"));
+    response
+}
+
 /// `value` escaped for a double-quoted HTML attribute (HTML Living Standard
 /// §13.1.2.3: `"` ends it, `&` starts a character reference).
 fn html_attribute(value: &str) -> String {

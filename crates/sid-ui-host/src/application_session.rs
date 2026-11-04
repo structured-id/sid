@@ -604,7 +604,17 @@ impl ApplicationSessions {
         }
         if let Some(error) = &params.error {
             tracing::warn!(%error, "authorization error");
-            return page(403, "The sign-in was refused.");
+            let text = if error == "access_denied" {
+                "You did not sign in."
+            } else {
+                "The sign-in was refused."
+            };
+            return sid_authn::oauth_http::link_page(
+                403,
+                text,
+                "Sign in again",
+                &local_path(&pending.redirect_url),
+            );
         }
         let Some(code) = params.code else {
             return page(400, "The sign-in answer carries no code.");

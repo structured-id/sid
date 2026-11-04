@@ -347,9 +347,14 @@ const SIGN_IN_COOKIE: &str = "__Host-ops-bff-signin-";
 /// A sign-in started by a browser that sent no cookie: its state and the
 /// `name=value` of the correlation cookie the browser keeps for it.
 async fn started(f: &Fixture) -> (String, String) {
+    started_at(f, "/").await
+}
+
+/// [`started`] for a sign-in returning to `rd`.
+async fn started_at(f: &Fixture, rd: &str) -> (String, String) {
     let response = f
         .adapter
-        .start_sign_in(Request::new(StartSignInRequest { rd: "/".into() }))
+        .start_sign_in(Request::new(StartSignInRequest { rd: rd.into() }))
         .await
         .unwrap();
     assert_eq!(status(&response), "302");
@@ -542,12 +547,13 @@ async fn a_callback_must_name_a_recorded_sign_in_of_the_issuer() {
     assert_eq!(status(&replay), "400", "the sign-in is taken once");
 }
 
-/// An authorization error from the issuer ends the sign-in without a
-/// session.
+/// An authorization error from the issuer (the user declined) ends the
+/// sign-in without a session, on a page that offers to sign in again where
+/// the sign-in started.
 #[tokio::test]
 async fn an_authorization_error_is_refused() {
     let f = fixture(memory(), true);
-    let (state, browser) = started(&f).await;
+    let (state, browser) = started_at(&f, "/operators?page=2").await;
     let response = f
         .adapter
         .complete_sign_in(with_cookie(
@@ -563,6 +569,11 @@ async fn an_authorization_error_is_refused() {
         .await
         .unwrap();
     assert_eq!(status(&response), "403");
+    let page = String::from_utf8(response.get_ref().data.clone()).unwrap();
+    assert!(
+        page.contains("<a href=\"/operators?page=2\">Sign in again</a>"),
+        "{page}"
+    );
     // No session is made; the ended sign-in's correlation cookie is cleared.
     let set: Vec<_> = response
         .metadata()

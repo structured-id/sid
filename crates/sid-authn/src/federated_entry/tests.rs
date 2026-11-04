@@ -957,6 +957,74 @@ fn name_of(browser: &Browser) -> &str {
     browser.cookie.split('=').next().unwrap()
 }
 
+// An error return (the holder declined at the issuer) ends its entry and
+// names where it was to continue, once: a repeat finds nothing, and no code
+// is exchanged.
+#[tokio::test]
+async fn a_declined_entry_ends_and_names_its_continuation() {
+    let issuer = TestIssuer::start().await;
+    let entry = entry(&issuer);
+    let browser = begin(&entry, &EntryRequest::default()).await;
+    let state = browser.state();
+    let cookies = [browser.cookie.as_str()];
+    assert_eq!(
+        entry.decline(&state, cookies, REDIRECT).await.unwrap(),
+        CONTINUATION
+    );
+    assert!(matches!(
+        entry.decline(&state, cookies, REDIRECT).await,
+        Err(EntryError::Unknown)
+    ));
+    issuer.issue_for(&browser.url, json!({}));
+    assert!(matches!(
+        browser.complete(&entry, "c", REDIRECT).await,
+        Err(EntryError::Unknown)
+    ));
+    assert_eq!(issuer.exchanges(), 0);
+}
+
+// Regression guard: only the browser that started an entry declines it, at
+// its own redirect URI, before its code was exchanged. A decline without its
+// cookie leaves it to its browser; one after the exchange leaves the
+// admission its retry resumes.
+#[tokio::test]
+async fn a_decline_ends_only_its_own_unexchanged_entry() {
+    let issuer = TestIssuer::start().await;
+    let entry = entry(&issuer);
+    let browser = begin(&entry, &EntryRequest::default()).await;
+    let state = browser.state();
+    for cookies in [vec![], vec!["__Host-sid_platform=other"]] {
+        assert!(matches!(
+            entry.decline(&state, cookies, REDIRECT).await,
+            Err(EntryError::OtherBrowser)
+        ));
+    }
+    issuer.issue_for(&browser.url, json!({}));
+    let returned = browser.complete(&entry, "c", REDIRECT).await.unwrap();
+    assert!(matches!(
+        entry
+            .decline(&state, [browser.cookie.as_str()], REDIRECT)
+            .await,
+        Err(EntryError::Unknown)
+    ));
+    assert_eq!(
+        browser.complete(&entry, "c", REDIRECT).await.unwrap(),
+        returned
+    );
+
+    let elsewhere = begin(&entry, &EntryRequest::default()).await;
+    assert!(matches!(
+        entry
+            .decline(
+                &elsewhere.state(),
+                [elsewhere.cookie.as_str()],
+                "https://elsewhere.example/callback"
+            )
+            .await,
+        Err(EntryError::RedirectMismatch)
+    ));
+}
+
 // The client id and secret are form-urlencoded before Basic encoding
 // (RFC 6749 §2.3.1).
 #[test]

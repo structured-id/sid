@@ -512,6 +512,40 @@ impl FederatedEntry {
         Err(EntryError::Unknown)
     }
 
+    /// End the entry `state` names whose return at `redirect_uri` carried an
+    /// error (OpenID Connect Core 1.0 §3.1.2.6: the holder declined or the
+    /// issuer refused), to the browser whose `Cookie` header values are
+    /// `cookies`: the continuation it was started for. Only an entry whose
+    /// code was never exchanged ends; one already exchanged keeps what a
+    /// retry of its own return resumes, and is [`EntryError::Unknown`] here.
+    pub async fn decline<'a>(
+        &self,
+        state: &str,
+        cookies: impl IntoIterator<Item = &'a str>,
+        redirect_uri: &str,
+    ) -> Result<String, EntryError> {
+        let browser = self
+            .correlation(state)
+            .secret(cookies)
+            .ok_or(EntryError::OtherBrowser)?;
+        let key = self.key(state, &browser);
+        let Some(Progress::Pending(pending)) = self.pending.read(&key).await? else {
+            return Err(EntryError::Unknown);
+        };
+        if pending.issuer != self.trusted.issuer || pending.client_id != self.trusted.client_id {
+            return Err(EntryError::Unknown);
+        }
+        // Whatever the return names, an unexchanged entry it reached is over;
+        // a concurrent return that took it first owns it.
+        if self.pending.take(&key).await?.is_none() {
+            return Err(EntryError::Unknown);
+        }
+        if pending.redirect_uri != redirect_uri {
+            return Err(EntryError::RedirectMismatch);
+        }
+        Ok(pending.continuation)
+    }
+
     /// The subject and evidence of `token`, the ID Token answered for
     /// `pending`, validated against the trusted issuer (OpenID Connect Core
     /// 1.0 §3.1.3.7).
