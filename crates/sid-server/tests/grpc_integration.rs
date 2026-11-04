@@ -901,48 +901,6 @@ async fn test_webauthn_authenticate_start_unknown_user() {
 // OPAQUE (AuthService)
 // ═══════════════════════════════════════════════════════════════════
 
-/// A password is installed only by a password operation: the plain OPAQUE
-/// registration RPCs refuse a well-formed request and register nothing, so
-/// they cannot skip the password proof or the first history entry.
-#[tokio::test]
-async fn test_plain_opaque_registration_is_refused() {
-    let email = "plain-registration@sid.example.com";
-    let svc = TestServices::new(MockStorage::new());
-    let started = common::zkpp_client::start(b"Str0ngP@ssword1");
-    let err = svc
-        .auth
-        .opaque_registration_start(Request::new(OpaqueRegistrationStartRequest {
-            principal: email.to_string(),
-            registration_request: started.request,
-            claim_token: None,
-        }))
-        .await
-        .expect_err("the plain registration start is refused");
-    assert_eq!(err.code(), tonic::Code::Unimplemented, "{}", err.message());
-    assert_eq!(
-        common::error_reason(&err).as_deref(),
-        Some("FEATURE_NOT_AVAILABLE")
-    );
-    let err = svc
-        .auth
-        .opaque_registration_finish(Request::new(OpaqueRegistrationFinishRequest {
-            principal: email.to_string(),
-            registration_record: vec![0; 32],
-            server_setup: uuid::Uuid::now_v7().to_string(),
-        }))
-        .await
-        .expect_err("the plain registration finish is refused");
-    assert_eq!(err.code(), tonic::Code::Unimplemented, "{}", err.message());
-    assert!(
-        svc.storage
-            .get_profile_by_principal(sid_core::models::PrincipalType::Email, email)
-            .await
-            .unwrap()
-            .is_none(),
-        "nothing is registered"
-    );
-}
-
 /// Run a whole registration operation for `principal` with `password`.
 async fn opaque_register(
     svc: &TestServices,
@@ -1273,19 +1231,50 @@ async fn test_opaque_login_start_unknown_user() {
     );
 }
 
+/// A finish names the login its start returned. A login nobody started reads
+/// as an expired sign-in; a missing id, or bytes that are no login id (wrong
+/// length, nil, another UUID version), are refused before anything is
+/// looked up.
 #[tokio::test]
 async fn test_opaque_login_finish_invalid_state() {
     let svc = TestServices::new(MockStorage::new());
-    let req = Request::new(OpaqueLoginFinishRequest {
-        principal: "nonexistent@sid.example.com".to_string(),
-        credential_finalization: vec![0, 1, 2, 3],
-        server_login_state: "nonexistent-state".to_string(),
-    });
+    let finish = |login_id| {
+        Request::new(OpaqueLoginFinishRequest {
+            principal: "nonexistent@sid.example.com".to_string(),
+            credential_finalization: vec![0, 1, 2, 3],
+            login_id,
+        })
+    };
 
-    // An unknown login state reads as an expired sign-in.
-    let err = svc.auth.opaque_login_finish(req).await.unwrap_err();
+    let unknown = sid_ids::OpaqueLoginId::generate();
+    let err = svc
+        .auth
+        .opaque_login_finish(finish(Some(unknown.into())))
+        .await
+        .unwrap_err();
     assert_eq!(err.code(), tonic::Code::FailedPrecondition);
     assert_eq!(common::error_reason(&err).as_deref(), Some("INVALID_STATE"));
+
+    let mut v4 = *uuid::Uuid::new_v4().as_bytes();
+    v4[0] |= 1;
+    for login_id in [
+        None,
+        Some(sid_proto::sid::v1::ids::OpaqueLoginId { value: vec![7; 15] }),
+        Some(sid_proto::sid::v1::ids::OpaqueLoginId { value: vec![0; 16] }),
+        Some(sid_proto::sid::v1::ids::OpaqueLoginId { value: v4.to_vec() }),
+    ] {
+        let err = svc
+            .auth
+            .opaque_login_finish(finish(login_id.clone()))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument, "{login_id:?}");
+        assert_eq!(
+            common::error_reason(&err).as_deref(),
+            Some("INVALID_FIELD_VALUE"),
+            "{login_id:?}"
+        );
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1321,7 +1310,7 @@ async fn test_e2e_opaque_registration_and_login() {
         .await
         .unwrap();
     let login_resp = resp.into_inner();
-    let server_login_state = login_resp.server_login_state.clone();
+    let login_id = login_resp.login_id.clone();
 
     let cred_response =
         CredentialResponse::<PallasCipherSuite>::deserialize(&login_resp.credential_response)
@@ -1342,7 +1331,7 @@ async fn test_e2e_opaque_registration_and_login() {
         .opaque_login_finish(Request::new(OpaqueLoginFinishRequest {
             principal: email.to_string(),
             credential_finalization: client_login_finish.message.serialize().to_vec(),
-            server_login_state,
+            login_id,
         }))
         .await
         .unwrap();
@@ -4791,7 +4780,7 @@ async fn test_opaque_login_response_uses_dynamic_expires_in() {
         .opaque_login_finish(Request::new(OpaqueLoginFinishRequest {
             principal: email.to_string(),
             credential_finalization: login_finish.message.serialize().to_vec(),
-            server_login_state: login_resp.server_login_state,
+            login_id: login_resp.login_id,
         }))
         .await
         .unwrap()
@@ -4851,7 +4840,7 @@ async fn test_session_evicted_at_limit_stops_its_tokens() {
             .opaque_login_finish(Request::new(OpaqueLoginFinishRequest {
                 principal: email.to_string(),
                 credential_finalization: login_finish.message.serialize().to_vec(),
-                server_login_state: login_resp.server_login_state,
+                login_id: login_resp.login_id,
             }))
             .await
             .unwrap()
@@ -7390,8 +7379,7 @@ async fn test_delete_totp_credential_then_reenroll() {
         .await
         .unwrap()
         .into_inner();
-    assert!(!resp.secret.is_empty(), "should get new TOTP secret");
-    assert!(resp.qr_uri.contains("otpauth://totp/"));
+    assert_eq!(resp.shared_secret.len(), 20, "should get a new TOTP secret");
 }
 
 // ═══════════════════════════════════════════════════════════════════

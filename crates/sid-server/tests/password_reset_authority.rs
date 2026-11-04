@@ -195,7 +195,7 @@ async fn sign_in_from_device(
         .opaque_login_finish(from_device(OpaqueLoginFinishRequest {
             principal: principal.to_string(),
             credential_finalization: finished.message.serialize().to_vec(),
-            server_login_state: started.server_login_state,
+            login_id: started.login_id,
         }))
         .await
 }

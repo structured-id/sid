@@ -86,7 +86,7 @@ async fn register_and_sign_in(svc: &TestServices, registered: &str, typed: &str)
         .opaque_login_finish(Request::new(OpaqueLoginFinishRequest {
             principal: typed.to_string(),
             credential_finalization: finished.message.serialize().to_vec(),
-            server_login_state: started.server_login_state,
+            login_id: started.login_id,
         }))
         .await
         .expect("login finish");

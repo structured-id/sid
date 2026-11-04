@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use sid_core::models::{
     AuditEntry, Credential, CredentialData, CredentialFence, CredentialId, CredentialType,
 };
+use sid_ids::OpaqueLoginId;
 use sid_plugin::{CredentialStore, LoginState, StoredCredential};
 use tracing::warn;
 
@@ -124,8 +125,36 @@ pub struct OpenedPassword {
 /// The answer to a sign-in start.
 pub struct Started {
     pub credential_response: Vec<u8>,
-    /// The key the finish names its state by.
-    pub state_key: String,
+    /// The login the finish names its kept state by.
+    pub login_id: OpaqueLoginId,
+}
+
+/// The login a finish names, or `INVALID_ARGUMENT` before anything is
+/// looked up: absent, of another length, nil, max or not a UUIDv7.
+#[cfg(feature = "password-operation")]
+#[allow(clippy::result_large_err)]
+pub fn login_id(
+    field: Option<&sid_ids_proto::OpaqueLoginId>,
+) -> Result<OpaqueLoginId, tonic::Status> {
+    use sid_core::grpc_error::{ApiError, ErrorReason};
+    sid_ids_proto::required(field).map_err(|e| {
+        ApiError::new(ErrorReason::InvalidFieldValue, e.to_string())
+            .with_field_violation("login_id", "an OPAQUE login id")
+            .into()
+    })
+}
+
+/// Keep `pending` for the finish of a new login, under that login's id.
+async fn keep<H: PasswordSignInHost>(
+    host: &H,
+    pending: &PendingSignIn<H::Owner>,
+) -> Result<OpaqueLoginId, H::Error> {
+    let login_id = OpaqueLoginId::generate();
+    host.pending()
+        .insert(&login_id.to_string(), pending)
+        .await
+        .map_err(PasswordSignInError::from)?;
+    Ok(login_id)
 }
 
 /// An account whose password the sign-in verified.
@@ -170,14 +199,10 @@ async fn decoy_start<H: PasswordSignInHost>(
             warn!("OPAQUE fake login start failed: {}", e);
             PasswordSignInError::AuthenticationFailed
         })?;
-    let state_key = uuid::Uuid::now_v7().to_string();
-    host.pending()
-        .insert(&state_key, &PendingSignIn::Decoy { identity, owner })
-        .await
-        .map_err(PasswordSignInError::from)?;
+    let login_id = keep(host, &PendingSignIn::Decoy { identity, owner }).await?;
     Ok(Started {
         credential_response,
-        state_key,
+        login_id,
     })
 }
 
@@ -231,35 +256,32 @@ pub async fn start<H: PasswordSignInHost>(
             PasswordSignInError::AuthenticationFailed
         })?;
 
-    let state_key = uuid::Uuid::now_v7().to_string();
-    host.pending()
-        .insert(
-            &state_key,
-            &PendingSignIn::Password {
-                state,
-                owner,
-                credential_id: password.id,
-                credential_data: opened.stored,
-            },
-        )
-        .await
-        .map_err(PasswordSignInError::from)?;
+    let login_id = keep(
+        host,
+        &PendingSignIn::Password {
+            state,
+            owner,
+            credential_id: password.id,
+            credential_data: opened.stored,
+        },
+    )
+    .await?;
     Ok(Started {
         credential_response,
-        state_key,
+        login_id,
     })
 }
 
-/// Finish the sign-in stored under `state_key`: the account whose password
+/// Finish the sign-in `login` names: the account whose password
 /// `finalization` proves, after its password is marked used. A lockout is
 /// checked before the password, so during one a right and a wrong password
 /// get the same answer.
 pub async fn finish<H: PasswordSignInHost>(
     host: &H,
-    state_key: &str,
+    login: &OpaqueLoginId,
     finalization: &[u8],
 ) -> Result<Verified<H::Account>, H::Error> {
-    let pending = match host.pending().take(state_key).await {
+    let pending = match host.pending().take(&login.to_string()).await {
         Ok(pending) => pending.ok_or(PasswordSignInError::Expired)?,
         // A state this build cannot read (an earlier build's, without the
         // password's stored form to fence on) is spent: the client starts

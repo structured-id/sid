@@ -371,16 +371,6 @@ fn already_registered(principal_type: PrincipalType) -> tonic::Status {
         .into()
 }
 
-/// UNIMPLEMENTED: the plain OPAQUE registration, which installs no password
-/// (see the registration RPCs).
-fn plain_registration_refused() -> tonic::Status {
-    ApiError::new(
-        ErrorReason::FeatureNotAvailable,
-        "register through OpaqueZkppRegistrationStart and OpaqueZkppRegistrationFinish",
-    )
-    .into()
-}
-
 /// INVALID_STATE: `method` cannot step up a session at `decay` (an older
 /// session takes only phishing-resistant methods).
 fn step_up_method_unavailable(method: StepUpMethod, decay: &str) -> Status {
@@ -3344,31 +3334,6 @@ impl AuthServiceImpl {
 
 #[tonic::async_trait]
 impl AuthService for AuthServiceImpl {
-    // ── OPAQUE Registration ──
-
-    // A password is installed only by a password operation (registration,
-    // change or reset), which verifies the password proof when one is
-    // required and records the first history entry with the credential. A
-    // plain OPAQUE registration would do neither, so it registers nothing.
-
-    #[tracing::instrument(skip_all, fields(rpc = "opaque_registration_start"))]
-    #[instrument(skip_all, fields(method = "opaque_registration_start"))]
-    async fn opaque_registration_start(
-        &self,
-        _request: Request<OpaqueRegistrationStartRequest>,
-    ) -> Result<Response<OpaqueRegistrationStartResponse>, Status> {
-        Err(plain_registration_refused())
-    }
-
-    #[tracing::instrument(skip_all, fields(rpc = "opaque_registration_finish"))]
-    #[instrument(skip_all, fields(method = "opaque_registration_finish"))]
-    async fn opaque_registration_finish(
-        &self,
-        _request: Request<OpaqueRegistrationFinishRequest>,
-    ) -> Result<Response<OpaqueRegistrationFinishResponse>, Status> {
-        Err(plain_registration_refused())
-    }
-
     // ── OPAQUE Login ──
 
     #[tracing::instrument(skip_all, fields(rpc = "opaque_login_start"))]
@@ -3389,7 +3354,7 @@ impl AuthService for AuthServiceImpl {
                 .map_err(|e| e.0)?;
         Ok(Response::new(OpaqueLoginStartResponse {
             credential_response: started.credential_response,
-            server_login_state: started.state_key,
+            login_id: Some(started.login_id.into()),
         }))
     }
 
@@ -3412,22 +3377,20 @@ impl AuthService for AuthServiceImpl {
             "/sid.v1.authn.AuthService/OpaqueLoginFinish",
         )?;
         let req = request.into_inner();
+        let login = sid_authn::password_sign_in::login_id(req.login_id.as_ref())?;
         // The key is bound to this ceremony, checked before it is consumed.
         let native_key = self
-            .native_ceremony_key(native.as_ref(), req.server_login_state.as_bytes())
+            .native_ceremony_key(native.as_ref(), login.as_bytes())
             .await?;
 
         let host = ProfileSignIn {
             service: self,
             client_ip,
         };
-        let verified = sid_authn::password_sign_in::finish(
-            &host,
-            &req.server_login_state,
-            &req.credential_finalization,
-        )
-        .await
-        .map_err(|e| e.0)?;
+        let verified =
+            sid_authn::password_sign_in::finish(&host, &login, &req.credential_finalization)
+                .await
+                .map_err(|e| e.0)?;
         let profile = verified.account;
         // Evaluate login security (anomaly detection + policy enforcement).
         let method = LoginMethod::Password;
@@ -5339,23 +5302,23 @@ impl AuthService for AuthServiceImpl {
             .map(|e| e.email.clone())
             .or_else(|| profile.username.clone())
             .unwrap_or_else(|| profile.id.to_string());
-        let account_name = account_name_owned.as_str();
-
-        let qr_uri = sid_authn::build_otpauth_uri("StructuredID", account_name, &secret);
-        let secret_b32 = sid_authn::base32_encode(&secret);
-
         // The caller's own pending enrollment (5 min TTL): both steps are
         // authenticated as this profile, and a new start replaces the old.
         let enrollment_key = format!("totp:{}", profile_id);
         self.totp_enrollment
-            .insert(&enrollment_key, &(profile_id, secret))
+            .insert(&enrollment_key, &(profile_id, secret.clone()))
             .await?;
 
+        // The secret and the parameters the codes are checked with; the
+        // client presents them (Base32, otpauth URI, QR).
         Ok(Response::new(TotpEnrollmentChallenge {
-            secret: secret_b32,
-            qr_uri,
             issuer: "StructuredID".to_string(),
-            account_name: account_name.to_string(),
+            account_name: account_name_owned,
+            shared_secret: secret,
+            algorithm: TotpAlgorithm::Sha1.into(),
+            digits: sid_authn::TOTP_DIGITS,
+            period_seconds: u32::try_from(sid_authn::TOTP_PERIOD)
+                .expect("the TOTP period is a few seconds"),
         }))
     }
 

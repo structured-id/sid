@@ -175,7 +175,7 @@ async fn a_completion_proving_its_key_gets_a_refresh_generation() {
     let finish = start_login(&svc, PRINCIPAL, PASSWORD).await;
     let login_proof = proof(
         &rpc_uri("OpaqueLoginFinish"),
-        Binds::Ceremony(finish.server_login_state.as_bytes()),
+        Binds::Ceremony(&finish.login_id.as_ref().unwrap().value),
     );
     let first = svc
         .auth
@@ -324,7 +324,7 @@ async fn a_sign_in_enrolls_its_first_factor_and_completes_with_it() {
         .await
         .expect("the first enrollment starts")
         .into_inner();
-    let seed = sid_authn::base32_decode(&challenge.secret).unwrap();
+    let seed = challenge.shared_secret;
     let finished = svc
         .auth
         .finish_totp_enrollment(with_token(
@@ -394,7 +394,7 @@ async fn a_replaced_password_enrolls_nothing_from_its_older_sign_in() {
         .await
         .expect("the proof holds at the start")
         .into_inner();
-    let seed = sid_authn::base32_decode(&challenge.secret).unwrap();
+    let seed = challenge.shared_secret;
     replace_password().await;
 
     let refused = svc

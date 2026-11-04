@@ -128,15 +128,6 @@ impl TotpReplayGuard {
     }
 }
 
-/// Build an otpauth:// URI for QR code generation.
-pub fn build_otpauth_uri(issuer: &str, account: &str, secret: &[u8]) -> String {
-    let secret_b32 = base32_encode(secret);
-    format!(
-        "otpauth://totp/{}:{}?secret={}&issuer={}&algorithm=SHA1&digits={}&period={}",
-        issuer, account, secret_b32, issuer, TOTP_DIGITS, TOTP_PERIOD
-    )
-}
-
 /// Base32 encode (RFC 4648, no padding).
 pub fn base32_encode(data: &[u8]) -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";

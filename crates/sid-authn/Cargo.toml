@@ -101,8 +101,9 @@ phonenumber = { workspace = true }
 tonic = { workspace = true, optional = true }
 # The password operation's wire form (optional)
 sid-proto = { workspace = true, optional = true }
-# The password operation's typed id and its wire form (optional)
-sid-ids = { workspace = true, features = ["std", "serde"], optional = true }
+# The typed ids of password operations and sign-ins; their wire form
+# (optional).
+sid-ids = { workspace = true, features = ["std", "serde"] }
 sid-ids-proto = { workspace = true, optional = true }
 prost-types = { workspace = true, optional = true }
 # A keyed command's recorded response (optional)
@@ -132,7 +133,6 @@ oauth-http = ["grpc", "dep:sid-proto"]
 password-operation = [
     "grpc",
     "dep:sid-proto",
-    "dep:sid-ids",
     "dep:sid-ids-proto",
     "dep:prost-types",
 ]

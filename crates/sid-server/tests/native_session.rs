@@ -33,13 +33,13 @@ async fn services() -> (TestServices, ProfileId) {
     (svc, profile)
 }
 
-/// A native password sign-in whose finish proves the test key over its
-/// `server_login_state`.
+/// A native password sign-in whose finish proves the test key over the bytes
+/// of its `login_id`.
 async fn renewable_sign_in(svc: &TestServices) -> Response<OpaqueLoginFinishResponse> {
     let finish = start_login(svc, PRINCIPAL, PASSWORD).await;
     let proof = proof(
         &rpc_uri("OpaqueLoginFinish"),
-        Binds::Ceremony(finish.server_login_state.as_bytes()),
+        Binds::Ceremony(&finish.login_id.as_ref().unwrap().value),
     );
     svc.auth
         .opaque_login_finish(with_proof(finish, &proof))

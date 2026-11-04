@@ -65,7 +65,7 @@ async fn enrolled_seed_is_stored_sealed() {
         .await
         .unwrap()
         .into_inner();
-    let seed = sid_authn::base32_decode(&challenge.secret).unwrap();
+    let seed = challenge.shared_secret;
     svc.auth
         .finish_totp_enrollment(authed(
             FinishTotpEnrollmentRequest {

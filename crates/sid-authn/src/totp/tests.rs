@@ -119,18 +119,6 @@ fn test_generate_secret_randomness() {
 }
 
 #[test]
-fn test_otpauth_uri_format() {
-    let secret = vec![0x48, 0x65, 0x6c, 0x6c, 0x6f]; // "Hello"
-    let uri = build_otpauth_uri("StructuredID", "alice", &secret);
-    assert!(uri.starts_with("otpauth://totp/StructuredID:alice?"));
-    assert!(uri.contains("secret="));
-    assert!(uri.contains("issuer=StructuredID"));
-    assert!(uri.contains("algorithm=SHA1"));
-    assert!(uri.contains("digits=6"));
-    assert!(uri.contains("period=30"));
-}
-
-#[test]
 fn test_totp_code_length() {
     let secret = generate_secret();
     let code = compute_totp(&secret, 12345);

@@ -225,7 +225,7 @@ async fn sign_in(
                 .ok()
         })
         .map_or_else(|| vec![0u8; 64], |f| f.message.serialize().to_vec());
-    finish(h, &started.state_key, &finalization).await
+    finish(h, &started.login_id, &finalization).await
 }
 
 fn refused(r: Result<Verified<ProfileId>, HostError>) -> HostError {
@@ -266,9 +266,10 @@ async fn an_unreadable_state_is_an_expired_sign_in() {
         "sign-in",
         Duration::from_secs(60),
     );
+    let login = OpaqueLoginId::generate();
     earlier
         .insert(
-            "earlier-state",
+            &login.to_string(),
             &serde_json::json!({ "Password": {
                 "state": LoginState(vec![1]),
                 "profile_id": owner,
@@ -278,7 +279,7 @@ async fn an_unreadable_state_is_an_expired_sign_in() {
         .await
         .unwrap();
 
-    let e = refused(finish(&h, "earlier-state", &[0u8; 64]).await);
+    let e = refused(finish(&h, &login, &[0u8; 64]).await);
     assert!(
         matches!(e, HostError::SignIn(PasswordSignInError::Expired)),
         "{e:?}"
@@ -329,7 +330,7 @@ async fn a_password_resealed_after_the_start_fences_on_the_new_form() {
                 .unwrap()
         );
 
-        let verified = finish(&h, &started.state_key, &finalization).await.unwrap();
+        let verified = finish(&h, &started.login_id, &finalization).await.unwrap();
         let stored = h.store.get_credential(password.id).await.unwrap().unwrap();
         if change {
             assert!(verified.proved_by.data == password.data, "the form read");
@@ -458,7 +459,7 @@ async fn lockout_refuses_start_and_finish() {
         .await
         .unwrap();
     h.locked.lock().unwrap().insert(owner.to_string());
-    let e = finish(&h, &started.state_key, &[0u8; 64])
+    let e = finish(&h, &started.login_id, &[0u8; 64])
         .await
         .err()
         .unwrap();
@@ -495,8 +496,17 @@ async fn state_is_taken_once() {
         .serialize()
         .to_vec();
 
-    finish(&h, &started.state_key, &finalization).await.unwrap();
-    let e = finish(&h, &started.state_key, &finalization)
+    finish(&h, &started.login_id, &finalization).await.unwrap();
+    let e = finish(&h, &started.login_id, &finalization)
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        matches!(e, HostError::SignIn(PasswordSignInError::Expired)),
+        "{e:?}"
+    );
+    // A login nobody started finds no state either.
+    let e = finish(&h, &OpaqueLoginId::generate(), &finalization)
         .await
         .err()
         .unwrap();
@@ -540,7 +550,7 @@ async fn password_revoked_in_flight_signs_nobody_in() {
         .serialize()
         .to_vec();
 
-    let e = finish(&h, &started.state_key, &finalization)
+    let e = finish(&h, &started.login_id, &finalization)
         .await
         .err()
         .unwrap();
@@ -612,14 +622,15 @@ async fn an_earlier_decoy_state_is_an_expired_sign_in() {
         "sign-in",
         Duration::from_secs(60),
     );
+    let login = OpaqueLoginId::generate();
     earlier
         .insert(
-            "earlier-decoy",
+            &login.to_string(),
             &serde_json::json!({ "Decoy": { "identity": "nobody" } }),
         )
         .await
         .unwrap();
-    let e = refused(finish(&h, "earlier-decoy", &[0u8; 64]).await);
+    let e = refused(finish(&h, &login, &[0u8; 64]).await);
     assert!(
         matches!(e, HostError::SignIn(PasswordSignInError::Expired)),
         "{e:?}"
