@@ -618,6 +618,10 @@ CREATE TABLE IF NOT EXISTS native_generations (
 );
 
 CREATE INDEX IF NOT EXISTS idx_native_generations_session ON native_generations(session_id);
+-- A generation's predecessor, found by every rotation; a generation has at
+-- most one.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_native_generations_successor
+    ON native_generations(successor_id) WHERE successor_id IS NOT NULL;
 
 -- One row per credential of a generation: its SHA-256, never the credential.
 CREATE TABLE IF NOT EXISTS native_credentials (

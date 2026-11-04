@@ -23,6 +23,7 @@ use zeroize::Zeroizing;
 
 use crate::dpop::{DPopError, DPopValidator, NativeProofBinding};
 use crate::oauth2::OAuth2Server;
+use crate::revocation_cache::RevocationCache;
 
 /// Response metadata carrying a generation's [`NativeCredentialSet`].
 pub const CREDENTIALS_METADATA: &str = "sid-native-credentials-bin";
@@ -146,13 +147,15 @@ pub async fn issue<S>(
 ) -> Result<NativeCredentialSet, NativeError>
 where
     S: GrantStore + ?Sized,
+    S::Owner: std::fmt::Display,
 {
     let first = new_generation(session, key_jkt, policy);
     store
         .issue_native_generation(
             &first.generation,
+            // The account the session belongs to acted, not the session.
             AuditEntry::user(
-                session.id.to_string(),
+                session.profile_id.to_string(),
                 "native_session.issue",
                 first.generation.id.to_string(),
             )
@@ -187,11 +190,13 @@ pub async fn refresh<S>(
     store: &S,
     keys: &dyn KeyManager,
     proofs: &DPopValidator,
+    revocation: &RevocationCache,
     request: RefreshRequest<'_>,
     policy: NativePolicy,
 ) -> Result<Refreshed<S::Owner>, NativeError>
 where
     S: GrantStore + ?Sized,
+    S::Owner: std::fmt::Display,
 {
     let presented = store
         .native_generation_by_credential(&OAuth2Server::hash_token(request.credential))
@@ -238,7 +243,7 @@ where
                 redeliver_until: chrono::Utc::now() + window,
             },
             AuditEntry::user(
-                session.id.to_string(),
+                session.profile_id.to_string(),
                 "native_session.refresh",
                 successor.generation.id.to_string(),
             )
@@ -262,7 +267,7 @@ where
             // A retired credential with the session's own key: whoever holds
             // it is not the client alone. The session and what it
             // authenticated end; a failure to end it fails the request.
-            store
+            let ended = store
                 .delete_session(
                     session.id,
                     &SessionEnd::new(RevocationReason::AnomalyDetected, "system"),
@@ -272,6 +277,14 @@ where
                     )),
                 )
                 .await?;
+            // Their access tokens stop at once in every process. Each end
+            // also committed its revocation as owed work, which publishes
+            // whatever is not published now.
+            for id in ended {
+                if let Err(e) = revocation.revoke_session(id.to_string()).await {
+                    tracing::warn!(session_id = %id, error = %e, "reused session revocation left to its owed work");
+                }
+            }
             Err(NativeError::Reused)
         }
         NativeRotationOutcome::Ended => Err(NativeError::Ended),

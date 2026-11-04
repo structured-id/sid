@@ -16,6 +16,7 @@ struct Harness {
     store: SqliteBackend,
     keys: SoftwareKeyManager,
     proofs: DPopValidator,
+    revocation: crate::revocation_cache::RevocationCache,
     policy: NativePolicy,
 }
 
@@ -33,6 +34,10 @@ async fn harness() -> Harness {
         store: SqliteBackend::new_in_memory().await.unwrap(),
         keys: keys(),
         proofs: DPopValidator::new(Arc::new(sid_plugin::InProcessCeremonyState::new())),
+        revocation: crate::revocation_cache::RevocationCache::new(
+            std::time::Duration::from_secs(900),
+            Arc::new(sid_plugin::cache::InMemoryCacheBackend::new()),
+        ),
         policy: NativePolicy::from_session_policy(&SecurityPolicy::ce_default().session).unwrap(),
     }
 }
@@ -108,6 +113,7 @@ async fn present(
         &h.store,
         &h.keys,
         &h.proofs,
+        &h.revocation,
         RefreshRequest {
             proof: &proof,
             method: "POST",
@@ -201,6 +207,13 @@ async fn a_retired_credential_with_its_key_ends_the_session() {
         .unwrap();
     assert!(matches!(err, NativeError::Reused), "{err:?}");
     assert!(h.store.get_session(s.id).await.unwrap().is_none());
+    // Its access tokens stop now, not when the revocation work runs.
+    assert!(
+        h.revocation
+            .is_revoked("any-token", &s.id.to_string())
+            .await
+            .unwrap()
+    );
 }
 
 /// A credential no generation holds is refused and ends nothing.

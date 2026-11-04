@@ -1723,6 +1723,8 @@ CREATE INDEX idx_recovery_shards_sid_unconsumed ON recovery_shards USING btree (
 
 CREATE INDEX idx_native_generations_session ON native_generations USING btree (session_id);
 
+CREATE UNIQUE INDEX idx_native_generations_successor ON native_generations USING btree (successor_id) WHERE (successor_id IS NOT NULL);
+
 CREATE INDEX idx_native_credentials_generation ON native_credentials USING btree (generation_id);
 
 CREATE INDEX idx_refresh_tokens_family ON refresh_tokens USING btree (family_id);

@@ -174,3 +174,6 @@ impl SqliteBackend {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

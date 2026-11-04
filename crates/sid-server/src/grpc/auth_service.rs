@@ -3506,6 +3506,7 @@ impl AuthService for AuthServiceImpl {
             self.storage.as_ref(),
             self.key_manager.as_ref(),
             &self.dpop_validator,
+            &self.revocation_cache,
             sid_authn::native_session::RefreshRequest {
                 proof: proof.proof(),
                 method: &proof.target().method,

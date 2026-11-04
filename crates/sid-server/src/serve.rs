@@ -475,7 +475,7 @@ fn transcoded_request<B>(mut request: http::Request<B>) -> http::Request<B> {
 /// Request headers the annotated RPCs read as metadata: credentials, DPoP
 /// proofs, operation contexts, client address and locale.
 #[cfg(feature = "http")]
-pub const HTTP_FORWARDED_HEADERS: [&str; 13] = [
+pub const HTTP_FORWARDED_HEADERS: [&str; 15] = [
     "authorization",
     // The IdP session cookie, read by the authorization and end-session
     // endpoints, and the origin a ceremony that sets it must come from.
@@ -492,6 +492,10 @@ pub const HTTP_FORWARDED_HEADERS: [&str; 13] = [
     "user-agent",
     sid_authn::operation::grpc::OPERATION_KEY_HEADER,
     sid_authn::operation::grpc::OPERATION_PERIOD_HEADER,
+    // A native client's proof of its application key and the refresh
+    // credential it presents (native_session.proto).
+    sid_authn::native_session::PROOF_METADATA,
+    sid_authn::native_session::REFRESH_METADATA,
 ];
 
 /// The embedded transcoder serving this server's annotated RPCs over HTTP:
