@@ -12,7 +12,9 @@ use sid_core::Error;
 use sid_core::models::session::{AuthLevel, Elevation};
 use sid_core::models::{
     AuditEntry, AuthCodeRedemption, AuthorizationCode, BrowserCsrfToken, BrowserSecretHash,
-    MutationContext, RefreshToken, ResourceId, RevocationReason, Session, SessionEnd, SessionId,
+    MutationContext, NativeExchange, NativeGeneration, NativeGenerationState, NativePresented,
+    NativeRotation, NativeRotationOutcome, RefreshToken, ResourceId, RevocationReason, Session,
+    SessionEnd, SessionId,
 };
 use uuid::Uuid;
 
@@ -1404,4 +1406,303 @@ pub async fn a_pending_context_completes_once<H: GrantHarness>(h: &H) {
         .await;
     assert!(matches!(refused, Err(Error::Fenced(_))), "{refused:?}");
     assert!(h.store().get_session(late.id).await.unwrap().is_none());
+}
+
+/// A native generation of `credentials` refresh credentials for `session`,
+/// bound to the key `jkt`.
+fn native_generation<O>(session: &Session<O>, jkt: &str, credentials: usize) -> NativeGeneration {
+    NativeGeneration {
+        id: Uuid::now_v7(),
+        session_id: session.id,
+        key_jkt: jkt.to_owned(),
+        credential_hashes: (0..credentials)
+            .map(|_| {
+                let mut hash = Uuid::new_v4().as_bytes().to_vec();
+                hash.extend_from_slice(Uuid::new_v4().as_bytes());
+                hash
+            })
+            .collect(),
+        expires_at: ms(Utc::now() + Duration::days(30)),
+        created_at: ms(Utc::now()),
+    }
+}
+
+fn exchange() -> NativeExchange {
+    NativeExchange::from_bytes(Uuid::new_v4().as_bytes()).expect("16 bytes")
+}
+
+/// A stored session of a new owner with its first native generation.
+async fn native_session<H: GrantHarness>(h: &H) -> (Session<H::Owner>, NativeGeneration) {
+    let s = session(h.owner().await);
+    h.store()
+        .create_session_atomic(&s, 0, None, ctx())
+        .await
+        .unwrap();
+    let first = native_generation(&s, "jkt-conformance", 2);
+    h.store()
+        .issue_native_generation(&first, ctx())
+        .await
+        .unwrap();
+    (s, first)
+}
+
+async fn presented<H: GrantHarness>(h: &H, hash: &[u8]) -> Option<NativePresented> {
+    h.store()
+        .native_generation_by_credential(hash)
+        .await
+        .unwrap()
+}
+
+/// The first generation is stored only for a live session: each of its
+/// credentials names it, current, with its key; a session that does not
+/// exist or has expired gets none, and the same generation twice is a
+/// conflict.
+pub async fn native_generation_issued_for_a_live_session<H: GrantHarness>(h: &H) {
+    let (s, first) = native_session(h).await;
+    for hash in &first.credential_hashes {
+        let found = presented(h, hash).await.expect("credential stored");
+        assert_eq!(found.generation, first.id);
+        assert_eq!(found.session_id, s.id);
+        assert_eq!(found.key_jkt, "jkt-conformance");
+        assert_eq!(found.expires_at, first.expires_at);
+        assert_eq!(found.state, NativeGenerationState::Current);
+    }
+    let again = h.store().issue_native_generation(&first, ctx()).await;
+    assert!(matches!(again, Err(Error::Conflict(_))), "{again:?}");
+
+    let absent = native_generation(&session(h.owner().await), "jkt", 2);
+    let refused = h.store().issue_native_generation(&absent, ctx()).await;
+    assert!(matches!(refused, Err(Error::Fenced(_))), "{refused:?}");
+    assert!(presented(h, &absent.credential_hashes[0]).await.is_none());
+
+    let mut expired = session(h.owner().await);
+    expired.expires_at = ms(Utc::now() - Duration::minutes(1));
+    h.store()
+        .create_session_atomic(&expired, 0, None, ctx())
+        .await
+        .unwrap();
+    let late = native_generation(&expired, "jkt", 2);
+    let refused = h.store().issue_native_generation(&late, ctx()).await;
+    assert!(matches!(refused, Err(Error::Fenced(_))), "{refused:?}");
+}
+
+/// A generation rotates once. A retry of the same exchange inside the window
+/// answers the sealed result and stores nothing; another exchange finds it
+/// retired; once the successor rotates, the predecessor's retry finds it
+/// retired too and its sealed result is gone.
+pub async fn native_generation_rotates_once<H: GrantHarness>(h: &H) {
+    let (s, first) = native_session(h).await;
+    let x = exchange();
+    let second = native_generation(&s, "jkt-conformance", 2);
+    let window = ms(Utc::now() + Duration::seconds(30));
+    let rotate = |successor: &NativeGeneration, exchange: NativeExchange, sealed: &[u8]| {
+        let successor = successor.clone();
+        let sealed = sealed.to_vec();
+        async move {
+            h.store()
+                .rotate_native_generation(
+                    NativeRotation {
+                        presented: first.id,
+                        exchange,
+                        successor: &successor,
+                        sealed: &sealed,
+                        redeliver_until: window,
+                    },
+                    ctx(),
+                )
+                .await
+                .unwrap()
+        }
+    };
+
+    assert_eq!(
+        rotate(&second, x, b"sealed-second").await,
+        NativeRotationOutcome::Rotated
+    );
+    let rotated = presented(h, &first.credential_hashes[0]).await.unwrap();
+    assert_eq!(
+        rotated.state,
+        NativeGenerationState::Rotated {
+            exchange: x,
+            successor: second.id,
+            redeliver_until: window,
+            sealed: Some(b"sealed-second".to_vec()),
+        }
+    );
+    for hash in &second.credential_hashes {
+        let found = presented(h, hash).await.unwrap();
+        assert_eq!(found.generation, second.id);
+        assert_eq!(found.state, NativeGenerationState::Current);
+    }
+
+    // The retry brings another successor: it is answered the first one's
+    // sealed result, and its own successor is never stored.
+    let branch = native_generation(&s, "jkt-conformance", 2);
+    assert_eq!(
+        rotate(&branch, x, b"sealed-branch").await,
+        NativeRotationOutcome::Redeliver(b"sealed-second".to_vec())
+    );
+    assert!(presented(h, &branch.credential_hashes[0]).await.is_none());
+
+    let other = native_generation(&s, "jkt-conformance", 2);
+    assert_eq!(
+        rotate(&other, exchange(), b"sealed-other").await,
+        NativeRotationOutcome::Retired
+    );
+    assert!(presented(h, &other.credential_hashes[0]).await.is_none());
+
+    // The successor in use retires its predecessor's redelivery.
+    let third = native_generation(&s, "jkt-conformance", 2);
+    assert_eq!(
+        h.store()
+            .rotate_native_generation(
+                NativeRotation {
+                    presented: second.id,
+                    exchange: exchange(),
+                    successor: &third,
+                    sealed: b"sealed-third",
+                    redeliver_until: window,
+                },
+                ctx(),
+            )
+            .await
+            .unwrap(),
+        NativeRotationOutcome::Rotated
+    );
+    let late = native_generation(&s, "jkt-conformance", 2);
+    assert_eq!(
+        rotate(&late, x, b"sealed-late").await,
+        NativeRotationOutcome::Retired
+    );
+    let NativeGenerationState::Rotated { sealed, .. } = presented(h, &first.credential_hashes[1])
+        .await
+        .unwrap()
+        .state
+    else {
+        panic!("the first generation rotated");
+    };
+    assert_eq!(
+        sealed, None,
+        "a used successor left its predecessor's result"
+    );
+}
+
+/// After its window, a rotated generation's retry of the same exchange finds
+/// it retired: a saved result is never delivered late.
+pub async fn native_redelivery_ends_with_its_window<H: GrantHarness>(h: &H) {
+    let (s, first) = native_session(h).await;
+    let x = exchange();
+    let second = native_generation(&s, "jkt-conformance", 2);
+    let passed = ms(Utc::now() - Duration::seconds(1));
+    fn rotation<'a>(
+        presented: Uuid,
+        exchange: NativeExchange,
+        successor: &'a NativeGeneration,
+        redeliver_until: chrono::DateTime<Utc>,
+    ) -> NativeRotation<'a> {
+        NativeRotation {
+            presented,
+            exchange,
+            successor,
+            sealed: b"sealed",
+            redeliver_until,
+        }
+    }
+    let rotation = |successor| rotation(first.id, x, successor, passed);
+    assert_eq!(
+        h.store()
+            .rotate_native_generation(rotation(&second), ctx())
+            .await
+            .unwrap(),
+        NativeRotationOutcome::Rotated
+    );
+    let retry = native_generation(&s, "jkt-conformance", 2);
+    assert_eq!(
+        h.store()
+            .rotate_native_generation(rotation(&retry), ctx())
+            .await
+            .unwrap(),
+        NativeRotationOutcome::Retired
+    );
+}
+
+/// Concurrent rotations of one generation under one exchange: one rotates,
+/// every other is answered its sealed result, and only that one successor is
+/// stored. Under different exchanges the others find it retired.
+pub async fn concurrent_native_rotation<H: GrantHarness>(h: &H) {
+    for same_exchange in [true, false] {
+        let (s, first) = native_session(h).await;
+        let x = exchange();
+        let successors: Vec<_> = (0..4)
+            .map(|_| native_generation(&s, "jkt-conformance", 2))
+            .collect();
+        let sealed: Vec<Vec<u8>> = (0..4).map(|i| vec![i as u8; 8]).collect();
+        let window = ms(Utc::now() + Duration::seconds(30));
+        let exchanges: Vec<_> = (0..4)
+            .map(|_| if same_exchange { x } else { exchange() })
+            .collect();
+        let rotate = |i: usize| {
+            h.store().rotate_native_generation(
+                NativeRotation {
+                    presented: first.id,
+                    exchange: exchanges[i],
+                    successor: &successors[i],
+                    sealed: &sealed[i],
+                    redeliver_until: window,
+                },
+                ctx(),
+            )
+        };
+        let (a, b, c, d) = tokio::join!(rotate(0), rotate(1), rotate(2), rotate(3));
+        let outcomes: Vec<_> = [a, b, c, d].into_iter().map(Result::unwrap).collect();
+        let winners: Vec<usize> = (0..4)
+            .filter(|i| outcomes[*i] == NativeRotationOutcome::Rotated)
+            .collect();
+        assert_eq!(winners.len(), 1, "{outcomes:?}");
+        let won = winners[0];
+        for (i, outcome) in outcomes.iter().enumerate() {
+            let stored = presented(h, &successors[i].credential_hashes[0])
+                .await
+                .is_some();
+            assert_eq!(stored, i == won, "successor {i} of {outcomes:?}");
+            if i != won {
+                let expected = if same_exchange {
+                    NativeRotationOutcome::Redeliver(sealed[won].clone())
+                } else {
+                    NativeRotationOutcome::Retired
+                };
+                assert_eq!(outcome, &expected);
+            }
+        }
+    }
+}
+
+/// Ending a session ends its native generations: no credential names one,
+/// and a rotation in flight finds the session ended and stores nothing.
+pub async fn native_generations_end_with_their_session<H: GrantHarness>(h: &H) {
+    let (s, first) = native_session(h).await;
+    h.store().delete_session(s.id, &end(), ctx()).await.unwrap();
+    assert!(presented(h, &first.credential_hashes[0]).await.is_none());
+    let successor = native_generation(&s, "jkt-conformance", 2);
+    assert_eq!(
+        h.store()
+            .rotate_native_generation(
+                NativeRotation {
+                    presented: first.id,
+                    exchange: exchange(),
+                    successor: &successor,
+                    sealed: b"sealed",
+                    redeliver_until: ms(Utc::now() + Duration::seconds(30)),
+                },
+                ctx(),
+            )
+            .await
+            .unwrap(),
+        NativeRotationOutcome::Ended
+    );
+    assert!(
+        presented(h, &successor.credential_hashes[0])
+            .await
+            .is_none()
+    );
 }

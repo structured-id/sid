@@ -595,6 +595,39 @@ CREATE INDEX IF NOT EXISTS idx_refresh_tokens_hash ON refresh_tokens(token_hash)
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_family ON refresh_tokens(family_id);
 
 --------------------------------------------------------------------------------
+-- native_generations: the refresh credentials of a native session, one
+-- generation at a time, bound to its application key. A rotated generation
+-- keeps the exchange that rotated it, its successor and, until the successor
+-- is used, the sealed result a retry of that exchange receives until
+-- redeliver_until.
+--------------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS native_generations (
+    id              TEXT PRIMARY KEY,
+    session_id      TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    key_jkt         TEXT NOT NULL,
+    expires_at      TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    exchange        BLOB CHECK (exchange IS NULL OR length(exchange) = 16),
+    successor_id    TEXT,
+    redeliver_until TEXT,
+    sealed          BLOB,
+    CHECK ((exchange IS NULL) = (successor_id IS NULL)),
+    CHECK ((exchange IS NULL) = (redeliver_until IS NULL)),
+    CHECK (sealed IS NULL OR exchange IS NOT NULL)
+);
+
+CREATE INDEX IF NOT EXISTS idx_native_generations_session ON native_generations(session_id);
+
+-- One row per credential of a generation: its SHA-256, never the credential.
+CREATE TABLE IF NOT EXISTS native_credentials (
+    credential_hash BLOB PRIMARY KEY,
+    generation_id   TEXT NOT NULL REFERENCES native_generations(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_native_credentials_generation ON native_credentials(generation_id);
+
+--------------------------------------------------------------------------------
 -- authorization_codes
 --------------------------------------------------------------------------------
 

@@ -78,6 +78,14 @@ pub const CE_SESSION_IDLE_TIMEOUT_HOURS: u32 = 0;
 /// CE: No concurrent session limit (0 = unlimited).
 pub const CE_SESSION_MAX_CONCURRENT: u32 = 0;
 
+/// CE: two refresh credentials per native generation: the one a refresh
+/// presents and a spare for its retry after a lost response.
+pub const CE_NATIVE_REFRESH_GENERATION_SIZE: u32 = 2;
+
+/// CE: a retry of a committed native refresh receives its result for 30
+/// seconds, the OAuth refresh grace window's length.
+pub const CE_NATIVE_REDELIVERY_WINDOW_SECONDS: u32 = 30;
+
 /// CE: Session decay — full trust for 1 hour.
 pub const CE_SESSION_DECAY_FULL_TRUST_HOURS: u32 = 1;
 
@@ -574,6 +582,14 @@ pub struct SessionPolicy {
 
     /// Maximum concurrent sessions per profile. 0 = unlimited.
     pub max_concurrent_sessions: u32,
+
+    /// Refresh credentials in each generation of a native session, 1 to
+    /// `NATIVE_GENERATION_SIZE_MAX`.
+    pub native_refresh_generation_size: u32,
+
+    /// Seconds a committed native refresh is delivered again to a retry of
+    /// its exchange.
+    pub native_redelivery_window_seconds: u32,
 }
 
 /// Enforcement configuration.
@@ -700,6 +716,8 @@ impl SecurityPolicy {
                     medium_trust_hours: CE_SESSION_DECAY_MEDIUM_TRUST_HOURS,
                 },
                 max_concurrent_sessions: CE_SESSION_MAX_CONCURRENT,
+                native_refresh_generation_size: CE_NATIVE_REFRESH_GENERATION_SIZE,
+                native_redelivery_window_seconds: CE_NATIVE_REDELIVERY_WINDOW_SECONDS,
             },
             passkey_prompt: PasskeyPromptConfig {
                 mode: CE_PASSKEY_PROMPT_MODE,

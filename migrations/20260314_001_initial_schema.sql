@@ -1426,6 +1426,35 @@ CREATE TABLE refresh_tokens (
     CONSTRAINT refresh_tokens_session_id_fkey FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 
+-- The refresh credentials of a native session, one generation at a time,
+-- bound to its application key. A rotated generation keeps the exchange that
+-- rotated it, its successor and, until the successor is used, the sealed
+-- result a retry of that exchange receives until redeliver_until.
+CREATE TABLE native_generations (
+    id uuid NOT NULL,
+    session_id uuid NOT NULL,
+    key_jkt text NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    exchange bytea,
+    successor_id uuid,
+    redeliver_until timestamp with time zone,
+    sealed bytea,
+    CONSTRAINT native_generations_pkey PRIMARY KEY (id),
+    CONSTRAINT native_generations_session_id_fkey FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+    CONSTRAINT native_generations_exchange_check CHECK (exchange IS NULL OR length(exchange) = 16),
+    CONSTRAINT native_generations_rotated_check CHECK (num_nulls(exchange, successor_id, redeliver_until) IN (0, 3)),
+    CONSTRAINT native_generations_sealed_check CHECK (sealed IS NULL OR exchange IS NOT NULL)
+);
+
+-- One row per credential of a generation: its SHA-256, never the credential.
+CREATE TABLE native_credentials (
+    credential_hash bytea NOT NULL,
+    generation_id uuid NOT NULL,
+    CONSTRAINT native_credentials_pkey PRIMARY KEY (credential_hash),
+    CONSTRAINT native_credentials_generation_id_fkey FOREIGN KEY (generation_id) REFERENCES native_generations(id) ON DELETE CASCADE
+);
+
 CREATE TABLE resource_access (
     oauth_client_id text,
     machine_client_id character varying(255),
@@ -1691,6 +1720,10 @@ CREATE INDEX idx_provisioning_credentials_connector ON provisioning_credentials 
 CREATE UNIQUE INDEX idx_recovery_shards_profile_type ON recovery_shards USING btree (profile_id, shard_type);
 
 CREATE INDEX idx_recovery_shards_sid_unconsumed ON recovery_shards USING btree (profile_id) WHERE (((shard_type)::text = 'sid'::text) AND (consumed = false));
+
+CREATE INDEX idx_native_generations_session ON native_generations USING btree (session_id);
+
+CREATE INDEX idx_native_credentials_generation ON native_credentials USING btree (generation_id);
 
 CREATE INDEX idx_refresh_tokens_family ON refresh_tokens USING btree (family_id);
 
