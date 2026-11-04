@@ -1318,21 +1318,13 @@ async fn a_back_channel_logout_ends_the_application_session() {
     }
 }
 
-/// A logout naming no session ends every session of its subject
-/// authenticated by then, not one signed in afterwards.
+/// The client is registered with the session required (Back-Channel Logout
+/// 1.0 §2.2): a logout naming no session is `invalid_request` and ends
+/// nothing, never a subject-wide end.
 #[tokio::test]
-async fn a_subject_logout_ends_what_authenticated_before_it() {
+async fn a_logout_without_its_session_ends_nothing() {
     let (f, key) = issuing_fixture(memory());
-    let (before, _) = signed_in(&f, false).await;
-    let mut later = claims();
-    later.sid = "issuer-session-2".into();
-    later.auth_time = chrono::Utc::now().timestamp() + 60;
-    let (after, _) = f
-        .sessions
-        .create_session("access".into(), None, later, &connection().binding())
-        .await
-        .unwrap();
-
+    let (id, _) = signed_in(&f, false).await;
     let token = logout_token(
         &key,
         "ops-web",
@@ -1345,11 +1337,8 @@ async fn a_subject_logout_ends_what_authenticated_before_it() {
         .receive_back_channel_logout(logout_post(&token))
         .await
         .unwrap();
-    assert_eq!(status(&answer), "200");
-    assert!(session_read(&f, &before).await.is_err());
-    session_read(&f, &after)
-        .await
-        .expect("a later sign-in stays");
+    assert_eq!(status(&answer), "400");
+    session_read(&f, &id).await.expect("nothing was ended");
 }
 
 /// A token for another client, of another type, or a request that is not a

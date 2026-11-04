@@ -18,8 +18,7 @@ use rand::TryRng;
 use secrecy::{ExposeSecret, SecretString};
 use sha2::{Digest, Sha256};
 use sid_authn::bff_session::{
-    BffSession, BffSessionStore, IssuerLogout, PendingSignIn, RefreshClaim, SessionClaims,
-    TokenReplacement,
+    BffSession, BffSessionStore, PendingSignIn, RefreshClaim, SessionClaims, TokenReplacement,
 };
 use sid_authn::issuer_directory::{IssuedTokenRefusal, IssuerDirectory};
 use sid_authn::relying_party::Connection;
@@ -152,8 +151,8 @@ impl ApplicationSessions {
     }
 
     /// The issuer's back-channel logout (Back-Channel Logout 1.0 §2.5–§2.8):
-    /// the validated logout token's issuer session, or subject, is recorded
-    /// as ended before 200 is answered; an invalid request is 400
+    /// the validated logout token's issuer session is recorded as ended
+    /// before 200 is answered; an invalid request is 400
     /// `invalid_request`, a store that cannot record it 503 so the issuer
     /// retries.
     async fn receive_logout(&self, body: HttpBody) -> Response<HttpBody> {
@@ -193,17 +192,12 @@ impl ApplicationSessions {
                 return http(503);
             }
         };
-        let logout = match claims.sid.as_deref() {
-            Some(sid) => IssuerLogout::Session {
-                iss: &claims.iss,
-                sid,
-            },
-            None => IssuerLogout::Subject {
-                iss: &claims.iss,
-                sub: &claims.sub,
-            },
+        // The client is registered with the session required (§2.2): a logout
+        // naming no session is not one it accepts, never a subject-wide end.
+        let Some(sid) = claims.sid.as_deref() else {
+            return logout_refused("the logout token names no session");
         };
-        match self.sessions.record_issuer_logout(logout, claims.iat).await {
+        match self.sessions.record_issuer_logout(&claims.iss, sid).await {
             Ok(()) => http(200),
             Err(e) => {
                 tracing::error!(error = %e, "cannot record the issuer's logout");

@@ -1320,42 +1320,18 @@ async fn test_an_issuer_session_logout_ends_its_sessions_only() {
         iss: "https://other.sid.example.com".into(),
         ..test_claims()
     };
-    let logout = IssuerLogout::Session {
-        iss: &claims.iss,
-        sid: &claims.sid,
-    };
-    a.record_issuer_logout(logout, 100).await.unwrap();
-    a.record_issuer_logout(logout, 100).await.unwrap();
+    // Replicas recording the same logout at once, and a repeat, all leave it
+    // recorded.
+    let (first, second) = tokio::join!(
+        a.record_issuer_logout(&claims.iss, &claims.sid),
+        b.record_issuer_logout(&claims.iss, &claims.sid),
+    );
+    first.unwrap();
+    second.unwrap();
+    a.record_issuer_logout(&claims.iss, &claims.sid)
+        .await
+        .unwrap();
     assert!(b.ended_by_issuer(&claims).await.unwrap());
     assert!(!b.ended_by_issuer(&other).await.unwrap());
     assert!(!b.ended_by_issuer(&other_issuer).await.unwrap());
-}
-
-/// A subject-wide logout ends the sessions authenticated by its time, not a
-/// later sign-in of the same subject; a later logout moves the time forward,
-/// an earlier one never back.
-#[tokio::test]
-async fn test_a_subject_logout_ends_what_authenticated_before_it() {
-    let store = store();
-    let earlier = SessionClaims {
-        auth_time: 90,
-        ..test_claims()
-    };
-    let later = SessionClaims {
-        auth_time: 110,
-        sid: "sess_later".into(),
-        ..test_claims()
-    };
-    let logout = IssuerLogout::Subject {
-        iss: &earlier.iss,
-        sub: &earlier.sub,
-    };
-    store.record_issuer_logout(logout, 100).await.unwrap();
-    assert!(store.ended_by_issuer(&earlier).await.unwrap());
-    assert!(!store.ended_by_issuer(&later).await.unwrap());
-
-    store.record_issuer_logout(logout, 50).await.unwrap();
-    assert!(store.ended_by_issuer(&earlier).await.unwrap());
-    store.record_issuer_logout(logout, 120).await.unwrap();
-    assert!(store.ended_by_issuer(&later).await.unwrap());
 }
