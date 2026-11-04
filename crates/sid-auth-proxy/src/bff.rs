@@ -22,7 +22,7 @@ use crate::ProxyState;
 use secrecy::{ExposeSecret, SecretString};
 use sid_authn::bff_session::{BffSession, SessionClaims};
 
-use sid_authn::relying_party::Connection;
+use sid_authn::relying_party::{Connection, sign_in_cookie};
 use sid_infra::issuer_client::{RpClient, RpClientError};
 
 /// BFF routes.
@@ -65,6 +65,10 @@ async fn login_handler(
     // Same shape and strength as the verifier: 256 random bits.
     let nonce = generate_pkce_verifier();
     let return_to = local_path(params.rd.as_deref());
+    // The secret only the browser that started this sign-in holds, in a
+    // correlation cookie of this sign-in alone: sign-ins started at once in
+    // several tabs each keep their own and none replaces another's.
+    let browser = generate_pkce_verifier();
 
     // Without a store there is no login to start: sending the user on with a
     // state nobody can verify would make the callback unverifiable.
@@ -74,7 +78,7 @@ async fn login_handler(
             SecretString::from(code_verifier),
             nonce.clone(),
             return_to,
-            &connection.sign_in_binding(),
+            &connection.browser_sign_in_binding(&browser),
         )
         .await
     {
@@ -84,11 +88,21 @@ async fn login_handler(
             return StatusCode::SERVICE_UNAVAILABLE.into_response();
         }
     };
-    redirect(
+    let mut response = redirect(
         connection
             .authorize_url(&code_challenge, &state_param, &nonce)
             .as_str(),
-    )
+    );
+    let secure_flag = if state.bff_dev_mode { "" } else { " Secure;" };
+    let correlation = format!(
+        "{}={browser}; Path=/; HttpOnly;{secure_flag} SameSite=Lax; Max-Age={}",
+        sign_in_cookie(&state.bff_cookie_name, &state_param),
+        state.bff_sessions.pending_ttl().as_secs()
+    );
+    if let Ok(val) = correlation.parse() {
+        response.headers_mut().append("set-cookie", val);
+    }
+    response
 }
 
 /// Query parameters for login.
@@ -118,19 +132,30 @@ fn local_path(requested: Option<&str>) -> String {
 /// `GET /auth/callback`: redeem the authorization code.
 async fn callback_handler(
     State(state): State<ProxyState>,
+    headers: axum::http::HeaderMap,
     Query(params): Query<CallbackParams>,
 ) -> Response {
+    // A callback completes only the sign-in of the browser that started it
+    // (RFC 6749 §10.12, RFC 9700 §4.7.1): otherwise an attacker's own unused
+    // code, sent to a victim's browser, would sign the victim in to the
+    // attacker's account.
+    let correlation = sign_in_cookie(&state.bff_cookie_name, &params.state);
+    let Some(browser) = extract_bff_cookie(&headers, &correlation) else {
+        tracing::warn!("BFF callback: the sign-in was started in another browser");
+        return StatusCode::BAD_REQUEST.into_response();
+    };
     let (link, connection) = match connected(&state).await {
         Ok(pair) => pair,
         Err(status) => return status.into_response(),
     };
 
-    // A sign-in started under another connection or callback (a bundle
-    // replaced since) is not found under this one, and stays for a replica
-    // that still holds that connection.
+    // A sign-in started in another browser, or under another connection or
+    // callback (a bundle replaced since), is not found under this binding and
+    // stays: for its own browser, or a replica that still holds that
+    // connection.
     let pending = match state
         .bff_sessions
-        .take_pending(&params.state, &connection.sign_in_binding())
+        .take_pending(&params.state, &connection.browser_sign_in_binding(&browser))
         .await
     {
         Ok(Some(p)) => p,
@@ -148,6 +173,25 @@ async fn callback_handler(
         }
     };
 
+    // The sign-in is taken, whatever comes of it: its correlation cookie,
+    // and only its own, is cleared.
+    let mut response = complete_sign_in(&state, link, connection, params, pending).await;
+    let secure_flag = if state.bff_dev_mode { "" } else { " Secure;" };
+    let cleared = format!("{correlation}=; Path=/; HttpOnly;{secure_flag} SameSite=Lax; Max-Age=0");
+    if let Ok(val) = cleared.parse() {
+        response.headers_mut().append("set-cookie", val);
+    }
+    response
+}
+
+/// The rest of a callback whose pending sign-in this browser took.
+async fn complete_sign_in(
+    state: &ProxyState,
+    link: &RpClient,
+    connection: &Connection,
+    params: CallbackParams,
+    pending: sid_authn::bff_session::PendingSignIn,
+) -> Response {
     // The answer must come from the integration's issuer (RFC 9207 §2.4).
     if params.iss.as_deref() != Some(connection.issuer.as_str()) {
         tracing::warn!("BFF callback: authorization response from another issuer");
@@ -176,7 +220,7 @@ async fn callback_handler(
             return StatusCode::BAD_GATEWAY.into_response();
         }
     };
-    let mut claims = match verified_claims(&state, connection, &tokens.access_token).await {
+    let mut claims = match verified_claims(state, connection, &tokens.access_token).await {
         Ok(claims) => claims,
         Err(status) => return status.into_response(),
     };
