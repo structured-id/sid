@@ -129,6 +129,8 @@ fn ce_security_policy_response() -> pb::SecurityPolicyResponse {
         session_max_lifetime_hours: CE_SESSION_MAX_LIFETIME_HOURS as i32,
         session_idle_timeout_hours: CE_SESSION_IDLE_TIMEOUT_HOURS as i32,
         session_max_concurrent: CE_SESSION_MAX_CONCURRENT as i32,
+        native_refresh_generation_size: ce.session.native_refresh_generation_size,
+        native_redelivery_window_seconds: ce.session.native_redelivery_window_seconds,
         network: Some(pb::NetworkPolicy {
             allowed_countries: Vec::new(),
             blocked_countries: Vec::new(),

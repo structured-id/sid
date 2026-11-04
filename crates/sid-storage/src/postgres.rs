@@ -2027,6 +2027,29 @@ impl GrantStore for PostgresBackend {
         Ok(true)
     }
 
+    async fn issue_native_generation(
+        &self,
+        generation: &sid_core::models::NativeGeneration,
+        ctx: MutationContext,
+    ) -> SidResult<()> {
+        self.issue_native_generation_impl(generation, ctx).await
+    }
+
+    async fn native_generation_by_credential(
+        &self,
+        hash: &[u8],
+    ) -> SidResult<Option<sid_core::models::NativePresented>> {
+        self.native_generation_by_credential_impl(hash).await
+    }
+
+    async fn rotate_native_generation(
+        &self,
+        rotation: sid_core::models::NativeRotation<'_>,
+        ctx: MutationContext,
+    ) -> SidResult<sid_core::models::NativeRotationOutcome> {
+        self.rotate_native_generation_impl(rotation, ctx).await
+    }
+
     async fn create_auth_code(
         &self,
         code: &AuthorizationCode,
@@ -8988,6 +9011,7 @@ mod instance_secret;
 mod job_lock;
 mod login_policy;
 mod machine_credential;
+mod native_session;
 mod operation;
 pub use operation::PgOperationStore;
 mod password_history;

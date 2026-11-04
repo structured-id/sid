@@ -59,6 +59,8 @@ pub mod login_policy;
 pub mod machine_auth;
 pub mod magic_link;
 pub mod migration;
+#[cfg(feature = "keyed")]
+pub mod native_session;
 pub mod normalize;
 pub mod oauth2;
 #[cfg(feature = "oauth-http")]

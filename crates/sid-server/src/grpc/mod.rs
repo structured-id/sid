@@ -17,6 +17,7 @@ pub mod flow_service;
 pub mod identity_service;
 #[allow(dead_code)]
 pub mod machine_user_service;
+mod native_session;
 pub mod oidc_issuer_service;
 pub mod oidc_provider_service;
 pub mod password_operation;

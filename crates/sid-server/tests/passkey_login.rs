@@ -136,6 +136,55 @@ async fn signed_in_profile(
         .profile_id
 }
 
+/// A native passkey sign-in proving the application key over the start's
+/// `state_key` gets a refresh generation, in both the identifier and the
+/// discoverable flow. A proof over anything else is refused before the
+/// ceremony is consumed: the same assertion then completes with the right
+/// proof.
+#[tokio::test]
+async fn a_passkey_sign_in_proving_its_key_gets_a_refresh_generation() {
+    use common::native_client::{Binds, generation, proof, rpc_uri, with_proof};
+    let (svc, _profile, mut key) = account_with_passkey().await;
+    for principal in [Some(EMAIL.to_string()), None] {
+        let start = svc
+            .auth
+            .web_authn_authentication_start(Request::new(WebAuthnAuthenticationStartRequest {
+                principal: principal.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let finish = WebAuthnAuthenticationFinishRequest {
+            credential: key.assert(&start.options),
+            principal,
+            ..Default::default()
+        };
+        let finish_with = |reference: &[u8]| {
+            with_proof(
+                finish.clone(),
+                &proof(
+                    &rpc_uri("WebAuthnAuthenticationFinish"),
+                    Binds::Ceremony(reference),
+                ),
+            )
+        };
+        let refused = svc
+            .auth
+            .web_authn_authentication_finish(finish_with(b"another ceremony"))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+
+        let signed_in = svc
+            .auth
+            .web_authn_authentication_finish(finish_with(start.state_key.as_bytes()))
+            .await
+            .expect("signed in");
+        let set = generation(&signed_in).expect("a refresh generation");
+        assert_eq!(set.refresh_credentials.len(), 2);
+    }
+}
+
 /// Each sign-in stores the authenticator's signature counter and when the
 /// credential was used; without it the counter check compares against the
 /// registration value forever and a cloned authenticator is never noticed.
