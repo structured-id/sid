@@ -237,8 +237,10 @@ async fn store_modes(mode: &str, store: Arc<dyn WorkStore>) {
     let sent = Arc::new(Progress::default());
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let started = Instant::now();
-    let running =
-        tokio::spawn(runner(&store, &sent).run(async move { stopped.await.unwrap_or(()) }));
+    let runner = runner(&store, &sent);
+    // Woken after each acceptance, as the notifier's consumer does.
+    let waker = runner.waker();
+    let running = tokio::spawn(runner.run(async move { stopped.await.unwrap_or(()) }));
     let done = sent.reach(owed * FAN_OUT).await;
     // The accepted ones of `accept` drain with the backlog.
     rate(mode, "drain", owed, done - started);
@@ -250,6 +252,7 @@ async fn store_modes(mode: &str, store: Arc<dyn WorkStore>) {
         accept_event(store.as_ref(), &event(), CAPACITY)
             .await
             .unwrap();
+        waker.wake();
         let delivered = sent.reach(before + FAN_OUT).await;
         samples.push(delivered - started);
     }
