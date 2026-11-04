@@ -31,8 +31,9 @@ anyhow = { workspace = true }
 sid-proto = { workspace = true }
 tonic = { workspace = true }
 # The browser adapter of the hosted application: its client at the issuer,
-# the issuer directory, the session store and revocations.
-sid-authn = { workspace = true }
+# the issuer directory, the session store and revocations, and the browser
+# pages it answers with.
+sid-authn = { workspace = true, features = ["oauth-http"] }
 # The application's own database, where the adapter's sessions live:
 # PostgreSQL for shared replicas, SQLite for a single instance.
 sid-storage = { workspace = true, features = ["storage-pg", "storage-sqlite"] }

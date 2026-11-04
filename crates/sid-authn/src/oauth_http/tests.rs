@@ -352,6 +352,33 @@ fn test_page() {
     assert_eq!(response.get_ref().data, b"Unknown issuer");
 }
 
+/// A link page carries its text and one escaped link, may not be framed and
+/// loads nothing; a quote in the target cannot leave its attribute.
+#[test]
+fn test_link_page() {
+    let response = link_page(
+        403,
+        "You did not sign in.",
+        "Sign in again",
+        "/a?b=1&c=\"x\"",
+    );
+    assert_eq!(status_code(&response), "403");
+    assert_eq!(response.get_ref().content_type, "text/html; charset=utf-8");
+    let html = String::from_utf8(response.get_ref().data.clone()).unwrap();
+    assert!(html.contains("<p>You did not sign in.</p>"), "{html}");
+    assert!(
+        html.contains("<a href=\"/a?b=1&amp;c=&quot;x&quot;\">Sign in again</a>"),
+        "{html}"
+    );
+    let header = |name| response.metadata().get(name).unwrap().to_str().unwrap();
+    assert_eq!(header("cache-control"), "no-store");
+    assert_eq!(header("x-frame-options"), "DENY");
+    assert_eq!(
+        header("content-security-policy"),
+        "default-src 'none'; frame-ancestors 'none'"
+    );
+}
+
 /// A raw answer with no content keeps an empty content type.
 #[test]
 fn test_raw_answer() {
