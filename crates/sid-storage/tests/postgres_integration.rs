@@ -403,6 +403,9 @@ mod operation_result_store {
         results_are_purged_by_method,
         a_result_is_kept_no_longer_than_its_retention,
         operation_periods_bound_admission,
+        a_keyed_creation_binds_one_identifier,
+        a_binding_lives_with_its_completion,
+        bindings_travel_between_stores,
     );
 }
 
@@ -458,18 +461,21 @@ async fn operation_tables(pool: &sqlx::PgPool) -> Vec<String> {
                        coalesce(column_default, ''))
          FROM information_schema.columns
          WHERE table_schema = current_schema()
-           AND table_name IN ('operation_period_state', 'operation_periods', 'operation_results')
+           AND table_name IN ('operation_period_state', 'operation_periods', 'operation_results',
+                              'operation_resources')
          UNION ALL
          SELECT format('%s %s %s', c.conrelid::regclass::text, c.conname,
                        pg_get_constraintdef(c.oid))
          FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid
          WHERE t.relnamespace = current_schema()::regnamespace
-           AND t.relname IN ('operation_period_state', 'operation_periods', 'operation_results')
+           AND t.relname IN ('operation_period_state', 'operation_periods', 'operation_results',
+                             'operation_resources')
          UNION ALL
          SELECT format('%s %s', tablename, regexp_replace(indexdef, ' ON \\S+\\.', ' ON '))
          FROM pg_indexes
          WHERE schemaname = current_schema()
-           AND tablename IN ('operation_period_state', 'operation_periods', 'operation_results')
+           AND tablename IN ('operation_period_state', 'operation_periods', 'operation_results',
+                             'operation_resources')
          ORDER BY 1",
     )
     .fetch_all(pool)
@@ -501,6 +507,9 @@ mod host_operation_result_store {
         results_are_purged_by_method,
         a_result_is_kept_no_longer_than_its_retention,
         operation_periods_bound_admission,
+        a_keyed_creation_binds_one_identifier,
+        a_binding_lives_with_its_completion,
+        bindings_travel_between_stores,
     );
 }
 

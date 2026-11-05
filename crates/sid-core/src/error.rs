@@ -34,6 +34,11 @@ pub enum Error {
     #[error("Operation already completed: {0}")]
     OperationCompleted(String),
 
+    /// The caller's key already names another command (another method,
+    /// other inputs or another period): nothing was bound or committed.
+    #[error("Operation key names another command: {0}")]
+    OperationKeyReused(String),
+
     /// The period a keyed command names is not admitted by the store that
     /// owns it: the command committed nothing.
     #[error("Operation period not admitted: {0}")]
@@ -109,6 +114,7 @@ impl Error {
                 | Self::AuthorizationDenied(_)
                 | Self::Conflict(_)
                 | Self::OperationCompleted(_)
+                | Self::OperationKeyReused(_)
                 | Self::OperationPeriodRefused(_)
                 | Self::Fenced(_)
                 | Self::Expired(_)

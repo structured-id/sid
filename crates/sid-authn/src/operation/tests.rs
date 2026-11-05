@@ -171,10 +171,58 @@ async fn test_upkeep_retires_periods_past_their_retention() {
     );
 }
 
-/// Every attempt of one command names the same created identifier; another
+/// The identifier of what a keyed creation creates is a fresh UUIDv7 bound to
+/// the command: every attempt of it, concurrent ones included, resolves the
+/// same one; the key with other inputs is a conflict and binds nothing.
+#[tokio::test]
+async fn test_resource_id_is_allocated_once_per_command() {
+    let storage = SqliteBackend::new_in_memory().await.unwrap();
+    let period = period(&storage).await;
+    let context = OperationContext::new(OperationKey::parse("k-create").unwrap(), period);
+    let command = || KeyedCommand::of::<CreateProject>("profile:a", context.clone(), &create("p"));
+
+    let (first, second) = (command(), command());
+    let (a, b) = tokio::join!(first.resource_id(&storage), second.resource_id(&storage));
+    let id = a.unwrap();
+    assert_eq!(b.unwrap(), id, "concurrent attempts share one identifier");
+    assert_eq!(id.get_version_num(), 7, "allocated in its domain format");
+    assert_eq!(command().resource_id(&storage).await.unwrap(), id);
+
+    let other = KeyedCommand::of::<CreateProject>("profile:a", context.clone(), &create("q"));
+    assert!(matches!(
+        other.resource_id(&storage).await,
+        Err(OperationError::KeyConflict)
+    ));
+    // Another caller's key of the same name is another command.
+    let theirs = KeyedCommand::of::<CreateProject>("profile:b", context, &create("p"));
+    assert_ne!(theirs.resource_id(&storage).await.unwrap(), id);
+}
+
+/// A command named with a period the store retired binds nothing.
+#[tokio::test]
+async fn test_resource_id_under_a_retired_period_is_refused() {
+    let storage = SqliteBackend::new_in_memory().await.unwrap();
+    let policy = storage.operation_period_policy().await.unwrap();
+    let issued = storage
+        .current_operation_period(Utc::now(), policy.acceptance)
+        .await
+        .unwrap();
+    let past = issued.accepted_until + policy.retention + Duration::seconds(1);
+    assert_eq!(upkeep(&storage, past).await, 1);
+    let context = OperationContext::new(OperationKey::parse("k-late").unwrap(), issued.period);
+    let command = KeyedCommand::of::<CreateProject>("profile:a", context, &create("p"));
+    assert!(matches!(
+        command.resource_id(&storage).await,
+        Err(OperationError::PeriodRefused(
+            OperationPeriodRefusal::Retired
+        ))
+    ));
+}
+
+/// Every attempt of one command names the same correlation key; another
 /// key, period, caller or method names another one.
 #[test]
-fn test_created_id_is_the_commands_own() {
+fn test_command_id_is_the_commands_own() {
     let context = |key: &str, period| {
         OperationContext::new(
             OperationKey::parse(key).unwrap(),
@@ -182,7 +230,7 @@ fn test_created_id_is_the_commands_own() {
         )
     };
     let id = |namespace: &str, context, request: &CreateProjectRequest| {
-        KeyedCommand::of::<CreateProject>(namespace, context, request).created_id()
+        KeyedCommand::of::<CreateProject>(namespace, context, request).command_id()
     };
     let first = id("profile:a", context("k", 1), &create("p"));
     assert_eq!(first, id("profile:a", context("k", 1), &create("p")));
@@ -197,7 +245,7 @@ fn test_created_id_is_the_commands_own() {
         context("k", 1),
         &DeleteProjectRequest::default(),
     );
-    assert_ne!(first, other_method.created_id());
+    assert_ne!(first, other_method.command_id());
     assert_eq!(first.get_version_num(), 5);
 }
 

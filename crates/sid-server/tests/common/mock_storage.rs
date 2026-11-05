@@ -119,6 +119,8 @@ pub struct MockStorageInner {
     work: HashMap<WorkId, StoredWork>,
     /// Completions of keyed commands by (namespace, key).
     operations: HashMap<(String, String), OperationRecord>,
+    /// The identifiers keyed creations bound, by (namespace, key).
+    operation_resources: HashMap<(String, String), sid_core::models::OperationResourceBinding>,
     /// The periods keyed commands are admitted under, by number.
     operation_periods: std::collections::BTreeMap<u64, sid_core::models::OperationPeriodRecord>,
     /// The last period issued.
@@ -1844,6 +1846,70 @@ impl sid_plugin::OperationResultStore for MockStorage {
             return Ok(false);
         }
         inner.operations.insert(slot, record.clone());
+        Ok(true)
+    }
+    async fn bind_operation_resource(
+        &self,
+        proposal: &sid_core::models::OperationResourceBinding,
+    ) -> SidResult<uuid::Uuid> {
+        let slot = (
+            proposal.namespace.clone(),
+            proposal.key.as_str().to_string(),
+        );
+        let reused = || sid_core::Error::OperationKeyReused(proposal.key.as_str().into());
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(period) = proposal.period {
+            inner.admit_operation_period(period)?;
+        }
+        let now = chrono::Utc::now();
+        match inner.operations.get(&slot) {
+            Some(r) if r.completion.retain_until.is_some_and(|until| until <= now) => {
+                inner.operation_resources.remove(&slot);
+            }
+            Some(r)
+                if r.completion.method != proposal.method
+                    || r.completion.fingerprint != proposal.fingerprint
+                    || r.completion.period != proposal.period =>
+            {
+                return Err(reused());
+            }
+            _ => {}
+        }
+        match inner.operation_resources.get(&slot) {
+            Some(held) if held.same_command(proposal) => Ok(held.resource),
+            Some(_) => Err(reused()),
+            None => {
+                inner.operation_resources.insert(slot, proposal.clone());
+                Ok(proposal.resource)
+            }
+        }
+    }
+    async fn export_operation_resources(
+        &self,
+    ) -> SidResult<Vec<sid_core::models::OperationResourceBinding>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .operation_resources
+            .values()
+            .cloned()
+            .collect())
+    }
+    async fn import_operation_resource(
+        &self,
+        binding: &sid_core::models::OperationResourceBinding,
+    ) -> SidResult<bool> {
+        let slot = (binding.namespace.clone(), binding.key.as_str().to_string());
+        let mut inner = self.inner.lock().unwrap();
+        if inner.operation_resources.contains_key(&slot)
+            || binding
+                .period
+                .is_some_and(|p| inner.admit_operation_period(p).is_err())
+        {
+            return Ok(false);
+        }
+        inner.operation_resources.insert(slot, binding.clone());
         Ok(true)
     }
 }
