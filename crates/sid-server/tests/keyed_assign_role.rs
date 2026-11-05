@@ -538,7 +538,9 @@ async fn policy_edit_answers_its_stored_revision(h: Harness) {
                 name: format!("p{}", tag()),
                 policy_text: "permit(principal, action, resource);".into(),
                 effect: sid_proto::sid::v1::PolicyEffect::Permit as i32,
-                enabled: true,
+                // Disabled: the system project is shared by every test, and an
+                // enabled permit-all would decide other tests' checks.
+                enabled: false,
                 ..Default::default()
             },
             &h.token,
@@ -617,7 +619,8 @@ async fn policy(h: &Harness) -> sid_proto::sid::v1::Policy {
                 name: format!("p{}", tag()),
                 policy_text: "permit(principal, action, resource);".into(),
                 effect: sid_proto::sid::v1::PolicyEffect::Permit as i32,
-                enabled: true,
+                // Disabled, as in policy_edit_answers_its_stored_revision.
+                enabled: false,
                 ..Default::default()
             },
             &h.token,
