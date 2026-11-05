@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.15](https://github.com/structured-id/sid/compare/v0.2.14...v0.2.15) - 2026-11-05
+
+### Added
+
+- *(authn)* binary references on the sign-in path ([#409](https://github.com/structured-id/sid/pull/409))
+- *(authn)* binary OPAQUE login id and raw TOTP secret ([#406](https://github.com/structured-id/sid/pull/406))
+
 ## [0.2.14](https://github.com/structured-id/sid/compare/v0.2.13...v0.2.14) - 2026-11-05
 
 ### Added
