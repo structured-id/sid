@@ -1069,7 +1069,7 @@ async fn token_exchange_over_http() {
 
     let profile = common::test_profile();
     let machine = MachineUser::new(
-        ProjectId::system(),
+        ProjectId::SYSTEM,
         EXCHANGE_MACHINE,
         "HTTP exchange bot",
         OwnerType::System,
@@ -1307,7 +1307,7 @@ async fn registration_endpoints() -> (TestServices, String) {
     let iat = sid_core::models::InitialAccessToken {
         id: sid_core::models::InitialAccessTokenId::new(),
         token_hash: Sha256::digest(IAT.as_bytes()).to_vec(),
-        project_id: sid_core::models::ProjectId::system(),
+        project_id: sid_core::models::ProjectId::SYSTEM,
         max_clients: 10,
         clients_registered: 0,
         allowed_scopes: vec!["openid".into(), "profile".into()],

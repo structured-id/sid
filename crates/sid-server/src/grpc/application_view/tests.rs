@@ -7,7 +7,7 @@ const ISSUER: &str = "https://sid.example.com/i/0123456789abcdef0123456789abcdef
 fn client(kind: ApplicationType) -> OAuth2Client {
     OAuth2Client {
         client_id: "sid_test123".to_string(),
-        project_id: ProjectId::system(),
+        project_id: ProjectId::SYSTEM,
         application_id: ApplicationId::generate(),
         default_resource: Some(ResourceId::generate()),
         application_type: kind,
@@ -148,7 +148,7 @@ fn test_application_to_proto_carries_its_roles() {
 fn test_system_integration_is_shown() {
     let app = Application {
         id: ApplicationId::generate(),
-        project_id: ProjectId::system(),
+        project_id: ProjectId::SYSTEM,
         name: "Account".into(),
         system: Some(sid_core::models::SystemIntegration::Account),
         revision: 0,

@@ -8,7 +8,7 @@ fn make_pending_auth() -> DeviceAuthorizationCode {
         "WDJB-MJHT".to_string(),
         Some("openid".to_string()),
         sid_core::models::ResourceId::generate(),
-        ProjectId::new(),
+        ProjectId::generate(),
     )
 }
 

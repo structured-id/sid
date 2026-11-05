@@ -60,7 +60,7 @@ async fn fixture() -> Fixture {
             .await
             .unwrap();
     let machine = MachineUser::new(
-        ProjectId::system(),
+        ProjectId::SYSTEM,
         "mu_checker",
         "Route checker",
         OwnerType::System,
@@ -86,7 +86,7 @@ async fn fixture() -> Fixture {
     let now = chrono::Utc::now();
     let app = Application {
         id: ApplicationId::generate(),
-        project_id: ProjectId::system(),
+        project_id: ProjectId::SYSTEM,
         name: "Orders PDP".into(),
         system: None,
         revision: 0,

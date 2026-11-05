@@ -188,7 +188,7 @@ async fn concurrent_rotations_with_one_key_rotate_once(h: Harness) {
         .await
         .unwrap();
     let machine = MachineUser::new(
-        ProjectId::system(),
+        ProjectId::SYSTEM,
         format!("mu_{}", tag()),
         "Rotated",
         OwnerType::System,
@@ -260,7 +260,7 @@ async fn a_publication_answers_with_the_config_it_published(h: Harness) {
         .ensure_system_project(AuditEntry::system("test", "branding").into())
         .await
         .unwrap();
-    let project = sid_core::models::ProjectId::system().0.to_string();
+    let project = sid_core::models::ProjectId::SYSTEM.to_string();
     let token = common::administrator_token(&common::test_jwt(), h.storage.as_ref()).await;
     let branding = sid_server::grpc::branding_service::BrandingServiceImpl::new(
         h.storage.clone(),

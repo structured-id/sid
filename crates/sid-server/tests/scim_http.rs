@@ -348,7 +348,7 @@ impl Replica {
     async fn grant(&self, installation: &Installation, connector: &Connector) {
         let role = installation
             .storage
-            .list_roles(ProjectId::system())
+            .list_roles(ProjectId::SYSTEM)
             .await
             .unwrap()
             .into_iter()
@@ -359,7 +359,7 @@ impl Replica {
                 principal: Some(Principal::ProvisioningConnectorId(
                     connector.proto.id.clone().unwrap(),
                 )),
-                role_id: role.id.0.to_string(),
+                role_id: Some(role.id.into()),
                 scope: Some(format!("oauth_resource:{}", installation.directory.id)),
                 expires_at: None,
                 admin: None,
@@ -976,7 +976,7 @@ async fn refuses_before_effects(engine: Engine) {
             principal: Some(Principal::ProvisioningConnectorId(
                 connector.proto.id.clone().unwrap(),
             )),
-            role_id: Uuid::now_v7().to_string(),
+            role_id: Some(sid_core::models::RoleId::generate().into()),
             scope: None,
             expires_at: None,
             admin: None,

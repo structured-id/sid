@@ -130,7 +130,7 @@ impl SqliteBackend {
                 "INSERT INTO invites (id, code, created_by, created_by_machine, created_by_name, metadata, max_uses, use_count, expires_at, active, created_at) \
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
-            .bind(invite.id.0.to_string())
+            .bind(invite.id.to_string())
             .bind(&invite.code)
             .bind(by_profile)
             .bind(by_machine)
@@ -154,7 +154,7 @@ impl SqliteBackend {
             invite_columns!(),
             " FROM invites WHERE id = ?"
         ))
-        .bind(id.0.to_string())
+        .bind(id.to_string())
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -229,7 +229,7 @@ impl SqliteBackend {
             "SELECT profile_id, credential_id, redeemed_at FROM invite_redemptions \
              WHERE invite_id = ? ORDER BY redeemed_at, profile_id LIMIT ? OFFSET ?",
         )
-        .bind(id.0.to_string())
+        .bind(id.to_string())
         .bind(i64::try_from(limit).map_err(|e| SidError::Storage(e.to_string()))?)
         .bind(i64::try_from(offset).map_err(|e| SidError::Storage(e.to_string()))?)
         .fetch_all(&self.pool)
@@ -268,7 +268,7 @@ impl SqliteBackend {
              RETURNING ",
             invite_columns!()
         ))
-        .bind(id.0.to_string())
+        .bind(id.to_string())
         .bind(fmt_dt(&chrono::Utc::now()))
         .fetch_optional(&mut *tx)
         .await
@@ -289,7 +289,7 @@ impl SqliteBackend {
     ) -> SidResult<()> {
         let mut tx = self.begin_write().await?;
         sqlx::query("UPDATE invites SET active = 0 WHERE id = ?")
-            .bind(id.0.to_string())
+            .bind(id.to_string())
             .execute(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(format!("Revoke invite failed: {e}")))?;

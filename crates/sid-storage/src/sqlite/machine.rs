@@ -28,14 +28,10 @@ fn count_col(row: &sqlx::sqlite::SqliteRow, name: &str) -> SidResult<u32> {
 
 // Unknown stored values are errors, never an active service owned by a Profile.
 fn row_to_machine_user(row: &sqlx::sqlite::SqliteRow) -> SidResult<MachineUser> {
-    let project_id: String = col(row, "project_id")?;
     let max_token_lifetime: Option<i64> = col(row, "max_token_lifetime")?;
     Ok(MachineUser {
         id: col(row, "id")?,
-        project_id: ProjectId(
-            uuid::Uuid::parse_str(&project_id)
-                .map_err(|e| SidError::Storage(format!("column project_id: {e}")))?,
-        ),
+        project_id: col(row, "project_id")?,
         machine_type: parsed_col(row, "machine_type")?,
         owner_type: parsed_col(row, "owner_type")?,
         owner_id: col(row, "owner_id")?,
@@ -205,7 +201,7 @@ impl SqliteBackend {
             "INSERT INTO machine_users (id, project_id, machine_type, owner_type, owner_id, client_id, display_name, description, status, scopes, ip_allowlist, rate_limit_rpm, max_token_lifetime, expires_at, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         ).bind(mu.id)
-        .bind(mu.project_id.0.to_string())
+        .bind(mu.project_id.to_string())
         .bind(mu.machine_type.as_str())
         .bind(mu.owner_type.as_str())
         .bind(&mu.owner_id)
@@ -254,7 +250,7 @@ impl SqliteBackend {
         project_id: ProjectId,
     ) -> SidResult<Vec<MachineUser>> {
         let rows = sqlx::query("SELECT * FROM machine_users WHERE project_id = ?")
-            .bind(project_id.0.to_string())
+            .bind(project_id.to_string())
             .fetch_all(&self.pool)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;

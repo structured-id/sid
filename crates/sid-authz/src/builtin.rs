@@ -53,7 +53,7 @@ async fn ensure_builtin(storage: &dyn StorageBackend, role: Role) -> Result<Role
 
 async fn stored_with_key(storage: &dyn StorageBackend, key: &str) -> Result<Option<Role>> {
     Ok(storage
-        .list_roles(ProjectId::system())
+        .list_roles(ProjectId::SYSTEM)
         .await?
         .into_iter()
         .find(|r| r.key == key))

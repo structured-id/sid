@@ -27,7 +27,7 @@ pub(crate) async fn insert_work_in_tx(
     // The same obligation again is already stored: accepted, whatever the load.
     let exists: bool =
         sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM durable_work WHERE id = ?)")
-            .bind(work.id.0.to_string())
+            .bind(work.id.to_string())
             .fetch_one(&mut *tx)
             .await
             .map_err(storage)?;
@@ -56,7 +56,7 @@ pub(crate) async fn insert_work_in_tx(
             created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING",
     )
-    .bind(work.id.0.to_string())
+    .bind(work.id.to_string())
     .bind(work.kind.as_str())
     .bind(&work.payload)
     .bind(i64::from(work.max_attempts))
@@ -199,7 +199,7 @@ impl WorkStore for SqliteBackend {
         )
         .bind(result)
         .bind(fmt_dt(&chrono::Utc::now()))
-        .bind(id.0.to_string())
+        .bind(id.to_string())
         .bind(generation)
         .execute(&self.pool)
         .await
@@ -233,7 +233,7 @@ impl WorkStore for SqliteBackend {
         .bind(&failure.error)
         .bind(failure.ambiguous)
         .bind(fmt_dt(&chrono::Utc::now()))
-        .bind(id.0.to_string())
+        .bind(id.to_string())
         .bind(generation)
         .fetch_optional(&mut *tx)
         .await
@@ -258,7 +258,7 @@ impl WorkStore for SqliteBackend {
                 ambiguous, result, not_before, expires_at, created_at, updated_at
              FROM durable_work WHERE id = ?",
         )
-        .bind(id.0.to_string())
+        .bind(id.to_string())
         .fetch_optional(&self.pool)
         .await
         .map_err(storage)?;
@@ -296,7 +296,7 @@ impl WorkStore for SqliteBackend {
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT (id) DO NOTHING",
         )
-        .bind(record.id.0.to_string())
+        .bind(record.id.to_string())
         .bind(record.kind.as_str())
         .bind(&work.payload)
         .bind(record.state.as_str())

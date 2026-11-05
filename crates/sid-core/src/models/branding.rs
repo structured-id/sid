@@ -372,7 +372,7 @@ mod tests {
     fn test_branding_config_serde() {
         let config = BrandingConfig {
             id: BrandingConfigId::new(),
-            project_id: ProjectId::new(),
+            project_id: ProjectId::generate(),
             status: BrandingStatus::Draft,
             revision: 0,
             assets: BrandingAssets {

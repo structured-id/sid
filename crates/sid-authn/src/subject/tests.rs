@@ -42,7 +42,7 @@ async fn storage_with_profile() -> (SqliteBackend, ProfileId) {
 fn make_client(subject_type: SubjectType) -> OAuth2Client {
     OAuth2Client {
         client_id: "test-client".to_string(),
-        project_id: ProjectId::system(),
+        project_id: ProjectId::SYSTEM,
         application_id: sid_core::models::ApplicationId::generate(),
         default_resource: None,
         application_type: ApplicationType::Web,
@@ -236,7 +236,7 @@ async fn test_projects_of_one_org_share_the_binding() {
     let client_a = make_client(SubjectType::Public);
     let mut client_b = make_client(SubjectType::Public);
     client_b.client_id = "other-project-client".to_string();
-    client_b.project_id = ProjectId::new();
+    client_b.project_id = ProjectId::generate();
 
     assert_eq!(
         binding_sub(&storage, pid, &client_a).await,

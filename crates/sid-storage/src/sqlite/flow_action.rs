@@ -37,8 +37,8 @@ impl SqliteBackend {
                 data, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(action.id.0.to_string())
-        .bind(action.project_id.0.to_string())
+        .bind(action.id.to_string())
+        .bind(action.project_id.to_string())
         .bind(action.flow_type.as_str())
         .bind(action.action_point.as_str())
         .bind(action.order)
@@ -71,7 +71,7 @@ impl SqliteBackend {
         .bind(action.order)
         .bind(&data)
         .bind(fmt_dt(&action.updated_at))
-        .bind(action.id.0.to_string())
+        .bind(action.id.to_string())
         .bind(revision)
         .execute(&mut *tx)
         .await
@@ -87,7 +87,7 @@ impl SqliteBackend {
 
     pub(crate) async fn get_flow_action_impl(&self, id: ActionId) -> SidResult<Option<FlowAction>> {
         sqlx::query("SELECT data, revision FROM flow_actions WHERE id = ?")
-            .bind(id.0.to_string())
+            .bind(id.to_string())
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| SidError::Storage(format!("Query: {e}")))?
@@ -109,7 +109,7 @@ impl SqliteBackend {
                  WHERE project_id = ? AND flow_type = ? AND action_point = ?
                  ORDER BY action_order, id",
                 )
-                .bind(project_id.0.to_string())
+                .bind(project_id.to_string())
                 .bind(flow_type.as_str())
                 .bind(point.as_str())
                 .fetch_all(&self.pool)
@@ -121,7 +121,7 @@ impl SqliteBackend {
                  WHERE project_id = ? AND flow_type = ?
                  ORDER BY action_point, action_order, id",
                 )
-                .bind(project_id.0.to_string())
+                .bind(project_id.to_string())
                 .bind(flow_type.as_str())
                 .fetch_all(&self.pool)
                 .await

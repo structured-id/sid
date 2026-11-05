@@ -85,7 +85,7 @@ impl Harness {
     fn scope(&self) -> sid_proto::sid::v1::PolicyScope {
         sid_proto::sid::v1::PolicyScope {
             scope: Some(sid_proto::sid::v1::policy_scope::Scope::ProjectId(
-                self.project.0.to_string(),
+                self.project.into(),
             )),
         }
     }
@@ -210,7 +210,7 @@ async fn test_duplicate_group_name_is_group_already_exists() {
     let h = harness().await;
     let name = unique("dup-group");
     let group = || authz::CreateGroupRequest {
-        project_id: h.project.0.to_string(),
+        project_id: Some(h.project.into()),
         name: name.clone(),
         ..Default::default()
     };
@@ -228,12 +228,12 @@ async fn test_duplicate_group_name_is_group_already_exists() {
 #[tokio::test]
 async fn test_unknown_identifiers_are_typed_not_found() {
     let h = harness().await;
-    let missing = uuid::Uuid::now_v7().to_string();
-
     let err = h
         .svc
         .get_role(h.authed(authz::GetRoleRequest {
-            identifier: Some(authz::get_role_request::Identifier::Id(missing.clone())),
+            identifier: Some(authz::get_role_request::Identifier::Id(
+                sid_core::models::RoleId::generate().into(),
+            )),
             ..Default::default()
         }))
         .await
@@ -244,7 +244,9 @@ async fn test_unknown_identifiers_are_typed_not_found() {
     let err = h
         .svc
         .get_group(h.authed(authz::GetGroupRequest {
-            identifier: Some(authz::get_group_request::Identifier::Id(missing.clone())),
+            identifier: Some(authz::get_group_request::Identifier::Id(
+                sid_core::models::GroupId::generate().into(),
+            )),
             ..Default::default()
         }))
         .await
@@ -254,7 +256,9 @@ async fn test_unknown_identifiers_are_typed_not_found() {
 
     let err = h
         .svc
-        .get_policy(h.authed(GetPolicyRequest { id: missing }))
+        .get_policy(h.authed(GetPolicyRequest {
+            id: Some(sid_core::models::CedarPolicyId::generate().into()),
+        }))
         .await
         .expect_err("no policy");
     assert_eq!(err.code(), Code::NotFound);
@@ -266,9 +270,8 @@ async fn test_unknown_identifiers_are_typed_not_found() {
 #[tokio::test]
 async fn test_list_role_assignments_by_role() {
     let h = harness().await;
-    let project = h.project.0.to_string();
     let create_role = |name: String| authz::CreateRoleRequest {
-        project_id: project.clone(),
+        project_id: Some(h.project.into()),
         name,
         ..Default::default()
     };
@@ -288,13 +291,14 @@ async fn test_list_role_assignments_by_role() {
         .into_inner()
         .role
         .expect("role");
-    let assign = |role_id: &str, profile: ProfileId| authz::AssignRoleRequest {
-        role_id: role_id.to_string(),
-        principal: Some(authz::assign_role_request::Principal::ProfileId(
-            profile.to_string(),
-        )),
-        ..Default::default()
-    };
+    let assign =
+        |role_id: &Option<sid_ids_proto::RoleId>, profile: ProfileId| authz::AssignRoleRequest {
+            role_id: role_id.clone(),
+            principal: Some(authz::assign_role_request::Principal::ProfileId(
+                profile.into(),
+            )),
+            ..Default::default()
+        };
     let mut expected = Vec::new();
     for _ in 0..2 {
         let a = h
@@ -316,14 +320,20 @@ async fn test_list_role_assignments_by_role() {
         .svc
         .list_role_assignments(h.authed(authz::ListRoleAssignmentsRequest {
             filter: Some(authz::list_role_assignments_request::Filter::RoleId(
-                role.id.clone(),
+                role.id.clone().expect("role id"),
             )),
         }))
         .await
         .expect("listed by role")
         .into_inner()
         .assignments;
-    let mut ids: Vec<String> = listed.into_iter().map(|a| a.id).collect();
+    let typed = |id: Option<sid_ids_proto::RoleAssignmentId>| {
+        sid_ids_proto::required(id.as_ref()).expect("assignment id")
+    };
+    let mut ids: Vec<sid_core::models::RoleAssignmentId> =
+        listed.into_iter().map(|a| typed(a.id)).collect();
+    let mut expected: Vec<sid_core::models::RoleAssignmentId> =
+        expected.into_iter().map(typed).collect();
     ids.sort();
     expected.sort();
     assert_eq!(ids, expected);

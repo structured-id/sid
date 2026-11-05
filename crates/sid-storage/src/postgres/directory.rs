@@ -492,9 +492,9 @@ macro_rules! group_insert {
 
 async fn write_group(tx: &mut Tx<'_>, g: &Group, sql: &'static str) -> Result<u64, sqlx::Error> {
     sqlx::query(sql)
-        .bind(g.id.0)
-        .bind(g.project_id.0)
-        .bind(g.parent_group_id.map(|gid| gid.0))
+        .bind(g.id)
+        .bind(g.project_id)
+        .bind(g.parent_group_id)
         .bind(&g.name)
         .bind(&g.description)
         .bind(g.created_at)
@@ -516,7 +516,7 @@ pub(super) async fn insert_group(tx: &mut Tx<'_>, g: &Group) -> SidResult<()> {
 /// does not exist.
 async fn update_group(tx: &mut Tx<'_>, g: &Group) -> SidResult<bool> {
     sqlx::query("UPDATE groups SET name = $2, description = $3, updated_at = $4 WHERE id = $1")
-        .bind(g.id.0)
+        .bind(g.id)
         .bind(&g.name)
         .bind(&g.description)
         .bind(g.updated_at)
@@ -533,7 +533,7 @@ pub(super) async fn add_member(tx: &mut Tx<'_>, member: &GroupMember) -> SidResu
     // Exclusive lock on the group: a fenced grant to it takes it FOR SHARE,
     // so neither commits unseen by the other.
     sqlx::query("SELECT 1 FROM groups WHERE id = $1 FOR UPDATE")
-        .bind(member.group_id.0)
+        .bind(member.group_id)
         .execute(&mut **tx)
         .await
         .map_err(storage("lock group"))?;
@@ -542,7 +542,7 @@ pub(super) async fn add_member(tx: &mut Tx<'_>, member: &GroupMember) -> SidResu
          WHERE group_id = $1 AND basis_assignment_id IS NOT NULL AND granted_by = $2
          LIMIT 1",
     )
-    .bind(member.group_id.0)
+    .bind(member.group_id)
     .bind(format!("user:{}", member.profile_id))
     .fetch_optional(&mut **tx)
     .await
@@ -558,7 +558,7 @@ pub(super) async fn add_member(tx: &mut Tx<'_>, member: &GroupMember) -> SidResu
         VALUES ($1, $2, $3)
         ON CONFLICT (group_id, profile_id) DO NOTHING",
     )
-    .bind(member.group_id.0)
+    .bind(member.group_id)
     .bind(member.profile_id)
     .bind(member.added_at)
     .execute(&mut **tx)
@@ -584,7 +584,7 @@ pub(super) async fn remove_member(
     profile_id: ProfileId,
 ) -> SidResult<()> {
     sqlx::query("DELETE FROM group_members WHERE group_id = $1 AND profile_id = $2")
-        .bind(group_id.0)
+        .bind(group_id)
         .bind(profile_id)
         .execute(&mut **tx)
         .await
@@ -680,7 +680,7 @@ impl PostgresBackend {
             DirectoryWriteMode::Create => insert_group(&mut tx, &write.group).await?,
             DirectoryWriteMode::Update => {
                 if !update_group(&mut tx, &write.group).await? {
-                    return Err(SidError::NotFound(format!("group {}", group_id.0)));
+                    return Err(SidError::NotFound(format!("group {group_id}")));
                 }
             }
         }
@@ -695,7 +695,7 @@ impl PostgresBackend {
             }
             add_member(&mut tx, member).await?;
         }
-        Self::audit_in_tx(&mut tx, &format!("group:{}", group_id.0), ctx).await?;
+        Self::audit_in_tx(&mut tx, &format!("group:{group_id}"), ctx).await?;
         tx.commit().await.map_err(storage("commit"))?;
         Ok(())
     }

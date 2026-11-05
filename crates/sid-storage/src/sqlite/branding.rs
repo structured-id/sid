@@ -39,8 +39,8 @@ impl SqliteBackend {
             "INSERT INTO branding_configs (id, project_id, status, data, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?)",
         )
-        .bind(config.id.0.to_string())
-        .bind(config.project_id.0.to_string())
+        .bind(config.id.to_string())
+        .bind(config.project_id.to_string())
         .bind(config.status.as_str())
         .bind(&data)
         .bind(fmt_dt(&config.created_at))
@@ -66,7 +66,7 @@ impl SqliteBackend {
         )
         .bind(&data)
         .bind(fmt_dt(&config.updated_at))
-        .bind(config.id.0.to_string())
+        .bind(config.id.to_string())
         .bind(revision)
         .execute(&mut *tx)
         .await
@@ -93,8 +93,8 @@ impl SqliteBackend {
         let draft = sqlx::query(
             "SELECT id FROM branding_configs WHERE id = ? AND project_id = ? AND status = 'draft'",
         )
-        .bind(id.0.to_string())
-        .bind(project_id.0.to_string())
+        .bind(id.to_string())
+        .bind(project_id.to_string())
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("publish branding: {e}")))?;
@@ -107,7 +107,7 @@ impl SqliteBackend {
              WHERE project_id = ? AND status = 'published'",
         )
         .bind(&at)
-        .bind(project_id.0.to_string())
+        .bind(project_id.to_string())
         .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("archive branding: {e}")))?;
@@ -117,14 +117,14 @@ impl SqliteBackend {
              WHERE id = ?",
         )
         .bind(&at)
-        .bind(id.0.to_string())
+        .bind(id.to_string())
         .execute(&mut *tx)
         .await
         .map_err(|e| super::insert_error("published branding", e))?;
         let published = sqlx::query(
             "SELECT status, revision, updated_at, data FROM branding_configs WHERE id = ?",
         )
-        .bind(id.0.to_string())
+        .bind(id.to_string())
         .fetch_one(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("read published branding: {e}")))?;
@@ -141,7 +141,7 @@ impl SqliteBackend {
             "SELECT status, revision, updated_at, data FROM branding_configs
              WHERE project_id = ? AND status = 'published'",
         )
-        .bind(project_id.0.to_string())
+        .bind(project_id.to_string())
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("Query: {e}")))?
@@ -155,7 +155,7 @@ impl SqliteBackend {
         id: BrandingConfigId,
     ) -> SidResult<Option<BrandingConfig>> {
         sqlx::query("SELECT status, revision, updated_at, data FROM branding_configs WHERE id = ?")
-            .bind(id.0.to_string())
+            .bind(id.to_string())
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| SidError::Storage(format!("Query: {e}")))?
@@ -172,7 +172,7 @@ impl SqliteBackend {
             "SELECT status, revision, updated_at, data FROM branding_configs
              WHERE project_id = ? ORDER BY updated_at DESC, id",
         )
-        .bind(project_id.0.to_string())
+        .bind(project_id.to_string())
         .fetch_all(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("Query: {e}")))?
@@ -190,7 +190,7 @@ impl SqliteBackend {
         // A published config is never deleted, even one published meanwhile.
         let deleted =
             sqlx::query("DELETE FROM branding_configs WHERE id = ? AND status <> 'published'")
-                .bind(id.0.to_string())
+                .bind(id.to_string())
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| SidError::Storage(format!("Delete: {e}")))?

@@ -243,8 +243,7 @@ impl<S: StorageBackend + ?Sized + 'static> PolicySimulator<S> {
                 } => {
                     if !applicable.scopes.contains(&scope) {
                         errors.push(format!(
-                            "proposed policy '{name}' belongs to project {} and does not apply to {resource}",
-                            project_id.0
+                            "proposed policy '{name}' belongs to project {project_id} and does not apply to {resource}"
                         ));
                         continue;
                     }
@@ -287,14 +286,14 @@ impl<S: StorageBackend + ?Sized + 'static> PolicySimulator<S> {
                             p.enabled = *en;
                         }
                     } else {
-                        errors.push(format!("policy {} not found for update", id.0));
+                        errors.push(format!("policy {id} not found for update"));
                     }
                 }
                 ProposedChange::DeletePolicy { id } => {
                     let before = policies.len();
                     policies.retain(|p| p.id != *id);
                     if policies.len() == before {
-                        errors.push(format!("policy {} not found for deletion", id.0));
+                        errors.push(format!("policy {id} not found for deletion"));
                     }
                 }
             }
@@ -308,7 +307,7 @@ impl<S: StorageBackend + ?Sized + 'static> PolicySimulator<S> {
         policies
             .iter()
             .filter(|p| p.enabled)
-            .map(|p| (p.id.0.to_string(), p.policy_text.clone()))
+            .map(|p| (p.id.to_string(), p.policy_text.clone()))
             .collect()
     }
 }
@@ -322,7 +321,7 @@ mod tests {
     async fn setup() -> (PolicySimulator<MockStorage>, Arc<MockStorage>, ProjectId) {
         let storage = Arc::new(MockStorage::new());
         let simulator = PolicySimulator::new(storage.clone());
-        let project_id = ProjectId::new();
+        let project_id = ProjectId::generate();
         (simulator, storage, project_id)
     }
 
@@ -332,7 +331,7 @@ mod tests {
     }
 
     fn resource(project_id: ProjectId) -> String {
-        format!("project:{}", project_id.0)
+        format!("project:{project_id}")
     }
 
     // ── No changes ──
@@ -485,7 +484,7 @@ mod tests {
             policy_text: r#"permit(principal, action == Action::"read", resource);"#.into(),
             effect: PolicyEffect::Permit,
         }];
-        for parent in [Some(ProjectId::new()), None] {
+        for parent in [Some(ProjectId::generate()), None] {
             let target = storage.register_resource(parent);
             let result = sim
                 .simulate(
@@ -617,7 +616,7 @@ mod tests {
     async fn test_delete_nonexistent_reports_error() {
         let (sim, _, pid) = setup().await;
         let changes = vec![ProposedChange::DeletePolicy {
-            id: CedarPolicyId::new(),
+            id: CedarPolicyId::generate(),
         }];
 
         let result = sim

@@ -116,7 +116,7 @@ pub fn create_test_session(profile_id: ProfileId) -> Session {
 pub fn create_test_oauth2_client(client_id: &str) -> OAuth2Client {
     OAuth2Client {
         client_id: client_id.to_string(),
-        project_id: ProjectId::system(),
+        project_id: ProjectId::SYSTEM,
         application_id: sid_core::models::ApplicationId::generate(),
         default_resource: None,
         application_type: sid_core::models::ApplicationType::default(),
@@ -435,7 +435,7 @@ pub async fn test_session_save_and_get(backend: &dyn StorageBackend) {
 pub async fn test_role_roundtrip(backend: &dyn StorageBackend) {
     let key = format!("editor_{}", Uuid::now_v7().simple());
     let name = format!("Content Editor {key}");
-    let mut role = sid_core::models::Role::new(ProjectId::system(), &key, &name);
+    let mut role = sid_core::models::Role::new(ProjectId::SYSTEM, &key, &name);
     role.group = Some("Content".into());
     role.description = Some("edits content".into());
     role.permissions = vec!["content:read".into(), "content:write".into()];
@@ -468,7 +468,7 @@ pub async fn test_cedar_policy_write_contract(backend: &dyn StorageBackend) {
 
     let name = format!("deny_export_{}", Uuid::now_v7().simple());
     let policy = CedarPolicy::new(
-        sid_core::models::PolicyScope::Project(ProjectId::system()),
+        sid_core::models::PolicyScope::Project(ProjectId::SYSTEM),
         &name,
         r#"forbid(principal, action == Action::"export", resource);"#,
         PolicyEffect::Forbid,
@@ -580,7 +580,7 @@ pub async fn test_project_write_contract(backend: &dyn StorageBackend) {
     backend.ensure_system_project(test_audit()).await.unwrap();
     assert!(
         backend
-            .update_project(ProjectId::system(), &rename, test_audit())
+            .update_project(ProjectId::SYSTEM, &rename, test_audit())
             .await
             .unwrap()
             .is_none(),
@@ -588,7 +588,7 @@ pub async fn test_project_write_contract(backend: &dyn StorageBackend) {
     );
     assert_ne!(
         backend
-            .get_project(ProjectId::system())
+            .get_project(ProjectId::SYSTEM)
             .await
             .unwrap()
             .unwrap()
@@ -625,7 +625,7 @@ pub async fn test_profile_grant_write_contract(backend: &dyn StorageBackend) {
         .unwrap();
     backend.ensure_system_project(test_audit()).await.unwrap();
     let mut grant = ProfileGrant::new(
-        ProjectId::system(),
+        ProjectId::SYSTEM,
         profile.id,
         vec!["admin".into(), "editor".into()],
     );
@@ -649,7 +649,7 @@ pub async fn test_profile_grant_write_contract(backend: &dyn StorageBackend) {
     assert_eq!(by_profile[0].role_keys, ["admin", "editor"]);
     assert!(
         backend
-            .list_profile_grants_for_project(ProjectId::system())
+            .list_profile_grants_for_project(ProjectId::SYSTEM)
             .await
             .unwrap()
             .iter()
@@ -686,7 +686,7 @@ pub async fn test_ensure_system_project_concurrent(backend: &dyn StorageBackend)
     c.unwrap();
     assert!(
         backend
-            .get_project(ProjectId::system())
+            .get_project(ProjectId::SYSTEM)
             .await
             .unwrap()
             .expect("system project")
@@ -699,7 +699,7 @@ pub async fn test_cedar_policy_concurrent_update(backend: &dyn StorageBackend) {
     use sid_core::models::{CedarPolicy, PolicyEffect};
 
     let policy = CedarPolicy::new(
-        sid_core::models::PolicyScope::Project(ProjectId::system()),
+        sid_core::models::PolicyScope::Project(ProjectId::SYSTEM),
         format!("race_{}", Uuid::now_v7().simple()),
         "permit(principal, action, resource);",
         PolicyEffect::Permit,
@@ -1170,7 +1170,7 @@ pub async fn test_access_request_decided_once(backend: &dyn StorageBackend) {
         .await
         .unwrap();
 
-    let mut request = AccessRequest::new(requester.id, ProjectId::system(), "staging-access");
+    let mut request = AccessRequest::new(requester.id, ProjectId::SYSTEM, "staging-access");
     request.justification = Some("on call".into());
     request.requested_duration_hours = Some(8);
     backend
@@ -1202,7 +1202,7 @@ pub async fn test_access_request_decided_once(backend: &dyn StorageBackend) {
 
     backend.ensure_system_project(test_audit()).await.unwrap();
     let role = sid_core::models::Role::new(
-        ProjectId::system(),
+        ProjectId::SYSTEM,
         format!("staging-access-{}", Uuid::now_v7().simple()),
         format!("Staging access {}", Uuid::now_v7().simple()),
     );
@@ -1242,7 +1242,7 @@ pub async fn test_access_request_decided_once(backend: &dyn StorageBackend) {
     assert_eq!(decided.review_comment.as_deref(), comment);
     assert!(
         backend
-            .get_access_request(sid_core::models::AccessRequestId(uuid::Uuid::now_v7()))
+            .get_access_request(sid_core::models::AccessRequestId::generate())
             .await
             .unwrap()
             .is_none()
@@ -1287,12 +1287,12 @@ pub async fn test_access_request_approval_grants_the_role(backend: &dyn StorageB
         .await
         .unwrap();
     let role = Role::new(
-        ProjectId::system(),
+        ProjectId::SYSTEM,
         format!("staging-{}", Uuid::now_v7().simple()),
         format!("Staging {}", Uuid::now_v7().simple()),
     );
     backend.create_role(&role, test_audit()).await.unwrap();
-    let pending = || AccessRequest::new(requester.id, ProjectId::system(), role.key.clone());
+    let pending = || AccessRequest::new(requester.id, ProjectId::SYSTEM, role.key.clone());
     let grant =
         |role_id| RoleAssignment::new(RoleAssignmentPrincipal::Profile(requester.id), role_id);
 
@@ -1304,7 +1304,7 @@ pub async fn test_access_request_approval_grants_the_role(backend: &dyn StorageB
         .unwrap();
     let mut approved = request.clone();
     approved.approve(reviewer.id, None).unwrap();
-    let orphan = grant(sid_core::models::RoleId::new());
+    let orphan = grant(sid_core::models::RoleId::generate());
     assert!(
         backend
             .approve_access_request(&approved, &orphan, test_audit())
@@ -1752,10 +1752,10 @@ pub async fn test_integrity_counts_ignore_group_assignments(backend: &dyn Storag
     use sid_core::models::{Group, Role, RoleAssignment, RoleAssignmentPrincipal};
 
     let key = format!("viewer_{}", Uuid::now_v7().simple());
-    let role = Role::new(ProjectId::system(), &key, format!("Viewer {key}"));
+    let role = Role::new(ProjectId::SYSTEM, &key, format!("Viewer {key}"));
     backend.create_role(&role, test_audit()).await.unwrap();
     let group = Group::new(
-        ProjectId::system(),
+        ProjectId::SYSTEM,
         format!("ops_{}", Uuid::now_v7().simple()),
     );
     backend.create_group(&group, test_audit()).await.unwrap();
@@ -1919,7 +1919,7 @@ pub async fn test_scim_outbound_roundtrip(backend: &dyn StorageBackend) {
     let target = ScimOutboundTarget {
         id: ScimOutboundTargetId::new(),
         client_id: "downstream-app".into(),
-        project_id: ProjectId::system(),
+        project_id: ProjectId::SYSTEM,
         display_name: "Downstream".into(),
         endpoint_url: "https://scim.sid.example.com/v2".into(),
         auth: OutboundAuthConfig::Bearer {
@@ -1956,7 +1956,7 @@ pub async fn test_scim_outbound_roundtrip(backend: &dyn StorageBackend) {
     ));
     assert!(
         backend
-            .list_scim_outbound_targets(ProjectId::system())
+            .list_scim_outbound_targets(ProjectId::SYSTEM)
             .await
             .unwrap()
             .iter()
@@ -2136,7 +2136,7 @@ pub async fn test_scim_outbound_roundtrip(backend: &dyn StorageBackend) {
         .unwrap();
     assert!(
         !backend
-            .list_scim_outbound_targets(ProjectId::system())
+            .list_scim_outbound_targets(ProjectId::SYSTEM)
             .await
             .unwrap()
             .iter()
@@ -2280,7 +2280,7 @@ pub async fn test_session_get_nonexistent(backend: &dyn StorageBackend) {
 pub async fn test_ensure_system_project(backend: &dyn StorageBackend) {
     backend.ensure_system_project(test_audit()).await.unwrap();
 
-    let project = backend.get_project(ProjectId::system()).await.unwrap();
+    let project = backend.get_project(ProjectId::SYSTEM).await.unwrap();
     assert!(project.is_some());
     assert!(project.unwrap().is_system);
 }
@@ -2289,7 +2289,7 @@ pub async fn test_cannot_delete_system_project(backend: &dyn StorageBackend) {
     backend.ensure_system_project(test_audit()).await.unwrap();
 
     let result = backend
-        .delete_project(ProjectId::system(), test_audit())
+        .delete_project(ProjectId::SYSTEM, test_audit())
         .await;
     assert!(result.is_err());
 }
@@ -2564,7 +2564,7 @@ pub async fn test_oauth2_client_full_roundtrip(backend: &dyn StorageBackend) {
     };
     let client = OAuth2Client {
         client_id: format!("test-full-{}", Uuid::now_v7().simple()),
-        project_id: ProjectId::system(),
+        project_id: ProjectId::SYSTEM,
         application_id: sid_core::models::ApplicationId::generate(),
         default_resource: None,
         application_type: ApplicationType::Spa,
@@ -2690,7 +2690,7 @@ pub fn create_test_iat(max_clients: u32) -> sid_core::models::InitialAccessToken
     sid_core::models::InitialAccessToken {
         id: sid_core::models::InitialAccessTokenId(Uuid::now_v7()),
         token_hash: Uuid::now_v7().as_bytes().to_vec(),
-        project_id: ProjectId::system(),
+        project_id: ProjectId::SYSTEM,
         max_clients,
         clients_registered: 0,
         allowed_scopes: vec!["openid".into()],
@@ -2735,7 +2735,7 @@ pub async fn test_iat_save_get_list_revoke(backend: &dyn StorageBackend) {
         .unwrap();
     assert_eq!(by_hash.id, iat.id);
     let listed = backend
-        .list_initial_access_tokens_by_project(ProjectId::system())
+        .list_initial_access_tokens_by_project(ProjectId::SYSTEM)
         .await
         .unwrap();
     assert!(listed.iter().any(|t| t.id == iat.id));
@@ -5027,7 +5027,7 @@ pub async fn test_delete_profile_grant(backend: &dyn StorageBackend) {
         .create_profile(&profile, test_audit())
         .await
         .unwrap();
-    let admin = ProfileGrant::new(ProjectId::system(), profile.id, vec!["admin".into()]);
+    let admin = ProfileGrant::new(ProjectId::SYSTEM, profile.id, vec!["admin".into()]);
     let project =
         sid_core::models::Project::new(format!("grants-{}", Uuid::now_v7().simple()), None);
     backend

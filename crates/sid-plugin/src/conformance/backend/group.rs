@@ -13,7 +13,7 @@ use super::test_audit;
 async fn stored_group(backend: &dyn StorageBackend) -> Group {
     backend.ensure_system_project(test_audit()).await.unwrap();
     let mut group = Group::new(
-        ProjectId::system(),
+        ProjectId::SYSTEM,
         format!("group-{}", Uuid::now_v7().simple()),
     );
     group.description = Some("first".into());
@@ -117,9 +117,9 @@ pub async fn test_group_membership_roundtrip(backend: &dyn StorageBackend) {
         .into_iter()
         .map(|g| g.id)
         .collect();
-    of_alice.sort_by_key(|g| g.0);
+    of_alice.sort();
     let mut expected = vec![admins.id, staff.id];
-    expected.sort_by_key(|g| g.0);
+    expected.sort();
     assert_eq!(of_alice, expected);
 
     backend

@@ -6,37 +6,12 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use super::ProfileId;
 
-/// Unique identifier for a project.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ProjectId(pub Uuid);
-
-impl ProjectId {
-    /// Create a new random project ID (UUIDv7, time-ordered).
-    pub fn new() -> Self {
-        Self(Uuid::now_v7())
-    }
-
-    /// The well-known system project ID (`Uuid::nil()`).
-    /// This is the default project that always exists and cannot be deleted.
-    pub fn system() -> Self {
-        Self(Uuid::nil())
-    }
-
-    /// Check if this is the system project ID.
-    pub fn is_system(&self) -> bool {
-        self.0 == Uuid::nil()
-    }
-}
-
-impl Default for ProjectId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+/// Validated identifier of a project: a UUIDv7, or the nil UUID of the system
+/// project ([`ProjectId::SYSTEM`]); construction and decoding go through `sid_ids`.
+pub use sid_ids::ProjectId;
 
 /// Edit of a user project: each field given replaces the stored one, the
 /// others stay as stored.
@@ -69,7 +44,7 @@ impl Project {
     pub fn system() -> Self {
         let now = Utc::now();
         Self {
-            id: ProjectId::system(),
+            id: ProjectId::SYSTEM,
             name: "SID".to_string(),
             description: "Default system project".to_string(),
             owner_id: None,
@@ -83,7 +58,7 @@ impl Project {
     pub fn new(name: impl Into<String>, owner_id: Option<ProfileId>) -> Self {
         let now = Utc::now();
         Self {
-            id: ProjectId::new(),
+            id: ProjectId::generate(),
             name: name.into(),
             description: String::new(),
             owner_id,
@@ -127,21 +102,21 @@ mod tests {
 
     #[test]
     fn test_project_id_unique() {
-        let id1 = ProjectId::new();
-        let id2 = ProjectId::new();
+        let id1 = ProjectId::generate();
+        let id2 = ProjectId::generate();
         assert_ne!(id1, id2);
     }
 
     #[test]
     fn test_system_project_id() {
-        let id = ProjectId::system();
+        let id = ProjectId::SYSTEM;
         assert!(id.is_system());
-        assert_eq!(id.0, Uuid::nil());
+        assert!(id.as_uuid().is_nil());
     }
 
     #[test]
     fn test_regular_project_id_not_system() {
-        let id = ProjectId::new();
+        let id = ProjectId::generate();
         assert!(!id.is_system());
     }
 }

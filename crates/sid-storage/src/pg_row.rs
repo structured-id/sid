@@ -474,7 +474,7 @@ impl SessionRow {
 
 #[derive(Debug, sqlx::FromRow)]
 pub struct ProjectRow {
-    pub id: Uuid,
+    pub id: ProjectId,
     pub name: String,
     pub description: String,
     pub owner_id: Option<ProfileId>,
@@ -486,7 +486,7 @@ pub struct ProjectRow {
 impl ProjectRow {
     pub fn into_domain(self) -> Project {
         Project {
-            id: ProjectId(self.id),
+            id: self.id,
             name: self.name,
             description: self.description,
             owner_id: self.owner_id,
@@ -504,7 +504,7 @@ impl ProjectRow {
 #[derive(Debug, sqlx::FromRow)]
 pub struct OAuth2ClientRow {
     pub client_id: String,
-    pub project_id: Uuid,
+    pub project_id: ProjectId,
     pub application_id: sid_core::models::ApplicationId,
     pub default_resource: Option<sid_core::models::ResourceId>,
     pub application_type: String,
@@ -551,7 +551,7 @@ impl OAuth2ClientRow {
         let parse = |column: &str, e: String| SidError::Storage(format!("column {column}: {e}"));
         Ok(OAuth2Client {
             client_id: self.client_id,
-            project_id: ProjectId(self.project_id),
+            project_id: self.project_id,
             application_id: self.application_id,
             default_resource: self.default_resource,
             application_type: self
@@ -641,7 +641,7 @@ impl OAuth2ClientRow {
 #[derive(Debug, sqlx::FromRow)]
 pub struct ApplicationRow {
     pub id: sid_core::models::ApplicationId,
-    pub project_id: Uuid,
+    pub project_id: ProjectId,
     pub name: String,
     pub system_integration: Option<String>,
     pub revision: i64,
@@ -653,7 +653,7 @@ impl ApplicationRow {
     pub fn into_domain(self) -> SidResult<sid_core::models::Application> {
         Ok(sid_core::models::Application {
             id: self.id,
-            project_id: ProjectId(self.project_id),
+            project_id: self.project_id,
             name: self.name,
             system: self
                 .system_integration
@@ -824,8 +824,8 @@ impl AuthCodeRow {
 
 #[derive(Debug, sqlx::FromRow)]
 pub struct RoleRow {
-    pub id: Uuid,
-    pub project_id: Uuid,
+    pub id: RoleId,
+    pub project_id: ProjectId,
     pub key: String,
     pub name: String,
     pub description: Option<String>,
@@ -839,8 +839,8 @@ pub struct RoleRow {
 impl RoleRow {
     pub fn into_domain(self) -> sid_core::Result<Role> {
         Ok(Role {
-            id: RoleId(self.id),
-            project_id: ProjectId(self.project_id),
+            id: self.id,
+            project_id: self.project_id,
             key: self.key,
             name: self.name,
             description: self.description,
@@ -860,11 +860,11 @@ impl RoleRow {
 
 #[derive(Debug, sqlx::FromRow)]
 pub struct GroupRow {
-    pub id: Uuid,
-    pub project_id: Uuid,
+    pub id: GroupId,
+    pub project_id: ProjectId,
     pub name: String,
     pub description: Option<String>,
-    pub parent_group_id: Option<Uuid>,
+    pub parent_group_id: Option<GroupId>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -872,11 +872,11 @@ pub struct GroupRow {
 impl GroupRow {
     pub fn into_domain(self) -> Group {
         Group {
-            id: GroupId(self.id),
-            project_id: ProjectId(self.project_id),
+            id: self.id,
+            project_id: self.project_id,
             name: self.name,
             description: self.description,
-            parent_group_id: self.parent_group_id.map(GroupId),
+            parent_group_id: self.parent_group_id,
             created_at: self.created_at,
             updated_at: self.updated_at,
         }
@@ -889,7 +889,7 @@ impl GroupRow {
 
 #[derive(Debug, sqlx::FromRow)]
 pub struct GroupMemberRow {
-    pub group_id: Uuid,
+    pub group_id: GroupId,
     pub profile_id: ProfileId,
     pub added_at: DateTime<Utc>,
 }
@@ -897,7 +897,7 @@ pub struct GroupMemberRow {
 impl GroupMemberRow {
     pub fn into_domain(self) -> GroupMember {
         GroupMember {
-            group_id: GroupId(self.group_id),
+            group_id: self.group_id,
             profile_id: self.profile_id,
             added_at: self.added_at,
         }
@@ -910,19 +910,19 @@ impl GroupMemberRow {
 
 #[derive(Debug, sqlx::FromRow)]
 pub struct RoleAssignmentRow {
-    pub id: Uuid,
+    pub id: RoleAssignmentId,
     pub profile_id: Option<ProfileId>,
-    pub group_id: Option<Uuid>,
+    pub group_id: Option<GroupId>,
     pub machine_user_id: Option<MachineUserId>,
     pub oauth_client_id: Option<String>,
     pub provisioning_connector_id: Option<sid_core::models::ProvisioningConnectorId>,
-    pub role_id: Uuid,
+    pub role_id: RoleId,
     pub scope: Option<String>,
     pub expires_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub granted_by: Option<String>,
-    pub basis_assignment_id: Option<Uuid>,
-    pub depends_on_assignment_id: Option<Uuid>,
+    pub basis_assignment_id: Option<RoleAssignmentId>,
+    pub depends_on_assignment_id: Option<RoleAssignmentId>,
     pub revision: i64,
 }
 
@@ -933,7 +933,7 @@ impl RoleAssignmentRow {
         let principal = if let Some(pid) = self.profile_id {
             RoleAssignmentPrincipal::Profile(pid)
         } else if let Some(gid) = self.group_id {
-            RoleAssignmentPrincipal::Group(GroupId(gid))
+            RoleAssignmentPrincipal::Group(gid)
         } else if let Some(mid) = self.machine_user_id {
             RoleAssignmentPrincipal::MachineUser(mid)
         } else if let Some(client_id) = self.oauth_client_id {
@@ -948,9 +948,9 @@ impl RoleAssignmentRow {
         };
 
         Ok(RoleAssignment {
-            id: RoleAssignmentId(self.id),
+            id: self.id,
             principal,
-            role_id: RoleId(self.role_id),
+            role_id: self.role_id,
             scope: self.scope,
             expires_at: self.expires_at,
             created_at: self.created_at,
@@ -959,8 +959,8 @@ impl RoleAssignmentRow {
             policy_admin: None,
             provenance: self.granted_by.map(|granted_by| AssignmentProvenance {
                 granted_by,
-                basis: self.basis_assignment_id.map(RoleAssignmentId),
-                depends_on: self.depends_on_assignment_id.map(RoleAssignmentId),
+                basis: self.basis_assignment_id,
+                depends_on: self.depends_on_assignment_id,
                 // The ceiling lives in its own table; the store attaches it.
                 ceiling: None,
             }),
@@ -980,8 +980,8 @@ impl RoleAssignmentRow {
 
 #[derive(Debug, sqlx::FromRow)]
 pub struct CedarPolicyRow {
-    pub id: Uuid,
-    pub project_id: Option<Uuid>,
+    pub id: CedarPolicyId,
+    pub project_id: Option<ProjectId>,
     pub resource_id: Option<sid_core::models::ResourceId>,
     pub name: String,
     pub description: Option<String>,
@@ -999,12 +999,9 @@ impl CedarPolicyRow {
     /// a resource is an error too: it would apply where it was not written.
     pub fn into_domain(self) -> SidResult<CedarPolicy> {
         Ok(CedarPolicy {
-            id: CedarPolicyId(self.id),
-            scope: sid_core::models::PolicyScope::from_columns(
-                self.project_id.map(ProjectId),
-                self.resource_id,
-            )
-            .map_err(SidError::Storage)?,
+            id: self.id,
+            scope: sid_core::models::PolicyScope::from_columns(self.project_id, self.resource_id)
+                .map_err(SidError::Storage)?,
             name: self.name,
             description: self.description,
             policy_text: self.policy_text,
@@ -1049,7 +1046,7 @@ impl ProfileMetadataRow {
 #[derive(Debug, sqlx::FromRow)]
 pub struct ProfileGrantRow {
     pub id: Uuid,
-    pub project_id: Uuid,
+    pub project_id: ProjectId,
     pub profile_id: ProfileId,
     pub role_keys: String,
     pub granted_by: Option<String>,
@@ -1062,7 +1059,7 @@ impl ProfileGrantRow {
     pub fn into_domain(self) -> ProfileGrant {
         ProfileGrant {
             id: ProfileGrantId(self.id),
-            project_id: ProjectId(self.project_id),
+            project_id: self.project_id,
             profile_id: self.profile_id,
             // Written space-separated, like role permissions.
             role_keys: split_ws(&self.role_keys),
@@ -1171,7 +1168,7 @@ pub struct DeviceAuthRow {
     pub resource_id: sid_core::models::ResourceId,
     pub status: String,
     pub authorized_by: Option<ProfileId>,
-    pub project_id: Uuid,
+    pub project_id: ProjectId,
     pub interval_secs: i32,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
@@ -1192,7 +1189,7 @@ impl DeviceAuthRow {
             resource: self.resource_id,
             status: self.status.parse().map_err(SidError::Storage)?,
             authorized_by: self.authorized_by,
-            project_id: ProjectId(self.project_id),
+            project_id: self.project_id,
             interval: self.interval_secs,
             created_at: self.created_at,
             expires_at: self.expires_at,
@@ -1352,7 +1349,7 @@ impl PatRow {
 #[derive(Debug, sqlx::FromRow)]
 pub struct MachineUserRow {
     pub id: MachineUserId,
-    pub project_id: Uuid,
+    pub project_id: ProjectId,
     pub machine_type: String,
     pub owner_type: String,
     pub owner_id: String,
@@ -1376,7 +1373,7 @@ impl MachineUserRow {
         let status: MachineUserStatus = self.status.parse().map_err(SidError::Storage)?;
         Ok(MachineUser {
             id: self.id,
-            project_id: ProjectId(self.project_id),
+            project_id: self.project_id,
             machine_type: self.machine_type.parse().map_err(SidError::Storage)?,
             owner_type: self.owner_type.parse().map_err(SidError::Storage)?,
             owner_id: self.owner_id,
@@ -1462,7 +1459,7 @@ impl ImpersonationGrantRow {
 #[derive(Debug, sqlx::FromRow)]
 pub struct InitialAccessTokenRow {
     pub id: Uuid,
-    pub project_id: Uuid,
+    pub project_id: ProjectId,
     pub token_hash: Vec<u8>,
     pub max_clients: i32,
     pub clients_registered: i32,
@@ -1479,7 +1476,7 @@ impl InitialAccessTokenRow {
     pub fn into_domain(self) -> InitialAccessToken {
         InitialAccessToken {
             id: InitialAccessTokenId(self.id),
-            project_id: ProjectId(self.project_id),
+            project_id: self.project_id,
             token_hash: self.token_hash,
             max_clients: self.max_clients as u32,
             clients_registered: self.clients_registered as u32,
@@ -1631,7 +1628,7 @@ impl SodRuleRow {
 pub struct ScimOutboundTargetRow {
     pub id: Uuid,
     pub client_id: String,
-    pub project_id: Uuid,
+    pub project_id: ProjectId,
     pub display_name: String,
     pub endpoint_url: String,
     pub auth_config: serde_json::Value,
@@ -1651,7 +1648,7 @@ impl ScimOutboundTargetRow {
         Ok(ScimOutboundTarget {
             id: ScimOutboundTargetId(self.id),
             client_id: self.client_id,
-            project_id: ProjectId(self.project_id),
+            project_id: self.project_id,
             display_name: self.display_name,
             endpoint_url: self.endpoint_url,
             auth: serde_json::from_value(self.auth_config).map_err(|e| field("auth", e))?,

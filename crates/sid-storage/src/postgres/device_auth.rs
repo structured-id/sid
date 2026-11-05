@@ -36,7 +36,7 @@ impl PostgresBackend {
         .bind(&code.device_code_hash)
         .bind(&code.user_code)
         .bind(code.scope.as_deref())
-        .bind(code.project_id.0)
+        .bind(code.project_id)
         .bind(code.expires_at)
         .bind(code.interval)
         .bind(code.status.as_str())

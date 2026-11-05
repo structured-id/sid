@@ -21,7 +21,7 @@ fn valid_iat() -> InitialAccessToken {
     InitialAccessToken {
         id: InitialAccessTokenId::new(),
         token_hash: vec![0; 32],
-        project_id: ProjectId::system(),
+        project_id: ProjectId::SYSTEM,
         max_clients: 10,
         clients_registered: 0,
         allowed_scopes: vec!["openid".into(), "profile".into(), "email".into()],

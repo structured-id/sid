@@ -41,6 +41,12 @@ pub fn pallas_point(bytes: &[u8; 32]) -> Option<pasta_curves::pallas::Affine> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct HistoryEpochId(pub Uuid);
 
+impl core::fmt::Display for HistoryEpochId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 impl HistoryEpochId {
     /// A fresh, time-ordered epoch id.
     pub fn generate() -> Self {

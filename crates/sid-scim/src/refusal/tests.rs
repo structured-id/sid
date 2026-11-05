@@ -96,10 +96,7 @@ fn test_taken_user_name_is_uniqueness() {
 
 #[test]
 fn test_taken_group_name_is_uniqueness() {
-    let status = group_write(
-        GroupId(uuid::Uuid::now_v7()),
-        SidError::Conflict("g".into()),
-    );
+    let status = group_write(GroupId::generate(), SidError::Conflict("g".into()));
     assert_eq!(
         shape(&status),
         (
@@ -117,7 +114,7 @@ fn test_missing_resources_are_typed_not_found() {
         shape(&user_write(id, SidError::NotFound("p".into()))).1,
         "PROFILE_NOT_FOUND"
     );
-    let gid = GroupId(uuid::Uuid::now_v7());
+    let gid = GroupId::generate();
     assert_eq!(
         shape(&group_write(gid, SidError::NotFound("g".into()))).1,
         "GROUP_NOT_FOUND"
@@ -142,11 +139,7 @@ fn test_stale_and_failed_writes() {
         Code::Internal
     );
     assert_eq!(
-        group_write(
-            GroupId(uuid::Uuid::now_v7()),
-            SidError::Validation("rule".into())
-        )
-        .code(),
+        group_write(GroupId::generate(), SidError::Validation("rule".into())).code(),
         Code::InvalidArgument
     );
 }

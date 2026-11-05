@@ -56,7 +56,7 @@ impl PostgresBackend {
              VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
         .bind(app.id)
-        .bind(app.project_id.0)
+        .bind(app.project_id)
         .bind(&app.name)
         .bind(revision(app.revision, "application")?)
         .bind(app.created_at)
@@ -163,7 +163,7 @@ impl PostgresBackend {
             "SELECT * FROM applications WHERE project_id = $1
              ORDER BY created_at, id OFFSET $2 LIMIT $3",
         )
-        .bind(project_id.0)
+        .bind(project_id)
         .bind(i64::try_from(offset).map_err(|e| SidError::Validation(format!("offset: {e}")))?)
         .bind(i64::try_from(limit).map_err(|e| SidError::Validation(format!("limit: {e}")))?)
         .fetch_all(&self.pool)
@@ -188,7 +188,7 @@ impl PostgresBackend {
         .bind(&app.name)
         .bind(app.updated_at)
         .bind(revision(app.revision, "application")?)
-        .bind(app.project_id.0)
+        .bind(app.project_id)
         .bind(app.created_at)
         .execute(&mut *tx)
         .await

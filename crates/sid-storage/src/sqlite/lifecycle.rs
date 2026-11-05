@@ -149,7 +149,7 @@ impl SqliteBackend {
 
     pub(crate) async fn get_pat_impl(&self, id: PatId) -> SidResult<Option<PersonalAccessToken>> {
         let row = sqlx::query("SELECT * FROM personal_access_tokens WHERE id = ?")
-            .bind(id.0.to_string())
+            .bind(id.to_string())
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -195,7 +195,7 @@ impl SqliteBackend {
             "INSERT INTO personal_access_tokens (id, profile_id, name, description, token_hash, token_prefix, scopes, ip_allowlist, status, expires_at, last_used_at, last_used_ip, use_count, revoked_at, revoked_by, created_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
-        .bind(pat.id.0.to_string()).bind(pat.profile_id)
+        .bind(pat.id.to_string()).bind(pat.profile_id)
         .bind(&pat.name)
         .bind(&pat.description)
         .bind(&pat.token_hash)
@@ -236,7 +236,7 @@ impl SqliteBackend {
         )
         .bind(&now)
         .bind(ip)
-        .bind(id.0.to_string())
+        .bind(id.to_string())
         .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(e.to_string()))?
@@ -263,7 +263,7 @@ impl SqliteBackend {
         )
         .bind(&now)
         .bind(revoked_by)
-        .bind(id.0.to_string())
+        .bind(id.to_string())
         .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(e.to_string()))?

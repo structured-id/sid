@@ -261,7 +261,7 @@ fn new_integration(
     let now = chrono::Utc::now();
     let app = Application {
         id: ApplicationId::generate(),
-        project_id: ProjectId::system(),
+        project_id: ProjectId::SYSTEM,
         name: "Account".to_owned(),
         system: Some(SystemIntegration::Account),
         revision: 0,

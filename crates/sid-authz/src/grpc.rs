@@ -27,8 +27,8 @@ use sid_core::models::audit::{ActorType, AuditOutcome};
 use sid_core::models::{
     AUTHZ_CHECK, AuditEntry, CedarPolicy, CedarPolicyId, ConnectorState, Group, GroupId,
     GroupMember, MutationContext, PolicyScope, ProfileId, ProjectId, ProvisioningConnectorId,
-    ResourceId, ResourceState, Role, RoleAssignment, RoleAssignmentId, RoleAssignmentPrincipal,
-    RoleId, TOKEN_INTROSPECT,
+    ResourceId, ResourceState, Role, RoleAssignment, RoleAssignmentPrincipal, RoleId,
+    TOKEN_INTROSPECT,
 };
 use sid_plugin::StorageBackend;
 use sid_plugin::audit::AuditLog;
@@ -51,50 +51,14 @@ fn to_timestamp(dt: chrono::DateTime<chrono::Utc>) -> prost_types::Timestamp {
     }
 }
 
+/// The identifier a request names in `field`, checked before any lookup: an
+/// absent or malformed one is refused on that field.
 #[allow(clippy::result_large_err)]
-fn parse_profile_id(id: &str) -> Result<ProfileId, Status> {
-    ProfileId::parse(id).map_err(|_| invalid_field("profile_id", "not a profile identifier"))
-}
-
-#[allow(clippy::result_large_err)]
-fn parse_project_id(id: &str) -> Result<ProjectId, Status> {
-    uuid::Uuid::parse_str(id)
-        .map(ProjectId)
-        .map_err(|_| invalid_field("project_id", "not a project identifier"))
-}
-
-#[allow(clippy::result_large_err)]
-fn parse_role_id(id: &str) -> Result<RoleId, Status> {
-    uuid::Uuid::parse_str(id)
-        .map(RoleId)
-        .map_err(|_| invalid_field("role_id", "not a role identifier"))
-}
-
-#[allow(clippy::result_large_err)]
-fn parse_group_id(id: &str) -> Result<GroupId, Status> {
-    uuid::Uuid::parse_str(id)
-        .map(GroupId)
-        .map_err(|_| invalid_field("group_id", "not a group identifier"))
-}
-
-#[allow(clippy::result_large_err)]
-fn parse_policy_id(id: &str) -> Result<CedarPolicyId, Status> {
-    uuid::Uuid::parse_str(id)
-        .map(CedarPolicyId)
-        .map_err(|_| invalid_field("policy_id", "not a policy identifier"))
-}
-
-#[allow(clippy::result_large_err)]
-fn parse_assignment_id(id: &str) -> Result<RoleAssignmentId, Status> {
-    uuid::Uuid::parse_str(id)
-        .map(RoleAssignmentId)
-        .map_err(|_| invalid_field("assignment_id", "not a role assignment identifier"))
-}
-
-#[allow(clippy::result_large_err)]
-fn parse_machine_user_id(id: &str) -> Result<sid_core::models::MachineUserId, Status> {
-    sid_core::models::MachineUserId::parse(id)
-        .map_err(|_| invalid_field("machine_user_id", "not a machine user identifier"))
+pub(crate) fn wire_id<W: sid_ids_proto::WireId>(
+    value: Option<&W>,
+    field: &'static str,
+) -> Result<W::Domain, Status> {
+    sid_ids_proto::required(value).map_err(|e| invalid_field(field, e.to_string()))
 }
 
 #[allow(clippy::result_large_err)]
@@ -111,7 +75,7 @@ fn parse_connector_id(
 
 /// ROLE_NOT_FOUND for `id`.
 fn role_not_found(id: RoleId) -> Status {
-    not_found(ErrorReason::RoleNotFound, "Role", id.0.to_string())
+    not_found(ErrorReason::RoleNotFound, "Role", id.to_string())
 }
 
 /// GROUP_NOT_FOUND for `name` (an identifier or a group name).
@@ -121,7 +85,7 @@ fn group_not_found(name: impl Into<String>) -> Status {
 
 /// POLICY_NOT_FOUND for `id`.
 fn policy_not_found(id: CedarPolicyId) -> Status {
-    not_found(ErrorReason::PolicyNotFound, "Policy", id.0.to_string())
+    not_found(ErrorReason::PolicyNotFound, "Policy", id.to_string())
 }
 
 /// The checker may not ask this question: told apart from the subject's
@@ -172,40 +136,12 @@ fn proto_to_policy_effect(proto: i32) -> sid_core::models::PolicyEffect {
     }
 }
 
-/// Extract project_id from a resource string.
-///
-/// Supported formats:
-/// - "project:<uuid>" → project UUID
-/// - bare UUID → interpreted as project ID
-/// - "<type>:<id>" → attempt to parse <id> as project UUID
-#[allow(clippy::result_large_err, dead_code)]
-pub fn extract_project_from_resource(resource: &str) -> Result<ProjectId, Status> {
-    if let Some(id) = resource.strip_prefix("project:") {
-        return parse_project_id(id);
-    }
-
-    if let Ok(uuid) = uuid::Uuid::parse_str(resource) {
-        return Ok(ProjectId(uuid));
-    }
-
-    if let Some((_type_part, id_part)) = resource.split_once(':')
-        && let Ok(uuid) = uuid::Uuid::parse_str(id_part)
-    {
-        return Ok(ProjectId(uuid));
-    }
-
-    Err(invalid_field(
-        "resource",
-        "names a project: 'project:<uuid>' or '<type>:<uuid>'",
-    ))
-}
-
 // ── Conversion helpers ──────────────────────────────────────────────
 
 fn role_to_proto(r: &Role) -> sid_proto::sid::v1::Role {
     sid_proto::sid::v1::Role {
-        id: r.id.0.to_string(),
-        project_id: r.project_id.0.to_string(),
+        id: Some(r.id.into()),
+        project_id: Some(r.project_id.into()),
         name: r.key.clone(),
         description: r.description.clone(),
         permissions: r.permissions.clone(),
@@ -216,8 +152,8 @@ fn role_to_proto(r: &Role) -> sid_proto::sid::v1::Role {
 
 fn group_to_proto(g: &Group) -> sid_proto::sid::v1::Group {
     sid_proto::sid::v1::Group {
-        id: g.id.0.to_string(),
-        project_id: g.project_id.0.to_string(),
+        id: Some(g.id.into()),
+        project_id: Some(g.project_id.into()),
         name: g.name.clone(),
         description: g.description.clone(),
         created_at: Some(to_timestamp(g.created_at)),
@@ -292,13 +228,13 @@ async fn resolved<T: prost::Message + Default>(
 fn assignment_to_proto(a: &RoleAssignment) -> sid_proto::sid::v1::RoleAssignment {
     let principal = match &a.principal {
         RoleAssignmentPrincipal::Profile(pid) => {
-            Some(role_assignment::Principal::ProfileId(pid.to_string()))
+            Some(role_assignment::Principal::ProfileId((*pid).into()))
         }
         RoleAssignmentPrincipal::Group(gid) => {
-            Some(role_assignment::Principal::GroupId(gid.0.to_string()))
+            Some(role_assignment::Principal::GroupId((*gid).into()))
         }
         RoleAssignmentPrincipal::MachineUser(mid) => {
-            Some(role_assignment::Principal::MachineUserId(mid.to_string()))
+            Some(role_assignment::Principal::MachineUserId((*mid).into()))
         }
         RoleAssignmentPrincipal::OAuthClient(client_id) => {
             Some(role_assignment::Principal::OauthClientId(client_id.clone()))
@@ -309,9 +245,9 @@ fn assignment_to_proto(a: &RoleAssignment) -> sid_proto::sid::v1::RoleAssignment
     };
 
     sid_proto::sid::v1::RoleAssignment {
-        id: a.id.0.to_string(),
+        id: Some(a.id.into()),
         principal,
-        role_id: a.role_id.0.to_string(),
+        role_id: Some(a.role_id.into()),
         scope: a.scope.clone(),
         expires_at: a.expires_at.map(to_timestamp),
         created_at: Some(to_timestamp(a.created_at)),
@@ -319,8 +255,8 @@ fn assignment_to_proto(a: &RoleAssignment) -> sid_proto::sid::v1::RoleAssignment
         policy_admin: a.policy_admin.as_ref().map(policy_authority_to_proto),
         provenance: a.provenance.as_ref().map(|p| AssignmentProvenance {
             granted_by: p.granted_by.clone(),
-            basis_assignment_id: p.basis.map(|id| id.0.to_string()),
-            depends_on_assignment_id: p.depends_on.map(|id| id.0.to_string()),
+            basis_assignment_id: p.basis.map(Into::into),
+            depends_on_assignment_id: p.depends_on.map(Into::into),
             approved_ceiling: p
                 .ceiling
                 .as_ref()
@@ -381,7 +317,7 @@ fn envelope_to_proto(e: &sid_core::models::AdminEnvelope) -> AdminEnvelope {
                 Op::Redelegate => AdminOperation::Redelegate,
             } as i32)
             .collect(),
-        role_ids: e.roles.iter().map(|id| id.0.to_string()).collect(),
+        role_ids: e.roles.iter().map(|id| (*id).into()).collect(),
         permission_ceiling: e.permission_ceiling.iter().cloned().collect(),
         recipient_kinds: e
             .recipient_kinds
@@ -393,7 +329,7 @@ fn envelope_to_proto(e: &sid_core::models::AdminEnvelope) -> AdminEnvelope {
                 Kind::OAuthClient => RecipientKind::OauthClient,
             } as i32)
             .collect(),
-        recipient_group_id: e.recipient_group.map(|g| g.0.to_string()),
+        recipient_group_id: e.recipient_group.map(Into::into),
         max_validity: Some(prost_types::Duration {
             seconds: e.max_validity_secs,
             nanos: 0,
@@ -424,11 +360,7 @@ fn envelope_from_proto(e: AdminEnvelope) -> Result<sid_core::models::AdminEnvelo
     let roles = e
         .role_ids
         .iter()
-        .map(|id| {
-            uuid::Uuid::parse_str(id)
-                .map(RoleId)
-                .map_err(|_| invalid_field("admin.role_ids", "not a role identifier"))
-        })
+        .map(|id| wire_id(Some(id), "admin.role_ids"))
         .collect::<Result<_, _>>()?;
     let recipient_kinds = e
         .recipient_kinds
@@ -446,11 +378,8 @@ fn envelope_from_proto(e: AdminEnvelope) -> Result<sid_core::models::AdminEnvelo
         .collect::<Result<_, _>>()?;
     let recipient_group = e
         .recipient_group_id
-        .map(|id| {
-            uuid::Uuid::parse_str(&id)
-                .map(GroupId)
-                .map_err(|_| invalid_field("admin.recipient_group_id", "not a group identifier"))
-        })
+        .as_ref()
+        .map(|id| wire_id(Some(id), "admin.recipient_group_id"))
         .transpose()?;
     let max_validity_secs = match e.max_validity {
         Some(d) if d.nanos == 0 => d.seconds,
@@ -491,7 +420,7 @@ fn policy_to_proto(p: &CedarPolicy) -> Policy {
     };
 
     Policy {
-        id: p.id.0.to_string(),
+        id: Some(p.id.into()),
         scope: Some(policy_scope_to_proto(p.scope)),
         name: p.name.clone(),
         description: p.description.clone(),
@@ -509,7 +438,7 @@ fn policy_scope_to_proto(scope: PolicyScope) -> sid_proto::sid::v1::PolicyScope 
     sid_proto::sid::v1::PolicyScope {
         scope: Some(match scope {
             PolicyScope::Installation => Scope::Installation(()),
-            PolicyScope::Project(id) => Scope::ProjectId(id.0.to_string()),
+            PolicyScope::Project(id) => Scope::ProjectId(id.into()),
             PolicyScope::Resource(id) => Scope::Resource(id.into()),
         }),
     }
@@ -524,7 +453,7 @@ fn policy_scope_from_proto(
     match scope.and_then(|s| s.scope.as_ref()) {
         None => Err(missing_field(field)),
         Some(Scope::Installation(())) => Ok(PolicyScope::Installation),
-        Some(Scope::ProjectId(id)) => parse_project_id(id).map(PolicyScope::Project),
+        Some(Scope::ProjectId(id)) => wire_id(Some(id), field).map(PolicyScope::Project),
         Some(Scope::Resource(id)) => ResourceId::try_from(id)
             .map(PolicyScope::Resource)
             .map_err(|_| invalid_field(field, "not a protected resource identifier")),
@@ -832,7 +761,7 @@ fn policy_mutation(
     id: CedarPolicyId,
     fence: sid_core::models::ActorFence,
 ) -> sid_core::models::MutationContext {
-    sid_core::models::MutationContext::from(asker.audit(action, id.0.to_string())).fenced_by(fence)
+    sid_core::models::MutationContext::from(asker.audit(action, id.to_string())).fenced_by(fence)
 }
 
 /// The status of a refused administration change: no covering authority,
@@ -1032,7 +961,9 @@ impl AuthzServiceImpl {
             Some(Scope::Resource(id)) => ResourceId::try_from(id)
                 .map(|id| format!("oauth_resource:{id}"))
                 .unwrap_or_else(|_| "oauth_resource:unknown".to_owned()),
-            Some(Scope::ProjectId(id)) => format!("project:{id}"),
+            Some(Scope::ProjectId(id)) => ProjectId::try_from(id)
+                .map(|id| format!("project:{id}"))
+                .unwrap_or_else(|_| "project:unknown".to_owned()),
             None => "unknown".to_owned(),
         };
         let metadata = serde_json::json!({
@@ -1085,20 +1016,18 @@ impl AuthzServiceImpl {
             .target
             .as_ref()
             .ok_or_else(|| missing_field("target"))?;
-        let resource = match &target.scope {
-            Some(Scope::Resource(id)) => Some(ResourceId::try_from(id).map_err(|_| {
-                invalid_field("target.resource", "not a protected resource identifier")
-            })?),
+        let (resource, engine_resource) = match &target.scope {
+            Some(Scope::Resource(id)) => {
+                let resource = ResourceId::try_from(id).map_err(|_| {
+                    invalid_field("target.resource", "not a protected resource identifier")
+                })?;
+                (Some(resource), format!("oauth_resource:{resource}"))
+            }
             Some(Scope::ProjectId(id)) => {
-                parse_project_id(id)?;
-                None
+                let project: ProjectId = wire_id(Some(id), "target.project_id")?;
+                (None, format!("project:{project}"))
             }
             None => return Err(missing_field("target")),
-        };
-        let engine_resource = match (&target.scope, resource) {
-            (_, Some(resource)) => format!("oauth_resource:{resource}"),
-            (Some(Scope::ProjectId(id)), None) => format!("project:{id}"),
-            _ => return Err(missing_field("target")),
         };
         // The object is part of the question, in the application's own
         // namespace; policies may name it.
@@ -1685,9 +1614,7 @@ impl AuthzServiceImpl {
                 .await
                 .map_err(storage_failure)?
                 .map(|_| ())
-                .ok_or_else(|| {
-                    not_found(ErrorReason::ProjectNotFound, "Project", id.0.to_string())
-                }),
+                .ok_or_else(|| not_found(ErrorReason::ProjectNotFound, "Project", id.to_string())),
             PolicyScope::Resource(id) => self
                 .storage
                 .get_protected_resource(id)
@@ -1758,7 +1685,7 @@ impl AuthzService for AuthzServiceImpl {
             return Ok(Response::new(recorded));
         }
         let answer = async {
-            let project_id = parse_project_id(&req.project_id)?;
+            let project_id = wire_id(req.project_id.as_ref(), "project_id")?;
 
             if req.name.is_empty() {
                 return Err(missing_field("name"));
@@ -1774,7 +1701,7 @@ impl AuthzService for AuthzServiceImpl {
             let ctx = MutationContext::from(AuditEntry::admin(
                 caller.profile_id.to_string(),
                 "role.create",
-                role.id.0.to_string(),
+                role.id.to_string(),
             ))
             .with_operation(command.completion(answer.encode_to_vec()));
             let committed = self.storage.create_role(&role, ctx).await;
@@ -1788,7 +1715,7 @@ impl AuthzService for AuthzServiceImpl {
                 other => storage_failure(other),
             })?;
 
-            info!("Created role '{}' in project {}", role.key, project_id.0);
+            info!("Created role '{}' in project {project_id}", role.key);
             Ok(answer)
         }
         .await;
@@ -1805,7 +1732,7 @@ impl AuthzService for AuthzServiceImpl {
 
         let role = match req.identifier {
             Some(get_role_request::Identifier::Id(id)) => {
-                let role_id = parse_role_id(&id)?;
+                let role_id = wire_id(Some(&id), "id")?;
                 self.storage
                     .get_role(role_id)
                     .await
@@ -1813,11 +1740,7 @@ impl AuthzService for AuthzServiceImpl {
                     .ok_or_else(|| role_not_found(role_id))?
             }
             Some(get_role_request::Identifier::Name(name)) => {
-                let project_id_str = req
-                    .project_id
-                    .as_deref()
-                    .ok_or_else(|| missing_field("project_id"))?;
-                let project_id = parse_project_id(project_id_str)?;
+                let project_id = wire_id(req.project_id.as_ref(), "project_id")?;
                 self.storage
                     .get_role_by_name(project_id, &name)
                     .await
@@ -1848,7 +1771,7 @@ impl AuthzService for AuthzServiceImpl {
             return Ok(Response::new(recorded));
         }
         let answer = async {
-            let role_id = parse_role_id(&req.id)?;
+            let role_id = wire_id(req.id.as_ref(), "id")?;
 
             // Only the root learns a role is missing.
             let mut role = match self
@@ -1879,7 +1802,7 @@ impl AuthzService for AuthzServiceImpl {
             let answer = UpdateRoleResponse {
                 role: Some(role_to_proto(&role)),
             };
-            let audit = MutationContext::from(asker.audit("role.update", role.id.0.to_string()))
+            let audit = MutationContext::from(asker.audit("role.update", role.id.to_string()))
                 .with_operation(command.completion(answer.encode_to_vec()));
             let committed = match crate::admin::RoleAdministration::new(self.storage.clone())
                 .edit_role(&administrator, &role, audit)
@@ -1913,7 +1836,7 @@ impl AuthzService for AuthzServiceImpl {
             return Ok(Response::new(recorded));
         }
         let answer = async {
-            let role_id = parse_role_id(&req.id)?;
+            let role_id = wire_id(req.id.as_ref(), "id")?;
 
             self.storage
                 .get_role(role_id)
@@ -1925,7 +1848,7 @@ impl AuthzService for AuthzServiceImpl {
             let ctx = MutationContext::from(AuditEntry::admin(
                 caller.profile_id.to_string(),
                 "role.delete",
-                role_id.0.to_string(),
+                role_id.to_string(),
             ))
             .with_operation(command.completion(answer.encode_to_vec()));
             let committed = self.storage.delete_role(role_id, ctx).await;
@@ -1936,7 +1859,7 @@ impl AuthzService for AuthzServiceImpl {
                 other => storage_failure(other),
             })?;
 
-            info!("Deleted role {}", role_id.0);
+            info!("Deleted role {role_id}");
             Ok(answer)
         }
         .await;
@@ -1950,7 +1873,7 @@ impl AuthzService for AuthzServiceImpl {
     ) -> Result<Response<ListRolesResponse>, Status> {
         self.admin(&request).await?;
         let req = request.into_inner();
-        let project_id = parse_project_id(&req.project_id)?;
+        let project_id = wire_id(req.project_id.as_ref(), "project_id")?;
 
         let roles = self
             .storage
@@ -1982,7 +1905,7 @@ impl AuthzService for AuthzServiceImpl {
             return decode_assigned(&result);
         }
         let answer = async {
-            let role_id = parse_role_id(&req.role_id)?;
+            let role_id = wire_id(req.role_id.as_ref(), "role_id")?;
 
             // Only the root learns a role is missing; anyone else is refused as
             // for any change its authority does not cover.
@@ -2005,16 +1928,13 @@ impl AuthzService for AuthzServiceImpl {
 
             let principal = match req.principal {
                 Some(assign_role_request::Principal::ProfileId(id)) => {
-                    let pid = parse_profile_id(&id)?;
-                    RoleAssignmentPrincipal::Profile(pid)
+                    RoleAssignmentPrincipal::Profile(wire_id(Some(&id), "profile_id")?)
                 }
                 Some(assign_role_request::Principal::GroupId(id)) => {
-                    let gid = parse_group_id(&id)?;
-                    RoleAssignmentPrincipal::Group(gid)
+                    RoleAssignmentPrincipal::Group(wire_id(Some(&id), "group_id")?)
                 }
                 Some(assign_role_request::Principal::MachineUserId(id)) => {
-                    let mid = parse_machine_user_id(&id)?;
-                    RoleAssignmentPrincipal::MachineUser(mid)
+                    RoleAssignmentPrincipal::MachineUser(wire_id(Some(&id), "machine_user_id")?)
                 }
                 Some(assign_role_request::Principal::OauthClientId(client_id)) => {
                     self.confidential_client(&client_id).await?;
@@ -2064,9 +1984,7 @@ impl AuthzService for AuthzServiceImpl {
                     .await?;
             }
 
-            let audit = asker
-                .audit("role.assign", assignment.id.0.to_string())
-                .into();
+            let audit = asker.audit("role.assign", assignment.id.to_string()).into();
             let assigned = crate::admin::RoleAdministration::new(self.storage.clone())
                 .assign_recording(&administrator, assignment, audit, |stored| {
                     Some(
@@ -2086,10 +2004,7 @@ impl AuthzService for AuthzServiceImpl {
                 Err(e) => return Err(administration_refusal(e)),
             };
 
-            info!(
-                "Assigned role {} (assignment {})",
-                role_id.0, assignment.id.0
-            );
+            info!("Assigned role {role_id} (assignment {})", assignment.id);
 
             Ok(Response::new(AssignRoleResponse {
                 assignment: Some(assignment_to_proto(&assignment)),
@@ -2115,11 +2030,11 @@ impl AuthzService for AuthzServiceImpl {
             return Ok(Response::new(recorded));
         }
         let answer = async {
-            let assignment_id = parse_assignment_id(&req.assignment_id)?;
+            let assignment_id = wire_id(req.assignment_id.as_ref(), "assignment_id")?;
 
             let answer = RevokeRoleResponse {};
             let audit =
-                MutationContext::from(asker.audit("role.revoke", assignment_id.0.to_string()))
+                MutationContext::from(asker.audit("role.revoke", assignment_id.to_string()))
                     .with_operation(command.completion(answer.encode_to_vec()));
             let committed = crate::admin::RoleAdministration::new(self.storage.clone())
                 .revoke(&administrator, assignment_id, audit)
@@ -2128,7 +2043,7 @@ impl AuthzService for AuthzServiceImpl {
                 .map(|_| ());
             let answer = settled(committed, answer, revocation_refusal)?;
 
-            info!("Revoked role assignment {}", assignment_id.0);
+            info!("Revoked role assignment {assignment_id}");
             Ok(answer)
         }
         .await;
@@ -2147,15 +2062,15 @@ impl AuthzService for AuthzServiceImpl {
 
         let assignments = match req.filter {
             Some(list_role_assignments_request::Filter::ProfileId(id)) => {
-                let pid = parse_profile_id(&id)?;
+                let pid = wire_id(Some(&id), "profile_id")?;
                 self.storage.list_role_assignments_for_profile(pid).await
             }
             Some(list_role_assignments_request::Filter::GroupId(id)) => {
-                let gid = parse_group_id(&id)?;
+                let gid = wire_id(Some(&id), "group_id")?;
                 self.storage.list_role_assignments_for_group(gid).await
             }
             Some(list_role_assignments_request::Filter::MachineUserId(id)) => {
-                let mid = parse_machine_user_id(&id)?;
+                let mid = wire_id(Some(&id), "machine_user_id")?;
                 self.storage
                     .list_role_assignments_for_machine_user(mid)
                     .await
@@ -2171,7 +2086,7 @@ impl AuthzService for AuthzServiceImpl {
                     .await
             }
             Some(list_role_assignments_request::Filter::RoleId(id)) => {
-                let role_id = parse_role_id(&id)?;
+                let role_id = wire_id(Some(&id), "role_id")?;
                 self.storage.list_role_assignments_for_role(role_id).await
             }
             None => return Err(missing_field("filter")),
@@ -2205,7 +2120,7 @@ impl AuthzService for AuthzServiceImpl {
             return Ok(Response::new(recorded));
         }
         let answer = async {
-            let project_id = parse_project_id(&req.project_id)?;
+            let project_id = wire_id(req.project_id.as_ref(), "project_id")?;
 
             if req.name.is_empty() {
                 return Err(missing_field("name"));
@@ -2220,7 +2135,7 @@ impl AuthzService for AuthzServiceImpl {
             let ctx = MutationContext::from(AuditEntry::admin(
                 caller.profile_id.to_string(),
                 "group.create",
-                group.id.0.to_string(),
+                group.id.to_string(),
             ))
             .with_operation(command.completion(answer.encode_to_vec()));
             let committed = self.storage.create_group(&group, ctx).await;
@@ -2234,7 +2149,7 @@ impl AuthzService for AuthzServiceImpl {
                 other => storage_failure(other),
             })?;
 
-            info!("Created group '{}' in project {}", group.name, project_id.0);
+            info!("Created group '{}' in project {project_id}", group.name);
             Ok(answer)
         }
         .await;
@@ -2251,19 +2166,15 @@ impl AuthzService for AuthzServiceImpl {
 
         let group = match req.identifier {
             Some(get_group_request::Identifier::Id(id)) => {
-                let gid = parse_group_id(&id)?;
+                let gid: GroupId = wire_id(Some(&id), "id")?;
                 self.storage
                     .get_group(gid)
                     .await
                     .map_err(storage_failure)?
-                    .ok_or_else(|| group_not_found(gid.0.to_string()))?
+                    .ok_or_else(|| group_not_found(gid.to_string()))?
             }
             Some(get_group_request::Identifier::Name(name)) => {
-                let project_id_str = req
-                    .project_id
-                    .as_deref()
-                    .ok_or_else(|| missing_field("project_id"))?;
-                let project_id = parse_project_id(project_id_str)?;
+                let project_id = wire_id(req.project_id.as_ref(), "project_id")?;
                 let groups = self
                     .storage
                     .list_groups(project_id)
@@ -2294,12 +2205,12 @@ impl AuthzService for AuthzServiceImpl {
         // left it: the state its commit recorded, never one read around it.
         let command =
             command::<keyed::UpdateGroup>(&metadata, format!("user:{}", caller.profile_id), &req)?;
-        let group_id = parse_group_id(&req.id)?;
+        let group_id: GroupId = wire_id(req.id.as_ref(), "id")?;
         let audit = || {
             AuditEntry::admin(
                 caller.profile_id.to_string(),
                 "group.update",
-                group_id.0.to_string(),
+                group_id.to_string(),
             )
         };
         let group: Group = match req.description.as_deref() {
@@ -2312,7 +2223,7 @@ impl AuthzService for AuthzServiceImpl {
                             .get_group(group_id)
                             .await
                             .map_err(storage_failure)?
-                            .ok_or_else(|| group_not_found(group_id.0.to_string()))
+                            .ok_or_else(|| group_not_found(group_id.to_string()))
                     })
                     .await?
             }
@@ -2331,7 +2242,7 @@ impl AuthzService for AuthzServiceImpl {
                         {
                             Ok(true) => Ok(command.recorded_effect(&*self.storage).await?),
                             Ok(false) => Err(sid_authn::operation::grpc::Effect::Refused(
-                                group_not_found(group_id.0.to_string()),
+                                group_not_found(group_id.to_string()),
                             )),
                             Err(e) => Err(sid_authn::operation::grpc::Effect::Store(e)),
                         }
@@ -2360,25 +2271,25 @@ impl AuthzService for AuthzServiceImpl {
             return Ok(Response::new(recorded));
         }
         let answer = async {
-            let group_id = parse_group_id(&req.id)?;
+            let group_id: GroupId = wire_id(req.id.as_ref(), "id")?;
 
             self.storage
                 .get_group(group_id)
                 .await
                 .map_err(storage_failure)?
-                .ok_or_else(|| group_not_found(group_id.0.to_string()))?;
+                .ok_or_else(|| group_not_found(group_id.to_string()))?;
 
             let answer = DeleteGroupResponse {};
             let ctx = MutationContext::from(AuditEntry::admin(
                 caller.profile_id.to_string(),
                 "group.delete",
-                group_id.0.to_string(),
+                group_id.to_string(),
             ))
             .with_operation(command.completion(answer.encode_to_vec()));
             let committed = self.storage.delete_group(group_id, ctx).await;
             let answer = settled(committed, answer, storage_failure)?;
 
-            info!("Deleted group {}", group_id.0);
+            info!("Deleted group {group_id}");
             Ok(answer)
         }
         .await;
@@ -2392,7 +2303,7 @@ impl AuthzService for AuthzServiceImpl {
     ) -> Result<Response<ListGroupsResponse>, Status> {
         self.admin(&request).await?;
         let req = request.into_inner();
-        let project_id = parse_project_id(&req.project_id)?;
+        let project_id = wire_id(req.project_id.as_ref(), "project_id")?;
 
         let groups = self
             .storage
@@ -2424,21 +2335,21 @@ impl AuthzService for AuthzServiceImpl {
             return Ok(Response::new(recorded));
         }
         let answer = async {
-            let group_id = parse_group_id(&req.group_id)?;
-            let profile_id = parse_profile_id(&req.profile_id)?;
+            let group_id: GroupId = wire_id(req.group_id.as_ref(), "group_id")?;
+            let profile_id = wire_id(req.profile_id.as_ref(), "profile_id")?;
 
             self.storage
                 .get_group(group_id)
                 .await
                 .map_err(storage_failure)?
-                .ok_or_else(|| group_not_found(group_id.0.to_string()))?;
+                .ok_or_else(|| group_not_found(group_id.to_string()))?;
 
             let member = GroupMember::new(group_id, profile_id);
             let answer = AddToGroupResponse {};
             let ctx = MutationContext::from(AuditEntry::admin(
                 caller.profile_id.to_string(),
                 "group.add_member",
-                format!("{}:{}", group_id.0, profile_id),
+                format!("{group_id}:{profile_id}"),
             ))
             .with_operation(command.completion(answer.encode_to_vec()));
             let committed = self.storage.add_to_group(&member, ctx).await;
@@ -2453,7 +2364,7 @@ impl AuthzService for AuthzServiceImpl {
                 other => storage_failure(other),
             })?;
 
-            info!("Added profile {} to group {}", profile_id, group_id.0);
+            info!("Added profile {profile_id} to group {group_id}");
             Ok(answer)
         }
         .await;
@@ -2479,14 +2390,14 @@ impl AuthzService for AuthzServiceImpl {
             return Ok(Response::new(recorded));
         }
         let answer = async {
-            let group_id = parse_group_id(&req.group_id)?;
-            let profile_id = parse_profile_id(&req.profile_id)?;
+            let group_id: GroupId = wire_id(req.group_id.as_ref(), "group_id")?;
+            let profile_id = wire_id(req.profile_id.as_ref(), "profile_id")?;
 
             let answer = RemoveFromGroupResponse {};
             let ctx = MutationContext::from(AuditEntry::admin(
                 caller.profile_id.to_string(),
                 "group.remove_member",
-                format!("{}:{}", group_id.0, profile_id),
+                format!("{group_id}:{profile_id}"),
             ))
             .with_operation(command.completion(answer.encode_to_vec()));
             let committed = self
@@ -2495,7 +2406,7 @@ impl AuthzService for AuthzServiceImpl {
                 .await;
             let answer = settled(committed, answer, storage_failure)?;
 
-            info!("Removed profile {} from group {}", profile_id, group_id.0);
+            info!("Removed profile {profile_id} from group {group_id}");
             Ok(answer)
         }
         .await;
@@ -2509,7 +2420,7 @@ impl AuthzService for AuthzServiceImpl {
     ) -> Result<Response<ListGroupMembersResponse>, Status> {
         self.admin(&request).await?;
         let req = request.into_inner();
-        let group_id = parse_group_id(&req.group_id)?;
+        let group_id: GroupId = wire_id(req.group_id.as_ref(), "group_id")?;
 
         let members = self
             .storage
@@ -2518,7 +2429,7 @@ impl AuthzService for AuthzServiceImpl {
             .map_err(storage_failure)?;
 
         Ok(Response::new(ListGroupMembersResponse {
-            profile_ids: members.iter().map(|m| m.profile_id.to_string()).collect(),
+            profile_ids: members.iter().map(|m| m.profile_id.into()).collect(),
         }))
     }
 
@@ -2588,7 +2499,7 @@ impl AuthzService for AuthzServiceImpl {
     ) -> Result<Response<GetPolicyResponse>, Status> {
         let asker = self.asker(&request).await?;
         let req = request.into_inner();
-        let policy_id = parse_policy_id(&req.id)?;
+        let policy_id = wire_id(req.id.as_ref(), "id")?;
         let (policy, _) = self
             .policy_for(&asker, policy_id, sid_core::models::PolicyOperation::Read)
             .await?;
@@ -2613,7 +2524,7 @@ impl AuthzService for AuthzServiceImpl {
             return Ok(Response::new(recorded));
         }
         let answer = async {
-            let policy_id = parse_policy_id(&req.id)?;
+            let policy_id = wire_id(req.id.as_ref(), "id")?;
             let (mut policy, fence) = self
                 .policy_for(&asker, policy_id, sid_core::models::PolicyOperation::Edit)
                 .await?;
@@ -2668,7 +2579,7 @@ impl AuthzService for AuthzServiceImpl {
             return Ok(Response::new(recorded));
         }
         let answer = async {
-            let policy_id = parse_policy_id(&req.id)?;
+            let policy_id: CedarPolicyId = wire_id(req.id.as_ref(), "id")?;
             let (_, fence) = self
                 .policy_for(&asker, policy_id, sid_core::models::PolicyOperation::Edit)
                 .await?;
@@ -2679,7 +2590,7 @@ impl AuthzService for AuthzServiceImpl {
             let committed = self.storage.delete_cedar_policy(policy_id, ctx).await;
             let answer = settled(committed, answer, storage_failure)?;
 
-            info!("Deleted policy {}", policy_id.0);
+            info!("Deleted policy {policy_id}");
             Ok(answer)
         }
         .await;
@@ -2731,7 +2642,7 @@ impl AuthzService for AuthzServiceImpl {
         let policy_pairs: Vec<(String, String)> = policies
             .into_iter()
             .filter(|p| p.enabled)
-            .map(|p| (p.id.0.to_string(), p.policy_text))
+            .map(|p| (p.id.to_string(), p.policy_text))
             .collect();
 
         if policy_pairs.is_empty() {
@@ -2760,22 +2671,27 @@ impl AuthzService for AuthzServiceImpl {
                 CedarError::InvalidPolicy(_) => internal("evaluate_policy", e),
             })?;
 
+        // Cedar names a match by the id text it was given above.
         let matches = result
             .matches
             .iter()
-            .map(|m| PolicyMatch {
-                policy_id: m.policy_id.clone(),
-                policy_name: String::new(),
-                effect: match m.effect {
-                    crate::cedar::CedarEffect::Permit => {
-                        sid_proto::sid::v1::PolicyEffect::Permit.into()
-                    }
-                    crate::cedar::CedarEffect::Forbid => {
-                        sid_proto::sid::v1::PolicyEffect::Forbid.into()
-                    }
-                },
+            .map(|m| {
+                let id = CedarPolicyId::parse(&m.policy_id)
+                    .map_err(|e| internal("evaluate_policy", e))?;
+                Ok(PolicyMatch {
+                    policy_id: Some(id.into()),
+                    policy_name: String::new(),
+                    effect: match m.effect {
+                        crate::cedar::CedarEffect::Permit => {
+                            sid_proto::sid::v1::PolicyEffect::Permit.into()
+                        }
+                        crate::cedar::CedarEffect::Forbid => {
+                            sid_proto::sid::v1::PolicyEffect::Forbid.into()
+                        }
+                    },
+                })
             })
-            .collect();
+            .collect::<Result<_, Status>>()?;
 
         Ok(Response::new(EvaluatePolicyResponse {
             allowed: result.allowed,
@@ -2849,7 +2765,7 @@ impl AuthzService for AuthzServiceImpl {
         self.check_maintenance()?;
         let req = request.into_inner();
 
-        let project_id = parse_project_id(&req.project_id)?;
+        let project_id = wire_id(req.project_id.as_ref(), "project_id")?;
 
         if req.proposed_changes.is_empty() {
             return Err(missing_field("proposed_changes"));
@@ -2872,7 +2788,7 @@ impl AuthzService for AuthzServiceImpl {
                     }
                 }
                 Some(sid_proto::sid::v1::policy_change::Change::UpdatePolicy(up)) => {
-                    let id = parse_policy_id(&up.id)?;
+                    let id = wire_id(up.id.as_ref(), "proposed_changes.update_policy.id")?;
                     crate::simulator::ProposedChange::UpdatePolicy {
                         id,
                         policy_text: up.policy_text.clone(),
@@ -2887,7 +2803,7 @@ impl AuthzService for AuthzServiceImpl {
                     }
                 }
                 Some(sid_proto::sid::v1::policy_change::Change::DeletePolicyId(id)) => {
-                    let policy_id = parse_policy_id(id)?;
+                    let policy_id = wire_id(Some(id), "proposed_changes.delete_policy_id")?;
                     crate::simulator::ProposedChange::DeletePolicy { id: policy_id }
                 }
                 Some(sid_proto::sid::v1::policy_change::Change::AssignRole(_))
@@ -2927,7 +2843,7 @@ impl AuthzService for AuthzServiceImpl {
         // Resource scope.
         let resource = req
             .resource
-            .unwrap_or_else(|| format!("project:{}", project_id.0));
+            .unwrap_or_else(|| format!("project:{project_id}"));
 
         let simulator = crate::simulator::PolicySimulator::new(self.storage.clone());
         let result = simulator
@@ -2936,7 +2852,7 @@ impl AuthzService for AuthzServiceImpl {
             .map_err(|e| sid_core::grpc_error::refuse::internal("simulate", e))?;
 
         info!(
-            project_id = %project_id.0,
+            project_id = %project_id,
             changes = changes.len(),
             checked = result.total_checked,
             gained = result.total_gained,
@@ -2970,7 +2886,7 @@ impl AuthzService for AuthzServiceImpl {
             .collect();
 
         Ok(Response::new(SimulatePolicyResponse {
-            project_id: project_id.0.to_string(),
+            project_id: Some(project_id.into()),
             impacts,
             total_checked: result.total_checked as i32,
             total_gained: result.total_gained as i32,

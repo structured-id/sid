@@ -49,7 +49,7 @@ async fn setup() -> Setup {
             .with_profile(admin.clone())
             .with_profile(user.clone()),
     );
-    let role = Role::new(ProjectId::system(), "viewer", "Viewer");
+    let role = Role::new(ProjectId::SYSTEM, "viewer", "Viewer");
     storage
         .create_role(&role, AuditEntry::system("test", "role").into())
         .await
@@ -78,30 +78,31 @@ fn granted_by_root(s: &Setup) -> Option<AssignmentProvenance> {
 
 fn request_for(s: &Setup, role: &str, hours: Option<i64>) -> AccessRequestMessage {
     AccessRequestMessage {
-        requester_profile_id: s.user.id.to_string(),
+        requester_profile_id: Some(s.user.id.into()),
         requested_role: role.to_string(),
         justification: "on call".into(),
         requested_duration: hours.map(|h| prost_types::Duration {
             seconds: h * 3600,
             nanos: 0,
         }),
-        project_id: ProjectId::system().0.to_string(),
+        project_id: Some(ProjectId::SYSTEM.into()),
     }
 }
 
-async fn file(s: &Setup, role: &str, hours: Option<i64>) -> String {
-    s.svc
+async fn file(s: &Setup, role: &str, hours: Option<i64>) -> AccessRequestId {
+    let filed = s
+        .svc
         .request_access(authed(request_for(s, role, hours), &s.user_token))
         .await
         .expect("request filed")
-        .into_inner()
-        .request_id
+        .into_inner();
+    sid_ids_proto::required(filed.request_id.as_ref()).expect("request id")
 }
 
-fn approve(s: &Setup, request_id: &str) -> Request<DecideRequestRequest> {
+fn approve(s: &Setup, request_id: &AccessRequestId) -> Request<DecideRequestRequest> {
     authed(
         DecideRequestRequest {
-            request_id: request_id.to_string(),
+            request_id: Some((*request_id).into()),
             approved: true,
             reason: String::new(),
         },
@@ -152,7 +153,7 @@ async fn a_request_names_an_existing_project_role() {
     assert_eq!(error_reason(&err).as_deref(), Some("ROLE_NOT_FOUND"));
 
     let mut elsewhere = request_for(&s, "viewer", None);
-    elsewhere.project_id = ProjectId::new().0.to_string();
+    elsewhere.project_id = Some(ProjectId::generate().into());
     let err = s
         .svc
         .request_access(authed(elsewhere, &s.user_token))
@@ -187,12 +188,7 @@ async fn an_approval_that_cannot_grant_records_nothing() {
         .expect_err("the role is gone");
     assert_eq!(err.code(), Code::FailedPrecondition, "{err:?}");
     assert_eq!(error_reason(&err).as_deref(), Some("INVALID_STATE"));
-    let stored = s
-        .storage
-        .get_access_request(AccessRequestId(uuid::Uuid::parse_str(&id).unwrap()))
-        .await
-        .unwrap()
-        .unwrap();
+    let stored = s.storage.get_access_request(id).await.unwrap().unwrap();
     assert_eq!(stored.status, AccessRequestStatus::Pending);
     assert!(
         s.storage
@@ -212,14 +208,14 @@ async fn a_temporary_role_is_the_project_role() {
     let grant = |role: &str| {
         authed(
             GrantTemporaryRoleRequest {
-                profile_id: s.user.id.to_string(),
+                profile_id: Some(s.user.id.into()),
                 role: role.to_string(),
                 expires_at: Some(prost_types::Timestamp {
                     seconds: expires.timestamp(),
                     nanos: 0,
                 }),
                 justification: "incident".into(),
-                project_id: ProjectId::system().0.to_string(),
+                project_id: Some(ProjectId::SYSTEM.into()),
             },
             &s.admin_token,
         )
@@ -283,7 +279,7 @@ async fn decisions_name_unknown_and_decided_requests() {
     let s = setup().await;
     let err = s
         .svc
-        .decide_request(approve(&s, &uuid::Uuid::now_v7().to_string()))
+        .decide_request(approve(&s, &AccessRequestId::generate()))
         .await
         .expect_err("unknown request");
     assert_eq!(err.code(), Code::NotFound);

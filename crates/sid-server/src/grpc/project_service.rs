@@ -437,7 +437,7 @@ impl ProjectServiceImpl {
 
 fn project_to_proto(p: &Project) -> sid_proto::sid::v1::Project {
     sid_proto::sid::v1::Project {
-        id: p.id.0.to_string(),
+        id: p.id.to_string(),
         name: p.name.clone(),
         description: p.description.clone(),
         owner_profile_id: p.owner_id.map(|id| id.to_string()).unwrap_or_default(),
@@ -592,8 +592,8 @@ fn dcr_refusal(error: dcr::DcrError, reason: ErrorReason) -> Status {
 
 fn role_to_proto(r: &Role) -> sid_proto::sid::v1::Role {
     sid_proto::sid::v1::Role {
-        id: r.id.0.to_string(),
-        project_id: r.project_id.0.to_string(),
+        id: Some(r.id.into()),
+        project_id: Some(r.project_id.into()),
         name: r.key.clone(),
         description: r.description.clone(),
         permissions: r.permissions.clone(),
@@ -618,14 +618,12 @@ fn decode_result(result: &[u8]) -> Result<sid_proto::sid::v1::Project, Status> {
 
 #[allow(clippy::result_large_err)]
 fn parse_project_id(id: &str) -> Result<ProjectId, Status> {
-    uuid::Uuid::parse_str(id)
-        .map(ProjectId)
-        .map_err(|_| invalid_field("project_id", "not a project identifier"))
+    ProjectId::parse(id).map_err(|_| invalid_field("project_id", "not a project identifier"))
 }
 
 /// PROJECT_NOT_FOUND for `id`.
 fn project_not_found(id: ProjectId) -> Status {
-    not_found(ErrorReason::ProjectNotFound, "Project", id.0.to_string())
+    not_found(ErrorReason::ProjectNotFound, "Project", id.to_string())
 }
 
 /// The initial access token is unknown, revoked, expired or used up: it
@@ -757,7 +755,7 @@ impl ProjectService for ProjectServiceImpl {
             let ctx: MutationContext = AuditEntry::admin(
                 caller.profile_id.to_string(),
                 "project.create",
-                project.id.0.to_string(),
+                project.id.to_string(),
             )
             .into();
             match self
@@ -777,7 +775,7 @@ impl ProjectService for ProjectServiceImpl {
                 Err(e) => return Err(storage_failure(e)),
             }
 
-            info!("Created project '{}' ({})", project.name, project.id.0);
+            info!("Created project '{}' ({})", project.name, project.id);
 
             Ok(response)
         }
@@ -861,7 +859,7 @@ impl ProjectService for ProjectServiceImpl {
                 let ctx = MutationContext::from(AuditEntry::admin(
                     caller.profile_id.to_string(),
                     "project.update",
-                    project_id.0.to_string(),
+                    project_id.to_string(),
                 ))
                 .with_operation(command.effect_completion());
                 // Only the fields given are written: an edit racing a deletion
@@ -909,11 +907,11 @@ impl ProjectService for ProjectServiceImpl {
                 let ctx = MutationContext::from(AuditEntry::admin(
                     caller.profile_id.to_string(),
                     "project.delete",
-                    project_id.0.to_string(),
+                    project_id.to_string(),
                 ))
                 .with_operation(command.completion(().encode_to_vec()));
                 self.storage.delete_project(project_id, ctx).await?;
-                info!("Deleted project {}", project_id.0);
+                info!("Deleted project {project_id}");
                 Ok(())
             })
             .await?;
@@ -1403,7 +1401,7 @@ impl ProjectService for ProjectServiceImpl {
                 role.group = req.group.clone();
                 role.permissions = req.permissions.clone();
                 let view = role_to_proto(&role);
-                let ctx = admin_ctx(&caller, "role.create", role.id.0.to_string())
+                let ctx = admin_ctx(&caller, "role.create", role.id.to_string())
                     .with_operation(command.completion(view.encode_to_vec()));
 
                 // The store rejects a second role with this key or display name.
@@ -1421,7 +1419,7 @@ impl ProjectService for ProjectServiceImpl {
                         .into(),
                         other => Effect::from(other),
                     })?;
-                info!("Added role '{}' to project {}", role.key, project_id.0);
+                info!("Added role '{}' to project {project_id}", role.key);
                 Ok(view)
             })
             .await?;
@@ -1440,8 +1438,7 @@ impl ProjectService for ProjectServiceImpl {
         let operation = context(&request)?;
         let req = request.into_inner();
 
-        let role_id = uuid::Uuid::parse_str(&req.role_id)
-            .map(RoleId)
+        let role_id = RoleId::parse(&req.role_id)
             .map_err(|_| invalid_field("role_id", "not a role identifier"))?;
         let role_not_found = || not_found(ErrorReason::RoleNotFound, "Role", req.role_id.clone());
 
@@ -1462,13 +1459,10 @@ impl ProjectService for ProjectServiceImpl {
                         return Err(role_not_found().into());
                     }
                 }
-                let ctx = admin_ctx(&caller, "role.delete", role_id.0.to_string())
+                let ctx = admin_ctx(&caller, "role.delete", role_id.to_string())
                     .with_operation(command.completion(().encode_to_vec()));
                 self.storage.delete_role(role_id, ctx).await?;
-                info!(
-                    "Removed role {} from project {}",
-                    role_id.0, role.project_id.0
-                );
+                info!("Removed role {} from project {}", role_id, role.project_id);
                 Ok(())
             })
             .await?;
@@ -1846,7 +1840,7 @@ impl ProjectService for ProjectServiceImpl {
                     .await?;
                 info!(
                     "Created IAT {} for project {} (max_clients: {}, expires: {})",
-                    token.id.0, project_id.0, token.max_clients, token.expires_at
+                    token.id.0, project_id, token.max_clients, token.expires_at
                 );
                 issued = Some(token_value);
                 Ok(recorded)
@@ -1936,7 +1930,7 @@ fn sha256_hash(data: &[u8]) -> Vec<u8> {
 fn iat_to_proto(t: &InitialAccessToken) -> sid_proto::sid::v1::InitialAccessToken {
     sid_proto::sid::v1::InitialAccessToken {
         id: t.id.0.to_string(),
-        project_id: t.project_id.0.to_string(),
+        project_id: t.project_id.to_string(),
         max_clients: t.max_clients,
         clients_registered: t.clients_registered,
         allowed_scopes: t.allowed_scopes.clone(),
@@ -2031,7 +2025,7 @@ impl ProjectServiceImpl {
                 (e, _) => Effect::from(e),
             })?;
 
-        info!("Created application {} in project {}", app.id, project_id.0);
+        info!("Created application {} in project {project_id}", app.id);
         Ok((recorded, client_secret))
     }
 

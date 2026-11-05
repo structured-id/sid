@@ -412,7 +412,7 @@ pub async fn test_failed_mutation_records_no_completion(backend: &dyn StorageBac
     backend.ensure_system_project(test_audit()).await.unwrap();
     let (ns, key) = (namespace(), key());
     let refused = backend
-        .delete_project(ProjectId::system(), keyed(&ns, &key, b"inputs"))
+        .delete_project(ProjectId::SYSTEM, keyed(&ns, &key, b"inputs"))
         .await;
     assert!(refused.is_err());
     assert!(

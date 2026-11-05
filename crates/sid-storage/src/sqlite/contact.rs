@@ -18,7 +18,7 @@ use super::{SqliteBackend, WriteTx, fmt_dt, fmt_dt_opt, insert_error};
 /// Phone `id` as the transaction leaves it.
 async fn phone_in_tx(tx: &mut WriteTx, id: ProfilePhoneId) -> SidResult<ProfilePhone> {
     let row = sqlx::query("SELECT * FROM profile_phones WHERE id = ?")
-        .bind(id.0.to_string())
+        .bind(id.to_string())
         .fetch_one(&mut **tx)
         .await
         .map_err(|e| SidError::Storage(format!("read phone: {e}")))?;
@@ -28,7 +28,7 @@ async fn phone_in_tx(tx: &mut WriteTx, id: ProfilePhoneId) -> SidResult<ProfileP
 /// Email `id` as the transaction leaves it.
 async fn email_in_tx(tx: &mut WriteTx, id: ProfileEmailId) -> SidResult<ProfileEmail> {
     let row = sqlx::query("SELECT * FROM profile_emails WHERE id = ?")
-        .bind(id.0.to_string())
+        .bind(id.to_string())
         .fetch_one(&mut **tx)
         .await
         .map_err(|e| SidError::Storage(format!("read email: {e}")))?;
@@ -60,7 +60,7 @@ impl SqliteBackend {
                 verified_at, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(phone.id.0.to_string())
+        .bind(phone.id.to_string())
         .bind(phone.profile_id)
         .bind(i64::try_from(phone.e164).map_err(|e| SidError::Validation(format!("e164: {e}")))?)
         .bind(phone.extension.map(i64::from))
@@ -105,7 +105,7 @@ impl SqliteBackend {
         .bind(settings.can_receive_fax)
         .bind(settings.can_receive_voice)
         .bind(fmt_dt(&at))
-        .bind(id.0.to_string())
+        .bind(id.to_string())
         .bind(profile_id)
         .execute(&mut *tx)
         .await
@@ -132,7 +132,7 @@ impl SqliteBackend {
         let exists: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM profile_phones WHERE id = ? AND profile_id = ?)",
         )
-        .bind(id.0.to_string())
+        .bind(id.to_string())
         .bind(profile_id)
         .fetch_one(&mut *tx)
         .await
@@ -151,7 +151,7 @@ impl SqliteBackend {
         .map_err(|e| SidError::Storage(format!("clear primary phone: {e}")))?;
         sqlx::query("UPDATE profile_phones SET is_primary = 1, updated_at = ? WHERE id = ?")
             .bind(&at)
-            .bind(id.0.to_string())
+            .bind(id.to_string())
             .execute(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(format!("set primary phone: {e}")))?;
@@ -183,7 +183,7 @@ impl SqliteBackend {
                 verified, verified_at, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(email.id.0.to_string())
+        .bind(email.id.to_string())
         .bind(email.profile_id)
         .bind(&email.email)
         .bind(email.label.as_str())
@@ -218,7 +218,7 @@ impl SqliteBackend {
         .bind(settings.custom_label.is_some())
         .bind(settings.custom_label.clone().flatten())
         .bind(fmt_dt(&at))
-        .bind(id.0.to_string())
+        .bind(id.to_string())
         .bind(profile_id)
         .execute(&mut *tx)
         .await
@@ -245,7 +245,7 @@ impl SqliteBackend {
         let exists: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM profile_emails WHERE id = ? AND profile_id = ?)",
         )
-        .bind(id.0.to_string())
+        .bind(id.to_string())
         .bind(profile_id)
         .fetch_one(&mut *tx)
         .await
@@ -264,7 +264,7 @@ impl SqliteBackend {
         .map_err(|e| SidError::Storage(format!("clear primary email: {e}")))?;
         sqlx::query("UPDATE profile_emails SET is_primary = 1, updated_at = ? WHERE id = ?")
             .bind(&at)
-            .bind(id.0.to_string())
+            .bind(id.to_string())
             .execute(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(format!("set primary email: {e}")))?;

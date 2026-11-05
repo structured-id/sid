@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! RBAC operations: Role, Group, GroupMember, RoleAssignment, SoD, CedarPolicy.
 
-use super::{SqliteBackend, col, dt_col, fmt_dt, fmt_dt_opt, uuid_col};
+use super::{SqliteBackend, col, dt_col, fmt_dt, fmt_dt_opt};
 use sid_core::{
     Error as SidError, Result as SidResult,
     models::{
@@ -15,8 +15,8 @@ fn row_to_role(row: &sqlx::sqlite::SqliteRow) -> SidResult<Role> {
     let permissions: String = col(row, "permissions")?;
     let revision: i64 = col(row, "revision")?;
     Ok(Role {
-        id: RoleId(uuid_col(row, "id")?),
-        project_id: ProjectId(uuid_col(row, "project_id")?),
+        id: col(row, "id")?,
+        project_id: col(row, "project_id")?,
         key: col(row, "key")?,
         name: col(row, "name")?,
         description: col(row, "description")?,
@@ -30,19 +30,12 @@ fn row_to_role(row: &sqlx::sqlite::SqliteRow) -> SidResult<Role> {
 }
 
 fn row_to_group(row: &sqlx::sqlite::SqliteRow) -> SidResult<Group> {
-    let parent: Option<String> = col(row, "parent_group_id")?;
     Ok(Group {
-        id: GroupId(uuid_col(row, "id")?),
-        project_id: ProjectId(uuid_col(row, "project_id")?),
+        id: col(row, "id")?,
+        project_id: col(row, "project_id")?,
         name: col(row, "name")?,
         description: col(row, "description")?,
-        parent_group_id: parent
-            .map(|s| {
-                uuid::Uuid::parse_str(&s)
-                    .map(GroupId)
-                    .map_err(|e| SidError::Storage(format!("column parent_group_id: {e}")))
-            })
-            .transpose()?,
+        parent_group_id: col(row, "parent_group_id")?,
         created_at: dt_col(row, "created_at")?,
         updated_at: dt_col(row, "updated_at")?,
     })
@@ -50,7 +43,7 @@ fn row_to_group(row: &sqlx::sqlite::SqliteRow) -> SidResult<Group> {
 
 fn row_to_group_member(row: &sqlx::sqlite::SqliteRow) -> SidResult<GroupMember> {
     Ok(GroupMember {
-        group_id: GroupId(uuid_col(row, "group_id")?),
+        group_id: col(row, "group_id")?,
         profile_id: col(row, "profile_id")?,
         added_at: dt_col(row, "added_at")?,
     })
@@ -60,16 +53,12 @@ fn row_to_group_member(row: &sqlx::sqlite::SqliteRow) -> SidResult<GroupMember> 
 /// a row breaking that is reported, not patched over.
 fn row_to_role_assignment(row: &sqlx::sqlite::SqliteRow) -> SidResult<RoleAssignment> {
     use sid_core::models::{MachineUserId, ProfileId};
-    let id = uuid_col(row, "id")?;
-    let group_id: Option<String> = col(row, "group_id")?;
+    let id: RoleAssignmentId = col(row, "id")?;
 
     let principal = if let Some(pid) = col::<Option<ProfileId>>(row, "profile_id")? {
         RoleAssignmentPrincipal::Profile(pid)
-    } else if let Some(gid) = group_id {
-        RoleAssignmentPrincipal::Group(GroupId(
-            uuid::Uuid::parse_str(&gid)
-                .map_err(|e| SidError::Storage(format!("column group_id: {e}")))?,
-        ))
+    } else if let Some(gid) = col::<Option<GroupId>>(row, "group_id")? {
+        RoleAssignmentPrincipal::Group(gid)
     } else if let Some(mid) = col::<Option<MachineUserId>>(row, "machine_user_id")? {
         RoleAssignmentPrincipal::MachineUser(mid)
     } else if let Some(client_id) = col::<Option<String>>(row, "oauth_client_id")? {
@@ -85,9 +74,9 @@ fn row_to_role_assignment(row: &sqlx::sqlite::SqliteRow) -> SidResult<RoleAssign
     };
 
     Ok(RoleAssignment {
-        id: RoleAssignmentId(id),
+        id,
         principal,
-        role_id: RoleId(uuid_col(row, "role_id")?),
+        role_id: col(row, "role_id")?,
         scope: col(row, "scope")?,
         expires_at: super::dt_col_opt(row, "expires_at")?,
         created_at: dt_col(row, "created_at")?,
@@ -96,15 +85,7 @@ fn row_to_role_assignment(row: &sqlx::sqlite::SqliteRow) -> SidResult<RoleAssign
         policy_admin: None,
         provenance: col::<Option<String>>(row, "granted_by")?
             .map(|granted_by| {
-                let reference = |column: &str| -> SidResult<Option<RoleAssignmentId>> {
-                    col::<Option<String>>(row, column)?
-                        .map(|id| {
-                            uuid::Uuid::parse_str(&id)
-                                .map(RoleAssignmentId)
-                                .map_err(|e| SidError::Storage(format!("column {column}: {e}")))
-                        })
-                        .transpose()
-                };
+                let reference = |column: &str| col::<Option<RoleAssignmentId>>(row, column);
                 Ok::<_, SidError>(sid_core::models::AssignmentProvenance {
                     granted_by,
                     basis: reference("basis_assignment_id")?,
@@ -130,7 +111,7 @@ pub(crate) async fn insert_role_assignment(
     let mut connector_id = None;
     match &assignment.principal {
         RoleAssignmentPrincipal::Profile(pid) => profile_id = Some(*pid),
-        RoleAssignmentPrincipal::Group(gid) => group_id = Some(gid.0.to_string()),
+        RoleAssignmentPrincipal::Group(gid) => group_id = Some(gid.to_string()),
         RoleAssignmentPrincipal::MachineUser(mid) => machine_user_id = Some(*mid),
         RoleAssignmentPrincipal::OAuthClient(client) => oauth_client_id = Some(client),
         RoleAssignmentPrincipal::ProvisioningConnector(id) => connector_id = Some(*id),
@@ -142,22 +123,22 @@ pub(crate) async fn insert_role_assignment(
             granted_by, basis_assignment_id, depends_on_assignment_id)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
-    .bind(assignment.id.0.to_string())
+    .bind(assignment.id.to_string())
     .bind(profile_id)
     .bind(&group_id)
     .bind(machine_user_id)
     .bind(oauth_client_id)
     .bind(connector_id)
-    .bind(assignment.role_id.0.to_string())
+    .bind(assignment.role_id.to_string())
     .bind(&assignment.scope)
     .bind(fmt_dt_opt(assignment.expires_at))
     .bind(fmt_dt(&assignment.created_at))
     .bind(provenance.map(|p| p.granted_by.as_str()))
-    .bind(provenance.and_then(|p| p.basis).map(|id| id.0.to_string()))
+    .bind(provenance.and_then(|p| p.basis).map(|id| id.to_string()))
     .bind(
         provenance
             .and_then(|p| p.depends_on)
-            .map(|id| id.0.to_string()),
+            .map(|id| id.to_string()),
     )
     .execute(&mut **tx)
     .await
@@ -179,7 +160,7 @@ pub(crate) async fn insert_role_assignment(
             sqlx::query(
                 "INSERT INTO role_assignment_ceilings (assignment_id, permission) VALUES (?, ?)",
             )
-            .bind(assignment.id.0.to_string())
+            .bind(assignment.id.to_string())
             .bind(permission)
             .execute(&mut **tx)
             .await
@@ -207,7 +188,7 @@ where
                AND (expires_at IS NULL OR expires_at > ?)
                AND (? IS NULL OR profile_id = ?))",
     )
-    .bind(Role::installation_administrator().id.0.to_string())
+    .bind(Role::installation_administrator().id.to_string())
     .bind(sid_core::models::INSTALLATION_SCOPE)
     .bind(fmt_dt(&chrono::Utc::now()))
     .bind(profile)
@@ -228,7 +209,7 @@ pub(crate) async fn administrators(
              WHERE role_id = ? AND scope = ?
                AND (expires_at IS NULL OR expires_at > ?))",
     )
-    .bind(Role::installation_administrator().id.0.to_string())
+    .bind(Role::installation_administrator().id.to_string())
     .bind(sid_core::models::INSTALLATION_SCOPE)
     .bind(fmt_dt(&chrono::Utc::now()))
     .fetch_all(&mut **tx)
@@ -261,8 +242,8 @@ pub(crate) async fn grant_installation_administrator(
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO NOTHING",
     )
-    .bind(role.id.0.to_string())
-    .bind(role.project_id.0.to_string())
+    .bind(role.id.to_string())
+    .bind(role.project_id.to_string())
     .bind(&role.key)
     .bind(&role.name)
     .bind(&role.description)
@@ -294,7 +275,7 @@ async fn keep_last_administrator(
          WHERE ra.role_id = ? AND ra.scope = ?
            AND (ra.expires_at IS NULL OR ra.expires_at > ?)",
     )
-    .bind(Role::installation_administrator().id.0.to_string())
+    .bind(Role::installation_administrator().id.to_string())
     .bind(sid_core::models::INSTALLATION_SCOPE)
     .bind(fmt_dt(&chrono::Utc::now()))
     .fetch_all(&mut **tx)
@@ -329,7 +310,7 @@ async fn update_role_in_tx(
     .bind(&role.group)
     .bind(role.permissions_string())
     .bind(fmt_dt(&role.updated_at))
-    .bind(role.id.0.to_string())
+    .bind(role.id.to_string())
     .bind(revision)
     .execute(&mut **tx)
     .await
@@ -348,13 +329,13 @@ async fn insert_admin_envelope(
     envelope
         .validate()
         .map_err(|e| SidError::Validation(e.to_string()))?;
-    let id = id.0.to_string();
+    let id = id.to_string();
     sqlx::query(
         "INSERT INTO role_assignment_admin (assignment_id, recipient_group_id, max_validity_secs)
          VALUES (?, ?, ?)",
     )
     .bind(&id)
-    .bind(envelope.recipient_group.map(|g| g.0.to_string()))
+    .bind(envelope.recipient_group.map(|g| g.to_string()))
     .bind(envelope.max_validity_secs)
     .execute(&mut **tx)
     .await
@@ -391,7 +372,7 @@ async fn insert_admin_envelope(
             "INSERT INTO role_assignment_admin_roles (assignment_id, role_id) VALUES (?, ?)",
         )
         .bind(&id)
-        .bind(role.0.to_string())
+        .bind(role.to_string())
         .execute(&mut **tx)
         .await
         .map_err(|e| super::insert_error("administrative envelope role", e))?;
@@ -412,7 +393,7 @@ pub(crate) async fn check_authority_in_tx(
         "SELECT revision FROM role_assignments
          WHERE id = ? AND (expires_at IS NULL OR expires_at > ?)",
     )
-    .bind(basis.assignment.0.to_string())
+    .bind(basis.assignment.to_string())
     .bind(fmt_dt(&chrono::Utc::now()))
     .fetch_optional(&mut **tx)
     .await
@@ -425,7 +406,7 @@ pub(crate) async fn check_authority_in_tx(
     if let Some((group, member)) = basis.member {
         let held: Option<(i64,)> =
             sqlx::query_as("SELECT 1 FROM group_members WHERE group_id = ? AND profile_id = ?")
-                .bind(group.0.to_string())
+                .bind(group.to_string())
                 .bind(member)
                 .fetch_optional(&mut **tx)
                 .await
@@ -449,7 +430,7 @@ pub(crate) async fn insert_policy_authority_in_tx(
         sqlx::query(
             "INSERT INTO role_assignment_policy_admin (assignment_id, operation) VALUES (?, ?)",
         )
-        .bind(id.0.to_string())
+        .bind(id.to_string())
         .bind(operation.as_str())
         .execute(&mut **tx)
         .await
@@ -468,7 +449,7 @@ async fn check_assignment_fence(
     check_authority_in_tx(tx, &fence.basis).await?;
     let (role, checked) = &fence.role;
     let held: Option<(String,)> = sqlx::query_as("SELECT permissions FROM roles WHERE id = ?")
-        .bind(role.0.to_string())
+        .bind(role.to_string())
         .fetch_optional(&mut **tx)
         .await
         .map_err(read)?;
@@ -486,7 +467,7 @@ async fn check_assignment_fence(
     if let Some((group, member)) = fence.recipient_membership {
         let held: Option<(i64,)> =
             sqlx::query_as("SELECT 1 FROM group_members WHERE group_id = ? AND profile_id = ?")
-                .bind(group.0.to_string())
+                .bind(group.to_string())
                 .bind(member)
                 .fetch_optional(&mut **tx)
                 .await
@@ -500,7 +481,7 @@ async fn check_assignment_fence(
     if let Some((group, grantor)) = fence.grantor_outside {
         let inside: Option<(i64,)> =
             sqlx::query_as("SELECT 1 FROM group_members WHERE group_id = ? AND profile_id = ?")
-                .bind(group.0.to_string())
+                .bind(group.to_string())
                 .bind(grantor)
                 .fetch_optional(&mut **tx)
                 .await
@@ -548,11 +529,11 @@ pub(crate) async fn with_admin_envelopes(
         |id: &str| SidError::Storage(format!("administrative envelope {id} unreadable"));
     let read_error =
         |e: sqlx::Error| SidError::Storage(format!("read administrative envelopes: {e}"));
-    let ids = id_list(assignments.iter().map(|a| a.id.0));
+    let ids = id_list(assignments.iter().map(|a| a.id.into_uuid()));
     let position: std::collections::HashMap<String, usize> = assignments
         .iter()
         .enumerate()
-        .map(|(i, a)| (a.id.0.to_string(), i))
+        .map(|(i, a)| (a.id.to_string(), i))
         .collect();
     let at = |id: &str| position.get(id).copied().ok_or_else(|| unreadable(id));
 
@@ -608,16 +589,13 @@ pub(crate) async fn with_admin_envelopes(
     let mut envelopes = std::collections::HashMap::<String, AdminEnvelope>::new();
     for head in heads {
         let id: String = head.try_get("assignment_id").map_err(read_error)?;
-        let group: Option<String> = head.try_get("recipient_group_id").map_err(read_error)?;
+        let group: Option<GroupId> = head.try_get("recipient_group_id").map_err(read_error)?;
         let envelope = AdminEnvelope {
             operations: Default::default(),
             roles: Default::default(),
             permission_ceiling: Default::default(),
             recipient_kinds: Default::default(),
-            recipient_group: group
-                .map(|g| uuid::Uuid::parse_str(&g).map(GroupId))
-                .transpose()
-                .map_err(|_| unreadable(&id))?,
+            recipient_group: group,
             max_validity_secs: head.try_get("max_validity_secs").map_err(read_error)?,
         };
         envelopes.insert(id, envelope);
@@ -651,7 +629,7 @@ pub(crate) async fn with_admin_envelopes(
         }
     }
 
-    let roles: Vec<(String, String)> = sqlx::query_as(
+    let roles: Vec<(String, RoleId)> = sqlx::query_as(
         "SELECT assignment_id, role_id FROM role_assignment_admin_roles
          WHERE assignment_id IN (SELECT value FROM json_each(?))",
     )
@@ -660,7 +638,6 @@ pub(crate) async fn with_admin_envelopes(
     .await
     .map_err(read_error)?;
     for (id, role) in roles {
-        let role = RoleId(uuid::Uuid::parse_str(&role).map_err(|_| unreadable(&id))?);
         envelopes
             .get_mut(&id)
             .ok_or_else(|| unreadable(&id))?
@@ -678,19 +655,13 @@ pub(crate) async fn with_admin_envelopes(
 /// what it was written to deny.
 fn row_to_cedar_policy(row: &sqlx::sqlite::SqliteRow) -> SidResult<CedarPolicy> {
     let revision: i64 = col(row, "revision")?;
-    let project = col::<Option<String>>(row, "project_id")?
-        .map(|raw| {
-            uuid::Uuid::parse_str(&raw)
-                .map(ProjectId)
-                .map_err(|e| SidError::Storage(format!("column project_id: {e}")))
-        })
-        .transpose()?;
+    let project = col::<Option<ProjectId>>(row, "project_id")?;
     // A scope naming both a project and a resource would apply where it was
     // not written: an error, never one of the two.
     let scope = sid_core::models::PolicyScope::from_columns(project, col(row, "resource_id")?)
         .map_err(SidError::Storage)?;
     Ok(CedarPolicy {
-        id: CedarPolicyId(uuid_col(row, "id")?),
+        id: col(row, "id")?,
         scope,
         name: col(row, "name")?,
         description: col(row, "description")?,
@@ -724,7 +695,7 @@ impl SqliteBackend {
 
     pub(crate) async fn get_role_impl(&self, id: RoleId) -> SidResult<Option<Role>> {
         let row = sqlx::query("SELECT * FROM roles WHERE id = ?")
-            .bind(id.0.to_string())
+            .bind(id.to_string())
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -736,7 +707,7 @@ impl SqliteBackend {
             return Ok(Vec::new());
         }
         let rows = sqlx::query("SELECT * FROM roles WHERE id IN (SELECT value FROM json_each(?))")
-            .bind(id_list(ids.iter().map(|id| id.0)))
+            .bind(id_list(ids.iter().map(|id| id.into_uuid())))
             .fetch_all(&self.pool)
             .await
             .map_err(|e| SidError::Storage(format!("read roles: {e}")))?;
@@ -749,7 +720,7 @@ impl SqliteBackend {
         name: &str,
     ) -> SidResult<Option<Role>> {
         let row = sqlx::query("SELECT * FROM roles WHERE project_id = ? AND name = ?")
-            .bind(project_id.0.to_string())
+            .bind(project_id.to_string())
             .bind(name)
             .fetch_optional(&self.pool)
             .await
@@ -767,8 +738,8 @@ impl SqliteBackend {
             "INSERT INTO roles (id, project_id, key, name, description, group_label, permissions, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(role.id.0.to_string())
-        .bind(role.project_id.0.to_string())
+        .bind(role.id.to_string())
+        .bind(role.project_id.to_string())
         .bind(&role.key)
         .bind(&role.name)
         .bind(&role.description)
@@ -779,7 +750,7 @@ impl SqliteBackend {
         .execute(&mut *tx)
         .await
         .map_err(|e| super::insert_error("role", e))?;
-        Self::commit_mutation(tx, &format!("role:{}", role.id.0), audit).await
+        Self::commit_mutation(tx, &format!("role:{}", role.id), audit).await
     }
 
     pub(crate) async fn update_role_impl(
@@ -791,7 +762,7 @@ impl SqliteBackend {
         if !update_role_in_tx(&mut tx, role).await? {
             return Ok(false);
         }
-        Self::commit_mutation(tx, &format!("role:{}", role.id.0), audit).await?;
+        Self::commit_mutation(tx, &format!("role:{}", role.id), audit).await?;
         Ok(true)
     }
 
@@ -807,19 +778,17 @@ impl SqliteBackend {
         let mut tx = self.begin_write().await?;
         check_authority_in_tx(&mut tx, &fence.authority).await?;
         if let Some(bounded) = &fence.bounded {
-            let present: Vec<(String,)> = sqlx::query_as(
+            let present: Vec<(RoleAssignmentId,)> = sqlx::query_as(
                 "SELECT DISTINCT a.id FROM role_assignments a
                  JOIN role_assignment_ceilings c ON c.assignment_id = a.id
                  WHERE a.role_id = ?",
             )
-            .bind(role.id.0.to_string())
+            .bind(role.id.to_string())
             .fetch_all(&mut *tx)
             .await
             .map_err(read)?;
             for (id,) in present {
-                let id = uuid::Uuid::parse_str(&id)
-                    .map_err(|e| SidError::Storage(format!("column id: {e}")))?;
-                if !bounded.contains(&RoleAssignmentId(id)) {
+                if !bounded.contains(&id) {
                     return Err(SidError::Fenced(
                         "an assignment under an approved ceiling appeared since the check".into(),
                     ));
@@ -829,7 +798,7 @@ impl SqliteBackend {
         if !update_role_in_tx(&mut tx, role).await? {
             return Ok(false);
         }
-        Self::commit_mutation(tx, &format!("role:{}", role.id.0), audit).await?;
+        Self::commit_mutation(tx, &format!("role:{}", role.id), audit).await?;
         Ok(true)
     }
 
@@ -845,16 +814,16 @@ impl SqliteBackend {
             return Err(crate::administrator_role_assigned());
         }
         sqlx::query("DELETE FROM roles WHERE id = ?")
-            .bind(id.0.to_string())
+            .bind(id.to_string())
             .execute(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
-        Self::commit_mutation(tx, &format!("role:{}", id.0), audit).await
+        Self::commit_mutation(tx, &format!("role:{id}"), audit).await
     }
 
     pub(crate) async fn list_roles_impl(&self, project_id: ProjectId) -> SidResult<Vec<Role>> {
         let rows = sqlx::query("SELECT * FROM roles WHERE project_id = ?")
-            .bind(project_id.0.to_string())
+            .bind(project_id.to_string())
             .fetch_all(&self.pool)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -865,7 +834,7 @@ impl SqliteBackend {
 
     pub(crate) async fn get_group_impl(&self, id: GroupId) -> SidResult<Option<Group>> {
         let row = sqlx::query("SELECT * FROM groups WHERE id = ?")
-            .bind(id.0.to_string())
+            .bind(id.to_string())
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -879,7 +848,7 @@ impl SqliteBackend {
     ) -> SidResult<()> {
         let mut tx = self.begin_write().await?;
         super::directory::insert_group(&mut tx, group).await?;
-        Self::commit_mutation(tx, &format!("group:{}", group.id.0), audit).await
+        Self::commit_mutation(tx, &format!("group:{}", group.id), audit).await
     }
 
     pub(crate) async fn set_group_description_impl(
@@ -892,7 +861,7 @@ impl SqliteBackend {
         let updated = sqlx::query("UPDATE groups SET description = ?, updated_at = ? WHERE id = ?")
             .bind(description)
             .bind(fmt_dt(&chrono::Utc::now()))
-            .bind(id.0.to_string())
+            .bind(id.to_string())
             .execute(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(format!("update group: {e}")))?
@@ -903,12 +872,12 @@ impl SqliteBackend {
         }
         // The group as this write leaves it, read in its transaction.
         let group = sqlx::query("SELECT * FROM groups WHERE id = ?")
-            .bind(id.0.to_string())
+            .bind(id.to_string())
             .fetch_one(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(format!("read updated group: {e}")))?;
         audit.record_effect(&row_to_group(&group)?)?;
-        Self::commit_mutation(tx, &format!("group:{}", id.0), audit).await?;
+        Self::commit_mutation(tx, &format!("group:{id}"), audit).await?;
         Ok(true)
     }
 
@@ -923,7 +892,7 @@ impl SqliteBackend {
         // checked only at commit here, so the reference is looked up first.
         let restricting =
             sqlx::query("SELECT 1 FROM role_assignment_admin WHERE recipient_group_id = ? LIMIT 1")
-                .bind(id.0.to_string())
+                .bind(id.to_string())
                 .fetch_optional(&mut *tx)
                 .await
                 .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -933,16 +902,16 @@ impl SqliteBackend {
             ));
         }
         sqlx::query("DELETE FROM groups WHERE id = ?")
-            .bind(id.0.to_string())
+            .bind(id.to_string())
             .execute(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
-        Self::commit_mutation(tx, &format!("group:{}", id.0), audit).await
+        Self::commit_mutation(tx, &format!("group:{id}"), audit).await
     }
 
     pub(crate) async fn list_groups_impl(&self, project_id: ProjectId) -> SidResult<Vec<Group>> {
         let rows = sqlx::query("SELECT * FROM groups WHERE project_id = ?")
-            .bind(project_id.0.to_string())
+            .bind(project_id.to_string())
             .fetch_all(&self.pool)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -956,7 +925,7 @@ impl SqliteBackend {
     ) -> SidResult<()> {
         let mut tx = self.begin_write().await?;
         super::directory::add_member(&mut tx, member).await?;
-        Self::commit_mutation(tx, &format!("group:{}", member.group_id.0), audit).await
+        Self::commit_mutation(tx, &format!("group:{}", member.group_id), audit).await
     }
 
     pub(crate) async fn remove_from_group_impl(
@@ -967,7 +936,7 @@ impl SqliteBackend {
     ) -> SidResult<()> {
         let mut tx = self.begin_write().await?;
         super::directory::remove_member(&mut tx, group_id, profile_id).await?;
-        Self::commit_mutation(tx, &format!("group:{}", group_id.0), audit).await
+        Self::commit_mutation(tx, &format!("group:{group_id}"), audit).await
     }
 
     pub(crate) async fn list_group_members_impl(
@@ -975,7 +944,7 @@ impl SqliteBackend {
         group_id: GroupId,
     ) -> SidResult<Vec<GroupMember>> {
         let rows = sqlx::query("SELECT * FROM group_members WHERE group_id = ?")
-            .bind(group_id.0.to_string())
+            .bind(group_id.to_string())
             .fetch_all(&self.pool)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -1007,7 +976,7 @@ impl SqliteBackend {
     ) -> SidResult<()> {
         let mut tx = self.begin_write().await?;
         insert_role_assignment(&mut tx, assignment).await?;
-        Self::commit_mutation(tx, &format!("role_assignment:{}", assignment.id.0), audit).await
+        Self::commit_mutation(tx, &format!("role_assignment:{}", assignment.id), audit).await
     }
 
     pub(crate) async fn get_role_assignment_impl(
@@ -1015,7 +984,7 @@ impl SqliteBackend {
         id: RoleAssignmentId,
     ) -> SidResult<Option<RoleAssignment>> {
         let rows = sqlx::query("SELECT * FROM role_assignments WHERE id = ?")
-            .bind(id.0.to_string())
+            .bind(id.to_string())
             .fetch_all(&self.pool)
             .await
             .map_err(|e| SidError::Storage(format!("read role assignment: {e}")))?;
@@ -1031,7 +1000,7 @@ impl SqliteBackend {
         let mut tx = self.begin_write().await?;
         check_assignment_fence(&mut tx, fence).await?;
         insert_role_assignment(&mut tx, assignment).await?;
-        Self::commit_mutation(tx, &format!("role_assignment:{}", assignment.id.0), audit).await
+        Self::commit_mutation(tx, &format!("role_assignment:{}", assignment.id), audit).await
     }
 
     pub(crate) async fn delete_role_assignment_fenced_impl(
@@ -1046,7 +1015,7 @@ impl SqliteBackend {
         let removed: Option<(Option<sid_core::models::ProvisioningConnectorId>,)> = sqlx::query_as(
             "DELETE FROM role_assignments WHERE id = ? RETURNING provisioning_connector_id",
         )
-        .bind(id.0.to_string())
+        .bind(id.to_string())
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -1056,7 +1025,7 @@ impl SqliteBackend {
         if let Some(connector) = connector {
             super::provisioning_connector::bump_connector_revision(&mut tx, connector).await?;
         }
-        Self::commit_mutation(tx, &format!("role_assignment:{}", id.0), audit).await?;
+        Self::commit_mutation(tx, &format!("role_assignment:{id}"), audit).await?;
         Ok(true)
     }
 
@@ -1070,14 +1039,14 @@ impl SqliteBackend {
         let removed: Option<(Option<sid_core::models::ProvisioningConnectorId>,)> = sqlx::query_as(
             "DELETE FROM role_assignments WHERE id = ? RETURNING provisioning_connector_id",
         )
-        .bind(id.0.to_string())
+        .bind(id.to_string())
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(e.to_string()))?;
         if let Some((Some(connector),)) = removed {
             super::provisioning_connector::bump_connector_revision(&mut tx, connector).await?;
         }
-        Self::commit_mutation(tx, &format!("role_assignment:{}", id.0), audit).await
+        Self::commit_mutation(tx, &format!("role_assignment:{id}"), audit).await
     }
 
     pub(crate) async fn list_role_assignments_for_profile_impl(
@@ -1097,7 +1066,7 @@ impl SqliteBackend {
         group_id: GroupId,
     ) -> SidResult<Vec<RoleAssignment>> {
         let rows = sqlx::query("SELECT * FROM role_assignments WHERE group_id = ?")
-            .bind(group_id.0.to_string())
+            .bind(group_id.to_string())
             .fetch_all(&self.pool)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -1164,7 +1133,7 @@ impl SqliteBackend {
         role_id: RoleId,
     ) -> SidResult<Vec<RoleAssignment>> {
         let rows = sqlx::query("SELECT * FROM role_assignments WHERE role_id = ?")
-            .bind(role_id.0.to_string())
+            .bind(role_id.to_string())
             .fetch_all(&self.pool)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -1230,7 +1199,7 @@ impl SqliteBackend {
         id: CedarPolicyId,
     ) -> SidResult<Option<CedarPolicy>> {
         let row = sqlx::query("SELECT * FROM cedar_policies WHERE id = ?")
-            .bind(id.0.to_string())
+            .bind(id.to_string())
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -1255,7 +1224,7 @@ impl SqliteBackend {
         .bind(policy.effect.as_str())
         .bind(policy.enabled)
         .bind(fmt_dt(&policy.updated_at))
-        .bind(policy.id.0.to_string())
+        .bind(policy.id.to_string())
         .bind(revision)
         .execute(&mut *tx)
         .await
@@ -1265,7 +1234,7 @@ impl SqliteBackend {
         if !updated {
             return Ok(false);
         }
-        Self::commit_mutation(tx, &format!("cedar_policy:{}", policy.id.0), audit).await?;
+        Self::commit_mutation(tx, &format!("cedar_policy:{}", policy.id), audit).await?;
         Ok(true)
     }
 
@@ -1279,8 +1248,8 @@ impl SqliteBackend {
             "INSERT INTO cedar_policies (id, project_id, resource_id, name, description, policy_text, effect, enabled, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(policy.id.0.to_string())
-        .bind(policy.scope.project().map(|p| p.0.to_string()))
+        .bind(policy.id.to_string())
+        .bind(policy.scope.project().map(|p| p.to_string()))
         .bind(policy.scope.resource())
         .bind(&policy.name)
         .bind(&policy.description)
@@ -1292,7 +1261,7 @@ impl SqliteBackend {
         .execute(&mut *tx)
         .await
         .map_err(|e| super::insert_error("policy", e))?;
-        Self::commit_mutation(tx, &format!("cedar_policy:{}", policy.id.0), audit).await
+        Self::commit_mutation(tx, &format!("cedar_policy:{}", policy.id), audit).await
     }
 
     pub(crate) async fn delete_cedar_policy_impl(
@@ -1302,11 +1271,11 @@ impl SqliteBackend {
     ) -> SidResult<()> {
         let mut tx = self.begin_write().await?;
         sqlx::query("DELETE FROM cedar_policies WHERE id = ?")
-            .bind(id.0.to_string())
+            .bind(id.to_string())
             .execute(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
-        Self::commit_mutation(tx, &format!("cedar_policy:{}", id.0), audit).await
+        Self::commit_mutation(tx, &format!("cedar_policy:{id}"), audit).await
     }
 
     pub(crate) async fn list_cedar_policies_impl(
@@ -1315,7 +1284,7 @@ impl SqliteBackend {
     ) -> SidResult<Vec<CedarPolicy>> {
         let rows =
             sqlx::query("SELECT * FROM cedar_policies WHERE project_id IS ? AND resource_id IS ?")
-                .bind(scope.project().map(|p| p.0.to_string()))
+                .bind(scope.project().map(|p| p.to_string()))
                 .bind(scope.resource())
                 .fetch_all(&self.pool)
                 .await

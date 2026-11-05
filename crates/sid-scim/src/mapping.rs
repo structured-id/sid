@@ -35,7 +35,7 @@ impl ScimOrgContext {
     pub fn installation(org: &sid_core::models::Organization) -> Self {
         Self {
             org_domain: org.canonical_domain.clone(),
-            project_id: sid_core::models::ProjectId::system(),
+            project_id: sid_core::models::ProjectId::SYSTEM,
         }
     }
 }
@@ -315,7 +315,7 @@ pub fn sid_to_scim_user(
     // Group refs (read-only)
     for (gid, display) in group_memberships {
         user.groups.push(proto::ScimGroupRef {
-            value: gid.0.to_string(),
+            value: gid.to_string(),
             display: display.clone(),
         });
     }
@@ -347,7 +347,7 @@ pub fn sid_to_scim_group(
     base_url: &str,
 ) -> proto::ScimGroup {
     proto::ScimGroup {
-        id: group.id.0.to_string(),
+        id: group.id.to_string(),
         display_name: group.name.clone(),
         members: members
             .iter()
@@ -360,7 +360,7 @@ pub fn sid_to_scim_group(
             resource_type: "Group".into(),
             created: timestamp_to_proto(group.created_at),
             last_modified: timestamp_to_proto(group.updated_at),
-            location: format!("{}/scim/v2/Groups/{}", base_url, group.id.0),
+            location: format!("{}/scim/v2/Groups/{}", base_url, group.id),
             ..Default::default()
         }),
     }

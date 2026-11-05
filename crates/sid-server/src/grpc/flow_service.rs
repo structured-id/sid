@@ -82,9 +82,7 @@ async fn require_admin<T>(
 
 #[allow(clippy::result_large_err)]
 fn parse_project_id(s: &str) -> Result<ProjectId, Status> {
-    Uuid::parse_str(s)
-        .map(ProjectId)
-        .map_err(|_| invalid_field("project_id", "not a project identifier"))
+    ProjectId::parse(s).map_err(|_| invalid_field("project_id", "not a project identifier"))
 }
 
 #[allow(clippy::result_large_err)]
@@ -279,7 +277,7 @@ fn proto_step_to_domain(step: &pb::admin::StepConfig) -> (String, StepConfig) {
 
 fn domain_config_to_proto(config: &FlowConfig) -> pb::FlowConfig {
     pb::FlowConfig {
-        project_id: config.project_id.0.to_string(),
+        project_id: config.project_id.to_string(),
         flow_type: domain_flow_type_to_proto(&config.flow_type),
         steps: config
             .steps
@@ -314,7 +312,7 @@ fn domain_action_to_proto(action: &FlowAction) -> pb::FlowAction {
 
     pb::FlowAction {
         action_id: action.id.0.to_string(),
-        project_id: action.project_id.0.to_string(),
+        project_id: action.project_id.to_string(),
         flow_type: domain_flow_type_to_proto(&action.flow_type),
         action_point: domain_action_point_to_proto(&action.action_point),
         name: action.name.clone(),
@@ -366,7 +364,7 @@ impl FlowConfigService for FlowConfigServiceImpl {
                 not_found(
                     ErrorReason::FlowConfigNotFound,
                     "FlowConfig",
-                    format!("{}:{flow_type}", project_id.0),
+                    format!("{project_id}:{flow_type}"),
                 )
             })?;
 
@@ -404,7 +402,7 @@ impl FlowConfigService for FlowConfigServiceImpl {
         let audit: MutationContext = AuditEntry::admin(
             &admin_sub,
             "flow_config.save",
-            format!("{}:{}", project_id.0, flow_type),
+            format!("{project_id}:{flow_type}"),
         )
         .into();
         self.storage

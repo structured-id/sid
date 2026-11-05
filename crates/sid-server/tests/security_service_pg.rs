@@ -77,7 +77,7 @@ fn authed_request<T>(msg: T, token: &str) -> Request<T> {
 fn make_test_client(client_id: &str, required_acr: Option<AuthLevel>) -> OAuth2Client {
     OAuth2Client {
         client_id: client_id.to_string(),
-        project_id: sid_core::models::ProjectId::system(),
+        project_id: sid_core::models::ProjectId::SYSTEM,
         application_id: sid_core::models::ApplicationId::generate(),
         default_resource: None,
         application_type: ApplicationType::Spa,

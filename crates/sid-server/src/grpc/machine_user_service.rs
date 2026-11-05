@@ -37,7 +37,6 @@ use sid_proto::sid::v1::{
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 use tracing::info;
-use uuid::Uuid;
 
 use sid_core::grpc_error::{ApiError, ErrorReason};
 
@@ -183,9 +182,7 @@ fn parse_machine_user_id(s: &str) -> Result<MachineUserId, Status> {
 
 /// Parse a project ID string into the domain type.
 fn parse_project_id(s: &str) -> Result<ProjectId, Status> {
-    Uuid::parse_str(s)
-        .map(ProjectId)
-        .map_err(|_| invalid_field("project_id", "not a project identifier"))
+    ProjectId::parse(s).map_err(|_| invalid_field("project_id", "not a project identifier"))
 }
 
 /// MACHINE_USER_NOT_FOUND for `id`.
@@ -312,7 +309,7 @@ fn impersonation_target_to_proto(t: DomainImpersonationTargetType) -> ProtoImper
 fn machine_user_to_proto(mu: &MachineUser) -> MachineUserInfo {
     MachineUserInfo {
         id: mu.id.to_string(),
-        project_id: mu.project_id.0.to_string(),
+        project_id: mu.project_id.to_string(),
         client_id: mu.client_id.clone(),
         display_name: mu.display_name.clone(),
         description: mu.description.clone().unwrap_or_default(),
@@ -450,7 +447,7 @@ impl MachineUserService for MachineUserServiceImpl {
 
         info!(
             "Created machine user {} ({}) for project {}",
-            mu.id, mu.display_name, mu.project_id.0
+            mu.id, mu.display_name, mu.project_id
         );
 
         Ok(Response::new(response))

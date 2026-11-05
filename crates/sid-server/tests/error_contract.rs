@@ -194,7 +194,7 @@ async fn services(svc: TestServices) -> sid_serve::Services {
                 storage.clone(),
                 sid_scim::mapping::ScimOrgContext {
                     org_domain: "corp.sid.example.com".into(),
-                    project_id: sid_core::models::ProjectId::system(),
+                    project_id: sid_core::models::ProjectId::SYSTEM,
                 },
                 "https://sid.example.com".into(),
                 sid_scim::grpc::ScimDirectory {

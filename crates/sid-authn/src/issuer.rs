@@ -237,7 +237,7 @@ pub async fn ensure_issuer_resource(
     let now = chrono::Utc::now();
     let app = Application {
         id: ApplicationId::generate(),
-        project_id: ProjectId::system(),
+        project_id: ProjectId::SYSTEM,
         name: name.to_owned(),
         system: None,
         revision: 0,

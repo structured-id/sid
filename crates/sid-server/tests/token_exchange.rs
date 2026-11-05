@@ -27,7 +27,7 @@ fn setup_machine_user_for_exchange(
     let secret_hash = sid_authn::bearer_secret::verifier_of(raw_secret);
 
     let mu = MachineUser::new(
-        ProjectId::system(),
+        ProjectId::SYSTEM,
         "mu_test_exchange",
         "Test Exchange Bot",
         OwnerType::System,
@@ -107,7 +107,7 @@ async fn orders_api(svc: &TestServices, scopes: Option<&[&str]>) {
     let now = chrono::Utc::now();
     let app = Application {
         id: ApplicationId::generate(),
-        project_id: ProjectId::system(),
+        project_id: ProjectId::SYSTEM,
         name: "Orders API".into(),
         system: None,
         revision: 0,
@@ -562,7 +562,7 @@ async fn test_token_exchange_no_grant_for_target() {
     let secret_hash = sid_authn::bearer_secret::verifier_of(raw_secret);
 
     let mu = MachineUser::new(
-        ProjectId::system(),
+        ProjectId::SYSTEM,
         "mu_no_grant",
         "No Grant Bot",
         OwnerType::System,

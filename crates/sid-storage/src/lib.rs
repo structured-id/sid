@@ -177,12 +177,13 @@ fn check_other_administrator_assignment(
     removed: sid_core::models::RoleAssignmentId,
     administrators: &[(uuid::Uuid, String)],
 ) -> sid_core::Result<()> {
-    if !administrators.iter().any(|(id, _)| *id == removed.0) {
+    let removed = removed.into_uuid();
+    if !administrators.iter().any(|(id, _)| *id == removed) {
         return Ok(());
     }
     let others = administrators
         .iter()
-        .filter(|(id, status)| *id != removed.0 && usable_administrator(status))
+        .filter(|(id, status)| *id != removed && usable_administrator(status))
         .count();
     if others == 0 {
         return Err(sid_core::Error::InvalidState(

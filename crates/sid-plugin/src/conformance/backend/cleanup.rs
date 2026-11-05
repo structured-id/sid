@@ -28,7 +28,7 @@ pub async fn test_delete_outbound_dlq_entry(backend: &dyn StorageBackend) {
     let target = ScimOutboundTarget {
         id: ScimOutboundTargetId::new(),
         client_id: format!("dlq-{}", Uuid::now_v7().simple()),
-        project_id: sid_core::models::ProjectId::system(),
+        project_id: sid_core::models::ProjectId::SYSTEM,
         display_name: "Downstream".into(),
         endpoint_url: "https://scim.sid.example.com/v2".into(),
         auth: OutboundAuthConfig::Bearer {
@@ -93,7 +93,7 @@ pub async fn test_cleanup_expired_device_auth_codes(backend: &dyn StorageBackend
             tag[tag.len() - 8..].to_uppercase(),
             None,
             resource,
-            ProjectId::system(),
+            ProjectId::SYSTEM,
         );
         code.expires_at = expires_at;
         code

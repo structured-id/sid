@@ -43,7 +43,7 @@ async fn profile(storage: &Arc<dyn StorageBackend>) -> ProfileId {
 
 async fn role(storage: &Arc<dyn StorageBackend>, permissions: &[&str]) -> Role {
     let t = tag();
-    let mut role = Role::new(ProjectId::system(), format!("k{t}"), format!("n{t}"));
+    let mut role = Role::new(ProjectId::SYSTEM, format!("k{t}"), format!("n{t}"));
     role.permissions = permissions.iter().map(|p| p.to_string()).collect();
     storage.create_role(&role, audit()).await.unwrap();
     storage.get_role(role.id).await.unwrap().unwrap()
@@ -144,7 +144,7 @@ async fn run(engine: &str, storage: Arc<dyn StorageBackend>) {
     let question = AuthzCheckRequest {
         subject: format!("user:{worker}"),
         action: measured.permissions[0].clone(),
-        resource: format!("project:{}", ProjectId::system().0),
+        resource: format!("project:{}", ProjectId::SYSTEM),
         context: Default::default(),
     };
     let mut samples = Vec::with_capacity(CHECKS);

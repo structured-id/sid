@@ -65,7 +65,7 @@ async fn profile(storage: &Arc<dyn StorageBackend>) -> ProfileId {
 async fn role(storage: &Arc<dyn StorageBackend>, permissions: &[&str]) -> Role {
     storage.ensure_system_project(audit()).await.unwrap();
     let t = tag();
-    let mut role = Role::new(ProjectId::system(), format!("k{t}"), format!("n{t}"));
+    let mut role = Role::new(ProjectId::SYSTEM, format!("k{t}"), format!("n{t}"));
     role.permissions = permissions.iter().map(|p| p.to_string()).collect();
     storage.create_role(&role, audit()).await.unwrap();
     storage.get_role(role.id).await.unwrap().unwrap()
@@ -226,7 +226,7 @@ async fn every_bound_refuses(storage: Arc<dyn StorageBackend>) {
             )
             .await,
     );
-    let group = Group::new(ProjectId::system(), format!("g{}", tag()));
+    let group = Group::new(ProjectId::SYSTEM, format!("g{}", tag()));
     o.storage.create_group(&group, audit()).await.unwrap();
     denied(
         o.core
@@ -299,7 +299,7 @@ async fn envelopes_are_not_combined(storage: Arc<dyn StorageBackend>) {
         )
         .await
         .unwrap();
-    let group = Group::new(ProjectId::system(), format!("g{}", tag()));
+    let group = Group::new(ProjectId::SYSTEM, format!("g{}", tag()));
     o.storage.create_group(&group, audit()).await.unwrap();
     let worker = profile(&o.storage).await;
     denied(
@@ -337,7 +337,7 @@ async fn envelopes_are_not_combined(storage: Arc<dyn StorageBackend>) {
 /// removed before the commit is refused by the fence.
 async fn a_recipient_group_admits_members_only(storage: Arc<dyn StorageBackend>) {
     let o = Office::new(storage).await;
-    let group = Group::new(ProjectId::system(), format!("g{}", tag()));
+    let group = Group::new(ProjectId::SYSTEM, format!("g{}", tag()));
     o.storage.create_group(&group, audit()).await.unwrap();
     let member = profile(&o.storage).await;
     o.storage
@@ -674,7 +674,7 @@ async fn a_grantor_never_joins_the_group_it_granted(storage: Arc<dyn StorageBack
         )
         .await
         .unwrap();
-    let team = Group::new(ProjectId::system(), format!("g{}", tag()));
+    let team = Group::new(ProjectId::SYSTEM, format!("g{}", tag()));
     o.storage.create_group(&team, audit()).await.unwrap();
     o.core
         .assign(
@@ -837,7 +837,7 @@ async fn a_membership_racing_a_grant_never_reaches_the_grantor(storage: Arc<dyn 
         .unwrap();
     let as_team_admin = Administrator::Holder(AuthzPrincipal::Profile(team_admin));
     for round in 0..RACES {
-        let team = Group::new(ProjectId::system(), format!("g{}", tag()));
+        let team = Group::new(ProjectId::SYSTEM, format!("g{}", tag()));
         o.storage.create_group(&team, audit()).await.unwrap();
         let joining = GroupMember::new(team.id, team_admin);
         let delay = stagger(round);
@@ -975,9 +975,9 @@ async fn a_holder_sees_what_it_administers(storage: Arc<dyn StorageBackend>) {
         .iter()
         .map(|a| a.id)
         .collect();
-    everything.sort_by_key(|id| id.0);
+    everything.sort();
     let mut expected = vec![granted.id, other.id];
-    expected.sort_by_key(|id| id.0);
+    expected.sort();
     assert_eq!(everything, expected);
 }
 
@@ -1052,7 +1052,7 @@ async fn policy_authority_is_explicit_and_scoped(storage: Arc<dyn StorageBackend
     );
     denied(
         o.core
-            .policy_authority(&as_holder, Edit, PolicyScope::Project(ProjectId::system()))
+            .policy_authority(&as_holder, Edit, PolicyScope::Project(ProjectId::SYSTEM))
             .await,
     );
 
@@ -1139,7 +1139,7 @@ async fn policy_writes_are_fenced_by_their_authority(storage: Arc<dyn StorageBac
         .unwrap();
     let policy = |name: String| {
         CedarPolicy::new(
-            PolicyScope::Project(ProjectId::system()),
+            PolicyScope::Project(ProjectId::SYSTEM),
             &name,
             "forbid(principal, action, resource);",
             PolicyEffect::Forbid,
@@ -1179,7 +1179,7 @@ async fn a_group_authority_holds_only_for_a_current_member(storage: Arc<dyn Stor
     use sid_core::models::{CedarPolicy, PolicyEffect, PolicyScope, ResourceId};
     let o = Office::new(storage).await;
     let resource = ResourceId::generate();
-    let team = Group::new(ProjectId::system(), format!("g{}", tag()));
+    let team = Group::new(ProjectId::SYSTEM, format!("g{}", tag()));
     o.storage.create_group(&team, audit()).await.unwrap();
     let member = profile(&o.storage).await;
     o.storage
@@ -1204,7 +1204,7 @@ async fn a_group_authority_holds_only_for_a_current_member(storage: Arc<dyn Stor
         .await
         .unwrap();
     let policy = CedarPolicy::new(
-        PolicyScope::Project(ProjectId::system()),
+        PolicyScope::Project(ProjectId::SYSTEM),
         format!("p{}", tag()),
         "forbid(principal, action, resource);",
         PolicyEffect::Forbid,
@@ -1256,7 +1256,7 @@ async fn the_root_holds_only_its_current_assignment(storage: Arc<dyn StorageBack
             .await,
     );
     let policy = CedarPolicy::new(
-        PolicyScope::Project(ProjectId::system()),
+        PolicyScope::Project(ProjectId::SYSTEM),
         format!("p{}", tag()),
         "forbid(principal, action, resource);",
         PolicyEffect::Forbid,

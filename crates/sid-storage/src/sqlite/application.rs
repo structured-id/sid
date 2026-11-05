@@ -11,7 +11,7 @@ use sid_core::{Error as SidError, Result as SidResult};
 use super::project::{
     OAUTH2_CLIENT_CREATE, client_conflict, insert_oauth2_client, row_to_oauth2_client,
 };
-use super::{SqliteBackend, col, dt_col, fmt_dt, insert_error, uuid_col};
+use super::{SqliteBackend, col, dt_col, fmt_dt, insert_error};
 
 fn storage(e: sqlx::Error) -> SidError {
     SidError::Storage(e.to_string())
@@ -38,7 +38,7 @@ fn words(row: &sqlx::sqlite::SqliteRow, column: &str) -> SidResult<Vec<String>> 
 fn row_to_application(row: &sqlx::sqlite::SqliteRow) -> SidResult<Application> {
     Ok(Application {
         id: col(row, "id")?,
-        project_id: ProjectId(uuid_col(row, "project_id")?),
+        project_id: col(row, "project_id")?,
         name: col(row, "name")?,
         system: col::<Option<String>>(row, "system_integration")?
             .map(|kind| {
@@ -93,7 +93,7 @@ pub(super) async fn insert_application<'e, E: sqlx::SqliteExecutor<'e>>(
          VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(app.id)
-    .bind(app.project_id.0.to_string())
+    .bind(app.project_id.to_string())
     .bind(&app.name)
     .bind(revision(app.revision, "application")?)
     .bind(fmt_dt(&app.created_at))
@@ -210,7 +210,7 @@ impl SqliteBackend {
             "SELECT * FROM applications WHERE project_id = ?
              ORDER BY created_at, id LIMIT ? OFFSET ?",
         )
-        .bind(project_id.0.to_string())
+        .bind(project_id.to_string())
         .bind(count(limit, "limit")?)
         .bind(count(offset, "offset")?)
         .fetch_all(&self.pool)
@@ -235,7 +235,7 @@ impl SqliteBackend {
         .bind(fmt_dt(&app.updated_at))
         .bind(app.id)
         .bind(revision(app.revision, "application")?)
-        .bind(app.project_id.0.to_string())
+        .bind(app.project_id.to_string())
         .bind(fmt_dt(&app.created_at))
         .execute(&mut *tx)
         .await

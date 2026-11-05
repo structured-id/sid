@@ -119,7 +119,7 @@ where
         "INSERT INTO credentials (id, profile_id, credential_type, status, data, label, policy_version, zkpp_verified, opaque_curve, legacy_algorithm, opaque_credential_identifier, zkpp_artifact, created_at, last_used_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
-    .bind(credential.id.0.to_string())
+    .bind(credential.id.to_string())
     .bind(credential.profile_id)
     .bind(credential.credential_type.as_str())
     .bind(credential.status.as_str())
@@ -509,7 +509,7 @@ impl SqliteBackend {
              ON CONFLICT(principal_type, value) DO NOTHING
              RETURNING id",
         )
-        .bind(principal.id.0.to_string())
+        .bind(principal.id.to_string())
         .bind(principal.principal_type.as_str())
         .bind(&principal.value)
         .bind(principal.verified)
@@ -538,7 +538,7 @@ impl SqliteBackend {
                 "INSERT INTO profile_emails (id, profile_id, email, label, custom_label, is_primary, verified, verified_at, created_at, updated_at)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
-            .bind(email.id.0.to_string())
+            .bind(email.id.to_string())
             .bind(email.profile_id)
             .bind(&email.email)
             .bind(email.label.as_str())
@@ -558,7 +558,7 @@ impl SqliteBackend {
                 "INSERT INTO profile_phones (id, profile_id, e164, extension, label, custom_label, is_primary, can_receive_sms, can_receive_fax, can_receive_voice, verified, verified_at, created_at, updated_at)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
-            .bind(phone.id.0.to_string())
+            .bind(phone.id.to_string())
             .bind(phone.profile_id)
             .bind(phone.e164 as i64)
             .bind(phone.extension.map(|e| e as i32))
@@ -582,12 +582,12 @@ impl SqliteBackend {
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(uuid::Uuid::now_v7().to_string())
-        .bind(principal.id.0.to_string())
+        .bind(principal.id.to_string())
         .bind(principal.profile_id.to_string())
         .bind(principal.is_primary)
         .bind(&principal.source_field)
-        .bind(principal.source_email_id.map(|id| id.0.to_string()))
-        .bind(principal.source_phone_id.map(|id| id.0.to_string()))
+        .bind(principal.source_email_id.map(|id| id.to_string()))
+        .bind(principal.source_phone_id.map(|id| id.to_string()))
         .bind(fmt_dt(&principal.created_at))
         .execute(&mut *tx)
         .await
@@ -605,7 +605,7 @@ impl SqliteBackend {
             )
             .bind(invite.to_string())
             .bind(profile.id)
-            .bind(credential.as_ref().map(|c| c.id.0.to_string()))
+            .bind(credential.as_ref().map(|c| c.id.to_string()))
             .bind(fmt_dt(&chrono::Utc::now()))
             .execute(&mut *tx)
             .await
@@ -633,7 +633,7 @@ impl SqliteBackend {
         id: ProfilePhoneId,
     ) -> SidResult<Option<ProfilePhone>> {
         let row = sqlx::query("SELECT * FROM profile_phones WHERE id = ?")
-            .bind(id.0.to_string())
+            .bind(id.to_string())
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -683,7 +683,7 @@ impl SqliteBackend {
         id: ProfileEmailId,
     ) -> SidResult<Option<ProfileEmail>> {
         let row = sqlx::query("SELECT * FROM profile_emails WHERE id = ?")
-            .bind(id.0.to_string())
+            .bind(id.to_string())
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -738,7 +738,7 @@ impl SqliteBackend {
              LEFT JOIN principal_bindings pb ON pr.id = pb.principal_id
              WHERE pr.id = ?"
         )
-        .bind(id.0.to_string())
+        .bind(id.to_string())
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -860,7 +860,7 @@ impl SqliteBackend {
              JOIN profiles prof ON pb.profile_id = prof.id
              WHERE pb.principal_id = ? AND prof.status = 'active'",
         )
-        .bind(principal_id.0.to_string())
+        .bind(principal_id.to_string())
         .fetch_one(&self.pool)
         .await
         .map_err(|e| SidError::Storage(e.to_string()))
@@ -874,7 +874,7 @@ impl SqliteBackend {
             "SELECT id, principal_id, profile_id, is_primary, source_field, source_email_id, source_phone_id, created_at
              FROM principal_bindings WHERE principal_id = ?"
         )
-        .bind(principal_id.0.to_string())
+        .bind(principal_id.to_string())
         .fetch_all(&self.pool)
         .await
         .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -934,7 +934,7 @@ impl SqliteBackend {
                            WHERE d.principal_id = principals.id
                              AND d.disposition = 'quarantined')",
         )
-        .bind(principal_id.0.to_string())
+        .bind(principal_id.to_string())
         .bind(profile_id.to_string())
         .bind(fmt_dt(&chrono::Utc::now()))
         .execute(&mut *tx)
@@ -949,9 +949,9 @@ impl SqliteBackend {
             "UPDATE principal_bindings SET source_field = 'email', source_email_id = ?3
              WHERE principal_id = ?1 AND profile_id = ?2",
         )
-        .bind(principal_id.0.to_string())
+        .bind(principal_id.to_string())
         .bind(profile_id.to_string())
-        .bind(contact.id.0.to_string())
+        .bind(contact.id.to_string())
         .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("link reconciled key: {e}")))?;
@@ -963,7 +963,7 @@ impl SqliteBackend {
                  recorded_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
              WHERE principal_id = ?1",
         )
-        .bind(principal_id.0.to_string())
+        .bind(principal_id.to_string())
         .bind(reason)
         .execute(&mut *tx)
         .await
@@ -979,7 +979,7 @@ impl SqliteBackend {
                  INNER JOIN principal_bindings pb ON pr.id = pb.principal_id
                  WHERE pr.id = ? AND pb.profile_id = ?",
             )
-            .bind(principal_id.0.to_string())
+            .bind(principal_id.to_string())
             .bind(profile_id.to_string())
             .fetch_one(&mut *tx)
             .await
@@ -1016,7 +1016,7 @@ impl SqliteBackend {
         id: CredentialId,
     ) -> SidResult<Option<Credential>> {
         let row = sqlx::query("SELECT * FROM credentials WHERE id = ?")
-            .bind(id.0.to_string())
+            .bind(id.to_string())
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -1056,8 +1056,8 @@ impl SqliteBackend {
              ORDER BY id LIMIT ?",
         )
         .bind(credential_type.as_str())
-        .bind(after.map(|id| id.0.to_string()))
-        .bind(after.map(|id| id.0.to_string()))
+        .bind(after.map(|id| id.to_string()))
+        .bind(after.map(|id| id.to_string()))
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
         .await
@@ -1378,7 +1378,7 @@ impl SqliteBackend {
              WHERE id = ? AND status = 'active' RETURNING profile_id",
         )
         .bind(label)
-        .bind(id.0.to_string())
+        .bind(id.to_string())
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -1412,7 +1412,7 @@ impl SqliteBackend {
         .bind(new.opaque_credential_identifier.map(|id| id.to_vec()))
         .bind(artifact)
         .bind(fmt_dt(&chrono::Utc::now()))
-        .bind(id.0.to_string())
+        .bind(id.to_string())
         .bind(expected)
         .fetch_optional(&mut *tx)
         .await
@@ -1447,7 +1447,7 @@ impl SqliteBackend {
              WHERE id = ? AND data = ? RETURNING profile_id",
         )
         .bind(data)
-        .bind(id.0.to_string())
+        .bind(id.to_string())
         .bind(expected)
         .fetch_optional(&mut *tx)
         .await
@@ -1470,7 +1470,7 @@ impl SqliteBackend {
              WHERE id = ? AND status = 'active' RETURNING profile_id",
         )
         .bind(fmt_dt(&chrono::Utc::now()))
-        .bind(id.0.to_string())
+        .bind(id.to_string())
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -1495,7 +1495,7 @@ impl SqliteBackend {
         )
         .bind(data)
         .bind(fmt_dt(&chrono::Utc::now()))
-        .bind(id.0.to_string())
+        .bind(id.to_string())
         .bind(expected)
         .fetch_optional(&mut *tx)
         .await
@@ -1545,7 +1545,7 @@ impl SqliteBackend {
     ) -> SidResult<()> {
         let mut tx = self.begin_write().await?;
         sqlx::query("DELETE FROM credentials WHERE id = ?")
-            .bind(id.0.to_string())
+            .bind(id.to_string())
             .execute(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -1564,7 +1564,7 @@ impl SqliteBackend {
         let mut tx = self.begin_write().await?;
         let target: Option<(String, String)> =
             sqlx::query_as("SELECT credential_type, status FROM credentials WHERE id = ?")
-                .bind(id.0.to_string())
+                .bind(id.to_string())
                 .fetch_optional(&mut *tx)
                 .await
                 .map_err(storage)?;
@@ -1582,7 +1582,7 @@ impl SqliteBackend {
                    AND id <> ?1 AND status = 'active'
                    AND credential_type IN (SELECT value FROM json_each(?2))",
             )
-            .bind(id.0.to_string())
+            .bind(id.to_string())
             .bind(serde_json::to_string(&primary_types).expect("names serialize"))
             .fetch_one(&mut *tx)
             .await
@@ -1592,7 +1592,7 @@ impl SqliteBackend {
             }
         }
         sqlx::query("UPDATE credentials SET status = 'revoked' WHERE id = ?")
-            .bind(id.0.to_string())
+            .bind(id.to_string())
             .execute(&mut *tx)
             .await
             .map_err(storage)?;

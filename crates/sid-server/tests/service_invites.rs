@@ -38,7 +38,7 @@ struct Invites {
 
 async fn invites() -> Invites {
     let machine = MachineUser::new(
-        ProjectId::system(),
+        ProjectId::SYSTEM,
         ISSUER,
         "Onboarding service",
         OwnerType::System,
@@ -117,7 +117,7 @@ impl Invites {
         let role = self
             .svc
             .storage
-            .list_roles(ProjectId::system())
+            .list_roles(ProjectId::SYSTEM)
             .await
             .unwrap()
             .into_iter()
@@ -467,21 +467,20 @@ async fn the_invite_issuer_role_is_assigned_to_a_machine_user_on_one_resource() 
     let role = i
         .svc
         .storage
-        .list_roles(ProjectId::system())
+        .list_roles(ProjectId::SYSTEM)
         .await
         .unwrap()
         .into_iter()
         .find(|r| r.key == INVITE_ISSUER_ROLE)
         .unwrap()
-        .id
-        .0
-        .to_string();
+        .id;
+    let role = Some(sid_ids_proto::RoleId::from(role));
     let admin = common::administrator_token(&i.svc.jwt, i.svc.storage.as_ref()).await;
     let on = Some(format!("oauth_resource:{}", i.resource.id));
-    let machine = || Some(Principal::MachineUserId(i.machine.id.to_string()));
+    let machine = || Some(Principal::MachineUserId(i.machine.id.into()));
     let cases = [
         (
-            Some(Principal::ProfileId(test_profile().id.to_string())),
+            Some(Principal::ProfileId(test_profile().id.into())),
             on.clone(),
         ),
         (

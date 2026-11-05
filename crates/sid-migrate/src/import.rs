@@ -260,7 +260,7 @@ pub async fn import_snapshot(
     // 1. Projects (must exist before anything else)
     info!(count = snapshot.projects.len(), "importing projects...");
     for project in &snapshot.projects {
-        let audit = make_audit(&actor, "import_project", &project.id.0.to_string());
+        let audit = make_audit(&actor, "import_project", &project.id.to_string());
         // Already in the store (the system project, or an earlier import): kept as stored.
         result.projects += created(backend.create_project(project, audit).await, || async {
             Ok(backend.get_project(project.id).await?.is_some())
@@ -360,7 +360,7 @@ pub async fn import_snapshot(
     // 3. Principals (depend on profiles)
     info!(count = snapshot.principals.len(), "importing principals...");
     for principal in &snapshot.principals {
-        let audit = make_audit(&actor, "import_principal", &principal.id.0.to_string());
+        let audit = make_audit(&actor, "import_principal", &principal.id.to_string());
         backend.save_principal(principal, audit).await?;
         result.principals += 1;
     }
@@ -371,7 +371,7 @@ pub async fn import_snapshot(
         "importing credentials..."
     );
     for credential in &snapshot.credentials {
-        let audit = make_audit(&actor, "import_credential", &credential.id.0.to_string());
+        let audit = make_audit(&actor, "import_credential", &credential.id.to_string());
         match backend.create_credential(credential, audit).await {
             Ok(()) => result.credentials += 1,
             Err(sid_core::Error::Conflict(_))
@@ -505,7 +505,7 @@ pub async fn import_snapshot(
         "importing initial access tokens..."
     );
     for iat in &snapshot.initial_access_tokens {
-        let audit = make_audit(&actor, "import_iat", &iat.id.0.to_string());
+        let audit = make_audit(&actor, "import_iat", &iat.id.to_string());
         backend.create_initial_access_token(iat, audit).await?;
         result.initial_access_tokens += 1;
     }
@@ -513,7 +513,7 @@ pub async fn import_snapshot(
     // 9. Roles (depend on projects)
     info!(count = snapshot.roles.len(), "importing roles...");
     for role in &snapshot.roles {
-        let audit = make_audit(&actor, "import_role", &role.id.0.to_string());
+        let audit = make_audit(&actor, "import_role", &role.id.to_string());
         result.roles += created(backend.create_role(role, audit).await, || async {
             Ok(backend.get_role(role.id).await?.is_some())
         })
@@ -523,7 +523,7 @@ pub async fn import_snapshot(
     // 10. Groups (depend on projects)
     info!(count = snapshot.groups.len(), "importing groups...");
     for group in &snapshot.groups {
-        let audit = make_audit(&actor, "import_group", &group.id.0.to_string());
+        let audit = make_audit(&actor, "import_group", &group.id.to_string());
         backend.create_group(group, audit).await?;
         result.groups += 1;
     }
@@ -537,7 +537,7 @@ pub async fn import_snapshot(
         let audit = make_audit(
             &actor,
             "import_group_member",
-            &format!("{}:{}", member.group_id.0, member.profile_id),
+            &format!("{}:{}", member.group_id, member.profile_id),
         );
         backend.add_to_group(member, audit).await?;
         result.group_members += 1;
@@ -552,11 +552,7 @@ pub async fn import_snapshot(
         "importing role assignments..."
     );
     for assignment in sources_first(&snapshot.role_assignments)? {
-        let audit = make_audit(
-            &actor,
-            "import_role_assignment",
-            &assignment.id.0.to_string(),
-        );
+        let audit = make_audit(&actor, "import_role_assignment", &assignment.id.to_string());
         result.role_assignments += created(
             backend.create_role_assignment(assignment, audit).await,
             || async {
@@ -575,7 +571,7 @@ pub async fn import_snapshot(
         "importing cedar policies..."
     );
     for policy in &snapshot.cedar_policies {
-        let audit = make_audit(&actor, "import_cedar_policy", &policy.id.0.to_string());
+        let audit = make_audit(&actor, "import_cedar_policy", &policy.id.to_string());
         backend.create_cedar_policy(policy, audit).await?;
         result.cedar_policies += 1;
     }
@@ -609,7 +605,7 @@ pub async fn import_snapshot(
         "importing device auth codes..."
     );
     for code in &snapshot.device_auth_codes {
-        let audit = make_audit(&actor, "import_device_auth_code", &code.id.0.to_string());
+        let audit = make_audit(&actor, "import_device_auth_code", &code.id.to_string());
         backend.create_device_auth_code(code, audit).await?;
         result.device_auth_codes += 1;
     }
@@ -620,7 +616,7 @@ pub async fn import_snapshot(
         "importing profile grants..."
     );
     for grant in &snapshot.profile_grants {
-        let audit = make_audit(&actor, "import_profile_grant", &grant.id.0.to_string());
+        let audit = make_audit(&actor, "import_profile_grant", &grant.id.to_string());
         result.profile_grants +=
             created(backend.create_profile_grant(grant, audit).await, || async {
                 Ok(backend.get_profile_grant(grant.id).await?.is_some())
@@ -634,11 +630,7 @@ pub async fn import_snapshot(
         "importing upstream providers..."
     );
     for provider in &snapshot.upstream_providers {
-        let audit = make_audit(
-            &actor,
-            "import_upstream_provider",
-            &provider.id.0.to_string(),
-        );
+        let audit = make_audit(&actor, "import_upstream_provider", &provider.id.to_string());
         result.upstream_providers += created(
             backend.create_upstream_provider(provider, audit).await,
             || async { Ok(backend.get_upstream_provider(provider.id).await?.is_some()) },
@@ -652,11 +644,7 @@ pub async fn import_snapshot(
         "importing upstream identities..."
     );
     for identity in &snapshot.upstream_identities {
-        let audit = make_audit(
-            &actor,
-            "import_upstream_identity",
-            &identity.id.0.to_string(),
-        );
+        let audit = make_audit(&actor, "import_upstream_identity", &identity.id.to_string());
         result.upstream_identities += created(
             backend.create_upstream_identity(identity, audit).await,
             || async {
@@ -678,7 +666,7 @@ pub async fn import_snapshot(
         "importing PATs..."
     );
     for pat in &snapshot.personal_access_tokens {
-        let audit = make_audit(&actor, "import_pat", &pat.id.0.to_string());
+        let audit = make_audit(&actor, "import_pat", &pat.id.to_string());
         backend.create_pat(pat, None, audit).await?;
         result.personal_access_tokens += 1;
     }
@@ -811,7 +799,7 @@ pub async fn import_snapshot(
         let audit = make_audit(
             &actor,
             "import_scim_outbound_target",
-            &target.id.0.to_string(),
+            &target.id.to_string(),
         );
         result.scim_outbound_targets += created(
             backend.create_scim_outbound_target(target, audit).await,
@@ -956,7 +944,7 @@ fn sources_first(
         if pending.len() == before {
             anyhow::bail!(
                 "role assignments {:?} depend on each other in a cycle",
-                pending.iter().map(|a| a.id.0).collect::<Vec<_>>()
+                pending.iter().map(|a| a.id.to_string()).collect::<Vec<_>>()
             );
         }
     }

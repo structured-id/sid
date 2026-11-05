@@ -64,17 +64,16 @@ async fn as_admin<T>(svc: &TestServices, message: T) -> Request<T> {
     request
 }
 
-async fn checker_role(svc: &TestServices) -> String {
-    svc.storage
-        .list_roles(ProjectId::system())
+async fn checker_role(svc: &TestServices) -> Option<sid_ids_proto::RoleId> {
+    let role = svc
+        .storage
+        .list_roles(ProjectId::SYSTEM)
         .await
         .unwrap()
         .into_iter()
         .find(|r| r.key == PERMISSION_CHECKER_ROLE)
-        .expect("provisioned at start")
-        .id
-        .0
-        .to_string()
+        .expect("provisioned at start");
+    Some(role.id.into())
 }
 
 fn on(resource: impl std::fmt::Display) -> Option<String> {
@@ -154,14 +153,14 @@ async fn permission_checking_is_assigned_only_to_a_service_on_one_resource() {
     let client = || Some(Principal::OauthClientId(common::CONFIDENTIAL_CLIENT.into()));
     let cases = [
         (
-            Some(Principal::ProfileId(test_profile().id.to_string())),
+            Some(Principal::ProfileId(test_profile().id.into())),
             on(userinfo),
             Code::InvalidArgument,
         ),
         (client(), None, Code::InvalidArgument),
         (
             client(),
-            Some(format!("project:{}", ProjectId::system().0)),
+            Some(format!("project:{}", ProjectId::SYSTEM)),
             Code::InvalidArgument,
         ),
         (client(), on(ResourceId::generate()), Code::NotFound),
@@ -241,7 +240,7 @@ async fn asking() -> Asking {
     use sid_core::models::machine_user::{MachineCredentialType, MachineUserCredential, OwnerType};
     let machine = |client_id: &str| {
         sid_core::models::MachineUser::new(
-            ProjectId::system(),
+            ProjectId::SYSTEM,
             client_id,
             client_id,
             OwnerType::System,
@@ -289,7 +288,7 @@ async fn asking() -> Asking {
             let now = chrono::Utc::now();
             let app = sid_core::models::Application {
                 id: sid_core::models::ApplicationId::generate(),
-                project_id: ProjectId::system(),
+                project_id: ProjectId::SYSTEM,
                 name: path.clone(),
                 system: None,
                 revision: 0,
@@ -327,7 +326,7 @@ async fn asking() -> Asking {
     let wiki = resource("wiki").await;
     // The subjects' own grants: each may read orders.
     let mut reader =
-        sid_core::models::Role::new(ProjectId::system(), "orders-reader", "Orders reader");
+        sid_core::models::Role::new(ProjectId::SYSTEM, "orders-reader", "Orders reader");
     reader.permissions = vec!["orders.read".into()];
     svc.storage.create_role(&reader, audit()).await.unwrap();
     for principal in [
@@ -581,7 +580,7 @@ async fn a_checker_asks_about_a_subject_on_its_resource_only() {
     let mut project_wide = a.named("orders.read", &a.orders);
     project_wide.target = Some(PermissionTarget {
         scope: Some(permission_target::Scope::ProjectId(
-            ProjectId::system().0.to_string(),
+            ProjectId::SYSTEM.into(),
         )),
         object: String::new(),
     });
@@ -629,7 +628,7 @@ async fn the_checker_role_grants_nothing_else() {
             .await
             .unwrap()
             .into_iter()
-            .map(|assignment| (assignment.id.0, assignment.scope))
+            .map(|assignment| (assignment.id, assignment.scope))
             .collect::<Vec<_>>()
     };
     let before = held().await;
@@ -639,7 +638,7 @@ async fn the_checker_role_grants_nothing_else() {
         .assign_role(bearing(
             &token,
             AssignRoleRequest {
-                principal: Some(Principal::MachineUserId(a.checker.id.to_string())),
+                principal: Some(Principal::MachineUserId(a.checker.id.into())),
                 role_id: checker_role(&a.svc).await,
                 scope: on(a.wiki.id),
                 expires_at: None,
@@ -655,7 +654,7 @@ async fn the_checker_role_grants_nothing_else() {
         .revoke_role(bearing(
             &token,
             RevokeRoleRequest {
-                assignment_id: before[0].0.to_string(),
+                assignment_id: Some(before[0].0.into()),
             },
         ))
         .await
@@ -672,7 +671,7 @@ async fn the_checker_role_grants_nothing_else() {
             ListRoleAssignmentsRequest {
                 filter: Some(
                     sid_proto::sid::v1::authz::list_role_assignments_request::Filter::MachineUserId(
-                        a.checker.id.to_string(),
+                        a.checker.id.into(),
                     ),
                 ),
             },
@@ -2159,7 +2158,7 @@ async fn an_object_action_is_decided_for_its_object_with_current_permission() {
     assert!(sid_auth::receiver::admitted(&first).is_err());
 
     let mut canceller =
-        sid_core::models::Role::new(ProjectId::system(), "orders-canceller", "Orders canceller");
+        sid_core::models::Role::new(ProjectId::SYSTEM, "orders-canceller", "Orders canceller");
     canceller.permissions = vec!["orders.cancel".into()];
     let audit = || sid_core::models::AuditEntry::system("test", "checking").into();
     a.svc
@@ -2227,7 +2226,7 @@ async fn an_object_action_has_its_proof_admitted_before_its_handler() {
     .unwrap();
     let mut p = protected_at(&a, serve_issuer(&a, verifiers).await).await;
     let mut canceller =
-        sid_core::models::Role::new(ProjectId::system(), "orders-canceller", "Orders canceller");
+        sid_core::models::Role::new(ProjectId::SYSTEM, "orders-canceller", "Orders canceller");
     canceller.permissions = vec!["orders.cancel".into()];
     let audit = || sid_core::models::AuditEntry::system("test", "checking").into();
     a.svc

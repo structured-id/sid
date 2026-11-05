@@ -122,6 +122,12 @@ pub const CE_ENROLLMENT_TRACK_SOURCE: bool = true;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SecurityPolicyId(pub Uuid);
 
+impl core::fmt::Display for SecurityPolicyId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 impl SecurityPolicyId {
     pub fn new() -> Self {
         Self(Uuid::now_v7())

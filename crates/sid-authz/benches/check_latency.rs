@@ -72,7 +72,7 @@ fn question(who: ProfileId, action: &str) -> AuthzCheckRequest {
     AuthzCheckRequest {
         subject: format!("user:{who}"),
         action: action.to_string(),
-        resource: format!("project:{}", ProjectId::system().0),
+        resource: format!("project:{}", ProjectId::SYSTEM),
         context: Default::default(),
     }
 }
@@ -96,7 +96,7 @@ async fn run(engine: &str, storage: Arc<dyn StorageBackend>) {
     // and a role key is unique in its project.
     let run = uuid::Uuid::now_v7().simple().to_string();
     let mut role = Role::new(
-        ProjectId::system(),
+        ProjectId::SYSTEM,
         format!("reader_{run}"),
         format!("Reader {run}"),
     );
@@ -168,7 +168,7 @@ async fn run(engine: &str, storage: Arc<dyn StorageBackend>) {
             )
         };
         let policy = CedarPolicy::new(
-            PolicyScope::Project(ProjectId::system()),
+            PolicyScope::Project(ProjectId::SYSTEM),
             format!("bench {run} {i}"),
             text,
             effect,

@@ -6,7 +6,7 @@ use crate::test_mock::MockStorage;
 async fn setup() -> (GroupService<MockStorage>, Arc<MockStorage>, ProjectId) {
     let storage = Arc::new(MockStorage::new());
     let service = GroupService::new(storage.clone());
-    let project_id = ProjectId::new();
+    let project_id = ProjectId::generate();
     (service, storage, project_id)
 }
 
@@ -56,7 +56,7 @@ async fn test_add_member_duplicate() {
 async fn test_add_member_group_not_found() {
     let (service, _, _) = setup().await;
     let result = service
-        .add_member(GroupId::new(), ProfileId::generate())
+        .add_member(GroupId::generate(), ProfileId::generate())
         .await;
     assert!(result.is_err());
 }

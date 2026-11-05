@@ -10,7 +10,7 @@ fn test_target() -> ScimOutboundTarget {
     ScimOutboundTarget {
         id: ScimOutboundTargetId::new(),
         client_id: "test-app".into(),
-        project_id: ProjectId::system(),
+        project_id: ProjectId::SYSTEM,
         display_name: "Test App".into(),
         endpoint_url: "https://scim.example.com/v2".into(),
         auth: OutboundAuthConfig::Bearer {

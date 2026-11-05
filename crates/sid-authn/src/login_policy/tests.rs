@@ -35,7 +35,7 @@ fn client(
     let now = Utc::now();
     let app = sid_core::models::Application {
         id: sid_core::models::ApplicationId::generate(),
-        project_id: sid_core::models::ProjectId::system(),
+        project_id: sid_core::models::ProjectId::SYSTEM,
         name: "Orders web".into(),
         system: None,
         revision: 0,

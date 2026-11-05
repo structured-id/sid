@@ -50,14 +50,13 @@ impl<S: StorageBackend> GroupService<S> {
         self.storage
             .get_group(group_id)
             .await?
-            .ok_or_else(|| Error::NotFound(format!("group {}", group_id.0)))?;
+            .ok_or_else(|| Error::NotFound(format!("group {group_id}")))?;
 
         // Check for duplicate membership.
         let existing = self.storage.list_group_members(group_id).await?;
         if existing.iter().any(|m| m.profile_id == profile_id) {
             return Err(Error::Conflict(format!(
-                "profile {} already in group {}",
-                profile_id, group_id.0
+                "profile {profile_id} already in group {group_id}"
             )));
         }
 
@@ -65,7 +64,7 @@ impl<S: StorageBackend> GroupService<S> {
         self.storage
             .add_to_group(
                 &member,
-                AuditEntry::system("group.add_member", group_id.0.to_string()).into(),
+                AuditEntry::system("group.add_member", group_id.to_string()).into(),
             )
             .await?;
         Ok(member)
@@ -77,7 +76,7 @@ impl<S: StorageBackend> GroupService<S> {
             .remove_from_group(
                 group_id,
                 profile_id,
-                AuditEntry::system("group.remove_member", group_id.0.to_string()).into(),
+                AuditEntry::system("group.remove_member", group_id.to_string()).into(),
             )
             .await
     }
@@ -108,7 +107,7 @@ impl<S: StorageBackend> GroupService<S> {
         self.storage
             .delete_group(
                 group_id,
-                AuditEntry::system("group.delete", group_id.0.to_string()).into(),
+                AuditEntry::system("group.delete", group_id.to_string()).into(),
             )
             .await
     }

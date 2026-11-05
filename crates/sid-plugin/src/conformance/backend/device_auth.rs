@@ -29,7 +29,7 @@ async fn stored_request(backend: &dyn StorageBackend) -> (DeviceAuthorizationCod
         tag[tag.len() - 8..].to_uppercase(),
         Some("openid".to_string()),
         super::application::grant_resource(backend).await,
-        ProjectId::system(),
+        ProjectId::SYSTEM,
     );
     backend
         .create_device_auth_code(&code, test_audit())

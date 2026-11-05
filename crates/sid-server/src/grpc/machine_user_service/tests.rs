@@ -1,4 +1,5 @@
 use super::*;
+use uuid::Uuid;
 
 // ── client_id generation ──
 
@@ -62,7 +63,7 @@ fn test_sha256_hex_length() {
 #[test]
 fn test_machine_user_to_proto() {
     let mu = MachineUser::new(
-        ProjectId(Uuid::nil()),
+        ProjectId::SYSTEM,
         "mu_test123",
         "Test Bot",
         OwnerType::System,
@@ -82,7 +83,7 @@ fn test_machine_user_to_proto() {
 #[test]
 fn test_machine_user_to_proto_with_restrictions() {
     let mut mu = MachineUser::new(
-        ProjectId(Uuid::nil()),
+        ProjectId::SYSTEM,
         "mu_restricted",
         "Restricted Bot",
         OwnerType::Profile,
@@ -164,7 +165,7 @@ fn test_parse_project_id_valid() {
     let uuid = Uuid::now_v7();
     let result = parse_project_id(&uuid.to_string());
     assert!(result.is_ok());
-    assert_eq!(result.unwrap().0, uuid);
+    assert_eq!(result.unwrap().into_uuid(), uuid);
 }
 
 #[test]

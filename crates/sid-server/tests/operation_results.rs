@@ -333,7 +333,7 @@ async fn test_initial_access_token_retry_answers_without_its_value() {
     let svc = TestServices::new(MockStorage::new().with_system_project());
     let token = issue_admin_token(&svc.jwt, ProfileId::generate());
     let create = || CreateInitialAccessTokenRequest {
-        project_id: sid_core::models::ProjectId::system().0.to_string(),
+        project_id: sid_core::models::ProjectId::SYSTEM.to_string(),
         max_clients: 1,
         ..Default::default()
     };
@@ -358,7 +358,7 @@ async fn test_initial_access_token_retry_answers_without_its_value() {
         .project
         .list_initial_access_tokens(keyed(
             ListInitialAccessTokensRequest {
-                project_id: sid_core::models::ProjectId::system().0.to_string(),
+                project_id: sid_core::models::ProjectId::SYSTEM.to_string(),
             },
             &token,
             None,
@@ -377,7 +377,7 @@ async fn test_create_application_retry_answers_without_its_secret() {
     let svc = TestServices::new(MockStorage::new().with_system_project());
     let token = issue_admin_token(&svc.jwt, ProfileId::generate());
     let create = || CreateApplicationRequest {
-        project_id: sid_core::models::ProjectId::system().0.to_string(),
+        project_id: sid_core::models::ProjectId::SYSTEM.to_string(),
         name: "billing".to_string(),
         client: Some(ClientRoleSettings {
             // A web client (the unspecified type) gets a secret.
@@ -407,7 +407,7 @@ async fn test_create_application_retry_answers_without_its_secret() {
         .project
         .list_applications(keyed(
             ListApplicationsRequest {
-                project_id: sid_core::models::ProjectId::system().0.to_string(),
+                project_id: sid_core::models::ProjectId::SYSTEM.to_string(),
                 ..Default::default()
             },
             &token,
@@ -900,7 +900,7 @@ async fn machine_user_with_secret(
         .machine_user
         .create_machine_user(keyed(
             CreateMachineUserRequest {
-                project_id: sid_core::models::ProjectId::system().0.to_string(),
+                project_id: sid_core::models::ProjectId::SYSTEM.to_string(),
                 display_name: "ci".into(),
                 ..Default::default()
             },

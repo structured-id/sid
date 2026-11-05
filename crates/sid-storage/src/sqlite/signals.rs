@@ -35,7 +35,7 @@ impl SqliteBackend {
             "INSERT INTO anomaly_events (id, rule_id, profile_id, ip_address, description, risk_score, reaction, timestamp) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(event.id.0.to_string())
+        .bind(event.id.to_string())
         .bind(&event.rule_id)
         .bind(&event.profile_id)
         .bind(event.ip_address.map(super::ip_to_bytes))

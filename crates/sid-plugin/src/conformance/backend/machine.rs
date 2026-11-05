@@ -21,7 +21,7 @@ fn tag() -> String {
 async fn machine_user(backend: &dyn StorageBackend) -> MachineUser {
     backend.ensure_system_project(test_audit()).await.unwrap();
     MachineUser::new(
-        ProjectId::system(),
+        ProjectId::SYSTEM,
         format!("mu-{}", tag()),
         "ci",
         OwnerType::System,
