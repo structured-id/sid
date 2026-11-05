@@ -199,6 +199,41 @@ async fn test_listing_without_a_profile_lists_the_callers_own() {
     assert!(theirs.credentials.is_empty());
 }
 
+/// Regression: a session signed in with a User-Agent stores that agent's
+/// fingerprint (a version-4 UUID) for the new-device rule; listing it as a
+/// managed device id refused it as corruption and failed the whole listing.
+/// A fingerprint is no registered device: the listing names none.
+#[tokio::test]
+async fn test_a_session_fingerprint_is_not_listed_as_a_device() {
+    let (svc, owner, owner_token, _) = owner_and_stranger().await;
+    let mut session = sid_core::models::Session::new(
+        owner.id,
+        None,
+        chrono::Utc::now() + chrono::Duration::hours(1),
+    );
+    session.device_id = Some(sid_authn::sign_in_security::device_id("Mozilla/5.0"));
+    svc.storage
+        .create_session(&session, AuditEntry::system("test", "setup").into())
+        .await
+        .unwrap();
+
+    let listed = svc
+        .identity
+        .list_sessions(authed(
+            ListSessionsRequest { profile_id: None },
+            &owner_token,
+        ))
+        .await
+        .expect("the listing answers")
+        .into_inner()
+        .sessions;
+    let found = listed
+        .iter()
+        .find(|s| s.id == Some(session.id.into()))
+        .expect("the session is listed");
+    assert_eq!(found.device_id, None);
+}
+
 /// Naming another Profile takes administrator authority; a user is refused
 /// before anything about that Profile is read.
 #[tokio::test]

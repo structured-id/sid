@@ -288,7 +288,9 @@ pub struct Session<O = ProfileId> {
     /// OAuth2 client that initiated this session (None for direct auth).
     pub client_id: Option<String>,
 
-    /// Device identifier for session binding.
+    /// Fingerprint of the User-Agent the session signed in with, the
+    /// sign-in history the new-device rule compares later sign-ins by. Not a
+    /// registered `Device` id.
     pub device_id: Option<Uuid>,
 
     /// Client address; none when the transport reported no peer.

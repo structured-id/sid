@@ -1390,24 +1390,22 @@ impl IdentityService for IdentityServiceImpl {
         Ok(Response::new(ListSessionsResponse {
             sessions: sessions
                 .into_iter()
-                .map(|s| {
-                    let device_id = match s.device_id {
-                        Some(id) => convert::stored_id::<DeviceId, _>(id)?,
-                        None => None,
-                    };
-                    Ok(Session {
-                        id: Some(s.id.into()),
-                        client_id: s.client_id.unwrap_or_default(),
-                        device_id,
-                        ip_address: s.ip_address.map(|ip| ip.to_string()).unwrap_or_default(),
-                        user_agent: s.user_agent,
-                        created_at: Some(convert::to_timestamp(s.created_at)),
-                        expires_at: Some(convert::to_timestamp(s.expires_at)),
-                        last_activity_at: None,
-                        scopes: vec![],
-                    })
+                .map(|s| Session {
+                    id: Some(s.id.into()),
+                    client_id: s.client_id.unwrap_or_default(),
+                    // The stored value is the User-Agent fingerprint the
+                    // new-device rule compares sign-ins by, never a
+                    // registered Device; a session carries no managed device
+                    // association, so it names none.
+                    device_id: None,
+                    ip_address: s.ip_address.map(|ip| ip.to_string()).unwrap_or_default(),
+                    user_agent: s.user_agent,
+                    created_at: Some(convert::to_timestamp(s.created_at)),
+                    expires_at: Some(convert::to_timestamp(s.expires_at)),
+                    last_activity_at: None,
+                    scopes: vec![],
                 })
-                .collect::<Result<_, Status>>()?,
+                .collect(),
         }))
     }
 
