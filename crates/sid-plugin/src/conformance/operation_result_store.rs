@@ -4,7 +4,9 @@
 //! another store, and is dropped only when its owner asks.
 
 use sid_core::Error;
-use sid_core::models::{AuditEntry, MutationContext, OperationCompletion, OperationKey};
+use sid_core::models::{
+    AuditEntry, MutationContext, OperationCompletion, OperationKey, OperationResourceBinding,
+};
 use uuid::Uuid;
 
 use crate::OperationResultStore;
@@ -312,6 +314,31 @@ pub async fn operation_periods_bound_admission(store: &dyn OperationResultStore)
 
     // The earlier period still admits while the next one is current.
     let kept = key();
+    // A creation bound and completed in the period, and one bound and never
+    // completed: the retirement drops the first binding, keeps the second.
+    let in_period = |key: &OperationKey| OperationResourceBinding {
+        method: "keyed".into(),
+        period: Some(first.period),
+        ..proposal(&ns, key, "keyed")
+    };
+    store
+        .bind_operation_resource(&in_period(&kept))
+        .await
+        .unwrap();
+    let unfinished = key();
+    let begun = in_period(&unfinished);
+    store.bind_operation_resource(&begun).await.unwrap();
+    let mut unissued_binding = in_period(&key());
+    unissued_binding.period = Some(OperationPeriod::new(i64::MAX as u64));
+    assert_eq!(
+        refused(
+            store
+                .bind_operation_resource(&unissued_binding)
+                .await
+                .map(|_| ())
+        ),
+        OperationPeriodRefusal::NotIssued
+    );
     store
         .record_outcome(keyed(&kept, first.period))
         .await
@@ -359,6 +386,36 @@ pub async fn operation_periods_bound_admission(store: &dyn OperationResultStore)
             "a retired period's completions go with it"
         );
     }
+    let bindings = store.export_operation_resources().await.unwrap();
+    assert!(
+        !bindings.iter().any(|b| b.namespace == ns && b.key == kept),
+        "a completed creation's binding goes with its period"
+    );
+    assert!(
+        bindings.contains(&begun),
+        "an unfinished creation's binding is kept to reconcile it"
+    );
+    // Carried to another store, that binding still holds its key there,
+    // although no command runs under its retired period any more.
+    let mut carried_begun = begun.clone();
+    carried_begun.namespace = namespace();
+    assert!(
+        store
+            .import_operation_resource(&carried_begun)
+            .await
+            .unwrap(),
+        "an unfinished creation's binding under a retired period is carried"
+    );
+    let rebound = OperationResourceBinding {
+        period: Some(next.period),
+        resource: Uuid::now_v7(),
+        ..carried_begun.clone()
+    };
+    let err = store.bind_operation_resource(&rebound).await.unwrap_err();
+    assert!(
+        matches!(err, Error::OperationKeyReused(_)),
+        "the carried binding keeps its key from a new command: {err:?}"
+    );
     assert_eq!(
         refused(store.record_outcome(keyed(&key(), first.period)).await),
         OperationPeriodRefusal::Retired
@@ -455,6 +512,237 @@ pub async fn operation_periods_bound_admission(store: &dyn OperationResultStore)
     assert!(held(&after, foreign) && held(&after, reissued.period));
     assert!(after.issued_through >= foreign);
     store.record_outcome(keyed(&key(), foreign)).await.unwrap();
+}
+
+/// A keyed creation's identifier proposal for `key` in `namespace`.
+fn proposal(namespace: &str, key: &OperationKey, method: &str) -> OperationResourceBinding {
+    OperationResourceBinding {
+        namespace: namespace.into(),
+        key: key.clone(),
+        method: method.into(),
+        fingerprint: sid_core::models::operation::fingerprint(b"inputs"),
+        period: None,
+        resource: Uuid::now_v7(),
+    }
+}
+
+/// The first attempt of a keyed creation binds its proposed identifier;
+/// every later or concurrent attempt of the same command resolves that one,
+/// whatever it proposes. The key for another method or other inputs binds
+/// nothing and is refused; another namespace's key of the same name is its
+/// own.
+pub async fn a_keyed_creation_binds_one_identifier(store: &dyn OperationResultStore) {
+    let (ns, key) = (namespace(), key());
+    let first = proposal(&ns, &key, "create");
+    assert_eq!(
+        store.bind_operation_resource(&first).await.unwrap(),
+        first.resource
+    );
+    let retry = proposal(&ns, &key, "create");
+    assert_eq!(
+        store.bind_operation_resource(&retry).await.unwrap(),
+        first.resource,
+        "a retry resolves the identifier the first attempt bound"
+    );
+
+    let mut other_inputs = proposal(&ns, &key, "create");
+    other_inputs.fingerprint = sid_core::models::operation::fingerprint(b"other");
+    for conflicting in [other_inputs, proposal(&ns, &key, "delete")] {
+        let err = store
+            .bind_operation_resource(&conflicting)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::OperationKeyReused(_)), "{err:?}");
+    }
+    let theirs = proposal(&namespace(), &key, "create");
+    assert_eq!(
+        store.bind_operation_resource(&theirs).await.unwrap(),
+        theirs.resource
+    );
+
+    // Concurrent first attempts of one command: one binding, both see it.
+    let racing = self::key();
+    let (a, b) = (
+        proposal(&ns, &racing, "create"),
+        proposal(&ns, &racing, "create"),
+    );
+    let (x, y) = tokio::join!(
+        store.bind_operation_resource(&a),
+        store.bind_operation_resource(&b)
+    );
+    let (x, y) = (x.unwrap(), y.unwrap());
+    assert_eq!(x, y, "concurrent attempts resolve one binding");
+    assert!(x == a.resource || x == b.resource);
+}
+
+/// A key bound by a creation completes only that creation: another method or
+/// other inputs under the key are refused and record nothing, so the
+/// creation's binding is never left with another command's completion. A
+/// binding and a completion of different commands racing on one key leave
+/// it to exactly one of them.
+pub async fn a_bound_key_completes_only_its_own_command(store: &dyn OperationResultStore) {
+    let (ns, bound_key) = (namespace(), key());
+    let creation = proposal(&ns, &bound_key, "create");
+    store.bind_operation_resource(&creation).await.unwrap();
+    let other_inputs = MutationContext::from(AuditEntry::system("conformance", "operation_result"))
+        .with_operation(OperationCompletion::new(
+            &ns,
+            bound_key.clone(),
+            "create",
+            b"other",
+            vec![],
+        ));
+    for conflicting in [outcome(&ns, &bound_key, "delete", b""), other_inputs] {
+        let err = store.record_outcome(conflicting).await.unwrap_err();
+        assert!(matches!(err, Error::OperationKeyReused(_)), "{err:?}");
+    }
+    assert!(
+        store
+            .get_operation_result(&ns, &bound_key)
+            .await
+            .unwrap()
+            .is_none(),
+        "a refused completion records nothing"
+    );
+    assert_eq!(
+        store
+            .bind_operation_resource(&proposal(&ns, &bound_key, "create"))
+            .await
+            .unwrap(),
+        creation.resource,
+        "the creation keeps its binding"
+    );
+    store
+        .record_outcome(outcome(&ns, &bound_key, "create", b"done"))
+        .await
+        .unwrap();
+
+    for _ in 0..16 {
+        let racing = key();
+        let creation = proposal(&ns, &racing, "create");
+        let (bound, recorded) = tokio::join!(
+            store.bind_operation_resource(&creation),
+            store.record_outcome(outcome(&ns, &racing, "delete", b"")),
+        );
+        match (bound, recorded) {
+            (Ok(_), Err(Error::OperationKeyReused(_)))
+            | (Err(Error::OperationKeyReused(_)), Ok(())) => {}
+            other => panic!("one command owns the key, got {other:?}"),
+        }
+    }
+}
+
+/// A key completed for another command binds nothing. A completed creation's
+/// binding goes with its completion: once the completion's retention ended,
+/// the key takes a new binding; purging the completion drops the binding.
+pub async fn a_binding_lives_with_its_completion(store: &dyn OperationResultStore) {
+    let ns = namespace();
+    let done = key();
+    store
+        .record_outcome(outcome(&ns, &done, "abort", b""))
+        .await
+        .unwrap();
+    let err = store
+        .bind_operation_resource(&proposal(&ns, &done, "create"))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::OperationKeyReused(_)), "{err:?}");
+
+    let expired = key();
+    let old = proposal(&ns, &expired, "deliver");
+    store.bind_operation_resource(&old).await.unwrap();
+    let now = chrono::Utc::now();
+    store
+        .record_outcome(
+            MutationContext::from(AuditEntry::system("conformance", "operation_result"))
+                .with_operation(
+                    OperationCompletion::new(&ns, expired.clone(), "deliver", b"inputs", vec![])
+                        .retained_until(now - chrono::Duration::seconds(1)),
+                ),
+        )
+        .await
+        .unwrap();
+    // A binding whose completion expired is not carried to another store:
+    // it would hold a key the source already released.
+    assert!(
+        !store
+            .export_operation_resources()
+            .await
+            .unwrap()
+            .iter()
+            .any(|b| b.namespace == ns && b.key == expired),
+        "an expired creation's binding is not exported"
+    );
+    let renewed = proposal(&ns, &expired, "deliver");
+    assert_eq!(
+        store.bind_operation_resource(&renewed).await.unwrap(),
+        renewed.resource,
+        "an expired completion frees its key for a new binding"
+    );
+    // The new binding stands: the expired completion was consumed, so the
+    // next attempt of the new command resolves the same identifier.
+    assert_eq!(
+        store
+            .bind_operation_resource(&proposal(&ns, &expired, "deliver"))
+            .await
+            .unwrap(),
+        renewed.resource,
+        "the renewed binding is stable"
+    );
+
+    let purged = key();
+    let bound = proposal(&ns, &purged, "commit");
+    store.bind_operation_resource(&bound).await.unwrap();
+    store
+        .record_outcome(outcome(&ns, &purged, "commit", b""))
+        .await
+        .unwrap();
+    store
+        .purge_operation_results(&ns, "commit", now + chrono::Duration::seconds(5))
+        .await
+        .unwrap();
+    assert!(
+        !store
+            .export_operation_resources()
+            .await
+            .unwrap()
+            .iter()
+            .any(|b| b.namespace == ns && b.key == purged),
+        "the purge drops the binding with its completion"
+    );
+}
+
+/// A binding leaves in the export and comes back through import; importing
+/// it again writes nothing, and a creation resumed in the importing store
+/// resolves the carried identifier.
+pub async fn bindings_travel_between_stores(store: &dyn OperationResultStore) {
+    let (ns, key) = (namespace(), key());
+    let bound = proposal(&ns, &key, "create");
+    store.bind_operation_resource(&bound).await.unwrap();
+    let mine = store
+        .export_operation_resources()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|b| b.namespace == ns && b.key == key)
+        .expect("exported");
+    assert_eq!(mine, bound);
+    assert!(
+        !store.import_operation_resource(&mine).await.unwrap(),
+        "an existing binding is kept"
+    );
+
+    let mut moved = mine.clone();
+    moved.namespace = namespace();
+    assert!(store.import_operation_resource(&moved).await.unwrap());
+    assert_eq!(
+        store
+            .bind_operation_resource(&proposal(&moved.namespace, &key, "create"))
+            .await
+            .unwrap(),
+        moved.resource,
+        "the resumed creation finds the carried identifier"
+    );
 }
 
 /// Completions of one method in one namespace are dropped once older than

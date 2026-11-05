@@ -780,6 +780,17 @@ pub async fn import_snapshot(
         }
     }
 
+    // 26d. Identifiers keyed creations bound (a resumed creation finds its own)
+    info!(
+        count = snapshot.operation_resources.len(),
+        "importing operation resource bindings..."
+    );
+    for binding in &snapshot.operation_resources {
+        if backend.import_operation_resource(binding).await? {
+            result.operation_resources += 1;
+        }
+    }
+
     // 27. Magic link sessions
     info!(
         count = snapshot.magic_link_sessions.len(),
@@ -996,6 +1007,7 @@ pub struct ImportResult {
     pub export_jobs: u64,
     pub durable_work: u64,
     pub operation_results: u64,
+    pub operation_resources: u64,
     pub magic_link_sessions: u64,
     pub scim_outbound_targets: u64,
     pub scim_outbound_records: u64,
@@ -1040,6 +1052,7 @@ impl ImportResult {
             + self.export_jobs
             + self.durable_work
             + self.operation_results
+            + self.operation_resources
             + self.magic_link_sessions
             + self.scim_outbound_targets
             + self.scim_outbound_records
@@ -1082,6 +1095,7 @@ impl std::fmt::Display for ImportResult {
         writeln!(f, "  Machine Credentials:  {}", self.machine_credentials)?;
         writeln!(f, "  Impersonation Grants: {}", self.impersonation_grants)?;
         writeln!(f, "  Operation Results:    {}", self.operation_results)?;
+        writeln!(f, "  Operation Resources:  {}", self.operation_resources)?;
         writeln!(f, "  SCIM Targets:         {}", self.scim_outbound_targets)?;
         writeln!(f, "  Branding Configs:     {}", self.branding_configs)?;
         writeln!(f, "  ─────────────────────────────")?;

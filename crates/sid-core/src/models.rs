@@ -197,7 +197,7 @@ pub use oidc_issuer::{IssuerAuthority, IssuerHandle, IssuerId, IssuerSigningKey,
 pub use operation::{
     IssuedOperationPeriod, OperationCompletion, OperationContext, OperationKey, OperationPeriod,
     OperationPeriodPolicy, OperationPeriodRecord, OperationPeriodRefusal, OperationPeriodState,
-    OperationRecord,
+    OperationRecord, OperationResourceBinding,
 };
 pub use organization::{OrgId, OrgStatus, OrgType, Organization};
 pub use password_history::{
