@@ -154,9 +154,9 @@ fn every_rpc_is_annotated_or_deliberately_internal() {
     assert_eq!(unannotated, internal);
 }
 
-/// The registration result names only the installed credential: no Profile
-/// identifier under any name or number, field 1 included, so a client cannot
-/// read one from it.
+/// The registration result names only the installed credential, as its first
+/// and only field: no Profile identifier under any name or number, so a
+/// client cannot read one from it.
 #[test]
 fn registration_results_name_only_the_credential() {
     let pool = prost_reflect::DescriptorPool::decode(FILE_DESCRIPTOR_SET).unwrap();
@@ -176,7 +176,7 @@ fn registration_results_name_only_the_credential() {
             fields,
             vec![(
                 "credential_id".to_owned(),
-                3,
+                1,
                 "sid.v1.ids.CredentialId".to_owned()
             )],
             "{message}"
