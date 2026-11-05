@@ -4,6 +4,8 @@
 //! CE RBAC: roles, groups, role assignments, Cedar policies.
 //! All checks = flat SQL queries. No recursion. No graph. No ReBAC.
 
+use core::num::NonZeroU8;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -19,21 +21,9 @@ pub use admin::{
 
 // ── Role ──────────────────────────────────────────────────────────────
 
-/// Unique identifier for a role.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct RoleId(pub Uuid);
-
-impl RoleId {
-    pub fn new() -> Self {
-        Self(Uuid::now_v7())
-    }
-}
-
-impl Default for RoleId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+/// Validated identifier of a role: a UUIDv7, or a built-in role
+/// ([`RoleId::builtin`]); construction and decoding go through `sid_ids`.
+pub use sid_ids::RoleId;
 
 /// Role represents a named collection of permissions.
 ///
@@ -66,7 +56,7 @@ impl Role {
     pub fn new(project_id: ProjectId, key: impl Into<String>, name: impl Into<String>) -> Self {
         let now = Utc::now();
         Self {
-            id: RoleId::new(),
+            id: RoleId::generate(),
             project_id,
             key: key.into(),
             name: name.into(),
@@ -97,10 +87,10 @@ impl Role {
     /// The built-in role of the system project granting [`TOKEN_INTROSPECT`],
     /// assigned on one protected resource at a time.
     pub fn token_inspector() -> Self {
-        let mut role = Self::new(ProjectId::system(), TOKEN_INSPECTOR_ROLE, "Token inspector");
+        let mut role = Self::new(ProjectId::SYSTEM, TOKEN_INSPECTOR_ROLE, "Token inspector");
         // One id in every installation: a snapshot restored where the role was
         // already provisioned names the same role.
-        role.id = RoleId(TOKEN_INSPECTOR_ROLE_ID);
+        role.id = TOKEN_INSPECTOR_ROLE_ID;
         role.description = Some("Inspects access tokens issued for a protected resource".into());
         role.permissions = vec![TOKEN_INTROSPECT.to_string()];
         role
@@ -110,11 +100,11 @@ impl Role {
     /// assigned to a service on one protected resource at a time.
     pub fn permission_checker() -> Self {
         let mut role = Self::new(
-            ProjectId::system(),
+            ProjectId::SYSTEM,
             PERMISSION_CHECKER_ROLE,
             "Permission checker",
         );
-        role.id = RoleId(PERMISSION_CHECKER_ROLE_ID);
+        role.id = PERMISSION_CHECKER_ROLE_ID;
         role.description =
             Some("Asks whether a subject may act on a protected resource's objects".into());
         role.permissions = vec![AUTHZ_CHECK.to_string()];
@@ -125,12 +115,8 @@ impl Role {
     /// action, assigned to a provisioning connector on one organization's
     /// directory resource. A narrower custom role grants a subset.
     pub fn scim_provisioner() -> Self {
-        let mut role = Self::new(
-            ProjectId::system(),
-            SCIM_PROVISIONER_ROLE,
-            "SCIM provisioner",
-        );
-        role.id = RoleId(SCIM_PROVISIONER_ROLE_ID);
+        let mut role = Self::new(ProjectId::SYSTEM, SCIM_PROVISIONER_ROLE, "SCIM provisioner");
+        role.id = SCIM_PROVISIONER_ROLE_ID;
         role.description =
             Some("Provisions an organization's directory users and groups over SCIM".into());
         role.permissions = SCIM_ACTIONS.iter().map(|a| a.to_string()).collect();
@@ -143,11 +129,11 @@ impl Role {
     /// permission list.
     pub fn installation_administrator() -> Self {
         let mut role = Self::new(
-            ProjectId::system(),
+            ProjectId::SYSTEM,
             INSTALLATION_ADMINISTRATOR_ROLE,
             "Installation administrator",
         );
-        role.id = RoleId(INSTALLATION_ADMINISTRATOR_ROLE_ID);
+        role.id = INSTALLATION_ADMINISTRATOR_ROLE_ID;
         role.description = Some("Administers the whole installation".into());
         role
     }
@@ -155,8 +141,8 @@ impl Role {
     /// The built-in role of the system project granting every invite action,
     /// assigned to a service on the enrollment API resource.
     pub fn invite_issuer() -> Self {
-        let mut role = Self::new(ProjectId::system(), INVITE_ISSUER_ROLE, "Invite issuer");
-        role.id = RoleId(INVITE_ISSUER_ROLE_ID);
+        let mut role = Self::new(ProjectId::SYSTEM, INVITE_ISSUER_ROLE, "Invite issuer");
+        role.id = INVITE_ISSUER_ROLE_ID;
         role.description = Some("Issues, reads and revokes registration invites".into());
         role.permissions = INVITE_ACTIONS.iter().map(|a| a.to_string()).collect();
         role
@@ -183,8 +169,7 @@ pub const INSTALLATION_ADMINISTRATOR_ROLE: &str = "installation-administrator";
 
 /// Id of the built-in installation administrator role, fixed like the token
 /// inspector's.
-const INSTALLATION_ADMINISTRATOR_ROLE_ID: Uuid =
-    Uuid::from_u128(0x0000_0000_0000_0000_0000_0000_0000_0005);
+const INSTALLATION_ADMINISTRATOR_ROLE_ID: RoleId = RoleId::builtin(NonZeroU8::new(5).unwrap());
 
 /// Scope of an assignment across the whole installation, as stored.
 pub const INSTALLATION_SCOPE: &str = "installation";
@@ -193,7 +178,7 @@ pub const INSTALLATION_SCOPE: &str = "installation";
 pub const INVITE_ISSUER_ROLE: &str = "invite-issuer";
 
 /// Id of the built-in invite issuer role, fixed like the token inspector's.
-const INVITE_ISSUER_ROLE_ID: Uuid = Uuid::from_u128(0x0000_0000_0000_0000_0000_0000_0000_0004);
+const INVITE_ISSUER_ROLE_ID: RoleId = RoleId::builtin(NonZeroU8::new(4).unwrap());
 
 /// SCIM directory actions a provisioning connector can be granted on its
 /// organization's directory resource. Every one starts with
@@ -233,7 +218,7 @@ pub const SCIM_ACTIONS: [&str; 10] = [
 pub const SCIM_PROVISIONER_ROLE: &str = "scim-provisioner";
 
 /// Id of the built-in SCIM provisioner role, fixed like the token inspector's.
-const SCIM_PROVISIONER_ROLE_ID: Uuid = Uuid::from_u128(0x0000_0000_0000_0000_0000_0000_0000_0002);
+const SCIM_PROVISIONER_ROLE_ID: RoleId = RoleId::builtin(NonZeroU8::new(2).unwrap());
 
 /// The action of inspecting access tokens issued for one protected resource
 /// (RFC 7662), independent of the right to obtain them.
@@ -243,7 +228,7 @@ pub const TOKEN_INTROSPECT: &str = "oauth.token.introspect";
 pub const TOKEN_INSPECTOR_ROLE: &str = "token-inspector";
 
 /// Id of the built-in token inspector role, fixed like the system project's.
-const TOKEN_INSPECTOR_ROLE_ID: Uuid = Uuid::from_u128(0x0000_0000_0000_0000_0000_0000_0000_0001);
+const TOKEN_INSPECTOR_ROLE_ID: RoleId = RoleId::builtin(NonZeroU8::new(1).unwrap());
 
 /// The action of asking whether another subject may act on one protected
 /// resource's objects; the asking service is not that subject and gains none
@@ -255,7 +240,7 @@ pub const PERMISSION_CHECKER_ROLE: &str = "permission-checker";
 
 /// Id of the built-in permission checker role, fixed like the token
 /// inspector's.
-const PERMISSION_CHECKER_ROLE_ID: Uuid = Uuid::from_u128(0x0000_0000_0000_0000_0000_0000_0000_0003);
+const PERMISSION_CHECKER_ROLE_ID: RoleId = RoleId::builtin(NonZeroU8::new(3).unwrap());
 
 /// Scope prefix of an assignment on one protected resource; the resource
 /// fixes its issuer.
@@ -263,21 +248,9 @@ const OAUTH_RESOURCE_SCOPE: &str = "oauth_resource:";
 
 // ── Group ─────────────────────────────────────────────────────────────
 
-/// Unique identifier for a group.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct GroupId(pub Uuid);
-
-impl GroupId {
-    pub fn new() -> Self {
-        Self(Uuid::now_v7())
-    }
-}
-
-impl Default for GroupId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+/// Validated UUIDv7 identifier of a group; construction and decoding go
+/// through `sid_ids`.
+pub use sid_ids::GroupId;
 
 /// Group represents a collection of profiles.
 ///
@@ -299,7 +272,7 @@ impl Group {
     pub fn new(project_id: ProjectId, name: impl Into<String>) -> Self {
         let now = Utc::now();
         Self {
-            id: GroupId::new(),
+            id: GroupId::generate(),
             project_id,
             name: name.into(),
             description: None,
@@ -335,21 +308,9 @@ impl GroupMember {
 
 // ── Role Assignment ───────────────────────────────────────────────────
 
-/// Unique identifier for a role assignment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct RoleAssignmentId(pub Uuid);
-
-impl RoleAssignmentId {
-    pub fn new() -> Self {
-        Self(Uuid::now_v7())
-    }
-}
-
-impl Default for RoleAssignmentId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+/// Validated UUIDv7 identifier of a role assignment; construction and decoding
+/// go through `sid_ids`.
+pub use sid_ids::RoleAssignmentId;
 
 /// Who receives the role: a profile, group, machine user, an independent
 /// OAuth client acting as a service (its `client_id`), or a provisioning
@@ -463,7 +424,7 @@ pub struct RoleAssignment {
 impl RoleAssignment {
     pub fn new(principal: RoleAssignmentPrincipal, role_id: RoleId) -> Self {
         Self {
-            id: RoleAssignmentId::new(),
+            id: RoleAssignmentId::generate(),
             principal,
             role_id,
             scope: None,
@@ -510,7 +471,7 @@ impl RoleAssignment {
     /// administrator role across the installation: the one assignment that
     /// allows every action on every project and protected resource.
     pub fn administers_installation(&self) -> bool {
-        self.role_id.0 == INSTALLATION_ADMINISTRATOR_ROLE_ID
+        self.role_id == INSTALLATION_ADMINISTRATOR_ROLE_ID
             && self.scope.as_deref() == Some(INSTALLATION_SCOPE)
             && !self.is_expired()
     }
@@ -548,7 +509,7 @@ impl RoleAssignment {
     pub fn expired_event(&self) -> Event {
         self.governance_event(
             event_types::GOVERNANCE_ROLE_EXPIRED,
-            format!("expired:{}", self.id.0),
+            format!("expired:{}", self.id),
             serde_json::json!({ "expired_at": self.expires_at.map(|t| t.to_rfc3339()) }),
         )
     }
@@ -559,7 +520,7 @@ impl RoleAssignment {
     pub fn expiring_event(&self, threshold: i64, hours_left: i64) -> Event {
         self.governance_event(
             event_types::GOVERNANCE_ROLE_EXPIRING,
-            format!("expiring:{}:{threshold}", self.id.0),
+            format!("expiring:{}:{threshold}", self.id),
             serde_json::json!({
                 "expires_at": self.expires_at.map(|t| t.to_rfc3339()),
                 "hours_left": hours_left,
@@ -575,16 +536,16 @@ impl RoleAssignment {
         extra: serde_json::Value,
     ) -> Event {
         let mut data = serde_json::json!({
-            "assignment_id": self.id.0,
+            "assignment_id": self.id,
             "principal": self.principal,
-            "role_id": self.role_id.0,
+            "role_id": self.role_id,
             "scope": self.scope,
         });
         if let (Some(data), serde_json::Value::Object(extra)) = (data.as_object_mut(), extra) {
             data.extend(extra);
         }
         let mut event = Event::new("sid-governance", event_type)
-            .with_subject(format!("role_assignment/{}", self.id.0))
+            .with_subject(format!("role_assignment/{}", self.id))
             .with_data(data);
         event.id = Uuid::new_v5(&ROLE_ASSIGNMENT_EVENT_NAMESPACE, identity.as_bytes()).to_string();
         event
@@ -597,21 +558,9 @@ const ROLE_ASSIGNMENT_EVENT_NAMESPACE: Uuid =
 
 // ── Cedar Policy ──────────────────────────────────────────────────────
 
-/// Unique identifier for a Cedar policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct CedarPolicyId(pub Uuid);
-
-impl CedarPolicyId {
-    pub fn new() -> Self {
-        Self(Uuid::now_v7())
-    }
-}
-
-impl Default for CedarPolicyId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+/// Validated UUIDv7 identifier of a Cedar policy; construction and decoding go
+/// through `sid_ids`.
+pub use sid_ids::CedarPolicyId;
 
 /// Cedar policy effect.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -716,7 +665,7 @@ impl CedarPolicy {
     ) -> Self {
         let now = Utc::now();
         Self {
-            id: CedarPolicyId::new(),
+            id: CedarPolicyId::generate(),
             scope,
             name: name.into(),
             description: None,
@@ -735,6 +684,12 @@ impl CedarPolicy {
 /// Unique identifier for a user grant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProfileGrantId(pub Uuid);
+
+impl core::fmt::Display for ProfileGrantId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.0.fmt(f)
+    }
+}
 
 impl ProfileGrantId {
     pub fn new() -> Self {

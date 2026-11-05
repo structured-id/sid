@@ -16,6 +16,8 @@ sid-authn = { workspace = true, optional = true }
 sid-core = { workspace = true }
 sid-plugin = { workspace = true }
 sid-proto = { workspace = true, optional = true }
+# Checked conversions of the identifier messages the services carry.
+sid-ids-proto = { workspace = true, optional = true }
 async-trait = { workspace = true }
 cedar-policy = { workspace = true }
 chrono = { workspace = true }
@@ -34,7 +36,7 @@ uuid = { workspace = true }
 
 [features]
 default = ["grpc"]
-grpc = ["dep:sid-authn", "sid-authn/grpc", "sid-core/grpc", "dep:sid-proto", "dep:tonic", "dep:tonic-types", "dep:prost", "dep:prost-types"]
+grpc = ["dep:sid-authn", "sid-authn/grpc", "sid-core/grpc", "dep:sid-proto", "dep:sid-ids-proto", "dep:tonic", "dep:tonic-types", "dep:prost", "dep:prost-types"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

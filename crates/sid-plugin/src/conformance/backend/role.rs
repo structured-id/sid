@@ -28,7 +28,7 @@ async fn stored_role(backend: &dyn StorageBackend) -> Role {
     backend.ensure_system_project(test_audit()).await.unwrap();
     let tag = Uuid::now_v7().simple().to_string();
     let mut role = Role::new(
-        ProjectId::system(),
+        ProjectId::SYSTEM,
         format!("key-{tag}"),
         format!("name-{tag}"),
     );
@@ -268,9 +268,9 @@ pub async fn test_roles_by_project_and_name(backend: &dyn StorageBackend) {
         .into_iter()
         .map(|r| r.id)
         .collect();
-    listed.sort_by_key(|id| id.0);
+    listed.sort();
     let mut expected = vec![viewer.id, editor.id];
-    expected.sort_by_key(|id| id.0);
+    expected.sort();
     assert_eq!(listed, expected);
 
     let found = backend
@@ -317,11 +317,11 @@ pub async fn test_role_assignments_by_principal(backend: &dyn StorageBackend) {
             .into_iter()
             .map(|a| a.id)
             .collect();
-        ids.sort_by_key(|id| id.0);
+        ids.sort();
         ids
     };
     let mut of_role = vec![to_group.id, to_machine.id];
-    of_role.sort_by_key(|id| id.0);
+    of_role.sort();
     assert_eq!(assignments_of(role.id).await, of_role);
     assert_eq!(assignments_of(other_role.id).await, vec![other.id]);
 
@@ -429,11 +429,11 @@ pub async fn test_held_role_assignments_and_roles(backend: &dyn StorageBackend) 
             .list_role_assignments_held_by_profile(profile)
             .await
             .unwrap();
-        held.sort_by_key(|a| a.id.0);
+        held.sort_by_key(|a| a.id);
         held
     };
     let mut expected = vec![own.id, through_first.id, through_second.id];
-    expected.sort_by_key(|id| id.0);
+    expected.sort();
     let read = held(holder).await;
     assert_eq!(read.iter().map(|a| a.id).collect::<Vec<_>>(), expected);
     let administering = read.iter().find(|a| a.id == through_first.id).unwrap();
@@ -450,7 +450,7 @@ pub async fn test_held_role_assignments_and_roles(backend: &dyn StorageBackend) 
         .await
         .unwrap();
     let mut expected = vec![own.id, through_second.id];
-    expected.sort_by_key(|id| id.0);
+    expected.sort();
     assert_eq!(
         held(holder).await.iter().map(|a| a.id).collect::<Vec<_>>(),
         expected,
@@ -458,18 +458,18 @@ pub async fn test_held_role_assignments_and_roles(backend: &dyn StorageBackend) 
     );
 
     let mut roles: Vec<_> = backend
-        .get_roles(&[role.id, other_role.id, RoleId::new()])
+        .get_roles(&[role.id, other_role.id, RoleId::generate()])
         .await
         .unwrap()
         .into_iter()
         .map(|r| (r.id, r.key))
         .collect();
-    roles.sort_by_key(|(id, _)| id.0);
+    roles.sort_by_key(|(id, _)| *id);
     let mut expected = vec![
         (role.id, role.key.clone()),
         (other_role.id, other_role.key.clone()),
     ];
-    expected.sort_by_key(|(id, _)| id.0);
+    expected.sort_by_key(|(id, _)| *id);
     assert_eq!(roles, expected);
     assert!(backend.get_roles(&[]).await.unwrap().is_empty());
 }
@@ -556,11 +556,11 @@ pub async fn test_cedar_policies_by_scope(backend: &dyn StorageBackend) {
 
     let ids = |listed: &[CedarPolicy]| {
         let mut ids: Vec<_> = listed.iter().map(|p| p.id).collect();
-        ids.sort_by_key(|id| id.0);
+        ids.sort();
         ids
     };
     let mut expected = vec![a.id, b.id];
-    expected.sort_by_key(|id| id.0);
+    expected.sort();
     let listed = backend.list_cedar_policies(project).await.unwrap();
     assert_eq!(ids(&listed), expected);
     let forbid = listed.iter().find(|p| p.id == b.id).unwrap();
@@ -620,10 +620,7 @@ pub async fn test_administrative_assignment(backend: &dyn StorageBackend) {
     };
     let working = stored_role(backend).await;
     let administrator = stored_role(backend).await;
-    let group = Group::new(
-        ProjectId::system(),
-        format!("g-{}", Uuid::now_v7().simple()),
-    );
+    let group = Group::new(ProjectId::SYSTEM, format!("g-{}", Uuid::now_v7().simple()));
     backend.create_group(&group, test_audit()).await.unwrap();
     let envelope = AdminEnvelope {
         operations: [AdminOperation::Assign, AdminOperation::Redelegate].into(),
@@ -664,7 +661,7 @@ pub async fn test_administrative_assignment(backend: &dyn StorageBackend) {
     assert_eq!(by_id.provenance, root.provenance);
     assert!(
         backend
-            .get_role_assignment(sid_core::models::RoleAssignmentId::new())
+            .get_role_assignment(sid_core::models::RoleAssignmentId::generate())
             .await
             .unwrap()
             .is_none()
@@ -754,10 +751,7 @@ pub async fn test_fenced_assignment(backend: &dyn StorageBackend) {
     let working = stored_role(backend).await;
     let administrator = stored_role(backend).await;
     let holder = assignee(backend).await;
-    let group = Group::new(
-        ProjectId::system(),
-        format!("g-{}", Uuid::now_v7().simple()),
-    );
+    let group = Group::new(ProjectId::SYSTEM, format!("g-{}", Uuid::now_v7().simple()));
     backend.create_group(&group, test_audit()).await.unwrap();
     let worker = assignee(backend).await;
     backend
@@ -930,12 +924,7 @@ pub async fn test_grantor_never_joins_its_group(backend: &dyn StorageBackend) {
         .create_role_assignment(&basis, test_audit())
         .await
         .unwrap();
-    let new_group = || {
-        Group::new(
-            ProjectId::system(),
-            format!("g-{}", Uuid::now_v7().simple()),
-        )
-    };
+    let new_group = || Group::new(ProjectId::SYSTEM, format!("g-{}", Uuid::now_v7().simple()));
     let to_group = |group: &Group| {
         RoleAssignment::new(RoleAssignmentPrincipal::Group(group.id), working.id)
             .granted(AssignmentProvenance {

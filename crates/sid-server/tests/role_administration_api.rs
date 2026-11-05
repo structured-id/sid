@@ -92,7 +92,7 @@ async fn stored_role(h: &Harness, permissions: &[&str]) -> Role {
     let ctx = || AuditEntry::system("test", "role").into();
     h.storage.ensure_system_project(ctx()).await.unwrap();
     let tag = uuid::Uuid::now_v7().simple().to_string();
-    let mut role = Role::new(ProjectId::system(), format!("k{tag}"), format!("n{tag}"));
+    let mut role = Role::new(ProjectId::SYSTEM, format!("k{tag}"), format!("n{tag}"));
     role.permissions = permissions.iter().map(|p| p.to_string()).collect();
     h.storage.create_role(&role, ctx()).await.unwrap();
     role
@@ -107,8 +107,8 @@ fn days(n: i64) -> prost_types::Timestamp {
 
 fn assign(role: &Role, to: ProfileId, expires: Option<i64>) -> AssignRoleRequest {
     AssignRoleRequest {
-        principal: Some(Principal::ProfileId(to.to_string())),
-        role_id: role.id.0.to_string(),
+        principal: Some(Principal::ProfileId(to.into())),
+        role_id: Some(role.id.into()),
         scope: None,
         expires_at: expires.map(days),
         admin: None,
@@ -122,7 +122,7 @@ fn assign(role: &Role, to: ProfileId, expires: Option<i64>) -> AssignRoleRequest
 fn accountant_envelope(role: &Role) -> AdminEnvelope {
     AdminEnvelope {
         operations: vec![AdminOperation::Assign as i32],
-        role_ids: vec![role.id.0.to_string()],
+        role_ids: vec![role.id.into()],
         permission_ceiling: vec!["ledger.post".into(), "ledger.read".into()],
         recipient_kinds: vec![RecipientKind::Profile as i32],
         recipient_group_id: None,
@@ -184,14 +184,14 @@ async fn an_envelope_holder_assigns_within_it() {
     assert_eq!(working.admin, None);
     let provenance = working.provenance.expect("provenance");
     assert_eq!(provenance.granted_by, format!("user:{}", access_admin.id));
-    assert_eq!(provenance.basis_assignment_id, Some(admin_grant.id.clone()));
+    assert_eq!(provenance.basis_assignment_id, admin_grant.id.clone());
     assert_eq!(provenance.depends_on_assignment_id, None);
 
     let listed = h
         .svc
         .list_role_assignments(authed(
             ListRoleAssignmentsRequest {
-                filter: Some(Filter::ProfileId(access_admin.id.to_string())),
+                filter: Some(Filter::ProfileId(access_admin.id.into())),
             },
             &h.admin_token,
         ))
@@ -225,7 +225,7 @@ async fn update_role_keeps_approved_ceilings() {
     );
 
     let widen = UpdateRoleRequest {
-        id: accountant.id.0.to_string(),
+        id: Some(accountant.id.into()),
         description: None,
         permissions: vec![
             "ledger.read".into(),
@@ -264,7 +264,7 @@ async fn a_grantor_is_not_added_to_its_group() {
     let administrator_role = stored_role(&h, &["roles.administer"]).await;
     let team_admin = stored_profile(&h).await;
     let team = Group::new(
-        ProjectId::system(),
+        ProjectId::SYSTEM,
         format!("g{}", uuid::Uuid::now_v7().simple()),
     );
     h.storage
@@ -280,8 +280,8 @@ async fn a_grantor_is_not_added_to_its_group() {
     granted(
         &h,
         AssignRoleRequest {
-            principal: Some(Principal::GroupId(team.id.0.to_string())),
-            role_id: auditor.id.0.to_string(),
+            principal: Some(Principal::GroupId(team.id.into())),
+            role_id: Some(auditor.id.into()),
             scope: None,
             expires_at: Some(days(5)),
             admin: None,
@@ -295,8 +295,8 @@ async fn a_grantor_is_not_added_to_its_group() {
         .svc
         .add_to_group(authed(
             AddToGroupRequest {
-                group_id: team.id.0.to_string(),
-                profile_id: team_admin.id.to_string(),
+                group_id: Some(team.id.into()),
+                profile_id: Some(team_admin.id.into()),
             },
             &h.admin_token,
         ))
@@ -339,7 +339,7 @@ async fn a_malformed_envelope_names_its_field() {
         (with(|e| e.operations = vec![99]), "admin.operations"),
         (with(|e| e.role_ids.clear()), "admin.role_ids"),
         (
-            with(|e| e.role_ids = vec!["not-a-role".into()]),
+            with(|e| e.role_ids = vec![sid_ids_proto::RoleId { value: vec![0; 3] }]),
             "admin.role_ids",
         ),
         (
@@ -352,7 +352,7 @@ async fn a_malformed_envelope_names_its_field() {
             "admin.recipient_kinds",
         ),
         (
-            with(|e| e.recipient_group_id = Some("not-a-group".into())),
+            with(|e| e.recipient_group_id = Some(sid_ids_proto::GroupId { value: vec![0; 3] })),
             "admin.recipient_group_id",
         ),
         (with(|e| e.max_validity = None), "admin.max_validity"),

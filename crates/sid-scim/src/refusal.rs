@@ -107,7 +107,7 @@ pub(crate) fn user_not_found(id: ProfileId) -> Status {
 
 /// The group `id` does not exist (404).
 pub(crate) fn group_not_found(id: GroupId) -> Status {
-    not_found(ErrorReason::GroupNotFound, "Group", id.0.to_string())
+    not_found(ErrorReason::GroupNotFound, "Group", id.to_string())
 }
 
 /// A user write refused by storage. The only unique attribute a user write

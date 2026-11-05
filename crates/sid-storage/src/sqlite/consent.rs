@@ -76,7 +76,7 @@ impl SqliteBackend {
             "INSERT INTO consents (id, profile_id, client_id, status, consented_at, revoked_at, updated_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(consent.id.0.to_string())
+        .bind(consent.id.to_string())
         .bind(consent.profile_id)
         .bind(&consent.client_id)
         .bind(consent.status.as_str())
@@ -91,8 +91,8 @@ impl SqliteBackend {
                 "INSERT INTO claim_grants (id, consent_id, claim_name, claim_type, granted_at, revoked_at) \
                  VALUES (?, ?, ?, ?, ?, ?)",
             )
-            .bind(grant.id.0.to_string())
-            .bind(consent.id.0.to_string())
+            .bind(grant.id.to_string())
+            .bind(consent.id.to_string())
             .bind(&grant.claim_name)
             .bind(grant.claim_type.as_str())
             .bind(fmt_dt(&grant.granted_at))
@@ -118,7 +118,7 @@ impl SqliteBackend {
         let now = fmt_dt(&chrono::Utc::now());
         let mut tx = self.begin_write().await?;
         let active = sqlx::query_scalar::<_, String>("SELECT status FROM consents WHERE id = ?")
-            .bind(id.0.to_string())
+            .bind(id.to_string())
             .fetch_optional(&mut *tx)
             .await
             .map_err(storage)?
@@ -135,7 +135,7 @@ impl SqliteBackend {
                  WHERE claim_grants.revoked_at IS NOT NULL",
             )
             .bind(Uuid::now_v7().to_string())
-            .bind(id.0.to_string())
+            .bind(id.to_string())
             .bind(claim_name)
             .bind(claim_type.as_str())
             .bind(&now),
@@ -144,7 +144,7 @@ impl SqliteBackend {
                  WHERE consent_id = ?2 AND claim_name = ?3 AND revoked_at IS NULL",
             )
             .bind(&now)
-            .bind(id.0.to_string())
+            .bind(id.to_string())
             .bind(claim_name),
         }
         .execute(&mut *tx)
@@ -158,7 +158,7 @@ impl SqliteBackend {
         }
         sqlx::query("UPDATE consents SET updated_at = ? WHERE id = ?")
             .bind(&now)
-            .bind(id.0.to_string())
+            .bind(id.to_string())
             .execute(&mut *tx)
             .await
             .map_err(storage)?;
@@ -168,7 +168,7 @@ impl SqliteBackend {
 
     pub(crate) async fn get_consent_impl(&self, id: ConsentId) -> SidResult<Option<ConsentRecord>> {
         let row = sqlx::query(select_consents!("id = ?"))
-            .bind(id.0.to_string())
+            .bind(id.to_string())
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -254,7 +254,7 @@ impl SqliteBackend {
         let mut tx = self.begin_write().await?;
         // Its claim grants go with it (ON DELETE CASCADE).
         let deleted = sqlx::query("DELETE FROM consents WHERE id = ?")
-            .bind(id.0.to_string())
+            .bind(id.to_string())
             .execute(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?

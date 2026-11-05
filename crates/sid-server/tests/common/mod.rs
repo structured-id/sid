@@ -352,7 +352,7 @@ pub async fn routes_to(svc: &TestServices, principal: &str, profile: ProfileId) 
 pub fn test_client() -> sid_core::models::OAuth2Client {
     sid_core::models::OAuth2Client {
         client_id: "test-client".to_string(),
-        project_id: sid_core::models::ProjectId::system(),
+        project_id: sid_core::models::ProjectId::SYSTEM,
         application_id: sid_core::models::ApplicationId::generate(),
         default_resource: None,
         application_type: sid_core::models::ApplicationType::Spa,
@@ -582,7 +582,7 @@ pub async fn grant_inspection(
 ) -> sid_core::models::RoleAssignment {
     let role = svc
         .storage
-        .list_roles(sid_core::models::ProjectId::system())
+        .list_roles(sid_core::models::ProjectId::SYSTEM)
         .await
         .unwrap()
         .into_iter()

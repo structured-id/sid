@@ -7,7 +7,7 @@ fn make_device_auth() -> DeviceAuthorizationCode {
         "WDJB-MJHT".to_string(),
         Some("openid profile".to_string()),
         crate::models::ResourceId::generate(),
-        ProjectId::new(),
+        ProjectId::generate(),
     )
 }
 

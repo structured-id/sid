@@ -29,7 +29,7 @@ fn req<T>(msg: T, token: Option<&str>) -> Request<T> {
 /// A stored machine user every RPC can name.
 fn existing() -> MachineUser {
     MachineUser::new(
-        ProjectId::system(),
+        ProjectId::SYSTEM,
         "mu_existing",
         "existing",
         OwnerType::System,
@@ -41,7 +41,7 @@ fn existing() -> MachineUser {
 /// order; `None` when the call succeeds.
 async fn codes(svc: &TestServices, id: &str, token: Option<&str>) -> Vec<Option<Code>> {
     let m = &svc.machine_user;
-    let project = ProjectId::system().0.to_string();
+    let project = ProjectId::SYSTEM.to_string();
     let id = id.to_string();
     vec![
         m.create_machine_user(req(
@@ -237,7 +237,7 @@ async fn test_machine_user_creation_records_the_administrator() {
     svc.machine_user
         .create_machine_user(req(
             CreateMachineUserRequest {
-                project_id: ProjectId::system().0.to_string(),
+                project_id: ProjectId::SYSTEM.to_string(),
                 display_name: "billing".to_string(),
                 ..Default::default()
             },
@@ -261,7 +261,7 @@ async fn test_an_administrators_machine_user_belongs_to_the_organization() {
         .machine_user
         .create_machine_user(req(
             CreateMachineUserRequest {
-                project_id: ProjectId::system().0.to_string(),
+                project_id: ProjectId::SYSTEM.to_string(),
                 display_name: "billing".to_string(),
                 ..Default::default()
             },

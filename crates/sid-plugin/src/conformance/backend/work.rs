@@ -250,7 +250,7 @@ pub async fn test_expired_role_assignments_owe_event(backend: &dyn StorageBacken
         .await
         .unwrap();
     let key = format!("temp_{}", Uuid::now_v7().simple());
-    let role = Role::new(ProjectId::system(), &key, &key);
+    let role = Role::new(ProjectId::SYSTEM, &key, &key);
     backend
         .create_role(&role, super::test_audit())
         .await

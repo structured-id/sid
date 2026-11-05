@@ -405,7 +405,7 @@ mod tests {
         );
 
         let config = FlowConfig {
-            project_id: ProjectId::new(),
+            project_id: ProjectId::generate(),
             flow_type: FlowType::Authentication,
             steps,
             timeout_seconds: 300,
@@ -430,7 +430,7 @@ mod tests {
     fn test_flow_action_serde() {
         let action = FlowAction {
             id: ActionId::new(),
-            project_id: ProjectId::new(),
+            project_id: ProjectId::generate(),
             flow_type: FlowType::Authentication,
             action_point: ActionPoint::PostAuthentication,
             name: "Enrich context".into(),
@@ -536,7 +536,7 @@ mod tests {
 
     #[test]
     fn test_flow_config_default_timeout() {
-        let json = r#"{"project_id":"550e8400-e29b-41d4-a716-446655440000","flow_type":"authentication","steps":{},"updated_at":"2026-03-10T00:00:00Z"}"#;
+        let json = r#"{"project_id":"0192f3a4-7c1e-7b2a-9d4e-3f5a6b7c8d9e","flow_type":"authentication","steps":{},"updated_at":"2026-03-10T00:00:00Z"}"#;
         let config: FlowConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.timeout_seconds, 300);
     }

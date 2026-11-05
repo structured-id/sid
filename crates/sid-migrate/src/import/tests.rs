@@ -1642,7 +1642,7 @@ async fn applications_resources_and_access_survive_migration() {
     let ctx = || -> MutationContext { AuditEntry::system("test", "app").into() };
     let app = |name: &str| Application {
         id: ApplicationId::generate(),
-        project_id: ProjectId::system(),
+        project_id: ProjectId::SYSTEM,
         name: name.into(),
         system: None,
         revision: 0,
@@ -1697,7 +1697,7 @@ async fn applications_resources_and_access_survive_migration() {
     use sid_core::models::machine_user::{MachineCredentialType, MachineUserCredential, OwnerType};
     use sid_core::models::{MachineUser, Role, RoleAssignment, RoleAssignmentPrincipal};
     source.ensure_system_project(ctx()).await.unwrap();
-    let ci = MachineUser::new(ProjectId::system(), "ci", "CI", OwnerType::System, "system");
+    let ci = MachineUser::new(ProjectId::SYSTEM, "ci", "CI", OwnerType::System, "system");
     source.create_machine_user(&ci, ctx()).await.unwrap();
     source
         .add_machine_credential(
@@ -1979,10 +1979,10 @@ async fn administrative_assignments_survive_migration() {
     let source = SqliteBackend::new_in_memory().await.unwrap();
     let ctx = || -> MutationContext { AuditEntry::system("test", "admin").into() };
     source.ensure_system_project(ctx()).await.unwrap();
-    let mut working = Role::new(ProjectId::system(), "editor", "Editor");
+    let mut working = Role::new(ProjectId::SYSTEM, "editor", "Editor");
     working.permissions = vec!["documents:read".into()];
     source.create_role(&working, ctx()).await.unwrap();
-    let administrator = Role::new(ProjectId::system(), "admins", "Admins");
+    let administrator = Role::new(ProjectId::SYSTEM, "admins", "Admins");
     source.create_role(&administrator, ctx()).await.unwrap();
     let mut holders = Vec::new();
     for name in ["root-holder", "delegate", "worker"] {
@@ -2078,14 +2078,20 @@ async fn administrative_assignments_survive_migration() {
 fn a_dependency_cycle_is_refused() {
     use sid_core::models::{AssignmentProvenance, RoleAssignment, RoleAssignmentPrincipal, RoleId};
     let profile = Profile::new(Some("cycle")).id;
-    let mut first = RoleAssignment::new(RoleAssignmentPrincipal::Profile(profile), RoleId::new());
-    let second = RoleAssignment::new(RoleAssignmentPrincipal::Profile(profile), RoleId::new())
-        .granted(AssignmentProvenance {
-            granted_by: "user:a".into(),
-            basis: Some(first.id),
-            depends_on: Some(first.id),
-            ceiling: None,
-        });
+    let mut first = RoleAssignment::new(
+        RoleAssignmentPrincipal::Profile(profile),
+        RoleId::generate(),
+    );
+    let second = RoleAssignment::new(
+        RoleAssignmentPrincipal::Profile(profile),
+        RoleId::generate(),
+    )
+    .granted(AssignmentProvenance {
+        granted_by: "user:a".into(),
+        basis: Some(first.id),
+        depends_on: Some(first.id),
+        ceiling: None,
+    });
     first = first.granted(AssignmentProvenance {
         granted_by: "user:b".into(),
         basis: Some(second.id),

@@ -58,7 +58,7 @@ async fn fixture() -> Fixture {
 
     let app = |name: &str| Application {
         id: ApplicationId::generate(),
-        project_id: ProjectId::system(),
+        project_id: ProjectId::SYSTEM,
         name: name.into(),
         system: None,
         revision: 0,
@@ -388,7 +388,7 @@ async fn a_machine_user_names_its_target() {
     use sid_core::models::machine_user::OwnerType;
     let f = fixture().await;
     let ci = MachineUser::new(
-        ProjectId::system(),
+        ProjectId::SYSTEM,
         "ci".to_string(),
         "CI",
         OwnerType::System,

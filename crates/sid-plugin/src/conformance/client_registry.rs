@@ -62,7 +62,7 @@ pub fn client() -> OAuth2Client {
     let now = Utc::now().trunc_subsecs(3);
     OAuth2Client {
         client_id: format!("conformance-{}", Uuid::now_v7().simple()),
-        project_id: ProjectId::system(),
+        project_id: ProjectId::SYSTEM,
         application_id: ApplicationId::generate(),
         default_resource: None,
         application_type: ApplicationType::Web,

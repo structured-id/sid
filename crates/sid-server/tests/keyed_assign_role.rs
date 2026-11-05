@@ -17,7 +17,7 @@ use sid_authn::revocation_cache::RevocationCache;
 use sid_authz::cedar::CedarService;
 use sid_authz::grpc::AuthzServiceImpl;
 use sid_core::grpc_error::extract_error_info;
-use sid_core::models::{AuditEntry, Profile, ProfileId, ProjectId, Role};
+use sid_core::models::{AuditEntry, Profile, ProfileId, ProjectId, Role, RoleAssignmentId};
 use sid_plugin::StorageBackend;
 use sid_proto::sid::v1::authz::assign_role_request::Principal;
 use sid_proto::sid::v1::authz::list_role_assignments_request::Filter;
@@ -112,16 +112,21 @@ async fn role(h: &Harness) -> Role {
     let ctx = || AuditEntry::system("test", "role").into();
     h.storage.ensure_system_project(ctx()).await.unwrap();
     let tag = tag();
-    let mut role = Role::new(ProjectId::system(), format!("k{tag}"), format!("n{tag}"));
+    let mut role = Role::new(ProjectId::SYSTEM, format!("k{tag}"), format!("n{tag}"));
     role.permissions = vec!["ledger.read".into()];
     h.storage.create_role(&role, ctx()).await.unwrap();
     role
 }
 
+/// The domain identifier a response carries in `id`.
+fn typed<W: sid_ids_proto::WireId>(id: Option<W>) -> W::Domain {
+    sid_ids_proto::required(id.as_ref()).expect("identifier")
+}
+
 fn assign(role: &Role, to: ProfileId) -> AssignRoleRequest {
     AssignRoleRequest {
-        principal: Some(Principal::ProfileId(to.to_string())),
-        role_id: role.id.0.to_string(),
+        principal: Some(Principal::ProfileId(to.into())),
+        role_id: Some(role.id.into()),
         scope: None,
         expires_at: None,
         admin: None,
@@ -129,22 +134,24 @@ fn assign(role: &Role, to: ProfileId) -> AssignRoleRequest {
     }
 }
 
-async fn assigned(h: &Harness, request: AssignRoleRequest, key: &str) -> String {
-    h.svc
-        .assign_role(call(request, &h.token, Some(key)))
-        .await
-        .expect("assigned")
-        .into_inner()
-        .assignment
-        .expect("assignment")
-        .id
+async fn assigned(h: &Harness, request: AssignRoleRequest, key: &str) -> RoleAssignmentId {
+    typed(
+        h.svc
+            .assign_role(call(request, &h.token, Some(key)))
+            .await
+            .expect("assigned")
+            .into_inner()
+            .assignment
+            .expect("assignment")
+            .id,
+    )
 }
 
-async fn held(h: &Harness, who: ProfileId) -> Vec<String> {
+async fn held(h: &Harness, who: ProfileId) -> Vec<RoleAssignmentId> {
     h.svc
         .list_role_assignments(call(
             ListRoleAssignmentsRequest {
-                filter: Some(Filter::ProfileId(who.to_string())),
+                filter: Some(Filter::ProfileId(who.into())),
             },
             &h.token,
             None,
@@ -154,7 +161,7 @@ async fn held(h: &Harness, who: ProfileId) -> Vec<String> {
         .into_inner()
         .assignments
         .into_iter()
-        .map(|a| a.id)
+        .map(|a| typed(a.id))
         .collect()
 }
 
@@ -180,7 +187,7 @@ async fn retry_after_revocation_recreates_nothing(h: Harness) {
     h.svc
         .revoke_role(call(
             RevokeRoleRequest {
-                assignment_id: first.clone(),
+                assignment_id: Some(first.into()),
             },
             &h.token,
             Some(&format!("k-{}", tag())),
@@ -222,10 +229,10 @@ async fn concurrent_calls_with_one_key_assign_once(h: Harness) {
         let request = call(assign(&role, who), &h.token, Some(&key));
         async move { svc.assign_role(request).await }
     });
-    let ids: Vec<String> = futures::future::join_all(calls)
+    let ids: Vec<RoleAssignmentId> = futures::future::join_all(calls)
         .await
         .into_iter()
-        .map(|r| r.expect("assigned").into_inner().assignment.unwrap().id)
+        .map(|r| typed(r.expect("assigned").into_inner().assignment.unwrap().id))
         .collect();
     let stored = held(&h, who).await;
     assert_eq!(stored.len(), 1, "{stored:?}");
@@ -240,19 +247,20 @@ async fn keys_are_per_caller(h: Harness) {
     let other = profile(&h).await;
     let key = format!("k-{}", tag());
     let mine = assigned(&h, assign(&role, who), &key).await;
-    let theirs = h
-        .svc
-        .assign_role(call(
-            assign(&role, other),
-            &common::administrator_token(&h.jwt, h.storage.as_ref()).await,
-            Some(&key),
-        ))
-        .await
-        .expect("another caller's command")
-        .into_inner()
-        .assignment
-        .unwrap()
-        .id;
+    let theirs = typed(
+        h.svc
+            .assign_role(call(
+                assign(&role, other),
+                &common::administrator_token(&h.jwt, h.storage.as_ref()).await,
+                Some(&key),
+            ))
+            .await
+            .expect("another caller's command")
+            .into_inner()
+            .assignment
+            .unwrap()
+            .id,
+    );
     assert_ne!(mine, theirs);
 }
 
@@ -285,7 +293,7 @@ async fn role_creation_retry_answers_with_its_role(h: Harness) {
     let create = || {
         call(
             CreateRoleRequest {
-                project_id: ProjectId::system().0.to_string(),
+                project_id: Some(ProjectId::SYSTEM.into()),
                 name: format!("n{}", tag_of(&key)),
                 description: None,
                 permissions: vec!["ledger.read".into()],
@@ -316,7 +324,7 @@ async fn membership_removal_retry_keeps_a_later_addition(h: Harness) {
         .svc
         .create_group(call(
             CreateGroupRequest {
-                project_id: ProjectId::system().0.to_string(),
+                project_id: Some(ProjectId::SYSTEM.into()),
                 name: format!("g{}", tag()),
                 description: None,
             },
@@ -333,7 +341,7 @@ async fn membership_removal_retry_keeps_a_later_addition(h: Harness) {
         call(
             AddToGroupRequest {
                 group_id: group.clone(),
-                profile_id: who.to_string(),
+                profile_id: Some(who.into()),
             },
             &h.token,
             Some(&format!("k-{}", tag())),
@@ -344,7 +352,7 @@ async fn membership_removal_retry_keeps_a_later_addition(h: Harness) {
         call(
             RemoveFromGroupRequest {
                 group_id: group.clone(),
-                profile_id: who.to_string(),
+                profile_id: Some(who.into()),
             },
             &h.token,
             Some(&key),
@@ -355,13 +363,7 @@ async fn membership_removal_retry_keeps_a_later_addition(h: Harness) {
     h.svc.add_to_group(add()).await.unwrap();
     h.svc.remove_from_group(remove()).await.unwrap();
 
-    let members = h
-        .storage
-        .list_group_members(sid_core::models::GroupId(
-            uuid::Uuid::parse_str(&group).unwrap(),
-        ))
-        .await
-        .unwrap();
+    let members = h.storage.list_group_members(typed(group)).await.unwrap();
     assert!(
         members.iter().any(|m| m.profile_id == who),
         "the retried removal took the later addition away"
@@ -382,7 +384,7 @@ async fn concurrent_group_creations_with_one_key_answer_one_group(h: Harness) {
         let svc = h.svc.clone();
         let request = call(
             CreateGroupRequest {
-                project_id: ProjectId::system().0.to_string(),
+                project_id: Some(ProjectId::SYSTEM.into()),
                 name: name.clone(),
                 description: None,
             },
@@ -391,17 +393,20 @@ async fn concurrent_group_creations_with_one_key_answer_one_group(h: Harness) {
         );
         async move { svc.create_group(request).await }
     });
-    let ids: std::collections::BTreeSet<String> = futures::future::join_all(calls)
-        .await
-        .into_iter()
-        .map(|r| {
-            r.expect("every attempt answers")
-                .into_inner()
-                .group
-                .unwrap()
-                .id
-        })
-        .collect();
+    let ids: std::collections::BTreeSet<sid_core::models::GroupId> =
+        futures::future::join_all(calls)
+            .await
+            .into_iter()
+            .map(|r| {
+                typed(
+                    r.expect("every attempt answers")
+                        .into_inner()
+                        .group
+                        .unwrap()
+                        .id,
+                )
+            })
+            .collect();
     assert_eq!(ids.len(), 1, "{ids:?}");
 }
 
@@ -417,7 +422,7 @@ async fn group_edit_without_a_description_is_recorded(h: Harness) {
         .svc
         .create_group(call(
             CreateGroupRequest {
-                project_id: ProjectId::system().0.to_string(),
+                project_id: Some(ProjectId::SYSTEM.into()),
                 name: format!("g{}", tag()),
                 description: Some("first".into()),
             },
@@ -474,7 +479,7 @@ async fn group_edit_answers_the_group_its_commit_left(h: Harness) {
         .svc
         .create_group(call(
             CreateGroupRequest {
-                project_id: ProjectId::system().0.to_string(),
+                project_id: Some(ProjectId::SYSTEM.into()),
                 name: format!("g{}", tag()),
                 description: Some("first".into()),
             },
@@ -503,8 +508,10 @@ async fn group_edit_answers_the_group_its_commit_left(h: Harness) {
         .svc
         .get_group(call(
             GetGroupRequest {
-                project_id: Some(ProjectId::system().0.to_string()),
-                identifier: Some(get_group_request::Identifier::Id(group.clone())),
+                project_id: Some(ProjectId::SYSTEM.into()),
+                identifier: Some(get_group_request::Identifier::Id(
+                    group.clone().expect("group id"),
+                )),
             },
             &h.token,
             None,
@@ -532,7 +539,7 @@ async fn policy_edit_answers_its_stored_revision(h: Harness) {
             CreatePolicyRequest {
                 scope: Some(sid_proto::sid::v1::PolicyScope {
                     scope: Some(sid_proto::sid::v1::policy_scope::Scope::ProjectId(
-                        ProjectId::system().0.to_string(),
+                        ProjectId::SYSTEM.into(),
                     )),
                 }),
                 name: format!("p{}", tag()),
@@ -613,7 +620,7 @@ async fn policy(h: &Harness) -> sid_proto::sid::v1::Policy {
             CreatePolicyRequest {
                 scope: Some(sid_proto::sid::v1::PolicyScope {
                     scope: Some(sid_proto::sid::v1::policy_scope::Scope::ProjectId(
-                        ProjectId::system().0.to_string(),
+                        ProjectId::SYSTEM.into(),
                     )),
                 }),
                 name: format!("p{}", tag()),
@@ -677,7 +684,7 @@ async fn concurrent_role_edits_with_one_key_answer_one_edit(h: Harness) {
         let svc = h.svc.clone();
         let request = call(
             UpdateRoleRequest {
-                id: role.id.0.to_string(),
+                id: Some(role.id.into()),
                 description: Some("edited".into()),
                 ..Default::default()
             },

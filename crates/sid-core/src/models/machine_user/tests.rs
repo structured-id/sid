@@ -2,7 +2,7 @@ use super::*;
 
 fn make_machine_user() -> MachineUser {
     MachineUser::new(
-        ProjectId::new(),
+        ProjectId::generate(),
         "mu_ci_deploy",
         "CI Deploy Bot",
         OwnerType::Profile,

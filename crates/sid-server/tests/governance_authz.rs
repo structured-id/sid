@@ -44,7 +44,7 @@ async fn test_governance_rpcs_require_a_token() {
 
     let err = svc
         .request_access(Request::new(AccessRequestMessage {
-            requester_profile_id: victim.id.to_string(),
+            requester_profile_id: Some(victim.id.into()),
             requested_role: "admin".to_string(),
             ..Default::default()
         }))
@@ -60,7 +60,7 @@ async fn test_governance_rpcs_require_a_token() {
 
     let err = svc
         .grant_temporary_role(Request::new(GrantTemporaryRoleRequest {
-            profile_id: victim.id.to_string(),
+            profile_id: Some(victim.id.into()),
             role: "admin".to_string(),
             expires_at: Some(in_one_day()),
             ..Default::default()
@@ -86,7 +86,7 @@ async fn test_governance_rpcs_refuse_a_non_admin() {
     let err = svc
         .request_access(authed(
             AccessRequestMessage {
-                requester_profile_id: victim.id.to_string(),
+                requester_profile_id: Some(victim.id.into()),
                 requested_role: "admin".to_string(),
                 ..Default::default()
             },
@@ -105,7 +105,7 @@ async fn test_governance_rpcs_refuse_a_non_admin() {
     let err = svc
         .decide_request(authed(
             DecideRequestRequest {
-                request_id: uuid::Uuid::now_v7().to_string(),
+                request_id: Some(sid_core::models::AccessRequestId::generate().into()),
                 approved: true,
                 reason: String::new(),
             },
@@ -118,7 +118,7 @@ async fn test_governance_rpcs_refuse_a_non_admin() {
     let err = svc
         .grant_temporary_role(authed(
             GrantTemporaryRoleRequest {
-                profile_id: user.id.to_string(),
+                profile_id: Some(user.id.into()),
                 role: "admin".to_string(),
                 expires_at: Some(in_one_day()),
                 ..Default::default()
@@ -145,7 +145,7 @@ async fn test_pending_queue_with_unreadable_requester_is_reported() {
     use sid_plugin::StorageBackend;
     storage
         .create_role(
-            &sid_core::models::Role::new(sid_core::models::ProjectId::system(), "viewer", "Viewer"),
+            &sid_core::models::Role::new(sid_core::models::ProjectId::SYSTEM, "viewer", "Viewer"),
             sid_core::models::AuditEntry::system("test", "role").into(),
         )
         .await
@@ -155,9 +155,9 @@ async fn test_pending_queue_with_unreadable_requester_is_reported() {
     let user_token = issue_token(&test_jwt(), &user, &["openid".to_string()]);
     svc.request_access(authed(
         AccessRequestMessage {
-            requester_profile_id: user.id.to_string(),
+            requester_profile_id: Some(user.id.into()),
             requested_role: "viewer".to_string(),
-            project_id: sid_core::models::ProjectId::system().0.to_string(),
+            project_id: Some(sid_core::models::ProjectId::SYSTEM.into()),
             ..Default::default()
         },
         &user_token,
@@ -192,7 +192,7 @@ async fn test_governance_rpcs_allow_an_administrator() {
     let err = svc
         .decide_request(authed(
             DecideRequestRequest {
-                request_id: uuid::Uuid::now_v7().to_string(),
+                request_id: Some(sid_core::models::AccessRequestId::generate().into()),
                 approved: true,
                 reason: String::new(),
             },

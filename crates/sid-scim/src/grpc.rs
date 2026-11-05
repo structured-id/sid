@@ -25,7 +25,6 @@ use sid_proto::sid::v1 as proto;
 use sid_proto::sid::v1::scim_service_server::ScimService;
 use tonic::{Request, Response, Status};
 use tracing::{instrument, warn};
-use uuid::Uuid;
 
 use crate::filter;
 use crate::mapping::{
@@ -197,9 +196,7 @@ fn parse_profile_id(attribute: &str, id: &str) -> Result<ProfileId, Status> {
 
 #[allow(clippy::result_large_err)]
 fn parse_group_id(id: &str) -> Result<GroupId, Status> {
-    Uuid::parse_str(id)
-        .map(GroupId)
-        .map_err(|_| refusal::invalid_id("id"))
+    GroupId::parse(id).map_err(|_| refusal::invalid_id("id"))
 }
 
 #[tonic::async_trait]
@@ -876,7 +873,7 @@ impl ScimService for ScimServiceImpl {
         }
 
         let group = scim_create_group_to_sid(&req, self.org_ctx.project_id);
-        let group_id_str = group.id.0.to_string();
+        let group_id_str = group.id.to_string();
 
         let mut write = DirectoryGroupWrite::new(DirectoryWriteMode::Create, group.clone());
         for member_ref in &req.members {
@@ -989,7 +986,7 @@ impl ScimService for ScimServiceImpl {
             .map_err(storage_failure)?
             .ok_or_else(|| refusal::group_not_found(group_id))?;
 
-        let group_id_str = group.id.0.to_string();
+        let group_id_str = group.id.to_string();
 
         let patch_result = patch::apply_group_patch(&req.operations).map_err(refusal::patch)?;
         if !patch_result.add_members.is_empty() || !patch_result.remove_members.is_empty() {
@@ -1053,7 +1050,7 @@ impl ScimService for ScimServiceImpl {
             .map_err(storage_failure)?
             .ok_or_else(|| refusal::group_not_found(group_id))?;
 
-        let group_id_str = group_id.0.to_string();
+        let group_id_str = group_id.to_string();
 
         let event = Event::new("sid-scim", event_types::SCIM_GROUP_DELETED)
             .with_subject(format!("group/{}", group_id_str))

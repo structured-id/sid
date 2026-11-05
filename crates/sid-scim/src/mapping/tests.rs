@@ -3,7 +3,7 @@ use super::*;
 fn test_org_ctx() -> ScimOrgContext {
     ScimOrgContext {
         org_domain: "acme.corp".into(),
-        project_id: sid_core::models::ProjectId::new(),
+        project_id: sid_core::models::ProjectId::generate(),
     }
 }
 
@@ -76,7 +76,7 @@ fn test_installation_context_uses_the_organization_domain() {
     let org = sid_core::models::Organization::implicit_community("corp.sid.example.com");
     let ctx = ScimOrgContext::installation(&org);
     assert_eq!(ctx.org_domain, "corp.sid.example.com");
-    assert_eq!(ctx.project_id, sid_core::models::ProjectId::system());
+    assert_eq!(ctx.project_id, sid_core::models::ProjectId::SYSTEM);
 
     let mapping = scim_create_user_to_sid(&test_create_request(), &ctx).unwrap();
     let login = mapping
@@ -236,7 +236,7 @@ fn test_suspended_user_active_false() {
 
 #[test]
 fn test_group_mapping() {
-    let project_id = sid_core::models::ProjectId::new();
+    let project_id = sid_core::models::ProjectId::generate();
     let req = proto::ScimCreateGroupRequest {
         display_name: "Engineering".into(),
         members: vec![],
@@ -248,7 +248,7 @@ fn test_group_mapping() {
 
 #[test]
 fn test_group_to_scim_with_members() {
-    let project_id = sid_core::models::ProjectId::new();
+    let project_id = sid_core::models::ProjectId::generate();
     let group = Group::new(project_id, "Engineering");
     let pid = ProfileId::generate();
     let members = vec![(pid, "Alice Smith".to_string())];

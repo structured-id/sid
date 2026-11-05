@@ -351,7 +351,10 @@ impl ScimOutboundWorker {
                 || t == event_types::SCIM_GROUP_UPDATED
                 || t == event_types::SCIM_GROUP_DELETED =>
             {
-                let group_id = GroupId(extract_uuid_field(&event.data, "group_id")?);
+                let group_id = GroupId::from_uuid(extract_uuid_field(&event.data, "group_id")?)
+                    .map_err(|e| {
+                        ScimClientError::Serialization(format!("invalid group_id: {e}"))
+                    })?;
                 self.sync_group(target, client, group_id).await
             }
             _ => {
@@ -450,7 +453,7 @@ impl ScimOutboundWorker {
             .map_err(storage)?
         {
             if self
-                .find_downstream_id(target.id, group.id.0, OutboundEntityType::Group)
+                .find_downstream_id(target.id, group.id.into_uuid(), OutboundEntityType::Group)
                 .await?
                 .is_some()
             {
@@ -486,7 +489,7 @@ impl ScimOutboundWorker {
         if !target.group_push.enabled {
             return Ok(());
         }
-        let entity = group_id.0;
+        let entity = group_id.into_uuid();
         let kind = OutboundEntityType::Group;
         // As for a user: the creates recorded as sent are looked up first,
         // under the names they went out with, before anything decides on the

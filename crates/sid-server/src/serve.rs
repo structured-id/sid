@@ -278,7 +278,7 @@ async fn start_scim_outbound(
 ) -> anyhow::Result<Option<sid_core::models::RequiredReceiver>> {
     let targets = c
         .storage
-        .list_scim_outbound_targets(sid_core::models::ProjectId::system())
+        .list_scim_outbound_targets(sid_core::models::ProjectId::SYSTEM)
         .await
         .map_err(|e| anyhow::anyhow!("loading SCIM outbound targets: {e}"))?;
     let worker = std::sync::Arc::new(sid_scim::outbound::worker::ScimOutboundWorker::new(

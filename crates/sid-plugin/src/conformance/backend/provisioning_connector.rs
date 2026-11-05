@@ -561,7 +561,7 @@ pub async fn test_connector_fence_holds_writes_to_current_authority(backend: &dy
     // A role granted or removed moves the revision.
     backend.ensure_system_project(test_audit()).await.unwrap();
     let key = format!("fence-{}", Uuid::now_v7().simple());
-    let role = Role::new(ProjectId::system(), &key, &key);
+    let role = Role::new(ProjectId::SYSTEM, &key, &key);
     backend.create_role(&role, test_audit()).await.unwrap();
     let assignment = RoleAssignment::new(
         RoleAssignmentPrincipal::ProvisioningConnector(c.id),

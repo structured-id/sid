@@ -13,7 +13,7 @@ fn create_test_role(project_id: ProjectId, key: &str, permissions: &[&str]) -> R
 async fn setup() -> (RbacService<MockStorage>, Arc<MockStorage>, ProjectId) {
     let storage = Arc::new(MockStorage::new());
     let service = RbacService::new(storage.clone());
-    let project_id = ProjectId::new();
+    let project_id = ProjectId::generate();
     (service, storage, project_id)
 }
 
@@ -44,7 +44,7 @@ async fn test_check_permission_direct_role() {
     storage
         .create_role_assignment(
             &assignment,
-            AuditEntry::system("role_assignment.create", assignment.id.0.to_string()).into(),
+            AuditEntry::system("role_assignment.create", assignment.id.to_string()).into(),
         )
         .await
         .unwrap();
@@ -91,7 +91,7 @@ async fn test_check_permission_via_group() {
     storage
         .add_to_group(
             &GroupMember::new(group.id, profile_id),
-            AuditEntry::system("group.add_member", group.id.0.to_string()).into(),
+            AuditEntry::system("group.add_member", group.id.to_string()).into(),
         )
         .await
         .unwrap();
@@ -100,7 +100,7 @@ async fn test_check_permission_via_group() {
     storage
         .create_role_assignment(
             &assignment,
-            AuditEntry::system("role_assignment.create", assignment.id.0.to_string()).into(),
+            AuditEntry::system("role_assignment.create", assignment.id.to_string()).into(),
         )
         .await
         .unwrap();
@@ -135,7 +135,7 @@ async fn test_expired_assignment_filtered() {
     storage
         .create_role_assignment(
             &assignment,
-            AuditEntry::system("role_assignment.create", assignment.id.0.to_string()).into(),
+            AuditEntry::system("role_assignment.create", assignment.id.to_string()).into(),
         )
         .await
         .unwrap();
@@ -164,7 +164,7 @@ async fn test_non_expired_assignment_included() {
     storage
         .create_role_assignment(
             &assignment,
-            AuditEntry::system("role_assignment.create", assignment.id.0.to_string()).into(),
+            AuditEntry::system("role_assignment.create", assignment.id.to_string()).into(),
         )
         .await
         .unwrap();
@@ -193,7 +193,7 @@ async fn test_resolve_effective_roles_deduplication() {
     storage
         .create_role_assignment(
             &a1,
-            AuditEntry::system("role_assignment.create", a1.id.0.to_string()).into(),
+            AuditEntry::system("role_assignment.create", a1.id.to_string()).into(),
         )
         .await
         .unwrap();
@@ -210,7 +210,7 @@ async fn test_resolve_effective_roles_deduplication() {
     storage
         .add_to_group(
             &GroupMember::new(group.id, profile_id),
-            AuditEntry::system("group.add_member", group.id.0.to_string()).into(),
+            AuditEntry::system("group.add_member", group.id.to_string()).into(),
         )
         .await
         .unwrap();
@@ -218,7 +218,7 @@ async fn test_resolve_effective_roles_deduplication() {
     storage
         .create_role_assignment(
             &a2,
-            AuditEntry::system("role_assignment.create", a2.id.0.to_string()).into(),
+            AuditEntry::system("role_assignment.create", a2.id.to_string()).into(),
         )
         .await
         .unwrap();
@@ -235,8 +235,8 @@ async fn test_resolve_effective_roles_deduplication() {
 async fn test_resolve_roles_project_scoped() {
     let (service, storage, _) = setup().await;
     let profile_id = ProfileId::generate();
-    let project_a = ProjectId::new();
-    let project_b = ProjectId::new();
+    let project_a = ProjectId::generate();
+    let project_b = ProjectId::generate();
 
     let role_a = create_test_role(project_a, "admin", &["all"]);
     let role_b = create_test_role(project_b, "viewer", &["read"]);
@@ -260,14 +260,14 @@ async fn test_resolve_roles_project_scoped() {
     storage
         .create_role_assignment(
             &a1,
-            AuditEntry::system("role_assignment.create", a1.id.0.to_string()).into(),
+            AuditEntry::system("role_assignment.create", a1.id.to_string()).into(),
         )
         .await
         .unwrap();
     storage
         .create_role_assignment(
             &a2,
-            AuditEntry::system("role_assignment.create", a2.id.0.to_string()).into(),
+            AuditEntry::system("role_assignment.create", a2.id.to_string()).into(),
         )
         .await
         .unwrap();
@@ -302,7 +302,7 @@ async fn test_check_role() {
     storage
         .create_role_assignment(
             &assignment,
-            AuditEntry::system("role_assignment.create", assignment.id.0.to_string()).into(),
+            AuditEntry::system("role_assignment.create", assignment.id.to_string()).into(),
         )
         .await
         .unwrap();
@@ -409,14 +409,14 @@ async fn test_list_effective_permissions() {
     storage
         .create_role_assignment(
             &a1,
-            AuditEntry::system("role_assignment.create", a1.id.0.to_string()).into(),
+            AuditEntry::system("role_assignment.create", a1.id.to_string()).into(),
         )
         .await
         .unwrap();
     storage
         .create_role_assignment(
             &a2,
-            AuditEntry::system("role_assignment.create", a2.id.0.to_string()).into(),
+            AuditEntry::system("role_assignment.create", a2.id.to_string()).into(),
         )
         .await
         .unwrap();
@@ -444,7 +444,7 @@ async fn test_check_permission_detailed_allow() {
     storage
         .create_role_assignment(
             &assignment,
-            AuditEntry::system("role_assignment.create", assignment.id.0.to_string()).into(),
+            AuditEntry::system("role_assignment.create", assignment.id.to_string()).into(),
         )
         .await
         .unwrap();
@@ -518,14 +518,14 @@ async fn test_multiple_groups_combine_roles() {
     storage
         .add_to_group(
             &GroupMember::new(group1.id, profile_id),
-            AuditEntry::system("group.add_member", group1.id.0.to_string()).into(),
+            AuditEntry::system("group.add_member", group1.id.to_string()).into(),
         )
         .await
         .unwrap();
     storage
         .add_to_group(
             &GroupMember::new(group2.id, profile_id),
-            AuditEntry::system("group.add_member", group2.id.0.to_string()).into(),
+            AuditEntry::system("group.add_member", group2.id.to_string()).into(),
         )
         .await
         .unwrap();
@@ -535,14 +535,14 @@ async fn test_multiple_groups_combine_roles() {
     storage
         .create_role_assignment(
             &a1,
-            AuditEntry::system("role_assignment.create", a1.id.0.to_string()).into(),
+            AuditEntry::system("role_assignment.create", a1.id.to_string()).into(),
         )
         .await
         .unwrap();
     storage
         .create_role_assignment(
             &a2,
-            AuditEntry::system("role_assignment.create", a2.id.0.to_string()).into(),
+            AuditEntry::system("role_assignment.create", a2.id.to_string()).into(),
         )
         .await
         .unwrap();
@@ -580,7 +580,7 @@ async fn test_list_expiring_role_assignments() {
     storage
         .create_role_assignment(
             &a1,
-            AuditEntry::system("role_assignment.create", a1.id.0.to_string()).into(),
+            AuditEntry::system("role_assignment.create", a1.id.to_string()).into(),
         )
         .await
         .unwrap();
@@ -591,7 +591,7 @@ async fn test_list_expiring_role_assignments() {
     storage
         .create_role_assignment(
             &a2,
-            AuditEntry::system("role_assignment.create", a2.id.0.to_string()).into(),
+            AuditEntry::system("role_assignment.create", a2.id.to_string()).into(),
         )
         .await
         .unwrap();
@@ -601,7 +601,7 @@ async fn test_list_expiring_role_assignments() {
     storage
         .create_role_assignment(
             &a3,
-            AuditEntry::system("role_assignment.create", a3.id.0.to_string()).into(),
+            AuditEntry::system("role_assignment.create", a3.id.to_string()).into(),
         )
         .await
         .unwrap();
@@ -638,7 +638,7 @@ async fn test_cleanup_expired_role_assignments() {
     storage
         .create_role_assignment(
             &a1,
-            AuditEntry::system("role_assignment.create", a1.id.0.to_string()).into(),
+            AuditEntry::system("role_assignment.create", a1.id.to_string()).into(),
         )
         .await
         .unwrap();
@@ -649,7 +649,7 @@ async fn test_cleanup_expired_role_assignments() {
     storage
         .create_role_assignment(
             &a2,
-            AuditEntry::system("role_assignment.create", a2.id.0.to_string()).into(),
+            AuditEntry::system("role_assignment.create", a2.id.to_string()).into(),
         )
         .await
         .unwrap();
@@ -659,7 +659,7 @@ async fn test_cleanup_expired_role_assignments() {
     storage
         .create_role_assignment(
             &a3,
-            AuditEntry::system("role_assignment.create", a3.id.0.to_string()).into(),
+            AuditEntry::system("role_assignment.create", a3.id.to_string()).into(),
         )
         .await
         .unwrap();

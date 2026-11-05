@@ -49,17 +49,15 @@ async fn as_admin<T>(svc: &TestServices, message: T) -> Request<T> {
     request
 }
 
-async fn provisioner_role(svc: &TestServices) -> String {
+async fn provisioner_role(svc: &TestServices) -> sid_core::models::RoleId {
     svc.storage
-        .list_roles(ProjectId::system())
+        .list_roles(ProjectId::SYSTEM)
         .await
         .unwrap()
         .into_iter()
         .find(|r| r.key == SCIM_PROVISIONER_ROLE)
         .expect("provisioned at start")
         .id
-        .0
-        .to_string()
 }
 
 async fn stored_connector(svc: &TestServices) -> ProvisioningConnector {
@@ -79,10 +77,14 @@ fn on(resource: impl std::fmt::Display) -> Option<String> {
     Some(format!("oauth_resource:{resource}"))
 }
 
-fn assign(principal: Principal, role_id: String, scope: Option<String>) -> AssignRoleRequest {
+fn assign(
+    principal: Principal,
+    role_id: sid_core::models::RoleId,
+    scope: Option<String>,
+) -> AssignRoleRequest {
     AssignRoleRequest {
         principal: Some(principal),
-        role_id,
+        role_id: Some(role_id.into()),
         scope,
         expires_at: None,
         admin: None,
@@ -215,7 +217,7 @@ async fn provisioning_is_assigned_only_to_a_live_connector_on_one_resource() {
         (of(&live), None, Code::InvalidArgument),
         (
             of(&live),
-            Some(format!("project:{}", ProjectId::system().0)),
+            Some(format!("project:{}", ProjectId::SYSTEM)),
             Code::InvalidArgument,
         ),
         (of(&live), on(ResourceId::generate()), Code::NotFound),
@@ -236,7 +238,7 @@ async fn provisioning_is_assigned_only_to_a_live_connector_on_one_resource() {
     ];
     for (i, (principal, scope, code)) in cases.into_iter().enumerate() {
         let err = authz
-            .assign_role(as_admin(&svc, assign(principal, role.clone(), scope)).await)
+            .assign_role(as_admin(&svc, assign(principal, role, scope)).await)
             .await
             .unwrap_err();
         assert_eq!(err.code(), code, "case {i}: {err:?}");

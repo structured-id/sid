@@ -47,6 +47,12 @@ pub const INSTALLATION_EMAIL_POLICY_REVISION: i64 = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PrincipalId(pub Uuid);
 
+impl core::fmt::Display for PrincipalId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 impl PrincipalId {
     /// Create a new random Principal ID (UUIDv7, time-ordered).
     pub fn new() -> Self {
@@ -261,6 +267,12 @@ impl From<&Principal> for PrincipalEntity {
 /// Unique identifier for a PrincipalBinding record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PrincipalBindingId(pub Uuid);
+
+impl core::fmt::Display for PrincipalBindingId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.0.fmt(f)
+    }
+}
 
 impl PrincipalBindingId {
     pub fn new() -> Self {

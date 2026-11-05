@@ -49,7 +49,7 @@ impl SqliteBackend {
                  created_at, expires_at, verified_at, completed_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(session.id.0.to_string())
+        .bind(session.id.to_string())
         .bind(session.profile_id)
         .bind(&session.email)
         .bind(&session.destination)
@@ -75,7 +75,7 @@ impl SqliteBackend {
                     created_at, expires_at, verified_at, completed_at \
              FROM password_reset_sessions WHERE id = ?",
         )
-        .bind(id.0.to_string())
+        .bind(id.to_string())
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -95,7 +95,7 @@ impl SqliteBackend {
              WHERE id = ?2 AND status = 'pending' AND expires_at > ?1",
         )
         .bind(&now)
-        .bind(id.0.to_string())
+        .bind(id.to_string())
         .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("Verify reset_session failed: {e}")))?
@@ -135,7 +135,7 @@ impl SqliteBackend {
              RETURNING profile_id",
         )
         .bind(&now)
-        .bind(id.0.to_string())
+        .bind(id.to_string())
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("Complete reset_session failed: {e}")))?;

@@ -151,7 +151,7 @@ async fn insert_epoch(tx: &mut WriteTx, e: &HistoryEpoch) -> SidResult<()> {
              ksf_memory_kib, ksf_passes, ksf_lanes, ksf_salt, status, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
-    .bind(e.id.0.to_string())
+    .bind(e.id.to_string())
     .bind(e.owner)
     .bind(e.suite.as_str())
     .bind(e.public_key.as_slice())
@@ -181,7 +181,7 @@ async fn record_descriptor(
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'compare_only', ?)
          ON CONFLICT (id) DO NOTHING",
     )
-    .bind(d.id.0.to_string())
+    .bind(d.id.to_string())
     .bind(owner)
     .bind(d.suite.as_str())
     .bind(d.public_key.as_slice())
@@ -198,7 +198,7 @@ async fn record_descriptor(
         epoch_columns!(),
         " FROM password_history_epochs WHERE id = ?"
     ))
-    .bind(d.id.0.to_string())
+    .bind(d.id.to_string())
     .fetch_one(&mut **tx)
     .await
     .map_err(storage("descriptor read"))?;
@@ -316,7 +316,7 @@ pub(super) async fn apply_in_tx(tx: &mut WriteTx, commit: &HistoryCommit) -> Sid
     }
     let accepted_at = chrono::Utc::now();
     let now = fmt_dt(&accepted_at);
-    let active = commit.epochs[0].id.0.to_string();
+    let active = commit.epochs[0].id.to_string();
     sqlx::query(
         "UPDATE password_history_epochs SET status = 'compare_only'
          WHERE owner_id = ? AND status = 'active' AND id <> ?",
@@ -344,7 +344,7 @@ pub(super) async fn apply_in_tx(tx: &mut WriteTx, commit: &HistoryCommit) -> Sid
                  (epoch_id, owner_id, seq, entry, operation_id, policy_version, created_at)
              VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(epoch.0.to_string())
+        .bind(epoch.to_string())
         .bind(owner)
         .bind(seq)
         .bind(entry.as_slice())
@@ -456,7 +456,7 @@ impl SqliteBackend {
                      (epoch_id, owner_id, seq, entry, operation_id, policy_version, created_at)
                  VALUES (?, ?, ?, ?, ?, ?, ?)",
             )
-            .bind(entry.epoch.0.to_string())
+            .bind(entry.epoch.to_string())
             .bind(archive.owner)
             .bind(entry.seq)
             .bind(entry.entry.as_slice())
@@ -566,7 +566,7 @@ async fn insert_key_epoch(
              ksf_memory_kib, ksf_passes, ksf_lanes, ksf_salt, status, created_at, created_by)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
-    .bind(e.id.0.to_string())
+    .bind(e.id.to_string())
     .bind(e.owner_domain.as_slice())
     .bind(e.suite.as_str())
     .bind(e.public_key.as_slice())
@@ -644,7 +644,7 @@ fn require_active(new: &NewKeyEpoch) -> SidResult<()> {
 
 /// A live set as stored: a JSON array of epoch ids, sorted.
 fn live_text(live: &[HistoryEpochId]) -> String {
-    serde_json::to_string(&live.iter().map(|e| e.0.to_string()).collect::<Vec<_>>())
+    serde_json::to_string(&live.iter().map(|e| e.to_string()).collect::<Vec<_>>())
         .expect("a list of strings serializes")
 }
 
@@ -660,7 +660,7 @@ async fn read_key_archive(
     for epoch in epochs {
         let key: Vec<u8> =
             sqlx::query_scalar("SELECT wrapped_key FROM history_key_epochs WHERE id = ?")
-                .bind(epoch.id.0.to_string())
+                .bind(epoch.id.to_string())
                 .fetch_one(&mut *conn)
                 .await
                 .map_err(storage("archive key"))?;
@@ -782,7 +782,7 @@ impl HistoryKeyStore for SqliteHistoryKeyStore {
             "UPDATE history_key_epochs SET status = 'compare_only'
              WHERE id = ? AND owner_domain = ? AND status = 'active'",
         )
-        .bind(replaces.0.to_string())
+        .bind(replaces.to_string())
         .bind(owner_domain.as_slice())
         .execute(&mut *tx)
         .await
@@ -792,7 +792,7 @@ impl HistoryKeyStore for SqliteHistoryKeyStore {
             "INSERT INTO history_key_replaced (epoch_id, owner_domain, replaced_at_revision)
              VALUES (?, ?, ?) ON CONFLICT (epoch_id) DO NOTHING",
         )
-        .bind(replaces.0.to_string())
+        .bind(replaces.to_string())
         .bind(owner_domain.as_slice())
         .bind(replaced_at_revision)
         .execute(&mut *tx)
@@ -815,7 +815,7 @@ impl HistoryKeyStore for SqliteHistoryKeyStore {
             let owned: Option<i64> = sqlx::query_scalar(
                 "SELECT 1 FROM history_key_epochs WHERE id = ? AND owner_domain = ?",
             )
-            .bind(epoch.0.to_string())
+            .bind(epoch.to_string())
             .bind(owner_domain)
             .fetch_optional(&mut *tx)
             .await
@@ -923,7 +923,7 @@ impl HistoryKeyStore for SqliteHistoryKeyStore {
                  ON CONFLICT (operation_id, epoch_id) DO UPDATE SET expires_at = excluded.expires_at",
             )
             .bind(prep.operation.to_string())
-            .bind(epoch.id.0.to_string())
+            .bind(epoch.id.to_string())
             .bind(owner_domain)
             .bind(&expires)
             .execute(&mut *tx)
@@ -1100,7 +1100,7 @@ impl HistoryKeyStore for SqliteHistoryKeyStore {
     async fn get_epoch_key(&self, epoch: HistoryEpochId) -> SidResult<Option<WrappedHistoryKey>> {
         let key: Option<Vec<u8>> =
             sqlx::query_scalar("SELECT wrapped_key FROM history_key_epochs WHERE id = ?")
-                .bind(epoch.0.to_string())
+                .bind(epoch.to_string())
                 .fetch_optional(&self.pool)
                 .await
                 .map_err(storage("epoch key"))?;
@@ -1195,7 +1195,7 @@ impl HistoryKeyStore for SqliteHistoryKeyStore {
                 "INSERT INTO history_key_replaced (epoch_id, owner_domain, replaced_at_revision)
                  VALUES (?, ?, ?)",
             )
-            .bind(epoch.0.to_string())
+            .bind(epoch.to_string())
             .bind(archive.owner_domain.as_slice())
             .bind(revision)
             .execute(&mut *tx)

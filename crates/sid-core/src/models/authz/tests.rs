@@ -10,7 +10,7 @@ use chrono::Duration;
 #[test]
 fn test_token_inspector_role() {
     let role = Role::token_inspector();
-    assert_eq!(role.project_id, ProjectId::system());
+    assert_eq!(role.project_id, ProjectId::SYSTEM);
     assert_eq!(role.key, TOKEN_INSPECTOR_ROLE);
     assert_eq!(role.permissions, vec![TOKEN_INTROSPECT.to_string()]);
     // The same role in every installation, so restored assignments name it.
@@ -23,7 +23,7 @@ fn test_token_inspector_role() {
 #[test]
 fn test_scim_provisioner_role() {
     let role = Role::scim_provisioner();
-    assert_eq!(role.project_id, ProjectId::system());
+    assert_eq!(role.project_id, ProjectId::SYSTEM);
     assert_eq!(role.key, SCIM_PROVISIONER_ROLE);
     assert_eq!(role.permissions.len(), SCIM_ACTIONS.len());
     for action in SCIM_ACTIONS {
@@ -42,7 +42,7 @@ fn test_scim_provisioner_role() {
 #[test]
 fn test_permission_checker_role() {
     let role = Role::permission_checker();
-    assert_eq!(role.project_id, ProjectId::system());
+    assert_eq!(role.project_id, ProjectId::SYSTEM);
     assert_eq!(role.key, PERMISSION_CHECKER_ROLE);
     assert_eq!(role.permissions, vec![AUTHZ_CHECK.to_string()]);
     assert!(!role.has_permission(TOKEN_INTROSPECT));
@@ -59,7 +59,7 @@ fn test_resource_scope_round_trip() {
     let resource = crate::models::ResourceId::generate();
     let assignment = RoleAssignment::new(
         RoleAssignmentPrincipal::OAuthClient("orders-pdp".into()),
-        RoleId::new(),
+        RoleId::generate(),
     )
     .on_resource(resource);
     assert_eq!(
@@ -84,7 +84,7 @@ fn test_resource_scope_round_trip() {
 
 #[test]
 fn test_role_new_defaults() {
-    let project_id = ProjectId::new();
+    let project_id = ProjectId::generate();
     let role = Role::new(project_id, "admin", "Administrator");
     assert_eq!(role.key, "admin");
     assert_eq!(role.name, "Administrator");
@@ -96,7 +96,7 @@ fn test_role_new_defaults() {
 
 #[test]
 fn test_role_has_permission() {
-    let mut role = Role::new(ProjectId::new(), "editor", "Editor");
+    let mut role = Role::new(ProjectId::generate(), "editor", "Editor");
     assert!(!role.has_permission("profiles:read"));
 
     role.permissions = vec!["profiles:read".into(), "profiles:write".into()];
@@ -107,7 +107,7 @@ fn test_role_has_permission() {
 
 #[test]
 fn test_role_permissions_string() {
-    let mut role = Role::new(ProjectId::new(), "admin", "Admin");
+    let mut role = Role::new(ProjectId::generate(), "admin", "Admin");
     role.permissions = vec!["profiles:read".into(), "clients:write".into()];
     assert_eq!(role.permissions_string(), "profiles:read clients:write");
 }
@@ -126,8 +126,8 @@ fn test_role_parse_permissions_empty() {
 
 #[test]
 fn test_role_id_unique() {
-    let id1 = RoleId::new();
-    let id2 = RoleId::new();
+    let id1 = RoleId::generate();
+    let id2 = RoleId::generate();
     assert_ne!(id1, id2);
 }
 
@@ -135,7 +135,7 @@ fn test_role_id_unique() {
 
 #[test]
 fn test_group_new_defaults() {
-    let project_id = ProjectId::new();
+    let project_id = ProjectId::generate();
     let group = Group::new(project_id, "engineering");
     assert_eq!(group.name, "engineering");
     assert_eq!(group.project_id, project_id);
@@ -144,14 +144,14 @@ fn test_group_new_defaults() {
 
 #[test]
 fn test_group_id_unique() {
-    let id1 = GroupId::new();
-    let id2 = GroupId::new();
+    let id1 = GroupId::generate();
+    let id2 = GroupId::generate();
     assert_ne!(id1, id2);
 }
 
 #[test]
 fn test_group_member_new() {
-    let group_id = GroupId::new();
+    let group_id = GroupId::generate();
     let profile_id = ProfileId::generate();
     let member = GroupMember::new(group_id, profile_id);
     assert_eq!(member.group_id, group_id);
@@ -163,7 +163,7 @@ fn test_group_member_new() {
 #[test]
 fn test_role_assignment_new() {
     let principal = RoleAssignmentPrincipal::Profile(ProfileId::generate());
-    let role_id = RoleId::new();
+    let role_id = RoleId::generate();
     let assignment = RoleAssignment::new(principal.clone(), role_id);
     assert_eq!(assignment.principal, principal);
     assert_eq!(assignment.role_id, role_id);
@@ -176,7 +176,7 @@ fn test_role_assignment_new() {
 fn test_role_assignment_not_expired() {
     let mut assignment = RoleAssignment::new(
         RoleAssignmentPrincipal::Profile(ProfileId::generate()),
-        RoleId::new(),
+        RoleId::generate(),
     );
     assignment.expires_at = Some(Utc::now() + Duration::hours(1));
     assert!(!assignment.is_expired());
@@ -186,7 +186,7 @@ fn test_role_assignment_not_expired() {
 fn test_role_assignment_expired() {
     let mut assignment = RoleAssignment::new(
         RoleAssignmentPrincipal::Profile(ProfileId::generate()),
-        RoleId::new(),
+        RoleId::generate(),
     );
     assignment.expires_at = Some(Utc::now() - Duration::seconds(1));
     assert!(assignment.is_expired());
@@ -195,16 +195,16 @@ fn test_role_assignment_expired() {
 #[test]
 fn test_role_assignment_no_expiry_not_expired() {
     let assignment = RoleAssignment::new(
-        RoleAssignmentPrincipal::Group(GroupId::new()),
-        RoleId::new(),
+        RoleAssignmentPrincipal::Group(GroupId::generate()),
+        RoleId::generate(),
     );
     assert!(!assignment.is_expired());
 }
 
 #[test]
 fn test_role_assignment_id_unique() {
-    let id1 = RoleAssignmentId::new();
-    let id2 = RoleAssignmentId::new();
+    let id1 = RoleAssignmentId::generate();
+    let id2 = RoleAssignmentId::generate();
     assert_ne!(id1, id2);
 }
 
@@ -235,7 +235,7 @@ fn test_scope_type_serde_roundtrip() {
 
 #[test]
 fn test_cedar_policy_new() {
-    let project_id = ProjectId::new();
+    let project_id = ProjectId::generate();
     let policy = CedarPolicy::new(
         PolicyScope::Project(project_id),
         "allow-read",
@@ -253,7 +253,7 @@ fn test_cedar_policy_new() {
 /// itself; columns naming both are no scope, never one of the two.
 #[test]
 fn a_policy_scope_round_trips_through_its_columns() {
-    let project = ProjectId::new();
+    let project = ProjectId::generate();
     let resource = ResourceId::generate();
     for scope in [
         PolicyScope::Installation,
@@ -290,8 +290,8 @@ fn test_policy_effect_serde_roundtrip() {
 
 #[test]
 fn test_cedar_policy_id_unique() {
-    let id1 = CedarPolicyId::new();
-    let id2 = CedarPolicyId::new();
+    let id1 = CedarPolicyId::generate();
+    let id2 = CedarPolicyId::generate();
     assert_ne!(id1, id2);
 }
 
@@ -312,7 +312,7 @@ fn test_internal_roles_constants() {
 
 #[test]
 fn test_profile_grant_new() {
-    let project_id = ProjectId::new();
+    let project_id = ProjectId::generate();
     let profile_id = ProfileId::generate();
     let grant = ProfileGrant::new(
         project_id,
@@ -330,7 +330,7 @@ fn test_profile_grant_new() {
 #[test]
 fn test_profile_grant_has_role() {
     let grant = ProfileGrant::new(
-        ProjectId::new(),
+        ProjectId::generate(),
         ProfileId::generate(),
         vec!["admin".into(), "viewer".into()],
     );
@@ -341,14 +341,22 @@ fn test_profile_grant_has_role() {
 
 #[test]
 fn test_profile_grant_expired() {
-    let mut grant = ProfileGrant::new(ProjectId::new(), ProfileId::generate(), vec!["temp".into()]);
+    let mut grant = ProfileGrant::new(
+        ProjectId::generate(),
+        ProfileId::generate(),
+        vec!["temp".into()],
+    );
     grant.expires_at = Some(Utc::now() - Duration::seconds(1));
     assert!(grant.is_expired());
 }
 
 #[test]
 fn test_profile_grant_not_expired() {
-    let mut grant = ProfileGrant::new(ProjectId::new(), ProfileId::generate(), vec!["temp".into()]);
+    let mut grant = ProfileGrant::new(
+        ProjectId::generate(),
+        ProfileId::generate(),
+        vec!["temp".into()],
+    );
     grant.expires_at = Some(Utc::now() + Duration::hours(1));
     assert!(!grant.is_expired());
 }
@@ -363,7 +371,7 @@ fn test_profile_grant_id_unique() {
 #[test]
 fn test_profile_grant_serde_roundtrip() {
     let grant = ProfileGrant::new(
-        ProjectId::new(),
+        ProjectId::generate(),
         ProfileId::generate(),
         vec!["admin".into()],
     );
@@ -378,14 +386,14 @@ fn test_profile_grant_serde_roundtrip() {
 
 #[test]
 fn test_role_key_vs_name() {
-    let role = Role::new(ProjectId::new(), "content_editor", "Content Editor");
+    let role = Role::new(ProjectId::generate(), "content_editor", "Content Editor");
     assert_eq!(role.key, "content_editor");
     assert_eq!(role.name, "Content Editor");
 }
 
 #[test]
 fn test_role_group() {
-    let mut role = Role::new(ProjectId::new(), "editor", "Editor");
+    let mut role = Role::new(ProjectId::generate(), "editor", "Editor");
     assert!(role.group.is_none());
     role.group = Some("Content".into());
     assert_eq!(role.group.as_deref(), Some("Content"));
@@ -398,7 +406,7 @@ fn test_role_assignment_with_expiry() {
     let expiry = Utc::now() + Duration::hours(48);
     let assignment = RoleAssignment::new(
         RoleAssignmentPrincipal::Profile(ProfileId::generate()),
-        RoleId::new(),
+        RoleId::generate(),
     )
     .with_expiry(expiry);
 
@@ -410,7 +418,7 @@ fn test_role_assignment_with_expiry() {
 fn test_hours_until_expiry_future() {
     let assignment = RoleAssignment::new(
         RoleAssignmentPrincipal::Profile(ProfileId::generate()),
-        RoleId::new(),
+        RoleId::generate(),
     )
     .with_expiry(Utc::now() + Duration::hours(48));
 
@@ -422,7 +430,7 @@ fn test_hours_until_expiry_future() {
 fn test_hours_until_expiry_past() {
     let assignment = RoleAssignment::new(
         RoleAssignmentPrincipal::Profile(ProfileId::generate()),
-        RoleId::new(),
+        RoleId::generate(),
     )
     .with_expiry(Utc::now() - Duration::hours(1));
 
@@ -433,7 +441,7 @@ fn test_hours_until_expiry_past() {
 fn test_hours_until_expiry_no_expiry() {
     let assignment = RoleAssignment::new(
         RoleAssignmentPrincipal::Profile(ProfileId::generate()),
-        RoleId::new(),
+        RoleId::generate(),
     );
 
     assert!(assignment.hours_until_expiry().is_none());
@@ -451,7 +459,8 @@ fn test_role_expiry_alert_hours_ordered() {
 // ── Governance events ──────────────────────────────────────────
 
 fn temporary(principal: RoleAssignmentPrincipal) -> RoleAssignment {
-    RoleAssignment::new(principal, RoleId::new()).with_expiry(Utc::now() - Duration::seconds(1))
+    RoleAssignment::new(principal, RoleId::generate())
+        .with_expiry(Utc::now() - Duration::seconds(1))
 }
 
 /// The expired event names the assignment, its principal, role and expiry,
@@ -463,8 +472,8 @@ fn test_role_expired_event_once_per_assignment() {
 
     let event = assignment.expired_event();
     assert_eq!(event.event_type, event_types::GOVERNANCE_ROLE_EXPIRED);
-    assert_eq!(event.data["assignment_id"], assignment.id.0.to_string());
-    assert_eq!(event.data["role_id"], assignment.role_id.0.to_string());
+    assert_eq!(event.data["assignment_id"], assignment.id.to_string());
+    assert_eq!(event.data["role_id"], assignment.role_id.to_string());
     assert_eq!(event.data["principal"]["Profile"], pid.to_string());
     assert!(event.data["expired_at"].is_string());
     assert_eq!(event.id, assignment.expired_event().id);
@@ -476,7 +485,7 @@ fn test_role_expired_event_once_per_assignment() {
 /// often the scan sees it; a different threshold is a different warning.
 #[test]
 fn test_role_expiring_event_once_per_threshold() {
-    let assignment = temporary(RoleAssignmentPrincipal::Group(GroupId::new()));
+    let assignment = temporary(RoleAssignmentPrincipal::Group(GroupId::generate()));
 
     let first = assignment.expiring_event(24, 20);
     assert_eq!(first.event_type, event_types::GOVERNANCE_ROLE_EXPIRING);

@@ -141,7 +141,7 @@ impl TestIssuer {
         let mut verifiers = Vec::new();
         for checker in &setup.checkers {
             let machine = MachineUser::new(
-                ProjectId::system(),
+                ProjectId::SYSTEM,
                 &checker.client_id,
                 &checker.client_id,
                 OwnerType::System,
@@ -351,7 +351,7 @@ impl TestIssuer {
 
     /// A stored role named `name` holding `permissions`.
     pub async fn role(&self, name: &str, permissions: &[&str]) -> Role {
-        let mut role = Role::new(ProjectId::system(), name, name);
+        let mut role = Role::new(ProjectId::SYSTEM, name, name);
         role.permissions = permissions.iter().map(|p| (*p).to_owned()).collect();
         self.storage
             .create_role(&role, audit("role.create"))
@@ -365,7 +365,7 @@ impl TestIssuer {
     /// `indicator`. What it may do there is what its grants allow.
     pub async fn machine(&self, client_id: &str, secret: &str, indicator: &str) -> MachineUser {
         let machine = MachineUser::new(
-            ProjectId::system(),
+            ProjectId::SYSTEM,
             client_id,
             client_id,
             OwnerType::System,
@@ -567,7 +567,7 @@ async fn register(
     let now = chrono::Utc::now();
     let app = sid_core::models::Application {
         id: sid_core::models::ApplicationId::generate(),
-        project_id: ProjectId::system(),
+        project_id: ProjectId::SYSTEM,
         name: indicator.to_owned(),
         system: None,
         revision: 0,
@@ -587,7 +587,7 @@ async fn register(
     };
     let client = OAuth2Client {
         client_id: console(&resource),
-        project_id: ProjectId::system(),
+        project_id: ProjectId::SYSTEM,
         application_id: app.id,
         default_resource: Some(resource.id),
         application_type: ApplicationType::Spa,

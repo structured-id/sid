@@ -5,26 +5,13 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use super::profile::ProfileId;
 use super::project::ProjectId;
 
-/// Unique identifier for an access request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct AccessRequestId(pub Uuid);
-
-impl AccessRequestId {
-    pub fn new() -> Self {
-        Self(Uuid::now_v7())
-    }
-}
-
-impl Default for AccessRequestId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+/// Validated UUIDv7 identifier of an access request; construction and decoding
+/// go through `sid_ids`.
+pub use sid_ids::AccessRequestId;
 
 /// Access request status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -100,7 +87,7 @@ impl AccessRequest {
         role_key: impl Into<String>,
     ) -> Self {
         Self {
-            id: AccessRequestId::new(),
+            id: AccessRequestId::generate(),
             requester_id,
             project_id,
             role_key: role_key.into(),
@@ -121,7 +108,7 @@ impl AccessRequest {
         if self.status == AccessRequestStatus::Approved {
             return Err(crate::Error::Validation(format!(
                 "access request {} is approved only with its role assignment",
-                self.id.0
+                self.id
             )));
         }
         Ok(())
@@ -133,13 +120,13 @@ impl AccessRequest {
         if self.status != AccessRequestStatus::Approved {
             return Err(crate::Error::Validation(format!(
                 "access request {} is not approved",
-                self.id.0
+                self.id
             )));
         }
         if grant.principal != super::RoleAssignmentPrincipal::Profile(self.requester_id) {
             return Err(crate::Error::Validation(format!(
                 "the assignment of access request {} is not its requester's",
-                self.id.0
+                self.id
             )));
         }
         Ok(())
@@ -212,7 +199,7 @@ mod tests {
     #[test]
     fn test_new_access_request() {
         let requester = ProfileId::generate();
-        let project = ProjectId::new();
+        let project = ProjectId::generate();
         let request = AccessRequest::new(requester, project, "editor");
 
         assert_eq!(request.requester_id, requester);
@@ -224,7 +211,7 @@ mod tests {
 
     #[test]
     fn test_approve_request() {
-        let mut request = AccessRequest::new(ProfileId::generate(), ProjectId::new(), "admin");
+        let mut request = AccessRequest::new(ProfileId::generate(), ProjectId::generate(), "admin");
         let reviewer = ProfileId::generate();
         request
             .approve(reviewer, Some("Approved per policy".into()))
@@ -237,7 +224,7 @@ mod tests {
 
     #[test]
     fn test_deny_request() {
-        let mut request = AccessRequest::new(ProfileId::generate(), ProjectId::new(), "admin");
+        let mut request = AccessRequest::new(ProfileId::generate(), ProjectId::generate(), "admin");
         let reviewer = ProfileId::generate();
         request
             .deny(reviewer, Some("Not justified".into()))
@@ -247,35 +234,36 @@ mod tests {
 
     #[test]
     fn test_cancel_request() {
-        let mut request = AccessRequest::new(ProfileId::generate(), ProjectId::new(), "viewer");
+        let mut request =
+            AccessRequest::new(ProfileId::generate(), ProjectId::generate(), "viewer");
         request.cancel().unwrap();
         assert_eq!(request.status, AccessRequestStatus::Cancelled);
     }
 
     #[test]
     fn test_cannot_approve_non_pending() {
-        let mut request = AccessRequest::new(ProfileId::generate(), ProjectId::new(), "admin");
+        let mut request = AccessRequest::new(ProfileId::generate(), ProjectId::generate(), "admin");
         request.deny(ProfileId::generate(), None).unwrap();
         assert!(request.approve(ProfileId::generate(), None).is_err());
     }
 
     #[test]
     fn test_cannot_deny_non_pending() {
-        let mut request = AccessRequest::new(ProfileId::generate(), ProjectId::new(), "admin");
+        let mut request = AccessRequest::new(ProfileId::generate(), ProjectId::generate(), "admin");
         request.approve(ProfileId::generate(), None).unwrap();
         assert!(request.deny(ProfileId::generate(), None).is_err());
     }
 
     #[test]
     fn test_cannot_cancel_non_pending() {
-        let mut request = AccessRequest::new(ProfileId::generate(), ProjectId::new(), "admin");
+        let mut request = AccessRequest::new(ProfileId::generate(), ProjectId::generate(), "admin");
         request.approve(ProfileId::generate(), None).unwrap();
         assert!(request.cancel().is_err());
     }
 
     #[test]
     fn test_check_expired() {
-        let mut request = AccessRequest::new(ProfileId::generate(), ProjectId::new(), "admin");
+        let mut request = AccessRequest::new(ProfileId::generate(), ProjectId::generate(), "admin");
         request.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
         assert!(request.check_expired());
         assert_eq!(request.status, AccessRequestStatus::Expired);
@@ -283,7 +271,7 @@ mod tests {
 
     #[test]
     fn test_not_expired() {
-        let mut request = AccessRequest::new(ProfileId::generate(), ProjectId::new(), "admin");
+        let mut request = AccessRequest::new(ProfileId::generate(), ProjectId::generate(), "admin");
         request.expires_at = Some(Utc::now() + chrono::Duration::hours(24));
         assert!(!request.check_expired());
         assert_eq!(request.status, AccessRequestStatus::Pending);
@@ -291,13 +279,14 @@ mod tests {
 
     #[test]
     fn test_role_expires_at_permanent() {
-        let request = AccessRequest::new(ProfileId::generate(), ProjectId::new(), "admin");
+        let request = AccessRequest::new(ProfileId::generate(), ProjectId::generate(), "admin");
         assert!(request.role_expires_at().is_none());
     }
 
     #[test]
     fn test_role_expires_at_temporary() {
-        let mut request = AccessRequest::new(ProfileId::generate(), ProjectId::new(), "viewer");
+        let mut request =
+            AccessRequest::new(ProfileId::generate(), ProjectId::generate(), "viewer");
         request.requested_duration_hours = Some(24);
         let expires = request.role_expires_at().unwrap();
         let expected = Utc::now() + chrono::Duration::hours(24);
@@ -333,14 +322,15 @@ mod tests {
 
     #[test]
     fn test_id_unique() {
-        let id1 = AccessRequestId::new();
-        let id2 = AccessRequestId::new();
+        let id1 = AccessRequestId::generate();
+        let id2 = AccessRequestId::generate();
         assert_ne!(id1, id2);
     }
 
     #[test]
     fn test_serde_roundtrip() {
-        let mut request = AccessRequest::new(ProfileId::generate(), ProjectId::new(), "editor");
+        let mut request =
+            AccessRequest::new(ProfileId::generate(), ProjectId::generate(), "editor");
         request.justification = Some("Need to edit docs".into());
         request.requested_duration_hours = Some(72);
         let json = serde_json::to_string(&request).unwrap();

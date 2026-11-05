@@ -73,7 +73,7 @@ fn test_text_roundtrip() {
 fn test_domain_to_proto_status() {
     let config = BrandingConfig {
         id: BrandingConfigId::new(),
-        project_id: ProjectId::new(),
+        project_id: ProjectId::generate(),
         status: BrandingStatus::Published,
         revision: 0,
         tokens: DesignTokens::default(),

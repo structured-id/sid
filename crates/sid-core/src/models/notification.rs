@@ -14,6 +14,12 @@ use super::ProfileId;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NotificationId(pub Uuid);
 
+impl core::fmt::Display for NotificationId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 impl NotificationId {
     pub fn new() -> Self {
         Self(Uuid::now_v7())

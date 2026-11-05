@@ -11,7 +11,6 @@ use sid_core::models::{
     ProvisioningConnectorId, ResourceId, SCIM_ACTION_PREFIX, TOKEN_INTROSPECT,
 };
 use sid_plugin::StorageBackend;
-use uuid::Uuid;
 
 use crate::cedar::CedarService;
 use crate::compiled::PolicySets;
@@ -100,8 +99,7 @@ impl<S: StorageBackend + ?Sized> CeAuthzEngine<S> {
         } else {
             resource
         };
-        Uuid::parse_str(id_str)
-            .map(ProjectId)
+        ProjectId::parse(id_str)
             .map_err(|e| AuthzError::InvalidResource(format!("{resource}: {e}")))
     }
 
@@ -236,7 +234,7 @@ impl<S: StorageBackend + ?Sized> CeAuthzEngine<S> {
                     .map_err(|e| AuthzError::Storage(e.to_string()))?
                     .into_iter()
                     .filter(|p| p.enabled)
-                    .map(|p| (p.id.0.to_string(), p.policy_text)),
+                    .map(|p| (p.id.to_string(), p.policy_text)),
             );
         }
         Ok(enabled)
@@ -439,7 +437,7 @@ impl<S: StorageBackend + ?Sized> CeAuthzEngine<S> {
         Ok(self.combine(
             &principal,
             request,
-            &project_id.0.to_string(),
+            &project_id.to_string(),
             &granting_roles,
             applicable,
         ))

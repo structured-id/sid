@@ -3337,8 +3337,8 @@ async fn test_ep6_audit_wiring_produces_records() {
 
     // 2. create_group
     let group = sid_core::models::Group {
-        id: sid_core::models::GroupId(uuid::Uuid::now_v7()),
-        project_id: sid_core::models::ProjectId::system(),
+        id: sid_core::models::GroupId::generate(),
+        project_id: sid_core::models::ProjectId::SYSTEM,
         parent_group_id: None,
         name: format!("ep6-group-{}", uuid::Uuid::now_v7()),
         description: Some("EP6 test group".into()),
@@ -3346,7 +3346,7 @@ async fn test_ep6_audit_wiring_produces_records() {
         updated_at: chrono::Utc::now(),
     };
     backend.create_group(&group, audit.clone()).await.unwrap();
-    let chain_id = format!("group:{}", group.id.0);
+    let chain_id = format!("group:{}", group.id);
     let chain_result = audit_log.verify_chain(&chain_id).await.unwrap();
     assert!(
         chain_result.records_verified > 0,

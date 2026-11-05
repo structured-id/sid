@@ -91,8 +91,7 @@ impl BrandingServiceImpl {
 
     #[allow(clippy::result_large_err)]
     fn parse_project_id(s: &str) -> Result<ProjectId, Status> {
-        Uuid::parse_str(s)
-            .map(ProjectId)
+        sid_core::models::ProjectId::parse(s)
             .map_err(|_| invalid_field("project_id", "not a project identifier"))
     }
 
@@ -109,7 +108,7 @@ impl BrandingServiceImpl {
 fn domain_to_proto(config: &BrandingConfig) -> pb::BrandingConfig {
     pb::BrandingConfig {
         id: config.id.0.to_string(),
-        project_id: config.project_id.0.to_string(),
+        project_id: config.project_id.to_string(),
         status: match config.status {
             BrandingStatus::Draft => pb::BrandingStatus::Draft.into(),
             BrandingStatus::Published => pb::BrandingStatus::Published.into(),
@@ -316,7 +315,7 @@ impl BrandingService for BrandingServiceImpl {
             .get_published_branding(project_id)
             .await
             .map_err(storage_failure)?
-            .ok_or_else(|| branding_not_found(format!("project:{}", project_id.0)))?;
+            .ok_or_else(|| branding_not_found(format!("project:{project_id}")))?;
 
         Ok(Response::new(domain_to_proto(&config)))
     }

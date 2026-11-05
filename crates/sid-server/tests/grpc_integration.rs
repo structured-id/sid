@@ -463,7 +463,7 @@ async fn test_introspect_by_a_machine_user() {
     use sid_core::models::machine_user::{MachineCredentialType, MachineUserCredential, OwnerType};
     let profile = test_profile();
     let pdp = sid_core::models::MachineUser::new(
-        sid_core::models::ProjectId::system(),
+        sid_core::models::ProjectId::SYSTEM,
         "orders-pdp",
         "Orders PDP",
         OwnerType::System,
@@ -533,7 +533,7 @@ async fn test_introspect_expired_permission() {
     );
     let role = svc
         .storage
-        .list_roles(sid_core::models::ProjectId::system())
+        .list_roles(sid_core::models::ProjectId::SYSTEM)
         .await
         .unwrap()
         .into_iter()
@@ -2691,11 +2691,11 @@ async fn test_admin_get_project() {
     let storage = MockStorage::new().with_system_project();
     let svc = TestServices::new(storage);
 
-    let system_id = sid_core::models::ProjectId::system();
+    let system_id = sid_core::models::ProjectId::SYSTEM;
     let req = admin_request(
         &svc,
         GetProjectRequest {
-            id: system_id.0.to_string(),
+            id: system_id.to_string(),
         },
     );
 
@@ -2730,7 +2730,7 @@ async fn test_admin_update_project() {
     let req = new_command(admin_request(
         &svc,
         UpdateProjectRequest {
-            id: project_id.0.to_string(),
+            id: project_id.to_string(),
             name: Some("Updated Name".to_string()),
             description: Some("new desc".to_string()),
         },
@@ -2752,7 +2752,7 @@ async fn test_admin_delete_project() {
     let req = new_command(admin_request(
         &svc,
         DeleteProjectRequest {
-            id: project_id.0.to_string(),
+            id: project_id.to_string(),
         },
     ));
 
@@ -2763,7 +2763,7 @@ async fn test_admin_delete_project() {
     let req = admin_request(
         &svc,
         GetProjectRequest {
-            id: project_id.0.to_string(),
+            id: project_id.to_string(),
         },
     );
     let err = svc.project.get_project(req).await.unwrap_err();
@@ -2775,11 +2775,11 @@ async fn test_admin_delete_system_project_forbidden() {
     let storage = MockStorage::new().with_system_project();
     let svc = TestServices::new(storage);
 
-    let system_id = sid_core::models::ProjectId::system();
+    let system_id = sid_core::models::ProjectId::SYSTEM;
     let req = new_command(admin_request(
         &svc,
         DeleteProjectRequest {
-            id: system_id.0.to_string(),
+            id: system_id.to_string(),
         },
     ));
 
@@ -2890,7 +2890,7 @@ fn create_app(
     admin_request(
         svc,
         CreateApplicationRequest {
-            project_id: sid_core::models::ProjectId::system().0.to_string(),
+            project_id: sid_core::models::ProjectId::SYSTEM.to_string(),
             name: name.to_string(),
             client,
             resource,
@@ -3021,7 +3021,7 @@ async fn test_resource_indicator_is_validated() {
         .list_applications(admin_request(
             &svc,
             ListApplicationsRequest {
-                project_id: sid_core::models::ProjectId::system().0.to_string(),
+                project_id: sid_core::models::ProjectId::SYSTEM.to_string(),
                 page_size: 100,
                 page_token: String::new(),
             },
@@ -3296,7 +3296,7 @@ async fn test_machine_user_is_given_resource_access() {
         .resource
         .unwrap();
     let ci = MachineUser::new(
-        sid_core::models::ProjectId::system(),
+        sid_core::models::ProjectId::SYSTEM,
         "ci-deploy".to_string(),
         "CI",
         OwnerType::System,
@@ -3465,7 +3465,7 @@ async fn test_resource_management_requires_an_administrator() {
     let svc = TestServices::new(storage);
     let token = issue_token(&svc.jwt, &profile, &["openid".to_string()]);
     let mut request = tonic::Request::new(CreateApplicationRequest {
-        project_id: sid_core::models::ProjectId::system().0.to_string(),
+        project_id: sid_core::models::ProjectId::SYSTEM.to_string(),
         name: "API".to_string(),
         client: None,
         resource: Some(resource_settings()),
@@ -3631,7 +3631,7 @@ async fn test_application_in_a_foreign_organization_is_refused() {
     let req = admin_request(
         &svc,
         CreateApplicationRequest {
-            project_id: sid_core::models::ProjectId::system().0.to_string(),
+            project_id: sid_core::models::ProjectId::SYSTEM.to_string(),
             name: "Foreign".to_string(),
             client: Some(client_settings(ApplicationType::Web)),
             resource: None,
@@ -3711,11 +3711,11 @@ async fn test_admin_list_applications() {
     let storage = MockStorage::new().with_system_project().with_client(client);
     let svc = TestServices::new(storage);
 
-    let system_id = sid_core::models::ProjectId::system();
+    let system_id = sid_core::models::ProjectId::SYSTEM;
     let req = admin_request(
         &svc,
         ListApplicationsRequest {
-            project_id: system_id.0.to_string(),
+            project_id: system_id.to_string(),
             page_size: 100,
             page_token: String::new(),
         },
@@ -6201,7 +6201,7 @@ async fn test_admin_metadata_requires_admin() {
 async fn test_flow_config_requires_auth() {
     let svc = TestServices::new(MockStorage::new());
     let req = Request::new(GetFlowConfigRequest {
-        project_id: Uuid::new_v4().to_string(),
+        project_id: sid_core::models::ProjectId::generate().to_string(),
         flow_type: "authentication".to_string(),
     });
     let err = svc.flow_config.get_flow_config(req).await.unwrap_err();
@@ -6216,7 +6216,7 @@ async fn test_flow_config_requires_admin_role() {
 
     let req = authed_request(
         GetFlowConfigRequest {
-            project_id: Uuid::new_v4().to_string(),
+            project_id: sid_core::models::ProjectId::generate().to_string(),
             flow_type: "authentication".to_string(),
         },
         &token,
@@ -6232,7 +6232,7 @@ async fn test_flow_config_get_not_found() {
 
     let req = authed_request(
         GetFlowConfigRequest {
-            project_id: Uuid::new_v4().to_string(),
+            project_id: sid_core::models::ProjectId::generate().to_string(),
             flow_type: "authentication".to_string(),
         },
         &admin_token,
@@ -6248,7 +6248,7 @@ async fn test_flow_config_invalid_flow_type() {
 
     let req = authed_request(
         GetFlowConfigRequest {
-            project_id: Uuid::new_v4().to_string(),
+            project_id: sid_core::models::ProjectId::generate().to_string(),
             flow_type: "nonexistent".to_string(),
         },
         &admin_token,
@@ -6261,7 +6261,7 @@ async fn test_flow_config_invalid_flow_type() {
 async fn test_flow_config_save_and_list() {
     let svc = TestServices::new(MockStorage::new());
     let admin_token = issue_admin_token(&svc.jwt, sid_core::models::ProfileId::generate());
-    let project_id = Uuid::new_v4().to_string();
+    let project_id = sid_core::models::ProjectId::generate().to_string();
 
     // Save a config
     let req = authed_request(
@@ -6304,7 +6304,7 @@ async fn test_flow_config_save_and_list() {
 async fn test_flow_action_requires_auth() {
     let svc = TestServices::new(MockStorage::new());
     let req = Request::new(ListFlowActionsRequest {
-        project_id: Uuid::new_v4().to_string(),
+        project_id: sid_core::models::ProjectId::generate().to_string(),
         flow_type: "authentication".to_string(),
         action_point: 0,
     });
@@ -6319,7 +6319,7 @@ async fn test_flow_action_create_requires_name() {
 
     let req = authed_request(
         CreateFlowActionRequest {
-            project_id: Uuid::new_v4().to_string(),
+            project_id: sid_core::models::ProjectId::generate().to_string(),
             flow_type: "authentication".to_string(),
             action_point: 2,      // POST_AUTHENTICATION
             name: "".to_string(), // empty name
@@ -6347,7 +6347,7 @@ async fn test_flow_action_create_requires_config() {
 
     let req = authed_request(
         CreateFlowActionRequest {
-            project_id: Uuid::new_v4().to_string(),
+            project_id: sid_core::models::ProjectId::generate().to_string(),
             flow_type: "authentication".to_string(),
             action_point: 1, // PRE_AUTHENTICATION
             name: "Test hook".to_string(),
@@ -6370,7 +6370,7 @@ async fn test_flow_action_create_validates_webhook_url() {
 
     let req = authed_request(
         CreateFlowActionRequest {
-            project_id: Uuid::new_v4().to_string(),
+            project_id: sid_core::models::ProjectId::generate().to_string(),
             flow_type: "registration".to_string(),
             action_point: 6, // POST_REGISTRATION
             name: "Bad hook".to_string(),
@@ -6398,7 +6398,7 @@ async fn test_flow_action_create_success() {
 
     let req = authed_request(
         CreateFlowActionRequest {
-            project_id: Uuid::new_v4().to_string(),
+            project_id: sid_core::models::ProjectId::generate().to_string(),
             flow_type: "authentication".to_string(),
             action_point: 2, // POST_AUTHENTICATION
             name: "Risk check".to_string(),
@@ -6431,7 +6431,7 @@ async fn test_flow_action_get_not_found() {
 
     let req = authed_request(
         GetFlowActionRequest {
-            project_id: Uuid::new_v4().to_string(),
+            project_id: sid_core::models::ProjectId::generate().to_string(),
             flow_type: "authentication".to_string(),
             action_id: Uuid::new_v4().to_string(),
         },
@@ -6448,7 +6448,7 @@ async fn test_flow_action_delete_not_found() {
 
     let req = authed_request(
         DeleteFlowActionRequest {
-            project_id: Uuid::new_v4().to_string(),
+            project_id: sid_core::models::ProjectId::generate().to_string(),
             flow_type: "authentication".to_string(),
             action_id: Uuid::new_v4().to_string(),
         },
@@ -6465,7 +6465,7 @@ async fn test_flow_action_update_not_found() {
 
     let req = authed_request(
         UpdateFlowActionRequest {
-            project_id: Uuid::new_v4().to_string(),
+            project_id: sid_core::models::ProjectId::generate().to_string(),
             flow_type: "authentication".to_string(),
             action_id: Uuid::new_v4().to_string(),
             name: Some("Updated name".to_string()),
@@ -6488,7 +6488,7 @@ async fn test_flow_action_list_empty() {
 
     let req = authed_request(
         ListFlowActionsRequest {
-            project_id: Uuid::new_v4().to_string(),
+            project_id: sid_core::models::ProjectId::generate().to_string(),
             flow_type: "authentication".to_string(),
             action_point: 0, // unspecified = all
         },
@@ -7473,7 +7473,7 @@ async fn test_governance_decide_request_requires_bearer_token() {
 
     // No bearer token → Unauthenticated.
     let req = Request::new(sid_proto::sid::v1::authz::DecideRequestRequest {
-        request_id: Uuid::now_v7().to_string(),
+        request_id: Some(sid_core::models::AccessRequestId::generate().into()),
         approved: true,
         reason: String::new(),
     });
@@ -7501,7 +7501,7 @@ async fn test_governance_decide_request_with_bearer_extracts_reviewer() {
     // With bearer token — extracts reviewer but request_id doesn't exist → NotFound.
     let req = authed_request(
         sid_proto::sid::v1::authz::DecideRequestRequest {
-            request_id: Uuid::now_v7().to_string(),
+            request_id: Some(sid_core::models::AccessRequestId::generate().into()),
             approved: true,
             reason: "approved for testing".to_string(),
         },
@@ -10513,7 +10513,7 @@ fn setup_iat_for_dcr(storage: MockStorage) -> (MockStorage, String) {
     let iat = InitialAccessToken {
         id: InitialAccessTokenId::new(),
         token_hash,
-        project_id: ProjectId::system(),
+        project_id: ProjectId::SYSTEM,
         max_clients: 10,
         clients_registered: 0,
         allowed_scopes: vec!["openid".into(), "profile".into()],
@@ -10629,7 +10629,7 @@ async fn test_dcr_redirect_pattern_cannot_reach_another_host() {
 
     let iats = svc
         .storage
-        .list_initial_access_tokens_by_project(sid_core::models::ProjectId::system())
+        .list_initial_access_tokens_by_project(sid_core::models::ProjectId::SYSTEM)
         .await
         .unwrap();
     assert_eq!(
@@ -10744,13 +10744,13 @@ async fn test_dcr_refuses_incompatible_subject_metadata() {
     }
     let registered = svc
         .storage
-        .list_oauth2_clients_by_project(sid_core::models::ProjectId::system(), 0, 100)
+        .list_oauth2_clients_by_project(sid_core::models::ProjectId::SYSTEM, 0, 100)
         .await
         .unwrap();
     assert!(registered.is_empty(), "registered: {registered:?}");
     let iats = svc
         .storage
-        .list_initial_access_tokens_by_project(sid_core::models::ProjectId::system())
+        .list_initial_access_tokens_by_project(sid_core::models::ProjectId::SYSTEM)
         .await
         .unwrap();
     assert_eq!(iats[0].clients_registered, 0);
@@ -10804,7 +10804,7 @@ async fn test_dcr_auth_method_default_and_unknown() {
     );
     let registered = svc
         .storage
-        .list_oauth2_clients_by_project(sid_core::models::ProjectId::system(), 0, 100)
+        .list_oauth2_clients_by_project(sid_core::models::ProjectId::SYSTEM, 0, 100)
         .await
         .unwrap();
     assert_eq!(registered.len(), 1, "registered: {registered:?}");
@@ -10820,7 +10820,7 @@ async fn test_confidential_application_uses_client_secret_basic() {
         .create_application(admin_request(
             &svc,
             CreateApplicationRequest {
-                project_id: sid_core::models::ProjectId::system().0.to_string(),
+                project_id: sid_core::models::ProjectId::SYSTEM.to_string(),
                 name: "Web".to_string(),
                 client: Some(client_settings(ApplicationType::Web)),
                 resource: None,

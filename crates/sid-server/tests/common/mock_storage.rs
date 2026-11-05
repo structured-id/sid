@@ -28,7 +28,7 @@ pub struct MockStorageInner {
     cedar_policies: Vec<CedarPolicy>,
     pub refresh_tokens_by_hash: HashMap<Vec<u8>, RefreshToken>,
     auth_codes_by_hash: HashMap<Vec<u8>, AuthorizationCode>,
-    projects: HashMap<Uuid, Project>,
+    projects: HashMap<ProjectId, Project>,
     principals: HashMap<Uuid, Principal>,
     /// Uniqueness index: (principal_type, normalized_value) → principal_id
     principal_unique: HashSet<(String, String)>,
@@ -41,7 +41,7 @@ pub struct MockStorageInner {
     /// Profile phones: phone_id → ProfilePhone.
     profile_phones: HashMap<Uuid, ProfilePhone>,
     reset_sessions: HashMap<Uuid, PasswordResetSession>,
-    access_requests: HashMap<Uuid, sid_core::models::AccessRequest>,
+    access_requests: HashMap<sid_core::models::AccessRequestId, sid_core::models::AccessRequest>,
     email_provider: Option<sid_core::models::EmailProviderConfig>,
     machine_users: HashMap<MachineUserId, sid_core::models::MachineUser>,
     machine_credentials: Vec<sid_core::models::MachineUserCredential>,
@@ -610,7 +610,7 @@ impl MockStorage {
 
     pub fn with_project(self, project: Project) -> Self {
         let mut inner = self.inner.lock().unwrap();
-        inner.projects.insert(project.id.0, project);
+        inner.projects.insert(project.id, project);
         drop(inner);
         self
     }
@@ -4205,16 +4205,16 @@ impl StorageBackend for MockStorage {
     // === PROJECT OPERATIONS ===
     async fn get_project(&self, id: ProjectId) -> SidResult<Option<Project>> {
         let inner = self.inner.lock().unwrap();
-        Ok(inner.projects.get(&id.0).cloned())
+        Ok(inner.projects.get(&id).cloned())
     }
 
     async fn create_project(&self, project: &Project, ctx: MutationContext) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
-        if inner.projects.contains_key(&project.id.0) {
+        if inner.projects.contains_key(&project.id) {
             return Err(sid_core::Error::Conflict("project already exists".into()));
         }
         inner.owe(&ctx)?;
-        inner.projects.insert(project.id.0, project.clone());
+        inner.projects.insert(project.id, project.clone());
         Ok(())
     }
 
@@ -4225,7 +4225,7 @@ impl StorageBackend for MockStorage {
         ctx: MutationContext,
     ) -> SidResult<Option<Project>> {
         let mut inner = self.inner.lock().unwrap();
-        let Some(mut project) = inner.projects.get(&id.0).filter(|p| !p.is_system).cloned() else {
+        let Some(mut project) = inner.projects.get(&id).filter(|p| !p.is_system).cloned() else {
             return Ok(None);
         };
         if let Some(name) = &change.name {
@@ -4238,13 +4238,13 @@ impl StorageBackend for MockStorage {
         let mut ctx = ctx;
         ctx.record_effect(&project)?;
         inner.owe(&ctx)?;
-        inner.projects.insert(id.0, project.clone());
+        inner.projects.insert(id, project.clone());
         Ok(Some(project))
     }
 
     async fn delete_project(&self, id: ProjectId, ctx: MutationContext) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
-        if let Some(project) = inner.projects.get(&id.0)
+        if let Some(project) = inner.projects.get(&id)
             && project.is_system
         {
             return Err(sid_core::Error::Validation(
@@ -4252,7 +4252,7 @@ impl StorageBackend for MockStorage {
             ));
         }
         inner.owe(&ctx)?;
-        inner.projects.remove(&id.0);
+        inner.projects.remove(&id);
         Ok(())
     }
 
@@ -4293,10 +4293,10 @@ impl StorageBackend for MockStorage {
 
     async fn ensure_system_project(&self, _audit: MutationContext) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
-        let system_id = ProjectId::system();
-        if !inner.projects.contains_key(&system_id.0) {
+        let system_id = ProjectId::SYSTEM;
+        if !inner.projects.contains_key(&system_id) {
             let system = Project::system();
-            inner.projects.insert(system.id.0, system);
+            inner.projects.insert(system.id, system);
         }
         Ok(())
     }
@@ -4449,7 +4449,7 @@ impl StorageBackend for MockStorage {
     ) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
         if inner.role_assignments.iter().any(|s| s.id == a.id) {
-            return Err(sid_core::Error::Conflict(format!("assignment {}", a.id.0)));
+            return Err(sid_core::Error::Conflict(format!("assignment {}", a.id)));
         }
         // An OAuth client principal must exist, as its foreign key requires.
         if let RoleAssignmentPrincipal::OAuthClient(client) = &a.principal
@@ -6109,25 +6109,19 @@ impl StorageBackend for MockStorage {
         ctx: MutationContext,
     ) -> SidResult<()> {
         let mut inner = self.inner.lock().unwrap();
-        if inner.access_requests.contains_key(&request.id.0) {
+        if inner.access_requests.contains_key(&request.id) {
             return Err(sid_core::Error::Conflict(
                 "access request already exists".into(),
             ));
         }
-        inner.access_requests.insert(request.id.0, request.clone());
+        inner.access_requests.insert(request.id, request.clone());
         inner.owe(&ctx)
     }
     async fn get_access_request(
         &self,
         id: sid_core::models::AccessRequestId,
     ) -> SidResult<Option<sid_core::models::AccessRequest>> {
-        Ok(self
-            .inner
-            .lock()
-            .unwrap()
-            .access_requests
-            .get(&id.0)
-            .cloned())
+        Ok(self.inner.lock().unwrap().access_requests.get(&id).cloned())
     }
     async fn list_pending_access_requests(
         &self,
@@ -6153,7 +6147,7 @@ impl StorageBackend for MockStorage {
     ) -> SidResult<bool> {
         request.check_plain_decision()?;
         let mut inner = self.inner.lock().unwrap();
-        let Some(stored) = inner.access_requests.get_mut(&request.id.0) else {
+        let Some(stored) = inner.access_requests.get_mut(&request.id) else {
             return Ok(false);
         };
         if stored.status != sid_core::models::AccessRequestStatus::Pending {
@@ -6175,7 +6169,7 @@ impl StorageBackend for MockStorage {
     ) -> SidResult<bool> {
         request.check_approval(grant)?;
         let mut inner = self.inner.lock().unwrap();
-        match inner.access_requests.get(&request.id.0) {
+        match inner.access_requests.get(&request.id) {
             Some(stored) if stored.status == sid_core::models::AccessRequestStatus::Pending => {}
             _ => return Ok(false),
         }
@@ -6184,19 +6178,19 @@ impl StorageBackend for MockStorage {
         if !inner.roles.contains_key(&grant.role_id) {
             return Err(sid_core::Error::Storage(format!(
                 "role {} does not exist",
-                grant.role_id.0
+                grant.role_id
             )));
         }
         if inner.role_assignments.iter().any(|a| a.id == grant.id) {
             return Err(sid_core::Error::Conflict(format!(
                 "assignment {}",
-                grant.id.0
+                grant.id
             )));
         }
         inner.owe(&ctx)?;
         let stored = inner
             .access_requests
-            .get_mut(&request.id.0)
+            .get_mut(&request.id)
             .expect("checked above");
         stored.status = request.status;
         stored.reviewed_by = request.reviewed_by;

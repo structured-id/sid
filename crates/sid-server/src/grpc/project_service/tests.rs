@@ -31,7 +31,7 @@ fn test_system_project_to_proto() {
 
 #[test]
 fn test_role_to_proto() {
-    let project_id = ProjectId::new();
+    let project_id = ProjectId::generate();
     let mut role = Role::new(project_id, "editor", "Editor");
     role.description = Some("Can edit content".to_string());
     role.permissions = vec!["profiles:read".into(), "profiles:write".into()];
@@ -48,7 +48,7 @@ fn test_parse_project_id_valid() {
     let id = uuid::Uuid::now_v7();
     let result = parse_project_id(&id.to_string());
     assert!(result.is_ok());
-    assert_eq!(result.unwrap().0, id);
+    assert_eq!(result.unwrap().into_uuid(), id);
 }
 
 #[test]

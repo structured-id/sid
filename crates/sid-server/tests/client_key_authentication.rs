@@ -53,7 +53,7 @@ async fn key_client(jwks: Option<ClientKeySet>) -> TestServices {
     let now = chrono::Utc::now();
     let app = Application {
         id: ApplicationId::generate(),
-        project_id: ProjectId::system(),
+        project_id: ProjectId::SYSTEM,
         name: "Account API".into(),
         system: None,
         revision: 0,

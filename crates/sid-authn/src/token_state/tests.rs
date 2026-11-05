@@ -65,7 +65,7 @@ async fn fixture() -> Fixture {
     let now = Utc::now();
     let app = Application {
         id: ApplicationId::generate(),
-        project_id: ProjectId::system(),
+        project_id: ProjectId::SYSTEM,
         name: "Orders web".into(),
         system: None,
         revision: 0,
@@ -78,7 +78,7 @@ async fn fixture() -> Fixture {
         .await
         .unwrap();
     let machine = MachineUser::new(
-        ProjectId::system(),
+        ProjectId::SYSTEM,
         "mu_worker",
         "Worker",
         OwnerType::System,

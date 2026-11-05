@@ -2,6 +2,7 @@ use super::*;
 use crate::test_mock::MockStorage;
 use sid_core::models::machine_user::MachineUserId;
 use sid_core::models::*;
+use uuid::Uuid;
 
 fn create_test_role(project_id: ProjectId, key: &str, permissions: &[&str]) -> Role {
     let mut role = Role::new(project_id, key, key);
@@ -12,7 +13,7 @@ fn create_test_role(project_id: ProjectId, key: &str, permissions: &[&str]) -> R
 async fn setup() -> (CeAuthzEngine<MockStorage>, Arc<MockStorage>, ProjectId) {
     let storage = Arc::new(MockStorage::new());
     let engine = CeAuthzEngine::new(storage.clone());
-    let project_id = ProjectId::new();
+    let project_id = ProjectId::generate();
     (engine, storage, project_id)
 }
 
@@ -66,21 +67,21 @@ fn test_parse_subject_machine_invalid_uuid() {
 fn test_parse_project_with_prefix() {
     let uuid = Uuid::now_v7();
     let id = CeAuthzEngine::<MockStorage>::parse_project(&format!("project:{uuid}")).unwrap();
-    assert_eq!(id.0, uuid);
+    assert_eq!(id.into_uuid(), uuid);
 }
 
 #[test]
 fn test_parse_project_typed_resource() {
     let uuid = Uuid::now_v7();
     let id = CeAuthzEngine::<MockStorage>::parse_project(&format!("doc:{uuid}")).unwrap();
-    assert_eq!(id.0, uuid);
+    assert_eq!(id.into_uuid(), uuid);
 }
 
 #[test]
 fn test_parse_project_bare_uuid() {
     let uuid = Uuid::now_v7();
     let id = CeAuthzEngine::<MockStorage>::parse_project(&uuid.to_string()).unwrap();
-    assert_eq!(id.0, uuid);
+    assert_eq!(id.into_uuid(), uuid);
 }
 
 #[test]
@@ -100,7 +101,7 @@ async fn test_check_no_roles_denies() {
         .check(&AuthzCheckRequest {
             subject: format!("user:{profile_id}"),
             action: "profiles:read".into(),
-            resource: format!("project:{}", project_id.0),
+            resource: format!("project:{project_id}"),
             context: Default::default(),
         })
         .await
@@ -130,7 +131,7 @@ async fn test_check_rbac_allows() {
         .check(&AuthzCheckRequest {
             subject: format!("user:{profile_id}"),
             action: "profiles:read".into(),
-            resource: format!("project:{}", project_id.0),
+            resource: format!("project:{project_id}"),
             context: Default::default(),
         })
         .await
@@ -167,7 +168,7 @@ async fn test_check_rbac_wrong_permission_denies() {
         .check(&AuthzCheckRequest {
             subject: format!("user:{profile_id}"),
             action: "profiles:delete".into(),
-            resource: format!("project:{}", project_id.0),
+            resource: format!("project:{project_id}"),
             context: Default::default(),
         })
         .await
@@ -210,7 +211,7 @@ async fn test_check_via_group_allows() {
         .check(&AuthzCheckRequest {
             subject: format!("user:{profile_id}"),
             action: "docs:write".into(),
-            resource: format!("project:{}", project_id.0),
+            resource: format!("project:{project_id}"),
             context: Default::default(),
         })
         .await
@@ -241,7 +242,7 @@ async fn test_check_expired_role_denies() {
         .check(&AuthzCheckRequest {
             subject: format!("user:{profile_id}"),
             action: "profiles:read".into(),
-            resource: format!("project:{}", project_id.0),
+            resource: format!("project:{project_id}"),
             context: Default::default(),
         })
         .await
@@ -258,7 +259,7 @@ async fn test_check_invalid_subject() {
         .check(&AuthzCheckRequest {
             subject: "not-a-uuid".into(),
             action: "read".into(),
-            resource: format!("project:{}", project_id.0),
+            resource: format!("project:{project_id}"),
             context: Default::default(),
         })
         .await;
@@ -306,7 +307,7 @@ async fn test_check_cedar_permits_when_rbac_denies() {
         .check(&AuthzCheckRequest {
             subject: format!("user:{profile_id}"),
             action: "profiles:read".into(),
-            resource: format!("project:{}", project_id.0),
+            resource: format!("project:{project_id}"),
             context: Default::default(),
         })
         .await
@@ -342,7 +343,7 @@ async fn test_check_disabled_cedar_policy_ignored() {
         .check(&AuthzCheckRequest {
             subject: format!("user:{profile_id}"),
             action: "profiles:read".into(),
-            resource: format!("project:{}", project_id.0),
+            resource: format!("project:{project_id}"),
             context: Default::default(),
         })
         .await
@@ -376,7 +377,7 @@ async fn test_explicit_forbid_overrides_a_role_grant() {
     let ask = |action: &str| AuthzCheckRequest {
         subject: format!("user:{profile_id}"),
         action: action.into(),
-        resource: format!("project:{}", project_id.0),
+        resource: format!("project:{project_id}"),
         context: Default::default(),
     };
     assert!(
@@ -448,7 +449,7 @@ async fn test_an_unevaluable_policy_set_denies_a_role_grant() {
         .check(&AuthzCheckRequest {
             subject: format!("user:{profile_id}"),
             action: "profiles:write".into(),
-            resource: format!("project:{}", project_id.0),
+            resource: format!("project:{project_id}"),
             context: Default::default(),
         })
         .await
@@ -476,13 +477,13 @@ async fn test_batch_check() {
         AuthzCheckRequest {
             subject: format!("user:{profile_id}"),
             action: "profiles:read".into(),
-            resource: format!("project:{}", project_id.0),
+            resource: format!("project:{project_id}"),
             context: Default::default(),
         },
         AuthzCheckRequest {
             subject: format!("user:{profile_id}"),
             action: "profiles:delete".into(),
-            resource: format!("project:{}", project_id.0),
+            resource: format!("project:{project_id}"),
             context: Default::default(),
         },
     ];
@@ -522,7 +523,7 @@ async fn test_service_principals_hold_project_roles() {
     let check = |subject: String, action: &str| AuthzCheckRequest {
         subject,
         action: action.into(),
-        resource: format!("project:{}", project_id.0),
+        resource: format!("project:{project_id}"),
         context: Default::default(),
     };
 
@@ -556,7 +557,7 @@ async fn test_service_principals_hold_project_roles() {
     );
     // Another project's check is not decided by this project's role.
     let mut elsewhere = check(format!("machine:{machine}"), "releases:write");
-    elsewhere.resource = format!("project:{}", ProjectId::new().0);
+    elsewhere.resource = format!("project:{}", ProjectId::generate());
     assert!(!engine.check(&elsewhere).await.unwrap().is_allowed());
 }
 
@@ -581,7 +582,7 @@ async fn test_resource_role_is_not_a_project_role() {
     let project_wide = AuthzCheckRequest {
         subject: "oauth_client:pdp".into(),
         action: TOKEN_INTROSPECT.into(),
-        resource: format!("project:{}", ProjectId::system().0),
+        resource: format!("project:{}", ProjectId::SYSTEM),
         context: Default::default(),
     };
     assert!(!engine.check(&project_wide).await.unwrap().is_allowed());
@@ -734,8 +735,8 @@ async fn test_inspection_is_scoped_to_the_resource() {
     let (engine, storage, _) = setup().await;
     let role = stored_inspector_role(&storage).await;
     let (orders, wiki) = (
-        storage.register_resource(Some(ProjectId::system())),
-        storage.register_resource(Some(ProjectId::system())),
+        storage.register_resource(Some(ProjectId::SYSTEM)),
+        storage.register_resource(Some(ProjectId::SYSTEM)),
     );
     let machine = MachineUserId::generate();
     assign(
@@ -807,7 +808,7 @@ async fn test_inspection_is_scoped_to_the_resource() {
 async fn test_inspection_needs_a_live_resource_assignment() {
     let (engine, storage, _) = setup().await;
     let role = stored_inspector_role(&storage).await;
-    let resource = storage.register_resource(Some(ProjectId::system()));
+    let resource = storage.register_resource(Some(ProjectId::SYSTEM));
     assign(
         &storage,
         &RoleAssignment::new(
@@ -820,7 +821,7 @@ async fn test_inspection_needs_a_live_resource_assignment() {
     .await;
     let mut project_wide =
         RoleAssignment::new(RoleAssignmentPrincipal::OAuthClient("wide".into()), role.id);
-    project_wide.scope = Some(format!("project:{}", ProjectId::system().0));
+    project_wide.scope = Some(format!("project:{}", ProjectId::SYSTEM));
     assign(&storage, &project_wide).await;
     assign(
         &storage,
@@ -833,7 +834,7 @@ async fn test_inspection_needs_a_live_resource_assignment() {
     storage
         .create_cedar_policy(
             &sid_core::models::CedarPolicy::new(
-                sid_core::models::PolicyScope::Project(ProjectId::system()),
+                sid_core::models::PolicyScope::Project(ProjectId::SYSTEM),
                 "allow_all",
                 "permit(principal, action, resource);",
                 sid_core::models::PolicyEffect::Permit,
@@ -952,7 +953,7 @@ async fn test_connector_is_held_to_scim_on_its_resource() {
                 .check(&scim(
                     subject.clone(),
                     action,
-                    format!("project:{}", project_id.0)
+                    format!("project:{project_id}")
                 ))
                 .await
                 .unwrap()
@@ -1038,7 +1039,7 @@ async fn test_unreachable_storage_never_allows() {
     let request = AuthzCheckRequest {
         subject: format!("user:{profile_id}"),
         action: "profiles:read".into(),
-        resource: format!("project:{}", project_id.0),
+        resource: format!("project:{project_id}"),
         context: Default::default(),
     };
     assert!(engine.check(&request).await.unwrap().is_allowed());
@@ -1058,12 +1059,12 @@ async fn test_unreachable_storage_never_allows() {
 async fn test_a_role_grants_only_in_its_project() {
     let (engine, storage, project_id) = setup().await;
     let profile_id = granted(&storage, project_id, "profiles:read").await;
-    let other = ProjectId::new();
+    let other = ProjectId::generate();
     let resp = engine
         .check(&AuthzCheckRequest {
             subject: format!("user:{profile_id}"),
             action: "profiles:read".into(),
-            resource: format!("project:{}", other.0),
+            resource: format!("project:{other}"),
             context: Default::default(),
         })
         .await
@@ -1111,7 +1112,7 @@ async fn test_a_forbid_failing_at_runtime_denies_a_role_grant() {
         .check(&AuthzCheckRequest {
             subject: format!("user:{profile_id}"),
             action: "profiles:write".into(),
-            resource: format!("project:{}", project_id.0),
+            resource: format!("project:{project_id}"),
             context: Default::default(),
         })
         .await
@@ -1152,7 +1153,7 @@ async fn test_identifiers_with_quotes_reach_the_policies_intact() {
         .check(&AuthzCheckRequest {
             subject: format!("oauth_client:{client}"),
             action: action.into(),
-            resource: format!("project:{}", project_id.0),
+            resource: format!("project:{project_id}"),
             context: Default::default(),
         })
         .await
@@ -1312,9 +1313,9 @@ async fn a_local_permit_does_not_override_an_inherited_forbid() {
 #[tokio::test]
 async fn an_unrelated_projects_or_resources_policy_has_no_effect() {
     let g = granted_on_resource().await;
-    let other_resource = g.storage.register_resource(Some(ProjectId::new()));
+    let other_resource = g.storage.register_resource(Some(ProjectId::generate()));
     g.policy(
-        PolicyScope::Project(ProjectId::new()),
+        PolicyScope::Project(ProjectId::generate()),
         PolicyEffect::Forbid,
         FORBID_ALL,
     )
@@ -1443,7 +1444,7 @@ impl Administered {
             .check(&AuthzCheckRequest {
                 subject: format!("user:{user}"),
                 action: action.into(),
-                resource: format!("project:{}", self.project.0),
+                resource: format!("project:{}", self.project),
                 context: Default::default(),
             })
             .await
@@ -1564,14 +1565,14 @@ async fn service_actions_stay_refused_to_the_administrator() {
 async fn test_engine_over_a_dyn_store() {
     let storage: Arc<dyn sid_plugin::StorageBackend> = Arc::new(MockStorage::new());
     let engine = CeAuthzEngine::new(storage);
-    let project_id = ProjectId::new();
+    let project_id = ProjectId::generate();
     let profile_id = ProfileId::generate();
 
     let resp = engine
         .check(&AuthzCheckRequest {
             subject: format!("user:{profile_id}"),
             action: "read".into(),
-            resource: format!("project:{}", project_id.0),
+            resource: format!("project:{project_id}"),
             context: Default::default(),
         })
         .await

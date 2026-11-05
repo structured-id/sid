@@ -498,8 +498,7 @@ impl HistoryKeyStore for PgHistoryKeyStore {
                  VALUES ($1, $2, $3, $4)
                  ON CONFLICT (operation_id, epoch_id) DO UPDATE SET expires_at = EXCLUDED.expires_at",
             )
-            .bind(prep.operation)
-            .bind(epoch.id.0)
+            .bind(prep.operation).bind(epoch.id.0)
             .bind(owner_domain)
             .bind(prep.expires_at)
             .execute(&mut *tx)

@@ -71,7 +71,7 @@ fn authed<T>(msg: T, token: &str) -> Request<T> {
 fn project_scope(project_id: ProjectId) -> sid_proto::sid::v1::PolicyScope {
     sid_proto::sid::v1::PolicyScope {
         scope: Some(sid_proto::sid::v1::policy_scope::Scope::ProjectId(
-            project_id.0.to_string(),
+            project_id.into(),
         )),
     }
 }
@@ -92,7 +92,7 @@ fn allow_all(project_id: ProjectId, name: &str) -> CreatePolicyRequest {
 #[tokio::test]
 async fn test_authz_rpcs_require_a_token() {
     let h = harness().await;
-    let project = ProjectId::new();
+    let project = ProjectId::generate();
     let name = format!("allow-all-{}", uuid::Uuid::now_v7().simple());
 
     let err = h
@@ -112,7 +112,7 @@ async fn test_authz_rpcs_require_a_token() {
     let err = h
         .svc
         .list_roles(Request::new(ListRolesRequest {
-            project_id: project.0.to_string(),
+            project_id: Some(project.into()),
             ..Default::default()
         }))
         .await
@@ -137,7 +137,7 @@ async fn test_authz_management_refuses_a_non_admin() {
     let h = harness().await;
     let user = Profile::new(Some("mallory"));
     let token = issue_token(&h.jwt, &user, &["openid".to_string()]);
-    let project = ProjectId::new();
+    let project = ProjectId::generate();
     let name = format!("allow-all-{}", uuid::Uuid::now_v7().simple());
     let denied = |r: Result<(), tonic::Status>| r.err().map(|e| e.code());
 
@@ -152,7 +152,7 @@ async fn test_authz_management_refuses_a_non_admin() {
             h.svc
                 .create_role(authed(
                     CreateRoleRequest {
-                        project_id: project.0.to_string(),
+                        project_id: Some(project.into()),
                         name: "admin".to_string(),
                         ..Default::default()
                     },
@@ -165,9 +165,9 @@ async fn test_authz_management_refuses_a_non_admin() {
             h.svc
                 .assign_role(authed(
                     authz::AssignRoleRequest {
-                        role_id: uuid::Uuid::now_v7().to_string(),
+                        role_id: Some(sid_core::models::RoleId::generate().into()),
                         principal: Some(authz::assign_role_request::Principal::ProfileId(
-                            user.id.to_string(),
+                            user.id.into(),
                         )),
                         ..Default::default()
                     },
@@ -218,7 +218,7 @@ async fn test_authz_check_allows_the_callers_own_subject() {
         .check_permission(authed(
             CheckPermissionRequest {
                 action: "get".to_string(),
-                target: Some(on_project(ProjectId::system())),
+                target: Some(on_project(ProjectId::SYSTEM)),
                 evaluation: Some(authz::check_permission_request::Evaluation::Self_(
                     authz::SelfEvaluation {},
                 )),
@@ -233,9 +233,7 @@ async fn test_authz_check_allows_the_callers_own_subject() {
 /// The whole of `project` as a permission target.
 fn on_project(project: ProjectId) -> authz::PermissionTarget {
     authz::PermissionTarget {
-        scope: Some(authz::permission_target::Scope::ProjectId(
-            project.0.to_string(),
-        )),
+        scope: Some(authz::permission_target::Scope::ProjectId(project.into())),
         object: String::new(),
     }
 }
@@ -264,7 +262,7 @@ async fn test_authz_management_allows_an_administrator() {
     let name = format!("allow-read-{}", uuid::Uuid::now_v7().simple());
     let created = h
         .svc
-        .create_policy(authed(allow_all(ProjectId::system(), &name), &token))
+        .create_policy(authed(allow_all(ProjectId::SYSTEM, &name), &token))
         .await
         .expect("admin creates")
         .into_inner()

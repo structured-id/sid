@@ -3,7 +3,7 @@ use super::*;
 fn make_public_client() -> OAuth2Client {
     OAuth2Client {
         client_id: "test-public".to_string(),
-        project_id: ProjectId::system(),
+        project_id: ProjectId::SYSTEM,
         application_id: ApplicationId::generate(),
         default_resource: None,
         application_type: ApplicationType::Spa,
@@ -50,7 +50,7 @@ fn make_public_client() -> OAuth2Client {
 fn make_confidential_client() -> OAuth2Client {
     OAuth2Client {
         client_id: "test-confidential".to_string(),
-        project_id: ProjectId::system(),
+        project_id: ProjectId::SYSTEM,
         application_id: ApplicationId::generate(),
         default_resource: None,
         application_type: ApplicationType::Web,

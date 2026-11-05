@@ -508,7 +508,7 @@ fn test_client_with_acr(
 ) -> sid_core::models::OAuth2Client {
     sid_core::models::OAuth2Client {
         client_id: name.to_string(),
-        project_id: sid_core::models::ProjectId::system(),
+        project_id: sid_core::models::ProjectId::SYSTEM,
         application_id: sid_core::models::ApplicationId::generate(),
         default_resource: None,
         application_type: sid_core::models::ApplicationType::Web,

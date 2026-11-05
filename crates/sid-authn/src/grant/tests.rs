@@ -241,7 +241,7 @@ fn client() -> OAuth2Client {
     use sid_core::models::*;
     OAuth2Client {
         client_id: "cabinet".into(),
-        project_id: ProjectId::system(),
+        project_id: ProjectId::SYSTEM,
         application_id: ApplicationId::generate(),
         default_resource: None,
         application_type: ApplicationType::Web,

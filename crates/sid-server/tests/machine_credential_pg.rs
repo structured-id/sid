@@ -42,7 +42,7 @@ async fn test_concurrent_attempts_at_the_limit_add_one_credential() {
     let storage = pg_storage().await;
     let suffix = Uuid::now_v7().simple().to_string();
     let mu = MachineUser::new(
-        ProjectId::system(),
+        ProjectId::SYSTEM,
         format!("mu_{}", &suffix[..12]),
         "racing",
         OwnerType::System,

@@ -171,7 +171,7 @@ mod verify {
     fn client() -> OAuth2Client {
         OAuth2Client {
             client_id: CLIENT.into(),
-            project_id: ProjectId::system(),
+            project_id: ProjectId::SYSTEM,
             application_id: ApplicationId::generate(),
             default_resource: None,
             application_type: ApplicationType::Web,

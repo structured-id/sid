@@ -245,7 +245,9 @@ fn row_to_initial_access_token(row: &sqlx::postgres::PgRow) -> SidResult<Initial
     Ok(InitialAccessToken {
         id: InitialAccessTokenId(row.get("id")),
         token_hash: row.get("token_hash"),
-        project_id: ProjectId(row.get("project_id")),
+        project_id: row
+            .try_get("project_id")
+            .map_err(|e| SidError::Storage(format!("initial access token project: {e}")))?,
         max_clients: count("max_clients")?,
         clients_registered: count("clients_registered")?,
         allowed_scopes: words("allowed_scopes"),
@@ -668,7 +670,7 @@ impl PostgresBackend {
                 updated_at = $7, revision = revision + 1
              WHERE id = $1 AND revision = $2",
         )
-        .bind(r.id.0)
+        .bind(r.id)
         .bind(revision)
         .bind(&r.name)
         .bind(&r.description)
@@ -693,7 +695,7 @@ impl PostgresBackend {
         let mut connector_id = None;
         match &assignment.principal {
             RoleAssignmentPrincipal::Profile(pid) => profile_id = Some(*pid),
-            RoleAssignmentPrincipal::Group(gid) => group_id = Some(gid.0),
+            RoleAssignmentPrincipal::Group(gid) => group_id = Some(*gid),
             RoleAssignmentPrincipal::MachineUser(mid) => machine_user_id = Some(*mid),
             RoleAssignmentPrincipal::OAuthClient(client) => oauth_client_id = Some(client),
             RoleAssignmentPrincipal::ProvisioningConnector(id) => connector_id = Some(*id),
@@ -705,19 +707,18 @@ impl PostgresBackend {
                 granted_by, basis_assignment_id, depends_on_assignment_id)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
         )
-        .bind(assignment.id.0)
+        .bind(assignment.id)
         .bind(profile_id)
         .bind(group_id)
         .bind(machine_user_id)
         .bind(oauth_client_id)
-        .bind(connector_id)
-        .bind(assignment.role_id.0)
+        .bind(connector_id).bind(assignment.role_id)
         .bind(&assignment.scope)
         .bind(assignment.expires_at)
         .bind(assignment.created_at)
         .bind(provenance.map(|p| p.granted_by.as_str()))
-        .bind(provenance.and_then(|p| p.basis).map(|id| id.0))
-        .bind(provenance.and_then(|p| p.depends_on).map(|id| id.0))
+        .bind(provenance.and_then(|p| p.basis))
+        .bind(provenance.and_then(|p| p.depends_on))
         .execute(&mut **tx)
         .await
         .map_err(|e| insert_error("role assignment", e))?;
@@ -739,7 +740,7 @@ impl PostgresBackend {
                 "INSERT INTO role_assignment_ceilings (assignment_id, permission)
                  SELECT $1, UNNEST($2::text[])",
             )
-            .bind(assignment.id.0)
+            .bind(assignment.id)
             .bind(&permissions)
             .execute(&mut **tx)
             .await
@@ -766,7 +767,7 @@ impl PostgresBackend {
                    AND (expires_at IS NULL OR expires_at > NOW())
                    AND ($3::uuid IS NULL OR profile_id = $3))",
         )
-        .bind(Role::installation_administrator().id.0)
+        .bind(Role::installation_administrator().id)
         .bind(sid_core::models::INSTALLATION_SCOPE)
         .bind(profile)
         .fetch_one(executor)
@@ -789,8 +790,8 @@ impl PostgresBackend {
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
              ON CONFLICT (id) DO NOTHING",
         )
-        .bind(role.id.0)
-        .bind(role.project_id.0)
+        .bind(role.id)
+        .bind(role.project_id)
         .bind(&role.key)
         .bind(&role.name)
         .bind(&role.description)
@@ -822,7 +823,7 @@ impl PostgresBackend {
                    AND (expires_at IS NULL OR expires_at > NOW()))
              ORDER BY id FOR UPDATE",
         )
-        .bind(Role::installation_administrator().id.0)
+        .bind(Role::installation_administrator().id)
         .bind(sid_core::models::INSTALLATION_SCOPE)
         .fetch_all(&mut **tx)
         .await
@@ -846,7 +847,7 @@ impl PostgresBackend {
                AND (ra.expires_at IS NULL OR ra.expires_at > NOW())
              ORDER BY ra.id FOR UPDATE OF ra",
         )
-        .bind(Role::installation_administrator().id.0)
+        .bind(Role::installation_administrator().id)
         .bind(sid_core::models::INSTALLATION_SCOPE)
         .fetch_all(&mut **tx)
         .await
@@ -867,9 +868,8 @@ impl PostgresBackend {
         sqlx::query(
             "INSERT INTO role_assignment_admin (assignment_id, recipient_group_id, max_validity_secs)
              VALUES ($1, $2, $3)",
-        )
-        .bind(id.0)
-        .bind(envelope.recipient_group.map(|g| g.0))
+        ).bind(id)
+        .bind(envelope.recipient_group)
         .bind(envelope.max_validity_secs)
         .execute(&mut **tx)
         .await
@@ -895,18 +895,18 @@ impl PostgresBackend {
             "INSERT INTO role_assignment_admin_entries (assignment_id, kind, value)
              SELECT $1, k, v FROM UNNEST($2::text[], $3::text[]) AS t(k, v)",
         )
-        .bind(id.0)
+        .bind(id)
         .bind(&kinds)
         .bind(&values)
         .execute(&mut **tx)
         .await
         .map_err(|e| insert_error("administrative envelope entry", e))?;
-        let roles: Vec<uuid::Uuid> = envelope.roles.iter().map(|r| r.0).collect();
+        let roles: Vec<RoleId> = envelope.roles.iter().copied().collect();
         sqlx::query(
             "INSERT INTO role_assignment_admin_roles (assignment_id, role_id)
              SELECT $1, r FROM UNNEST($2::uuid[]) AS t(r)",
         )
-        .bind(id.0)
+        .bind(id)
         .bind(&roles)
         .execute(&mut **tx)
         .await
@@ -928,7 +928,7 @@ impl PostgresBackend {
              WHERE id = $1 AND (expires_at IS NULL OR expires_at > now())
              FOR SHARE",
         )
-        .bind(basis.assignment.0)
+        .bind(basis.assignment)
         .fetch_optional(&mut **tx)
         .await
         .map_err(read)?;
@@ -941,7 +941,7 @@ impl PostgresBackend {
             let held: Option<(i32,)> = sqlx::query_as(
                 "SELECT 1 FROM group_members WHERE group_id = $1 AND profile_id = $2 FOR SHARE",
             )
-            .bind(group.0)
+            .bind(group)
             .bind(member)
             .fetch_optional(&mut **tx)
             .await
@@ -966,7 +966,7 @@ impl PostgresBackend {
             "INSERT INTO role_assignment_policy_admin (assignment_id, operation)
              SELECT $1, o FROM UNNEST($2::text[]) AS t(o)",
         )
-        .bind(id.0)
+        .bind(id)
         .bind(&operations)
         .execute(&mut **tx)
         .await
@@ -986,7 +986,7 @@ impl PostgresBackend {
         let (role, checked) = &fence.role;
         let held: Option<(String,)> =
             sqlx::query_as("SELECT permissions FROM roles WHERE id = $1 FOR SHARE")
-                .bind(role.0)
+                .bind(role)
                 .fetch_optional(&mut **tx)
                 .await
                 .map_err(read)?;
@@ -1005,7 +1005,7 @@ impl PostgresBackend {
             let held: Option<(i32,)> = sqlx::query_as(
                 "SELECT 1 FROM group_members WHERE group_id = $1 AND profile_id = $2 FOR SHARE",
             )
-            .bind(group.0)
+            .bind(group)
             .bind(member)
             .fetch_optional(&mut **tx)
             .await
@@ -1021,14 +1021,14 @@ impl PostgresBackend {
             // FOR UPDATE, so it either commits first and is seen here, or
             // waits and sees this assignment.
             sqlx::query("SELECT 1 FROM groups WHERE id = $1 FOR SHARE")
-                .bind(group.0)
+                .bind(group)
                 .execute(&mut **tx)
                 .await
                 .map_err(read)?;
             let inside: Option<(i32,)> = sqlx::query_as(
                 "SELECT 1 FROM group_members WHERE group_id = $1 AND profile_id = $2",
             )
-            .bind(group.0)
+            .bind(group)
             .bind(grantor)
             .fetch_optional(&mut **tx)
             .await
@@ -1055,8 +1055,8 @@ impl PostgresBackend {
         if assignments.is_empty() {
             return Ok(assignments);
         }
-        let ids: Vec<uuid::Uuid> = assignments.iter().map(|a| a.id.0).collect();
-        let ceilings: Vec<(uuid::Uuid, String)> = sqlx::query_as(
+        let ids: Vec<RoleAssignmentId> = assignments.iter().map(|a| a.id).collect();
+        let ceilings: Vec<(RoleAssignmentId, String)> = sqlx::query_as(
             "SELECT assignment_id, permission FROM role_assignment_ceilings
              WHERE assignment_id = ANY($1)",
         )
@@ -1064,7 +1064,7 @@ impl PostgresBackend {
         .fetch_all(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("read approved ceilings: {e}")))?;
-        let position: std::collections::HashMap<uuid::Uuid, usize> =
+        let position: std::collections::HashMap<RoleAssignmentId, usize> =
             ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
         for (id, permission) in ceilings {
             let provenance = position
@@ -1078,7 +1078,7 @@ impl PostgresBackend {
                 .get_or_insert_with(Default::default)
                 .insert(permission);
         }
-        let held_operations: Vec<(uuid::Uuid, String)> = sqlx::query_as(
+        let held_operations: Vec<(RoleAssignmentId, String)> = sqlx::query_as(
             "SELECT assignment_id, operation FROM role_assignment_policy_admin
              WHERE assignment_id = ANY($1)",
         )
@@ -1102,7 +1102,7 @@ impl PostgresBackend {
                 .operations
                 .insert(operation);
         }
-        let heads: Vec<(uuid::Uuid, Option<uuid::Uuid>, i64)> = sqlx::query_as(
+        let heads: Vec<(RoleAssignmentId, Option<GroupId>, i64)> = sqlx::query_as(
             "SELECT assignment_id, recipient_group_id, max_validity_secs
              FROM role_assignment_admin WHERE assignment_id = ANY($1)",
         )
@@ -1113,7 +1113,7 @@ impl PostgresBackend {
         if heads.is_empty() {
             return Ok(assignments);
         }
-        let mut envelopes: std::collections::HashMap<uuid::Uuid, AdminEnvelope> = heads
+        let mut envelopes: std::collections::HashMap<RoleAssignmentId, AdminEnvelope> = heads
             .into_iter()
             .map(|(id, group, max)| {
                 (
@@ -1123,14 +1123,14 @@ impl PostgresBackend {
                         roles: Default::default(),
                         permission_ceiling: Default::default(),
                         recipient_kinds: Default::default(),
-                        recipient_group: group.map(GroupId),
+                        recipient_group: group,
                         max_validity_secs: max,
                     },
                 )
             })
             .collect();
-        let held: Vec<uuid::Uuid> = envelopes.keys().copied().collect();
-        let entries: Vec<(uuid::Uuid, String, String)> = sqlx::query_as(
+        let held: Vec<RoleAssignmentId> = envelopes.keys().copied().collect();
+        let entries: Vec<(RoleAssignmentId, String, String)> = sqlx::query_as(
             "SELECT assignment_id, kind, value FROM role_assignment_admin_entries
              WHERE assignment_id = ANY($1)",
         )
@@ -1138,8 +1138,9 @@ impl PostgresBackend {
         .fetch_all(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("read administrative envelopes: {e}")))?;
-        let unreadable =
-            |id: uuid::Uuid| SidError::Storage(format!("administrative envelope {id} unreadable"));
+        let unreadable = |id: RoleAssignmentId| {
+            SidError::Storage(format!("administrative envelope {id} unreadable"))
+        };
         for (id, kind, value) in entries {
             let envelope = envelopes.get_mut(&id).ok_or_else(|| unreadable(id))?;
             match kind.as_str() {
@@ -1159,7 +1160,7 @@ impl PostgresBackend {
                 _ => return Err(unreadable(id)),
             }
         }
-        let roles: Vec<(uuid::Uuid, uuid::Uuid)> = sqlx::query_as(
+        let roles: Vec<(RoleAssignmentId, RoleId)> = sqlx::query_as(
             "SELECT assignment_id, role_id FROM role_assignment_admin_roles
              WHERE assignment_id = ANY($1)",
         )
@@ -1172,10 +1173,10 @@ impl PostgresBackend {
                 .get_mut(&id)
                 .ok_or_else(|| unreadable(id))?
                 .roles
-                .insert(RoleId(role));
+                .insert(role);
         }
         for assignment in &mut assignments {
-            assignment.admin = envelopes.remove(&assignment.id.0);
+            assignment.admin = envelopes.remove(&assignment.id);
         }
         Ok(assignments)
     }
@@ -1189,8 +1190,7 @@ impl PostgresBackend {
         Ok(sqlx::query(
             "UPDATE access_requests SET status = $2, reviewed_by = $3, review_comment = $4, reviewed_at = $5
              WHERE id = $1 AND status = 'pending'",
-        )
-        .bind(request.id.0)
+        ).bind(request.id)
         .bind(request.status.as_str())
         .bind(request.reviewed_by)
         .bind(&request.review_comment)
@@ -1248,7 +1248,7 @@ impl PostgresBackend {
             .map_err(|e| SidError::Validation(format!("client revision: {e}")))?;
         let written = sqlx::query(sql)
             .bind(&client.client_id)
-            .bind(client.project_id.0)
+            .bind(client.project_id)
             .bind(client.application_type.as_str())
             .bind(&client.client_secret_hash)
             .bind(&client.redirect_uris)
@@ -3160,7 +3160,7 @@ impl StorageBackend for PostgresBackend {
     async fn get_project(&self, id: ProjectId) -> SidResult<Option<Project>> {
         let row =
             sqlx::query_as::<_, crate::pg_row::ProjectRow>("SELECT * FROM projects WHERE id = $1")
-                .bind(id.0)
+                .bind(id)
                 .fetch_optional(&self.pool)
                 .await
                 .map_err(|e| SidError::Storage(format!("Query failed: {}", e)))?;
@@ -3176,8 +3176,7 @@ impl StorageBackend for PostgresBackend {
         sqlx::query(
             "INSERT INTO projects (id, name, description, owner_id, is_system, created_at, updated_at)
             VALUES ($1, $2, $3, $4, $5, $6, $7)",
-        )
-        .bind(proj.id.0)
+        ).bind(proj.id)
         .bind(&proj.name)
         .bind(&proj.description)
         .bind(proj.owner_id)
@@ -3187,7 +3186,7 @@ impl StorageBackend for PostgresBackend {
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("project", e))?;
-        Self::audit_in_tx(&mut tx, &format!("project:{}", proj.id.0), audit).await?;
+        Self::audit_in_tx(&mut tx, &format!("project:{}", proj.id), audit).await?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -3211,7 +3210,7 @@ impl StorageBackend for PostgresBackend {
              WHERE id = $1 AND NOT is_system
              RETURNING *",
         )
-        .bind(id.0)
+        .bind(id)
         .bind(&change.name)
         .bind(&change.description)
         .bind(change.updated_at)
@@ -3224,7 +3223,7 @@ impl StorageBackend for PostgresBackend {
         let project = row.into_domain();
         let mut audit = audit;
         audit.record_effect(&project)?;
-        Self::audit_in_tx(&mut tx, &format!("project:{}", id.0), audit).await?;
+        Self::audit_in_tx(&mut tx, &format!("project:{id}"), audit).await?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -3244,11 +3243,11 @@ impl StorageBackend for PostgresBackend {
             .map_err(|e| SidError::Storage(e.to_string()))?;
         // A system project is never deleted, whatever its id.
         sqlx::query("DELETE FROM projects WHERE id = $1 AND NOT is_system")
-            .bind(id.0)
+            .bind(id)
             .execute(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(format!("Delete failed: {}", e)))?;
-        Self::audit_in_tx(&mut tx, &format!("project:{}", id.0), audit).await?;
+        Self::audit_in_tx(&mut tx, &format!("project:{id}"), audit).await?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -3285,7 +3284,7 @@ impl StorageBackend for PostgresBackend {
             "SELECT * FROM oauth2_clients WHERE project_id = $1
              ORDER BY created_at DESC, client_id OFFSET $2 LIMIT $3",
         )
-        .bind(project_id.0)
+        .bind(project_id)
         .bind(offset as i64)
         .bind(limit as i64)
         .fetch_all(&self.pool)
@@ -3295,7 +3294,7 @@ impl StorageBackend for PostgresBackend {
     }
 
     async fn ensure_system_project(&self, audit: MutationContext) -> SidResult<()> {
-        if self.get_project(ProjectId::system()).await?.is_some() {
+        if self.get_project(ProjectId::SYSTEM).await?.is_some() {
             return Ok(());
         }
         // Replicas starting together race here; the one that loses finds it created.
@@ -3691,7 +3690,7 @@ impl StorageBackend for PostgresBackend {
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
         )
         .bind(token.id.0)
-        .bind(token.project_id.0)
+        .bind(token.project_id)
         .bind(&token.token_hash)
         .bind(iat_count(token.max_clients)?)
         .bind(iat_count(token.clients_registered)?)
@@ -3811,7 +3810,7 @@ impl StorageBackend for PostgresBackend {
         let rows = sqlx::query(
             "SELECT * FROM initial_access_tokens WHERE project_id = $1 ORDER BY created_at",
         )
-        .bind(project_id.0)
+        .bind(project_id)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("list initial access tokens: {e}")))?;
@@ -4214,7 +4213,7 @@ impl StorageBackend for PostgresBackend {
 
     async fn get_role(&self, id: RoleId) -> SidResult<Option<Role>> {
         let row = sqlx::query_as::<_, crate::pg_row::RoleRow>("SELECT * FROM roles WHERE id = $1")
-            .bind(id.0)
+            .bind(id)
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| SidError::Storage(format!("Query failed: {}", e)))?;
@@ -4225,10 +4224,9 @@ impl StorageBackend for PostgresBackend {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
-        let ids: Vec<uuid::Uuid> = ids.iter().map(|id| id.0).collect();
         let rows =
             sqlx::query_as::<_, crate::pg_row::RoleRow>("SELECT * FROM roles WHERE id = ANY($1)")
-                .bind(&ids)
+                .bind(ids)
                 .fetch_all(&self.pool)
                 .await
                 .map_err(|e| SidError::Storage(format!("read roles: {e}")))?;
@@ -4239,7 +4237,7 @@ impl StorageBackend for PostgresBackend {
         let row = sqlx::query_as::<_, crate::pg_row::RoleRow>(
             "SELECT * FROM roles WHERE project_id = $1 AND name = $2",
         )
-        .bind(project_id.0)
+        .bind(project_id)
         .bind(name)
         .fetch_optional(&self.pool)
         .await
@@ -4257,8 +4255,8 @@ impl StorageBackend for PostgresBackend {
             "INSERT INTO roles (id, project_id, key, name, description, group_label, permissions, created_at, updated_at)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         )
-        .bind(r.id.0)
-        .bind(r.project_id.0)
+        .bind(r.id)
+        .bind(r.project_id)
         .bind(&r.key)
         .bind(&r.name)
         .bind(&r.description)
@@ -4269,7 +4267,7 @@ impl StorageBackend for PostgresBackend {
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("role", e))?;
-        Self::audit_in_tx(&mut tx, &format!("role:{}", r.id.0), audit).await?;
+        Self::audit_in_tx(&mut tx, &format!("role:{}", r.id), audit).await?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -4285,7 +4283,7 @@ impl StorageBackend for PostgresBackend {
         if !Self::update_role_in_tx(&mut tx, r).await? {
             return Ok(false);
         }
-        Self::audit_in_tx(&mut tx, &format!("role:{}", r.id.0), audit).await?;
+        Self::audit_in_tx(&mut tx, &format!("role:{}", r.id), audit).await?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -4310,7 +4308,7 @@ impl StorageBackend for PostgresBackend {
         // so none can commit unseen between this check and the update.
         let held: Option<(i64,)> =
             sqlx::query_as("SELECT revision FROM roles WHERE id = $1 FOR UPDATE")
-                .bind(r.id.0)
+                .bind(r.id)
                 .fetch_optional(&mut *tx)
                 .await
                 .map_err(read)?;
@@ -4319,19 +4317,16 @@ impl StorageBackend for PostgresBackend {
         }
         Self::check_authority_in_tx(&mut tx, &fence.authority).await?;
         if let Some(bounded) = &fence.bounded {
-            let present: Vec<(uuid::Uuid,)> = sqlx::query_as(
+            let present: Vec<(RoleAssignmentId,)> = sqlx::query_as(
                 "SELECT DISTINCT a.id FROM role_assignments a
                  JOIN role_assignment_ceilings c ON c.assignment_id = a.id
                  WHERE a.role_id = $1",
             )
-            .bind(r.id.0)
+            .bind(r.id)
             .fetch_all(&mut *tx)
             .await
             .map_err(read)?;
-            if present
-                .iter()
-                .any(|(id,)| !bounded.contains(&RoleAssignmentId(*id)))
-            {
+            if present.iter().any(|(id,)| !bounded.contains(id)) {
                 return Err(SidError::Fenced(
                     "an assignment under an approved ceiling appeared since the check".into(),
                 ));
@@ -4340,7 +4335,7 @@ impl StorageBackend for PostgresBackend {
         if !Self::update_role_in_tx(&mut tx, r).await? {
             return Ok(false);
         }
-        Self::audit_in_tx(&mut tx, &format!("role:{}", r.id.0), audit).await?;
+        Self::audit_in_tx(&mut tx, &format!("role:{}", r.id), audit).await?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -4357,7 +4352,7 @@ impl StorageBackend for PostgresBackend {
             // The role row is locked first: an assignment of it, which takes
             // a key-share lock on the row, cannot slip in before the delete.
             sqlx::query("SELECT id FROM roles WHERE id = $1 FOR UPDATE")
-                .bind(id.0)
+                .bind(id)
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| SidError::Storage(format!("lock administrator role: {e}")))?;
@@ -4366,11 +4361,11 @@ impl StorageBackend for PostgresBackend {
             }
         }
         sqlx::query("DELETE FROM roles WHERE id = $1")
-            .bind(id.0)
+            .bind(id)
             .execute(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(format!("Delete failed: {}", e)))?;
-        Self::audit_in_tx(&mut tx, &format!("role:{}", id.0), audit).await?;
+        Self::audit_in_tx(&mut tx, &format!("role:{id}"), audit).await?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -4381,7 +4376,7 @@ impl StorageBackend for PostgresBackend {
         let rows = sqlx::query_as::<_, crate::pg_row::RoleRow>(
             "SELECT * FROM roles WHERE project_id = $1",
         )
-        .bind(project_id.0)
+        .bind(project_id)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("Query failed: {}", e)))?;
@@ -4393,7 +4388,7 @@ impl StorageBackend for PostgresBackend {
     async fn get_group(&self, id: GroupId) -> SidResult<Option<Group>> {
         let row =
             sqlx::query_as::<_, crate::pg_row::GroupRow>("SELECT * FROM groups WHERE id = $1")
-                .bind(id.0)
+                .bind(id)
                 .fetch_optional(&self.pool)
                 .await
                 .map_err(|e| SidError::Storage(format!("Query failed: {}", e)))?;
@@ -4407,7 +4402,7 @@ impl StorageBackend for PostgresBackend {
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
         directory::insert_group(&mut tx, g).await?;
-        Self::audit_in_tx(&mut tx, &format!("group:{}", g.id.0), audit).await?;
+        Self::audit_in_tx(&mut tx, &format!("group:{}", g.id), audit).await?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -4427,7 +4422,7 @@ impl StorageBackend for PostgresBackend {
             .map_err(|e| SidError::Storage(e.to_string()))?;
         let updated =
             sqlx::query("UPDATE groups SET description = $2, updated_at = NOW() WHERE id = $1")
-                .bind(id.0)
+                .bind(id)
                 .bind(description)
                 .execute(&mut *tx)
                 .await
@@ -4440,13 +4435,13 @@ impl StorageBackend for PostgresBackend {
         // The group as this write leaves it, read under the row lock it holds.
         let group =
             sqlx::query_as::<_, crate::pg_row::GroupRow>("SELECT * FROM groups WHERE id = $1")
-                .bind(id.0)
+                .bind(id)
                 .fetch_one(&mut *tx)
                 .await
                 .map_err(|e| SidError::Storage(format!("read updated group: {e}")))?
                 .into_domain();
         audit.record_effect(&group)?;
-        Self::audit_in_tx(&mut tx, &format!("group:{}", id.0), audit).await?;
+        Self::audit_in_tx(&mut tx, &format!("group:{id}"), audit).await?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -4460,7 +4455,7 @@ impl StorageBackend for PostgresBackend {
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
         sqlx::query("DELETE FROM groups WHERE id = $1")
-            .bind(id.0)
+            .bind(id)
             .execute(&mut *tx)
             .await
             .map_err(|e| match &e {
@@ -4473,7 +4468,7 @@ impl StorageBackend for PostgresBackend {
                 }
                 _ => SidError::Storage(format!("Delete failed: {e}")),
             })?;
-        Self::audit_in_tx(&mut tx, &format!("group:{}", id.0), audit).await?;
+        Self::audit_in_tx(&mut tx, &format!("group:{id}"), audit).await?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -4484,7 +4479,7 @@ impl StorageBackend for PostgresBackend {
         let rows = sqlx::query_as::<_, crate::pg_row::GroupRow>(
             "SELECT * FROM groups WHERE project_id = $1",
         )
-        .bind(project_id.0)
+        .bind(project_id)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("Query failed: {}", e)))?;
@@ -4500,7 +4495,7 @@ impl StorageBackend for PostgresBackend {
         directory::add_member(&mut tx, member).await?;
         Self::audit_in_tx(
             &mut tx,
-            &format!("group:{}:member:{}", member.group_id.0, member.profile_id),
+            &format!("group:{}:member:{}", member.group_id, member.profile_id),
             audit,
         )
         .await?;
@@ -4524,7 +4519,7 @@ impl StorageBackend for PostgresBackend {
         directory::remove_member(&mut tx, group_id, profile_id).await?;
         Self::audit_in_tx(
             &mut tx,
-            &format!("group:{}:member:{}", group_id.0, profile_id),
+            &format!("group:{group_id}:member:{profile_id}"),
             audit,
         )
         .await?;
@@ -4538,7 +4533,7 @@ impl StorageBackend for PostgresBackend {
         let rows = sqlx::query_as::<_, crate::pg_row::GroupMemberRow>(
             "SELECT * FROM group_members WHERE group_id = $1",
         )
-        .bind(group_id.0)
+        .bind(group_id)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("Query failed: {}", e)))?;
@@ -4574,7 +4569,7 @@ impl StorageBackend for PostgresBackend {
         Self::insert_role_assignment_in_tx(&mut tx, assignment).await?;
         Self::audit_in_tx(
             &mut tx,
-            &format!("role_assignment:{}", assignment.id.0),
+            &format!("role_assignment:{}", assignment.id),
             audit,
         )
         .await?;
@@ -4598,14 +4593,14 @@ impl StorageBackend for PostgresBackend {
         let removed: Option<(Option<sid_core::models::ProvisioningConnectorId>,)> = sqlx::query_as(
             "DELETE FROM role_assignments WHERE id = $1 RETURNING provisioning_connector_id",
         )
-        .bind(id.0)
+        .bind(id)
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("Delete failed: {}", e)))?;
         if let Some((Some(connector),)) = removed {
             Self::bump_connector_revision(&mut tx, connector).await?;
         }
-        Self::audit_in_tx(&mut tx, &format!("role_assignment:{}", id.0), audit).await?;
+        Self::audit_in_tx(&mut tx, &format!("role_assignment:{id}"), audit).await?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -4616,7 +4611,7 @@ impl StorageBackend for PostgresBackend {
         let rows = sqlx::query_as::<_, crate::pg_row::RoleAssignmentRow>(
             "SELECT * FROM role_assignments WHERE id = $1",
         )
-        .bind(id.0)
+        .bind(id)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("read role assignment: {e}")))?;
@@ -4638,7 +4633,7 @@ impl StorageBackend for PostgresBackend {
         Self::insert_role_assignment_in_tx(&mut tx, assignment).await?;
         Self::audit_in_tx(
             &mut tx,
-            &format!("role_assignment:{}", assignment.id.0),
+            &format!("role_assignment:{}", assignment.id),
             audit,
         )
         .await?;
@@ -4667,7 +4662,7 @@ impl StorageBackend for PostgresBackend {
         let removed: Option<(Option<sid_core::models::ProvisioningConnectorId>,)> = sqlx::query_as(
             "DELETE FROM role_assignments WHERE id = $1 RETURNING provisioning_connector_id",
         )
-        .bind(id.0)
+        .bind(id)
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("Delete failed: {e}")))?;
@@ -4677,7 +4672,7 @@ impl StorageBackend for PostgresBackend {
         if let Some(connector) = connector {
             Self::bump_connector_revision(&mut tx, connector).await?;
         }
-        Self::audit_in_tx(&mut tx, &format!("role_assignment:{}", id.0), audit).await?;
+        Self::audit_in_tx(&mut tx, &format!("role_assignment:{id}"), audit).await?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -4705,7 +4700,7 @@ impl StorageBackend for PostgresBackend {
         let rows = sqlx::query_as::<_, crate::pg_row::RoleAssignmentRow>(
             "SELECT * FROM role_assignments WHERE group_id = $1",
         )
-        .bind(group_id.0)
+        .bind(group_id)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("Query failed: {}", e)))?;
@@ -4781,7 +4776,7 @@ impl StorageBackend for PostgresBackend {
         let rows = sqlx::query_as::<_, crate::pg_row::RoleAssignmentRow>(
             "SELECT * FROM role_assignments WHERE role_id = $1",
         )
-        .bind(role_id.0)
+        .bind(role_id)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("Query failed: {}", e)))?;
@@ -4850,7 +4845,7 @@ impl StorageBackend for PostgresBackend {
         let row = sqlx::query_as::<_, crate::pg_row::CedarPolicyRow>(
             "SELECT * FROM cedar_policies WHERE id = $1",
         )
-        .bind(id.0)
+        .bind(id)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("Query failed: {}", e)))?;
@@ -4874,7 +4869,7 @@ impl StorageBackend for PostgresBackend {
                 enabled = $6, updated_at = $7, revision = revision + 1
              WHERE id = $1 AND revision = $2",
         )
-        .bind(policy.id.0)
+        .bind(policy.id)
         .bind(revision)
         .bind(&policy.description)
         .bind(&policy.policy_text)
@@ -4889,7 +4884,7 @@ impl StorageBackend for PostgresBackend {
         if !updated {
             return Ok(false);
         }
-        Self::audit_in_tx(&mut tx, &format!("cedar_policy:{}", policy.id.0), audit).await?;
+        Self::audit_in_tx(&mut tx, &format!("cedar_policy:{}", policy.id), audit).await?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -4909,9 +4904,8 @@ impl StorageBackend for PostgresBackend {
         sqlx::query(
             "INSERT INTO cedar_policies (id, project_id, resource_id, name, description, policy_text, effect, enabled, created_at, updated_at)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
-        )
-        .bind(policy.id.0)
-        .bind(policy.scope.project().map(|p| p.0))
+        ).bind(policy.id)
+        .bind(policy.scope.project())
         .bind(policy.scope.resource())
         .bind(&policy.name)
         .bind(&policy.description)
@@ -4923,7 +4917,7 @@ impl StorageBackend for PostgresBackend {
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("policy", e))?;
-        Self::audit_in_tx(&mut tx, &format!("cedar_policy:{}", policy.id.0), audit).await?;
+        Self::audit_in_tx(&mut tx, &format!("cedar_policy:{}", policy.id), audit).await?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -4941,11 +4935,11 @@ impl StorageBackend for PostgresBackend {
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
         sqlx::query("DELETE FROM cedar_policies WHERE id = $1")
-            .bind(id.0)
+            .bind(id)
             .execute(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(format!("Delete failed: {}", e)))?;
-        Self::audit_in_tx(&mut tx, &format!("cedar_policy:{}", id.0), audit).await?;
+        Self::audit_in_tx(&mut tx, &format!("cedar_policy:{id}"), audit).await?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -4957,7 +4951,7 @@ impl StorageBackend for PostgresBackend {
             "SELECT * FROM cedar_policies
              WHERE project_id IS NOT DISTINCT FROM $1 AND resource_id IS NOT DISTINCT FROM $2",
         )
-        .bind(scope.project().map(|p| p.0))
+        .bind(scope.project())
         .bind(scope.resource())
         .fetch_all(&self.pool)
         .await
@@ -5072,8 +5066,7 @@ impl StorageBackend for PostgresBackend {
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind(grant.id.0)
-        .bind(grant.profile_id)
-        .bind(grant.project_id.0)
+        .bind(grant.profile_id).bind(grant.project_id)
         .bind(grant.role_keys.join(" "))
         .bind(&grant.granted_by)
         .bind(grant.expires_at)
@@ -5132,7 +5125,7 @@ impl StorageBackend for PostgresBackend {
         let rows = sqlx::query_as::<_, crate::pg_row::ProfileGrantRow>(
             "SELECT * FROM profile_grants WHERE project_id = $1",
         )
-        .bind(project_id.0)
+        .bind(project_id)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("Query failed: {}", e)))?;
@@ -5919,8 +5912,7 @@ impl StorageBackend for PostgresBackend {
                 scopes, ip_allowlist, status, expires_at, last_used_at, last_used_ip,
                 use_count, revoked_at, revoked_by, created_at)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
-        )
-        .bind(pat.id.0).bind(pat.profile_id)
+        ).bind(pat.id.0).bind(pat.profile_id)
         .bind(&pat.name)
         .bind(&pat.description)
         .bind(&pat.token_hash)
@@ -6201,7 +6193,7 @@ impl StorageBackend for PostgresBackend {
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)",
         )
         .bind(mu.id)
-        .bind(mu.project_id.0)
+        .bind(mu.project_id)
         .bind(mu.machine_type.as_str())
         .bind(mu.owner_type.as_str())
         .bind(&mu.owner_id)
@@ -6267,7 +6259,7 @@ impl StorageBackend for PostgresBackend {
         let rows = sqlx::query_as::<_, crate::pg_row::MachineUserRow>(
             "SELECT * FROM machine_users WHERE project_id = $1 ORDER BY created_at DESC",
         )
-        .bind(project_id.0)
+        .bind(project_id)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("Query failed: {}", e)))?;
@@ -6584,8 +6576,7 @@ impl StorageBackend for PostgresBackend {
         sqlx::query(
             "INSERT INTO consents (id, profile_id, client_id, status, consented_at, revoked_at, updated_at) \
              VALUES ($1, $2, $3, $4, $5, $6, $7)",
-        )
-        .bind(consent.id.0)
+        ).bind(consent.id.0)
         .bind(consent.profile_id)
         .bind(&consent.client_id)
         .bind(consent.status.as_str())
@@ -6600,8 +6591,7 @@ impl StorageBackend for PostgresBackend {
                 "INSERT INTO claim_grants (id, consent_id, claim_name, claim_type, granted_at, revoked_at) \
                  VALUES ($1, $2, $3, $4, $5, $6)",
             )
-            .bind(grant.id.0)
-            .bind(consent.id.0)
+            .bind(grant.id.0).bind(consent.id.0)
             .bind(&grant.claim_name)
             .bind(grant.claim_type.as_str())
             .bind(grant.granted_at)
@@ -6781,8 +6771,7 @@ impl StorageBackend for PostgresBackend {
         sqlx::query(
             "INSERT INTO anomaly_events (id, rule_id, profile_id, ip_address, description, risk_score, reaction, timestamp)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-        )
-        .bind(event.id.0)
+        ).bind(event.id.0)
         .bind(&event.rule_id)
         .bind(&event.profile_id)
         .bind(event.ip_address)
@@ -7488,8 +7477,7 @@ impl StorageBackend for PostgresBackend {
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
         )
         .bind(target.id.0)
-        .bind(&target.client_id)
-        .bind(target.project_id.0)
+        .bind(&target.client_id).bind(target.project_id)
         .bind(&target.display_name)
         .bind(&target.endpoint_url)
         .bind(&auth_config_json)
@@ -7535,7 +7523,7 @@ impl StorageBackend for PostgresBackend {
         let rows = sqlx::query_as::<_, crate::pg_row::ScimOutboundTargetRow>(
             "SELECT * FROM scim_outbound_targets WHERE project_id = $1 AND enabled = true",
         )
-        .bind(project_id.0)
+        .bind(project_id)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("Query failed: {}", e)))?;
@@ -7693,8 +7681,7 @@ impl StorageBackend for PostgresBackend {
     ) -> SidResult<Option<ScimOutboundRecord>> {
         let row = sqlx::query_as::<_, crate::pg_row::ScimOutboundRecordRow>(
             "SELECT * FROM scim_outbound_records WHERE target_id = $1 AND sid_entity_id = $2 AND entity_type = $3",
-        )
-        .bind(target_id.0)
+        ).bind(target_id.0)
         .bind(sid_entity_id)
         .bind(entity_type.as_str())
         .fetch_optional(&self.pool)
@@ -7763,7 +7750,7 @@ impl StorageBackend for PostgresBackend {
         let row: Option<(serde_json::Value,)> = sqlx::query_as(
             "SELECT data FROM flow_configs WHERE project_id = $1 AND flow_type = $2",
         )
-        .bind(project_id.0)
+        .bind(project_id)
         .bind(flow_type.as_str())
         .fetch_optional(&self.pool)
         .await
@@ -7796,7 +7783,7 @@ impl StorageBackend for PostgresBackend {
              VALUES ($1, $2, $3, $4)
              ON CONFLICT (project_id, flow_type) DO UPDATE SET data = $3, updated_at = $4",
         )
-        .bind(config.project_id.0)
+        .bind(config.project_id)
         .bind(config.flow_type.as_str())
         .bind(&data)
         .bind(config.updated_at)
@@ -7807,7 +7794,7 @@ impl StorageBackend for PostgresBackend {
             &mut tx,
             &format!(
                 "flow_config:{}:{}",
-                config.project_id.0,
+                config.project_id,
                 config.flow_type.as_str()
             ),
             audit,
@@ -7826,7 +7813,7 @@ impl StorageBackend for PostgresBackend {
         let rows: Vec<(serde_json::Value,)> = sqlx::query_as(
             "SELECT data FROM flow_configs WHERE project_id = $1 ORDER BY flow_type",
         )
-        .bind(project_id.0)
+        .bind(project_id)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("Query failed: {e}")))?;
@@ -7859,7 +7846,7 @@ impl StorageBackend for PostgresBackend {
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind(action.id.0)
-        .bind(action.project_id.0)
+        .bind(action.project_id)
         .bind(action.flow_type.as_str())
         .bind(action.action_point.as_str())
         .bind(action.order)
@@ -7944,7 +7931,7 @@ impl StorageBackend for PostgresBackend {
                      WHERE project_id = $1 AND flow_type = $2 AND action_point = $3
                      ORDER BY action_order, id",
                 )
-                .bind(project_id.0)
+                .bind(project_id)
                 .bind(flow_type.as_str())
                 .bind(point.as_str())
                 .fetch_all(&self.pool)
@@ -7956,7 +7943,7 @@ impl StorageBackend for PostgresBackend {
                      WHERE project_id = $1 AND flow_type = $2
                      ORDER BY action_point, action_order, id",
                 )
-                .bind(project_id.0)
+                .bind(project_id)
                 .bind(flow_type.as_str())
                 .fetch_all(&self.pool)
                 .await
@@ -8007,7 +7994,7 @@ impl StorageBackend for PostgresBackend {
              VALUES ($1, $2, $3, $4, $5, $6)",
         )
         .bind(config.id.0)
-        .bind(config.project_id.0)
+        .bind(config.project_id)
         .bind(config.status.as_str())
         .bind(&data)
         .bind(config.created_at)
@@ -8075,7 +8062,7 @@ impl StorageBackend for PostgresBackend {
         // publishes in a project run one after the other and each archives
         // what the previous one published.
         sqlx::query("SELECT id FROM branding_configs WHERE project_id = $1 ORDER BY id FOR UPDATE")
-            .bind(project_id.0)
+            .bind(project_id)
             .execute(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(format!("lock branding: {e}")))?;
@@ -8084,7 +8071,7 @@ impl StorageBackend for PostgresBackend {
              WHERE id = $1 AND project_id = $2 AND status = 'draft'",
         )
         .bind(id.0)
-        .bind(project_id.0)
+        .bind(project_id)
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("publish branding: {e}")))?;
@@ -8096,7 +8083,7 @@ impl StorageBackend for PostgresBackend {
                 revision = revision + 1
              WHERE project_id = $1 AND status = 'published'",
         )
-        .bind(project_id.0)
+        .bind(project_id)
         .bind(at)
         .execute(&mut *tx)
         .await
@@ -8135,7 +8122,7 @@ impl StorageBackend for PostgresBackend {
             "SELECT status, revision, updated_at, data FROM branding_configs
              WHERE project_id = $1 AND status = 'published'",
         )
-        .bind(project_id.0)
+        .bind(project_id)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("Query failed: {e}")))?
@@ -8166,7 +8153,7 @@ impl StorageBackend for PostgresBackend {
             "SELECT status, revision, updated_at, data FROM branding_configs
              WHERE project_id = $1 ORDER BY updated_at DESC, id",
         )
-        .bind(project_id.0)
+        .bind(project_id)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("Query failed: {e}")))?
@@ -8228,8 +8215,7 @@ impl StorageBackend for PostgresBackend {
             sqlx::query(
                 "INSERT INTO invites (id, code, created_by, created_by_machine, created_by_name, metadata, max_uses, use_count, expires_at, active, created_at)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
-            )
-            .bind(invite.id.0)
+            ).bind(invite.id.0)
             .bind(&invite.code)
             .bind(by_profile)
             .bind(by_machine)
@@ -8614,9 +8600,8 @@ impl StorageBackend for PostgresBackend {
              requested_duration_hours, status, reviewed_by, review_comment, created_at, reviewed_at, expires_at)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
         )
-        .bind(request.id.0)
-        .bind(request.requester_id)
-        .bind(request.project_id.0)
+        .bind(request.id)
+        .bind(request.requester_id).bind(request.project_id)
         .bind(&request.role_key)
         .bind(&request.justification)
         .bind(duration)
@@ -8629,7 +8614,7 @@ impl StorageBackend for PostgresBackend {
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("access request", e))?;
-        Self::audit_in_tx(&mut tx, &format!("access_request:{}", request.id.0), ctx).await?;
+        Self::audit_in_tx(&mut tx, &format!("access_request:{}", request.id), ctx).await?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -8639,7 +8624,7 @@ impl StorageBackend for PostgresBackend {
     async fn get_access_request(&self, id: AccessRequestId) -> SidResult<Option<AccessRequest>> {
         let row =
             sqlx::query_as::<_, AccessRequestRow>("SELECT * FROM access_requests WHERE id = $1")
-                .bind(id.0)
+                .bind(id)
                 .fetch_optional(&self.pool)
                 .await
                 .map_err(|e| SidError::Storage(format!("Query failed: {}", e)))?;
@@ -8673,7 +8658,7 @@ impl StorageBackend for PostgresBackend {
         if !Self::decide_access_request_in_tx(&mut tx, request).await? {
             return Ok(false);
         }
-        Self::audit_in_tx(&mut tx, &format!("access_request:{}", request.id.0), audit).await?;
+        Self::audit_in_tx(&mut tx, &format!("access_request:{}", request.id), audit).await?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -8697,7 +8682,7 @@ impl StorageBackend for PostgresBackend {
         }
         // A grant that cannot be stored rolls the approval back.
         Self::insert_role_assignment_in_tx(&mut tx, grant).await?;
-        Self::audit_in_tx(&mut tx, &format!("access_request:{}", request.id.0), audit).await?;
+        Self::audit_in_tx(&mut tx, &format!("access_request:{}", request.id), audit).await?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -8991,9 +8976,9 @@ impl StorageBackend for PostgresBackend {
 /// Row type for access_requests table.
 #[derive(sqlx::FromRow)]
 struct AccessRequestRow {
-    id: Uuid,
+    id: AccessRequestId,
     requester_id: ProfileId,
-    project_id: Uuid,
+    project_id: ProjectId,
     role_key: String,
     justification: Option<String>,
     requested_duration_hours: Option<i32>,
@@ -9008,9 +8993,9 @@ struct AccessRequestRow {
 impl AccessRequestRow {
     fn into_domain(self) -> SidResult<AccessRequest> {
         Ok(AccessRequest {
-            id: AccessRequestId(self.id),
+            id: self.id,
             requester_id: self.requester_id,
-            project_id: ProjectId(self.project_id),
+            project_id: self.project_id,
             role_key: self.role_key,
             justification: self.justification,
             requested_duration_hours: self

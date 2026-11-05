@@ -81,6 +81,12 @@ impl PartialEq for CredentialData {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CredentialId(pub Uuid);
 
+impl core::fmt::Display for CredentialId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 impl CredentialId {
     /// Create a new random credential ID (UUIDv7, time-ordered).
     pub fn new() -> Self {

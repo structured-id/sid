@@ -35,10 +35,7 @@ fn to_opt_timestamp(dt: Option<chrono::DateTime<chrono::Utc>>) -> Option<prost_t
     dt.map(to_timestamp)
 }
 
-#[allow(clippy::result_large_err)]
-fn parse_profile_id(field: &'static str, id: &str) -> Result<ProfileId, Status> {
-    ProfileId::parse(id).map_err(|_| invalid_field(field, "not a profile identifier"))
-}
+use crate::grpc::wire_id;
 
 fn profile_not_found(id: ProfileId) -> Status {
     not_found(ErrorReason::ProfileNotFound, "Profile", id.to_string())
@@ -50,7 +47,7 @@ fn already_decided(id: AccessRequestId) -> Status {
         ErrorReason::InvalidState,
         "the access request was already decided",
     )
-    .with_precondition("ACCESS_REQUEST_STATE", id.0.to_string(), "not pending")
+    .with_precondition("ACCESS_REQUEST_STATE", id.to_string(), "not pending")
     .into()
 }
 
@@ -111,13 +108,11 @@ impl GovernanceServiceImpl {
     /// `role_field` names the request field that carries the key.
     async fn project_role(
         &self,
-        project_id: &str,
+        project_id: Option<&sid_proto::sid::v1::ids::ProjectId>,
         role_field: &'static str,
         key: &str,
     ) -> Result<Role, Status> {
-        let project = uuid::Uuid::parse_str(project_id)
-            .map(ProjectId)
-            .map_err(|_| invalid_field("project_id", "not a project identifier"))?;
+        let project: ProjectId = wire_id(project_id, "project_id")?;
         if key.is_empty() {
             return Err(missing_field(role_field));
         }
@@ -126,11 +121,7 @@ impl GovernanceServiceImpl {
             .await
             .map_err(storage_failure)?
             .ok_or_else(|| {
-                not_found(
-                    ErrorReason::ProjectNotFound,
-                    "Project",
-                    project.0.to_string(),
-                )
+                not_found(ErrorReason::ProjectNotFound, "Project", project.to_string())
             })?;
         self.storage
             .list_roles(project)
@@ -152,7 +143,8 @@ impl GovernanceService for GovernanceServiceImpl {
         let caller = self.caller(&request).await?;
         let req = request.into_inner();
 
-        let requester_id = parse_profile_id("requester_profile_id", &req.requester_profile_id)?;
+        let requester_id: ProfileId =
+            wire_id(req.requester_profile_id.as_ref(), "requester_profile_id")?;
         caller.require_self_or_admin(requester_id)?;
 
         if req.requested_role.is_empty() {
@@ -168,7 +160,11 @@ impl GovernanceService for GovernanceServiceImpl {
 
         // A request names a role the project defines.
         let role = self
-            .project_role(&req.project_id, "requested_role", &req.requested_role)
+            .project_role(
+                req.project_id.as_ref(),
+                "requested_role",
+                &req.requested_role,
+            )
             .await?;
 
         let mut access_req = AccessRequest::new(requester_id, role.project_id, &role.key);
@@ -206,7 +202,7 @@ impl GovernanceService for GovernanceServiceImpl {
                 AuditEntry::user(
                     caller.profile_id.to_string(),
                     "governance.access_request.create",
-                    access_req.id.0.to_string(),
+                    access_req.id.to_string(),
                 )
                 .into(),
             )
@@ -215,11 +211,11 @@ impl GovernanceService for GovernanceServiceImpl {
 
         info!(
             "Access request {} created by {} for role '{}'",
-            access_req.id.0, requester_id, req.requested_role
+            access_req.id, requester_id, req.requested_role
         );
 
         Ok(Response::new(AccessRequestResponse {
-            request_id: access_req.id.0.to_string(),
+            request_id: Some(access_req.id.into()),
             status: domain_status_to_proto(DomainAccessRequestStatus::Pending),
             created_at: Some(to_timestamp(created_at)),
         }))
@@ -266,8 +262,8 @@ impl GovernanceService for GovernanceServiceImpl {
                     .unwrap_or_else(|| r.requester_id.to_string());
 
                 AccessRequestDetail {
-                    request_id: r.id.0.to_string(),
-                    requester_profile_id: r.requester_id.to_string(),
+                    request_id: Some(r.id.into()),
+                    requester_profile_id: Some(r.requester_id.into()),
                     requester_display_name: display_name,
                     requested_role: r.role_key,
                     justification: r.justification.unwrap_or_default(),
@@ -296,9 +292,7 @@ impl GovernanceService for GovernanceServiceImpl {
         let reviewer_id = self.admin(&request).await?.profile_id;
         let req = request.into_inner();
 
-        let request_id = uuid::Uuid::parse_str(&req.request_id)
-            .map(AccessRequestId)
-            .map_err(|_| invalid_field("request_id", "not an access request identifier"))?;
+        let request_id: AccessRequestId = wire_id(req.request_id.as_ref(), "request_id")?;
 
         let mut access_req = self
             .storage
@@ -309,7 +303,7 @@ impl GovernanceService for GovernanceServiceImpl {
                 not_found(
                     ErrorReason::AccessRequestNotFound,
                     "AccessRequest",
-                    request_id.0.to_string(),
+                    request_id.to_string(),
                 )
             })?;
 
@@ -323,7 +317,7 @@ impl GovernanceService for GovernanceServiceImpl {
                     AuditEntry::admin(
                         "system".to_string(),
                         "governance.access_request.expired",
-                        request_id.0.to_string(),
+                        request_id.to_string(),
                     )
                     .into(),
                 )
@@ -331,7 +325,7 @@ impl GovernanceService for GovernanceServiceImpl {
                 .map_err(storage_failure)?;
 
             return Ok(Response::new(DecideRequestResponse {
-                request_id: req.request_id,
+                request_id: Some(request_id.into()),
                 status: domain_status_to_proto(DomainAccessRequestStatus::Expired),
             }));
         }
@@ -362,7 +356,7 @@ impl GovernanceService for GovernanceServiceImpl {
             } else {
                 "governance.access_request.denied"
             },
-            request_id.0.to_string(),
+            request_id.to_string(),
         )
         .into();
 
@@ -413,11 +407,11 @@ impl GovernanceService for GovernanceServiceImpl {
         }
         info!(
             "Access request {} {:?} for {} (role '{}')",
-            request_id.0, new_status, access_req.requester_id, access_req.role_key
+            request_id, new_status, access_req.requester_id, access_req.role_key
         );
 
         Ok(Response::new(DecideRequestResponse {
-            request_id: req.request_id,
+            request_id: Some(request_id.into()),
             status: domain_status_to_proto(new_status),
         }))
     }
@@ -430,7 +424,7 @@ impl GovernanceService for GovernanceServiceImpl {
         let caller = self.admin(&request).await?;
         let req = request.into_inner();
 
-        let profile_id = parse_profile_id("profile_id", &req.profile_id)?;
+        let profile_id: ProfileId = wire_id(req.profile_id.as_ref(), "profile_id")?;
 
         if req.role.is_empty() {
             return Err(missing_field("role"));
@@ -450,7 +444,7 @@ impl GovernanceService for GovernanceServiceImpl {
             .map_err(storage_failure)?
             .ok_or_else(|| profile_not_found(profile_id))?;
         let role = self
-            .project_role(&req.project_id, "role", &req.role)
+            .project_role(req.project_id.as_ref(), "role", &req.role)
             .await?;
 
         // The project role itself, until the expiry, granted through the
@@ -470,7 +464,7 @@ impl GovernanceService for GovernanceServiceImpl {
                 AuditEntry::admin(
                     caller.profile_id.to_string(),
                     "governance.temporary_role.grant",
-                    assignment_id.0.to_string(),
+                    assignment_id.to_string(),
                 )
                 .into(),
             )
@@ -483,7 +477,7 @@ impl GovernanceService for GovernanceServiceImpl {
         );
 
         Ok(Response::new(GrantTemporaryRoleResponse {
-            assignment_id: assignment_id.0.to_string(),
+            assignment_id: Some(assignment_id.into()),
             expires_at: Some(to_timestamp(expires_dt)),
         }))
     }

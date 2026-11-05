@@ -7,7 +7,7 @@ use sid_core::{
 };
 use sqlx::Row;
 
-use super::{SqliteBackend, col, dt_col, dt_col_opt, fmt_dt, fmt_dt_opt, parsed_col, uuid_col};
+use super::{SqliteBackend, col, dt_col, dt_col_opt, fmt_dt, fmt_dt_opt, parsed_col};
 
 /// Insert of a new client; an existing `client_id`, or a client role its
 /// application already has, writes nothing.
@@ -51,7 +51,7 @@ const OAUTH2_CLIENT_UPDATE: &str = "UPDATE oauth2_clients SET
 /// A UUID stored as text.
 fn row_to_project(row: &sqlx::sqlite::SqliteRow) -> SidResult<Project> {
     Ok(Project {
-        id: ProjectId(uuid_col(row, "id")?),
+        id: col(row, "id")?,
         name: col(row, "name")?,
         description: col(row, "description")?,
         owner_id: col(row, "owner_id")?,
@@ -107,7 +107,7 @@ pub(super) fn row_to_oauth2_client(row: &sqlx::sqlite::SqliteRow) -> SidResult<O
 
     Ok(OAuth2Client {
         client_id: col(row, "client_id")?,
-        project_id: ProjectId(uuid_col(row, "project_id")?),
+        project_id: col(row, "project_id")?,
         application_id: col(row, "application_id")?,
         default_resource: col(row, "default_resource")?,
         application_type: parsed_col(row, "application_type")?,
@@ -160,7 +160,7 @@ impl SqliteBackend {
 
     pub(crate) async fn get_project_impl(&self, id: ProjectId) -> SidResult<Option<Project>> {
         let row = sqlx::query("SELECT * FROM projects WHERE id = ?")
-            .bind(id.0.to_string())
+            .bind(id.to_string())
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -177,7 +177,7 @@ impl SqliteBackend {
             "INSERT INTO projects (id, name, description, owner_id, is_system, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(project.id.0.to_string())
+        .bind(project.id.to_string())
         .bind(&project.name)
         .bind(&project.description)
         .bind(project.owner_id)
@@ -187,7 +187,7 @@ impl SqliteBackend {
         .execute(&mut *tx)
         .await
         .map_err(|e| super::insert_error("project", e))?;
-        Self::commit_mutation(tx, &format!("project:{}", project.id.0), audit).await
+        Self::commit_mutation(tx, &format!("project:{}", project.id), audit).await
     }
 
     pub(crate) async fn update_project_impl(
@@ -206,7 +206,7 @@ impl SqliteBackend {
         .bind(&change.name)
         .bind(&change.description)
         .bind(fmt_dt(&change.updated_at))
-        .bind(id.0.to_string())
+        .bind(id.to_string())
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| super::insert_error("project", e))?;
@@ -215,7 +215,7 @@ impl SqliteBackend {
         };
         let mut audit = audit;
         audit.record_effect(&project)?;
-        Self::commit_mutation(tx, &format!("project:{}", id.0), audit).await?;
+        Self::commit_mutation(tx, &format!("project:{id}"), audit).await?;
         Ok(Some(project))
     }
 
@@ -232,11 +232,11 @@ impl SqliteBackend {
         let mut tx = self.begin_write().await?;
         // A system project is never deleted, whatever its id.
         sqlx::query("DELETE FROM projects WHERE id = ? AND is_system = 0")
-            .bind(id.0.to_string())
+            .bind(id.to_string())
             .execute(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
-        Self::commit_mutation(tx, &format!("project:{}", id.0), audit).await
+        Self::commit_mutation(tx, &format!("project:{id}"), audit).await
     }
 
     pub(crate) async fn list_projects_impl(
@@ -370,7 +370,7 @@ pub(super) async fn insert_oauth2_client<'e, E: sqlx::SqliteExecutor<'e>>(
         .bind(client.grant_types.join(" "))
         .bind(&client.client_name)
         .bind(client.active)
-        .bind(client.project_id.0.to_string())
+        .bind(client.project_id.to_string())
         .bind(client.application_type.as_str())
         .bind(client.required_acr.map(|a| a.as_str().to_string()))
         .bind(client.required_amr.join(" "))
@@ -390,7 +390,7 @@ pub(super) async fn insert_oauth2_client<'e, E: sqlx::SqliteExecutor<'e>>(
         .bind(json_text(&client.contacts)?)
         .bind(fmt_dt(&client.client_id_issued_at))
         .bind(fmt_dt_opt(client.client_secret_expires_at))
-        .bind(client.registration_iat.map(|iat| iat.0.to_string()))
+        .bind(client.registration_iat.map(|iat| iat.to_string()))
         .bind(&client.registration_access_token_hash)
         .bind(client.login_strategy.as_str())
         .bind(client.show_federation_button)
@@ -439,7 +439,7 @@ impl SqliteBackend {
             "SELECT revoked, expires_at, max_clients, clients_registered
              FROM initial_access_tokens WHERE id = ?",
         )
-        .bind(iat.0.to_string())
+        .bind(iat.to_string())
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(e.to_string()))?
@@ -464,7 +464,7 @@ impl SqliteBackend {
             "UPDATE initial_access_tokens SET clients_registered = clients_registered + 1
              WHERE id = ?",
         )
-        .bind(iat.0.to_string())
+        .bind(iat.to_string())
         .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -528,7 +528,7 @@ impl SqliteBackend {
             "SELECT * FROM oauth2_clients WHERE project_id = ?
              ORDER BY created_at DESC, client_id LIMIT ? OFFSET ?",
         )
-        .bind(project_id.0.to_string())
+        .bind(project_id.to_string())
         .bind(limit as i64)
         .bind(offset as i64)
         .fetch_all(&self.pool)

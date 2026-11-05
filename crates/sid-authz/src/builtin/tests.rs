@@ -14,12 +14,12 @@ fn stored_with_key(roles: &[Role], key: &str) -> usize {
 async fn the_token_inspector_role_is_provisioned_once() {
     let storage = MockStorage::new();
     let first = ensure_token_inspector_role(&storage).await.unwrap();
-    assert_eq!(first.project_id, ProjectId::system());
+    assert_eq!(first.project_id, ProjectId::SYSTEM);
     assert!(first.has_permission(TOKEN_INTROSPECT));
 
     let again = ensure_token_inspector_role(&storage).await.unwrap();
     assert_eq!(again.id, first.id);
-    let roles = storage.list_roles(ProjectId::system()).await.unwrap();
+    let roles = storage.list_roles(ProjectId::SYSTEM).await.unwrap();
     assert_eq!(stored_with_key(&roles, TOKEN_INSPECTOR_ROLE), 1);
 }
 
@@ -30,12 +30,12 @@ async fn the_scim_provisioner_role_is_provisioned_once() {
     let storage = MockStorage::new();
     ensure_token_inspector_role(&storage).await.unwrap();
     let first = ensure_scim_provisioner_role(&storage).await.unwrap();
-    assert_eq!(first.project_id, ProjectId::system());
+    assert_eq!(first.project_id, ProjectId::SYSTEM);
     assert_eq!(first.permissions, SCIM_ACTIONS.map(String::from).to_vec());
 
     let again = ensure_scim_provisioner_role(&storage).await.unwrap();
     assert_eq!(again.id, first.id);
-    let roles = storage.list_roles(ProjectId::system()).await.unwrap();
+    let roles = storage.list_roles(ProjectId::SYSTEM).await.unwrap();
     assert_eq!(stored_with_key(&roles, SCIM_PROVISIONER_ROLE), 1);
     assert_eq!(stored_with_key(&roles, TOKEN_INSPECTOR_ROLE), 1);
 }
@@ -47,12 +47,12 @@ async fn the_permission_checker_role_is_provisioned_once() {
     let storage = MockStorage::new();
     ensure_token_inspector_role(&storage).await.unwrap();
     let first = ensure_permission_checker_role(&storage).await.unwrap();
-    assert_eq!(first.project_id, ProjectId::system());
+    assert_eq!(first.project_id, ProjectId::SYSTEM);
     assert_eq!(first.permissions, vec![AUTHZ_CHECK.to_string()]);
 
     let again = ensure_permission_checker_role(&storage).await.unwrap();
     assert_eq!(again.id, first.id);
-    let roles = storage.list_roles(ProjectId::system()).await.unwrap();
+    let roles = storage.list_roles(ProjectId::SYSTEM).await.unwrap();
     assert_eq!(stored_with_key(&roles, PERMISSION_CHECKER_ROLE), 1);
     assert_eq!(stored_with_key(&roles, TOKEN_INSPECTOR_ROLE), 1);
 }
@@ -64,13 +64,13 @@ async fn the_invite_issuer_role_is_provisioned_once() {
     let storage = MockStorage::new();
     ensure_scim_provisioner_role(&storage).await.unwrap();
     let first = ensure_invite_issuer_role(&storage).await.unwrap();
-    assert_eq!(first.project_id, ProjectId::system());
+    assert_eq!(first.project_id, ProjectId::SYSTEM);
     assert_eq!(first.permissions, INVITE_ACTIONS.map(String::from).to_vec());
 
     let again = ensure_invite_issuer_role(&storage).await.unwrap();
     assert_eq!(again.id, first.id);
     assert_ne!(first.id, Role::scim_provisioner().id);
-    let roles = storage.list_roles(ProjectId::system()).await.unwrap();
+    let roles = storage.list_roles(ProjectId::SYSTEM).await.unwrap();
     assert_eq!(stored_with_key(&roles, INVITE_ISSUER_ROLE), 1);
     assert_eq!(stored_with_key(&roles, SCIM_PROVISIONER_ROLE), 1);
 }
@@ -85,14 +85,14 @@ async fn the_installation_administrator_role_is_provisioned_once() {
         .await
         .unwrap();
     assert_eq!(first.id, Role::installation_administrator().id);
-    assert_eq!(first.project_id, ProjectId::system());
+    assert_eq!(first.project_id, ProjectId::SYSTEM);
     assert!(first.permissions.is_empty());
 
     let again = ensure_installation_administrator_role(&storage)
         .await
         .unwrap();
     assert_eq!(again.id, first.id);
-    let roles = storage.list_roles(ProjectId::system()).await.unwrap();
+    let roles = storage.list_roles(ProjectId::SYSTEM).await.unwrap();
     assert_eq!(
         stored_with_key(&roles, sid_core::models::INSTALLATION_ADMINISTRATOR_ROLE),
         1

@@ -30,7 +30,7 @@ fn bearing<T>(token: &str, message: T) -> Request<T> {
 async fn authz(svc: &TestServices) -> sid_authz::grpc::AuthzServiceImpl {
     for role in [
         Role::installation_administrator(),
-        Role::new(ProjectId::system(), "editor", "Editor"),
+        Role::new(ProjectId::SYSTEM, "editor", "Editor"),
     ] {
         svc.storage
             .create_role(&role, AuditEntry::system("test", "role").into())
@@ -51,7 +51,7 @@ async fn authz(svc: &TestServices) -> sid_authz::grpc::AuthzServiceImpl {
 fn assign(principal: Principal, role: &Role, scope: Option<&str>) -> AssignRoleRequest {
     AssignRoleRequest {
         principal: Some(principal),
-        role_id: role.id.0.to_string(),
+        role_id: Some(role.id.into()),
         scope: scope.map(str::to_owned),
         expires_at: None,
         admin: None,
@@ -73,20 +73,20 @@ async fn the_administrator_role_goes_to_a_profile_across_the_installation() {
     let administrator = Role::installation_administrator();
     let editor = svc
         .storage
-        .list_roles(ProjectId::system())
+        .list_roles(ProjectId::SYSTEM)
         .await
         .unwrap()
         .into_iter()
         .find(|r| r.key == "editor")
         .unwrap();
-    let to_profile = || Principal::ProfileId(profile.id.to_string());
+    let to_profile = || Principal::ProfileId(profile.id.into());
     let resource = format!(
         "oauth_resource:{}",
         sid_core::models::ResourceId::generate()
     );
     let refused = [
         assign(
-            Principal::GroupId(uuid::Uuid::now_v7().to_string()),
+            Principal::GroupId(sid_core::models::GroupId::generate().into()),
             &administrator,
             Some(INSTALLATION_SCOPE),
         ),
@@ -143,7 +143,7 @@ async fn the_last_administrator_assignment_is_not_revoked() {
         .revoke_role(bearing(
             &root,
             RevokeRoleRequest {
-                assignment_id: only.0.to_string(),
+                assignment_id: Some(only.into()),
             },
         ))
         .await
@@ -156,7 +156,7 @@ async fn the_last_administrator_assignment_is_not_revoked() {
         .delete_role(bearing(
             &root,
             DeleteRoleRequest {
-                id: Role::installation_administrator().id.0.to_string(),
+                id: Some(Role::installation_administrator().id.into()),
             },
         ))
         .await

@@ -74,7 +74,7 @@ async fn setup_directory() -> (
     let storage: Arc<dyn StorageBackend> = Arc::new(backend);
 
     // Create a project for SCIM group scoping
-    let project_id = ProjectId::system();
+    let project_id = ProjectId::SYSTEM;
 
     let org_ctx = ScimOrgContext {
         org_domain: "acme.corp".into(),
@@ -169,7 +169,7 @@ async fn connector_secret(
     );
     storage.ensure_system_project(audit()).await.unwrap();
     let key = format!("scim-test-{}", Uuid::now_v7().simple());
-    let mut role = Role::new(ProjectId::system(), &key, &key);
+    let mut role = Role::new(ProjectId::SYSTEM, &key, &key);
     role.permissions = actions.iter().map(|a| (*a).to_owned()).collect();
     storage.create_role(&role, audit()).await.unwrap();
     storage
@@ -1174,7 +1174,7 @@ async fn test_group_add_and_remove_members() {
     assert_eq!(patched.members[0].value, user.id);
 
     // Verify in DB
-    let group_id = GroupId(Uuid::parse_str(&group.id).unwrap());
+    let group_id = GroupId::parse(&group.id).unwrap();
     let members = storage.list_group_members(group_id).await.unwrap();
     assert_eq!(members.len(), 1);
 
@@ -1211,7 +1211,7 @@ async fn test_delete_group() {
         .unwrap()
         .into_inner();
 
-    let group_id = GroupId(Uuid::parse_str(&group.id).unwrap());
+    let group_id = GroupId::parse(&group.id).unwrap();
 
     service
         .delete_group(provisioned(proto::ScimDeleteGroupRequest {
@@ -1644,7 +1644,7 @@ async fn test_scim_membership_needs_its_own_grant() {
     assert_eq!(err.code(), tonic::Code::PermissionDenied);
     assert!(
         storage
-            .list_group_members(GroupId(Uuid::parse_str(&group.id).unwrap()))
+            .list_group_members(GroupId::parse(&group.id).unwrap())
             .await
             .unwrap()
             .is_empty()

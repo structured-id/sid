@@ -135,7 +135,7 @@ fn target(name: &str, enabled: bool, endpoint: &str) -> ScimOutboundTarget {
     ScimOutboundTarget {
         id: ScimOutboundTargetId::new(),
         client_id: format!("{name}-app"),
-        project_id: ProjectId::system(),
+        project_id: ProjectId::SYSTEM,
         display_name: name.into(),
         endpoint_url: endpoint.into(),
         auth: OutboundAuthConfig::Bearer {
@@ -536,7 +536,7 @@ fn user_event(event_type: &str, profile: ProfileId) -> Event {
 }
 
 fn group_event(event_type: &str, group: GroupId) -> Event {
-    Event::new("sid-scim", event_type).with_data(json!({"group_id": group.0.to_string()}))
+    Event::new("sid-scim", event_type).with_data(json!({"group_id": group.to_string()}))
 }
 
 /// A deactivation delivered after the reactivation that followed it (a
@@ -662,7 +662,7 @@ async fn test_a_group_renamed_after_a_lost_create_is_created_once() {
         target_group: "platform".into(),
     });
     let (storage, worker) = worker(vec![t.clone()]).await;
-    let group = Group::new(ProjectId::system(), "Engineering");
+    let group = Group::new(ProjectId::SYSTEM, "Engineering");
     storage
         .write_directory_group(
             &DirectoryGroupWrite::new(DirectoryWriteMode::Create, group.clone()),
@@ -790,7 +790,7 @@ async fn test_a_group_follows_its_current_membership() {
         let provisioned = user_event(event_types::SCIM_USER_PROVISIONED, p.id);
         assert_eq!(first(&worker, &provisioned).await, Settlement::Done);
     }
-    let group = Group::new(ProjectId::system(), "Engineering");
+    let group = Group::new(ProjectId::SYSTEM, "Engineering");
     let mut write = DirectoryGroupWrite::new(DirectoryWriteMode::Create, group.clone());
     write.add_members.push(GroupMember::new(group.id, alice.id));
     write.add_members.push(GroupMember::new(group.id, bob.id));
@@ -889,7 +889,7 @@ async fn test_a_member_created_after_its_group_joins_it() {
     let t = target("app", true, &endpoint);
     let (storage, worker) = worker(vec![t.clone()]).await;
     let alice = stored_profile(&storage, "alice").await;
-    let group = Group::new(ProjectId::system(), "Engineering");
+    let group = Group::new(ProjectId::SYSTEM, "Engineering");
     let mut write = DirectoryGroupWrite::new(DirectoryWriteMode::Create, group.clone());
     write.add_members.push(GroupMember::new(group.id, alice.id));
     storage
@@ -1011,7 +1011,7 @@ async fn group_pushed_before(
     storage: &SqliteBackend,
     member: ProfileId,
 ) {
-    let group = Group::new(ProjectId::system(), "Engineering");
+    let group = Group::new(ProjectId::SYSTEM, "Engineering");
     let mut write = DirectoryGroupWrite::new(DirectoryWriteMode::Create, group.clone());
     write.add_members.push(GroupMember::new(group.id, member));
     storage
@@ -1091,7 +1091,7 @@ async fn test_a_mapped_group_keeps_its_downstream_name() {
     let alice = stored_profile(&storage, "alice").await;
     let provisioned = user_event(event_types::SCIM_USER_PROVISIONED, alice.id);
     assert_eq!(first(&worker, &provisioned).await, Settlement::Done);
-    let group = Group::new(ProjectId::system(), "Engineering");
+    let group = Group::new(ProjectId::SYSTEM, "Engineering");
     storage
         .write_directory_group(
             &DirectoryGroupWrite::new(DirectoryWriteMode::Create, group.clone()),
@@ -1128,7 +1128,7 @@ async fn test_an_empty_group_is_renamed() {
     let (endpoint, down) = downstream().await;
     let t = target("app", true, &endpoint);
     let (storage, worker) = worker(vec![t.clone()]).await;
-    let group = Group::new(ProjectId::system(), "Engineering");
+    let group = Group::new(ProjectId::SYSTEM, "Engineering");
     storage
         .write_directory_group(
             &DirectoryGroupWrite::new(DirectoryWriteMode::Create, group.clone()),
@@ -1176,7 +1176,7 @@ async fn test_a_renamed_pushed_group_keeps_following_its_state() {
         let provisioned = user_event(event_types::SCIM_USER_PROVISIONED, p.id);
         assert_eq!(first(&worker, &provisioned).await, Settlement::Done);
     }
-    let group = Group::new(ProjectId::system(), "Engineering");
+    let group = Group::new(ProjectId::SYSTEM, "Engineering");
     let mut write = DirectoryGroupWrite::new(DirectoryWriteMode::Create, group.clone());
     write.add_members.push(GroupMember::new(group.id, alice.id));
     write.add_members.push(GroupMember::new(group.id, bob.id));

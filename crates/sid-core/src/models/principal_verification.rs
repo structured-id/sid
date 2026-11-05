@@ -18,6 +18,12 @@ use super::PrincipalId;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct VerificationId(pub Uuid);
 
+impl core::fmt::Display for VerificationId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 impl VerificationId {
     pub fn new() -> Self {
         Self(Uuid::now_v7())

@@ -151,7 +151,7 @@ impl RoleAdministration {
     ) -> Result<RoleAssignment> {
         let root = self.root_basis(actor).await?;
         let Some(role) = self.storage.get_role(proposed.role_id).await? else {
-            return Err(actor.missing(format!("role {}", proposed.role_id.0)));
+            return Err(actor.missing(format!("role {}", proposed.role_id)));
         };
         if let Some(envelope) = &proposed.admin {
             envelope
@@ -294,7 +294,7 @@ impl RoleAdministration {
             };
         };
         let Some(role) = self.storage.get_role(target.role_id).await? else {
-            return Err(actor.missing(format!("role {}", target.role_id.0)));
+            return Err(actor.missing(format!("role {}", target.role_id)));
         };
         let fence = match (actor, root) {
             (Administrator::Root(_), Some(basis)) => AssignmentFence {
@@ -327,7 +327,7 @@ impl RoleAdministration {
     ) -> Result<bool> {
         let root = self.root_basis(actor).await?;
         let Some(current) = self.storage.get_role(edited.id).await? else {
-            return Err(actor.missing(format!("role {}", edited.id.0)));
+            return Err(actor.missing(format!("role {}", edited.id)));
         };
         let authority = match (actor, root) {
             (Administrator::Root(_), Some(basis)) => basis,
@@ -357,7 +357,7 @@ impl RoleAdministration {
                         Administrator::Root(_) => Error::InvalidState(format!(
                             "assignment {} was approved under a narrower ceiling; \
                              reauthorize it before widening the role",
-                            assignment.id.0
+                            assignment.id
                         )),
                         Administrator::Holder(_) => not_permitted(),
                     });
@@ -376,7 +376,7 @@ impl RoleAdministration {
     /// The holder's administrative assignment permitting the edit of `role`
     /// to its new content, with the revision its commit re-checks.
     async fn basis_for_edit(&self, holder: &AuthzPrincipal, role: &Role) -> Result<AuthorityBasis> {
-        let project = Some(format!("project:{}", role.project_id.0));
+        let project = Some(format!("project:{}", role.project_id));
         let mut held = self.envelopes_of(holder, &None).await?;
         held.extend(self.envelopes_of(holder, &project).await?);
         held.into_iter()

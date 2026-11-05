@@ -20,7 +20,7 @@ fn create_test_jwt() -> Arc<JwtService> {
 fn create_test_client() -> OAuth2Client {
     OAuth2Client {
         client_id: "test-client".to_string(),
-        project_id: sid_core::models::ProjectId::system(),
+        project_id: sid_core::models::ProjectId::SYSTEM,
         application_id: sid_core::models::ApplicationId::generate(),
         default_resource: None,
         application_type: sid_core::models::ApplicationType::Spa,

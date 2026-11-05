@@ -4,12 +4,12 @@
 use sid_core::{
     Error as SidError, Result as SidResult,
     models::{
-        AccessRequest, AccessRequestId, AccessRequestStatus, MutationContext, ProfileId, ProjectId,
+        AccessRequest, AccessRequestId, AccessRequestStatus, MutationContext, ProfileId,
         RoleAssignment, notification::NotificationPreferences,
     },
 };
 
-use super::{SqliteBackend, col, dt_col, dt_col_opt, fmt_dt, fmt_dt_opt, insert_error, uuid_col};
+use super::{SqliteBackend, col, dt_col, dt_col_opt, fmt_dt, fmt_dt_opt, insert_error};
 
 /// The columns an access request is read from.
 macro_rules! access_request_columns {
@@ -22,9 +22,9 @@ macro_rules! access_request_columns {
 fn row_to_access_request(row: &sqlx::sqlite::SqliteRow) -> SidResult<AccessRequest> {
     let status: String = col(row, "status")?;
     Ok(AccessRequest {
-        id: AccessRequestId(uuid_col(row, "id")?),
+        id: col(row, "id")?,
         requester_id: col(row, "requester_id")?,
-        project_id: ProjectId(uuid_col(row, "project_id")?),
+        project_id: col(row, "project_id")?,
         role_key: col(row, "role_key")?,
         justification: col(row, "justification")?,
         requested_duration_hours: col::<Option<i64>>(row, "requested_duration_hours")?
@@ -55,7 +55,7 @@ async fn decide_in_tx(
     .bind(request.reviewed_by)
     .bind(&request.review_comment)
     .bind(fmt_dt_opt(request.reviewed_at))
-    .bind(request.id.0.to_string())
+    .bind(request.id.to_string())
     .execute(&mut **tx)
     .await
     .map_err(|e| SidError::Storage(format!("Decide access_request failed: {e}")))?
@@ -75,9 +75,9 @@ impl SqliteBackend {
             access_request_columns!(),
             ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         ))
-        .bind(request.id.0.to_string())
+        .bind(request.id.to_string())
         .bind(request.requester_id)
-        .bind(request.project_id.0.to_string())
+        .bind(request.project_id.to_string())
         .bind(&request.role_key)
         .bind(&request.justification)
         .bind(request.requested_duration_hours.map(i64::from))
@@ -90,7 +90,7 @@ impl SqliteBackend {
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("access request", e))?;
-        Self::commit_mutation(tx, &format!("access_request:{}", request.id.0), ctx).await
+        Self::commit_mutation(tx, &format!("access_request:{}", request.id), ctx).await
     }
 
     pub(crate) async fn get_access_request_impl(
@@ -102,7 +102,7 @@ impl SqliteBackend {
             access_request_columns!(),
             " FROM access_requests WHERE id = ?"
         ))
-        .bind(id.0.to_string())
+        .bind(id.to_string())
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -134,7 +134,7 @@ impl SqliteBackend {
         if !decide_in_tx(&mut tx, request).await? {
             return Ok(false);
         }
-        Self::commit_mutation(tx, &format!("access_request:{}", request.id.0), audit).await?;
+        Self::commit_mutation(tx, &format!("access_request:{}", request.id), audit).await?;
         Ok(true)
     }
 
@@ -151,7 +151,7 @@ impl SqliteBackend {
         }
         // A grant that cannot be stored rolls the approval back.
         super::rbac::insert_role_assignment(&mut tx, grant).await?;
-        Self::commit_mutation(tx, &format!("access_request:{}", request.id.0), audit).await?;
+        Self::commit_mutation(tx, &format!("access_request:{}", request.id), audit).await?;
         Ok(true)
     }
 

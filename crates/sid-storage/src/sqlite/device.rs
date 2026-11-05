@@ -9,7 +9,7 @@ use sid_core::{
     models::{
         Device, DeviceAuthCodeId, DeviceAuthDecision, DeviceAuthStatus, DeviceAuthorizationCode,
         DeviceCodeRedemption, DeviceId, DevicePoll, DeviceTrustChange, MutationContext, ProfileId,
-        ProjectId, RefreshToken, Session, SessionId,
+        RefreshToken, Session, SessionId,
     },
 };
 
@@ -41,7 +41,7 @@ fn row_to_device_auth(row: &sqlx::sqlite::SqliteRow) -> SidResult<DeviceAuthoriz
         resource: col(row, "resource_id")?,
         status: parsed_col(row, "status")?,
         authorized_by: col(row, "authorized_by")?,
-        project_id: ProjectId(uuid_col(row, "project_id")?),
+        project_id: super::col(row, "project_id")?,
         interval: col(row, "interval_secs")?,
         created_at: dt_col(row, "created_at")?,
         expires_at: dt_col(row, "expires_at")?,
@@ -239,14 +239,14 @@ impl SqliteBackend {
                 authorized_at, last_polled_at, redeemed_session_id, resource_id)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(code.id.0.to_string())
+        .bind(code.id.to_string())
         .bind(&code.client_id)
         .bind(&code.device_code_hash)
         .bind(&code.user_code)
         .bind(&code.scope)
         .bind(code.status.as_str())
         .bind(code.authorized_by)
-        .bind(code.project_id.0.to_string())
+        .bind(code.project_id.to_string())
         .bind(code.interval)
         .bind(fmt_dt(&code.created_at))
         .bind(fmt_dt(&code.expires_at))
@@ -306,7 +306,7 @@ impl SqliteBackend {
         .bind(status)
         .bind(authorized_by)
         .bind(authorized_at)
-        .bind(id.0.to_string())
+        .bind(id.to_string())
         .bind(&now)
         .execute(&mut *tx)
         .await
@@ -332,7 +332,7 @@ impl SqliteBackend {
         let row = sqlx::query(
             "SELECT last_polled_at, interval_secs FROM device_authorization_codes WHERE id = ?",
         )
-        .bind(id.0.to_string())
+        .bind(id.to_string())
         .fetch_optional(&mut *tx)
         .await
         .map_err(storage)?
@@ -354,7 +354,7 @@ impl SqliteBackend {
         )
         .bind(fmt_dt(&now))
         .bind(interval)
-        .bind(id.0.to_string())
+        .bind(id.to_string())
         .execute(&mut *tx)
         .await
         .map_err(storage)?;

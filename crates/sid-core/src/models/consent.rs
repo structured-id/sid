@@ -14,6 +14,12 @@ use super::ProfileId;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ConsentId(pub Uuid);
 
+impl core::fmt::Display for ConsentId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 impl ConsentId {
     pub fn new() -> Self {
         Self(Uuid::now_v7())
@@ -29,6 +35,12 @@ impl Default for ConsentId {
 /// Unique identifier for a claim grant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ClaimGrantId(pub Uuid);
+
+impl core::fmt::Display for ClaimGrantId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.0.fmt(f)
+    }
+}
 
 impl ClaimGrantId {
     pub fn new() -> Self {

@@ -326,7 +326,7 @@ pub async fn test_directory_group_writes(backend: &dyn StorageBackend) {
     backend.ensure_system_project(test_audit()).await.unwrap();
     let (first, _, _) = provision(backend).await;
     let (second, _, _) = provision(backend).await;
-    let mut group = Group::new(ProjectId::system(), format!("dir_{}", tag()));
+    let mut group = Group::new(ProjectId::SYSTEM, format!("dir_{}", tag()));
     let mut write = DirectoryGroupWrite::new(DirectoryWriteMode::Create, group.clone());
     write.add_members.push(GroupMember::new(group.id, first.id));
     let event = owed_event();
@@ -376,7 +376,7 @@ pub async fn test_directory_group_writes(backend: &dyn StorageBackend) {
 
     let missing = DirectoryGroupWrite::new(
         DirectoryWriteMode::Update,
-        Group::new(ProjectId::system(), format!("missing_{}", tag())),
+        Group::new(ProjectId::SYSTEM, format!("missing_{}", tag())),
     );
     let err = backend
         .write_directory_group(&missing, test_audit())

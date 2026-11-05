@@ -31,7 +31,7 @@ async fn profile(storage: &Arc<dyn StorageBackend>, name: &str) -> ProfileId {
 }
 
 async fn role(storage: &Arc<dyn StorageBackend>, key: &str, permissions: &[&str]) -> Role {
-    let mut role = Role::new(ProjectId::system(), key, key);
+    let mut role = Role::new(ProjectId::SYSTEM, key, key);
     role.permissions = permissions.iter().map(|p| p.to_string()).collect();
     storage.create_role(&role, audit()).await.unwrap();
     storage.get_role(role.id).await.unwrap().unwrap()
@@ -43,7 +43,7 @@ async fn reads_ledger(engine: &CeAuthzEngine<dyn StorageBackend>, who: ProfileId
         .check(&AuthzCheckRequest {
             subject: format!("user:{who}"),
             action: "ledger.read".into(),
-            resource: format!("project:{}", ProjectId::system().0),
+            resource: format!("project:{}", ProjectId::SYSTEM),
             context: Default::default(),
         })
         .await

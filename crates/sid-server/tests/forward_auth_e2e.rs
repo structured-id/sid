@@ -34,7 +34,7 @@ const INSPECTOR_SECRET: &str = "forward-auth-inspector-secret";
 fn with_machine_user(storage: MockStorage, client_id: &str, secret: &str) -> MockStorage {
     use sid_core::models::machine_user::*;
     let mu = MachineUser::new(
-        ProjectId::system(),
+        ProjectId::SYSTEM,
         client_id,
         "Forward auth bot",
         OwnerType::System,
@@ -84,7 +84,7 @@ async fn register(
     let now = Utc::now();
     let app = Application {
         id: ApplicationId::generate(),
-        project_id: ProjectId::system(),
+        project_id: ProjectId::SYSTEM,
         name: indicator.into(),
         system: None,
         revision: 0,

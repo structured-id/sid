@@ -81,7 +81,7 @@ fn row_to_auth_code(row: &sqlx::sqlite::SqliteRow) -> SidResult<AuthorizationCod
 fn row_to_initial_access_token(row: &sqlx::sqlite::SqliteRow) -> SidResult<InitialAccessToken> {
     Ok(InitialAccessToken {
         id: InitialAccessTokenId(uuid_col(row, "id")?),
-        project_id: ProjectId(uuid_col(row, "project_id")?),
+        project_id: super::col(row, "project_id")?,
         token_hash: col(row, "token_hash")?,
         max_clients: count_col(row, "max_clients")?,
         clients_registered: count_col(row, "clients_registered")?,
@@ -321,8 +321,8 @@ impl SqliteBackend {
             "INSERT INTO initial_access_tokens (id, project_id, token_hash, max_clients, clients_registered, allowed_scopes, allowed_grant_types, allowed_redirect_patterns, created_by, revoked, expires_at, created_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(token.id.0.to_string())
-        .bind(token.project_id.0.to_string())
+        .bind(token.id.to_string())
+        .bind(token.project_id.to_string())
         .bind(&token.token_hash)
         .bind(i64::from(token.max_clients))
         .bind(i64::from(token.clients_registered))
@@ -344,7 +344,7 @@ impl SqliteBackend {
         id: InitialAccessTokenId,
     ) -> SidResult<Option<InitialAccessToken>> {
         let row = sqlx::query("SELECT * FROM initial_access_tokens WHERE id = ?")
-            .bind(id.0.to_string())
+            .bind(id.to_string())
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -368,7 +368,7 @@ impl SqliteBackend {
         project_id: ProjectId,
     ) -> SidResult<Vec<InitialAccessToken>> {
         let rows = sqlx::query("SELECT * FROM initial_access_tokens WHERE project_id = ?")
-            .bind(project_id.0.to_string())
+            .bind(project_id.to_string())
             .fetch_all(&self.pool)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -382,7 +382,7 @@ impl SqliteBackend {
     ) -> SidResult<()> {
         let mut tx = self.begin_write().await?;
         let revoked = sqlx::query("UPDATE initial_access_tokens SET revoked = 1 WHERE id = ?")
-            .bind(id.0.to_string())
+            .bind(id.to_string())
             .execute(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?

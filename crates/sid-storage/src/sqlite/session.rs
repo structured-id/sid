@@ -226,7 +226,7 @@ impl SqliteBackend {
                     "SELECT 1 FROM credentials
                      WHERE id = ? AND profile_id = ? AND status = 'active' AND data = ?",
                 )
-                .bind(fence.id.0.to_string())
+                .bind(fence.id.to_string())
                 .bind(session.profile_id)
                 .bind(fence.data.expose())
                 .fetch_optional(&mut *tx)
@@ -243,7 +243,7 @@ impl SqliteBackend {
                     "SELECT 1 FROM principals
                      WHERE id = ? AND assigned_profile_id = ? AND assignment_revision = ?",
                 )
-                .bind(fence.principal.0.to_string())
+                .bind(fence.principal.to_string())
                 .bind(session.profile_id)
                 .bind(fence.revision)
                 .fetch_optional(&mut *tx)

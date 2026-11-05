@@ -22,7 +22,7 @@ fn application(id: ApplicationId, name: &str) -> Application {
     let now = Utc::now().trunc_subsecs(3);
     Application {
         id,
-        project_id: ProjectId::system(),
+        project_id: ProjectId::SYSTEM,
         name: name.to_owned(),
         system: None,
         revision: 0,

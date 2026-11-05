@@ -2,7 +2,7 @@ use super::*;
 use crate::models::{ProfileId, ProjectId};
 
 fn accountant() -> Role {
-    let mut role = Role::new(ProjectId::system(), "accountant", "Accountant");
+    let mut role = Role::new(ProjectId::SYSTEM, "accountant", "Accountant");
     role.permissions = vec!["ledger.read".into(), "ledger.post".into()];
     role
 }
@@ -57,7 +57,7 @@ fn every_bound_refuses_on_its_own() {
         e.covers(AdminOperation::EditRole, &role, &worker(), false, Some(1)),
         Err(Uncovered::Operation)
     );
-    let other = Role::new(ProjectId::system(), "auditor", "Auditor");
+    let other = Role::new(ProjectId::SYSTEM, "auditor", "Auditor");
     assert_eq!(
         e.covers(AdminOperation::Assign, &other, &worker(), false, Some(1)),
         Err(Uncovered::Role)
@@ -68,13 +68,13 @@ fn every_bound_refuses_on_its_own() {
         e.covers(AdminOperation::Assign, &grown, &worker(), false, Some(1)),
         Err(Uncovered::Ceiling)
     );
-    let group = RoleAssignmentPrincipal::Group(GroupId(uuid::Uuid::now_v7()));
+    let group = RoleAssignmentPrincipal::Group(GroupId::generate());
     assert_eq!(
         e.covers(AdminOperation::Assign, &role, &group, false, Some(1)),
         Err(Uncovered::Recipient)
     );
     let mut grouped = e.clone();
-    grouped.recipient_group = Some(GroupId(uuid::Uuid::now_v7()));
+    grouped.recipient_group = Some(GroupId::generate());
     assert_eq!(
         grouped.covers(AdminOperation::Assign, &role, &worker(), false, Some(1)),
         Err(Uncovered::Recipient)
@@ -164,7 +164,7 @@ fn redelegation_only_narrows() {
     kinds.recipient_kinds.insert(RecipientKind::Group);
     assert!(!parent.is_narrowed_by(&kinds));
 
-    let group = GroupId(uuid::Uuid::now_v7());
+    let group = GroupId::generate();
     parent.recipient_group = Some(group);
     assert!(
         !parent.is_narrowed_by(&child),

@@ -77,7 +77,7 @@ async fn fixture() -> Fixture {
         svc.storage.clone(),
         sid_scim::mapping::ScimOrgContext {
             org_domain: "corp.sid.example.com".into(),
-            project_id: ProjectId::system(),
+            project_id: ProjectId::SYSTEM,
         },
         "https://sid.example.com".into(),
         ScimDirectory {
@@ -135,7 +135,7 @@ impl Fixture {
         let role = self
             .svc
             .storage
-            .list_roles(ProjectId::system())
+            .list_roles(ProjectId::SYSTEM)
             .await
             .unwrap()
             .into_iter()
@@ -147,7 +147,7 @@ impl Fixture {
                     principal: Some(Principal::ProvisioningConnectorId(
                         connector.id.clone().unwrap(),
                     )),
-                    role_id: role.id.0.to_string(),
+                    role_id: Some(role.id.into()),
                     scope: Some(format!("oauth_resource:{}", self.directory.id)),
                     expires_at: None,
                     admin: None,

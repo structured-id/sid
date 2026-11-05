@@ -48,17 +48,16 @@ async fn as_admin<T>(svc: &TestServices, message: T) -> Request<T> {
     request
 }
 
-async fn inspector_role(svc: &TestServices) -> String {
-    svc.storage
-        .list_roles(ProjectId::system())
+async fn inspector_role(svc: &TestServices) -> Option<sid_ids_proto::RoleId> {
+    let role = svc
+        .storage
+        .list_roles(ProjectId::SYSTEM)
         .await
         .unwrap()
         .into_iter()
         .find(|r| r.key == TOKEN_INSPECTOR_ROLE)
-        .expect("provisioned at start")
-        .id
-        .0
-        .to_string()
+        .expect("provisioned at start");
+    Some(role.id.into())
 }
 
 fn on(resource: impl std::fmt::Display) -> Option<String> {
@@ -127,14 +126,14 @@ async fn inspection_is_assigned_only_to_a_service_on_one_resource() {
     let client = || Some(Principal::OauthClientId(common::CONFIDENTIAL_CLIENT.into()));
     let cases = [
         (
-            Some(Principal::ProfileId(test_profile().id.to_string())),
+            Some(Principal::ProfileId(test_profile().id.into())),
             on(userinfo),
             Code::InvalidArgument,
         ),
         (client(), None, Code::InvalidArgument),
         (
             client(),
-            Some(format!("project:{}", ProjectId::system().0)),
+            Some(format!("project:{}", ProjectId::SYSTEM)),
             Code::InvalidArgument,
         ),
         (client(), on(ResourceId::generate()), Code::NotFound),
@@ -235,7 +234,7 @@ async fn a_retired_resource_takes_no_inspector() {
     let authz = authz(&svc);
     let app = sid_core::models::Application {
         id: sid_core::models::ApplicationId::generate(),
-        project_id: ProjectId::system(),
+        project_id: ProjectId::SYSTEM,
         name: "Retiring API".into(),
         system: None,
         revision: 0,
@@ -290,7 +289,7 @@ async fn a_retired_resource_takes_no_inspector() {
 async fn a_machine_inspector_keeps_its_restrictions() {
     use sid_core::models::machine_user::{MachineCredentialType, MachineUserCredential, OwnerType};
     let mut pdp = sid_core::models::MachineUser::new(
-        ProjectId::system(),
+        ProjectId::SYSTEM,
         "fenced-pdp",
         "Fenced PDP",
         OwnerType::System,

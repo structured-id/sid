@@ -45,7 +45,7 @@ pub(super) fn client_to_proto(c: &OAuth2Client, issuer: &str) -> proto::OAuthCli
     proto::OAuthClient {
         client_id: c.client_id.clone(),
         application_id: c.application_id.to_string(),
-        project_id: c.project_id.0.to_string(),
+        project_id: c.project_id.to_string(),
         name: c.client_name.clone(),
         r#type: application_type_to_proto(c.application_type).into(),
         redirect_uris: c.redirect_uris.clone(),
@@ -105,7 +105,7 @@ pub(super) fn application_to_proto(
 ) -> proto::Application {
     proto::Application {
         id: app.id.to_string(),
-        project_id: app.project_id.0.to_string(),
+        project_id: app.project_id.to_string(),
         name: app.name.clone(),
         client,
         resource,

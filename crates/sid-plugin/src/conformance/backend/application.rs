@@ -143,7 +143,7 @@ fn access(client: &OAuth2Client, resource: &ProtectedResource, scopes: &[&str]) 
 
 async fn system_project(backend: &dyn StorageBackend) -> ProjectId {
     backend.ensure_system_project(test_audit()).await.unwrap();
-    ProjectId::system()
+    ProjectId::SYSTEM
 }
 
 fn is_conflict<T: std::fmt::Debug>(result: sid_core::Result<T>) -> bool {
@@ -433,7 +433,7 @@ pub async fn test_application_update_and_list(backend: &dyn StorageBackend) {
     );
     // The project never changes through an update.
     let mut moved = stored.clone();
-    moved.project_id = ProjectId::system();
+    moved.project_id = ProjectId::SYSTEM;
     assert!(
         !backend
             .update_application(&moved, test_audit())

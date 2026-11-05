@@ -19,6 +19,12 @@ use super::profile::ProfileId;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct InviteId(pub Uuid);
 
+impl core::fmt::Display for InviteId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 impl InviteId {
     pub fn new() -> Self {
         Self(Uuid::now_v7())

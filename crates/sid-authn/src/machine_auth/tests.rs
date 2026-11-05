@@ -57,7 +57,7 @@ async fn fixture() -> Fixture {
     .await
     .unwrap();
     let machine = MachineUser::new(
-        ProjectId::system(),
+        ProjectId::SYSTEM,
         "mu_orchestrator",
         "Tenant orchestrator",
         OwnerType::System,
@@ -172,7 +172,7 @@ async fn a_machine_token_authenticates_its_machine() {
 async fn a_token_for_something_else_is_refused() {
     let f = fixture().await;
     let other = MachineUser::new(
-        ProjectId::system(),
+        ProjectId::SYSTEM,
         "mu_reader",
         "EDS reader",
         OwnerType::System,
