@@ -1906,6 +1906,11 @@ async fn test_role_assignments_by_principal() {
 }
 
 #[tokio::test]
+async fn test_held_role_assignments_and_roles() {
+    common::role::test_held_role_assignments_and_roles(&setup().await).await;
+}
+
+#[tokio::test]
 async fn test_expiring_role_assignments() {
     common::role::test_expiring_role_assignments(&setup().await).await;
 }

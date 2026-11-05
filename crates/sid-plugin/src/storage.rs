@@ -911,6 +911,10 @@ pub trait StorageBackend:
     /// Get a role by ID.
     async fn get_role(&self, id: RoleId) -> Result<Option<Role>>;
 
+    /// The stored roles among `ids`, in one read and in no particular order;
+    /// an id naming no role is left out.
+    async fn get_roles(&self, ids: &[RoleId]) -> Result<Vec<Role>>;
+
     /// Get a role by name within a project.
     async fn get_role_by_name(&self, project_id: ProjectId, name: &str) -> Result<Option<Role>>;
 
@@ -1038,6 +1042,13 @@ pub trait StorageBackend:
     async fn list_role_assignments_for_group(
         &self,
         group_id: GroupId,
+    ) -> Result<Vec<RoleAssignment>>;
+
+    /// The role assignments a profile holds: its own and those of every group
+    /// it is a member of, in one read whatever the number of groups.
+    async fn list_role_assignments_held_by_profile(
+        &self,
+        profile_id: ProfileId,
     ) -> Result<Vec<RoleAssignment>>;
 
     /// List role assignments for a machine user.
