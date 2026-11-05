@@ -4221,6 +4221,20 @@ impl StorageBackend for PostgresBackend {
         row.map(|r| r.into_domain()).transpose()
     }
 
+    async fn get_roles(&self, ids: &[RoleId]) -> SidResult<Vec<Role>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids: Vec<uuid::Uuid> = ids.iter().map(|id| id.0).collect();
+        let rows =
+            sqlx::query_as::<_, crate::pg_row::RoleRow>("SELECT * FROM roles WHERE id = ANY($1)")
+                .bind(&ids)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| SidError::Storage(format!("read roles: {e}")))?;
+        rows.into_iter().map(|r| r.into_domain()).collect()
+    }
+
     async fn get_role_by_name(&self, project_id: ProjectId, name: &str) -> SidResult<Option<Role>> {
         let row = sqlx::query_as::<_, crate::pg_row::RoleRow>(
             "SELECT * FROM roles WHERE project_id = $1 AND name = $2",
@@ -4695,6 +4709,26 @@ impl StorageBackend for PostgresBackend {
         .fetch_all(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("Query failed: {}", e)))?;
+        self.role_assignments(rows).await
+    }
+
+    async fn list_role_assignments_held_by_profile(
+        &self,
+        profile_id: ProfileId,
+    ) -> SidResult<Vec<RoleAssignment>> {
+        // Both branches use an index: role_assignments(profile_id), and
+        // group_members(profile_id) joined to role_assignments(group_id).
+        let rows = sqlx::query_as::<_, crate::pg_row::RoleAssignmentRow>(
+            "SELECT * FROM role_assignments WHERE profile_id = $1
+             UNION ALL
+             SELECT ra.* FROM role_assignments ra
+             JOIN group_members gm ON gm.group_id = ra.group_id
+             WHERE gm.profile_id = $1",
+        )
+        .bind(profile_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(format!("read held role assignments: {e}")))?;
         self.role_assignments(rows).await
     }
 

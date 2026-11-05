@@ -367,6 +367,113 @@ pub async fn test_role_assignments_by_principal(backend: &dyn StorageBackend) {
     );
 }
 
+/// A profile holds its own assignments and those of every group it is a
+/// member of, each with its envelope, and no other group's or profile's; a
+/// membership that ends takes its group's assignments with it. Roles read
+/// by a list of ids come back for the ids naming one.
+pub async fn test_held_role_assignments_and_roles(backend: &dyn StorageBackend) {
+    use sid_core::models::{
+        AdminEnvelope, AdminOperation, Group, GroupMember, RecipientKind, RoleId,
+    };
+
+    let role = stored_role(backend).await;
+    let other_role = stored_role(backend).await;
+    let holder = assignee(backend).await;
+    let stranger = assignee(backend).await;
+    let group = |tag: &str| {
+        Group::new(
+            role.project_id,
+            format!("{tag}-{}", Uuid::now_v7().simple()),
+        )
+    };
+    let (first, second, foreign) = (group("first"), group("second"), group("foreign"));
+    for g in [&first, &second, &foreign] {
+        backend.create_group(g, test_audit()).await.unwrap();
+    }
+    for g in [&first, &second] {
+        backend
+            .add_to_group(&GroupMember::new(g.id, holder), test_audit())
+            .await
+            .unwrap();
+    }
+    let envelope = AdminEnvelope {
+        operations: [AdminOperation::Assign].into(),
+        roles: [role.id].into(),
+        permission_ceiling: ["documents:read".to_string()].into(),
+        recipient_kinds: [RecipientKind::Profile].into(),
+        recipient_group: None,
+        max_validity_secs: 3_600,
+    };
+    let own = RoleAssignment::new(RoleAssignmentPrincipal::Profile(holder), role.id);
+    let through_first = RoleAssignment::new(RoleAssignmentPrincipal::Group(first.id), role.id)
+        .administering(envelope.clone());
+    let through_second =
+        RoleAssignment::new(RoleAssignmentPrincipal::Group(second.id), other_role.id);
+    let not_a_member = RoleAssignment::new(RoleAssignmentPrincipal::Group(foreign.id), role.id);
+    let someone_else = RoleAssignment::new(RoleAssignmentPrincipal::Profile(stranger), role.id);
+    for a in [
+        &own,
+        &through_first,
+        &through_second,
+        &not_a_member,
+        &someone_else,
+    ] {
+        backend
+            .create_role_assignment(a, test_audit())
+            .await
+            .unwrap();
+    }
+
+    let held = |profile| async move {
+        let mut held = backend
+            .list_role_assignments_held_by_profile(profile)
+            .await
+            .unwrap();
+        held.sort_by_key(|a| a.id.0);
+        held
+    };
+    let mut expected = vec![own.id, through_first.id, through_second.id];
+    expected.sort_by_key(|id| id.0);
+    let read = held(holder).await;
+    assert_eq!(read.iter().map(|a| a.id).collect::<Vec<_>>(), expected);
+    let administering = read.iter().find(|a| a.id == through_first.id).unwrap();
+    assert_eq!(administering.principal, through_first.principal);
+    assert_eq!(administering.admin.as_ref(), Some(&envelope));
+    assert!(
+        read.iter()
+            .filter(|a| a.id != through_first.id)
+            .all(|a| a.admin.is_none())
+    );
+
+    backend
+        .remove_from_group(first.id, holder, test_audit())
+        .await
+        .unwrap();
+    let mut expected = vec![own.id, through_second.id];
+    expected.sort_by_key(|id| id.0);
+    assert_eq!(
+        held(holder).await.iter().map(|a| a.id).collect::<Vec<_>>(),
+        expected,
+        "an ended membership still grants its group's roles"
+    );
+
+    let mut roles: Vec<_> = backend
+        .get_roles(&[role.id, other_role.id, RoleId::new()])
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| (r.id, r.key))
+        .collect();
+    roles.sort_by_key(|(id, _)| id.0);
+    let mut expected = vec![
+        (role.id, role.key.clone()),
+        (other_role.id, other_role.key.clone()),
+    ];
+    expected.sort_by_key(|(id, _)| id.0);
+    assert_eq!(roles, expected);
+    assert!(backend.get_roles(&[]).await.unwrap().is_empty());
+}
+
 /// The expiry scan returns assignments already expired or expiring within
 /// the window, never one expiring later or one without an expiry.
 pub async fn test_expiring_role_assignments(backend: &dyn StorageBackend) {

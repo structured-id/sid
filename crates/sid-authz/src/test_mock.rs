@@ -1169,6 +1169,14 @@ impl sid_plugin::StorageBackend for MockStorage {
         let roles = self.roles.lock().unwrap();
         Ok(roles.iter().find(|r| r.id == id).cloned())
     }
+    async fn get_roles(&self, ids: &[RoleId]) -> Result<Vec<Role>> {
+        let roles = self.roles.lock().unwrap();
+        Ok(roles
+            .iter()
+            .filter(|r| ids.contains(&r.id))
+            .cloned()
+            .collect())
+    }
     async fn get_role_by_name(&self, project_id: ProjectId, name: &str) -> Result<Option<Role>> {
         let roles = self.roles.lock().unwrap();
         Ok(roles
@@ -1380,6 +1388,30 @@ impl sid_plugin::StorageBackend for MockStorage {
             .filter(
                 |a| matches!(&a.principal, RoleAssignmentPrincipal::Group(gid) if *gid == group_id),
             )
+            .cloned()
+            .collect())
+    }
+    async fn list_role_assignments_held_by_profile(
+        &self,
+        profile_id: ProfileId,
+    ) -> Result<Vec<RoleAssignment>> {
+        self.reachable()?;
+        let groups: Vec<GroupId> = self
+            .group_members
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| m.profile_id == profile_id)
+            .map(|m| m.group_id)
+            .collect();
+        let assignments = self.role_assignments.lock().unwrap();
+        Ok(assignments
+            .iter()
+            .filter(|a| match &a.principal {
+                RoleAssignmentPrincipal::Profile(pid) => *pid == profile_id,
+                RoleAssignmentPrincipal::Group(gid) => groups.contains(gid),
+                _ => false,
+            })
             .cloned()
             .collect())
     }
