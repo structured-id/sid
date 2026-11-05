@@ -180,18 +180,26 @@ fn own_ctx(profile_id: ProfileId, action: &str, target: String) -> MutationConte
     AuditEntry::user(profile_id.to_string(), action, target).into()
 }
 
-/// Parse a phone ID string into `ProfilePhoneId`.
-fn parse_phone_id(id: &str) -> Result<sid_core::models::profile_phone::ProfilePhoneId, Status> {
-    uuid::Uuid::parse_str(id)
-        .map(sid_core::models::profile_phone::ProfilePhoneId)
-        .map_err(|_| invalid_field("phone_id", "not a phone identifier"))
+/// The phone a request names, validated before any lookup.
+#[allow(clippy::result_large_err)]
+fn parse_phone_id(
+    id: Option<&sid_ids_proto::ProfilePhoneId>,
+) -> Result<sid_core::models::profile_phone::ProfilePhoneId, Status> {
+    let id = super::convert::wire_id(id, "phone_id")?;
+    Ok(sid_core::models::profile_phone::ProfilePhoneId(
+        id.into_uuid(),
+    ))
 }
 
-/// Parse an email ID string into `ProfileEmailId`.
-fn parse_email_id(id: &str) -> Result<sid_core::models::profile_email::ProfileEmailId, Status> {
-    uuid::Uuid::parse_str(id)
-        .map(sid_core::models::profile_email::ProfileEmailId)
-        .map_err(|_| invalid_field("email_id", "not an email identifier"))
+/// The email a request names, validated before any lookup.
+#[allow(clippy::result_large_err)]
+fn parse_email_id(
+    id: Option<&sid_ids_proto::ProfileEmailId>,
+) -> Result<sid_core::models::profile_email::ProfileEmailId, Status> {
+    let id = super::convert::wire_id(id, "email_id")?;
+    Ok(sid_core::models::profile_email::ProfileEmailId(
+        id.into_uuid(),
+    ))
 }
 
 pub struct AccountServiceImpl {
@@ -628,7 +636,7 @@ impl AccountService for AccountServiceImpl {
                     created_at: now,
                     updated_at: now,
                 };
-                let view = super::convert::phone_to_proto(&phone);
+                let view = super::convert::phone_to_proto(&phone)?;
                 // A primary phone takes the flag from the current one in the
                 // same write.
                 let ctx = own_ctx(profile_id, "phone.added", phone.id.0.to_string())
@@ -648,7 +656,7 @@ impl AccountService for AccountServiceImpl {
         let profile_id = self.extract_profile_id(&request).await?;
         let operation = context(&request)?;
         let req = request.into_inner();
-        let phone_id = parse_phone_id(&req.phone_id)?;
+        let phone_id = parse_phone_id(req.phone_id.as_ref())?;
 
         // A retry of a completed removal answers as it did.
         let command = KeyedCommand::by_profile::<keyed::RemovePhone>(profile_id, operation, &req);
@@ -673,7 +681,7 @@ impl AccountService for AccountServiceImpl {
         let profile_id = self.extract_profile_id(&request).await?;
         let operation = context(&request)?;
         let req = request.into_inner();
-        let phone_id = parse_phone_id(&req.phone_id)?;
+        let phone_id = parse_phone_id(req.phone_id.as_ref())?;
 
         // Only the settings given are written, on this profile's phone: the
         // number, its verification and the primary flag stay as stored.
@@ -710,7 +718,7 @@ impl AccountService for AccountServiceImpl {
                 Ok(command.recorded_effect(&*self.storage).await?)
             })
             .await?;
-        Ok(Response::new(super::convert::phone_to_proto(&phone)))
+        Ok(Response::new(super::convert::phone_to_proto(&phone)?))
     }
 
     async fn set_primary_phone(
@@ -720,7 +728,7 @@ impl AccountService for AccountServiceImpl {
         let profile_id = self.extract_profile_id(&request).await?;
         let operation = context(&request)?;
         let req = request.into_inner();
-        let phone_id = parse_phone_id(&req.phone_id)?;
+        let phone_id = parse_phone_id(req.phone_id.as_ref())?;
 
         // A retry of a completed move answers with the phone as that move's
         // commit left it, and never moves the flag back over a later move.
@@ -741,7 +749,7 @@ impl AccountService for AccountServiceImpl {
                 Ok(command.recorded_effect(&*self.storage).await?)
             })
             .await?;
-        Ok(Response::new(super::convert::phone_to_proto(&phone)))
+        Ok(Response::new(super::convert::phone_to_proto(&phone)?))
     }
 
     async fn list_phones(
@@ -757,7 +765,10 @@ impl AccountService for AccountServiceImpl {
             .map_err(storage_failure)?;
 
         Ok(Response::new(ListPhonesResponse {
-            phones: phones.iter().map(super::convert::phone_to_proto).collect(),
+            phones: phones
+                .iter()
+                .map(super::convert::phone_to_proto)
+                .collect::<Result<_, _>>()?,
         }))
     }
 
@@ -799,7 +810,7 @@ impl AccountService for AccountServiceImpl {
                     created_at: now,
                     updated_at: now,
                 };
-                let view = super::convert::email_to_proto(&email);
+                let view = super::convert::email_to_proto(&email)?;
                 // A primary email takes the flag from the current one in the
                 // same write.
                 let ctx = own_ctx(profile_id, "email.added", email.id.0.to_string())
@@ -819,7 +830,7 @@ impl AccountService for AccountServiceImpl {
         let profile_id = self.extract_profile_id(&request).await?;
         let operation = context(&request)?;
         let req = request.into_inner();
-        let email_id = parse_email_id(&req.email_id)?;
+        let email_id = parse_email_id(req.email_id.as_ref())?;
 
         // A retry of a completed removal answers as it did.
         let command = KeyedCommand::by_profile::<keyed::RemoveEmail>(profile_id, operation, &req);
@@ -844,7 +855,7 @@ impl AccountService for AccountServiceImpl {
         let profile_id = self.extract_profile_id(&request).await?;
         let operation = context(&request)?;
         let req = request.into_inner();
-        let email_id = parse_email_id(&req.email_id)?;
+        let email_id = parse_email_id(req.email_id.as_ref())?;
 
         // Only the label is written, on this profile's email: the address, its
         // verification and the primary flag stay as stored.
@@ -878,7 +889,7 @@ impl AccountService for AccountServiceImpl {
                 Ok(command.recorded_effect(&*self.storage).await?)
             })
             .await?;
-        Ok(Response::new(super::convert::email_to_proto(&email)))
+        Ok(Response::new(super::convert::email_to_proto(&email)?))
     }
 
     async fn set_primary_email(
@@ -888,7 +899,7 @@ impl AccountService for AccountServiceImpl {
         let profile_id = self.extract_profile_id(&request).await?;
         let operation = context(&request)?;
         let req = request.into_inner();
-        let email_id = parse_email_id(&req.email_id)?;
+        let email_id = parse_email_id(req.email_id.as_ref())?;
 
         // A retry of a completed move answers with the email as that move's
         // commit left it, and never moves the flag back over a later move.
@@ -909,7 +920,7 @@ impl AccountService for AccountServiceImpl {
                 Ok(command.recorded_effect(&*self.storage).await?)
             })
             .await?;
-        Ok(Response::new(super::convert::email_to_proto(&email)))
+        Ok(Response::new(super::convert::email_to_proto(&email)?))
     }
 
     async fn list_emails(
@@ -925,7 +936,10 @@ impl AccountService for AccountServiceImpl {
             .map_err(storage_failure)?;
 
         Ok(Response::new(ListEmailsResponse {
-            emails: emails.iter().map(super::convert::email_to_proto).collect(),
+            emails: emails
+                .iter()
+                .map(super::convert::email_to_proto)
+                .collect::<Result<_, _>>()?,
         }))
     }
 

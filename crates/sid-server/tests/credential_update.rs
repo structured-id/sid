@@ -25,7 +25,7 @@ fn authed<T>(msg: T, token: &str) -> Request<T> {
 fn rename(credential: &Credential, label: &str, token: &str) -> Request<UpdateCredentialRequest> {
     authed(
         UpdateCredentialRequest {
-            credential_id: credential.id.0.to_string(),
+            credential_id: Some(common::wire_credential_id(credential.id)),
             label: Some(label.to_string()),
         },
         token,
@@ -47,7 +47,7 @@ async fn test_an_update_without_a_label_is_recorded_for_its_retry() {
     let token = fresh_token(&svc, &profile).await;
     let keyed = |label: Option<&str>, key: &str| {
         let mut req = Request::new(UpdateCredentialRequest {
-            credential_id: credential.id.0.to_string(),
+            credential_id: Some(common::wire_credential_id(credential.id)),
             label: label.map(str::to_owned),
         });
         req.metadata_mut()

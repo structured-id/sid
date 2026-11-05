@@ -12,10 +12,20 @@ use tonic::transport::Server;
 /// return UNIMPLEMENTED (never called by RecipientResolver).
 struct MockIdentityService;
 
+/// The Profile the mock identity service knows none of.
+const MISSING: &str = "0192f3a4-7c1e-7b2a-9d4e-3f5a6b7c8d9e";
+
+/// The Profile `CALLER_TOKEN` stands for.
+const CALLER_PROFILE: &str = "0192f3a4-7c1e-7b2a-9d4e-3f5a6b7c8d9f";
+
+fn profile_id(text: &str) -> sid_ids::ProfileId {
+    sid_ids::ProfileId::parse(text).unwrap()
+}
+
 /// Helper: build a default Profile proto with given id and email.
-fn mock_profile(id: &str, email: &str) -> Profile {
+fn mock_profile(id: sid_ids::ProfileId, email: &str) -> Profile {
     Profile {
-        id: id.into(),
+        id: Some(id.into()),
         profile_type: 0,
         username: Some("alice".into()),
         email: Some(email.into()),
@@ -53,31 +63,49 @@ impl IdentityService for MockIdentityService {
     ) -> Result<tonic::Response<GetProfileResponse>, tonic::Status> {
         let req = request.into_inner();
         let id = match req.identifier {
-            Some(get_profile_request::Identifier::Id(id)) => id,
+            Some(get_profile_request::Identifier::Id(id)) => sid_ids_proto::required(Some(&id))
+                .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?,
             _ => return Err(tonic::Status::invalid_argument("id required")),
         };
-        if id == "not-found" {
+        if id == profile_id(MISSING) {
             return Err(tonic::Status::not_found("profile not found"));
         }
         Ok(tonic::Response::new(GetProfileResponse {
-            profile: Some(mock_profile(&id, "alice@sid.example.com")),
+            profile: Some(mock_profile(id, "alice@sid.example.com")),
         }))
     }
 
+    /// A named Profile's principals; with none named, the caller's own, as
+    /// the identity service resolves them from the caller's token.
     async fn list_principals(
         &self,
         request: tonic::Request<ListPrincipalsRequest>,
     ) -> Result<tonic::Response<ListPrincipalsResponse>, tonic::Status> {
+        let presented = request
+            .metadata()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
         let req = request.into_inner();
-        if req.profile_id == "not-found" {
-            return Ok(tonic::Response::new(ListPrincipalsResponse {
-                principals: vec![],
-            }));
+        match req.profile_id.as_ref() {
+            None if presented != Some(format!("Bearer {CALLER_TOKEN}")) => {
+                return Err(tonic::Status::unauthenticated("authentication required"));
+            }
+            None => {}
+            Some(named) => {
+                let named = sid_ids_proto::required(Some(named))
+                    .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
+                if named == profile_id(MISSING) {
+                    return Ok(tonic::Response::new(ListPrincipalsResponse {
+                        principals: vec![],
+                    }));
+                }
+            }
         }
         Ok(tonic::Response::new(ListPrincipalsResponse {
             principals: vec![
                 Principal {
-                    id: "id-1".into(),
+                    id: Some(sid_ids::PrincipalId::generate().into()),
                     r#type: PrincipalType::Email as i32,
                     value: "alice@sid.example.com".into(),
                     verified: true,
@@ -88,7 +116,7 @@ impl IdentityService for MockIdentityService {
                     ..Default::default()
                 },
                 Principal {
-                    id: "id-2".into(),
+                    id: Some(sid_ids::PrincipalId::generate().into()),
                     r#type: PrincipalType::Phone as i32,
                     value: "+380501234567".into(),
                     verified: true,
@@ -241,7 +269,10 @@ impl IdentityService for MockIdentityService {
             return Err(tonic::Status::unauthenticated("authentication required"));
         }
         Ok(tonic::Response::new(GetProfileResponse {
-            profile: Some(mock_profile("caller-profile", "caller@sid.example.com")),
+            profile: Some(mock_profile(
+                profile_id(CALLER_PROFILE),
+                "caller@sid.example.com",
+            )),
         }))
     }
     async fn list_devices(
@@ -325,11 +356,12 @@ async fn test_grpc_resolve_profile_with_email_and_phone() {
     let url = start_mock_server().await;
     let resolver = RecipientResolver::with_identity(&url).await.unwrap();
 
+    let id = sid_ids::ProfileId::generate();
     let event =
-        Event::new("sid-server", "sid.session.created.v1").with_subject("profile/test-profile-id");
+        Event::new("sid-server", "sid.session.created.v1").with_subject(format!("profile/{id}"));
 
     let r = resolver.resolve(&event).await.unwrap();
-    assert_eq!(r.profile_id, "test-profile-id");
+    assert_eq!(r.profile_id, id.to_string());
     assert_eq!(r.email.as_deref(), Some("alice@sid.example.com"));
     assert_eq!(r.phone.as_deref(), Some("+380501234567"));
 }
@@ -351,7 +383,7 @@ async fn test_grpc_current_contact_is_the_callers_own() {
     assert_eq!(
         contact,
         Some((
-            "caller-profile".to_string(),
+            CALLER_PROFILE.to_string(),
             Contact {
                 email: Some("caller@sid.example.com".into()),
                 phone: Some("+380501234567".into()),
@@ -370,15 +402,16 @@ async fn test_grpc_resolve_caches_result() {
     let url = start_mock_server().await;
     let resolver = RecipientResolver::with_identity(&url).await.unwrap();
 
+    let id = sid_ids::ProfileId::generate().to_string();
     let event =
-        Event::new("sid-server", "sid.session.created.v1").with_subject("profile/cache-test-id");
+        Event::new("sid-server", "sid.session.created.v1").with_subject(format!("profile/{id}"));
 
     // First call — gRPC.
     let r1 = resolver.resolve(&event).await.unwrap();
     assert_eq!(r1.email.as_deref(), Some("alice@sid.example.com"));
 
     // Second call — should hit cache (no gRPC).
-    let cached = resolver.get_cached("cache-test-id").await;
+    let cached = resolver.get_cached(&id).await;
     assert!(cached.is_some(), "should be cached after first resolve");
 
     let r2 = resolver.resolve(&event).await.unwrap();
@@ -391,14 +424,30 @@ async fn test_grpc_resolve_not_found_is_profile_gone() {
     let resolver = RecipientResolver::with_identity(&url).await.unwrap();
 
     let event = Event::new("sid-server", "sid.session.created.v1")
-        .with_subject("profile/not-found")
+        .with_subject(format!("profile/{MISSING}"))
         .with_data(serde_json::json!({
             "email": "fallback@sid.example.com"
         }));
 
     // A deleted profile is not reached through data the event carried.
     let err = resolver.resolve(&event).await.unwrap_err();
-    assert_eq!(err, ResolveError::ProfileGone("not-found".into()));
+    assert_eq!(err, ResolveError::ProfileGone(MISSING.into()));
+}
+
+/// A subject that is not a Profile id names no Profile that could exist:
+/// the delivery gives up instead of retrying, and the service is never asked.
+#[tokio::test]
+async fn test_grpc_resolve_malformed_subject_is_profile_gone() {
+    // No server: asking the identity service would be Unavailable.
+    let resolver = RecipientResolver::with_identity("http://127.0.0.1:1")
+        .await
+        .unwrap();
+
+    let event =
+        Event::new("sid-server", "sid.session.created.v1").with_subject("profile/not-a-profile");
+
+    let err = resolver.resolve(&event).await.unwrap_err();
+    assert_eq!(err, ResolveError::ProfileGone("not-a-profile".into()));
 }
 
 #[tokio::test]
@@ -409,7 +458,7 @@ async fn test_grpc_resolve_unreachable_is_retryable() {
         .unwrap();
 
     let event = Event::new("sid-server", "sid.session.created.v1")
-        .with_subject("profile/unreachable")
+        .with_subject(format!("profile/{}", sid_ids::ProfileId::generate()))
         .with_data(serde_json::json!({
             "email": "event-fallback@sid.example.com"
         }));

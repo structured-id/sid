@@ -128,6 +128,22 @@ pub fn name_command(metadata: &mut tonic::metadata::MetadataMap, key: &str) {
     sid_authn::operation::grpc::insert_context(metadata, &context);
 }
 
+/// A stored credential's id as a request names it.
+#[allow(dead_code)]
+pub fn wire_credential_id(id: sid_core::models::CredentialId) -> sid_ids_proto::CredentialId {
+    sid_ids::CredentialId::from_uuid(id.0)
+        .expect("a stored credential id")
+        .into()
+}
+
+/// A stored login handle's id as a request names it.
+#[allow(dead_code)]
+pub fn wire_principal_id(id: sid_core::models::PrincipalId) -> sid_ids_proto::PrincipalId {
+    sid_ids::PrincipalId::from_uuid(id.0)
+        .expect("a stored principal id")
+        .into()
+}
+
 /// The shared cache of the test stack (Redis 63799).
 #[allow(dead_code)]
 pub async fn test_redis() -> Arc<dyn sid_plugin::cache::CacheBackend> {

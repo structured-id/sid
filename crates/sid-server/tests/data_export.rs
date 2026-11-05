@@ -50,10 +50,9 @@ async fn a_reused_export_is_recorded_for_the_retry() {
         .await
         .unwrap()
         .into_inner();
-    assert_eq!(
-        reused.export_id, first.export_id,
-        "the ready export is reused"
-    );
+    // The answer carries the job's own creation time, so an equal answer is
+    // the same export.
+    assert_eq!(reused, first, "the ready export is reused");
     svc.identity
         .acknowledge_export(authed(AcknowledgeExportRequest {}, &token))
         .await
@@ -65,10 +64,7 @@ async fn a_reused_export_is_recorded_for_the_retry() {
         .await
         .unwrap()
         .into_inner();
-    assert_eq!(
-        retried.export_id, reused.export_id,
-        "the retry prepared another export"
-    );
+    assert_eq!(retried, reused, "the retry prepared another export");
 }
 
 #[tokio::test]

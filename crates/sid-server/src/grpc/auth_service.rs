@@ -385,22 +385,12 @@ fn step_up_method_unavailable(method: StepUpMethod, decay: &str) -> Status {
     .into()
 }
 
-/// The identifier a request names in `field`, validated before any lookup:
-/// an absent or malformed one is refused on that field.
-#[allow(clippy::result_large_err)]
-fn wire_id<W: sid_ids_proto::WireId>(
-    value: Option<&W>,
-    field: &'static str,
-) -> Result<W::Domain, Status> {
-    sid_ids_proto::required(value).map_err(|e| invalid_field(field, e.to_string()))
-}
+use super::convert::wire_id;
 
-/// A stored credential's id as an answer carries it; a stored id that is not
-/// one is corruption, never sent as it is.
+/// A stored credential's id as an answer carries it.
 #[allow(clippy::result_large_err)]
 fn credential_wire(id: CredentialId) -> Result<Option<sid_ids_proto::CredentialId>, Status> {
-    let id = sid_ids::CredentialId::from_uuid(id.0).map_err(|e| internal("credential id", e))?;
-    Ok(Some(id.into()))
+    super::convert::stored_id::<sid_ids::CredentialId, _>(id.0)
 }
 
 /// The refusal of an email code request. The limit counts requests per

@@ -60,16 +60,29 @@ fn credential_not_found(id: CredentialId) -> Status {
 }
 
 #[allow(clippy::result_large_err)]
-fn parse_credential_id(s: &str) -> Result<CredentialId, Status> {
-    uuid::Uuid::parse_str(s)
-        .map(CredentialId)
-        .map_err(|_| invalid_field("credential_id", "not a credential identifier"))
+fn parse_credential_id(id: Option<&sid_ids_proto::CredentialId>) -> Result<CredentialId, Status> {
+    let id = convert::wire_id(id, "credential_id")?;
+    Ok(CredentialId(id.into_uuid()))
 }
 
 #[allow(clippy::result_large_err)]
-fn parse_device_id(s: &str) -> Result<DeviceId, Status> {
-    s.parse::<DeviceId>()
-        .map_err(|_| invalid_field("device_id", "not a device identifier"))
+fn parse_device_id(id: Option<&sid_ids_proto::DeviceId>) -> Result<DeviceId, Status> {
+    convert::wire_id(id, "device_id")
+}
+
+/// The Profile a self-service request acts on: the caller's own when the
+/// request names none; naming another takes administrator authority.
+#[allow(clippy::result_large_err)]
+fn target_profile(
+    caller: &Caller,
+    named: Option<&sid_ids_proto::ProfileId>,
+) -> Result<ProfileId, Status> {
+    let Some(named) = named else {
+        return Ok(caller.profile_id);
+    };
+    let pid = convert::wire_id(Some(named), "profile_id")?;
+    caller.require_self_or_admin(pid)?;
+    Ok(pid)
 }
 
 /// DEVICE_NOT_FOUND for `id`: also the answer for another profile's device,
@@ -687,8 +700,7 @@ impl IdentityService for IdentityServiceImpl {
             {
                 let mut source = RegistrationSource::admin_created(caller.profile_id);
                 if let Some(referrer) = &req.referrer_id {
-                    let rid = ProfileId::parse(referrer)
-                        .map_err(|_| invalid_field("referrer_id", "not a profile identifier"))?;
+                    let rid = convert::wire_id(Some(referrer), "referrer_id")?;
                     if self
                         .storage
                         .get_profile(rid)
@@ -784,9 +796,9 @@ impl IdentityService for IdentityServiceImpl {
         // account exists).
         let (named, profile) = match req.identifier {
             Some(get_profile_request::Identifier::Id(id)) => {
-                let pid = convert::parse_profile_id(&id)?;
+                let pid = convert::wire_id(Some(&id), "id")?;
                 caller.require_self_or_admin(pid)?;
-                (id, self.storage.get_profile(pid).await)
+                (pid.to_string(), self.storage.get_profile(pid).await)
             }
             // A handle is personal data: the refusal names its kind, not its
             // value, since error details travel through proxies and logs.
@@ -830,7 +842,7 @@ impl IdentityService for IdentityServiceImpl {
         // target: a refused caller learns nothing more than without one.
         let operation = context(&request);
         let req = request.into_inner();
-        let pid = convert::parse_profile_id(&req.id)?;
+        let pid = convert::wire_id(req.id.as_ref(), "id")?;
         caller.require_self_or_admin(pid)?;
         let operation = operation?;
 
@@ -844,7 +856,7 @@ impl IdentityService for IdentityServiceImpl {
                     .storage
                     .get_profile(pid)
                     .await?
-                    .ok_or_else(|| profile_not_found(req.id.clone()))?;
+                    .ok_or_else(|| profile_not_found(pid.to_string()))?;
                 let req = req.clone();
                 if let Some(v) = req.given_name {
                     profile.given_name = Some(v);
@@ -917,7 +929,7 @@ impl IdentityService for IdentityServiceImpl {
         }
         let operation = context(&request)?;
         let req = request.into_inner();
-        let pid = convert::parse_profile_id(&req.id)?;
+        let pid = convert::wire_id(req.id.as_ref(), "id")?;
 
         // A retry of a completed deletion answers as it did and owes its
         // events and purge only once.
@@ -1018,8 +1030,7 @@ impl IdentityService for IdentityServiceImpl {
     ) -> Result<Response<ListCredentialsResponse>, Status> {
         let caller = self.caller(&request).await?;
         let req = request.into_inner();
-        let pid = convert::parse_profile_id(&req.profile_id)?;
-        caller.require_self_or_admin(pid)?;
+        let pid = target_profile(&caller, req.profile_id.as_ref())?;
 
         let creds = self
             .storage
@@ -1027,38 +1038,11 @@ impl IdentityService for IdentityServiceImpl {
             .await
             .map_err(storage_failure)?;
 
-        let infos = creds
-            .iter()
-            .map(convert::credential_info)
-            .collect::<Result<Vec<_>, Status>>()?;
-
         Ok(Response::new(ListCredentialsResponse {
             credentials: creds
                 .into_iter()
-                .zip(infos)
-                .map(|(c, info)| Credential {
-                    id: c.id.0.to_string(),
-                    profile_id: c.profile_id.to_string(),
-                    r#type: match c.credential_type {
-                        sid_core::models::CredentialType::Opaque => CredentialType::Opaque.into(),
-                        sid_core::models::CredentialType::WebAuthn => {
-                            CredentialType::Webauthn.into()
-                        }
-                        sid_core::models::CredentialType::Totp => CredentialType::Totp.into(),
-                        sid_core::models::CredentialType::Recovery => {
-                            CredentialType::Recovery.into()
-                        }
-                        sid_core::models::CredentialType::LegacyHash => {
-                            CredentialType::LegacyHash.into()
-                        }
-                    },
-                    data: vec![], // Never expose raw credential data over gRPC
-                    label: c.label,
-                    created_at: Some(convert::to_timestamp(c.created_at)),
-                    last_used_at: c.last_used_at.map(convert::to_timestamp),
-                    info,
-                })
-                .collect(),
+                .map(credential_to_proto)
+                .collect::<Result<_, _>>()?,
         }))
     }
 
@@ -1075,7 +1059,7 @@ impl IdentityService for IdentityServiceImpl {
         }
         let operation = context(&request);
         let req = request.into_inner();
-        let cred_id = parse_credential_id(&req.credential_id)?;
+        let cred_id = parse_credential_id(req.credential_id.as_ref())?;
         // A retry of a completed rename answers with the credential as that
         // rename left it and never writes its label over a later one.
         let command = KeyedCommand::by_profile::<keyed::UpdateCredential>(
@@ -1137,7 +1121,7 @@ impl IdentityService for IdentityServiceImpl {
         }
         let operation = context(&request)?;
         let req = request.into_inner();
-        let cred_id = parse_credential_id(&req.credential_id)?;
+        let cred_id = parse_credential_id(req.credential_id.as_ref())?;
 
         // A retry of a completed revocation answers as it did, not as a
         // credential not found.
@@ -1190,8 +1174,7 @@ impl IdentityService for IdentityServiceImpl {
         }
         let operation = context(&request);
         let req = request.into_inner();
-        let pid = convert::parse_profile_id(&req.profile_id)?;
-        caller.require_self_or_admin(pid)?;
+        let pid = target_profile(&caller, req.profile_id.as_ref())?;
         let operation = operation?;
 
         let principal_type = match req.r#type() {
@@ -1218,7 +1201,7 @@ impl IdentityService for IdentityServiceImpl {
                 self.storage
                     .get_profile(pid)
                     .await?
-                    .ok_or_else(|| profile_not_found(req.profile_id.clone()))?;
+                    .ok_or_else(|| profile_not_found(pid.to_string()))?;
 
                 let mut principal = sid_core::models::Principal::new(pid, principal_type, &value);
                 if let Some(email) = &email {
@@ -1274,7 +1257,7 @@ impl IdentityService for IdentityServiceImpl {
 
         // Its proof is shown only to the holder.
         Ok(Response::new(AddPrincipalResponse {
-            principal: convert::principal_to_proto(&stored),
+            principal: convert::principal_to_proto(&stored)?,
         }))
     }
 
@@ -1286,8 +1269,7 @@ impl IdentityService for IdentityServiceImpl {
     ) -> Result<Response<ListPrincipalsResponse>, Status> {
         let caller = self.caller(&request).await?;
         let req = request.into_inner();
-        let pid = convert::parse_profile_id(&req.profile_id)?;
-        caller.require_self_or_admin(pid)?;
+        let pid = target_profile(&caller, req.profile_id.as_ref())?;
 
         let principals = self
             .storage
@@ -1298,8 +1280,9 @@ impl IdentityService for IdentityServiceImpl {
         Ok(Response::new(ListPrincipalsResponse {
             principals: principals
                 .iter()
-                .filter_map(convert::principal_to_proto)
-                .collect(),
+                .map(convert::principal_to_proto)
+                .filter_map(Result::transpose)
+                .collect::<Result<_, _>>()?,
         }))
     }
 
@@ -1316,9 +1299,9 @@ impl IdentityService for IdentityServiceImpl {
         }
         let operation = context(&request)?;
         let req = request.into_inner();
-        let principal_id = uuid::Uuid::parse_str(&req.principal_id)
-            .map(sid_core::models::PrincipalId)
-            .map_err(|_| invalid_field("principal_id", "not a principal identifier"))?;
+        let principal_id = sid_core::models::PrincipalId(
+            convert::wire_id(req.principal_id.as_ref(), "principal_id")?.into_uuid(),
+        );
 
         // A retry of a completed removal answers as it did, not as a principal
         // not found, and never removes a binding made again since.
@@ -1396,8 +1379,7 @@ impl IdentityService for IdentityServiceImpl {
     ) -> Result<Response<ListSessionsResponse>, Status> {
         let caller = self.caller(&request).await?;
         let req = request.into_inner();
-        let pid = convert::parse_profile_id(&req.profile_id)?;
-        caller.require_self_or_admin(pid)?;
+        let pid = target_profile(&caller, req.profile_id.as_ref())?;
 
         let sessions = self
             .storage
@@ -1408,19 +1390,24 @@ impl IdentityService for IdentityServiceImpl {
         Ok(Response::new(ListSessionsResponse {
             sessions: sessions
                 .into_iter()
-                .map(|s| Session {
-                    id: s.id.to_string(),
-                    profile_id: s.profile_id.to_string(),
-                    client_id: s.client_id.unwrap_or_default(),
-                    device_id: s.device_id.map(|d| d.to_string()),
-                    ip_address: s.ip_address.map(|ip| ip.to_string()).unwrap_or_default(),
-                    user_agent: s.user_agent,
-                    created_at: Some(convert::to_timestamp(s.created_at)),
-                    expires_at: Some(convert::to_timestamp(s.expires_at)),
-                    last_activity_at: None,
-                    scopes: vec![],
+                .map(|s| {
+                    let device_id = match s.device_id {
+                        Some(id) => convert::stored_id::<DeviceId, _>(id)?,
+                        None => None,
+                    };
+                    Ok(Session {
+                        id: Some(s.id.into()),
+                        client_id: s.client_id.unwrap_or_default(),
+                        device_id,
+                        ip_address: s.ip_address.map(|ip| ip.to_string()).unwrap_or_default(),
+                        user_agent: s.user_agent,
+                        created_at: Some(convert::to_timestamp(s.created_at)),
+                        expires_at: Some(convert::to_timestamp(s.expires_at)),
+                        last_activity_at: None,
+                        scopes: vec![],
+                    })
                 })
-                .collect(),
+                .collect::<Result<_, Status>>()?,
         }))
     }
 
@@ -1436,8 +1423,7 @@ impl IdentityService for IdentityServiceImpl {
             return Err(maintenance());
         }
         let req = request.into_inner();
-        let session_id = SessionId::parse(&req.session_id)
-            .map_err(|_| invalid_field("session_id", "not a session identifier"))?;
+        let session_id: SessionId = convert::wire_id(req.session_id.as_ref(), "session_id")?;
 
         // Fetch the session first: only its owner or an administrator may end it.
         let session = self
@@ -1548,7 +1534,9 @@ impl IdentityService for IdentityServiceImpl {
         }
 
         let req = request.into_inner();
-        let profile_id = convert::parse_profile_id(&req.profile_id)?;
+        // Named even by its owner: revocation ends every session of the
+        // Profile, so it is never implied by the caller's context.
+        let profile_id = convert::wire_id(req.profile_id.as_ref(), "profile_id")?;
         caller.require_self_or_admin(profile_id)?;
         caller.require_interactive()?;
 
@@ -1624,7 +1612,6 @@ impl IdentityService for IdentityServiceImpl {
 
         let operation = operation?;
         let answer = |closure: &sid_core::models::ClosureRequest| RequestClosureResponse {
-            profile_id: closure.profile_id.to_string(),
             mode: req.mode,
             grace_period_end: closure.grace_period_end.map(convert::to_timestamp),
         };
@@ -1738,7 +1725,6 @@ impl IdentityService for IdentityServiceImpl {
         // CE only supports JSON.
         let format = sid_core::models::ExportFormat::Json;
         let answer = |job: &sid_core::models::ExportJob| PrepareExportResponse {
-            export_id: job.id.to_string(),
             estimated_ready: Some(convert::to_timestamp(job.created_at)),
         };
 
@@ -1779,7 +1765,13 @@ impl IdentityService for IdentityServiceImpl {
             Some(j) => Ok(Response::new(GetExportStatusResponse {
                 export_status: convert::export_status_to_proto(&j.status).into(),
                 size_bytes: j.size_bytes,
-                checksum_sha256: j.checksum_sha256,
+                // Stored hex-encoded; a value that does not decode is corruption.
+                checksum_sha256: j
+                    .checksum_sha256
+                    .as_deref()
+                    .map(hex::decode)
+                    .transpose()
+                    .map_err(|e| internal("stored export checksum", e))?,
                 ready_at: j.ready_at.map(convert::to_timestamp),
                 expires_at: j.expires_at.map(convert::to_timestamp),
             })),
@@ -1883,7 +1875,7 @@ impl IdentityService for IdentityServiceImpl {
         let caller = self.caller(&request).await?;
         let req = request.into_inner();
 
-        let profile_id = convert::parse_profile_id(&req.profile_id)?;
+        let profile_id = target_profile(&caller, req.profile_id.as_ref())?;
 
         // Only allow listing own devices.
         if profile_id != caller.profile_id {
@@ -1914,7 +1906,7 @@ impl IdentityService for IdentityServiceImpl {
         request: Request<GetDeviceRequest>,
     ) -> Result<Response<sid_proto::sid::v1::Device>, Status> {
         let caller_id = self.caller(&request).await?.profile_id;
-        let device_id = parse_device_id(&request.into_inner().device_id)?;
+        let device_id = parse_device_id(request.into_inner().device_id.as_ref())?;
         let device = self.owned_device(caller_id, device_id).await?;
         Ok(Response::new(convert::device_to_proto(&device)))
     }
@@ -1928,7 +1920,7 @@ impl IdentityService for IdentityServiceImpl {
         let caller_id = self.caller(&request).await?.profile_id;
         let operation = context(&request);
         let req = request.into_inner();
-        let device_id = parse_device_id(&req.device_id)?;
+        let device_id = parse_device_id(req.device_id.as_ref())?;
         let command = KeyedCommand::by_profile::<keyed::UpdateDevice>(caller_id, operation?, &req);
         let Some(name) = req.display_name.clone() else {
             // Nothing to write: the device as it is, recorded as this
@@ -1981,7 +1973,7 @@ impl IdentityService for IdentityServiceImpl {
         let caller_id = self.caller(&request).await?.profile_id;
         let operation = context(&request);
         let req = request.into_inner();
-        let device_id = parse_device_id(&req.device_id)?;
+        let device_id = parse_device_id(req.device_id.as_ref())?;
 
         // A retry of a completed removal answers as it did, not as a device
         // not found.
@@ -2012,7 +2004,7 @@ impl IdentityService for IdentityServiceImpl {
         request: Request<TrustDeviceRequest>,
     ) -> Result<Response<sid_proto::sid::v1::Device>, Status> {
         self.change_device_trust::<keyed::TrustDevice>(request, true, |r| {
-            parse_device_id(&r.device_id)
+            parse_device_id(r.device_id.as_ref())
         })
         .await
     }
@@ -2024,7 +2016,7 @@ impl IdentityService for IdentityServiceImpl {
         request: Request<RevokeDeviceTrustRequest>,
     ) -> Result<Response<sid_proto::sid::v1::Device>, Status> {
         self.change_device_trust::<keyed::RevokeDeviceTrust>(request, false, |r| {
-            parse_device_id(&r.device_id)
+            parse_device_id(r.device_id.as_ref())
         })
         .await
     }
@@ -2060,24 +2052,29 @@ impl IdentityService for IdentityServiceImpl {
 fn credential_response(
     cred: sid_core::models::Credential,
 ) -> Result<UpdateCredentialResponse, Status> {
-    let info = convert::credential_info(&cred)?;
     Ok(UpdateCredentialResponse {
-        credential: Some(Credential {
-            id: cred.id.0.to_string(),
-            profile_id: cred.profile_id.to_string(),
-            r#type: match cred.credential_type {
-                sid_core::models::CredentialType::Opaque => CredentialType::Opaque.into(),
-                sid_core::models::CredentialType::WebAuthn => CredentialType::Webauthn.into(),
-                sid_core::models::CredentialType::Totp => CredentialType::Totp.into(),
-                sid_core::models::CredentialType::Recovery => CredentialType::Recovery.into(),
-                sid_core::models::CredentialType::LegacyHash => CredentialType::LegacyHash.into(),
-            },
-            data: vec![],
-            label: cred.label,
-            created_at: Some(convert::to_timestamp(cred.created_at)),
-            last_used_at: cred.last_used_at.map(convert::to_timestamp),
-            info,
-        }),
+        credential: Some(credential_to_proto(cred)?),
+    })
+}
+
+/// `cred` as the wire carries it: never its secret material.
+#[allow(clippy::result_large_err)]
+fn credential_to_proto(cred: sid_core::models::Credential) -> Result<Credential, Status> {
+    let info = convert::credential_info(&cred)?;
+    Ok(Credential {
+        id: convert::stored_id::<sid_ids::CredentialId, _>(cred.id.0)?,
+        r#type: match cred.credential_type {
+            sid_core::models::CredentialType::Opaque => CredentialType::Opaque.into(),
+            sid_core::models::CredentialType::WebAuthn => CredentialType::Webauthn.into(),
+            sid_core::models::CredentialType::Totp => CredentialType::Totp.into(),
+            sid_core::models::CredentialType::Recovery => CredentialType::Recovery.into(),
+            sid_core::models::CredentialType::LegacyHash => CredentialType::LegacyHash.into(),
+        },
+        data: vec![],
+        label: cred.label,
+        created_at: Some(convert::to_timestamp(cred.created_at)),
+        last_used_at: cred.last_used_at.map(convert::to_timestamp),
+        info,
     })
 }
 

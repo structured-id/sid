@@ -131,7 +131,7 @@ async fn password_session_cannot_revoke_strong_factor() {
         .identity
         .revoke_credential(authed(
             RevokeCredentialRequest {
-                credential_id: passkey.id.0.to_string(),
+                credential_id: Some(common::wire_credential_id(passkey.id)),
             },
             &bearer,
         ))

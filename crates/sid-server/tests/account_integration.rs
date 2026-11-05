@@ -353,7 +353,7 @@ async fn the_account_api_admits_the_bffs_token_for_the_users_own_account() {
         .into_inner()
         .profile
         .unwrap();
-    assert_eq!(own.id, profile.id.to_string());
+    assert_eq!(own.id, Some(profile.id.into()));
 
     // No administration through the account client, whatever the user's role.
     let err = svc

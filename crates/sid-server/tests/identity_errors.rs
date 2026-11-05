@@ -46,6 +46,21 @@ async fn owner_and_stranger() -> (TestServices, Profile, String, String) {
     (svc, owner, owner_token, stranger_token)
 }
 
+/// `cred`'s id as a request names it.
+fn wire_credential(cred: &Credential) -> sid_ids_proto::CredentialId {
+    common::wire_credential_id(cred.id)
+}
+
+/// A TOTP credential stored for `profile`.
+async fn credential(svc: &TestServices, profile: ProfileId) -> Credential {
+    let cred = Credential::new(profile, CredentialType::Totp, vec![1, 2, 3], None);
+    svc.storage
+        .create_credential(&cred, AuditEntry::system("test", "setup").into())
+        .await
+        .unwrap();
+    cred
+}
+
 /// A device stored for `profile`, trusted as given.
 async fn device(svc: &TestServices, profile: ProfileId, trusted: bool) -> Device {
     let mut d = Device::new(profile, DeviceType::Desktop);
@@ -67,7 +82,7 @@ async fn test_foreign_device_is_device_not_found() {
         .identity
         .get_device(authed(
             GetDeviceRequest {
-                device_id: d.id.to_string(),
+                device_id: Some(d.id.into()),
             },
             &stranger,
         ))
@@ -93,7 +108,7 @@ async fn test_device_removal_is_audited_as_the_user() {
     svc.identity
         .remove_device(authed(
             RemoveDeviceRequest {
-                device_id: d.id.to_string(),
+                device_id: Some(d.id.into()),
             },
             &owner_token,
         ))
@@ -118,7 +133,7 @@ async fn test_trusted_device_limit_is_quota_exceeded() {
         .identity
         .trust_device(authed(
             TrustDeviceRequest {
-                device_id: extra.id.to_string(),
+                device_id: Some(extra.id.into()),
             },
             &owner_token,
         ))
@@ -137,16 +152,12 @@ async fn test_trusted_device_limit_is_quota_exceeded() {
 #[tokio::test]
 async fn test_foreign_credential_is_credential_not_found() {
     let (svc, owner, _, stranger) = owner_and_stranger().await;
-    let cred = Credential::new(owner.id, CredentialType::Totp, vec![1, 2, 3], None);
-    svc.storage
-        .create_credential(&cred, AuditEntry::system("test", "setup").into())
-        .await
-        .unwrap();
+    let cred = credential(&svc, owner.id).await;
     let err = svc
         .identity
         .update_credential(authed(
             UpdateCredentialRequest {
-                credential_id: cred.id.0.to_string(),
+                credential_id: Some(wire_credential(&cred)),
                 label: Some("mine now".to_string()),
             },
             &stranger,
@@ -155,6 +166,118 @@ async fn test_foreign_credential_is_credential_not_found() {
         .unwrap_err();
     assert_eq!(err.code(), Code::NotFound);
     assert_eq!(reason(&err), "CREDENTIAL_NOT_FOUND");
+}
+
+/// A self-service listing that names no Profile acts on the caller's own,
+/// resolved from its session: the client never sends its own ProfileId.
+#[tokio::test]
+async fn test_listing_without_a_profile_lists_the_callers_own() {
+    let (svc, owner, owner_token, stranger) = owner_and_stranger().await;
+    let own = credential(&svc, owner.id).await;
+    let listed = svc
+        .identity
+        .list_credentials(authed(
+            ListCredentialsRequest { profile_id: None },
+            &owner_token,
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(listed.credentials.len(), 1);
+    assert_eq!(listed.credentials[0].id, Some(wire_credential(&own)));
+
+    // Another caller's own listing never includes it.
+    let theirs = svc
+        .identity
+        .list_credentials(authed(
+            ListCredentialsRequest { profile_id: None },
+            &stranger,
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(theirs.credentials.is_empty());
+}
+
+/// Naming another Profile takes administrator authority; a user is refused
+/// before anything about that Profile is read.
+#[tokio::test]
+async fn test_naming_another_profile_takes_admin() {
+    let (svc, owner, _, stranger) = owner_and_stranger().await;
+    credential(&svc, owner.id).await;
+    let err = svc
+        .identity
+        .list_credentials(authed(
+            ListCredentialsRequest {
+                profile_id: Some(owner.id.into()),
+            },
+            &stranger,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::PermissionDenied);
+
+    let admin = issue_admin_token(&svc.jwt, ProfileId::generate());
+    let listed = svc
+        .identity
+        .list_credentials(authed(
+            ListCredentialsRequest {
+                profile_id: Some(owner.id.into()),
+            },
+            &admin,
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(listed.credentials.len(), 1);
+}
+
+/// A reference that is not a valid identifier of its kind is refused on its
+/// field before any lookup, never read as absent (the caller's own).
+#[tokio::test]
+async fn test_a_malformed_reference_is_refused_on_its_field() {
+    let (svc, _, owner_token, _) = owner_and_stranger().await;
+    let malformed = sid_ids_proto::ProfileId { value: vec![0; 3] };
+    let err = svc
+        .identity
+        .list_credentials(authed(
+            ListCredentialsRequest {
+                profile_id: Some(malformed),
+            },
+            &owner_token,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::InvalidArgument);
+    assert_eq!(
+        err.get_error_details()
+            .bad_request()
+            .unwrap()
+            .field_violations[0]
+            .field,
+        "profile_id"
+    );
+
+    // A required reference left out is refused on its field too.
+    let err = svc
+        .identity
+        .revoke_credential(authed(
+            RevokeCredentialRequest {
+                credential_id: None,
+            },
+            &owner_token,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::InvalidArgument);
+    assert_eq!(
+        err.get_error_details()
+            .bad_request()
+            .unwrap()
+            .field_violations[0]
+            .field,
+        "credential_id"
+    );
 }
 
 /// Regression: a failed read of the profile's passkeys answered "no passkey",
@@ -183,7 +306,7 @@ async fn test_unknown_revocation_reason_is_refused() {
         .identity
         .revoke_profile(authed(
             RevokeProfileRequest {
-                profile_id: owner.id.to_string(),
+                profile_id: Some(owner.id.into()),
                 reason: "because".to_string(),
             },
             &admin,
@@ -226,7 +349,11 @@ async fn test_list_profiles_pages_follow_the_token() {
             .await
             .unwrap()
             .into_inner();
-        seen.extend(page.profiles.into_iter().map(|p| p.id));
+        seen.extend(
+            page.profiles
+                .into_iter()
+                .map(|p| sid_ids_proto::required(p.id.as_ref()).unwrap()),
+        );
         if page.next_page_token.is_empty() {
             break;
         }

@@ -398,7 +398,10 @@ async fn test_route_outcomes() {
             .await
             .unwrap(),
     );
-    let work = claimed(ROUTE, serde_json::to_vec(&security_event()).unwrap());
+    // A Profile that could exist: only asking the service can resolve it.
+    let event = Event::new("sid-server", event_types::SECURITY_BRUTE_FORCE)
+        .with_subject(format!("profile/{}", sid_ids::ProfileId::generate()));
+    let work = claimed(ROUTE, serde_json::to_vec(&event).unwrap());
     assert!(
         matches!(unreachable.handle(&work).await, WorkOutcome::Retry(_)),
         "an unresolved recipient was not retried"

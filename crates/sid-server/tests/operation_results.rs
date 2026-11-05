@@ -220,7 +220,7 @@ async fn test_retired_period_leaves_no_effect_before_the_commit() {
         .identity
         .add_principal(in_period(
             AddPrincipalRequest {
-                profile_id: profile.id.to_string(),
+                profile_id: None,
                 r#type: PrincipalType::Email.into(),
                 value: "fresh@sid.example.com".into(),
             },
@@ -597,7 +597,7 @@ async fn test_credential_rename_retry_keeps_a_later_label() {
     let rename = |label: &str, key: &str| {
         keyed(
             UpdateCredentialRequest {
-                credential_id: cred.id.0.to_string(),
+                credential_id: Some(common::wire_credential_id(cred.id)),
                 label: Some(label.to_string()),
             },
             &token,
@@ -722,13 +722,13 @@ async fn test_device_trust_retry_keeps_a_later_distrust() {
         .await
         .unwrap();
     let token = common::issue_token(&svc.jwt, &profile, &["openid".to_string()]);
-    let id = device.id.to_string();
+    let id: sid_ids_proto::DeviceId = device.id.into();
 
     let first = svc
         .identity
         .trust_device(keyed(
             TrustDeviceRequest {
-                device_id: id.clone(),
+                device_id: Some(id.clone()),
             },
             &token,
             Some("op-trust"),
@@ -739,7 +739,7 @@ async fn test_device_trust_retry_keeps_a_later_distrust() {
     svc.identity
         .revoke_device_trust(keyed(
             RevokeDeviceTrustRequest {
-                device_id: id.clone(),
+                device_id: Some(id.clone()),
             },
             &token,
             Some("op-distrust"),
@@ -749,7 +749,9 @@ async fn test_device_trust_retry_keeps_a_later_distrust() {
     let retry = svc
         .identity
         .trust_device(keyed(
-            TrustDeviceRequest { device_id: id },
+            TrustDeviceRequest {
+                device_id: Some(id),
+            },
             &token,
             Some("op-trust"),
         ))
@@ -782,7 +784,7 @@ async fn test_principal_removal_retry_answers_as_the_removal() {
         .identity
         .add_principal(keyed(
             AddPrincipalRequest {
-                profile_id: profile.id.to_string(),
+                profile_id: None,
                 r#type: PrincipalType::Username as i32,
                 value: "unbind_retry_handle".to_string(),
             },

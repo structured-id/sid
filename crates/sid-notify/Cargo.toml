@@ -81,6 +81,9 @@ tonic-reflection = { workspace = true }
 sid-proto = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
+# The Profile references the identity service takes and answers.
+sid-ids = { workspace = true }
+sid-ids-proto = { workspace = true }
 
 # PostgreSQL (optional — for template persistence)
 sqlx = { workspace = true, features = ["postgres"] }

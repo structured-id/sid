@@ -462,11 +462,10 @@ async fn current_profile(replica: &str, browser: &Browser, csrf: bool) -> (Optio
     .await;
     (
         message.map(|m| {
-            GetProfileResponse::decode(&m[..])
+            let profile = GetProfileResponse::decode(&m[..]).unwrap().profile.unwrap();
+            sid_ids_proto::required(profile.id.as_ref())
                 .unwrap()
-                .profile
-                .unwrap()
-                .id
+                .to_string()
         }),
         status,
     )
