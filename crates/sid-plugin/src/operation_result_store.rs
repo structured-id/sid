@@ -7,8 +7,9 @@ use chrono::{DateTime, Duration, Utc};
 use sid_core::Result;
 use sid_core::models::{
     IssuedOperationPeriod, MutationContext, OperationKey, OperationPeriod, OperationPeriodPolicy,
-    OperationPeriodState, OperationRecord,
+    OperationPeriodState, OperationRecord, OperationResourceBinding,
 };
+use uuid::Uuid;
 
 /// A keyed command's completion is admitted only under a period this store
 /// issued and has not retired; a commit under any other refuses with
@@ -92,4 +93,25 @@ pub trait OperationResultStore: Send + Sync {
     /// Returns `false`, writing nothing, when its key is already completed in
     /// its namespace.
     async fn import_operation_result(&self, record: &OperationRecord) -> Result<bool>;
+
+    /// The resource identifier of the keyed creation `proposal` names:
+    /// `proposal.resource` when this call binds the key first, else the one an
+    /// earlier attempt of the same command bound. Concurrent attempts resolve
+    /// one binding. The key bound or completed for another method, other
+    /// inputs or another period is `Error::OperationKeyReused`, binding
+    /// nothing; a key whose completion's retention ended takes a new binding.
+    /// A keyed command's period is admitted first, like its commit. The
+    /// binding is durable when this returns, before the creation's first
+    /// effect outside this store.
+    async fn bind_operation_resource(&self, proposal: &OperationResourceBinding) -> Result<Uuid>;
+
+    /// Every binding still held, to carry to another store with the
+    /// completions: a creation resumed after a migration must find its
+    /// identifier.
+    async fn export_operation_resources(&self) -> Result<Vec<OperationResourceBinding>>;
+
+    /// Store an exported binding. Returns `false`, writing nothing, when its
+    /// key is already bound in its namespace or its period is not admitted
+    /// here.
+    async fn import_operation_resource(&self, binding: &OperationResourceBinding) -> Result<bool>;
 }

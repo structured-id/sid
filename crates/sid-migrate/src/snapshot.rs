@@ -12,9 +12,10 @@ use sid_core::models::{
     BrandingConfig, CedarPolicy, ClosureRequest, Credential, Device, DeviceAuthorizationCode,
     ExportJob, Group, GroupMember, ImpersonationGrant, InitialAccessToken, MachineUser,
     MachineUserCredential, MagicLinkSession, OAuth2Client, OperationPeriodState, OperationRecord,
-    OutboundDlqEntry, PersonalAccessToken, Principal, Profile, ProfileGrant, ProfileMetadata,
-    Project, RefreshToken, Role, RoleAssignment, ScimOutboundRecord, ScimOutboundTarget,
-    ServiceBinding, Session, SodConflictRule, UpstreamIdentity, UpstreamProvider, WorkSnapshot,
+    OperationResourceBinding, OutboundDlqEntry, PersonalAccessToken, Principal, Profile,
+    ProfileGrant, ProfileMetadata, Project, RefreshToken, Role, RoleAssignment, ScimOutboundRecord,
+    ScimOutboundTarget, ServiceBinding, Session, SodConflictRule, UpstreamIdentity,
+    UpstreamProvider, WorkSnapshot,
 };
 
 /// Data snapshot from a SID instance.
@@ -170,6 +171,10 @@ pub struct Snapshot {
     /// the move resolves to its recorded result.
     pub operation_results: Vec<OperationRecord>,
 
+    /// The identifiers keyed creations bound, so a creation resumed after the
+    /// move finds the identifier it began under.
+    pub operation_resources: Vec<OperationResourceBinding>,
+
     /// Magic link sessions.
     pub magic_link_sessions: Vec<MagicLinkSession>,
 
@@ -216,7 +221,7 @@ pub struct SnapshotMetadata {
 
 /// The snapshot format this build writes and reads. A snapshot of another
 /// format is refused, never converted: its contents are not this format's.
-pub const FORMAT_VERSION: u32 = 6;
+pub const FORMAT_VERSION: u32 = 7;
 
 impl Snapshot {
     /// `json` as a snapshot of [`FORMAT_VERSION`]; another format is refused
@@ -295,6 +300,7 @@ impl Snapshot {
                 active: Vec::new(),
             },
             operation_results: Vec::new(),
+            operation_resources: Vec::new(),
             magic_link_sessions: Vec::new(),
             scim_outbound_targets: Vec::new(),
             scim_outbound_records: Vec::new(),
@@ -349,6 +355,7 @@ impl Snapshot {
         count += self.durable_work.len() as u64;
         count += self.operation_periods.active.len() as u64;
         count += self.operation_results.len() as u64;
+        count += self.operation_resources.len() as u64;
         count += self.magic_link_sessions.len() as u64;
         count += self.scim_outbound_targets.len() as u64;
         count += self.scim_outbound_records.len() as u64;

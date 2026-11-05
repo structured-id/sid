@@ -27,6 +27,11 @@ pub fn internal(operation: &'static str, cause: impl std::fmt::Display) -> Statu
 pub fn storage_failure(cause: crate::Error) -> Status {
     match cause {
         crate::Error::OperationPeriodRefused(refusal) => operation_period_refused(refusal),
+        crate::Error::OperationKeyReused(_) => ApiError::new(
+            ErrorReason::OperationKeyConflict,
+            "the operation key already names another command",
+        )
+        .into(),
         cause => internal("storage", cause),
     }
 }

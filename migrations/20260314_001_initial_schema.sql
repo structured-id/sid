@@ -440,6 +440,19 @@ CREATE TABLE operation_results (
     CONSTRAINT operation_results_period_fkey FOREIGN KEY (period) REFERENCES operation_periods(period)
 );
 
+CREATE TABLE operation_resources (
+    namespace text NOT NULL,
+    op_key text NOT NULL,
+    method text NOT NULL,
+    fingerprint bytea NOT NULL,
+    period bigint,
+    resource uuid NOT NULL,
+    bound_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT operation_resources_pkey PRIMARY KEY (namespace, op_key)
+);
+
+CREATE INDEX operation_resources_period ON operation_resources USING btree (period) WHERE (period IS NOT NULL);
+
 CREATE TABLE organizations (
     id uuid NOT NULL,
     org_type text NOT NULL,

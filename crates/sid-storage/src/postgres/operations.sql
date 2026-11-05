@@ -38,3 +38,20 @@ CREATE TABLE IF NOT EXISTS operation_results (
 
 CREATE INDEX IF NOT EXISTS operation_results_retain_until
     ON operation_results USING btree (retain_until) WHERE (retain_until IS NOT NULL);
+
+-- The identifier each keyed creation allocated, bound to its command. No key
+-- to operation_periods: a binding of a creation that never completed outlives
+-- the retirement of its period, kept to reconcile what it began.
+CREATE TABLE IF NOT EXISTS operation_resources (
+    namespace text NOT NULL,
+    op_key text NOT NULL,
+    method text NOT NULL,
+    fingerprint bytea NOT NULL,
+    period bigint,
+    resource uuid NOT NULL,
+    bound_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT operation_resources_pkey PRIMARY KEY (namespace, op_key)
+);
+
+CREATE INDEX IF NOT EXISTS operation_resources_period
+    ON operation_resources USING btree (period) WHERE (period IS NOT NULL);

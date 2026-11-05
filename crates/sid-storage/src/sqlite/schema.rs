@@ -743,6 +743,23 @@ CREATE TABLE IF NOT EXISTS operation_results (
 CREATE INDEX IF NOT EXISTS operation_results_retain_until
     ON operation_results (retain_until_ms) WHERE retain_until_ms IS NOT NULL;
 
+-- The identifier each keyed creation allocated, bound to its command. Not a
+-- reference to operation_periods: a binding of a creation that never
+-- completed outlives the retirement of its period, kept to reconcile what it
+-- began.
+CREATE TABLE IF NOT EXISTS operation_resources (
+    namespace   TEXT NOT NULL,
+    op_key      TEXT NOT NULL,
+    method      TEXT NOT NULL,
+    fingerprint BLOB NOT NULL,
+    period      INTEGER,
+    resource    BLOB NOT NULL,
+    bound_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (namespace, op_key)
+);
+CREATE INDEX IF NOT EXISTS operation_resources_period
+    ON operation_resources (period) WHERE period IS NOT NULL;
+
 -- Short-lived state a ceremony step leaves for the next, and single-use
 -- admissions; live while expires_at_ms (Unix milliseconds) is ahead.
 CREATE TABLE IF NOT EXISTS ceremony_states (

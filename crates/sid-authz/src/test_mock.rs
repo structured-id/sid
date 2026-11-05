@@ -353,6 +353,23 @@ impl sid_plugin::OperationResultStore for MockStorage {
     async fn import_operation_result(&self, _: &OperationRecord) -> Result<bool> {
         unimplemented!()
     }
+    async fn bind_operation_resource(
+        &self,
+        _: &sid_core::models::OperationResourceBinding,
+    ) -> Result<uuid::Uuid> {
+        unimplemented!()
+    }
+    async fn export_operation_resources(
+        &self,
+    ) -> Result<Vec<sid_core::models::OperationResourceBinding>> {
+        unimplemented!()
+    }
+    async fn import_operation_resource(
+        &self,
+        _: &sid_core::models::OperationResourceBinding,
+    ) -> Result<bool> {
+        unimplemented!()
+    }
 }
 
 #[async_trait::async_trait]

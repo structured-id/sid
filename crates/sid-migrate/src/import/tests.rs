@@ -1859,6 +1859,53 @@ fn client_for(app: &sid_core::models::Application) -> sid_core::models::OAuth2Cl
     }
 }
 
+/// A keyed creation begun before a migration resumes under the identifier it
+/// bound: the snapshot carries the binding, a repeated import adds nothing,
+/// and the target resolves the same identifier for the command.
+#[tokio::test]
+async fn operation_resource_bindings_survive_migration() {
+    use sid_core::models::{OperationKey, OperationResourceBinding};
+
+    let source = SqliteBackend::new_in_memory().await.unwrap();
+    let binding = OperationResourceBinding {
+        namespace: "profile:p".into(),
+        key: OperationKey::parse("create-org-1").unwrap(),
+        method: "sid.v1.OrgService/CreateOrg".into(),
+        fingerprint: sid_core::models::operation::fingerprint(b"inputs"),
+        period: None,
+        resource: uuid::Uuid::now_v7(),
+    };
+    source.bind_operation_resource(&binding).await.unwrap();
+
+    let snapshot = export(&source).await.unwrap();
+    assert_eq!(snapshot.operation_resources, vec![binding.clone()]);
+
+    let target = SqliteBackend::new_in_memory().await.unwrap();
+    assert_eq!(
+        import(&target, &snapshot)
+            .await
+            .unwrap()
+            .operation_resources,
+        1
+    );
+    assert_eq!(
+        import(&target, &snapshot)
+            .await
+            .unwrap()
+            .operation_resources,
+        0,
+        "a repeated import adds nothing"
+    );
+    let resumed = OperationResourceBinding {
+        resource: uuid::Uuid::now_v7(),
+        ..binding.clone()
+    };
+    assert_eq!(
+        target.bind_operation_resource(&resumed).await.unwrap(),
+        binding.resource
+    );
+}
+
 /// A keyed command completed before a migration is still completed after it:
 /// the retry finds the recorded result and executes nothing on the target.
 #[tokio::test]

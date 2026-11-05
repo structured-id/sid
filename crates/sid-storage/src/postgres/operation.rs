@@ -7,11 +7,12 @@ use chrono::{DateTime, Duration, Utc};
 use sid_core::models::{
     IssuedOperationPeriod, MutationContext, OperationCompletion, OperationKey, OperationPeriod,
     OperationPeriodPolicy, OperationPeriodRecord, OperationPeriodRefusal, OperationPeriodState,
-    OperationRecord,
+    OperationRecord, OperationResourceBinding,
 };
 use sid_core::{Error as SidError, Result as SidResult};
 use sid_plugin::OperationResultStore;
 use sqlx::PgPool;
+use uuid::Uuid;
 
 use super::PostgresBackend;
 
@@ -67,10 +68,11 @@ impl PgOperationStore {
 
 /// Record `operation` in `tx`. When another transaction already committed
 /// the key, this one must commit nothing: `OperationCompleted`; a completion
-/// past its retention no longer holds the key and is replaced. A concurrent
-/// transaction holding the same key makes this insert wait for its outcome.
-/// A keyed command's period is admitted first: its row is held shared until
-/// the commit, so a retirement waits for this transaction or refuses it.
+/// past its retention no longer holds the key and is consumed with its
+/// binding. A key a creation bound completes only that creation's command:
+/// another is refused as `OperationKeyReused`. A keyed command's period is
+/// admitted first: its row is held shared until the commit, so a retirement
+/// waits for this transaction or refuses it.
 pub(super) async fn record_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     operation: &OperationCompletion,
@@ -79,15 +81,27 @@ pub(super) async fn record_in_tx(
     if let Some(period) = period {
         admit(tx, period, true).await?;
     }
+    lock_key(tx, &operation.namespace, &operation.key).await?;
+    consume_expired(tx, &operation.namespace, &operation.key).await?;
+    let held: Option<(String, Vec<u8>, Option<i64>)> = sqlx::query_as(
+        "SELECT method, fingerprint, period FROM operation_resources
+         WHERE namespace = $1 AND op_key = $2",
+    )
+    .bind(&operation.namespace)
+    .bind(operation.key.as_str())
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|e| SidError::Storage(format!("operation resource: {e}")))?;
+    if let Some((method, fingerprint, held_in)) = held
+        && (method != operation.method || fingerprint != operation.fingerprint || held_in != period)
+    {
+        return Err(SidError::OperationKeyReused(operation.key.as_str().into()));
+    }
     let inserted = sqlx::query(
         "INSERT INTO operation_results
              (namespace, op_key, method, fingerprint, result, period, retain_until)
          VALUES ($1, $2, $3, $4, $5, $6, $7)
-         ON CONFLICT (namespace, op_key) DO UPDATE SET
-             method = EXCLUDED.method, fingerprint = EXCLUDED.fingerprint,
-             result = EXCLUDED.result, completed_at = NOW(),
-             period = EXCLUDED.period, retain_until = EXCLUDED.retain_until
-         WHERE operation_results.retain_until <= NOW()",
+         ON CONFLICT (namespace, op_key) DO NOTHING",
     )
     .bind(&operation.namespace)
     .bind(operation.key.as_str())
@@ -103,6 +117,49 @@ pub(super) async fn record_in_tx(
     if inserted == 0 {
         return Err(SidError::OperationCompleted(operation.key.as_str().into()));
     }
+    Ok(())
+}
+
+/// Serialize the transactions that decide who holds `key` in `namespace`: a
+/// creation's binding and a command's completion each check the other's row
+/// before writing their own, so two of them on one key must not interleave.
+/// The lock ends with the transaction; a hash collision only serializes two
+/// unrelated keys.
+async fn lock_key(
+    conn: &mut sqlx::PgConnection,
+    namespace: &str,
+    key: &OperationKey,
+) -> SidResult<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1 || chr(31) || $2, 0))")
+        .bind(namespace)
+        .bind(key.as_str())
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| SidError::Storage(format!("operation key lock: {e}")))?;
+    Ok(())
+}
+
+/// Release `key` in `namespace` when its completion's retention ended: the
+/// expired completion and its binding are deleted, so whatever is written
+/// next stands for every later attempt.
+async fn consume_expired(
+    conn: &mut sqlx::PgConnection,
+    namespace: &str,
+    key: &OperationKey,
+) -> SidResult<()> {
+    sqlx::query(
+        "WITH gone AS (
+             DELETE FROM operation_results
+             WHERE namespace = $1 AND op_key = $2 AND retain_until <= NOW()
+             RETURNING namespace, op_key)
+         DELETE FROM operation_resources r USING gone g
+         WHERE r.namespace = g.namespace AND r.op_key = g.op_key",
+    )
+    .bind(namespace)
+    .bind(key.as_str())
+    .execute(&mut *conn)
+    .await
+    .map_err(|e| SidError::Storage(format!("operation resource: {e}")))?;
     Ok(())
 }
 
@@ -314,6 +371,17 @@ async fn retire(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, periods: &[i64])
         .execute(&mut **tx)
         .await
         .map_err(|e| SidError::Storage(format!("operation periods: {e}")))?;
+    // A completed creation's binding goes with its completion; one that never
+    // completed is kept to reconcile what it began.
+    sqlx::query(
+        "DELETE FROM operation_resources r WHERE r.period = ANY($1) AND EXISTS (
+             SELECT 1 FROM operation_results o
+             WHERE o.namespace = r.namespace AND o.op_key = r.op_key)",
+    )
+    .bind(periods)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| SidError::Storage(format!("retire operation resources: {e}")))?;
     sqlx::query("DELETE FROM operation_results WHERE period = ANY($1)")
         .bind(periods)
         .execute(&mut **tx)
@@ -524,26 +592,196 @@ async fn purge(
     method: &str,
     before: DateTime<Utc>,
 ) -> SidResult<u64> {
-    sqlx::query(
-        "DELETE FROM operation_results
-         WHERE namespace = $1 AND method = $2 AND completed_at < $3",
+    // The bindings of the dropped completions go in the same statement.
+    let dropped: i64 = sqlx::query_scalar(
+        "WITH gone AS (
+             DELETE FROM operation_results
+             WHERE namespace = $1 AND method = $2 AND completed_at < $3
+             RETURNING namespace, op_key),
+         freed AS (
+             DELETE FROM operation_resources r USING gone g
+             WHERE r.namespace = g.namespace AND r.op_key = g.op_key)
+         SELECT count(*) FROM gone",
     )
     .bind(namespace)
     .bind(method)
     .bind(before)
-    .execute(pool)
+    .fetch_one(pool)
     .await
-    .map(|done| done.rows_affected())
-    .map_err(|e| SidError::Storage(format!("purge operation results: {e}")))
+    .map_err(|e| SidError::Storage(format!("purge operation results: {e}")))?;
+    Ok(dropped as u64)
 }
 
 async fn purge_expired(pool: &PgPool, now: DateTime<Utc>) -> SidResult<u64> {
-    sqlx::query("DELETE FROM operation_results WHERE retain_until <= $1")
-        .bind(now)
-        .execute(pool)
+    let dropped: i64 = sqlx::query_scalar(
+        "WITH gone AS (
+             DELETE FROM operation_results WHERE retain_until <= $1
+             RETURNING namespace, op_key),
+         freed AS (
+             DELETE FROM operation_resources r USING gone g
+             WHERE r.namespace = g.namespace AND r.op_key = g.op_key)
+         SELECT count(*) FROM gone",
+    )
+    .bind(now)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| SidError::Storage(format!("purge expired operation results: {e}")))?;
+    Ok(dropped as u64)
+}
+
+/// method, fingerprint, period, resource
+type BindingRow = (String, Vec<u8>, Option<i64>, Uuid);
+
+/// The binding `row` holds for `namespace`/`key`.
+fn binding_of(
+    namespace: String,
+    key: OperationKey,
+    (method, fingerprint, period, resource): BindingRow,
+) -> SidResult<OperationResourceBinding> {
+    Ok(OperationResourceBinding {
+        namespace,
+        key,
+        method,
+        fingerprint,
+        period: period.map(period_of).transpose()?,
+        resource,
+    })
+}
+
+async fn bind(pool: &PgPool, proposal: &OperationResourceBinding) -> SidResult<Uuid> {
+    let reused = || SidError::OperationKeyReused(proposal.key.as_str().into());
+    let mut tx = pool
+        .begin()
         .await
-        .map(|done| done.rows_affected())
-        .map_err(|e| SidError::Storage(format!("purge expired operation results: {e}")))
+        .map_err(|e| SidError::Storage(format!("begin: {e}")))?;
+    let period = proposal.period.map(column).transpose()?;
+    if let Some(period) = period {
+        admit(&mut tx, period, true).await?;
+    }
+    lock_key(&mut tx, &proposal.namespace, &proposal.key).await?;
+    // A key completed for another command binds nothing.
+    let completed: Option<(String, Vec<u8>, Option<i64>)> = sqlx::query_as(
+        "SELECT method, fingerprint, period FROM operation_results
+         WHERE namespace = $1 AND op_key = $2
+           AND (retain_until IS NULL OR retain_until > NOW())",
+    )
+    .bind(&proposal.namespace)
+    .bind(proposal.key.as_str())
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| SidError::Storage(format!("operation result: {e}")))?;
+    if let Some((method, fingerprint, done_in)) = completed
+        && (method != proposal.method || fingerprint != proposal.fingerprint || done_in != period)
+    {
+        return Err(reused());
+    }
+    // A key whose completion's retention ended is free again.
+    consume_expired(&mut tx, &proposal.namespace, &proposal.key).await?;
+    // The first attempt binds; the key's lock orders concurrent attempts.
+    let bound: Option<Uuid> = sqlx::query_scalar(
+        "INSERT INTO operation_resources
+             (namespace, op_key, method, fingerprint, period, resource)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (namespace, op_key) DO NOTHING
+         RETURNING resource",
+    )
+    .bind(&proposal.namespace)
+    .bind(proposal.key.as_str())
+    .bind(&proposal.method)
+    .bind(&proposal.fingerprint)
+    .bind(period)
+    .bind(proposal.resource)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| SidError::Storage(format!("operation resource: {e}")))?;
+    let resource = match bound {
+        Some(resource) => resource,
+        None => {
+            let row: BindingRow = sqlx::query_as(
+                "SELECT method, fingerprint, period, resource FROM operation_resources
+                 WHERE namespace = $1 AND op_key = $2",
+            )
+            .bind(&proposal.namespace)
+            .bind(proposal.key.as_str())
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| SidError::Storage(format!("operation resource: {e}")))?;
+            let held = binding_of(proposal.namespace.clone(), proposal.key.clone(), row)?;
+            if !held.same_command(proposal) {
+                return Err(reused());
+            }
+            held.resource
+        }
+    };
+    tx.commit()
+        .await
+        .map_err(|e| SidError::Storage(format!("commit: {e}")))?;
+    Ok(resource)
+}
+
+/// namespace, op_key, then a [`BindingRow`]
+type FullBindingRow = (String, String, String, Vec<u8>, Option<i64>, Uuid);
+
+async fn export_resources(pool: &PgPool) -> SidResult<Vec<OperationResourceBinding>> {
+    // A binding whose completion expired holds a key already released: it
+    // stays here until the purge, and is not carried elsewhere.
+    let rows: Vec<FullBindingRow> = sqlx::query_as(
+        "SELECT namespace, op_key, method, fingerprint, period, resource
+         FROM operation_resources r
+         WHERE NOT EXISTS (
+             SELECT 1 FROM operation_results o
+             WHERE o.namespace = r.namespace AND o.op_key = r.op_key
+               AND o.retain_until <= NOW())
+         ORDER BY bound_at, namespace, op_key",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| SidError::Storage(format!("operation resources: {e}")))?;
+    rows.into_iter()
+        .map(|(namespace, key, method, fingerprint, period, resource)| {
+            let key = OperationKey::parse(&key)
+                .map_err(|e| SidError::Storage(format!("column op_key: {e}")))?;
+            binding_of(namespace, key, (method, fingerprint, period, resource))
+        })
+        .collect()
+}
+
+async fn import_resource(pool: &PgPool, binding: &OperationResourceBinding) -> SidResult<bool> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| SidError::Storage(format!("begin: {e}")))?;
+    // A binding under a retired period is an unfinished creation's, kept to
+    // reconcile it: it is carried and holds its key, though nothing runs
+    // under that period any more. One under a period never issued here is
+    // not taken.
+    if let Some(period) = binding.period {
+        match admit(&mut tx, column(period)?, true).await {
+            Ok(()) | Err(SidError::OperationPeriodRefused(OperationPeriodRefusal::Retired)) => {}
+            Err(SidError::OperationPeriodRefused(_)) => return Ok(false),
+            Err(e) => return Err(e),
+        }
+    }
+    let inserted = sqlx::query(
+        "INSERT INTO operation_resources
+             (namespace, op_key, method, fingerprint, period, resource)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (namespace, op_key) DO NOTHING",
+    )
+    .bind(&binding.namespace)
+    .bind(binding.key.as_str())
+    .bind(&binding.method)
+    .bind(&binding.fingerprint)
+    .bind(binding.period.map(column).transpose()?)
+    .bind(binding.resource)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| SidError::Storage(format!("operation resource import: {e}")))?
+    .rows_affected();
+    tx.commit()
+        .await
+        .map_err(|e| SidError::Storage(format!("commit: {e}")))?;
+    Ok(inserted == 1)
 }
 
 #[async_trait]
@@ -623,6 +861,24 @@ impl OperationResultStore for PgOperationStore {
     async fn import_operation_result(&self, record: &OperationRecord) -> SidResult<bool> {
         import(&self.pool, record).await
     }
+
+    async fn bind_operation_resource(
+        &self,
+        proposal: &OperationResourceBinding,
+    ) -> SidResult<Uuid> {
+        bind(&self.pool, proposal).await
+    }
+
+    async fn export_operation_resources(&self) -> SidResult<Vec<OperationResourceBinding>> {
+        export_resources(&self.pool).await
+    }
+
+    async fn import_operation_resource(
+        &self,
+        binding: &OperationResourceBinding,
+    ) -> SidResult<bool> {
+        import_resource(&self.pool, binding).await
+    }
 }
 
 #[async_trait]
@@ -700,5 +956,23 @@ impl OperationResultStore for PostgresBackend {
 
     async fn import_operation_result(&self, record: &OperationRecord) -> SidResult<bool> {
         import(&self.pool, record).await
+    }
+
+    async fn bind_operation_resource(
+        &self,
+        proposal: &OperationResourceBinding,
+    ) -> SidResult<Uuid> {
+        bind(&self.pool, proposal).await
+    }
+
+    async fn export_operation_resources(&self) -> SidResult<Vec<OperationResourceBinding>> {
+        export_resources(&self.pool).await
+    }
+
+    async fn import_operation_resource(
+        &self,
+        binding: &OperationResourceBinding,
+    ) -> SidResult<bool> {
+        import_resource(&self.pool, binding).await
     }
 }

@@ -45,6 +45,18 @@ fn storage_failure_answers_a_refused_period() {
     );
 }
 
+/// A creation whose key names another command is the caller's conflict, not
+/// an internal failure.
+#[test]
+fn storage_failure_answers_a_reused_key() {
+    let reused = storage_failure(crate::Error::OperationKeyReused("k".into()));
+    assert_eq!(reused.code(), Code::AlreadyExists);
+    assert_eq!(
+        reused.get_error_details().error_info().unwrap().reason,
+        "OPERATION_KEY_CONFLICT"
+    );
+}
+
 /// Field refusals name the field in BadRequest, not the submitted value.
 #[test]
 fn field_refusals_carry_bad_request() {

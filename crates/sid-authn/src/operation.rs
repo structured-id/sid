@@ -109,12 +109,44 @@ impl KeyedCommand {
         }
     }
 
-    /// The identifier of what this command creates, the same for every
-    /// attempt of it: a creation committed in several steps (a tenant schema
-    /// beside its record) resumes under it after a lost reply instead of
-    /// creating a second one. A name-based UUID of the command (RFC 9562
+    /// The identifier of the resource this command creates, allocated in its
+    /// domain format (UUIDv7) and bound to the command in the owning store,
+    /// the same for every attempt of it: a creation committed in several
+    /// steps (a tenant schema beside its record) resumes under it after a lost
+    /// reply instead of creating a second one. The binding is durable before
+    /// the caller's first effect outside `storage`; it proves neither that the
+    /// creation finished nor who executes it. The key bound or completed for
+    /// another call is [`OperationError::KeyConflict`].
+    pub async fn resource_id(
+        &self,
+        storage: &(impl OperationResultStore + ?Sized),
+    ) -> Result<uuid::Uuid, OperationError> {
+        let proposal = sid_core::models::OperationResourceBinding {
+            namespace: self.namespace.clone(),
+            key: self.key.clone(),
+            method: self.method.to_string(),
+            fingerprint: sid_core::models::operation::fingerprint(&self.inputs),
+            period: self.period,
+            resource: uuid::Uuid::now_v7(),
+        };
+        storage
+            .bind_operation_resource(&proposal)
+            .await
+            .map_err(|e| match e {
+                sid_core::Error::OperationKeyReused(_) => OperationError::KeyConflict,
+                sid_core::Error::OperationPeriodRefused(refusal) => {
+                    OperationError::PeriodRefused(refusal)
+                }
+                e => OperationError::Store(e),
+            })
+    }
+
+    /// A correlation key of this command, the same for every attempt of it,
+    /// for records the command names internally (an issuance it asks another
+    /// component for). Never the identifier of a resource it creates, which
+    /// is [`Self::resource_id`]. A name-based UUID of the command (RFC 9562
     /// 5.5), so it reveals neither the caller nor the key.
-    pub fn created_id(&self) -> uuid::Uuid {
+    pub fn command_id(&self) -> uuid::Uuid {
         /// The UUID namespace of keyed command names.
         const COMMANDS: uuid::Uuid = uuid::uuid!("0192f3a4-7c1e-7b2a-9d4e-6b1f0c2d3e4f");
         let mut name = Vec::new();

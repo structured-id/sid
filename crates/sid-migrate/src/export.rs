@@ -314,6 +314,7 @@ pub async fn export_snapshot(
     // executing again, and a retired period stays retired.
     snapshot.operation_periods = backend.export_operation_periods().await?;
     snapshot.operation_results = backend.export_operation_results().await?;
+    snapshot.operation_resources = backend.export_operation_resources().await?;
 
     // 6. Audit log (optional)
     if include_audit {

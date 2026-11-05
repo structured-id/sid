@@ -119,6 +119,8 @@ pub struct MockStorageInner {
     work: HashMap<WorkId, StoredWork>,
     /// Completions of keyed commands by (namespace, key).
     operations: HashMap<(String, String), OperationRecord>,
+    /// The identifiers keyed creations bound, by (namespace, key).
+    operation_resources: HashMap<(String, String), sid_core::models::OperationResourceBinding>,
     /// The periods keyed commands are admitted under, by number.
     operation_periods: std::collections::BTreeMap<u64, sid_core::models::OperationPeriodRecord>,
     /// The last period issued.
@@ -1844,6 +1846,82 @@ impl sid_plugin::OperationResultStore for MockStorage {
             return Ok(false);
         }
         inner.operations.insert(slot, record.clone());
+        Ok(true)
+    }
+    async fn bind_operation_resource(
+        &self,
+        proposal: &sid_core::models::OperationResourceBinding,
+    ) -> SidResult<uuid::Uuid> {
+        let slot = (
+            proposal.namespace.clone(),
+            proposal.key.as_str().to_string(),
+        );
+        let reused = || sid_core::Error::OperationKeyReused(proposal.key.as_str().into());
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(period) = proposal.period {
+            inner.admit_operation_period(period)?;
+        }
+        let now = chrono::Utc::now();
+        match inner.operations.get(&slot) {
+            Some(r) if r.completion.retain_until.is_some_and(|until| until <= now) => {
+                inner.operations.remove(&slot);
+                inner.operation_resources.remove(&slot);
+            }
+            Some(r)
+                if r.completion.method != proposal.method
+                    || r.completion.fingerprint != proposal.fingerprint
+                    || r.completion.period != proposal.period =>
+            {
+                return Err(reused());
+            }
+            _ => {}
+        }
+        match inner.operation_resources.get(&slot) {
+            Some(held) if held.same_command(proposal) => Ok(held.resource),
+            Some(_) => Err(reused()),
+            None => {
+                inner.operation_resources.insert(slot, proposal.clone());
+                Ok(proposal.resource)
+            }
+        }
+    }
+    async fn export_operation_resources(
+        &self,
+    ) -> SidResult<Vec<sid_core::models::OperationResourceBinding>> {
+        let inner = self.inner.lock().unwrap();
+        let now = chrono::Utc::now();
+        Ok(inner
+            .operation_resources
+            .iter()
+            .filter(|(slot, _)| {
+                !inner
+                    .operations
+                    .get(*slot)
+                    .is_some_and(|r| r.completion.retain_until.is_some_and(|u| u <= now))
+            })
+            .map(|(_, b)| b.clone())
+            .collect())
+    }
+    async fn import_operation_resource(
+        &self,
+        binding: &sid_core::models::OperationResourceBinding,
+    ) -> SidResult<bool> {
+        let slot = (binding.namespace.clone(), binding.key.as_str().to_string());
+        let mut inner = self.inner.lock().unwrap();
+        // A binding under a retired period is an unfinished creation's: it is
+        // carried; one under a period never issued here is not.
+        let unissued = binding.period.is_some_and(|p| {
+            matches!(
+                inner.admit_operation_period(p),
+                Err(sid_core::Error::OperationPeriodRefused(
+                    sid_core::models::OperationPeriodRefusal::NotIssued
+                ))
+            )
+        });
+        if inner.operation_resources.contains_key(&slot) || unissued {
+            return Ok(false);
+        }
+        inner.operation_resources.insert(slot, binding.clone());
         Ok(true)
     }
 }
@@ -6480,14 +6558,26 @@ impl MockStorageInner {
                 operation.namespace.clone(),
                 operation.key.as_str().to_string(),
             );
-            // A completion past its retention no longer holds the key.
+            // A completion past its retention no longer holds the key: it
+            // goes with its binding.
             let now = chrono::Utc::now();
-            if self
-                .operations
-                .get(&slot)
-                .is_some_and(|r| r.completion.retain_until.is_none_or(|until| until > now))
-            {
-                return Err(sid_core::Error::OperationCompleted(slot.1));
+            match self.operations.get(&slot) {
+                Some(r) if r.completion.retain_until.is_none_or(|until| until > now) => {
+                    return Err(sid_core::Error::OperationCompleted(slot.1));
+                }
+                Some(_) => {
+                    self.operations.remove(&slot);
+                    self.operation_resources.remove(&slot);
+                }
+                None => {}
+            }
+            // A key a creation bound completes only that creation's command.
+            if self.operation_resources.get(&slot).is_some_and(|held| {
+                held.method != operation.method
+                    || held.fingerprint != operation.fingerprint
+                    || held.period != operation.period
+            }) {
+                return Err(sid_core::Error::OperationKeyReused(slot.1));
             }
             self.operations.insert(
                 slot,

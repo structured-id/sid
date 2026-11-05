@@ -279,6 +279,34 @@ impl OperationRecord {
     }
 }
 
+/// The identifier a keyed creation allocated for what it creates, bound in
+/// the owning operation store to the command that named it: under
+/// `namespace`, `key` names a call of `method` with inputs digesting to
+/// `fingerprint` named with `period`, and `resource` is what that command
+/// creates. Every attempt of the command resolves the same `resource`; the
+/// key bound to another call is a conflict. A binding is not a completion:
+/// it proves neither that the creation finished nor who executes it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperationResourceBinding {
+    pub namespace: String,
+    pub key: OperationKey,
+    pub method: String,
+    pub fingerprint: Vec<u8>,
+    pub period: Option<OperationPeriod>,
+    pub resource: uuid::Uuid,
+}
+
+impl OperationResourceBinding {
+    /// Whether this binding names the call `method` with `fingerprint`
+    /// named with `period`: the same command. Anything else under its key is
+    /// a conflict.
+    pub fn same_command(&self, other: &Self) -> bool {
+        self.method == other.method
+            && self.period == other.period
+            && self.fingerprint == other.fingerprint
+    }
+}
+
 /// The digest of a command's significant inputs.
 pub fn fingerprint(inputs: &[u8]) -> Vec<u8> {
     Sha256::digest(inputs).to_vec()
