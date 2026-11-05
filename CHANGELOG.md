@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.19](https://github.com/structured-id/sid/compare/v0.2.18...v0.2.19) - 2026-11-05
+
+### Other
+
+- *(proto)* build on fields numbered in place ([#422](https://github.com/structured-id/sid/pull/422))
+- *(authz)* resolve roles in a fixed number of reads ([#424](https://github.com/structured-id/sid/pull/424))
+
 ## [0.2.18](https://github.com/structured-id/sid/compare/v0.2.17...v0.2.18) - 2026-11-05
 
 ### Added
