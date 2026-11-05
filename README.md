@@ -53,6 +53,7 @@ Environment variables:
 |----------|---------|-------------|
 | `SID_ISSUER` | - (required) | Public base URL of the installation; its host is the installation organization's domain |
 | `SID_DATABASE_URL` | - (required) | PostgreSQL connection string |
+| `SID_STORAGE_POSTGRESQL_SCHEMA` | - | Schema holding this installation's tables; unset uses the account's default schema (see below) |
 | `SID_GRPC_BIND` | `127.0.0.1:50051` | gRPC listen address |
 | `SID_BIND` | - | HTTP listen address of the embedded transcoder (OIDC endpoints, SCIM); unset serves no HTTP |
 | `SID_SCIM_BASE_URL` | `SID_ISSUER` | Public URL the SCIM endpoint is reached under (`/scim/v2` follows) |
@@ -67,6 +68,18 @@ Environment variables:
 | `SID_ACCOUNT_URL` | - | Public URL of the account UI, set together with `SID_ACCOUNT_CLIENT_JWKS` (a file holding its BFF's public JWK Set); its `/login` page runs browser sign-in, its `/verify` page opens emailed sign-in links and its `/reset/new` page emailed password reset links. Without it, and without an email provider configured by an administrator, password reset requests are refused as not configured |
 | `SID_MAGIC_LINKS_ENABLED` | `false` | Email sign-in links to Corporate accounts; requires `SID_ACCOUNT_URL` |
 | `RUST_LOG` | `sid=info` | Log level |
+
+### An installation in a schema of its own
+
+With `SID_STORAGE_POSTGRESQL_SCHEMA` several installations share one database, each in its own schema. The migration creates the schema if it is missing and a read-only role `<schema>_reader` (`-` becomes `_`) that may read `<schema>.profiles_view`, for host applications joining their own data with profiles.
+
+To keep each installation's records out of another's reach, give it a login role that owns its schema and holds no right on the others: PostgreSQL then refuses that role any read, listing or change of another installation's tables. Such a role has no `CREATE` on the database and no `CREATEROLE`, so prepare both beforehand as an administrator; the migration uses them as they are:
+
+```sql
+CREATE ROLE sid_a LOGIN PASSWORD '...';
+CREATE SCHEMA sid_a AUTHORIZATION sid_a;
+CREATE ROLE sid_a_reader NOLOGIN;
+```
 
 ### Event delivery without a broker
 

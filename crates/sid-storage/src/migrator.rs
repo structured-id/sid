@@ -97,18 +97,32 @@ async fn migrate(pool: &PgPool, schema: Option<&str>) -> SidResult<()> {
     if let Some(schema_name) = schema {
         validate_schema_name(schema_name)?;
 
-        // A schema name cannot be a bind parameter. `validate_schema_name`
-        // above admits only ASCII alphanumerics, `_` and `-`, none of which
-        // can end the quoted identifier this interpolates into.
-        sqlx::query(AssertSqlSafe(format!(
-            "CREATE SCHEMA IF NOT EXISTS \"{}\"",
-            schema_name
-        )))
-        .execute(pool)
-        .await
-        .map_err(|e| {
-            SidError::Storage(format!("Failed to create schema '{}': {}", schema_name, e))
-        })?;
+        // A schema the host prepared is used as it is: PostgreSQL checks the
+        // database's CREATE privilege before it looks for the schema, so even
+        // `CREATE SCHEMA IF NOT EXISTS` refuses an account that holds only
+        // its own schema.
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1)")
+                .bind(schema_name)
+                .fetch_one(pool)
+                .await
+                .map_err(|e| {
+                    SidError::Storage(format!("Failed to look up schema '{schema_name}': {e}"))
+                })?;
+        if !exists {
+            // A schema name cannot be a bind parameter. `validate_schema_name`
+            // above admits only ASCII alphanumerics, `_` and `-`, none of
+            // which can end the quoted identifier this interpolates into.
+            sqlx::query(AssertSqlSafe(format!(
+                "CREATE SCHEMA IF NOT EXISTS \"{}\"",
+                schema_name
+            )))
+            .execute(pool)
+            .await
+            .map_err(|e| {
+                SidError::Storage(format!("Failed to create schema '{}': {}", schema_name, e))
+            })?;
+        }
 
         // Same validated identifier, same reason.
         sqlx::query(AssertSqlSafe(format!(

@@ -2641,6 +2641,153 @@ async fn test_commit_survives_restart() {
     common::restart::test_commit_survives_restart(setup).await;
 }
 
+// ─── Instance namespaces (two schemas, each served by a login role of its own) ───
+
+/// An instance whose schema is owned by a login role that holds no right on
+/// any other instance's schema; its engine connects and migrates as that role.
+/// The host prepares the schema and its reader role, which an account without
+/// the database's CREATE and CREATEROLE rights cannot make.
+struct OwnInstance {
+    backend: PostgresBackend,
+    schema: String,
+    role: String,
+    /// The test database's URL, signed in as `role`.
+    url: String,
+}
+
+async fn own_instance(admin: &sqlx::PgPool, prefix: &str) -> OwnInstance {
+    let schema = format!("{prefix}_{}", uuid::Uuid::now_v7().simple());
+    let role = format!("{schema}_owner");
+    let password = uuid::Uuid::new_v4().simple().to_string();
+    for statement in [
+        format!("CREATE ROLE \"{role}\" LOGIN PASSWORD '{password}'"),
+        format!("CREATE SCHEMA \"{schema}\" AUTHORIZATION \"{role}\""),
+        format!("CREATE ROLE \"{schema}_reader\" NOLOGIN"),
+    ] {
+        sqlx::query(sqlx::AssertSqlSafe(statement))
+            .execute(admin)
+            .await
+            .unwrap();
+    }
+    let mut url = url::Url::parse(&database_url()).expect("the test database URL parses");
+    url.set_username(&role).unwrap();
+    url.set_password(Some(&password)).unwrap();
+    let url: String = url.into();
+    let backend = PostgresBackend::new(&url, Some(schema.clone()))
+        .await
+        .expect("the instance's role connects");
+    sid_storage::migrator::run_migrations(backend.pool(), Some(&schema))
+        .await
+        .expect("the instance's role migrates its own schema");
+    OwnInstance {
+        backend,
+        schema,
+        role,
+        url,
+    }
+}
+
+async fn drop_own_instances(admin: &sqlx::PgPool, instances: Vec<OwnInstance>) {
+    for instance in &instances {
+        instance.backend.pool().close().await;
+    }
+    for instance in &instances {
+        for statement in [
+            format!("DROP SCHEMA \"{}\" CASCADE", instance.schema),
+            format!("DROP ROLE \"{}_reader\"", instance.schema),
+            format!("DROP ROLE \"{}\"", instance.role),
+        ] {
+            sqlx::query(sqlx::AssertSqlSafe(statement))
+                .execute(admin)
+                .await
+                .unwrap();
+        }
+    }
+}
+
+/// The database account of one instance reaching for another instance's
+/// schema with plain SQL, past the engine.
+struct ForeignSchema {
+    pool: sqlx::PgPool,
+    schema: String,
+}
+
+#[async_trait::async_trait]
+impl common::namespace::NativeNamespaces for ForeignSchema {
+    async fn reach(&self, access: common::namespace::Reach) -> common::namespace::Answer {
+        use common::namespace::{Answer, Reach};
+        let table = format!("\"{}\".profiles", self.schema);
+        let result = match access {
+            Reach::Read(id) => sqlx::query(sqlx::AssertSqlSafe(format!(
+                "SELECT id FROM {table} WHERE id = $1"
+            )))
+            .bind(id.into_uuid())
+            .fetch_optional(&self.pool)
+            .await
+            .map(|_| ()),
+            Reach::Query => sqlx::query(sqlx::AssertSqlSafe(format!("SELECT id FROM {table}")))
+                .fetch_all(&self.pool)
+                .await
+                .map(|_| ()),
+            Reach::Write(id) => sqlx::query(sqlx::AssertSqlSafe(format!(
+                "UPDATE {table} SET given_name = 'changed' WHERE id = $1"
+            )))
+            .bind(id.into_uuid())
+            .execute(&self.pool)
+            .await
+            .map(|_| ()),
+        };
+        match result {
+            Ok(()) => Answer::Reached,
+            // SQLSTATE 42501 insufficient_privilege: PostgreSQL refused the
+            // role any right on the other schema.
+            Err(sqlx::Error::Database(e)) if e.code().as_deref() == Some("42501") => {
+                Answer::Refused
+            }
+            Err(e) => panic!("the probe failed otherwise than refused: {e}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_instances_are_isolated() {
+    let admin = setup().await;
+    let a = own_instance(admin.pool(), "ns_a").await;
+    let b = own_instance(admin.pool(), "ns_b").await;
+    let outcome = tokio::spawn({
+        let (a, b) = (a.backend.clone(), b.backend.clone());
+        async move { common::namespace::test_instances_are_isolated(&a, &b).await }
+    })
+    .await;
+    drop_own_instances(admin.pool(), vec![a, b]).await;
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic.into_panic());
+    }
+}
+
+#[tokio::test]
+async fn test_native_namespace_refuses_the_other_instance() {
+    let admin = setup().await;
+    let a = own_instance(admin.pool(), "nsn_a").await;
+    let b = own_instance(admin.pool(), "nsn_b").await;
+    let probe = ForeignSchema {
+        pool: sqlx::PgPool::connect(&b.url).await.unwrap(),
+        schema: a.schema.clone(),
+    };
+    let outcome = tokio::spawn({
+        let a = a.backend.clone();
+        async move {
+            common::namespace::test_native_namespace_refuses_the_other_instance(&a, &probe).await;
+            probe.pool.close().await;
+        }
+    })
+    .await;
+    drop_own_instances(admin.pool(), vec![a, b]).await;
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic.into_panic());
+    }
+}
+
 /// `url` with its database replaced by `database`; its connection parameters
 /// stay as they are.
 fn with_database(url: &str, database: &str) -> String {

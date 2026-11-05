@@ -33,6 +33,7 @@ pub mod flow_action;
 pub mod group;
 pub mod job_lock;
 pub mod machine;
+pub mod namespace;
 pub mod notification;
 pub mod operation;
 pub mod organization;
