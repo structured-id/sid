@@ -182,8 +182,10 @@ async fn a_replica_started_later_serves_an_existing_session() {
 async fn a_session_past_its_absolute_deadline_is_gone_on_both_replicas() {
     let store = shared_store().await;
     // max_age far below idle_timeout, so what expires the session is the
-    // absolute deadline and not the idle window.
-    let short = Duration::from_millis(300);
+    // absolute deadline and not the idle window. The lifetime leaves the first
+    // read time to reach a loaded store; the wait is counted from the creation's
+    // answer, by which the deadline is already set, so it always passes it.
+    let short = Duration::from_secs(2);
     let a = build(store.clone(), short, LONG);
     let b = build(store, short, LONG);
 
@@ -191,9 +193,10 @@ async fn a_session_past_its_absolute_deadline_is_gone_on_both_replicas() {
         .create_session("access".into(), None, test_claims(), CONN)
         .await
         .unwrap();
+    let created = tokio::time::Instant::now();
     assert!(b.get_session(&id).await.unwrap().is_some());
 
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    tokio::time::sleep_until(created + short + Duration::from_millis(300)).await;
 
     assert!(b.get_session(&id).await.unwrap().is_none(), "B expires it");
     assert!(
