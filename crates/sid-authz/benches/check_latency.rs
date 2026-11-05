@@ -5,6 +5,8 @@
 //! - `check allow`: a role assignment grants the action;
 //! - `check deny`: no assignment grants it;
 //! - `batch 16`: one batch of 16 questions, half allowed;
+//! - `policy allow`, `policy deny`, `policy b16`: the same under eight
+//!   project policies that do not apply to them;
 //!
 //! and the throughput of `concurrent`: 32 tasks checking at once.
 //!
@@ -17,8 +19,8 @@ use std::time::{Duration, Instant};
 
 use sid_authz::AuthzCheckRequest;
 use sid_core::models::{
-    AuditEntry, MutationContext, Profile, ProfileId, ProjectId, Role, RoleAssignment,
-    RoleAssignmentPrincipal,
+    AuditEntry, CedarPolicy, MutationContext, PolicyEffect, PolicyScope, Profile, ProfileId,
+    ProjectId, Role, RoleAssignment, RoleAssignmentPrincipal,
 };
 use sid_plugin::StorageBackend;
 
@@ -53,6 +55,8 @@ const BATCHES: usize = 500;
 const BATCH: usize = 16;
 const TASKS: usize = 32;
 const PER_TASK: usize = 200;
+/// The project policies the `policy *` decisions evaluate.
+const POLICIES: usize = 8;
 
 fn audit() -> MutationContext {
     AuditEntry::system("bench", "check-latency").into()
@@ -145,6 +149,60 @@ async fn run(engine: &str, storage: Arc<dyn StorageBackend>) {
     }
     let allocations = ALLOCATIONS.load(Ordering::Relaxed) - before;
     report(engine, "batch 16", samples, allocations);
+
+    // The same decisions under the project's policies: permits and forbids
+    // that never apply here, so every decision evaluates them all.
+    let mut policies = Vec::with_capacity(POLICIES);
+    for i in 0..POLICIES {
+        let (text, effect) = if i % 2 == 0 {
+            (
+                format!("permit(principal, action == Action::\"bench.other{i}\", resource);"),
+                PolicyEffect::Permit,
+            )
+        } else {
+            (
+                format!(
+                    "forbid(principal, action, resource) when {{ context has bench{i} && context.bench{i} == \"never\" }};"
+                ),
+                PolicyEffect::Forbid,
+            )
+        };
+        let policy = CedarPolicy::new(
+            PolicyScope::Project(ProjectId::system()),
+            format!("bench {run} {i}"),
+            text,
+            effect,
+        );
+        storage.create_cedar_policy(&policy, audit()).await.unwrap();
+        policies.push(policy.id);
+    }
+    assert!(authz.check(&allowed).await.unwrap().is_allowed());
+    for (what, q) in [("policy allow", &allowed), ("policy deny", &denied)] {
+        let mut samples = Vec::with_capacity(CHECKS);
+        let before = ALLOCATIONS.load(Ordering::Relaxed);
+        for _ in 0..CHECKS {
+            let started = Instant::now();
+            let decision = authz.check(q).await.unwrap();
+            samples.push(started.elapsed());
+            std::hint::black_box(decision);
+        }
+        let allocations = ALLOCATIONS.load(Ordering::Relaxed) - before;
+        report(engine, what, samples, allocations);
+    }
+    let mut samples = Vec::with_capacity(BATCHES);
+    let before = ALLOCATIONS.load(Ordering::Relaxed);
+    for _ in 0..BATCHES {
+        let started = Instant::now();
+        let decisions = authz.batch_check(&batch).await.unwrap();
+        samples.push(started.elapsed());
+        assert_eq!(decisions.len(), BATCH);
+    }
+    let allocations = ALLOCATIONS.load(Ordering::Relaxed) - before;
+    report(engine, "policy b16", samples, allocations);
+    // The persistent database keeps nothing of this run's policies.
+    for id in policies {
+        storage.delete_cedar_policy(id, audit()).await.unwrap();
+    }
 
     let started = Instant::now();
     let tasks: Vec<_> = (0..TASKS)

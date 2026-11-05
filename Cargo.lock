@@ -5180,7 +5180,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "sid-admin"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "chrono",
  "hex",
@@ -5200,7 +5200,7 @@ dependencies = [
 
 [[package]]
 name = "sid-attestation"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5232,7 +5232,7 @@ dependencies = [
 
 [[package]]
 name = "sid-auth"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5275,7 +5275,7 @@ dependencies = [
 
 [[package]]
 name = "sid-auth-proxy"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5314,7 +5314,7 @@ dependencies = [
 
 [[package]]
 name = "sid-authn"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "arc-swap",
  "argon2",
@@ -5383,11 +5383,12 @@ dependencies = [
 
 [[package]]
 name = "sid-authz"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "async-trait",
  "cedar-policy",
  "chrono",
+ "dashmap",
  "prost",
  "prost-types",
  "serde",
@@ -5407,7 +5408,7 @@ dependencies = [
 
 [[package]]
 name = "sid-core"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "aes-gcm",
  "chrono",
@@ -5478,7 +5479,7 @@ dependencies = [
 
 [[package]]
 name = "sid-fed"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5495,7 +5496,7 @@ dependencies = [
 
 [[package]]
 name = "sid-i18n"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "pretty_assertions",
  "serde",
@@ -5527,7 +5528,7 @@ dependencies = [
 
 [[package]]
 name = "sid-infra"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -5565,7 +5566,7 @@ dependencies = [
 
 [[package]]
 name = "sid-keys"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "async-trait",
  "secrecy",
@@ -5579,7 +5580,7 @@ dependencies = [
 
 [[package]]
 name = "sid-migrate"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5612,7 +5613,7 @@ dependencies = [
 
 [[package]]
 name = "sid-notify"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -5701,7 +5702,7 @@ dependencies = [
 
 [[package]]
 name = "sid-org-crypto"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -5741,7 +5742,7 @@ dependencies = [
 
 [[package]]
 name = "sid-plugin"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5769,7 +5770,7 @@ dependencies = [
 
 [[package]]
 name = "sid-proto"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "glob",
  "prost",
@@ -5786,7 +5787,7 @@ dependencies = [
 
 [[package]]
 name = "sid-proto-build"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "heck",
  "prost-reflect",
@@ -5795,7 +5796,7 @@ dependencies = [
 
 [[package]]
 name = "sid-scim"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "async-trait",
  "axum",
@@ -5825,7 +5826,7 @@ dependencies = [
 
 [[package]]
 name = "sid-serve"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "bytes",
  "prost-reflect",
@@ -5839,7 +5840,7 @@ dependencies = [
 
 [[package]]
 name = "sid-server"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -5916,7 +5917,7 @@ dependencies = [
 
 [[package]]
 name = "sid-storage"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5944,7 +5945,7 @@ dependencies = [
 
 [[package]]
 name = "sid-test-issuer"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "arc-swap",
  "chrono",
@@ -5977,7 +5978,7 @@ dependencies = [
 
 [[package]]
 name = "sid-ui-host"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "anyhow",
  "async-trait",
