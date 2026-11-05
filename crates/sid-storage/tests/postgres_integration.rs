@@ -454,6 +454,31 @@ macro_rules! host_operation_result_store {
     )*};
 }
 
+/// A host replica starting on a current schema takes no lock on the
+/// operation tables: its `ensure_schema` finishes while a serving replica's
+/// completion write is open on both. Bug prevented: `CREATE INDEX IF NOT
+/// EXISTS` locked each table before it found the index, so the start queued
+/// behind open writes and they behind it, until PostgreSQL aborted one side
+/// as a deadlock.
+#[tokio::test]
+async fn a_current_operation_schema_is_checked_beside_open_writes() {
+    let (store, schema) = host_operation_store().await;
+    let pool = schema_pool(&schema).await;
+    let mut writing = pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE operation_results, operation_resources IN ROW EXCLUSIVE MODE")
+        .execute(&mut *writing)
+        .await
+        .unwrap();
+    let checked =
+        tokio::time::timeout(std::time::Duration::from_secs(10), store.ensure_schema()).await;
+    writing.rollback().await.unwrap();
+    pool.close().await;
+    drop_schema(&schema).await;
+    checked
+        .expect("the schema check waited on the open write")
+        .unwrap();
+}
+
 /// The columns and constraints of the operation tables in the schema the
 /// connection `pool` names first, one line each, sorted.
 async fn operation_tables(pool: &sqlx::PgPool) -> Vec<String> {
