@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.14](https://github.com/structured-id/sid/compare/v0.2.13...v0.2.14) - 2026-11-05
+
+### Added
+
+- *(authn)* renewable native sessions bound to the application key ([#397](https://github.com/structured-id/sid/pull/397))
+
+### Fixed
+
+- *(authn)* return a declined sign-in to the application ([#401](https://github.com/structured-id/sid/pull/401))
+- *(ui-host)* end application sessions on back-channel logout ([#399](https://github.com/structured-id/sid/pull/399))
+
 ## [0.2.13](https://github.com/structured-id/sid/compare/v0.2.12...v0.2.13) - 2026-11-04
 
 ### Added
