@@ -174,6 +174,14 @@ pub fn bearer<T>(response: &tonic::Response<T>) -> String {
         .to_string()
 }
 
+/// The text form of the session id an answer carries; an answer without a
+/// valid one fails the test.
+pub fn session_text(id: Option<&sid_ids_proto::SessionId>) -> String {
+    sid_ids_proto::required(id)
+        .expect("the answer names its session")
+        .to_string()
+}
+
 /// A whole login on one replica by a native client: start and finish.
 pub async fn login(
     svc: &TestServices,
@@ -185,7 +193,7 @@ pub async fn login(
     let access_token = bearer(&response);
     let body = response.into_inner();
     Ok(LoggedIn {
-        session_id: body.session_id,
+        session_id: session_text(body.session_id.as_ref()),
         access_token,
         expires_in: body.expires_in,
     })

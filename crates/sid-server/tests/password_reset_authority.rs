@@ -48,8 +48,8 @@ fn request<T>(message: T, device: bool) -> Request<T> {
 }
 
 /// A reset of `profile`, verified as the mailbox link verifies it: the
-/// verified reset session and the replacement password's history context.
-async fn verified_reset(svc: &TestServices, profile: &Profile) -> (String, PasswordHistoryContext) {
+/// replacement password's history context, whose operation names the reset.
+async fn verified_reset(svc: &TestServices, profile: &Profile) -> PasswordHistoryContext {
     let token = "reset-token";
     let token_hash: String = Sha256::digest(token.as_bytes())
         .iter()
@@ -68,16 +68,13 @@ async fn verified_reset(svc: &TestServices, profile: &Profile) -> (String, Passw
     let verified = svc
         .auth
         .verify_password_reset(Request::new(VerifyPasswordResetRequest {
-            session_id: reset.id.to_string(),
+            reset_session_id: common::reset_wire(reset.id),
             token: token.to_string(),
         }))
         .await
         .expect("the mailbox token verifies")
         .into_inner();
-    (
-        verified.reset_session_id,
-        verified.history.expect("the reset's history context"),
-    )
+    verified.history.expect("the reset's history context")
 }
 
 /// Reset the password of `profile` to `NEW_PASSWORD`: verify, the OPAQUE
@@ -95,7 +92,7 @@ async fn complete_as(
     profile: &Profile,
     device: bool,
 ) -> tonic::Response<CompletePasswordResetResponse> {
-    let (reset_session_id, context) = verified_reset(svc, profile).await;
+    let context = verified_reset(svc, profile).await;
     let started = client::start(NEW_PASSWORD);
     let executed = svc
         .auth
@@ -112,7 +109,6 @@ async fn complete_as(
     svc.auth
         .complete_password_reset(request(
             CompletePasswordResetRequest {
-                reset_session_id,
                 operation_id: context.operation_id,
                 registration_record: client::finish(
                     started,
@@ -154,9 +150,7 @@ async fn register_from_device(svc: &TestServices, principal: &str, password: &[u
         .into_inner();
     let credential = svc
         .storage
-        .get_credential(sid_core::models::CredentialId(
-            done.credential_id.parse().unwrap(),
-        ))
+        .get_credential(common::credential_of(&done.credential_id))
         .await
         .unwrap()
         .expect("the registered credential");
@@ -213,7 +207,7 @@ async fn a_reset_signs_in_with_the_clients_address_and_device() {
     let sessions = svc.storage.list_sessions(&profile.id).await.unwrap();
     let session = sessions
         .iter()
-        .find(|s| Some(s.id.to_string()) == done.session_id)
+        .find(|s| Some(s.id.into()) == done.session_id)
         .expect("the reset's session");
     assert_eq!(session.ip_address, Some("203.0.113.7".parse().unwrap()));
     assert!(
@@ -340,6 +334,9 @@ async fn reset_of_password_only_account_signs_in() {
     let token = common::opaque_client::bearer(&done);
     let done = done.into_inner();
     let claims = svc.jwt.validate_access_token(&token).unwrap();
-    assert_eq!(Some(claims.sid), done.session_id);
+    assert_eq!(
+        claims.sid,
+        common::opaque_client::session_text(done.session_id.as_ref())
+    );
     assert!(done.expires_in.is_some_and(|secs| secs > 0));
 }

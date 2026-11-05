@@ -162,13 +162,23 @@ fn registration_results_name_only_the_credential() {
     let pool = prost_reflect::DescriptorPool::decode(FILE_DESCRIPTOR_SET).unwrap();
     for message in ["sid.v1.authn.OpaqueZkppRegistrationFinishResponse"] {
         let descriptor = pool.get_message_by_name(message).expect(message);
-        let fields: Vec<(String, u32, prost_reflect::Kind)> = descriptor
+        let fields: Vec<(String, u32, String)> = descriptor
             .fields()
-            .map(|f| (f.name().to_owned(), f.number(), f.kind()))
+            .map(|f| {
+                let kind = match f.kind() {
+                    prost_reflect::Kind::Message(m) => m.full_name().to_owned(),
+                    other => format!("{other:?}"),
+                };
+                (f.name().to_owned(), f.number(), kind)
+            })
             .collect();
         assert_eq!(
             fields,
-            vec![("credential_id".to_owned(), 2, prost_reflect::Kind::String)],
+            vec![(
+                "credential_id".to_owned(),
+                3,
+                "sid.v1.ids.CredentialId".to_owned()
+            )],
             "{message}"
         );
     }

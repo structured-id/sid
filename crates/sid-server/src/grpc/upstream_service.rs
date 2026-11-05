@@ -815,14 +815,14 @@ impl UpstreamService for UpstreamServiceImpl {
 /// The callback's answer for a session `session_id` whose credential lives
 /// `expires_in` seconds.
 fn success(
-    session_id: String,
+    session_id: sid_core::models::SessionId,
     expires_in: i64,
     new_profile_created: bool,
 ) -> HandleUpstreamCallbackResponse {
     HandleUpstreamCallbackResponse {
         result: Some(handle_upstream_callback_response::Result::Success(
             UpstreamAuthSuccess {
-                session_id,
+                session_id: session_id.to_string(),
                 expires_in,
                 new_profile_created,
             },

@@ -12,7 +12,7 @@ use common::mock_storage::MockStorage;
 use common::native_client::{Binds, ORIGIN, generation, proof, rpc_uri, with_proof};
 use common::opaque_client::{bearer, register, start_login};
 use sid_authn::native_session::REFRESH_METADATA;
-use sid_core::models::{ProfileId, SessionId};
+use sid_core::models::ProfileId;
 use sid_proto::sid::v1::auth_service_server::AuthService;
 use sid_proto::sid::v1::*;
 use tonic::{Code, Request, Response, Status};
@@ -111,7 +111,10 @@ async fn a_proved_sign_in_renews_its_session() {
     );
     let token = bearer(&refreshed);
     let claims = svc.jwt.validate_access_token(&token).unwrap();
-    assert_eq!(claims.sid, session_id);
+    assert_eq!(
+        claims.sid,
+        common::opaque_client::session_text(session_id.as_ref())
+    );
     assert_eq!(refreshed.into_inner().session_id, session_id);
     assert_eq!(svc.mock_storage.sessions_of(profile), 1);
 }
@@ -250,7 +253,7 @@ async fn an_ended_session_renews_no_more() {
     let (svc, _) = services().await;
     let signed_in = renewable_sign_in(&svc).await;
     let first = generation(&signed_in).unwrap();
-    let session = SessionId::parse(&signed_in.into_inner().session_id).unwrap();
+    let session = sid_ids_proto::required(signed_in.into_inner().session_id.as_ref()).unwrap();
     svc.storage
         .delete_session(
             session,

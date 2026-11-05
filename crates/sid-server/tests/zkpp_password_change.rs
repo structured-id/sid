@@ -11,7 +11,7 @@ use common::{TestServices, zkpp_client as client};
 use rand::rand_core::UnwrapErr;
 use rand::rngs::SysRng;
 use sid_authn::opaque_zkpp::ZkppConfig;
-use sid_core::models::{AuthLevel, Credential, CredentialId, CurrentPasswordRule, SecurityPolicy};
+use sid_core::models::{AuthLevel, Credential, CurrentPasswordRule, SecurityPolicy};
 use sid_opaque_ke::{
     ClientLogin, ClientLoginFinishParameters, ClientRegistration,
     ClientRegistrationFinishParameters, CredentialResponse, RegistrationResponse,
@@ -104,7 +104,7 @@ async fn registered_with(
         .into_inner();
     let credential = svc
         .storage
-        .get_credential(CredentialId(done.credential_id.parse().unwrap()))
+        .get_credential(common::credential_of(&done.credential_id))
         .await
         .unwrap()
         .unwrap();
@@ -195,7 +195,7 @@ async fn prepare_change_confirming(
         .auth
         .password_change_challenge(authed(
             PasswordChangeChallengeRequest {
-                credential_id: credential.id.0.to_string(),
+                credential_id: common::credential_wire(credential.id),
                 credential_request: login
                     .as_ref()
                     .map(|l| l.message.serialize().to_vec())
@@ -236,7 +236,7 @@ async fn prepare_change_confirming(
         .password_change_execute(authed(
             PasswordChangeExecuteRequest {
                 operation_id: context.operation_id.clone(),
-                credential_id: credential.id.0.to_string(),
+                credential_id: common::credential_wire(credential.id),
                 credential_finalization,
             },
             token,
@@ -263,7 +263,7 @@ async fn finish_change(
         .password_change_finish(authed(
             PasswordChangeFinishRequest {
                 operation_id: context.operation_id.clone(),
-                credential_id: credential.id.0.to_string(),
+                credential_id: common::credential_wire(credential.id),
                 registration_record: record,
                 proof: Some(proof),
             },
@@ -564,7 +564,7 @@ async fn test_a_replaced_history_key_keeps_the_retained_password_refused() {
         .into_inner();
     let credential = svc
         .storage
-        .get_credential(CredentialId(done.credential_id.parse().unwrap()))
+        .get_credential(common::credential_of(&done.credential_id))
         .await
         .unwrap()
         .unwrap();
@@ -906,7 +906,7 @@ async fn test_a_challenge_without_the_new_request_is_refused() {
         .auth
         .password_change_challenge(authed(
             PasswordChangeChallengeRequest {
-                credential_id: credential.id.0.to_string(),
+                credential_id: common::credential_wire(credential.id),
                 credential_request: login.message.serialize().to_vec(),
                 registration_request: Vec::new(),
             },
@@ -937,7 +937,7 @@ async fn unproved_change(
         .auth
         .password_change_challenge(authed(
             PasswordChangeChallengeRequest {
-                credential_id: credential.id.0.to_string(),
+                credential_id: common::credential_wire(credential.id),
                 credential_request: login.message.serialize().to_vec(),
                 registration_request: started.request.clone(),
             },
@@ -971,7 +971,7 @@ async fn unproved_change(
         .password_change_execute(authed(
             PasswordChangeExecuteRequest {
                 operation_id: context.operation_id.clone(),
-                credential_id: credential.id.0.to_string(),
+                credential_id: common::credential_wire(credential.id),
                 credential_finalization: finalization,
             },
             token,
@@ -1014,7 +1014,7 @@ async fn a_change_proved_against_a_replaced_password_does_not_commit() {
         .into_inner();
     let credential = svc
         .storage
-        .get_credential(CredentialId(done.credential_id.parse().unwrap()))
+        .get_credential(common::credential_of(&done.credential_id))
         .await
         .unwrap()
         .unwrap();
@@ -1034,7 +1034,7 @@ async fn a_change_proved_against_a_replaced_password_does_not_commit() {
                 .password_change_finish(authed(
                     PasswordChangeFinishRequest {
                         operation_id: context.operation_id,
-                        credential_id: credential.id.0.to_string(),
+                        credential_id: common::credential_wire(credential.id),
                         registration_record: record,
                         proof: None,
                     },
@@ -1074,7 +1074,7 @@ async fn test_abandoned_current_password_guesses_are_limited() {
             svc.auth
                 .password_change_challenge(authed(
                     PasswordChangeChallengeRequest {
-                        credential_id: credential.id.0.to_string(),
+                        credential_id: common::credential_wire(credential.id),
                         credential_request: login.message.serialize().to_vec(),
                         registration_request: client::start(NEW).request,
                     },
@@ -1135,7 +1135,7 @@ async fn test_only_issued_current_password_responses_are_counted() {
             svc.auth
                 .password_change_challenge(authed(
                     PasswordChangeChallengeRequest {
-                        credential_id: credential.id.0.to_string(),
+                        credential_id: common::credential_wire(credential.id),
                         credential_request,
                         registration_request: client::start(NEW).request,
                     },

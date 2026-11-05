@@ -725,6 +725,52 @@ pub async fn issue_code(
     .expect("issue a sign-in code")
 }
 
+/// The email code session `id` as VerifyOtp and ResendOtp name it.
+pub fn otp_session(id: uuid::Uuid) -> Option<sid_ids_proto::OtpSessionId> {
+    Some(
+        sid_ids::OtpSessionId::from_uuid(id)
+            .expect("an issued code session id")
+            .into(),
+    )
+}
+
+/// The stored credential `id` as a request names it.
+pub fn credential_wire(id: sid_core::models::CredentialId) -> Option<sid_ids_proto::CredentialId> {
+    Some(
+        sid_ids::CredentialId::from_uuid(id.0)
+            .expect("a stored credential id")
+            .into(),
+    )
+}
+
+/// The stored credential an answer names; an answer without a valid id
+/// fails the test.
+pub fn credential_of(id: &Option<sid_ids_proto::CredentialId>) -> sid_core::models::CredentialId {
+    sid_core::models::CredentialId(
+        sid_ids_proto::required(id.as_ref())
+            .expect("the answer names its credential")
+            .into_uuid(),
+    )
+}
+
+/// The reset session `id` as VerifyPasswordReset names it.
+pub fn reset_wire(id: sid_core::models::ResetSessionId) -> Option<sid_ids_proto::ResetSessionId> {
+    Some(
+        sid_ids::ResetSessionId::from_uuid(id.0)
+            .expect("a stored reset session id")
+            .into(),
+    )
+}
+
+/// The magic link `id` as VerifyMagicLink names it.
+pub fn magic_link(id: uuid::Uuid) -> Option<sid_ids_proto::MagicLinkId> {
+    Some(
+        sid_ids::MagicLinkId::from_uuid(id)
+            .expect("an issued magic link id")
+            .into(),
+    )
+}
+
 /// The field-encryption key manager every test server uses.
 pub fn test_key_manager() -> Arc<dyn sid_keys::KeyManager> {
     Arc::new(

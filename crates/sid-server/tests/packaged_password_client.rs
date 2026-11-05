@@ -336,11 +336,10 @@ async fn password_lifecycle(adapter: &str) {
         prost::Message::encode_to_vec(&retried),
         prost::Message::encode_to_vec(&installed)
     );
-    let credential_id = installed.credential_id;
+    let credential_id = installed.credential_id.clone();
+    let stored_id = sid_ids_proto::required(credential_id.as_ref()).unwrap();
     let installed_credential = storage
-        .get_credential(sid_core::models::CredentialId(
-            credential_id.parse().unwrap(),
-        ))
+        .get_credential(sid_core::models::CredentialId(stored_id.into_uuid()))
         .await
         .unwrap()
         .unwrap();
@@ -543,7 +542,11 @@ async fn password_lifecycle(adapter: &str) {
         .unwrap();
     let verified = auth
         .verify_password_reset(VerifyPasswordResetRequest {
-            session_id: reset.id.to_string(),
+            reset_session_id: Some(
+                sid_ids::ResetSessionId::from_uuid(reset.id.0)
+                    .unwrap()
+                    .into(),
+            ),
             token: reset_secret.into(),
         })
         .await
@@ -573,7 +576,6 @@ async fn password_lifecycle(adapter: &str) {
             .unwrap(),
     );
     auth.complete_password_reset(CompletePasswordResetRequest {
-        reset_session_id: verified.reset_session_id,
         operation_id: context.operation_id,
         registration_record: record,
         proof: Some(proof),

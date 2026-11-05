@@ -82,7 +82,6 @@ async fn login(
         .web_authn_authentication_finish(Request::new(WebAuthnAuthenticationFinishRequest {
             credential: key.assert(&start.options),
             principal: Some(EMAIL.to_string()),
-            ..Default::default()
         }))
         .await
         .map(|r| r.into_inner())
@@ -127,7 +126,7 @@ async fn signed_in_profile(
     svc: &TestServices,
     signed_in: &WebAuthnAuthenticationFinishResponse,
 ) -> sid_core::models::ProfileId {
-    let id = sid_core::models::SessionId::parse(&signed_in.session_id).unwrap();
+    let id = sid_ids_proto::required(signed_in.session_id.as_ref()).unwrap();
     svc.storage
         .get_session(id)
         .await
@@ -137,7 +136,7 @@ async fn signed_in_profile(
 }
 
 /// A native passkey sign-in proving the application key over the start's
-/// `state_key` gets a refresh generation, in both the identifier and the
+/// `challenge` gets a refresh generation, in both the identifier and the
 /// discoverable flow. A proof over anything else is refused before the
 /// ceremony is consumed: the same assertion then completes with the right
 /// proof.
@@ -157,7 +156,6 @@ async fn a_passkey_sign_in_proving_its_key_gets_a_refresh_generation() {
         let finish = WebAuthnAuthenticationFinishRequest {
             credential: key.assert(&start.options),
             principal,
-            ..Default::default()
         };
         let finish_with = |reference: &[u8]| {
             with_proof(
@@ -177,7 +175,7 @@ async fn a_passkey_sign_in_proving_its_key_gets_a_refresh_generation() {
 
         let signed_in = svc
             .auth
-            .web_authn_authentication_finish(finish_with(start.state_key.as_bytes()))
+            .web_authn_authentication_finish(finish_with(&start.challenge))
             .await
             .expect("signed in");
         let set = generation(&signed_in).expect("a refresh generation");
@@ -213,7 +211,7 @@ async fn session_amr(
     svc: &TestServices,
     signed_in: &WebAuthnAuthenticationFinishResponse,
 ) -> Vec<String> {
-    let id = sid_core::models::SessionId::parse(&signed_in.session_id).unwrap();
+    let id = sid_ids_proto::required(signed_in.session_id.as_ref()).unwrap();
     svc.storage.get_session(id).await.unwrap().unwrap().amr
 }
 
@@ -407,7 +405,6 @@ async fn a_passkey_revoked_before_the_second_factor_signs_nobody_in() {
         .web_authn_authentication_finish(Request::new(WebAuthnAuthenticationFinishRequest {
             credential: key.assert(&start.options),
             principal: Some(EMAIL.to_string()),
-            ..Default::default()
         }))
         .await
         .expect("the pending context");

@@ -837,7 +837,7 @@ async fn test_webauthn_register_finish_no_bearer() {
 async fn test_password_change_challenge_no_bearer() {
     let svc = TestServices::new(MockStorage::new());
     let req = Request::new(PasswordChangeChallengeRequest {
-        credential_id: Uuid::now_v7().to_string(),
+        credential_id: Some(sid_ids::CredentialId::generate().into()),
         credential_request: vec![],
         registration_request: vec![],
     });
@@ -852,7 +852,7 @@ async fn test_password_change_execute_no_bearer() {
     let svc = TestServices::new(MockStorage::new());
     let req = Request::new(PasswordChangeExecuteRequest {
         operation_id: None,
-        credential_id: Uuid::now_v7().to_string(),
+        credential_id: Some(sid_ids::CredentialId::generate().into()),
         credential_finalization: vec![],
     });
 
@@ -866,7 +866,7 @@ async fn test_password_change_finish_no_bearer() {
     let svc = TestServices::new(MockStorage::new());
     let req = Request::new(PasswordChangeFinishRequest {
         operation_id: None,
-        credential_id: Uuid::now_v7().to_string(),
+        credential_id: Some(sid_ids::CredentialId::generate().into()),
         registration_record: vec![],
         proof: None,
     });
@@ -1029,15 +1029,13 @@ async fn test_registration_creates_account_with_single_principal() {
         .expect("profile created");
     let credential = svc
         .storage
-        .get_credential(sid_core::models::CredentialId(
-            resp.credential_id.parse().unwrap(),
-        ))
+        .get_credential(common::credential_of(&resp.credential_id))
         .await
         .unwrap()
         .expect("the result names the credential");
     assert_eq!(credential.profile_id, profile.id);
-    // The serialized result: only field 2 (credential_id), no Profile
-    // identifier under any number.
+    // The serialized result: only the credential id, no Profile identifier
+    // under any number.
     assert_eq!(
         prost::Message::encode_to_vec(&resp),
         prost::Message::encode_to_vec(&sid_proto::sid::v1::OpaqueZkppRegistrationFinishResponse {
@@ -1107,7 +1105,7 @@ async fn test_password_change_rejects_foreign_credential() {
         .auth
         .password_change_challenge(authed_request(
             PasswordChangeChallengeRequest {
-                credential_id: victim_cred.id.0.to_string(),
+                credential_id: common::credential_wire(victim_cred.id),
                 credential_request: vec![],
                 registration_request: vec![],
             },
@@ -1122,7 +1120,7 @@ async fn test_password_change_rejects_foreign_credential() {
         .password_change_finish(authed_request(
             PasswordChangeFinishRequest {
                 operation_id: Some(sid_ids::PasswordOperationId::generate().into()),
-                credential_id: victim_cred.id.0.to_string(),
+                credential_id: common::credential_wire(victim_cred.id),
                 registration_record: vec![0; 32],
                 proof: None,
             },
@@ -1295,7 +1293,7 @@ async fn test_e2e_opaque_registration_and_login() {
     let registered = opaque_register(&svc, email, password)
         .await
         .expect("registration");
-    assert!(!registered.credential_id.is_empty());
+    common::credential_of(&registered.credential_id);
 
     // Step 3: OPAQUE Login
     let client_login_start =
@@ -2263,7 +2261,7 @@ async fn test_late_policy_proof_never_verifies_a_stored_credential() {
 
     let req = authed_request(
         SubmitDeferredZkProofRequest {
-            credential_id: cred.id.0.to_string(),
+            credential_id: common::credential_wire(cred.id),
             zkpp_proof: vec![1, 2, 3],
             instances: vec![],
             policy_version: 7,
@@ -2327,9 +2325,8 @@ async fn zkpp_register_without_proof(
         .await
         .unwrap()
         .into_inner();
-    let id: uuid::Uuid = done.credential_id.parse().unwrap();
     svc.storage
-        .get_credential(sid_core::models::CredentialId(id))
+        .get_credential(common::credential_of(&done.credential_id))
         .await
         .unwrap()
         .unwrap()
@@ -4845,7 +4842,9 @@ async fn test_session_evicted_at_limit_stops_its_tokens() {
             .await
             .unwrap()
             .into_inner();
-        sessions.push(token.session_id);
+        sessions.push(common::opaque_client::session_text(
+            token.session_id.as_ref(),
+        ));
         // Distinct creation times order the sessions.
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
@@ -5375,7 +5374,7 @@ async fn test_magic_link_disabled_by_default() {
     let err = svc
         .auth
         .verify_magic_link(Request::new(VerifyMagicLinkRequest {
-            session_id: Uuid::now_v7().to_string(),
+            magic_link_id: Some(sid_ids::MagicLinkId::generate().into()),
             token: "any".to_string(),
         }))
         .await
@@ -5549,7 +5548,7 @@ async fn test_magic_link_follows_the_principal_assignment() {
     let err = svc
         .auth
         .verify_magic_link(Request::new(VerifyMagicLinkRequest {
-            session_id: link.session_id.to_string(),
+            magic_link_id: common::magic_link(link.session_id),
             token,
         }))
         .await
@@ -5580,7 +5579,7 @@ async fn test_magic_link_verify_issues_provisional_session() {
     let resp = svc
         .auth
         .verify_magic_link(Request::new(VerifyMagicLinkRequest {
-            session_id: link.session_id.to_string(),
+            magic_link_id: common::magic_link(link.session_id),
             token,
         }))
         .await
@@ -5588,7 +5587,7 @@ async fn test_magic_link_verify_issues_provisional_session() {
     let access_token = common::opaque_client::bearer(&resp);
     let resp = resp.into_inner();
 
-    let session_id: sid_core::models::SessionId = resp.session_id.parse().unwrap();
+    let session_id = sid_ids_proto::required(resp.session_id.as_ref()).unwrap();
     let session = svc
         .storage
         .get_session(session_id)
@@ -5627,7 +5626,7 @@ async fn test_magic_link_verify_unreadable_session_is_reported() {
     let err = svc
         .auth
         .verify_magic_link(Request::new(VerifyMagicLinkRequest {
-            session_id: link.session_id.to_string(),
+            magic_link_id: common::magic_link(link.session_id),
             token,
         }))
         .await
@@ -5654,7 +5653,7 @@ async fn test_magic_link_verify_unrecorded_consumption_is_reported() {
     let err = svc
         .auth
         .verify_magic_link(Request::new(VerifyMagicLinkRequest {
-            session_id: link.session_id.to_string(),
+            magic_link_id: common::magic_link(link.session_id),
             token,
         }))
         .await
@@ -5680,7 +5679,7 @@ async fn test_magic_link_verify_rejects_personal_profile() {
     let err = svc
         .auth
         .verify_magic_link(Request::new(VerifyMagicLinkRequest {
-            session_id: link.session_id.to_string(),
+            magic_link_id: common::magic_link(link.session_id),
             token,
         }))
         .await
@@ -7062,7 +7061,7 @@ async fn test_request_otp_returns_session() {
     });
     let resp = svc.auth.request_otp(req).await.unwrap();
     let inner = resp.into_inner();
-    assert!(!inner.otp_session_id.is_empty());
+    sid_ids_proto::required(inner.otp_session_id.as_ref()).expect("a code session id");
     assert!(!inner.masked_target.is_empty());
     assert_eq!(inner.expires_in_seconds, 600);
     assert_eq!(inner.code_length, 8);
@@ -7103,7 +7102,7 @@ async fn test_request_otp_anti_enumeration() {
     let resp = svc.auth.request_otp(req).await.unwrap();
     let inner = resp.into_inner();
     // Should return a plausible response even for nonexistent emails
-    assert!(!inner.otp_session_id.is_empty());
+    sid_ids_proto::required(inner.otp_session_id.as_ref()).expect("a code session id");
     assert!(inner.expires_in_seconds > 0);
 }
 
@@ -7124,12 +7123,19 @@ async fn test_verify_otp_invalid_session_id() {
     let storage = MockStorage::new().with_system_project();
     let svc = TestServices::new(storage);
 
-    let req = Request::new(VerifyOtpRequest {
-        code: "12345678".to_string(),
-        session_id: Some("not-a-uuid".to_string()),
-    });
-    let err = svc.auth.verify_otp(req).await.unwrap_err();
-    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    for otp_session_id in [
+        None,
+        Some(sid_ids_proto::OtpSessionId {
+            value: vec![0x01; 15],
+        }),
+    ] {
+        let req = Request::new(VerifyOtpRequest {
+            code: "12345678".to_string(),
+            otp_session_id,
+        });
+        let err = svc.auth.verify_otp(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
 }
 
 #[tokio::test]
@@ -7167,7 +7173,7 @@ async fn test_verify_otp_wrong_code() {
     // Try wrong code
     let req = Request::new(VerifyOtpRequest {
         code: "00000000".to_string(),
-        session_id: Some(resp.otp_session_id),
+        otp_session_id: resp.otp_session_id,
     });
     let resp = svc.auth.verify_otp(req).await.unwrap();
     assert!(!resp.into_inner().verified);
@@ -7179,7 +7185,7 @@ async fn test_resend_otp_without_session() {
     let svc = TestServices::new(storage);
 
     let req = Request::new(ResendOtpRequest {
-        session_id: Some(Uuid::new_v4().to_string()),
+        otp_session_id: Some(sid_ids::OtpSessionId::generate().into()),
     });
     let err = svc.auth.resend_otp(req).await.unwrap_err();
     // An unknown code session reads as an expired one: request a new code.
@@ -7231,7 +7237,7 @@ async fn test_resend_otp_after_request() {
 
     // Resend
     let req = Request::new(ResendOtpRequest {
-        session_id: Some(resp.otp_session_id),
+        otp_session_id: resp.otp_session_id,
     });
     let resp = svc.auth.resend_otp(req).await.unwrap();
     assert!(resp.into_inner().expires_in > 0);
@@ -7252,7 +7258,7 @@ async fn test_delete_mfa_credential_requires_elevated_session() {
     let bearer = common::issue_token(&svc.jwt, &profile, &["openid".to_string()]);
     let req = authed_request(
         DeleteMfaCredentialRequest {
-            credential_id: Uuid::now_v7().to_string(),
+            credential_id: Some(sid_ids::CredentialId::generate().into()),
         },
         &bearer,
     );
@@ -7293,7 +7299,7 @@ async fn test_delete_mfa_credential_not_found() {
     // Non-existent credential → NotFound.
     let req = authed_request(
         DeleteMfaCredentialRequest {
-            credential_id: Uuid::now_v7().to_string(),
+            credential_id: Some(sid_ids::CredentialId::generate().into()),
         },
         &bearer,
     );
@@ -7347,7 +7353,7 @@ async fn test_delete_totp_credential_then_reenroll() {
     // Delete the TOTP credential.
     let req = authed_request(
         DeleteMfaCredentialRequest {
-            credential_id: cred_id.0.to_string(),
+            credential_id: common::credential_wire(cred_id),
         },
         &bearer,
     );
@@ -7574,7 +7580,6 @@ fn step_up_request(
     );
     authed_request(
         RequestStepUpRequest {
-            session_id: session.id.to_string(),
             method: method as i32,
         },
         &token,
@@ -7602,7 +7607,7 @@ async fn test_request_step_up_totp_returns_empty_challenge() {
 
     // 1-phase: no challenge needed, just echoes the method.
     assert_eq!(resp.method, StepUpMethod::Totp as i32);
-    assert!(resp.challenge_id.is_empty());
+    assert!(resp.challenge_id.is_none());
     assert!(resp.challenge.is_none());
     // Decay-aware fields.
     assert!(
@@ -7720,7 +7725,7 @@ async fn test_request_step_up_unspecified_returns_available_methods() {
 
     // Query mode returns all enrolled methods (Full decay → no restrictions).
     assert_eq!(resp.method, StepUpMethod::Unspecified as i32);
-    assert!(resp.challenge_id.is_empty());
+    assert!(resp.challenge_id.is_none());
     assert!(resp.challenge.is_none());
     assert_eq!(resp.decay_level, "full");
     assert!(
@@ -7946,9 +7951,8 @@ async fn test_complete_step_up_totp_elevates_session() {
     // CompleteStepUp with TOTP.
     let req = authed_request(
         CompleteStepUpRequest {
-            session_id: session.id.to_string(),
             method: StepUpMethod::Totp as i32,
-            challenge_id: String::new(),
+            challenge_id: None,
             proof: Some(complete_step_up_request::Proof::TotpCode(code)),
         },
         &bearer,
@@ -8006,7 +8010,7 @@ async fn test_complete_step_up_totp_elevates_session() {
 async fn recovery_step_up_fixture(
     code: &str,
     status: sid_core::models::credential::CredentialStatus,
-) -> (TestServices, String, sid_core::models::session::Session) {
+) -> (TestServices, String) {
     use sid_core::models::session::Session;
     use sid_core::models::{Credential, CredentialData, CredentialType};
 
@@ -8038,19 +8042,14 @@ async fn recovery_step_up_fixture(
         .create_credential(&credential, AuditEntry::system("test", "recovery").into())
         .await
         .unwrap();
-    (svc, bearer, session)
+    (svc, bearer)
 }
 
-fn recovery_step_up(
-    session: &sid_core::models::session::Session,
-    code: &str,
-    bearer: &str,
-) -> Request<CompleteStepUpRequest> {
+fn recovery_step_up(code: &str, bearer: &str) -> Request<CompleteStepUpRequest> {
     authed_request(
         CompleteStepUpRequest {
-            session_id: session.id.to_string(),
             method: StepUpMethod::RecoveryCode as i32,
-            challenge_id: String::new(),
+            challenge_id: None,
             proof: Some(complete_step_up_request::Proof::RecoveryCode(
                 code.to_string(),
             )),
@@ -8063,12 +8062,11 @@ fn recovery_step_up(
 #[tokio::test]
 async fn test_complete_step_up_revoked_recovery_codes_refused() {
     use sid_core::models::credential::CredentialStatus;
-    let (svc, bearer, session) =
-        recovery_step_up_fixture("AAAA-BBBB-CCCC", CredentialStatus::Revoked).await;
+    let (svc, bearer) = recovery_step_up_fixture("AAAA-BBBB-CCCC", CredentialStatus::Revoked).await;
 
     let err = svc
         .auth
-        .complete_step_up(recovery_step_up(&session, "AAAA-BBBB-CCCC", &bearer))
+        .complete_step_up(recovery_step_up("AAAA-BBBB-CCCC", &bearer))
         .await
         .unwrap_err();
 
@@ -8080,20 +8078,19 @@ async fn test_complete_step_up_revoked_recovery_codes_refused() {
 #[tokio::test]
 async fn test_complete_step_up_recovery_code_is_single_use() {
     use sid_core::models::credential::CredentialStatus;
-    let (svc, bearer, session) =
-        recovery_step_up_fixture("AAAA-BBBB-CCCC", CredentialStatus::Active).await;
+    let (svc, bearer) = recovery_step_up_fixture("AAAA-BBBB-CCCC", CredentialStatus::Active).await;
 
     // Each step-up rotates the token, so later calls use the one it returned.
     let rotated = svc
         .auth
-        .complete_step_up(recovery_step_up(&session, "AAAA-BBBB-CCCC", &bearer))
+        .complete_step_up(recovery_step_up("AAAA-BBBB-CCCC", &bearer))
         .await
         .unwrap()
         .into_inner()
         .new_session_token;
     let err = svc
         .auth
-        .complete_step_up(recovery_step_up(&session, "AAAA-BBBB-CCCC", &rotated))
+        .complete_step_up(recovery_step_up("AAAA-BBBB-CCCC", &rotated))
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::Unauthenticated);
@@ -8103,7 +8100,7 @@ async fn test_complete_step_up_recovery_code_is_single_use() {
         "refused as a revoked token, not as a spent code: {err:?}"
     );
     svc.auth
-        .complete_step_up(recovery_step_up(&session, "ZZZZ-ZZZZ-ZZZZ", &rotated))
+        .complete_step_up(recovery_step_up("ZZZZ-ZZZZ-ZZZZ", &rotated))
         .await
         .unwrap();
 }
@@ -8155,9 +8152,8 @@ async fn test_complete_step_up_totp_wrong_code() {
     // Wrong code.
     let req = authed_request(
         CompleteStepUpRequest {
-            session_id: session.id.to_string(),
             method: StepUpMethod::Totp as i32,
-            challenge_id: String::new(),
+            challenge_id: None,
             proof: Some(complete_step_up_request::Proof::TotpCode(
                 "000000".to_string(),
             )),
@@ -8199,9 +8195,8 @@ async fn test_complete_step_up_no_mfa_enrolled() {
     // No TOTP credential enrolled → FailedPrecondition.
     let req = authed_request(
         CompleteStepUpRequest {
-            session_id: session.id.to_string(),
             method: StepUpMethod::Totp as i32,
-            challenge_id: String::new(),
+            challenge_id: None,
             proof: Some(complete_step_up_request::Proof::TotpCode(
                 "123456".to_string(),
             )),
@@ -8242,9 +8237,8 @@ async fn test_complete_step_up_webauthn_expired_challenge() {
 
     let req = authed_request(
         CompleteStepUpRequest {
-            session_id: session.id.to_string(),
             method: StepUpMethod::Webauthn as i32,
-            challenge_id: String::new(),
+            challenge_id: None,
             proof: Some(complete_step_up_request::Proof::WebauthnAssertion(vec![
                 1, 2, 3,
             ])),
@@ -8298,9 +8292,8 @@ async fn test_complete_step_up_webauthn_no_challenge_id() {
     );
     let req = authed_request(
         CompleteStepUpRequest {
-            session_id: session.id.to_string(),
             method: StepUpMethod::Webauthn as i32,
-            challenge_id: "nonexistent-challenge".to_string(),
+            challenge_id: Some(sid_ids::StepUpChallengeId::generate().into()),
             proof: Some(complete_step_up_request::Proof::WebauthnAssertion(
                 assertion,
             )),
@@ -9703,7 +9696,7 @@ async fn test_request_password_reset_storage_fault_keeps_answer_shape() {
 async fn test_verify_password_reset_invalid_session() {
     let svc = TestServices::new(MockStorage::new());
     let req = Request::new(VerifyPasswordResetRequest {
-        session_id: Uuid::now_v7().to_string(),
+        reset_session_id: Some(sid_ids::ResetSessionId::generate().into()),
         token: "sometoken".to_string(),
     });
     // An unknown reset reads as an expired one: the reset starts again.
@@ -9740,7 +9733,7 @@ async fn test_verify_password_reset_wrong_token() {
 
     let svc = TestServices::new(storage);
     let req = Request::new(VerifyPasswordResetRequest {
-        session_id: session_id.to_string(),
+        reset_session_id: common::reset_wire(session_id),
         token: "wrong_token".to_string(),
     });
     let resp = svc.auth.verify_password_reset(req).await;
@@ -9776,14 +9769,14 @@ async fn test_verify_password_reset_correct_token() {
 
     let svc = TestServices::new(storage);
     let req = Request::new(VerifyPasswordResetRequest {
-        session_id: session_id.to_string(),
+        reset_session_id: common::reset_wire(session_id),
         token: correct_token.to_string(),
     });
     let resp = svc.auth.verify_password_reset(req).await;
     assert!(resp.is_ok(), "verify should succeed: {:?}", resp.err());
 
     let inner = resp.unwrap().into_inner();
-    assert!(!inner.reset_session_id.is_empty());
+    assert!(inner.history.is_some(), "the reset's operation");
     assert!(inner.expires_in > 0);
 }
 
@@ -9817,14 +9810,14 @@ async fn test_verify_password_reset_already_consumed() {
 
     // First verify — succeeds
     let req = Request::new(VerifyPasswordResetRequest {
-        session_id: session_id.to_string(),
+        reset_session_id: common::reset_wire(session_id),
         token: token.to_string(),
     });
     assert!(svc.auth.verify_password_reset(req).await.is_ok());
 
     // Second verify — fails (already consumed)
     let req = Request::new(VerifyPasswordResetRequest {
-        session_id: session_id.to_string(),
+        reset_session_id: common::reset_wire(session_id),
         token: token.to_string(),
     });
     let resp = svc.auth.verify_password_reset(req).await;
@@ -9835,16 +9828,20 @@ async fn test_verify_password_reset_already_consumed() {
 #[tokio::test]
 async fn test_complete_password_reset_requires_verified_session() {
     let svc = TestServices::new(MockStorage::new());
+    // The reset is the one its operation names; an operation no verified
+    // reset prepared is refused as an expired operation, as at execute: the
+    // reset starts again.
     let req = Request::new(CompletePasswordResetRequest {
-        reset_session_id: Uuid::now_v7().to_string(),
-        operation_id: None,
+        operation_id: Some(sid_ids::PasswordOperationId::generate().into()),
         registration_record: vec![],
         proof: None,
     });
-    // An unknown reset reads as an expired one: the reset starts again.
     let err = svc.auth.complete_password_reset(req).await.unwrap_err();
     assert_eq!(err.code(), tonic::Code::FailedPrecondition);
-    assert_eq!(common::error_reason(&err).as_deref(), Some("INVALID_STATE"));
+    assert_eq!(
+        common::error_reason(&err).as_deref(),
+        Some("OPERATION_EXPIRED")
+    );
 }
 
 /// A completed password reset ends every earlier session everywhere: their
@@ -9891,7 +9888,7 @@ async fn test_complete_password_reset_ends_earlier_sessions() {
     let verified = svc
         .auth
         .verify_password_reset(Request::new(VerifyPasswordResetRequest {
-            session_id: reset.id.to_string(),
+            reset_session_id: common::reset_wire(reset.id),
             token: token.to_string(),
         }))
         .await
@@ -9926,7 +9923,6 @@ async fn test_complete_password_reset_ends_earlier_sessions() {
 
     svc.auth
         .complete_password_reset(Request::new(CompletePasswordResetRequest {
-            reset_session_id: verified.reset_session_id,
             operation_id: context.operation_id,
             registration_record: finish.message.serialize().to_vec(),
             proof: None,
@@ -10377,7 +10373,7 @@ async fn test_event_mfa_disabled_on_credential_delete() {
     svc.auth
         .delete_mfa_credential(authed_request(
             DeleteMfaCredentialRequest {
-                credential_id: cred_id.0.to_string(),
+                credential_id: common::credential_wire(cred_id),
             },
             &bearer,
         ))
