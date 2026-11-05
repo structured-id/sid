@@ -221,7 +221,7 @@ pub struct SnapshotMetadata {
 
 /// The snapshot format this build writes and reads. A snapshot of another
 /// format is refused, never converted: its contents are not this format's.
-pub const FORMAT_VERSION: u32 = 6;
+pub const FORMAT_VERSION: u32 = 7;
 
 impl Snapshot {
     /// `json` as a snapshot of [`FORMAT_VERSION`]; another format is refused

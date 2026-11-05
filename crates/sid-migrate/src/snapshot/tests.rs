@@ -51,6 +51,27 @@ fn test_only_this_format_is_read() {
     );
 }
 
+// A snapshot of the format before keyed-creation bindings is refused by its
+// version: read as this format it would lose unfinished creations' bound
+// identifiers, or fail on the missing field.
+#[test]
+fn test_a_snapshot_without_bindings_is_refused_by_its_version() {
+    let snapshot = Snapshot::new("sqlite", "sqlite://a.db");
+    let mut earlier = serde_json::to_value(&snapshot).unwrap();
+    earlier["metadata"]["version"] = serde_json::json!(6);
+    earlier
+        .as_object_mut()
+        .unwrap()
+        .remove("operation_resources");
+    let refused = Snapshot::parse(&earlier.to_string()).unwrap_err();
+    assert!(
+        refused
+            .to_string()
+            .contains("unsupported snapshot format 6"),
+        "{refused}"
+    );
+}
+
 // A session exported in a snapshot names its Profile as `profile_id` and is
 // read back with the same Profile and session.
 #[test]

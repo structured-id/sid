@@ -584,11 +584,32 @@ pub async fn a_binding_lives_with_its_completion(store: &dyn OperationResultStor
         )
         .await
         .unwrap();
+    // A binding whose completion expired is not carried to another store:
+    // it would hold a key the source already released.
+    assert!(
+        !store
+            .export_operation_resources()
+            .await
+            .unwrap()
+            .iter()
+            .any(|b| b.namespace == ns && b.key == expired),
+        "an expired creation's binding is not exported"
+    );
     let renewed = proposal(&ns, &expired, "deliver");
     assert_eq!(
         store.bind_operation_resource(&renewed).await.unwrap(),
         renewed.resource,
         "an expired completion frees its key for a new binding"
+    );
+    // The new binding stands: the expired completion was consumed, so the
+    // next attempt of the new command resolves the same identifier.
+    assert_eq!(
+        store
+            .bind_operation_resource(&proposal(&ns, &expired, "deliver"))
+            .await
+            .unwrap(),
+        renewed.resource,
+        "the renewed binding is stable"
     );
 
     let purged = key();

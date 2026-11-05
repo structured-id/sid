@@ -1864,6 +1864,7 @@ impl sid_plugin::OperationResultStore for MockStorage {
         let now = chrono::Utc::now();
         match inner.operations.get(&slot) {
             Some(r) if r.completion.retain_until.is_some_and(|until| until <= now) => {
+                inner.operations.remove(&slot);
                 inner.operation_resources.remove(&slot);
             }
             Some(r)
@@ -1887,13 +1888,18 @@ impl sid_plugin::OperationResultStore for MockStorage {
     async fn export_operation_resources(
         &self,
     ) -> SidResult<Vec<sid_core::models::OperationResourceBinding>> {
-        Ok(self
-            .inner
-            .lock()
-            .unwrap()
+        let inner = self.inner.lock().unwrap();
+        let now = chrono::Utc::now();
+        Ok(inner
             .operation_resources
-            .values()
-            .cloned()
+            .iter()
+            .filter(|(slot, _)| {
+                !inner
+                    .operations
+                    .get(*slot)
+                    .is_some_and(|r| r.completion.retain_until.is_some_and(|u| u <= now))
+            })
+            .map(|(_, b)| b.clone())
             .collect())
     }
     async fn import_operation_resource(

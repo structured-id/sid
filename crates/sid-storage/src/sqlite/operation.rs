@@ -566,7 +566,8 @@ impl OperationResultStore for SqliteBackend {
             admit(&mut tx, period).await?;
         }
         // A key completed for another command binds nothing; one whose
-        // completion's retention ended frees its old binding.
+        // completion's retention ended is free again: the expired completion
+        // and its binding are consumed, so the binding made next stands.
         let completed: Option<(String, Vec<u8>, Option<i64>, Option<i64>)> = sqlx::query_as(
             "SELECT method, fingerprint, period, retain_until_ms FROM operation_results
              WHERE namespace = ? AND op_key = ?",
@@ -578,12 +579,16 @@ impl OperationResultStore for SqliteBackend {
         .map_err(|e| SidError::Storage(format!("operation result: {e}")))?;
         match completed {
             Some((_, _, _, Some(until))) if until <= now => {
-                sqlx::query("DELETE FROM operation_resources WHERE namespace = ? AND op_key = ?")
+                for table in ["operation_results", "operation_resources"] {
+                    sqlx::query(sqlx::AssertSqlSafe(format!(
+                        "DELETE FROM {table} WHERE namespace = ? AND op_key = ?"
+                    )))
                     .bind(&proposal.namespace)
                     .bind(proposal.key.as_str())
                     .execute(&mut *tx)
                     .await
                     .map_err(|e| SidError::Storage(format!("operation resource: {e}")))?;
+                }
             }
             Some((method, fingerprint, done_in, _))
                 if method != proposal.method
@@ -639,10 +644,18 @@ impl OperationResultStore for SqliteBackend {
     }
 
     async fn export_operation_resources(&self) -> SidResult<Vec<OperationResourceBinding>> {
+        // A binding whose completion expired holds a key already released: it
+        // stays here until the purge, and is not carried elsewhere.
         let rows: Vec<(String, String, String, Vec<u8>, Option<i64>, Uuid)> = sqlx::query_as(
             "SELECT namespace, op_key, method, fingerprint, period, resource
-             FROM operation_resources ORDER BY bound_at_ms, namespace, op_key",
+             FROM operation_resources r
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM operation_results o
+                 WHERE o.namespace = r.namespace AND o.op_key = r.op_key
+                   AND o.retain_until_ms <= ?)
+             ORDER BY bound_at_ms, namespace, op_key",
         )
+        .bind(Utc::now().timestamp_millis())
         .fetch_all(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("operation resources: {e}")))?;
