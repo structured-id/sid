@@ -1908,11 +1908,17 @@ impl sid_plugin::OperationResultStore for MockStorage {
     ) -> SidResult<bool> {
         let slot = (binding.namespace.clone(), binding.key.as_str().to_string());
         let mut inner = self.inner.lock().unwrap();
-        if inner.operation_resources.contains_key(&slot)
-            || binding
-                .period
-                .is_some_and(|p| inner.admit_operation_period(p).is_err())
-        {
+        // A binding under a retired period is an unfinished creation's: it is
+        // carried; one under a period never issued here is not.
+        let unissued = binding.period.is_some_and(|p| {
+            matches!(
+                inner.admit_operation_period(p),
+                Err(sid_core::Error::OperationPeriodRefused(
+                    sid_core::models::OperationPeriodRefusal::NotIssued
+                ))
+            )
+        });
+        if inner.operation_resources.contains_key(&slot) || unissued {
             return Ok(false);
         }
         inner.operation_resources.insert(slot, binding.clone());
@@ -6552,14 +6558,26 @@ impl MockStorageInner {
                 operation.namespace.clone(),
                 operation.key.as_str().to_string(),
             );
-            // A completion past its retention no longer holds the key.
+            // A completion past its retention no longer holds the key: it
+            // goes with its binding.
             let now = chrono::Utc::now();
-            if self
-                .operations
-                .get(&slot)
-                .is_some_and(|r| r.completion.retain_until.is_none_or(|until| until > now))
-            {
-                return Err(sid_core::Error::OperationCompleted(slot.1));
+            match self.operations.get(&slot) {
+                Some(r) if r.completion.retain_until.is_none_or(|until| until > now) => {
+                    return Err(sid_core::Error::OperationCompleted(slot.1));
+                }
+                Some(_) => {
+                    self.operations.remove(&slot);
+                    self.operation_resources.remove(&slot);
+                }
+                None => {}
+            }
+            // A key a creation bound completes only that creation's command.
+            if self.operation_resources.get(&slot).is_some_and(|held| {
+                held.method != operation.method
+                    || held.fingerprint != operation.fingerprint
+                    || held.period != operation.period
+            }) {
+                return Err(sid_core::Error::OperationKeyReused(slot.1));
             }
             self.operations.insert(
                 slot,

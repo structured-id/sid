@@ -18,9 +18,11 @@ use super::{SqliteBackend, WriteTx, fmt_dt};
 
 /// Record `operation` in `tx`. When another transaction already committed
 /// the key, this one must commit nothing: `OperationCompleted`; a completion
-/// past its retention no longer holds the key and is replaced. A keyed
-/// command's period is admitted first; the write transaction serializes it
-/// with every retirement.
+/// past its retention no longer holds the key and is consumed with its
+/// binding. A key a creation bound completes only that creation's command:
+/// another is refused as `OperationKeyReused`. A keyed command's period is
+/// admitted first; the write transaction serializes it with every
+/// retirement and every binding.
 pub(super) async fn record_in_tx(
     tx: &mut WriteTx,
     operation: &OperationCompletion,
@@ -30,16 +32,33 @@ pub(super) async fn record_in_tx(
         admit(tx, period).await?;
     }
     let now = Utc::now();
+    consume_expired(
+        tx,
+        &operation.namespace,
+        &operation.key,
+        now.timestamp_millis(),
+    )
+    .await?;
+    let held: Option<(String, Vec<u8>, Option<i64>)> = sqlx::query_as(
+        "SELECT method, fingerprint, period FROM operation_resources
+         WHERE namespace = ? AND op_key = ?",
+    )
+    .bind(&operation.namespace)
+    .bind(operation.key.as_str())
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|e| SidError::Storage(format!("operation resource: {e}")))?;
+    if let Some((method, fingerprint, held_in)) = held
+        && (method != operation.method || fingerprint != operation.fingerprint || held_in != period)
+    {
+        return Err(SidError::OperationKeyReused(operation.key.as_str().into()));
+    }
     let inserted = sqlx::query(
         "INSERT INTO operation_results
              (namespace, op_key, method, fingerprint, result, completed_at, period,
               retain_until_ms)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT (namespace, op_key) DO UPDATE SET
-             method = excluded.method, fingerprint = excluded.fingerprint,
-             result = excluded.result, completed_at = excluded.completed_at,
-             period = excluded.period, retain_until_ms = excluded.retain_until_ms
-         WHERE operation_results.retain_until_ms <= ?",
+         ON CONFLICT (namespace, op_key) DO NOTHING",
     )
     .bind(&operation.namespace)
     .bind(operation.key.as_str())
@@ -49,13 +68,47 @@ pub(super) async fn record_in_tx(
     .bind(fmt_dt(&now))
     .bind(period)
     .bind(operation.retain_until.map(|t| t.timestamp_millis()))
-    .bind(now.timestamp_millis())
     .execute(&mut **tx)
     .await
     .map_err(|e| SidError::Storage(format!("operation completion: {e}")))?
     .rows_affected();
     if inserted == 0 {
         return Err(SidError::OperationCompleted(operation.key.as_str().into()));
+    }
+    Ok(())
+}
+
+/// Release `key` in `namespace` when its completion's retention ended at
+/// `now_ms`: the expired completion and its binding are deleted, so whatever
+/// is written next stands for every later attempt.
+async fn consume_expired(
+    conn: &mut sqlx::SqliteConnection,
+    namespace: &str,
+    key: &OperationKey,
+    now_ms: i64,
+) -> SidResult<()> {
+    let expired: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM operation_results
+         WHERE namespace = ? AND op_key = ? AND retain_until_ms <= ?",
+    )
+    .bind(namespace)
+    .bind(key.as_str())
+    .bind(now_ms)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(|e| SidError::Storage(format!("operation result: {e}")))?;
+    if expired.is_none() {
+        return Ok(());
+    }
+    for table in ["operation_results", "operation_resources"] {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DELETE FROM {table} WHERE namespace = ? AND op_key = ?"
+        )))
+        .bind(namespace)
+        .bind(key.as_str())
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| SidError::Storage(format!("operation resource: {e}")))?;
     }
     Ok(())
 }
@@ -565,11 +618,11 @@ impl OperationResultStore for SqliteBackend {
         if let Some(period) = period {
             admit(&mut tx, period).await?;
         }
-        // A key completed for another command binds nothing; one whose
-        // completion's retention ended is free again: the expired completion
-        // and its binding are consumed, so the binding made next stands.
-        let completed: Option<(String, Vec<u8>, Option<i64>, Option<i64>)> = sqlx::query_as(
-            "SELECT method, fingerprint, period, retain_until_ms FROM operation_results
+        // A key whose completion's retention ended is free again; one
+        // completed for another command binds nothing.
+        consume_expired(&mut tx, &proposal.namespace, &proposal.key, now).await?;
+        let completed: Option<(String, Vec<u8>, Option<i64>)> = sqlx::query_as(
+            "SELECT method, fingerprint, period FROM operation_results
              WHERE namespace = ? AND op_key = ?",
         )
         .bind(&proposal.namespace)
@@ -577,27 +630,12 @@ impl OperationResultStore for SqliteBackend {
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("operation result: {e}")))?;
-        match completed {
-            Some((_, _, _, Some(until))) if until <= now => {
-                for table in ["operation_results", "operation_resources"] {
-                    sqlx::query(sqlx::AssertSqlSafe(format!(
-                        "DELETE FROM {table} WHERE namespace = ? AND op_key = ?"
-                    )))
-                    .bind(&proposal.namespace)
-                    .bind(proposal.key.as_str())
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(|e| SidError::Storage(format!("operation resource: {e}")))?;
-                }
-            }
-            Some((method, fingerprint, done_in, _))
-                if method != proposal.method
-                    || fingerprint != proposal.fingerprint
-                    || done_in != period =>
-            {
-                return Err(reused());
-            }
-            _ => {}
+        if let Some((method, fingerprint, done_in)) = completed
+            && (method != proposal.method
+                || fingerprint != proposal.fingerprint
+                || done_in != period)
+        {
+            return Err(reused());
         }
         let held: Option<(String, Vec<u8>, Option<i64>, Uuid)> = sqlx::query_as(
             "SELECT method, fingerprint, period, resource FROM operation_resources
@@ -679,9 +717,14 @@ impl OperationResultStore for SqliteBackend {
         binding: &OperationResourceBinding,
     ) -> SidResult<bool> {
         let mut tx = self.begin_write().await?;
+        // A binding under a retired period is an unfinished creation's, kept
+        // to reconcile it: it is carried and holds its key, though nothing
+        // runs under that period any more. One under a period never issued
+        // here is not taken.
         if let Some(period) = binding.period {
             match admit(&mut tx, column(period)?).await {
-                Ok(()) => {}
+                Ok(()) | Err(SidError::OperationPeriodRefused(OperationPeriodRefusal::Retired)) => {
+                }
                 Err(SidError::OperationPeriodRefused(_)) => return Ok(false),
                 Err(e) => return Err(e),
             }

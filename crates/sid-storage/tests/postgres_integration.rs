@@ -404,6 +404,7 @@ mod operation_result_store {
         a_result_is_kept_no_longer_than_its_retention,
         operation_periods_bound_admission,
         a_keyed_creation_binds_one_identifier,
+        a_bound_key_completes_only_its_own_command,
         a_binding_lives_with_its_completion,
         bindings_travel_between_stores,
     );
@@ -508,6 +509,7 @@ mod host_operation_result_store {
         a_result_is_kept_no_longer_than_its_retention,
         operation_periods_bound_admission,
         a_keyed_creation_binds_one_identifier,
+        a_bound_key_completes_only_its_own_command,
         a_binding_lives_with_its_completion,
         bindings_travel_between_stores,
     );

@@ -395,6 +395,27 @@ pub async fn operation_periods_bound_admission(store: &dyn OperationResultStore)
         bindings.contains(&begun),
         "an unfinished creation's binding is kept to reconcile it"
     );
+    // Carried to another store, that binding still holds its key there,
+    // although no command runs under its retired period any more.
+    let mut carried_begun = begun.clone();
+    carried_begun.namespace = namespace();
+    assert!(
+        store
+            .import_operation_resource(&carried_begun)
+            .await
+            .unwrap(),
+        "an unfinished creation's binding under a retired period is carried"
+    );
+    let rebound = OperationResourceBinding {
+        period: Some(next.period),
+        resource: Uuid::now_v7(),
+        ..carried_begun.clone()
+    };
+    let err = store.bind_operation_resource(&rebound).await.unwrap_err();
+    assert!(
+        matches!(err, Error::OperationKeyReused(_)),
+        "the carried binding keeps its key from a new command: {err:?}"
+    );
     assert_eq!(
         refused(store.record_outcome(keyed(&key(), first.period)).await),
         OperationPeriodRefusal::Retired
@@ -552,6 +573,63 @@ pub async fn a_keyed_creation_binds_one_identifier(store: &dyn OperationResultSt
     let (x, y) = (x.unwrap(), y.unwrap());
     assert_eq!(x, y, "concurrent attempts resolve one binding");
     assert!(x == a.resource || x == b.resource);
+}
+
+/// A key bound by a creation completes only that creation: another method or
+/// other inputs under the key are refused and record nothing, so the
+/// creation's binding is never left with another command's completion. A
+/// binding and a completion of different commands racing on one key leave
+/// it to exactly one of them.
+pub async fn a_bound_key_completes_only_its_own_command(store: &dyn OperationResultStore) {
+    let (ns, bound_key) = (namespace(), key());
+    let creation = proposal(&ns, &bound_key, "create");
+    store.bind_operation_resource(&creation).await.unwrap();
+    let other_inputs = MutationContext::from(AuditEntry::system("conformance", "operation_result"))
+        .with_operation(OperationCompletion::new(
+            &ns,
+            bound_key.clone(),
+            "create",
+            b"other",
+            vec![],
+        ));
+    for conflicting in [outcome(&ns, &bound_key, "delete", b""), other_inputs] {
+        let err = store.record_outcome(conflicting).await.unwrap_err();
+        assert!(matches!(err, Error::OperationKeyReused(_)), "{err:?}");
+    }
+    assert!(
+        store
+            .get_operation_result(&ns, &bound_key)
+            .await
+            .unwrap()
+            .is_none(),
+        "a refused completion records nothing"
+    );
+    assert_eq!(
+        store
+            .bind_operation_resource(&proposal(&ns, &bound_key, "create"))
+            .await
+            .unwrap(),
+        creation.resource,
+        "the creation keeps its binding"
+    );
+    store
+        .record_outcome(outcome(&ns, &bound_key, "create", b"done"))
+        .await
+        .unwrap();
+
+    for _ in 0..16 {
+        let racing = key();
+        let creation = proposal(&ns, &racing, "create");
+        let (bound, recorded) = tokio::join!(
+            store.bind_operation_resource(&creation),
+            store.record_outcome(outcome(&ns, &racing, "delete", b"")),
+        );
+        match (bound, recorded) {
+            (Ok(_), Err(Error::OperationKeyReused(_)))
+            | (Err(Error::OperationKeyReused(_)), Ok(())) => {}
+            other => panic!("one command owns the key, got {other:?}"),
+        }
+    }
 }
 
 /// A key completed for another command binds nothing. A completed creation's
