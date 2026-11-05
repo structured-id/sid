@@ -5516,9 +5516,9 @@ dependencies = [
 
 [[package]]
 name = "sid-ids-proto"
-version = "0.1.4"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "670b079a14f3c8551f444a511aa92b2277b40df8a13e551c73ed1a5958bd8caa"
+checksum = "edb68df2ab1a62d325b34486a9edaec97045b2fec5fc0d64f833ec8d1aab89fd"
 dependencies = [
  "prost",
  "prost-build",

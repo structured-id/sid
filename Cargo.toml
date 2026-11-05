@@ -236,7 +236,7 @@ time = "0.3"
 
 # Identifier packages of the StructuredID SDK.
 sid-ids = { version = "0.4", default-features = false }
-sid-ids-proto = "0.1.4"
+sid-ids-proto = "0.1.5"
 
 # Workspace crates
 sid-keys = { path = "crates/sid-keys" }
