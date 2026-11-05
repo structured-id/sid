@@ -5,13 +5,13 @@
 //! No recursion, no graph traversal, no ReBAC.
 //! All checks = flat queries. Expired assignments are filtered out.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use sid_core::Result;
 use sid_core::models::{
     AuthzPrincipal, INSTALLATION_ADMINISTRATOR_ROLE, ProfileId, ProjectId, ResourceId, Role,
-    RoleAssignment,
+    RoleAssignment, RoleId,
 };
 use sid_plugin::StorageBackend;
 
@@ -65,28 +65,14 @@ impl<S: StorageBackend + ?Sized> RbacService<S> {
         profile_id: ProfileId,
         project_id: ProjectId,
     ) -> Result<Vec<Role>> {
-        // 1. Get direct role assignments for the profile.
-        let direct_assignments = self
+        // Direct and group assignments in one read, then their roles in one.
+        let assignments = self
             .storage
-            .list_role_assignments_for_profile(profile_id)
+            .list_role_assignments_held_by_profile(profile_id)
             .await?;
-
-        // 2. Get group memberships → group role assignments.
-        let groups = self.storage.list_groups_for_profile(profile_id).await?;
-        let mut group_assignments = Vec::new();
-        for group in &groups {
-            let assignments = self
-                .storage
-                .list_role_assignments_for_group(group.id)
-                .await?;
-            group_assignments.extend(assignments);
-        }
-
-        // 3. Combine, filter expired, deduplicate role IDs.
         let mut seen_role_ids = HashSet::new();
         let mut effective_role_ids = Vec::new();
-
-        for assignment in direct_assignments.iter().chain(group_assignments.iter()) {
+        for assignment in &assignments {
             // A role held on one protected resource counts only there.
             if assignment.is_expired() || assignment.resource_scope().is_some() {
                 continue;
@@ -95,18 +81,71 @@ impl<S: StorageBackend + ?Sized> RbacService<S> {
                 effective_role_ids.push(assignment.role_id);
             }
         }
+        let mut roles = self.roles_by_id(&effective_role_ids).await?;
+        Ok(effective_role_ids
+            .iter()
+            .filter_map(|id| roles.remove(id))
+            .filter(|role| role.project_id == project_id)
+            .collect())
+    }
 
-        // 4. Fetch full Role objects, filter to requested project.
-        let mut roles = Vec::new();
-        for role_id in effective_role_ids {
-            if let Some(role) = self.storage.get_role(role_id).await?
-                && role.project_id == project_id
-            {
-                roles.push(role);
+    /// The stored roles among `ids`, by id.
+    async fn roles_by_id(&self, ids: &[RoleId]) -> Result<HashMap<RoleId, Role>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        Ok(self
+            .storage
+            .get_roles(ids)
+            .await?
+            .into_iter()
+            .map(|role| (role.id, role))
+            .collect())
+    }
+
+    /// Keys of the roles granting `permission` to `principal` through the
+    /// unexpired assignments `counts` admits whose role `in_scope` admits, and
+    /// the installation administrator's, in assignment order, each role once.
+    async fn granting_roles(
+        &self,
+        principal: &AuthzPrincipal,
+        permission: &str,
+        counts: impl Fn(&RoleAssignment) -> bool,
+        in_scope: impl Fn(&Role) -> bool,
+    ) -> Result<Vec<String>> {
+        let assignments = self.assignments_of(principal).await?;
+        let mut seen = HashSet::new();
+        // `None` is the installation administrator's assignment.
+        let mut picked = Vec::new();
+        for assignment in &assignments {
+            if assignment.administers_installation() {
+                if seen.insert(assignment.role_id) {
+                    picked.push(None);
+                }
+                continue;
+            }
+            if assignment.is_expired() || !counts(assignment) || !seen.insert(assignment.role_id) {
+                continue;
+            }
+            picked.push(Some(assignment.role_id));
+        }
+        let ids: Vec<RoleId> = picked.iter().flatten().copied().collect();
+        let mut roles = self.roles_by_id(&ids).await?;
+        let mut granting = Vec::new();
+        for pick in picked {
+            match pick {
+                None => granting.push(INSTALLATION_ADMINISTRATOR_ROLE.to_owned()),
+                Some(id) => {
+                    if let Some(role) = roles.remove(&id)
+                        && in_scope(&role)
+                        && role.has_permission(permission)
+                    {
+                        granting.push(role.key);
+                    }
+                }
             }
         }
-
-        Ok(roles)
+        Ok(granting)
     }
 
     /// Keys of the roles granting `permission` to `principal` on the protected
@@ -120,29 +159,13 @@ impl<S: StorageBackend + ?Sized> RbacService<S> {
         resource: ResourceId,
         permission: &str,
     ) -> Result<Vec<String>> {
-        let assignments = self.assignments_of(principal).await?;
-        let mut seen = HashSet::new();
-        let mut granting = Vec::new();
-        for assignment in &assignments {
-            if assignment.administers_installation() {
-                if seen.insert(assignment.role_id) {
-                    granting.push(INSTALLATION_ADMINISTRATOR_ROLE.to_owned());
-                }
-                continue;
-            }
-            if assignment.is_expired()
-                || assignment.resource_scope() != Some(resource)
-                || !seen.insert(assignment.role_id)
-            {
-                continue;
-            }
-            if let Some(role) = self.storage.get_role(assignment.role_id).await?
-                && role.has_permission(permission)
-            {
-                granting.push(role.key);
-            }
-        }
-        Ok(granting)
+        self.granting_roles(
+            principal,
+            permission,
+            |assignment| assignment.resource_scope() == Some(resource),
+            |_| true,
+        )
+        .await
     }
 
     /// Keys of the roles of `project` granting `permission` to `principal`:
@@ -155,48 +178,22 @@ impl<S: StorageBackend + ?Sized> RbacService<S> {
         project: ProjectId,
         permission: &str,
     ) -> Result<Vec<String>> {
-        let assignments = self.assignments_of(principal).await?;
-        let mut seen = HashSet::new();
-        let mut granting = Vec::new();
-        for assignment in &assignments {
-            if assignment.administers_installation() {
-                if seen.insert(assignment.role_id) {
-                    granting.push(INSTALLATION_ADMINISTRATOR_ROLE.to_owned());
-                }
-                continue;
-            }
-            if assignment.is_expired()
-                || assignment.resource_scope().is_some()
-                || !seen.insert(assignment.role_id)
-            {
-                continue;
-            }
-            if let Some(role) = self.storage.get_role(assignment.role_id).await?
-                && role.project_id == project
-                && role.has_permission(permission)
-            {
-                granting.push(role.key);
-            }
-        }
-        Ok(granting)
+        self.granting_roles(
+            principal,
+            permission,
+            |assignment| assignment.resource_scope().is_none(),
+            |role| role.project_id == project,
+        )
+        .await
     }
 
     /// Every stored assignment of `principal`, a profile's groups included.
     async fn assignments_of(&self, principal: &AuthzPrincipal) -> Result<Vec<RoleAssignment>> {
         Ok(match principal {
             AuthzPrincipal::Profile(profile_id) => {
-                let mut all = self
-                    .storage
-                    .list_role_assignments_for_profile(*profile_id)
-                    .await?;
-                for group in self.storage.list_groups_for_profile(*profile_id).await? {
-                    all.extend(
-                        self.storage
-                            .list_role_assignments_for_group(group.id)
-                            .await?,
-                    );
-                }
-                all
+                self.storage
+                    .list_role_assignments_held_by_profile(*profile_id)
+                    .await?
             }
             AuthzPrincipal::MachineUser(machine) => {
                 self.storage

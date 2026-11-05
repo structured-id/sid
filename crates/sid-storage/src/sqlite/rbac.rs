@@ -526,7 +526,15 @@ async fn read_assignments(
     with_admin_envelopes(pool, assignments).await
 }
 
-/// Attach to `assignments` the envelopes of the administrative ones.
+/// `ids` as the JSON array `json_each` reads back as rows of their text form.
+fn id_list(ids: impl Iterator<Item = uuid::Uuid>) -> String {
+    let ids: Vec<String> = ids.map(|id| id.to_string()).collect();
+    serde_json::to_string(&ids).expect("a list of strings serializes")
+}
+
+/// Attach to `assignments` their approved ceilings, policy authority and the
+/// envelopes of the administrative ones: a fixed number of reads, whatever
+/// the number of assignments.
 pub(crate) async fn with_admin_envelopes(
     pool: &sqlx::SqlitePool,
     mut assignments: Vec<RoleAssignment>,
@@ -540,60 +548,68 @@ pub(crate) async fn with_admin_envelopes(
         |id: &str| SidError::Storage(format!("administrative envelope {id} unreadable"));
     let read_error =
         |e: sqlx::Error| SidError::Storage(format!("read administrative envelopes: {e}"));
-    for assignment in &mut assignments {
-        let Some(provenance) = assignment.provenance.as_mut() else {
-            continue;
-        };
-        let permissions: Vec<(String,)> = sqlx::query_as(
-            "SELECT permission FROM role_assignment_ceilings WHERE assignment_id = ?",
-        )
-        .bind(assignment.id.0.to_string())
-        .fetch_all(pool)
-        .await
-        .map_err(|e| SidError::Storage(format!("read approved ceilings: {e}")))?;
-        if !permissions.is_empty() {
-            provenance.ceiling = Some(permissions.into_iter().map(|(p,)| p).collect());
-        }
+    let ids = id_list(assignments.iter().map(|a| a.id.0));
+    let position: std::collections::HashMap<String, usize> = assignments
+        .iter()
+        .enumerate()
+        .map(|(i, a)| (a.id.0.to_string(), i))
+        .collect();
+    let at = |id: &str| position.get(id).copied().ok_or_else(|| unreadable(id));
+
+    let ceilings: Vec<(String, String)> = sqlx::query_as(
+        "SELECT assignment_id, permission FROM role_assignment_ceilings
+         WHERE assignment_id IN (SELECT value FROM json_each(?))",
+    )
+    .bind(&ids)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| SidError::Storage(format!("read approved ceilings: {e}")))?;
+    for (id, permission) in ceilings {
+        let provenance = assignments[at(&id)?].provenance.as_mut().ok_or_else(|| {
+            SidError::Storage(format!("approved ceiling of {id} without provenance"))
+        })?;
+        provenance
+            .ceiling
+            .get_or_insert_with(Default::default)
+            .insert(permission);
     }
-    for assignment in &mut assignments {
-        let id = assignment.id.0.to_string();
-        let held = sqlx::query(
-            "SELECT operation FROM role_assignment_policy_admin WHERE assignment_id = ?",
-        )
-        .bind(&id)
-        .fetch_all(pool)
-        .await
-        .map_err(read_error)?;
-        for row in held {
-            let operation: String = row.try_get("operation").map_err(read_error)?;
-            assignment
-                .policy_admin
-                .get_or_insert_with(|| sid_core::models::PolicyAuthority {
-                    operations: Default::default(),
-                })
-                .operations
-                .insert(
-                    sid_core::models::PolicyOperation::parse(&operation)
-                        .ok_or_else(|| unreadable(&id))?,
-                );
-        }
+
+    let held: Vec<(String, String)> = sqlx::query_as(
+        "SELECT assignment_id, operation FROM role_assignment_policy_admin
+         WHERE assignment_id IN (SELECT value FROM json_each(?))",
+    )
+    .bind(&ids)
+    .fetch_all(pool)
+    .await
+    .map_err(read_error)?;
+    for (id, operation) in held {
+        let operation =
+            sid_core::models::PolicyOperation::parse(&operation).ok_or_else(|| unreadable(&id))?;
+        assignments[at(&id)?]
+            .policy_admin
+            .get_or_insert_with(|| sid_core::models::PolicyAuthority {
+                operations: Default::default(),
+            })
+            .operations
+            .insert(operation);
+    }
+
+    let heads = sqlx::query(
+        "SELECT assignment_id, recipient_group_id, max_validity_secs FROM role_assignment_admin
+         WHERE assignment_id IN (SELECT value FROM json_each(?))",
+    )
+    .bind(&ids)
+    .fetch_all(pool)
+    .await
+    .map_err(read_error)?;
+    if heads.is_empty() {
+        return Ok(assignments);
     }
     let mut envelopes = std::collections::HashMap::<String, AdminEnvelope>::new();
-    for assignment in &assignments {
-        let id = assignment.id.0.to_string();
-        let Some(head) = sqlx::query(
-            "SELECT recipient_group_id, max_validity_secs FROM role_assignment_admin
-             WHERE assignment_id = ?",
-        )
-        .bind(&id)
-        .fetch_optional(pool)
-        .await
-        .map_err(read_error)?
-        else {
-            continue;
-        };
+    for head in heads {
+        let id: String = head.try_get("assignment_id").map_err(read_error)?;
         let group: Option<String> = head.try_get("recipient_group_id").map_err(read_error)?;
-        let mut envelope = AdminEnvelope {
+        let envelope = AdminEnvelope {
             operations: Default::default(),
             roles: Default::default(),
             permission_ceiling: Default::default(),
@@ -604,49 +620,56 @@ pub(crate) async fn with_admin_envelopes(
                 .map_err(|_| unreadable(&id))?,
             max_validity_secs: head.try_get("max_validity_secs").map_err(read_error)?,
         };
-        let entries = sqlx::query(
-            "SELECT kind, value FROM role_assignment_admin_entries WHERE assignment_id = ?",
-        )
-        .bind(&id)
-        .fetch_all(pool)
-        .await
-        .map_err(read_error)?;
-        for entry in entries {
-            let kind: String = entry.try_get("kind").map_err(read_error)?;
-            let value: String = entry.try_get("value").map_err(read_error)?;
-            match kind.as_str() {
-                "operation" => {
-                    envelope
-                        .operations
-                        .insert(AdminOperation::parse(&value).ok_or_else(|| unreadable(&id))?);
-                }
-                "recipient_kind" => {
-                    envelope
-                        .recipient_kinds
-                        .insert(RecipientKind::parse(&value).ok_or_else(|| unreadable(&id))?);
-                }
-                "permission" => {
-                    envelope.permission_ceiling.insert(value);
-                }
-                _ => return Err(unreadable(&id)),
-            }
-        }
-        let roles =
-            sqlx::query("SELECT role_id FROM role_assignment_admin_roles WHERE assignment_id = ?")
-                .bind(&id)
-                .fetch_all(pool)
-                .await
-                .map_err(read_error)?;
-        for role in roles {
-            let role: String = role.try_get("role_id").map_err(read_error)?;
-            envelope.roles.insert(RoleId(
-                uuid::Uuid::parse_str(&role).map_err(|_| unreadable(&id))?,
-            ));
-        }
         envelopes.insert(id, envelope);
     }
-    for assignment in &mut assignments {
-        assignment.admin = envelopes.remove(&assignment.id.0.to_string());
+
+    let entries: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT assignment_id, kind, value FROM role_assignment_admin_entries
+         WHERE assignment_id IN (SELECT value FROM json_each(?))",
+    )
+    .bind(&ids)
+    .fetch_all(pool)
+    .await
+    .map_err(read_error)?;
+    for (id, kind, value) in entries {
+        let envelope = envelopes.get_mut(&id).ok_or_else(|| unreadable(&id))?;
+        match kind.as_str() {
+            "operation" => {
+                envelope
+                    .operations
+                    .insert(AdminOperation::parse(&value).ok_or_else(|| unreadable(&id))?);
+            }
+            "recipient_kind" => {
+                envelope
+                    .recipient_kinds
+                    .insert(RecipientKind::parse(&value).ok_or_else(|| unreadable(&id))?);
+            }
+            "permission" => {
+                envelope.permission_ceiling.insert(value);
+            }
+            _ => return Err(unreadable(&id)),
+        }
+    }
+
+    let roles: Vec<(String, String)> = sqlx::query_as(
+        "SELECT assignment_id, role_id FROM role_assignment_admin_roles
+         WHERE assignment_id IN (SELECT value FROM json_each(?))",
+    )
+    .bind(&ids)
+    .fetch_all(pool)
+    .await
+    .map_err(read_error)?;
+    for (id, role) in roles {
+        let role = RoleId(uuid::Uuid::parse_str(&role).map_err(|_| unreadable(&id))?);
+        envelopes
+            .get_mut(&id)
+            .ok_or_else(|| unreadable(&id))?
+            .roles
+            .insert(role);
+    }
+
+    for (id, envelope) in envelopes {
+        assignments[at(&id)?].admin = Some(envelope);
     }
     Ok(assignments)
 }
@@ -706,6 +729,18 @@ impl SqliteBackend {
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
         row.as_ref().map(row_to_role).transpose()
+    }
+
+    pub(crate) async fn get_roles_impl(&self, ids: &[RoleId]) -> SidResult<Vec<Role>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query("SELECT * FROM roles WHERE id IN (SELECT value FROM json_each(?))")
+            .bind(id_list(ids.iter().map(|id| id.0)))
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| SidError::Storage(format!("read roles: {e}")))?;
+        rows.iter().map(row_to_role).collect()
     }
 
     pub(crate) async fn get_role_by_name_impl(
@@ -1066,6 +1101,24 @@ impl SqliteBackend {
             .fetch_all(&self.pool)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
+        read_assignments(&self.pool, &rows).await
+    }
+
+    pub(crate) async fn list_role_assignments_held_by_profile_impl(
+        &self,
+        profile_id: ProfileId,
+    ) -> SidResult<Vec<RoleAssignment>> {
+        let rows = sqlx::query(
+            "SELECT * FROM role_assignments WHERE profile_id = ?1
+             UNION ALL
+             SELECT ra.* FROM role_assignments ra
+             JOIN group_members gm ON gm.group_id = ra.group_id
+             WHERE gm.profile_id = ?1",
+        )
+        .bind(profile_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| SidError::Storage(format!("read held role assignments: {e}")))?;
         read_assignments(&self.pool, &rows).await
     }
 

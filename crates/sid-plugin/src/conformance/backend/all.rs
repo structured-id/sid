@@ -201,6 +201,7 @@ macro_rules! storage_conformance {
                 test_connector_role_assignment
                 test_roles_by_project_and_name
                 test_role_assignments_by_principal
+                test_held_role_assignments_and_roles
                 test_expiring_role_assignments
                 test_cedar_policies_by_scope
                 test_administrative_assignment

@@ -1736,6 +1736,13 @@ impl StorageBackend for SqliteBackend {
         self.get_role_impl(id).await
     }
 
+    async fn get_roles(
+        &self,
+        ids: &[sid_core::models::RoleId],
+    ) -> SidResult<Vec<sid_core::models::Role>> {
+        self.get_roles_impl(ids).await
+    }
+
     async fn get_role_by_name(
         &self,
         project_id: sid_core::models::ProjectId,
@@ -1912,6 +1919,14 @@ impl StorageBackend for SqliteBackend {
         group_id: sid_core::models::GroupId,
     ) -> SidResult<Vec<sid_core::models::RoleAssignment>> {
         self.list_role_assignments_for_group_impl(group_id).await
+    }
+
+    async fn list_role_assignments_held_by_profile(
+        &self,
+        profile_id: sid_core::models::ProfileId,
+    ) -> SidResult<Vec<sid_core::models::RoleAssignment>> {
+        self.list_role_assignments_held_by_profile_impl(profile_id)
+            .await
     }
 
     async fn list_role_assignments_for_machine_user(

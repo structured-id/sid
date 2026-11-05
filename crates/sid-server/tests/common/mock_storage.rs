@@ -4305,6 +4305,14 @@ impl StorageBackend for MockStorage {
     async fn get_role(&self, id: RoleId) -> SidResult<Option<Role>> {
         Ok(self.inner.lock().unwrap().roles.get(&id).cloned())
     }
+    async fn get_roles(&self, ids: &[RoleId]) -> SidResult<Vec<Role>> {
+        let inner = self.inner.lock().unwrap();
+        Ok(ids
+            .iter()
+            .filter_map(|id| inner.roles.get(id))
+            .cloned()
+            .collect())
+    }
     async fn get_role_by_name(&self, p: ProjectId, n: &str) -> SidResult<Option<Role>> {
         let inner = self.inner.lock().unwrap();
         Ok(inner
@@ -4502,6 +4510,13 @@ impl StorageBackend for MockStorage {
     }
     async fn list_role_assignments_for_group(&self, g: GroupId) -> SidResult<Vec<RoleAssignment>> {
         self.assignments_where(|a| a.principal == RoleAssignmentPrincipal::Group(g))
+    }
+    // No group memberships are held here, so a profile holds only its own.
+    async fn list_role_assignments_held_by_profile(
+        &self,
+        p: ProfileId,
+    ) -> SidResult<Vec<RoleAssignment>> {
+        self.assignments_where(|a| a.principal == RoleAssignmentPrincipal::Profile(p))
     }
     async fn list_role_assignments_for_machine_user(
         &self,
