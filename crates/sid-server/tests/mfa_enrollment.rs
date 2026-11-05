@@ -67,17 +67,6 @@ fn test_generate_secret_randomness() {
 }
 
 #[test]
-fn test_build_otpauth_uri_format() {
-    let secret = vec![0u8; 20];
-    let uri = sid_authn::build_otpauth_uri("StructuredID", "alice@sid.example.com", &secret);
-    assert!(uri.starts_with("otpauth://totp/StructuredID:alice@sid.example.com?"));
-    assert!(uri.contains("issuer=StructuredID"));
-    assert!(uri.contains("algorithm=SHA1"));
-    assert!(uri.contains("digits=6"));
-    assert!(uri.contains("period=30"));
-}
-
-#[test]
 fn test_base32_encode_roundtrip() {
     let secret = sid_authn::generate_secret();
     let encoded = sid_authn::base32_encode(&secret);
@@ -607,19 +596,24 @@ async fn test_handler_start_totp_enrollment_success() {
     let resp = svc.auth.start_totp_enrollment(req).await.unwrap();
     let challenge = resp.into_inner();
 
-    assert!(
-        !challenge.secret.is_empty(),
-        "secret must be non-empty base32"
-    );
-    assert!(
-        challenge.qr_uri.starts_with("otpauth://totp/"),
-        "qr_uri must be otpauth scheme"
-    );
+    // The raw secret and the parameters the codes are checked with, no
+    // display form (the client builds Base32 and the otpauth URI).
+    assert_eq!(challenge.shared_secret.len(), 20, "20 secret bytes");
+    assert_eq!(challenge.algorithm(), TotpAlgorithm::Sha1);
+    assert_eq!(challenge.digits, 6);
+    assert_eq!(challenge.period_seconds, 30);
     assert_eq!(challenge.issuer, "StructuredID");
     assert!(
         !challenge.account_name.is_empty(),
         "account_name must be present"
     );
+
+    // A code computed from exactly what was delivered confirms it.
+    let code = sid_authn::generate_current_totp(&challenge.shared_secret);
+    svc.auth
+        .finish_totp_enrollment(authed_request(FinishTotpEnrollmentRequest { code }, &token))
+        .await
+        .expect("a code from the delivered secret confirms the enrollment");
 }
 
 #[tokio::test]

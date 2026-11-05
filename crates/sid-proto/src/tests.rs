@@ -154,16 +154,13 @@ fn every_rpc_is_annotated_or_deliberately_internal() {
     assert_eq!(unannotated, internal);
 }
 
-/// The registration results name only the installed credential: no Profile
+/// The registration result names only the installed credential: no Profile
 /// identifier under any name or number, field 1 included, so a client cannot
-/// read one from a result of either registration.
+/// read one from it.
 #[test]
 fn registration_results_name_only_the_credential() {
     let pool = prost_reflect::DescriptorPool::decode(FILE_DESCRIPTOR_SET).unwrap();
-    for message in [
-        "sid.v1.authn.OpaqueZkppRegistrationFinishResponse",
-        "sid.v1.authn.OpaqueRegistrationFinishResponse",
-    ] {
+    for message in ["sid.v1.authn.OpaqueZkppRegistrationFinishResponse"] {
         let descriptor = pool.get_message_by_name(message).expect(message);
         let fields: Vec<(String, u32, prost_reflect::Kind)> = descriptor
             .fields()

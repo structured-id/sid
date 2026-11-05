@@ -109,7 +109,7 @@ pub async fn try_start_login(
     Ok(OpaqueLoginFinishRequest {
         principal: principal.to_string(),
         credential_finalization: finalization,
-        server_login_state: started.server_login_state,
+        login_id: started.login_id,
     })
 }
 

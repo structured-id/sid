@@ -186,7 +186,7 @@ async fn login(
         .opaque_login_finish(OpaqueLoginFinishRequest {
             principal: principal.into(),
             credential_finalization: finalization,
-            server_login_state: response.server_login_state,
+            login_id: response.login_id,
         })
         .await
         .map_err(|e| e.to_string())?;

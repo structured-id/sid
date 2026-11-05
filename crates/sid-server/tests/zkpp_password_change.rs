@@ -326,7 +326,7 @@ async fn signs_in_as(svc: &TestServices, principal: &str, password: &[u8]) -> bo
         .opaque_login_finish(Request::new(OpaqueLoginFinishRequest {
             principal: principal.to_string(),
             credential_finalization: finished.message.serialize().to_vec(),
-            server_login_state: started.server_login_state,
+            login_id: started.login_id,
         }))
         .await
         .is_ok()

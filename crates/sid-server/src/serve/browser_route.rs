@@ -32,8 +32,6 @@ pub const BROWSER_METHODS: &[&str] = &[
     "/sid.v1.authn.AuthService/GetZkppPolicy",
     "/sid.v1.authn.AuthService/OpaqueLoginStart",
     "/sid.v1.authn.AuthService/OpaqueLoginFinish",
-    "/sid.v1.authn.AuthService/OpaqueRegistrationStart",
-    "/sid.v1.authn.AuthService/OpaqueRegistrationFinish",
     "/sid.v1.authn.AuthService/OpaqueZkppRegistrationStart",
     "/sid.v1.authn.AuthService/OpaqueZkppRegistrationFinish",
     "/sid.v1.authn.AuthService/LegacyMigrateStart",

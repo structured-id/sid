@@ -161,7 +161,7 @@ async fn enrollment_code_cannot_be_reused() {
         .await
         .unwrap()
         .into_inner();
-    let seed = sid_authn::base32_decode(&challenge.secret).unwrap();
+    let seed = challenge.shared_secret;
     let code = sid_authn::generate_current_totp(&seed);
     svc.auth
         .finish_totp_enrollment(authed(
