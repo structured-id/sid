@@ -385,14 +385,22 @@ fn step_up_method_unavailable(method: StepUpMethod, decay: &str) -> Status {
     .into()
 }
 
-/// The email code session a verify or resend names.
+/// The identifier a request names in `field`, validated before any lookup:
+/// an absent or malformed one is refused on that field.
 #[allow(clippy::result_large_err)]
-fn parse_otp_session(id: Option<&str>) -> Result<uuid::Uuid, Status> {
-    let id = id
-        .filter(|id| !id.is_empty())
-        .ok_or_else(|| missing_field("session_id"))?;
-    uuid::Uuid::parse_str(id)
-        .map_err(|_| invalid_field("session_id", "not an email code session identifier"))
+fn wire_id<W: sid_ids_proto::WireId>(
+    value: Option<&W>,
+    field: &'static str,
+) -> Result<W::Domain, Status> {
+    sid_ids_proto::required(value).map_err(|e| invalid_field(field, e.to_string()))
+}
+
+/// A stored credential's id as an answer carries it; a stored id that is not
+/// one is corruption, never sent as it is.
+#[allow(clippy::result_large_err)]
+fn credential_wire(id: CredentialId) -> Result<Option<sid_ids_proto::CredentialId>, Status> {
+    let id = sid_ids::CredentialId::from_uuid(id.0).map_err(|e| internal("credential id", e))?;
+    Ok(Some(id.into()))
 }
 
 /// The refusal of an email code request. The limit counts requests per
@@ -3086,13 +3094,9 @@ impl AuthServiceImpl {
         // The commit is the whole sign-in: what it owes (its evictions'
         // revocations) committed with it as owed work, so the same session
         // is delivered again from the moment it committed.
-        let session_id = delivery
-            .session_id
-            .parse()
-            .map_err(|e| internal("the retained session reference", e))?;
         let session = self
             .storage
-            .get_session(session_id)
+            .get_session(delivery.session_id)
             .await
             .map_err(storage_failure)?
             .filter(|session| !session.is_expired() && session.profile_id == assignment.profile)
@@ -3195,12 +3199,10 @@ impl AuthServiceImpl {
     /// (a foreign or wrong credential id reveals nothing).
     async fn own_password(
         &self,
-        credential_id: &str,
+        credential_id: Option<&sid_ids_proto::CredentialId>,
         caller: ProfileId,
     ) -> Result<Credential, Status> {
-        let cred_id = uuid::Uuid::parse_str(credential_id)
-            .map(CredentialId)
-            .map_err(|_| invalid_field("credential_id", "not a credential identifier"))?;
+        let cred_id = CredentialId(wire_id(credential_id, "credential_id")?.into_uuid());
         let credential = self
             .storage
             .get_credential(cred_id)
@@ -3308,15 +3310,13 @@ impl AuthServiceImpl {
     /// The reset session `id` while it is verified and unexpired.
     async fn verified_reset_session(
         &self,
-        id: &str,
+        id: sid_core::models::ResetSessionId,
     ) -> Result<sid_core::models::PasswordResetSession, Status> {
-        let session_id = uuid::Uuid::parse_str(id)
-            .map_err(|_| invalid_field("reset_session_id", "not a reset session identifier"))?;
         // An unknown reset session and an expired one answer alike: either
         // way the reset starts again.
         let session = self
             .storage
-            .get_reset_session(sid_core::models::ResetSessionId(session_id))
+            .get_reset_session(id)
             .await
             .map_err(storage_failure)?
             .filter(|s| !s.is_expired())
@@ -3324,7 +3324,7 @@ impl AuthServiceImpl {
         if session.status != sid_core::models::ResetSessionStatus::Verified {
             return Err(
                 ApiError::new(ErrorReason::InvalidState, "the reset is not verified yet")
-                    .with_precondition("RESET_SESSION_STATE", id, "unverified")
+                    .with_precondition("RESET_SESSION_STATE", id.0.to_string(), "unverified")
                     .into(),
             );
         }
@@ -3431,7 +3431,7 @@ impl AuthService for AuthServiceImpl {
         info!("OPAQUE login for profile {}", profile.id);
 
         signed_in.respond(|session_id, expires_in| OpaqueLoginFinishResponse {
-            session_id,
+            session_id: Some(session_id.into()),
             expires_in,
             second_factors,
             enrollable_factors,
@@ -3494,7 +3494,7 @@ impl AuthService for AuthServiceImpl {
             .native_access(&profile, &refreshed.session, Some(refreshed.set))
             .await?
             .respond(|session_id, expires_in| RefreshNativeSessionResponse {
-                session_id,
+                session_id: Some(session_id.into()),
                 expires_in,
             })
     }
@@ -3593,7 +3593,7 @@ impl AuthService for AuthServiceImpl {
         };
         let credential = done.credential(profile_id, done.password_file.clone());
         let response = OpaqueZkppRegistrationFinishResponse {
-            credential_id: credential.id.0.to_string(),
+            credential_id: credential_wire(credential.id)?,
         };
         let completion = done.completion(Self::finish_result(&response));
         self.commit_registration(
@@ -3627,7 +3627,9 @@ impl AuthService for AuthServiceImpl {
         let required = self.password_change_authority(&verified.caller).await?;
 
         let req = request.into_inner();
-        let credential = self.own_password(&req.credential_id, caller).await?;
+        let credential = self
+            .own_password(req.credential_id.as_ref(), caller)
+            .await?;
         // The challenge fixes the new password's request: the current
         // password is confirmed for it, and execute starts no other.
         if req.registration_request.is_empty() {
@@ -3729,7 +3731,9 @@ impl AuthService for AuthServiceImpl {
         let required = self.password_change_authority(&verified.caller).await?;
 
         let req = request.into_inner();
-        let credential = self.own_password(&req.credential_id, caller).await?;
+        let credential = self
+            .own_password(req.credential_id.as_ref(), caller)
+            .await?;
         let id = operation_id(req.operation_id.as_ref())?;
         if !req.credential_finalization.is_empty() {
             // As at sign-in: during a lockout a right and a wrong password
@@ -3801,7 +3805,9 @@ impl AuthService for AuthServiceImpl {
         let required = self.password_change_authority(&verified.caller).await?;
 
         let req = request.into_inner();
-        let credential = self.own_password(&req.credential_id, caller).await?;
+        let credential = self
+            .own_password(req.credential_id.as_ref(), caller)
+            .await?;
         let id = operation_id(req.operation_id.as_ref())?;
         let done = match self
             .password_ops
@@ -4046,7 +4052,7 @@ impl AuthService for AuthServiceImpl {
         );
 
         Ok(Response::new(WebAuthnRegistrationFinishResponse {
-            credential_id: cred.id.0.to_string(),
+            credential_id: credential_wire(cred.id)?,
         }))
     }
 
@@ -4091,9 +4097,8 @@ impl AuthService for AuthServiceImpl {
         };
 
         Ok(Response::new(WebAuthnAuthenticationStartResponse {
-            challenge: result.state_key.clone().into_bytes(),
+            challenge: result.state_key.into_bytes(),
             options: result.options,
-            state_key: result.state_key,
         }))
     }
 
@@ -4124,8 +4129,8 @@ impl AuthService for AuthServiceImpl {
         let key_amr;
         let proved_by;
         // The key is bound to the ceremony the assertion answers (its
-        // start's `state_key`, taken from the assertion's own challenge, not
-        // from the request), checked before that ceremony is consumed.
+        // start's `challenge`, taken from the assertion's own challenge),
+        // checked before that ceremony is consumed.
         let native_key;
         let profile = if let Some(identifier) = &req.principal {
             // ── Identifier-based flow ──
@@ -4160,7 +4165,7 @@ impl AuthService for AuthServiceImpl {
         } else {
             // ── Conditional UI / Discoverable flow ──
             // The ceremony state is found from the assertion and consumed by
-            // the finish below (single use); `req.state_key` is not needed.
+            // the finish below (single use).
             let credential = DiscoverableAssertionResponse::parse(&req.credential)
                 .map_err(|_| not_an_assertion())?;
             let state_key = credential.state_key().map_err(|_| expired())?;
@@ -4243,7 +4248,7 @@ impl AuthService for AuthServiceImpl {
 
         signed_in.respond(
             |session_id, expires_in| WebAuthnAuthenticationFinishResponse {
-                session_id,
+                session_id: Some(session_id.into()),
                 expires_in,
                 second_factors,
                 enrollable_factors,
@@ -4556,7 +4561,7 @@ impl AuthService for AuthServiceImpl {
         // link.
         let unsent = || {
             Ok(Response::new(RequestMagicLinkResponse {
-                session_id: uuid::Uuid::now_v7().to_string(),
+                magic_link_id: Some(sid_ids::MagicLinkId::generate().into()),
                 expires_in: sid_core::models::MAGIC_LINK_EXPIRY_SECS as i32,
             }))
         };
@@ -4604,8 +4609,10 @@ impl AuthService for AuthServiceImpl {
 
         info!(session_id = %result.session_id, "Magic link requested");
 
+        let magic_link_id = sid_ids::MagicLinkId::from_uuid(result.session_id)
+            .map_err(|e| internal("magic link id", e))?;
         Ok(Response::new(RequestMagicLinkResponse {
-            session_id: result.session_id.to_string(),
+            magic_link_id: Some(magic_link_id.into()),
             expires_in: result.expires_in_seconds as i32,
         }))
     }
@@ -4625,8 +4632,7 @@ impl AuthService for AuthServiceImpl {
         let captcha_pass = extract_captcha_pass(request.metadata());
         let req = request.into_inner();
 
-        let session_id = uuid::Uuid::parse_str(&req.session_id)
-            .map_err(|_| invalid_field("session_id", "not a magic link session identifier"))?;
+        let session_id = wire_id(req.magic_link_id.as_ref(), "magic_link_id")?.into_uuid();
 
         let result = magic_link
             .verify_magic_link(session_id, &req.token)
@@ -4677,7 +4683,7 @@ impl AuthService for AuthServiceImpl {
                 info!("Magic link verified for profile {}", profile.id);
 
                 signed_in.respond(|session_id, expires_in| VerifyMagicLinkResponse {
-                    session_id,
+                    session_id: Some(session_id.into()),
                     // A provisional session lasts minutes.
                     expires_in: expires_in as i32,
                 })
@@ -4714,8 +4720,7 @@ impl AuthService for AuthServiceImpl {
     ) -> Result<Response<ValidateSessionResponse>, Status> {
         let caller = self.caller(&request).await?;
         let req = request.into_inner();
-        let session_id = SessionId::parse(&req.session_id)
-            .map_err(|_| invalid_field("session_id", "not a session identifier"))?;
+        let session_id = wire_id(req.session_id.as_ref(), "session_id")?;
 
         match self.storage.get_session(session_id).await {
             // Someone else's session answers exactly like an unknown one.
@@ -5061,10 +5066,10 @@ impl AuthService for AuthServiceImpl {
             })?;
 
         // Store migration state
-        let state_key = uuid::Uuid::now_v7().to_string();
+        let upgrade = sid_ids::ImportedPasswordUpgradeId::generate();
         self.migration_state
             .insert(
-                &state_key,
+                &upgrade.to_string(),
                 &MigrationState {
                     profile_id: profile.id,
                     credential_identifier,
@@ -5079,7 +5084,7 @@ impl AuthService for AuthServiceImpl {
         );
 
         Ok(Response::new(LegacyMigrateStartResponse {
-            migration_token: state_key,
+            upgrade_id: Some(upgrade.into()),
             opaque_registration_response: response_bytes,
         }))
     }
@@ -5099,9 +5104,10 @@ impl AuthService for AuthServiceImpl {
         let req = request.into_inner();
 
         // Retrieve migration state
+        let upgrade = wire_id(req.upgrade_id.as_ref(), "upgrade_id")?;
         let migration = self
             .migration_state
-            .take(&req.migration_token)
+            .take(&upgrade.to_string())
             .await?
             .ok_or_else(|| ceremony_expired("password migration"))?;
 
@@ -5222,7 +5228,7 @@ impl AuthService for AuthServiceImpl {
         );
 
         signed_in.respond(|session_id, expires_in| LegacyMigrateFinishResponse {
-            session_id,
+            session_id: Some(session_id.into()),
             expires_in,
             second_factors,
             enrollable_factors,
@@ -5419,7 +5425,7 @@ impl AuthService for AuthServiceImpl {
         info!("TOTP enrolled for profile {}", profile_id);
 
         Ok(Response::new(FinishTotpEnrollmentResponse {
-            credential_id: credential_id.0.to_string(),
+            credential_id: credential_wire(credential_id)?,
             recovery_codes,
         }))
     }
@@ -5510,7 +5516,7 @@ impl AuthService for AuthServiceImpl {
                 info!("TOTP completed the sign-in of profile {}", profile_id);
                 return signed_in.respond(|session_id, expires_in| MfaVerifyResponse {
                     verified: true,
-                    session_id: Some(session_id),
+                    session_id: Some(session_id.into()),
                     expires_in: Some(expires_in),
                     redirect_to: None,
                     remaining_codes: None,
@@ -5566,13 +5572,13 @@ impl AuthService for AuthServiceImpl {
         // The caller presented the session's token, so the elevated one goes
         // back the same way, whoever it is (a native client or a BFF).
         SignedIn {
-            session_id: session_id.to_string(),
+            session_id,
             expires_in: self.jwt.access_token_ttl_secs(),
             delivery: Delivery::bearer(access_token.into()),
         }
         .respond(|session_id, expires_in| MfaVerifyResponse {
             verified: true,
-            session_id: Some(session_id),
+            session_id: Some(session_id.into()),
             expires_in: Some(expires_in),
             redirect_to: None,
             remaining_codes: None,
@@ -5711,7 +5717,7 @@ impl AuthService for AuthServiceImpl {
 
         Ok(Response::new(MfaVerifyResponse {
             verified: true,
-            session_id: Some(session_id.to_string()),
+            session_id: Some(session_id.into()),
             // Recovery doesn't elevate: no new token is delivered.
             expires_in: None,
             redirect_to: None,
@@ -5769,8 +5775,10 @@ impl AuthService for AuthServiceImpl {
 
         info!(session_id = %result.session_id, "OTP code requested");
 
+        let otp_session_id = sid_ids::OtpSessionId::from_uuid(result.session_id)
+            .map_err(|e| internal("email code session id", e))?;
         Ok(Response::new(RequestOtpResponse {
-            otp_session_id: result.session_id.to_string(),
+            otp_session_id: Some(otp_session_id.into()),
             masked_target: masked,
             expires_in_seconds: result.expires_in_seconds,
             code_length: result.code_length,
@@ -5790,7 +5798,7 @@ impl AuthService for AuthServiceImpl {
         let captcha_pass = extract_captcha_pass(request.metadata());
         let req = request.into_inner();
 
-        let session_id = parse_otp_session(req.session_id.as_deref())?;
+        let session_id = wire_id(req.otp_session_id.as_ref(), "otp_session_id")?.into_uuid();
 
         let result = self
             .otp
@@ -5841,7 +5849,7 @@ impl AuthService for AuthServiceImpl {
                 signed_in.respond(|session_id, expires_in| VerifyOtpResponse {
                     verified: true,
                     redirect_to: None,
-                    session_id: Some(session_id),
+                    session_id: Some(session_id.into()),
                     expires_in: Some(expires_in),
                 })
             }
@@ -5883,7 +5891,7 @@ impl AuthService for AuthServiceImpl {
         self.check_maintenance().await?;
         let req = request.into_inner();
 
-        let session_id = parse_otp_session(req.session_id.as_deref())?;
+        let session_id = wire_id(req.otp_session_id.as_ref(), "otp_session_id")?.into_uuid();
 
         // A new code in the same session, the one the client verifies
         // against, sent to the mailbox bound at the request.
@@ -6063,17 +6071,9 @@ impl AuthService for AuthServiceImpl {
         let method = StepUpMethod::try_from(req_inner.method).unwrap_or(StepUpMethod::Unspecified);
 
         // ── Session decay + method filtering ──
-        // Step-up always works on the caller's own session; a session id in the
-        // request may only name that same session.
+        // Step-up always works on the caller's own session, the token's.
         let session_id = SessionId::parse(&claims.sid)
             .map_err(|e| internal("read session id of a verified token", e))?;
-        if !req_inner.session_id.is_empty() && req_inner.session_id != claims.sid {
-            return Err(ApiError::new(
-                ErrorReason::InsufficientPermissions,
-                "a step-up applies only to the caller's own session",
-            )
-            .into());
-        }
         let session = self
             .storage
             .get_session(session_id)
@@ -6150,7 +6150,7 @@ impl AuthService for AuthServiceImpl {
                 }
                 Ok(Response::new(StepUpChallenge {
                     method: StepUpMethod::Unspecified as i32,
-                    challenge_id: String::new(),
+                    challenge_id: None,
                     challenge: None,
                     allowed_methods: allowed,
                     decay_level: decay_str.to_string(),
@@ -6164,7 +6164,7 @@ impl AuthService for AuthServiceImpl {
                 // 1-phase methods: no challenge needed, client calls CompleteStepUp directly.
                 Ok(Response::new(StepUpChallenge {
                     method: req_inner.method,
-                    challenge_id: String::new(),
+                    challenge_id: None,
                     challenge: None,
                     allowed_methods: allowed,
                     decay_level: decay_str.to_string(),
@@ -6190,17 +6190,17 @@ impl AuthService for AuthServiceImpl {
 
                 // Store state_key keyed by session and challenge: only a completion
                 // on the same session can consume it.
-                let challenge_id = uuid::Uuid::now_v7().to_string();
+                let challenge_id = sid_ids::StepUpChallengeId::generate();
                 self.step_up_state
                     .insert(
-                        &step_up_challenge_key(&claims.sid, &challenge_id),
+                        &step_up_challenge_key(&claims.sid, &challenge_id.to_string()),
                         &result.state_key,
                     )
                     .await?;
 
                 Ok(Response::new(StepUpChallenge {
                     method: req_inner.method,
-                    challenge_id,
+                    challenge_id: Some(challenge_id.into()),
                     challenge: Some(step_up_challenge::Challenge::WebauthnOptions(options_json)),
                     allowed_methods: allowed,
                     decay_level: decay_str.to_string(),
@@ -6267,9 +6267,13 @@ impl AuthService for AuthServiceImpl {
                 // The step-up this session requested, and the assertion must
                 // answer that step-up's own challenge.
                 let expired = || ceremony_expired("passkey step-up");
+                let challenge_id = wire_id(req.challenge_id.as_ref(), "challenge_id")?;
                 let state_key = self
                     .step_up_state
-                    .take(&step_up_challenge_key(&claims.sid, &req.challenge_id))
+                    .take(&step_up_challenge_key(
+                        &claims.sid,
+                        &challenge_id.to_string(),
+                    ))
                     .await?
                     .ok_or_else(expired)?;
                 if credential.state_key().ok() != Some(state_key) {
@@ -6387,8 +6391,7 @@ impl AuthService for AuthServiceImpl {
         let context = sid_authn::operation::grpc::context(&request)?;
         let req = request.into_inner();
         let credential_id = sid_core::models::CredentialId(
-            uuid::Uuid::parse_str(&req.credential_id)
-                .map_err(|_| invalid_field("credential_id", "not a credential identifier"))?,
+            wire_id(req.credential_id.as_ref(), "credential_id")?.into_uuid(),
         );
 
         // A retry of a completed deletion answers as it did, not as a
@@ -6552,14 +6555,13 @@ impl AuthService for AuthServiceImpl {
     ) -> Result<Response<VerifyPasswordResetResponse>, Status> {
         let req = request.into_inner();
 
-        let session_id = uuid::Uuid::parse_str(&req.session_id)
-            .map_err(|_| invalid_field("session_id", "not a reset session identifier"))?;
+        let session_id = wire_id(req.reset_session_id.as_ref(), "reset_session_id")?;
 
         // An unknown reset and an expired one answer alike: the reset starts
         // again from the email.
         let session = self
             .storage
-            .get_reset_session(sid_core::models::ResetSessionId(session_id))
+            .get_reset_session(sid_core::models::ResetSessionId(session_id.into_uuid()))
             .await
             .map_err(storage_failure)?
             .filter(|s| !s.is_expired())
@@ -6567,7 +6569,7 @@ impl AuthService for AuthServiceImpl {
 
         let already_used = || {
             ApiError::new(ErrorReason::InvalidState, "the reset link was already used")
-                .with_precondition("RESET_SESSION_STATE", req.session_id.clone(), "used")
+                .with_precondition("RESET_SESSION_STATE", session_id.to_string(), "used")
                 .into()
         };
         if session.status != sid_core::models::ResetSessionStatus::Pending {
@@ -6624,7 +6626,6 @@ impl AuthService for AuthServiceImpl {
             .await?;
 
         Ok(Response::new(VerifyPasswordResetResponse {
-            reset_session_id: session.id.to_string(),
             expires_in: sid_core::models::RESET_SESSION_TTL_SECS as i32,
             history: Some(prepared.context),
         }))
@@ -6656,7 +6657,7 @@ impl AuthService for AuthServiceImpl {
         // The operation outlives nothing: a reset that expired or was
         // completed meanwhile does not go on.
         let session = reset.ok_or_else(sid_authn::password_operation::operation_not_pending)?;
-        self.verified_reset_session(&session.to_string()).await?;
+        self.verified_reset_session(session).await?;
         Ok(Response::new(ExecutePasswordResetResponse {
             registration_response,
         }))
@@ -6674,13 +6675,12 @@ impl AuthService for AuthServiceImpl {
         let req = request.into_inner();
         let zkpp = self.require_zkpp()?;
 
-        let session = self.verified_reset_session(&req.reset_session_id).await?;
-        let profile_id = session.profile_id;
-
         // 1. The final record and its proof, checked against the reset's own
-        //    operation. A retry of a completed reset gets no session: the
-        //    password was replaced, the client signs in with it.
+        //    operation, which names the reset. A retry of a completed reset
+        //    gets no session: the password was replaced, the client signs in
+        //    with it.
         let id = operation_id(req.operation_id.as_ref())?;
+        let mut reset = None;
         let done = match self
             .password_ops
             .finish(
@@ -6690,7 +6690,10 @@ impl AuthService for AuthServiceImpl {
                 &req.registration_record,
                 req.proof,
                 |op| match op.purpose {
-                    OperationPurpose::Reset { session: s } if s == session.id => Ok(()),
+                    OperationPurpose::Reset { session } => {
+                        reset = Some(session);
+                        Ok(())
+                    }
                     _ => Err(sid_authn::password_operation::operation_not_pending()),
                 },
             )
@@ -6701,6 +6704,9 @@ impl AuthService for AuthServiceImpl {
             }
             Finish::Ready(done) => *done,
         };
+        let reset = reset.ok_or_else(sid_authn::password_operation::operation_not_pending)?;
+        let session = self.verified_reset_session(reset).await?;
+        let profile_id = session.profile_id;
 
         // 2. One transaction: the reset completes (only if still verified and
         //    unexpired), the new password replaces the old one with its
@@ -6832,7 +6838,7 @@ impl AuthService for AuthServiceImpl {
         let expires_in = i32::try_from(signed_in.expires_in)
             .map_err(|e| internal("session lifetime beyond the response field", e))?;
         signed_in.respond(|session_id, _| CompletePasswordResetResponse {
-            session_id: Some(session_id),
+            session_id: Some(session_id.into()),
             expires_in: Some(expires_in),
         })
     }

@@ -13,7 +13,6 @@ use common::opaque_client::{
 };
 use common::{SIGN_IN_ORIGIN, TestServices};
 use sid_authn::browser_session::{BrowserCookie, DEFAULT_COOKIE_NAME};
-use sid_core::models::SessionId;
 
 const PASSWORD: &[u8] = b"browser-session-password-2026";
 
@@ -68,15 +67,11 @@ async fn sign_in_page_ceremony_sets_the_session_cookie() {
         .secret([cookie.split(';').next().unwrap()])
         .unwrap();
     let body = response.into_inner();
-    let session = svc
-        .storage
-        .get_session(SessionId::parse(&body.session_id).unwrap())
-        .await
-        .unwrap()
-        .unwrap();
+    let session_id = sid_ids_proto::required(body.session_id.as_ref()).unwrap();
+    let session = svc.storage.get_session(session_id).await.unwrap().unwrap();
     assert_eq!(session.browser_secret_hash, Some(secret.hash()));
     let value = cookie.split(';').next().unwrap().split_once('=').unwrap().1;
-    assert_ne!(body.session_id, value);
+    assert_ne!(session_id.to_string(), value);
     assert!(
         (max_age - 1..=max_age).contains(&body.expires_in),
         "{}",
@@ -104,7 +99,7 @@ async fn sign_in_sets_the_authoritys_configured_cookie() {
     let secret = configured.secret([pair]).unwrap();
     let session = svc
         .storage
-        .get_session(SessionId::parse(&response.into_inner().session_id).unwrap())
+        .get_session(sid_ids_proto::required(response.into_inner().session_id.as_ref()).unwrap())
         .await
         .unwrap()
         .unwrap();
@@ -138,13 +133,9 @@ async fn native_client_gets_the_token_in_metadata() {
         .jwt
         .validate_access_token(&token)
         .expect("a valid token");
-    assert_eq!(claims.sid, body.session_id);
-    let session = svc
-        .storage
-        .get_session(SessionId::parse(&body.session_id).unwrap())
-        .await
-        .unwrap()
-        .unwrap();
+    let session_id = sid_ids_proto::required(body.session_id.as_ref()).unwrap();
+    assert_eq!(claims.sid, session_id.to_string());
+    let session = svc.storage.get_session(session_id).await.unwrap().unwrap();
     assert_eq!(session.browser_secret_hash, None);
 }
 

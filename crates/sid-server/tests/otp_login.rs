@@ -33,7 +33,7 @@ async fn unknown_address_takes_the_same_path() {
 
     svc.auth
         .resend_otp(Request::new(ResendOtpRequest {
-            session_id: Some(pending.otp_session_id.clone()),
+            otp_session_id: pending.otp_session_id.clone(),
         }))
         .await
         .expect("resend answers as for a held address");
@@ -41,7 +41,7 @@ async fn unknown_address_takes_the_same_path() {
         .auth
         .verify_otp(Request::new(VerifyOtpRequest {
             code: "00000000".to_string(),
-            session_id: Some(pending.otp_session_id),
+            otp_session_id: pending.otp_session_id,
         }))
         .await
         .expect("a wrong code answers as for a held address");
@@ -110,7 +110,9 @@ async fn pending_mail(
         },
     )
     .pending_delivery(
-        pending.otp_session_id.parse().unwrap(),
+        sid_ids_proto::required(pending.otp_session_id.as_ref())
+            .unwrap()
+            .into_uuid(),
         uuid::Uuid::from_slice(&owed.payload[16..]).unwrap(),
         chrono::Utc::now(),
     )
@@ -140,10 +142,8 @@ async fn only_an_account_gets_its_code_mail() {
 
     assert_eq!((unknown_owed.len(), held_owed.len()), (1, 1));
     assert_eq!(
-        uuid::Uuid::from_slice(&held_owed[0].payload[..16])
-            .unwrap()
-            .to_string(),
-        held.otp_session_id
+        Some(&held_owed[0].payload[..16]),
+        held.otp_session_id.as_ref().map(|id| id.value.as_slice())
     );
     assert!(
         pending_mail(&svc, &unknown, &unknown_owed[0])
@@ -224,7 +224,7 @@ async fn resent_code_verifies_in_the_original_session() {
 
     svc.auth
         .resend_otp(Request::new(ResendOtpRequest {
-            session_id: Some(pending.otp_session_id.clone()),
+            otp_session_id: pending.otp_session_id.clone(),
         }))
         .await
         .unwrap();
@@ -232,8 +232,13 @@ async fn resent_code_verifies_in_the_original_session() {
     // The resent code's mail names the original session.
     let owed = owed_code_mails(&svc).await;
     assert_eq!(owed.len(), 1);
-    let session = uuid::Uuid::from_slice(&owed[0].payload[..16]).unwrap();
-    assert_eq!(session.to_string(), pending.otp_session_id);
+    assert_eq!(
+        Some(&owed[0].payload[..16]),
+        pending
+            .otp_session_id
+            .as_ref()
+            .map(|id| id.value.as_slice())
+    );
 }
 
 /// The profile signed in is the one the address routes to: a claimant that
@@ -284,7 +289,7 @@ async fn code_signs_in_the_assigned_holder() {
         .auth
         .verify_otp(Request::new(VerifyOtpRequest {
             code,
-            session_id: Some(pending.session_id.to_string()),
+            otp_session_id: common::otp_session(pending.session_id),
         }))
         .await
         .unwrap();
@@ -302,10 +307,7 @@ async fn code_signs_in_the_assigned_holder() {
     assert_eq!(holder_sessions[0].amr, ["mca"]);
     // The caller receives the session the code opened, so the sign-in can
     // continue; before, it was created and its token thrown away.
-    assert_eq!(
-        verified.session_id.as_deref(),
-        Some(holder_sessions[0].id.to_string().as_str())
-    );
+    assert_eq!(verified.session_id, Some(holder_sessions[0].id.into()));
     let claims = svc.jwt.validate_access_token(&token).unwrap();
     assert_eq!(claims.sid, holder_sessions[0].id.to_string());
     assert!(verified.expires_in.is_some_and(|secs| secs > 0));
@@ -337,7 +339,7 @@ async fn unreadable_sign_in_history_refuses_the_sign_in() {
         .auth
         .verify_otp(Request::new(VerifyOtpRequest {
             code,
-            session_id: Some(pending.session_id.to_string()),
+            otp_session_id: common::otp_session(pending.session_id),
         }))
         .await
         .expect_err("a sign-in was allowed without its history");

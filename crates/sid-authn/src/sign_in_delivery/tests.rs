@@ -66,21 +66,22 @@ fn other_browser_requests_are_refused() {
 /// marked sensitive, and nothing into the message.
 #[test]
 fn credentials_go_into_sensitive_metadata() {
+    let session = sid_ids::SessionId::generate();
     let response = SignedIn {
-        session_id: "s".into(),
+        session_id: session,
         expires_in: 60,
         delivery: Delivery::Cookie("__Host-sid_session=x".into()),
     }
     .respond(|id, expires_in| (id, expires_in))
     .unwrap();
-    assert_eq!(response.get_ref(), &("s".to_string(), 60));
+    assert_eq!(response.get_ref(), &(session, 60));
     let cookie = response.metadata().get("set-cookie").unwrap();
     assert_eq!(cookie, "__Host-sid_session=x");
     assert!(cookie.is_sensitive());
     assert!(response.metadata().get("authorization").is_none());
 
     let response = SignedIn {
-        session_id: "s".into(),
+        session_id: sid_ids::SessionId::generate(),
         expires_in: 60,
         delivery: Delivery::bearer(SecretString::from("token")),
     }
@@ -108,7 +109,7 @@ fn a_refresh_generation_goes_into_its_binary_metadata() {
         redelivery_window: 30,
     };
     let response = SignedIn {
-        session_id: "s".into(),
+        session_id: sid_ids::SessionId::generate(),
         expires_in: 60,
         delivery: Delivery::Bearer {
             token: SecretString::from("token"),
@@ -160,7 +161,7 @@ fn browser_sign_in_binds_the_cookie_to_the_session() {
     assert!(session.browser_secret_hash.is_none());
 
     let signed = BrowserCredential::bind(&mut session).signed_in(&cookie, &session);
-    assert_eq!(signed.session_id, session.id.to_string());
+    assert_eq!(signed.session_id, session.id);
     assert!(
         (3590..=3600).contains(&signed.expires_in),
         "{}",

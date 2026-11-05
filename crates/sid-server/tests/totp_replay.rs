@@ -106,7 +106,7 @@ async fn verified_code_delivers_the_elevated_token_in_metadata() {
     assert!(claims.amr.iter().any(|m| m == "otp"), "{:?}", claims.amr);
     let body = verified.into_inner();
     assert!(body.verified);
-    assert_eq!(body.session_id, Some(session.id.to_string()));
+    assert_eq!(body.session_id, Some(session.id.into()));
 }
 
 /// A code spent on MFA verification does not also complete a step-up.
@@ -115,7 +115,7 @@ async fn code_spent_on_mfa_does_not_step_up() {
     let profile = test_profile();
     let svc = TestServices::new(MockStorage::new().with_profile(profile.clone()));
     let seed = sid_authn::generate_secret();
-    let (bearer, session) = enrolled(&svc, &profile, &seed).await;
+    let (bearer, _) = enrolled(&svc, &profile, &seed).await;
     let code = sid_authn::generate_current_totp(&seed);
 
     verify(&svc, &bearer, &code).await.expect("first use");
@@ -123,9 +123,8 @@ async fn code_spent_on_mfa_does_not_step_up() {
         .auth
         .complete_step_up(authed(
             CompleteStepUpRequest {
-                session_id: session.id.to_string(),
                 method: StepUpMethod::Totp as i32,
-                challenge_id: String::new(),
+                challenge_id: None,
                 proof: Some(complete_step_up_request::Proof::TotpCode(code)),
             },
             &bearer,

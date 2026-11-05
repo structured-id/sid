@@ -111,7 +111,7 @@ impl Delivery {
 /// A session a sign-in ceremony created: its id, the lifetime of the
 /// credential delivered, and that credential.
 pub struct SignedIn {
-    pub session_id: String,
+    pub session_id: sid_ids::SessionId,
     pub expires_in: i64,
     pub delivery: Delivery,
 }
@@ -120,7 +120,10 @@ impl SignedIn {
     /// The ceremony's answer `message` builds from the session id and the
     /// credential's lifetime, its credential in the response metadata.
     #[allow(clippy::result_large_err)]
-    pub fn respond<T>(self, message: impl FnOnce(String, i64) -> T) -> Result<Response<T>, Status> {
+    pub fn respond<T>(
+        self,
+        message: impl FnOnce(sid_ids::SessionId, i64) -> T,
+    ) -> Result<Response<T>, Status> {
         let mut response = Response::new(message(self.session_id, self.expires_in));
         self.delivery.deliver(response.metadata_mut())?;
         Ok(response)
@@ -147,7 +150,7 @@ impl BrowserCredential {
     pub fn signed_in<O>(self, cookie: &BrowserCookie, session: &Session<O>) -> SignedIn {
         let expires_in = (session.expires_at - Utc::now()).num_seconds();
         SignedIn {
-            session_id: session.id.to_string(),
+            session_id: session.id,
             expires_in,
             delivery: Delivery::Cookie(cookie.set(&self.0, expires_in)),
         }
@@ -164,7 +167,7 @@ impl BrowserCredential {
         deadline: DateTime<Utc>,
     ) -> Result<Vec<u8>, SealedSecretError> {
         let retained = Retained {
-            session: session.id.to_string(),
+            session: session.id,
             secret: self.0.encode().to_string(),
             deadline,
         };
@@ -178,7 +181,7 @@ impl BrowserCredential {
 /// A browser sign-in's delivery kept for a lost response, as sealed.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Retained {
-    session: String,
+    session: sid_ids::SessionId,
     secret: String,
     deadline: DateTime<Utc>,
 }
@@ -186,7 +189,7 @@ struct Retained {
 /// A retained browser delivery opened again: the session it names, until
 /// when it may be redelivered, and its credential.
 pub struct RetainedDelivery {
-    pub session_id: String,
+    pub session_id: sid_ids::SessionId,
     pub deadline: DateTime<Utc>,
     credential: BrowserCredential,
 }
@@ -214,7 +217,7 @@ impl RetainedDelivery {
     /// only while that session still stores this credential's hash: none for
     /// any other session.
     pub fn signed_in<O>(self, cookie: &BrowserCookie, session: &Session<O>) -> Option<SignedIn> {
-        let matches = session.id.to_string() == self.session_id
+        let matches = session.id == self.session_id
             && session.browser_secret_hash == Some(self.credential.0.hash());
         matches.then(|| self.credential.signed_in(cookie, session))
     }

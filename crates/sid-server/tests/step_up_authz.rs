@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Authorization of `AuthService::RequestStepUp`: step-up always works on the
-//! caller's own session. A session id in the request cannot point it at
-//! someone else's session, which would reveal that user's enrolled factors and
-//! start a WebAuthn challenge over their passkeys.
+//! caller's own session, the token's; the request names no session, so it
+//! cannot reveal another user's enrolled factors or start a WebAuthn
+//! challenge over their passkeys.
 
 mod common;
 
@@ -40,19 +40,17 @@ async fn test_request_step_up_requires_a_token() {
     );
     let err = svc
         .auth
-        .request_step_up(Request::new(RequestStepUpRequest {
-            session_id: session.id.to_string(),
-            ..Default::default()
-        }))
+        .request_step_up(Request::new(RequestStepUpRequest::default()))
         .await
         .expect_err("no token");
     assert_eq!(err.code(), Code::Unauthenticated);
 }
 
-/// Regression:another user naming the victim's session is refused and
-/// learns nothing about the victim's factors.
+/// Regression: another user's step-up answers about the caller's own
+/// session only: with no factors of its own it is refused, and the victim's
+/// enrolled TOTP is never offered.
 #[tokio::test]
-async fn test_request_step_up_refuses_a_foreign_session() {
+async fn test_request_step_up_answers_only_the_callers_session() {
     let victim = test_profile();
     let attacker = Profile::new(Some("mallory"));
     let victim_session = session_of(&victim);
@@ -74,16 +72,14 @@ async fn test_request_step_up_refuses_a_foreign_session() {
     );
     let err = svc
         .auth
-        .request_step_up(authed(
-            RequestStepUpRequest {
-                session_id: victim_session.id.to_string(),
-                ..Default::default()
-            },
-            &token,
-        ))
+        .request_step_up(authed(RequestStepUpRequest::default(), &token))
         .await
-        .expect_err("foreign session");
-    assert_eq!(err.code(), Code::PermissionDenied);
+        .expect_err("the caller has no factor of its own");
+    assert_eq!(
+        common::error_reason(&err).as_deref(),
+        Some("MFA_REQUIRED"),
+        "{err:?}"
+    );
 }
 
 /// The owner queries the step-up methods of their own session.
@@ -102,13 +98,7 @@ async fn test_request_step_up_answers_the_own_session() {
         issue_token_with_session(&svc.jwt, &owner, &["openid".to_string()], session.clone());
     let challenge = svc
         .auth
-        .request_step_up(authed(
-            RequestStepUpRequest {
-                session_id: session.id.to_string(),
-                ..Default::default()
-            },
-            &token,
-        ))
+        .request_step_up(authed(RequestStepUpRequest::default(), &token))
         .await
         .expect("own session")
         .into_inner();

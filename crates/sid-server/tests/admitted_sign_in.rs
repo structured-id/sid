@@ -120,7 +120,7 @@ async fn sufficient_evidence_signs_in_with_the_cookie() {
     let sessions = storage.list_sessions(&profile.id).await.unwrap();
     let session = sessions
         .iter()
-        .find(|s| s.id.to_string() == signed_in.session_id)
+        .find(|s| s.id == signed_in.session_id)
         .expect("the session is stored");
     assert_eq!(session.assurance_level, AuthLevel::Standard);
     assert_eq!(session.amr, ["pwd", "otp"]);
@@ -190,7 +190,7 @@ async fn an_elevated_policy_needs_the_window_of_the_real_authentication() {
     let sessions = storage.list_sessions(&profile.id).await.unwrap();
     let session = sessions
         .iter()
-        .find(|s| s.id.to_string() == signed_in.session_id)
+        .find(|s| s.id == signed_in.session_id)
         .unwrap();
     let elevation = session.elevation.expect("the step-up");
     assert_eq!(elevation.level, AuthLevel::Elevated);
@@ -576,7 +576,7 @@ async fn concurrent_repeats_commit_one_session() {
     let sessions = storage.list_sessions(&profile.id).await.unwrap();
     assert_eq!(sessions.len(), 1);
     for answer in [a, b].into_iter().flatten() {
-        assert_eq!(answer.session_id, sessions[0].id.to_string());
+        assert_eq!(answer.session_id, sessions[0].id);
     }
 }
 
@@ -680,7 +680,7 @@ async fn a_sign_in_owes_the_revocation_of_what_it_evicted() {
         .await
         .expect("committed, its eviction owed");
     let owed = sid_core::models::SessionRevocation {
-        session_id: evicted.clone(),
+        session_id: evicted.to_string(),
     }
     .work();
     let record = storage
@@ -691,7 +691,7 @@ async fn a_sign_in_owes_the_revocation_of_what_it_evicted() {
     assert_eq!(record.kind, owed.kind);
     let sessions = storage.list_sessions(&profile.id).await.unwrap();
     assert_eq!(sessions.len(), 1);
-    assert_eq!(sessions[0].id.to_string(), signed_in.session_id);
+    assert_eq!(sessions[0].id, signed_in.session_id);
 
     // Its answer lost, the repeat gets the same session, outage or not.
     for down in [true, false] {
@@ -794,7 +794,7 @@ async fn an_ended_suspended_or_late_operation_is_not_delivered_again() {
         .unwrap();
     storage
         .delete_session(
-            first.session_id.parse().unwrap(),
+            first.session_id,
             &sid_core::models::SessionEnd::new(
                 sid_core::models::RevocationReason::UserRequested,
                 "test",

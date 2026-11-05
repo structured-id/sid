@@ -18,9 +18,7 @@ use sid_authn::browser_session::BrowserCookie;
 use sid_authn::login_policy::{LoginPolicySource, LoginPolicyUnavailable, LoginRequirements};
 use sid_core::models::security_policy::EnforcementMode;
 use sid_core::models::session::AuthLevel;
-use sid_core::models::{
-    AuditEntry, Credential, CredentialData, CredentialType, ProfileId, SessionId,
-};
+use sid_core::models::{AuditEntry, Credential, CredentialData, CredentialType, ProfileId};
 use sid_proto::sid::v1::auth_service_server::AuthService;
 use sid_proto::sid::v1::*;
 use tonic::{Code, Request, Response, Status};
@@ -135,7 +133,7 @@ async fn a_password_sign_in_owing_otp_is_completed_by_totp() {
         body.browser_csrf, None,
         "a native client gets no CSRF token"
     );
-    let pending_id = SessionId::parse(&body.session_id).unwrap();
+    let pending_id = sid_ids_proto::required(body.session_id.as_ref()).unwrap();
     let pending = svc.storage.get_session(pending_id).await.unwrap().unwrap();
     assert!(pending.awaits_second_factor());
 
@@ -152,7 +150,7 @@ async fn a_password_sign_in_owing_otp_is_completed_by_totp() {
     assert!(claims.amr.iter().any(|m| m == "pwd"), "{:?}", claims.amr);
     assert!(claims.amr.iter().any(|m| m == "otp"), "{:?}", claims.amr);
     let body = completed.into_inner();
-    let session_id = SessionId::parse(body.session_id.as_deref().unwrap()).unwrap();
+    let session_id = sid_ids_proto::required(body.session_id.as_ref()).unwrap();
     assert_ne!(session_id, pending_id);
     let session = svc.storage.get_session(session_id).await.unwrap().unwrap();
     assert!(!session.is_provisional);
@@ -262,7 +260,7 @@ async fn a_new_device_is_answered_by_the_enrolled_factor() {
     let pending_token = bearer(&first);
     let body = first.into_inner();
     assert_eq!(body.second_factors, [StepUpMethod::Totp as i32]);
-    let pending_id = SessionId::parse(&body.session_id).unwrap();
+    let pending_id = sid_ids_proto::required(body.session_id.as_ref()).unwrap();
     let pending = svc.storage.get_session(pending_id).await.unwrap().unwrap();
     assert!(pending.awaits_second_factor());
 
@@ -274,7 +272,7 @@ async fn a_new_device_is_answered_by_the_enrolled_factor() {
     .await
     .expect("TOTP answers the rule");
     let body = completed.into_inner();
-    let session_id = SessionId::parse(body.session_id.as_deref().unwrap()).unwrap();
+    let session_id = sid_ids_proto::required(body.session_id.as_ref()).unwrap();
     let session = svc.storage.get_session(session_id).await.unwrap().unwrap();
     assert!(!session.is_provisional);
     assert_eq!(session.assurance_level, AuthLevel::Standard);
@@ -315,7 +313,7 @@ async fn a_sign_in_enrolls_its_first_factor_and_completes_with_it() {
     let (svc, _policy, profile) = services(None).await;
     let first = native_sign_in(&svc).await.expect("pending context");
     let token = bearer(&first);
-    let pending_id = SessionId::parse(&first.into_inner().session_id).unwrap();
+    let pending_id = sid_ids_proto::required(first.into_inner().session_id.as_ref()).unwrap();
     assert_eq!(svc.mock_storage.sessions_of(profile), 1);
 
     let challenge = svc
@@ -344,7 +342,7 @@ async fn a_sign_in_enrolls_its_first_factor_and_completes_with_it() {
         .await
         .expect("the new factor completes the sign-in")
         .into_inner();
-    let session_id = SessionId::parse(completed.session_id.as_deref().unwrap()).unwrap();
+    let session_id = sid_ids_proto::required(completed.session_id.as_ref()).unwrap();
     let session = svc.storage.get_session(session_id).await.unwrap().unwrap();
     assert!(!session.is_provisional);
     assert_eq!(session.assurance_level, AuthLevel::Standard);

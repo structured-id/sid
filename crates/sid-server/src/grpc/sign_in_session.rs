@@ -272,7 +272,7 @@ impl SignInSessions<'_> {
             .access_token_ttl_secs()
             .min((session.expires_at - Utc::now()).num_seconds());
         Ok(SignedIn {
-            session_id: session.id.to_string(),
+            session_id: session.id,
             expires_in,
             delivery: Delivery::Bearer {
                 token: access_token.into(),

@@ -68,7 +68,7 @@ async fn sign_in(
         ip,
         VerifyOtpRequest {
             code,
-            session_id: Some(pending.session_id.to_string()),
+            otp_session_id: common::otp_session(pending.session_id),
         },
     );
     if let Some(pass) = pass {

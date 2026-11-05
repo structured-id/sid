@@ -48,7 +48,7 @@ fn fixture() -> Fixture {
 
 fn validate(session: &Session) -> ValidateSessionRequest {
     ValidateSessionRequest {
-        session_id: session.id.to_string(),
+        session_id: Some(session.id.into()),
     }
 }
 

@@ -82,7 +82,7 @@ async fn email_code_refuses_a_quarantined_handle() {
         .auth
         .verify_otp(Request::new(VerifyOtpRequest {
             code,
-            session_id: Some(pending.session_id.to_string()),
+            otp_session_id: common::otp_session(pending.session_id),
         }))
         .await
         .unwrap()
@@ -150,7 +150,7 @@ async fn magic_link_refuses_a_quarantined_handle() {
     let err = svc
         .auth
         .verify_magic_link(Request::new(VerifyMagicLinkRequest {
-            session_id: link.session_id.to_string(),
+            magic_link_id: common::magic_link(link.session_id),
             token,
         }))
         .await
