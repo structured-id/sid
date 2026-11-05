@@ -24,7 +24,12 @@ fn authed_request<T>(msg: T, token: &str) -> Request<T> {
 }
 
 /// Two signed-in profiles; the first owns one phone and one email.
-async fn owner_and_stranger() -> (TestServices, String, String, String) {
+async fn owner_and_stranger() -> (
+    TestServices,
+    String,
+    sid_ids_proto::ProfilePhoneId,
+    sid_ids_proto::ProfileEmailId,
+) {
     let svc = TestServices::new(MockStorage::new());
     let owner = test_profile();
     let stranger = sid_core::models::Profile::new(Some("mallory"));
@@ -60,7 +65,12 @@ async fn owner_and_stranger() -> (TestServices, String, String, String) {
         .await
         .unwrap()
         .into_inner();
-    (svc, stranger_token, phone.id, email.id)
+    (
+        svc,
+        stranger_token,
+        phone.id.expect("the added phone's id"),
+        email.id.expect("the added email's id"),
+    )
 }
 
 /// Removing another profile's phone is PHONE_NOT_FOUND and leaves it stored.
@@ -71,7 +81,7 @@ async fn test_removing_a_foreign_phone_is_phone_not_found() {
         .account
         .remove_phone(authed_request(
             RemovePhoneRequest {
-                phone_id: phone_id.clone(),
+                phone_id: Some(phone_id.clone()),
             },
             &stranger,
         ))
@@ -80,8 +90,12 @@ async fn test_removing_a_foreign_phone_is_phone_not_found() {
     assert_eq!(err.code(), Code::NotFound);
     let details = err.get_error_details();
     assert_eq!(details.error_info().unwrap().reason, "PHONE_NOT_FOUND");
-    assert_eq!(details.resource_info().unwrap().resource_name, phone_id);
-    let id = sid_core::models::profile_phone::ProfilePhoneId(phone_id.parse().unwrap());
+    let stored = sid_ids_proto::required(Some(&phone_id)).unwrap();
+    assert_eq!(
+        details.resource_info().unwrap().resource_name,
+        stored.to_string()
+    );
+    let id = sid_core::models::profile_phone::ProfilePhoneId(stored.into_uuid());
     assert!(svc.storage.get_profile_phone(id).await.unwrap().is_some());
 }
 
@@ -93,7 +107,7 @@ async fn test_foreign_email_is_email_not_found() {
         .account
         .set_primary_email(authed_request(
             SetPrimaryEmailRequest {
-                email_id: email_id.clone(),
+                email_id: Some(email_id.clone()),
             },
             &stranger,
         ))
@@ -102,7 +116,12 @@ async fn test_foreign_email_is_email_not_found() {
     assert_eq!(err.code(), Code::NotFound);
     let details = err.get_error_details();
     assert_eq!(details.error_info().unwrap().reason, "EMAIL_NOT_FOUND");
-    assert_eq!(details.resource_info().unwrap().resource_name, email_id);
+    assert_eq!(
+        details.resource_info().unwrap().resource_name,
+        sid_ids_proto::required(Some(&email_id))
+            .unwrap()
+            .to_string()
+    );
 }
 
 /// Regression: an added email was lowercased (and otherwise unchecked), so
@@ -158,7 +177,9 @@ async fn test_malformed_phone_id_is_invalid_field() {
         .account
         .remove_phone(authed_request(
             RemovePhoneRequest {
-                phone_id: "not-a-uuid".to_string(),
+                phone_id: Some(sid_ids_proto::ProfilePhoneId {
+                    value: b"not-a-uuid".to_vec(),
+                }),
             },
             &stranger,
         ))

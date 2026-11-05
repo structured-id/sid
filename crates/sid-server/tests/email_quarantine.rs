@@ -31,7 +31,7 @@ fn authed<T>(msg: T, token: &str) -> Request<T> {
 
 fn add_email(profile: sid_core::models::ProfileId, address: &str) -> AddPrincipalRequest {
     AddPrincipalRequest {
-        profile_id: profile.to_string(),
+        profile_id: Some(profile.into()),
         r#type: sid_proto::sid::v1::PrincipalType::Email as i32,
         value: address.to_string(),
     }
@@ -207,7 +207,7 @@ async fn administrator_repairs_a_quarantined_handle() {
             identity
                 .list_principals(authed(
                     ListPrincipalsRequest {
-                        profile_id: profile.to_string(),
+                        profile_id: Some(profile.into()),
                     },
                     &token,
                 ))
@@ -259,7 +259,8 @@ async fn administrator_repairs_a_quarantined_handle() {
     assert!(!contact.verified);
     let shown = listed(admin).await;
     assert!(!shown.needs_address_confirmation);
-    assert_eq!(shown.source_email_id, Some(contact.id.0.to_string()));
+    let shown_contact = sid_ids_proto::required(shown.source_email_id.as_ref()).unwrap();
+    assert_eq!(shown_contact.into_uuid(), contact.id.0);
 }
 
 /// The repair is its command's outcome, committed with it: retried after the

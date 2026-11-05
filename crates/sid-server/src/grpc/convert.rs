@@ -63,7 +63,7 @@ pub(crate) fn profile_to_proto_with_contacts(
     };
 
     sid_proto::sid::v1::Profile {
-        id: p.id.to_string(),
+        id: Some(p.id.into()),
         profile_type: proto_type.into(),
         username: p.username.clone(),
         email: primary_email.map(|e| e.email.clone()),
@@ -89,9 +89,10 @@ pub(crate) fn profile_to_proto_with_contacts(
 /// Convert core `Principal` to proto `Principal`; none for a federated
 /// subject, which is a federation association, not a login handle the
 /// Profile's holder manages.
+#[allow(clippy::result_large_err)]
 pub(crate) fn principal_to_proto(
     p: &sid_core::models::Principal,
-) -> Option<sid_proto::sid::v1::Principal> {
+) -> Result<Option<sid_proto::sid::v1::Principal>, tonic::Status> {
     use sid_core::models::PrincipalType;
 
     let proto_type = match p.principal_type {
@@ -100,11 +101,15 @@ pub(crate) fn principal_to_proto(
         PrincipalType::Username => sid_proto::sid::v1::PrincipalType::Username,
         PrincipalType::FaceEmbedding => sid_proto::sid::v1::PrincipalType::FaceEmbedding,
         PrincipalType::NfcTag => sid_proto::sid::v1::PrincipalType::NfcTag,
-        PrincipalType::FederatedSubject => return None,
+        PrincipalType::FederatedSubject => return Ok(None),
+    };
+    let source_email_id = match p.source_email_id {
+        Some(id) => stored_id::<sid_ids::ProfileEmailId, _>(id.0)?,
+        None => None,
     };
 
-    Some(sid_proto::sid::v1::Principal {
-        id: p.id.0.to_string(),
+    Ok(Some(sid_proto::sid::v1::Principal {
+        id: stored_id::<sid_ids::PrincipalId, _>(p.id.0)?,
         r#type: proto_type.into(),
         value: p.value.clone(),
         verified: p.verified,
@@ -112,17 +117,20 @@ pub(crate) fn principal_to_proto(
         created_at: Some(to_timestamp(p.created_at)),
         updated_at: Some(to_timestamp(p.updated_at)),
         source_field: p.source_field.clone(),
-        source_email_id: p.source_email_id.map(|id| id.0.to_string()),
+        source_email_id,
         // An email key of another revision than this build derives keys
         // under routes nothing until its address is established again.
         needs_address_confirmation: p.principal_type == PrincipalType::Email
             && p.email_policy_revision
                 != Some(sid_core::models::INSTALLATION_EMAIL_POLICY_REVISION),
-    })
+    }))
 }
 
 /// Convert domain `ProfilePhone` to proto `ProfilePhone`.
-pub(crate) fn phone_to_proto(p: &ProfilePhone) -> sid_proto::sid::v1::ProfilePhone {
+#[allow(clippy::result_large_err)]
+pub(crate) fn phone_to_proto(
+    p: &ProfilePhone,
+) -> Result<sid_proto::sid::v1::ProfilePhone, tonic::Status> {
     use sid_core::models::profile_phone::PhoneLabel;
 
     let proto_label = match p.label {
@@ -136,8 +144,8 @@ pub(crate) fn phone_to_proto(p: &ProfilePhone) -> sid_proto::sid::v1::ProfilePho
         PhoneLabel::Custom => sid_proto::sid::v1::PhoneLabel::Custom,
     };
 
-    sid_proto::sid::v1::ProfilePhone {
-        id: p.id.0.to_string(),
+    Ok(sid_proto::sid::v1::ProfilePhone {
+        id: stored_id::<sid_ids::ProfilePhoneId, _>(p.id.0)?,
         e164: p.e164,
         extension: p.extension,
         label: proto_label.into(),
@@ -148,11 +156,14 @@ pub(crate) fn phone_to_proto(p: &ProfilePhone) -> sid_proto::sid::v1::ProfilePho
         can_receive_voice: p.can_receive_voice,
         verified: p.verified,
         verified_at: p.verified_at.map(to_timestamp),
-    }
+    })
 }
 
 /// Convert domain `ProfileEmail` to proto `ProfileEmail`.
-pub(crate) fn email_to_proto(e: &ProfileEmail) -> sid_proto::sid::v1::ProfileEmail {
+#[allow(clippy::result_large_err)]
+pub(crate) fn email_to_proto(
+    e: &ProfileEmail,
+) -> Result<sid_proto::sid::v1::ProfileEmail, tonic::Status> {
     use sid_core::models::profile_email::EmailLabel;
 
     let proto_label = match e.label {
@@ -163,15 +174,15 @@ pub(crate) fn email_to_proto(e: &ProfileEmail) -> sid_proto::sid::v1::ProfileEma
         EmailLabel::Custom => sid_proto::sid::v1::EmailLabel::Custom,
     };
 
-    sid_proto::sid::v1::ProfileEmail {
-        id: e.id.0.to_string(),
+    Ok(sid_proto::sid::v1::ProfileEmail {
+        id: stored_id::<sid_ids::ProfileEmailId, _>(e.id.0)?,
         email: e.email.clone(),
         label: proto_label.into(),
         custom_label: e.custom_label.clone(),
         is_primary: e.is_primary,
         verified: e.verified,
         verified_at: e.verified_at.map(to_timestamp),
-    }
+    })
 }
 
 /// Parse a profile ID string, returning a tonic status on failure.
@@ -180,6 +191,30 @@ pub(crate) fn parse_profile_id(id: &str) -> Result<ProfileId, tonic::Status> {
     ProfileId::parse(id).map_err(|_| {
         sid_core::grpc_error::refuse::invalid_field("profile_id", "not a profile identifier")
     })
+}
+
+/// The identifier a request names in `field`, validated before any lookup:
+/// an absent or malformed one is refused on that field.
+#[allow(clippy::result_large_err)]
+pub(crate) fn wire_id<W: sid_ids_proto::WireId>(
+    value: Option<&W>,
+    field: &'static str,
+) -> Result<W::Domain, tonic::Status> {
+    sid_ids_proto::required(value)
+        .map_err(|e| sid_core::grpc_error::refuse::invalid_field(field, e.to_string()))
+}
+
+/// A stored reference as an answer carries it. A stored value that is not a
+/// valid identifier of its kind is corruption, never sent as it is.
+#[allow(clippy::result_large_err)]
+pub(crate) fn stored_id<D, W>(id: uuid::Uuid) -> Result<Option<W>, tonic::Status>
+where
+    D: TryFrom<uuid::Uuid, Error = sid_ids::IdError>,
+    W: From<D>,
+{
+    D::try_from(id)
+        .map(|d| Some(W::from(d)))
+        .map_err(|e| sid_core::grpc_error::refuse::internal("stored identifier", e))
 }
 
 /// Display-safe WebAuthn credential info from a stored passkey record. A
@@ -300,8 +335,7 @@ pub(crate) fn device_to_proto(d: &Device) -> sid_proto::sid::v1::Device {
     };
 
     sid_proto::sid::v1::Device {
-        id: d.id.to_string(),
-        profile_id: d.profile_id.to_string(),
+        id: Some(d.id.into()),
         display_name: d.display_name.clone(),
         device_type: device_type.into(),
         os_info: d.os_info.clone(),

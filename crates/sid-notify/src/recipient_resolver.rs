@@ -161,9 +161,12 @@ impl RecipientResolver {
             .into_inner()
             .profile
             .ok_or_else(|| ResolveError::Unavailable("no current profile".into()))?;
+        let own = sid_ids_proto::required(profile.id.as_ref())
+            .map_err(|e| ResolveError::Unavailable(format!("current profile: {e}")))?;
+        // No Profile named: the caller's own, the one the token holds.
         let mut request =
             tonic::Request::new(sid_proto::sid::v1::identity::ListPrincipalsRequest {
-                profile_id: profile.id.clone(),
+                profile_id: None,
             });
         request
             .metadata_mut()
@@ -182,7 +185,7 @@ impl RecipientResolver {
             .min_by_key(|p| !p.is_primary)
             .map(|p| p.value.clone());
         Ok(Some((
-            profile.id,
+            own.to_string(),
             Contact {
                 email: profile.email,
                 phone,
@@ -246,6 +249,10 @@ impl RecipientResolver {
         >,
         profile_id: &str,
     ) -> Result<CachedRecipient, tonic::Status> {
+        // An event subject that is not a Profile id names no Profile that
+        // could exist: answered as not found, so the delivery gives up.
+        let id = sid_ids::ProfileId::parse(profile_id)
+            .map_err(|e| tonic::Status::not_found(format!("not a profile: {e}")))?;
         let mut client = client.write().await;
 
         // GetProfile → email (denormalized).
@@ -254,7 +261,7 @@ impl RecipientResolver {
                 sid_proto::sid::v1::identity::GetProfileRequest {
                     identifier: Some(
                         sid_proto::sid::v1::identity::get_profile_request::Identifier::Id(
-                            profile_id.to_string(),
+                            id.into(),
                         ),
                     ),
                 },
@@ -272,7 +279,7 @@ impl RecipientResolver {
         let principals_resp = client
             .list_principals(tonic::Request::new(
                 sid_proto::sid::v1::identity::ListPrincipalsRequest {
-                    profile_id: profile_id.to_string(),
+                    profile_id: Some(id.into()),
                 },
             ))
             .await?;

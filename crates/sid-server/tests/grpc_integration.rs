@@ -89,7 +89,7 @@ async fn test_create_profile() {
     assert_eq!(profile.username.as_deref(), Some("bob"));
     // Email now in profile_emails table, not on proto Profile
     assert_eq!(profile.given_name.as_deref(), Some("Bob"));
-    assert!(!profile.id.is_empty());
+    assert!(sid_ids_proto::required(profile.id.as_ref()).is_ok());
 }
 
 #[tokio::test]
@@ -182,7 +182,7 @@ async fn test_create_profile_email_only_no_username() {
         profile.username.is_none() || profile.username.as_deref() == Some(""),
         "email-only signup should not auto-generate username"
     );
-    assert!(!profile.id.is_empty());
+    assert!(sid_ids_proto::required(profile.id.as_ref()).is_ok());
 }
 
 #[tokio::test]
@@ -209,7 +209,7 @@ async fn test_create_profile_username_only_no_email() {
     let resp = svc.identity.create_profile(req).await.unwrap();
     let profile = resp.into_inner().profile.unwrap();
     assert_eq!(profile.username.as_deref(), Some("bob"));
-    assert!(!profile.id.is_empty());
+    assert!(sid_ids_proto::required(profile.id.as_ref()).is_ok());
 }
 
 #[tokio::test]
@@ -265,7 +265,7 @@ async fn test_create_profile_phone_only() {
         profile.username.is_none() || profile.username.as_deref() == Some(""),
         "phone-only signup should not have username"
     );
-    assert!(!profile.id.is_empty());
+    assert!(sid_ids_proto::required(profile.id.as_ref()).is_ok());
 }
 
 #[tokio::test]
@@ -4032,7 +4032,7 @@ async fn test_admin_delete_profile() {
     let req = admin_request(
         &svc,
         DeleteProfileRequest {
-            id: pid.to_string(),
+            id: Some(pid.into()),
         },
     );
 
@@ -4157,7 +4157,7 @@ async fn test_admin_get_nonexistent_profile() {
         &svc,
         GetProfileRequest {
             identifier: Some(get_profile_request::Identifier::Id(
-                Uuid::now_v7().to_string(),
+                ProfileId::generate().into(),
             )),
         },
     );
@@ -4190,13 +4190,14 @@ async fn test_admin_list_sessions() {
     let req = admin_request(
         &svc,
         ListSessionsRequest {
-            profile_id: profile.id.to_string(),
+            profile_id: Some(profile.id.into()),
         },
     );
 
     let resp = svc.identity.list_sessions(req).await.unwrap();
     let body = resp.into_inner();
     assert_eq!(body.sessions.len(), 1);
+    assert_eq!(body.sessions[0].id, Some(session.id.into()));
 }
 
 #[tokio::test]
@@ -4219,7 +4220,7 @@ async fn test_admin_revoke_session() {
     let req = admin_request(
         &svc,
         RevokeSessionRequest {
-            session_id: session.id.to_string(),
+            session_id: Some(session.id.into()),
         },
     );
 
@@ -4300,13 +4301,17 @@ async fn test_admin_list_credentials() {
     let req = admin_request(
         &svc,
         ListCredentialsRequest {
-            profile_id: profile.id.to_string(),
+            profile_id: Some(profile.id.into()),
         },
     );
 
     let resp = svc.identity.list_credentials(req).await.unwrap();
     let body = resp.into_inner();
     assert_eq!(body.credentials.len(), 1);
+    assert_eq!(
+        body.credentials[0].id,
+        Some(common::wire_credential_id(cred.id))
+    );
     // Credential data should be cleared (not exposed)
     assert!(body.credentials[0].data.is_empty());
     // The recorded configuration, not the deployment's primary.
@@ -4349,7 +4354,7 @@ async fn test_admin_revoke_credential() {
     let req = admin_request(
         &svc,
         RevokeCredentialRequest {
-            credential_id: cred1.id.0.to_string(),
+            credential_id: Some(common::wire_credential_id(cred1.id)),
         },
     );
 
@@ -4382,7 +4387,7 @@ async fn test_admin_revoke_last_credential_blocked() {
     let req = admin_request(
         &svc,
         RevokeCredentialRequest {
-            credential_id: cred.id.0.to_string(),
+            credential_id: Some(common::wire_credential_id(cred.id)),
         },
     );
 
@@ -8950,7 +8955,7 @@ async fn test_account_remove_phone_not_found() {
 
     let req = authed_request(
         sid_proto::sid::v1::account::RemovePhoneRequest {
-            phone_id: Uuid::now_v7().to_string(),
+            phone_id: Some(sid_ids::ProfilePhoneId::generate().into()),
         },
         &token,
     );
@@ -9091,7 +9096,7 @@ async fn test_account_remove_email_not_found() {
 
     let req = authed_request(
         sid_proto::sid::v1::account::RemoveEmailRequest {
-            email_id: Uuid::now_v7().to_string(),
+            email_id: Some(sid_ids::ProfileEmailId::generate().into()),
         },
         &token,
     );
@@ -9309,7 +9314,7 @@ fn add_principal_request(
     value: &str,
 ) -> AddPrincipalRequest {
     AddPrincipalRequest {
-        profile_id: profile.id.to_string(),
+        profile_id: Some(profile.id.into()),
         r#type: principal_type as i32,
         value: value.to_string(),
     }
@@ -9355,8 +9360,10 @@ async fn test_add_principal_claim_keeps_holder_route() {
     );
     assert!(entity.verified, "the claim stripped the holder's proof");
     assert_eq!(
-        added.id,
-        entity.id.0.to_string(),
+        sid_ids_proto::required(added.id.as_ref())
+            .unwrap()
+            .into_uuid(),
+        entity.id.0,
         "the claim names another principal"
     );
     assert!(!added.verified, "the claimant was shown the holder's proof");
@@ -10030,7 +10037,7 @@ async fn test_event_profile_claim_changed_on_update() {
     svc.identity
         .update_profile(authed_request(
             UpdateProfileRequest {
-                id: pid.to_string(),
+                id: Some(pid.into()),
                 given_name: Some("Updated".to_string()),
                 ..Default::default()
             },
@@ -10076,7 +10083,7 @@ async fn test_event_user_deleted_on_delete_profile() {
         .delete_profile(admin_request(
             &svc,
             DeleteProfileRequest {
-                id: pid.to_string(),
+                id: Some(pid.into()),
             },
         ))
         .await
@@ -10118,7 +10125,7 @@ async fn test_delete_profile_owes_its_history_key_purge() {
         .delete_profile(admin_request(
             &svc,
             DeleteProfileRequest {
-                id: pid.to_string(),
+                id: Some(pid.into()),
             },
         ))
         .await
@@ -10246,7 +10253,7 @@ async fn test_event_session_revoked_on_revoke() {
     svc.identity
         .revoke_session(authed_request(
             RevokeSessionRequest {
-                session_id: session_id.to_string(),
+                session_id: Some(session_id.into()),
             },
             &bearer,
         ))
@@ -11441,7 +11448,7 @@ async fn test_add_principal_no_event_when_sole_claimant() {
     let req = admin_request(
         &svc,
         AddPrincipalRequest {
-            profile_id: profile_a.id.to_string(),
+            profile_id: Some(profile_a.id.into()),
             r#type: sid_proto::sid::v1::PrincipalType::Email as i32,
             value: "contested@sid.example.com".to_string(),
         },
@@ -11481,7 +11488,7 @@ async fn test_add_principal_emits_contested_event_for_existing_holders() {
         .add_principal(admin_request(
             &svc,
             AddPrincipalRequest {
-                profile_id: profile_a.id.to_string(),
+                profile_id: Some(profile_a.id.into()),
                 r#type: sid_proto::sid::v1::PrincipalType::Email as i32,
                 value: "contested@sid.example.com".to_string(),
             },
@@ -11497,7 +11504,7 @@ async fn test_add_principal_emits_contested_event_for_existing_holders() {
         .add_principal(admin_request(
             &svc,
             AddPrincipalRequest {
-                profile_id: profile_b.id.to_string(),
+                profile_id: Some(profile_b.id.into()),
                 r#type: sid_proto::sid::v1::PrincipalType::Email as i32,
                 value: "contested@sid.example.com".to_string(),
             },
@@ -11569,7 +11576,7 @@ async fn test_add_principal_notifies_all_existing_holders_when_third_profile_joi
         .add_principal(admin_request(
             &svc,
             AddPrincipalRequest {
-                profile_id: profile_a.id.to_string(),
+                profile_id: Some(profile_a.id.into()),
                 r#type: sid_proto::sid::v1::PrincipalType::Email as i32,
                 value: "three@sid.example.com".to_string(),
             },
@@ -11583,7 +11590,7 @@ async fn test_add_principal_notifies_all_existing_holders_when_third_profile_joi
         .add_principal(admin_request(
             &svc,
             AddPrincipalRequest {
-                profile_id: profile_b.id.to_string(),
+                profile_id: Some(profile_b.id.into()),
                 r#type: sid_proto::sid::v1::PrincipalType::Email as i32,
                 value: "three@sid.example.com".to_string(),
             },
@@ -11602,7 +11609,7 @@ async fn test_add_principal_notifies_all_existing_holders_when_third_profile_joi
         .add_principal(admin_request(
             &svc,
             AddPrincipalRequest {
-                profile_id: profile_c.id.to_string(),
+                profile_id: Some(profile_c.id.into()),
                 r#type: sid_proto::sid::v1::PrincipalType::Email as i32,
                 value: "three@sid.example.com".to_string(),
             },

@@ -108,7 +108,7 @@ async fn provisioned_email_is_keyed_and_keeps_its_spelling() {
         .await
         .unwrap()
         .expect("the key finds the account");
-    assert_eq!(Some(profile.id.to_string()), created.profile.map(|p| p.id));
+    assert_eq!(Some(profile.id.into()), created.profile.and_then(|p| p.id));
     let emails = svc.storage.list_profile_emails(profile.id).await.unwrap();
     assert_eq!(emails[0].email, "Ann.Smith+work@sid.example.com");
 
@@ -151,15 +151,16 @@ async fn malformed_phone_is_refused() {
 #[tokio::test]
 async fn unknown_referrer_is_refused() {
     let svc = TestServices::new(MockStorage::new());
-    for referrer in ["not-a-profile", &ProfileId::generate().to_string()] {
+    let malformed = sid_ids_proto::ProfileId { value: vec![0; 3] };
+    for referrer in [malformed, ProfileId::generate().into()] {
         let mut msg = request(Some("dave"), None, None);
-        msg.referrer_id = Some(referrer.to_string());
+        msg.referrer_id = Some(referrer.clone());
         let err = svc
             .identity
             .create_profile(create(&svc, msg))
             .await
             .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument, "{referrer}");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument, "{referrer:?}");
     }
     assert!(
         svc.storage
@@ -187,7 +188,7 @@ async fn email_principal_links_its_contact_row() {
         .profile
         .unwrap();
 
-    let profile_id = ProfileId::parse(&profile.id).unwrap();
+    let profile_id: ProfileId = sid_ids_proto::required(profile.id.as_ref()).unwrap();
     let principals = svc
         .storage
         .get_principals_by_profile(profile_id)

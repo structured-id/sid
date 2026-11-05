@@ -7,7 +7,10 @@
 mod common;
 
 use common::mock_storage::MockStorage;
-use common::{TestServices, issue_admin_token, issue_token, test_profile};
+use common::{
+    TestServices, issue_admin_token, issue_token, test_profile, wire_credential_id,
+    wire_principal_id,
+};
 use sid_core::models::{
     AuditEntry, Credential, CredentialType, Principal, PrincipalId, PrincipalType, Profile, Session,
 };
@@ -88,7 +91,7 @@ async fn fixture() -> Fixture {
 #[tokio::test]
 async fn test_identity_rpcs_require_a_token() {
     let f = fixture().await;
-    let id = f.victim.id.to_string();
+    let id: sid_ids_proto::ProfileId = f.victim.id.into();
     let s = &f.svc.identity;
     let codes = [
         s.create_profile(Request::new(CreateProfileRequest::default()))
@@ -102,50 +105,58 @@ async fn test_identity_rpcs_require_a_token() {
         .err()
         .map(|e| e.code()),
         s.update_profile(Request::new(UpdateProfileRequest {
-            id: id.clone(),
+            id: Some(id.clone()),
             ..Default::default()
         }))
         .await
         .err()
         .map(|e| e.code()),
-        s.delete_profile(Request::new(DeleteProfileRequest { id: id.clone() }))
-            .await
-            .err()
-            .map(|e| e.code()),
+        s.delete_profile(Request::new(DeleteProfileRequest {
+            id: Some(id.clone()),
+        }))
+        .await
+        .err()
+        .map(|e| e.code()),
         s.list_profiles(Request::new(ListProfilesRequest::default()))
             .await
             .err()
             .map(|e| e.code()),
         s.list_credentials(Request::new(ListCredentialsRequest {
-            profile_id: id.clone(),
+            profile_id: Some(id.clone()),
         }))
         .await
         .err()
         .map(|e| e.code()),
         s.revoke_credential(Request::new(RevokeCredentialRequest {
-            credential_id: f.credential.id.0.to_string(),
+            credential_id: Some(wire_credential_id(f.credential.id)),
         }))
         .await
         .err()
         .map(|e| e.code()),
         s.list_principals(Request::new(ListPrincipalsRequest {
-            profile_id: id.clone(),
+            profile_id: Some(id.clone()),
         }))
         .await
         .err()
         .map(|e| e.code()),
         s.list_sessions(Request::new(ListSessionsRequest {
-            profile_id: id.clone(),
+            profile_id: Some(id.clone()),
         }))
         .await
         .err()
         .map(|e| e.code()),
         s.revoke_session(Request::new(RevokeSessionRequest {
-            session_id: f.session.id.to_string(),
+            session_id: Some(f.session.id.into()),
         }))
         .await
         .err()
         .map(|e| e.code()),
+        // Naming no Profile is not an anonymous request for nobody's: the
+        // caller's own needs a caller.
+        s.list_sessions(Request::new(ListSessionsRequest { profile_id: None }))
+            .await
+            .err()
+            .map(|e| e.code()),
     ];
     for (i, code) in codes.into_iter().enumerate() {
         assert_eq!(code, Some(Code::Unauthenticated), "rpc #{i}");
@@ -159,7 +170,7 @@ async fn test_identity_rpcs_require_a_token() {
 async fn test_identity_rpcs_refuse_a_foreign_target() {
     let f = fixture().await;
     let token = issue_token(&f.svc.jwt, &f.attacker, &["openid".to_string()]);
-    let id = f.victim.id.to_string();
+    let id: sid_ids_proto::ProfileId = f.victim.id.into();
     let s = &f.svc.identity;
     let denied = |r: Result<(), tonic::Status>| r.err().map(|e| e.code());
 
@@ -182,7 +193,7 @@ async fn test_identity_rpcs_refuse_a_foreign_target() {
         denied(
             s.update_profile(authed(
                 UpdateProfileRequest {
-                    id: id.clone(),
+                    id: Some(id.clone()),
                     given_name: Some("Owned".to_string()),
                     ..Default::default()
                 },
@@ -192,9 +203,14 @@ async fn test_identity_rpcs_refuse_a_foreign_target() {
             .map(|_| ()),
         ),
         denied(
-            s.delete_profile(authed(DeleteProfileRequest { id: id.clone() }, &token))
-                .await
-                .map(|_| ()),
+            s.delete_profile(authed(
+                DeleteProfileRequest {
+                    id: Some(id.clone()),
+                },
+                &token,
+            ))
+            .await
+            .map(|_| ()),
         ),
         denied(
             s.list_profiles(authed(ListProfilesRequest::default(), &token))
@@ -204,7 +220,7 @@ async fn test_identity_rpcs_refuse_a_foreign_target() {
         denied(
             s.list_credentials(authed(
                 ListCredentialsRequest {
-                    profile_id: id.clone(),
+                    profile_id: Some(id.clone()),
                 },
                 &token,
             ))
@@ -214,7 +230,7 @@ async fn test_identity_rpcs_refuse_a_foreign_target() {
         denied(
             s.update_credential(authed(
                 UpdateCredentialRequest {
-                    credential_id: f.credential.id.0.to_string(),
+                    credential_id: Some(wire_credential_id(f.credential.id)),
                     label: Some("owned".to_string()),
                 },
                 &token,
@@ -225,7 +241,7 @@ async fn test_identity_rpcs_refuse_a_foreign_target() {
         denied(
             s.revoke_credential(authed(
                 RevokeCredentialRequest {
-                    credential_id: f.credential.id.0.to_string(),
+                    credential_id: Some(wire_credential_id(f.credential.id)),
                 },
                 &token,
             ))
@@ -235,7 +251,7 @@ async fn test_identity_rpcs_refuse_a_foreign_target() {
         denied(
             s.add_principal(authed(
                 AddPrincipalRequest {
-                    profile_id: id.clone(),
+                    profile_id: Some(id.clone()),
                     r#type: PrincipalType::Email as i32,
                     value: "attacker@sid.example.com".to_string(),
                 },
@@ -247,7 +263,7 @@ async fn test_identity_rpcs_refuse_a_foreign_target() {
         denied(
             s.list_principals(authed(
                 ListPrincipalsRequest {
-                    profile_id: id.clone(),
+                    profile_id: Some(id.clone()),
                 },
                 &token,
             ))
@@ -257,7 +273,7 @@ async fn test_identity_rpcs_refuse_a_foreign_target() {
         denied(
             s.remove_principal(authed(
                 RemovePrincipalRequest {
-                    principal_id: f.principal.id.0.to_string(),
+                    principal_id: Some(wire_principal_id(f.principal.id)),
                 },
                 &token,
             ))
@@ -267,7 +283,7 @@ async fn test_identity_rpcs_refuse_a_foreign_target() {
         denied(
             s.list_sessions(authed(
                 ListSessionsRequest {
-                    profile_id: id.clone(),
+                    profile_id: Some(id.clone()),
                 },
                 &token,
             ))
@@ -277,7 +293,7 @@ async fn test_identity_rpcs_refuse_a_foreign_target() {
         denied(
             s.revoke_session(authed(
                 RevokeSessionRequest {
-                    session_id: f.session.id.to_string(),
+                    session_id: Some(f.session.id.into()),
                 },
                 &token,
             ))
@@ -340,7 +356,7 @@ async fn test_revoke_profile_refuses_a_foreign_target() {
         .identity
         .revoke_profile(authed(
             RevokeProfileRequest {
-                profile_id: f.victim.id.to_string(),
+                profile_id: Some(f.victim.id.into()),
                 reason: "emergency".to_string(),
             },
             &token,
@@ -350,6 +366,35 @@ async fn test_revoke_profile_refuses_a_foreign_target() {
     assert_eq!(err.code(), Code::PermissionDenied);
     let victim = f.svc.storage.get_profile(f.victim.id).await.unwrap();
     assert_eq!(victim.expect("still exists").status, f.victim.status);
+    assert!(
+        f.svc
+            .storage
+            .get_session(f.session.id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+/// Revocation ends every session of a Profile, so it is never implied: a
+/// request naming none is refused on the field, even from the owner.
+#[tokio::test]
+async fn test_revoke_profile_is_never_implied_by_the_caller() {
+    let f = fixture().await;
+    let token = issue_token(&f.svc.jwt, &f.victim, &["openid".to_string()]);
+    let err = f
+        .svc
+        .identity
+        .revoke_profile(authed(
+            RevokeProfileRequest {
+                profile_id: None,
+                reason: "user_requested".to_string(),
+            },
+            &token,
+        ))
+        .await
+        .expect_err("no profile named");
+    assert_eq!(err.code(), Code::InvalidArgument);
     assert!(
         f.svc
             .storage
@@ -371,7 +416,7 @@ async fn test_revoke_profile_owner_cannot_claim_an_admin_reason() {
         .identity
         .revoke_profile(authed(
             RevokeProfileRequest {
-                profile_id: f.victim.id.to_string(),
+                profile_id: Some(f.victim.id.into()),
                 reason: "emergency".to_string(),
             },
             &token,
@@ -381,12 +426,12 @@ async fn test_revoke_profile_owner_cannot_claim_an_admin_reason() {
     assert_eq!(err.code(), Code::PermissionDenied);
 }
 
-/// The owner reads and edits their own account.
+/// The owner reads and edits their own account, naming it or not.
 #[tokio::test]
 async fn test_identity_rpcs_allow_the_owner() {
     let f = fixture().await;
     let token = issue_token(&f.svc.jwt, &f.victim, &["openid".to_string()]);
-    let id = f.victim.id.to_string();
+    let id: sid_ids_proto::ProfileId = f.victim.id.into();
     let s = &f.svc.identity;
     s.get_profile(authed(
         GetProfileRequest {
@@ -398,7 +443,7 @@ async fn test_identity_rpcs_allow_the_owner() {
     .expect("own profile");
     s.update_profile(authed(
         UpdateProfileRequest {
-            id: id.clone(),
+            id: Some(id.clone()),
             given_name: Some("Alicia".to_string()),
             ..Default::default()
         },
@@ -408,15 +453,37 @@ async fn test_identity_rpcs_allow_the_owner() {
     .expect("own update");
     s.list_credentials(authed(
         ListCredentialsRequest {
-            profile_id: id.clone(),
+            profile_id: Some(id.clone()),
         },
         &token,
     ))
     .await
     .expect("own credentials");
-    s.list_sessions(authed(ListSessionsRequest { profile_id: id }, &token))
+    s.list_sessions(authed(
+        ListSessionsRequest {
+            profile_id: Some(id),
+        },
+        &token,
+    ))
+    .await
+    .expect("own sessions");
+
+    // Naming none is the owner's own account.
+    let sessions = s
+        .list_sessions(authed(ListSessionsRequest { profile_id: None }, &token))
         .await
-        .expect("own sessions");
+        .expect("own sessions, unnamed")
+        .into_inner()
+        .sessions;
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].id, Some(f.session.id.into()));
+    let principals = s
+        .list_principals(authed(ListPrincipalsRequest { profile_id: None }, &token))
+        .await
+        .expect("own principals, unnamed")
+        .into_inner()
+        .principals;
+    assert!(principals.iter().any(|p| p.value == f.principal.value));
 }
 
 /// An administrator lists accounts and acts on another user's account.
@@ -430,7 +497,7 @@ async fn test_identity_rpcs_allow_an_administrator() {
         .expect("admin lists");
     s.get_profile(authed(
         GetProfileRequest {
-            identifier: Some(get_profile_request::Identifier::Id(f.victim.id.to_string())),
+            identifier: Some(get_profile_request::Identifier::Id(f.victim.id.into())),
         },
         &token,
     ))
@@ -438,7 +505,7 @@ async fn test_identity_rpcs_allow_an_administrator() {
     .expect("admin reads");
     s.list_credentials(authed(
         ListCredentialsRequest {
-            profile_id: f.victim.id.to_string(),
+            profile_id: Some(f.victim.id.into()),
         },
         &token,
     ))
@@ -476,7 +543,7 @@ async fn test_remove_shared_principal_drops_only_own_hold() {
         .identity
         .remove_principal(authed(
             RemovePrincipalRequest {
-                principal_id: shared.id.0.to_string(),
+                principal_id: Some(wire_principal_id(shared.id)),
             },
             &token,
         ))
@@ -521,7 +588,7 @@ async fn test_admin_remove_principal_needs_a_single_holder() {
         .identity
         .remove_principal(authed(
             RemovePrincipalRequest {
-                principal_id: f.principal.id.0.to_string(),
+                principal_id: Some(wire_principal_id(f.principal.id)),
             },
             &token,
         ))
@@ -542,7 +609,7 @@ async fn test_admin_remove_principal_needs_a_single_holder() {
         .identity
         .remove_principal(authed(
             RemovePrincipalRequest {
-                principal_id: shared.id.0.to_string(),
+                principal_id: Some(wire_principal_id(shared.id)),
             },
             &attacker_token,
         ))
@@ -552,7 +619,7 @@ async fn test_admin_remove_principal_needs_a_single_holder() {
         .identity
         .remove_principal(authed(
             RemovePrincipalRequest {
-                principal_id: f.principal.id.0.to_string(),
+                principal_id: Some(wire_principal_id(f.principal.id)),
             },
             &token,
         ))

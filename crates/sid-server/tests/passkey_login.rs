@@ -293,7 +293,7 @@ async fn test_last_passkey_is_not_removed() {
         .identity
         .revoke_credential(authed(
             RevokeCredentialRequest {
-                credential_id: only.id.0.to_string(),
+                credential_id: Some(common::wire_credential_id(only.id)),
             },
             &bearer,
         ))
@@ -306,7 +306,7 @@ async fn test_last_passkey_is_not_removed() {
     svc.identity
         .revoke_credential(authed(
             RevokeCredentialRequest {
-                credential_id: totp.id.0.to_string(),
+                credential_id: Some(common::wire_credential_id(totp.id)),
             },
             &bearer,
         ))

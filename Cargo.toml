@@ -235,8 +235,8 @@ rustls = { version = "0.23", default-features = false, features = ["std", "tls12
 time = "0.3"
 
 # Identifier packages of the StructuredID SDK.
-sid-ids = { version = "0.3", default-features = false }
-sid-ids-proto = "0.1.3"
+sid-ids = { version = "0.4", default-features = false }
+sid-ids-proto = "0.1.4"
 
 # Workspace crates
 sid-keys = { path = "crates/sid-keys" }
