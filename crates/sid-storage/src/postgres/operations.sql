@@ -36,8 +36,18 @@ CREATE TABLE IF NOT EXISTS operation_results (
     CONSTRAINT operation_results_period_fkey FOREIGN KEY (period) REFERENCES operation_periods(period)
 );
 
-CREATE INDEX IF NOT EXISTS operation_results_retain_until
-    ON operation_results USING btree (retain_until) WHERE (retain_until IS NOT NULL);
+-- Each index is made only when the catalog lacks it: `CREATE INDEX IF NOT
+-- EXISTS` locks its table before it finds the index, so a host starting on a
+-- current schema would wait on the completions its serving replicas write,
+-- and they on it.
+DO $$
+BEGIN
+    IF to_regclass('operation_results_retain_until') IS NULL THEN
+        CREATE INDEX operation_results_retain_until
+            ON operation_results USING btree (retain_until) WHERE (retain_until IS NOT NULL);
+    END IF;
+END
+$$;
 
 -- The identifier each keyed creation allocated, bound to its command. No key
 -- to operation_periods: a binding of a creation that never completed outlives
@@ -53,5 +63,11 @@ CREATE TABLE IF NOT EXISTS operation_resources (
     CONSTRAINT operation_resources_pkey PRIMARY KEY (namespace, op_key)
 );
 
-CREATE INDEX IF NOT EXISTS operation_resources_period
-    ON operation_resources USING btree (period) WHERE (period IS NOT NULL);
+DO $$
+BEGIN
+    IF to_regclass('operation_resources_period') IS NULL THEN
+        CREATE INDEX operation_resources_period
+            ON operation_resources USING btree (period) WHERE (period IS NOT NULL);
+    END IF;
+END
+$$;
