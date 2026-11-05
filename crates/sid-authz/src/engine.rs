@@ -14,6 +14,7 @@ use sid_plugin::StorageBackend;
 use uuid::Uuid;
 
 use crate::cedar::CedarService;
+use crate::compiled::PolicySets;
 use crate::decision::{AuthzCheckRequest, AuthzCheckResponse, AuthzError};
 use crate::rbac::RbacService;
 
@@ -47,6 +48,8 @@ pub struct ApplicablePolicies {
 pub struct CeAuthzEngine<S: StorageBackend + ?Sized> {
     rbac: RbacService<S>,
     cedar: CedarService,
+    /// The applicable sets, compiled once per distinct set of policies.
+    policy_sets: PolicySets,
     storage: Arc<S>,
 }
 
@@ -55,6 +58,7 @@ impl<S: StorageBackend + ?Sized> CeAuthzEngine<S> {
         Self {
             rbac: RbacService::new(storage.clone()),
             cedar: CedarService::new(),
+            policy_sets: PolicySets::default(),
             storage,
         }
     }
@@ -287,8 +291,8 @@ impl<S: StorageBackend + ?Sized> CeAuthzEngine<S> {
         // Entities from their components: an identifier's quotes or
         // backslashes are part of it, never Cedar syntax.
         let evaluated = CedarService::entity(subject_type, &subject_id).and_then(|subject| {
-            self.cedar.evaluate_entities(
-                policies,
+            self.cedar.evaluate_compiled(
+                &*self.policy_sets.get(policies)?,
                 subject,
                 CedarService::entity("Action", &request.action)?,
                 CedarService::entity("Resource", target)?,
