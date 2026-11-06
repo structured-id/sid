@@ -36,7 +36,7 @@ uuid = { workspace = true }
 
 [features]
 default = ["grpc"]
-grpc = ["dep:sid-authn", "sid-authn/grpc", "sid-core/grpc", "dep:sid-proto", "dep:sid-ids-proto", "dep:tonic", "dep:tonic-types", "dep:prost", "dep:prost-types"]
+grpc = ["dep:sid-authn", "sid-authn/grpc", "sid-core/grpc", "dep:sid-proto", "sid-proto/grpc", "dep:sid-ids-proto", "dep:tonic", "dep:tonic-types", "dep:prost", "dep:prost-types"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

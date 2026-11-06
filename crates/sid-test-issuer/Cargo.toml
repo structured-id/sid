@@ -20,7 +20,7 @@ sid-authn = { workspace = true, features = ["grpc", "password-operation"] }
 # A test client's own credential at the issuer.
 sid-infra = { workspace = true, features = ["issuer-client"] }
 sid-authz = { workspace = true }
-sid-proto = { workspace = true }
+sid-proto = { workspace = true, features = ["grpc"] }
 sid-storage = { workspace = true, default-features = false, features = ["storage-sqlite"] }
 sid-auth = { path = "../sid-auth", default-features = false }
 arc-swap = { workspace = true }
