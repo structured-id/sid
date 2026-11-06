@@ -26,11 +26,15 @@ sid-proto = { workspace = true }
 sid-ids-proto = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
+# Hashes of issued client secrets.
+argon2 = { workspace = true }
 chrono = { workspace = true }
 rand = { workspace = true }
 secrecy = { workspace = true }
 sha2 = { workspace = true }
 serde_json = { workspace = true }
+# Constant-time comparison of registration access tokens.
+subtle = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

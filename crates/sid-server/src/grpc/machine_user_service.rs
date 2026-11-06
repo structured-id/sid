@@ -50,9 +50,14 @@ impl MachineUserServiceImpl {
         }
     }
 
+    /// The authenticated administrator making the call. Checked here, before
+    /// the operation context, so a caller without the right learns that
+    /// first; each operation checks it again for every other entry point.
     #[allow(clippy::result_large_err)]
     async fn caller<T>(&self, request: &Request<T>) -> Result<sid_authn::caller::Caller, Status> {
-        authenticate(request, self.jwt.verifier(), &self.revocation).await
+        let caller = authenticate(request, self.jwt.verifier(), &self.revocation).await?;
+        caller.require_admin()?;
+        Ok(caller)
     }
 }
 

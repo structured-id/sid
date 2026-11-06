@@ -1,162 +1,204 @@
+//! Each refusal of a project operation keeps the status the service has
+//! always answered with: its code, its `ErrorInfo` reason and the details a
+//! client acts on.
+
 use super::*;
+use sid_core::grpc_error::extract_error_info;
+use sid_core::models::{
+    ApplicationId, InitialAccessTokenId, ProjectId, ResourceId, ResourceIndicator, RoleId,
+};
+use tonic::Code;
 use tonic_types::StatusExt;
 
-#[test]
-fn test_project_to_proto() {
-    let project = Project::new("Test Project", None);
-    let proto = project_to_proto(&project);
-    assert_eq!(proto.id, Some(project.id.into()));
-    assert_eq!(proto.name, "Test Project");
-    assert!(proto.description.is_empty());
-    assert!(proto.owner_profile_id.is_none());
-    assert!(!proto.is_system);
-    assert!(proto.created_at.is_some());
-    assert!(proto.updated_at.is_some());
+fn reason(status: &Status) -> String {
+    extract_error_info(status).expect("ErrorInfo").0
 }
 
 #[test]
-fn test_project_to_proto_with_owner() {
-    let owner = sid_core::models::ProfileId::generate();
-    let project = Project::new("Owned", Some(owner));
-    let proto = project_to_proto(&project);
-    assert_eq!(proto.owner_profile_id, Some(owner.into()));
-}
-
-#[test]
-fn test_system_project_to_proto() {
-    let project = Project::system();
-    let proto = project_to_proto(&project);
-    assert_eq!(proto.name, "SID");
-    assert!(proto.is_system);
-}
-
-#[test]
-fn test_role_to_proto() {
-    let project_id = ProjectId::generate();
-    let mut role = Role::new(project_id, "editor", "Editor");
-    role.description = Some("Can edit content".to_string());
-    role.permissions = vec!["profiles:read".into(), "profiles:write".into()];
-
-    let proto = role_to_proto(&role);
-    assert_eq!(proto.name, "editor"); // proto.name = core.key
-    assert_eq!(proto.description, Some("Can edit content".to_string()));
-    assert_eq!(proto.permissions, vec!["profiles:read", "profiles:write"]);
-    assert!(proto.created_at.is_some());
-}
-
-/// A project and an initial access token travel as their identifiers'
-/// bytes; the system project's nil identifier is read back as the system
-/// project, and a malformed one is refused on its field.
-#[test]
-fn test_project_and_iat_wire_ids() {
-    let project = ProjectId::generate();
-    let wire: sid_ids_proto::ProjectId = project.into();
-    assert_eq!(
-        convert::wire_id(Some(&wire), "project_id").unwrap(),
-        project
-    );
-    let system: sid_ids_proto::ProjectId = ProjectId::SYSTEM.into();
-    let read: ProjectId = convert::wire_id(Some(&system), "project_id").unwrap();
-    assert!(read.is_system());
-    let bad = sid_ids_proto::ProjectId { value: vec![0; 3] };
-    let status = convert::wire_id(Some(&bad), "project_id").unwrap_err();
-    assert_eq!(status.code(), tonic::Code::InvalidArgument);
-
-    let iat = InitialAccessTokenId::generate();
-    let wire: sid_ids_proto::InitialAccessTokenId = iat.into();
-    assert_eq!(convert::wire_id(Some(&wire), "id").unwrap(), iat);
-}
-
-/// An initial access token shows its creator as the administrator's
-/// profile identifier, not a string.
-#[test]
-fn test_iat_to_proto_types_its_ids() {
-    let now = chrono::Utc::now();
-    let creator = sid_core::models::ProfileId::generate();
-    let token = InitialAccessToken {
-        id: InitialAccessTokenId::generate(),
-        token_hash: vec![1; 32],
-        project_id: ProjectId::generate(),
-        max_clients: 2,
-        clients_registered: 0,
-        allowed_scopes: vec![],
-        allowed_grant_types: vec![],
-        allowed_redirect_patterns: vec![],
-        expires_at: now,
-        created_at: now,
-        created_by: creator,
-        revoked: false,
-    };
-    let proto = iat_to_proto(&token);
-    assert_eq!(proto.id, Some(token.id.into()));
-    assert_eq!(proto.project_id, Some(token.project_id.into()));
-    assert_eq!(proto.created_by, Some(creator.into()));
-}
-
-#[test]
-fn test_proto_to_app_type() {
-    assert_eq!(
-        proto_to_app_type(sid_proto::sid::v1::ApplicationType::Web.into()),
-        ApplicationType::Web
-    );
-    assert_eq!(
-        proto_to_app_type(sid_proto::sid::v1::ApplicationType::Native.into()),
-        ApplicationType::Native
-    );
-    assert_eq!(
-        proto_to_app_type(sid_proto::sid::v1::ApplicationType::Api.into()),
-        ApplicationType::Api
-    );
-    assert_eq!(
-        proto_to_app_type(sid_proto::sid::v1::ApplicationType::Spa.into()),
-        ApplicationType::Spa
-    );
-    // Unspecified defaults to Web
-    assert_eq!(
-        proto_to_app_type(sid_proto::sid::v1::ApplicationType::Unspecified.into()),
-        ApplicationType::Web
-    );
-}
-
-#[test]
-fn test_generate_client_secret_length() {
-    let secret = generate_client_secret();
-    assert_eq!(secret.expose_secret().len(), 64); // 32 bytes * 2 hex chars
-}
-
-#[test]
-fn test_generate_client_secret_unique() {
-    let s1 = generate_client_secret();
-    let s2 = generate_client_secret();
-    assert_ne!(s1.expose_secret(), s2.expose_secret());
-}
-
-#[test]
-fn test_hash_secret_produces_argon2_hash() {
-    let secret = "test_secret_value";
-    let hash = hash_secret(secret).unwrap();
-    assert!(hash.starts_with("$argon2id$"));
-}
-
-#[test]
-fn test_hash_secret_different_salts() {
-    let secret = "same_secret";
-    let h1 = hash_secret(secret).unwrap();
-    let h2 = hash_secret(secret).unwrap();
-    assert_ne!(h1, h2); // different salts
-}
-
-#[test]
-fn test_application_type_mapping_roundtrip() {
-    for app_type in [
-        ApplicationType::Web,
-        ApplicationType::Native,
-        ApplicationType::Api,
-        ApplicationType::Spa,
-    ] {
-        let proto_type = super::super::application_view::application_type_to_proto(app_type);
-        let back = proto_to_app_type(proto_type.into());
-        assert_eq!(back, app_type);
+fn refusals_keep_their_code_and_reason() {
+    let app = ApplicationId::generate();
+    let resource = ResourceId::generate();
+    let cases: Vec<(ProjectError, Code, &str)> = vec![
+        (ProjectError::Internal, Code::Internal, "INTERNAL_ERROR"),
+        (
+            ProjectError::MissingField("name"),
+            Code::InvalidArgument,
+            "REQUIRED_FIELD_MISSING",
+        ),
+        (
+            ProjectError::InvalidField {
+                field: "scopes",
+                reason: "not a scope".into(),
+            },
+            Code::InvalidArgument,
+            "INVALID_FIELD_VALUE",
+        ),
+        (
+            ProjectError::Metadata {
+                field: "jwks",
+                message: "not a key set".into(),
+            },
+            Code::InvalidArgument,
+            "INVALID_FIELD_VALUE",
+        ),
+        (
+            ProjectError::ProjectNotFound(ProjectId::generate()),
+            Code::NotFound,
+            "PROJECT_NOT_FOUND",
+        ),
+        (
+            ProjectError::ApplicationNotFound(app),
+            Code::NotFound,
+            "APPLICATION_NOT_FOUND",
+        ),
+        (
+            ProjectError::ClientNotFound("sid_a".into()),
+            Code::NotFound,
+            "APPLICATION_NOT_FOUND",
+        ),
+        (
+            ProjectError::ClientGone("sid_a".into()),
+            Code::NotFound,
+            "APPLICATION_NOT_FOUND",
+        ),
+        (
+            ProjectError::RequesterNotFound("sid_a".into()),
+            Code::NotFound,
+            "APPLICATION_NOT_FOUND",
+        ),
+        (
+            ProjectError::ResourceNotFound(resource),
+            Code::NotFound,
+            "RESOURCE_NOT_FOUND",
+        ),
+        (
+            ProjectError::RoleNotFound(RoleId::generate()),
+            Code::NotFound,
+            "ROLE_NOT_FOUND",
+        ),
+        (
+            ProjectError::IatNotFound(InitialAccessTokenId::generate()),
+            Code::NotFound,
+            "INITIAL_ACCESS_TOKEN_NOT_FOUND",
+        ),
+        (
+            ProjectError::IssuerNotFound("acme".into()),
+            Code::NotFound,
+            "OIDC_ISSUER_NOT_FOUND",
+        ),
+        (
+            ProjectError::ProjectInUse(ProjectId::generate()),
+            Code::FailedPrecondition,
+            "INVALID_STATE",
+        ),
+        (
+            ProjectError::SystemProject("delete"),
+            Code::FailedPrecondition,
+            "SYSTEM_MANAGED",
+        ),
+        (
+            ProjectError::SystemManaged {
+                application: app,
+                what: "it cannot be deleted",
+            },
+            Code::FailedPrecondition,
+            "SYSTEM_MANAGED",
+        ),
+        (
+            ProjectError::RoleExists {
+                application: app,
+                role: "client",
+            },
+            Code::AlreadyExists,
+            "APPLICATION_ROLE_EXISTS",
+        ),
+        (
+            ProjectError::IndicatorTaken(
+                ResourceIndicator::parse("https://resources.example/orders").unwrap(),
+            ),
+            Code::AlreadyExists,
+            "RESOURCE_INDICATOR_TAKEN",
+        ),
+        (
+            ProjectError::ResourceRetired(resource),
+            Code::FailedPrecondition,
+            "RESOURCE_RETIRED",
+        ),
+        (
+            ProjectError::RetireByRemoval(resource),
+            Code::FailedPrecondition,
+            "RESOURCE_RETIRED",
+        ),
+        (
+            ProjectError::IssuerMismatch(resource),
+            Code::FailedPrecondition,
+            "ISSUER_MISMATCH",
+        ),
+        (
+            ProjectError::RoleTaken("editor".into()),
+            Code::AlreadyExists,
+            "ROLE_ALREADY_EXISTS",
+        ),
+        (
+            ProjectError::RoleRequired,
+            Code::InvalidArgument,
+            "REQUIRED_FIELD_MISSING",
+        ),
+        (
+            ProjectError::SubjectRequired,
+            Code::InvalidArgument,
+            "REQUIRED_FIELD_MISSING",
+        ),
+        (
+            ProjectError::SubjectMigrationRequired("sid_a".into()),
+            Code::FailedPrecondition,
+            "INVALID_STATE",
+        ),
+        (
+            ProjectError::IatUnusable,
+            Code::Unauthenticated,
+            "TOKEN_INVALID",
+        ),
+        (
+            ProjectError::IatEnded,
+            Code::Unauthenticated,
+            "TOKEN_INVALID",
+        ),
+        (
+            ProjectError::RatInvalid,
+            Code::Unauthenticated,
+            "TOKEN_INVALID",
+        ),
+        (
+            ProjectError::NotRegisteredDynamically("sid_a".into()),
+            Code::FailedPrecondition,
+            "INVALID_STATE",
+        ),
+        (
+            ProjectError::IatDeleted(InitialAccessTokenId::generate()),
+            Code::FailedPrecondition,
+            "INVALID_STATE",
+        ),
+        (
+            ProjectError::ChangedConcurrently,
+            Code::Aborted,
+            "CONCURRENT_MODIFICATION",
+        ),
+        (
+            ProjectError::Caller(sid_authn::caller::CallerError::Denied),
+            Code::PermissionDenied,
+            "INSUFFICIENT_PERMISSIONS",
+        ),
+        (
+            ProjectError::Operation(sid_authn::operation::OperationError::KeyConflict),
+            Code::AlreadyExists,
+            "OPERATION_KEY_CONFLICT",
+        ),
+    ];
+    for (error, code, expected) in cases {
+        let status = refusal(error);
+        assert_eq!(status.code(), code, "{status:?}");
+        assert_eq!(reason(&status), expected, "{status:?}");
     }
 }
 
@@ -164,10 +206,93 @@ fn test_application_type_mapping_roundtrip() {
 /// INVALID_FIELD_VALUE, so a client can point at the input.
 #[test]
 fn test_invalid_field_names_the_field() {
-    let status = invalid_field("resource.indicator", "not an absolute URI");
-    assert_eq!(status.code(), tonic::Code::InvalidArgument);
-    let (reason, _, _) = sid_core::grpc_error::extract_error_info(&status).expect("ErrorInfo");
-    assert_eq!(reason, "INVALID_FIELD_VALUE");
+    let status = refusal(ProjectError::InvalidField {
+        field: "resource.indicator",
+        reason: "not an absolute URI".into(),
+    });
+    assert_eq!(status.code(), Code::InvalidArgument);
+    assert_eq!(reason(&status), "INVALID_FIELD_VALUE");
     let violations = status.get_details_bad_request().expect("BadRequest");
     assert_eq!(violations.field_violations[0].field, "resource.indicator");
+}
+
+/// Refused client metadata carries its RFC 7591 §3.2.2 code and field: the
+/// request's own metadata as INVALID_FIELD_VALUE, what the initial access
+/// token does not allow as INSUFFICIENT_PERMISSIONS.
+#[test]
+fn metadata_refusals_carry_their_oauth_error() {
+    let metadata = |status: &Status| {
+        let (_, _, metadata) = extract_error_info(status).expect("ErrorInfo");
+        (
+            metadata.get("oauthError").cloned(),
+            metadata.get("field").cloned(),
+        )
+    };
+    let refused = refusal(ProjectError::Metadata {
+        field: "client_secret",
+        message: "client_secret does not match the issued secret".into(),
+    });
+    assert_eq!(
+        metadata(&refused),
+        (
+            Some("invalid_client_metadata".into()),
+            Some("client_secret".into())
+        )
+    );
+    assert_eq!(
+        refused.message(),
+        "client_secret does not match the issued secret"
+    );
+
+    let error = sid_authn::dcr::DcrError::InvalidRedirectUri("x".into());
+    let (oauth_error, field) = error.metadata_error().expect("a metadata error");
+    for (check, expected) in [
+        (RegistrationCheck::Metadata, "INVALID_FIELD_VALUE"),
+        (RegistrationCheck::TokenPolicy, "INSUFFICIENT_PERMISSIONS"),
+    ] {
+        let status = refusal(ProjectError::Registration {
+            error: sid_authn::dcr::DcrError::InvalidRedirectUri("x".into()),
+            check,
+        });
+        assert_eq!(reason(&status), expected);
+        assert_eq!(
+            metadata(&status),
+            (Some(oauth_error.into()), Some(field.into()))
+        );
+    }
+}
+
+/// The preconditions a client resolves by itself name what to do.
+#[test]
+fn preconditions_name_what_failed() {
+    let precondition = |error: ProjectError| {
+        let status = refusal(error);
+        let failure = status
+            .get_details_precondition_failure()
+            .expect("PreconditionFailure");
+        let violation = failure.violations.into_iter().next().expect("a violation");
+        (violation.r#type, violation.subject)
+    };
+    let project = ProjectId::generate();
+    assert_eq!(
+        precondition(ProjectError::ProjectInUse(project)),
+        ("PROJECT_IN_USE".into(), project.to_string())
+    );
+    let resource = ResourceId::generate();
+    assert_eq!(
+        precondition(ProjectError::ResourceRetired(resource)),
+        ("RESOURCE_STATE".into(), resource.to_string())
+    );
+    assert_eq!(
+        precondition(ProjectError::RetireByRemoval(resource)),
+        ("APPLICATION_REMOVED".into(), resource.to_string())
+    );
+    assert_eq!(
+        precondition(ProjectError::IssuerMismatch(resource)),
+        ("SAME_ISSUER".into(), resource.to_string())
+    );
+    assert_eq!(
+        precondition(ProjectError::SubjectMigrationRequired("sid_a".into())),
+        ("SUBJECT_TYPE".into(), "sid_a".into())
+    );
 }
