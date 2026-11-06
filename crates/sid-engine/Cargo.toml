@@ -1,0 +1,28 @@
+[package]
+name = "sid-engine"
+description = "StructuredID CE engine composition: lifecycle of the durable work runner and the maintenance an installation owes, transport-free"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+sid-authn = { workspace = true, features = ["keyed", "password-operation"] }
+sid-core = { workspace = true }
+sid-plugin = { workspace = true }
+chrono = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+sid-storage = { workspace = true, features = ["storage-pg", "storage-sqlite"] }
+sqlx = { workspace = true, features = ["postgres"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+
+[lints.rust]
+unreachable_pub = "warn"

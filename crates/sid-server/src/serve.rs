@@ -43,7 +43,7 @@ use sid_proto::sid::v1::{
     upstream_service_server::UpstreamServiceServer,
 };
 
-use crate::init::{CeComponents, spawn_work_runner};
+use crate::init::CeComponents;
 
 #[cfg(feature = "http")]
 pub mod browser_route;
@@ -348,7 +348,7 @@ pub async fn serve_on(
         &services.transcoded,
     )?;
 
-    let work_runner = spawn_work_runner(&c, &services.receivers, stopped.clone().wait())?;
+    let engine = crate::init::engine(&c, &services.receivers)?.start();
     let settlements = crate::init::spawn_cleanup_settlements(&c, stopped.clone().wait());
 
     let (routes, health) = services.services.into_parts();
@@ -416,8 +416,9 @@ pub async fn serve_on(
         Some(_) => finished(&mut http).await,
         None => Ok(()),
     };
-    // Attempts in flight record their outcome before the process ends.
-    let drained = work_runner.await;
+    // Attempts and maintenance runs in flight record their outcome before
+    // the process ends.
+    let drained = engine.drain().await;
     // A settlement being recorded finishes; an unacknowledged one is
     // delivered again.
     if let Some(settlements) = settlements {

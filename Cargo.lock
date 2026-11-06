@@ -6047,6 +6047,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "sid-engine"
+version = "0.2.20"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "serde_json",
+ "sid-authn",
+ "sid-core",
+ "sid-plugin",
+ "sid-storage",
+ "sqlx",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "sid-fed"
 version = "0.2.20"
 dependencies = [
@@ -6451,6 +6469,7 @@ dependencies = [
  "sid-authz",
  "sid-core",
  "sid-crypto",
+ "sid-engine",
  "sid-fed",
  "sid-i18n",
  "sid-ids",
