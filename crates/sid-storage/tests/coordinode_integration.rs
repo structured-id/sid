@@ -631,6 +631,39 @@ async fn commits_racing_retirement_are_never_left_behind() {
     }
 }
 
+/// Run history key store conformance `scenario` on a database of its own, so
+/// store-wide state (the write cutoff, fence compaction) is its own.
+macro_rules! history_key_store {
+    ($($scenario:ident),* $(,)?) => {$(
+        #[tokio::test(flavor = "multi_thread")]
+        async fn $scenario() {
+            sid_plugin::conformance::history_key_store::$scenario(&setup().await.history_keys())
+                .await;
+        }
+    )*};
+}
+
+mod history_key_store {
+    use super::*;
+
+    history_key_store!(
+        write_cutoff_only_rises,
+        first_epoch_never_resets_a_history,
+        epoch_is_ensured_once,
+        ensures_of_a_known_owner_agree,
+        owner_domains_are_separate,
+        epoch_rotation,
+        lifecycle_follows_the_live_set,
+        stale_live_set_cannot_retire,
+        key_archive_round_trip,
+        abandoned_enrollment_is_reclaimed,
+        cleanup_races_preparation,
+        abandoned_fences_are_compacted,
+        purged_owner_keeps_nothing,
+        key_versions_are_insert_only,
+    );
+}
+
 /// Two instances of SID on one host database, as two processes sharing it.
 async fn two_instances() -> (CoordinodeBackend, CoordinodeBackend) {
     let db = Arc::new(coordinode_embed::Database::open_in_memory().expect("CoordiNode in memory"));

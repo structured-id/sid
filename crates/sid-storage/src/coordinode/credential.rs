@@ -46,7 +46,7 @@ const ENTRY: &str = "h.epoch_id AS epoch_id, h.seq AS seq, h.entry AS entry,
     h.operation_id AS operation_id, h.policy_version AS policy_version,
     h.created_at AS created_at";
 
-fn fixed32(row: &Row, name: &str) -> SidResult<[u8; 32]> {
+pub(super) fn fixed32(row: &Row, name: &str) -> SidResult<[u8; 32]> {
     get_bytes(row, name)?
         .try_into()
         .map_err(|_| SidError::Storage(format!("{name}: not 32 bytes")))
@@ -377,8 +377,8 @@ fn record_descriptor(
 /// committed meanwhile refuses it.
 fn held_cutoff(tx: &Statements<'_>) -> SidResult<Option<DateTime<Utc>>> {
     let rows = tx.run(
-        "MATCH (c:SidHistoryCutoff) WHERE c.id = 1 RETURN id(c) AS node, c.not_before AS not_before",
-        Params::default(),
+        "MATCH (c:SidHistoryCutoff) WHERE c.id = $id RETURN id(c) AS node, c.not_before AS not_before",
+        Params::default().with("id", Cutoff::Credential.slot()),
     )?;
     if !hold_first(tx, &rows)? {
         return Err(SidError::Storage("history write cutoff missing".into()));
@@ -389,20 +389,82 @@ fn held_cutoff(tx: &Statements<'_>) -> SidResult<Option<DateTime<Utc>>> {
         .map(Option::flatten)
 }
 
-/// Create the history write cutoff of an empty store: none set yet.
+/// A history write cutoff: the credential service's, which fences history
+/// commits, or the history evaluator's, which fences its key selection.
+#[derive(Clone, Copy)]
+pub(super) enum Cutoff {
+    Credential,
+    Evaluator,
+}
+
+impl Cutoff {
+    const ALL: [Self; 2] = [Self::Credential, Self::Evaluator];
+
+    fn slot(self) -> Value {
+        Value::Int(match self {
+            Self::Credential => 1,
+            Self::Evaluator => 2,
+        })
+    }
+}
+
+/// Create the history write cutoffs of an empty store: none set yet.
 pub(super) fn init_cutoff(tx: &Statements<'_>) -> SidResult<Decision<()>> {
+    let mut created = false;
+    for which in Cutoff::ALL {
+        let params = Params::default().with("id", which.slot());
+        let rows = tx.run(
+            "MATCH (c:SidHistoryCutoff) WHERE c.id = $id RETURN c.id AS id",
+            params.clone(),
+        )?;
+        if rows.is_empty() {
+            tx.run(
+                "CREATE (c:SidHistoryCutoff {id: $id, not_before: null})",
+                params,
+            )?;
+            created = true;
+        }
+    }
+    Ok(if created {
+        Decision::Commit(())
+    } else {
+        Decision::Abandon(())
+    })
+}
+
+/// The write cutoff `which` records, read in `tx`; `None` when none was set.
+pub(super) fn read_cutoff(tx: &Statements<'_>, which: Cutoff) -> SidResult<Option<DateTime<Utc>>> {
     let rows = tx.run(
-        "MATCH (c:SidHistoryCutoff) WHERE c.id = 1 RETURN c.id AS id",
-        Params::default(),
+        "MATCH (c:SidHistoryCutoff) WHERE c.id = $id RETURN c.not_before AS not_before",
+        Params::default().with("id", which.slot()),
     )?;
-    if !rows.is_empty() {
-        return Ok(Decision::Abandon(()));
+    rows.first()
+        .map(|row| get_opt_time(row, "not_before"))
+        .transpose()
+        .map(Option::flatten)
+}
+
+/// Raise the write cutoff `which` to `not_before` in `tx`, monotonically:
+/// an equal or earlier value changes nothing. The cutoff in force, and
+/// whether it moved.
+pub(super) fn raise_cutoff(
+    tx: &Statements<'_>,
+    which: Cutoff,
+    not_before: DateTime<Utc>,
+) -> SidResult<(DateTime<Utc>, bool)> {
+    let not_before = sid_core::models::password_history::write_cutoff_instant(not_before);
+    if let Some(current) = read_cutoff(tx, which)?
+        && current >= not_before
+    {
+        return Ok((current, false));
     }
     tx.run(
-        "CREATE (c:SidHistoryCutoff {id: 1, not_before: null})",
-        Params::default(),
+        "MATCH (c:SidHistoryCutoff) WHERE c.id = $id SET c.not_before = $not_before",
+        Params::default()
+            .with("id", which.slot())
+            .with("not_before", time(not_before)),
     )?;
-    Ok(Decision::Commit(()))
+    Ok((not_before, true))
 }
 
 /// Apply `commit` in `tx`. `Ok(false)` when the owner's history is no longer
@@ -950,17 +1012,7 @@ impl CoordinodeBackend {
     }
 
     pub(super) async fn history_write_cutoff(&self) -> SidResult<Option<DateTime<Utc>>> {
-        self.read(|tx| {
-            let rows = tx.run(
-                "MATCH (c:SidHistoryCutoff) WHERE c.id = 1 RETURN c.not_before AS not_before",
-                Params::default(),
-            )?;
-            rows.first()
-                .map(|row| get_opt_time(row, "not_before"))
-                .transpose()
-                .map(Option::flatten)
-        })
-        .await
+        self.read(|tx| read_cutoff(tx, Cutoff::Credential)).await
     }
 
     pub(super) async fn raise_history_write_cutoff(
@@ -968,29 +1020,13 @@ impl CoordinodeBackend {
         not_before: DateTime<Utc>,
         ctx: MutationContext,
     ) -> SidResult<DateTime<Utc>> {
-        let not_before = sid_core::models::password_history::write_cutoff_instant(not_before);
         self.transaction(move |tx| {
-            let rows = tx.run(
-                "MATCH (c:SidHistoryCutoff) WHERE c.id = 1 RETURN c.not_before AS not_before",
-                Params::default(),
-            )?;
-            let current = rows
-                .first()
-                .map(|row| get_opt_time(row, "not_before"))
-                .transpose()?
-                .flatten();
-            // Monotonic: an equal or earlier value changes nothing.
-            if let Some(current) = current
-                && current >= not_before
-            {
-                return Ok(Decision::Abandon(current));
+            let (cutoff, moved) = raise_cutoff(tx, Cutoff::Credential, not_before)?;
+            if !moved {
+                return Ok(Decision::Abandon(cutoff));
             }
-            tx.run(
-                "MATCH (c:SidHistoryCutoff) WHERE c.id = 1 SET c.not_before = $not_before",
-                Params::default().with("not_before", time(not_before)),
-            )?;
             finalize(tx, "password_history_write_cutoff", ctx.clone())?;
-            Ok(Decision::Commit(not_before))
+            Ok(Decision::Commit(cutoff))
         })
         .await
     }

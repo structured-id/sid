@@ -173,6 +173,32 @@ pub async fn epoch_is_ensured_once(store: &dyn HistoryKeyStore) {
     assert_eq!(epoch_ids(store, domain).await, vec![ra.id]);
 }
 
+/// Concurrent ensures for an owner the store already knows, with no epoch
+/// yet (an aborted first enrollment made it known), still agree on one key.
+pub async fn ensures_of_a_known_owner_agree(store: &dyn HistoryKeyStore) {
+    for key in 0..16u8 {
+        let domain = owner();
+        store
+            .abandon_enrollment(&domain, Uuid::now_v7(), audit())
+            .await
+            .unwrap();
+        let (a, b, c) = (
+            new_epoch(domain, key),
+            new_epoch(domain, key.wrapping_add(64)),
+            new_epoch(domain, key.wrapping_add(128)),
+        );
+        let (ra, rb, rc) = tokio::join!(
+            store.ensure_epoch(&a, audit()),
+            store.ensure_epoch(&b, audit()),
+            store.ensure_epoch(&c, audit())
+        );
+        let ids: std::collections::BTreeSet<_> =
+            [ra.unwrap().id, rb.unwrap().id, rc.unwrap().id].into();
+        assert_eq!(ids.len(), 1, "two keys for one owner");
+        assert_eq!(epoch_ids(store, domain).await.len(), 1);
+    }
+}
+
 /// Owner domains are separate namespaces: one owner's keys are invisible to
 /// another, and a live set naming another owner's epoch is refused.
 pub async fn owner_domains_are_separate(store: &dyn HistoryKeyStore) {

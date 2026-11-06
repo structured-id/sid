@@ -28,6 +28,9 @@ mod directory;
 mod enrollment;
 mod flow;
 mod history;
+mod history_keys;
+
+pub use history_keys::CoordinodeHistoryKeyStore;
 mod instance_secret;
 mod job_lock;
 mod keys;
@@ -283,6 +286,13 @@ const SCHEMA: &[&str] = &[
     "CREATE CONSTRAINT sid_job_lock FOR (l:SidJobLock) REQUIRE l.job IS UNIQUE",
     "CREATE CONSTRAINT sid_audit_checkpoint FOR (c:SidAuditCheckpoint) REQUIRE c.chain IS UNIQUE",
     "CREATE INDEX sid_audit_record_at ON :SidAuditRecord(at)",
+    "CREATE CONSTRAINT sid_history_key_version FOR (k:SidHistoryKeyVersion) REQUIRE k.version IS UNIQUE",
+    "CREATE CONSTRAINT sid_history_owner FOR (o:SidHistoryOwner) REQUIRE o.domain IS UNIQUE",
+    "CREATE CONSTRAINT sid_history_key_epoch FOR (e:SidHistoryKeyEpoch) REQUIRE e.id IS UNIQUE",
+    "CREATE INDEX sid_history_key_epoch_owner ON :SidHistoryKeyEpoch(owner_domain)",
+    "CREATE CONSTRAINT sid_history_key_use FOR (u:SidHistoryKeyUse) REQUIRE u.pair IS UNIQUE",
+    "CREATE INDEX sid_history_key_use_owner ON :SidHistoryKeyUse(owner_domain)",
+    "CREATE CONSTRAINT sid_history_abandoned FOR (a:SidHistoryAbandoned) REQUIRE a.operation IS UNIQUE",
 ];
 
 /// SID's storage over the host's CoordiNode database.

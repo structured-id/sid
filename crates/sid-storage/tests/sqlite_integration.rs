@@ -534,6 +534,7 @@ history_key_store!(
     write_cutoff_only_rises,
     first_epoch_never_resets_a_history,
     epoch_is_ensured_once,
+    ensures_of_a_known_owner_agree,
     owner_domains_are_separate,
     epoch_rotation,
     lifecycle_follows_the_live_set,

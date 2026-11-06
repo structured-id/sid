@@ -14,8 +14,11 @@ use super::{
 /// The label of the field-encryption key versions.
 const FIELD: &str = "SidKeyVersion";
 
+/// The label of the history evaluator's key versions: its own key custody.
+pub(super) const HISTORY: &str = "SidHistoryKeyVersion";
+
 /// The versions under `label`, oldest first, read in `tx`.
-fn list(tx: &Statements<'_>, label: &str) -> SidResult<Vec<sid_keys::KeyVersionParams>> {
+pub(super) fn list(tx: &Statements<'_>, label: &str) -> SidResult<Vec<sid_keys::KeyVersionParams>> {
     let rows = tx.run(
         &format!(
             "MATCH (k:{label}) RETURN k.version AS version, k.salt AS salt,
@@ -43,7 +46,7 @@ fn list(tx: &Statements<'_>, label: &str) -> SidResult<Vec<sid_keys::KeyVersionP
 
 /// Store `params` under `label` unless its version exists: `false` then,
 /// and nothing changes. The chain entry `chain` records the insert.
-fn insert(
+pub(super) fn insert(
     tx: &Statements<'_>,
     label: &str,
     params: &sid_keys::KeyVersionParams,
