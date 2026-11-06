@@ -483,18 +483,18 @@ impl StorageBackend for CoordinodeBackend {
 
     async fn write_directory_user(
         &self,
-        _write: &DirectoryUserWrite,
-        _ctx: MutationContext,
+        write: &DirectoryUserWrite,
+        ctx: MutationContext,
     ) -> Result<Vec<Session>> {
-        refused("directory writes")
+        CoordinodeBackend::write_directory_user(self, write, ctx).await
     }
 
     async fn write_directory_group(
         &self,
-        _write: &DirectoryGroupWrite,
-        _ctx: MutationContext,
+        write: &DirectoryGroupWrite,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("directory writes")
+        CoordinodeBackend::write_directory_group(self, write, ctx).await
     }
 
     // === CONTACTS ===
@@ -993,9 +993,9 @@ impl StorageBackend for CoordinodeBackend {
 
     async fn query_directory(
         &self,
-        _query: &sid_core::models::DirectoryQuery,
+        query: &sid_core::models::DirectoryQuery,
     ) -> Result<sid_core::models::DirectoryPage> {
-        refused("the directory")
+        CoordinodeBackend::query_directory(self, query).await
     }
 
     async fn list_profiles_with_status(
@@ -1418,31 +1418,31 @@ impl StorageBackend for CoordinodeBackend {
 
     async fn get_profile_metadata(
         &self,
-        _profile_id: ProfileId,
-        _key: &str,
+        profile_id: ProfileId,
+        key: &str,
     ) -> Result<Option<ProfileMetadata>> {
-        refused("profile metadata")
+        CoordinodeBackend::get_profile_metadata(self, profile_id, key).await
     }
 
     async fn set_profile_metadata(
         &self,
-        _metadata: &ProfileMetadata,
-        _ctx: MutationContext,
+        metadata: &ProfileMetadata,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("profile metadata")
+        CoordinodeBackend::set_profile_metadata(self, metadata, ctx).await
     }
 
     async fn delete_profile_metadata(
         &self,
-        _profile_id: ProfileId,
-        _key: &str,
-        _ctx: MutationContext,
+        profile_id: ProfileId,
+        key: &str,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("profile metadata")
+        CoordinodeBackend::delete_profile_metadata(self, profile_id, key, ctx).await
     }
 
-    async fn list_profile_metadata(&self, _profile_id: ProfileId) -> Result<Vec<ProfileMetadata>> {
-        refused("profile metadata")
+    async fn list_profile_metadata(&self, profile_id: ProfileId) -> Result<Vec<ProfileMetadata>> {
+        CoordinodeBackend::list_profile_metadata(self, profile_id).await
     }
 
     // === DEVICES ===
@@ -1712,70 +1712,62 @@ impl StorageBackend for CoordinodeBackend {
 
     // === PERSONAL ACCESS TOKENS ===
 
-    async fn get_pat(&self, _id: PatId) -> Result<Option<PersonalAccessToken>> {
-        refused("personal access tokens")
+    async fn get_pat(&self, id: PatId) -> Result<Option<PersonalAccessToken>> {
+        CoordinodeBackend::get_pat(self, id).await
     }
 
-    async fn get_pat_by_token_hash(
-        &self,
-        _token_hash: &str,
-    ) -> Result<Option<PersonalAccessToken>> {
-        refused("personal access tokens")
+    async fn get_pat_by_token_hash(&self, token_hash: &str) -> Result<Option<PersonalAccessToken>> {
+        CoordinodeBackend::get_pat_by_token_hash(self, token_hash).await
     }
 
     async fn create_pat(
         &self,
-        _pat: &PersonalAccessToken,
-        _active_limit: Option<u64>,
-        _ctx: MutationContext,
+        pat: &PersonalAccessToken,
+        active_limit: Option<u64>,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("personal access tokens")
+        CoordinodeBackend::create_pat(self, pat, active_limit, ctx).await
     }
 
     async fn record_pat_use(
         &self,
-        _id: PatId,
-        _ip: Option<&str>,
-        _ctx: MutationContext,
+        id: PatId,
+        ip: Option<&str>,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("personal access tokens")
+        CoordinodeBackend::record_pat_use(self, id, ip, ctx).await
     }
 
-    async fn revoke_pat(
-        &self,
-        _id: PatId,
-        _revoked_by: &str,
-        _ctx: MutationContext,
-    ) -> Result<bool> {
-        refused("personal access tokens")
+    async fn revoke_pat(&self, id: PatId, revoked_by: &str, ctx: MutationContext) -> Result<bool> {
+        CoordinodeBackend::revoke_pat(self, id, revoked_by, ctx).await
     }
 
     async fn list_pats_by_profile(
         &self,
-        _profile_id: ProfileId,
+        profile_id: ProfileId,
     ) -> Result<Vec<PersonalAccessToken>> {
-        refused("personal access tokens")
+        CoordinodeBackend::list_pats_by_profile(self, profile_id).await
     }
 
     async fn list_all_pats(&self) -> Result<Vec<PersonalAccessToken>> {
-        refused("personal access tokens")
+        CoordinodeBackend::list_all_pats(self).await
     }
 
-    async fn count_active_pats_by_profile(&self, _profile_id: ProfileId) -> Result<u64> {
-        refused("personal access tokens")
+    async fn count_active_pats_by_profile(&self, profile_id: ProfileId) -> Result<u64> {
+        CoordinodeBackend::count_active_pats_by_profile(self, profile_id).await
     }
 
     async fn revoke_active_pats_by_profile(
         &self,
-        _profile_id: ProfileId,
-        _revoked_by: &str,
-        _ctx: MutationContext,
+        profile_id: ProfileId,
+        revoked_by: &str,
+        ctx: MutationContext,
     ) -> Result<u64> {
-        refused("personal access tokens")
+        CoordinodeBackend::revoke_active_pats_by_profile(self, profile_id, revoked_by, ctx).await
     }
 
-    async fn revoke_unused_pats(&self, _days: u32, _ctx: MutationContext) -> Result<u64> {
-        refused("personal access tokens")
+    async fn revoke_unused_pats(&self, days: u32, ctx: MutationContext) -> Result<u64> {
+        CoordinodeBackend::revoke_unused_pats(self, days, ctx).await
     }
 
     // === MACHINE USERS ===

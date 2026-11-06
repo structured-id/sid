@@ -6500,6 +6500,7 @@ dependencies = [
  "group",
  "libsqlite3-sys",
  "pasta_curves",
+ "rmpv",
  "secrecy",
  "serde",
  "serde_json",

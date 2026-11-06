@@ -346,6 +346,23 @@ pub(super) fn unbind(tx: &Statements<'_>, id: PrincipalId, holder: ProfileId) ->
     Ok(true)
 }
 
+/// The principals `holder` claims, as it holds each, oldest claim first.
+pub(super) fn held_by(tx: &Statements<'_>, holder: ProfileId) -> SidResult<Vec<Principal>> {
+    let rows = tx.run(
+        &format!("MATCH (b:SidPrincipalBinding) WHERE b.profile_id = $holder RETURN {BINDING}"),
+        Params::default().with("holder", profile_value(holder)),
+    )?;
+    let claims = rows.iter().map(binding).collect::<SidResult<Vec<_>>>()?;
+    let claims = super::sorted_page(claims, |b| (b.created_at, b.id.0), 0, u64::MAX);
+    let mut principals = Vec::with_capacity(claims.len());
+    for claim in &claims {
+        if let Some(entity) = by_id(tx, claim.principal_id)? {
+            principals.push(claimed(entity, claim));
+        }
+    }
+    Ok(principals)
+}
+
 /// `holder`'s claim on `id` as it holds it in `tx`.
 fn as_held(tx: &Statements<'_>, id: PrincipalId, holder: ProfileId) -> SidResult<Principal> {
     let entity = by_id(tx, id)?.ok_or_else(|| SidError::Storage("principal vanished".into()))?;
@@ -375,24 +392,7 @@ impl CoordinodeBackend {
         &self,
         holder: ProfileId,
     ) -> SidResult<Vec<Principal>> {
-        self.transaction(move |tx| {
-            let rows = tx.run(
-                &format!(
-                    "MATCH (b:SidPrincipalBinding) WHERE b.profile_id = $holder RETURN {BINDING}"
-                ),
-                Params::default().with("holder", profile_value(holder)),
-            )?;
-            let claims = rows.iter().map(binding).collect::<SidResult<Vec<_>>>()?;
-            let claims = super::sorted_page(claims, |b| (b.created_at, b.id.0), 0, u64::MAX);
-            let mut principals = Vec::with_capacity(claims.len());
-            for claim in &claims {
-                if let Some(entity) = by_id(tx, claim.principal_id)? {
-                    principals.push(claimed(entity, claim));
-                }
-            }
-            Ok(Decision::Abandon(principals))
-        })
-        .await
+        self.read(move |tx| held_by(tx, holder)).await
     }
 
     pub(super) async fn get_profile_by_principal(

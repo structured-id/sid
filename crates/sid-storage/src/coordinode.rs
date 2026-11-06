@@ -20,6 +20,7 @@ mod audit;
 mod backend;
 mod ceremony;
 mod credential;
+mod directory;
 mod enrollment;
 mod instance_secret;
 mod login_policy;
@@ -193,6 +194,12 @@ const SCHEMA: &[&str] = &[
     "CREATE CONSTRAINT sid_connector_credential_verifier FOR (k:SidProvisioningCredential) REQUIRE k.verifier IS UNIQUE",
     "CREATE INDEX sid_connector_credential_connector ON :SidProvisioningCredential(connector_id)",
     "CREATE CONSTRAINT sid_login_policy_epoch FOR (e:SidLoginPolicyEpoch) REQUIRE e.id IS UNIQUE",
+    "CREATE CONSTRAINT sid_profile_metadata FOR (m:SidProfileMetadata) REQUIRE m.pair IS UNIQUE",
+    "CREATE INDEX sid_profile_metadata_profile ON :SidProfileMetadata(profile_id)",
+    "CREATE CONSTRAINT sid_pat_id FOR (t:SidPat) REQUIRE t.id IS UNIQUE",
+    "CREATE CONSTRAINT sid_pat_hash FOR (t:SidPat) REQUIRE t.token_hash IS UNIQUE",
+    "CREATE INDEX sid_pat_profile ON :SidPat(profile_id)",
+    "CREATE INDEX sid_pat_status ON :SidPat(status)",
 ];
 
 /// SID's storage over the host's CoordiNode database.

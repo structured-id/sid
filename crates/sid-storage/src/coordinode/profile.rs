@@ -198,7 +198,11 @@ pub(super) fn get(tx: &Statements<'_>, id: ProfileId) -> SidResult<Option<Profil
 }
 
 /// The profiles `filter` selects, oldest first (creation time, then id).
-fn profiles(tx: &Statements<'_>, filter: &str, params: Params) -> SidResult<Vec<Profile>> {
+pub(super) fn profiles(
+    tx: &Statements<'_>,
+    filter: &str,
+    params: Params,
+) -> SidResult<Vec<Profile>> {
     let rows = tx.run(
         &format!("MATCH (p:SidProfile) {filter} RETURN {PROFILE}"),
         params,
@@ -225,6 +229,7 @@ pub(super) fn delete(tx: &Statements<'_>, id: ProfileId) -> SidResult<()> {
     super::credential::delete_profile_credentials(tx, id)?;
     super::rbac::delete_profile_records(tx, id)?;
     super::enrollment::delete_profile_records(tx, id)?;
+    super::directory::delete_profile_records(tx, id)?;
     tx.run(
         "MATCH (p:SidProfile) WHERE p.id = $id DETACH DELETE p",
         Params::default().with("id", profile_id(id)),
@@ -423,6 +428,50 @@ pub(super) fn upsert_email(tx: &Statements<'_>, email: &ProfileEmail) -> SidResu
     Ok(())
 }
 
+/// Store `phone`, or write it over the stored phone with its id; its
+/// creation time and profile stay as stored.
+pub(super) fn upsert_phone(tx: &Statements<'_>, phone: &ProfilePhone) -> SidResult<()> {
+    let e164 = i64::try_from(phone.e164)
+        .map_err(|_| SidError::Validation(format!("e164 {} out of range", phone.e164)))?;
+    let updated = tx.run(
+        "MATCH (c:SidPhone) WHERE c.id = $id
+         SET c.e164 = $e164, c.number_key = $number_key, c.extension = $extension,
+             c.contact_label = $label, c.custom_label = $custom_label,
+             c.is_primary = $is_primary, c.primary_of = $primary_of,
+             c.can_receive_sms = $can_receive_sms, c.can_receive_fax = $can_receive_fax,
+             c.can_receive_voice = $can_receive_voice, c.verified = $verified,
+             c.verified_at = $verified_at, c.updated_at = $updated_at
+         RETURN c.id AS id",
+        Params::default()
+            .with("id", uuid(&phone.id.0))
+            .with("e164", Value::Int(e164))
+            .with(
+                "number_key",
+                key(&[phone.profile_id.as_bytes(), &e164.to_be_bytes()])?,
+            )
+            .with(
+                "extension",
+                phone
+                    .extension
+                    .map_or(Value::Null, |e| Value::Int(i64::from(e))),
+            )
+            .with("label", Value::String(phone.label.as_str().into()))
+            .with("custom_label", opt_text(phone.custom_label.as_deref()))
+            .with("is_primary", Value::Bool(phone.is_primary))
+            .with("primary_of", primary_of(phone.profile_id, phone.is_primary))
+            .with("can_receive_sms", Value::Bool(phone.can_receive_sms))
+            .with("can_receive_fax", Value::Bool(phone.can_receive_fax))
+            .with("can_receive_voice", Value::Bool(phone.can_receive_voice))
+            .with("verified", Value::Bool(phone.verified))
+            .with("verified_at", opt_time(phone.verified_at))
+            .with("updated_at", time(phone.updated_at)),
+    )?;
+    if updated.is_empty() {
+        insert_phone(tx, phone)?;
+    }
+    Ok(())
+}
+
 /// Delete contact `id` of `label`; only `owner`'s when given.
 fn delete_contact(
     tx: &Statements<'_>,
@@ -460,6 +509,11 @@ pub(super) fn delete_email(
     owner: Option<ProfileId>,
 ) -> SidResult<()> {
     delete_contact(tx, "SidEmail", &id.0, owner)
+}
+
+/// `owner`'s emails, primary first, then oldest first.
+pub(super) fn emails_of(tx: &Statements<'_>, owner: ProfileId) -> SidResult<Vec<ProfileEmail>> {
+    contacts(tx, "SidEmail", EMAIL, owner, email)
 }
 
 /// `profile`'s contacts of `label`, primary first, then oldest first.

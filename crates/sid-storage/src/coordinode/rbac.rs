@@ -295,6 +295,27 @@ pub(super) fn insert_group(tx: &Statements<'_>, g: &Group) -> SidResult<()> {
     Ok(())
 }
 
+/// Write the name and description of the stored `g` in `tx`; false when it
+/// does not exist. Another group of the project holding the name is
+/// `Conflict`.
+pub(super) fn update_group(tx: &Statements<'_>, g: &Group) -> SidResult<bool> {
+    let Some(stored) = get_group(tx, g.id)? else {
+        return Ok(false);
+    };
+    tx.run(
+        "MATCH (g:SidGroup) WHERE g.id = $id
+         SET g.name = $name, g.project_name = $project_name, g.description = $description,
+             g.updated_at = $updated_at",
+        Params::default()
+            .with("id", bin(g.id.as_bytes()))
+            .with("name", Value::String(g.name.clone()))
+            .with("project_name", name_key(stored.project_id, &g.name)?)
+            .with("description", opt_text(g.description.as_deref()))
+            .with("updated_at", time(g.updated_at)),
+    )?;
+    Ok(true)
+}
+
 fn member(row: &Row) -> SidResult<GroupMember> {
     Ok(GroupMember {
         group_id: id(row, "group_id", GroupId::from_slice)?,

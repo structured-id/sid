@@ -27,7 +27,11 @@ pub use postgres_blob::PostgresBlobStore;
 
 #[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
 pub mod application_store;
-#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
+#[cfg(any(
+    feature = "storage-pg",
+    feature = "storage-sqlite",
+    feature = "storage-coordinode"
+))]
 mod directory_query;
 #[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
 mod key_versions;

@@ -26,7 +26,7 @@ storage-sqlite = ["dep:sqlx", "sqlx?/sqlite", "sid-ids/sqlx-sqlite", "dep:libsql
 
 # SID's records in a host's CoordiNode database, for a server host that
 # embeds the engine over its own CoordiNode store. No SQL driver.
-storage-coordinode = ["dep:coordinode-embed", "dep:coordinode-core"]
+storage-coordinode = ["dep:coordinode-embed", "dep:coordinode-core", "dep:rmpv"]
 
 [dependencies]
 sid-ids = { workspace = true, features = ["std", "serde"] }
@@ -42,6 +42,9 @@ libsqlite3-sys = { version = "0.37", optional = true }
 # The host's CoordiNode database and its value type.
 coordinode-embed = { version = "0.9", optional = true }
 coordinode-core = { version = "0.9", optional = true }
+# CoordiNode's nested document value: a free-form JSON value is stored as a
+# document, not as serialized text.
+rmpv = { version = "1", features = ["with-serde"], optional = true }
 
 # Async
 async-trait = { workspace = true }
