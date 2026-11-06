@@ -7,7 +7,7 @@
 use tracing::info;
 
 use sid_serve::shutdown;
-use sid_server::init::{init_ce, spawn_ce_background_tasks};
+use sid_server::init::init_ce;
 use sid_server::serve::{CeServices, serve};
 
 fn main() -> anyhow::Result<()> {
@@ -33,7 +33,6 @@ async fn run() -> anyhow::Result<()> {
     info!("Starting StructuredID v{}", env!("CARGO_PKG_VERSION"));
 
     let c = init_ce().await?;
-    spawn_ce_background_tasks(&c);
     let services = CeServices::new(&c).await?;
     serve(c, services, shutdown::signal()).await?;
 

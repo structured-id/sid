@@ -669,17 +669,54 @@ async fn a_restored_database_gets_the_configured_cutoff_back() {
     );
 }
 
-/// A machine-credential alert keeps its id across scans (relayed once) and
-/// a different alert (another credential or another day) gets another id.
+fn retention(pairs: &[(&str, &str)]) -> anyhow::Result<sid_engine::AuditRetention> {
+    audit_retention_from_lookup(|k| {
+        Ok(pairs
+            .iter()
+            .find(|(name, _)| *name == k)
+            .map(|(_, v)| v.to_string()))
+    })
+}
+
+/// Unset: a year, archived (records are kept until an archive holds them);
+/// both settings are read.
 #[test]
-fn test_credential_alert_id_is_stable_per_alert() {
-    let expired = credential_alert_id("expired:kid-1");
-    assert_eq!(expired, credential_alert_id("expired:kid-1"));
-    assert!(uuid::Uuid::parse_str(&expired).is_ok());
-    assert_ne!(expired, credential_alert_id("expired:kid-2"));
-    assert_ne!(
-        credential_alert_id("expiring:kid-1:3"),
-        credential_alert_id("expiring:kid-1:2")
+fn audit_retention_defaults_to_a_year_archived() {
+    use sid_engine::{AuditRetention, RetentionAction};
+    assert_eq!(retention(&[]).unwrap(), AuditRetention::default());
+    assert_eq!(
+        retention(&[
+            ("SID_AUDIT_RETENTION_DAYS", "30"),
+            ("SID_AUDIT_RETENTION_ACTION", "delete")
+        ])
+        .unwrap(),
+        AuditRetention {
+            days: 30,
+            action: RetentionAction::Delete
+        }
+    );
+}
+
+/// A value that does not parse, or is out of range, stops startup instead of
+/// becoming the default (a bad setting once silently meant 365 days).
+#[test]
+fn audit_retention_refuses_bad_settings() {
+    for days in ["", "abc", "0", "-5", "36501"] {
+        assert!(
+            retention(&[("SID_AUDIT_RETENTION_DAYS", days)]).is_err(),
+            "{days:?}"
+        );
+    }
+    assert!(retention(&[("SID_AUDIT_RETENTION_ACTION", "purge")]).is_err());
+    // A setting the lookup cannot read is refused, not taken as unset.
+    assert!(
+        audit_retention_from_lookup(|k| {
+            if k == "SID_AUDIT_RETENTION_DAYS" {
+                anyhow::bail!("{k} is not valid Unicode")
+            }
+            Ok(None)
+        })
+        .is_err()
     );
 }
 

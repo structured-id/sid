@@ -25,7 +25,7 @@ use sid_authn::otp::OtpService;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_authn::revocation_cascade::RevocationCascadeService;
 use sid_authn::webauthn::WebAuthnServer;
-use sid_authn::work_runner::{RunnerConfig, WorkHandler, WorkRunner};
+use sid_authn::work_runner::{RunnerConfig, WorkHandler};
 use sid_core::models::AuditEntry;
 use sid_plugin::cache::CacheBackend;
 use sid_plugin::event_bus::EventBus;
@@ -44,26 +44,33 @@ use sid_authn::opaque_zkpp::ZkppOpaqueServer;
 use sid_authz::cedar::CedarService;
 use sid_authz::grpc::AuthzServiceImpl;
 
-// Advisory lock IDs for background tasks (multi-instance coordination).
-// Lock 42 is reserved for migrations (migrator.rs).
-const LOCK_PAT_AUTO_REVOKE: i64 = 43;
-const LOCK_CREDENTIAL_EXPIRY: i64 = 44;
-const LOCK_ROLE_EXPIRY: i64 = 45;
-const LOCK_QUARANTINE_CLEANUP: i64 = 46;
-const LOCK_PROFILE_PURGE: i64 = 47;
-const LOCK_MIGRATION_DEADLINE: i64 = 48;
-const LOCK_AUDIT_PARTITION: i64 = 49;
-const LOCK_PRINCIPAL_EXPIRY: i64 = 50;
-const LOCK_ENROLLMENT_COMPACTION: i64 = 51;
-
-/// Namespace of machine-credential alert event ids.
-const CREDENTIAL_ALERT_NAMESPACE: uuid::Uuid =
-    uuid::Uuid::from_u128(0x9b47_2c1e_65fa_4d38_a0c2_e81f_3d96_7b54);
-
-/// The id of a machine-credential alert: the same alert gets the same id, so
-/// a repeated scan relays it once.
-fn credential_alert_id(alert: &str) -> String {
-    uuid::Uuid::new_v5(&CREDENTIAL_ALERT_NAMESPACE, alert.as_bytes()).to_string()
+/// Audit retention from `SID_AUDIT_RETENTION_DAYS` (default 365, 1 to 36500)
+/// and `SID_AUDIT_RETENTION_ACTION` (`archive`, the default, or `delete`);
+/// anything else, including a setting `get` cannot read, is an error, never a
+/// silent default.
+pub fn audit_retention_from_lookup(
+    get: impl Fn(&str) -> anyhow::Result<Option<String>>,
+) -> anyhow::Result<sid_engine::AuditRetention> {
+    use sid_engine::RetentionAction;
+    let days = match get("SID_AUDIT_RETENTION_DAYS")? {
+        None => sid_engine::AuditRetention::default().days,
+        Some(v) => v
+            .trim()
+            .parse::<u32>()
+            .ok()
+            .filter(|d| (1..=36500).contains(d))
+            .ok_or_else(|| {
+                anyhow::anyhow!("SID_AUDIT_RETENTION_DAYS must be 1 to 36500 days, got {v:?}")
+            })?,
+    };
+    let action = match get("SID_AUDIT_RETENTION_ACTION")?.as_deref().map(str::trim) {
+        None | Some("archive") => RetentionAction::Archive,
+        Some("delete") => RetentionAction::Delete,
+        Some(other) => {
+            anyhow::bail!("SID_AUDIT_RETENTION_ACTION must be archive or delete, got {other:?}")
+        }
+    };
+    Ok(sid_engine::AuditRetention { days, action })
 }
 
 /// All initialized CE components and gRPC services.
@@ -98,7 +105,7 @@ pub struct CeComponents {
     /// Executes account closures whose grace period has ended.
     pub closure_service: Arc<AccountClosureService>,
     /// How long audit records are kept and what happens to them after.
-    pub audit_retention: crate::background_tasks::AuditRetention,
+    pub audit_retention: sid_engine::AuditRetention,
     /// Days a profile has to finish its password migration.
     pub migration_deadline_days: i64,
     /// The installation's OIDC issuers and their signers.
@@ -1168,12 +1175,12 @@ pub async fn init_ce_with(host: CeHost) -> anyhow::Result<CeComponents> {
         revocation_cache.clone(),
     ));
 
-    let audit_retention = crate::background_tasks::AuditRetention::from_lookup(env_setting)?;
+    let audit_retention = audit_retention_from_lookup(env_setting)?;
     let migration_deadline_days = match env_setting("SID_MIGRATION_DEADLINE_DAYS")? {
         Some(v) => v
             .parse()
             .with_context(|| format!("SID_MIGRATION_DEADLINE_DAYS {v:?}"))?,
-        None => crate::background_tasks::DEFAULT_MIGRATION_DEADLINE_DAYS,
+        None => sid_engine::maintenance::DEFAULT_MIGRATION_DEADLINE_DAYS,
     };
 
     Ok(CeComponents {
@@ -1282,403 +1289,96 @@ pub(crate) fn write_new_key_file(path: &str, contents: &[u8], private: bool) -> 
         .with_context(|| format!("write key file {path}"))
 }
 
-/// This round's lock of background job `job`: `None` when another instance
-/// holds it, or when the store cannot be asked (logged; the next round retries).
-async fn take_job_lock(
-    storage: &dyn sid_plugin::storage::StorageBackend,
-    job: i64,
-    name: &str,
-) -> Option<sid_plugin::storage::JobLock> {
-    match storage.try_job_lock(job).await {
-        Ok(lock) => lock,
-        Err(e) => {
-            tracing::warn!(job = name, error = %e, "background job lock unavailable, skipping this round");
-            None
-        }
+/// The work and maintenance engine of these components: the CE handlers and
+/// those this server owes on top (authentication mail), and the CE
+/// maintenance with the purge of ended authentication mail. Facts are owed
+/// to the deployment's required receivers and to `also_required`
+/// (receivers this server runs). Every replica runs one; leases keep an
+/// attempt on a single replica, job locks a maintenance run on one instance.
+pub fn engine(
+    c: &CeComponents,
+    also_required: &[sid_core::models::RequiredReceiver],
+) -> anyhow::Result<sid_engine::Engine> {
+    let receivers = c
+        .required_receivers
+        .iter()
+        .chain(also_required)
+        .cloned()
+        .collect();
+    let mut handlers: Vec<Arc<dyn WorkHandler>> = vec![
+        Arc::new(BackChannelLogoutHandler::new(
+            c.issuers.clone(),
+            c.storage.clone(),
+        )?),
+        Arc::new(EventRelayHandler::new(
+            c.storage.clone(),
+            receivers,
+            sid_plugin::OWED_WORK_CAPACITY,
+        )),
+        Arc::new(sid_authn::event_relay::EventFanoutHandler::new(
+            c.event_bus.clone(),
+            c.storage.clone(),
+            sid_plugin::OWED_WORK_CAPACITY,
+        )),
+        Arc::new(sid_authn::event_relay::EventDeliveryHandler::new(
+            c.event_bus.clone(),
+        )),
+        Arc::new(sid_authn::principal_contest::PrincipalContestHandler::new(
+            c.storage.clone(),
+        )),
+        Arc::new(
+            sid_authn::session_revocation::SessionRevocationHandler::new(
+                c.revocation_cache.clone(),
+            ),
+        ),
+        c.auth_svc.enrollment_handler(),
+        c.auth_svc.owner_purge_handler(),
+        c.code_mail.clone(),
+    ];
+    if let Some(mail) = &c.magic_link_mail {
+        handlers.push(mail.clone());
     }
-}
-
-/// Free a job lock after the job's run. A failed release is logged: the lock
-/// frees itself (closed session, lease end), so the job resumes later.
-async fn release_job_lock(lock: sid_plugin::storage::JobLock, name: &str) {
-    if let Err(e) = lock.release().await {
-        tracing::warn!(job = name, error = %e, "background job lock release failed");
+    if let Some(mail) = &c.reset_mail {
+        handlers.push(mail.clone());
     }
-}
-
-/// Spawn all CE background tasks, each run by one instance at a time.
-pub fn spawn_ce_background_tasks(c: &CeComponents) {
-    // Ended first enrollments' records (hourly): their work, aborts and
-    // fences are dropped once no step of them can still arrive.
-    {
+    let mail_purge = {
+        // Ended authentication mail records. Idempotent, so no job lock.
         let storage = c.storage.clone();
-        let auth = c.auth_svc.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
-            loop {
-                interval.tick().await;
-                if let Some(lock) = take_job_lock(
-                    &*storage,
-                    LOCK_ENROLLMENT_COMPACTION,
-                    "enrollment_compaction",
-                )
-                .await
-                {
-                    match auth.compact_enrollments().await {
-                        Ok(0) => {}
-                        Ok(n) => info!("Compacted {} ended enrollment records", n),
-                        Err(e) => tracing::warn!("enrollment compaction failed: {}", e),
-                    }
-                    release_job_lock(lock, "enrollment_compaction").await;
-                }
-            }
-        });
-    }
-
-    // Ended authentication mail records (hourly). Idempotent, so no job lock.
-    {
-        let storage = c.storage.clone();
-        tokio::spawn(async move {
-            let every = std::time::Duration::from_secs(3600);
-            let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
-            loop {
-                interval.tick().await;
-                match crate::auth_mail::purge_ended_mail(storage.as_ref(), chrono::Utc::now()).await
-                {
-                    Ok(0) => {}
-                    Ok(n) => info!("Dropped {} ended authentication mail records", n),
-                    Err(e) => tracing::warn!("authentication mail purge failed: {}", e),
-                }
-            }
-        });
-    }
-
-    // Operation results and periods past their retention (every minute): a
-    // retained sign-in delivery is dropped within a minute of its
-    // operation's end, and a period that stopped accepting new commands is
-    // retired with its completions once its retention passed.
-    {
-        let storage = c.storage.clone();
-        tokio::spawn(async move {
-            let every = std::time::Duration::from_secs(60);
-            let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
-            loop {
-                interval.tick().await;
-                sid_authn::operation::upkeep(storage.as_ref(), chrono::Utc::now()).await;
-            }
-        });
-    }
-
-    // Ceremony state past its deadline (every minute): one-time proofs,
-    // codes and counts leave rows behind, which no database expires by
-    // itself. Idempotent like the purge above, so no job lock.
-    {
-        let storage = c.storage.clone();
-        tokio::spawn(async move {
-            let every = std::time::Duration::from_secs(60);
-            let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
-            loop {
-                interval.tick().await;
-                crate::background_tasks::purge_ceremony_state(storage.as_ref()).await;
-            }
-        });
-    }
-
-    // PAT auto-revoke (hourly)
-    {
-        let storage = c.storage.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
-            loop {
-                interval.tick().await;
-                if let Some(lock) =
-                    take_job_lock(&*storage, LOCK_PAT_AUTO_REVOKE, "pat_auto_revoke").await
-                {
-                    match storage
-                        .revoke_unused_pats(
-                            sid_core::models::pat::PAT_AUTO_REVOKE_UNUSED_DAYS,
-                            AuditEntry::system("pat.auto_revoke_unused", "background_task").into(),
-                        )
+        sid_engine::maintenance::Job::shared(
+            "authentication_mail_purge",
+            std::time::Duration::from_secs(3600),
+            sid_engine::maintenance::FirstRun::AfterInterval,
+            Arc::new(move || {
+                let storage = storage.clone();
+                Box::pin(async move {
+                    match crate::auth_mail::purge_ended_mail(storage.as_ref(), chrono::Utc::now())
                         .await
                     {
                         Ok(0) => {}
-                        Ok(n) => info!("Auto-revoked {} unused PATs", n),
-                        Err(e) => tracing::warn!("PAT auto-revoke failed: {}", e),
+                        Ok(n) => info!("Dropped {} ended authentication mail records", n),
+                        Err(e) => tracing::warn!("authentication mail purge failed: {}", e),
                     }
-                    release_job_lock(lock, "pat_auto_revoke").await;
-                }
-            }
-        });
-    }
-
-    // Machine credential expiry (hourly). Each alert is relayed as durable
-    // work whose id follows from the credential (and the day count), so the
-    // hourly scan announces an expiry once and each day's warning once.
-    {
-        let storage = c.storage.clone();
-        tokio::spawn(async move {
-            let alert_days = sid_core::models::machine_user::CREDENTIAL_ALERT_BEFORE_EXPIRY_DAYS;
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
-            loop {
-                interval.tick().await;
-                let Some(lock) =
-                    take_job_lock(&*storage, LOCK_CREDENTIAL_EXPIRY, "credential_expiry").await
-                else {
-                    continue;
-                };
-                match storage.list_expiring_machine_credentials(alert_days).await {
-                    Ok(creds) => {
-                        let now = chrono::Utc::now();
-                        for cred in &creds {
-                            if let Some(exp) = cred.expires_at {
-                                if exp <= now {
-                                    let mut event = sid_core::models::event::Event::new(
-                                        "sid-server",
-                                        sid_core::models::event::event_types::MACHINE_USER_CREDENTIAL_EXPIRED,
-                                    )
-                                    .with_subject(format!("machine_credential/{}", cred.kid))
-                                    .with_data(serde_json::json!({
-                                        "kid": cred.kid,
-                                        "machine_user_id": cred.machine_user_id,
-                                        "expired_at": exp.to_rfc3339(),
-                                    }));
-                                    event.id =
-                                        credential_alert_id(&format!("expired:{}", cred.kid));
-                                    if let Err(e) =
-                                        sid_authn::event_relay::relay_observed(&*storage, &event)
-                                            .await
-                                    {
-                                        tracing::warn!(
-                                            "Failed to relay credential_expired event: {}",
-                                            e
-                                        );
-                                    }
-                                    tracing::warn!(
-                                        kid = %cred.kid,
-                                        machine_user_id = %cred.machine_user_id,
-                                        "Machine credential expired, should be revoked"
-                                    );
-                                } else {
-                                    let days_left = (exp - now).num_days();
-                                    let mut event = sid_core::models::event::Event::new(
-                                        "sid-server",
-                                        sid_core::models::event::event_types::MACHINE_USER_CREDENTIAL_EXPIRING,
-                                    )
-                                    .with_subject(format!("machine_credential/{}", cred.kid))
-                                    .with_data(serde_json::json!({
-                                        "kid": cred.kid,
-                                        "machine_user_id": cred.machine_user_id,
-                                        "expires_at": exp.to_rfc3339(),
-                                        "days_left": days_left,
-                                    }));
-                                    event.id = credential_alert_id(&format!(
-                                        "expiring:{}:{days_left}",
-                                        cred.kid
-                                    ));
-                                    if let Err(e) =
-                                        sid_authn::event_relay::relay_observed(&*storage, &event)
-                                            .await
-                                    {
-                                        tracing::warn!(
-                                            "Failed to relay credential_expiring event: {}",
-                                            e
-                                        );
-                                    }
-                                    tracing::info!(
-                                        kid = %cred.kid,
-                                        machine_user_id = %cred.machine_user_id,
-                                        days_left = days_left,
-                                        "Machine credential expiring soon"
-                                    );
-                                }
-                            }
-                        }
-                        if !creds.is_empty() {
-                            info!(
-                                "Credential expiry scan: {} credentials expiring/expired",
-                                creds.len()
-                            );
-                        }
-                    }
-                    Err(e) => tracing::warn!("Credential expiry scan failed: {}", e),
-                }
-                release_job_lock(lock, "credential_expiry").await;
-            }
-        });
-    }
-
-    // Role assignment auto-revoke (every 5 minutes). Each warning threshold is
-    // announced once per assignment; each removal owes its expired event in
-    // the removal's own transaction.
-    {
-        let storage = c.storage.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
-            loop {
-                interval.tick().await;
-                let Some(lock) = take_job_lock(&*storage, LOCK_ROLE_EXPIRY, "role_expiry").await
-                else {
-                    continue;
-                };
-
-                let max_window = *sid_core::models::authz::ROLE_EXPIRY_ALERT_HOURS
-                    .first()
-                    .unwrap_or(&72);
-                match storage.list_expiring_role_assignments(max_window).await {
-                    Ok(assignments) => {
-                        let now = chrono::Utc::now();
-                        for a in &assignments {
-                            if let Some(exp) = a.expires_at {
-                                if exp <= now {
-                                    continue;
-                                }
-                                let hours_left = (exp - now).num_hours();
-                                // The thresholds descend: the last one reached
-                                // is the tightest warning due now.
-                                if let Some(&threshold) =
-                                    sid_core::models::authz::ROLE_EXPIRY_ALERT_HOURS
-                                        .iter()
-                                        .rev()
-                                        .find(|&&t| hours_left <= t)
-                                {
-                                    let event = a.expiring_event(threshold, hours_left);
-                                    if let Err(e) =
-                                        sid_authn::event_relay::relay_observed(&*storage, &event)
-                                            .await
-                                    {
-                                        tracing::warn!(
-                                            "Failed to relay role_expiring event: {}",
-                                            e
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => tracing::warn!("Role expiry scan failed: {}", e),
-                }
-
-                match storage
-                    .cleanup_expired_role_assignments(
-                        AuditEntry::system("role_assignment.auto_revoke", "background_task").into(),
-                    )
-                    .await
-                {
-                    Ok(removed) if removed.is_empty() => {}
-                    Ok(removed) => {
-                        info!("Auto-revoked {} expired role assignments", removed.len())
-                    }
-                    Err(e) => tracing::warn!("Role assignment auto-revoke failed: {}", e),
-                }
-                release_job_lock(lock, "role_expiry").await;
-            }
-        });
-    }
-
-    // Quarantine cleanup (daily)
-    {
-        let storage = c.storage.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(86400));
-            loop {
-                interval.tick().await;
-                if let Some(lock) =
-                    take_job_lock(&*storage, LOCK_QUARANTINE_CLEANUP, "quarantine_cleanup").await
-                {
-                    crate::background_tasks::cleanup_quarantine(storage.as_ref()).await;
-                    release_job_lock(lock, "quarantine_cleanup").await;
-                }
-            }
-        });
-    }
-
-    // Account closure lifecycle (hourly, leader-only): closures whose grace
-    // period ended are executed, closed profiles are purged at quarantine end.
-    {
-        let storage = c.storage.clone();
-        let closures = c.closure_service.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
-            loop {
-                interval.tick().await;
-                if let Some(lock) =
-                    take_job_lock(&*storage, LOCK_PROFILE_PURGE, "profile_purge").await
-                {
-                    crate::background_tasks::execute_due_closures(storage.as_ref(), &closures)
-                        .await;
-                    crate::background_tasks::purge_closed_profiles(storage.as_ref()).await;
-                    release_job_lock(lock, "profile_purge").await;
-                }
-            }
-        });
-    }
-
-    // Migration deadline enforcement (daily)
-    {
-        let storage = c.storage.clone();
-        let deadline_days = c.migration_deadline_days;
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(86400));
-            loop {
-                interval.tick().await;
-                if let Some(lock) =
-                    take_job_lock(&*storage, LOCK_MIGRATION_DEADLINE, "migration_deadline").await
-                {
-                    crate::background_tasks::enforce_migration_deadline(
-                        storage.as_ref(),
-                        deadline_days,
-                    )
-                    .await;
-                    release_job_lock(lock, "migration_deadline").await;
-                }
-            }
-        });
-    }
-
-    // Audit storage maintenance (daily, leader-only): this and next month's
-    // storage prepared, months past retention removed when the site chose
-    // `delete`.
-    {
-        let storage = c.storage.clone();
-        let retention = c.audit_retention;
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(86400));
-            loop {
-                interval.tick().await;
-                if let Some(lock) =
-                    take_job_lock(&*storage, LOCK_AUDIT_PARTITION, "audit_partition").await
-                {
-                    if let Err(e) = crate::background_tasks::manage_audit_partitions(
-                        storage.as_ref(),
-                        retention,
-                        chrono::Utc::now(),
-                    )
-                    .await
-                    {
-                        tracing::error!(error = %e, "audit storage maintenance failed");
-                    }
-                    release_job_lock(lock, "audit_partition").await;
-                }
-            }
-        });
-    }
-
-    // ── Principal verification expiry (daily, leader-only) ──
-    {
-        let storage = c.storage.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(86400));
-            loop {
-                interval.tick().await;
-                if let Some(lock) =
-                    take_job_lock(&*storage, LOCK_PRINCIPAL_EXPIRY, "principal_expiry").await
-                {
-                    crate::background_tasks::expire_principal_verifications(storage.as_ref()).await;
-                    release_job_lock(lock, "principal_expiry").await;
-                }
-            }
-        });
-    }
+                })
+            }),
+        )
+    };
+    let maintenance = sid_engine::Maintenance::ce(sid_engine::CeMaintenance {
+        storage: c.storage.clone(),
+        closures: c.closure_service.clone(),
+        history_evaluation: c.auth_svc.history_evaluation(),
+        audit_retention: c.audit_retention,
+        migration_deadline_days: c.migration_deadline_days,
+        source: "sid-server".into(),
+    })
+    .with(mail_purge);
+    sid_engine::Engine::new(sid_engine::EngineParts {
+        storage: c.storage.clone(),
+        worker: format!("sid-server-{}-{}", std::process::id(), uuid::Uuid::now_v7()),
+        handlers,
+        runner: RunnerConfig::default(),
+        maintenance,
+    })
+    .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 /// The receivers `SID_EVENT_RECEIVERS` names (comma-separated; `none` for a
@@ -1799,65 +1499,6 @@ pub(crate) fn bus_carries_history_evaluator(
         );
     }
     Ok(())
-}
-
-/// Start the runner for work the storage commits with a mutation (owed
-/// back-channel logouts and session revocations, relayed events and their
-/// deliveries, contestation checks). Every replica runs one; leases keep an attempt on a single
-/// replica. Facts are owed to the deployment's required receivers and to
-/// `also_required` (receivers this server runs). Runs until `shutdown`
-/// resolves, then lets attempts in flight record their outcome.
-pub fn spawn_work_runner(
-    c: &CeComponents,
-    also_required: &[sid_core::models::RequiredReceiver],
-    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
-) -> anyhow::Result<tokio::task::JoinHandle<()>> {
-    let receivers = c
-        .required_receivers
-        .iter()
-        .chain(also_required)
-        .cloned()
-        .collect();
-    let mut handlers: Vec<Arc<dyn WorkHandler>> = vec![
-        Arc::new(BackChannelLogoutHandler::new(
-            c.issuers.clone(),
-            c.storage.clone(),
-        )?),
-        Arc::new(EventRelayHandler::new(
-            c.storage.clone(),
-            receivers,
-            sid_plugin::OWED_WORK_CAPACITY,
-        )),
-        Arc::new(sid_authn::event_relay::EventFanoutHandler::new(
-            c.event_bus.clone(),
-            c.storage.clone(),
-            sid_plugin::OWED_WORK_CAPACITY,
-        )),
-        Arc::new(sid_authn::event_relay::EventDeliveryHandler::new(
-            c.event_bus.clone(),
-        )),
-        Arc::new(sid_authn::principal_contest::PrincipalContestHandler::new(
-            c.storage.clone(),
-        )),
-        Arc::new(
-            sid_authn::session_revocation::SessionRevocationHandler::new(
-                c.revocation_cache.clone(),
-            ),
-        ),
-        c.auth_svc.enrollment_handler(),
-        c.auth_svc.owner_purge_handler(),
-        c.code_mail.clone(),
-    ];
-    if let Some(mail) = &c.magic_link_mail {
-        handlers.push(mail.clone());
-    }
-    if let Some(mail) = &c.reset_mail {
-        handlers.push(mail.clone());
-    }
-    let worker = format!("sid-server-{}-{}", std::process::id(), uuid::Uuid::now_v7());
-    let runner = WorkRunner::new(c.storage.clone(), worker, handlers, RunnerConfig::default())
-        .map_err(|e| anyhow::anyhow!("work runner: {e}"))?;
-    Ok(tokio::spawn(runner.run(shutdown)))
 }
 
 /// With a separate history evaluator, consume the cleanup settlements it
