@@ -698,6 +698,35 @@ mod principal_store {
     );
 }
 
+/// A store holding records that break a constraint SID relies on (written
+/// past SID, here two profiles with one username) is refused at opening:
+/// SID never serves without the uniqueness its writers rely on.
+#[tokio::test(flavor = "multi_thread")]
+async fn opening_refuses_a_store_that_cannot_hold_the_schema() {
+    let db = Arc::new(coordinode_embed::Database::open_in_memory().expect("CoordiNode in memory"));
+    let host = db.clone();
+    tokio::task::spawn_blocking(move || {
+        for _ in 0..2 {
+            host.execute_cypher_shared(
+                "CREATE (p:SidProfile {id: 'twin', username: 'twin'})",
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("a host write");
+        }
+    })
+    .await
+    .unwrap();
+    let refused = CoordinodeBackend::new(db).await;
+    assert!(
+        matches!(refused, Err(sid_core::Error::Storage(_))),
+        "the store was served without its constraints: {:?}",
+        refused.err()
+    );
+}
+
 /// What the store owes across a restart and across the host's backup and
 /// restore, on databases kept in files.
 mod recovery {
