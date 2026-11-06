@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.20](https://github.com/structured-id/sid/compare/v0.2.19...v0.2.20) - 2026-11-06
+
+### Added
+
+- *(authz)* typed identifiers in authorization ([#429](https://github.com/structured-id/sid/pull/429))
+
 ## [0.2.19](https://github.com/structured-id/sid/compare/v0.2.18...v0.2.19) - 2026-11-05
 
 ### Other
