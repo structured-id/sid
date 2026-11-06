@@ -88,7 +88,7 @@ impl SqliteBackend {
         id: ProfileGrantId,
     ) -> SidResult<Option<ProfileGrant>> {
         let row = sqlx::query("SELECT * FROM profile_grants WHERE id = ?")
-            .bind(id.to_string())
+            .bind(id.0)
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -105,8 +105,8 @@ impl SqliteBackend {
             "INSERT INTO profile_grants (id, project_id, profile_id, role_keys, granted_by, expires_at, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(grant.id.to_string())
-        .bind(grant.project_id.to_string())
+        .bind(grant.id.0)
+        .bind(grant.project_id)
         .bind(grant.profile_id)
         .bind(grant.role_keys.join(","))
         .bind(&grant.granted_by)
@@ -126,7 +126,7 @@ impl SqliteBackend {
     ) -> SidResult<()> {
         let mut tx = self.begin_write().await?;
         sqlx::query("DELETE FROM profile_grants WHERE id = ?")
-            .bind(id.to_string())
+            .bind(id.0)
             .execute(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -150,7 +150,7 @@ impl SqliteBackend {
         project_id: ProjectId,
     ) -> SidResult<Vec<ProfileGrant>> {
         let rows = sqlx::query("SELECT * FROM profile_grants WHERE project_id = ?")
-            .bind(project_id.to_string())
+            .bind(project_id)
             .fetch_all(&self.pool)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -164,7 +164,7 @@ impl SqliteBackend {
         id: UpstreamProviderId,
     ) -> SidResult<Option<UpstreamProvider>> {
         let row = sqlx::query("SELECT * FROM upstream_providers WHERE id = ?")
-            .bind(id.to_string())
+            .bind(id.0)
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -226,7 +226,7 @@ impl SqliteBackend {
             .map_err(|e| SidError::Validation(format!("provider revision: {e}")))?;
         let mut tx = self.begin_write().await?;
         let written = sqlx::query(sql)
-            .bind(provider.id.to_string())
+            .bind(provider.id.0)
             .bind(&provider.name)
             .bind(provider.protocol.as_str())
             .bind(provider.trust_category.as_str())
@@ -262,7 +262,7 @@ impl SqliteBackend {
     ) -> SidResult<()> {
         let mut tx = self.begin_write().await?;
         sqlx::query("DELETE FROM upstream_providers WHERE id = ?")
-            .bind(id.to_string())
+            .bind(id.0)
             .execute(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -291,7 +291,7 @@ impl SqliteBackend {
         let row = sqlx::query(
             "SELECT * FROM upstream_identities WHERE provider_id = ? AND upstream_subject = ?",
         )
-        .bind(provider_id.to_string())
+        .bind(provider_id.0)
         .bind(upstream_subject)
         .fetch_optional(&self.pool)
         .await
@@ -311,9 +311,9 @@ impl SqliteBackend {
                 last_login_at, login_count)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(identity.id.to_string())
+        .bind(identity.id.0)
         .bind(identity.profile_id)
-        .bind(identity.provider_id.to_string())
+        .bind(identity.provider_id.0)
         .bind(&identity.upstream_subject)
         .bind(&identity.upstream_issuer)
         .bind(&identity.upstream_email)
@@ -347,7 +347,7 @@ impl SqliteBackend {
         .bind(&login.name)
         .bind(&login.picture)
         .bind(fmt_dt(&login.at))
-        .bind(id.to_string())
+        .bind(id.0)
         .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("record upstream login: {e}")))?
@@ -379,7 +379,7 @@ impl SqliteBackend {
     ) -> SidResult<()> {
         let mut tx = self.begin_write().await?;
         sqlx::query("DELETE FROM upstream_identities WHERE id = ?")
-            .bind(id.to_string())
+            .bind(id.0)
             .execute(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;

@@ -239,14 +239,14 @@ impl SqliteBackend {
                 authorized_at, last_polled_at, redeemed_session_id, resource_id)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(code.id.to_string())
+        .bind(code.id.0)
         .bind(&code.client_id)
         .bind(&code.device_code_hash)
         .bind(&code.user_code)
         .bind(&code.scope)
         .bind(code.status.as_str())
         .bind(code.authorized_by)
-        .bind(code.project_id.to_string())
+        .bind(code.project_id)
         .bind(code.interval)
         .bind(fmt_dt(&code.created_at))
         .bind(fmt_dt(&code.expires_at))
@@ -306,7 +306,7 @@ impl SqliteBackend {
         .bind(status)
         .bind(authorized_by)
         .bind(authorized_at)
-        .bind(id.to_string())
+        .bind(id.0)
         .bind(&now)
         .execute(&mut *tx)
         .await
@@ -332,7 +332,7 @@ impl SqliteBackend {
         let row = sqlx::query(
             "SELECT last_polled_at, interval_secs FROM device_authorization_codes WHERE id = ?",
         )
-        .bind(id.to_string())
+        .bind(id.0)
         .fetch_optional(&mut *tx)
         .await
         .map_err(storage)?
@@ -354,7 +354,7 @@ impl SqliteBackend {
         )
         .bind(fmt_dt(&now))
         .bind(interval)
-        .bind(id.to_string())
+        .bind(id.0)
         .execute(&mut *tx)
         .await
         .map_err(storage)?;

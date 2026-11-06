@@ -15,6 +15,7 @@ use sqlx::Row;
 
 use super::{
     SqliteBackend, WriteTx, col, dt_col, dt_col_opt, fmt_dt, fmt_dt_opt, insert_error, parsed_col,
+    uuid_col,
 };
 
 /// Whitespace-separated list column.
@@ -67,10 +68,8 @@ fn row_to_closure_request(row: &sqlx::sqlite::SqliteRow) -> SidResult<ClosureReq
 }
 
 fn row_to_export_job(row: &sqlx::sqlite::SqliteRow) -> SidResult<ExportJob> {
-    let id: String = col(row, "id")?;
     Ok(ExportJob {
-        id: uuid::Uuid::parse_str(&id)
-            .map_err(|e| SidError::Storage(format!("column id: bad export job id {id}: {e}")))?,
+        id: uuid_col(row, "id")?,
         profile_id: col(row, "profile_id")?,
         format: parsed_col::<ExportFormat>(row, "format")?,
         status: parsed_col::<ExportStatus>(row, "status")?,
@@ -84,10 +83,8 @@ fn row_to_export_job(row: &sqlx::sqlite::SqliteRow) -> SidResult<ExportJob> {
 }
 
 fn row_to_magic_link(row: &sqlx::sqlite::SqliteRow) -> SidResult<MagicLinkSession> {
-    let id: String = col(row, "id")?;
     Ok(MagicLinkSession {
-        id: uuid::Uuid::parse_str(&id)
-            .map_err(|e| SidError::Storage(format!("column id: bad magic link id {id}: {e}")))?,
+        id: uuid_col(row, "id")?,
         email: col(row, "email")?,
         destination: col(row, "destination")?,
         token_hash: col(row, "token_hash")?,
@@ -145,7 +142,7 @@ impl SqliteBackend {
 
     pub(crate) async fn get_pat_impl(&self, id: PatId) -> SidResult<Option<PersonalAccessToken>> {
         let row = sqlx::query("SELECT * FROM personal_access_tokens WHERE id = ?")
-            .bind(id.to_string())
+            .bind(id)
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -191,7 +188,7 @@ impl SqliteBackend {
             "INSERT INTO personal_access_tokens (id, profile_id, name, description, token_hash, token_prefix, scopes, ip_allowlist, status, expires_at, last_used_at, last_used_ip, use_count, revoked_at, revoked_by, created_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
-        .bind(pat.id.to_string()).bind(pat.profile_id)
+        .bind(pat.id).bind(pat.profile_id)
         .bind(&pat.name)
         .bind(&pat.description)
         .bind(&pat.token_hash)
@@ -232,7 +229,7 @@ impl SqliteBackend {
         )
         .bind(&now)
         .bind(ip)
-        .bind(id.to_string())
+        .bind(id)
         .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(e.to_string()))?
@@ -259,7 +256,7 @@ impl SqliteBackend {
         )
         .bind(&now)
         .bind(revoked_by)
-        .bind(id.to_string())
+        .bind(id)
         .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(e.to_string()))?
@@ -469,8 +466,8 @@ impl SqliteBackend {
 
     // === ExportJob ===
 
-    /// Run one export job status change (`?1` id, `?2` time, stored in the
-    /// same text form); `true` when it applied.
+    /// Run one export job status change (`?1` id, `?2` time); `true` when it
+    /// applied.
     async fn transition_export_job(
         &self,
         id: uuid::Uuid,
@@ -480,7 +477,7 @@ impl SqliteBackend {
     ) -> SidResult<bool> {
         let mut tx = self.begin_write().await?;
         let changed = sqlx::query(sql)
-            .bind(id.to_string())
+            .bind(id)
             .bind(fmt_dt(&at))
             .execute(&mut *tx)
             .await
@@ -536,7 +533,7 @@ impl SqliteBackend {
             "INSERT INTO export_jobs (id, profile_id, format, status, archive_path, size_bytes, checksum_sha256, created_at, ready_at, expires_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(job.id.to_string())
+        .bind(job.id)
         .bind(job.profile_id)
         .bind(job.format.as_str())
         .bind(job.status.as_str())
@@ -571,7 +568,7 @@ impl SqliteBackend {
         job_id: uuid::Uuid,
     ) -> SidResult<Option<ExportJob>> {
         let row = sqlx::query("SELECT * FROM export_jobs WHERE id = ?")
-            .bind(job_id.to_string())
+            .bind(job_id)
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -591,7 +588,7 @@ impl SqliteBackend {
                  (id, email, destination, token_hash, sealed_token, consumed, created_at, expires_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(session.id.to_string())
+        .bind(session.id)
         .bind(&session.email)
         .bind(&session.destination)
         .bind(&session.token_hash)
@@ -610,7 +607,7 @@ impl SqliteBackend {
         id: uuid::Uuid,
     ) -> SidResult<Option<MagicLinkSession>> {
         let row = sqlx::query("SELECT * FROM magic_link_sessions WHERE id = ?")
-            .bind(id.to_string())
+            .bind(id)
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -624,7 +621,7 @@ impl SqliteBackend {
     ) -> SidResult<()> {
         let mut tx = self.begin_write().await?;
         sqlx::query("UPDATE magic_link_sessions SET consumed = 1, sealed_token = x'' WHERE id = ?")
-            .bind(id.to_string())
+            .bind(id)
             .execute(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -644,7 +641,7 @@ impl SqliteBackend {
              WHERE id = ? AND consumed = 0 AND expires_at > ?
              RETURNING *",
         )
-        .bind(id.to_string())
+        .bind(id)
         .bind(fmt_dt(&chrono::Utc::now()))
         .fetch_optional(&mut *tx)
         .await

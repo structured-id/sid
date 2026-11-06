@@ -344,10 +344,10 @@ pub(crate) fn ip_col(
     raw.map(|bytes| ip_from_bytes(&bytes)).transpose()
 }
 
-/// Decode a UUID stored as text; a malformed value is an error, never nil.
+/// Decode a UUID stored as its 16 bytes; any other value is an error, never
+/// nil.
 pub(crate) fn uuid_col(row: &sqlx::sqlite::SqliteRow, name: &str) -> SidResult<uuid::Uuid> {
-    let raw: String = col(row, name)?;
-    uuid::Uuid::parse_str(&raw).map_err(|e| SidError::Storage(format!("column {name}: {e}")))
+    col(row, name)
 }
 
 /// Decode an RFC 3339 timestamp column; a malformed value is an error, never
@@ -2892,7 +2892,7 @@ impl StorageBackend for SqliteBackend {
         let row: Option<(String,)> = sqlx::query_as(
             "SELECT data FROM flow_configs WHERE project_id = ?1 AND flow_type = ?2",
         )
-        .bind(project_id.to_string())
+        .bind(project_id)
         .bind(flow_type.as_str())
         .fetch_optional(&self.pool)
         .await
@@ -2915,7 +2915,7 @@ impl StorageBackend for SqliteBackend {
             .map_err(|e| SidError::Storage(format!("Serialize: {e}")))?;
         let mut tx = self.begin_write().await?;
         sqlx::query("INSERT INTO flow_configs (project_id, flow_type, data, updated_at) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(project_id, flow_type) DO UPDATE SET data = ?3, updated_at = ?4")
-        .bind(config.project_id.to_string()).bind(config.flow_type.as_str()).bind(&data)
+        .bind(config.project_id).bind(config.flow_type.as_str()).bind(&data)
         .bind(config.updated_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
         .execute(&mut *tx).await.map_err(|e| SidError::Storage(format!("Insert: {e}")))?;
         Self::commit_mutation(
@@ -2936,7 +2936,7 @@ impl StorageBackend for SqliteBackend {
         let rows: Vec<(String,)> = sqlx::query_as(
             "SELECT data FROM flow_configs WHERE project_id = ?1 ORDER BY flow_type",
         )
-        .bind(project_id.to_string())
+        .bind(project_id)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("Query: {e}")))?;
@@ -2984,7 +2984,7 @@ impl StorageBackend for SqliteBackend {
     ) -> SidResult<()> {
         let mut tx = self.begin_write().await?;
         sqlx::query("DELETE FROM flow_actions WHERE id = ?1")
-            .bind(id.to_string())
+            .bind(id.0)
             .execute(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(format!("Delete: {e}")))?;

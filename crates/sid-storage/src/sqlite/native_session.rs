@@ -23,7 +23,7 @@ async fn insert_generation(tx: &mut WriteTx, generation: &NativeGeneration) -> S
         "INSERT INTO native_generations (id, session_id, key_jkt, expires_at, created_at)
          VALUES (?, ?, ?, ?, ?)",
     )
-    .bind(generation.id.to_string())
+    .bind(generation.id)
     .bind(generation.session_id)
     .bind(&generation.key_jkt)
     .bind(fmt_dt(&generation.expires_at))
@@ -36,7 +36,7 @@ async fn insert_generation(tx: &mut WriteTx, generation: &NativeGeneration) -> S
             "INSERT INTO native_credentials (credential_hash, generation_id) VALUES (?, ?)",
         )
         .bind(hash)
-        .bind(generation.id.to_string())
+        .bind(generation.id)
         .execute(&mut **tx)
         .await
         .map_err(|e| insert_error("native credential", e))?;
@@ -124,7 +124,7 @@ impl SqliteBackend {
         let now = chrono::Utc::now();
         let now_text = fmt_dt(&now);
         let Some(row) = sqlx::query("SELECT * FROM native_generations WHERE id = ?")
-            .bind(rotation.presented.to_string())
+            .bind(rotation.presented)
             .fetch_optional(&mut *tx)
             .await
             .map_err(storage)?
@@ -140,7 +140,7 @@ impl SqliteBackend {
             NativeGenerationState::Current => {
                 // Its predecessor's redelivery ends now that this one is used.
                 sqlx::query("UPDATE native_generations SET sealed = NULL WHERE successor_id = ?")
-                    .bind(rotation.presented.to_string())
+                    .bind(rotation.presented)
                     .execute(&mut *tx)
                     .await
                     .map_err(storage)?;
@@ -150,10 +150,10 @@ impl SqliteBackend {
                      WHERE id = ?",
                 )
                 .bind(rotation.exchange.as_bytes().as_slice())
-                .bind(rotation.successor.id.to_string())
+                .bind(rotation.successor.id)
                 .bind(fmt_dt(&rotation.redeliver_until))
                 .bind(rotation.sealed)
-                .bind(rotation.presented.to_string())
+                .bind(rotation.presented)
                 .execute(&mut *tx)
                 .await
                 .map_err(storage)?;

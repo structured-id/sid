@@ -27,7 +27,7 @@ pub(crate) async fn insert_work_in_tx(
     // The same obligation again is already stored: accepted, whatever the load.
     let exists: bool =
         sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM durable_work WHERE id = ?)")
-            .bind(work.id.to_string())
+            .bind(work.id.0)
             .fetch_one(&mut *tx)
             .await
             .map_err(storage)?;
@@ -56,7 +56,7 @@ pub(crate) async fn insert_work_in_tx(
             created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING",
     )
-    .bind(work.id.to_string())
+    .bind(work.id.0)
     .bind(work.kind.as_str())
     .bind(&work.payload)
     .bind(i64::from(work.max_attempts))
@@ -141,7 +141,7 @@ impl WorkStore for SqliteBackend {
         .await
         .map_err(storage)?;
 
-        let due: Vec<String> = sqlx::query_scalar(
+        let due: Vec<uuid::Uuid> = sqlx::query_scalar(
             "SELECT id FROM durable_work
              WHERE kind IN (SELECT value FROM json_each(?))
                AND ((state = 'pending' AND not_before <= ?)
@@ -168,12 +168,12 @@ impl WorkStore for SqliteBackend {
             .bind(worker)
             .bind(&lease_until)
             .bind(&now_s)
-            .bind(&id)
+            .bind(id)
             .fetch_one(&mut *tx)
             .await
             .map_err(storage)?;
             claimed.push(ClaimedWork {
-                id: work_id(col(&row, "id")?)?,
+                id: WorkId(col(&row, "id")?),
                 kind: WorkKind::new(&col::<String>(&row, "kind")?)?,
                 payload: col(&row, "payload")?,
                 attempt: count(col(&row, "attempts")?)?,
@@ -199,7 +199,7 @@ impl WorkStore for SqliteBackend {
         )
         .bind(result)
         .bind(fmt_dt(&chrono::Utc::now()))
-        .bind(id.to_string())
+        .bind(id.0)
         .bind(generation)
         .execute(&self.pool)
         .await
@@ -233,7 +233,7 @@ impl WorkStore for SqliteBackend {
         .bind(&failure.error)
         .bind(failure.ambiguous)
         .bind(fmt_dt(&chrono::Utc::now()))
-        .bind(id.to_string())
+        .bind(id.0)
         .bind(generation)
         .fetch_optional(&mut *tx)
         .await
@@ -258,7 +258,7 @@ impl WorkStore for SqliteBackend {
                 ambiguous, result, not_before, expires_at, created_at, updated_at
              FROM durable_work WHERE id = ?",
         )
-        .bind(id.to_string())
+        .bind(id.0)
         .fetch_optional(&self.pool)
         .await
         .map_err(storage)?;
@@ -296,7 +296,7 @@ impl WorkStore for SqliteBackend {
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT (id) DO NOTHING",
         )
-        .bind(record.id.to_string())
+        .bind(record.id.0)
         .bind(record.kind.as_str())
         .bind(&work.payload)
         .bind(record.state.as_str())
@@ -336,7 +336,7 @@ impl WorkStore for SqliteBackend {
             .await
             .map_err(storage)?;
         // Compared as instants: stored timestamps do not all sort as text.
-        let ended: Vec<(String, String)> = sqlx::query_as(
+        let ended: Vec<(uuid::Uuid, String)> = sqlx::query_as(
             "SELECT id, updated_at FROM durable_work
              WHERE kind = ? AND state NOT IN ('pending', 'claimed')",
         )
@@ -350,7 +350,7 @@ impl WorkStore for SqliteBackend {
                 .map_err(|e| SidError::Storage(format!("work updated_at: {e}")))?;
             if updated_at < before {
                 sqlx::query("DELETE FROM durable_work WHERE id = ?")
-                    .bind(&id)
+                    .bind(id)
                     .execute(&mut *tx)
                     .await
                     .map_err(storage)?;
@@ -365,7 +365,7 @@ impl WorkStore for SqliteBackend {
 /// The work record in `row`.
 fn record(row: &sqlx::sqlite::SqliteRow) -> SidResult<WorkRecord> {
     Ok(WorkRecord {
-        id: work_id(col(row, "id")?)?,
+        id: WorkId(col(row, "id")?),
         kind: WorkKind::new(&col::<String>(row, "kind")?)?,
         state: WorkState::parse(&col::<String>(row, "state")?)?,
         attempts: count(col(row, "attempts")?)?,
@@ -379,12 +379,6 @@ fn record(row: &sqlx::sqlite::SqliteRow) -> SidResult<WorkRecord> {
         created_at: time(&col::<String>(row, "created_at")?)?,
         updated_at: time(&col::<String>(row, "updated_at")?)?,
     })
-}
-
-fn work_id(value: String) -> SidResult<WorkId> {
-    uuid::Uuid::parse_str(&value)
-        .map(WorkId)
-        .map_err(|e| SidError::Storage(format!("bad work id {value}: {e}")))
 }
 
 /// A stored timestamp. A malformed one is an error: expiry and retry times

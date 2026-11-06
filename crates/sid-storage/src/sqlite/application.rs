@@ -93,7 +93,7 @@ pub(super) async fn insert_application<'e, E: sqlx::SqliteExecutor<'e>>(
          VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(app.id)
-    .bind(app.project_id.to_string())
+    .bind(app.project_id)
     .bind(&app.name)
     .bind(revision(app.revision, "application")?)
     .bind(fmt_dt(&app.created_at))
@@ -210,7 +210,7 @@ impl SqliteBackend {
             "SELECT * FROM applications WHERE project_id = ?
              ORDER BY created_at, id LIMIT ? OFFSET ?",
         )
-        .bind(project_id.to_string())
+        .bind(project_id)
         .bind(count(limit, "limit")?)
         .bind(count(offset, "offset")?)
         .fetch_all(&self.pool)
@@ -235,7 +235,7 @@ impl SqliteBackend {
         .bind(fmt_dt(&app.updated_at))
         .bind(app.id)
         .bind(revision(app.revision, "application")?)
-        .bind(app.project_id.to_string())
+        .bind(app.project_id)
         .bind(fmt_dt(&app.created_at))
         .execute(&mut *tx)
         .await

@@ -29,13 +29,7 @@ fn count_col(row: &sqlx::sqlite::SqliteRow, name: &str) -> SidResult<u32> {
 // Unknown stored values are errors, never an active service owned by a Profile.
 fn row_to_machine_user(row: &sqlx::sqlite::SqliteRow) -> SidResult<MachineUser> {
     let max_token_lifetime: Option<i64> = col(row, "max_token_lifetime")?;
-    let owner_id: Option<String> = col(row, "owner_id")?;
-    let owner_id = owner_id
-        .map(|id| {
-            uuid::Uuid::parse_str(&id)
-                .map_err(|e| SidError::Storage(format!("column owner_id: {e}")))
-        })
-        .transpose()?;
+    let owner_id: Option<uuid::Uuid> = col(row, "owner_id")?;
     Ok(MachineUser {
         id: col(row, "id")?,
         project_id: col(row, "project_id")?,
@@ -208,10 +202,10 @@ impl SqliteBackend {
             "INSERT INTO machine_users (id, project_id, machine_type, owner_type, owner_id, client_id, display_name, description, status, scopes, ip_allowlist, rate_limit_rpm, max_token_lifetime, expires_at, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         ).bind(mu.id)
-        .bind(mu.project_id.to_string())
+        .bind(mu.project_id)
         .bind(mu.machine_type.as_str())
         .bind(mu.owner.kind().as_str())
-        .bind(mu.owner.id().map(|id| id.to_string()))
+        .bind(mu.owner.id())
         .bind(&mu.client_id)
         .bind(&mu.display_name)
         .bind(&mu.description)
@@ -257,7 +251,7 @@ impl SqliteBackend {
         project_id: ProjectId,
     ) -> SidResult<Vec<MachineUser>> {
         let rows = sqlx::query("SELECT * FROM machine_users WHERE project_id = ?")
-            .bind(project_id.to_string())
+            .bind(project_id)
             .fetch_all(&self.pool)
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -429,15 +423,14 @@ impl SqliteBackend {
         grant: &ImpersonationGrant,
         audit: MutationContext,
     ) -> SidResult<()> {
-        let id = uuid::Uuid::now_v7();
         let mut tx = self.begin_write().await?;
         sqlx::query(
-            "INSERT INTO impersonation_grants (id, machine_user_id, target_type, target, allowed_scopes, created_at)
-             VALUES (?, ?, ?, ?, ?, ?)
+            "INSERT INTO impersonation_grants (machine_user_id, target_type, target, allowed_scopes, created_at)
+             VALUES (?, ?, ?, ?, ?)
              ON CONFLICT(machine_user_id, target_type, target) DO UPDATE SET
                 allowed_scopes=excluded.allowed_scopes"
         )
-        .bind(id.to_string()).bind(grant.machine_user_id)
+        .bind(grant.machine_user_id)
         .bind(grant.target_type.as_str())
         .bind(&grant.target)
         .bind(grant.allowed_scopes.join(" "))
