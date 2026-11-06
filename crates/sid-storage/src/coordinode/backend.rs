@@ -1447,158 +1447,167 @@ impl StorageBackend for CoordinodeBackend {
 
     // === DEVICES ===
 
-    async fn create_device(&self, _device: &Device, _ctx: MutationContext) -> Result<()> {
-        refused("devices")
+    async fn create_device(&self, device: &Device, ctx: MutationContext) -> Result<()> {
+        CoordinodeBackend::create_device(self, device, ctx).await
     }
 
     async fn rename_device(
         &self,
-        _id: DeviceId,
-        _display_name: Option<&str>,
-        _ctx: MutationContext,
+        id: DeviceId,
+        display_name: Option<&str>,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("devices")
+        CoordinodeBackend::rename_device(self, id, display_name, ctx).await
     }
 
     async fn set_device_trust(
         &self,
-        _id: DeviceId,
-        _trusted: bool,
-        _max_trusted: usize,
-        _ctx: MutationContext,
+        id: DeviceId,
+        trusted: bool,
+        max_trusted: usize,
+        ctx: MutationContext,
     ) -> Result<DeviceTrustChange> {
-        refused("devices")
+        CoordinodeBackend::set_device_trust(self, id, trusted, max_trusted, ctx).await
     }
 
-    async fn get_device(&self, _id: DeviceId) -> Result<Option<Device>> {
-        refused("devices")
+    async fn get_device(&self, id: DeviceId) -> Result<Option<Device>> {
+        CoordinodeBackend::get_device(self, id).await
     }
 
-    async fn list_devices_by_profile(&self, _profile_id: ProfileId) -> Result<Vec<Device>> {
-        refused("devices")
+    async fn list_devices_by_profile(&self, profile_id: ProfileId) -> Result<Vec<Device>> {
+        CoordinodeBackend::list_devices_by_profile(self, profile_id).await
     }
 
-    async fn delete_device(&self, _id: DeviceId, _ctx: MutationContext) -> Result<()> {
-        refused("devices")
+    async fn delete_device(&self, id: DeviceId, ctx: MutationContext) -> Result<()> {
+        CoordinodeBackend::delete_device(self, id, ctx).await
     }
 
     async fn get_device_by_fingerprint(
         &self,
-        _profile_id: ProfileId,
-        _fingerprint_hash: &str,
+        profile_id: ProfileId,
+        fingerprint_hash: &str,
     ) -> Result<Option<Device>> {
-        refused("devices")
+        CoordinodeBackend::get_device_by_fingerprint(self, profile_id, fingerprint_hash).await
     }
 
     async fn create_device_attestation(
         &self,
-        _attestation: &DeviceAttestation,
-        _ctx: MutationContext,
+        attestation: &DeviceAttestation,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("device attestations")
+        CoordinodeBackend::create_device_attestation(self, attestation, ctx).await
     }
 
     async fn rotate_device_attestation(
         &self,
-        _device_id: DeviceId,
-        _device_public_key: &[u8],
-        _attestation_object: Option<&[u8]>,
-        _attestation_certificate: Option<&[u8]>,
-        _ctx: MutationContext,
+        device_id: DeviceId,
+        device_public_key: &[u8],
+        attestation_object: Option<&[u8]>,
+        attestation_certificate: Option<&[u8]>,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("device attestations")
+        CoordinodeBackend::rotate_device_attestation(
+            self,
+            device_id,
+            device_public_key,
+            attestation_object,
+            attestation_certificate,
+            ctx,
+        )
+        .await
     }
 
     async fn revoke_device_attestation(
         &self,
-        _device_id: DeviceId,
-        _ctx: MutationContext,
+        device_id: DeviceId,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("device attestations")
+        CoordinodeBackend::revoke_device_attestation(self, device_id, ctx).await
     }
 
     async fn get_device_attestation(
         &self,
-        _id: DeviceAttestationId,
+        id: DeviceAttestationId,
     ) -> Result<Option<DeviceAttestation>> {
-        refused("device attestations")
+        CoordinodeBackend::get_device_attestation(self, id).await
     }
 
     async fn get_device_attestation_by_device_id(
         &self,
-        _device_id: DeviceId,
+        device_id: DeviceId,
     ) -> Result<Option<DeviceAttestation>> {
-        refused("device attestations")
+        CoordinodeBackend::get_device_attestation_by_device_id(self, device_id).await
     }
 
     async fn list_device_attestations_by_profile(
         &self,
-        _profile_id: ProfileId,
+        profile_id: ProfileId,
     ) -> Result<Vec<DeviceAttestation>> {
-        refused("device attestations")
+        CoordinodeBackend::list_device_attestations_by_profile(self, profile_id).await
     }
 
     async fn delete_device_attestation(
         &self,
-        _device_id: DeviceId,
-        _ctx: MutationContext,
+        device_id: DeviceId,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("device attestations")
+        CoordinodeBackend::delete_device_attestation(self, device_id, ctx).await
     }
 
     // === DEVICE AUTHORIZATION ===
 
     async fn create_device_auth_code(
         &self,
-        _code: &DeviceAuthorizationCode,
-        _ctx: MutationContext,
+        code: &DeviceAuthorizationCode,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("device authorization")
+        CoordinodeBackend::create_device_auth_code(self, code, ctx).await
     }
 
     async fn get_device_auth_by_device_code_hash(
         &self,
-        _device_code_hash: &[u8],
+        device_code_hash: &[u8],
     ) -> Result<Option<DeviceAuthorizationCode>> {
-        refused("device authorization")
+        CoordinodeBackend::get_device_auth_by_device_code_hash(self, device_code_hash).await
     }
 
     async fn get_device_auth_by_user_code(
         &self,
-        _user_code: &str,
+        user_code: &str,
     ) -> Result<Option<DeviceAuthorizationCode>> {
-        refused("device authorization")
+        CoordinodeBackend::get_device_auth_by_user_code(self, user_code).await
     }
 
     async fn decide_device_auth(
         &self,
-        _id: DeviceAuthCodeId,
-        _decision: sid_core::models::DeviceAuthDecision,
-        _ctx: MutationContext,
+        id: DeviceAuthCodeId,
+        decision: sid_core::models::DeviceAuthDecision,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("device authorization")
+        CoordinodeBackend::decide_device_auth(self, id, decision, ctx).await
     }
 
     async fn record_device_poll(
         &self,
-        _id: DeviceAuthCodeId,
-        _ctx: MutationContext,
+        id: DeviceAuthCodeId,
+        ctx: MutationContext,
     ) -> Result<sid_core::models::DevicePoll> {
-        refused("device authorization")
+        CoordinodeBackend::record_device_poll(self, id, ctx).await
     }
 
     async fn redeem_device_code(
         &self,
-        _device_code_hash: &[u8],
-        _session: &Session,
-        _refresh_token: &RefreshToken,
-        _ctx: MutationContext,
+        device_code_hash: &[u8],
+        session: &Session,
+        refresh_token: &RefreshToken,
+        ctx: MutationContext,
     ) -> Result<sid_core::models::DeviceCodeRedemption> {
-        refused("device authorization")
+        CoordinodeBackend::redeem_device_code(self, device_code_hash, session, refresh_token, ctx)
+            .await
     }
 
-    async fn cleanup_expired_device_auth_codes(&self, _ctx: MutationContext) -> Result<u64> {
-        refused("device authorization")
+    async fn cleanup_expired_device_auth_codes(&self, ctx: MutationContext) -> Result<u64> {
+        CoordinodeBackend::cleanup_expired_device_auth_codes(self, ctx).await
     }
 
     // === PROFILE GRANTS ===

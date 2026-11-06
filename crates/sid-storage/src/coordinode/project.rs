@@ -159,6 +159,7 @@ impl CoordinodeBackend {
                 Some(stored) if !stored.is_system => {
                     super::rbac::delete_project_records(tx, id)?;
                     super::machine::delete_project_records(tx, id)?;
+                    super::device::delete_project_records(tx, id)?;
                 }
                 _ => return Ok(()),
             }

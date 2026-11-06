@@ -20,6 +20,7 @@ mod audit;
 mod backend;
 mod ceremony;
 mod credential;
+mod device;
 mod directory;
 mod enrollment;
 mod instance_secret;
@@ -207,6 +208,18 @@ const SCHEMA: &[&str] = &[
     "CREATE CONSTRAINT sid_magic_link FOR (l:SidMagicLink) REQUIRE l.id IS UNIQUE",
     "CREATE INDEX sid_magic_link_email ON :SidMagicLink(email)",
     "CREATE INDEX sid_magic_link_expires ON :SidMagicLink(expires_at)",
+    "CREATE CONSTRAINT sid_device_id FOR (d:SidDevice) REQUIRE d.id IS UNIQUE",
+    "CREATE INDEX sid_device_profile ON :SidDevice(profile_id)",
+    "CREATE INDEX sid_device_fingerprint ON :SidDevice(fingerprint_hash)",
+    "CREATE CONSTRAINT sid_attestation_id FOR (a:SidDeviceAttestation) REQUIRE a.id IS UNIQUE",
+    "CREATE CONSTRAINT sid_attestation_device FOR (a:SidDeviceAttestation) REQUIRE a.device_id IS UNIQUE",
+    "CREATE INDEX sid_attestation_profile ON :SidDeviceAttestation(profile_id)",
+    "CREATE CONSTRAINT sid_device_auth_id FOR (c:SidDeviceAuth) REQUIRE c.id IS UNIQUE",
+    "CREATE CONSTRAINT sid_device_auth_hash FOR (c:SidDeviceAuth) REQUIRE c.device_code_hash IS UNIQUE",
+    "CREATE CONSTRAINT sid_device_auth_user_code FOR (c:SidDeviceAuth) REQUIRE c.user_code IS UNIQUE",
+    "CREATE INDEX sid_device_auth_expires ON :SidDeviceAuth(expires_at)",
+    "CREATE INDEX sid_device_auth_project ON :SidDeviceAuth(project_id)",
+    "CREATE INDEX sid_device_auth_authorized_by ON :SidDeviceAuth(authorized_by)",
 ];
 
 /// SID's storage over the host's CoordiNode database.

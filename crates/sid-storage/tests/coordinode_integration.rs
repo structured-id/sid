@@ -62,13 +62,27 @@ mod harness {
             // committing the epoch with whatever the host wrote.
             let (backend, db) = (self.0.clone(), self.1.clone());
             tokio::task::spawn_blocking(move || {
-                let tx = db.begin_transaction().expect("a host transaction");
-                let epoch = backend
-                    .advance_login_policy_epoch_in(tx)
-                    .expect("the epoch advanced");
-                db.commit_transaction(tx)
-                    .expect("the policy write committed");
-                epoch
+                // A host runs its write again when a concurrent commit
+                // conflicts with it, as every CoordiNode writer does.
+                for _ in 0..64 {
+                    let tx = db.begin_transaction().expect("a host transaction");
+                    let epoch = match backend.advance_login_policy_epoch_in(tx) {
+                        Ok(epoch) => epoch,
+                        Err(_) => {
+                            db.rollback_transaction(tx).ok();
+                            continue;
+                        }
+                    };
+                    match db.commit_transaction(tx) {
+                        Ok(_) => return epoch,
+                        Err(
+                            coordinode_embed::DatabaseError::TransactionConflict { .. }
+                            | coordinode_embed::DatabaseError::RevisionMismatch { .. },
+                        ) => continue,
+                        Err(e) => panic!("the policy write failed: {e}"),
+                    }
+                }
+                panic!("the policy write kept conflicting")
             })
             .await
             .expect("the host's write")
