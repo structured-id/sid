@@ -12,7 +12,7 @@ sid-authn = { path = "../sid-authn", features = ["grpc"] }
 sid-authz = { path = "../sid-authz", default-features = false }
 sid-core = { path = "../sid-core", features = ["grpc"] }
 sid-plugin = { path = "../sid-plugin" }
-sid-proto = { path = "../sid-proto" }
+sid-proto = { path = "../sid-proto", features = ["grpc"] }
 tonic = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
