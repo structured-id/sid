@@ -16,9 +16,9 @@ use sid_core::{Error as SidError, Result as SidResult};
 use uuid::Uuid;
 
 use super::{
-    CoordinodeBackend, Params, Row, Statements, document, get_bool, get_bytes, get_document,
-    get_int, get_opt_text, get_parsed, get_text, get_time, get_uuid, hold_first, key, opt_text,
-    time, uuid,
+    CoordinodeBackend, Params, Row, Statements, document, get_bool, get_document, get_int,
+    get_opt_text, get_parsed, get_text, get_time, get_uuid, hold_first, key, opt_text,
+    project::project_value, time, uuid,
 };
 
 const TARGET: &str = "t.id AS id, t.client_id AS client_id, t.project_id AS project_id,
@@ -46,7 +46,7 @@ fn target(row: &Row) -> SidResult<ScimOutboundTarget> {
     Ok(ScimOutboundTarget {
         id: ScimOutboundTargetId(get_uuid(row, "id")?),
         client_id: get_text(row, "client_id")?,
-        project_id: ProjectId::from_slice(&get_bytes(row, "project_id")?)
+        project_id: ProjectId::from_uuid(get_uuid(row, "project_id")?)
             .map_err(|e| SidError::Storage(format!("project_id: {e}")))?,
         display_name: get_text(row, "display_name")?,
         endpoint_url: get_text(row, "endpoint_url")?,
@@ -164,7 +164,7 @@ fn delete_target(tx: &Statements<'_>, id: ScimOutboundTargetId) -> SidResult<()>
 pub(super) fn delete_project_records(tx: &Statements<'_>, project: ProjectId) -> SidResult<()> {
     let rows = tx.run(
         "MATCH (t:SidScimTarget) WHERE t.project_id = $id RETURN t.id AS id",
-        Params::default().with("id", Value::Binary(project.as_bytes().to_vec())),
+        Params::default().with("id", project_value(project)),
     )?;
     for row in &rows {
         delete_target(tx, ScimOutboundTargetId(get_uuid(row, "id")?))?;
@@ -181,10 +181,7 @@ impl CoordinodeBackend {
         let params = Params::default()
             .with("id", uuid(&t.id.0))
             .with("client_id", Value::String(t.client_id.clone()))
-            .with(
-                "project_id",
-                Value::Binary(t.project_id.as_bytes().to_vec()),
-            )
+            .with("project_id", project_value(t.project_id))
             .with("display_name", Value::String(t.display_name.clone()))
             .with("endpoint_url", Value::String(t.endpoint_url.clone()))
             .with("auth", document(&t.auth, "auth")?)
@@ -201,7 +198,7 @@ impl CoordinodeBackend {
         self.mutate(format!("scim_outbound_target:{}", t.id.0), ctx, move |tx| {
             let held = tx.run(
                 "MATCH (j:SidProject) WHERE j.id = $id RETURN id(j) AS node",
-                Params::default().with("id", Value::Binary(project.as_bytes().to_vec())),
+                Params::default().with("id", project_value(project)),
             )?;
             if !hold_first(tx, &held)? {
                 return Err(SidError::NotFound(format!("project {project}")));
@@ -252,7 +249,7 @@ impl CoordinodeBackend {
                     "MATCH (t:SidScimTarget) WHERE t.project_id = $id AND t.enabled = true
                      RETURN {TARGET}"
                 ),
-                Params::default().with("id", Value::Binary(project.as_bytes().to_vec())),
+                Params::default().with("id", project_value(project)),
             )?;
             rows.iter().map(target).collect()
         })

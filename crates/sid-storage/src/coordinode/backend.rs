@@ -2236,65 +2236,65 @@ impl StorageBackend for CoordinodeBackend {
 
     async fn get_flow_config(
         &self,
-        _project_id: ProjectId,
-        _flow_type: sid_core::models::FlowType,
+        project_id: ProjectId,
+        flow_type: sid_core::models::FlowType,
     ) -> Result<Option<sid_core::models::FlowConfig>> {
-        refused("flow configurations")
+        CoordinodeBackend::get_flow_config(self, project_id, flow_type).await
     }
 
     async fn save_flow_config(
         &self,
-        _config: &sid_core::models::FlowConfig,
-        _ctx: MutationContext,
+        config: &sid_core::models::FlowConfig,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("flow configurations")
+        CoordinodeBackend::save_flow_config(self, config, ctx).await
     }
 
     async fn list_flow_configs(
         &self,
-        _project_id: ProjectId,
+        project_id: ProjectId,
     ) -> Result<Vec<sid_core::models::FlowConfig>> {
-        refused("flow configurations")
+        CoordinodeBackend::list_flow_configs(self, project_id).await
     }
 
     async fn create_flow_action(
         &self,
-        _action: &sid_core::models::FlowAction,
-        _ctx: MutationContext,
+        action: &sid_core::models::FlowAction,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("flow actions")
+        CoordinodeBackend::create_flow_action(self, action, ctx).await
     }
 
     async fn update_flow_action(
         &self,
-        _action: &sid_core::models::FlowAction,
-        _ctx: MutationContext,
+        action: &sid_core::models::FlowAction,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("flow actions")
+        CoordinodeBackend::update_flow_action(self, action, ctx).await
     }
 
     async fn get_flow_action(
         &self,
-        _id: sid_core::models::ActionId,
+        id: sid_core::models::ActionId,
     ) -> Result<Option<sid_core::models::FlowAction>> {
-        refused("flow actions")
+        CoordinodeBackend::get_flow_action(self, id).await
     }
 
     async fn list_flow_actions(
         &self,
-        _project_id: ProjectId,
-        _flow_type: sid_core::models::FlowType,
-        _action_point: Option<sid_core::models::ActionPoint>,
+        project_id: ProjectId,
+        flow_type: sid_core::models::FlowType,
+        action_point: Option<sid_core::models::ActionPoint>,
     ) -> Result<Vec<sid_core::models::FlowAction>> {
-        refused("flow actions")
+        CoordinodeBackend::list_flow_actions(self, project_id, flow_type, action_point).await
     }
 
     async fn delete_flow_action(
         &self,
-        _id: sid_core::models::ActionId,
-        _ctx: MutationContext,
+        id: sid_core::models::ActionId,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("flow actions")
+        CoordinodeBackend::delete_flow_action(self, id, ctx).await
     }
 
     // === BRANDING ===

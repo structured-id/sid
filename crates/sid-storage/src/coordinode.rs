@@ -24,6 +24,7 @@ mod credential;
 mod device;
 mod directory;
 mod enrollment;
+mod flow;
 mod history;
 mod instance_secret;
 mod lifecycle;
@@ -261,6 +262,10 @@ const SCHEMA: &[&str] = &[
     "CREATE INDEX sid_scim_record_target ON :SidScimRecord(target_id)",
     "CREATE CONSTRAINT sid_scim_dead_letter FOR (d:SidScimDeadLetter) REQUIRE d.id IS UNIQUE",
     "CREATE INDEX sid_scim_dead_letter_target ON :SidScimDeadLetter(target_id)",
+    "CREATE CONSTRAINT sid_flow_config FOR (c:SidFlowConfig) REQUIRE c.pair IS UNIQUE",
+    "CREATE INDEX sid_flow_config_project ON :SidFlowConfig(project_id)",
+    "CREATE CONSTRAINT sid_flow_action FOR (a:SidFlowAction) REQUIRE a.id IS UNIQUE",
+    "CREATE INDEX sid_flow_action_project ON :SidFlowAction(project_id)",
 ];
 
 /// SID's storage over the host's CoordiNode database.
