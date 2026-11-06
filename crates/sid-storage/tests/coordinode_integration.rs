@@ -698,6 +698,97 @@ mod principal_store {
     );
 }
 
+/// What the store owes across a restart and across the host's backup and
+/// restore, on databases kept in files.
+mod recovery {
+    use sid_plugin::conformance::backend::{backup, namespace, restart};
+
+    use super::*;
+
+    async fn open(
+        path: std::path::PathBuf,
+    ) -> (CoordinodeBackend, Arc<coordinode_embed::Database>) {
+        let db = tokio::task::spawn_blocking(move || coordinode_embed::Database::open(path))
+            .await
+            .expect("the opening")
+            .expect("CoordiNode in a directory");
+        let db = Arc::new(db);
+        let backend = CoordinodeBackend::new(db.clone())
+            .await
+            .expect("SID's schema in CoordiNode");
+        (backend, db)
+    }
+
+    /// The process that committed is gone: its database closes and opens
+    /// again from its files.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_commit_survives_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        restart::test_commit_survives_restart(|| {
+            let path = path.clone();
+            async move { open(path).await.0 }
+        })
+        .await;
+    }
+
+    /// The host's own procedure: a binary export of one snapshot, restored
+    /// into a new database that SID then opens.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_restore_returns_the_backed_up_state() {
+        let (live_dir, restored_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let (live, db) = open(live_dir.path().to_path_buf()).await;
+        let restored_path = restored_dir.path().to_path_buf();
+        backup::test_restore_returns_the_backed_up_state(
+            &live,
+            &live,
+            || async move {
+                tokio::task::spawn_blocking(move || {
+                    let snapshot = db.engine().snapshot();
+                    let mut dump = Vec::new();
+                    coordinode_embed::backup::export::export_binary(
+                        db.engine(),
+                        &db.interner().expect("the field dictionary"),
+                        1,
+                        &snapshot,
+                        &mut dump,
+                    )
+                    .expect("the backup");
+                    dump
+                })
+                .await
+                .expect("the backup task")
+            },
+            |dump: Vec<u8>| async move {
+                let target = restored_path.clone();
+                tokio::task::spawn_blocking(move || {
+                    let db = coordinode_embed::Database::open(target).expect("a new database");
+                    db.restore(
+                        coordinode_embed::backup::BackupFormat::Binary,
+                        &dump,
+                        &coordinode_embed::backup::restore::RestoreOptions::default(),
+                    )
+                    .expect("the restore");
+                })
+                .await
+                .expect("the restore task");
+                let (restored, _) = open(restored_path).await;
+                (restored.clone(), restored)
+            },
+        )
+        .await;
+    }
+
+    /// Two installations, each in a database of its own. Native namespaces
+    /// inside one CoordiNode database, and their refusal of another
+    /// installation's account, wait for the database to provide them.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_instances_are_isolated() {
+        let (a, b) = (store().await, store().await);
+        namespace::test_instances_are_isolated(&a.0, &b.0).await;
+    }
+}
+
 /// Two instances of SID on one host database, as two processes sharing it.
 async fn two_instances() -> (CoordinodeBackend, CoordinodeBackend) {
     let db = Arc::new(coordinode_embed::Database::open_in_memory().expect("CoordiNode in memory"));
