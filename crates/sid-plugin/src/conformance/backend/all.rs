@@ -8,20 +8,54 @@
 //! sid_plugin::storage_conformance!(setup);
 //! ```
 //!
+//! A backend whose stores share one server (a schema each on one database,
+//! say) also names the function that removes a scenario's store once the
+//! scenario ended, passed or not; its backend is `Clone`:
+//!
+//! ```ignore
+//! async fn finish(backend: MyBackend, outcome: Result<(), tokio::task::JoinError>) {
+//!     /* drop the store, then resume a panic in `outcome` */
+//! }
+//! sid_plugin::storage_conformance!(setup, finish);
+//! ```
+//!
 //! Scenarios that need more than a backend (several instances, an audit log, a
 //! way to age a row, ten thousand seeded profiles) take that from the harness
 //! and are run by it.
+
+/// Run `$scenario` on a backend of its own from `$setup`, then hand that
+/// backend and the scenario's outcome to the harness's `$finish`, if any.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __storage_run {
+    ($setup:path, [], $scenario:path) => {
+        $scenario(&$setup().await).await;
+    };
+    ($setup:path, [$finish:path], $scenario:path) => {{
+        let backend = $setup().await;
+        let outcome = ::tokio::spawn({
+            let backend = ::core::clone::Clone::clone(&backend);
+            async move { $scenario(&backend).await }
+        })
+        .await;
+        $finish(backend, outcome).await;
+    }};
+}
 
 /// One test per scenario of `$module`.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __storage_scenarios {
-    ($setup:ident, $module:ident: $($scenario:ident)*) => {
+    ($setup:ident $finish:tt, $module:ident: $($scenario:ident)*) => {
         mod $module {
             $(
                 #[tokio::test]
                 async fn $scenario() {
-                    $crate::conformance::backend::$module::$scenario(&super::$setup().await).await;
+                    $crate::__storage_run!(
+                        super::$setup,
+                        $finish,
+                        $crate::conformance::backend::$module::$scenario
+                    );
                 }
             )*
         }
@@ -32,14 +66,30 @@ macro_rules! __storage_scenarios {
 #[macro_export]
 macro_rules! storage_conformance {
     ($setup:ident) => {
+        $crate::__storage_conformance!($setup []);
+    };
+    ($setup:ident, $finish:ident) => {
+        $crate::__storage_conformance!($setup [$finish]);
+    };
+}
+
+/// The storage contract's tests, each run as [`__storage_run`] runs it.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __storage_conformance {
+    ($setup:ident [$($finish:ident)?]) => {
         mod storage_contract {
             use super::$setup;
+            $(use super::$finish;)?
 
             mod shared {
-                $crate::__storage_shared_scenarios!(super::super::$setup);
+                $crate::__storage_shared_scenarios!(
+                    super::super::$setup,
+                    [$(super::super::$finish)?]
+                );
             }
 
-            $crate::__storage_scenarios!($setup, admin_claim:
+            $crate::__storage_scenarios!($setup [$(super::$finish)?],admin_claim:
                 test_last_administrator_cannot_request_closure
                 test_last_administrator_assignment_is_kept
                 test_closing_administrator_is_not_counted
@@ -49,7 +99,7 @@ macro_rules! storage_conformance {
                 test_adoption_races_claim
                 test_admin_claim_consumed_once
             );
-            $crate::__storage_scenarios!($setup, application:
+            $crate::__storage_scenarios!($setup [$(super::$finish)?],application:
                 test_application_roles_are_stored_together
                 test_project_in_use_is_not_deleted
                 test_concurrent_indicator_registration
@@ -62,44 +112,44 @@ macro_rules! storage_conformance {
                 test_resource_listing_and_import
                 test_client_default_resource
             );
-            $crate::__storage_scenarios!($setup, branding:
+            $crate::__storage_scenarios!($setup [$(super::$finish)?],branding:
                 test_branding_draft_write_contract
                 test_branding_publish_contract
                 test_branding_concurrent_publish
             );
-            $crate::__storage_scenarios!($setup, browser_session:
+            $crate::__storage_scenarios!($setup [$(super::$finish)?],browser_session:
                 test_ending_a_session_ends_what_it_authenticated
             );
-            $crate::__storage_scenarios!($setup, cleanup:
+            $crate::__storage_scenarios!($setup [$(super::$finish)?],cleanup:
                 test_delete_outbound_dlq_entry
                 test_cleanup_expired_device_auth_codes
                 test_delete_expired_magic_link_sessions
                 test_delete_expired_reset_sessions
             );
-            $crate::__storage_scenarios!($setup, config:
+            $crate::__storage_scenarios!($setup [$(super::$finish)?],config:
                 test_flow_configs
                 test_email_provider_config
             );
-            $crate::__storage_scenarios!($setup, consent:
+            $crate::__storage_scenarios!($setup [$(super::$finish)?],consent:
                 test_create_consent_never_replaces
                 test_change_claim_grant
                 test_claim_grant_keeps_ended_consent_ended
                 test_claim_grants_under_concurrency
             );
-            $crate::__storage_scenarios!($setup, device:
+            $crate::__storage_scenarios!($setup [$(super::$finish)?],device:
                 test_create_device_never_replaces
                 test_rename_device_keeps_trust
                 test_device_trust_changes
                 test_device_trust_limit_under_concurrency
                 test_device_by_fingerprint
             );
-            $crate::__storage_scenarios!($setup, device_auth:
+            $crate::__storage_scenarios!($setup [$(super::$finish)?],device_auth:
                 test_device_auth_create_and_get
                 test_device_auth_decided_once
                 test_device_poll_interval
                 test_device_code_redeemed_once
             );
-            $crate::__storage_scenarios!($setup, directory:
+            $crate::__storage_scenarios!($setup [$(super::$finish)?],directory:
                 test_directory_user_create_stores_everything
                 test_directory_user_create_taken_login_writes_nothing
                 test_directory_user_concurrent_create_single_winner
@@ -108,17 +158,17 @@ macro_rules! storage_conformance {
                 test_directory_user_deprovision_ends_access
                 test_directory_group_writes
             );
-            $crate::__storage_scenarios!($setup, directory_query:
+            $crate::__storage_scenarios!($setup [$(super::$finish)?],directory_query:
                 test_directory_filters_before_pagination
                 test_directory_comparison_semantics
                 test_directory_folds_unicode_case
                 test_directory_users_carry_their_attributes
                 test_directory_omits_retired_profiles
             );
-            $crate::__storage_scenarios!($setup, email_policy:
+            $crate::__storage_scenarios!($setup [$(super::$finish)?],email_policy:
                 test_email_key_written_only_under_the_active_revision
             );
-            $crate::__storage_scenarios!($setup, enrollment_policy:
+            $crate::__storage_scenarios!($setup [$(super::$finish)?],enrollment_policy:
                 test_kept_mode_and_domains_enforced
                 test_registration_admitted_by_the_stored_policy
                 test_admission_records_its_source
@@ -126,22 +176,22 @@ macro_rules! storage_conformance {
                 test_enrollment_policy_stored_and_replaced
                 test_enrollment_policy_keeps_invite_range
             );
-            $crate::__storage_scenarios!($setup, export_job:
+            $crate::__storage_scenarios!($setup [$(super::$finish)?],export_job:
                 test_export_job_roundtrip
                 test_export_job_status_transitions
                 test_export_job_commits_owed_work
             );
-            $crate::__storage_scenarios!($setup, flow_action:
+            $crate::__storage_scenarios!($setup [$(super::$finish)?],flow_action:
                 test_flow_actions_listed_by_point_in_order
                 test_flow_action_write_contract
             );
-            $crate::__storage_scenarios!($setup, group:
+            $crate::__storage_scenarios!($setup [$(super::$finish)?],group:
                 test_create_group_never_replaces
                 test_group_membership_roundtrip
                 test_add_to_group_never_duplicates
                 test_set_group_description_keeps_deleted_deleted
             );
-            $crate::__storage_scenarios!($setup, machine:
+            $crate::__storage_scenarios!($setup [$(super::$finish)?],machine:
                 test_create_machine_user_never_replaces
                 test_machine_user_owner_round_trips
                 test_update_machine_user_keeps_status
@@ -155,7 +205,7 @@ macro_rules! storage_conformance {
                 test_machine_credentials_listing_and_expiry
                 test_impersonation_grants
             );
-            $crate::__storage_scenarios!($setup, operation:
+            $crate::__storage_scenarios!($setup [$(super::$finish)?],operation:
                 test_operation_completion_commits_with_effect
                 test_update_records_the_state_it_left
                 test_completed_operation_commits_nothing
@@ -166,10 +216,10 @@ macro_rules! storage_conformance {
                 test_device_trust_records_the_device_it_left
                 test_failed_mutation_records_no_completion
             );
-            $crate::__storage_scenarios!($setup, organization:
+            $crate::__storage_scenarios!($setup [$(super::$finish)?],organization:
                 test_instance_organization_and_clients
             );
-            $crate::__storage_scenarios!($setup, principal_assignment:
+            $crate::__storage_scenarios!($setup [$(super::$finish)?],principal_assignment:
                 test_claim_does_not_change_assignment
                 test_claim_with_proof_does_not_transfer
                 test_claimant_view_carries_no_proof
@@ -181,11 +231,11 @@ macro_rules! storage_conformance {
                 test_sign_in_routes_only_the_holder
                 test_profile_by_principal_is_assigned_holder
             );
-            $crate::__storage_scenarios!($setup, project:
+            $crate::__storage_scenarios!($setup [$(super::$finish)?],project:
                 test_projects_count_and_listing
                 test_oauth2_clients_by_project_paging
             );
-            $crate::__storage_scenarios!($setup, provisioning_connector:
+            $crate::__storage_scenarios!($setup [$(super::$finish)?],provisioning_connector:
                 test_create_connector_never_replaces
                 test_rename_connector_is_revision_checked
                 test_transition_connector
@@ -197,7 +247,7 @@ macro_rules! storage_conformance {
                 test_connector_fence_holds_writes_to_current_authority
                 test_connector_fence_races_a_disable
             );
-            $crate::__storage_scenarios!($setup, role:
+            $crate::__storage_scenarios!($setup [$(super::$finish)?],role:
                 test_create_role_never_replaces
                 test_update_role_is_compare_and_swap
                 test_oauth_client_role_assignment
@@ -213,7 +263,7 @@ macro_rules! storage_conformance {
                 test_fenced_role_edit
                 test_create_role_assignment_never_replaces
             );
-            $crate::__storage_scenarios!($setup, service_binding:
+            $crate::__storage_scenarios!($setup [$(super::$finish)?],service_binding:
                 test_binding_is_stable
                 test_bindings_are_pairwise
                 test_concurrent_first_use_allocates_once
@@ -222,23 +272,23 @@ macro_rules! storage_conformance {
                 test_binding_import_conflict
                 test_binding_needs_profile
             );
-            $crate::__storage_scenarios!($setup, session:
+            $crate::__storage_scenarios!($setup [$(super::$finish)?],session:
                 test_create_session_never_replaces
                 test_record_authentication_keeps_ended_session_ended
                 test_record_authentication_is_compare_and_swap
                 test_record_authentication_refuses_expired_session
             );
-            $crate::__storage_scenarios!($setup, session_elevation:
+            $crate::__storage_scenarios!($setup [$(super::$finish)?],session_elevation:
                 test_session_elevation_roundtrip
                 test_session_base_level_refuses_step_up_levels
             );
-            $crate::__storage_scenarios!($setup, upstream:
+            $crate::__storage_scenarios!($setup [$(super::$finish)?],upstream:
                 test_upstream_provider_write_contract
                 test_upstream_identity_never_relinked
                 test_record_upstream_login_counts_every_login
                 test_enabled_providers_and_identities_by_profile
             );
-            $crate::__storage_scenarios!($setup, work:
+            $crate::__storage_scenarios!($setup [$(super::$finish)?],work:
                 test_magic_link_consumed_once
                 test_session_limit_evicts_oldest
                 test_session_end_owes_client_logout
@@ -253,8 +303,8 @@ macro_rules! storage_conformance {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __storage_shared_scenarios {
-    ($setup:path) => {
-        $crate::__storage_shared_scenarios!(@tests $setup;
+    ($setup:path, $finish:tt) => {
+        $crate::__storage_shared_scenarios!(@tests $setup, $finish;
             test_profile_create_and_get test_profile_get_by_username test_profile_get_by_email
             test_profile_get_nonexistent test_profile_get_by_email_not_found
             test_profile_get_by_username_not_found test_profile_update test_profile_delete
@@ -301,11 +351,15 @@ macro_rules! __storage_shared_scenarios {
             test_register_profile_concurrent_single_winner
         );
     };
-    (@tests $setup:path; $($scenario:ident)*) => {
+    (@tests $setup:path, $finish:tt; $($scenario:ident)*) => {
         $(
             #[tokio::test]
             async fn $scenario() {
-                $crate::conformance::backend::$scenario(&$setup().await).await;
+                $crate::__storage_run!(
+                    $setup,
+                    $finish,
+                    $crate::conformance::backend::$scenario
+                );
             }
         )*
     };
