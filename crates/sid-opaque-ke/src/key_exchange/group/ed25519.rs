@@ -354,22 +354,27 @@ impl<'de> serde::Deserialize<'de> for SigningKey {
                 Formatter::write_str(formatter, "tuple struct SigningKey")
             }
 
+            // The key is written as its seed (`self.sk`), which is any 32 bytes
+            // and mostly no canonical scalar: it is read back as bytes.
             fn visit_newtype_struct<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
             where
                 D: Deserializer<'de>,
             {
-                let sk = Scalar::deserialize(deserializer)?;
-                Ok(SigningKey::from_bytes(sk.to_bytes()))
+                let sk = zeroize::Zeroizing::new(<[u8; 32]>::deserialize(deserializer)?);
+                Ok(SigningKey::from_bytes(*sk))
             }
 
             fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
             where
                 A: SeqAccess<'de>,
             {
-                let sk: Scalar = seq.next_element()?.ok_or_else(|| {
-                    Error::invalid_length(0, &"tuple struct SigningKey with 1 element")
-                })?;
-                Ok(SigningKey::from_bytes(sk.to_bytes()))
+                let sk: zeroize::Zeroizing<[u8; 32]> = seq
+                    .next_element::<[u8; 32]>()?
+                    .map(zeroize::Zeroizing::new)
+                    .ok_or_else(|| {
+                        Error::invalid_length(0, &"tuple struct SigningKey with 1 element")
+                    })?;
+                Ok(SigningKey::from_bytes(*sk))
             }
         }
 
@@ -502,5 +507,31 @@ mod test {
             &custom_signature,
         )
         .unwrap();
+    }
+
+    /// A signing key is written as its seed and read back as that seed:
+    /// most seeds are no canonical scalar, so reading one as a scalar failed
+    /// for about 15 keys in 16.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn signing_key_serde_round_trip() {
+        for _ in 0..64 {
+            let mut seed = SecretKey::default();
+            rand::rng().fill_bytes(&mut seed);
+            let key = Ed25519::deserialize_take_sk(&mut seed.as_slice()).unwrap();
+
+            let json = serde_json::to_string(&key).unwrap();
+            assert_eq!(
+                serde_json::from_str::<super::SigningKey>(&json).unwrap(),
+                key
+            );
+
+            let binary = postcard::to_allocvec(&key).unwrap();
+            assert_eq!(binary, seed, "the binary encoding is the seed");
+            assert_eq!(
+                postcard::from_bytes::<super::SigningKey>(&binary).unwrap(),
+                key
+            );
+        }
     }
 }
