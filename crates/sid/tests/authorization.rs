@@ -73,13 +73,15 @@ async fn sqlite(scratch: &Scratch) -> Arc<dyn StorageBackend> {
     )
 }
 
-async fn postgres() -> Arc<dyn StorageBackend> {
+/// A migrated store in a schema of its own: the installation it holds is
+/// sealed under this run's master key, which no later run has.
+async fn postgres(schema: &str) -> Arc<sid_storage::PostgresBackend> {
     let url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://sid:sid_dev@localhost:54399/sid".to_string());
-    let backend = sid_storage::PostgresBackend::new(&url, None)
+    let backend = sid_storage::PostgresBackend::new(&url, Some(schema.to_owned()))
         .await
         .expect("PostgreSQL on port 54399 (docker-compose.test.yml)");
-    sid_storage::migrator::run_migrations(backend.pool(), None)
+    sid_storage::migrator::run_migrations(backend.pool(), Some(schema))
         .await
         .expect("migrations");
     Arc::new(backend)
@@ -284,8 +286,17 @@ async fn an_embedded_installation_decides_on_a_sqlite_file() {
 #[tokio::test]
 async fn an_embedded_installation_decides_on_postgres() {
     let scratch = Scratch::new();
-    let installation = open(postgres().await, &scratch).await;
+    let schema = format!("authz_{}", uuid::Uuid::now_v7().simple());
+    let backend = postgres(&schema).await;
+    let installation = open(backend.clone(), &scratch).await;
     scenarios(&installation).await;
+    // The schema goes with the master key that sealed it.
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP SCHEMA \"{schema}\" CASCADE"
+    )))
+    .execute(backend.pool())
+    .await
+    .unwrap();
 }
 
 /// A grant committed to the file is decided the same way by the
