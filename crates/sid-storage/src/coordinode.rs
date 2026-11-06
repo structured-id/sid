@@ -24,6 +24,7 @@ mod credential;
 mod device;
 mod directory;
 mod enrollment;
+mod history;
 mod instance_secret;
 mod lifecycle;
 mod login_policy;
@@ -34,7 +35,9 @@ mod profile;
 mod project;
 mod rbac;
 mod registry;
+mod reset;
 mod session;
+mod signals;
 mod work;
 
 /// How often one change is run again after a conflicting commit before it is
@@ -239,6 +242,18 @@ const SCHEMA: &[&str] = &[
     "CREATE CONSTRAINT sid_upstream_identity_subject FOR (i:SidUpstreamIdentity) REQUIRE i.subject_key IS UNIQUE",
     "CREATE INDEX sid_upstream_identity_profile_id ON :SidUpstreamIdentity(profile_id)",
     "CREATE INDEX sid_upstream_identity_provider ON :SidUpstreamIdentity(provider_id)",
+    "CREATE CONSTRAINT sid_reset_session FOR (r:SidResetSession) REQUIRE r.id IS UNIQUE",
+    "CREATE INDEX sid_reset_session_profile ON :SidResetSession(profile_id)",
+    "CREATE INDEX sid_reset_session_expires ON :SidResetSession(expires_at)",
+    "CREATE CONSTRAINT sid_anomaly_event FOR (a:SidAnomalyEvent) REQUIRE a.id IS UNIQUE",
+    "CREATE INDEX sid_anomaly_event_rule ON :SidAnomalyEvent(rule_id)",
+    "CREATE CONSTRAINT sid_ip_reputation FOR (r:SidIpReputation) REQUIRE r.ip IS UNIQUE",
+    "CREATE INDEX sid_ip_reputation_score ON :SidIpReputation(score)",
+    "CREATE INDEX sid_ip_reputation_updated ON :SidIpReputation(updated_at)",
+    "CREATE CONSTRAINT sid_ip_allowlist FOR (w:SidIpAllowlistEntry) REQUIRE w.cidr IS UNIQUE",
+    "CREATE CONSTRAINT sid_notification_preferences FOR (n:SidNotificationPreferences) REQUIRE n.profile_id IS UNIQUE",
+    "CREATE CONSTRAINT sid_login_location FOR (l:SidLoginLocation) REQUIRE l.pair IS UNIQUE",
+    "CREATE INDEX sid_login_location_profile ON :SidLoginLocation(profile_id)",
 ];
 
 /// SID's storage over the host's CoordiNode database.

@@ -328,7 +328,7 @@ pub(super) fn delete_profile_grants(tx: &Statements<'_>, profile: ProfileId) -> 
     Ok(())
 }
 
-fn profile_sessions(tx: &Statements<'_>, profile: ProfileId) -> SidResult<Vec<Session>> {
+pub(super) fn profile_sessions(tx: &Statements<'_>, profile: ProfileId) -> SidResult<Vec<Session>> {
     let rows = tx.run(
         &format!("MATCH (s:SidSession) WHERE s.profile_id = $profile RETURN {SESSION}"),
         Params::default().with("profile", profile_value(profile)),

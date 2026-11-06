@@ -199,7 +199,7 @@ pub(super) fn insert(tx: &Statements<'_>, credential: &Credential) -> SidResult<
 
 /// Replace the profile's credentials of the types `credential` replaces (its
 /// one password, its recovery-code set) with it, in `tx`.
-fn replace(tx: &Statements<'_>, credential: &Credential) -> SidResult<()> {
+pub(super) fn replace(tx: &Statements<'_>, credential: &Credential) -> SidResult<()> {
     let replaced = credential.credential_type.replaces();
     if replaced.is_empty() {
         return Err(SidError::Validation(format!(

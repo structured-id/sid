@@ -235,7 +235,11 @@ fn administrator_role_assigned() -> sid_core::Error {
 
 /// The time before which an IP reputation entry counts as stale for a decay
 /// window of `older_than`; a window that no date can express is refused.
-#[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
+#[cfg(any(
+    feature = "storage-pg",
+    feature = "storage-sqlite",
+    feature = "storage-coordinode"
+))]
 fn decay_cutoff(
     older_than: std::time::Duration,
 ) -> sid_core::Result<chrono::DateTime<chrono::Utc>> {

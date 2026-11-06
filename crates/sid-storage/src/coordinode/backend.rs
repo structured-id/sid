@@ -402,42 +402,50 @@ impl SignInHistoryStore for CoordinodeBackend {
 
     async fn get_most_recent_session_ip(
         &self,
-        _profile_id: ProfileId,
+        profile_id: ProfileId,
     ) -> Result<Option<(std::net::IpAddr, DateTime<Utc>)>> {
-        refused("sign-in history")
+        CoordinodeBackend::get_most_recent_session_ip(self, profile_id).await
     }
 
     async fn has_recent_session_from_ip(
         &self,
-        _profile_id: ProfileId,
-        _ip: std::net::IpAddr,
-        _window: std::time::Duration,
+        profile_id: ProfileId,
+        ip: std::net::IpAddr,
+        window: std::time::Duration,
     ) -> Result<bool> {
-        refused("sign-in history")
+        CoordinodeBackend::has_recent_session_from_ip(self, profile_id, ip, window).await
     }
 
     async fn has_recent_session_from_device(
         &self,
-        _profile_id: ProfileId,
-        _device_id: Uuid,
-        _window: std::time::Duration,
+        profile_id: ProfileId,
+        device_id: Uuid,
+        window: std::time::Duration,
     ) -> Result<bool> {
-        refused("sign-in history")
+        CoordinodeBackend::has_recent_session_from_device(self, profile_id, device_id, window).await
     }
 
     async fn record_login_location(
         &self,
-        _profile_id: ProfileId,
-        _country: &str,
-        _latitude: f64,
-        _longitude: f64,
-        _designated_threshold: u32,
+        profile_id: ProfileId,
+        country: &str,
+        latitude: f64,
+        longitude: f64,
+        designated_threshold: u32,
     ) -> Result<()> {
-        refused("sign-in history")
+        CoordinodeBackend::record_login_location(
+            self,
+            profile_id,
+            country,
+            latitude,
+            longitude,
+            designated_threshold,
+        )
+        .await
     }
 
-    async fn get_designated_countries(&self, _profile_id: ProfileId) -> Result<Vec<String>> {
-        refused("sign-in history")
+    async fn get_designated_countries(&self, profile_id: ProfileId) -> Result<Vec<String>> {
+        CoordinodeBackend::get_designated_countries(self, profile_id).await
     }
 }
 
@@ -701,54 +709,50 @@ impl StorageBackend for CoordinodeBackend {
 
     // === SIGNALS ===
 
-    async fn save_anomaly_event(&self, _event: &AnomalyEventRecord) -> Result<()> {
-        refused("anomaly events")
+    async fn save_anomaly_event(&self, event: &AnomalyEventRecord) -> Result<()> {
+        CoordinodeBackend::save_anomaly_event(self, event).await
     }
 
     async fn list_anomaly_events(
         &self,
-        _rule_id: Option<&str>,
-        _limit: i32,
-        _offset: i32,
+        rule_id: Option<&str>,
+        limit: i32,
+        offset: i32,
     ) -> Result<Vec<AnomalyEventRecord>> {
-        refused("anomaly events")
+        CoordinodeBackend::list_anomaly_events(self, rule_id, limit, offset).await
     }
 
-    async fn record_ip_reputation_event(&self, _ip: &str, _success: bool) -> Result<()> {
-        refused("IP reputation")
+    async fn record_ip_reputation_event(&self, ip: &str, success: bool) -> Result<()> {
+        CoordinodeBackend::record_ip_reputation_event(self, ip, success).await
     }
 
-    async fn get_ip_reputation_score(&self, _ip: &str) -> Result<Option<f32>> {
-        refused("IP reputation")
+    async fn get_ip_reputation_score(&self, ip: &str) -> Result<Option<f32>> {
+        CoordinodeBackend::get_ip_reputation_score(self, ip).await
     }
 
-    async fn list_suspicious_ips(
-        &self,
-        _min_score: f32,
-        _limit: i64,
-    ) -> Result<Vec<(String, f32)>> {
-        refused("IP reputation")
+    async fn list_suspicious_ips(&self, min_score: f32, limit: i64) -> Result<Vec<(String, f32)>> {
+        CoordinodeBackend::list_suspicious_ips(self, min_score, limit).await
     }
 
-    async fn decay_ip_reputation(&self, _older_than: std::time::Duration) -> Result<u64> {
-        refused("IP reputation")
+    async fn decay_ip_reputation(&self, older_than: std::time::Duration) -> Result<u64> {
+        CoordinodeBackend::decay_ip_reputation(self, older_than).await
     }
 
     async fn add_ip_allowlist_entry(
         &self,
-        _cidr: &str,
-        _description: &str,
-        _ctx: MutationContext,
+        cidr: &str,
+        description: &str,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("the IP allowlist")
+        CoordinodeBackend::add_ip_allowlist_entry(self, cidr, description, ctx).await
     }
 
-    async fn remove_ip_allowlist_entry(&self, _cidr: &str, _ctx: MutationContext) -> Result<()> {
-        refused("the IP allowlist")
+    async fn remove_ip_allowlist_entry(&self, cidr: &str, ctx: MutationContext) -> Result<()> {
+        CoordinodeBackend::remove_ip_allowlist_entry(self, cidr, ctx).await
     }
 
     async fn list_ip_allowlist_entries(&self) -> Result<Vec<(String, String, DateTime<Utc>)>> {
-        refused("the IP allowlist")
+        CoordinodeBackend::list_ip_allowlist_entries(self).await
     }
 
     // === SESSIONS ===
@@ -2438,31 +2442,31 @@ impl StorageBackend for CoordinodeBackend {
 
     async fn get_notification_preferences(
         &self,
-        _profile_id: ProfileId,
+        profile_id: ProfileId,
     ) -> Result<Option<sid_core::models::notification::NotificationPreferences>> {
-        refused("notification preferences")
+        CoordinodeBackend::get_notification_preferences(self, profile_id).await
     }
 
     async fn save_notification_preferences(
         &self,
-        _preferences: &sid_core::models::notification::NotificationPreferences,
-        _ctx: MutationContext,
+        preferences: &sid_core::models::notification::NotificationPreferences,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("notification preferences")
+        CoordinodeBackend::save_notification_preferences(self, preferences, ctx).await
     }
 
     // === INTEGRITY ===
 
     async fn count_orphaned_sessions(&self) -> Result<u64> {
-        refused("integrity counts")
+        CoordinodeBackend::count_orphaned_sessions(self).await
     }
 
     async fn count_orphaned_credentials(&self) -> Result<u64> {
-        refused("integrity counts")
+        CoordinodeBackend::count_orphaned_credentials(self).await
     }
 
     async fn count_orphaned_role_assignments(&self) -> Result<u64> {
-        refused("integrity counts")
+        CoordinodeBackend::count_orphaned_role_assignments(self).await
     }
 
     // === ACCESS REQUESTS ===
@@ -2504,44 +2508,44 @@ impl StorageBackend for CoordinodeBackend {
 
     async fn create_reset_session(
         &self,
-        _session: &sid_core::models::PasswordResetSession,
-        _ctx: MutationContext,
+        session: &sid_core::models::PasswordResetSession,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("password resets")
+        CoordinodeBackend::create_reset_session(self, session, ctx).await
     }
 
     async fn get_reset_session(
         &self,
-        _id: sid_core::models::ResetSessionId,
+        id: sid_core::models::ResetSessionId,
     ) -> Result<Option<sid_core::models::PasswordResetSession>> {
-        refused("password resets")
+        CoordinodeBackend::get_reset_session(self, id).await
     }
 
     async fn verify_reset_session(
         &self,
-        _id: sid_core::models::ResetSessionId,
-        _ctx: MutationContext,
+        id: sid_core::models::ResetSessionId,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("password resets")
+        CoordinodeBackend::verify_reset_session(self, id, ctx).await
     }
 
     async fn complete_password_reset(
         &self,
-        _id: sid_core::models::ResetSessionId,
-        _credential: &Credential,
-        _history: Option<&HistoryCommit>,
-        _end: &SessionEnd,
-        _ctx: MutationContext,
+        id: sid_core::models::ResetSessionId,
+        credential: &Credential,
+        history: Option<&HistoryCommit>,
+        end: &SessionEnd,
+        ctx: MutationContext,
     ) -> Result<Option<Vec<Session>>> {
-        refused("password resets")
+        CoordinodeBackend::complete_password_reset(self, id, credential, history, end, ctx).await
     }
 
-    async fn count_active_reset_sessions(&self, _profile_id: ProfileId) -> Result<u32> {
-        refused("password resets")
+    async fn count_active_reset_sessions(&self, profile_id: ProfileId) -> Result<u32> {
+        CoordinodeBackend::count_active_reset_sessions(self, profile_id).await
     }
 
-    async fn delete_expired_reset_sessions(&self, _ctx: MutationContext) -> Result<u64> {
-        refused("password resets")
+    async fn delete_expired_reset_sessions(&self, ctx: MutationContext) -> Result<u64> {
+        CoordinodeBackend::delete_expired_reset_sessions(self, ctx).await
     }
 
     // === EMAIL PROVIDER ===

@@ -35,12 +35,16 @@ mod harness {
         PrincipalAssignmentFence, PrincipalType, ProfileId, ProjectId, ProtectedResource,
         ResourceAccess, ResourceId,
     };
+    use sid_plugin::SignInHistoryStore;
     use sid_plugin::conformance::backend::application::{
         grant_resource, instance_issuer, store_client,
     };
-    use sid_plugin::conformance::backend::{create_test_profile, instance_org, test_audit};
+    use sid_plugin::conformance::backend::{
+        create_test_profile, create_test_session, instance_org, test_audit,
+    };
     use sid_plugin::conformance::client_registry::RegistryHarness;
     use sid_plugin::conformance::credential_store::CredentialHarness;
+    use sid_plugin::conformance::sign_in_history::SignInHistoryHarness;
     use std::sync::Arc;
 
     use sid_plugin::conformance::grant_store::{
@@ -183,6 +187,58 @@ mod harness {
 
         fn missing_owner(&self) -> ProfileId {
             ProfileId::generate()
+        }
+    }
+
+    #[async_trait]
+    impl SignInHistoryHarness for Store {
+        type Owner = ProfileId;
+
+        fn store(&self) -> &dyn SignInHistoryStore<Owner = ProfileId> {
+            &self.0
+        }
+
+        async fn owner(&self) -> ProfileId {
+            let profile = create_test_profile("sign_in");
+            self.0
+                .create_profile(&profile, test_audit())
+                .await
+                .expect("a test profile");
+            profile.id
+        }
+
+        async fn sign_in(
+            &self,
+            owner: &ProfileId,
+            ip: Option<std::net::IpAddr>,
+            device: Option<uuid::Uuid>,
+        ) {
+            let mut session = create_test_session(*owner);
+            session.ip_address = ip;
+            session.device_id = device;
+            self.0
+                .create_session_atomic(&session, 0, None, test_audit())
+                .await
+                .expect("a stored session");
+        }
+
+        async fn begin_sign_in(
+            &self,
+            owner: &ProfileId,
+            ip: std::net::IpAddr,
+            device: Option<uuid::Uuid>,
+        ) {
+            let mut pending = sid_core::models::Session::new_awaiting_second_factor(
+                *owner,
+                Some(ip),
+                sid_core::models::AuthLevel::Basic,
+                vec!["pwd".into()],
+            );
+            pending.device_id = device;
+            self.0
+                .create_session_atomic(&pending, 0, None, test_audit())
+                .await
+                .expect("a stored pending context");
         }
     }
 
@@ -375,6 +431,15 @@ capability!(credential_store:
     user_handle_resolves_only_at_its_rp,
     user_handle_is_unique_per_rp,
     user_handle_needs_an_owner,
+);
+
+capability!(sign_in_history:
+    most_recent_session_is_the_latest,
+    a_session_without_an_address_is_no_location,
+    an_ipv6_address_keeps_its_width,
+    seen_address_and_device_are_per_account,
+    an_unfinished_sign_in_is_no_history,
+    location_is_designated_at_threshold,
 );
 
 capability!(issuer_store:
