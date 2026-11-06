@@ -80,7 +80,7 @@ fn row_to_auth_code(row: &sqlx::sqlite::SqliteRow) -> SidResult<AuthorizationCod
 
 fn row_to_initial_access_token(row: &sqlx::sqlite::SqliteRow) -> SidResult<InitialAccessToken> {
     Ok(InitialAccessToken {
-        id: InitialAccessTokenId(uuid_col(row, "id")?),
+        id: col(row, "id")?,
         project_id: super::col(row, "project_id")?,
         token_hash: col(row, "token_hash")?,
         max_clients: count_col(row, "max_clients")?,
@@ -329,14 +329,14 @@ impl SqliteBackend {
         .bind(token.allowed_scopes.join(" "))
         .bind(token.allowed_grant_types.join(" "))
         .bind(token.allowed_redirect_patterns.join(" "))
-        .bind(&token.created_by)
+        .bind(token.created_by)
         .bind(token.revoked)
         .bind(fmt_dt(&token.expires_at))
         .bind(fmt_dt(&token.created_at))
         .execute(&mut *tx)
         .await
         .map_err(|e| super::insert_error("initial access token", e))?;
-        Self::commit_mutation(tx, &format!("iat:{}", token.id.0), audit).await
+        Self::commit_mutation(tx, &format!("iat:{}", token.id), audit).await
     }
 
     pub(crate) async fn get_initial_access_token_impl(
@@ -388,8 +388,8 @@ impl SqliteBackend {
             .map_err(|e| SidError::Storage(e.to_string()))?
             .rows_affected();
         if revoked == 0 {
-            return Err(SidError::NotFound(format!("initial access token {}", id.0)));
+            return Err(SidError::NotFound(format!("initial access token {id}")));
         }
-        Self::commit_mutation(tx, &format!("iat:{}", id.0), audit).await
+        Self::commit_mutation(tx, &format!("iat:{id}"), audit).await
     }
 }

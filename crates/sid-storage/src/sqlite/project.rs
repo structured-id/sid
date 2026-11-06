@@ -90,8 +90,7 @@ pub(super) fn row_to_oauth2_client(row: &sqlx::sqlite::SqliteRow) -> SidResult<O
         .transpose()?;
     let registration_iat = optional_parsed("registration_iat")?
         .map(|id| {
-            uuid::Uuid::parse_str(&id)
-                .map(InitialAccessTokenId)
+            InitialAccessTokenId::parse(&id)
                 .map_err(|e| SidError::Storage(format!("column registration_iat: {e}")))
         })
         .transpose()?;
@@ -443,21 +442,20 @@ impl SqliteBackend {
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(e.to_string()))?
-        .ok_or_else(|| SidError::NotFound(format!("initial access token {}", iat.0)))?;
+        .ok_or_else(|| SidError::NotFound(format!("initial access token {iat}")))?;
         let revoked: bool = col(&row, "revoked")?;
         let expires_at = dt_col(&row, "expires_at")?;
         let max_clients: i64 = col(&row, "max_clients")?;
         let registered: i64 = col(&row, "clients_registered")?;
         if revoked {
-            return Err(SidError::Revoked(format!("initial access token {}", iat.0)));
+            return Err(SidError::Revoked(format!("initial access token {iat}")));
         }
         if expires_at <= chrono::Utc::now() {
-            return Err(SidError::Expired(format!("initial access token {}", iat.0)));
+            return Err(SidError::Expired(format!("initial access token {iat}")));
         }
         if max_clients > 0 && registered >= max_clients {
             return Err(SidError::InvalidState(format!(
-                "initial access token {} reached its client limit",
-                iat.0
+                "initial access token {iat} reached its client limit"
             )));
         }
         sqlx::query(

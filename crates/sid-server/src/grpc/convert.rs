@@ -2,9 +2,7 @@
 //! Converters between `sid_core::models` and `sid_proto::sid::v1` types.
 
 use chrono::{DateTime, Utc};
-use sid_core::models::{
-    Device, Profile, ProfileEmail, ProfileId, ProfilePhone, profile::ExportStatus,
-};
+use sid_core::models::{Device, Profile, ProfileEmail, ProfilePhone, profile::ExportStatus};
 
 /// Convert `chrono::DateTime<Utc>` to `prost_types::Timestamp`.
 pub(crate) fn to_timestamp(dt: DateTime<Utc>) -> prost_types::Timestamp {
@@ -185,14 +183,6 @@ pub(crate) fn email_to_proto(
     })
 }
 
-/// Parse a profile ID string, returning a tonic status on failure.
-#[allow(clippy::result_large_err)]
-pub(crate) fn parse_profile_id(id: &str) -> Result<ProfileId, tonic::Status> {
-    ProfileId::parse(id).map_err(|_| {
-        sid_core::grpc_error::refuse::invalid_field("profile_id", "not a profile identifier")
-    })
-}
-
 /// The identifier a request names in `field`, validated before any lookup:
 /// an absent or malformed one is refused on that field.
 #[allow(clippy::result_large_err)]
@@ -201,7 +191,7 @@ pub(crate) fn wire_id<W: sid_ids_proto::WireId>(
     field: &'static str,
 ) -> Result<W::Domain, tonic::Status> {
     sid_ids_proto::required(value)
-        .map_err(|e| sid_core::grpc_error::refuse::invalid_field(field, e.to_string()))
+        .map_err(|e| sid_core::grpc_error::refuse::invalid_field(field, format!("{field}: {e}")))
 }
 
 /// A stored reference as an answer carries it. A stored value that is not a

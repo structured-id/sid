@@ -5,9 +5,10 @@ use tonic_types::StatusExt;
 fn test_project_to_proto() {
     let project = Project::new("Test Project", None);
     let proto = project_to_proto(&project);
+    assert_eq!(proto.id, Some(project.id.into()));
     assert_eq!(proto.name, "Test Project");
     assert!(proto.description.is_empty());
-    assert!(proto.owner_profile_id.is_empty());
+    assert!(proto.owner_profile_id.is_none());
     assert!(!proto.is_system);
     assert!(proto.created_at.is_some());
     assert!(proto.updated_at.is_some());
@@ -18,7 +19,7 @@ fn test_project_to_proto_with_owner() {
     let owner = sid_core::models::ProfileId::generate();
     let project = Project::new("Owned", Some(owner));
     let proto = project_to_proto(&project);
-    assert_eq!(proto.owner_profile_id, owner.to_string());
+    assert_eq!(proto.owner_profile_id, Some(owner.into()));
 }
 
 #[test]
@@ -43,25 +44,53 @@ fn test_role_to_proto() {
     assert!(proto.created_at.is_some());
 }
 
+/// A project and an initial access token travel as their identifiers'
+/// bytes; the system project's nil identifier is read back as the system
+/// project, and a malformed one is refused on its field.
 #[test]
-fn test_parse_project_id_valid() {
-    let id = uuid::Uuid::now_v7();
-    let result = parse_project_id(&id.to_string());
-    assert!(result.is_ok());
-    assert_eq!(result.unwrap().into_uuid(), id);
+fn test_project_and_iat_wire_ids() {
+    let project = ProjectId::generate();
+    let wire: sid_ids_proto::ProjectId = project.into();
+    assert_eq!(
+        convert::wire_id(Some(&wire), "project_id").unwrap(),
+        project
+    );
+    let system: sid_ids_proto::ProjectId = ProjectId::SYSTEM.into();
+    let read: ProjectId = convert::wire_id(Some(&system), "project_id").unwrap();
+    assert!(read.is_system());
+    let bad = sid_ids_proto::ProjectId { value: vec![0; 3] };
+    let status = convert::wire_id(Some(&bad), "project_id").unwrap_err();
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+
+    let iat = InitialAccessTokenId::generate();
+    let wire: sid_ids_proto::InitialAccessTokenId = iat.into();
+    assert_eq!(convert::wire_id(Some(&wire), "id").unwrap(), iat);
 }
 
+/// An initial access token shows its creator as the administrator's
+/// profile identifier, not a string.
 #[test]
-fn test_parse_project_id_invalid() {
-    let result = parse_project_id("not-a-uuid");
-    assert!(result.is_err());
-}
-
-#[test]
-fn test_parse_project_id_nil() {
-    let result = parse_project_id(&uuid::Uuid::nil().to_string());
-    assert!(result.is_ok());
-    assert!(result.unwrap().is_system());
+fn test_iat_to_proto_types_its_ids() {
+    let now = chrono::Utc::now();
+    let creator = sid_core::models::ProfileId::generate();
+    let token = InitialAccessToken {
+        id: InitialAccessTokenId::generate(),
+        token_hash: vec![1; 32],
+        project_id: ProjectId::generate(),
+        max_clients: 2,
+        clients_registered: 0,
+        allowed_scopes: vec![],
+        allowed_grant_types: vec![],
+        allowed_redirect_patterns: vec![],
+        expires_at: now,
+        created_at: now,
+        created_by: creator,
+        revoked: false,
+    };
+    let proto = iat_to_proto(&token);
+    assert_eq!(proto.id, Some(token.id.into()));
+    assert_eq!(proto.project_id, Some(token.project_id.into()));
+    assert_eq!(proto.created_by, Some(creator.into()));
 }
 
 #[test]

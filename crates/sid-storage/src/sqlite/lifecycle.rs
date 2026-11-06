@@ -24,13 +24,9 @@ fn words(row: &sqlx::sqlite::SqliteRow, name: &str) -> SidResult<Vec<String>> {
 }
 
 fn row_to_pat(row: &sqlx::sqlite::SqliteRow) -> SidResult<PersonalAccessToken> {
-    let id: String = col(row, "id")?;
     let use_count: i64 = col(row, "use_count")?;
     Ok(PersonalAccessToken {
-        id: PatId(
-            uuid::Uuid::parse_str(&id)
-                .map_err(|e| SidError::Storage(format!("column id: bad PAT id {id}: {e}")))?,
-        ),
+        id: col(row, "id")?,
         profile_id: col(row, "profile_id")?,
         name: col(row, "name")?,
         description: col(row, "description")?,
@@ -218,7 +214,7 @@ impl SqliteBackend {
             }
             _ => SidError::Storage(e.to_string()),
         })?;
-        Self::commit_mutation(tx, &format!("pat:{}", pat.id.0), audit).await
+        Self::commit_mutation(tx, &format!("pat:{}", pat.id), audit).await
     }
 
     pub(crate) async fn record_pat_use_impl(
@@ -245,7 +241,7 @@ impl SqliteBackend {
         if !used {
             return Ok(false);
         }
-        Self::commit_mutation(tx, &format!("pat:{}", id.0), audit).await?;
+        Self::commit_mutation(tx, &format!("pat:{id}"), audit).await?;
         Ok(true)
     }
 
@@ -272,7 +268,7 @@ impl SqliteBackend {
         if !revoked {
             return Ok(false);
         }
-        Self::commit_mutation(tx, &format!("pat:{}", id.0), audit).await?;
+        Self::commit_mutation(tx, &format!("pat:{id}"), audit).await?;
         Ok(true)
     }
 

@@ -291,7 +291,7 @@ impl DataExportService {
                 "value": m.value,
             })).collect::<Vec<_>>(),
             "personal_access_tokens": pats.iter().map(|p| json!({
-                "id": p.id.0.to_string(),
+                "id": p.id.to_string(),
                 "name": p.name,
                 "status": p.status.as_str(),
                 "created_at": p.created_at.to_rfc3339(),

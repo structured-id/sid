@@ -9,31 +9,11 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use super::ProfileId;
 
-/// Unique identifier for a PAT.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct PatId(pub Uuid);
-
-impl core::fmt::Display for PatId {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl PatId {
-    pub fn new() -> Self {
-        Self(Uuid::now_v7())
-    }
-}
-
-impl Default for PatId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+/// Validated UUIDv7 identifier of a PAT.
+pub use sid_ids::PatId;
 
 /// PAT lifecycle status.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -175,7 +155,7 @@ impl PersonalAccessToken {
         scopes: Vec<String>,
     ) -> Self {
         Self {
-            id: PatId::new(),
+            id: PatId::generate(),
             profile_id,
             name: name.into(),
             description: None,

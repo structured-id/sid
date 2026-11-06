@@ -1,4 +1,5 @@
 use super::*;
+use sid_core::models::ProjectId;
 use uuid::Uuid;
 
 // ── client_id generation ──
@@ -66,14 +67,17 @@ fn test_machine_user_to_proto() {
         ProjectId::SYSTEM,
         "mu_test123",
         "Test Bot",
-        OwnerType::System,
-        "system",
+        MachineOwner::System,
     );
 
     let proto = machine_user_to_proto(&mu);
+    assert_eq!(proto.id, Some(mu.id.into()));
     assert_eq!(proto.client_id, "mu_test123");
     assert_eq!(proto.display_name, "Test Bot");
-    assert_eq!(proto.owner_type, "system");
+    assert_eq!(
+        proto.owner.and_then(|o| o.owner),
+        Some(v1::machine_user_owner::Owner::System(()))
+    );
     assert_eq!(proto.status, ProtoMachineUserStatus::Active as i32);
     assert_eq!(proto.machine_type, ProtoMachineUserType::Service as i32);
     assert!(proto.created_at.is_some());
@@ -82,12 +86,12 @@ fn test_machine_user_to_proto() {
 
 #[test]
 fn test_machine_user_to_proto_with_restrictions() {
+    let owner = sid_core::models::ProfileId::generate();
     let mut mu = MachineUser::new(
         ProjectId::SYSTEM,
         "mu_restricted",
         "Restricted Bot",
-        OwnerType::Profile,
-        "owner-id",
+        MachineOwner::Profile(owner),
     );
     mu.restrictions.ip_allowlist = vec!["10.0.0.0/8".into()];
     mu.restrictions.rate_limit_rpm = 100;
@@ -99,7 +103,11 @@ fn test_machine_user_to_proto_with_restrictions() {
     assert_eq!(proto.rate_limit_rpm, 100);
     assert_eq!(proto.max_token_lifetime, 3600);
     assert_eq!(proto.scopes, vec!["read", "write"]);
-    assert_eq!(proto.owner_type, "profile");
+    assert_eq!(
+        proto.owner.and_then(|o| o.owner),
+        Some(v1::machine_user_owner::Owner::Profile(owner.into())),
+        "the owner's own id, typed as a profile"
+    );
 }
 
 #[test]
@@ -137,41 +145,35 @@ fn test_grant_to_proto() {
     assert!(proto.created_at.is_some());
 }
 
-// ── Parsing helpers ──
+// ── Wire identifiers ──
 
+/// A machine user's identifier read off the wire is the one sent; a
+/// malformed or absent one is refused on its field. A project identifier
+/// keeps the system project's nil value.
 #[test]
-fn test_parse_machine_user_id_valid() {
-    let uuid = Uuid::now_v7();
-    let result = parse_machine_user_id(&uuid.to_string());
-    assert!(result.is_ok());
-    assert_eq!(result.unwrap().into_uuid(), uuid);
-}
-
-#[test]
-fn test_parse_machine_user_id_invalid() {
-    let result = parse_machine_user_id("not-a-uuid");
-    assert!(result.is_err());
-    assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
-}
-
-#[test]
-fn test_parse_machine_user_id_empty() {
-    let result = parse_machine_user_id("");
-    assert!(result.is_err());
-}
-
-#[test]
-fn test_parse_project_id_valid() {
-    let uuid = Uuid::now_v7();
-    let result = parse_project_id(&uuid.to_string());
-    assert!(result.is_ok());
-    assert_eq!(result.unwrap().into_uuid(), uuid);
-}
-
-#[test]
-fn test_parse_project_id_invalid() {
-    let result = parse_project_id("invalid");
-    assert!(result.is_err());
+fn test_wire_ids_of_the_machine_api() {
+    let id = MachineUserId::generate();
+    let wire: sid_ids_proto::MachineUserId = id.into();
+    assert_eq!(
+        convert::wire_id(Some(&wire), "machine_user_id").unwrap(),
+        id
+    );
+    for bad in [
+        Some(sid_ids_proto::MachineUserId {
+            value: Uuid::new_v4().as_bytes().to_vec(),
+        }),
+        Some(sid_ids_proto::MachineUserId { value: vec![] }),
+        None,
+    ] {
+        let status = convert::wire_id(bad.as_ref(), "machine_user_id").unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert!(status.message().contains("machine_user_id"));
+    }
+    let system: sid_ids_proto::ProjectId = sid_core::models::ProjectId::SYSTEM.into();
+    assert_eq!(
+        convert::wire_id(Some(&system), "project_id").unwrap(),
+        sid_core::models::ProjectId::SYSTEM
+    );
 }
 
 // ── Type conversion helpers ──

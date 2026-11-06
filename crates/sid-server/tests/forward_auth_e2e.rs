@@ -37,8 +37,7 @@ fn with_machine_user(storage: MockStorage, client_id: &str, secret: &str) -> Moc
         ProjectId::SYSTEM,
         client_id,
         "Forward auth bot",
-        OwnerType::System,
-        "system",
+        MachineOwner::System,
     );
     let cred = MachineUserCredential::new(
         mu.id,

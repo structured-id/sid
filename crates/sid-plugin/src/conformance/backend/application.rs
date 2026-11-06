@@ -744,8 +744,7 @@ pub async fn test_resource_access(backend: &dyn StorageBackend) {
 /// listed with the resource's other clients, and loses the access with its
 /// own deletion.
 pub async fn test_machine_user_resource_access(backend: &dyn StorageBackend) {
-    use sid_core::models::MachineUser;
-    use sid_core::models::machine_user::OwnerType;
+    use sid_core::models::{MachineOwner, MachineUser};
 
     let issuer = instance_issuer(backend).await;
     let project = system_project(backend).await;
@@ -761,8 +760,7 @@ pub async fn test_machine_user_resource_access(backend: &dyn StorageBackend) {
         project,
         format!("ci-{}", Uuid::now_v7().simple()),
         "ci",
-        OwnerType::System,
-        "system",
+        MachineOwner::System,
     );
     backend
         .create_machine_user(&ci, test_audit())

@@ -1063,7 +1063,7 @@ const EXCHANGE_SECRET: &str = "http-exchange-secret";
 #[tokio::test]
 async fn token_exchange_over_http() {
     use sid_core::models::machine_user::{
-        MachineCredentialType, MachineUser, MachineUserCredential, OwnerType,
+        MachineCredentialType, MachineOwner, MachineUser, MachineUserCredential,
     };
     use sid_core::models::{ImpersonationGrant, ImpersonationTargetType, ProjectId};
 
@@ -1072,8 +1072,7 @@ async fn token_exchange_over_http() {
         ProjectId::SYSTEM,
         EXCHANGE_MACHINE,
         "HTTP exchange bot",
-        OwnerType::System,
-        "system",
+        MachineOwner::System,
     );
     let credential = MachineUserCredential::new(
         machine.id,
@@ -1305,7 +1304,7 @@ const IAT: &str = "http-registration-initial-access-token";
 async fn registration_endpoints() -> (TestServices, String) {
     use sha2::{Digest, Sha256};
     let iat = sid_core::models::InitialAccessToken {
-        id: sid_core::models::InitialAccessTokenId::new(),
+        id: sid_core::models::InitialAccessTokenId::generate(),
         token_hash: Sha256::digest(IAT.as_bytes()).to_vec(),
         project_id: sid_core::models::ProjectId::SYSTEM,
         max_clients: 10,
@@ -1315,7 +1314,7 @@ async fn registration_endpoints() -> (TestServices, String) {
         allowed_redirect_patterns: vec!["https://*.sid.example.com/*".into()],
         expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
         created_at: chrono::Utc::now(),
-        created_by: "test".into(),
+        created_by: sid_core::models::ProfileId::generate(),
         revoked: false,
     };
     let svc = TestServices::new(

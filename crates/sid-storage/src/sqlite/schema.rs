@@ -678,7 +678,7 @@ CREATE TABLE IF NOT EXISTS initial_access_tokens (
     allowed_scopes            TEXT NOT NULL DEFAULT '',
     allowed_grant_types       TEXT NOT NULL DEFAULT '',
     allowed_redirect_patterns TEXT NOT NULL DEFAULT '',
-    created_by                TEXT NOT NULL DEFAULT '',
+    created_by                TEXT NOT NULL,
     revoked                   INTEGER NOT NULL DEFAULT 0,
     expires_at                TEXT NOT NULL,
     created_at                TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
@@ -1269,9 +1269,9 @@ CREATE TABLE IF NOT EXISTS machine_users (
     project_id          TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     machine_type        TEXT NOT NULL DEFAULT 'service'
                         CHECK (machine_type IN ('service', 'bot', 'agent')),
-    owner_type          TEXT NOT NULL DEFAULT 'profile'
+    owner_type          TEXT NOT NULL
                         CHECK (owner_type IN ('profile', 'organization', 'system')),
-    owner_id            TEXT NOT NULL,
+    owner_id            TEXT CHECK ((owner_type = 'system') = (owner_id IS NULL)),
     client_id           TEXT NOT NULL UNIQUE,
     display_name        TEXT NOT NULL,
     description         TEXT,

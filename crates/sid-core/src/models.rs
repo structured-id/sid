@@ -168,8 +168,8 @@ pub use invite::{
 };
 pub use machine_user::{
     CredentialStatus, ImpersonationGrant, ImpersonationTargetType, MachineCredentialType,
-    MachineRestrictions, MachineUser, MachineUserCredential, MachineUserId, MachineUserStatus,
-    MachineUserType, OwnerType,
+    MachineOwner, MachineRestrictions, MachineUser, MachineUserCredential, MachineUserId,
+    MachineUserStatus, MachineUserType, OwnerType,
 };
 pub use magic_link::{
     MAGIC_LINK_EMAIL_KIND, MAGIC_LINK_EXPIRY_SECS, MAGIC_LINK_RATE_LIMIT_MAX, MagicLinkSession,

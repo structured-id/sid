@@ -341,7 +341,7 @@ impl RevocationCascadeService {
     ) -> SidResult<RevocationRequest> {
         let mut req = RevocationRequest::new(
             RevocationTarget::Pat,
-            pat_id.0.to_string(),
+            pat_id.to_string(),
             RevocationReason::UserRequested,
             initiated_by,
         );
@@ -350,7 +350,7 @@ impl RevocationCascadeService {
             .revoke_pat(
                 pat_id,
                 initiated_by,
-                AuditEntry::system("pat.revoke", pat_id.0.to_string()).into(),
+                AuditEntry::system("pat.revoke", pat_id.to_string()).into(),
             )
             .await?;
 

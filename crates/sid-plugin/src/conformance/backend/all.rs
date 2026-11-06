@@ -141,6 +141,7 @@ macro_rules! storage_conformance {
             );
             $crate::__storage_scenarios!($setup, machine:
                 test_create_machine_user_never_replaces
+                test_machine_user_owner_round_trips
                 test_update_machine_user_keeps_status
                 test_transition_machine_user_is_compare_and_swap
                 test_add_machine_credential_never_replaces

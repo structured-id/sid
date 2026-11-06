@@ -4,9 +4,9 @@ use super::*;
 use chrono::Utc;
 use sid_core::models::{
     Application, ApplicationId, AuditEntry, ConnectorCredentialKind, ConnectorState,
-    MachineCredentialType, MachineUser, MachineUserCredential, MachineUserStatus, MutationContext,
-    OwnerType, ProjectId, ProvisioningConnector, ProvisioningCredential, ProvisioningDirection,
-    Session,
+    MachineCredentialType, MachineOwner, MachineUser, MachineUserCredential, MachineUserStatus,
+    MutationContext, ProjectId, ProvisioningConnector, ProvisioningCredential,
+    ProvisioningDirection, Session,
 };
 use sid_storage::sqlite::SqliteBackend;
 
@@ -81,8 +81,7 @@ async fn fixture() -> Fixture {
         ProjectId::SYSTEM,
         "mu_worker",
         "Worker",
-        OwnerType::System,
-        "system",
+        MachineOwner::System,
     );
     storage
         .create_machine_user(&machine, audit())

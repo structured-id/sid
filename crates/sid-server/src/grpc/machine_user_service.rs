@@ -15,9 +15,9 @@ use sid_authn::operation::grpc::context;
 use sid_authn::revocation_cache::RevocationCache;
 use sid_core::models::{
     AuditEntry, ImpersonationGrant, ImpersonationTargetType as DomainImpersonationTargetType,
-    MachineCredentialType as DomainCredentialType, MachineRestrictions, MachineUser,
+    MachineCredentialType as DomainCredentialType, MachineOwner, MachineRestrictions, MachineUser,
     MachineUserCredential, MachineUserId, MachineUserStatus as DomainMachineUserStatus,
-    MachineUserType as DomainMachineUserType, MutationContext, OwnerType, ProjectId,
+    MachineUserType as DomainMachineUserType, MutationContext,
     machine_user::CredentialStatus as DomainCredentialStatus,
 };
 use sid_plugin::storage::StorageBackend;
@@ -174,17 +174,6 @@ fn sha256_hex(data: &[u8]) -> String {
         .collect()
 }
 
-/// Parse a machine user ID string into the domain type.
-fn parse_machine_user_id(s: &str) -> Result<MachineUserId, Status> {
-    MachineUserId::parse(s)
-        .map_err(|_| invalid_field("machine_user_id", "not a machine user identifier"))
-}
-
-/// Parse a project ID string into the domain type.
-fn parse_project_id(s: &str) -> Result<ProjectId, Status> {
-    ProjectId::parse(s).map_err(|_| invalid_field("project_id", "not a project identifier"))
-}
-
 /// MACHINE_USER_NOT_FOUND for `id`.
 fn machine_user_not_found(id: MachineUserId) -> Status {
     not_found(
@@ -305,18 +294,29 @@ fn impersonation_target_to_proto(t: DomainImpersonationTargetType) -> ProtoImper
     }
 }
 
+/// Who a machine user acts for, as the API names it.
+fn owner_to_proto(owner: MachineOwner) -> v1::MachineUserOwner {
+    use v1::machine_user_owner::Owner;
+    v1::MachineUserOwner {
+        owner: Some(match owner {
+            MachineOwner::Profile(id) => Owner::Profile(id.into()),
+            MachineOwner::Organization(id) => Owner::Organization(id.into()),
+            MachineOwner::System => Owner::System(()),
+        }),
+    }
+}
+
 /// Convert domain `MachineUser` to proto `MachineUserInfo`.
 fn machine_user_to_proto(mu: &MachineUser) -> MachineUserInfo {
     MachineUserInfo {
-        id: mu.id.to_string(),
-        project_id: mu.project_id.to_string(),
+        id: Some(mu.id.into()),
+        project_id: Some(mu.project_id.into()),
         client_id: mu.client_id.clone(),
         display_name: mu.display_name.clone(),
         description: mu.description.clone().unwrap_or_default(),
         machine_type: machine_type_to_proto(mu.machine_type).into(),
         status: status_to_proto(mu.status).into(),
-        owner_type: mu.owner_type.as_str().to_string(),
-        owner_id: mu.owner_id.clone(),
+        owner: Some(owner_to_proto(mu.owner)),
         scopes: mu.scopes.clone(),
         ip_allowlist: mu.restrictions.ip_allowlist.clone(),
         rate_limit_rpm: mu.restrictions.rate_limit_rpm as i32,
@@ -349,7 +349,7 @@ fn grant_to_proto(grant: &ImpersonationGrant) -> ImpersonationGrantInfo {
             grant.target_type.as_str(),
             grant.target
         ),
-        machine_user_id: grant.machine_user_id.to_string(),
+        machine_user_id: Some(grant.machine_user_id.into()),
         target_type: impersonation_target_to_proto(grant.target_type).into(),
         target: grant.target.clone(),
         allowed_scopes: grant.allowed_scopes.clone(),
@@ -387,7 +387,7 @@ impl MachineUserService for MachineUserServiceImpl {
             return Err(missing_field("display_name"));
         }
 
-        let project_id = parse_project_id(&req.project_id)?;
+        let project_id = convert::wire_id(req.project_id.as_ref(), "project_id")?;
         // A retry of a completed creation answers with the machine user it
         // created and creates no second one.
         let command = KeyedCommand::by_profile::<keyed::CreateMachineUser>(
@@ -406,8 +406,7 @@ impl MachineUserService for MachineUserServiceImpl {
             project_id,
             &client_id,
             &req.display_name,
-            OwnerType::Organization,
-            self.organization.to_string(),
+            MachineOwner::Organization(self.organization),
         );
 
         mu.machine_type = proto_to_machine_type(req.machine_type);
@@ -459,7 +458,7 @@ impl MachineUserService for MachineUserServiceImpl {
     ) -> Result<Response<MachineUserResponse>, Status> {
         self.admin(&request).await?;
         let req = request.into_inner();
-        let id = parse_machine_user_id(&req.machine_user_id)?;
+        let id = convert::wire_id(req.machine_user_id.as_ref(), "machine_user_id")?;
 
         let mu = self
             .storage
@@ -480,7 +479,7 @@ impl MachineUserService for MachineUserServiceImpl {
         let caller = self.admin(&request).await?;
         let operation = context(&request)?;
         let req = request.into_inner();
-        let id = parse_machine_user_id(&req.machine_user_id)?;
+        let id = convert::wire_id(req.machine_user_id.as_ref(), "machine_user_id")?;
 
         // A retry of a completed edit answers with the machine user as that
         // edit left it and never writes its settings over a later edit.
@@ -553,7 +552,7 @@ impl MachineUserService for MachineUserServiceImpl {
         let caller = self.admin(&request).await?;
         let operation = context(&request)?;
         let req = request.into_inner();
-        let id = parse_machine_user_id(&req.machine_user_id)?;
+        let id = convert::wire_id(req.machine_user_id.as_ref(), "machine_user_id")?;
 
         // A retry of a completed deletion answers as it did.
         let command = KeyedCommand::by_profile::<keyed::DeleteMachineUser>(
@@ -588,7 +587,7 @@ impl MachineUserService for MachineUserServiceImpl {
     ) -> Result<Response<ListMachineUsersResponse>, Status> {
         self.admin(&request).await?;
         let req = request.into_inner();
-        let project_id = parse_project_id(&req.project_id)?;
+        let project_id = convert::wire_id(req.project_id.as_ref(), "project_id")?;
 
         let users = self
             .storage
@@ -608,7 +607,7 @@ impl MachineUserService for MachineUserServiceImpl {
         let caller = self.admin(&request).await?;
         let operation = context(&request)?;
         let req = request.into_inner();
-        let id = parse_machine_user_id(&req.machine_user_id)?;
+        let id = convert::wire_id(req.machine_user_id.as_ref(), "machine_user_id")?;
 
         // A retry of a completed suspension answers as it did and never
         // suspends again a machine user reactivated since.
@@ -689,7 +688,7 @@ impl MachineUserService for MachineUserServiceImpl {
         let caller = self.admin(&request).await?;
         let operation = context(&request)?;
         let req = request.into_inner();
-        let id = parse_machine_user_id(&req.machine_user_id)?;
+        let id = convert::wire_id(req.machine_user_id.as_ref(), "machine_user_id")?;
 
         // A retry of a completed reactivation answers as it did and never
         // reactivates a machine user suspended since.
@@ -769,7 +768,7 @@ impl MachineUserService for MachineUserServiceImpl {
         let caller = self.admin(&request).await?;
         let operation = context(&request)?;
         let req = request.into_inner();
-        let mu_id = parse_machine_user_id(&req.machine_user_id)?;
+        let mu_id = convert::wire_id(req.machine_user_id.as_ref(), "machine_user_id")?;
         let cred_type = proto_to_credential_type(req.credential_type)?;
         // A secret is shown once and only its verifier is kept: a retry of a
         // completed addition answers with the credential it added, its secret
@@ -881,7 +880,7 @@ impl MachineUserService for MachineUserServiceImpl {
     ) -> Result<Response<RevokeMachineCredentialResponse>, Status> {
         let caller = self.admin(&request).await?;
         let req = request.into_inner();
-        let mu_id = parse_machine_user_id(&req.machine_user_id)?;
+        let mu_id = convert::wire_id(req.machine_user_id.as_ref(), "machine_user_id")?;
 
         if req.kid.is_empty() {
             return Err(missing_field("kid"));
@@ -890,7 +889,7 @@ impl MachineUserService for MachineUserServiceImpl {
         let audit: MutationContext = AuditEntry::admin(
             caller.profile_id.to_string(),
             "machine_user.credential.revoke",
-            format!("{}:{}", req.machine_user_id, req.kid),
+            format!("{mu_id}:{}", req.kid),
         )
         .into();
 
@@ -916,10 +915,7 @@ impl MachineUserService for MachineUserServiceImpl {
         }
 
         self.stop_tokens(std::slice::from_ref(&req.kid)).await;
-        info!(
-            "Revoked credential {} for machine user {}",
-            req.kid, req.machine_user_id
-        );
+        info!("Revoked credential {} for machine user {mu_id}", req.kid);
 
         Ok(Response::new(RevokeMachineCredentialResponse {}))
     }
@@ -930,7 +926,7 @@ impl MachineUserService for MachineUserServiceImpl {
     ) -> Result<Response<ListMachineCredentialsResponse>, Status> {
         self.admin(&request).await?;
         let req = request.into_inner();
-        let mu_id = parse_machine_user_id(&req.machine_user_id)?;
+        let mu_id = convert::wire_id(req.machine_user_id.as_ref(), "machine_user_id")?;
 
         let creds = self
             .storage
@@ -950,7 +946,7 @@ impl MachineUserService for MachineUserServiceImpl {
         let caller = self.admin(&request).await?;
         let operation = context(&request)?;
         let req = request.into_inner();
-        let mu_id = parse_machine_user_id(&req.machine_user_id)?;
+        let mu_id = convert::wire_id(req.machine_user_id.as_ref(), "machine_user_id")?;
 
         if req.kid.is_empty() {
             return Err(missing_field("kid"));
@@ -1093,7 +1089,7 @@ impl MachineUserService for MachineUserServiceImpl {
         let caller = self.admin(&request).await?;
         let operation = context(&request)?;
         let req = request.into_inner();
-        let mu_id = parse_machine_user_id(&req.machine_user_id)?;
+        let mu_id = convert::wire_id(req.machine_user_id.as_ref(), "machine_user_id")?;
         let target_type = proto_to_impersonation_target(req.target_type)?;
 
         if req.target.is_empty() {
@@ -1158,7 +1154,7 @@ impl MachineUserService for MachineUserServiceImpl {
         let caller = self.admin(&request).await?;
         let operation = context(&request)?;
         let req = request.into_inner();
-        let mu_id = parse_machine_user_id(&req.machine_user_id)?;
+        let mu_id = convert::wire_id(req.machine_user_id.as_ref(), "machine_user_id")?;
 
         if req.target_type.is_empty() {
             return Err(missing_field("target_type"));
@@ -1204,7 +1200,7 @@ impl MachineUserService for MachineUserServiceImpl {
     ) -> Result<Response<ListImpersonationGrantsResponse>, Status> {
         self.admin(&request).await?;
         let req = request.into_inner();
-        let mu_id = parse_machine_user_id(&req.machine_user_id)?;
+        let mu_id = convert::wire_id(req.machine_user_id.as_ref(), "machine_user_id")?;
 
         let grants = self
             .storage

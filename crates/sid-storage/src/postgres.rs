@@ -243,7 +243,9 @@ fn row_to_initial_access_token(row: &sqlx::postgres::PgRow) -> SidResult<Initial
             .collect()
     };
     Ok(InitialAccessToken {
-        id: InitialAccessTokenId(row.get("id")),
+        id: row
+            .try_get("id")
+            .map_err(|e| SidError::Storage(format!("initial access token id: {e}")))?,
         token_hash: row.get("token_hash"),
         project_id: row
             .try_get("project_id")
@@ -255,7 +257,9 @@ fn row_to_initial_access_token(row: &sqlx::postgres::PgRow) -> SidResult<Initial
         allowed_redirect_patterns: words("allowed_redirect_patterns"),
         expires_at: row.get("expires_at"),
         created_at: row.get("created_at"),
-        created_by: row.get("created_by"),
+        created_by: row
+            .try_get("created_by")
+            .map_err(|e| SidError::Storage(format!("initial access token creator: {e}")))?,
         revoked: row.get("revoked"),
     })
 }
@@ -1275,7 +1279,7 @@ impl PostgresBackend {
             .bind(client.token_endpoint_auth_method.as_str())
             .bind(client.response_types.join(" "))
             .bind(&client.contacts)
-            .bind(client.registration_iat.map(|iat| iat.0))
+            .bind(client.registration_iat)
             .bind(&client.registration_access_token_hash)
             .bind(client.org_id)
             .bind(client.client_id_issued_at)
@@ -3689,7 +3693,7 @@ impl StorageBackend for PostgresBackend {
                 allowed_redirect_patterns, created_by, revoked, expires_at, created_at)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
         )
-        .bind(token.id.0)
+        .bind(token.id)
         .bind(token.project_id)
         .bind(&token.token_hash)
         .bind(iat_count(token.max_clients)?)
@@ -3697,14 +3701,14 @@ impl StorageBackend for PostgresBackend {
         .bind(token.allowed_scopes.join(" "))
         .bind(token.allowed_grant_types.join(" "))
         .bind(token.allowed_redirect_patterns.join(" "))
-        .bind(&token.created_by)
+        .bind(token.created_by)
         .bind(token.revoked)
         .bind(token.expires_at)
         .bind(token.created_at)
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("initial access token", e))?;
-        Self::audit_in_tx(&mut tx, &format!("iat:{}", token.id.0), audit).await?;
+        Self::audit_in_tx(&mut tx, &format!("iat:{}", token.id), audit).await?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -3735,33 +3739,32 @@ impl StorageBackend for PostgresBackend {
             "SELECT revoked, expires_at, max_clients, clients_registered
              FROM initial_access_tokens WHERE id = $1 FOR UPDATE",
         )
-        .bind(iat.0)
+        .bind(iat)
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("lock initial access token: {e}")))?
-        .ok_or_else(|| SidError::NotFound(format!("initial access token {}", iat.0)))?;
+        .ok_or_else(|| SidError::NotFound(format!("initial access token {iat}")))?;
         use sqlx::Row;
         let revoked: bool = row.get("revoked");
         let expires_at: chrono::DateTime<chrono::Utc> = row.get("expires_at");
         let max_clients: i32 = row.get("max_clients");
         let registered: i32 = row.get("clients_registered");
         if revoked {
-            return Err(SidError::Revoked(format!("initial access token {}", iat.0)));
+            return Err(SidError::Revoked(format!("initial access token {iat}")));
         }
         if expires_at <= chrono::Utc::now() {
-            return Err(SidError::Expired(format!("initial access token {}", iat.0)));
+            return Err(SidError::Expired(format!("initial access token {iat}")));
         }
         if max_clients > 0 && registered >= max_clients {
             return Err(SidError::InvalidState(format!(
-                "initial access token {} reached its client limit",
-                iat.0
+                "initial access token {iat} reached its client limit"
             )));
         }
         sqlx::query(
             "UPDATE initial_access_tokens SET clients_registered = clients_registered + 1
              WHERE id = $1",
         )
-        .bind(iat.0)
+        .bind(iat)
         .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("count initial access token use: {e}")))?;
@@ -3784,7 +3787,7 @@ impl StorageBackend for PostgresBackend {
         id: InitialAccessTokenId,
     ) -> SidResult<Option<InitialAccessToken>> {
         let row = sqlx::query("SELECT * FROM initial_access_tokens WHERE id = $1")
-            .bind(id.0)
+            .bind(id)
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| SidError::Storage(format!("get initial access token: {e}")))?;
@@ -3828,15 +3831,15 @@ impl StorageBackend for PostgresBackend {
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
         let revoked = sqlx::query("UPDATE initial_access_tokens SET revoked = TRUE WHERE id = $1")
-            .bind(id.0)
+            .bind(id)
             .execute(&mut *tx)
             .await
             .map_err(|e| SidError::Storage(format!("revoke initial access token: {e}")))?
             .rows_affected();
         if revoked == 0 {
-            return Err(SidError::NotFound(format!("initial access token {}", id.0)));
+            return Err(SidError::NotFound(format!("initial access token {id}")));
         }
-        Self::audit_in_tx(&mut tx, &format!("iat:{}", id.0), audit).await?;
+        Self::audit_in_tx(&mut tx, &format!("iat:{id}"), audit).await?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -5854,7 +5857,7 @@ impl StorageBackend for PostgresBackend {
         let row = sqlx::query_as::<_, crate::pg_row::PatRow>(
             "SELECT * FROM personal_access_tokens WHERE id = $1",
         )
-        .bind(id.0)
+        .bind(id)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| SidError::Storage(format!("Query failed: {}", e)))?;
@@ -5912,7 +5915,7 @@ impl StorageBackend for PostgresBackend {
                 scopes, ip_allowlist, status, expires_at, last_used_at, last_used_ip,
                 use_count, revoked_at, revoked_by, created_at)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
-        ).bind(pat.id.0).bind(pat.profile_id)
+        ).bind(pat.id).bind(pat.profile_id)
         .bind(&pat.name)
         .bind(&pat.description)
         .bind(&pat.token_hash)
@@ -5930,7 +5933,7 @@ impl StorageBackend for PostgresBackend {
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("PAT", e))?;
-        Self::audit_in_tx(&mut tx, &format!("pat:{}", pat.id.0), audit).await?;
+        Self::audit_in_tx(&mut tx, &format!("pat:{}", pat.id), audit).await?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -5953,7 +5956,7 @@ impl StorageBackend for PostgresBackend {
              SET last_used_at = NOW(), last_used_ip = $2, use_count = use_count + 1
              WHERE id = $1 AND status = 'active' AND (expires_at IS NULL OR expires_at > NOW())",
         )
-        .bind(id.0)
+        .bind(id)
         .bind(ip)
         .execute(&mut *tx)
         .await
@@ -5963,7 +5966,7 @@ impl StorageBackend for PostgresBackend {
         if !used {
             return Ok(false);
         }
-        Self::audit_in_tx(&mut tx, &format!("pat:{}", id.0), audit).await?;
+        Self::audit_in_tx(&mut tx, &format!("pat:{id}"), audit).await?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -5986,7 +5989,7 @@ impl StorageBackend for PostgresBackend {
              WHERE id = $2 AND status <> 'revoked'",
         )
         .bind(revoked_by)
-        .bind(id.0)
+        .bind(id)
         .execute(&mut *tx)
         .await
         .map_err(|e| SidError::Storage(format!("Update failed: {}", e)))?
@@ -5995,7 +5998,7 @@ impl StorageBackend for PostgresBackend {
         if !revoked {
             return Ok(false);
         }
-        Self::audit_in_tx(&mut tx, &format!("pat:{}", id.0), audit).await?;
+        Self::audit_in_tx(&mut tx, &format!("pat:{id}"), audit).await?;
         tx.commit()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
@@ -6195,8 +6198,8 @@ impl StorageBackend for PostgresBackend {
         .bind(mu.id)
         .bind(mu.project_id)
         .bind(mu.machine_type.as_str())
-        .bind(mu.owner_type.as_str())
-        .bind(&mu.owner_id)
+        .bind(mu.owner.kind().as_str())
+        .bind(mu.owner.id())
         .bind(&mu.client_id)
         .bind(&mu.display_name)
         .bind(&mu.description)

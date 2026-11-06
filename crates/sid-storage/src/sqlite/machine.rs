@@ -6,8 +6,8 @@ use sid_core::{
     models::{
         MutationContext, ProjectId,
         machine_user::{
-            ImpersonationGrant, MachineRestrictions, MachineUser, MachineUserCredential,
-            MachineUserId, MachineUserStatus,
+            ImpersonationGrant, MachineOwner, MachineRestrictions, MachineUser,
+            MachineUserCredential, MachineUserId, MachineUserStatus,
         },
     },
 };
@@ -29,12 +29,19 @@ fn count_col(row: &sqlx::sqlite::SqliteRow, name: &str) -> SidResult<u32> {
 // Unknown stored values are errors, never an active service owned by a Profile.
 fn row_to_machine_user(row: &sqlx::sqlite::SqliteRow) -> SidResult<MachineUser> {
     let max_token_lifetime: Option<i64> = col(row, "max_token_lifetime")?;
+    let owner_id: Option<String> = col(row, "owner_id")?;
+    let owner_id = owner_id
+        .map(|id| {
+            uuid::Uuid::parse_str(&id)
+                .map_err(|e| SidError::Storage(format!("column owner_id: {e}")))
+        })
+        .transpose()?;
     Ok(MachineUser {
         id: col(row, "id")?,
         project_id: col(row, "project_id")?,
         machine_type: parsed_col(row, "machine_type")?,
-        owner_type: parsed_col(row, "owner_type")?,
-        owner_id: col(row, "owner_id")?,
+        owner: MachineOwner::from_stored(parsed_col(row, "owner_type")?, owner_id)
+            .map_err(SidError::Storage)?,
         client_id: col(row, "client_id")?,
         display_name: col(row, "display_name")?,
         description: col(row, "description")?,
@@ -203,8 +210,8 @@ impl SqliteBackend {
         ).bind(mu.id)
         .bind(mu.project_id.to_string())
         .bind(mu.machine_type.as_str())
-        .bind(mu.owner_type.as_str())
-        .bind(&mu.owner_id)
+        .bind(mu.owner.kind().as_str())
+        .bind(mu.owner.id().map(|id| id.to_string()))
         .bind(&mu.client_id)
         .bind(&mu.display_name)
         .bind(&mu.description)

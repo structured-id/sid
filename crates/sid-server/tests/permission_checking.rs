@@ -237,14 +237,15 @@ struct Asking {
 }
 
 async fn asking() -> Asking {
-    use sid_core::models::machine_user::{MachineCredentialType, MachineUserCredential, OwnerType};
+    use sid_core::models::machine_user::{
+        MachineCredentialType, MachineOwner, MachineUserCredential,
+    };
     let machine = |client_id: &str| {
         sid_core::models::MachineUser::new(
             ProjectId::SYSTEM,
             client_id,
             client_id,
-            OwnerType::System,
-            "system",
+            MachineOwner::System,
         )
     };
     let checker = machine(CHECKER);
