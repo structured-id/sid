@@ -2800,7 +2800,7 @@ async fn test_admin_delete_project_in_use_is_refused() {
         .delete_project(new_command(admin_request(
             &svc,
             DeleteProjectRequest {
-                id: project_id.to_string(),
+                id: Some(project_id.into()),
             },
         )))
         .await
