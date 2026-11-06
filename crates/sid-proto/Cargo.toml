@@ -7,12 +7,15 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-# gRPC / Protobuf
-tonic = "0.14"
-tonic-prost = "0.14"
 prost = "0.14"
 prost-types = "0.14"
 sid-ids-proto = { workspace = true }
+# The generated gRPC client and server stubs (optional)
+tonic = { version = "0.14", optional = true }
+tonic-prost = { version = "0.14", optional = true }
+
+[features]
+grpc = ["dep:tonic", "dep:tonic-prost"]
 
 [dev-dependencies]
 # Reads the `google.api.http` method option, an extension prost-types drops.

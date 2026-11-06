@@ -28,7 +28,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
-sid-proto = { workspace = true }
+sid-proto = { workspace = true, features = ["grpc"] }
 tonic = { workspace = true }
 # The browser adapter of the hosted application: its client at the issuer,
 # the issuer directory, the session store and revocations, and the browser

@@ -27,7 +27,7 @@ sid-infra = { workspace = true, features = ["issuer-client"] }
 sid-crypto = { workspace = true, features = ["jwt", "tls-aws-lc"] }
 sid-core = { workspace = true }
 sid-plugin = { workspace = true }
-sid-proto = { workspace = true }
+sid-proto = { workspace = true, features = ["grpc"] }
 # The BFF's own database, where its sessions live: PostgreSQL for shared
 # replicas, SQLite for a single instance.
 sid-storage = { workspace = true, features = ["storage-pg", "storage-sqlite"] }

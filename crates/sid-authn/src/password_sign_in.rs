@@ -131,7 +131,7 @@ pub struct Started {
 
 /// The login a finish names, or `INVALID_ARGUMENT` before anything is
 /// looked up: absent, of another length, nil, max or not a UUIDv7.
-#[cfg(feature = "password-operation")]
+#[cfg(all(feature = "password-operation", feature = "grpc"))]
 #[allow(clippy::result_large_err)]
 pub fn login_id(
     field: Option<&sid_ids_proto::OpaqueLoginId>,
