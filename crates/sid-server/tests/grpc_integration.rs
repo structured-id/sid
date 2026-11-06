@@ -2770,6 +2770,47 @@ async fn test_admin_delete_project() {
     assert_eq!(err.code(), tonic::Code::NotFound);
 }
 
+/// A project an application still belongs to is not deleted: the refusal is
+/// FAILED_PRECONDITION naming the project, not a server failure, and the
+/// project stays.
+#[tokio::test]
+async fn test_admin_delete_project_in_use_is_refused() {
+    use tonic_types::StatusExt;
+    let custom = Project::new("Busy Project", None::<sid_core::models::ProfileId>);
+    let project_id = custom.id;
+    let svc = TestServices::new(MockStorage::new().with_project(custom));
+    let now = chrono::Utc::now();
+    let app = sid_core::models::Application {
+        id: sid_core::models::ApplicationId::generate(),
+        project_id,
+        name: "Busy".into(),
+        system: None,
+        revision: 0,
+        created_at: now,
+        updated_at: now,
+    };
+    svc.storage
+        .create_application(&app, None, None, AuditEntry::system("test", "setup").into())
+        .await
+        .unwrap();
+
+    let err = svc
+        .project
+        .delete_project(new_command(admin_request(
+            &svc,
+            DeleteProjectRequest {
+                id: project_id.to_string(),
+            },
+        )))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition, "{err:?}");
+    let violation = &err.get_details_precondition_failure().unwrap().violations[0];
+    assert_eq!(violation.r#type, "PROJECT_IN_USE");
+    assert_eq!(violation.subject, project_id.to_string());
+    assert!(svc.storage.get_project(project_id).await.unwrap().is_some());
+}
+
 #[tokio::test]
 async fn test_admin_delete_system_project_forbidden() {
     let storage = MockStorage::new().with_system_project();

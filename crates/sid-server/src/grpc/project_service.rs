@@ -626,6 +626,20 @@ fn project_not_found(id: ProjectId) -> Status {
     not_found(ErrorReason::ProjectNotFound, "Project", id.to_string())
 }
 
+/// INVALID_STATE: an application or SCIM target still belongs to the project.
+fn project_in_use(id: ProjectId) -> Status {
+    ApiError::new(
+        ErrorReason::InvalidState,
+        "the project still has applications or SCIM targets",
+    )
+    .with_precondition(
+        "PROJECT_IN_USE",
+        id.to_string(),
+        "remove its applications and SCIM targets first",
+    )
+    .into()
+}
+
 /// The initial access token is unknown, revoked, expired or used up: it
 /// registers no client (RFC 6750 §3.1 `invalid_token` on the HTTP form).
 fn iat_unusable() -> Status {
@@ -910,7 +924,13 @@ impl ProjectService for ProjectServiceImpl {
                     project_id.to_string(),
                 ))
                 .with_operation(command.completion(().encode_to_vec()));
-                self.storage.delete_project(project_id, ctx).await?;
+                self.storage
+                    .delete_project(project_id, ctx)
+                    .await
+                    .map_err(|e| match e {
+                        SidError::InvalidState(_) => Effect::from(project_in_use(project_id)),
+                        e => Effect::from(e),
+                    })?;
                 info!("Deleted project {project_id}");
                 Ok(())
             })

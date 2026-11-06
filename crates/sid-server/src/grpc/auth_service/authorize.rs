@@ -285,6 +285,9 @@ impl AuthServiceImpl {
         match self.storage.create_auth_code(&auth_code, ctx).await {
             Ok(()) => {}
             Err(sid_core::Error::Fenced(_)) => return Err(policy_changed()),
+            // The authorizing session ended (a logout) before the code was
+            // stored: the user is signed out, not facing a server failure.
+            Err(sid_core::Error::NotFound(_)) => return Err(session_ended()),
             Err(e) => return Err(storage_failure(e)),
         }
 

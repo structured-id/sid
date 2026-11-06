@@ -235,7 +235,13 @@ impl SqliteBackend {
             .bind(id.to_string())
             .execute(&mut *tx)
             .await
-            .map_err(|e| SidError::Storage(e.to_string()))?;
+            .map_err(|e| match &e {
+                // An application or SCIM target still belongs to the project.
+                sqlx::Error::Database(db) if db.is_foreign_key_violation() => {
+                    SidError::InvalidState(format!("project {id} is in use"))
+                }
+                _ => SidError::Storage(e.to_string()),
+            })?;
         Self::commit_mutation(tx, &format!("project:{id}"), audit).await
     }
 
