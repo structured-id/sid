@@ -377,3 +377,61 @@ async fn replicas_and_a_restart_share_the_installation() {
         .expect("signed in after the restart");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// Bug prevented: a replica started with its installation's setup creating
+/// the resource and the proof-confirming checker again (it fails on the
+/// existing records), or one started without it losing the checker's
+/// trust. Every replica takes the same setup and finds the same records.
+#[tokio::test]
+async fn replicas_take_the_installations_setup() {
+    let dir = std::env::temp_dir().join(format!("sid-test-issuer-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let installation = Installation::at(&dir.join("sid.db"));
+    let setup = || Setup {
+        resources: vec![RESOURCE.into()],
+        checkers: vec![Checker {
+            client_id: "replica-checker".into(),
+            secret: "replica-checker-secret".into(),
+            confirms_proofs: true,
+        }],
+    };
+    let first = TestIssuer::replica(setup(), &installation).await;
+    let second = TestIssuer::replica(setup(), &installation).await;
+    assert_eq!(
+        second.resource(RESOURCE).id,
+        first.resource(RESOURCE).id,
+        "the replica found the installation's resource"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Bug prevented: an account registered with a spelling its validation
+/// changes (surrounding space, case) registering, then not being found. It
+/// is found by its resolution key, as a sign-in finds it.
+#[tokio::test]
+async fn an_account_is_found_by_its_resolution_key() {
+    let issuer = TestIssuer::start(Setup::default()).await;
+    let profile = issuer
+        .password_account("  Spelled-User@SID.example.com ", PASSWORD)
+        .await;
+    let finish = issuer
+        .start_password_login("spelled-user@sid.example.com", PASSWORD)
+        .await;
+    let signed_in = auth_client(&issuer)
+        .opaque_login_finish(finish)
+        .await
+        .expect("signed in with the canonical spelling");
+    let token = signed_in
+        .metadata()
+        .get("authorization")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .strip_prefix("Bearer ")
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        issuer.jwt.validate_access_token(&token).unwrap().sub,
+        profile.id.to_string()
+    );
+}

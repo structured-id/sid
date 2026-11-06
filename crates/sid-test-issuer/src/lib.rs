@@ -116,7 +116,9 @@ impl TestIssuer {
     }
 
     /// A replica of `installation`, provisioned and serving as [`start`]
-    /// does. Its first replica creates `setup`; the others pass an empty one.
+    /// does. Every replica takes the installation's same `setup`, as
+    /// replicas run with one configuration: the first creates its records,
+    /// the others and a restarted one find them.
     ///
     /// [`start`]: Self::start
     pub async fn replica(setup: Setup, installation: &Installation) -> Self {
@@ -172,13 +174,34 @@ impl TestIssuer {
             .expect("token service"),
         );
 
+        // A replica of an installation starts with the installation's setup
+        // too, as replicas run with one configuration: the records the first
+        // created are found, never created twice.
         let mut resources = Vec::new();
         for indicator in &setup.resources {
-            resources.push(register(storage.as_ref(), &issuer, organization.id, indicator).await);
+            let parsed = ResourceIndicator::parse(indicator).expect("a resource indicator");
+            let found = storage
+                .protected_resource_by_indicator(issuer.id, &parsed)
+                .await
+                .expect("resource lookup");
+            resources.push(match found {
+                Some(resource) => resource,
+                None => register(storage.as_ref(), &issuer, organization.id, indicator).await,
+            });
         }
         let checker_role = Role::permission_checker();
         let mut verifiers = Vec::new();
         for checker in &setup.checkers {
+            if let Some(machine) = storage
+                .get_machine_user_by_client_id(&checker.client_id)
+                .await
+                .expect("checker lookup")
+            {
+                if checker.confirms_proofs {
+                    verifiers.push(verifier_entry(&machine, &resources));
+                }
+                continue;
+            }
             let machine = MachineUser::new(
                 ProjectId::SYSTEM,
                 &checker.client_id,
@@ -229,15 +252,7 @@ impl TestIssuer {
                     .expect("checker role");
             }
             if checker.confirms_proofs {
-                let listed: Vec<String> = resources
-                    .iter()
-                    .map(|r| format!("\"{}\"", r.indicator.as_str()))
-                    .collect();
-                verifiers.push(format!(
-                    r#"{{"subject": "machine:{}", "resources": [{}], "profiles": ["dpop"]}}"#,
-                    machine.id,
-                    listed.join(", ")
-                ));
+                verifiers.push(verifier_entry(&machine, &resources));
             }
         }
         let verifiers = sid_authz::request_verifier::RequestVerifiers::from_json(&format!(
@@ -614,8 +629,20 @@ impl TestIssuer {
             ))
             .await
             .expect("registration finish");
+        // The account is found as a sign-in finds it: by the principal's
+        // resolution key, not by the spelling the caller typed.
+        let key = sid_authn::normalize::normalize_principal(principal)
+            .expect("a principal the registration admitted")
+            .normalized;
+        let holder = self
+            .storage
+            .get_principal_by_value(sid_core::models::PrincipalType::Email, &key)
+            .await
+            .expect("principal lookup")
+            .and_then(|p| p.assigned_profile_id)
+            .expect("the registered principal's profile");
         self.storage
-            .get_profile_by_email(principal)
+            .get_profile(holder)
             .await
             .expect("profile lookup")
             .expect("the registered profile")
@@ -671,6 +698,20 @@ impl Drop for TestIssuer {
             stop.send(()).ok();
         }
     }
+}
+
+/// The request-verifier entry trusting `machine` to confirm DPoP proofs on
+/// `resources`.
+fn verifier_entry(machine: &MachineUser, resources: &[ProtectedResource]) -> String {
+    let listed: Vec<String> = resources
+        .iter()
+        .map(|r| format!("\"{}\"", r.indicator.as_str()))
+        .collect();
+    format!(
+        r#"{{"subject": "machine:{}", "resources": [{}], "profiles": ["dpop"]}}"#,
+        machine.id,
+        listed.join(", ")
+    )
 }
 
 /// The client that signs users in to `resource`'s application: the
