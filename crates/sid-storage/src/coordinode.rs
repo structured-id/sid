@@ -172,6 +172,9 @@ pub(super) enum Decision<T> {
 pub(super) struct Statements<'a> {
     db: &'a Database,
     id: TransactionId,
+    /// A time drawn before the transaction began: every commit at or before
+    /// it is in the transaction's snapshot, or not yet in the store at all.
+    snapshot_floor: u64,
     /// Set when a statement was refused for a concurrent transaction: the
     /// whole transaction runs again rather than failing.
     contended: Cell<bool>,
@@ -199,6 +202,14 @@ impl Statements<'_> {
         let Some(version) = self.db.node_version(node).map_err(storage)? else {
             return Ok(false);
         };
+        // A version written after the snapshot is not the one the decision
+        // read: holding it would commit that decision over the newer node.
+        if version > self.snapshot_floor {
+            self.contended.set(true);
+            return Err(SidError::Storage(
+                "a held node changed since the transaction began".into(),
+            ));
+        }
         self.db
             .expect_node_version(self.id, node, Some(version))
             .map_err(storage)?;
@@ -230,10 +241,12 @@ where
             // when that one ends: give it the time, longer each round.
             std::thread::sleep(RETRY_PAUSE * attempt.min(40));
         }
+        let snapshot_floor = db.read_ts().as_raw();
         let id = db.begin_transaction().map_err(storage)?;
         let statements = Statements {
             db,
             id,
+            snapshot_floor,
             contended: Cell::new(false),
         };
         let decided = match change(&statements) {

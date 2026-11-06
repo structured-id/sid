@@ -1028,10 +1028,11 @@ impl CoordinodeBackend {
             let Some(stored) = get_application(tx, app.id)? else {
                 return Ok(Decision::Abandon(false));
             };
-            // Project and creation time never change.
+            // Project and creation time never change; the time compares at the
+            // precision it is stored at.
             if stored.revision != app.revision
                 || stored.project_id != app.project_id
-                || stored.created_at != app.created_at
+                || stored.created_at != super::stored_time(app.created_at)
             {
                 return Ok(Decision::Abandon(false));
             }
@@ -1150,10 +1151,11 @@ impl CoordinodeBackend {
                 return Ok(Decision::Abandon(false));
             };
             // The client's origin never changes: an update carrying another
-            // origin writes nothing.
+            // origin writes nothing. Its times compare at the precision they
+            // are stored at.
             if stored.revision != update.revision
-                || stored.created_at != update.created_at
-                || stored.client_id_issued_at != update.client_id_issued_at
+                || stored.created_at != super::stored_time(update.created_at)
+                || stored.client_id_issued_at != super::stored_time(update.client_id_issued_at)
                 || stored.registration_iat != update.registration_iat
                 || stored.application_id != update.application_id
             {
@@ -1356,7 +1358,7 @@ impl CoordinodeBackend {
                 || stored.application_id != update.application_id
                 || stored.issuer_id != update.issuer_id
                 || stored.indicator != update.indicator
-                || stored.created_at != update.created_at
+                || stored.created_at != super::stored_time(update.created_at)
             {
                 return Ok(Decision::Abandon(false));
             }

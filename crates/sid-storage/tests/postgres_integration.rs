@@ -1794,6 +1794,12 @@ async fn test_application_update_and_list() {
 }
 
 #[tokio::test]
+async fn test_records_update_from_the_object_they_were_created_with() {
+    common::application::test_records_update_from_the_object_they_were_created_with(&setup().await)
+        .await;
+}
+
+#[tokio::test]
 async fn test_resource_update_and_retirement() {
     common::application::test_resource_update_and_retirement(&setup().await).await;
 }

@@ -522,6 +522,57 @@ pub async fn test_application_update_and_list(backend: &dyn StorageBackend) {
     );
 }
 
+/// A record created with a caller's full-resolution clock is updated from
+/// the same object it was created with: the store compares its immutable
+/// times at the precision it keeps them, not at the caller's.
+pub async fn test_records_update_from_the_object_they_were_created_with(
+    backend: &dyn StorageBackend,
+) {
+    let issuer = instance_issuer(backend).await;
+    let project = system_project(backend).await;
+    // A sub-microsecond part no store keeps.
+    let created = Utc::now().trunc_subsecs(3) + chrono::Duration::nanoseconds(1_234_567);
+    let mut app = application(project, "Fine clock");
+    app.created_at = created;
+    let mut client = client_of(&app);
+    client.created_at = created;
+    client.client_id_issued_at = created;
+    let mut api = resource(&app, issuer);
+    api.created_at = created;
+    backend
+        .create_application(&app, Some(&client), Some(&api), test_audit())
+        .await
+        .unwrap();
+
+    let mut renamed = app.clone();
+    renamed.name = "Renamed".into();
+    assert!(
+        backend
+            .update_application(&renamed, test_audit())
+            .await
+            .unwrap(),
+        "the application's update was refused"
+    );
+    let mut edited = client.clone();
+    edited.client_name = "Edited".into();
+    assert!(
+        backend
+            .update_oauth2_client(&edited, test_audit())
+            .await
+            .unwrap(),
+        "the client's update was refused"
+    );
+    let mut narrowed = api.clone();
+    narrowed.scopes = vec!["orders.read".into()];
+    assert!(
+        backend
+            .update_protected_resource(&narrowed, test_audit())
+            .await
+            .unwrap(),
+        "the resource's update was refused"
+    );
+}
+
 /// A resource's scopes and state change over its revision; it is retired
 /// only with its application and its indicator is never registered again.
 pub async fn test_resource_update_and_retirement(backend: &dyn StorageBackend) {

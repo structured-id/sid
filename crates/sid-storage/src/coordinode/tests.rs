@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{Row, document, get_document};
+use super::{Decision, Params, Row, document, get_document, get_text, hold_first, in_transaction};
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 enum Shape {
@@ -38,6 +38,42 @@ fn skipped_fields_keep_the_rest_in_place() {
         shapes: vec![Shape::Plain, Shape::Tagged("x".into())],
     };
     assert_eq!(round_trip(&sparse), sparse);
+}
+
+/// Run `query` in a transaction of its own and commit it.
+fn write(db: &coordinode_embed::Database, query: &str) {
+    let id = db.begin_transaction().unwrap();
+    db.execute_in_transaction(id, query, None).unwrap();
+    db.commit_transaction(id).unwrap();
+}
+
+/// A decision built on a node another commit changed after the transaction's
+/// snapshot runs again on the current node: holding the node must not pin
+/// the newer version under a decision made from the older one.
+#[test]
+fn a_decision_on_a_node_changed_after_the_snapshot_runs_again() {
+    let db = coordinode_embed::Database::open_in_memory().unwrap();
+    write(&db, "CREATE (p:SidProbe {k: 1, v: 'old'})");
+    let attempts = std::cell::Cell::new(0);
+    let seen = in_transaction(&db, |tx| {
+        attempts.set(attempts.get() + 1);
+        let rows = tx.run(
+            "MATCH (p:SidProbe) WHERE p.k = 1 RETURN p.v AS v, id(p) AS node",
+            Params::default(),
+        )?;
+        let v = get_text(&rows[0], "v")?;
+        if attempts.get() == 1 {
+            // Another writer commits between this read and the hold.
+            write(&db, "MATCH (p:SidProbe) WHERE p.k = 1 SET p.v = 'new'");
+        }
+        if !hold_first(tx, &rows)? {
+            return Ok(Decision::Abandon(None));
+        }
+        Ok(Decision::Commit(Some(v)))
+    })
+    .unwrap();
+    assert_eq!(seen.as_deref(), Some("new"));
+    assert_eq!(attempts.get(), 2);
 }
 
 /// A free-form JSON value reads back as written, numbers keeping their kind.
