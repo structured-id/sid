@@ -107,6 +107,26 @@ mod ceremony_state {
     );
 }
 
+/// Run instance secret conformance `scenario` against a fresh store.
+macro_rules! instance_secret_store {
+    ($($scenario:ident),* $(,)?) => {$(
+        #[tokio::test(flavor = "multi_thread")]
+        async fn $scenario() {
+            sid_plugin::conformance::instance_secret_store::$scenario(&setup().await).await;
+        }
+    )*};
+}
+
+mod instance_secret_store {
+    use super::*;
+
+    instance_secret_store!(
+        secret_is_absent_until_stored,
+        first_value_is_kept,
+        concurrent_inserts_agree,
+    );
+}
+
 /// The race `operation_periods_bound_admission` runs once, many times over:
 /// commits under a period racing its retirement are each refused or dropped
 /// with it, never left behind. CoordiNode checks only writes and pinned reads

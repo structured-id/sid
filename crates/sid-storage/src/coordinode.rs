@@ -18,6 +18,7 @@ use sid_core::{Error as SidError, Result as SidResult};
 
 mod audit;
 mod ceremony;
+mod instance_secret;
 mod operation;
 mod work;
 
@@ -44,6 +45,7 @@ const SCHEMA: &[&str] = &[
     "CREATE CONSTRAINT sid_operation_state FOR (s:SidOperationState) REQUIRE s.id IS UNIQUE",
     "CREATE CONSTRAINT sid_ceremony_state FOR (c:SidCeremonyState) REQUIRE c.slot IS UNIQUE",
     "CREATE CONSTRAINT sid_ceremony_count FOR (c:SidCeremonyCount) REQUIRE c.slot IS UNIQUE",
+    "CREATE CONSTRAINT sid_instance_secret FOR (s:SidInstanceSecret) REQUIRE s.name IS UNIQUE",
 ];
 
 /// SID's storage over the host's CoordiNode database.
