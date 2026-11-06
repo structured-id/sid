@@ -42,7 +42,6 @@ CLIENT_SETS=(
   "sid-keys|"
   "sid-core|"
   "sid-core|--no-default-features"
-  "sid-core|--features grpc"
   "sid-proto|"
 )
 
@@ -52,8 +51,6 @@ COMBOS=(
   "sid-keys|"
   "sid-core|"
   "sid-core|--no-default-features"
-  "sid-core|--features grpc"
-  "sid-core|--no-default-features --features grpc"
   "sid-proto|"
   "sid-proto|--features grpc"
   "sid-plugin|"
@@ -63,10 +60,9 @@ COMBOS=(
   "sid-storage|--no-default-features --features storage-sqlite"
   "sid-storage|--features storage-sqlite"
   "sid-authn|"
-  "sid-authn|--features grpc"
+  "sid-authn|--features keyed"
   "sid-authn|--features password-operation"
   "sid-authz|"
-  "sid-authz|--no-default-features"
   "structured-id|"
   "sid-admin|"
   "sid-fed|"
@@ -77,6 +73,10 @@ COMBOS=(
   "sid-infra|--features redis"
   "sid-infra|--features issuer-client"
   "sid-infra|--features http"
+  "sid-infra|--features grpc"
+  "sid-infra|--features authn-grpc"
+  "sid-infra|--features password-operation"
+  "sid-infra|--features oauth-http"
   "sid-org-crypto|"
   "sid-scim|"
   "sid-notify|"
@@ -172,8 +172,6 @@ check_consumers() {
     "sid-proto|--features grpc"
     "sid-core|"
     "sid-core|--features recovery"
-    "sid-core|--features grpc"
-    "sid-core|--features recovery,grpc"
     "combined|"
   )
   local entry found
@@ -198,11 +196,14 @@ check_consumers() {
   done
 }
 
-# The engine runs in its host's process and sid-proto without `grpc` carries
-# messages only: neither links the gRPC transport.
+# The engine and its cores run in their host's process and sid-proto without
+# `grpc` carries messages only: none links the gRPC transport, which the
+# shared adapters in sid-infra own. Those adapters in turn bring no store,
+# broker or cache of their own.
 check_transport_closures() {
   local entry pkg flags found
-  for entry in "structured-id|" "sid-proto|" "sid-authn|--features password-operation"; do
+  for entry in "structured-id|" "sid-proto|" "sid-core|" "sid-authz|" \
+    "sid-authn|--features password-operation"; do
     pkg="${entry%%|*}"
     flags="${entry#*|}"
     # shellcheck disable=SC2086
@@ -214,6 +215,20 @@ check_transport_closures() {
       fail=1
     else
       echo "ok   transport closure $pkg [$flags]"
+    fi
+  done
+  for flags in "--features grpc" "--features password-operation,oauth-http"; do
+    # shellcheck disable=SC2086
+    found="$(cargo tree --locked -p sid-infra --no-default-features $flags -e normal \
+      --prefix none -f '{p}' \
+      | grep -E '^(sqlx|sqlx-core|libsqlite3-sys|sid-storage|async-nats|fred|structured-proxy|axum) ' \
+      | sort -u || true)"
+    if [[ -n "$found" ]]; then
+      echo "FAIL adapter closure sid-infra [$flags] pulls a store, broker, cache or listener:"
+      echo "$found" | sed 's/^/    /'
+      fail=1
+    else
+      echo "ok   adapter closure sid-infra [$flags]"
     fi
   done
 }

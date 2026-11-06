@@ -7,8 +7,6 @@ pub mod crypto;
 pub mod embedded;
 pub mod enrollment;
 pub mod error;
-#[cfg(feature = "grpc")]
-pub mod grpc_error;
 pub mod models;
 
 pub use error::{Error, Result};

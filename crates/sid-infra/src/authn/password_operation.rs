@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! The password operation over gRPC: the status of each refusal, the
-//! evaluator reached as its own service and the evaluator's service.
+//! evaluator reached as its own service and the evaluator's service. The
+//! operation and its wire messages are [`sid_authn::password_operation`]'s.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use sid_core::grpc_error::refuse::invalid_field;
-use sid_core::grpc_error::{ApiError, ErrorReason};
+use sid_authn::password_operation::{
+    EVALUATION_WINDOW, HistoryAdmission, HistoryEvaluation, HistoryPreparation,
+    PasswordOperationError, operation_id, preparation_response, selection_of,
+};
 use sid_core::models::HistoryEpochDescriptor;
-use sid_core::models::password_history::MAX_HISTORY_DOMAINS;
 use sid_proto::sid::v1::authn::password_history_evaluator_service_client::PasswordHistoryEvaluatorServiceClient;
 use sid_proto::sid::v1::authn::password_history_evaluator_service_server::PasswordHistoryEvaluatorService;
 use sid_proto::sid::v1::authn::{
@@ -18,18 +20,14 @@ use sid_proto::sid::v1::authn::{
 use tonic::{Request, Response, Status};
 use tracing::warn;
 
-use super::{
-    EVALUATION_WINDOW, HistoryAdmission, HistoryEvaluation, HistoryPreparation, LiveDomains,
-    OwnerKind, PasswordOperationError, array32, descriptor_message, descriptor_of, domain_message,
-    internal, operation_id, timestamp, unavailable,
-};
-use crate::password_history::OperationDomain;
+use crate::grpc_error::refuse::invalid_field;
+use crate::grpc_error::{ApiError, ErrorReason, IntoStatus, OrStatus};
 
-impl From<PasswordOperationError> for Status {
-    fn from(e: PasswordOperationError) -> Self {
+impl IntoStatus for PasswordOperationError {
+    fn into_status(self) -> Status {
         use PasswordOperationError as E;
-        let message = e.to_string();
-        match e {
+        let message = self.to_string();
+        match self {
             E::Unavailable(_) => ApiError::new(ErrorReason::PasswordHistoryUnavailable, message)
                 .with_retry_after(Duration::from_secs(5))
                 .into(),
@@ -66,8 +64,8 @@ impl From<PasswordOperationError> for Status {
             E::InvalidOperationId(_) => ApiError::new(ErrorReason::InvalidFieldValue, message)
                 .with_field_violation("operation_id", "a password operation id")
                 .into(),
-            E::Ceremony(e) => e.into(),
-            E::Operation(e) => e.into(),
+            E::Ceremony(e) => e.into_status(),
+            E::Operation(e) => e.into_status(),
         }
     }
 }
@@ -89,53 +87,16 @@ impl RemoteHistoryEvaluator {
     }
 }
 
-/// The selection a preparation answer carries, when it is well formed: as
-/// many epochs as domains, within the bound, each domain the one its epoch
-/// describes under the shared relation.
-fn selection_of(response: &PreparePasswordHistoryResponse) -> Option<Vec<HistoryEpochDescriptor>> {
-    if response.epochs.is_empty()
-        || response.epochs.len() > MAX_HISTORY_DOMAINS
-        || response.epochs.len() != response.domains.len()
-    {
-        return None;
-    }
-    response
-        .epochs
-        .iter()
-        .zip(&response.domains)
-        .map(|(epoch, domain)| {
-            let epoch = descriptor_of(epoch)?;
-            (domain_message(&OperationDomain::of(&epoch)) == *domain).then_some(epoch)
-        })
-        .collect()
-}
-
 #[async_trait::async_trait]
 impl HistoryPreparation for RemoteHistoryEvaluator {
     async fn prepare(
         &self,
         admission: &HistoryAdmission,
     ) -> Result<Vec<HistoryEpochDescriptor>, PasswordOperationError> {
-        let live = &admission.live;
         let response = self
             .client
             .clone()
-            .prepare_password_history(PreparePasswordHistoryRequest {
-                operation_id: Some(admission.id.into()),
-                owner_domain: admission.owner_domain.to_vec(),
-                owner_kind: admission.kind.message() as i32,
-                expires_at: Some(timestamp(admission.expires_at)),
-                charge_key: admission.charge_key.clone(),
-                live_comparison_domains: live.domains.iter().map(|d| d.to_vec()).collect(),
-                history_revision: u64::try_from(live.revision).map_err(internal)?,
-                settled_operations: live
-                    .settled
-                    .iter()
-                    .map(|op| sid_ids_proto::PasswordOperationId {
-                        value: op.as_bytes().to_vec(),
-                    })
-                    .collect(),
-            })
+            .prepare_password_history(admission.request()?)
             .await
             .map_err(|status| {
                 // The client learns that history is unavailable, not why the
@@ -145,7 +106,7 @@ impl HistoryPreparation for RemoteHistoryEvaluator {
                     status.code(),
                     status.message()
                 );
-                unavailable("evaluator")
+                PasswordOperationError::Unavailable("evaluator")
             })?
             .into_inner();
         selection_of(&response).ok_or_else(|| {
@@ -153,60 +114,9 @@ impl HistoryPreparation for RemoteHistoryEvaluator {
                 "history evaluator answered a malformed selection of {} epochs",
                 response.epochs.len()
             );
-            unavailable("evaluator")
+            PasswordOperationError::Unavailable("evaluator")
         })
     }
-}
-
-/// The admission a preparation request carries, decoded; the evaluator
-/// checks each live domain against the owner's epochs.
-fn admission_of(
-    req: &PreparePasswordHistoryRequest,
-) -> Result<HistoryAdmission, PasswordOperationError> {
-    let field = |field, reason| PasswordOperationError::InvalidField { field, reason };
-    if req.live_comparison_domains.len() > MAX_HISTORY_DOMAINS {
-        return Err(field(
-            "live_comparison_domains",
-            "more domains than an operation holds",
-        ));
-    }
-    if req.settled_operations.len() > sid_core::models::password_history::MAX_HISTORY_DEPTH as usize
-    {
-        return Err(field(
-            "settled_operations",
-            "more operations than history retains",
-        ));
-    }
-    let mut domains = req
-        .live_comparison_domains
-        .iter()
-        .map(|d| array32(d, "live_comparison_domains"))
-        .collect::<Result<Vec<_>, _>>()?;
-    domains.sort_unstable();
-    let settled = req
-        .settled_operations
-        .iter()
-        .map(|op| operation_id(Some(op)).map(|id| id.into_uuid()))
-        .collect::<Result<Vec<_>, _>>()?;
-    let expires_at = req
-        .expires_at
-        .as_ref()
-        .and_then(|t| chrono::DateTime::from_timestamp(t.seconds, u32::try_from(t.nanos).ok()?))
-        .ok_or_else(|| field("expires_at", "a valid instant"))?;
-    Ok(HistoryAdmission {
-        id: operation_id(req.operation_id.as_ref())?,
-        owner_domain: array32(&req.owner_domain, "owner_domain")?,
-        kind: OwnerKind::of_message(req.owner_kind)
-            .ok_or_else(|| field("owner_kind", "a specified owner kind"))?,
-        expires_at,
-        charge_key: req.charge_key.clone(),
-        live: LiveDomains {
-            revision: i64::try_from(req.history_revision)
-                .map_err(|_| field("history_revision", "out of range"))?,
-            domains,
-            settled,
-        },
-    })
 }
 
 /// Whether the listener serving the evaluator offers Prepare. Prepare is an
@@ -274,8 +184,12 @@ impl PasswordHistoryEvaluatorService for PasswordHistoryEvaluatorImpl {
         request: Request<EvaluatePasswordHistoryRequest>,
     ) -> Result<Response<EvaluatePasswordHistoryResponse>, Status> {
         let req = request.into_inner();
-        let id = operation_id(req.operation_id.as_ref())?;
-        let evaluations = self.evaluation.evaluate(&id, &req.blinded_input).await?;
+        let id = operation_id(req.operation_id.as_ref()).or_status()?;
+        let evaluations = self
+            .evaluation
+            .evaluate(&id, &req.blinded_input)
+            .await
+            .or_status()?;
         Ok(Response::new(EvaluatePasswordHistoryResponse {
             evaluations,
         }))
@@ -287,15 +201,9 @@ impl PasswordHistoryEvaluatorService for PasswordHistoryEvaluatorImpl {
         request: Request<PreparePasswordHistoryRequest>,
     ) -> Result<Response<PreparePasswordHistoryResponse>, Status> {
         self.admission.admit(&request).await?;
-        let admission = admission_of(request.get_ref())?;
-        let epochs = self.evaluation.prepare(&admission).await?;
-        Ok(Response::new(PreparePasswordHistoryResponse {
-            domains: epochs
-                .iter()
-                .map(|e| domain_message(&OperationDomain::of(e)))
-                .collect(),
-            epochs: epochs.iter().map(descriptor_message).collect(),
-        }))
+        let admission = HistoryAdmission::of_request(request.get_ref()).or_status()?;
+        let epochs = self.evaluation.prepare(&admission).await.or_status()?;
+        Ok(Response::new(preparation_response(&epochs)))
     }
 }
 

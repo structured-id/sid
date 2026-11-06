@@ -6,12 +6,12 @@
 //! - Activity history, linked accounts, app launcher, notification prefs, passwordless — TODO
 
 use prost::Message;
-use sid_authn::caller::authenticate;
 use sid_authn::jwt::JwtService;
 use sid_authn::operation::KeyedCommand;
-use sid_authn::operation::grpc::{Effect, context};
 use sid_authn::revocation_cache::RevocationCache;
 use sid_core::models::{AuditEntry, MutationContext, ProfileId};
+use sid_infra::authn::caller::authenticate;
+use sid_infra::authn::operation::{Effect, context, run, settle};
 use sid_plugin::storage::StorageBackend;
 use sid_proto::keyed::account::account_service as keyed;
 use sid_proto::sid::v1::account::account_service_server::AccountService;
@@ -20,10 +20,10 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 use tracing::info;
 
-use sid_core::grpc_error::{ApiError, ErrorReason};
 use sid_core::models::principal::PrincipalType;
+use sid_infra::grpc_error::{ApiError, ErrorReason, IntoStatus, OrStatus};
 
-use sid_core::grpc_error::refuse::{
+use sid_infra::grpc_error::refuse::{
     invalid_field, missing_field, not_found, not_in_this_build, storage_failure,
 };
 

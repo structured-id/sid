@@ -4,11 +4,11 @@
 //! rendering can produce the SCIM error body from the status alone.
 
 use sid_core::Error as SidError;
-use sid_core::grpc_error::refuse::{
+use sid_core::models::{GroupId, ProfileId};
+use sid_infra::grpc_error::refuse::{
     authority_changed, changed_concurrently, internal, not_found, storage_failure,
 };
-use sid_core::grpc_error::{ApiError, ErrorReason};
-use sid_core::models::{GroupId, ProfileId};
+use sid_infra::grpc_error::{ApiError, ErrorReason};
 use tonic::Status;
 
 use crate::mapping::MappingError;

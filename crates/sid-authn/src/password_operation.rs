@@ -36,9 +36,9 @@
 //! evaluated elements, so the finish needs no evaluator read. A standalone
 //! installation runs both authorities in one process, so compromising that
 //! process merges them. A split deployment runs the evaluator as its own
-//! service ([`PasswordHistoryEvaluatorImpl`], with the deployment's own
-//! [`PrepareAdmission`]) and the credential service reaches it through
-//! [`RemoteHistoryEvaluator`].
+//! service, whose RPC adapter carries [`HistoryAdmission::request`] and
+//! [`preparation_response`], and the credential service reaches it through
+//! a [`HistoryPreparation`] over that transport.
 //!
 //! Every credential has its own OPRF key (`credential_identifier`, drawn at
 //! prepare and stored with the credential). Before the commit that key has
@@ -57,18 +57,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 mod enrollment;
-#[cfg(feature = "grpc")]
-mod grpc;
 mod purge;
 pub mod relayed;
 pub use enrollment::{
     EnrollmentHandler, EvaluatorDelivery, abort_event_id, compact_enrollments,
     compact_evaluator_fences,
-};
-#[cfg(feature = "grpc")]
-pub use grpc::{
-    ClientListener, InternalTransport, PasswordHistoryEvaluatorImpl, PrepareAdmission,
-    RemoteHistoryEvaluator,
 };
 pub use purge::{OwnerPurgeHandler, purge_event_id};
 pub use relayed::{
@@ -95,7 +88,8 @@ use sid_plugin::{CredentialStore, OperationResultStore, WorkStore};
 use sid_proto::sid::v1::authn::{
     PasswordHistoryContext, PasswordHistoryDomain, PasswordHistoryEpochDescriptor,
     PasswordHistoryEvaluation, PasswordHistoryEvaluationProof, PasswordHistoryKsf,
-    PasswordHistoryOwnerKind, PasswordRegistrationProof,
+    PasswordHistoryOwnerKind, PasswordRegistrationProof, PreparePasswordHistoryRequest,
+    PreparePasswordHistoryResponse,
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::warn;
@@ -116,7 +110,9 @@ const OPERATION_TTL: Duration = Duration::from_secs(15 * 60);
 const ADMISSION_CLOCK_SKEW: Duration = Duration::from_secs(60);
 /// History evaluations one subject may be charged per window.
 const EVALUATIONS_PER_WINDOW: u64 = 30;
-const EVALUATION_WINDOW: Duration = Duration::from_secs(60 * 60);
+/// The window those evaluations are counted in: how long a rate-limited
+/// subject waits before retrying.
+pub const EVALUATION_WINDOW: Duration = Duration::from_secs(60 * 60);
 /// How long a finish waits for KSF memory before reporting unavailable.
 const KSF_WAIT: Duration = Duration::from_secs(10);
 /// Concurrent KSF memory one replica admits, MiB.
@@ -417,6 +413,112 @@ pub struct HistoryAdmission {
     pub live: LiveDomains,
 }
 
+impl HistoryAdmission {
+    /// The preparation request asking the evaluator for this admission.
+    pub fn request(&self) -> Result<PreparePasswordHistoryRequest, PasswordOperationError> {
+        let live = &self.live;
+        Ok(PreparePasswordHistoryRequest {
+            operation_id: Some(self.id.into()),
+            owner_domain: self.owner_domain.to_vec(),
+            owner_kind: self.kind.message() as i32,
+            expires_at: Some(timestamp(self.expires_at)),
+            charge_key: self.charge_key.clone(),
+            live_comparison_domains: live.domains.iter().map(|d| d.to_vec()).collect(),
+            history_revision: u64::try_from(live.revision).map_err(internal)?,
+            settled_operations: live
+                .settled
+                .iter()
+                .map(|op| sid_ids_proto::PasswordOperationId {
+                    value: op.as_bytes().to_vec(),
+                })
+                .collect(),
+        })
+    }
+
+    /// The admission a preparation request carries, decoded; the evaluator
+    /// checks each live domain against the owner's epochs.
+    pub fn of_request(req: &PreparePasswordHistoryRequest) -> Result<Self, PasswordOperationError> {
+        if req.live_comparison_domains.len() > MAX_HISTORY_DOMAINS {
+            return Err(invalid_field(
+                "live_comparison_domains",
+                "more domains than an operation holds",
+            ));
+        }
+        if req.settled_operations.len()
+            > sid_core::models::password_history::MAX_HISTORY_DEPTH as usize
+        {
+            return Err(invalid_field(
+                "settled_operations",
+                "more operations than history retains",
+            ));
+        }
+        let mut domains = req
+            .live_comparison_domains
+            .iter()
+            .map(|d| array32(d, "live_comparison_domains"))
+            .collect::<Result<Vec<_>, _>>()?;
+        domains.sort_unstable();
+        let settled = req
+            .settled_operations
+            .iter()
+            .map(|op| operation_id(Some(op)).map(|id| id.into_uuid()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let expires_at = req
+            .expires_at
+            .as_ref()
+            .and_then(|t| chrono::DateTime::from_timestamp(t.seconds, u32::try_from(t.nanos).ok()?))
+            .ok_or_else(|| invalid_field("expires_at", "a valid instant"))?;
+        Ok(Self {
+            id: operation_id(req.operation_id.as_ref())?,
+            owner_domain: array32(&req.owner_domain, "owner_domain")?,
+            kind: OwnerKind::of_message(req.owner_kind)
+                .ok_or_else(|| invalid_field("owner_kind", "a specified owner kind"))?,
+            expires_at,
+            charge_key: req.charge_key.clone(),
+            live: LiveDomains {
+                revision: i64::try_from(req.history_revision)
+                    .map_err(|_| invalid_field("history_revision", "out of range"))?,
+                domains,
+                settled,
+            },
+        })
+    }
+}
+
+/// The evaluator's answer to a preparation selecting `epochs`.
+pub fn preparation_response(epochs: &[HistoryEpochDescriptor]) -> PreparePasswordHistoryResponse {
+    PreparePasswordHistoryResponse {
+        domains: epochs
+            .iter()
+            .map(|e| domain_message(&OperationDomain::of(e)))
+            .collect(),
+        epochs: epochs.iter().map(descriptor_message).collect(),
+    }
+}
+
+/// The selection a preparation answer carries, when it is well formed: as
+/// many epochs as domains, within the bound, each domain the one its epoch
+/// describes under the shared relation.
+pub fn selection_of(
+    response: &PreparePasswordHistoryResponse,
+) -> Option<Vec<HistoryEpochDescriptor>> {
+    if response.epochs.is_empty()
+        || response.epochs.len() > MAX_HISTORY_DOMAINS
+        || response.epochs.len() != response.domains.len()
+    {
+        return None;
+    }
+    response
+        .epochs
+        .iter()
+        .zip(&response.domains)
+        .map(|(epoch, domain)| {
+            let epoch = descriptor_of(epoch)?;
+            (domain_message(&OperationDomain::of(&epoch)) == *domain).then_some(epoch)
+        })
+        .collect()
+}
+
 /// Admits a password operation at the history evaluator and returns its
 /// selected epochs: the evaluator in this process, or as its own service.
 #[async_trait::async_trait]
@@ -480,8 +582,8 @@ fn descriptor_of(m: &PasswordHistoryEpochDescriptor) -> Option<HistoryEpochDescr
     })
 }
 
-/// Why a step of a password operation is refused. Each has one gRPC status
-/// (`grpc` feature): its code, `ErrorInfo` reason and details.
+/// Why a step of a password operation is refused. Each has one answer in
+/// each protocol its adapter serves.
 #[derive(Debug, thiserror::Error)]
 pub enum PasswordOperationError {
     /// A dependency of the history check cannot answer now; retryable.

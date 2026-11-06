@@ -105,29 +105,3 @@ async fn no_caller_from_an_ended_or_invalid_token() {
         CallerError::Unauthenticated
     );
 }
-
-// Each refusal keeps the status the services have always answered with.
-#[cfg(feature = "grpc")]
-#[test]
-fn refusals_keep_their_status() {
-    use sid_core::grpc_error::extract_error_info;
-    use tonic::{Code, Status};
-
-    let unauthenticated = Status::from(CallerError::Unauthenticated);
-    assert_eq!(unauthenticated.code(), Code::Unauthenticated);
-    assert_eq!(
-        extract_error_info(&unauthenticated).unwrap().0,
-        "TOKEN_INVALID"
-    );
-    let denied = Status::from(CallerError::Denied);
-    assert_eq!(denied.code(), Code::PermissionDenied);
-    assert_eq!(
-        extract_error_info(&denied).unwrap().0,
-        "INSUFFICIENT_PERMISSIONS"
-    );
-    let unavailable = Status::from(CallerError::Unavailable {
-        what: "token revocation state",
-        detail: "down".into(),
-    });
-    assert_eq!(unavailable.code(), Code::Unavailable);
-}

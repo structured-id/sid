@@ -13,15 +13,11 @@
 //! about which check failed.
 
 use chrono::Utc;
-use sid_core::grpc_error::refuse::storage_failure;
-use sid_core::grpc_error::{ApiError, ErrorReason};
 use sid_core::models::{MachineUser, MachineUserCredential};
 use sid_plugin::StorageBackend;
-use tonic::{Request, Status};
 
-use crate::caller::bearer_token;
 use crate::jwt::AccessTokenClaims;
-use crate::resource_token::ResourceTokenVerifier;
+use crate::resource_token::{OwnTokenError, ResourceTokenVerifier};
 use crate::revocation_cache::RevocationCache;
 
 /// An authenticated machine user and the credential its token was issued for.
@@ -100,46 +96,38 @@ pub async fn machine_token_state(
     })
 }
 
-fn unauthenticated() -> Status {
-    ApiError::new(ErrorReason::TokenInvalid, "authentication required").into()
+/// Whether the token `claims` were verified from was revoked; revocation
+/// reaches every replica through the shared cache.
+pub(crate) async fn revoked(
+    revocation: &RevocationCache,
+    claims: &AccessTokenClaims,
+) -> Result<bool, OwnTokenError> {
+    revocation
+        .is_revoked(&claims.jti, &claims.sid)
+        .await
+        .map_err(|e| OwnTokenError::Storage(sid_core::Error::Storage(e.to_string())))
 }
 
-/// The machine user `request`'s bearer token authenticates at the resource
+/// The machine user the `presented` token authenticates at the resource
 /// `tokens` verifies.
-#[allow(clippy::result_large_err)]
-pub async fn authenticate_machine<T>(
-    request: &Request<T>,
+pub async fn authenticate_machine(
+    presented: &str,
     storage: &dyn StorageBackend,
     tokens: &ResourceTokenVerifier,
     revocation: &RevocationCache,
-) -> Result<MachineCaller, Status> {
-    let presented = bearer_token(request)?;
-    let claims = match tokens.verify(presented).await {
-        Ok(claims) => claims,
-        Err(sid_core::Error::AuthenticationFailed(_)) => return Err(unauthenticated()),
-        Err(e) => return Err(storage_failure(e)),
-    };
-    // A sender-constrained token needs its proof, which a service call does
-    // not carry (RFC 9449 §7.1); a ProfileId never rides a machine's token.
-    if claims.cnf.is_some() || claims.pid.is_some() {
-        return Err(unauthenticated());
-    }
+) -> Result<MachineCaller, OwnTokenError> {
+    let claims = tokens.verify_own(presented).await?;
     let MachineTokenState::Usable {
         machine,
         credential,
     } = machine_token_state(storage, &claims)
         .await
-        .map_err(storage_failure)?
+        .map_err(OwnTokenError::Storage)?
     else {
-        return Err(unauthenticated());
+        return Err(OwnTokenError::Unauthenticated);
     };
-    // Revocation reaches every replica through the shared cache.
-    if revocation
-        .is_revoked(&claims.jti, &claims.sid)
-        .await
-        .map_err(|e| storage_failure(sid_core::Error::Storage(e.to_string())))?
-    {
-        return Err(unauthenticated());
+    if revoked(revocation, &claims).await? {
+        return Err(OwnTokenError::Unauthenticated);
     }
     Ok(MachineCaller {
         machine,

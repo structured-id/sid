@@ -11,7 +11,11 @@
 
 use chrono::{DateTime, Utc};
 use sid_core::models::session::{AuthLevel, FULL_TRUST_HOURS};
-use sid_core::models::{Credential, CredentialType, CurrentPasswordRule, Session};
+use sid_core::models::{
+    Credential, CredentialType, CurrentPasswordRule, ProfileId, Session, SessionId,
+};
+
+use crate::caller::{Caller, CallerError};
 
 /// Why the caller may not bind the credential.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,48 +145,64 @@ pub fn check_password_change<O>(
     }
 }
 
+/// Why an enrollment step against the stored account was refused.
+#[derive(Debug, thiserror::Error)]
+pub enum EnrollmentError {
+    /// The session may not bind the credential now.
+    #[error("credential binding refused: {0:?}")]
+    Refused(EnrollmentRefusal),
+    /// The caller is not a user's own sign-in session.
+    #[error(transparent)]
+    Caller(#[from] CallerError),
+    /// The caller's token names no live session of its own Profile.
+    #[error("the caller's session is not its own live session")]
+    SessionInvalid,
+    /// The stored session or credentials could not be read.
+    #[error("storage: {0}")]
+    Storage(sid_core::Error),
+}
+
+impl From<EnrollmentRefusal> for EnrollmentError {
+    fn from(refusal: EnrollmentRefusal) -> Self {
+        Self::Refused(refusal)
+    }
+}
+
 /// Refuse unless `caller`'s own interactive session may bind a new
 /// `credential_type` credential to the caller's account now, judged by the
 /// stored session and the account's current active credentials. Ceremonies
 /// call it at their start and again at their finish.
-#[cfg(feature = "grpc")]
-#[allow(clippy::result_large_err)]
 pub async fn authorize(
     storage: &dyn sid_plugin::StorageBackend,
-    caller: &crate::caller::Caller,
+    caller: &Caller,
     credential_type: CredentialType,
     passkey_satisfies_mfa: bool,
-) -> Result<(), tonic::Status> {
+) -> Result<(), EnrollmentError> {
     let session = own_session(storage, caller).await?;
-    let active = active_credentials(storage, caller).await?;
-    check_enrollment(
+    let active = active_credentials(storage, caller.profile_id).await?;
+    Ok(check_enrollment(
         &session,
         &active,
         credential_type,
         passkey_satisfies_mfa,
         Utc::now(),
-    )
-    .map_err(tonic::Status::from)
+    )?)
 }
 
 /// Refuse unless `pending` may bind the account's first second factor now,
 /// judged by the account's current active credentials (see
 /// [`check_sign_in_enrollment`]).
-#[cfg(feature = "grpc")]
-#[allow(clippy::result_large_err)]
 pub async fn authorize_sign_in(
     storage: &dyn sid_plugin::StorageBackend,
     pending: &Session,
     passkey_satisfies_mfa: bool,
-) -> Result<(), tonic::Status> {
-    let active: Vec<Credential> = storage
-        .get_credentials_by_profile(pending.profile_id, None)
-        .await
-        .map_err(storage_failure)?
-        .into_iter()
-        .filter(|c| c.status.is_active())
-        .collect();
-    check_sign_in_enrollment(pending, &active, passkey_satisfies_mfa).map_err(tonic::Status::from)
+) -> Result<(), EnrollmentError> {
+    let active = active_credentials(storage, pending.profile_id).await?;
+    Ok(check_sign_in_enrollment(
+        pending,
+        &active,
+        passkey_satisfies_mfa,
+    )?)
 }
 
 /// Refuse unless `caller`'s own interactive session may replace the
@@ -190,16 +210,14 @@ pub async fn authorize_sign_in(
 /// whether the change must prove the current password now. Every
 /// password-change step calls it; the finish checks the answer against the
 /// operation it commits.
-#[cfg(feature = "grpc")]
-#[allow(clippy::result_large_err)]
 pub async fn password_change_authority(
     storage: &dyn sid_plugin::StorageBackend,
-    caller: &crate::caller::Caller,
+    caller: &Caller,
     passkey_satisfies_mfa: bool,
     rule: CurrentPasswordRule,
-) -> Result<bool, tonic::Status> {
+) -> Result<bool, EnrollmentError> {
     let session = own_session(storage, caller).await?;
-    let active = active_credentials(storage, caller).await?;
+    let active = active_credentials(storage, caller.profile_id).await?;
     match check_password_change(
         &session,
         &active,
@@ -214,106 +232,46 @@ pub async fn password_change_authority(
     }
 }
 
-/// The refusal of a password change that needed the current password and
-/// did not prove it.
-#[cfg(feature = "grpc")]
-pub fn current_password_required() -> tonic::Status {
-    EnrollmentRefusal::CurrentPasswordRequired.into()
-}
-
 /// How long the caller's session may still change its password without the
 /// current password, by this server's clock now (see
 /// [`current_password_required_in`]).
-#[cfg(feature = "grpc")]
-#[allow(clippy::result_large_err)]
 pub async fn password_change_requirement(
     storage: &dyn sid_plugin::StorageBackend,
-    caller: &crate::caller::Caller,
+    caller: &Caller,
     rule: CurrentPasswordRule,
-) -> Result<chrono::Duration, tonic::Status> {
+) -> Result<chrono::Duration, EnrollmentError> {
     let session = own_session(storage, caller).await?;
     Ok(current_password_required_in(&session, rule, Utc::now()))
 }
 
 /// The caller's own live interactive session, as stored.
-#[cfg(feature = "grpc")]
-#[allow(clippy::result_large_err)]
 async fn own_session(
     storage: &dyn sid_plugin::StorageBackend,
-    caller: &crate::caller::Caller,
-) -> Result<Session, tonic::Status> {
-    use sid_core::grpc_error::{ApiError, ErrorReason};
-    use sid_core::models::SessionId;
-
+    caller: &Caller,
+) -> Result<Session, EnrollmentError> {
     caller.require_interactive()?;
-    let invalid = || tonic::Status::from(ApiError::new(ErrorReason::TokenInvalid, ""));
-    let session_id = SessionId::parse(&caller.session_id).map_err(|_| invalid())?;
+    let session_id =
+        SessionId::parse(&caller.session_id).map_err(|_| EnrollmentError::SessionInvalid)?;
     storage
         .get_session(session_id)
         .await
-        .map_err(storage_failure)?
+        .map_err(EnrollmentError::Storage)?
         .filter(|s| s.profile_id == caller.profile_id && !s.is_expired())
-        .ok_or_else(invalid)
+        .ok_or(EnrollmentError::SessionInvalid)
 }
 
-/// The caller's active credentials.
-#[cfg(feature = "grpc")]
-#[allow(clippy::result_large_err)]
+/// The active credentials of `profile`.
 async fn active_credentials(
     storage: &dyn sid_plugin::StorageBackend,
-    caller: &crate::caller::Caller,
-) -> Result<Vec<Credential>, tonic::Status> {
+    profile: ProfileId,
+) -> Result<Vec<Credential>, EnrollmentError> {
     Ok(storage
-        .get_credentials_by_profile(caller.profile_id, None)
+        .get_credentials_by_profile(profile, None)
         .await
-        .map_err(storage_failure)?
+        .map_err(EnrollmentError::Storage)?
         .into_iter()
         .filter(|c| c.status.is_active())
         .collect())
-}
-
-#[cfg(feature = "grpc")]
-fn storage_failure(e: sid_core::Error) -> tonic::Status {
-    tracing::warn!("Storage error: {}", e);
-    tonic::Status::from(sid_core::grpc_error::ApiError::internal())
-}
-
-/// The status a refusal answers with; `continuation` tells the client what
-/// to do next.
-#[cfg(feature = "grpc")]
-impl From<EnrollmentRefusal> for tonic::Status {
-    fn from(refusal: EnrollmentRefusal) -> Self {
-        use sid_core::grpc_error::{ApiError, ErrorReason};
-
-        let err = match refusal {
-            EnrollmentRefusal::Provisional => ApiError::new(
-                ErrorReason::MfaRequired,
-                "sign in to the account, or recover it, before changing its credentials",
-            )
-            .with_metadata("continuation", "authenticate"),
-            EnrollmentRefusal::Insufficient { required } => ApiError::new(
-                ErrorReason::MfaRequired,
-                "a stronger authentication is required to change this credential",
-            )
-            .with_metadata("required_acr", required.acr_value())
-            .with_metadata("continuation", "step_up"),
-            EnrollmentRefusal::Stale { required } => ApiError::new(
-                ErrorReason::MfaRequired,
-                "authenticate again to change this credential",
-            )
-            .with_metadata("required_acr", required.acr_value())
-            .with_metadata("continuation", "reauthenticate"),
-            EnrollmentRefusal::CurrentPasswordRequired => ApiError::new(
-                ErrorReason::StepUpRequired,
-                "enter the current password to change it",
-            )
-            .with_metadata("continuation", "current_password")
-            // The canonical STEP_UP_REQUIRED detail: the method to add, the
-            // password (RFC 8176 §2 `pwd`).
-            .with_precondition("amr", "pwd", "prove the current password"),
-        };
-        tonic::Status::from(err)
-    }
 }
 
 #[cfg(test)]

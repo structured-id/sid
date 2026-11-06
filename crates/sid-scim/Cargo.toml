@@ -7,10 +7,12 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-sid-authn = { path = "../sid-authn", features = ["grpc"] }
+sid-authn = { path = "../sid-authn", features = ["keyed"] }
 # The fixed CE decision on a connector's directory actions.
-sid-authz = { path = "../sid-authz", default-features = false }
-sid-core = { path = "../sid-core", features = ["grpc"] }
+sid-authz = { path = "../sid-authz" }
+sid-core = { path = "../sid-core" }
+# Connector authentication, keyed commands and the canonical status.
+sid-infra = { workspace = true, features = ["authn-grpc"] }
 sid-plugin = { path = "../sid-plugin" }
 sid-proto = { path = "../sid-proto", features = ["grpc"] }
 tonic = { workspace = true }

@@ -6,12 +6,12 @@
 //! CE: stores attestation data and device public keys without
 //! cryptographic verification of attestation chains.
 
-use sid_core::grpc_error::refuse::{invalid_field, missing_field, not_found, storage_failure};
-use sid_core::grpc_error::{ApiError, ErrorReason};
 use sid_core::models::{
     AuditEntry, DeviceAttestation, DeviceAttestationFormat, DeviceId, KeyStorageType,
     MutationContext, ProfileId, SessionId,
 };
+use sid_infra::grpc_error::refuse::{invalid_field, missing_field, not_found, storage_failure};
+use sid_infra::grpc_error::{ApiError, ErrorReason};
 use sid_plugin::StorageBackend;
 use sid_proto::sid::v1::attestation::attestation_service_server::AttestationService;
 use sid_proto::sid::v1::attestation::*;

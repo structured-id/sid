@@ -6,7 +6,6 @@ use sid_core::models::{
     AuditEntry, ConnectorCredentialKind, ConnectorState, MutationContext, ProvisioningCredential,
 };
 use sid_storage::sqlite::SqliteBackend;
-use tonic::Code;
 
 fn audit() -> MutationContext {
     AuditEntry::system("test", "connector").into()
@@ -45,19 +44,15 @@ async fn connector_with_secret(
     (connector, credential, issued.secret.expose_secret().clone())
 }
 
-fn bearing(token: &str) -> Request<()> {
-    let mut request = Request::new(());
-    request
-        .metadata_mut()
-        .insert("authorization", format!("Bearer {token}").parse().unwrap());
-    request
+fn unauthenticated(err: &OwnTokenError) -> bool {
+    matches!(err, OwnTokenError::Unauthenticated)
 }
 
 async fn refused(storage: &SqliteBackend, org: OrgId, token: &str) {
-    let err = authenticate_connector(&bearing(token), storage, org, None)
+    let err = authenticate_connector(token, storage, org, None)
         .await
         .unwrap_err();
-    assert_eq!(err.code(), Code::Unauthenticated, "{token}: {err:?}");
+    assert!(unauthenticated(&err), "{token}: {err:?}");
 }
 
 /// The secret of an active inbound connector of the endpoint's organization
@@ -68,7 +63,7 @@ async fn a_connector_secret_authenticates_its_connector() {
     let org = OrgId::generate();
     let (connector, credential, secret) =
         connector_with_secret(&storage, org, ProvisioningDirection::Inbound).await;
-    let caller = authenticate_connector(&bearing(&secret), &storage, org, None)
+    let caller = authenticate_connector(&secret, &storage, org, None)
         .await
         .unwrap();
     assert_eq!(caller.connector.id, connector.id);
@@ -188,13 +183,13 @@ async fn a_connector_client_authenticates_with_its_client_secret() {
         let err = authenticate_connector_client(&storage, org, &connector.client_id, presented)
             .await
             .unwrap_err();
-        assert_eq!(err.code(), Code::Unauthenticated, "{presented}");
+        assert!(unauthenticated(&err), "{presented}");
     }
     let err =
         authenticate_connector_client(&storage, OrgId::generate(), &connector.client_id, &secret)
             .await
             .unwrap_err();
-    assert_eq!(err.code(), Code::Unauthenticated, "another organization");
+    assert!(unauthenticated(&err), "another organization");
 
     assert!(
         storage
@@ -210,20 +205,16 @@ async fn a_connector_client_authenticates_with_its_client_secret() {
     let err = authenticate_connector_client(&storage, org, &connector.client_id, &secret)
         .await
         .unwrap_err();
-    assert_eq!(err.code(), Code::Unauthenticated, "disabled");
+    assert!(unauthenticated(&err), "disabled");
 }
 
-/// No bearer, a bearer of another kind, an unknown secret, and a secret with
-/// one character changed are refused alike.
+/// A bearer of another kind, an unknown secret, and a secret with one
+/// character changed are refused alike.
 #[tokio::test]
 async fn anything_but_a_stored_secret_is_refused() {
     let storage = storage().await;
     let org = OrgId::generate();
     let (_, _, secret) = connector_with_secret(&storage, org, ProvisioningDirection::Inbound).await;
-    let err = authenticate_connector(&Request::new(()), &storage, org, None)
-        .await
-        .unwrap_err();
-    assert_eq!(err.code(), Code::Unauthenticated);
     let mut altered = secret.clone();
     let last = altered.pop().unwrap();
     altered.push(if last == 'A' { 'B' } else { 'A' });
@@ -286,7 +277,7 @@ async fn an_unusable_connector_or_credential_is_refused() {
             .await
             .unwrap()
     );
-    authenticate_connector(&bearing(&secret), &storage, org, None)
+    authenticate_connector(&secret, &storage, org, None)
         .await
         .unwrap();
 

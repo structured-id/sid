@@ -44,7 +44,7 @@ async fn every_refusal_carries_error_info() {
         routes,
         health.names(),
         &[sid_proto::FILE_DESCRIPTOR_SET],
-        &[sid_core::grpc_error::DOMAIN_SID],
+        &[sid_infra::grpc_error::DOMAIN_SID],
         &[
             Caller::anonymous("anonymous"),
             Caller::bearer("malformed", "not-a-jwt"),

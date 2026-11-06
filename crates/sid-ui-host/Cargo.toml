@@ -33,12 +33,12 @@ tonic = { workspace = true }
 # The browser adapter of the hosted application: its client at the issuer,
 # the issuer directory, the session store and revocations, and the browser
 # pages it answers with.
-sid-authn = { workspace = true, features = ["oauth-http"] }
+sid-authn = { workspace = true }
 # The application's own database, where the adapter's sessions live:
 # PostgreSQL for shared replicas, SQLite for a single instance.
 sid-storage = { workspace = true, features = ["storage-pg", "storage-sqlite"] }
 sid-plugin = { workspace = true }
-sid-infra = { workspace = true, features = ["issuer-client", "redis", "http"] }
+sid-infra = { workspace = true, features = ["issuer-client", "redis", "http", "oauth-http"] }
 # The process's JWT signature provider, installed at startup.
 sid-crypto = { workspace = true, features = ["jwt"] }
 chrono = { workspace = true }
@@ -48,7 +48,7 @@ structured-proxy = { version = "8.1.4", default-features = false }
 http = { workspace = true }
 http-body-util = "0.1"
 async-trait = { workspace = true }
-sid-core = { workspace = true, features = ["grpc"] }
+sid-core = { workspace = true }
 secrecy = { workspace = true }
 base64 = { workspace = true }
 rand = { workspace = true }

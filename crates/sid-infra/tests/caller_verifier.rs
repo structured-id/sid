@@ -6,27 +6,23 @@
 //! service that only verifies tokens must be able to do so with the public
 //! key alone.
 
-#![cfg(feature = "grpc")]
-
-use sid_authn::caller::{AtIssuer, authenticate, bearer_token};
+use sid_authn::caller::AtIssuer;
 use sid_authn::issuer_state::{IssuerState, IssuerStateUnavailable};
 use sid_authn::jwt::{JwtService, TokenVerifier};
 use sid_authn::revocation_cache::RevocationCache;
 use sid_core::models::dpop::DPopBinding;
 use sid_core::models::{Profile, Session};
+use sid_infra::authn::caller::{authenticate, bearer_token};
 use sid_plugin::cache::{CacheError, CacheResult};
 use tonic::{Code, Request};
 
 const ISSUER: &str = "https://sid.example.com";
-const PUBLIC_KEY: &[u8] = include_bytes!("fixtures/test_ed25519_public.pem");
+const PUBLIC_KEY: &[u8] = include_bytes!("../../sid-authn/tests/fixtures/test_ed25519_public.pem");
+const PRIVATE_KEY: &[u8] =
+    include_bytes!("../../sid-authn/tests/fixtures/test_ed25519_private.pem");
 
 fn jwt() -> JwtService {
-    JwtService::new(
-        include_bytes!("fixtures/test_ed25519_private.pem"),
-        PUBLIC_KEY,
-        ISSUER.to_string(),
-    )
-    .expect("JWT service")
+    JwtService::new(PRIVATE_KEY, PUBLIC_KEY, ISSUER.to_string()).expect("JWT service")
 }
 
 fn revocation() -> RevocationCache {
@@ -160,9 +156,7 @@ async fn token_exchanged_from_unbound_pat_is_refused() {
         cnf: None,
         act: None,
     };
-    let key =
-        jsonwebtoken::EncodingKey::from_ed_pem(include_bytes!("fixtures/test_ed25519_private.pem"))
-            .expect("signing key");
+    let key = jsonwebtoken::EncodingKey::from_ed_pem(PRIVATE_KEY).expect("signing key");
     let token = jsonwebtoken::encode(
         &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA),
         &claims,
@@ -206,9 +200,7 @@ fn installation_claims() -> sid_authn::jwt::AccessTokenClaims {
 /// `claims` signed with the installation's own key under JWS `typ` `typ`
 /// (the library's default `JWT` when `None`).
 fn signed(typ: Option<&str>, claims: &sid_authn::jwt::AccessTokenClaims) -> String {
-    let key =
-        jsonwebtoken::EncodingKey::from_ed_pem(include_bytes!("fixtures/test_ed25519_private.pem"))
-            .expect("signing key");
+    let key = jsonwebtoken::EncodingKey::from_ed_pem(PRIVATE_KEY).expect("signing key");
     let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
     if let Some(typ) = typ {
         header.typ = Some(typ.to_string());

@@ -631,6 +631,43 @@ impl<R: Reason> From<ApiError<R>> for tonic::Status {
     }
 }
 
+/// The one status a core's typed outcome is answered with over gRPC. Every
+/// service converts through this, never with a mapping of its own.
+pub trait IntoStatus {
+    fn into_status(self) -> tonic::Status;
+}
+
+impl IntoStatus for tonic::Status {
+    fn into_status(self) -> tonic::Status {
+        self
+    }
+}
+
+impl<R: Reason> IntoStatus for ApiError<R> {
+    fn into_status(self) -> tonic::Status {
+        self.into()
+    }
+}
+
+/// A storage failure, as [`refuse::storage_failure`] answers it.
+impl IntoStatus for sid_core::Error {
+    fn into_status(self) -> tonic::Status {
+        refuse::storage_failure(self)
+    }
+}
+
+/// [`IntoStatus`] for a result: `core_call().or_status()?` in a handler.
+pub trait OrStatus<T> {
+    #[allow(clippy::result_large_err)]
+    fn or_status(self) -> Result<T, tonic::Status>;
+}
+
+impl<T, E: IntoStatus> OrStatus<T> for Result<T, E> {
+    fn or_status(self) -> Result<T, tonic::Status> {
+        self.map_err(IntoStatus::into_status)
+    }
+}
+
 /// `ErrorInfo` of a status as (reason, domain, metadata), or `None` when the
 /// status carries none.
 pub fn extract_error_info(

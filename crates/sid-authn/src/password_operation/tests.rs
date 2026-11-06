@@ -1705,3 +1705,107 @@ fn the_history_write_cutoff_is_a_past_instant() {
         Err(HistoryCutoffError::Future)
     );
 }
+
+/// A preparation request is decoded before the evaluator acts on it, and an
+/// admission travels as it was: an owner domain or live domain that is not
+/// 32 bytes, an unspecified owner kind, a missing expiry, a malformed settled
+/// operation or more entries than the bounds allow is a malformed field.
+#[test]
+fn a_malformed_admission_is_refused_by_its_field() {
+    use sid_proto::sid::v1::authn::PasswordHistoryOwnerKind;
+    let expires_at = chrono::Utc::now() + chrono::Duration::minutes(5);
+    let good = PreparePasswordHistoryRequest {
+        operation_id: Some(PasswordOperationId::generate().into()),
+        owner_domain: vec![3; 32],
+        owner_kind: PasswordHistoryOwnerKind::Existing as i32,
+        expires_at: Some(timestamp(expires_at)),
+        charge_key: "charge".into(),
+        live_comparison_domains: vec![vec![2; 32], vec![1; 32]],
+        history_revision: 4,
+        settled_operations: vec![PasswordOperationId::generate().into()],
+    };
+    let admission = HistoryAdmission::of_request(&good).unwrap();
+    assert_eq!(admission.owner_domain, [3; 32]);
+    assert_eq!(admission.kind, OwnerKind::Existing);
+    assert_eq!(admission.expires_at, expires_at);
+    assert_eq!(admission.live.domains, vec![[1; 32], [2; 32]], "sorted");
+    assert_eq!(admission.live.revision, 4);
+    assert_eq!(admission.live.settled.len(), 1);
+    assert_eq!(
+        HistoryAdmission::of_request(&admission.request().unwrap()).unwrap(),
+        admission
+    );
+
+    for bad in [
+        PreparePasswordHistoryRequest {
+            owner_domain: vec![3; 31],
+            ..good.clone()
+        },
+        PreparePasswordHistoryRequest {
+            owner_kind: PasswordHistoryOwnerKind::Unspecified as i32,
+            ..good.clone()
+        },
+        PreparePasswordHistoryRequest {
+            expires_at: None,
+            ..good.clone()
+        },
+        PreparePasswordHistoryRequest {
+            live_comparison_domains: vec![vec![1; 31]],
+            ..good.clone()
+        },
+        PreparePasswordHistoryRequest {
+            live_comparison_domains: vec![vec![1; 32]; MAX_HISTORY_DOMAINS + 1],
+            ..good.clone()
+        },
+        PreparePasswordHistoryRequest {
+            settled_operations: vec![sid_ids_proto::PasswordOperationId { value: vec![1; 3] }],
+            ..good.clone()
+        },
+        PreparePasswordHistoryRequest {
+            history_revision: u64::MAX,
+            ..good.clone()
+        },
+    ] {
+        let refused = HistoryAdmission::of_request(&bad).unwrap_err();
+        assert!(
+            matches!(
+                refused,
+                PasswordOperationError::InvalidField { .. }
+                    | PasswordOperationError::InvalidOperationId(_)
+            ),
+            "{refused:?}"
+        );
+    }
+}
+
+/// A remote evaluator's answer is accepted only when it describes each
+/// domain it returns: as many epochs as domains, each domain the one its
+/// epoch gives under the shared relation, each description well formed.
+#[test]
+fn a_remote_selection_must_describe_its_domains() {
+    use sid_core::models::HistoryEpochUse;
+    let described = sid_core::models::KeyEpoch {
+        id: HistoryEpochId::generate(),
+        owner_domain: [3; 32],
+        suite: HistorySuite::PallasPoseidonV1,
+        public_key: [5; 32],
+        ksf: HistoryKsf::DEFAULT,
+        ksf_salt: [6; 32],
+        status: HistoryEpochUse::Active,
+        created_at: chrono::Utc::now(),
+    }
+    .descriptor();
+    let good = preparation_response(std::slice::from_ref(&described));
+    assert_eq!(selection_of(&good), Some(vec![described]));
+    let mut other_salt = good.clone();
+    other_salt.epochs[0].ksf_salt = vec![7; 32];
+    let mut malformed = good.clone();
+    malformed.epochs[0].epoch_id = vec![1; 3];
+    let mut unknown_suite = good.clone();
+    unknown_suite.epochs[0].suite = "pallas-poseidon-v0".into();
+    let mut missing = good.clone();
+    missing.epochs.clear();
+    for refused in [other_salt, malformed, unknown_suite, missing] {
+        assert_eq!(selection_of(&refused), None);
+    }
+}

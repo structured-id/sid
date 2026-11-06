@@ -298,7 +298,7 @@ async fn a_silent_issuer_fails_at_the_bound() {
 /// The `ErrorInfo.reason` the answer's `grpc-status-details-bin` carries.
 fn reason(answer: &Answer) -> String {
     let status = tonic::Status::from_header_map(answer.headers()).expect("a gRPC status");
-    sid_core::grpc_error::extract_error_info(&status)
+    sid_infra::grpc_error::extract_error_info(&status)
         .expect("a google.rpc.ErrorInfo")
         .0
 }

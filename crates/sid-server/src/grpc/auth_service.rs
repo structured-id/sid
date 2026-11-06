@@ -19,10 +19,6 @@ use sid_authn::jwt::JwtService;
 use sid_authn::legacy_hash::BuiltinLegacyVerifier;
 use sid_authn::magic_link::MagicLinkService;
 use sid_authn::normalize::{NormalizedPrincipal, normalize_principal};
-use sid_authn::oauth_http::{
-    client_authentication, client_refused, dpop_refusal, missing_parameter, target_refused,
-    token_error, token_refusal,
-};
 use sid_authn::oauth2::{IdTokenSource, OAuth2Server, TokenError};
 use sid_authn::opaque::OpaqueRouter;
 use sid_authn::opaque_zkpp::ZkppOpaqueServer;
@@ -37,7 +33,6 @@ use sid_authn::webauthn::{
     VerifiedAssertion, WebAuthnServer,
 };
 use sid_core::enrollment::{EnrollmentDecision, evaluate_enrollment};
-use sid_core::grpc_error::{ApiError, ErrorReason};
 use sid_core::models::WebAuthnUserHandle;
 use sid_core::models::dpop::DPopBinding;
 use sid_core::models::event::{Event, event_types};
@@ -51,6 +46,11 @@ use sid_core::models::{
 use sid_core::models::{
     HistoryCommit, MutationContext, OidcIssuer, OperationCompletion, ProfileEmail, ProfilePhone,
     RevocationReason,
+};
+use sid_infra::grpc_error::{ApiError, ErrorReason, IntoStatus, OrStatus};
+use sid_infra::oauth_http::{
+    client_authentication, client_refused, dpop_refusal, missing_parameter, target_refused,
+    token_error, token_refusal,
 };
 use sid_plugin::cache::CacheBackend;
 use sid_plugin::crypto::StoredCredential;
@@ -67,7 +67,7 @@ use sid_authn::native_session::{NativePolicy, PROOF_METADATA, REFRESH_METADATA};
 use sid_authn::password_operation::{
     CurrentPasswordCheck, OperationOwner, change_context, operation_id,
 };
-use sid_core::grpc_error::refuse::{
+use sid_infra::grpc_error::refuse::{
     changed_concurrently, dependency_unavailable, internal, invalid_field, maintenance,
     missing_field, not_configured, not_found, not_in_this_build, storage_failure,
 };

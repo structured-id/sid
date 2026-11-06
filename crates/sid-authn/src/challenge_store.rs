@@ -37,15 +37,6 @@ impl From<ChallengeStoreError> for sid_core::Error {
     }
 }
 
-/// An internal error to the client; the cause stays in the log.
-#[cfg(feature = "grpc")]
-impl From<ChallengeStoreError> for tonic::Status {
-    fn from(e: ChallengeStoreError) -> Self {
-        tracing::error!(error = %e, "ceremony state store failed");
-        sid_core::grpc_error::ApiError::internal().into()
-    }
-}
-
 /// A value read together with the form it is stored in, so a replacement
 /// applies only to exactly what was read.
 pub struct Versioned<V> {

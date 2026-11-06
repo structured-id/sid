@@ -17,7 +17,7 @@ fn internal_hides_the_cause() {
 /// A storage failure is an internal failure that hides its cause too.
 #[test]
 fn storage_failure_hides_the_cause() {
-    let status = storage_failure(crate::Error::Storage("connection reset by peer".into()));
+    let status = storage_failure(sid_core::Error::Storage("connection reset by peer".into()));
     assert_eq!(status.code(), Code::Internal);
     assert!(!status.message().contains("reset"));
 }
@@ -27,15 +27,15 @@ fn storage_failure_hides_the_cause() {
 /// period field.
 #[test]
 fn storage_failure_answers_a_refused_period() {
-    use crate::models::OperationPeriodRefusal;
-    let retired = storage_failure(crate::Error::OperationPeriodRefused(
+    use sid_core::models::OperationPeriodRefusal;
+    let retired = storage_failure(sid_core::Error::OperationPeriodRefused(
         OperationPeriodRefusal::Retired,
     ));
     assert_eq!(
         retired.get_error_details().error_info().unwrap().reason,
         "OPERATION_EXPIRED"
     );
-    let unissued = storage_failure(crate::Error::OperationPeriodRefused(
+    let unissued = storage_failure(sid_core::Error::OperationPeriodRefused(
         OperationPeriodRefusal::NotIssued,
     ));
     assert_eq!(unissued.code(), Code::InvalidArgument);
@@ -49,7 +49,7 @@ fn storage_failure_answers_a_refused_period() {
 /// an internal failure.
 #[test]
 fn storage_failure_answers_a_reused_key() {
-    let reused = storage_failure(crate::Error::OperationKeyReused("k".into()));
+    let reused = storage_failure(sid_core::Error::OperationKeyReused("k".into()));
     assert_eq!(reused.code(), Code::AlreadyExists);
     assert_eq!(
         reused.get_error_details().error_info().unwrap().reason,

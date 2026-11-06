@@ -2,17 +2,14 @@
 //! Keyed commands. A method that promises safe retry is called with the
 //! caller's operation context, answers a retry of a completed command with
 //! its recorded result, and commits its completion with its effect. This
-//! core takes no transport; [`grpc`] reads the context from a call and turns
-//! [`OperationError`] into its status.
+//! core takes no transport: an adapter reads the context from a call and
+//! answers [`CommandError`] in its protocol.
 
 use sid_core::models::{
     OperationCompletion, OperationContext, OperationKey, OperationPeriod, OperationPeriodRefusal,
 };
 use sid_plugin::OperationResultStore;
 use sid_proto::KeyedMethod;
-
-#[cfg(feature = "grpc")]
-pub mod grpc;
 
 /// Why a keyed command answered with no result of its own.
 #[derive(Debug, thiserror::Error)]
@@ -230,16 +227,14 @@ impl KeyedCommand {
     /// result; otherwise `effect` commits the mutation with
     /// [`Self::completion`] of its response, and a concurrent attempt that
     /// committed first answers with that attempt's result. Retries never
-    /// apply the effect again. A refusal `E` is answered as is; `run` in
-    /// [`grpc`] is this with a status.
+    /// apply the effect again. A refusal `E` is answered as is.
     pub async fn execute<T, E, F, Fut>(
         &self,
         storage: &(impl OperationResultStore + ?Sized),
         effect: F,
-    ) -> Result<T, E>
+    ) -> Result<T, CommandError<E>>
     where
         T: prost::Message + Default,
-        E: From<OperationError>,
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<T, Effect<E>>>,
     {
@@ -254,10 +249,9 @@ impl KeyedCommand {
         &self,
         storage: &(impl OperationResultStore + ?Sized),
         effect: F,
-    ) -> Result<T, E>
+    ) -> Result<T, CommandError<E>>
     where
         T: serde::de::DeserializeOwned,
-        E: From<OperationError>,
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<T, Effect<E>>>,
     {
@@ -275,17 +269,16 @@ impl KeyedCommand {
         storage: &(impl OperationResultStore + ?Sized),
         audit: sid_core::models::AuditEntry,
         current: F,
-    ) -> Result<T, E>
+    ) -> Result<T, CommandError<E>>
     where
         T: prost::Message + Default,
-        E: From<OperationError>,
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<T, E>>,
     {
         if let Some(result) = self.completed(storage).await? {
             return Ok(decode(&result)?);
         }
-        let response = current().await?;
+        let response = current().await.map_err(CommandError::Refused)?;
         let ctx = sid_core::models::MutationContext::from(audit)
             .with_operation(self.completion(response.encode_to_vec()));
         match storage.record_outcome(ctx).await {
@@ -302,17 +295,16 @@ impl KeyedCommand {
         storage: &(impl OperationResultStore + ?Sized),
         audit: sid_core::models::AuditEntry,
         current: F,
-    ) -> Result<T, E>
+    ) -> Result<T, CommandError<E>>
     where
         T: serde::Serialize + serde::de::DeserializeOwned,
-        E: From<OperationError>,
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<T, E>>,
     {
         if let Some(result) = self.completed(storage).await? {
             return Ok(decode_recorded(&result)?);
         }
-        let state = current().await?;
+        let state = current().await.map_err(CommandError::Refused)?;
         let mut ctx =
             sid_core::models::MutationContext::from(audit).with_operation(self.effect_completion());
         ctx.record_effect(&state).map_err(OperationError::Store)?;
@@ -343,9 +335,8 @@ impl KeyedCommand {
         storage: &(impl OperationResultStore + ?Sized),
         decode: fn(&[u8]) -> Result<T, OperationError>,
         effect: F,
-    ) -> Result<T, E>
+    ) -> Result<T, CommandError<E>>
     where
-        E: From<OperationError>,
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<T, Effect<E>>>,
     {
@@ -359,10 +350,28 @@ impl KeyedCommand {
             // A refusal caused by a concurrent attempt of this command that
             // committed first (a limit counted before the key) is that
             // attempt's result; any other refusal is answered as is.
-            Err(Effect::Refused(refusal)) => match self.completed(storage).await {
-                Ok(Some(result)) => Ok(decode(&result)?),
-                _ => Err(refusal),
-            },
+            Err(Effect::Refused(refusal)) => {
+                self.refused(storage, decode, CommandError::Refused(refusal))
+                    .await
+            }
+            Err(Effect::Operation(e)) => {
+                self.refused(storage, decode, CommandError::Operation(e))
+                    .await
+            }
+        }
+    }
+
+    /// An effect's `refusal`, unless a concurrent attempt of this command
+    /// committed meanwhile: then that attempt's result.
+    async fn refused<T, E>(
+        &self,
+        storage: &(impl OperationResultStore + ?Sized),
+        decode: fn(&[u8]) -> Result<T, OperationError>,
+        refusal: CommandError<E>,
+    ) -> Result<T, CommandError<E>> {
+        match self.completed(storage).await {
+            Ok(Some(result)) => Ok(decode(&result)?),
+            _ => Err(refusal),
         }
     }
 
@@ -406,6 +415,9 @@ impl KeyedCommand {
 pub enum Effect<E> {
     /// Refused before or by the commit, answered as is.
     Refused(E),
+    /// Refused by a keyed command the effect ran itself (another command's
+    /// key it resolved), answered as that command's refusal.
+    Operation(OperationError),
     /// The store's failure; an already completed key is resolved to its
     /// recorded result.
     Store(sid_core::Error),
@@ -414,6 +426,36 @@ pub enum Effect<E> {
 impl<E> From<sid_core::Error> for Effect<E> {
     fn from(e: sid_core::Error) -> Self {
         Self::Store(e)
+    }
+}
+
+impl<E> From<OperationError> for Effect<E> {
+    fn from(e: OperationError) -> Self {
+        Self::Operation(e)
+    }
+}
+
+/// Why a keyed command answered with no result of its own: its effect's
+/// refusal `E`, or the command's own.
+#[derive(Debug)]
+pub enum CommandError<E> {
+    Refused(E),
+    Operation(OperationError),
+}
+
+impl<E> From<OperationError> for CommandError<E> {
+    fn from(e: OperationError) -> Self {
+        Self::Operation(e)
+    }
+}
+
+impl<E: From<OperationError>> CommandError<E> {
+    /// The refusal, in a vocabulary that also names the command's own.
+    pub fn refusal(self) -> E {
+        match self {
+            Self::Refused(e) => e,
+            Self::Operation(e) => e.into(),
+        }
     }
 }
 

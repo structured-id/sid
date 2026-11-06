@@ -12,31 +12,18 @@ name = "sid_authz"
 path = "src/lib.rs"
 
 [dependencies]
-sid-authn = { workspace = true, optional = true }
 sid-core = { workspace = true }
 sid-plugin = { workspace = true }
-sid-proto = { workspace = true, optional = true }
-# Checked conversions of the identifier messages the services carry.
-sid-ids-proto = { workspace = true, optional = true }
 async-trait = { workspace = true }
 cedar-policy = { workspace = true }
 chrono = { workspace = true }
 # The compiled policy sets, shared by concurrent decisions.
 dashmap = { workspace = true }
-prost = { workspace = true, optional = true }
-prost-types = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tonic = { workspace = true, optional = true }
-# Reads which field a refusal names, to tell a refused token from other refusals.
-tonic-types = { workspace = true, optional = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
-
-[features]
-default = ["grpc"]
-grpc = ["dep:sid-authn", "sid-authn/grpc", "sid-core/grpc", "dep:sid-proto", "sid-proto/grpc", "dep:sid-ids-proto", "dep:tonic", "dep:tonic-types", "dep:prost", "dep:prost-types"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -140,8 +140,8 @@ impl BrowserSecret {
     }
 
     /// The secret `value` carries, when it is exactly 32 bytes of unpadded
-    /// base64url.
-    pub(crate) fn decode(value: &str) -> Option<Self> {
+    /// base64url: what a transport adapter reads from a presented bearer.
+    pub fn decode(value: &str) -> Option<Self> {
         let decoded = Zeroizing::new(URL_SAFE_NO_PAD.decode(value).ok()?);
         let bytes: [u8; 32] = decoded.as_slice().try_into().ok()?;
         Some(Self(Zeroizing::new(bytes)))

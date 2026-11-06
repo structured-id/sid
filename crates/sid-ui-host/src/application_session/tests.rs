@@ -253,7 +253,7 @@ fn status(response: &Response<HttpBody>) -> String {
 }
 
 fn reason(status: &Status) -> String {
-    sid_core::grpc_error::extract_error_info(status).unwrap().0
+    sid_infra::grpc_error::extract_error_info(status).unwrap().0
 }
 
 /// Sign-in starts with a redirect to the issuer's authorization endpoint,

@@ -1,5 +1,5 @@
 use super::*;
-use sid_core::grpc_error::extract_error_info;
+use crate::grpc_error::extract_error_info;
 use tower::{Layer, Service, ServiceExt};
 
 fn metadata(keys: &[&str], periods: &[&str]) -> MetadataMap {

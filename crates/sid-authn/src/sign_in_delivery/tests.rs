@@ -3,7 +3,6 @@
 use chrono::{Duration, Utc};
 use secrecy::SecretString;
 use sid_core::models::{ProfileId, Session};
-use tonic::metadata::MetadataMap;
 
 use super::*;
 use crate::browser_session::BrowserCookie;
@@ -14,38 +13,29 @@ fn page() -> url::Origin {
         .origin()
 }
 
-fn with_origins(origins: &[&str]) -> MetadataMap {
-    let mut metadata = MetadataMap::new();
-    for origin in origins {
-        metadata.append("origin", origin.parse().unwrap());
-    }
-    metadata
+fn client(origins: &[&str], page: Option<&url::Origin>) -> Result<CeremonyClient, NotSignInPage> {
+    ceremony_client(origins.iter().copied().map(Some), page)
 }
 
 /// A request without `Origin` is a native client, with or without a page.
 #[test]
 fn no_origin_is_a_native_client() {
-    assert_eq!(
-        ceremony_client(&with_origins(&[]), Some(&page())).unwrap(),
-        CeremonyClient::Native
-    );
-    assert_eq!(
-        ceremony_client(&with_origins(&[]), None).unwrap(),
-        CeremonyClient::Native
-    );
+    assert_eq!(client(&[], Some(&page())).unwrap(), CeremonyClient::Native);
+    assert_eq!(client(&[], None).unwrap(), CeremonyClient::Native);
 }
 
 /// Exactly the sign-in page's `Origin` is the browser.
 #[test]
 fn sign_in_page_origin_is_the_browser() {
     assert_eq!(
-        ceremony_client(&with_origins(&["https://sid.example.com"]), Some(&page())).unwrap(),
+        client(&["https://sid.example.com"], Some(&page())).unwrap(),
         CeremonyClient::Browser
     );
 }
 
 /// Any other browser request is refused, never answered as a native client:
-/// another origin, `null`, a repeated `Origin`, or no configured page.
+/// another origin, `null`, a repeated `Origin`, one that is not text, or no
+/// configured page.
 #[test]
 fn other_browser_requests_are_refused() {
     for origins in [
@@ -55,80 +45,41 @@ fn other_browser_requests_are_refused() {
         vec!["https://sid.example.com:8443"],
     ] {
         assert!(
-            ceremony_client(&with_origins(&origins), Some(&page())).is_err(),
+            client(&origins, Some(&page())).is_err(),
             "{origins:?} was accepted"
         );
     }
-    assert!(ceremony_client(&with_origins(&["https://sid.example.com"]), None).is_err());
+    assert!(ceremony_client([None], Some(&page())).is_err());
+    assert!(client(&["https://sid.example.com"], None).is_err());
 }
 
-/// The cookie goes into `set-cookie`, the token into `authorization`, both
-/// marked sensitive, and nothing into the message.
+/// The cookie goes into `set-cookie`, the token into `authorization` with
+/// the refresh generation encoded beside it, and nothing anywhere else.
 #[test]
-fn credentials_go_into_sensitive_metadata() {
-    let session = sid_ids::SessionId::generate();
-    let response = SignedIn {
-        session_id: session,
-        expires_in: 60,
-        delivery: Delivery::Cookie("__Host-sid_session=x".into()),
-    }
-    .respond(|id, expires_in| (id, expires_in))
-    .unwrap();
-    assert_eq!(response.get_ref(), &(session, 60));
-    let cookie = response.metadata().get("set-cookie").unwrap();
-    assert_eq!(cookie, "__Host-sid_session=x");
-    assert!(cookie.is_sensitive());
-    assert!(response.metadata().get("authorization").is_none());
-
-    let response = SignedIn {
-        session_id: sid_ids::SessionId::generate(),
-        expires_in: 60,
-        delivery: Delivery::bearer(SecretString::from("token")),
-    }
-    .respond(|_, _| ())
-    .unwrap();
-    let token = response.metadata().get("authorization").unwrap();
-    assert_eq!(token, "Bearer token");
-    assert!(token.is_sensitive());
-    assert!(response.metadata().get("set-cookie").is_none());
-    assert!(
-        response
-            .metadata()
-            .get_bin(crate::native_session::CREDENTIALS_METADATA)
-            .is_none()
+fn each_credential_names_its_header() {
+    let (name, value, refresh) = Delivery::Cookie("__Host-sid_session=x".into()).header();
+    assert_eq!(
+        (name, value.as_str()),
+        ("set-cookie", "__Host-sid_session=x")
     );
-}
+    assert!(refresh.is_none());
 
-/// A native session's refresh generation travels beside its access token in
-/// its own binary metadata, marked sensitive and decodable as sent.
-#[test]
-fn a_refresh_generation_goes_into_its_binary_metadata() {
+    let (name, value, refresh) = Delivery::bearer(SecretString::from("token")).header();
+    assert_eq!((name, value.as_str()), ("authorization", "Bearer token"));
+    assert!(refresh.is_none());
+
     let set = NativeCredentialSet {
         refresh_credentials: vec!["a".into(), "b".into()],
         expires_in: 3600,
         redelivery_window: 30,
     };
-    let response = SignedIn {
-        session_id: sid_ids::SessionId::generate(),
-        expires_in: 60,
-        delivery: Delivery::Bearer {
-            token: SecretString::from("token"),
-            refresh: Some(set.clone()),
-        },
+    let (_, _, refresh) = Delivery::Bearer {
+        token: SecretString::from("token"),
+        refresh: Some(set.clone()),
     }
-    .respond(|_, _| ())
-    .unwrap();
-    let sent = response
-        .metadata()
-        .get_bin(crate::native_session::CREDENTIALS_METADATA)
-        .unwrap();
-    assert!(sent.is_sensitive());
-    let decoded = NativeCredentialSet::decode(sent.to_bytes().unwrap().as_ref()).unwrap();
+    .header();
+    let decoded = NativeCredentialSet::decode(refresh.unwrap().as_slice()).unwrap();
     assert_eq!(decoded, set);
-    assert_eq!(
-        response.metadata().get("authorization").unwrap(),
-        "Bearer token"
-    );
 }
 
 /// The cookie's lifetime is what remains of the session when the credential

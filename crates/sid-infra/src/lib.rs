@@ -9,10 +9,14 @@
 //! - `RedisCacheBackend` — Redis/Dragonfly distributed cache
 //! - `issuer_registry` — the issuer registry over gRPC
 
+#[cfg(feature = "authn-grpc")]
+pub mod authn;
 #[cfg(feature = "issuer-client")]
 pub mod client_credential;
 #[cfg(feature = "issuer-client")]
 pub mod deadline;
+#[cfg(feature = "grpc")]
+pub mod grpc_error;
 #[cfg(feature = "http")]
 pub mod http;
 #[cfg(feature = "issuer-client")]
@@ -23,6 +27,8 @@ pub mod issuer_registry;
 pub mod nats_event_bus;
 #[cfg(feature = "nats")]
 pub mod nats_topology;
+#[cfg(feature = "oauth-http")]
+pub mod oauth_http;
 #[cfg(feature = "redis")]
 pub mod redis_cache;
 pub mod route;
