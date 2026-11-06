@@ -67,7 +67,7 @@ impl CoordinodeBackend {
                 "MATCH (p:SidProfile) WHERE p.id = $id RETURN id(p) AS node",
                 Params::default().with("id", Value::Binary(s.profile_id.as_bytes().to_vec())),
             )?;
-            if !super::hold_first(tx, &held)? {
+            if !super::claim_first(tx, &held)? {
                 return Err(SidError::NotFound(format!("profile {}", s.profile_id)));
             }
             if get_reset(tx, s.id)?.is_some() {

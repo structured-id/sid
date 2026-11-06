@@ -241,7 +241,7 @@ impl CoordinodeBackend {
                 "MATCH (p:SidProfile) WHERE p.id = $id RETURN id(p) AS node",
                 Params::default().with("id", bin(req.profile_id.as_bytes())),
             )?;
-            if !super::hold_first(tx, &held)? {
+            if !super::claim_first(tx, &held)? {
                 return Err(SidError::NotFound(format!("profile {}", req.profile_id)));
             }
             insert_closure(tx, &req, false)
@@ -315,7 +315,7 @@ impl CoordinodeBackend {
                 "MATCH (p:SidProfile) WHERE p.id = $id RETURN id(p) AS node",
                 Params::default().with("id", bin(job.profile_id.as_bytes())),
             )?;
-            if !super::hold_first(tx, &held)? {
+            if !super::claim_first(tx, &held)? {
                 return Err(SidError::NotFound(format!("profile {}", job.profile_id)));
             }
             if !exports_where(tx, "e.id = $value", uuid(&job.id))?.is_empty() {
