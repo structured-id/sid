@@ -424,28 +424,28 @@ impl StorageBackend for CoordinodeBackend {
 
     // === PROFILES ===
 
-    async fn get_profile(&self, _id: ProfileId) -> Result<Option<Profile>> {
-        refused("profiles")
+    async fn get_profile(&self, id: ProfileId) -> Result<Option<Profile>> {
+        CoordinodeBackend::get_profile(self, id).await
     }
 
-    async fn get_profile_by_username(&self, _username: &str) -> Result<Option<Profile>> {
-        refused("profiles")
+    async fn get_profile_by_username(&self, username: &str) -> Result<Option<Profile>> {
+        CoordinodeBackend::get_profile_by_username(self, username).await
     }
 
-    async fn get_profile_by_email(&self, _email: &str) -> Result<Option<Profile>> {
-        refused("profiles")
+    async fn get_profile_by_email(&self, email: &str) -> Result<Option<Profile>> {
+        CoordinodeBackend::get_profile_by_email(self, email).await
     }
 
-    async fn create_profile(&self, _profile: &Profile, _ctx: MutationContext) -> Result<()> {
-        refused("profiles")
+    async fn create_profile(&self, profile: &Profile, ctx: MutationContext) -> Result<()> {
+        CoordinodeBackend::create_profile(self, profile, ctx).await
     }
 
-    async fn update_profile(&self, _profile: &Profile, _ctx: MutationContext) -> Result<bool> {
-        refused("profiles")
+    async fn update_profile(&self, profile: &Profile, ctx: MutationContext) -> Result<bool> {
+        CoordinodeBackend::update_profile(self, profile, ctx).await
     }
 
-    async fn delete_profile(&self, _id: ProfileId, _ctx: MutationContext) -> Result<()> {
-        refused("profiles")
+    async fn delete_profile(&self, id: ProfileId, ctx: MutationContext) -> Result<()> {
+        CoordinodeBackend::delete_profile(self, id, ctx).await
     }
 
     async fn register_profile(
@@ -474,100 +474,94 @@ impl StorageBackend for CoordinodeBackend {
 
     // === CONTACTS ===
 
-    async fn get_profile_phone(&self, _id: ProfilePhoneId) -> Result<Option<ProfilePhone>> {
-        refused("profile phones")
+    async fn get_profile_phone(&self, id: ProfilePhoneId) -> Result<Option<ProfilePhone>> {
+        CoordinodeBackend::get_profile_phone(self, id).await
     }
 
-    async fn list_profile_phones(&self, _profile_id: ProfileId) -> Result<Vec<ProfilePhone>> {
-        refused("profile phones")
+    async fn list_profile_phones(&self, profile_id: ProfileId) -> Result<Vec<ProfilePhone>> {
+        CoordinodeBackend::list_profile_phones(self, profile_id).await
     }
 
     async fn get_primary_profile_phone(
         &self,
-        _profile_id: ProfileId,
+        profile_id: ProfileId,
     ) -> Result<Option<ProfilePhone>> {
-        refused("profile phones")
+        CoordinodeBackend::get_primary_profile_phone(self, profile_id).await
     }
 
-    async fn create_profile_phone(
-        &self,
-        _phone: &ProfilePhone,
-        _ctx: MutationContext,
-    ) -> Result<()> {
-        refused("profile phones")
+    async fn create_profile_phone(&self, phone: &ProfilePhone, ctx: MutationContext) -> Result<()> {
+        CoordinodeBackend::create_profile_phone(self, phone, ctx).await
     }
 
     async fn update_profile_phone_settings(
         &self,
-        _profile_id: ProfileId,
-        _id: ProfilePhoneId,
-        _settings: &PhoneSettings,
-        _at: DateTime<Utc>,
-        _ctx: MutationContext,
+        profile_id: ProfileId,
+        id: ProfilePhoneId,
+        settings: &PhoneSettings,
+        at: DateTime<Utc>,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("profile phones")
+        CoordinodeBackend::update_profile_phone_settings(self, profile_id, id, settings, at, ctx)
+            .await
     }
 
     async fn set_primary_profile_phone(
         &self,
-        _profile_id: ProfileId,
-        _id: ProfilePhoneId,
-        _at: DateTime<Utc>,
-        _ctx: MutationContext,
+        profile_id: ProfileId,
+        id: ProfilePhoneId,
+        at: DateTime<Utc>,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("profile phones")
+        CoordinodeBackend::set_primary_profile_phone(self, profile_id, id, at, ctx).await
     }
 
-    async fn delete_profile_phone(&self, _id: ProfilePhoneId, _ctx: MutationContext) -> Result<()> {
-        refused("profile phones")
+    async fn delete_profile_phone(&self, id: ProfilePhoneId, ctx: MutationContext) -> Result<()> {
+        CoordinodeBackend::delete_profile_phone(self, id, ctx).await
     }
 
-    async fn get_profile_email(&self, _id: ProfileEmailId) -> Result<Option<ProfileEmail>> {
-        refused("profile emails")
+    async fn get_profile_email(&self, id: ProfileEmailId) -> Result<Option<ProfileEmail>> {
+        CoordinodeBackend::get_profile_email(self, id).await
     }
 
-    async fn list_profile_emails(&self, _profile_id: ProfileId) -> Result<Vec<ProfileEmail>> {
-        refused("profile emails")
+    async fn list_profile_emails(&self, profile_id: ProfileId) -> Result<Vec<ProfileEmail>> {
+        CoordinodeBackend::list_profile_emails(self, profile_id).await
     }
 
     async fn get_primary_profile_email(
         &self,
-        _profile_id: ProfileId,
+        profile_id: ProfileId,
     ) -> Result<Option<ProfileEmail>> {
-        refused("profile emails")
+        CoordinodeBackend::get_primary_profile_email(self, profile_id).await
     }
 
-    async fn create_profile_email(
-        &self,
-        _email: &ProfileEmail,
-        _ctx: MutationContext,
-    ) -> Result<()> {
-        refused("profile emails")
+    async fn create_profile_email(&self, email: &ProfileEmail, ctx: MutationContext) -> Result<()> {
+        CoordinodeBackend::create_profile_email(self, email, ctx).await
     }
 
     async fn update_profile_email_settings(
         &self,
-        _profile_id: ProfileId,
-        _id: ProfileEmailId,
-        _settings: &EmailSettings,
-        _at: DateTime<Utc>,
-        _ctx: MutationContext,
+        profile_id: ProfileId,
+        id: ProfileEmailId,
+        settings: &EmailSettings,
+        at: DateTime<Utc>,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("profile emails")
+        CoordinodeBackend::update_profile_email_settings(self, profile_id, id, settings, at, ctx)
+            .await
     }
 
     async fn set_primary_profile_email(
         &self,
-        _profile_id: ProfileId,
-        _id: ProfileEmailId,
-        _at: DateTime<Utc>,
-        _ctx: MutationContext,
+        profile_id: ProfileId,
+        id: ProfileEmailId,
+        at: DateTime<Utc>,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("profile emails")
+        CoordinodeBackend::set_primary_profile_email(self, profile_id, id, at, ctx).await
     }
 
-    async fn delete_profile_email(&self, _id: ProfileEmailId, _ctx: MutationContext) -> Result<()> {
-        refused("profile emails")
+    async fn delete_profile_email(&self, id: ProfileEmailId, ctx: MutationContext) -> Result<()> {
+        CoordinodeBackend::delete_profile_email(self, id, ctx).await
     }
 
     // === PRINCIPALS ===
@@ -954,12 +948,12 @@ impl StorageBackend for CoordinodeBackend {
 
     // === ADMIN QUERIES ===
 
-    async fn list_profiles(&self, _offset: u64, _limit: u64) -> Result<Vec<Profile>> {
-        refused("profiles")
+    async fn list_profiles(&self, offset: u64, limit: u64) -> Result<Vec<Profile>> {
+        CoordinodeBackend::list_profiles(self, offset, limit).await
     }
 
     async fn count_profiles(&self) -> Result<u64> {
-        refused("profiles")
+        CoordinodeBackend::count_profiles(self).await
     }
 
     async fn query_directory(
@@ -971,13 +965,13 @@ impl StorageBackend for CoordinodeBackend {
 
     async fn list_profiles_with_status(
         &self,
-        _status: sid_core::models::ProfileStatus,
+        status: sid_core::models::ProfileStatus,
     ) -> Result<Vec<Profile>> {
-        refused("profiles")
+        CoordinodeBackend::list_profiles_with_status(self, status).await
     }
 
     async fn list_profiles_with_pending_migration(&self) -> Result<Vec<Profile>> {
-        refused("profiles")
+        CoordinodeBackend::list_profiles_with_pending_migration(self).await
     }
 
     async fn end_legacy_migration(

@@ -21,6 +21,7 @@ mod backend;
 mod ceremony;
 mod instance_secret;
 mod operation;
+mod profile;
 mod work;
 
 /// How often one change is run again after a conflicting commit before it is
@@ -47,6 +48,19 @@ const SCHEMA: &[&str] = &[
     "CREATE CONSTRAINT sid_ceremony_state FOR (c:SidCeremonyState) REQUIRE c.slot IS UNIQUE",
     "CREATE CONSTRAINT sid_ceremony_count FOR (c:SidCeremonyCount) REQUIRE c.slot IS UNIQUE",
     "CREATE CONSTRAINT sid_instance_secret FOR (s:SidInstanceSecret) REQUIRE s.name IS UNIQUE",
+    "CREATE CONSTRAINT sid_profile_id FOR (p:SidProfile) REQUIRE p.id IS UNIQUE",
+    "CREATE CONSTRAINT sid_profile_username FOR (p:SidProfile) REQUIRE p.username IS UNIQUE",
+    "CREATE INDEX sid_profile_status ON :SidProfile(status)",
+    "CREATE INDEX sid_profile_migration ON :SidProfile(migration_pending)",
+    "CREATE CONSTRAINT sid_phone_id FOR (c:SidPhone) REQUIRE c.id IS UNIQUE",
+    "CREATE CONSTRAINT sid_phone_number FOR (c:SidPhone) REQUIRE c.number_key IS UNIQUE",
+    "CREATE CONSTRAINT sid_phone_primary FOR (c:SidPhone) REQUIRE c.primary_of IS UNIQUE",
+    "CREATE INDEX sid_phone_profile ON :SidPhone(profile_id)",
+    "CREATE CONSTRAINT sid_email_id FOR (c:SidEmail) REQUIRE c.id IS UNIQUE",
+    "CREATE CONSTRAINT sid_email_address FOR (c:SidEmail) REQUIRE c.address_key IS UNIQUE",
+    "CREATE CONSTRAINT sid_email_primary FOR (c:SidEmail) REQUIRE c.primary_of IS UNIQUE",
+    "CREATE INDEX sid_email_profile ON :SidEmail(profile_id)",
+    "CREATE INDEX sid_email_address_lookup ON :SidEmail(email)",
 ];
 
 /// SID's storage over the host's CoordiNode database.
@@ -252,7 +266,14 @@ fn contention(e: &DatabaseError) -> bool {
 }
 
 fn storage(e: DatabaseError) -> SidError {
-    SidError::Storage(format!("CoordiNode: {e}"))
+    match e {
+        // A unique key already held: the record exists. The index names it;
+        // the value is the caller's input and stays out of the message.
+        DatabaseError::UniqueViolation { index, .. } => {
+            SidError::Conflict(format!("{index} already exists"))
+        }
+        e => SidError::Storage(format!("CoordiNode: {e}")),
+    }
 }
 
 // ─── Values ───
@@ -267,6 +288,78 @@ pub(super) fn slot(namespace: &str, key: &str) -> SidResult<Vec<u8>> {
     slot.extend_from_slice(namespace.as_bytes());
     slot.extend_from_slice(key.as_bytes());
     Ok(slot)
+}
+
+/// A UUID as its 16 bytes.
+pub(super) fn uuid(id: &uuid::Uuid) -> Value {
+    Value::Binary(id.as_bytes().to_vec())
+}
+
+pub(super) fn opt_uuid(id: Option<&uuid::Uuid>) -> Value {
+    id.map_or(Value::Null, uuid)
+}
+
+/// Key bytes of `parts`, each prefixed by its length, so no two lists of
+/// parts share one.
+pub(super) fn key(parts: &[&[u8]]) -> SidResult<Value> {
+    let mut key = Vec::with_capacity(parts.iter().map(|p| 4 + p.len()).sum());
+    for part in parts {
+        let length = u32::try_from(part.len())
+            .map_err(|_| SidError::Validation("key part too long".into()))?;
+        key.extend_from_slice(&length.to_be_bytes());
+        key.extend_from_slice(part);
+    }
+    Ok(Value::Binary(key))
+}
+
+pub(super) fn texts(values: &[String]) -> Value {
+    Value::Array(values.iter().cloned().map(Value::String).collect())
+}
+
+pub(super) fn get_uuid(row: &Row, name: &str) -> SidResult<uuid::Uuid> {
+    uuid::Uuid::from_slice(&get_bytes(row, name)?)
+        .map_err(|e| SidError::Storage(format!("{name} is no UUID: {e}")))
+}
+
+pub(super) fn get_opt_uuid(row: &Row, name: &str) -> SidResult<Option<uuid::Uuid>> {
+    get_opt_bytes(row, name)?
+        .map(|b| {
+            uuid::Uuid::from_slice(&b)
+                .map_err(|e| SidError::Storage(format!("{name} is no UUID: {e}")))
+        })
+        .transpose()
+}
+
+pub(super) fn get_texts(row: &Row, name: &str) -> SidResult<Vec<String>> {
+    match field(row, name)? {
+        Value::Array(items) => items
+            .iter()
+            .map(|item| match item {
+                Value::String(s) => Ok(s.clone()),
+                other => Err(SidError::Storage(format!("{name} holds {other:?}"))),
+            })
+            .collect(),
+        other => Err(SidError::Storage(format!(
+            "{name} is not a list: {other:?}"
+        ))),
+    }
+}
+
+/// The count a `count(..) AS n` query returned.
+pub(super) fn get_count(rows: &[Row]) -> SidResult<u64> {
+    let n = rows
+        .first()
+        .map(|row| get_int(row, "n"))
+        .transpose()?
+        .unwrap_or(0);
+    u64::try_from(n).map_err(|_| SidError::Storage(format!("bad count: {n}")))
+}
+
+/// A page bound as the statement's integer.
+pub(super) fn page(value: u64) -> SidResult<Value> {
+    i64::try_from(value)
+        .map(Value::Int)
+        .map_err(|_| SidError::Validation(format!("page bound {value} out of range")))
 }
 
 pub(super) fn time(t: chrono::DateTime<chrono::Utc>) -> Value {
