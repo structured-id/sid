@@ -105,6 +105,15 @@ fn get(tx: &Statements<'_>, id: CredentialId) -> SidResult<Option<Credential>> {
     rows.first().map(credential).transpose()
 }
 
+/// Whether credential `id` is stored, read in `tx`.
+pub(super) fn exists(tx: &Statements<'_>, id: CredentialId) -> SidResult<bool> {
+    let rows = tx.run(
+        "MATCH (c:SidCredential) WHERE c.id = $id RETURN c.id AS id",
+        Params::default().with("id", uuid(&id.0)),
+    )?;
+    Ok(!rows.is_empty())
+}
+
 /// `active_password_of` of a credential: its profile while it is the
 /// profile's active password, which a profile has one of.
 fn active_password_of(credential: &Credential) -> Value {

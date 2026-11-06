@@ -475,10 +475,10 @@ impl StorageBackend for CoordinodeBackend {
 
     async fn register_profile(
         &self,
-        _registration: &NewRegistration,
-        _ctx: MutationContext,
+        registration: &NewRegistration,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("registration")
+        CoordinodeBackend::register_profile(self, registration, ctx).await
     }
 
     async fn write_directory_user(
@@ -1067,40 +1067,40 @@ impl StorageBackend for CoordinodeBackend {
     // === INSTALLATION ===
 
     async fn admin_exists(&self) -> Result<bool> {
-        refused("the installation's administrators")
+        CoordinodeBackend::admin_exists(self).await
     }
 
     async fn bootstrap_policy(&self) -> Result<sid_core::models::BootstrapPolicy> {
-        refused("the bootstrap policy")
+        CoordinodeBackend::bootstrap_policy(self).await
     }
 
     async fn adopt_central_management(
         &self,
-        _ctx: MutationContext,
+        ctx: MutationContext,
     ) -> Result<sid_core::models::CentralAdoption> {
-        refused("the bootstrap policy")
+        CoordinodeBackend::adopt_central_management(self, ctx).await
     }
 
     async fn enrollment_policy(&self) -> Result<Option<sid_core::models::EnrollmentPolicy>> {
-        refused("the enrollment policy")
+        CoordinodeBackend::enrollment_policy(self).await
     }
 
     async fn set_enrollment_policy(
         &self,
-        _policy: &sid_core::models::EnrollmentPolicy,
-        _mode: sid_core::models::ModeWrite,
-        _ctx: MutationContext,
+        policy: &sid_core::models::EnrollmentPolicy,
+        mode: sid_core::models::ModeWrite,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("the enrollment policy")
+        CoordinodeBackend::set_enrollment_policy(self, policy, mode, ctx).await
     }
 
     async fn claim_first_admin(
         &self,
-        _claim_sealed: &[u8],
-        _profile: ProfileId,
-        _ctx: MutationContext,
+        claim_sealed: &[u8],
+        profile: ProfileId,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("the admin claim")
+        CoordinodeBackend::claim_first_admin(self, claim_sealed, profile, ctx).await
     }
 
     async fn instance_organization(&self) -> Result<Option<sid_core::models::Organization>> {
@@ -1197,226 +1197,221 @@ impl StorageBackend for CoordinodeBackend {
 
     // === ROLES ===
 
-    async fn get_role(&self, _id: RoleId) -> Result<Option<Role>> {
-        refused("roles")
+    async fn get_role(&self, id: RoleId) -> Result<Option<Role>> {
+        CoordinodeBackend::get_role(self, id).await
     }
 
-    async fn get_roles(&self, _ids: &[RoleId]) -> Result<Vec<Role>> {
-        refused("roles")
+    async fn get_roles(&self, ids: &[RoleId]) -> Result<Vec<Role>> {
+        CoordinodeBackend::get_roles(self, ids).await
     }
 
-    async fn get_role_by_name(&self, _project_id: ProjectId, _name: &str) -> Result<Option<Role>> {
-        refused("roles")
+    async fn get_role_by_name(&self, project_id: ProjectId, name: &str) -> Result<Option<Role>> {
+        CoordinodeBackend::get_role_by_name(self, project_id, name).await
     }
 
-    async fn create_role(&self, _role: &Role, _ctx: MutationContext) -> Result<()> {
-        refused("roles")
+    async fn create_role(&self, role: &Role, ctx: MutationContext) -> Result<()> {
+        CoordinodeBackend::create_role(self, role, ctx).await
     }
 
-    async fn update_role(&self, _role: &Role, _ctx: MutationContext) -> Result<bool> {
-        refused("roles")
+    async fn update_role(&self, role: &Role, ctx: MutationContext) -> Result<bool> {
+        CoordinodeBackend::update_role(self, role, ctx).await
     }
 
     async fn update_role_fenced(
         &self,
-        _role: &Role,
-        _fence: &sid_core::models::RoleEditFence,
-        _ctx: MutationContext,
+        role: &Role,
+        fence: &sid_core::models::RoleEditFence,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("roles")
+        CoordinodeBackend::update_role_fenced(self, role, fence, ctx).await
     }
 
-    async fn delete_role(&self, _id: RoleId, _ctx: MutationContext) -> Result<()> {
-        refused("roles")
+    async fn delete_role(&self, id: RoleId, ctx: MutationContext) -> Result<()> {
+        CoordinodeBackend::delete_role(self, id, ctx).await
     }
 
-    async fn list_roles(&self, _project_id: ProjectId) -> Result<Vec<Role>> {
-        refused("roles")
+    async fn list_roles(&self, project_id: ProjectId) -> Result<Vec<Role>> {
+        CoordinodeBackend::list_roles(self, project_id).await
     }
 
     // === GROUPS ===
 
-    async fn get_group(&self, _id: GroupId) -> Result<Option<Group>> {
-        refused("groups")
+    async fn get_group(&self, id: GroupId) -> Result<Option<Group>> {
+        CoordinodeBackend::get_group(self, id).await
     }
 
-    async fn create_group(&self, _group: &Group, _ctx: MutationContext) -> Result<()> {
-        refused("groups")
+    async fn create_group(&self, group: &Group, ctx: MutationContext) -> Result<()> {
+        CoordinodeBackend::create_group(self, group, ctx).await
     }
 
     async fn set_group_description(
         &self,
-        _id: GroupId,
-        _description: Option<&str>,
-        _ctx: MutationContext,
+        id: GroupId,
+        description: Option<&str>,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("groups")
+        CoordinodeBackend::set_group_description(self, id, description, ctx).await
     }
 
-    async fn delete_group(&self, _id: GroupId, _ctx: MutationContext) -> Result<()> {
-        refused("groups")
+    async fn delete_group(&self, id: GroupId, ctx: MutationContext) -> Result<()> {
+        CoordinodeBackend::delete_group(self, id, ctx).await
     }
 
-    async fn list_groups(&self, _project_id: ProjectId) -> Result<Vec<Group>> {
-        refused("groups")
+    async fn list_groups(&self, project_id: ProjectId) -> Result<Vec<Group>> {
+        CoordinodeBackend::list_groups(self, project_id).await
     }
 
-    async fn add_to_group(&self, _member: &GroupMember, _ctx: MutationContext) -> Result<()> {
-        refused("groups")
+    async fn add_to_group(&self, member: &GroupMember, ctx: MutationContext) -> Result<()> {
+        CoordinodeBackend::add_to_group(self, member, ctx).await
     }
 
     async fn remove_from_group(
         &self,
-        _group_id: GroupId,
-        _profile_id: ProfileId,
-        _ctx: MutationContext,
+        group_id: GroupId,
+        profile_id: ProfileId,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("groups")
+        CoordinodeBackend::remove_from_group(self, group_id, profile_id, ctx).await
     }
 
-    async fn list_group_members(&self, _group_id: GroupId) -> Result<Vec<GroupMember>> {
-        refused("groups")
+    async fn list_group_members(&self, group_id: GroupId) -> Result<Vec<GroupMember>> {
+        CoordinodeBackend::list_group_members(self, group_id).await
     }
 
-    async fn list_groups_for_profile(&self, _profile_id: ProfileId) -> Result<Vec<Group>> {
-        refused("groups")
+    async fn list_groups_for_profile(&self, profile_id: ProfileId) -> Result<Vec<Group>> {
+        CoordinodeBackend::list_groups_for_profile(self, profile_id).await
     }
 
     // === ROLE ASSIGNMENTS ===
 
     async fn create_role_assignment(
         &self,
-        _assignment: &RoleAssignment,
-        _ctx: MutationContext,
+        assignment: &RoleAssignment,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("role assignments")
+        CoordinodeBackend::create_role_assignment(self, assignment, ctx).await
     }
 
     async fn delete_role_assignment(
         &self,
-        _id: RoleAssignmentId,
-        _ctx: MutationContext,
+        id: RoleAssignmentId,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("role assignments")
+        CoordinodeBackend::delete_role_assignment(self, id, ctx).await
     }
 
-    async fn get_role_assignment(&self, _id: RoleAssignmentId) -> Result<Option<RoleAssignment>> {
-        refused("role assignments")
+    async fn get_role_assignment(&self, id: RoleAssignmentId) -> Result<Option<RoleAssignment>> {
+        CoordinodeBackend::get_role_assignment(self, id).await
     }
 
     async fn create_role_assignment_fenced(
         &self,
-        _assignment: &RoleAssignment,
-        _fence: &sid_core::models::AssignmentFence,
-        _ctx: MutationContext,
+        assignment: &RoleAssignment,
+        fence: &sid_core::models::AssignmentFence,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("role assignments")
+        CoordinodeBackend::create_role_assignment_fenced(self, assignment, fence, ctx).await
     }
 
     async fn delete_role_assignment_fenced(
         &self,
-        _id: RoleAssignmentId,
-        _fence: &sid_core::models::AssignmentFence,
-        _ctx: MutationContext,
+        id: RoleAssignmentId,
+        fence: &sid_core::models::AssignmentFence,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("role assignments")
+        CoordinodeBackend::delete_role_assignment_fenced(self, id, fence, ctx).await
     }
 
     async fn list_role_assignments_for_profile(
         &self,
-        _profile_id: ProfileId,
+        profile_id: ProfileId,
     ) -> Result<Vec<RoleAssignment>> {
-        refused("role assignments")
+        CoordinodeBackend::list_role_assignments_for_profile(self, profile_id).await
     }
 
     async fn list_role_assignments_for_group(
         &self,
-        _group_id: GroupId,
+        group_id: GroupId,
     ) -> Result<Vec<RoleAssignment>> {
-        refused("role assignments")
+        CoordinodeBackend::list_role_assignments_for_group(self, group_id).await
     }
 
     async fn list_role_assignments_held_by_profile(
         &self,
-        _profile_id: ProfileId,
+        profile_id: ProfileId,
     ) -> Result<Vec<RoleAssignment>> {
-        refused("role assignments")
+        CoordinodeBackend::list_role_assignments_held_by_profile(self, profile_id).await
     }
 
     async fn list_role_assignments_for_machine_user(
         &self,
-        _machine_user_id: MachineUserId,
+        machine_user_id: MachineUserId,
     ) -> Result<Vec<RoleAssignment>> {
-        refused("role assignments")
+        CoordinodeBackend::list_role_assignments_for_machine_user(self, machine_user_id).await
     }
 
     async fn list_role_assignments_for_oauth_client(
         &self,
-        _client_id: &str,
+        client_id: &str,
     ) -> Result<Vec<RoleAssignment>> {
-        refused("role assignments")
+        CoordinodeBackend::list_role_assignments_for_oauth_client(self, client_id).await
     }
 
     async fn list_role_assignments_for_provisioning_connector(
         &self,
-        _connector_id: ProvisioningConnectorId,
+        connector_id: ProvisioningConnectorId,
     ) -> Result<Vec<RoleAssignment>> {
-        refused("role assignments")
+        CoordinodeBackend::list_role_assignments_for_provisioning_connector(self, connector_id)
+            .await
     }
 
-    async fn list_role_assignments_for_role(
-        &self,
-        _role_id: RoleId,
-    ) -> Result<Vec<RoleAssignment>> {
-        refused("role assignments")
+    async fn list_role_assignments_for_role(&self, role_id: RoleId) -> Result<Vec<RoleAssignment>> {
+        CoordinodeBackend::list_role_assignments_for_role(self, role_id).await
     }
 
     async fn list_expiring_role_assignments(
         &self,
-        _within_hours: i64,
+        within_hours: i64,
     ) -> Result<Vec<RoleAssignment>> {
-        refused("role assignments")
+        CoordinodeBackend::list_expiring_role_assignments(self, within_hours).await
     }
 
     async fn cleanup_expired_role_assignments(
         &self,
-        _ctx: MutationContext,
+        ctx: MutationContext,
     ) -> Result<Vec<RoleAssignment>> {
-        refused("role assignments")
+        CoordinodeBackend::cleanup_expired_role_assignments(self, ctx).await
     }
 
     async fn list_sod_rules(&self) -> Result<Vec<SodConflictRule>> {
-        refused("separation-of-duties rules")
+        // No write path stores separation-of-duties rules: none are held.
+        Ok(Vec::new())
     }
 
     // === CEDAR POLICIES ===
 
-    async fn get_cedar_policy(&self, _id: CedarPolicyId) -> Result<Option<CedarPolicy>> {
-        refused("Cedar policies")
+    async fn get_cedar_policy(&self, id: CedarPolicyId) -> Result<Option<CedarPolicy>> {
+        CoordinodeBackend::get_cedar_policy(self, id).await
     }
 
-    async fn create_cedar_policy(
-        &self,
-        _policy: &CedarPolicy,
-        _ctx: MutationContext,
-    ) -> Result<()> {
-        refused("Cedar policies")
+    async fn create_cedar_policy(&self, policy: &CedarPolicy, ctx: MutationContext) -> Result<()> {
+        CoordinodeBackend::create_cedar_policy(self, policy, ctx).await
     }
 
     async fn update_cedar_policy(
         &self,
-        _policy: &CedarPolicy,
-        _ctx: MutationContext,
+        policy: &CedarPolicy,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("Cedar policies")
+        CoordinodeBackend::update_cedar_policy(self, policy, ctx).await
     }
 
-    async fn delete_cedar_policy(&self, _id: CedarPolicyId, _ctx: MutationContext) -> Result<()> {
-        refused("Cedar policies")
+    async fn delete_cedar_policy(&self, id: CedarPolicyId, ctx: MutationContext) -> Result<()> {
+        CoordinodeBackend::delete_cedar_policy(self, id, ctx).await
     }
 
-    async fn list_cedar_policies(&self, _scope: PolicyScope) -> Result<Vec<CedarPolicy>> {
-        refused("Cedar policies")
+    async fn list_cedar_policies(&self, scope: PolicyScope) -> Result<Vec<CedarPolicy>> {
+        CoordinodeBackend::list_cedar_policies(self, scope).await
     }
 
     // === PROFILE METADATA ===
@@ -2330,68 +2325,68 @@ impl StorageBackend for CoordinodeBackend {
 
     // === INVITES AND REGISTRATION SOURCES ===
 
-    async fn create_invites(&self, _invites: &[Invite], _ctx: MutationContext) -> Result<()> {
-        refused("invites")
+    async fn create_invites(&self, invites: &[Invite], ctx: MutationContext) -> Result<()> {
+        CoordinodeBackend::create_invites(self, invites, ctx).await
     }
 
-    async fn get_invite(&self, _id: InviteId) -> Result<Option<Invite>> {
-        refused("invites")
+    async fn get_invite(&self, id: InviteId) -> Result<Option<Invite>> {
+        CoordinodeBackend::get_invite(self, id).await
     }
 
-    async fn get_invite_by_code(&self, _code: &str) -> Result<Option<Invite>> {
-        refused("invites")
+    async fn get_invite_by_code(&self, code: &str) -> Result<Option<Invite>> {
+        CoordinodeBackend::get_invite_by_code(self, code).await
     }
 
     async fn list_invites(
         &self,
-        _filter: &InviteFilter,
-        _offset: u64,
-        _limit: u64,
+        filter: &InviteFilter,
+        offset: u64,
+        limit: u64,
     ) -> Result<Vec<Invite>> {
-        refused("invites")
+        CoordinodeBackend::list_invites(self, filter, offset, limit).await
     }
 
-    async fn count_invites(&self, _filter: &InviteFilter) -> Result<u64> {
-        refused("invites")
+    async fn count_invites(&self, filter: &InviteFilter) -> Result<u64> {
+        CoordinodeBackend::count_invites(self, filter).await
     }
 
     async fn list_invite_redemptions(
         &self,
-        _id: InviteId,
-        _offset: u64,
-        _limit: u64,
+        id: InviteId,
+        offset: u64,
+        limit: u64,
     ) -> Result<Vec<sid_core::models::InviteRedemption>> {
-        refused("invites")
+        CoordinodeBackend::list_invite_redemptions(self, id, offset, limit).await
     }
 
-    async fn try_use_invite(&self, _id: InviteId, _ctx: MutationContext) -> Result<Option<Invite>> {
-        refused("invites")
+    async fn try_use_invite(&self, id: InviteId, ctx: MutationContext) -> Result<Option<Invite>> {
+        CoordinodeBackend::try_use_invite(self, id, ctx).await
     }
 
-    async fn revoke_invite(&self, _id: InviteId, _ctx: MutationContext) -> Result<()> {
-        refused("invites")
+    async fn revoke_invite(&self, id: InviteId, ctx: MutationContext) -> Result<()> {
+        CoordinodeBackend::revoke_invite(self, id, ctx).await
     }
 
     async fn get_registration_source(
         &self,
-        _profile_id: ProfileId,
+        profile_id: ProfileId,
     ) -> Result<Option<RegistrationSource>> {
-        refused("registration sources")
+        CoordinodeBackend::get_registration_source(self, profile_id).await
     }
 
     async fn count_registrations_by_source(
         &self,
-        _since: DateTime<Utc>,
+        since: DateTime<Utc>,
     ) -> Result<Vec<(RegistrationSourceType, u64)>> {
-        refused("registration sources")
+        CoordinodeBackend::count_registrations_by_source(self, since).await
     }
 
     async fn top_referrers(
         &self,
-        _since: DateTime<Utc>,
-        _limit: u64,
+        since: DateTime<Utc>,
+        limit: u64,
     ) -> Result<Vec<(ProfileId, u64)>> {
-        refused("registration sources")
+        CoordinodeBackend::top_referrers(self, since, limit).await
     }
 
     // === JOBS AND AUDIT RETENTION ===
@@ -2448,35 +2443,35 @@ impl StorageBackend for CoordinodeBackend {
 
     async fn create_access_request(
         &self,
-        _request: &AccessRequest,
-        _ctx: MutationContext,
+        request: &AccessRequest,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("access requests")
+        CoordinodeBackend::create_access_request(self, request, ctx).await
     }
 
-    async fn get_access_request(&self, _id: AccessRequestId) -> Result<Option<AccessRequest>> {
-        refused("access requests")
+    async fn get_access_request(&self, id: AccessRequestId) -> Result<Option<AccessRequest>> {
+        CoordinodeBackend::get_access_request(self, id).await
     }
 
     async fn list_pending_access_requests(&self) -> Result<Vec<AccessRequest>> {
-        refused("access requests")
+        CoordinodeBackend::list_pending_access_requests(self).await
     }
 
     async fn decide_access_request(
         &self,
-        _request: &AccessRequest,
-        _ctx: MutationContext,
+        request: &AccessRequest,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("access requests")
+        CoordinodeBackend::decide_access_request(self, request, ctx).await
     }
 
     async fn approve_access_request(
         &self,
-        _request: &AccessRequest,
-        _grant: &RoleAssignment,
-        _ctx: MutationContext,
+        request: &AccessRequest,
+        grant: &RoleAssignment,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("access requests")
+        CoordinodeBackend::approve_access_request(self, request, grant, ctx).await
     }
 
     // === PASSWORD RESET ===

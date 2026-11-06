@@ -20,11 +20,13 @@ mod audit;
 mod backend;
 mod ceremony;
 mod credential;
+mod enrollment;
 mod instance_secret;
 mod operation;
 mod principal;
 mod profile;
 mod project;
+mod rbac;
 mod registry;
 mod session;
 mod work;
@@ -132,6 +134,48 @@ const SCHEMA: &[&str] = &[
     "CREATE CONSTRAINT sid_history_entry FOR (h:SidHistoryEntry) REQUIRE h.key IS UNIQUE",
     "CREATE INDEX sid_history_entry_owner ON :SidHistoryEntry(owner_id)",
     "CREATE CONSTRAINT sid_history_cutoff FOR (c:SidHistoryCutoff) REQUIRE c.id IS UNIQUE",
+    "CREATE CONSTRAINT sid_role_id FOR (r:SidRole) REQUIRE r.id IS UNIQUE",
+    "CREATE CONSTRAINT sid_role_key FOR (r:SidRole) REQUIRE r.project_key IS UNIQUE",
+    "CREATE CONSTRAINT sid_role_name FOR (r:SidRole) REQUIRE r.project_name IS UNIQUE",
+    "CREATE INDEX sid_role_project ON :SidRole(project_id)",
+    "CREATE CONSTRAINT sid_group_id FOR (g:SidGroup) REQUIRE g.id IS UNIQUE",
+    "CREATE CONSTRAINT sid_group_name FOR (g:SidGroup) REQUIRE g.project_name IS UNIQUE",
+    "CREATE INDEX sid_group_project ON :SidGroup(project_id)",
+    "CREATE INDEX sid_group_parent ON :SidGroup(parent_group_id)",
+    "CREATE CONSTRAINT sid_group_member FOR (m:SidGroupMember) REQUIRE m.pair IS UNIQUE",
+    "CREATE INDEX sid_group_member_group ON :SidGroupMember(group_id)",
+    "CREATE INDEX sid_group_member_profile ON :SidGroupMember(profile_id)",
+    "CREATE CONSTRAINT sid_assignment_id FOR (a:SidRoleAssignment) REQUIRE a.id IS UNIQUE",
+    "CREATE INDEX sid_assignment_profile ON :SidRoleAssignment(profile_id)",
+    "CREATE INDEX sid_assignment_group ON :SidRoleAssignment(group_id)",
+    "CREATE INDEX sid_assignment_machine_user ON :SidRoleAssignment(machine_user_id)",
+    "CREATE INDEX sid_assignment_client ON :SidRoleAssignment(oauth_client_id)",
+    "CREATE INDEX sid_assignment_connector ON :SidRoleAssignment(connector_id)",
+    "CREATE INDEX sid_assignment_role ON :SidRoleAssignment(role_id)",
+    "CREATE INDEX sid_assignment_depends_on ON :SidRoleAssignment(depends_on_id)",
+    "CREATE INDEX sid_assignment_admin_group ON :SidRoleAssignment(admin_group)",
+    "CREATE INDEX sid_assignment_expires ON :SidRoleAssignment(expires_at)",
+    "CREATE CONSTRAINT sid_admin_role FOR (e:SidAdminRole) REQUIRE e.pair IS UNIQUE",
+    "CREATE INDEX sid_admin_role_assignment ON :SidAdminRole(assignment_id)",
+    "CREATE INDEX sid_admin_role_role ON :SidAdminRole(role_id)",
+    "CREATE CONSTRAINT sid_policy_id FOR (c:SidCedarPolicy) REQUIRE c.id IS UNIQUE",
+    "CREATE CONSTRAINT sid_policy_name FOR (c:SidCedarPolicy) REQUIRE c.scope_name IS UNIQUE",
+    "CREATE INDEX sid_policy_kind ON :SidCedarPolicy(scope_kind)",
+    "CREATE INDEX sid_policy_project ON :SidCedarPolicy(project_id)",
+    "CREATE INDEX sid_policy_resource ON :SidCedarPolicy(resource_id)",
+    "CREATE CONSTRAINT sid_access_request_id FOR (q:SidAccessRequest) REQUIRE q.id IS UNIQUE",
+    "CREATE INDEX sid_access_request_status ON :SidAccessRequest(status)",
+    "CREATE INDEX sid_access_request_requester ON :SidAccessRequest(requester_id)",
+    "CREATE INDEX sid_access_request_project ON :SidAccessRequest(project_id)",
+    "CREATE CONSTRAINT sid_enrollment_policy FOR (p:SidEnrollmentPolicy) REQUIRE p.scope IS UNIQUE",
+    "CREATE CONSTRAINT sid_bootstrap_policy FOR (p:SidBootstrapPolicy) REQUIRE p.scope IS UNIQUE",
+    "CREATE CONSTRAINT sid_invite_id FOR (i:SidInvite) REQUIRE i.id IS UNIQUE",
+    "CREATE CONSTRAINT sid_invite_code FOR (i:SidInvite) REQUIRE i.code_key IS UNIQUE",
+    "CREATE CONSTRAINT sid_invite_redemption FOR (r:SidInviteRedemption) REQUIRE r.pair IS UNIQUE",
+    "CREATE INDEX sid_invite_redemption_invite ON :SidInviteRedemption(invite_id)",
+    "CREATE INDEX sid_invite_redemption_profile ON :SidInviteRedemption(profile_id)",
+    "CREATE CONSTRAINT sid_registration_source FOR (s:SidRegistrationSource) REQUIRE s.profile_id IS UNIQUE",
+    "CREATE INDEX sid_registration_source_created ON :SidRegistrationSource(created_at)",
 ];
 
 /// SID's storage over the host's CoordiNode database.
@@ -160,6 +204,7 @@ impl CoordinodeBackend {
         backend.transaction(principal::init_email_policy).await?;
         backend.transaction(project::init_system_project).await?;
         backend.transaction(credential::init_cutoff).await?;
+        backend.transaction(enrollment::init_policies).await?;
         Ok(backend)
     }
 

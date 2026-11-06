@@ -653,12 +653,13 @@ fn conflict(client: &OAuth2Client) -> SidError {
     ))
 }
 
-/// Delete client `client_id` and every access it held, in `tx`; returns its
-/// application.
+/// Delete client `client_id` with every access and role assignment it held,
+/// in `tx`; returns its application.
 fn delete_client(tx: &Statements<'_>, client_id: &str) -> SidResult<Option<ApplicationId>> {
     let Some(stored) = get_client(tx, client_id)? else {
         return Ok(None);
     };
+    super::rbac::delete_client_records(tx, client_id)?;
     for query in [
         "MATCH (x:SidResourceAccess) WHERE x.client_id = $id DETACH DELETE x",
         "MATCH (c:SidClient) WHERE c.client_id = $id DETACH DELETE c",

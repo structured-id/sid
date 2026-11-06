@@ -223,6 +223,8 @@ pub(super) fn delete(tx: &Statements<'_>, id: ProfileId) -> SidResult<()> {
     super::project::disown(tx, id)?;
     super::session::delete_profile_grants(tx, id)?;
     super::credential::delete_profile_credentials(tx, id)?;
+    super::rbac::delete_profile_records(tx, id)?;
+    super::enrollment::delete_profile_records(tx, id)?;
     tx.run(
         "MATCH (p:SidProfile) WHERE p.id = $id DETACH DELETE p",
         Params::default().with("id", profile_id(id)),

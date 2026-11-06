@@ -45,6 +45,7 @@ impl InstanceSecretStore for CoordinodeBackend {
             if !stored.is_empty() {
                 return Ok(Decision::Abandon(false));
             }
+            super::enrollment::check_claim_allowed(tx, secret)?;
             // Concurrent first inserts create one unique name: all but one
             // commit conflict and run again, finding the stored value.
             tx.run(

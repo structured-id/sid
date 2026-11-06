@@ -155,6 +155,12 @@ impl CoordinodeBackend {
             ));
         }
         self.mutate(format!("project:{id}"), ctx, move |tx| {
+            match get(tx, id)? {
+                Some(stored) if !stored.is_system => {
+                    super::rbac::delete_project_records(tx, id)?;
+                }
+                _ => return Ok(()),
+            }
             // A system project is never deleted, whatever its id.
             tx.run(
                 "MATCH (j:SidProject) WHERE j.id = $id AND j.is_system = false DETACH DELETE j",
