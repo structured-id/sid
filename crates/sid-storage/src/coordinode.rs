@@ -22,6 +22,8 @@ mod ceremony;
 mod credential;
 mod enrollment;
 mod instance_secret;
+mod login_policy;
+mod machine;
 mod operation;
 mod principal;
 mod profile;
@@ -176,6 +178,21 @@ const SCHEMA: &[&str] = &[
     "CREATE INDEX sid_invite_redemption_profile ON :SidInviteRedemption(profile_id)",
     "CREATE CONSTRAINT sid_registration_source FOR (s:SidRegistrationSource) REQUIRE s.profile_id IS UNIQUE",
     "CREATE INDEX sid_registration_source_created ON :SidRegistrationSource(created_at)",
+    "CREATE CONSTRAINT sid_machine_user_id FOR (m:SidMachineUser) REQUIRE m.id IS UNIQUE",
+    "CREATE CONSTRAINT sid_machine_user_client FOR (m:SidMachineUser) REQUIRE m.client_id IS UNIQUE",
+    "CREATE INDEX sid_machine_user_project ON :SidMachineUser(project_id)",
+    "CREATE CONSTRAINT sid_machine_credential FOR (k:SidMachineCredential) REQUIRE k.kid IS UNIQUE",
+    "CREATE INDEX sid_machine_credential_user ON :SidMachineCredential(machine_user_id)",
+    "CREATE INDEX sid_machine_credential_expires ON :SidMachineCredential(expires_at)",
+    "CREATE CONSTRAINT sid_impersonation_grant FOR (g:SidImpersonationGrant) REQUIRE g.triple IS UNIQUE",
+    "CREATE INDEX sid_impersonation_grant_user ON :SidImpersonationGrant(machine_user_id)",
+    "CREATE CONSTRAINT sid_connector_id FOR (c:SidProvisioningConnector) REQUIRE c.id IS UNIQUE",
+    "CREATE CONSTRAINT sid_connector_client FOR (c:SidProvisioningConnector) REQUIRE c.client_id IS UNIQUE",
+    "CREATE INDEX sid_connector_org ON :SidProvisioningConnector(org_id)",
+    "CREATE CONSTRAINT sid_connector_credential_id FOR (k:SidProvisioningCredential) REQUIRE k.id IS UNIQUE",
+    "CREATE CONSTRAINT sid_connector_credential_verifier FOR (k:SidProvisioningCredential) REQUIRE k.verifier IS UNIQUE",
+    "CREATE INDEX sid_connector_credential_connector ON :SidProvisioningCredential(connector_id)",
+    "CREATE CONSTRAINT sid_login_policy_epoch FOR (e:SidLoginPolicyEpoch) REQUIRE e.id IS UNIQUE",
 ];
 
 /// SID's storage over the host's CoordiNode database.
@@ -260,13 +277,18 @@ impl CoordinodeBackend {
 /// What every mutation commits besides its own state, in its transaction.
 fn finalize(tx: &Statements<'_>, chain: &str, ctx: MutationContext) -> SidResult<()> {
     // The authority first: a write whose actor or policy changed commits
-    // nothing. Fences are checked against the stores that hold the actor or
-    // policy; this backend holds none of them yet, so it cannot confirm one.
-    if let Some(fence) = &ctx.fence {
-        // A fence is checked or refused, never ignored.
-        return Err(SidError::Fenced(format!(
-            "CoordiNode storage cannot check the fence {fence:?}"
-        )));
+    // nothing. What the fence names is held for the commit.
+    match ctx.fence {
+        Some(sid_core::models::ActorFence::Connector {
+            connector,
+            revision,
+            credential,
+        }) => machine::check_connector_fence(tx, connector, revision, credential)?,
+        Some(sid_core::models::ActorFence::LoginPolicy { epoch }) => {
+            login_policy::check_fence(tx, epoch)?
+        }
+        Some(sid_core::models::ActorFence::Authority(basis)) => rbac::check_authority(tx, &basis)?,
+        None => {}
     }
     // Then the completion: a keyed command another commit already completed
     // commits nothing, not even its audit or work.

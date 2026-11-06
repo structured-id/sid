@@ -826,7 +826,7 @@ fn keep_last_administrator(tx: &Statements<'_>, assignment_id: RoleAssignmentId)
 /// Check in `tx` that `basis` still holds: its assignment unexpired at the
 /// checked revision and, when it reached the actor through a group, the
 /// actor still a member. Both are held for the commit.
-fn check_authority(tx: &Statements<'_>, basis: &AuthorityBasis) -> SidResult<()> {
+pub(super) fn check_authority(tx: &Statements<'_>, basis: &AuthorityBasis) -> SidResult<()> {
     let rows = tx.run(
         "MATCH (a:SidRoleAssignment) WHERE a.id = $id
          RETURN id(a) AS node, a.revision AS revision, a.expires_at AS expires_at",

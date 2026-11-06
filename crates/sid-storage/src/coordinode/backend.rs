@@ -1780,219 +1780,243 @@ impl StorageBackend for CoordinodeBackend {
 
     // === MACHINE USERS ===
 
-    async fn get_machine_user(&self, _id: MachineUserId) -> Result<Option<MachineUser>> {
-        refused("machine users")
+    async fn get_machine_user(&self, id: MachineUserId) -> Result<Option<MachineUser>> {
+        CoordinodeBackend::get_machine_user(self, id).await
     }
 
-    async fn get_machine_user_by_client_id(&self, _client_id: &str) -> Result<Option<MachineUser>> {
-        refused("machine users")
+    async fn get_machine_user_by_client_id(&self, client_id: &str) -> Result<Option<MachineUser>> {
+        CoordinodeBackend::get_machine_user_by_client_id(self, client_id).await
     }
 
-    async fn create_machine_user(&self, _mu: &MachineUser, _ctx: MutationContext) -> Result<()> {
-        refused("machine users")
+    async fn create_machine_user(&self, mu: &MachineUser, ctx: MutationContext) -> Result<()> {
+        CoordinodeBackend::create_machine_user(self, mu, ctx).await
     }
 
-    async fn update_machine_user(&self, _mu: &MachineUser, _ctx: MutationContext) -> Result<bool> {
-        refused("machine users")
+    async fn update_machine_user(&self, mu: &MachineUser, ctx: MutationContext) -> Result<bool> {
+        CoordinodeBackend::update_machine_user(self, mu, ctx).await
     }
 
     async fn transition_machine_user(
         &self,
-        _id: MachineUserId,
-        _from: MachineUserStatus,
-        _to: MachineUserStatus,
-        _ctx: MutationContext,
+        id: MachineUserId,
+        from: MachineUserStatus,
+        to: MachineUserStatus,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("machine users")
+        CoordinodeBackend::transition_machine_user(self, id, from, to, ctx).await
     }
 
-    async fn delete_machine_user(&self, _id: MachineUserId, _ctx: MutationContext) -> Result<()> {
-        refused("machine users")
+    async fn delete_machine_user(&self, id: MachineUserId, ctx: MutationContext) -> Result<()> {
+        CoordinodeBackend::delete_machine_user(self, id, ctx).await
     }
 
     async fn list_machine_users_by_project(
         &self,
-        _project_id: ProjectId,
+        project_id: ProjectId,
     ) -> Result<Vec<MachineUser>> {
-        refused("machine users")
+        CoordinodeBackend::list_machine_users_by_project(self, project_id).await
     }
 
     async fn get_machine_credential_by_kid(
         &self,
-        _kid: &str,
+        kid: &str,
     ) -> Result<Option<MachineUserCredential>> {
-        refused("machine credentials")
+        CoordinodeBackend::get_machine_credential_by_kid(self, kid).await
     }
 
     async fn add_machine_credential(
         &self,
-        _cred: &MachineUserCredential,
-        _active_limit: Option<u64>,
-        _ctx: MutationContext,
+        cred: &MachineUserCredential,
+        active_limit: Option<u64>,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("machine credentials")
+        CoordinodeBackend::add_machine_credential(self, cred, active_limit, ctx).await
     }
 
     async fn rotate_machine_credential(
         &self,
-        _machine_user_id: MachineUserId,
-        _old_kid: &str,
-        _new: &MachineUserCredential,
-        _grace_until: DateTime<Utc>,
-        _ctx: MutationContext,
+        machine_user_id: MachineUserId,
+        old_kid: &str,
+        new: &MachineUserCredential,
+        grace_until: DateTime<Utc>,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("machine credentials")
+        CoordinodeBackend::rotate_machine_credential(
+            self,
+            machine_user_id,
+            old_kid,
+            new,
+            grace_until,
+            ctx,
+        )
+        .await
     }
 
     async fn revoke_machine_credential(
         &self,
-        _machine_user_id: MachineUserId,
-        _kid: &str,
-        _ctx: MutationContext,
+        machine_user_id: MachineUserId,
+        kid: &str,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("machine credentials")
+        CoordinodeBackend::revoke_machine_credential(self, machine_user_id, kid, ctx).await
     }
 
     async fn revoke_active_machine_credentials_by_user(
         &self,
-        _id: MachineUserId,
-        _ctx: MutationContext,
+        id: MachineUserId,
+        ctx: MutationContext,
     ) -> Result<u64> {
-        refused("machine credentials")
+        CoordinodeBackend::revoke_active_machine_credentials_by_user(self, id, ctx).await
     }
 
     async fn list_machine_credentials_by_user(
         &self,
-        _id: MachineUserId,
+        id: MachineUserId,
     ) -> Result<Vec<MachineUserCredential>> {
-        refused("machine credentials")
+        CoordinodeBackend::list_machine_credentials_by_user(self, id).await
     }
 
     async fn list_expiring_machine_credentials(
         &self,
-        _within_days: u32,
+        within_days: u32,
     ) -> Result<Vec<MachineUserCredential>> {
-        refused("machine credentials")
+        CoordinodeBackend::list_expiring_machine_credentials(self, within_days).await
     }
 
     // === PROVISIONING CONNECTORS ===
 
     async fn get_provisioning_connector(
         &self,
-        _id: ProvisioningConnectorId,
+        id: ProvisioningConnectorId,
     ) -> Result<Option<ProvisioningConnector>> {
-        refused("provisioning connectors")
+        CoordinodeBackend::get_provisioning_connector(self, id).await
     }
 
     async fn get_provisioning_connector_by_client_id(
         &self,
-        _client_id: &str,
+        client_id: &str,
     ) -> Result<Option<ProvisioningConnector>> {
-        refused("provisioning connectors")
+        CoordinodeBackend::get_provisioning_connector_by_client_id(self, client_id).await
     }
 
     async fn list_provisioning_connectors(
         &self,
-        _org_id: OrgId,
+        org_id: OrgId,
     ) -> Result<Vec<ProvisioningConnector>> {
-        refused("provisioning connectors")
+        CoordinodeBackend::list_provisioning_connectors(self, org_id).await
     }
 
     async fn create_provisioning_connector(
         &self,
-        _connector: &ProvisioningConnector,
-        _ctx: MutationContext,
+        connector: &ProvisioningConnector,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("provisioning connectors")
+        CoordinodeBackend::create_provisioning_connector(self, connector, ctx).await
     }
 
     async fn rename_provisioning_connector(
         &self,
-        _id: ProvisioningConnectorId,
-        _revision: i64,
-        _display_name: &str,
-        _ctx: MutationContext,
+        id: ProvisioningConnectorId,
+        revision: i64,
+        display_name: &str,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("provisioning connectors")
+        CoordinodeBackend::rename_provisioning_connector(self, id, revision, display_name, ctx)
+            .await
     }
 
     async fn transition_provisioning_connector(
         &self,
-        _id: ProvisioningConnectorId,
-        _from: ConnectorState,
-        _to: ConnectorState,
-        _ctx: MutationContext,
+        id: ProvisioningConnectorId,
+        from: ConnectorState,
+        to: ConnectorState,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("provisioning connectors")
+        CoordinodeBackend::transition_provisioning_connector(self, id, from, to, ctx).await
     }
 
     async fn add_provisioning_credential(
         &self,
-        _credential: &ProvisioningCredential,
-        _ctx: MutationContext,
+        credential: &ProvisioningCredential,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("provisioning credentials")
+        CoordinodeBackend::add_provisioning_credential(self, credential, ctx).await
     }
 
     async fn rotate_provisioning_credential(
         &self,
-        _connector_id: ProvisioningConnectorId,
-        _old: ProvisioningCredentialId,
-        _new: &ProvisioningCredential,
-        _grace_until: DateTime<Utc>,
-        _ctx: MutationContext,
+        connector_id: ProvisioningConnectorId,
+        old: ProvisioningCredentialId,
+        new: &ProvisioningCredential,
+        grace_until: DateTime<Utc>,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("provisioning credentials")
+        CoordinodeBackend::rotate_provisioning_credential(
+            self,
+            connector_id,
+            old,
+            new,
+            grace_until,
+            ctx,
+        )
+        .await
     }
 
     async fn revoke_provisioning_credential(
         &self,
-        _connector_id: ProvisioningConnectorId,
-        _id: ProvisioningCredentialId,
-        _ctx: MutationContext,
+        connector_id: ProvisioningConnectorId,
+        id: ProvisioningCredentialId,
+        ctx: MutationContext,
     ) -> Result<bool> {
-        refused("provisioning credentials")
+        CoordinodeBackend::revoke_provisioning_credential(self, connector_id, id, ctx).await
     }
 
     async fn list_provisioning_credentials(
         &self,
-        _connector_id: ProvisioningConnectorId,
+        connector_id: ProvisioningConnectorId,
     ) -> Result<Vec<ProvisioningCredential>> {
-        refused("provisioning credentials")
+        CoordinodeBackend::list_provisioning_credentials(self, connector_id).await
     }
 
     async fn find_provisioning_credential(
         &self,
-        _verifier: &str,
+        verifier: &str,
     ) -> Result<Option<(ProvisioningCredential, ProvisioningConnector)>> {
-        refused("provisioning credentials")
+        CoordinodeBackend::find_provisioning_credential(self, verifier).await
     }
 
     // === IMPERSONATION GRANTS ===
 
     async fn save_impersonation_grant(
         &self,
-        _grant: &ImpersonationGrant,
-        _ctx: MutationContext,
+        grant: &ImpersonationGrant,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("impersonation grants")
+        CoordinodeBackend::save_impersonation_grant(self, grant, ctx).await
     }
 
     async fn delete_impersonation_grant(
         &self,
-        _machine_user_id: MachineUserId,
-        _target_type: &str,
-        _target: &str,
-        _ctx: MutationContext,
+        machine_user_id: MachineUserId,
+        target_type: &str,
+        target: &str,
+        ctx: MutationContext,
     ) -> Result<()> {
-        refused("impersonation grants")
+        CoordinodeBackend::delete_impersonation_grant(
+            self,
+            machine_user_id,
+            target_type,
+            target,
+            ctx,
+        )
+        .await
     }
 
     async fn list_impersonation_grants(
         &self,
-        _machine_user_id: MachineUserId,
+        machine_user_id: MachineUserId,
     ) -> Result<Vec<ImpersonationGrant>> {
-        refused("impersonation grants")
+        CoordinodeBackend::list_impersonation_grants(self, machine_user_id).await
     }
 
     // === QUARANTINE AND CLOSURE ===

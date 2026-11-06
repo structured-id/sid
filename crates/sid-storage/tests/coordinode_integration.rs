@@ -10,10 +10,16 @@ use std::sync::Arc;
 use sid_storage::coordinode::CoordinodeBackend;
 
 async fn setup() -> CoordinodeBackend {
-    let db = coordinode_embed::Database::open_in_memory().expect("CoordiNode in memory");
-    CoordinodeBackend::new(Arc::new(db))
+    store().await.0
+}
+
+/// A fresh backend with the host's handle on its database.
+async fn store() -> harness::Store {
+    let db = Arc::new(coordinode_embed::Database::open_in_memory().expect("CoordiNode in memory"));
+    let backend = CoordinodeBackend::new(db.clone())
         .await
-        .expect("SID's schema in CoordiNode")
+        .expect("SID's schema in CoordiNode");
+    harness::Store(backend, db)
 }
 
 // The complete storage contract, one test per scenario.
@@ -35,8 +41,10 @@ mod harness {
     use sid_plugin::conformance::backend::{create_test_profile, instance_org, test_audit};
     use sid_plugin::conformance::client_registry::RegistryHarness;
     use sid_plugin::conformance::credential_store::CredentialHarness;
+    use std::sync::Arc;
+
     use sid_plugin::conformance::grant_store::{
-        AssignmentHarness, GrantHarness, OwnerStatusHarness,
+        AssignmentHarness, GrantHarness, LoginPolicyHarness, OwnerStatusHarness,
     };
     use sid_plugin::conformance::issuer_store::IssuerHarness;
     use sid_plugin::{
@@ -44,7 +52,28 @@ mod harness {
     };
     use sid_storage::coordinode::CoordinodeBackend;
 
-    pub struct Store(pub CoordinodeBackend);
+    /// The backend and the host's handle on the database it is in.
+    pub struct Store(pub CoordinodeBackend, pub Arc<coordinode_embed::Database>);
+
+    #[async_trait]
+    impl LoginPolicyHarness for Store {
+        async fn advance_login_policy(&self) -> i64 {
+            // A host's policy write: its own transaction on the database,
+            // committing the epoch with whatever the host wrote.
+            let (backend, db) = (self.0.clone(), self.1.clone());
+            tokio::task::spawn_blocking(move || {
+                let tx = db.begin_transaction().expect("a host transaction");
+                let epoch = backend
+                    .advance_login_policy_epoch_in(tx)
+                    .expect("the epoch advanced");
+                db.commit_transaction(tx)
+                    .expect("the policy write committed");
+                epoch
+            })
+            .await
+            .expect("the host's write")
+        }
+    }
 
     #[async_trait]
     impl GrantHarness for Store {
@@ -254,7 +283,7 @@ macro_rules! capability {
             $(
                 #[tokio::test(flavor = "multi_thread")]
                 async fn $scenario() {
-                    sid_plugin::conformance::$module::$scenario(&harness::Store(setup().await)).await;
+                    sid_plugin::conformance::$module::$scenario(&store().await).await;
                 }
             )*
         }
@@ -267,6 +296,9 @@ capability!(grant_store:
     a_pending_context_evicts_no_session,
     a_pending_context_completes_once,
     a_login_policy_fence_is_never_ignored,
+    session_commits_only_under_the_current_login_policy,
+    auth_code_commits_only_under_the_current_login_policy,
+    a_policy_write_serializes_with_its_sessions,
     an_assignment_proof_is_never_ignored,
     a_session_commits_only_under_its_current_assignment,
     session_refused_after_its_password_changed,
