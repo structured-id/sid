@@ -1788,7 +1788,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4688,7 +4688,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4746,7 +4746,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5180,7 +5180,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "sid-admin"
-version = "0.2.20"
+version = "0.2.21"
 dependencies = [
  "chrono",
  "hex",
@@ -5200,7 +5200,7 @@ dependencies = [
 
 [[package]]
 name = "sid-attestation"
-version = "0.2.20"
+version = "0.2.21"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5232,7 +5232,7 @@ dependencies = [
 
 [[package]]
 name = "sid-auth"
-version = "0.2.20"
+version = "0.2.21"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5275,7 +5275,7 @@ dependencies = [
 
 [[package]]
 name = "sid-auth-proxy"
-version = "0.2.20"
+version = "0.2.21"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5314,7 +5314,7 @@ dependencies = [
 
 [[package]]
 name = "sid-authn"
-version = "0.2.20"
+version = "0.2.21"
 dependencies = [
  "arc-swap",
  "argon2",
@@ -5383,7 +5383,7 @@ dependencies = [
 
 [[package]]
 name = "sid-authz"
-version = "0.2.20"
+version = "0.2.21"
 dependencies = [
  "async-trait",
  "cedar-policy",
@@ -5409,7 +5409,7 @@ dependencies = [
 
 [[package]]
 name = "sid-core"
-version = "0.2.20"
+version = "0.2.21"
 dependencies = [
  "aes-gcm",
  "chrono",
@@ -5480,7 +5480,7 @@ dependencies = [
 
 [[package]]
 name = "sid-engine"
-version = "0.2.20"
+version = "0.2.21"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5503,7 +5503,7 @@ dependencies = [
 
 [[package]]
 name = "sid-fed"
-version = "0.2.20"
+version = "0.2.21"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5520,7 +5520,7 @@ dependencies = [
 
 [[package]]
 name = "sid-i18n"
-version = "0.2.20"
+version = "0.2.21"
 dependencies = [
  "pretty_assertions",
  "serde",
@@ -5552,7 +5552,7 @@ dependencies = [
 
 [[package]]
 name = "sid-infra"
-version = "0.2.20"
+version = "0.2.21"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -5590,7 +5590,7 @@ dependencies = [
 
 [[package]]
 name = "sid-keys"
-version = "0.2.20"
+version = "0.2.21"
 dependencies = [
  "async-trait",
  "secrecy",
@@ -5604,7 +5604,7 @@ dependencies = [
 
 [[package]]
 name = "sid-migrate"
-version = "0.2.20"
+version = "0.2.21"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5637,7 +5637,7 @@ dependencies = [
 
 [[package]]
 name = "sid-notify"
-version = "0.2.20"
+version = "0.2.21"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -5682,7 +5682,7 @@ dependencies = [
 
 [[package]]
 name = "sid-opaque-ke"
-version = "4.2.0"
+version = "4.2.1"
 dependencies = [
  "anyhow",
  "argon2",
@@ -5728,7 +5728,7 @@ dependencies = [
 
 [[package]]
 name = "sid-org-crypto"
-version = "0.2.20"
+version = "0.2.21"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -5768,7 +5768,7 @@ dependencies = [
 
 [[package]]
 name = "sid-plugin"
-version = "0.2.20"
+version = "0.2.21"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5796,7 +5796,7 @@ dependencies = [
 
 [[package]]
 name = "sid-proto"
-version = "0.2.20"
+version = "0.2.21"
 dependencies = [
  "glob",
  "prost",
@@ -5813,7 +5813,7 @@ dependencies = [
 
 [[package]]
 name = "sid-proto-build"
-version = "0.2.20"
+version = "0.2.21"
 dependencies = [
  "heck",
  "prost-reflect",
@@ -5822,7 +5822,7 @@ dependencies = [
 
 [[package]]
 name = "sid-scim"
-version = "0.2.20"
+version = "0.2.21"
 dependencies = [
  "async-trait",
  "axum",
@@ -5852,7 +5852,7 @@ dependencies = [
 
 [[package]]
 name = "sid-serve"
-version = "0.2.20"
+version = "0.2.21"
 dependencies = [
  "bytes",
  "prost-reflect",
@@ -5866,7 +5866,7 @@ dependencies = [
 
 [[package]]
 name = "sid-server"
-version = "0.2.20"
+version = "0.2.21"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -5945,7 +5945,7 @@ dependencies = [
 
 [[package]]
 name = "sid-storage"
-version = "0.2.20"
+version = "0.2.21"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5973,7 +5973,7 @@ dependencies = [
 
 [[package]]
 name = "sid-test-issuer"
-version = "0.2.20"
+version = "0.2.21"
 dependencies = [
  "arc-swap",
  "chrono",
@@ -6006,7 +6006,7 @@ dependencies = [
 
 [[package]]
 name = "sid-ui-host"
-version = "0.2.20"
+version = "0.2.21"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6678,10 +6678,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7601,7 +7601,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
